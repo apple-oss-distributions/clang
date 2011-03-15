@@ -9,10 +9,10 @@
 	<string>090120</string>
 	<key>OpenSourceWebsiteURL</key>
 	<string>http://clang.llvm.org/</string>
-        <key>OpenSourceSVN</key>
+        <key>OpenSourceSCM</key>
         <string>svn export http://llvm.org/svn/llvm-project/cfe/trunk</string>
 	<key>OpenSourceLicense</key>
-	<string>University of Illinois Open Source License</string>
+	<string>llvm</string>
 	<key>OpenSourceLicenseFile</key>
 	<string>clang.txt</string>
 </dict>
@@ -25,10 +25,10 @@
 	<string>090120</string>
 	<key>OpenSourceWebsiteURL</key>
 	<string>http://llvm.org/</string>
-        <key>OpenSourceSVN</key>
+        <key>OpenSourceSCM</key>
         <string>svn export http://llvm.org/svn/llvm-project/llvm/trunk</string>
 	<key>OpenSourceLicense</key>
-	<string>University of Illinois Open Source License</string>
+	<string>llvm</string>
 	<key>OpenSourceLicenseFile</key>
 	<string>clang-llvm.txt</string>
 </dict>

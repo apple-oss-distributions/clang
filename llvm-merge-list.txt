@@ -1,0 +1,201 @@
+# alignof rename.
+117774
+
+# <rdar://problem/8611144> [PR8506] valueprop crash
+117709
+
+# <rdar://problem/8611556> [PR8471] - [scev] clang segfaults while optimizing a snippet of C code
+117698
+
+# Test fix needed for <rdar://problem/8611144> [PR8506] valueprop crash
+117712
+
+# <rdar://problem/8606584> [PR8336] clang hangs while optimizing a snippet of C code
+118133
+118143
+
+# <rdar://problem/8606771> instcombine miscompilation
+117953
+
+# <rdar://problem/8608173> Execute clang_parseTranslationUnit() on a separate thread with a larger stack
+118222
+118272
+
+# <rdar://problem/8616046> [PR8522] Use-after-free in VMCore library (ConstantUniqueMap::refineAbstractType)
+118030
+
+# <rdar://problem/8613782> Merge ARM fast-isel fixes
+# <rdar://problem/8617794> thumb conditional instruction not in IT block error
+117710
+117848
+117994
+117995
+117996
+118126
+118148
+118192
+118333
+
+# <rdar://problem/8636812> [regression] 20020614-1.c fails
+118471
+
+# <rdar://problem/8639732> StringRef::edit_distance leaks memory (leak during code completion)
+118370
+
+# <rdar://problem/8017633> "movzx" and "movsx" not recognized
+117901
+
+# <rdar://problem/8398679> need a general alias mechanism for the assembler
+
+# For clean merges:
+117724
+
+117773
+117803
+117815
+117816
+117817
+117818
+117819
+117820
+117821
+117822
+117823
+117824
+117826
+117827
+117828
+117830
+117831
+117840
+117843
+117844
+117845
+117846
+117847
+
+117857
+117858
+117859
+117860
+117861
+117862
+117863
+
+117884
+117885
+117886
+
+117888
+117889
+117890
+117891
+117892
+117893
+117894
+117895
+
+117897
+117898
+117899
+
+# <rdar://problem/8653152> llc rejects -emit-llvm output
+118726
+
+# <rdar://problem/8662359> [regression] major (90% user time) performance regression on -O0 -g on automative-susan
+119382
+119400
+
+# <rdar://problem/8673083> /tmp/cc-EaE6Vo.s:7187:unsupported relocation on symbol d18
+118888
+
+# <rdar://problem/8674684> elapsed Time regression in PostgreSQL build
+119455
+119550
+119554
+119562
+119570
+119578
+119584
+119587
+119595
+
+# <rdar://problem/8675131> PR8366: -march=native on i5 emits unaligned movaps
+119605
+
+# <rdar://problem/8673046> support .symbol_resolver directive
+119816
+
+# <rdar://problem/8692109> merge fast-isel change for t2STRHi12
+119810
+119856
+119859
+119861
+119862
+119911
+
+# <rdar://problem/7920815> Exception handling is incorrect under 32-bit
+# <rdar://problem/8687257> i386 backend reuses spill slot after setjmp
+119875
+
+# <rdar://problem/8581401> bad source location in assembler diagnostic
+119676
+
+# <rdar://problem/8716642> bogus function prologues
+118026
+
+# <rdar://problem/8730409> dwarf writer generates invalid .byte directives (>255)
+121323
+
+# <rdar://problem/8739316> miscompilation in instcombine
+121353
+
+# <rdar://problem/8740754> libclang should not be built using flat namespaces
+121223
+121231
+
+# <rdar://problem/8741045> [Adobe] Inline assembly parser rejecting lock/ prefix
+121320
+
+# <rdar://problem/8741810> [PR8735] c++ miscompile at -O2
+120995
+
+# <rdar://problem/8742570> Merge data structure speedups in backend
+120003
+120440
+
+# <rdar://problem/8745191> clang-124 broke thread local variable support
+121330
+
+# <rdar://problem/8747933> tls dag combine broken
+121316
+121340
+121358
+
+# <rdar://problem/8756731> instcombine miscompilation
+122529
+
+# <rdar://problem/8813415> [regression] [nt] External/SPEC/CINT2000/164_gzip/164_gzip.exec miscompile
+122771
+122772
+Custom: 123696
+
+# <rdar://problem/8792542> misaligned branch destination
+120324
+122313
+
+# <rdar://problem/8795958> clang crash
+122104
+
+# <rdar://problem/8876232> __thread implementation doesn't preserve enough registers (ABI issue)
+123712
+
+# <rdar://problem/8898416> build failure at -O0
+#
+# Required reversion of 123010 and 123008. Manually patched via Eric in r124427.
+
+# <rdar://problem/8926440> illegal instruction targeting sp
+119977
+
+# <rdar://problem/8960959> crash during thumb isel
+123864
