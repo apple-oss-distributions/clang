@@ -16,7 +16,7 @@
 #include "llvm/PassSupport.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ManagedStatic.h"
-#include "llvm/System/Mutex.h"
+#include "llvm/Support/Mutex.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringMap.h"
@@ -26,7 +26,7 @@ using namespace llvm;
 
 // FIXME: We use ManagedStatic to erase the pass registrar on shutdown.
 // Unfortunately, passes are registered with static ctors, and having
-// llvm_shutdown clear this map prevents successful ressurection after 
+// llvm_shutdown clear this map prevents successful resurrection after
 // llvm_shutdown is run.  Ideally we should find a solution so that we don't
 // leak the map, AND can still resurrect after shutdown.
 static ManagedStatic<PassRegistry> PassRegistryObj;
@@ -106,7 +106,8 @@ void PassRegistry::registerPass(const PassInfo &PI, bool ShouldFree) {
   PassRegistryImpl *Impl = static_cast<PassRegistryImpl*>(getImpl());
   bool Inserted =
     Impl->PassInfoMap.insert(std::make_pair(PI.getTypeInfo(),&PI)).second;
-  assert(Inserted && "Pass registered multiple times!"); Inserted=Inserted;
+  assert(Inserted && "Pass registered multiple times!");
+  (void)Inserted;
   Impl->PassInfoStringMap[PI.getPassArgument()] = &PI;
   
   // Notify any listeners.

@@ -55,6 +55,13 @@ FunctionPass *llvm::createRegisterAllocator(CodeGenOpt::Level OptLevel) {
     RegisterRegAlloc::setDefault(RegAlloc);
   }
 
+  // This forces linking of the linear scan register allocator,
+  // so -regalloc=linearscan still works in clang.
+  if (Ctor == createGreedyRegisterAllocator)
+    return createGreedyRegisterAllocator();
+  if (Ctor == createLinearScanRegisterAllocator)
+    return createLinearScanRegisterAllocator();
+
   if (Ctor != createDefaultRegisterAllocator)
     return Ctor();
 

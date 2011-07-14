@@ -250,13 +250,18 @@ namespace clang {
     virtual void ReadPreprocessedEntities() = 0;
     
     /// \brief Read the preprocessed entity at the given offset.
-    virtual PreprocessedEntity *ReadPreprocessedEntity(uint64_t Offset) = 0;
+    virtual PreprocessedEntity *
+    ReadPreprocessedEntityAtOffset(uint64_t Offset) = 0;
   };
   
   /// \brief A record of the steps taken while preprocessing a source file,
   /// including the various preprocessing directives processed, macros 
   /// instantiated, etc.
   class PreprocessingRecord : public PPCallbacks {
+    /// \brief Whether we should include nested macro instantiations in
+    /// the preprocessing record.
+    bool IncludeNestedMacroInstantiations;
+    
     /// \brief Allocator used to store preprocessing objects.
     llvm::BumpPtrAllocator BumpAlloc;
 
@@ -280,7 +285,8 @@ namespace clang {
     void MaybeLoadPreallocatedEntities() const ;
     
   public:
-    PreprocessingRecord();
+    /// \brief Construct 
+    explicit PreprocessingRecord(bool IncludeNestedMacroInstantiations);
     
     /// \brief Allocate memory in the preprocessing record.
     void *Allocate(unsigned Size, unsigned Align = 8) {
@@ -290,6 +296,10 @@ namespace clang {
     /// \brief Deallocate memory in the preprocessing record.
     void Deallocate(void *Ptr) { }
     
+    size_t getTotalMemory() const {
+      return BumpAlloc.getTotalMemory();
+    }
+    
     // Iteration over the preprocessed entities.
     typedef std::vector<PreprocessedEntity *>::iterator iterator;
     typedef std::vector<PreprocessedEntity *>::const_iterator const_iterator;
@@ -297,7 +307,7 @@ namespace clang {
     iterator end(bool OnlyLocalEntities = false);
     const_iterator begin(bool OnlyLocalEntities = false) const;
     const_iterator end(bool OnlyLocalEntities = false) const;
-    
+
     /// \brief Add a new preprocessed entity to this record.
     void addPreprocessedEntity(PreprocessedEntity *Entity);
     
@@ -333,15 +343,16 @@ namespace clang {
     MacroDefinition *findMacroDefinition(const MacroInfo *MI);
     
     virtual void MacroExpands(const Token &Id, const MacroInfo* MI);
-    virtual void MacroDefined(const IdentifierInfo *II, const MacroInfo *MI);
-    virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
-                                const MacroInfo *MI);
+    virtual void MacroDefined(const Token &Id, const MacroInfo *MI);
+    virtual void MacroUndefined(const Token &Id, const MacroInfo *MI);
     virtual void InclusionDirective(SourceLocation HashLoc,
                                     const Token &IncludeTok,
                                     llvm::StringRef FileName,
                                     bool IsAngled,
                                     const FileEntry *File,
-                                    SourceLocation EndLoc);
+                                    SourceLocation EndLoc,
+                                    llvm::StringRef SearchPath,
+                                    llvm::StringRef RelativePath);
   };
 } // end namespace clang
 

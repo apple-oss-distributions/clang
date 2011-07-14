@@ -19,7 +19,6 @@
 #include <string>
 
 namespace llvm {
-class LLVMContext;
 class raw_ostream;
 class raw_fd_ostream;
 class Timer;
@@ -59,29 +58,26 @@ class TargetInfo;
 /// come in two forms; a short form that reuses the CompilerInstance objects,
 /// and a long form that takes explicit instances of any required objects.
 class CompilerInstance {
-  /// The LLVM context used for this instance.
-  llvm::OwningPtr<llvm::LLVMContext> LLVMContext;
-
   /// The options used in this compiler instance.
-  llvm::OwningPtr<CompilerInvocation> Invocation;
+  llvm::IntrusiveRefCntPtr<CompilerInvocation> Invocation;
 
   /// The diagnostics engine instance.
   llvm::IntrusiveRefCntPtr<Diagnostic> Diagnostics;
 
   /// The target being compiled for.
-  llvm::OwningPtr<TargetInfo> Target;
+  llvm::IntrusiveRefCntPtr<TargetInfo> Target;
 
   /// The file manager.
-  llvm::OwningPtr<FileManager> FileMgr;
+  llvm::IntrusiveRefCntPtr<FileManager> FileMgr;
 
   /// The source manager.
-  llvm::OwningPtr<SourceManager> SourceMgr;
+  llvm::IntrusiveRefCntPtr<SourceManager> SourceMgr;
 
   /// The preprocessor.
-  llvm::OwningPtr<Preprocessor> PP;
+  llvm::IntrusiveRefCntPtr<Preprocessor> PP;
 
   /// The AST context.
-  llvm::OwningPtr<ASTContext> Context;
+  llvm::IntrusiveRefCntPtr<ASTContext> Context;
 
   /// The AST consumer.
   llvm::OwningPtr<ASTConsumer> Consumer;
@@ -155,23 +151,6 @@ public:
   bool ExecuteAction(FrontendAction &Act);
 
   /// }
-  /// @name LLVM Context
-  /// {
-
-  bool hasLLVMContext() const { return LLVMContext != 0; }
-
-  llvm::LLVMContext &getLLVMContext() const {
-    assert(LLVMContext && "Compiler instance has no LLVM context!");
-    return *LLVMContext;
-  }
-
-  llvm::LLVMContext *takeLLVMContext() { return LLVMContext.take(); }
-
-  /// setLLVMContext - Replace the current LLVM context and take ownership of
-  /// \arg Value.
-  void setLLVMContext(llvm::LLVMContext *Value);
-
-  /// }
   /// @name Compiler Invocation and Options
   /// {
 
@@ -182,10 +161,7 @@ public:
     return *Invocation;
   }
 
-  CompilerInvocation *takeInvocation() { return Invocation.take(); }
-
-  /// setInvocation - Replace the current invocation; the compiler instance
-  /// takes ownership of \arg Value.
+  /// setInvocation - Replace the current invocation.
   void setInvocation(CompilerInvocation *Value);
 
   /// }
@@ -272,13 +248,13 @@ public:
 
   bool hasDiagnostics() const { return Diagnostics != 0; }
 
+  /// Get the current diagnostics engine.
   Diagnostic &getDiagnostics() const {
     assert(Diagnostics && "Compiler instance has no diagnostics!");
     return *Diagnostics;
   }
 
-  /// setDiagnostics - Replace the current diagnostics engine; the compiler
-  /// instance takes ownership of \arg Value.
+  /// setDiagnostics - Replace the current diagnostics engine.
   void setDiagnostics(Diagnostic *Value);
 
   DiagnosticClient &getDiagnosticClient() const {
@@ -298,12 +274,7 @@ public:
     return *Target;
   }
 
-  /// takeTarget - Remove the current diagnostics engine and give ownership
-  /// to the caller.
-  TargetInfo *takeTarget() { return Target.take(); }
-
-  /// setTarget - Replace the current diagnostics engine; the compiler
-  /// instance takes ownership of \arg Value.
+  /// Replace the current diagnostics engine.
   void setTarget(TargetInfo *Value);
 
   /// }
@@ -312,17 +283,17 @@ public:
 
   bool hasFileManager() const { return FileMgr != 0; }
 
+  /// Return the current file manager to the caller.
   FileManager &getFileManager() const {
     assert(FileMgr && "Compiler instance has no file manager!");
     return *FileMgr;
   }
+  
+  void resetAndLeakFileManager() {
+    FileMgr.resetWithoutRelease();
+  }
 
-  /// takeFileManager - Remove the current file manager and give ownership to
-  /// the caller.
-  FileManager *takeFileManager() { return FileMgr.take(); }
-
-  /// setFileManager - Replace the current file manager; the compiler instance
-  /// takes ownership of \arg Value.
+  /// setFileManager - Replace the current file manager.
   void setFileManager(FileManager *Value);
 
   /// }
@@ -331,17 +302,17 @@ public:
 
   bool hasSourceManager() const { return SourceMgr != 0; }
 
+  /// Return the current source manager.
   SourceManager &getSourceManager() const {
     assert(SourceMgr && "Compiler instance has no source manager!");
     return *SourceMgr;
   }
+  
+  void resetAndLeakSourceManager() {
+    SourceMgr.resetWithoutRelease();
+  }
 
-  /// takeSourceManager - Remove the current source manager and give ownership
-  /// to the caller.
-  SourceManager *takeSourceManager() { return SourceMgr.take(); }
-
-  /// setSourceManager - Replace the current source manager; the compiler
-  /// instance takes ownership of \arg Value.
+  /// setSourceManager - Replace the current source manager.
   void setSourceManager(SourceManager *Value);
 
   /// }
@@ -350,17 +321,17 @@ public:
 
   bool hasPreprocessor() const { return PP != 0; }
 
+  /// Return the current preprocessor.
   Preprocessor &getPreprocessor() const {
     assert(PP && "Compiler instance has no preprocessor!");
     return *PP;
   }
 
-  /// takePreprocessor - Remove the current preprocessor and give ownership to
-  /// the caller.
-  Preprocessor *takePreprocessor() { return PP.take(); }
+  void resetAndLeakPreprocessor() {
+    PP.resetWithoutRelease();
+  }
 
-  /// setPreprocessor - Replace the current preprocessor; the compiler instance
-  /// takes ownership of \arg Value.
+  /// Replace the current preprocessor.
   void setPreprocessor(Preprocessor *Value);
 
   /// }
@@ -373,13 +344,12 @@ public:
     assert(Context && "Compiler instance has no AST context!");
     return *Context;
   }
+  
+  void resetAndLeakASTContext() {
+    Context.resetWithoutRelease();
+  }
 
-  /// takeASTContext - Remove the current AST context and give ownership to the
-  /// caller.
-  ASTContext *takeASTContext() { return Context.take(); }
-
-  /// setASTContext - Replace the current AST context; the compiler instance
-  /// takes ownership of \arg Value.
+  /// setASTContext - Replace the current AST context.
   void setASTContext(ASTContext *Value);
 
   /// \brief Replace the current Sema; the compiler instance takes ownership
@@ -454,11 +424,6 @@ public:
   /// @name Output Files
   /// {
 
-  /// getOutputFileList - Get the list of (path, output stream) pairs of output
-  /// files; the path may be empty but the stream will always be non-null.
-  const std::list< std::pair<std::string,
-                             llvm::raw_ostream*> > &getOutputFileList() const;
-
   /// addOutputFile - Add an output file onto the list of tracked output files.
   ///
   /// \param OutFile - The output file info.
@@ -505,18 +470,21 @@ public:
   /// attached to (and, then, owned by) the returned Diagnostic
   /// object.
   ///
+  /// \param CodeGenOpts If non-NULL, the code gen options in use, which may be
+  /// used by some diagnostics printers (for logging purposes only).
+  ///
   /// \return The new object on success, or null on failure.
   static llvm::IntrusiveRefCntPtr<Diagnostic> 
   createDiagnostics(const DiagnosticOptions &Opts, int Argc,
                     const char* const *Argv,
-                    DiagnosticClient *Client = 0);
+                    DiagnosticClient *Client = 0,
+                    const CodeGenOptions *CodeGenOpts = 0);
 
   /// Create the file manager and replace any existing one with it.
   void createFileManager();
 
   /// Create the source manager and replace any existing one with it.
-  void createSourceManager(FileManager &FileMgr,
-                           const FileSystemOptions &FSOpts);
+  void createSourceManager(FileManager &FileMgr);
 
   /// Create the preprocessor, using the invocation, file, and source managers,
   /// and replace any existing one with it.
@@ -534,7 +502,6 @@ public:
                                           const DependencyOutputOptions &,
                                           const TargetInfo &,
                                           const FrontendOptions &,
-                                          const FileSystemOptions &,
                                           SourceManager &, FileManager &);
 
   /// Create the AST context.
@@ -642,7 +609,6 @@ public:
   static bool InitializeSourceManager(llvm::StringRef InputFile,
                                       Diagnostic &Diags,
                                       FileManager &FileMgr,
-                                      const FileSystemOptions &FSOpts,
                                       SourceManager &SourceMgr,
                                       const FrontendOptions &Opts);
 

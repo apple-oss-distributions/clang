@@ -48,18 +48,12 @@ using namespace llvm;
 // Primitive Helper Functions.
 //===----------------------------------------------------------------------===//
 
-void X86AsmPrinter::PrintPICBaseSymbol(raw_ostream &O) const {
-  const TargetLowering *TLI = TM.getTargetLowering();
-  O << *static_cast<const X86TargetLowering*>(TLI)->getPICBaseSymbol(MF,
-                                                                    OutContext);
-}
-
 /// runOnMachineFunction - Emit the function body.
 ///
 bool X86AsmPrinter::runOnMachineFunction(MachineFunction &MF) {
   SetupMachineFunction(MF);
 
-  if (Subtarget->isTargetCOFF()) {
+  if (Subtarget->isTargetCOFF() && !Subtarget->isTargetEnvMacho()) {
     bool Intrn = MF.getFunction()->hasInternalLinkage();
     OutStreamer.BeginCOFFSymbolDef(CurrentFnSym);
     OutStreamer.EmitCOFFSymbolStorageClass(Intrn ? COFF::IMAGE_SYM_CLASS_STATIC
@@ -185,15 +179,12 @@ void X86AsmPrinter::printSymbolOperand(const MachineOperand &MO,
     // These affect the name of the symbol, not any suffix.
     break;
   case X86II::MO_GOT_ABSOLUTE_ADDRESS:
-    O << " + [.-";
-    PrintPICBaseSymbol(O);
-    O << ']';
+    O << " + [.-" << *MF->getPICBaseSymbol() << ']';
     break;
   case X86II::MO_PIC_BASE_OFFSET:
   case X86II::MO_DARWIN_NONLAZY_PIC_BASE:
   case X86II::MO_DARWIN_HIDDEN_NONLAZY_PIC_BASE:
-    O << '-';
-    PrintPICBaseSymbol(O);
+    O << '-' << *MF->getPICBaseSymbol();
     break;
   case X86II::MO_TLSGD:     O << "@TLSGD";     break;
   case X86II::MO_GOTTPOFF:  O << "@GOTTPOFF";  break;
@@ -206,8 +197,7 @@ void X86AsmPrinter::printSymbolOperand(const MachineOperand &MO,
   case X86II::MO_PLT:       O << "@PLT";       break;
   case X86II::MO_TLVP:      O << "@TLVP";      break;
   case X86II::MO_TLVP_PIC_BASE:
-    O << "@TLVP" << '-';
-    PrintPICBaseSymbol(O);
+    O << "@TLVP" << '-' << *MF->getPICBaseSymbol();
     break;
   }
 }
@@ -312,6 +302,9 @@ void X86AsmPrinter::printLeaMemReference(const MachineInstr *MI, unsigned Op,
     printSymbolOperand(MI->getOperand(Op+3), O);
   }
 
+  if (Modifier && strcmp(Modifier, "H") == 0)
+    O << "+8";
+
   if (HasParenPart) {
     assert(IndexReg.getReg() != X86::ESP &&
            "X86 doesn't allow scaling by ESP");
@@ -344,10 +337,8 @@ void X86AsmPrinter::printMemReference(const MachineInstr *MI, unsigned Op,
 
 void X86AsmPrinter::printPICLabel(const MachineInstr *MI, unsigned Op,
                                   raw_ostream &O) {
-  PrintPICBaseSymbol(O);
-  O << '\n';
-  PrintPICBaseSymbol(O);
-  O << ':';
+  O << *MF->getPICBaseSymbol() << '\n';
+  O << *MF->getPICBaseSymbol() << ':';
 }
 
 bool X86AsmPrinter::printAsmMRegister(const MachineOperand &MO, char Mode,
@@ -470,6 +461,9 @@ bool X86AsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
     case 'q': // Print SImode register
       // These only apply to registers, ignore on mem.
       break;
+    case 'H':
+      printMemReference(MI, OpNo, O, "H");
+      return false;
     case 'P': // Don't print @PLT, but do print as memory.
       printMemReference(MI, OpNo, O, "no-rip");
       return false;
@@ -480,13 +474,13 @@ bool X86AsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
 }
 
 void X86AsmPrinter::EmitStartOfAsmFile(Module &M) {
-  if (Subtarget->isTargetDarwin())
+  if (Subtarget->isTargetEnvMacho())
     OutStreamer.SwitchSection(getObjFileLowering().getTextSection());
 }
 
 
 void X86AsmPrinter::EmitEndOfAsmFile(Module &M) {
-  if (Subtarget->isTargetDarwin()) {
+  if (Subtarget->isTargetEnvMacho()) {
     // All darwin targets use mach-o.
     MachineModuleInfoMachO &MMIMacho =
       MMI->getObjFileInfo<MachineModuleInfoMachO>();
@@ -580,15 +574,14 @@ void X86AsmPrinter::EmitEndOfAsmFile(Module &M) {
     OutStreamer.EmitAssemblerFlag(MCAF_SubsectionsViaSymbols);
   }
 
-  if (Subtarget->isTargetWindows()
-   && !Subtarget->isTargetCygMing()
-   && MMI->callsExternalVAFunctionWithFloatingPointArguments()) {
+  if (Subtarget->isTargetWindows() && !Subtarget->isTargetCygMing() &&
+      MMI->callsExternalVAFunctionWithFloatingPointArguments()) {
     StringRef SymbolName = Subtarget->is64Bit() ? "_fltused" : "__fltused";
     MCSymbol *S = MMI->getContext().GetOrCreateSymbol(SymbolName);
     OutStreamer.EmitSymbolAttribute(S, MCSA_Global);
   }
 
-  if (Subtarget->isTargetCOFF()) {
+  if (Subtarget->isTargetCOFF() && !Subtarget->isTargetEnvMacho()) {
     X86COFFMachineModuleInfo &COFFMMI =
       MMI->getObjFileInfo<X86COFFMachineModuleInfo>();
 
@@ -716,12 +709,13 @@ void X86AsmPrinter::PrintDebugValueComment(const MachineInstr *MI,
 //===----------------------------------------------------------------------===//
 
 static MCInstPrinter *createX86MCInstPrinter(const Target &T,
+                                             TargetMachine &TM,
                                              unsigned SyntaxVariant,
                                              const MCAsmInfo &MAI) {
   if (SyntaxVariant == 0)
-    return new X86ATTInstPrinter(MAI);
+    return new X86ATTInstPrinter(TM, MAI);
   if (SyntaxVariant == 1)
-    return new X86IntelInstPrinter(MAI);
+    return new X86IntelInstPrinter(TM, MAI);
   return 0;
 }
 

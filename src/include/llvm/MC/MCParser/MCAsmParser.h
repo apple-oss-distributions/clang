@@ -10,7 +10,7 @@
 #ifndef LLVM_MC_MCASMPARSER_H
 #define LLVM_MC_MCASMPARSER_H
 
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 
 namespace llvm {
 class AsmToken;
@@ -102,7 +102,7 @@ public:
   /// EatToEndOfStatement - Skip to the end of the current statement, for error
   /// recovery.
   virtual void EatToEndOfStatement() = 0;
-  
+
   /// ParseExpression - Parse an arbitrary expression.
   ///
   /// @param Res - The value of the expression. The result is undefined

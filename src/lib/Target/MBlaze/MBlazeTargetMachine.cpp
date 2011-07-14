@@ -33,21 +33,21 @@ static MCStreamer *createMCStreamer(const Target &T, const std::string &TT,
                                     MCContext &Ctx, TargetAsmBackend &TAB,
                                     raw_ostream &_OS,
                                     MCCodeEmitter *_Emitter,
-                                    bool RelaxAll) {
+                                    bool RelaxAll,
+                                    bool NoExecStack) {
   Triple TheTriple(TT);
-  switch (TheTriple.getOS()) {
-  case Triple::Darwin:
+
+  if (TheTriple.isOSDarwin()) {
     llvm_unreachable("MBlaze does not support Darwin MACH-O format");
     return NULL;
-  case Triple::MinGW32:
-  case Triple::MinGW64:
-  case Triple::Cygwin:
-  case Triple::Win32:
-    llvm_unreachable("ARM does not support Windows COFF format");
-    return NULL;
-  default:
-    return createELFStreamer(Ctx, TAB, _OS, _Emitter, RelaxAll);
   }
+
+  if (TheTriple.isOSWindows()) {
+    llvm_unreachable("MBlaze does not support Windows COFF format");
+    return NULL;
+  }
+
+  return createELFStreamer(Ctx, TAB, _OS, _Emitter, RelaxAll, NoExecStack);
 }
 
 
@@ -61,7 +61,7 @@ extern "C" void LLVMInitializeMBlazeTarget() {
   // Register the MC code emitter
   TargetRegistry::RegisterCodeEmitter(TheMBlazeTarget,
                                       llvm::createMBlazeMCCodeEmitter);
-  
+
   // Register the asm backend
   TargetRegistry::RegisterAsmBackend(TheMBlazeTarget,
                                      createMBlazeAsmBackend);
@@ -85,8 +85,9 @@ MBlazeTargetMachine(const Target &T, const std::string &TT,
   Subtarget(TT, FS),
   DataLayout("E-p:32:32:32-i8:8:8-i16:16:16"),
   InstrInfo(*this),
-  FrameInfo(TargetFrameInfo::StackGrowsUp, 8, 0),
-  TLInfo(*this), TSInfo(*this), ELFWriterInfo(*this) {
+  FrameLowering(Subtarget),
+  TLInfo(*this), TSInfo(*this), ELFWriterInfo(*this),
+  InstrItins(Subtarget.getInstrItineraryData()) {
   if (getRelocationModel() == Reloc::Default) {
       setRelocationModel(Reloc::Static);
   }
@@ -97,8 +98,8 @@ MBlazeTargetMachine(const Target &T, const std::string &TT,
 
 // Install an instruction selector pass using
 // the ISelDag to gen MBlaze code.
-bool MBlazeTargetMachine::
-addInstSelector(PassManagerBase &PM, CodeGenOpt::Level OptLevel) {
+bool MBlazeTargetMachine::addInstSelector(PassManagerBase &PM,
+                                          CodeGenOpt::Level OptLevel) {
   PM.add(createMBlazeISelDag(*this));
   return false;
 }
@@ -106,8 +107,8 @@ addInstSelector(PassManagerBase &PM, CodeGenOpt::Level OptLevel) {
 // Implemented by targets that want to run passes immediately before
 // machine code is emitted. return true if -print-machineinstrs should
 // print out the code after the passes.
-bool MBlazeTargetMachine::
-addPreEmitPass(PassManagerBase &PM, CodeGenOpt::Level OptLevel) {
+bool MBlazeTargetMachine::addPreEmitPass(PassManagerBase &PM,
+                                         CodeGenOpt::Level OptLevel) {
   PM.add(createMBlazeDelaySlotFillerPass(*this));
   return true;
 }

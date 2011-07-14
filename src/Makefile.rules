@@ -205,7 +205,7 @@ ifdef LLVMC_BASED_DRIVER
 TOOLNAME = $(LLVMC_BASED_DRIVER)
 
 LLVMLIBS = CompilerDriver.a
-LINK_COMPONENTS = support system
+LINK_COMPONENTS = support
 
 endif # LLVMC_BASED_DRIVER
 
@@ -388,10 +388,19 @@ ifeq ($(ENABLE_PIC),0)
   CXX.Flags     += -fPIC
   CPP.BaseFlags += -fPIC
 endif
+
+  LD.Flags += -Wl,--no-relax
 endif
 
-ifeq ($(ARCH),Alpha)
-  LD.Flags += -Wl,--no-relax
+# GNU ld/PECOFF accepts but ignores them below;
+#   --version-script
+#   --export-dynamic
+#   --rpath
+# FIXME: autoconf should be aware of them.
+ifneq (,$(filter $(HOST_OS),Cygwin MingW))
+  HAVE_LINK_VERSION_SCRIPT := 0
+  RPATH :=
+  RDYNAMIC := -Wl,--export-all-symbols
 endif
 
 #--------------------------------------------------------------------
@@ -435,11 +444,11 @@ endif
 # LLVM Capable Compiler
 #--------------------------------------------------------------------
 
-ifeq ($(LLVMCC_OPTION),llvm-gcc)
+ifneq ($(findstring llvm-gcc,$(LLVMCC_OPTION)),)
   LLVMCC := $(LLVMGCC)
   LLVMCXX := $(LLVMGXX)
 else
-  ifeq ($(LLVMCC_OPTION),clang)
+  ifneq ($(findstring clang,$(LLVMCC_OPTION)),)
     ifneq ($(CLANGPATH),)
       LLVMCC := $(CLANGPATH)
       LLVMCXX := $(CLANGXXPATH)
@@ -621,11 +630,11 @@ else
 endif
 
 ifeq ($(HOST_OS),SunOS)
-CPP.BaseFlags += -include llvm/System/Solaris.h
+CPP.BaseFlags += -include llvm/Support/Solaris.h
 endif
 
 ifeq ($(HOST_OS),AuroraUX)
-CPP.BaseFlags += -include llvm/System/Solaris.h
+CPP.BaseFlags += -include llvm/Support/Solaris.h
 endif # !HOST_OS - AuroraUX.
 
 LD.Flags      += -L$(LibDir) -L$(LLVMLibDir)
@@ -637,26 +646,42 @@ CPP.Flags     += $(sort -I$(PROJ_OBJ_DIR) -I$(PROJ_SRC_DIR) \
 	         $(LLVM_OBJ_ROOT) $(LLVM_SRC_ROOT))) \
 	         $(CPP.BaseFlags)
 
+# SHOW_DIAGNOSTICS support.
+ifeq ($(SHOW_DIAGNOSTICS),1)
+  Compile.Wrapper := env CC_LOG_DIAGNOSTICS=1 \
+	                  CC_LOG_DIAGNOSTICS_FILE="$(LLVM_OBJ_ROOT)/$(BuildMode)/diags"
+else
+  Compile.Wrapper :=
+endif
+
 ifeq ($(BUILD_COMPONENT), 1)
-  Compile.C     = $(BUILD_CC) $(CPP.Flags) $(C.Flags) $(CFLAGS) $(CPPFLAGS) \
+  Compile.C     = $(Compile.Wrapper) \
+	          $(BUILD_CC) $(CPP.Flags) $(C.Flags) $(CFLAGS) $(CPPFLAGS) \
                   $(TargetCommonOpts) $(CompileCommonOpts) -c
-  Compile.CXX   = $(BUILD_CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) \
+  Compile.CXX   = $(Compile.Wrapper) \
+	          $(BUILD_CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) \
 		  $(CPPFLAGS) \
                   $(TargetCommonOpts) $(CompileCommonOpts) -c
-  Preprocess.CXX= $(BUILD_CXX) $(CPP.Flags) $(CPPFLAGS) $(TargetCommonOpts) \
+  Preprocess.CXX= $(Compile.Wrapper) \
+	          $(BUILD_CXX) $(CPP.Flags) $(CPPFLAGS) $(TargetCommonOpts) \
                   $(CompileCommonOpts) $(CXX.Flags) -E
-  Link          = $(BUILD_CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) \
-		  $(LDFLAGS) \
-                  $(TargetCommonOpts) $(CompileCommonOpts) $(LD.Flags) $(Strip)
+  Link          = $(Compile.Wrapper) \
+	          $(BUILD_CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) \
+		  $(LD.Flags) $(LDFLAGS) \
+                  $(TargetCommonOpts) $(CompileCommonOpts) $(Strip)
 else
-  Compile.C     = $(CC) $(CPP.Flags) $(C.Flags) $(CFLAGS) $(CPPFLAGS) \
+  Compile.C     = $(Compile.Wrapper) \
+	          $(CC) $(CPP.Flags) $(C.Flags) $(CFLAGS) $(CPPFLAGS) \
                   $(TargetCommonOpts) $(CompileCommonOpts) -c
-  Compile.CXX   = $(CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) $(CPPFLAGS) \
+  Compile.CXX   = $(Compile.Wrapper) \
+	          $(CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) $(CPPFLAGS) \
                   $(TargetCommonOpts) $(CompileCommonOpts) -c
-  Preprocess.CXX= $(CXX) $(CPP.Flags) $(TargetCommonOpts) $(CPPFLAGS) \
+  Preprocess.CXX= $(Compile.Wrapper) \
+	          $(CXX) $(CPP.Flags) $(TargetCommonOpts) $(CPPFLAGS) \
                   $(CompileCommonOpts) $(CXX.Flags) -E
-  Link          = $(CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) $(LDFLAGS) \
-                  $(TargetCommonOpts)  $(CompileCommonOpts) $(LD.Flags) $(Strip)
+  Link          = $(Compile.Wrapper) \
+	          $(CXX) $(CPP.Flags) $(CXX.Flags) $(CXXFLAGS) $(LD.Flags) \
+                  $(LDFLAGS) $(TargetCommonOpts)  $(CompileCommonOpts) $(Strip)
 endif
 
 BCCompile.C   = $(LLVMCC) $(CPP.Flags) $(C.Flags) $(CFLAGS) $(CPPFLAGS) \
@@ -709,6 +734,24 @@ BaseNameSources := $(sort $(basename $(Sources)))
 
 ObjectsO  := $(BaseNameSources:%=$(ObjDir)/%.o)
 ObjectsBC := $(BaseNameSources:%=$(ObjDir)/%.bc)
+
+#----------------------------------------------------------
+# For Mingw MSYS bash and Python/w32:
+#
+# $(ECHOPATH) prints DOSish pathstring.
+#   ex) $(ECHOPATH) /include/sys/types.h
+#   --> C:/mingw/include/sys/types.h
+# built-in "echo" does not transform path to DOSish path.
+#
+# FIXME: It would not be needed when MSYS's python
+# were provided.
+#----------------------------------------------------------
+
+ifeq (-mingw32,$(findstring -mingw32,$(BUILD_TRIPLE)))
+  ECHOPATH := $(Verb)python -u -c "import sys;print ' '.join(sys.argv[1:])"
+else
+  ECHOPATH := $(Verb)$(ECHO)
+endif
 
 ###############################################################################
 # DIRECTORIES: Handle recursive descent of directory structure
@@ -831,7 +874,9 @@ $(RecursiveTargets)::
 else
 $(RecursiveTargets)::
 	$(Verb) for dir in $(OPTIONAL_DIRS); do \
-	  ($(MAKE) -C$$dir $@ ) || exit 1; \
+	  if [ -d $(PROJ_SRC_DIR)/$$dir ]; then\
+	    ($(MAKE) -C$$dir $@ ) || exit 1; \
+	  fi \
 	done
 endif
 endif
@@ -947,11 +992,6 @@ ifdef EXPORTED_SYMBOL_FILE
 # First, set up the native export file, which may differ from the source
 # export file.
 
-# The option --version-script is not effective on GNU ld win32.
-ifneq (,$(filter $(HOST_OS),Cygwin MingW))
-  HAVE_LINK_VERSION_SCRIPT := 0
-endif
-
 ifeq ($(HOST_OS),Darwin)
 # Darwin convention prefixes symbols with underscores.
 NativeExportsFile := $(ObjDir)/$(notdir $(EXPORTED_SYMBOL_FILE)).sed
@@ -967,7 +1007,9 @@ $(NativeExportsFile): $(EXPORTED_SYMBOL_FILE) $(ObjDir)/.dir
 	$(Verb) echo "{" > $@
 	$(Verb) grep -q "\<" $< && echo "  global:" >> $@ || :
 	$(Verb) sed -e 's/$$/;/' -e 's/^/    /' < $< >> $@
+ifneq ($(HOST_OS),OpenBSD)
 	$(Verb) echo "  local: *;" >> $@
+endif
 	$(Verb) echo "};" >> $@
 clean-local::
 	-$(Verb) $(RM) -f $(NativeExportsFile)
@@ -1079,12 +1121,14 @@ ifdef LIBRARYNAME
 # Make sure there isn't any extraneous whitespace on the LIBRARYNAME option
 LIBRARYNAME := $(strip $(LIBRARYNAME))
 ifdef LOADABLE_MODULE
-LibName.A  := $(LibDir)/$(LIBRARYNAME).a
-LibName.SO := $(SharedLibDir)/$(LIBRARYNAME)$(SHLIBEXT)
+BaseLibName.A  := $(LIBRARYNAME).a
+BaseLibName.SO := $(LIBRARYNAME)$(SHLIBEXT)
 else
-LibName.A  := $(LibDir)/lib$(LIBRARYNAME).a
-LibName.SO := $(SharedLibDir)/$(SharedPrefix)$(LIBRARYNAME)$(SHLIBEXT)
+BaseLibName.A  := lib$(LIBRARYNAME).a
+BaseLibName.SO := $(SharedPrefix)$(LIBRARYNAME)$(SHLIBEXT)
 endif
+LibName.A  := $(LibDir)/$(BaseLibName.A)
+LibName.SO := $(SharedLibDir)/$(BaseLibName.SO)
 LibName.O  := $(LibDir)/$(LIBRARYNAME).o
 LibName.BCA:= $(LibDir)/lib$(LIBRARYNAME).bca
 
@@ -1138,7 +1182,7 @@ DestSharedLibDir := $(DESTDIR)$(PROJ_bindir)
 else
 DestSharedLibDir := $(DESTDIR)$(PROJ_libdir)
 endif
-DestSharedLib := $(DestSharedLibDir)/$(SharedPrefix)$(LIBRARYNAME)$(SHLIBEXT)
+DestSharedLib := $(DestSharedLibDir)/$(BaseLibName.SO)
 
 install-local:: $(DestSharedLib)
 
@@ -1500,31 +1544,31 @@ BC_DEPEND_MOVEFILE = then $(MV) -f "$(ObjDir)/$*.bc.d.tmp" "$(ObjDir)/$*.bc.d"; 
 $(ObjDir)/%.ll: %.cpp $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCXX)
 	$(Echo) "Compiling $*.cpp for $(BuildMode) build (bytecode)"
 	$(Verb) if $(BCCompile.CXX) $(BC_DEPEND_OPTIONS) \
-                              $< -o $(ObjDir)/$*.ll -S -emit-llvm ; \
+			$< -o $(ObjDir)/$*.ll -S $(LLVMCC_EMITIR_FLAG) ; \
 	        $(BC_DEPEND_MOVEFILE)
 
 $(ObjDir)/%.ll: %.mm $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCXX)
 	$(Echo) "Compiling $*.mm for $(BuildMode) build (bytecode)"
 	$(Verb) if $(BCCompile.CXX) $(BC_DEPEND_OPTIONS) \
-                              $< -o $(ObjDir)/$*.ll -S -emit-llvm ; \
+			$< -o $(ObjDir)/$*.ll -S $(LLVMCC_EMITIR_FLAG) ; \
 	        $(BC_DEPEND_MOVEFILE)
 
 $(ObjDir)/%.ll: %.cc $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCXX)
 	$(Echo) "Compiling $*.cc for $(BuildMode) build (bytecode)"
 	$(Verb) if $(BCCompile.CXX) $(BC_DEPEND_OPTIONS) \
-                              $< -o $(ObjDir)/$*.ll -S -emit-llvm ; \
+			$< -o $(ObjDir)/$*.ll -S $(LLVMCC_EMITIR_FLAG) ; \
 	        $(BC_DEPEND_MOVEFILE)
 
 $(ObjDir)/%.ll: %.c $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCC)
 	$(Echo) "Compiling $*.c for $(BuildMode) build (bytecode)"
 	$(Verb) if $(BCCompile.C) $(BC_DEPEND_OPTIONS) \
-                              $< -o $(ObjDir)/$*.ll -S -emit-llvm ; \
+			$< -o $(ObjDir)/$*.ll -S $(LLVMCC_EMITIR_FLAG) ; \
 	        $(BC_DEPEND_MOVEFILE)
 
 $(ObjDir)/%.ll: %.m $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCC)
 	$(Echo) "Compiling $*.m for $(BuildMode) build (bytecode)"
 	$(Verb) if $(BCCompile.C) $(BC_DEPEND_OPTIONS) \
-                              $< -o $(ObjDir)/$*.ll -S -emit-llvm ; \
+			$< -o $(ObjDir)/$*.ll -S $(LLVMCC_EMITIR_FLAG) ; \
 	        $(BC_DEPEND_MOVEFILE)
 
 # Provide alternate rule sets if dependencies are disabled
@@ -1552,23 +1596,23 @@ $(ObjDir)/%.o: %.m $(ObjDir)/.dir $(BUILT_SOURCES)
 
 $(ObjDir)/%.ll: %.cpp $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCXX)
 	$(Echo) "Compiling $*.cpp for $(BuildMode) build (bytecode)"
-	$(BCCompile.CXX) $< -o $@ -S -emit-llvm
+	$(BCCompile.CXX) $< -o $@ -S $(LLVMCC_EMITIR_FLAG)
 
 $(ObjDir)/%.ll: %.mm $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCXX)
 	$(Echo) "Compiling $*.mm for $(BuildMode) build (bytecode)"
-	$(BCCompile.CXX) $< -o $@ -S -emit-llvm
+	$(BCCompile.CXX) $< -o $@ -S $(LLVMCC_EMITIR_FLAG)
 
 $(ObjDir)/%.ll: %.cc $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCXX)
 	$(Echo) "Compiling $*.cc for $(BuildMode) build (bytecode)"
-	$(BCCompile.CXX) $< -o $@ -S -emit-llvm
+	$(BCCompile.CXX) $< -o $@ -S $(LLVMCC_EMITIR_FLAG)
 
 $(ObjDir)/%.ll: %.c $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCC)
 	$(Echo) "Compiling $*.c for $(BuildMode) build (bytecode)"
-	$(BCCompile.C) $< -o $@ -S -emit-llvm
+	$(BCCompile.C) $< -o $@ -S $(LLVMCC_EMITIR_FLAG)
 
 $(ObjDir)/%.ll: %.m $(ObjDir)/.dir $(BUILT_SOURCES) $(LLVMCC)
 	$(Echo) "Compiling $*.m for $(BuildMode) build (bytecode)"
-	$(BCCompile.C) $< -o $@ -S -emit-llvm
+	$(BCCompile.C) $< -o $@ -S $(LLVMCC_EMITIR_FLAG)
 
 endif
 
@@ -1717,6 +1761,11 @@ $(TARGET:%=$(ObjDir)/%GenAsmMatcher.inc.tmp): \
 $(ObjDir)/%GenAsmMatcher.inc.tmp : %.td $(ObjDir)/.dir
 	$(Echo) "Building $(<F) assembly matcher with tblgen"
 	$(Verb) $(TableGen) -gen-asm-matcher -o $(call SYSPATH, $@) $<
+
+$(TARGET:%=$(ObjDir)/%GenMCCodeEmitter.inc.tmp): \
+$(ObjDir)/%GenMCCodeEmitter.inc.tmp: %.td $(ObjDir)/.dir
+	$(Echo) "Building $(<F) MC code emitter with tblgen"
+	$(Verb) $(TableGen) -gen-emitter -mc-emitter -o $(call SYSPATH, $@) $<
 
 $(TARGET:%=$(ObjDir)/%GenCodeEmitter.inc.tmp): \
 $(ObjDir)/%GenCodeEmitter.inc.tmp: %.td $(ObjDir)/.dir
@@ -1975,7 +2024,7 @@ $(DistZip) : $(TopDistDir)/.makedistdir
 	$(Verb) cd $(PROJ_OBJ_ROOT) ; $(ZIP) -rq $(DistZip) $(DistName)
 
 dist :: $(DistTarGZip) $(DistTarBZ2) $(DistZip)
-	$(Echo) ===== DISTRIBUTION PACKAGING SUCESSFUL =====
+	$(Echo) ===== DISTRIBUTION PACKAGING SUCCESSFUL =====
 
 DistCheckDir := $(PROJ_OBJ_ROOT)/_distcheckdir
 
@@ -2124,8 +2173,13 @@ install-local::
 	$(Verb) $(MKDIR) $(DESTDIR)$(PROJ_includedir)
 	$(Verb) if test -d "$(PROJ_SRC_ROOT)/include" ; then \
 	  cd $(PROJ_SRC_ROOT)/include && \
-	  for  hdr in `find . -type f '!' '(' -name '*~' \
-	      -o -name '.#*' -o -name '*.in' ')' -print | grep -v CVS | \
+	  for hdr in `find . -type f \
+	      '(' -name LICENSE.TXT \
+	       -o -name '*.def' \
+	       -o -name '*.h' \
+	       -o -name '*.inc' \
+	       -o -name '*.td' \
+	      ')' -print | grep -v CVS | \
 	      grep -v .svn` ; do \
 	    instdir=`dirname "$(DESTDIR)$(PROJ_includedir)/$$hdr"` ; \
 	    if test \! -d "$$instdir" ; then \
@@ -2138,7 +2192,19 @@ install-local::
 ifneq ($(PROJ_SRC_ROOT),$(PROJ_OBJ_ROOT))
 	$(Verb) if test -d "$(PROJ_OBJ_ROOT)/include" ; then \
 	  cd $(PROJ_OBJ_ROOT)/include && \
-	  for hdr in `find . -type f -print | grep -v CVS` ; do \
+	  for hdr in `find . -type f \
+	      '(' -name LICENSE.TXT \
+	       -o -name '*.def' \
+	       -o -name '*.h' \
+	       -o -name '*.inc' \
+	       -o -name '*.td' \
+	      ')' -print | grep -v CVS | \
+	      grep -v .svn` ; do \
+	    instdir=`dirname "$(DESTDIR)$(PROJ_includedir)/$$hdr"` ; \
+	    if test \! -d "$$instdir" ; then \
+	      $(EchoCmd) Making install directory $$instdir ; \
+	      $(MKDIR) $$instdir ;\
+	    fi ; \
 	    $(DataInstall) $$hdr $(DESTDIR)$(PROJ_includedir)/$$hdr ; \
 	  done ; \
 	fi

@@ -18,8 +18,8 @@
 
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/SystemUtils.h"
-#include "llvm/System/Program.h"
-#include "llvm/System/TimeValue.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/TimeValue.h"
 
 #include <stdexcept>
 #include <string>
@@ -53,18 +53,19 @@ namespace {
 #endif
   }
 
-  int ExecuteProgram (const std::string& name,
-                      const StrVector& args) {
+  int ExecuteProgram (const std::string& name, const StrVector& args) {
     sys::Path prog(name);
 
-    if (!prog.isAbsolute())
-      prog = FindExecutable(name, ProgramName, (void *)(intptr_t)&Main);
+    if (sys::path::is_relative(prog.str())) {
+      prog = PrependMainExecutablePath(name, ProgramName,
+                                       (void *)(intptr_t)&Main);
 
-    if (prog.isEmpty()) {
-      prog = sys::Program::FindProgramByName(name);
-      if (prog.isEmpty()) {
-        PrintError("Can't find program '" + name + "'");
-        return -1;
+      if (!prog.canExecute()) {
+        prog = sys::Program::FindProgramByName(name);
+        if (prog.isEmpty()) {
+          PrintError("Can't find program '" + name + "'");
+          return -1;
+        }
       }
     }
     if (!prog.canExecute()) {

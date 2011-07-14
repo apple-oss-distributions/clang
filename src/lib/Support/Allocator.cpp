@@ -12,10 +12,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/Allocator.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/Support/Recycler.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Memory.h"
+#include "llvm/Support/Memory.h"
 #include <cstring>
 
 namespace llvm {
@@ -136,6 +136,14 @@ unsigned BumpPtrAllocator::GetNumSlabs() const {
   return NumSlabs;
 }
 
+size_t BumpPtrAllocator::getTotalMemory() const {
+  size_t TotalMemory = 0;
+  for (MemSlab *Slab = CurSlab; Slab != 0; Slab = Slab->NextPtr) {
+    TotalMemory += Slab->Size;
+  }
+  return TotalMemory;
+}
+  
 void BumpPtrAllocator::PrintStats() const {
   unsigned NumSlabs = 0;
   size_t TotalMemory = 0;

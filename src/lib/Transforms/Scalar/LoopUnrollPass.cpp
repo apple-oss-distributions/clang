@@ -16,7 +16,7 @@
 #include "llvm/IntrinsicInst.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Analysis/LoopPass.h"
-#include "llvm/Analysis/InlineCost.h"
+#include "llvm/Analysis/CodeMetrics.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -43,7 +43,13 @@ namespace {
   class LoopUnroll : public LoopPass {
   public:
     static char ID; // Pass ID, replacement for typeid
-    LoopUnroll() : LoopPass(ID) {
+    LoopUnroll(int T = -1, int C = -1,  int P = -1) : LoopPass(ID) {
+      CurrentThreshold = (T == -1) ? UnrollThreshold : unsigned(T);
+      CurrentCount = (C == -1) ? UnrollCount : unsigned(C);
+      CurrentAllowPartial = (P == -1) ? UnrollAllowPartial : (bool)P;
+
+      UserThreshold = (T != -1) || (UnrollThreshold.getNumOccurrences() > 0);
+     
       initializeLoopUnrollPass(*PassRegistry::getPassRegistry());
     }
 
@@ -56,7 +62,10 @@ namespace {
     // explicit -unroll-threshold).
     static const unsigned OptSizeUnrollThreshold = 50;
     
+    unsigned CurrentCount;
     unsigned CurrentThreshold;
+    bool     CurrentAllowPartial;
+    bool     UserThreshold;        // CurrentThreshold is user-specified.
 
     bool runOnLoop(Loop *L, LPPassManager &LPM);
 
@@ -87,7 +96,9 @@ INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
 INITIALIZE_PASS_DEPENDENCY(LCSSA)
 INITIALIZE_PASS_END(LoopUnroll, "loop-unroll", "Unroll loops", false, false)
 
-Pass *llvm::createLoopUnrollPass() { return new LoopUnroll(); }
+Pass *llvm::createLoopUnrollPass(int Threshold, int Count, int AllowPartial) {
+  return new LoopUnroll(Threshold, Count, AllowPartial);
+}
 
 /// ApproximateLoopSize - Approximate the size of the loop.
 static unsigned ApproximateLoopSize(const Loop *L, unsigned &NumCalls) {
@@ -99,21 +110,6 @@ static unsigned ApproximateLoopSize(const Loop *L, unsigned &NumCalls) {
   
   unsigned LoopSize = Metrics.NumInsts;
   
-  // If we can identify the induction variable, we know that it will become
-  // constant when we unroll the loop, so factor that into our loop size 
-  // estimate.
-  // FIXME: We have to divide by InlineConstants::InstrCost because the
-  // measure returned by CountCodeReductionForConstant is not an instruction
-  // count, but rather a weight as defined by InlineConstants.  It would 
-  // probably be a good idea to standardize on a single weighting scheme by
-  // pushing more of the logic for weighting into CodeMetrics.
-  if (PHINode *IndVar = L->getCanonicalInductionVariable()) {
-    unsigned SizeDecrease = Metrics.CountCodeReductionForConstant(IndVar);
-    // NOTE: Because SizeDecrease is a fuzzy estimate, we don't want to allow
-    // it to totally negate the cost of unrolling a loop.
-    SizeDecrease = SizeDecrease > LoopSize / 2 ? LoopSize / 2 : SizeDecrease;
-  }
-  
   // Don't allow an estimate of size zero.  This would allows unrolling of loops
   // with huge iteration counts, which is a compile time problem even if it's
   // not a problem for code quality.
@@ -123,7 +119,6 @@ static unsigned ApproximateLoopSize(const Loop *L, unsigned &NumCalls) {
 }
 
 bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
-  
   LoopInfo *LI = &getAnalysis<LoopInfo>();
 
   BasicBlock *Header = L->getHeader();
@@ -135,14 +130,14 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
   // from UnrollThreshold, it is overridden to a smaller value if the current
   // function is marked as optimize-for-size, and the unroll threshold was
   // not user specified.
-  CurrentThreshold = UnrollThreshold;
-  if (Header->getParent()->hasFnAttr(Attribute::OptimizeForSize) &&
-      UnrollThreshold.getNumOccurrences() == 0)
-    CurrentThreshold = OptSizeUnrollThreshold;
+  unsigned Threshold = CurrentThreshold;
+  if (!UserThreshold && 
+      Header->getParent()->hasFnAttr(Attribute::OptimizeForSize))
+    Threshold = OptSizeUnrollThreshold;
 
   // Find trip count
   unsigned TripCount = L->getSmallConstantTripCount();
-  unsigned Count = UnrollCount;
+  unsigned Count = CurrentCount;
 
   // Automatically select an unroll count.
   if (Count == 0) {
@@ -156,7 +151,7 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
   }
 
   // Enforce the threshold.
-  if (CurrentThreshold != NoThreshold) {
+  if (Threshold != NoThreshold) {
     unsigned NumInlineCandidates;
     unsigned LoopSize = ApproximateLoopSize(L, NumInlineCandidates);
     DEBUG(dbgs() << "  Loop Size = " << LoopSize << "\n");
@@ -165,16 +160,16 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
       return false;
     }
     uint64_t Size = (uint64_t)LoopSize*Count;
-    if (TripCount != 1 && Size > CurrentThreshold) {
+    if (TripCount != 1 && Size > Threshold) {
       DEBUG(dbgs() << "  Too large to fully unroll with count: " << Count
-            << " because size: " << Size << ">" << CurrentThreshold << "\n");
-      if (!UnrollAllowPartial) {
+            << " because size: " << Size << ">" << Threshold << "\n");
+      if (!CurrentAllowPartial) {
         DEBUG(dbgs() << "  will not try to unroll partially because "
               << "-unroll-allow-partial not given\n");
         return false;
       }
       // Reduce unroll count to be modulo of TripCount for partial unrolling
-      Count = CurrentThreshold / LoopSize;
+      Count = Threshold / LoopSize;
       while (Count != 0 && TripCount%Count != 0) {
         Count--;
       }

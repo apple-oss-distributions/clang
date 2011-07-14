@@ -23,7 +23,9 @@ namespace serialization {
 enum DeclUpdateKind {
   UPD_CXX_SET_DEFINITIONDATA,
   UPD_CXX_ADDED_IMPLICIT_MEMBER,
-  UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION
+  UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION,
+  UPD_CXX_ADDED_ANONYMOUS_NAMESPACE,
+  UPD_CXX_INSTANTIATED_STATIC_DATA_MEMBER
 };
 
 TypeIdx TypeIdxFromBuiltin(const BuiltinType *BT);
@@ -34,7 +36,7 @@ TypeID MakeTypeID(QualType T, IdxForTypeTy IdxForType) {
     return PREDEF_TYPE_NULL_ID;
 
   unsigned FastQuals = T.getLocalFastQualifiers();
-  T.removeFastQualifiers();
+  T.removeLocalFastQualifiers();
 
   if (T.hasLocalNonFastQualifiers())
     return IdxForType(T).asTypeID(FastQuals);

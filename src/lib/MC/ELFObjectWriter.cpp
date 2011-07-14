@@ -11,74 +11,35 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/MC/ELFObjectWriter.h"
-#include "llvm/ADT/SmallPtrSet.h"
+#include "ELFObjectWriter.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCAsmLayout.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCELFSymbolFlags.h"
 #include "llvm/MC/MCExpr.h"
-#include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSectionELF.h"
-#include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ELF.h"
 #include "llvm/Target/TargetAsmBackend.h"
+#include "llvm/ADT/StringSwitch.h"
 
 #include "../Target/X86/X86FixupKinds.h"
+#include "../Target/ARM/ARMFixupKinds.h"
 
 #include <vector>
 using namespace llvm;
 
-static unsigned GetType(const MCSymbolData &SD) {
-  uint32_t Type = (SD.getFlags() & (0xf << ELF_STT_Shift)) >> ELF_STT_Shift;
-  assert(Type == ELF::STT_NOTYPE || Type == ELF::STT_OBJECT ||
-         Type == ELF::STT_FUNC || Type == ELF::STT_SECTION ||
-         Type == ELF::STT_FILE || Type == ELF::STT_COMMON ||
-         Type == ELF::STT_TLS);
-  return Type;
+bool ELFObjectWriter::isFixupKindPCRel(const MCAssembler &Asm, unsigned Kind) {
+  const MCFixupKindInfo &FKI =
+    Asm.getBackend().getFixupKindInfo((MCFixupKind) Kind);
+
+  return FKI.Flags & MCFixupKindInfo::FKF_IsPCRel;
 }
 
-static unsigned GetBinding(const MCSymbolData &SD) {
-  uint32_t Binding = (SD.getFlags() & (0xf << ELF_STB_Shift)) >> ELF_STB_Shift;
-  assert(Binding == ELF::STB_LOCAL || Binding == ELF::STB_GLOBAL ||
-         Binding == ELF::STB_WEAK);
-  return Binding;
-}
-
-static void SetBinding(MCSymbolData &SD, unsigned Binding) {
-  assert(Binding == ELF::STB_LOCAL || Binding == ELF::STB_GLOBAL ||
-         Binding == ELF::STB_WEAK);
-  uint32_t OtherFlags = SD.getFlags() & ~(0xf << ELF_STB_Shift);
-  SD.setFlags(OtherFlags | (Binding << ELF_STB_Shift));
-}
-
-static unsigned GetVisibility(MCSymbolData &SD) {
-  unsigned Visibility =
-    (SD.getFlags() & (0xf << ELF_STV_Shift)) >> ELF_STV_Shift;
-  assert(Visibility == ELF::STV_DEFAULT || Visibility == ELF::STV_INTERNAL ||
-         Visibility == ELF::STV_HIDDEN || Visibility == ELF::STV_PROTECTED);
-  return Visibility;
-}
-
-static bool isFixupKindX86PCRel(unsigned Kind) {
-  switch (Kind) {
-  default:
-    return false;
-  case X86::reloc_pcrel_1byte:
-  case X86::reloc_pcrel_4byte:
-  case X86::reloc_riprel_4byte:
-  case X86::reloc_riprel_4byte_movq_load:
-    return true;
-  }
-}
-
-static bool RelocNeedsGOT(MCSymbolRefExpr::VariantKind Variant) {
+bool ELFObjectWriter::RelocNeedsGOT(MCSymbolRefExpr::VariantKind Variant) {
   switch (Variant) {
   default:
     return false;
@@ -98,233 +59,12 @@ static bool RelocNeedsGOT(MCSymbolRefExpr::VariantKind Variant) {
   }
 }
 
-namespace {
-
-  class ELFObjectWriterImpl {
-    /*static bool isFixupKindX86RIPRel(unsigned Kind) {
-      return Kind == X86::reloc_riprel_4byte ||
-        Kind == X86::reloc_riprel_4byte_movq_load;
-    }*/
-
-
-    /// ELFSymbolData - Helper struct for containing some precomputed information
-    /// on symbols.
-    struct ELFSymbolData {
-      MCSymbolData *SymbolData;
-      uint64_t StringIndex;
-      uint32_t SectionIndex;
-
-      // Support lexicographic sorting.
-      bool operator<(const ELFSymbolData &RHS) const {
-        if (GetType(*SymbolData) == ELF::STT_FILE)
-          return true;
-        if (GetType(*RHS.SymbolData) == ELF::STT_FILE)
-          return false;
-        return SymbolData->getSymbol().getName() <
-               RHS.SymbolData->getSymbol().getName();
-      }
-    };
-
-    /// @name Relocation Data
-    /// @{
-
-    struct ELFRelocationEntry {
-      // Make these big enough for both 32-bit and 64-bit
-      uint64_t r_offset;
-      int Index;
-      unsigned Type;
-      const MCSymbol *Symbol;
-      uint64_t r_addend;
-
-      // Support lexicographic sorting.
-      bool operator<(const ELFRelocationEntry &RE) const {
-        return RE.r_offset < r_offset;
-      }
-    };
-
-    SmallPtrSet<const MCSymbol *, 16> UsedInReloc;
-    DenseMap<const MCSymbol *, const MCSymbol *> Renames;
-
-    llvm::DenseMap<const MCSectionData*,
-                   std::vector<ELFRelocationEntry> > Relocations;
-    DenseMap<const MCSection*, uint64_t> SectionStringTableIndex;
-
-    /// @}
-    /// @name Symbol Table Data
-    /// @{
-
-    SmallString<256> StringTable;
-    std::vector<ELFSymbolData> LocalSymbolData;
-    std::vector<ELFSymbolData> ExternalSymbolData;
-    std::vector<ELFSymbolData> UndefinedSymbolData;
-
-    /// @}
-
-    int NumRegularSections;
-
-    bool NeedsGOT;
-
-    ELFObjectWriter *Writer;
-
-    raw_ostream &OS;
-
-    unsigned Is64Bit : 1;
-
-    bool HasRelocationAddend;
-
-    Triple::OSType OSType;
-
-    uint16_t EMachine;
-
-    // This holds the symbol table index of the last local symbol.
-    unsigned LastLocalSymbolIndex;
-    // This holds the .strtab section index.
-    unsigned StringTableIndex;
-
-    unsigned ShstrtabIndex;
-
-  public:
-    ELFObjectWriterImpl(ELFObjectWriter *_Writer, bool _Is64Bit,
-                        uint16_t _EMachine, bool _HasRelAddend,
-                        Triple::OSType _OSType)
-      : NeedsGOT(false), Writer(_Writer), OS(Writer->getStream()),
-        Is64Bit(_Is64Bit), HasRelocationAddend(_HasRelAddend),
-        OSType(_OSType), EMachine(_EMachine) {
-    }
-
-    void Write8(uint8_t Value) { Writer->Write8(Value); }
-    void Write16(uint16_t Value) { Writer->Write16(Value); }
-    void Write32(uint32_t Value) { Writer->Write32(Value); }
-    //void Write64(uint64_t Value) { Writer->Write64(Value); }
-    void WriteZeros(unsigned N) { Writer->WriteZeros(N); }
-    //void WriteBytes(StringRef Str, unsigned ZeroFillSize = 0) {
-    //  Writer->WriteBytes(Str, ZeroFillSize);
-    //}
-
-    void WriteWord(uint64_t W) {
-      if (Is64Bit)
-        Writer->Write64(W);
-      else
-        Writer->Write32(W);
-    }
-
-    void String8(char *buf, uint8_t Value) {
-      buf[0] = Value;
-    }
-
-    void StringLE16(char *buf, uint16_t Value) {
-      buf[0] = char(Value >> 0);
-      buf[1] = char(Value >> 8);
-    }
-
-    void StringLE32(char *buf, uint32_t Value) {
-      StringLE16(buf, uint16_t(Value >> 0));
-      StringLE16(buf + 2, uint16_t(Value >> 16));
-    }
-
-    void StringLE64(char *buf, uint64_t Value) {
-      StringLE32(buf, uint32_t(Value >> 0));
-      StringLE32(buf + 4, uint32_t(Value >> 32));
-    }
-
-    void StringBE16(char *buf ,uint16_t Value) {
-      buf[0] = char(Value >> 8);
-      buf[1] = char(Value >> 0);
-    }
-
-    void StringBE32(char *buf, uint32_t Value) {
-      StringBE16(buf, uint16_t(Value >> 16));
-      StringBE16(buf + 2, uint16_t(Value >> 0));
-    }
-
-    void StringBE64(char *buf, uint64_t Value) {
-      StringBE32(buf, uint32_t(Value >> 32));
-      StringBE32(buf + 4, uint32_t(Value >> 0));
-    }
-
-    void String16(char *buf, uint16_t Value) {
-      if (Writer->isLittleEndian())
-        StringLE16(buf, Value);
-      else
-        StringBE16(buf, Value);
-    }
-
-    void String32(char *buf, uint32_t Value) {
-      if (Writer->isLittleEndian())
-        StringLE32(buf, Value);
-      else
-        StringBE32(buf, Value);
-    }
-
-    void String64(char *buf, uint64_t Value) {
-      if (Writer->isLittleEndian())
-        StringLE64(buf, Value);
-      else
-        StringBE64(buf, Value);
-    }
-
-    void WriteHeader(uint64_t SectionDataSize, unsigned NumberOfSections);
-
-    void WriteSymbolEntry(MCDataFragment *F, uint64_t name, uint8_t info,
-                          uint64_t value, uint64_t size,
-                          uint8_t other, uint16_t shndx);
-
-    void WriteSymbol(MCDataFragment *F, ELFSymbolData &MSD,
-                     const MCAsmLayout &Layout);
-
-    void WriteSymbolTable(MCDataFragment *F, const MCAssembler &Asm,
-                          const MCAsmLayout &Layout,
-                          unsigned NumRegularSections);
-
-    void RecordRelocation(const MCAssembler &Asm, const MCAsmLayout &Layout,
-                          const MCFragment *Fragment, const MCFixup &Fixup,
-                          MCValue Target, uint64_t &FixedValue);
-
-    uint64_t getSymbolIndexInSymbolTable(const MCAssembler &Asm,
-                                         const MCSymbol *S);
-
-    /// ComputeSymbolTable - Compute the symbol table data
-    ///
-    /// \param StringTable [out] - The string table data.
-    /// \param StringIndexMap [out] - Map from symbol names to offsets in the
-    /// string table.
-    void ComputeSymbolTable(MCAssembler &Asm);
-
-    void WriteRelocation(MCAssembler &Asm, MCAsmLayout &Layout,
-                         const MCSectionData &SD);
-
-    void WriteRelocations(MCAssembler &Asm, MCAsmLayout &Layout) {
-      for (MCAssembler::const_iterator it = Asm.begin(),
-             ie = Asm.end(); it != ie; ++it) {
-        WriteRelocation(Asm, Layout, *it);
-      }
-    }
-
-    void CreateMetadataSections(MCAssembler &Asm, MCAsmLayout &Layout);
-
-    void ExecutePostLayoutBinding(MCAssembler &Asm);
-
-    void WriteSecHdrEntry(uint32_t Name, uint32_t Type, uint64_t Flags,
-                          uint64_t Address, uint64_t Offset,
-                          uint64_t Size, uint32_t Link, uint32_t Info,
-                          uint64_t Alignment, uint64_t EntrySize);
-
-    void WriteRelocationsFragment(const MCAssembler &Asm, MCDataFragment *F,
-                                  const MCSectionData *SD);
-
-    bool IsFixupFullyResolved(const MCAssembler &Asm,
-                              const MCValue Target,
-                              bool IsPCRel,
-                              const MCFragment *DF) const;
-
-    void WriteObject(MCAssembler &Asm, const MCAsmLayout &Layout);
-  };
-
-}
+ELFObjectWriter::~ELFObjectWriter()
+{}
 
 // Emit the ELF header.
-void ELFObjectWriterImpl::WriteHeader(uint64_t SectionDataSize,
-                                      unsigned NumberOfSections) {
+void ELFObjectWriter::WriteHeader(uint64_t SectionDataSize,
+                                  unsigned NumberOfSections) {
   // ELF Header
   // ----------
   //
@@ -338,14 +78,14 @@ void ELFObjectWriterImpl::WriteHeader(uint64_t SectionDataSize,
   Write8('L');  // e_ident[EI_MAG2]
   Write8('F');  // e_ident[EI_MAG3]
 
-  Write8(Is64Bit ? ELF::ELFCLASS64 : ELF::ELFCLASS32); // e_ident[EI_CLASS]
+  Write8(is64Bit() ? ELF::ELFCLASS64 : ELF::ELFCLASS32); // e_ident[EI_CLASS]
 
   // e_ident[EI_DATA]
-  Write8(Writer->isLittleEndian() ? ELF::ELFDATA2LSB : ELF::ELFDATA2MSB);
+  Write8(isLittleEndian() ? ELF::ELFDATA2LSB : ELF::ELFDATA2MSB);
 
   Write8(ELF::EV_CURRENT);        // e_ident[EI_VERSION]
   // e_ident[EI_OSABI]
-  switch (OSType) {
+  switch (TargetObjectWriter->getOSType()) {
     case Triple::FreeBSD:  Write8(ELF::ELFOSABI_FREEBSD); break;
     case Triple::Linux:    Write8(ELF::ELFOSABI_LINUX); break;
     default:               Write8(ELF::ELFOSABI_NONE); break;
@@ -356,125 +96,107 @@ void ELFObjectWriterImpl::WriteHeader(uint64_t SectionDataSize,
 
   Write16(ELF::ET_REL);             // e_type
 
-  Write16(EMachine); // e_machine = target
+  Write16(TargetObjectWriter->getEMachine()); // e_machine = target
 
   Write32(ELF::EV_CURRENT);         // e_version
   WriteWord(0);                    // e_entry, no entry point in .o file
   WriteWord(0);                    // e_phoff, no program header for .o
-  WriteWord(SectionDataSize + (Is64Bit ? sizeof(ELF::Elf64_Ehdr) :
+  WriteWord(SectionDataSize + (is64Bit() ? sizeof(ELF::Elf64_Ehdr) :
             sizeof(ELF::Elf32_Ehdr)));  // e_shoff = sec hdr table off in bytes
 
-  // FIXME: Make this configurable.
-  Write32(0);   // e_flags = whatever the target wants
+  // e_flags = whatever the target wants
+  WriteEFlags();
 
   // e_ehsize = ELF header size
-  Write16(Is64Bit ? sizeof(ELF::Elf64_Ehdr) : sizeof(ELF::Elf32_Ehdr));
+  Write16(is64Bit() ? sizeof(ELF::Elf64_Ehdr) : sizeof(ELF::Elf32_Ehdr));
 
   Write16(0);                  // e_phentsize = prog header entry size
   Write16(0);                  // e_phnum = # prog header entries = 0
 
   // e_shentsize = Section header entry size
-  Write16(Is64Bit ? sizeof(ELF::Elf64_Shdr) : sizeof(ELF::Elf32_Shdr));
+  Write16(is64Bit() ? sizeof(ELF::Elf64_Shdr) : sizeof(ELF::Elf32_Shdr));
 
   // e_shnum     = # of section header ents
-  Write16(NumberOfSections);
+  if (NumberOfSections >= ELF::SHN_LORESERVE)
+    Write16(0);
+  else
+    Write16(NumberOfSections);
 
   // e_shstrndx  = Section # of '.shstrtab'
-  Write16(ShstrtabIndex);
+  if (NumberOfSections >= ELF::SHN_LORESERVE)
+    Write16(ELF::SHN_XINDEX);
+  else
+    Write16(ShstrtabIndex);
 }
 
-void ELFObjectWriterImpl::WriteSymbolEntry(MCDataFragment *F, uint64_t name,
-                                           uint8_t info, uint64_t value,
-                                           uint64_t size, uint8_t other,
-                                           uint16_t shndx) {
-  if (Is64Bit) {
-    char buf[8];
+void ELFObjectWriter::WriteSymbolEntry(MCDataFragment *SymtabF,
+                                       MCDataFragment *ShndxF,
+                                       uint64_t name,
+                                       uint8_t info, uint64_t value,
+                                       uint64_t size, uint8_t other,
+                                       uint32_t shndx,
+                                       bool Reserved) {
+  if (ShndxF) {
+    if (shndx >= ELF::SHN_LORESERVE && !Reserved)
+      String32(*ShndxF, shndx);
+    else
+      String32(*ShndxF, 0);
+  }
 
-    String32(buf, name);
-    F->getContents() += StringRef(buf, 4); // st_name
+  uint16_t Index = (shndx >= ELF::SHN_LORESERVE && !Reserved) ?
+    uint16_t(ELF::SHN_XINDEX) : shndx;
 
-    String8(buf, info);
-    F->getContents() += StringRef(buf, 1);  // st_info
-
-    String8(buf, other);
-    F->getContents() += StringRef(buf, 1); // st_other
-
-    String16(buf, shndx);
-    F->getContents() += StringRef(buf, 2); // st_shndx
-
-    String64(buf, value);
-    F->getContents() += StringRef(buf, 8); // st_value
-
-    String64(buf, size);
-    F->getContents() += StringRef(buf, 8);  // st_size
+  if (is64Bit()) {
+    String32(*SymtabF, name);  // st_name
+    String8(*SymtabF, info);   // st_info
+    String8(*SymtabF, other);  // st_other
+    String16(*SymtabF, Index); // st_shndx
+    String64(*SymtabF, value); // st_value
+    String64(*SymtabF, size);  // st_size
   } else {
-    char buf[4];
-
-    String32(buf, name);
-    F->getContents() += StringRef(buf, 4);  // st_name
-
-    String32(buf, value);
-    F->getContents() += StringRef(buf, 4); // st_value
-
-    String32(buf, size);
-    F->getContents() += StringRef(buf, 4);  // st_size
-
-    String8(buf, info);
-    F->getContents() += StringRef(buf, 1);  // st_info
-
-    String8(buf, other);
-    F->getContents() += StringRef(buf, 1); // st_other
-
-    String16(buf, shndx);
-    F->getContents() += StringRef(buf, 2); // st_shndx
+    String32(*SymtabF, name);  // st_name
+    String32(*SymtabF, value); // st_value
+    String32(*SymtabF, size);  // st_size
+    String8(*SymtabF, info);   // st_info
+    String8(*SymtabF, other);  // st_other
+    String16(*SymtabF, Index); // st_shndx
   }
 }
 
-static uint64_t SymbolValue(MCSymbolData &Data, const MCAsmLayout &Layout) {
+uint64_t ELFObjectWriter::SymbolValue(MCSymbolData &Data,
+                                      const MCAsmLayout &Layout) {
   if (Data.isCommon() && Data.isExternal())
     return Data.getCommonAlignment();
 
   const MCSymbol &Symbol = Data.getSymbol();
+
+  if (Symbol.isAbsolute() && Symbol.isVariable()) {
+    if (const MCExpr *Value = Symbol.getVariableValue()) {
+      int64_t IntValue;
+      if (Value->EvaluateAsAbsolute(IntValue, Layout))
+	return (uint64_t)IntValue;
+    }
+  }
+
   if (!Symbol.isInSection())
     return 0;
 
-  if (MCFragment *FF = Data.getFragment())
-    return Layout.getSymbolAddress(&Data) -
-      Layout.getSectionAddress(FF->getParent());
+  if (Data.getFragment())
+    return Layout.getSymbolOffset(&Data);
 
   return 0;
 }
 
-static const MCSymbol &AliasedSymbol(const MCSymbol &Symbol) {
-  const MCSymbol *S = &Symbol;
-  while (S->isVariable()) {
-    const MCExpr *Value = S->getVariableValue();
-    if (Value->getKind() != MCExpr::SymbolRef)
-      return *S;
-    const MCSymbolRefExpr *Ref = static_cast<const MCSymbolRefExpr*>(Value);
-    S = &Ref->getSymbol();
-  }
-  return *S;
-}
-
-void ELFObjectWriterImpl::ExecutePostLayoutBinding(MCAssembler &Asm) {
+void ELFObjectWriter::ExecutePostLayoutBinding(MCAssembler &Asm,
+                                               const MCAsmLayout &Layout) {
   // The presence of symbol versions causes undefined symbols and
   // versions declared with @@@ to be renamed.
 
   for (MCAssembler::symbol_iterator it = Asm.symbol_begin(),
          ie = Asm.symbol_end(); it != ie; ++it) {
     const MCSymbol &Alias = it->getSymbol();
-    const MCSymbol &Symbol = AliasedSymbol(Alias);
+    const MCSymbol &Symbol = Alias.AliasedSymbol();
     MCSymbolData &SD = Asm.getSymbolData(Symbol);
-
-    // Undefined symbols are global, but this is the first place we
-    // are able to set it.
-    if (Symbol.isUndefined() && !Symbol.isVariable()) {
-      if (GetBinding(SD) == ELF::STB_LOCAL) {
-        SetBinding(SD, ELF::STB_GLOBAL);
-        SetBinding(*it, ELF::STB_GLOBAL);
-      }
-    }
 
     // Not an alias.
     if (&Symbol == &Alias)
@@ -488,7 +210,7 @@ void ELFObjectWriterImpl::ExecutePostLayoutBinding(MCAssembler &Asm) {
     // Aliases defined with .symvar copy the binding from the symbol they alias.
     // This is the first place we are able to copy this information.
     it->setExternal(SD.isExternal());
-    SetBinding(*it, GetBinding(SD));
+    MCELF::SetBinding(*it, MCELF::GetBinding(SD));
 
     StringRef Rest = AliasName.substr(Pos);
     if (!Symbol.isUndefined() && !Rest.startswith("@@@"))
@@ -503,52 +225,47 @@ void ELFObjectWriterImpl::ExecutePostLayoutBinding(MCAssembler &Asm) {
   }
 }
 
-void ELFObjectWriterImpl::WriteSymbol(MCDataFragment *F, ELFSymbolData &MSD,
-                                      const MCAsmLayout &Layout) {
+void ELFObjectWriter::WriteSymbol(MCDataFragment *SymtabF,
+                                  MCDataFragment *ShndxF,
+                                  ELFSymbolData &MSD,
+                                  const MCAsmLayout &Layout) {
   MCSymbolData &OrigData = *MSD.SymbolData;
   MCSymbolData &Data =
-    Layout.getAssembler().getSymbolData(AliasedSymbol(OrigData.getSymbol()));
+    Layout.getAssembler().getSymbolData(OrigData.getSymbol().AliasedSymbol());
 
-  uint8_t Binding = GetBinding(OrigData);
-  uint8_t Visibility = GetVisibility(OrigData);
-  uint8_t Type = GetType(Data);
+  bool IsReserved = Data.isCommon() || Data.getSymbol().isAbsolute() ||
+    Data.getSymbol().isVariable();
+
+  uint8_t Binding = MCELF::GetBinding(OrigData);
+  uint8_t Visibility = MCELF::GetVisibility(OrigData);
+  uint8_t Type = MCELF::GetType(Data);
 
   uint8_t Info = (Binding << ELF_STB_Shift) | (Type << ELF_STT_Shift);
   uint8_t Other = Visibility;
 
   uint64_t Value = SymbolValue(Data, Layout);
   uint64_t Size = 0;
-  const MCExpr *ESize;
 
   assert(!(Data.isCommon() && !Data.isExternal()));
 
-  ESize = Data.getSize();
-  if (Data.getSize()) {
-    MCValue Res;
-    if (ESize->getKind() == MCExpr::Binary) {
-      const MCBinaryExpr *BE = static_cast<const MCBinaryExpr *>(ESize);
-
-      if (BE->EvaluateAsRelocatable(Res, &Layout)) {
-        assert(!Res.getSymA() || !Res.getSymA()->getSymbol().isDefined());
-        assert(!Res.getSymB() || !Res.getSymB()->getSymbol().isDefined());
-        Size = Res.getConstant();
-      }
-    } else if (ESize->getKind() == MCExpr::Constant) {
-      Size = static_cast<const MCConstantExpr *>(ESize)->getValue();
-    } else {
-      assert(0 && "Unsupported size expression");
-    }
+  const MCExpr *ESize = Data.getSize();
+  if (ESize) {
+    int64_t Res;
+    if (!ESize->EvaluateAsAbsolute(Res, Layout))
+      report_fatal_error("Size expression must be absolute.");
+    Size = Res;
   }
 
   // Write out the symbol table entry
-  WriteSymbolEntry(F, MSD.StringIndex, Info, Value,
-                   Size, Other, MSD.SectionIndex);
+  WriteSymbolEntry(SymtabF, ShndxF, MSD.StringIndex, Info, Value,
+                   Size, Other, MSD.SectionIndex, IsReserved);
 }
 
-void ELFObjectWriterImpl::WriteSymbolTable(MCDataFragment *F,
-                                           const MCAssembler &Asm,
-                                           const MCAsmLayout &Layout,
-                                           unsigned NumRegularSections) {
+void ELFObjectWriter::WriteSymbolTable(MCDataFragment *SymtabF,
+                                       MCDataFragment *ShndxF,
+                                       const MCAssembler &Asm,
+                                       const MCAsmLayout &Layout,
+                                     const SectionIndexMapTy &SectionIndexMap) {
   // The string table must be emitted first because we need the index
   // into the string table for all the symbol names.
   assert(StringTable.size() && "Missing string table");
@@ -556,27 +273,27 @@ void ELFObjectWriterImpl::WriteSymbolTable(MCDataFragment *F,
   // FIXME: Make sure the start of the symbol table is aligned.
 
   // The first entry is the undefined symbol entry.
-  unsigned EntrySize = Is64Bit ? ELF::SYMENTRY_SIZE64 : ELF::SYMENTRY_SIZE32;
-  F->getContents().append(EntrySize, '\x00');
+  WriteSymbolEntry(SymtabF, ShndxF, 0, 0, 0, 0, 0, 0, false);
 
   // Write the symbol table entries.
   LastLocalSymbolIndex = LocalSymbolData.size() + 1;
   for (unsigned i = 0, e = LocalSymbolData.size(); i != e; ++i) {
     ELFSymbolData &MSD = LocalSymbolData[i];
-    WriteSymbol(F, MSD, Layout);
+    WriteSymbol(SymtabF, ShndxF, MSD, Layout);
   }
 
   // Write out a symbol table entry for each regular section.
-  unsigned Index = 1;
-  for (MCAssembler::const_iterator it = Asm.begin();
-       Index <= NumRegularSections; ++it, ++Index) {
+  for (MCAssembler::const_iterator i = Asm.begin(), e = Asm.end(); i != e;
+       ++i) {
     const MCSectionELF &Section =
-      static_cast<const MCSectionELF&>(it->getSection());
-    // Leave out relocations so we don't have indexes within
-    // the relocations messed up
-    if (Section.getType() == ELF::SHT_RELA || Section.getType() == ELF::SHT_REL)
+      static_cast<const MCSectionELF&>(i->getSection());
+    if (Section.getType() == ELF::SHT_RELA ||
+        Section.getType() == ELF::SHT_REL ||
+        Section.getType() == ELF::SHT_STRTAB ||
+        Section.getType() == ELF::SHT_SYMTAB)
       continue;
-    WriteSymbolEntry(F, 0, ELF::STT_SECTION, 0, 0, ELF::STV_DEFAULT, Index);
+    WriteSymbolEntry(SymtabF, ShndxF, 0, ELF::STT_SECTION, 0, 0,
+                     ELF::STV_DEFAULT, SectionIndexMap.lookup(&Section), false);
     LastLocalSymbolIndex++;
   }
 
@@ -586,142 +303,1222 @@ void ELFObjectWriterImpl::WriteSymbolTable(MCDataFragment *F,
     assert(((Data.getFlags() & ELF_STB_Global) ||
             (Data.getFlags() & ELF_STB_Weak)) &&
            "External symbol requires STB_GLOBAL or STB_WEAK flag");
-    WriteSymbol(F, MSD, Layout);
-    if (GetBinding(Data) == ELF::STB_LOCAL)
+    WriteSymbol(SymtabF, ShndxF, MSD, Layout);
+    if (MCELF::GetBinding(Data) == ELF::STB_LOCAL)
       LastLocalSymbolIndex++;
   }
 
   for (unsigned i = 0, e = UndefinedSymbolData.size(); i != e; ++i) {
     ELFSymbolData &MSD = UndefinedSymbolData[i];
     MCSymbolData &Data = *MSD.SymbolData;
-    WriteSymbol(F, MSD, Layout);
-    if (GetBinding(Data) == ELF::STB_LOCAL)
+    WriteSymbol(SymtabF, ShndxF, MSD, Layout);
+    if (MCELF::GetBinding(Data) == ELF::STB_LOCAL)
       LastLocalSymbolIndex++;
   }
 }
 
-static bool ShouldRelocOnSymbol(const MCSymbolData &SD,
-                                const MCValue &Target,
-                                const MCFragment &F) {
-  const MCSymbol &Symbol = SD.getSymbol();
-  if (Symbol.isUndefined())
-    return true;
+const MCSymbol *ELFObjectWriter::SymbolToReloc(const MCAssembler &Asm,
+                                               const MCValue &Target,
+                                               const MCFragment &F) const {
+  const MCSymbol &Symbol = Target.getSymA()->getSymbol();
+  const MCSymbol &ASymbol = Symbol.AliasedSymbol();
+  const MCSymbol *Renamed = Renames.lookup(&Symbol);
+  const MCSymbolData &SD = Asm.getSymbolData(Symbol);
+
+  if (ASymbol.isUndefined()) {
+    if (Renamed)
+      return Renamed;
+    return &ASymbol;
+  }
+
+  if (SD.isExternal()) {
+    if (Renamed)
+      return Renamed;
+    return &Symbol;
+  }
 
   const MCSectionELF &Section =
-    static_cast<const MCSectionELF&>(Symbol.getSection());
+    static_cast<const MCSectionELF&>(ASymbol.getSection());
+  const SectionKind secKind = Section.getKind();
 
-  if (SD.isExternal())
-    return true;
+  if (secKind.isBSS())
+    return ExplicitRelSym(Asm, Target, F, true);
+
+  if (secKind.isThreadLocal()) {
+    if (Renamed)
+      return Renamed;
+    return &Symbol;
+  }
 
   MCSymbolRefExpr::VariantKind Kind = Target.getSymA()->getKind();
   const MCSectionELF &Sec2 =
     static_cast<const MCSectionELF&>(F.getParent()->getSection());
 
-  if (Section.getKind().isBSS())
-    return false;
-
   if (&Sec2 != &Section &&
       (Kind == MCSymbolRefExpr::VK_PLT ||
        Kind == MCSymbolRefExpr::VK_GOTPCREL ||
-       Kind == MCSymbolRefExpr::VK_GOTOFF))
-    return true;
+       Kind == MCSymbolRefExpr::VK_GOTOFF)) {
+    if (Renamed)
+      return Renamed;
+    return &Symbol;
+  }
 
-  if (Section.getFlags() & MCSectionELF::SHF_MERGE)
-    return Target.getConstant() != 0;
+  if (Section.getFlags() & ELF::SHF_MERGE) {
+    if (Target.getConstant() == 0)
+      return NULL;
+    if (Renamed)
+      return Renamed;
+    return &Symbol;
+  }
 
-  return false;
+  return ExplicitRelSym(Asm, Target, F, false);
 }
 
-// FIXME: this is currently X86/X86_64 only
-void ELFObjectWriterImpl::RecordRelocation(const MCAssembler &Asm,
-                                           const MCAsmLayout &Layout,
-                                           const MCFragment *Fragment,
-                                           const MCFixup &Fixup,
-                                           MCValue Target,
-                                           uint64_t &FixedValue) {
+
+void ELFObjectWriter::RecordRelocation(const MCAssembler &Asm,
+                                       const MCAsmLayout &Layout,
+                                       const MCFragment *Fragment,
+                                       const MCFixup &Fixup,
+                                       MCValue Target,
+                                       uint64_t &FixedValue) {
   int64_t Addend = 0;
   int Index = 0;
   int64_t Value = Target.getConstant();
-  const MCSymbol *Symbol = 0;
-  const MCSymbol *Renamed = 0;
+  const MCSymbol *RelocSymbol = NULL;
 
-  bool IsPCRel = isFixupKindX86PCRel(Fixup.getKind());
+  bool IsPCRel = isFixupKindPCRel(Asm, Fixup.getKind());
   if (!Target.isAbsolute()) {
-    Symbol = &AliasedSymbol(Target.getSymA()->getSymbol());
-    Renamed = Renames.lookup(Symbol);
-    if (!Renamed)
-      Renamed = Symbol;
-    MCSymbolData &SD = Asm.getSymbolData(*Symbol);
-    MCFragment *F = SD.getFragment();
+    const MCSymbol &Symbol = Target.getSymA()->getSymbol();
+    const MCSymbol &ASymbol = Symbol.AliasedSymbol();
+    RelocSymbol = SymbolToReloc(Asm, Target, *Fragment);
 
     if (const MCSymbolRefExpr *RefB = Target.getSymB()) {
       const MCSymbol &SymbolB = RefB->getSymbol();
       MCSymbolData &SDB = Asm.getSymbolData(SymbolB);
       IsPCRel = true;
-      MCSectionData *Sec = Fragment->getParent();
 
       // Offset of the symbol in the section
-      int64_t a = Layout.getSymbolAddress(&SDB) - Layout.getSectionAddress(Sec);
+      int64_t a = Layout.getSymbolOffset(&SDB);
 
       // Ofeset of the relocation in the section
       int64_t b = Layout.getFragmentOffset(Fragment) + Fixup.getOffset();
       Value += b - a;
     }
 
-    // Check that this case has already been fully resolved before we get
-    // here.
-    if (Symbol->isDefined() && !SD.isExternal() &&
-        IsPCRel &&
-        &Fragment->getParent()->getSection() == &Symbol->getSection()) {
-      llvm_unreachable("We don't need a relocation in this case.");
-      return;
-    }
+    if (!RelocSymbol) {
+      MCSymbolData &SD = Asm.getSymbolData(ASymbol);
+      MCFragment *F = SD.getFragment();
 
-    bool RelocOnSymbol = ShouldRelocOnSymbol(SD, Target, *Fragment);
-    if (!RelocOnSymbol) {
-      Index = F->getParent()->getOrdinal();
+      Index = F->getParent()->getOrdinal() + 1;
 
-      MCSectionData *FSD = F->getParent();
       // Offset of the symbol in the section
-      Value += Layout.getSymbolAddress(&SD) - Layout.getSectionAddress(FSD);
+      Value += Layout.getSymbolOffset(&SD);
     } else {
-      UsedInReloc.insert(Renamed);
+      if (Asm.getSymbolData(Symbol).getFlags() & ELF_Other_Weakref)
+        WeakrefUsedInReloc.insert(RelocSymbol);
+      else
+        UsedInReloc.insert(RelocSymbol);
       Index = -1;
     }
     Addend = Value;
     // Compensate for the addend on i386.
-    if (Is64Bit)
+    if (is64Bit())
       Value = 0;
   }
 
   FixedValue = Value;
+  unsigned Type = GetRelocType(Target, Fixup, IsPCRel,
+                               (RelocSymbol != 0), Addend);
 
+  uint64_t RelocOffset = Layout.getFragmentOffset(Fragment) +
+    Fixup.getOffset();
+
+  if (!hasRelocationAddend())
+    Addend = 0;
+  ELFRelocationEntry ERE(RelocOffset, Index, Type, RelocSymbol, Addend);
+  Relocations[Fragment->getParent()].push_back(ERE);
+}
+
+
+uint64_t
+ELFObjectWriter::getSymbolIndexInSymbolTable(const MCAssembler &Asm,
+                                             const MCSymbol *S) {
+  MCSymbolData &SD = Asm.getSymbolData(*S);
+  return SD.getIndex();
+}
+
+bool ELFObjectWriter::isInSymtab(const MCAssembler &Asm,
+                                 const MCSymbolData &Data,
+                                 bool Used, bool Renamed) {
+  if (Data.getFlags() & ELF_Other_Weakref)
+    return false;
+
+  if (Used)
+    return true;
+
+  if (Renamed)
+    return false;
+
+  const MCSymbol &Symbol = Data.getSymbol();
+
+  if (Symbol.getName() == "_GLOBAL_OFFSET_TABLE_")
+    return true;
+
+  const MCSymbol &A = Symbol.AliasedSymbol();
+  if (Symbol.isVariable() && !A.isVariable() && A.isUndefined())
+    return false;
+
+  bool IsGlobal = MCELF::GetBinding(Data) == ELF::STB_GLOBAL;
+  if (!Symbol.isVariable() && Symbol.isUndefined() && !IsGlobal)
+    return false;
+
+  if (!Asm.isSymbolLinkerVisible(Symbol) && !Symbol.isUndefined())
+    return false;
+
+  if (Symbol.isTemporary())
+    return false;
+
+  return true;
+}
+
+bool ELFObjectWriter::isLocal(const MCSymbolData &Data, bool isSignature,
+                              bool isUsedInReloc) {
+  if (Data.isExternal())
+    return false;
+
+  const MCSymbol &Symbol = Data.getSymbol();
+  const MCSymbol &RefSymbol = Symbol.AliasedSymbol();
+
+  if (RefSymbol.isUndefined() && !RefSymbol.isVariable()) {
+    if (isSignature && !isUsedInReloc)
+      return true;
+
+    return false;
+  }
+
+  return true;
+}
+
+void ELFObjectWriter::ComputeIndexMap(MCAssembler &Asm,
+                                      SectionIndexMapTy &SectionIndexMap,
+                                      const RelMapTy &RelMap) {
+  unsigned Index = 1;
+  for (MCAssembler::iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF &>(it->getSection());
+    if (Section.getType() != ELF::SHT_GROUP)
+      continue;
+    SectionIndexMap[&Section] = Index++;
+  }
+
+  for (MCAssembler::iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF &>(it->getSection());
+    if (Section.getType() == ELF::SHT_GROUP ||
+        Section.getType() == ELF::SHT_REL ||
+        Section.getType() == ELF::SHT_RELA)
+      continue;
+    SectionIndexMap[&Section] = Index++;
+    const MCSectionELF *RelSection = RelMap.lookup(&Section);
+    if (RelSection)
+      SectionIndexMap[RelSection] = Index++;
+  }
+}
+
+void ELFObjectWriter::ComputeSymbolTable(MCAssembler &Asm,
+                                      const SectionIndexMapTy &SectionIndexMap,
+                                         RevGroupMapTy RevGroupMap,
+                                         unsigned NumRegularSections) {
+  // FIXME: Is this the correct place to do this?
+  if (NeedsGOT) {
+    llvm::StringRef Name = "_GLOBAL_OFFSET_TABLE_";
+    MCSymbol *Sym = Asm.getContext().GetOrCreateSymbol(Name);
+    MCSymbolData &Data = Asm.getOrCreateSymbolData(*Sym);
+    Data.setExternal(true);
+    MCELF::SetBinding(Data, ELF::STB_GLOBAL);
+  }
+
+  // Index 0 is always the empty string.
+  StringMap<uint64_t> StringIndexMap;
+  StringTable += '\x00';
+
+  // FIXME: We could optimize suffixes in strtab in the same way we
+  // optimize them in shstrtab.
+
+  // Add the data for the symbols.
+  for (MCAssembler::symbol_iterator it = Asm.symbol_begin(),
+         ie = Asm.symbol_end(); it != ie; ++it) {
+    const MCSymbol &Symbol = it->getSymbol();
+
+    bool Used = UsedInReloc.count(&Symbol);
+    bool WeakrefUsed = WeakrefUsedInReloc.count(&Symbol);
+    bool isSignature = RevGroupMap.count(&Symbol);
+
+    if (!isInSymtab(Asm, *it,
+                    Used || WeakrefUsed || isSignature,
+                    Renames.count(&Symbol)))
+      continue;
+
+    ELFSymbolData MSD;
+    MSD.SymbolData = it;
+    const MCSymbol &RefSymbol = Symbol.AliasedSymbol();
+
+    // Undefined symbols are global, but this is the first place we
+    // are able to set it.
+    bool Local = isLocal(*it, isSignature, Used);
+    if (!Local && MCELF::GetBinding(*it) == ELF::STB_LOCAL) {
+      MCSymbolData &SD = Asm.getSymbolData(RefSymbol);
+      MCELF::SetBinding(*it, ELF::STB_GLOBAL);
+      MCELF::SetBinding(SD, ELF::STB_GLOBAL);
+    }
+
+    if (RefSymbol.isUndefined() && !Used && WeakrefUsed)
+      MCELF::SetBinding(*it, ELF::STB_WEAK);
+
+    if (it->isCommon()) {
+      assert(!Local);
+      MSD.SectionIndex = ELF::SHN_COMMON;
+    } else if (Symbol.isAbsolute() || RefSymbol.isVariable()) {
+      MSD.SectionIndex = ELF::SHN_ABS;
+    } else if (RefSymbol.isUndefined()) {
+      if (isSignature && !Used)
+        MSD.SectionIndex = SectionIndexMap.lookup(RevGroupMap[&Symbol]);
+      else
+        MSD.SectionIndex = ELF::SHN_UNDEF;
+    } else {
+      const MCSectionELF &Section =
+        static_cast<const MCSectionELF&>(RefSymbol.getSection());
+      MSD.SectionIndex = SectionIndexMap.lookup(&Section);
+      if (MSD.SectionIndex >= ELF::SHN_LORESERVE)
+        NeedsSymtabShndx = true;
+      assert(MSD.SectionIndex && "Invalid section index!");
+    }
+
+    // The @@@ in symbol version is replaced with @ in undefined symbols and
+    // @@ in defined ones.
+    StringRef Name = Symbol.getName();
+    SmallString<32> Buf;
+
+    size_t Pos = Name.find("@@@");
+    if (Pos != StringRef::npos) {
+      Buf += Name.substr(0, Pos);
+      unsigned Skip = MSD.SectionIndex == ELF::SHN_UNDEF ? 2 : 1;
+      Buf += Name.substr(Pos + Skip);
+      Name = Buf;
+    }
+
+    uint64_t &Entry = StringIndexMap[Name];
+    if (!Entry) {
+      Entry = StringTable.size();
+      StringTable += Name;
+      StringTable += '\x00';
+    }
+    MSD.StringIndex = Entry;
+    if (MSD.SectionIndex == ELF::SHN_UNDEF)
+      UndefinedSymbolData.push_back(MSD);
+    else if (Local)
+      LocalSymbolData.push_back(MSD);
+    else
+      ExternalSymbolData.push_back(MSD);
+  }
+
+  // Symbols are required to be in lexicographic order.
+  array_pod_sort(LocalSymbolData.begin(), LocalSymbolData.end());
+  array_pod_sort(ExternalSymbolData.begin(), ExternalSymbolData.end());
+  array_pod_sort(UndefinedSymbolData.begin(), UndefinedSymbolData.end());
+
+  // Set the symbol indices. Local symbols must come before all other
+  // symbols with non-local bindings.
+  unsigned Index = 1;
+  for (unsigned i = 0, e = LocalSymbolData.size(); i != e; ++i)
+    LocalSymbolData[i].SymbolData->setIndex(Index++);
+
+  Index += NumRegularSections;
+
+  for (unsigned i = 0, e = ExternalSymbolData.size(); i != e; ++i)
+    ExternalSymbolData[i].SymbolData->setIndex(Index++);
+  for (unsigned i = 0, e = UndefinedSymbolData.size(); i != e; ++i)
+    UndefinedSymbolData[i].SymbolData->setIndex(Index++);
+}
+
+void ELFObjectWriter::CreateRelocationSections(MCAssembler &Asm,
+                                               MCAsmLayout &Layout,
+                                               RelMapTy &RelMap) {
+  for (MCAssembler::const_iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionData &SD = *it;
+    if (Relocations[&SD].empty())
+      continue;
+
+    MCContext &Ctx = Asm.getContext();
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF&>(SD.getSection());
+
+    const StringRef SectionName = Section.getSectionName();
+    std::string RelaSectionName = hasRelocationAddend() ? ".rela" : ".rel";
+    RelaSectionName += SectionName;
+
+    unsigned EntrySize;
+    if (hasRelocationAddend())
+      EntrySize = is64Bit() ? sizeof(ELF::Elf64_Rela) : sizeof(ELF::Elf32_Rela);
+    else
+      EntrySize = is64Bit() ? sizeof(ELF::Elf64_Rel) : sizeof(ELF::Elf32_Rel);
+
+    const MCSectionELF *RelaSection =
+      Ctx.getELFSection(RelaSectionName, hasRelocationAddend() ?
+                        ELF::SHT_RELA : ELF::SHT_REL, 0,
+                        SectionKind::getReadOnly(),
+                        EntrySize, "");
+    RelMap[&Section] = RelaSection;
+    Asm.getOrCreateSectionData(*RelaSection);
+  }
+}
+
+void ELFObjectWriter::WriteRelocations(MCAssembler &Asm, MCAsmLayout &Layout,
+                                       const RelMapTy &RelMap) {
+  for (MCAssembler::const_iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionData &SD = *it;
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF&>(SD.getSection());
+
+    const MCSectionELF *RelaSection = RelMap.lookup(&Section);
+    if (!RelaSection)
+      continue;
+    MCSectionData &RelaSD = Asm.getOrCreateSectionData(*RelaSection);
+    RelaSD.setAlignment(is64Bit() ? 8 : 4);
+
+    MCDataFragment *F = new MCDataFragment(&RelaSD);
+    WriteRelocationsFragment(Asm, F, &*it);
+  }
+}
+
+void ELFObjectWriter::WriteSecHdrEntry(uint32_t Name, uint32_t Type,
+                                       uint64_t Flags, uint64_t Address,
+                                       uint64_t Offset, uint64_t Size,
+                                       uint32_t Link, uint32_t Info,
+                                       uint64_t Alignment,
+                                       uint64_t EntrySize) {
+  Write32(Name);        // sh_name: index into string table
+  Write32(Type);        // sh_type
+  WriteWord(Flags);     // sh_flags
+  WriteWord(Address);   // sh_addr
+  WriteWord(Offset);    // sh_offset
+  WriteWord(Size);      // sh_size
+  Write32(Link);        // sh_link
+  Write32(Info);        // sh_info
+  WriteWord(Alignment); // sh_addralign
+  WriteWord(EntrySize); // sh_entsize
+}
+
+void ELFObjectWriter::WriteRelocationsFragment(const MCAssembler &Asm,
+                                               MCDataFragment *F,
+                                               const MCSectionData *SD) {
+  std::vector<ELFRelocationEntry> &Relocs = Relocations[SD];
+  // sort by the r_offset just like gnu as does
+  array_pod_sort(Relocs.begin(), Relocs.end());
+
+  for (unsigned i = 0, e = Relocs.size(); i != e; ++i) {
+    ELFRelocationEntry entry = Relocs[e - i - 1];
+
+    if (!entry.Index)
+      ;
+    else if (entry.Index < 0)
+      entry.Index = getSymbolIndexInSymbolTable(Asm, entry.Symbol);
+    else
+      entry.Index += LocalSymbolData.size();
+    if (is64Bit()) {
+      String64(*F, entry.r_offset);
+
+      struct ELF::Elf64_Rela ERE64;
+      ERE64.setSymbolAndType(entry.Index, entry.Type);
+      String64(*F, ERE64.r_info);
+
+      if (hasRelocationAddend())
+        String64(*F, entry.r_addend);
+    } else {
+      String32(*F, entry.r_offset);
+
+      struct ELF::Elf32_Rela ERE32;
+      ERE32.setSymbolAndType(entry.Index, entry.Type);
+      String32(*F, ERE32.r_info);
+
+      if (hasRelocationAddend())
+        String32(*F, entry.r_addend);
+    }
+  }
+}
+
+static int compareBySuffix(const void *a, const void *b) {
+  const MCSectionELF *secA = *static_cast<const MCSectionELF* const *>(a);
+  const MCSectionELF *secB = *static_cast<const MCSectionELF* const *>(b);
+  const StringRef &NameA = secA->getSectionName();
+  const StringRef &NameB = secB->getSectionName();
+  const unsigned sizeA = NameA.size();
+  const unsigned sizeB = NameB.size();
+  const unsigned len = std::min(sizeA, sizeB);
+  for (unsigned int i = 0; i < len; ++i) {
+    char ca = NameA[sizeA - i - 1];
+    char cb = NameB[sizeB - i - 1];
+    if (ca != cb)
+      return cb - ca;
+  }
+
+  return sizeB - sizeA;
+}
+
+void ELFObjectWriter::CreateMetadataSections(MCAssembler &Asm,
+                                             MCAsmLayout &Layout,
+                                             SectionIndexMapTy &SectionIndexMap,
+                                             const RelMapTy &RelMap) {
+  MCContext &Ctx = Asm.getContext();
+  MCDataFragment *F;
+
+  unsigned EntrySize = is64Bit() ? ELF::SYMENTRY_SIZE64 : ELF::SYMENTRY_SIZE32;
+
+  // We construct .shstrtab, .symtab and .strtab in this order to match gnu as.
+  const MCSectionELF *ShstrtabSection =
+    Ctx.getELFSection(".shstrtab", ELF::SHT_STRTAB, 0,
+                      SectionKind::getReadOnly());
+  MCSectionData &ShstrtabSD = Asm.getOrCreateSectionData(*ShstrtabSection);
+  ShstrtabSD.setAlignment(1);
+
+  const MCSectionELF *SymtabSection =
+    Ctx.getELFSection(".symtab", ELF::SHT_SYMTAB, 0,
+                      SectionKind::getReadOnly(),
+                      EntrySize, "");
+  MCSectionData &SymtabSD = Asm.getOrCreateSectionData(*SymtabSection);
+  SymtabSD.setAlignment(is64Bit() ? 8 : 4);
+
+  MCSectionData *SymtabShndxSD = NULL;
+
+  if (NeedsSymtabShndx) {
+    const MCSectionELF *SymtabShndxSection =
+      Ctx.getELFSection(".symtab_shndx", ELF::SHT_SYMTAB_SHNDX, 0,
+                        SectionKind::getReadOnly(), 4, "");
+    SymtabShndxSD = &Asm.getOrCreateSectionData(*SymtabShndxSection);
+    SymtabShndxSD->setAlignment(4);
+  }
+
+  const MCSectionELF *StrtabSection;
+  StrtabSection = Ctx.getELFSection(".strtab", ELF::SHT_STRTAB, 0,
+                                    SectionKind::getReadOnly());
+  MCSectionData &StrtabSD = Asm.getOrCreateSectionData(*StrtabSection);
+  StrtabSD.setAlignment(1);
+
+  ComputeIndexMap(Asm, SectionIndexMap, RelMap);
+
+  ShstrtabIndex = SectionIndexMap.lookup(ShstrtabSection);
+  SymbolTableIndex = SectionIndexMap.lookup(SymtabSection);
+  StringTableIndex = SectionIndexMap.lookup(StrtabSection);
+
+  // Symbol table
+  F = new MCDataFragment(&SymtabSD);
+  MCDataFragment *ShndxF = NULL;
+  if (NeedsSymtabShndx) {
+    ShndxF = new MCDataFragment(SymtabShndxSD);
+  }
+  WriteSymbolTable(F, ShndxF, Asm, Layout, SectionIndexMap);
+
+  F = new MCDataFragment(&StrtabSD);
+  F->getContents().append(StringTable.begin(), StringTable.end());
+
+  F = new MCDataFragment(&ShstrtabSD);
+
+  std::vector<const MCSectionELF*> Sections;
+  for (MCAssembler::const_iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF&>(it->getSection());
+    Sections.push_back(&Section);
+  }
+  array_pod_sort(Sections.begin(), Sections.end(), compareBySuffix);
+
+  // Section header string table.
+  //
+  // The first entry of a string table holds a null character so skip
+  // section 0.
+  uint64_t Index = 1;
+  F->getContents() += '\x00';
+
+  for (unsigned int I = 0, E = Sections.size(); I != E; ++I) {
+    const MCSectionELF &Section = *Sections[I];
+
+    StringRef Name = Section.getSectionName();
+    if (I != 0) {
+      StringRef PreviousName = Sections[I - 1]->getSectionName();
+      if (PreviousName.endswith(Name)) {
+        SectionStringTableIndex[&Section] = Index - Name.size() - 1;
+        continue;
+      }
+    }
+    // Remember the index into the string table so we can write it
+    // into the sh_name field of the section header table.
+    SectionStringTableIndex[&Section] = Index;
+
+    Index += Name.size() + 1;
+    F->getContents() += Name;
+    F->getContents() += '\x00';
+  }
+}
+
+void ELFObjectWriter::CreateIndexedSections(MCAssembler &Asm,
+                                            MCAsmLayout &Layout,
+                                            GroupMapTy &GroupMap,
+                                            RevGroupMapTy &RevGroupMap,
+                                            SectionIndexMapTy &SectionIndexMap,
+                                            const RelMapTy &RelMap) {
+  // Create the .note.GNU-stack section if needed.
+  MCContext &Ctx = Asm.getContext();
+  if (Asm.getNoExecStack()) {
+    const MCSectionELF *GnuStackSection =
+      Ctx.getELFSection(".note.GNU-stack", ELF::SHT_PROGBITS, 0,
+                        SectionKind::getReadOnly());
+    Asm.getOrCreateSectionData(*GnuStackSection);
+  }
+
+  // Build the groups
+  for (MCAssembler::const_iterator it = Asm.begin(), ie = Asm.end();
+       it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF&>(it->getSection());
+    if (!(Section.getFlags() & ELF::SHF_GROUP))
+      continue;
+
+    const MCSymbol *SignatureSymbol = Section.getGroup();
+    Asm.getOrCreateSymbolData(*SignatureSymbol);
+    const MCSectionELF *&Group = RevGroupMap[SignatureSymbol];
+    if (!Group) {
+      Group = Ctx.CreateELFGroupSection();
+      MCSectionData &Data = Asm.getOrCreateSectionData(*Group);
+      Data.setAlignment(4);
+      MCDataFragment *F = new MCDataFragment(&Data);
+      String32(*F, ELF::GRP_COMDAT);
+    }
+    GroupMap[Group] = SignatureSymbol;
+  }
+
+  ComputeIndexMap(Asm, SectionIndexMap, RelMap);
+
+  // Add sections to the groups
+  for (MCAssembler::const_iterator it = Asm.begin(), ie = Asm.end();
+       it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF&>(it->getSection());
+    if (!(Section.getFlags() & ELF::SHF_GROUP))
+      continue;
+    const MCSectionELF *Group = RevGroupMap[Section.getGroup()];
+    MCSectionData &Data = Asm.getOrCreateSectionData(*Group);
+    // FIXME: we could use the previous fragment
+    MCDataFragment *F = new MCDataFragment(&Data);
+    unsigned Index = SectionIndexMap.lookup(&Section);
+    String32(*F, Index);
+  }
+}
+
+void ELFObjectWriter::WriteSection(MCAssembler &Asm,
+                                   const SectionIndexMapTy &SectionIndexMap,
+                                   uint32_t GroupSymbolIndex,
+                                   uint64_t Offset, uint64_t Size,
+                                   uint64_t Alignment,
+                                   const MCSectionELF &Section) {
+  uint64_t sh_link = 0;
+  uint64_t sh_info = 0;
+
+  switch(Section.getType()) {
+  case ELF::SHT_DYNAMIC:
+    sh_link = SectionStringTableIndex[&Section];
+    sh_info = 0;
+    break;
+
+  case ELF::SHT_REL:
+  case ELF::SHT_RELA: {
+    const MCSectionELF *SymtabSection;
+    const MCSectionELF *InfoSection;
+    SymtabSection = Asm.getContext().getELFSection(".symtab", ELF::SHT_SYMTAB,
+                                                   0,
+                                                   SectionKind::getReadOnly());
+    sh_link = SectionIndexMap.lookup(SymtabSection);
+    assert(sh_link && ".symtab not found");
+
+    // Remove ".rel" and ".rela" prefixes.
+    unsigned SecNameLen = (Section.getType() == ELF::SHT_REL) ? 4 : 5;
+    StringRef SectionName = Section.getSectionName().substr(SecNameLen);
+
+    InfoSection = Asm.getContext().getELFSection(SectionName,
+                                                 ELF::SHT_PROGBITS, 0,
+                                                 SectionKind::getReadOnly());
+    sh_info = SectionIndexMap.lookup(InfoSection);
+    break;
+  }
+
+  case ELF::SHT_SYMTAB:
+  case ELF::SHT_DYNSYM:
+    sh_link = StringTableIndex;
+    sh_info = LastLocalSymbolIndex;
+    break;
+
+  case ELF::SHT_SYMTAB_SHNDX:
+    sh_link = SymbolTableIndex;
+    break;
+
+  case ELF::SHT_PROGBITS:
+  case ELF::SHT_STRTAB:
+  case ELF::SHT_NOBITS:
+  case ELF::SHT_NOTE:
+  case ELF::SHT_NULL:
+  case ELF::SHT_ARM_ATTRIBUTES:
+  case ELF::SHT_INIT_ARRAY:
+  case ELF::SHT_FINI_ARRAY:
+  case ELF::SHT_PREINIT_ARRAY:
+  case ELF::SHT_X86_64_UNWIND:
+    // Nothing to do.
+    break;
+
+  case ELF::SHT_GROUP: {
+    sh_link = SymbolTableIndex;
+    sh_info = GroupSymbolIndex;
+    break;
+  }
+
+  default:
+    assert(0 && "FIXME: sh_type value not supported!");
+    break;
+  }
+
+  WriteSecHdrEntry(SectionStringTableIndex[&Section], Section.getType(),
+                   Section.getFlags(), 0, Offset, Size, sh_link, sh_info,
+                   Alignment, Section.getEntrySize());
+}
+
+bool ELFObjectWriter::IsELFMetaDataSection(const MCSectionData &SD) {
+  return SD.getOrdinal() == ~UINT32_C(0) &&
+    !SD.getSection().isVirtualSection();
+}
+
+uint64_t ELFObjectWriter::DataSectionSize(const MCSectionData &SD) {
+  uint64_t Ret = 0;
+  for (MCSectionData::const_iterator i = SD.begin(), e = SD.end(); i != e;
+       ++i) {
+    const MCFragment &F = *i;
+    assert(F.getKind() == MCFragment::FT_Data);
+    Ret += cast<MCDataFragment>(F).getContents().size();
+  }
+  return Ret;
+}
+
+uint64_t ELFObjectWriter::GetSectionFileSize(const MCAsmLayout &Layout,
+                                             const MCSectionData &SD) {
+  if (IsELFMetaDataSection(SD))
+    return DataSectionSize(SD);
+  return Layout.getSectionFileSize(&SD);
+}
+
+uint64_t ELFObjectWriter::GetSectionAddressSize(const MCAsmLayout &Layout,
+                                                const MCSectionData &SD) {
+  if (IsELFMetaDataSection(SD))
+    return DataSectionSize(SD);
+  return Layout.getSectionAddressSize(&SD);
+}
+
+void ELFObjectWriter::WriteDataSectionData(MCAssembler &Asm,
+                                           const MCAsmLayout &Layout,
+                                           const MCSectionELF &Section) {
+  uint64_t FileOff = OS.tell();
+  const MCSectionData &SD = Asm.getOrCreateSectionData(Section);
+
+  uint64_t Padding = OffsetToAlignment(FileOff, SD.getAlignment());
+  WriteZeros(Padding);
+  FileOff += Padding;
+
+  FileOff += GetSectionFileSize(Layout, SD);
+
+  if (IsELFMetaDataSection(SD)) {
+    for (MCSectionData::const_iterator i = SD.begin(), e = SD.end(); i != e;
+         ++i) {
+      const MCFragment &F = *i;
+      assert(F.getKind() == MCFragment::FT_Data);
+      WriteBytes(cast<MCDataFragment>(F).getContents().str());
+    }
+  } else {
+    Asm.WriteSectionData(&SD, Layout);
+  }
+}
+
+void ELFObjectWriter::WriteSectionHeader(MCAssembler &Asm,
+                                         const GroupMapTy &GroupMap,
+                                         const MCAsmLayout &Layout,
+                                      const SectionIndexMapTy &SectionIndexMap,
+                                   const SectionOffsetMapTy &SectionOffsetMap) {
+  const unsigned NumSections = Asm.size() + 1;
+
+  std::vector<const MCSectionELF*> Sections;
+  Sections.resize(NumSections - 1);
+
+  for (SectionIndexMapTy::const_iterator i=
+         SectionIndexMap.begin(), e = SectionIndexMap.end(); i != e; ++i) {
+    const std::pair<const MCSectionELF*, uint32_t> &p = *i;
+    Sections[p.second - 1] = p.first;
+  }
+
+  // Null section first.
+  uint64_t FirstSectionSize =
+    NumSections >= ELF::SHN_LORESERVE ? NumSections : 0;
+  uint32_t FirstSectionLink =
+    ShstrtabIndex >= ELF::SHN_LORESERVE ? ShstrtabIndex : 0;
+  WriteSecHdrEntry(0, 0, 0, 0, 0, FirstSectionSize, FirstSectionLink, 0, 0, 0);
+
+  for (unsigned i = 0; i < NumSections - 1; ++i) {
+    const MCSectionELF &Section = *Sections[i];
+    const MCSectionData &SD = Asm.getOrCreateSectionData(Section);
+    uint32_t GroupSymbolIndex;
+    if (Section.getType() != ELF::SHT_GROUP)
+      GroupSymbolIndex = 0;
+    else
+      GroupSymbolIndex = getSymbolIndexInSymbolTable(Asm,
+                                                     GroupMap.lookup(&Section));
+
+    uint64_t Size = GetSectionAddressSize(Layout, SD);
+
+    WriteSection(Asm, SectionIndexMap, GroupSymbolIndex,
+                 SectionOffsetMap.lookup(&Section), Size,
+                 SD.getAlignment(), Section);
+  }
+}
+
+void ELFObjectWriter::ComputeSectionOrder(MCAssembler &Asm,
+                                  std::vector<const MCSectionELF*> &Sections) {
+  for (MCAssembler::iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF &>(it->getSection());
+    if (Section.getType() == ELF::SHT_GROUP)
+      Sections.push_back(&Section);
+  }
+
+  for (MCAssembler::iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF &>(it->getSection());
+    if (Section.getType() != ELF::SHT_GROUP &&
+        Section.getType() != ELF::SHT_REL &&
+        Section.getType() != ELF::SHT_RELA)
+      Sections.push_back(&Section);
+  }
+
+  for (MCAssembler::iterator it = Asm.begin(),
+         ie = Asm.end(); it != ie; ++it) {
+    const MCSectionELF &Section =
+      static_cast<const MCSectionELF &>(it->getSection());
+    if (Section.getType() == ELF::SHT_REL ||
+        Section.getType() == ELF::SHT_RELA)
+      Sections.push_back(&Section);
+  }
+}
+
+void ELFObjectWriter::WriteObject(MCAssembler &Asm,
+                                  const MCAsmLayout &Layout) {
+  GroupMapTy GroupMap;
+  RevGroupMapTy RevGroupMap;
+  SectionIndexMapTy SectionIndexMap;
+
+  unsigned NumUserSections = Asm.size();
+
+  DenseMap<const MCSectionELF*, const MCSectionELF*> RelMap;
+  CreateRelocationSections(Asm, const_cast<MCAsmLayout&>(Layout), RelMap);
+
+  const unsigned NumUserAndRelocSections = Asm.size();
+  CreateIndexedSections(Asm, const_cast<MCAsmLayout&>(Layout), GroupMap,
+                        RevGroupMap, SectionIndexMap, RelMap);
+  const unsigned AllSections = Asm.size();
+  const unsigned NumIndexedSections = AllSections - NumUserAndRelocSections;
+
+  unsigned NumRegularSections = NumUserSections + NumIndexedSections;
+
+  // Compute symbol table information.
+  ComputeSymbolTable(Asm, SectionIndexMap, RevGroupMap, NumRegularSections);
+
+
+  WriteRelocations(Asm, const_cast<MCAsmLayout&>(Layout), RelMap);
+
+  CreateMetadataSections(const_cast<MCAssembler&>(Asm),
+                         const_cast<MCAsmLayout&>(Layout),
+                         SectionIndexMap,
+                         RelMap);
+
+  uint64_t NaturalAlignment = is64Bit() ? 8 : 4;
+  uint64_t HeaderSize = is64Bit() ? sizeof(ELF::Elf64_Ehdr) :
+                                    sizeof(ELF::Elf32_Ehdr);
+  uint64_t FileOff = HeaderSize;
+
+  std::vector<const MCSectionELF*> Sections;
+  ComputeSectionOrder(Asm, Sections);
+  unsigned NumSections = Sections.size();
+  SectionOffsetMapTy SectionOffsetMap;
+  for (unsigned i = 0; i < NumRegularSections + 1; ++i) {
+    const MCSectionELF &Section = *Sections[i];
+    const MCSectionData &SD = Asm.getOrCreateSectionData(Section);
+
+    FileOff = RoundUpToAlignment(FileOff, SD.getAlignment());
+
+    // Remember the offset into the file for this section.
+    SectionOffsetMap[&Section] = FileOff;
+
+    // Get the size of the section in the output file (including padding).
+    FileOff += GetSectionFileSize(Layout, SD);
+  }
+
+  FileOff = RoundUpToAlignment(FileOff, NaturalAlignment);
+
+  const unsigned SectionHeaderOffset = FileOff - HeaderSize;
+
+  uint64_t SectionHeaderEntrySize = is64Bit() ?
+    sizeof(ELF::Elf64_Shdr) : sizeof(ELF::Elf32_Shdr);
+  FileOff += (NumSections + 1) * SectionHeaderEntrySize;
+
+  for (unsigned i = NumRegularSections + 1; i < NumSections; ++i) {
+    const MCSectionELF &Section = *Sections[i];
+    const MCSectionData &SD = Asm.getOrCreateSectionData(Section);
+
+    FileOff = RoundUpToAlignment(FileOff, SD.getAlignment());
+
+    // Remember the offset into the file for this section.
+    SectionOffsetMap[&Section] = FileOff;
+
+    // Get the size of the section in the output file (including padding).
+    FileOff += GetSectionFileSize(Layout, SD);
+  }
+
+  // Write out the ELF header ...
+  WriteHeader(SectionHeaderOffset, NumSections + 1);
+
+  // ... then the regular sections ...
+  // + because of .shstrtab
+  for (unsigned i = 0; i < NumRegularSections + 1; ++i)
+    WriteDataSectionData(Asm, Layout, *Sections[i]);
+
+  FileOff = OS.tell();
+  uint64_t Padding = OffsetToAlignment(FileOff, NaturalAlignment);
+  WriteZeros(Padding);
+
+  // ... then the section header table ...
+  WriteSectionHeader(Asm, GroupMap, Layout, SectionIndexMap,
+                     SectionOffsetMap);
+
+  FileOff = OS.tell();
+
+  // ... and then the remainting sections ...
+  for (unsigned i = NumRegularSections + 1; i < NumSections; ++i)
+    WriteDataSectionData(Asm, Layout, *Sections[i]);
+}
+
+bool
+ELFObjectWriter::IsSymbolRefDifferenceFullyResolvedImpl(const MCAssembler &Asm,
+                                                      const MCSymbolData &DataA,
+                                                      const MCFragment &FB,
+                                                      bool InSet,
+                                                      bool IsPCRel) const {
+  if (DataA.getFlags() & ELF_STB_Weak)
+    return false;
+  return MCObjectWriter::IsSymbolRefDifferenceFullyResolvedImpl(
+                                                 Asm, DataA, FB,InSet, IsPCRel);
+}
+
+MCObjectWriter *llvm::createELFObjectWriter(MCELFObjectTargetWriter *MOTW,
+                                            raw_ostream &OS,
+                                            bool IsLittleEndian) {
+  switch (MOTW->getEMachine()) {
+    case ELF::EM_386:
+    case ELF::EM_X86_64:
+      return new X86ELFObjectWriter(MOTW, OS, IsLittleEndian); break;
+    case ELF::EM_ARM:
+      return new ARMELFObjectWriter(MOTW, OS, IsLittleEndian); break;
+    case ELF::EM_MBLAZE:
+      return new MBlazeELFObjectWriter(MOTW, OS, IsLittleEndian); break;
+    default: llvm_unreachable("Unsupported architecture"); break;
+  }
+}
+
+
+/// START OF SUBCLASSES for ELFObjectWriter
+//===- ARMELFObjectWriter -------------------------------------------===//
+
+ARMELFObjectWriter::ARMELFObjectWriter(MCELFObjectTargetWriter *MOTW,
+                                       raw_ostream &_OS,
+                                       bool IsLittleEndian)
+  : ELFObjectWriter(MOTW, _OS, IsLittleEndian)
+{}
+
+ARMELFObjectWriter::~ARMELFObjectWriter()
+{}
+
+// FIXME: get the real EABI Version from the Triple.
+void ARMELFObjectWriter::WriteEFlags() {
+  Write32(ELF::EF_ARM_EABIMASK & DefaultEABIVersion);
+}
+
+// In ARM, _MergedGlobals and other most symbols get emitted directly.
+// I.e. not as an offset to a section symbol.
+// This code is a first-cut approximation of what ARM/gcc does.
+
+const MCSymbol *ARMELFObjectWriter::ExplicitRelSym(const MCAssembler &Asm,
+                                                   const MCValue &Target,
+                                                   const MCFragment &F,
+                                                   bool IsBSS) const {
+  const MCSymbol &Symbol = Target.getSymA()->getSymbol();
+  bool EmitThisSym = false;
+
+  if (IsBSS) {
+    EmitThisSym = StringSwitch<bool>(Symbol.getName())
+      .Case("_MergedGlobals", true)
+      .Default(false);
+  } else {
+    EmitThisSym = StringSwitch<bool>(Symbol.getName())
+      .Case("_MergedGlobals", true)
+      .StartsWith(".L.str", true)
+      .Default(false);
+  }
+  if (EmitThisSym)
+    return &Symbol;
+  if (! Symbol.isTemporary())
+    return &Symbol;
+  return NULL;
+}
+
+unsigned ARMELFObjectWriter::GetRelocType(const MCValue &Target,
+                                          const MCFixup &Fixup,
+                                          bool IsPCRel,
+                                          bool IsRelocWithSymbol,
+                                          int64_t Addend) {
+  MCSymbolRefExpr::VariantKind Modifier = Target.isAbsolute() ?
+    MCSymbolRefExpr::VK_None : Target.getSymA()->getKind();
+
+  unsigned Type = 0;
+  if (IsPCRel) {
+    switch ((unsigned)Fixup.getKind()) {
+    default: assert(0 && "Unimplemented");
+    case FK_Data_4:
+      switch (Modifier) {
+      default: llvm_unreachable("Unsupported Modifier");
+      case MCSymbolRefExpr::VK_None:
+        Type = ELF::R_ARM_BASE_PREL;
+        break;
+      case MCSymbolRefExpr::VK_ARM_TLSGD:
+        assert(0 && "unimplemented");
+        break;
+      case MCSymbolRefExpr::VK_ARM_GOTTPOFF:
+        Type = ELF::R_ARM_TLS_IE32;
+        break;
+      }
+      break;
+    case ARM::fixup_arm_uncondbranch:
+      switch (Modifier) {
+      case MCSymbolRefExpr::VK_ARM_PLT:
+        Type = ELF::R_ARM_PLT32;
+        break;
+      default:
+        Type = ELF::R_ARM_CALL;
+        break;
+      }
+      break;
+    case ARM::fixup_arm_condbranch:
+      Type = ELF::R_ARM_JUMP24;
+      break;
+    case ARM::fixup_arm_movt_hi16:
+    case ARM::fixup_arm_movt_hi16_pcrel:
+      Type = ELF::R_ARM_MOVT_PREL;
+      break;
+    case ARM::fixup_arm_movw_lo16:
+    case ARM::fixup_arm_movw_lo16_pcrel:
+      Type = ELF::R_ARM_MOVW_PREL_NC;
+      break;
+    case ARM::fixup_t2_movt_hi16:
+    case ARM::fixup_t2_movt_hi16_pcrel:
+      Type = ELF::R_ARM_THM_MOVT_PREL;
+      break;
+    case ARM::fixup_t2_movw_lo16:
+    case ARM::fixup_t2_movw_lo16_pcrel:
+      Type = ELF::R_ARM_THM_MOVW_PREL_NC;
+      break;
+    }
+  } else {
+    switch ((unsigned)Fixup.getKind()) {
+    default: llvm_unreachable("invalid fixup kind!");
+    case FK_Data_4:
+      switch (Modifier) {
+      default: llvm_unreachable("Unsupported Modifier"); break;
+      case MCSymbolRefExpr::VK_ARM_GOT:
+        Type = ELF::R_ARM_GOT_BREL;
+        break;
+      case MCSymbolRefExpr::VK_ARM_TLSGD:
+        Type = ELF::R_ARM_TLS_GD32;
+        break;
+      case MCSymbolRefExpr::VK_ARM_TPOFF:
+        Type = ELF::R_ARM_TLS_LE32;
+        break;
+      case MCSymbolRefExpr::VK_ARM_GOTTPOFF:
+        Type = ELF::R_ARM_TLS_IE32;
+        break;
+      case MCSymbolRefExpr::VK_None:
+        Type = ELF::R_ARM_ABS32;
+        break;
+      case MCSymbolRefExpr::VK_ARM_GOTOFF:
+        Type = ELF::R_ARM_GOTOFF32;
+        break;
+      }
+      break;
+    case ARM::fixup_arm_ldst_pcrel_12:
+    case ARM::fixup_arm_pcrel_10:
+    case ARM::fixup_arm_adr_pcrel_12:
+    case ARM::fixup_arm_thumb_bl:
+    case ARM::fixup_arm_thumb_cb:
+    case ARM::fixup_arm_thumb_cp:
+    case ARM::fixup_arm_thumb_br:
+      assert(0 && "Unimplemented");
+      break;
+    case ARM::fixup_arm_uncondbranch:
+      Type = ELF::R_ARM_CALL;
+      break;
+    case ARM::fixup_arm_condbranch:
+      Type = ELF::R_ARM_JUMP24;
+      break;
+    case ARM::fixup_arm_movt_hi16:
+      Type = ELF::R_ARM_MOVT_ABS;
+      break;
+    case ARM::fixup_arm_movw_lo16:
+      Type = ELF::R_ARM_MOVW_ABS_NC;
+      break;
+    case ARM::fixup_t2_movt_hi16:
+      Type = ELF::R_ARM_THM_MOVT_ABS;
+      break;
+    case ARM::fixup_t2_movw_lo16:
+      Type = ELF::R_ARM_THM_MOVW_ABS_NC;
+      break;
+    }
+  }
+
+  if (RelocNeedsGOT(Modifier))
+    NeedsGOT = true;
+
+  return Type;
+}
+
+//===- MBlazeELFObjectWriter -------------------------------------------===//
+
+MBlazeELFObjectWriter::MBlazeELFObjectWriter(MCELFObjectTargetWriter *MOTW,
+                                             raw_ostream &_OS,
+                                             bool IsLittleEndian)
+  : ELFObjectWriter(MOTW, _OS, IsLittleEndian) {
+}
+
+MBlazeELFObjectWriter::~MBlazeELFObjectWriter() {
+}
+
+unsigned MBlazeELFObjectWriter::GetRelocType(const MCValue &Target,
+                                             const MCFixup &Fixup,
+                                             bool IsPCRel,
+                                             bool IsRelocWithSymbol,
+                                             int64_t Addend) {
+  // determine the type of the relocation
+  unsigned Type;
+  if (IsPCRel) {
+    switch ((unsigned)Fixup.getKind()) {
+    default:
+      llvm_unreachable("Unimplemented");
+    case FK_PCRel_4:
+      Type = ELF::R_MICROBLAZE_64_PCREL;
+      break;
+    case FK_PCRel_2:
+      Type = ELF::R_MICROBLAZE_32_PCREL;
+      break;
+    }
+  } else {
+    switch ((unsigned)Fixup.getKind()) {
+    default: llvm_unreachable("invalid fixup kind!");
+    case FK_Data_4:
+      Type = ((IsRelocWithSymbol || Addend !=0)
+              ? ELF::R_MICROBLAZE_32
+              : ELF::R_MICROBLAZE_64);
+      break;
+    case FK_Data_2:
+      Type = ELF::R_MICROBLAZE_32;
+      break;
+    }
+  }
+  return Type;
+}
+
+//===- X86ELFObjectWriter -------------------------------------------===//
+
+
+X86ELFObjectWriter::X86ELFObjectWriter(MCELFObjectTargetWriter *MOTW,
+                                       raw_ostream &_OS,
+                                       bool IsLittleEndian)
+  : ELFObjectWriter(MOTW, _OS, IsLittleEndian)
+{}
+
+X86ELFObjectWriter::~X86ELFObjectWriter()
+{}
+
+unsigned X86ELFObjectWriter::GetRelocType(const MCValue &Target,
+                                          const MCFixup &Fixup,
+                                          bool IsPCRel,
+                                          bool IsRelocWithSymbol,
+                                          int64_t Addend) {
   // determine the type of the relocation
 
-  MCSymbolRefExpr::VariantKind Modifier = Target.getSymA()->getKind();
+  MCSymbolRefExpr::VariantKind Modifier = Target.isAbsolute() ?
+    MCSymbolRefExpr::VK_None : Target.getSymA()->getKind();
   unsigned Type;
-  if (Is64Bit) {
+  if (is64Bit()) {
     if (IsPCRel) {
-      switch (Modifier) {
-      default:
-        llvm_unreachable("Unimplemented");
-      case MCSymbolRefExpr::VK_None:
-        Type = ELF::R_X86_64_PC32;
+      switch ((unsigned)Fixup.getKind()) {
+      default: llvm_unreachable("invalid fixup kind!");
+
+      case FK_Data_8: Type = ELF::R_X86_64_PC64; break;
+      case FK_Data_4: Type = ELF::R_X86_64_PC32; break;
+      case FK_Data_2: Type = ELF::R_X86_64_PC16; break;
+
+      case FK_PCRel_8:
+        assert(Modifier == MCSymbolRefExpr::VK_None);
+        Type = ELF::R_X86_64_PC64;
         break;
-      case MCSymbolRefExpr::VK_PLT:
-        Type = ELF::R_X86_64_PLT32;
+      case X86::reloc_signed_4byte:
+      case X86::reloc_riprel_4byte_movq_load:
+      case X86::reloc_riprel_4byte:
+      case FK_PCRel_4:
+        switch (Modifier) {
+        default:
+          llvm_unreachable("Unimplemented");
+        case MCSymbolRefExpr::VK_None:
+          Type = ELF::R_X86_64_PC32;
+          break;
+        case MCSymbolRefExpr::VK_PLT:
+          Type = ELF::R_X86_64_PLT32;
+          break;
+        case MCSymbolRefExpr::VK_GOTPCREL:
+          Type = ELF::R_X86_64_GOTPCREL;
+          break;
+        case MCSymbolRefExpr::VK_GOTTPOFF:
+          Type = ELF::R_X86_64_GOTTPOFF;
         break;
-      case MCSymbolRefExpr::VK_GOTPCREL:
-        Type = ELF::R_X86_64_GOTPCREL;
+        case MCSymbolRefExpr::VK_TLSGD:
+          Type = ELF::R_X86_64_TLSGD;
+          break;
+        case MCSymbolRefExpr::VK_TLSLD:
+          Type = ELF::R_X86_64_TLSLD;
+          break;
+        }
         break;
-      case MCSymbolRefExpr::VK_GOTTPOFF:
-        Type = ELF::R_X86_64_GOTTPOFF;
+      case FK_PCRel_2:
+        assert(Modifier == MCSymbolRefExpr::VK_None);
+        Type = ELF::R_X86_64_PC16;
         break;
-      case MCSymbolRefExpr::VK_TLSGD:
-        Type = ELF::R_X86_64_TLSGD;
-        break;
-      case MCSymbolRefExpr::VK_TLSLD:
-        Type = ELF::R_X86_64_TLSLD;
+      case FK_PCRel_1:
+        assert(Modifier == MCSymbolRefExpr::VK_None);
+        Type = ELF::R_X86_64_PC8;
         break;
       }
     } else {
@@ -729,7 +1526,6 @@ void ELFObjectWriterImpl::RecordRelocation(const MCAssembler &Asm,
       default: llvm_unreachable("invalid fixup kind!");
       case FK_Data_8: Type = ELF::R_X86_64_64; break;
       case X86::reloc_signed_4byte:
-      case X86::reloc_pcrel_4byte:
         assert(isInt<32>(Target.getConstant()));
         switch (Modifier) {
         default:
@@ -755,7 +1551,7 @@ void ELFObjectWriterImpl::RecordRelocation(const MCAssembler &Asm,
         Type = ELF::R_X86_64_32;
         break;
       case FK_Data_2: Type = ELF::R_X86_64_16; break;
-      case X86::reloc_pcrel_1byte:
+      case FK_PCRel_1:
       case FK_Data_1: Type = ELF::R_X86_64_8; break;
       }
     }
@@ -782,7 +1578,7 @@ void ELFObjectWriterImpl::RecordRelocation(const MCAssembler &Asm,
       // FIXME: Should we avoid selecting reloc_signed_4byte in 32 bit mode
       // instead?
       case X86::reloc_signed_4byte:
-      case X86::reloc_pcrel_4byte:
+      case FK_PCRel_4:
       case FK_Data_4:
         switch (Modifier) {
         default:
@@ -820,7 +1616,7 @@ void ELFObjectWriterImpl::RecordRelocation(const MCAssembler &Asm,
         }
         break;
       case FK_Data_2: Type = ELF::R_386_16; break;
-      case X86::reloc_pcrel_1byte:
+      case FK_PCRel_1:
       case FK_Data_1: Type = ELF::R_386_8; break;
       }
     }
@@ -829,535 +1625,5 @@ void ELFObjectWriterImpl::RecordRelocation(const MCAssembler &Asm,
   if (RelocNeedsGOT(Modifier))
     NeedsGOT = true;
 
-  ELFRelocationEntry ERE;
-
-  ERE.Index = Index;
-  ERE.Type = Type;
-  ERE.Symbol = Renamed;
-
-  ERE.r_offset = Layout.getFragmentOffset(Fragment) + Fixup.getOffset();
-
-  if (HasRelocationAddend)
-    ERE.r_addend = Addend;
-  else
-    ERE.r_addend = 0; // Silence compiler warning.
-
-  Relocations[Fragment->getParent()].push_back(ERE);
-}
-
-uint64_t
-ELFObjectWriterImpl::getSymbolIndexInSymbolTable(const MCAssembler &Asm,
-                                                 const MCSymbol *S) {
-  MCSymbolData &SD = Asm.getSymbolData(*S);
-
-  // Local symbol.
-  if (!SD.isExternal() && !S->isUndefined())
-    return SD.getIndex() + /* empty symbol */ 1;
-
-  // External or undefined symbol.
-  return SD.getIndex() + NumRegularSections + /* empty symbol */ 1;
-}
-
-static bool isInSymtab(const MCAssembler &Asm, const MCSymbolData &Data,
-                       bool Used, bool Renamed) {
-  if (Used)
-    return true;
-
-  if (Renamed)
-    return false;
-
-  const MCSymbol &Symbol = Data.getSymbol();
-
-  const MCSymbol &A = AliasedSymbol(Symbol);
-  if (&A != &Symbol && A.isUndefined())
-    return false;
-
-  if (!Asm.isSymbolLinkerVisible(Symbol) && !Symbol.isUndefined())
-    return false;
-
-  if (Symbol.isTemporary())
-    return false;
-
-  return true;
-}
-
-static bool isLocal(const MCSymbolData &Data) {
-  if (Data.isExternal())
-    return false;
-
-  const MCSymbol &Symbol = Data.getSymbol();
-  if (Symbol.isUndefined() && !Symbol.isVariable())
-    return false;
-
-  return true;
-}
-
-void ELFObjectWriterImpl::ComputeSymbolTable(MCAssembler &Asm) {
-  // FIXME: Is this the correct place to do this?
-  if (NeedsGOT) {
-    llvm::StringRef Name = "_GLOBAL_OFFSET_TABLE_";
-    MCSymbol *Sym = Asm.getContext().GetOrCreateSymbol(Name);
-    MCSymbolData &Data = Asm.getOrCreateSymbolData(*Sym);
-    Data.setExternal(true);
-    SetBinding(Data, ELF::STB_GLOBAL);
-  }
-
-  // Build section lookup table.
-  NumRegularSections = Asm.size();
-  DenseMap<const MCSection*, uint32_t> SectionIndexMap;
-  unsigned Index = 1;
-  for (MCAssembler::iterator it = Asm.begin(),
-         ie = Asm.end(); it != ie; ++it, ++Index)
-    SectionIndexMap[&it->getSection()] = Index;
-
-  // Index 0 is always the empty string.
-  StringMap<uint64_t> StringIndexMap;
-  StringTable += '\x00';
-
-  // Add the data for the symbols.
-  for (MCAssembler::symbol_iterator it = Asm.symbol_begin(),
-         ie = Asm.symbol_end(); it != ie; ++it) {
-    const MCSymbol &Symbol = it->getSymbol();
-
-    if (!isInSymtab(Asm, *it, UsedInReloc.count(&Symbol),
-                    Renames.count(&Symbol)))
-      continue;
-
-    ELFSymbolData MSD;
-    MSD.SymbolData = it;
-    bool Local = isLocal(*it);
-    const MCSymbol &RefSymbol = AliasedSymbol(Symbol);
-
-    if (it->isCommon()) {
-      assert(!Local);
-      MSD.SectionIndex = ELF::SHN_COMMON;
-    } else if (Symbol.isAbsolute() || RefSymbol.isVariable()) {
-      MSD.SectionIndex = ELF::SHN_ABS;
-    } else if (RefSymbol.isUndefined()) {
-      MSD.SectionIndex = ELF::SHN_UNDEF;
-    } else {
-      MSD.SectionIndex = SectionIndexMap.lookup(&RefSymbol.getSection());
-      assert(MSD.SectionIndex && "Invalid section index!");
-    }
-
-    // The @@@ in symbol version is replaced with @ in undefined symbols and
-    // @@ in defined ones.
-    StringRef Name = Symbol.getName();
-    size_t Pos = Name.find("@@@");
-    std::string FinalName;
-    if (Pos != StringRef::npos) {
-      StringRef Prefix = Name.substr(0, Pos);
-      unsigned n = MSD.SectionIndex == ELF::SHN_UNDEF ? 2 : 1;
-      StringRef Suffix = Name.substr(Pos + n);
-      FinalName = Prefix.str() + Suffix.str();
-    } else {
-      FinalName = Name.str();
-    }
-
-    uint64_t &Entry = StringIndexMap[FinalName];
-    if (!Entry) {
-      Entry = StringTable.size();
-      StringTable += FinalName;
-      StringTable += '\x00';
-    }
-    MSD.StringIndex = Entry;
-    if (MSD.SectionIndex == ELF::SHN_UNDEF)
-      UndefinedSymbolData.push_back(MSD);
-    else if (Local)
-      LocalSymbolData.push_back(MSD);
-    else
-      ExternalSymbolData.push_back(MSD);
-  }
-
-  // Symbols are required to be in lexicographic order.
-  array_pod_sort(LocalSymbolData.begin(), LocalSymbolData.end());
-  array_pod_sort(ExternalSymbolData.begin(), ExternalSymbolData.end());
-  array_pod_sort(UndefinedSymbolData.begin(), UndefinedSymbolData.end());
-
-  // Set the symbol indices. Local symbols must come before all other
-  // symbols with non-local bindings.
-  Index = 0;
-  for (unsigned i = 0, e = LocalSymbolData.size(); i != e; ++i)
-    LocalSymbolData[i].SymbolData->setIndex(Index++);
-  for (unsigned i = 0, e = ExternalSymbolData.size(); i != e; ++i)
-    ExternalSymbolData[i].SymbolData->setIndex(Index++);
-  for (unsigned i = 0, e = UndefinedSymbolData.size(); i != e; ++i)
-    UndefinedSymbolData[i].SymbolData->setIndex(Index++);
-}
-
-void ELFObjectWriterImpl::WriteRelocation(MCAssembler &Asm, MCAsmLayout &Layout,
-                                          const MCSectionData &SD) {
-  if (!Relocations[&SD].empty()) {
-    MCContext &Ctx = Asm.getContext();
-    const MCSection *RelaSection;
-    const MCSectionELF &Section =
-      static_cast<const MCSectionELF&>(SD.getSection());
-
-    const StringRef SectionName = Section.getSectionName();
-    std::string RelaSectionName = HasRelocationAddend ? ".rela" : ".rel";
-    RelaSectionName += SectionName;
-
-    unsigned EntrySize;
-    if (HasRelocationAddend)
-      EntrySize = Is64Bit ? sizeof(ELF::Elf64_Rela) : sizeof(ELF::Elf32_Rela);
-    else
-      EntrySize = Is64Bit ? sizeof(ELF::Elf64_Rel) : sizeof(ELF::Elf32_Rel);
-
-    RelaSection = Ctx.getELFSection(RelaSectionName, HasRelocationAddend ?
-                                    ELF::SHT_RELA : ELF::SHT_REL, 0,
-                                    SectionKind::getReadOnly(),
-                                    false, EntrySize);
-
-    MCSectionData &RelaSD = Asm.getOrCreateSectionData(*RelaSection);
-    RelaSD.setAlignment(Is64Bit ? 8 : 4);
-
-    MCDataFragment *F = new MCDataFragment(&RelaSD);
-
-    WriteRelocationsFragment(Asm, F, &SD);
-
-    Asm.AddSectionToTheEnd(*Writer, RelaSD, Layout);
-  }
-}
-
-void ELFObjectWriterImpl::WriteSecHdrEntry(uint32_t Name, uint32_t Type,
-                                           uint64_t Flags, uint64_t Address,
-                                           uint64_t Offset, uint64_t Size,
-                                           uint32_t Link, uint32_t Info,
-                                           uint64_t Alignment,
-                                           uint64_t EntrySize) {
-  Write32(Name);        // sh_name: index into string table
-  Write32(Type);        // sh_type
-  WriteWord(Flags);     // sh_flags
-  WriteWord(Address);   // sh_addr
-  WriteWord(Offset);    // sh_offset
-  WriteWord(Size);      // sh_size
-  Write32(Link);        // sh_link
-  Write32(Info);        // sh_info
-  WriteWord(Alignment); // sh_addralign
-  WriteWord(EntrySize); // sh_entsize
-}
-
-void ELFObjectWriterImpl::WriteRelocationsFragment(const MCAssembler &Asm,
-                                                   MCDataFragment *F,
-                                                   const MCSectionData *SD) {
-  std::vector<ELFRelocationEntry> &Relocs = Relocations[SD];
-  // sort by the r_offset just like gnu as does
-  array_pod_sort(Relocs.begin(), Relocs.end());
-
-  for (unsigned i = 0, e = Relocs.size(); i != e; ++i) {
-    ELFRelocationEntry entry = Relocs[e - i - 1];
-
-    if (entry.Index < 0)
-      entry.Index = getSymbolIndexInSymbolTable(Asm, entry.Symbol);
-    else
-      entry.Index += LocalSymbolData.size() + 1;
-    if (Is64Bit) {
-      char buf[8];
-
-      String64(buf, entry.r_offset);
-      F->getContents() += StringRef(buf, 8);
-
-      struct ELF::Elf64_Rela ERE64;
-      ERE64.setSymbolAndType(entry.Index, entry.Type);
-      String64(buf, ERE64.r_info);
-      F->getContents() += StringRef(buf, 8);
-
-      if (HasRelocationAddend) {
-        String64(buf, entry.r_addend);
-        F->getContents() += StringRef(buf, 8);
-      }
-    } else {
-      char buf[4];
-
-      String32(buf, entry.r_offset);
-      F->getContents() += StringRef(buf, 4);
-
-      struct ELF::Elf32_Rela ERE32;
-      ERE32.setSymbolAndType(entry.Index, entry.Type);
-      String32(buf, ERE32.r_info);
-      F->getContents() += StringRef(buf, 4);
-
-      if (HasRelocationAddend) {
-        String32(buf, entry.r_addend);
-        F->getContents() += StringRef(buf, 4);
-      }
-    }
-  }
-}
-
-void ELFObjectWriterImpl::CreateMetadataSections(MCAssembler &Asm,
-                                                 MCAsmLayout &Layout) {
-  MCContext &Ctx = Asm.getContext();
-  MCDataFragment *F;
-
-  const MCSection *SymtabSection;
-  unsigned EntrySize = Is64Bit ? ELF::SYMENTRY_SIZE64 : ELF::SYMENTRY_SIZE32;
-
-  unsigned NumRegularSections = Asm.size();
-
-  // We construct .shstrtab, .symtab and .strtab in this order to match gnu as.
-  const MCSection *ShstrtabSection;
-  ShstrtabSection = Ctx.getELFSection(".shstrtab", ELF::SHT_STRTAB, 0,
-                                      SectionKind::getReadOnly(), false);
-  MCSectionData &ShstrtabSD = Asm.getOrCreateSectionData(*ShstrtabSection);
-  ShstrtabSD.setAlignment(1);
-  ShstrtabIndex = Asm.size();
-
-  SymtabSection = Ctx.getELFSection(".symtab", ELF::SHT_SYMTAB, 0,
-                                    SectionKind::getReadOnly(),
-                                    false, EntrySize);
-  MCSectionData &SymtabSD = Asm.getOrCreateSectionData(*SymtabSection);
-  SymtabSD.setAlignment(Is64Bit ? 8 : 4);
-
-  const MCSection *StrtabSection;
-  StrtabSection = Ctx.getELFSection(".strtab", ELF::SHT_STRTAB, 0,
-                                    SectionKind::getReadOnly(), false);
-  MCSectionData &StrtabSD = Asm.getOrCreateSectionData(*StrtabSection);
-  StrtabSD.setAlignment(1);
-  StringTableIndex = Asm.size();
-
-  WriteRelocations(Asm, Layout);
-
-  // Symbol table
-  F = new MCDataFragment(&SymtabSD);
-  WriteSymbolTable(F, Asm, Layout, NumRegularSections);
-  Asm.AddSectionToTheEnd(*Writer, SymtabSD, Layout);
-
-  F = new MCDataFragment(&StrtabSD);
-  F->getContents().append(StringTable.begin(), StringTable.end());
-  Asm.AddSectionToTheEnd(*Writer, StrtabSD, Layout);
-
-  F = new MCDataFragment(&ShstrtabSD);
-
-  // Section header string table.
-  //
-  // The first entry of a string table holds a null character so skip
-  // section 0.
-  uint64_t Index = 1;
-  F->getContents() += '\x00';
-
-  for (MCAssembler::const_iterator it = Asm.begin(),
-         ie = Asm.end(); it != ie; ++it) {
-    const MCSectionELF &Section =
-      static_cast<const MCSectionELF&>(it->getSection());
-    // FIXME: We could merge suffixes like in .text and .rela.text.
-
-    // Remember the index into the string table so we can write it
-    // into the sh_name field of the section header table.
-    SectionStringTableIndex[&it->getSection()] = Index;
-
-    Index += Section.getSectionName().size() + 1;
-    F->getContents() += Section.getSectionName();
-    F->getContents() += '\x00';
-  }
-
-  Asm.AddSectionToTheEnd(*Writer, ShstrtabSD, Layout);
-}
-
-bool ELFObjectWriterImpl::IsFixupFullyResolved(const MCAssembler &Asm,
-                                               const MCValue Target,
-                                               bool IsPCRel,
-                                               const MCFragment *DF) const {
-  // If this is a PCrel relocation, find the section this fixup value is
-  // relative to.
-  const MCSection *BaseSection = 0;
-  if (IsPCRel) {
-    BaseSection = &DF->getParent()->getSection();
-    assert(BaseSection);
-  }
-
-  const MCSection *SectionA = 0;
-  const MCSymbol *SymbolA = 0;
-  if (const MCSymbolRefExpr *A = Target.getSymA()) {
-    SymbolA = &A->getSymbol();
-    SectionA = &SymbolA->getSection();
-  }
-
-  const MCSection *SectionB = 0;
-  if (const MCSymbolRefExpr *B = Target.getSymB()) {
-    SectionB = &B->getSymbol().getSection();
-  }
-
-  if (!BaseSection)
-    return SectionA == SectionB;
-
-  const MCSymbolData &DataA = Asm.getSymbolData(*SymbolA);
-  if (DataA.isExternal())
-    return false;
-
-  return !SectionB && BaseSection == SectionA;
-}
-
-void ELFObjectWriterImpl::WriteObject(MCAssembler &Asm,
-                                      const MCAsmLayout &Layout) {
-  // Compute symbol table information.
-  ComputeSymbolTable(Asm);
-
-  CreateMetadataSections(const_cast<MCAssembler&>(Asm),
-                         const_cast<MCAsmLayout&>(Layout));
-
-  // Add 1 for the null section.
-  unsigned NumSections = Asm.size() + 1;
-  uint64_t NaturalAlignment = Is64Bit ? 8 : 4;
-  uint64_t HeaderSize = Is64Bit ? sizeof(ELF::Elf64_Ehdr) : sizeof(ELF::Elf32_Ehdr);
-  uint64_t FileOff = HeaderSize;
-
-  for (MCAssembler::const_iterator it = Asm.begin(),
-         ie = Asm.end(); it != ie; ++it) {
-    const MCSectionData &SD = *it;
-
-    FileOff = RoundUpToAlignment(FileOff, SD.getAlignment());
-
-    // Get the size of the section in the output file (including padding).
-    uint64_t Size = Layout.getSectionFileSize(&SD);
-
-    FileOff += Size;
-  }
-
-  FileOff = RoundUpToAlignment(FileOff, NaturalAlignment);
-
-  // Write out the ELF header ...
-  WriteHeader(FileOff - HeaderSize, NumSections);
-
-  FileOff = HeaderSize;
-
-  // ... then all of the sections ...
-  DenseMap<const MCSection*, uint64_t> SectionOffsetMap;
-
-  DenseMap<const MCSection*, uint32_t> SectionIndexMap;
-
-  unsigned Index = 1;
-  for (MCAssembler::const_iterator it = Asm.begin(),
-         ie = Asm.end(); it != ie; ++it) {
-    const MCSectionData &SD = *it;
-
-    uint64_t Padding = OffsetToAlignment(FileOff, SD.getAlignment());
-    WriteZeros(Padding);
-    FileOff += Padding;
-
-    // Remember the offset into the file for this section.
-    SectionOffsetMap[&it->getSection()] = FileOff;
-    SectionIndexMap[&it->getSection()] = Index++;
-
-    FileOff += Layout.getSectionFileSize(&SD);
-
-    Asm.WriteSectionData(it, Layout, Writer);
-  }
-
-  uint64_t Padding = OffsetToAlignment(FileOff, NaturalAlignment);
-  WriteZeros(Padding);
-  FileOff += Padding;
-
-  // ... and then the section header table.
-  // Should we align the section header table?
-  //
-  // Null section first.
-  WriteSecHdrEntry(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-
-  for (MCAssembler::const_iterator it = Asm.begin(),
-         ie = Asm.end(); it != ie; ++it) {
-    const MCSectionData &SD = *it;
-    const MCSectionELF &Section =
-      static_cast<const MCSectionELF&>(SD.getSection());
-
-    uint64_t sh_link = 0;
-    uint64_t sh_info = 0;
-
-    switch(Section.getType()) {
-    case ELF::SHT_DYNAMIC:
-      sh_link = SectionStringTableIndex[&it->getSection()];
-      sh_info = 0;
-      break;
-
-    case ELF::SHT_REL:
-    case ELF::SHT_RELA: {
-      const MCSection *SymtabSection;
-      const MCSection *InfoSection;
-
-      SymtabSection = Asm.getContext().getELFSection(".symtab", ELF::SHT_SYMTAB, 0,
-                                                     SectionKind::getReadOnly(),
-                                                     false);
-      sh_link = SectionIndexMap[SymtabSection];
-
-      // Remove ".rel" and ".rela" prefixes.
-      unsigned SecNameLen = (Section.getType() == ELF::SHT_REL) ? 4 : 5;
-      StringRef SectionName = Section.getSectionName().substr(SecNameLen);
-
-      InfoSection = Asm.getContext().getELFSection(SectionName,
-                                                   ELF::SHT_PROGBITS, 0,
-                                                   SectionKind::getReadOnly(),
-                                                   false);
-      sh_info = SectionIndexMap[InfoSection];
-      break;
-    }
-
-    case ELF::SHT_SYMTAB:
-    case ELF::SHT_DYNSYM:
-      sh_link = StringTableIndex;
-      sh_info = LastLocalSymbolIndex;
-      break;
-
-    case ELF::SHT_PROGBITS:
-    case ELF::SHT_STRTAB:
-    case ELF::SHT_NOBITS:
-    case ELF::SHT_NULL:
-    case ELF::SHT_ARM_ATTRIBUTES:
-      // Nothing to do.
-      break;
-
-    default:
-      assert(0 && "FIXME: sh_type value not supported!");
-      break;
-    }
-
-    WriteSecHdrEntry(SectionStringTableIndex[&it->getSection()],
-                     Section.getType(), Section.getFlags(),
-                     0,
-                     SectionOffsetMap.lookup(&SD.getSection()),
-                     Layout.getSectionSize(&SD), sh_link,
-                     sh_info, SD.getAlignment(),
-                     Section.getEntrySize());
-  }
-}
-
-ELFObjectWriter::ELFObjectWriter(raw_ostream &OS,
-                                 bool Is64Bit,
-                                 Triple::OSType OSType,
-                                 uint16_t EMachine,
-                                 bool IsLittleEndian,
-                                 bool HasRelocationAddend)
-  : MCObjectWriter(OS, IsLittleEndian)
-{
-  Impl = new ELFObjectWriterImpl(this, Is64Bit, EMachine,
-                                 HasRelocationAddend, OSType);
-}
-
-ELFObjectWriter::~ELFObjectWriter() {
-  delete (ELFObjectWriterImpl*) Impl;
-}
-
-void ELFObjectWriter::ExecutePostLayoutBinding(MCAssembler &Asm) {
-  ((ELFObjectWriterImpl*) Impl)->ExecutePostLayoutBinding(Asm);
-}
-
-void ELFObjectWriter::RecordRelocation(const MCAssembler &Asm,
-                                       const MCAsmLayout &Layout,
-                                       const MCFragment *Fragment,
-                                       const MCFixup &Fixup, MCValue Target,
-                                       uint64_t &FixedValue) {
-  ((ELFObjectWriterImpl*) Impl)->RecordRelocation(Asm, Layout, Fragment, Fixup,
-                                                  Target, FixedValue);
-}
-
-bool ELFObjectWriter::IsFixupFullyResolved(const MCAssembler &Asm,
-                                           const MCValue Target,
-                                           bool IsPCRel,
-                                           const MCFragment *DF) const {
-  return ((ELFObjectWriterImpl*) Impl)->IsFixupFullyResolved(Asm, Target,
-                                                             IsPCRel, DF);
-}
-
-void ELFObjectWriter::WriteObject(MCAssembler &Asm,
-                                  const MCAsmLayout &Layout) {
-  ((ELFObjectWriterImpl*) Impl)->WriteObject(Asm, Layout);
+  return Type;
 }

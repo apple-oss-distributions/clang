@@ -41,7 +41,8 @@ static CXTypeKind GetBuiltinTypeKind(const BuiltinType *BT) {
     BTCASE(UInt128);
     BTCASE(Char_S);
     BTCASE(SChar);
-    BTCASE(WChar);
+    case BuiltinType::WChar_S: return CXType_WChar;
+    case BuiltinType::WChar_U: return CXType_WChar;
     BTCASE(Short);
     BTCASE(Int);
     BTCASE(Long);
@@ -63,7 +64,7 @@ static CXTypeKind GetBuiltinTypeKind(const BuiltinType *BT) {
 }
 
 static CXTypeKind GetTypeKind(QualType T) {
-  Type *TP = T.getTypePtrOrNull();
+  const Type *TP = T.getTypePtrOrNull();
   if (!TP)
     return CXType_Invalid;
 
@@ -112,6 +113,7 @@ CXType clang_getCursorType(CXCursor C) {
   using namespace cxcursor;
   
   CXTranslationUnit TU = cxcursor::getCursorTU(C);
+  ASTContext &Context = static_cast<ASTUnit *>(TU->TUData)->getASTContext();
   if (clang_isExpression(C.kind)) {
     QualType T = cxcursor::getCursorExpr(C)->getType();
     return MakeCXType(T, TU);
@@ -121,9 +123,9 @@ CXType clang_getCursorType(CXCursor C) {
     Decl *D = cxcursor::getCursorDecl(C);
 
     if (TypeDecl *TD = dyn_cast<TypeDecl>(D))
-      return MakeCXType(QualType(TD->getTypeForDecl(), 0), TU);
+      return MakeCXType(Context.getTypeDeclType(TD), TU);
     if (ObjCInterfaceDecl *ID = dyn_cast<ObjCInterfaceDecl>(D))
-      return MakeCXType(QualType(ID->getTypeForDecl(), 0), TU);
+      return MakeCXType(Context.getObjCInterfaceType(ID), TU);
     if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
       return MakeCXType(VD->getType(), TU);
     if (ObjCPropertyDecl *PD = dyn_cast<ObjCPropertyDecl>(D))
@@ -135,22 +137,22 @@ CXType clang_getCursorType(CXCursor C) {
   
   if (clang_isReference(C.kind)) {
     switch (C.kind) {
-    case CXCursor_ObjCSuperClassRef:
-      return MakeCXType(
-                QualType(getCursorObjCSuperClassRef(C).first->getTypeForDecl(), 
-                         0), 
-                        TU);
-      
-    case CXCursor_ObjCClassRef:
-      return MakeCXType(
-                      QualType(getCursorObjCClassRef(C).first->getTypeForDecl(), 
-                               0), 
-                        TU);
-      
-    case CXCursor_TypeRef:
-      return MakeCXType(QualType(getCursorTypeRef(C).first->getTypeForDecl(), 
-                                 0), 
-                        TU);
+    case CXCursor_ObjCSuperClassRef: {
+      QualType T
+        = Context.getObjCInterfaceType(getCursorObjCSuperClassRef(C).first);
+      return MakeCXType(T, TU);
+    }
+        
+    case CXCursor_ObjCClassRef: {
+      QualType T = Context.getObjCInterfaceType(getCursorObjCClassRef(C).first);
+      return MakeCXType(T, TU);
+    }
+        
+    case CXCursor_TypeRef: {
+      QualType T = Context.getTypeDeclType(getCursorTypeRef(C).first);
+      return MakeCXType(T, TU);
+
+    }
       
     case CXCursor_CXXBaseSpecifier:
       return cxtype::MakeCXType(getCursorCXXBaseSpecifier(C)->getType(), TU);
@@ -184,9 +186,24 @@ CXType clang_getCanonicalType(CXType CT) {
   return MakeCXType(AU->getASTContext().getCanonicalType(T), TU);
 }
 
+unsigned clang_isConstQualifiedType(CXType CT) {
+  QualType T = GetQualType(CT);
+  return T.isLocalConstQualified();
+}
+
+unsigned clang_isVolatileQualifiedType(CXType CT) {
+  QualType T = GetQualType(CT);
+  return T.isLocalVolatileQualified();
+}
+
+unsigned clang_isRestrictQualifiedType(CXType CT) {
+  QualType T = GetQualType(CT);
+  return T.isLocalRestrictQualified();
+}
+
 CXType clang_getPointeeType(CXType CT) {
   QualType T = GetQualType(CT);
-  Type *TP = T.getTypePtrOrNull();
+  const Type *TP = T.getTypePtrOrNull();
   
   if (!TP)
     return MakeCXType(QualType(), GetTU(CT));
@@ -217,7 +234,7 @@ CXCursor clang_getTypeDeclaration(CXType CT) {
     return cxcursor::MakeCXCursorInvalid(CXCursor_NoDeclFound);
 
   QualType T = GetQualType(CT);
-  Type *TP = T.getTypePtrOrNull();
+  const Type *TP = T.getTypePtrOrNull();
 
   if (!TP)
     return cxcursor::MakeCXCursorInvalid(CXCursor_NoDeclFound);
@@ -286,7 +303,7 @@ CXString clang_getTypeKindSpelling(enum CXTypeKind K) {
     TKIND(UInt128);
     TKIND(Char_S);
     TKIND(SChar);
-    TKIND(WChar);
+    case CXType_WChar: s = "WChar"; break;
     TKIND(Short);
     TKIND(Int);
     TKIND(Long);
@@ -350,6 +367,36 @@ unsigned clang_isPODType(CXType X) {
   if (!T.getTypePtrOrNull())
     return 0;
   return T->isPODType() ? 1 : 0;
+}
+
+CXString clang_getDeclObjCTypeEncoding(CXCursor C) {
+  if ((C.kind < CXCursor_FirstDecl) || (C.kind > CXCursor_LastDecl))
+    return cxstring::createCXString("");
+
+  Decl *D = static_cast<Decl*>(C.data[0]);
+  CXTranslationUnit TU = static_cast<CXTranslationUnit>(C.data[2]);
+  ASTUnit *AU = static_cast<ASTUnit*>(TU->TUData);
+  ASTContext &Ctx = AU->getASTContext();
+  std::string encoding;
+
+  if (ObjCMethodDecl *OMD = dyn_cast<ObjCMethodDecl>(D))  {
+    if (Ctx.getObjCEncodingForMethodDecl(OMD, encoding))
+      return cxstring::createCXString("?");
+  } else if (ObjCPropertyDecl *OPD = dyn_cast<ObjCPropertyDecl>(D)) 
+    Ctx.getObjCEncodingForPropertyDecl(OPD, NULL, encoding);
+  else if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
+    Ctx.getObjCEncodingForFunctionDecl(FD, encoding);
+  else {
+    QualType Ty;
+    if (TypeDecl *TD = dyn_cast<TypeDecl>(D))
+      Ty = Ctx.getTypeDeclType(TD);
+    if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+      Ty = VD->getType();
+    else return cxstring::createCXString("?");
+    Ctx.getObjCEncodingForType(Ty, encoding);
+  }
+
+  return cxstring::createCXString(encoding);
 }
 
 } // end: extern "C"

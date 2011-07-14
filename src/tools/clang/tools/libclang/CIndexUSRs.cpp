@@ -431,7 +431,7 @@ void USRGenerator::VisitTagDecl(TagDecl *D) {
   const unsigned off = Buf.size() - 1;
 
   if (EmitDeclName(D)) {
-    if (const TypedefDecl *TD = D->getTypedefForAnonDecl()) {
+    if (const TypedefNameDecl *TD = D->getTypedefNameForAnonDecl()) {
       Buf[off] = 'A';
       Out << '@' << TD;
     }
@@ -470,6 +470,15 @@ bool USRGenerator::GenLoc(const Decl *D) {
   if (generatedLoc)
     return IgnoreResults;
   generatedLoc = true;
+  
+  // Guard against null declarations in invalid code.
+  if (!D) {
+    IgnoreResults = true;
+    return true;
+  }
+
+  // Use the location of canonical decl.
+  D = D->getCanonicalDecl();
 
   const SourceManager &SM = AU->getSourceManager();
   SourceLocation L = D->getLocStart();
@@ -481,8 +490,7 @@ bool USRGenerator::GenLoc(const Decl *D) {
   const std::pair<FileID, unsigned> &Decomposed = SM.getDecomposedLoc(L);
   const FileEntry *FE = SM.getFileEntryForID(Decomposed.first);
   if (FE) {
-    llvm::sys::Path P(FE->getName());
-    Out << P.getLast();
+    Out << llvm::sys::path::filename(FE->getName());
   }
   else {
     // This case really isn't interesting.
@@ -517,6 +525,11 @@ void USRGenerator::VisitType(QualType T) {
 
     // Mangle in ObjC GC qualifiers?
 
+    if (const PackExpansionType *Expansion = T->getAs<PackExpansionType>()) {
+      Out << 'P';
+      T = Expansion->getPattern();
+    }
+    
     if (const BuiltinType *BT = T->getAs<BuiltinType>()) {
       unsigned char c = '\0';
       switch (BT->getKind()) {
@@ -544,7 +557,8 @@ void USRGenerator::VisitType(QualType T) {
         case BuiltinType::Char_S:
         case BuiltinType::SChar:
           c = 'C'; break;
-        case BuiltinType::WChar:
+        case BuiltinType::WChar_S:
+        case BuiltinType::WChar_U:
           c = 'W'; break;
         case BuiltinType::Short:
           c = 'S'; break;
@@ -565,8 +579,9 @@ void USRGenerator::VisitType(QualType T) {
         case BuiltinType::NullPtr:
           c = 'n'; break;
         case BuiltinType::Overload:
+        case BuiltinType::BoundMember:
         case BuiltinType::Dependent:
-        case BuiltinType::UndeducedAuto:
+        case BuiltinType::UnknownAny:
           IgnoreResults = true;
           return;
         case BuiltinType::ObjCId:
@@ -659,17 +674,23 @@ void USRGenerator::VisitTemplateParameterList(
        P != PEnd; ++P) {
     Out << '#';
     if (isa<TemplateTypeParmDecl>(*P)) {
+      if (cast<TemplateTypeParmDecl>(*P)->isParameterPack())
+        Out<< 'p';
       Out << 'T';
       continue;
     }
     
     if (NonTypeTemplateParmDecl *NTTP = dyn_cast<NonTypeTemplateParmDecl>(*P)) {
+      if (NTTP->isParameterPack())
+        Out << 'p';
       Out << 'N';
       VisitType(NTTP->getType());
       continue;
     }
     
     TemplateTemplateParmDecl *TTP = cast<TemplateTemplateParmDecl>(*P);
+    if (TTP->isParameterPack())
+      Out << 'p';
     Out << 't';
     VisitTemplateParameterList(TTP->getTemplateParameters());
   }
@@ -700,8 +721,11 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
       Visit(D);
     break;
       
+  case TemplateArgument::TemplateExpansion:
+    Out << 'P'; // pack expansion of...
+    // Fall through
   case TemplateArgument::Template:
-    VisitTemplateName(Arg.getAsTemplate());
+    VisitTemplateName(Arg.getAsTemplateOrTemplatePattern());
     break;
       
   case TemplateArgument::Expression:
@@ -709,7 +733,10 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
     break;
       
   case TemplateArgument::Pack:
-    // FIXME: Variadic templates
+    Out << 'p' << Arg.pack_size();
+    for (TemplateArgument::pack_iterator P = Arg.pack_begin(), PEnd = Arg.pack_end();
+         P != PEnd; ++P)
+      VisitTemplateArgument(*P);
     break;
       
   case TemplateArgument::Type:

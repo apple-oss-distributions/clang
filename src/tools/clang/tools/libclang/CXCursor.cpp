@@ -57,7 +57,7 @@ CXCursor cxcursor::MakeCXCursor(Decl *D, CXTranslationUnit TU,
                                 bool FirstInDeclGroup) {
   assert(D && TU && "Invalid arguments!");
   CXCursor C = { getCursorKindForDecl(D),
-                 { D, (void*) (FirstInDeclGroup ? 1 : 0), TU }
+                 { D, (void*)(intptr_t) (FirstInDeclGroup ? 1 : 0), TU }
                };
   return C;
 }
@@ -86,7 +86,6 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::BreakStmtClass:       
   case Stmt::ReturnStmtClass:      
   case Stmt::DeclStmtClass:        
-  case Stmt::SwitchCaseClass:      
   case Stmt::AsmStmtClass:         
   case Stmt::ObjCAtTryStmtClass:        
   case Stmt::ObjCAtCatchStmtClass:      
@@ -96,6 +95,10 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::ObjCForCollectionStmtClass:
   case Stmt::CXXCatchStmtClass:
   case Stmt::CXXTryStmtClass:  
+  case Stmt::CXXForRangeStmtClass:        
+  case Stmt::SEHTryStmtClass:
+  case Stmt::SEHExceptStmtClass:
+  case Stmt::SEHFinallyStmtClass:
     K = CXCursor_UnexposedStmt;
     break;
       
@@ -112,11 +115,12 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::ParenExprClass:             
   case Stmt::UnaryOperatorClass:
   case Stmt::OffsetOfExprClass:         
-  case Stmt::SizeOfAlignOfExprClass:     
+  case Stmt::UnaryExprOrTypeTraitExprClass:     
   case Stmt::ArraySubscriptExprClass:    
   case Stmt::BinaryOperatorClass:        
   case Stmt::CompoundAssignOperatorClass:
   case Stmt::ConditionalOperatorClass:   
+  case Stmt::BinaryConditionalOperatorClass:
   case Stmt::ImplicitCastExprClass:
   case Stmt::CStyleCastExprClass:
   case Stmt::CompoundLiteralExprClass:   
@@ -128,8 +132,8 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::VAArgExprClass:             
   case Stmt::AddrLabelExprClass:        
   case Stmt::StmtExprClass:             
-  case Stmt::TypesCompatibleExprClass:  
   case Stmt::ChooseExprClass:           
+  case Stmt::GenericSelectionExprClass:
   case Stmt::GNUNullExprClass:          
   case Stmt::CXXStaticCastExprClass:      
   case Stmt::CXXDynamicCastExprClass:     
@@ -149,9 +153,12 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::CXXPseudoDestructorExprClass:
   case Stmt::UnresolvedLookupExprClass:   
   case Stmt::UnaryTypeTraitExprClass:     
+  case Stmt::BinaryTypeTraitExprClass:     
+  case Stmt::ArrayTypeTraitExprClass:
+  case Stmt::ExpressionTraitExprClass:     
   case Stmt::DependentScopeDeclRefExprClass:  
   case Stmt::CXXBindTemporaryExprClass:   
-  case Stmt::CXXExprWithTemporariesClass: 
+  case Stmt::ExprWithCleanupsClass: 
   case Stmt::CXXUnresolvedConstructExprClass:
   case Stmt::CXXDependentScopeMemberExprClass:
   case Stmt::UnresolvedMemberExprClass:   
@@ -160,15 +167,18 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::ObjCEncodeExprClass:       
   case Stmt::ObjCSelectorExprClass:   
   case Stmt::ObjCProtocolExprClass:   
-  case Stmt::ObjCImplicitSetterGetterRefExprClass: 
   case Stmt::ObjCIsaExprClass:       
   case Stmt::ShuffleVectorExprClass: 
   case Stmt::BlockExprClass:  
+  case Stmt::OpaqueValueExprClass:
+  case Stmt::PackExpansionExprClass:
+  case Stmt::SizeOfPackExprClass:
     K = CXCursor_UnexposedExpr;
     break;
       
   case Stmt::DeclRefExprClass:           
   case Stmt::BlockDeclRefExprClass:
+  case Stmt::SubstNonTypeTemplateParmPackExprClass:
     // FIXME: UnresolvedLookupExpr?
     // FIXME: DependentScopeDeclRefExpr?
     K = CXCursor_DeclRefExpr;
@@ -185,10 +195,10 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
   case Stmt::CallExprClass:              
   case Stmt::CXXOperatorCallExprClass:
   case Stmt::CXXMemberCallExprClass:
+  case Stmt::CUDAKernelCallExprClass:
   case Stmt::CXXConstructExprClass:  
   case Stmt::CXXTemporaryObjectExprClass:
     // FIXME: CXXUnresolvedConstructExpr
-    // FIXME: ObjCImplicitSetterGetterRefExpr?
     K = CXCursor_CallExpr;
     break;
       
@@ -558,4 +568,3 @@ unsigned clang_CXCursorSet_insert(CXCursorSet set, CXCursor cursor) {
   return flag;
 }
 } // end: extern "C"
-

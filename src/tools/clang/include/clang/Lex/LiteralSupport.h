@@ -15,10 +15,10 @@
 #ifndef CLANG_LITERALSUPPORT_H
 #define CLANG_LITERALSUPPORT_H
 
-#include <string>
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
+#include <cctype>
 
 namespace clang {
 
@@ -27,6 +27,8 @@ class Preprocessor;
 class Token;
 class SourceLocation;
 class TargetInfo;
+class SourceManager;
+class LangOptions;
 
 /// NumericLiteralParser - This performs strict semantic analysis of the content
 /// of a ppnumber, classifying it as either integer, floating, or erroneous,
@@ -138,8 +140,11 @@ public:
 /// wide string analysis and Translation Phase #6 (concatenation of string
 /// literals) (C99 5.1.1.2p1).
 class StringLiteralParser {
-  Preprocessor &PP;
-
+  const SourceManager &SM;
+  const LangOptions &Features;
+  const TargetInfo &Target;
+  Diagnostic *Diags;
+  
   unsigned MaxTokenLength;
   unsigned SizeBound;
   unsigned wchar_tByteWidth;
@@ -148,12 +153,22 @@ class StringLiteralParser {
 public:
   StringLiteralParser(const Token *StringToks, unsigned NumStringToks,
                       Preprocessor &PP, bool Complain = true);
+  StringLiteralParser(const Token *StringToks, unsigned NumStringToks,
+                      const SourceManager &sm, const LangOptions &features,
+                      const TargetInfo &target, Diagnostic *diags = 0)
+    : SM(sm), Features(features), Target(target), Diags(diags),
+      MaxTokenLength(0), SizeBound(0), wchar_tByteWidth(0),
+      ResultPtr(ResultBuf.data()), hadError(false), AnyWide(false), Pascal(false) {
+    init(StringToks, NumStringToks);
+  }
+    
+
   bool hadError;
   bool AnyWide;
   bool Pascal;
 
-  const char *GetString() { return &ResultBuf[0]; }
-  unsigned GetStringLength() const { return ResultPtr-&ResultBuf[0]; }
+  const char *GetString() { return ResultBuf.data(); }
+  unsigned GetStringLength() const { return ResultPtr-ResultBuf.data(); }
 
   unsigned GetNumStringChars() const {
     if (AnyWide)
@@ -163,8 +178,13 @@ public:
   /// getOffsetOfStringByte - This function returns the offset of the
   /// specified byte of the string data represented by Token.  This handles
   /// advancing over escape sequences in the string.
-  static unsigned getOffsetOfStringByte(const Token &TheTok, unsigned ByteNo,
-                                        Preprocessor &PP, bool Complain = true);
+  ///
+  /// If the Diagnostics pointer is non-null, then this will do semantic
+  /// checking of the string literal and emit errors and warnings.
+  unsigned getOffsetOfStringByte(const Token &TheTok, unsigned ByteNo) const;
+  
+private:
+  void init(const Token *StringToks, unsigned NumStringToks);
 };
 
 }  // end namespace clang

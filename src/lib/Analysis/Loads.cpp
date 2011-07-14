@@ -17,6 +17,7 @@
 #include "llvm/GlobalAlias.h"
 #include "llvm/GlobalVariable.h"
 #include "llvm/IntrinsicInst.h"
+#include "llvm/Operator.h"
 using namespace llvm;
 
 /// AreEquivalentAddressValues - Test if A and B will obviously have the same
@@ -49,7 +50,7 @@ static bool AreEquivalentAddressValues(const Value *A, const Value *B) {
 /// getUnderlyingObjectWithOffset - Strip off up to MaxLookup GEPs and
 /// bitcasts to get back to the underlying object being addressed, keeping
 /// track of the offset in bytes from the GEPs relative to the result.
-/// This is closely related to Value::getUnderlyingObject but is located
+/// This is closely related to GetUnderlyingObject but is located
 /// here to avoid making VMCore depend on TargetData.
 static Value *getUnderlyingObjectWithOffset(Value *V, const TargetData *TD,
                                             uint64_t &ByteOffset,

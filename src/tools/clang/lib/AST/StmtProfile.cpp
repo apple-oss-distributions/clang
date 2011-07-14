@@ -25,11 +25,11 @@ using namespace clang;
 namespace {
   class StmtProfiler : public StmtVisitor<StmtProfiler> {
     llvm::FoldingSetNodeID &ID;
-    ASTContext &Context;
+    const ASTContext &Context;
     bool Canonical;
 
   public:
-    StmtProfiler(llvm::FoldingSetNodeID &ID, ASTContext &Context,
+    StmtProfiler(llvm::FoldingSetNodeID &ID, const ASTContext &Context,
                  bool Canonical)
       : ID(ID), Context(Context), Canonical(Canonical) { }
 
@@ -68,8 +68,7 @@ namespace {
 
 void StmtProfiler::VisitStmt(Stmt *S) {
   ID.AddInteger(S->getStmtClass());
-  for (Stmt::child_iterator C = S->child_begin(), CEnd = S->child_end();
-       C != CEnd; ++C)
+  for (Stmt::child_range C = S->children(); C; ++C)
     Visit(*C);
 }
 
@@ -102,7 +101,7 @@ void StmtProfiler::VisitDefaultStmt(DefaultStmt *S) {
 
 void StmtProfiler::VisitLabelStmt(LabelStmt *S) {
   VisitStmt(S);
-  VisitName(S->getID());
+  VisitDecl(S->getDecl());
 }
 
 void StmtProfiler::VisitIfStmt(IfStmt *S) {
@@ -130,7 +129,7 @@ void StmtProfiler::VisitForStmt(ForStmt *S) {
 
 void StmtProfiler::VisitGotoStmt(GotoStmt *S) {
   VisitStmt(S);
-  VisitName(S->getLabel()->getID());
+  VisitDecl(S->getLabel());
 }
 
 void StmtProfiler::VisitIndirectGotoStmt(IndirectGotoStmt *S) {
@@ -175,6 +174,22 @@ void StmtProfiler::VisitCXXCatchStmt(CXXCatchStmt *S) {
 }
 
 void StmtProfiler::VisitCXXTryStmt(CXXTryStmt *S) {
+  VisitStmt(S);
+}
+
+void StmtProfiler::VisitCXXForRangeStmt(CXXForRangeStmt *S) {
+  VisitStmt(S);
+}
+
+void StmtProfiler::VisitSEHTryStmt(SEHTryStmt *S) {
+  VisitStmt(S);
+}
+
+void StmtProfiler::VisitSEHFinallyStmt(SEHFinallyStmt *S) {
+  VisitStmt(S);
+}
+
+void StmtProfiler::VisitSEHExceptStmt(SEHExceptStmt *S) {
   VisitStmt(S);
 }
 
@@ -291,9 +306,9 @@ void StmtProfiler::VisitOffsetOfExpr(OffsetOfExpr *S) {
   VisitExpr(S);
 }
 
-void StmtProfiler::VisitSizeOfAlignOfExpr(SizeOfAlignOfExpr *S) {
+void StmtProfiler::VisitUnaryExprOrTypeTraitExpr(UnaryExprOrTypeTraitExpr *S) {
   VisitExpr(S);
-  ID.AddBoolean(S->isSizeOf());
+  ID.AddInteger(S->getKind());
   if (S->isArgumentType())
     VisitType(S->getArgumentType());
 }
@@ -350,19 +365,17 @@ void StmtProfiler::VisitConditionalOperator(ConditionalOperator *S) {
   VisitExpr(S);
 }
 
+void StmtProfiler::VisitBinaryConditionalOperator(BinaryConditionalOperator *S){
+  VisitExpr(S);
+}
+
 void StmtProfiler::VisitAddrLabelExpr(AddrLabelExpr *S) {
   VisitExpr(S);
-  VisitName(S->getLabel()->getID());
+  VisitDecl(S->getLabel());
 }
 
 void StmtProfiler::VisitStmtExpr(StmtExpr *S) {
   VisitExpr(S);
-}
-
-void StmtProfiler::VisitTypesCompatibleExpr(TypesCompatibleExpr *S) {
-  VisitExpr(S);
-  VisitType(S->getArgType1());
-  VisitType(S->getArgType2());
 }
 
 void StmtProfiler::VisitShuffleVectorExpr(ShuffleVectorExpr *S) {
@@ -431,8 +444,18 @@ void StmtProfiler::VisitBlockDeclRefExpr(BlockDeclRefExpr *S) {
   VisitDecl(S->getDecl());
   ID.AddBoolean(S->isByRef());
   ID.AddBoolean(S->isConstQualAdded());
-  if (S->getCopyConstructorExpr())
-    Visit(S->getCopyConstructorExpr());
+}
+
+void StmtProfiler::VisitGenericSelectionExpr(GenericSelectionExpr *S) {
+  VisitExpr(S);
+  for (unsigned i = 0; i != S->getNumAssocs(); ++i) {
+    QualType T = S->getAssocType(i);
+    if (T.isNull())
+      ID.AddPointer(0);
+    else
+      VisitType(T);
+    VisitExpr(S->getAssocExpr(i));
+  }
 }
 
 static Stmt::StmtClass DecodeOperatorCall(CXXOperatorCallExpr *S,
@@ -652,6 +675,10 @@ void StmtProfiler::VisitCXXMemberCallExpr(CXXMemberCallExpr *S) {
   VisitCallExpr(S);
 }
 
+void StmtProfiler::VisitCUDAKernelCallExpr(CUDAKernelCallExpr *S) {
+  VisitCallExpr(S);
+}
+
 void StmtProfiler::VisitCXXNamedCastExpr(CXXNamedCastExpr *S) {
   VisitExplicitCastExpr(S);
 }
@@ -780,6 +807,25 @@ void StmtProfiler::VisitUnaryTypeTraitExpr(UnaryTypeTraitExpr *S) {
   VisitType(S->getQueriedType());
 }
 
+void StmtProfiler::VisitBinaryTypeTraitExpr(BinaryTypeTraitExpr *S) {
+  VisitExpr(S);
+  ID.AddInteger(S->getTrait());
+  VisitType(S->getLhsType());
+  VisitType(S->getRhsType());
+}
+
+void StmtProfiler::VisitArrayTypeTraitExpr(ArrayTypeTraitExpr *S) {
+  VisitExpr(S);
+  ID.AddInteger(S->getTrait());
+  VisitType(S->getQueriedType());
+}
+
+void StmtProfiler::VisitExpressionTraitExpr(ExpressionTraitExpr *S) {
+  VisitExpr(S);
+  ID.AddInteger(S->getTrait());
+  VisitExpr(S->getQueriedExpression());
+}
+
 void
 StmtProfiler::VisitDependentScopeDeclRefExpr(DependentScopeDeclRefExpr *S) {
   VisitExpr(S);
@@ -790,11 +836,8 @@ StmtProfiler::VisitDependentScopeDeclRefExpr(DependentScopeDeclRefExpr *S) {
     VisitTemplateArguments(S->getTemplateArgs(), S->getNumTemplateArgs());
 }
 
-void StmtProfiler::VisitCXXExprWithTemporaries(CXXExprWithTemporaries *S) {
+void StmtProfiler::VisitExprWithCleanups(ExprWithCleanups *S) {
   VisitExpr(S);
-  for (unsigned I = 0, N = S->getNumTemporaries(); I != N; ++I)
-    VisitDecl(
-      const_cast<CXXDestructorDecl *>(S->getTemporary(I)->getDestructor()));
 }
 
 void
@@ -834,6 +877,26 @@ void StmtProfiler::VisitCXXNoexceptExpr(CXXNoexceptExpr *S) {
   VisitExpr(S);
 }
 
+void StmtProfiler::VisitPackExpansionExpr(PackExpansionExpr *S) {
+  VisitExpr(S);
+}
+
+void StmtProfiler::VisitSizeOfPackExpr(SizeOfPackExpr *S) {
+  VisitExpr(S);
+  VisitDecl(S->getPack());
+}
+
+void StmtProfiler::VisitSubstNonTypeTemplateParmPackExpr(
+                                         SubstNonTypeTemplateParmPackExpr *S) {
+  VisitExpr(S);
+  VisitDecl(S->getParameterPack());
+  VisitTemplateArgument(S->getArgumentPack());
+}
+
+void StmtProfiler::VisitOpaqueValueExpr(OpaqueValueExpr *E) {
+  VisitExpr(E);  
+}
+
 void StmtProfiler::VisitObjCStringLiteral(ObjCStringLiteral *S) {
   VisitExpr(S);
 }
@@ -862,22 +925,15 @@ void StmtProfiler::VisitObjCIvarRefExpr(ObjCIvarRefExpr *S) {
 
 void StmtProfiler::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *S) {
   VisitExpr(S);
-  VisitDecl(S->getProperty());
-  if (S->isSuperReceiver()) {
-    ID.AddBoolean(S->isSuperReceiver());
-    VisitType(S->getSuperType());
+  if (S->isImplicitProperty()) {
+    VisitDecl(S->getImplicitPropertyGetter());
+    VisitDecl(S->getImplicitPropertySetter());
+  } else {
+    VisitDecl(S->getExplicitProperty());
   }
-}
-
-void StmtProfiler::VisitObjCImplicitSetterGetterRefExpr(
-                                  ObjCImplicitSetterGetterRefExpr *S) {
-  VisitExpr(S);
-  VisitDecl(S->getGetterMethod());
-  VisitDecl(S->getSetterMethod());
-  VisitDecl(S->getInterfaceDecl());
   if (S->isSuperReceiver()) {
     ID.AddBoolean(S->isSuperReceiver());
-    VisitType(S->getSuperType());
+    VisitType(S->getSuperReceiverType());
   }
 }
 
@@ -899,23 +955,29 @@ void StmtProfiler::VisitDecl(Decl *D) {
     if (NonTypeTemplateParmDecl *NTTP = dyn_cast<NonTypeTemplateParmDecl>(D)) {
       ID.AddInteger(NTTP->getDepth());
       ID.AddInteger(NTTP->getIndex());
+      ID.AddBoolean(NTTP->isParameterPack());
       VisitType(NTTP->getType());
       return;
     }
 
     if (ParmVarDecl *Parm = dyn_cast<ParmVarDecl>(D)) {
-      // The Itanium C++ ABI uses the type of a parameter when mangling
-      // expressions that involve function parameters, so we will use the
-      // parameter's type for establishing function parameter identity. That
-      // way, our definition of "equivalent" (per C++ [temp.over.link])
-      // matches the definition of "equivalent" used for name mangling.
+      // The Itanium C++ ABI uses the type, scope depth, and scope
+      // index of a parameter when mangling expressions that involve
+      // function parameters, so we will use the parameter's type for
+      // establishing function parameter identity. That way, our
+      // definition of "equivalent" (per C++ [temp.over.link]) is at
+      // least as strong as the definition of "equivalent" used for
+      // name mangling.
       VisitType(Parm->getType());
+      ID.AddInteger(Parm->getFunctionScopeDepth());
+      ID.AddInteger(Parm->getFunctionScopeIndex());
       return;
     }
 
     if (TemplateTemplateParmDecl *TTP = dyn_cast<TemplateTemplateParmDecl>(D)) {
       ID.AddInteger(TTP->getDepth());
       ID.AddInteger(TTP->getIndex());
+      ID.AddBoolean(TTP->isParameterPack());
       return;
     }
   }
@@ -966,7 +1028,8 @@ void StmtProfiler::VisitTemplateArgument(const TemplateArgument &Arg) {
     break;
 
   case TemplateArgument::Template:
-    VisitTemplateName(Arg.getAsTemplate());
+  case TemplateArgument::TemplateExpansion:
+    VisitTemplateName(Arg.getAsTemplateOrTemplatePattern());
     break;
       
   case TemplateArgument::Declaration:
@@ -990,7 +1053,7 @@ void StmtProfiler::VisitTemplateArgument(const TemplateArgument &Arg) {
   }
 }
 
-void Stmt::Profile(llvm::FoldingSetNodeID &ID, ASTContext &Context,
+void Stmt::Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context,
                    bool Canonical) {
   StmtProfiler Profiler(ID, Context, Canonical);
   Profiler.Visit(this);

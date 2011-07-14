@@ -70,7 +70,7 @@ PPCSubtarget::PPCSubtarget(const std::string &TT, const std::string &FS,
   , HasSTFIWX(false)
   , HasLazyResolverStubs(false)
   , IsJITCodeModel(false)
-  , DarwinVers(0) {
+  , TargetTriple(TT) {
 
   // Determine default and user specified characteristics
   std::string CPU = "generic";
@@ -92,19 +92,6 @@ PPCSubtarget::PPCSubtarget(const std::string &TT, const std::string &FS,
   // support it, ignore.
   if (use64BitRegs() && !has64BitSupport())
     Use64BitRegs = false;
-  
-  // Set the boolean corresponding to the current target triple, or the default
-  // if one cannot be determined, to true.
-  if (TT.length() > 7) {
-    // Determine which version of darwin this is.
-    size_t DarwinPos = TT.find("-darwin");
-    if (DarwinPos != std::string::npos) {
-      if (isdigit(TT[DarwinPos+7]))
-        DarwinVers = atoi(&TT[DarwinPos+7]);
-      else
-        DarwinVers = 8;  // Minimum supported darwin is Tiger.
-    }
-  }
 
   // Set up darwin-specific properties.
   if (isDarwin())
@@ -129,7 +116,7 @@ void PPCSubtarget::SetJITMode() {
 /// is required to get the address of the global.
 bool PPCSubtarget::hasLazyResolverStub(const GlobalValue *GV,
                                        const TargetMachine &TM) const {
-  // We never hae stubs if HasLazyResolverStubs=false or if in static mode.
+  // We never have stubs if HasLazyResolverStubs=false or if in static mode.
   if (!HasLazyResolverStubs || TM.getRelocationModel() == Reloc::Static)
     return false;
   // If symbol visibility is hidden, the extra load is not needed if

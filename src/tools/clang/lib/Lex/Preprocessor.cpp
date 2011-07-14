@@ -53,7 +53,7 @@ Preprocessor::Preprocessor(Diagnostic &diags, const LangOptions &opts,
                            IdentifierInfoLookup* IILookup,
                            bool OwnsHeaders)
   : Diags(&diags), Features(opts), Target(target),FileMgr(Headers.getFileMgr()),
-    FileSystemOpts(Headers.getFileSystemOpts()), SourceMgr(SM),
+    SourceMgr(SM),
     HeaderInfo(Headers), ExternalSource(0),
     Identifiers(opts, IILookup), BuiltinInfo(Target), CodeComplete(0),
     CodeCompletionFile(0), SkipMainFilePreamble(0, true), CurPPLexer(0), 
@@ -89,6 +89,7 @@ Preprocessor::Preprocessor(Diagnostic &diags, const LangOptions &opts,
   // "Poison" __VA_ARGS__, which can only appear in the expansion of a macro.
   // This gets unpoisoned where it is allowed.
   (Ident__VA_ARGS__ = getIdentifierInfo("__VA_ARGS__"))->setIsPoisoned();
+  SetPoisonReason(Ident__VA_ARGS__,diag::ext_pp_bad_vaargs_use);
 
   // Initialize the pragma handlers.
   PragmaHandlers = new PragmaNamespace(llvm::StringRef());
@@ -96,6 +97,23 @@ Preprocessor::Preprocessor(Diagnostic &diags, const LangOptions &opts,
 
   // Initialize builtin macros like __LINE__ and friends.
   RegisterBuiltinMacros();
+
+  if(Features.Borland) {
+    Ident__exception_info        = getIdentifierInfo("_exception_info");
+    Ident___exception_info       = getIdentifierInfo("__exception_info");
+    Ident_GetExceptionInfo       = getIdentifierInfo("GetExceptionInformation");
+    Ident__exception_code        = getIdentifierInfo("_exception_code");
+    Ident___exception_code       = getIdentifierInfo("__exception_code");
+    Ident_GetExceptionCode       = getIdentifierInfo("GetExceptionCode");
+    Ident__abnormal_termination  = getIdentifierInfo("_abnormal_termination");
+    Ident___abnormal_termination = getIdentifierInfo("__abnormal_termination");
+    Ident_AbnormalTermination    = getIdentifierInfo("AbnormalTermination");
+  } else {
+    Ident__exception_info = Ident__exception_code = Ident__abnormal_termination = 0;
+    Ident___exception_info = Ident___exception_code = Ident___abnormal_termination = 0;
+    Ident_GetExceptionInfo = Ident_GetExceptionCode = Ident_AbnormalTermination = 0;
+  }
+
 }
 
 Preprocessor::~Preprocessor() {
@@ -278,124 +296,18 @@ void Preprocessor::CodeCompleteNaturalLanguage() {
     CodeComplete->CodeCompleteNaturalLanguage();
 }
 
-//===----------------------------------------------------------------------===//
-// Token Spelling
-//===----------------------------------------------------------------------===//
-
-/// getSpelling() - Return the 'spelling' of this token.  The spelling of a
-/// token are the characters used to represent the token in the source file
-/// after trigraph expansion and escaped-newline folding.  In particular, this
-/// wants to get the true, uncanonicalized, spelling of things like digraphs
-/// UCNs, etc.
-std::string Preprocessor::getSpelling(const Token &Tok,
-                                      const SourceManager &SourceMgr,
-                                      const LangOptions &Features, 
-                                      bool *Invalid) {
-  assert((int)Tok.getLength() >= 0 && "Token character range is bogus!");
-
-  // If this token contains nothing interesting, return it directly.
-  bool CharDataInvalid = false;
-  const char* TokStart = SourceMgr.getCharacterData(Tok.getLocation(), 
-                                                    &CharDataInvalid);
-  if (Invalid)
-    *Invalid = CharDataInvalid;
-  if (CharDataInvalid)
-    return std::string();
-
-  if (!Tok.needsCleaning())
-    return std::string(TokStart, TokStart+Tok.getLength());
-
-  std::string Result;
-  Result.reserve(Tok.getLength());
-
-  // Otherwise, hard case, relex the characters into the string.
-  for (const char *Ptr = TokStart, *End = TokStart+Tok.getLength();
-       Ptr != End; ) {
-    unsigned CharSize;
-    Result.push_back(Lexer::getCharAndSizeNoWarn(Ptr, CharSize, Features));
-    Ptr += CharSize;
-  }
-  assert(Result.size() != unsigned(Tok.getLength()) &&
-         "NeedsCleaning flag set on something that didn't need cleaning!");
-  return Result;
-}
-
-/// getSpelling() - Return the 'spelling' of this token.  The spelling of a
-/// token are the characters used to represent the token in the source file
-/// after trigraph expansion and escaped-newline folding.  In particular, this
-/// wants to get the true, uncanonicalized, spelling of things like digraphs
-/// UCNs, etc.
-std::string Preprocessor::getSpelling(const Token &Tok, bool *Invalid) const {
-  return getSpelling(Tok, SourceMgr, Features, Invalid);
-}
-
-/// getSpelling - This method is used to get the spelling of a token into a
-/// preallocated buffer, instead of as an std::string.  The caller is required
-/// to allocate enough space for the token, which is guaranteed to be at least
-/// Tok.getLength() bytes long.  The actual length of the token is returned.
-///
-/// Note that this method may do two possible things: it may either fill in
-/// the buffer specified with characters, or it may *change the input pointer*
-/// to point to a constant buffer with the data already in it (avoiding a
-/// copy).  The caller is not allowed to modify the returned buffer pointer
-/// if an internal buffer is returned.
-unsigned Preprocessor::getSpelling(const Token &Tok,
-                                   const char *&Buffer, bool *Invalid) const {
-  assert((int)Tok.getLength() >= 0 && "Token character range is bogus!");
-
-  // If this token is an identifier, just return the string from the identifier
-  // table, which is very quick.
-  if (const IdentifierInfo *II = Tok.getIdentifierInfo()) {
-    Buffer = II->getNameStart();
-    return II->getLength();
-  }
-
-  // Otherwise, compute the start of the token in the input lexer buffer.
-  const char *TokStart = 0;
-
-  if (Tok.isLiteral())
-    TokStart = Tok.getLiteralData();
-
-  if (TokStart == 0) {
-    bool CharDataInvalid = false;
-    TokStart = SourceMgr.getCharacterData(Tok.getLocation(), &CharDataInvalid);
-    if (Invalid)
-      *Invalid = CharDataInvalid;
-    if (CharDataInvalid) {
-      Buffer = "";
-      return 0;
-    }
-  }
-
-  // If this token contains nothing interesting, return it directly.
-  if (!Tok.needsCleaning()) {
-    Buffer = TokStart;
-    return Tok.getLength();
-  }
-
-  // Otherwise, hard case, relex the characters into the string.
-  char *OutBuf = const_cast<char*>(Buffer);
-  for (const char *Ptr = TokStart, *End = TokStart+Tok.getLength();
-       Ptr != End; ) {
-    unsigned CharSize;
-    *OutBuf++ = Lexer::getCharAndSizeNoWarn(Ptr, CharSize, Features);
-    Ptr += CharSize;
-  }
-  assert(unsigned(OutBuf-Buffer) != Tok.getLength() &&
-         "NeedsCleaning flag set on something that didn't need cleaning!");
-
-  return OutBuf-Buffer;
-}
-
 /// getSpelling - This method is used to get the spelling of a token into a
 /// SmallVector. Note that the returned StringRef may not point to the
 /// supplied buffer if a copy can be avoided.
 llvm::StringRef Preprocessor::getSpelling(const Token &Tok,
                                           llvm::SmallVectorImpl<char> &Buffer,
                                           bool *Invalid) const {
-  // Try the fast path.
-  if (const IdentifierInfo *II = Tok.getIdentifierInfo())
-    return II->getName();
+  // NOTE: this has to be checked *before* testing for an IdentifierInfo.
+  if (Tok.isNot(tok::raw_identifier)) {
+    // Try the fast path.
+    if (const IdentifierInfo *II = Tok.getIdentifierInfo())
+      return II->getName();
+  }
 
   // Resize the buffer if we need to copy into it.
   if (Tok.needsCleaning())
@@ -421,68 +333,11 @@ void Preprocessor::CreateString(const char *Buf, unsigned Len, Token &Tok,
                                            InstantiationLoc, Len);
   Tok.setLocation(Loc);
 
-  // If this is a literal token, set the pointer data.
-  if (Tok.isLiteral())
+  // If this is a raw identifier or a literal token, set the pointer data.
+  if (Tok.is(tok::raw_identifier))
+    Tok.setRawIdentifierData(DestPtr);
+  else if (Tok.isLiteral())
     Tok.setLiteralData(DestPtr);
-}
-
-
-/// AdvanceToTokenCharacter - Given a location that specifies the start of a
-/// token, return a new location that specifies a character within the token.
-SourceLocation Preprocessor::AdvanceToTokenCharacter(SourceLocation TokStart,
-                                                     unsigned CharNo) {
-  // Figure out how many physical characters away the specified instantiation
-  // character is.  This needs to take into consideration newlines and
-  // trigraphs.
-  bool Invalid = false;
-  const char *TokPtr = SourceMgr.getCharacterData(TokStart, &Invalid);
-
-  // If they request the first char of the token, we're trivially done.
-  if (Invalid || (CharNo == 0 && Lexer::isObviouslySimpleCharacter(*TokPtr)))
-    return TokStart;
-
-  unsigned PhysOffset = 0;
-
-  // The usual case is that tokens don't contain anything interesting.  Skip
-  // over the uninteresting characters.  If a token only consists of simple
-  // chars, this method is extremely fast.
-  while (Lexer::isObviouslySimpleCharacter(*TokPtr)) {
-    if (CharNo == 0)
-      return TokStart.getFileLocWithOffset(PhysOffset);
-    ++TokPtr, --CharNo, ++PhysOffset;
-  }
-
-  // If we have a character that may be a trigraph or escaped newline, use a
-  // lexer to parse it correctly.
-  for (; CharNo; --CharNo) {
-    unsigned Size;
-    Lexer::getCharAndSizeNoWarn(TokPtr, Size, Features);
-    TokPtr += Size;
-    PhysOffset += Size;
-  }
-
-  // Final detail: if we end up on an escaped newline, we want to return the
-  // location of the actual byte of the token.  For example foo\<newline>bar
-  // advanced by 3 should return the location of b, not of \\.  One compounding
-  // detail of this is that the escape may be made by a trigraph.
-  if (!Lexer::isObviouslySimpleCharacter(*TokPtr))
-    PhysOffset += Lexer::SkipEscapedNewLines(TokPtr)-TokPtr;
-
-  return TokStart.getFileLocWithOffset(PhysOffset);
-}
-
-SourceLocation Preprocessor::getLocForEndOfToken(SourceLocation Loc,
-                                                 unsigned Offset) {
-  if (Loc.isInvalid() || !Loc.isFileID())
-    return SourceLocation();
-
-  unsigned Len = Lexer::MeasureTokenLength(Loc, getSourceManager(), Features);
-  if (Len > Offset)
-    Len = Len - Offset;
-  else
-    return Loc;
-
-  return AdvanceToTokenCharacter(Loc, Len);
 }
 
 
@@ -536,28 +391,60 @@ void Preprocessor::EndSourceFile() {
 // Lexer Event Handling.
 //===----------------------------------------------------------------------===//
 
-/// LookUpIdentifierInfo - Given a tok::identifier token, look up the
-/// identifier information for the token and install it into the token.
-IdentifierInfo *Preprocessor::LookUpIdentifierInfo(Token &Identifier,
-                                                   const char *BufPtr) const {
-  assert(Identifier.is(tok::identifier) && "Not an identifier!");
-  assert(Identifier.getIdentifierInfo() == 0 && "Identinfo already exists!");
+/// LookUpIdentifierInfo - Given a tok::raw_identifier token, look up the
+/// identifier information for the token and install it into the token,
+/// updating the token kind accordingly.
+IdentifierInfo *Preprocessor::LookUpIdentifierInfo(Token &Identifier) const {
+  assert(Identifier.getRawIdentifierData() != 0 && "No raw identifier data!");
 
   // Look up this token, see if it is a macro, or if it is a language keyword.
   IdentifierInfo *II;
-  if (BufPtr && !Identifier.needsCleaning()) {
+  if (!Identifier.needsCleaning()) {
     // No cleaning needed, just use the characters from the lexed buffer.
-    II = getIdentifierInfo(llvm::StringRef(BufPtr, Identifier.getLength()));
+    II = getIdentifierInfo(llvm::StringRef(Identifier.getRawIdentifierData(),
+                                           Identifier.getLength()));
   } else {
     // Cleaning needed, alloca a buffer, clean into it, then use the buffer.
     llvm::SmallString<64> IdentifierBuffer;
     llvm::StringRef CleanedStr = getSpelling(Identifier, IdentifierBuffer);
     II = getIdentifierInfo(CleanedStr);
   }
+
+  // Update the token info (identifier info and appropriate token kind).
   Identifier.setIdentifierInfo(II);
+  Identifier.setKind(II->getTokenID());
+
   return II;
 }
 
+void Preprocessor::SetPoisonReason(IdentifierInfo *II, unsigned DiagID) {
+  PoisonReasons[II] = DiagID;
+}
+
+void Preprocessor::PoisonSEHIdentifiers(bool Poison) {
+  assert(Ident__exception_code && Ident__exception_info);
+  assert(Ident___exception_code && Ident___exception_info);
+  Ident__exception_code->setIsPoisoned(Poison);
+  Ident___exception_code->setIsPoisoned(Poison);
+  Ident_GetExceptionCode->setIsPoisoned(Poison);
+  Ident__exception_info->setIsPoisoned(Poison);
+  Ident___exception_info->setIsPoisoned(Poison);
+  Ident_GetExceptionInfo->setIsPoisoned(Poison);
+  Ident__abnormal_termination->setIsPoisoned(Poison);
+  Ident___abnormal_termination->setIsPoisoned(Poison);
+  Ident_AbnormalTermination->setIsPoisoned(Poison);
+}
+
+void Preprocessor::HandlePoisonedIdentifier(Token & Identifier) {
+  assert(Identifier.getIdentifierInfo() &&
+         "Can't handle identifiers without identifier info!");
+  llvm::DenseMap<IdentifierInfo*,unsigned>::const_iterator it =
+    PoisonReasons.find(Identifier.getIdentifierInfo());
+  if(it == PoisonReasons.end())
+    Diag(Identifier, diag::err_pp_used_poisoned_id);
+  else
+    Diag(Identifier,it->second) << Identifier.getIdentifierInfo();
+}
 
 /// HandleIdentifier - This callback is invoked when the lexer reads an
 /// identifier.  This callback looks up the identifier in the map and/or
@@ -576,10 +463,7 @@ void Preprocessor::HandleIdentifier(Token &Identifier) {
   // If this identifier was poisoned, and if it was not produced from a macro
   // expansion, emit an error.
   if (II.isPoisoned() && CurPPLexer) {
-    if (&II != Ident__VA_ARGS__)   // We warn about __VA_ARGS__ with poisoning.
-      Diag(Identifier, diag::err_pp_used_poisoned_id);
-    else
-      Diag(Identifier, diag::ext_pp_bad_vaargs_use);
+    HandlePoisonedIdentifier(Identifier);
   }
 
   // If this is a macro to be expanded, do it.
@@ -643,10 +527,11 @@ CommentHandler::~CommentHandler() { }
 
 CodeCompletionHandler::~CodeCompletionHandler() { }
 
-void Preprocessor::createPreprocessingRecord() {
+void Preprocessor::createPreprocessingRecord(
+                                      bool IncludeNestedMacroInstantiations) {
   if (Record)
     return;
   
-  Record = new PreprocessingRecord;
+  Record = new PreprocessingRecord(IncludeNestedMacroInstantiations);
   addPPCallbacks(Record);
 }

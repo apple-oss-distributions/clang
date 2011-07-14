@@ -45,6 +45,7 @@
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Target/Mangler.h"
+#include "llvm/Target/TargetAsmInfo.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetELFWriterInfo.h"
 #include "llvm/Target/TargetLowering.h"
@@ -64,7 +65,7 @@ char ELFWriter::ID = 0;
 
 ELFWriter::ELFWriter(raw_ostream &o, TargetMachine &tm)
   : MachineFunctionPass(ID), O(o), TM(tm),
-    OutContext(*new MCContext(*TM.getMCAsmInfo())),
+    OutContext(*new MCContext(*TM.getMCAsmInfo(), new TargetAsmInfo(tm))),
     TLOF(TM.getTargetLowering()->getObjFileLowering()),
     is64Bit(TM.getTargetData()->getPointerSizeInBits() == 64),
     isLittleEndian(TM.getTargetData()->isLittleEndian()),
@@ -76,7 +77,7 @@ ELFWriter::ELFWriter(raw_ostream &o, TargetMachine &tm)
   // Create the object code emitter object for this target.
   ElfCE = new ELFCodeEmitter(*this);
 
-  // Inital number of sections
+  // Initial number of sections
   NumSections = 0;
 }
 
@@ -327,6 +328,18 @@ void ELFWriter::AddToSymbolList(ELFSym *GblSym) {
   }
 }
 
+/// HasCommonSymbols - True if this section holds common symbols, this is
+/// indicated on the ELF object file by a symbol with SHN_COMMON section
+/// header index.
+static bool HasCommonSymbols(const MCSectionELF &S) {
+  // FIXME: this is wrong, a common symbol can be in .data for example.
+  if (StringRef(S.getSectionName()).startswith(".gnu.linkonce."))
+    return true;
+
+  return false;
+}
+
+
 // EmitGlobal - Choose the right section for global and emit it
 void ELFWriter::EmitGlobal(const GlobalValue *GV) {
 
@@ -363,7 +376,7 @@ void ELFWriter::EmitGlobal(const GlobalValue *GV) {
     unsigned Size = TD->getTypeAllocSize(GVar->getInitializer()->getType());
     GblSym->Size = Size;
 
-    if (S->HasCommonSymbols()) { // Symbol must go to a common section
+    if (HasCommonSymbols(*S)) { // Symbol must go to a common section
       GblSym->SectionIdx = ELF::SHN_COMMON;
 
       // A new linkonce section is created for each global in the
@@ -647,19 +660,21 @@ bool ELFWriter::EmitSpecialLLVMGlobal(const GlobalVariable *GV) {
 /// EmitXXStructorList - Emit the ctor or dtor list.  This just emits out the 
 /// function pointers, ignoring the init priority.
 void ELFWriter::EmitXXStructorList(Constant *List, ELFSection &Xtor) {
-  // Should be an array of '{ int, void ()* }' structs.  The first value is the
+  // Should be an array of '{ i32, void ()* }' structs.  The first value is the
   // init priority, which we ignore.
-  if (!isa<ConstantArray>(List)) return;
+  if (List->isNullValue()) return;
   ConstantArray *InitList = cast<ConstantArray>(List);
-  for (unsigned i = 0, e = InitList->getNumOperands(); i != e; ++i)
-    if (ConstantStruct *CS = dyn_cast<ConstantStruct>(InitList->getOperand(i))){
-      if (CS->getNumOperands() != 2) return;  // Not array of 2-element structs.
+  for (unsigned i = 0, e = InitList->getNumOperands(); i != e; ++i) {
+    if (InitList->getOperand(i)->isNullValue())
+      continue;
+    ConstantStruct *CS = cast<ConstantStruct>(InitList->getOperand(i));
 
-      if (CS->getOperand(1)->isNullValue())
-        return;  // Found a null terminator, exit printing.
-      // Emit the function pointer.
-      EmitGlobalConstant(CS->getOperand(1), Xtor);
-    }
+    if (CS->getOperand(1)->isNullValue())
+      continue;
+
+    // Emit the function pointer.
+    EmitGlobalConstant(CS->getOperand(1), Xtor);
+  }
 }
 
 bool ELFWriter::runOnMachineFunction(MachineFunction &MF) {

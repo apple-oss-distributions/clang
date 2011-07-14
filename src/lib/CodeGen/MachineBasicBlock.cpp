@@ -147,27 +147,46 @@ MachineBasicBlock::iterator MachineBasicBlock::getFirstNonPHI() {
   return I;
 }
 
+MachineBasicBlock::iterator
+MachineBasicBlock::SkipPHIsAndLabels(MachineBasicBlock::iterator I) {
+  while (I != end() && (I->isPHI() || I->isLabel() || I->isDebugValue()))
+    ++I;
+  return I;
+}
+
 MachineBasicBlock::iterator MachineBasicBlock::getFirstTerminator() {
   iterator I = end();
-  while (I != begin() && (--I)->getDesc().isTerminator())
+  while (I != begin() && ((--I)->getDesc().isTerminator() || I->isDebugValue()))
     ; /*noop */
-  if (I != end() && !I->getDesc().isTerminator()) ++I;
+  while (I != end() && !I->getDesc().isTerminator())
+    ++I;
   return I;
+}
+
+MachineBasicBlock::iterator MachineBasicBlock::getLastNonDebugInstr() {
+  iterator B = begin(), I = end();
+  while (I != B) {
+    --I;
+    if (I->isDebugValue())
+      continue;
+    return I;
+  }
+  // The block is all debug values.
+  return end();
+}
+
+const MachineBasicBlock *MachineBasicBlock::getLandingPadSuccessor() const {
+  // A block with a landing pad successor only has one other successor.
+  if (succ_size() > 2)
+    return 0;
+  for (const_succ_iterator I = succ_begin(), E = succ_end(); I != E; ++I)
+    if ((*I)->isLandingPad())
+      return *I;
+  return 0;
 }
 
 void MachineBasicBlock::dump() const {
   print(dbgs());
-}
-
-static inline void OutputReg(raw_ostream &os, unsigned RegNo,
-                             const TargetRegisterInfo *TRI = 0) {
-  if (RegNo != 0 && TargetRegisterInfo::isPhysicalRegister(RegNo)) {
-    if (TRI)
-      os << " %" << TRI->get(RegNo).Name;
-    else
-      os << " %physreg" << RegNo;
-  } else
-    os << " %reg" << RegNo;
 }
 
 StringRef MachineBasicBlock::getName() const {
@@ -207,7 +226,7 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
     if (Indexes) OS << '\t';
     OS << "    Live Ins:";
     for (livein_iterator I = livein_begin(),E = livein_end(); I != E; ++I)
-      OutputReg(OS, *I, TRI);
+      OS << ' ' << PrintReg(*I, TRI);
     OS << '\n';
   }
   // Print the preds of this block according to the CFG.
@@ -344,8 +363,7 @@ void MachineBasicBlock::addPredecessor(MachineBasicBlock *pred) {
 }
 
 void MachineBasicBlock::removePredecessor(MachineBasicBlock *pred) {
-  std::vector<MachineBasicBlock *>::iterator I =
-    std::find(Predecessors.begin(), Predecessors.end(), pred);
+  pred_iterator I = std::find(Predecessors.begin(), Predecessors.end(), pred);
   assert(I != Predecessors.end() && "Pred is not a predecessor of this block!");
   Predecessors.erase(I);
 }
@@ -383,8 +401,7 @@ MachineBasicBlock::transferSuccessorsAndUpdatePHIs(MachineBasicBlock *fromMBB) {
 }
 
 bool MachineBasicBlock::isSuccessor(const MachineBasicBlock *MBB) const {
-  std::vector<MachineBasicBlock *>::const_iterator I =
-    std::find(Successors.begin(), Successors.end(), MBB);
+  const_succ_iterator I = std::find(Successors.begin(), Successors.end(), MBB);
   return I != Successors.end();
 }
 
@@ -443,13 +460,23 @@ MachineBasicBlock::SplitCriticalEdge(MachineBasicBlock *Succ, Pass *P) {
   MachineFunction *MF = getParent();
   DebugLoc dl;  // FIXME: this is nowhere
 
-  // We may need to update this's terminator, but we can't do that if AnalyzeBranch
-  // fails. If this uses a jump table, we won't touch it.
+  // We may need to update this's terminator, but we can't do that if
+  // AnalyzeBranch fails. If this uses a jump table, we won't touch it.
   const TargetInstrInfo *TII = MF->getTarget().getInstrInfo();
   MachineBasicBlock *TBB = 0, *FBB = 0;
   SmallVector<MachineOperand, 4> Cond;
   if (TII->AnalyzeBranch(*this, TBB, FBB, Cond))
     return NULL;
+
+  // Avoid bugpoint weirdness: A block may end with a conditional branch but
+  // jumps to the same MBB is either case. We have duplicate CFG edges in that
+  // case that we can't handle. Since this never happens in properly optimized
+  // code, just skip those edges.
+  if (TBB && TBB == FBB) {
+    DEBUG(dbgs() << "Won't split critical edge after degenerate BB#"
+                 << getNumber() << '\n');
+    return NULL;
+  }
 
   MachineBasicBlock *NMBB = MF->CreateMachineBasicBlock();
   MF->insert(llvm::next(MachineFunction::iterator(this)), NMBB);

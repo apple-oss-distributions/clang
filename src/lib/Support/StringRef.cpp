@@ -68,7 +68,7 @@ int StringRef::compare_numeric(StringRef RHS) const {
 }
 
 // Compute the edit distance between the two given strings.
-unsigned StringRef::edit_distance(llvm::StringRef Other, 
+unsigned StringRef::edit_distance(llvm::StringRef Other,
                                   bool AllowReplacements,
                                   unsigned MaxEditDistance) {
   // The algorithm implemented below is the "classic"
@@ -92,14 +92,14 @@ unsigned StringRef::edit_distance(llvm::StringRef Other,
     Allocated.reset(previous);
   }
   unsigned *current = previous + (n + 1);
-  
-  for (unsigned i = 0; i <= n; ++i) 
+
+  for (unsigned i = 0; i <= n; ++i)
     previous[i] = i;
 
   for (size_type y = 1; y <= m; ++y) {
     current[0] = y;
     unsigned BestThisRow = current[0];
-    
+
     for (size_type x = 1; x <= n; ++x) {
       if (AllowReplacements) {
         current[x] = min(previous[x-1] + ((*this)[y-1] == Other[x-1]? 0u:1u),
@@ -111,10 +111,10 @@ unsigned StringRef::edit_distance(llvm::StringRef Other,
       }
       BestThisRow = min(BestThisRow, current[x]);
     }
-    
+
     if (MaxEditDistance && BestThisRow > MaxEditDistance)
       return MaxEditDistance + 1;
-    
+
     unsigned *tmp = current;
     current = previous;
     previous = tmp;
@@ -131,7 +131,7 @@ unsigned StringRef::edit_distance(llvm::StringRef Other,
 
 /// find - Search for the first string \arg Str in the string.
 ///
-/// \return - The index of the first occurence of \arg Str, or npos if not
+/// \return - The index of the first occurrence of \arg Str, or npos if not
 /// found.
 size_t StringRef::find(StringRef Str, size_t From) const {
   size_t N = Str.size();
@@ -145,7 +145,7 @@ size_t StringRef::find(StringRef Str, size_t From) const {
 
 /// rfind - Search for the last string \arg Str in the string.
 ///
-/// \return - The index of the last occurence of \arg Str, or npos if not
+/// \return - The index of the last occurrence of \arg Str, or npos if not
 /// found.
 size_t StringRef::rfind(StringRef Str) const {
   size_t N = Str.size();
@@ -200,6 +200,21 @@ StringRef::size_type StringRef::find_first_not_of(StringRef Chars,
   return npos;
 }
 
+/// find_last_of - Find the last character in the string that is in \arg C,
+/// or npos if not found.
+///
+/// Note: O(size() + Chars.size())
+StringRef::size_type StringRef::find_last_of(StringRef Chars,
+                                             size_t From) const {
+  std::bitset<1 << CHAR_BIT> CharBits;
+  for (size_type i = 0; i != Chars.size(); ++i)
+    CharBits.set((unsigned char)Chars[i]);
+
+  for (size_type i = min(From, Length) - 1, e = -1; i != e; --i)
+    if (CharBits.test((unsigned char)Data[i]))
+      return i;
+  return npos;
+}
 
 //===----------------------------------------------------------------------===//
 // Helpful Algorithms
@@ -240,10 +255,10 @@ static bool GetAsUnsignedInteger(StringRef Str, unsigned Radix,
   // Autosense radix if not specified.
   if (Radix == 0)
     Radix = GetAutoSenseRadix(Str);
-  
+
   // Empty strings (after the radix autosense) are invalid.
   if (Str.empty()) return true;
-  
+
   // Parse all the bytes of the string given this radix.  Watch for overflow.
   Result = 0;
   while (!Str.empty()) {
@@ -256,23 +271,23 @@ static bool GetAsUnsignedInteger(StringRef Str, unsigned Radix,
       CharVal = Str[0]-'A'+10;
     else
       return true;
-    
+
     // If the parsed value is larger than the integer radix, the string is
     // invalid.
     if (CharVal >= Radix)
       return true;
-    
+
     // Add in this character.
     unsigned long long PrevResult = Result;
     Result = Result*Radix+CharVal;
-    
+
     // Check for overflow.
     if (Result < PrevResult)
       return true;
 
     Str = Str.substr(1);
   }
-  
+
   return false;
 }
 
@@ -283,7 +298,7 @@ bool StringRef::getAsInteger(unsigned Radix, unsigned long long &Result) const {
 
 bool StringRef::getAsInteger(unsigned Radix, long long &Result) const {
   unsigned long long ULLVal;
-  
+
   // Handle positive strings first.
   if (empty() || front() != '-') {
     if (GetAsUnsignedInteger(*this, Radix, ULLVal) ||
@@ -293,7 +308,7 @@ bool StringRef::getAsInteger(unsigned Radix, long long &Result) const {
     Result = ULLVal;
     return false;
   }
-  
+
   // Get the positive part of the value.
   if (GetAsUnsignedInteger(substr(1), Radix, ULLVal) ||
       // Reject values so large they'd overflow as negative signed, but allow
@@ -301,7 +316,7 @@ bool StringRef::getAsInteger(unsigned Radix, long long &Result) const {
       // on signed overflow.
       (long long)-ULLVal > 0)
     return true;
-  
+
   Result = -ULLVal;
   return false;
 }
@@ -322,7 +337,7 @@ bool StringRef::getAsInteger(unsigned Radix, unsigned &Result) const {
     return true;
   Result = Val;
   return false;
-}  
+}
 
 bool StringRef::getAsInteger(unsigned Radix, APInt &Result) const {
   StringRef Str = *this;
@@ -332,7 +347,7 @@ bool StringRef::getAsInteger(unsigned Radix, APInt &Result) const {
     Radix = GetAutoSenseRadix(Str);
 
   assert(Radix > 1 && Radix <= 36);
-  
+
   // Empty strings (after the radix autosense) are invalid.
   if (Str.empty()) return true;
 
@@ -356,7 +371,7 @@ bool StringRef::getAsInteger(unsigned Radix, APInt &Result) const {
   if (BitWidth < Result.getBitWidth())
     BitWidth = Result.getBitWidth(); // don't shrink the result
   else
-    Result.zext(BitWidth);
+    Result = Result.zext(BitWidth);
 
   APInt RadixAP, CharAP; // unused unless !IsPowerOf2Radix
   if (!IsPowerOf2Radix) {
@@ -377,12 +392,12 @@ bool StringRef::getAsInteger(unsigned Radix, APInt &Result) const {
       CharVal = Str[0]-'A'+10;
     else
       return true;
-    
+
     // If the parsed value is larger than the integer radix, the string is
     // invalid.
     if (CharVal >= Radix)
       return true;
-    
+
     // Add in this character.
     if (IsPowerOf2Radix) {
       Result <<= Log2Radix;
@@ -395,6 +410,6 @@ bool StringRef::getAsInteger(unsigned Radix, APInt &Result) const {
 
     Str = Str.substr(1);
   }
-  
+
   return false;
 }

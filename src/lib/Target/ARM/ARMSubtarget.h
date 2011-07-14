@@ -17,7 +17,7 @@
 #include "llvm/Target/TargetInstrItineraries.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetSubtarget.h"
-#include "ARMBaseRegisterInfo.h"
+#include "llvm/ADT/Triple.h"
 #include <string>
 
 namespace llvm {
@@ -26,7 +26,7 @@ class GlobalValue;
 class ARMSubtarget : public TargetSubtarget {
 protected:
   enum ARMArchEnum {
-    V4, V4T, V5T, V5TE, V6, V6M, V6T2, V7A, V7M
+    V4, V4T, V5T, V5TE, V6, V6M, V6T2, V7A, V7K, V7M
   };
 
   enum ARMProcFamilyEnum {
@@ -43,7 +43,7 @@ protected:
   };
 
   /// ARMArchVersion - ARM architecture version: V4, V4T (base), V5T, V5TE,
-  /// V6, V6T2, V7A, V7M.
+  /// V6, V6T2, V7A, V7K, V7M.
   ARMArchEnum ARMArchVersion;
 
   /// ARMProcFamily - ARM processor family: Cortex-A8, Cortex-A9, and others.
@@ -57,12 +57,17 @@ protected:
   /// determine if NEON should actually be used.
   bool UseNEONForSinglePrecisionFP;
 
-  /// SlowVMLx - If the VFP2 instructions are available, indicates whether
-  /// the VML[AS] instructions are slow (if so, don't use them).
-  bool SlowVMLx;
+  /// SlowFPVMLx - If the VFP2 / NEON instructions are available, indicates
+  /// whether the FP VML[AS] instructions are slow (if so, don't use them).
+  bool SlowFPVMLx;
+
+  /// HasVMLxForwarding - If true, NEON has special multiplier accumulator
+  /// forwarding to allow mul + mla being issued back to back.
+  bool HasVMLxForwarding;
 
   /// SlowFPBrcc - True if floating point compare + branch is slow.
   bool SlowFPBrcc;
+
 
   /// IsThumb - True if we are in thumb mode, false if in ARM mode.
   bool IsThumb;
@@ -82,6 +87,11 @@ protected:
   /// UseMovt - True if MOVT / MOVW pairs are used for materialization of 32-bit
   /// imms (including global addresses).
   bool UseMovt;
+
+  /// SupportsTailCall - True if the OS supports tail call. The dynamic linker
+  /// must be able to synthesize call stubs for interworking between ARM and
+  /// Thumb.
+  bool SupportsTailCall;
 
   /// HasFP16 - True if subtarget supports half-precision FP (We support VFP+HF
   /// only so far)
@@ -106,6 +116,15 @@ protected:
   /// over 16-bit ones.
   bool Pref32BitThumb;
 
+  /// AvoidCPSRPartialUpdate - If true, codegen would avoid using instructions
+  /// that partially update CPSR and add false dependency on the previous
+  /// CPSR setting instruction.
+  bool AvoidCPSRPartialUpdate;
+
+  /// HasMPExtension - True if the subtarget supports Multiprocessing
+  /// extension (ARMv7 only).
+  bool HasMPExtension;
+
   /// FPOnlySP - If true, the floating point unit only supports single
   /// precision.
   bool FPOnlySP;
@@ -121,6 +140,9 @@ protected:
 
   /// CPUString - String name of used CPU.
   std::string CPUString;
+
+  /// TargetTriple - What processor and OS we're targeting.
+  Triple TargetTriple;
 
   /// Selected instruction itineraries (one entry per itinerary class.)
   InstrItineraryData InstrItins;
@@ -152,6 +174,8 @@ protected:
   std::string ParseSubtargetFeatures(const std::string &FS,
                                      const std::string &CPU);
 
+  void computeIssueWidth();
+
   bool hasV4TOps()  const { return ARMArchVersion >= V4T;  }
   bool hasV5TOps()  const { return ARMArchVersion >= V5T;  }
   bool hasV5TEOps() const { return ARMArchVersion >= V5TE; }
@@ -172,16 +196,21 @@ protected:
   bool hasDivide() const { return HasHardwareDivide; }
   bool hasT2ExtractPack() const { return HasT2ExtractPack; }
   bool hasDataBarrier() const { return HasDataBarrier; }
-  bool useVMLx() const {return hasVFP2() && !SlowVMLx; }
+  bool useFPVMLx() const { return !SlowFPVMLx; }
+  bool hasVMLxForwarding() const { return HasVMLxForwarding; }
   bool isFPBrccSlow() const { return SlowFPBrcc; }
   bool isFPOnlySP() const { return FPOnlySP; }
   bool prefers32BitThumb() const { return Pref32BitThumb; }
+  bool avoidCPSRPartialUpdate() const { return AvoidCPSRPartialUpdate; }
+  bool hasMPExtension() const { return HasMPExtension; }
 
   bool hasFP16() const { return HasFP16; }
   bool hasD16() const { return HasD16; }
 
-  bool isTargetDarwin() const { return TargetType == isDarwin; }
-  bool isTargetELF() const { return TargetType == isELF; }
+  const Triple &getTargetTriple() const { return TargetTriple; }
+
+  bool isTargetDarwin() const { return TargetTriple.isOSDarwin(); }
+  bool isTargetELF() const { return !isTargetDarwin(); }
 
   bool isAPCS_ABI() const { return TargetABI == ARM_ABI_APCS; }
   bool isAAPCS_ABI() const { return TargetABI == ARM_ABI_AAPCS; }
@@ -194,13 +223,15 @@ protected:
   bool isR9Reserved() const { return IsR9Reserved; }
 
   bool useMovt() const { return UseMovt && hasV6T2Ops(); }
+  bool supportsTailCall() const { return SupportsTailCall; }
 
   bool allowsUnalignedMem() const { return AllowsUnalignedMem; }
 
   const std::string & getCPUString() const { return CPUString; }
 
+
   unsigned getMispredictionPenalty() const;
-  
+
   /// enablePostRAScheduler - True at 'More' optimization.
   bool enablePostRAScheduler(CodeGenOpt::Level OptLevel,
                              TargetSubtarget::AntiDepBreakMode& Mode,

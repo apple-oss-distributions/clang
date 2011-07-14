@@ -53,6 +53,10 @@ class VTTBuilder {
   /// GenerateDefinition - Whether the VTT builder should generate LLVM IR for
   /// the VTT.
   bool GenerateDefinition;
+
+  /// The linkage to use for any construction vtables required by this VTT.
+  /// Only required if we're building a definition.
+  llvm::GlobalVariable::LinkageTypes LinkageForConstructionVTables;
   
   /// GetAddrOfVTable - Returns the address of the vtable for the base class in
   /// the given vtable class.
@@ -109,7 +113,9 @@ class VTTBuilder {
   
 public:
   VTTBuilder(CodeGenModule &CGM, const CXXRecordDecl *MostDerivedClass,
-             bool GenerateDefinition);
+             bool GenerateDefinition,
+             llvm::GlobalVariable::LinkageTypes LinkageForConstructionVTables
+               = (llvm::GlobalVariable::LinkageTypes) -1);
 
   // getVTTComponents - Returns a reference to the VTT components.
   const VTTComponentsVectorTy &getVTTComponents() const {
@@ -132,13 +138,19 @@ public:
 
 VTTBuilder::VTTBuilder(CodeGenModule &CGM,
                        const CXXRecordDecl *MostDerivedClass,
-                       bool GenerateDefinition)
+                       bool GenerateDefinition,
+          llvm::GlobalVariable::LinkageTypes LinkageForConstructionVTables)
   : CGM(CGM), MostDerivedClass(MostDerivedClass), 
   MostDerivedClassLayout(CGM.getContext().getASTRecordLayout(MostDerivedClass)),
-  GenerateDefinition(GenerateDefinition) {
+    GenerateDefinition(GenerateDefinition),
+    LinkageForConstructionVTables(LinkageForConstructionVTables) {
+  assert(!GenerateDefinition ||
+         LinkageForConstructionVTables
+           != (llvm::GlobalVariable::LinkageTypes) -1);
     
   // Lay out this VTT.
-  LayoutVTT(BaseSubobject(MostDerivedClass, 0), /*BaseIsVirtual=*/false);
+  LayoutVTT(BaseSubobject(MostDerivedClass, CharUnits::Zero()), 
+            /*BaseIsVirtual=*/false);
 }
 
 llvm::Constant *
@@ -148,7 +160,7 @@ VTTBuilder::GetAddrOfVTable(BaseSubobject Base, bool BaseIsVirtual,
     return 0;
   
   if (Base.getBase() == MostDerivedClass) {
-    assert(Base.getBaseOffset() == 0 &&
+    assert(Base.getBaseOffset().isZero() &&
            "Most derived class vtable must have a zero offset!");
     // This is a regular vtable.
     return CGM.getVTables().GetAddrOfVTable(MostDerivedClass);
@@ -156,6 +168,7 @@ VTTBuilder::GetAddrOfVTable(BaseSubobject Base, bool BaseIsVirtual,
   
   return CGM.getVTables().GenerateConstructionVTable(MostDerivedClass, 
                                                      Base, BaseIsVirtual,
+                                           LinkageForConstructionVTables,
                                                      AddressPoints);
 }
 
@@ -217,7 +230,7 @@ void VTTBuilder::LayoutSecondaryVTTs(BaseSubobject Base) {
       cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
 
     const ASTRecordLayout &Layout = CGM.getContext().getASTRecordLayout(RD);
-    uint64_t BaseOffset = Base.getBaseOffset() + 
+    CharUnits BaseOffset = Base.getBaseOffset() + 
       Layout.getBaseClassOffset(BaseDecl);
    
     // Layout the VTT for this base.
@@ -256,7 +269,7 @@ VTTBuilder::LayoutSecondaryVirtualPointers(BaseSubobject Base,
     
     bool BaseDeclIsMorallyVirtual = BaseIsMorallyVirtual;
     bool BaseDeclIsNonVirtualPrimaryBase = false;
-    uint64_t BaseOffset;
+    CharUnits BaseOffset;
     if (I->isVirtual()) {
       // Ignore virtual bases that we've already visited.
       if (!VBases.insert(BaseDecl))
@@ -267,9 +280,10 @@ VTTBuilder::LayoutSecondaryVirtualPointers(BaseSubobject Base,
     } else {
       const ASTRecordLayout &Layout = CGM.getContext().getASTRecordLayout(RD);
       
-      BaseOffset = Base.getBaseOffset() + Layout.getBaseClassOffset(BaseDecl);
+      BaseOffset = Base.getBaseOffset() + 
+        Layout.getBaseClassOffset(BaseDecl);
       
-      if (!Layout.getPrimaryBaseWasVirtual() &&
+      if (!Layout.isPrimaryBaseVirtual() &&
           Layout.getPrimaryBase() == BaseDecl)
         BaseDeclIsNonVirtualPrimaryBase = true;
     }
@@ -282,8 +296,8 @@ VTTBuilder::LayoutSecondaryVirtualPointers(BaseSubobject Base,
     if (!BaseDeclIsNonVirtualPrimaryBase &&
         (BaseDecl->getNumVBases() || BaseDeclIsMorallyVirtual)) {
       // Add the vtable pointer.
-      AddVTablePointer(BaseSubobject(BaseDecl, BaseOffset), VTable, VTableClass, 
-                       AddressPoints);
+      AddVTablePointer(BaseSubobject(BaseDecl, BaseOffset), VTable, 
+                       VTableClass, AddressPoints);
     }
 
     // And lay out the secondary virtual pointers for the base class.
@@ -315,7 +329,7 @@ void VTTBuilder::LayoutVirtualVTTs(const CXXRecordDecl *RD,
       if (!VBases.insert(BaseDecl))
         continue;
     
-      uint64_t BaseOffset = 
+      CharUnits BaseOffset = 
         MostDerivedClassLayout.getVBaseClassOffset(BaseDecl);
       
       LayoutVTT(BaseSubobject(BaseDecl, BaseOffset), /*BaseIsVirtual=*/true);
@@ -365,55 +379,50 @@ void VTTBuilder::LayoutVTT(BaseSubobject Base, bool BaseIsVirtual) {
   
 }
 
-llvm::GlobalVariable *
-CodeGenVTables::GenerateVTT(llvm::GlobalVariable::LinkageTypes Linkage,
-                            bool GenerateDefinition,
-                            const CXXRecordDecl *RD) {
-  // Only classes that have virtual bases need a VTT.
-  if (RD->getNumVBases() == 0)
-    return 0;
+void
+CodeGenVTables::EmitVTTDefinition(llvm::GlobalVariable *VTT,
+                                  llvm::GlobalVariable::LinkageTypes Linkage,
+                                  const CXXRecordDecl *RD) {
+  VTTBuilder Builder(CGM, RD, /*GenerateDefinition=*/true, Linkage);
 
-  llvm::SmallString<256> OutName;
-  CGM.getCXXABI().getMangleContext().mangleCXXVTT(RD, OutName);
-  llvm::StringRef Name = OutName.str();
-
-  D1(printf("vtt %s\n", RD->getNameAsCString()));
-
-  llvm::GlobalVariable *GV = CGM.getModule().getGlobalVariable(Name, true);
-  if (GV == 0 || GV->isDeclaration()) {
-    const llvm::Type *Int8PtrTy = 
-      llvm::Type::getInt8PtrTy(CGM.getLLVMContext());
-
-    VTTBuilder Builder(CGM, RD, GenerateDefinition);
-
-    const llvm::ArrayType *Type = 
-      llvm::ArrayType::get(Int8PtrTy, Builder.getVTTComponents().size());
-
-    llvm::Constant *Init = 0;
-    if (GenerateDefinition)
-      Init = llvm::ConstantArray::get(Type, Builder.getVTTComponents().data(),
-                                      Builder.getVTTComponents().size());
-
-    llvm::GlobalVariable *OldGV = GV;
-    GV = new llvm::GlobalVariable(CGM.getModule(), Type, /*isConstant=*/true, 
-                                  Linkage, Init, Name);
-    CGM.setGlobalVisibility(GV, RD, /*ForDefinition*/ GenerateDefinition);
-    
-    if (OldGV) {
-      GV->takeName(OldGV);
-      llvm::Constant *NewPtr = 
-        llvm::ConstantExpr::getBitCast(GV, OldGV->getType());
-      OldGV->replaceAllUsesWith(NewPtr);
-      OldGV->eraseFromParent();
-    }
-  }
+  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGM.getLLVMContext());
+  const llvm::ArrayType *ArrayType = 
+    llvm::ArrayType::get(Int8PtrTy, Builder.getVTTComponents().size());
   
-  return GV;
+  llvm::Constant *Init = 
+    llvm::ConstantArray::get(ArrayType, Builder.getVTTComponents().data(),
+                             Builder.getVTTComponents().size());
+
+  VTT->setInitializer(Init);
+
+  // Set the correct linkage.
+  VTT->setLinkage(Linkage);
+
+  // Set the right visibility.
+  CGM.setTypeVisibility(VTT, RD, CodeGenModule::TVK_ForVTT);
 }
 
-llvm::GlobalVariable *CodeGenVTables::getVTT(const CXXRecordDecl *RD) {
-  return GenerateVTT(llvm::GlobalValue::ExternalLinkage, 
-                     /*GenerateDefinition=*/false, RD);
+llvm::GlobalVariable *CodeGenVTables::GetAddrOfVTT(const CXXRecordDecl *RD) {
+  assert(RD->getNumVBases() && "Only classes with virtual bases need a VTT");
+
+  llvm::SmallString<256> OutName;
+  llvm::raw_svector_ostream Out(OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXVTT(RD, Out);
+  Out.flush();
+  llvm::StringRef Name = OutName.str();
+
+  VTTBuilder Builder(CGM, RD, /*GenerateDefinition=*/false);
+
+  const llvm::Type *Int8PtrTy = 
+    llvm::Type::getInt8PtrTy(CGM.getLLVMContext());
+  const llvm::ArrayType *ArrayType = 
+    llvm::ArrayType::get(Int8PtrTy, Builder.getVTTComponents().size());
+
+  llvm::GlobalVariable *GV =
+    CGM.CreateOrReplaceCXXRuntimeVariable(Name, ArrayType, 
+                                          llvm::GlobalValue::ExternalLinkage);
+  GV->setUnnamedAddr(true);
+  return GV;
 }
 
 bool CodeGenVTables::needsVTTParameter(GlobalDecl GD) {

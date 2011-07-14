@@ -13,6 +13,7 @@
 
 #include "ARMSubtarget.h"
 #include "ARMGenSubtarget.inc"
+#include "ARMBaseRegisterInfo.h"
 #include "llvm/GlobalValue.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/CommandLine.h"
@@ -24,12 +25,15 @@ ReserveR9("arm-reserve-r9", cl::Hidden,
           cl::desc("Reserve R9, making it unavailable as GPR"));
 
 static cl::opt<bool>
-UseMOVT("arm-use-movt",
-        cl::init(true), cl::Hidden);
+DarwinUseMOVT("arm-darwin-use-movt", cl::init(true), cl::Hidden);
+
+static cl::opt<bool>
+DarwinAllowTailCalls("arm-darwin-allow-tail-calls", cl::init(false), cl::Hidden);
 
 static cl::opt<bool>
 StrictAlign("arm-strict-align", cl::Hidden,
             cl::desc("Disallow all unaligned memory accesses"));
+
 
 ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &FS,
                            bool isT)
@@ -37,25 +41,29 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &FS,
   , ARMProcFamily(Others)
   , ARMFPUType(None)
   , UseNEONForSinglePrecisionFP(false)
-  , SlowVMLx(false)
+  , SlowFPVMLx(false)
+  , HasVMLxForwarding(false)
   , SlowFPBrcc(false)
   , IsThumb(isT)
   , ThumbMode(Thumb1)
   , NoARM(false)
   , PostRAScheduler(false)
   , IsR9Reserved(ReserveR9)
-  , UseMovt(UseMOVT)
+  , UseMovt(false)
+  , SupportsTailCall(false)
   , HasFP16(false)
   , HasD16(false)
   , HasHardwareDivide(false)
   , HasT2ExtractPack(false)
   , HasDataBarrier(false)
   , Pref32BitThumb(false)
+  , AvoidCPSRPartialUpdate(false)
+  , HasMPExtension(false)
   , FPOnlySP(false)
   , AllowsUnalignedMem(false)
   , stackAlignment(4)
   , CPUString("generic")
-  , TargetType(isELF) // Default to ELF unless otherwise specified.
+  , TargetTriple(TT)
   , TargetABI(ARM_ABI_APCS) {
   // Default to soft float ABI
   if (FloatABIType == FloatABI::Default)
@@ -63,13 +71,13 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &FS,
 
   // Determine default and user specified characteristics
 
-  // Parse features string.
-  CPUString = ParseSubtargetFeatures(FS, CPUString);
-
   // When no arch is specified either by CPU or by attributes, make the default
   // ARMv4T.
-  if (CPUString == "generic" && (FS.empty() || FS == "generic"))
+  const char *ARMArchFeature = "";
+  if (CPUString == "generic" && (FS.empty() || FS == "generic")) {
     ARMArchVersion = V4T;
+    ARMArchFeature = ",+v4t";
+  }
 
   // Set the boolean corresponding to the current target triple, or the default
   // if one cannot be determined, to true.
@@ -87,23 +95,54 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &FS,
     unsigned SubVer = TT[Idx];
     if (SubVer >= '7' && SubVer <= '9') {
       ARMArchVersion = V7A;
-      if (Len >= Idx+2 && TT[Idx+1] == 'm')
+      ARMArchFeature = ",+v7a";
+      if (Len >= Idx+2 && TT[Idx+1] == 'm') {
         ARMArchVersion = V7M;
+        ARMArchFeature = ",+v7m";
+      }
     } else if (SubVer == '6') {
       ARMArchVersion = V6;
-      if (Len >= Idx+3 && TT[Idx+1] == 't' && TT[Idx+2] == '2')
+      ARMArchFeature = ",+v6";
+      if (Len >= Idx+3 && TT[Idx+1] == 't' && TT[Idx+2] == '2') {
         ARMArchVersion = V6T2;
+        ARMArchFeature = ",+v6t2";
+      }
     } else if (SubVer == '5') {
       ARMArchVersion = V5T;
-      if (Len >= Idx+3 && TT[Idx+1] == 't' && TT[Idx+2] == 'e')
+      ARMArchFeature = ",+v5t";
+      if (Len >= Idx+3 && TT[Idx+1] == 't' && TT[Idx+2] == 'e') {
         ARMArchVersion = V5TE;
+        ARMArchFeature = ",+v5te";
+      }
     } else if (SubVer == '4') {
-      if (Len >= Idx+2 && TT[Idx+1] == 't')
+      if (Len >= Idx+2 && TT[Idx+1] == 't') {
         ARMArchVersion = V4T;
-      else
+        ARMArchFeature = ",+v4t";
+      } else {
         ARMArchVersion = V4;
+        ARMArchFeature = "";
+      }
     }
   }
+
+  if (TT.find("eabi") != std::string::npos)
+    TargetABI = ARM_ABI_AAPCS;
+
+  // Parse features string.  If the first entry in FS (the CPU) is missing,
+  // insert the architecture feature derived from the target triple.  This is
+  // important for setting features that are implied based on the architecture
+  // version.
+  std::string FSWithArch;
+  if (FS.empty())
+    FSWithArch = std::string(ARMArchFeature);
+  else if (FS.find(',') == 0)
+    FSWithArch = std::string(ARMArchFeature) + FS;
+  else
+    FSWithArch = FS;
+  CPUString = ParseSubtargetFeatures(FSWithArch, CPUString);
+
+  // After parsing Itineraries, set ItinData.IssueWidth.
+  computeIssueWidth();
 
   // Thumb2 implies at least V6T2.
   if (ARMArchVersion >= V6T2)
@@ -111,20 +150,19 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &FS,
   else if (ThumbMode >= Thumb2)
     ARMArchVersion = V6T2;
 
-  if (Len >= 10) {
-    if (TT.find("-darwin") != std::string::npos)
-      // arm-darwin
-      TargetType = isDarwin;
-  }
-
-  if (TT.find("eabi") != std::string::npos)
-    TargetABI = ARM_ABI_AAPCS;
-
   if (isAAPCS_ABI())
     stackAlignment = 8;
 
-  if (isTargetDarwin())
+  if (!isTargetDarwin())
+    UseMovt = hasV6T2Ops();
+  else {
     IsR9Reserved = ReserveR9 | (ARMArchVersion < V6);
+    UseMovt = DarwinUseMOVT && hasV6T2Ops();
+    unsigned Maj, Min, Rev;
+    TargetTriple.getDarwinNumber(Maj, Min, Rev);
+    if (DarwinAllowTailCalls)
+      SupportsTailCall = Maj > 4;
+  }
 
   if (!isThumb() || hasThumb2())
     PostRAScheduler = true;
@@ -135,6 +173,7 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &FS,
     AllowsUnalignedMem = true;
 }
 
+
 /// GVIsIndirectSymbol - true if the GV will be accessed via an indirect symbol.
 bool
 ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
@@ -144,7 +183,9 @@ ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
 
   // Materializable GVs (in JIT lazy compilation mode) do not require an extra
   // load from stub.
-  bool isDecl = GV->isDeclaration() && !GV->isMaterializable();
+  bool isDecl = GV->hasAvailableExternallyLinkage();
+  if (GV->isDeclaration() && !GV->isMaterializable())
+    isDecl = true;
 
   if (!isTargetDarwin()) {
     // Extra load is needed for all externally visible.
@@ -175,7 +216,7 @@ ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
       // through a stub.
       if (!isDecl && !GV->isWeakForLinker())
         return false;
-    
+
       // Unless we have a symbol with hidden visibility, we have to go through a
       // normal $non_lazy_ptr stub because this symbol might be resolved late.
       if (!GV->hasHiddenVisibility())  // Non-hidden $non_lazy_ptr reference.
@@ -193,9 +234,25 @@ unsigned ARMSubtarget::getMispredictionPenalty() const {
     return 13;
   else if (isCortexA9())
     return 8;
-  
+
   // Otherwise, just return a sensible default.
   return 10;
+}
+
+void ARMSubtarget::computeIssueWidth() {
+  unsigned allStage1Units = 0;
+  for (const InstrItinerary *itin = InstrItins.Itineraries;
+       itin->FirstStage != ~0U; ++itin) {
+    const InstrStage *IS = InstrItins.Stages + itin->FirstStage;
+    allStage1Units |= IS->getUnits();
+  }
+  InstrItins.IssueWidth = 0;
+  while (allStage1Units) {
+    ++InstrItins.IssueWidth;
+    // clear the lowest bit
+    allStage1Units ^= allStage1Units & ~(allStage1Units - 1);
+  }
+  assert(InstrItins.IssueWidth <= 2 && "itinerary bug, too many stage 1 units");
 }
 
 bool ARMSubtarget::enablePostRAScheduler(

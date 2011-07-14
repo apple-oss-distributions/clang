@@ -6,12 +6,14 @@ add_llvm_library(LLVMScalarOpts
   CorrelatedValuePropagation.cpp
   DCE.cpp
   DeadStoreElimination.cpp
-  GEPSplitter.cpp
+  EarlyCSE.cpp
   GVN.cpp
   IndVarSimplify.cpp
   JumpThreading.cpp
   LICM.cpp
   LoopDeletion.cpp
+  LoopIdiomRecognize.cpp
+  LoopInstSimplify.cpp
   LoopRotation.cpp
   LoopStrengthReduce.cpp
   LoopUnrollPass.cpp
@@ -24,7 +26,6 @@ add_llvm_library(LLVMScalarOpts
   Scalar.cpp
   ScalarReplAggregates.cpp
   SimplifyCFGPass.cpp
-  SimplifyHalfPowrLibCalls.cpp
   SimplifyLibCalls.cpp
   Sink.cpp
   TailDuplication.cpp

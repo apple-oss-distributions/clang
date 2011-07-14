@@ -25,6 +25,8 @@
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Allocator.h"
@@ -35,7 +37,6 @@ namespace clang {
 class SourceManager;
 class ExternalPreprocessorSource;
 class FileManager;
-class FileSystemOptions;
 class FileEntry;
 class HeaderSearch;
 class PragmaNamespace;
@@ -53,12 +54,11 @@ class PreprocessingRecord;
 /// single source file, and don't know anything about preprocessor-level issues
 /// like the #include stack, token expansion, etc.
 ///
-class Preprocessor {
+class Preprocessor : public llvm::RefCountedBase<Preprocessor> {
   Diagnostic        *Diags;
   LangOptions        Features;
   const TargetInfo  &Target;
   FileManager       &FileMgr;
-  const FileSystemOptions &FileSystemOpts;
   SourceManager     &SourceMgr;
   ScratchBuffer     *ScratchBuf;
   HeaderSearch      &HeaderInfo;
@@ -198,6 +198,16 @@ class Preprocessor {
   /// to the actual definition of the macro.
   llvm::DenseMap<IdentifierInfo*, MacroInfo*> Macros;
 
+  /// \brief Macros that we want to warn because they are not used at the end
+  /// of the translation unit; we store just their SourceLocations instead
+  /// something like MacroInfo*. The benefit of this is that when we are
+  /// deserializing from PCH, we don't need to deserialize identifier & macros
+  /// just so that we can report that they are unused, we just warn using
+  /// the SourceLocations of this set (that will be filled by the ASTReader).
+  /// We are using SmallPtrSet instead of a vector for faster removal.
+  typedef llvm::SmallPtrSet<SourceLocation, 32> WarnUnusedMacroLocsTy;
+  WarnUnusedMacroLocsTy WarnUnusedMacroLocs;
+
   /// MacroArgCache - This is a "freelist" of MacroArg objects that can be
   /// reused for quick allocation.
   MacroArgs *MacroArgCache;
@@ -207,6 +217,10 @@ class Preprocessor {
   /// push_macro directive, we keep a MacroInfo stack used to restore 
   /// previous macro value.
   llvm::DenseMap<IdentifierInfo*, std::vector<MacroInfo*> > PragmaPushMacroInfo;
+
+  /// \brief Instantiation source location for the last macro that expanded
+  /// to no tokens.
+  SourceLocation LastEmptyMacroInstantiationLoc;
 
   // Various statistics we track for performance analysis.
   unsigned NumDirectives, NumIncluded, NumDefined, NumUndefined, NumPragma;
@@ -281,7 +295,6 @@ public:
   const LangOptions &getLangOptions() const { return Features; }
   const TargetInfo &getTargetInfo() const { return Target; }
   FileManager &getFileManager() const { return FileMgr; }
-  const FileSystemOptions &getFileSystemOpts() const { return FileSystemOpts; }
   SourceManager &getSourceManager() const { return SourceMgr; }
   HeaderSearch &getHeaderSearchInfo() const { return HeaderInfo; }
 
@@ -357,6 +370,12 @@ public:
   macro_iterator macro_begin(bool IncludeExternalMacros = true) const;
   macro_iterator macro_end(bool IncludeExternalMacros = true) const;
 
+  /// \brief Instantiation source location for the last macro that expanded
+  /// to no tokens.
+  SourceLocation getLastEmptyMacroInstantiationLoc() const {
+    return LastEmptyMacroInstantiationLoc;
+  }
+
   const std::string &getPredefines() const { return Predefines; }
   /// setPredefines - Set the predefines for this Preprocessor.  These
   /// predefines are automatically injected when parsing the main file.
@@ -422,7 +441,7 @@ public:
   
   /// \brief Create a new preprocessing record, which will keep track of 
   /// all macro expansions, macro definitions, etc.
-  void createPreprocessingRecord();
+  void createPreprocessingRecord(bool IncludeNestedMacroInstantiations);
   
   /// EnterMainSourceFile - Enter the specified FileID as the main source file,
   /// which implicitly adds the builtin defines etc.
@@ -610,6 +629,9 @@ public:
   /// for which we are performing code completion.
   bool isCodeCompletionFile(SourceLocation FileLoc) const;
 
+  /// \brief Determine if we are performing code completion.
+  bool isCodeCompletionEnabled() const { return CodeCompletionFile != 0; }
+
   /// \brief Instruct the preprocessor to skip part of the main
   /// the main source file.
   ///
@@ -626,12 +648,24 @@ public:
   /// the specified Token's location, translating the token's start
   /// position in the current buffer into a SourcePosition object for rendering.
   DiagnosticBuilder Diag(SourceLocation Loc, unsigned DiagID) {
-    return Diags->Report(FullSourceLoc(Loc, getSourceManager()), DiagID);
+    return Diags->Report(Loc, DiagID);
   }
 
   DiagnosticBuilder Diag(const Token &Tok, unsigned DiagID) {
-    return Diags->Report(FullSourceLoc(Tok.getLocation(), getSourceManager()),
-                         DiagID);
+    return Diags->Report(Tok.getLocation(), DiagID);
+  }
+
+  /// getSpelling() - Return the 'spelling' of the token at the given
+  /// location; does not go up to the spelling location or down to the
+  /// instantiation location.
+  ///
+  /// \param buffer A buffer which will be used only if the token requires
+  ///   "cleaning", e.g. if it contains trigraphs or escaped newlines
+  /// \param invalid If non-null, will be set \c true if an error occurs.
+  llvm::StringRef getSpelling(SourceLocation loc,
+                              llvm::SmallVectorImpl<char> &buffer,
+                              bool *invalid = 0) const {
+    return Lexer::getSpelling(loc, buffer, SourceMgr, Features, invalid);
   }
 
   /// getSpelling() - Return the 'spelling' of the Tok token.  The spelling of a
@@ -640,18 +674,10 @@ public:
   /// wants to get the true, uncanonicalized, spelling of things like digraphs
   /// UCNs, etc.
   ///
-  /// \param Invalid If non-NULL, will be set \c true if an error occurs.
-  std::string getSpelling(const Token &Tok, bool *Invalid = 0) const;
-
-  /// getSpelling() - Return the 'spelling' of the Tok token.  The spelling of a
-  /// token is the characters used to represent the token in the source file
-  /// after trigraph expansion and escaped-newline folding.  In particular, this
-  /// wants to get the true, uncanonicalized, spelling of things like digraphs
-  /// UCNs, etc.
-  static std::string getSpelling(const Token &Tok,
-                                 const SourceManager &SourceMgr,
-                                 const LangOptions &Features, 
-                                 bool *Invalid = 0);
+  /// \param Invalid If non-null, will be set \c true if an error occurs.
+  std::string getSpelling(const Token &Tok, bool *Invalid = 0) const {
+    return Lexer::getSpelling(Tok, SourceMgr, Features, Invalid);
+  }
 
   /// getSpelling - This method is used to get the spelling of a token into a
   /// preallocated buffer, instead of as an std::string.  The caller is required
@@ -664,7 +690,9 @@ public:
   /// copy).  The caller is not allowed to modify the returned buffer pointer
   /// if an internal buffer is returned.
   unsigned getSpelling(const Token &Tok, const char *&Buffer, 
-                       bool *Invalid = 0) const;
+                       bool *Invalid = 0) const {
+    return Lexer::getSpelling(Tok, Buffer, SourceMgr, Features, Invalid);
+  }
 
   /// getSpelling - This method is used to get the spelling of a token into a
   /// SmallVector. Note that the returned StringRef may not point to the
@@ -711,7 +739,9 @@ public:
   /// location should refer to. The default offset (0) produces a source
   /// location pointing just past the end of the token; an offset of 1 produces
   /// a source location pointing to the last character in the token, etc.
-  SourceLocation getLocForEndOfToken(SourceLocation Loc, unsigned Offset = 0);
+  SourceLocation getLocForEndOfToken(SourceLocation Loc, unsigned Offset = 0) {
+    return Lexer::getLocForEndOfToken(Loc, Offset, SourceMgr, Features);
+  }
 
   /// DumpToken - Print the token to stderr, used for debugging.
   ///
@@ -721,7 +751,10 @@ public:
 
   /// AdvanceToTokenCharacter - Given a location that specifies the start of a
   /// token, return a new location that specifies a character within the token.
-  SourceLocation AdvanceToTokenCharacter(SourceLocation TokStart,unsigned Char);
+  SourceLocation AdvanceToTokenCharacter(SourceLocation TokStart,
+                                         unsigned Char) const {
+    return Lexer::AdvanceToTokenCharacter(TokStart, Char, SourceMgr, Features);
+  }
 
   /// IncrementPasteCounter - Increment the counters for the number of token
   /// paste operations performed.  If fast was specified, this is a 'fast paste'
@@ -745,10 +778,42 @@ public:
   // Preprocessor callback methods.  These are invoked by a lexer as various
   // directives and events are found.
 
-  /// LookUpIdentifierInfo - Given a tok::identifier token, look up the
-  /// identifier information for the token and install it into the token.
-  IdentifierInfo *LookUpIdentifierInfo(Token &Identifier,
-                                       const char *BufPtr = 0) const;
+  /// LookUpIdentifierInfo - Given a tok::raw_identifier token, look up the
+  /// identifier information for the token and install it into the token,
+  /// updating the token kind accordingly.
+  IdentifierInfo *LookUpIdentifierInfo(Token &Identifier) const;
+
+private:
+  llvm::DenseMap<IdentifierInfo*,unsigned> PoisonReasons;
+
+public:
+
+  // SetPoisonReason - Call this function to indicate the reason for
+  // poisoning an identifier. If that identifier is accessed while
+  // poisoned, then this reason will be used instead of the default
+  // "poisoned" diagnostic.
+  void SetPoisonReason(IdentifierInfo *II, unsigned DiagID);
+
+  // HandlePoisonedIdentifier - Display reason for poisoned
+  // identifier.
+  void HandlePoisonedIdentifier(Token & Tok);
+
+  void MaybeHandlePoisonedIdentifier(Token & Identifier) {
+    if(IdentifierInfo * II = Identifier.getIdentifierInfo()) {
+      if(II->isPoisoned()) {
+        HandlePoisonedIdentifier(Identifier);
+      }
+    }
+  }
+
+private:
+  /// Identifiers used for SEH handling in Borland. These are only
+  /// allowed in particular circumstances
+  IdentifierInfo *Ident__exception_code, *Ident___exception_code, *Ident_GetExceptionCode; // __except block
+  IdentifierInfo *Ident__exception_info, *Ident___exception_info, *Ident_GetExceptionInfo; // __except filter expression
+  IdentifierInfo *Ident__abnormal_termination, *Ident___abnormal_termination, *Ident_AbnormalTermination; // __finally
+public:
+  void PoisonSEHIdentifiers(bool Poison = true); // Borland
 
   /// HandleIdentifier - This callback is invoked when the lexer reads an
   /// identifier and has filled in the tokens IdentifierInfo member.  This
@@ -773,13 +838,13 @@ public:
   /// read is the correct one.
   void HandleDirective(Token &Result);
 
-  /// CheckEndOfDirective - Ensure that the next token is a tok::eom token.  If
-  /// not, emit a diagnostic and consume up until the eom.  If EnableMacros is
+  /// CheckEndOfDirective - Ensure that the next token is a tok::eod token.  If
+  /// not, emit a diagnostic and consume up until the eod.  If EnableMacros is
   /// true, then we consider macros that expand to zero tokens as being ok.
   void CheckEndOfDirective(const char *Directive, bool EnableMacros = false);
 
   /// DiscardUntilEndOfDirective - Read and discard all tokens remaining on the
-  /// current line until the tok::eom token is found.
+  /// current line until the tok::eod token is found.
   void DiscardUntilEndOfDirective();
 
   /// SawDateOrTime - This returns true if the preprocessor has seen a use of
@@ -810,7 +875,9 @@ public:
   /// for system #include's or not (i.e. using <> instead of "").
   const FileEntry *LookupFile(llvm::StringRef Filename,
                               bool isAngled, const DirectoryLookup *FromDir,
-                              const DirectoryLookup *&CurDir);
+                              const DirectoryLookup *&CurDir,
+                              llvm::SmallVectorImpl<char> *SearchPath,
+                              llvm::SmallVectorImpl<char> *RelativePath);
 
   /// GetCurLookup - The DirectoryLookup structure used to find the current
   /// FileEntry, if CurLexer is non-null and if applicable.  This allows us to
@@ -830,9 +897,13 @@ public:
   ///
   /// This code concatenates and consumes tokens up to the '>' token.  It
   /// returns false if the > was found, otherwise it returns true if it finds
-  /// and consumes the EOM marker.
+  /// and consumes the EOD marker.
   bool ConcatenateIncludeName(llvm::SmallString<128> &FilenameBuffer,
                               SourceLocation &End);
+
+  /// LexOnOffSwitch - Lex an on-off-switch (C99 6.10.6p2) and verify that it is
+  /// followed by EOD.  Return true if the token is not a valid on-off-switch.
+  bool LexOnOffSwitch(tok::OnOffSwitch &OOS);
 
 private:
 
@@ -862,7 +933,7 @@ private:
   void ReleaseMacroInfo(MacroInfo* MI);
 
   /// ReadMacroName - Lex and validate a macro name, which occurs after a
-  /// #define or #undef.  This emits a diagnostic, sets the token kind to eom,
+  /// #define or #undef.  This emits a diagnostic, sets the token kind to eod,
   /// and discards the rest of the macro line if the macro name is invalid.
   void ReadMacroName(Token &MacroNameTok, char isDefineUndef = 0);
 
@@ -928,9 +999,6 @@ private:
   /// HandleMicrosoft__pragma - Like Handle_Pragma except the pragma text
   /// is not enclosed within a string literal.
   void HandleMicrosoft__pragma(Token &Tok);
-
-  void Handle_Pragma(unsigned Introducer, const std::string &StrVal, 
-                     SourceLocation PragmaLoc, SourceLocation RParenLoc);
 
   /// EnterSourceFileWithLexer - Add a lexer to the top of the include stack and
   /// start lexing tokens from it instead of the current buffer.
@@ -1018,6 +1086,10 @@ public:
   // Return true and store the first token only if any CommentHandler
   // has inserted some tokens and getCommentRetentionState() is false.
   bool HandleComment(Token &Token, SourceRange Comment);
+
+  /// \brief A macro is used, update information about macros that need unused
+  /// warnings.
+  void markMacroAsUsed(MacroInfo *MI);
 };
 
 /// \brief Abstract base class that describes a handler that will receive

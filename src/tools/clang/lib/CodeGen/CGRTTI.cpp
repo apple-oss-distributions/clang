@@ -16,6 +16,7 @@
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/Type.h"
 #include "clang/Frontend/CodeGenOptions.h"
+#include "CGObjCRuntime.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -29,6 +30,10 @@ class RTTIBuilder {
   
   /// Fields - The fields of the RTTI descriptor currently being built.
   llvm::SmallVector<llvm::Constant *, 16> Fields;
+
+  /// GetAddrOfTypeName - Returns the mangled type name of the given type.
+  llvm::GlobalVariable *
+  GetAddrOfTypeName(QualType Ty, llvm::GlobalVariable::LinkageTypes Linkage);
 
   /// GetAddrOfExternalRTTIDescriptor - Returns the constant for the RTTI 
   /// descriptor of the given type.
@@ -59,64 +64,10 @@ class RTTIBuilder {
   void BuildPointerToMemberTypeInfo(const MemberPointerType *Ty);
   
 public:
-  RTTIBuilder(CodeGenModule &cgm)
-    : CGM(cgm), VMContext(cgm.getModule().getContext()),
-      Int8PtrTy(llvm::Type::getInt8PtrTy(VMContext)) { }
+  RTTIBuilder(CodeGenModule &CGM) : CGM(CGM), 
+    VMContext(CGM.getModule().getContext()),
+    Int8PtrTy(llvm::Type::getInt8PtrTy(VMContext)) { }
 
-  llvm::Constant *BuildName(QualType Ty, bool Hidden, 
-                            llvm::GlobalVariable::LinkageTypes Linkage) {
-    llvm::SmallString<256> OutName;
-    CGM.getCXXABI().getMangleContext().mangleCXXRTTIName(Ty, OutName);
-    llvm::StringRef Name = OutName.str();
-
-    llvm::GlobalVariable *OGV = CGM.getModule().getNamedGlobal(Name);
-    if (OGV && !OGV->isDeclaration())
-      return llvm::ConstantExpr::getBitCast(OGV, Int8PtrTy);
-
-    llvm::Constant *C = llvm::ConstantArray::get(VMContext, Name.substr(4));
-
-    llvm::GlobalVariable *GV = 
-      new llvm::GlobalVariable(CGM.getModule(), C->getType(), true, Linkage,
-                               C, Name);
-    if (OGV) {
-      GV->takeName(OGV);
-      llvm::Constant *NewPtr = llvm::ConstantExpr::getBitCast(GV,
-                                                              OGV->getType());
-      OGV->replaceAllUsesWith(NewPtr);
-      OGV->eraseFromParent();
-    }
-    if (Hidden && Linkage != llvm::GlobalValue::InternalLinkage)
-      GV->setVisibility(llvm::GlobalVariable::HiddenVisibility);
-    return llvm::ConstantExpr::getBitCast(GV, Int8PtrTy);
-  }
-
-  // FIXME: unify with DecideExtern
-  bool DecideHidden(QualType Ty) {
-    // For this type, see if all components are never hidden.
-    if (const MemberPointerType *MPT = Ty->getAs<MemberPointerType>())
-      return (DecideHidden(MPT->getPointeeType())
-              && DecideHidden(QualType(MPT->getClass(), 0)));
-    if (const PointerType *PT = Ty->getAs<PointerType>())
-      return DecideHidden(PT->getPointeeType());
-    if (const FunctionType *FT = Ty->getAs<FunctionType>()) {
-      if (DecideHidden(FT->getResultType()) == false)
-        return false;
-      if (const FunctionProtoType *FPT = Ty->getAs<FunctionProtoType>()) {
-        for (unsigned i = 0; i <FPT->getNumArgs(); ++i)
-          if (DecideHidden(FPT->getArgType(i)) == false)
-            return false;
-        for (unsigned i = 0; i <FPT->getNumExceptions(); ++i)
-          if (DecideHidden(FPT->getExceptionType(i)) == false)
-            return false;
-        return true;
-      }
-    }
-    if (const RecordType *RT = Ty->getAs<RecordType>())
-      if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl()))
-        return RD->getVisibility() == HiddenVisibility;
-    return false;
-  }
-  
   // Pointer type info flags.
   enum {
     /// PTI_Const - Type has const qualifier.
@@ -162,10 +113,34 @@ public:
 };
 }
 
+llvm::GlobalVariable *
+RTTIBuilder::GetAddrOfTypeName(QualType Ty, 
+                               llvm::GlobalVariable::LinkageTypes Linkage) {
+  llvm::SmallString<256> OutName;
+  llvm::raw_svector_ostream Out(OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXRTTIName(Ty, Out);
+  Out.flush();
+  llvm::StringRef Name = OutName.str();
+
+  // We know that the mangled name of the type starts at index 4 of the
+  // mangled name of the typename, so we can just index into it in order to
+  // get the mangled name of the type.
+  llvm::Constant *Init = llvm::ConstantArray::get(VMContext, Name.substr(4));
+
+  llvm::GlobalVariable *GV = 
+    CGM.CreateOrReplaceCXXRuntimeVariable(Name, Init->getType(), Linkage);
+
+  GV->setInitializer(Init);
+
+  return GV;
+}
+
 llvm::Constant *RTTIBuilder::GetAddrOfExternalRTTIDescriptor(QualType Ty) {
   // Mangle the RTTI name.
   llvm::SmallString<256> OutName;
-  CGM.getCXXABI().getMangleContext().mangleCXXRTTI(Ty, OutName);
+  llvm::raw_svector_ostream Out(OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXRTTI(Ty, Out);
+  Out.flush();
   llvm::StringRef Name = OutName.str();
 
   // Look for an existing global.
@@ -196,7 +171,8 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
     case BuiltinType::Void:
     case BuiltinType::NullPtr:
     case BuiltinType::Bool:
-    case BuiltinType::WChar:
+    case BuiltinType::WChar_S:
+    case BuiltinType::WChar_U:
     case BuiltinType::Char_U:
     case BuiltinType::Char_S:
     case BuiltinType::UChar:
@@ -220,8 +196,9 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
       
     case BuiltinType::Overload:
     case BuiltinType::Dependent:
-    case BuiltinType::UndeducedAuto:
-      assert(false && "Should not see this type here!");
+    case BuiltinType::BoundMember:
+    case BuiltinType::UnknownAny:
+      llvm_unreachable("asking for RRTI for a placeholder type!");
       
     case BuiltinType::ObjCId:
     case BuiltinType::ObjCClass:
@@ -328,7 +305,8 @@ static bool ContainsIncompleteClassType(QualType Ty) {
 
 /// getTypeInfoLinkage - Return the linkage that the type info and type info
 /// name constants should have for the given type.
-static llvm::GlobalVariable::LinkageTypes getTypeInfoLinkage(QualType Ty) {
+static llvm::GlobalVariable::LinkageTypes 
+getTypeInfoLinkage(CodeGenModule &CGM, QualType Ty) {
   // Itanium C++ ABI 2.9.5p7:
   //   In addition, it and all of the intermediate abi::__pointer_type_info 
   //   structs in the chain down to the abi::__class_type_info for the
@@ -348,16 +326,22 @@ static llvm::GlobalVariable::LinkageTypes getTypeInfoLinkage(QualType Ty) {
     return llvm::GlobalValue::InternalLinkage;
 
   case ExternalLinkage:
+    if (!CGM.getLangOptions().RTTI) {
+      // RTTI is not enabled, which means that this type info struct is going
+      // to be used for exception handling. Give it linkonce_odr linkage.
+      return llvm::GlobalValue::LinkOnceODRLinkage;
+    }
+
     if (const RecordType *Record = dyn_cast<RecordType>(Ty)) {
       const CXXRecordDecl *RD = cast<CXXRecordDecl>(Record->getDecl());
       if (RD->isDynamicClass())
-        return CodeGenModule::getVTableLinkage(RD);
+        return CGM.getVTableLinkage(RD);
     }
 
-    return llvm::GlobalValue::WeakODRLinkage;
+    return llvm::GlobalValue::LinkOnceODRLinkage;
   }
 
-  return llvm::GlobalValue::WeakODRLinkage;
+  return llvm::GlobalValue::LinkOnceODRLinkage;
 }
 
 // CanUseSingleInheritance - Return whether the given record decl has a "single, 
@@ -506,18 +490,77 @@ void RTTIBuilder::BuildVTablePointer(const Type *Ty) {
   Fields.push_back(VTable);
 }
 
+// maybeUpdateRTTILinkage - Will update the linkage of the RTTI data structures
+// from available_externally to the correct linkage if necessary. An example of
+// this is:
+//
+//   struct A {
+//     virtual void f();
+//   };
+//
+//   const std::type_info &g() {
+//     return typeid(A);
+//   }
+//
+//   void A::f() { }
+//
+// When we're generating the typeid(A) expression, we do not yet know that
+// A's key function is defined in this translation unit, so we will give the
+// typeinfo and typename structures available_externally linkage. When A::f
+// forces the vtable to be generated, we need to change the linkage of the
+// typeinfo and typename structs, otherwise we'll end up with undefined
+// externals when linking.
+static void 
+maybeUpdateRTTILinkage(CodeGenModule &CGM, llvm::GlobalVariable *GV,
+                       QualType Ty) {
+  // We're only interested in globals with available_externally linkage.
+  if (!GV->hasAvailableExternallyLinkage())
+    return;
+
+  // Get the real linkage for the type.
+  llvm::GlobalVariable::LinkageTypes Linkage = getTypeInfoLinkage(CGM, Ty);
+
+  // If variable is supposed to have available_externally linkage, we don't
+  // need to do anything.
+  if (Linkage == llvm::GlobalVariable::AvailableExternallyLinkage)
+    return;
+
+  // Update the typeinfo linkage.
+  GV->setLinkage(Linkage);
+
+  // Get the typename global.
+  llvm::SmallString<256> OutName;
+  llvm::raw_svector_ostream Out(OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXRTTIName(Ty, Out);
+  Out.flush();
+  llvm::StringRef Name = OutName.str();
+
+  llvm::GlobalVariable *TypeNameGV = CGM.getModule().getNamedGlobal(Name);
+
+  assert(TypeNameGV->hasAvailableExternallyLinkage() &&
+         "Type name has different linkage from type info!");
+
+  // And update its linkage.
+  TypeNameGV->setLinkage(Linkage);
+}
+
 llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   // We want to operate on the canonical type.
   Ty = CGM.getContext().getCanonicalType(Ty);
 
   // Check if we've already emitted an RTTI descriptor for this type.
   llvm::SmallString<256> OutName;
-  CGM.getCXXABI().getMangleContext().mangleCXXRTTI(Ty, OutName);
+  llvm::raw_svector_ostream Out(OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXRTTI(Ty, Out);
+  Out.flush();
   llvm::StringRef Name = OutName.str();
-  
+
   llvm::GlobalVariable *OldGV = CGM.getModule().getNamedGlobal(Name);
-  if (OldGV && !OldGV->isDeclaration())
+  if (OldGV && !OldGV->isDeclaration()) {
+    maybeUpdateRTTILinkage(CGM, OldGV, Ty);
+
     return llvm::ConstantExpr::getBitCast(OldGV, Int8PtrTy);
+  }
 
   // Check if there is already an external RTTI descriptor for this type.
   bool IsStdLib = IsStandardLibraryRTTIDescriptor(Ty);
@@ -529,14 +572,16 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   if (IsStdLib)
     Linkage = llvm::GlobalValue::ExternalLinkage;
   else
-    Linkage = getTypeInfoLinkage(Ty);
+    Linkage = getTypeInfoLinkage(CGM, Ty);
 
   // Add the vtable pointer.
   BuildVTablePointer(cast<Type>(Ty));
   
   // And the name.
-  bool Hidden = DecideHidden(Ty);
-  Fields.push_back(BuildName(Ty, Hidden, Linkage));
+  llvm::GlobalVariable *TypeName = GetAddrOfTypeName(Ty, Linkage);
+
+  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(VMContext);
+  Fields.push_back(llvm::ConstantExpr::getBitCast(TypeName, Int8PtrTy));
 
   switch (Ty->getTypeClass()) {
 #define TYPE(Class, Base)
@@ -634,14 +679,28 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   // type_infos themselves, so we can emit these as hidden symbols.
   // But don't do this if we're worried about strict visibility
   // compatibility.
-  if (const RecordType *RT = dyn_cast<RecordType>(Ty))
-    CGM.setTypeVisibility(GV, cast<CXXRecordDecl>(RT->getDecl()),
-                          /*ForRTTI*/ true, /*ForDefinition*/ true);
-  else if (Hidden || 
-           (CGM.getCodeGenOpts().HiddenWeakVTables &&
-            Linkage == llvm::GlobalValue::WeakODRLinkage))
-    GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+  if (const RecordType *RT = dyn_cast<RecordType>(Ty)) {
+    const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+
+    CGM.setTypeVisibility(GV, RD, CodeGenModule::TVK_ForRTTI);
+    CGM.setTypeVisibility(TypeName, RD, CodeGenModule::TVK_ForRTTIName);
+  } else {
+    Visibility TypeInfoVisibility = DefaultVisibility;
+    if (CGM.getCodeGenOpts().HiddenWeakVTables &&
+        Linkage == llvm::GlobalValue::LinkOnceODRLinkage)
+      TypeInfoVisibility = HiddenVisibility;
+
+    // The type name should have the same visibility as the type itself.
+    Visibility ExplicitVisibility = Ty->getVisibility();
+    TypeName->setVisibility(CodeGenModule::
+                            GetLLVMVisibility(ExplicitVisibility));
   
+    TypeInfoVisibility = minVisibility(TypeInfoVisibility, Ty->getVisibility());
+    GV->setVisibility(CodeGenModule::GetLLVMVisibility(TypeInfoVisibility));
+  }
+
+  GV->setUnnamedAddr(true);
+
   return llvm::ConstantExpr::getBitCast(GV, Int8PtrTy);
 }
 
@@ -819,14 +878,16 @@ void RTTIBuilder::BuildVMIClassTypeInfo(const CXXRecordDecl *RD) {
     // For a non-virtual base, this is the offset in the object of the base
     // subobject. For a virtual base, this is the offset in the virtual table of
     // the virtual base offset for the virtual base referenced (negative).
+    CharUnits Offset;
     if (Base->isVirtual())
-      OffsetFlags = CGM.getVTables().getVirtualBaseOffsetOffset(RD, BaseDecl);
+      Offset = 
+        CGM.getVTables().getVirtualBaseOffsetOffset(RD, BaseDecl);
     else {
       const ASTRecordLayout &Layout = CGM.getContext().getASTRecordLayout(RD);
-      OffsetFlags = Layout.getBaseClassOffset(BaseDecl) / 8;
+      Offset = Layout.getBaseClassOffset(BaseDecl);
     };
     
-    OffsetFlags <<= 8;
+    OffsetFlags = Offset.getQuantity() << 8;
     
     // The low-order byte of __offset_flags contains flags, as given by the 
     // masks from the enumeration __offset_flags_masks.
@@ -920,6 +981,10 @@ llvm::Constant *CodeGenModule::GetAddrOfRTTIDescriptor(QualType Ty,
   if (!ForEH && !getContext().getLangOptions().RTTI) {
     const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(VMContext);
     return llvm::Constant::getNullValue(Int8PtrTy);
+  }
+  
+  if (ForEH && Ty->isObjCObjectPointerType() && !Features.NeXTRuntime) {
+    return Runtime->GetEHType(Ty);
   }
 
   return RTTIBuilder(*this).BuildTypeInfo(Ty);

@@ -367,11 +367,7 @@ void TokenLexer::Lex(Token &Tok) {
     // won't be handled by Preprocessor::HandleIdentifier because this is coming
     // from a macro expansion.
     if (II->isPoisoned() && TokenIsFromPaste) {
-      // We warn about __VA_ARGS__ with poisoning.
-      if (II->isStr("__VA_ARGS__"))
-        PP.Diag(Tok, diag::ext_pp_bad_vaargs_use);
-      else
-        PP.Diag(Tok, diag::err_pp_used_poisoned_id);
+      PP.HandlePoisonedIdentifier(Tok);
     }
 
     if (!DisableMacroExpansion && II->isHandleIdentifierCase())
@@ -435,12 +431,13 @@ bool TokenLexer::PasteTokens(Token &Tok) {
     // Lex the resultant pasted token into Result.
     Token Result;
 
-    if (Tok.is(tok::identifier) && RHS.is(tok::identifier)) {
+    if (Tok.isAnyIdentifier() && RHS.isAnyIdentifier()) {
       // Common paste case: identifier+identifier = identifier.  Avoid creating
       // a lexer and other overhead.
       PP.IncrementPasteCounter(true);
       Result.startToken();
-      Result.setKind(tok::identifier);
+      Result.setKind(tok::raw_identifier);
+      Result.setRawIdentifierData(ResultTokStrPtr);
       Result.setLocation(ResultTokLoc);
       Result.setLength(LHSLen+RHSLen);
     } else {
@@ -524,10 +521,10 @@ bool TokenLexer::PasteTokens(Token &Tok) {
   // Now that we got the result token, it will be subject to expansion.  Since
   // token pasting re-lexes the result token in raw mode, identifier information
   // isn't looked up.  As such, if the result is an identifier, look up id info.
-  if (Tok.is(tok::identifier)) {
+  if (Tok.is(tok::raw_identifier)) {
     // Look up the identifier info for the token.  We disabled identifier lookup
     // by saying we're skipping contents, so we need to do this manually.
-    PP.LookUpIdentifierInfo(Tok, ResultTokStrPtr);
+    PP.LookUpIdentifierInfo(Tok);
   }
   return false;
 }
@@ -542,6 +539,11 @@ unsigned TokenLexer::isNextTokenLParen() const {
   return Tokens[CurToken].is(tok::l_paren);
 }
 
+/// isParsingPreprocessorDirective - Return true if we are in the middle of a
+/// preprocessor directive.
+bool TokenLexer::isParsingPreprocessorDirective() const {
+  return Tokens[NumTokens-1].is(tok::eod) && !isAtEnd();
+}
 
 /// HandleMicrosoftCommentPaste - In microsoft compatibility mode, /##/ pastes
 /// together to form a comment that comments out everything in the current

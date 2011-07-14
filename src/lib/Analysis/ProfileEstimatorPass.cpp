@@ -140,7 +140,7 @@ void ProfileEstimatorPass::recurseBasicBlock(BasicBlock *BB) {
     // loop, thus the edge is a backedge, continue and do not check if the
     // value is valid.
     if (BBisHeader && BBLoop->contains(*bbi)) {
-      printEdgeError(edge, "but is backedge, continueing");
+      printEdgeError(edge, "but is backedge, continuing");
       continue;
     }
     // If the edges value is missing (and this is no loop header, and this is
@@ -323,6 +323,7 @@ bool ProfileEstimatorPass::runOnFunction(Function &F) {
   FunctionInformation.erase(&F);
   BlockInformation[&F].clear();
   EdgeInformation[&F].clear();
+  BBToVisit.clear();
 
   // Mark all blocks as to visit.
   for (Function::iterator bi = F.begin(), be = F.end(); bi != be; ++bi)

@@ -21,7 +21,7 @@
 #ifndef LLVM_CODEGEN_LIVEINTERVAL_H
 #define LLVM_CODEGEN_LIVEINTERVAL_H
 
-#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/IntEqClasses.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/AlignOf.h"
 #include "llvm/CodeGen/SlotIndexes.h"
@@ -205,8 +205,7 @@ namespace llvm {
     typedef SmallVector<LiveRange,4> Ranges;
     typedef SmallVector<VNInfo*,4> VNInfoList;
 
-    unsigned reg;        // the register or stack slot of this interval
-                         // if the top bits is set, it represents a stack slot.
+    const unsigned reg;  // the register or stack slot of this interval.
     float weight;        // weight of this interval
     Ranges ranges;       // the ranges in which this register is live
     VNInfoList valnos;   // value#'s
@@ -222,11 +221,8 @@ namespace llvm {
 
     };
 
-    LiveInterval(unsigned Reg, float Weight, bool IsSS = false)
-      : reg(Reg), weight(Weight) {
-      if (IsSS)
-        reg = reg | (1U << (sizeof(unsigned)*CHAR_BIT-1));
-    }
+    LiveInterval(unsigned Reg, float Weight)
+      : reg(Reg), weight(Weight) {}
 
     typedef Ranges::iterator iterator;
     iterator begin() { return ranges.begin(); }
@@ -250,6 +246,7 @@ namespace llvm {
     /// position is in a hole, this method returns an iterator pointing to the
     /// LiveRange immediately after the hole.
     iterator advanceTo(iterator I, SlotIndex Pos) {
+      assert(I != end());
       if (Pos >= endIndex())
         return end();
       while (I->end <= Pos) ++I;
@@ -274,19 +271,6 @@ namespace llvm {
       ranges.clear();
     }
 
-    /// isStackSlot - Return true if this is a stack slot interval.
-    ///
-    bool isStackSlot() const {
-      return reg & (1U << (sizeof(unsigned)*CHAR_BIT-1));
-    }
-
-    /// getStackSlotIndex - Return stack slot index if this is a stack slot
-    /// interval.
-    int getStackSlotIndex() const {
-      assert(isStackSlot() && "Interval is not a stack slot interval!");
-      return reg & ~(1U << (sizeof(unsigned)*CHAR_BIT-1));
-    }
-
     bool hasAtLeastOneValue() const { return !valnos.empty(); }
 
     bool containsOneValue() const { return valnos.size() == 1; }
@@ -300,6 +284,11 @@ namespace llvm {
     }
     inline const VNInfo *getValNumInfo(unsigned ValNo) const {
       return valnos[ValNo];
+    }
+
+    /// containsValue - Returns true if VNI belongs to this interval.
+    bool containsValue(const VNInfo *VNI) const {
+      return VNI && VNI->id < getNumValNums() && VNI == getValNumInfo(VNI->id);
     }
 
     /// getNextValue - Create a new value number and return it.  MIIdx specifies
@@ -463,6 +452,11 @@ namespace llvm {
       addRangeFrom(LR, ranges.begin());
     }
 
+    /// extendInBlock - If this interval is live before UseIdx in the basic
+    /// block that starts at StartIdx, extend it to be live at UseIdx and return
+    /// the value. If there is no live range before UseIdx, return NULL.
+    VNInfo *extendInBlock(SlotIndex StartIdx, SlotIndex UseIdx);
+
     /// join - Join two live intervals (this, and other) together.  This applies
     /// mappings to the value numbers in the LHS/RHS intervals as specified.  If
     /// the intervals are not joinable, this aborts.
@@ -559,12 +553,8 @@ namespace llvm {
   /// }
 
   class ConnectedVNInfoEqClasses {
-    LiveIntervals &lis_;
-
-    // Map each value number to its equivalence class.
-    // The invariant is that EqClass[x] <= x.
-    // Two values are connected iff EqClass[x] == EqClass[b].
-    SmallVector<unsigned, 8> eqClass_;
+    LiveIntervals &LIS;
+    IntEqClasses EqClass;
 
     // Note that values a and b are connected.
     void Connect(unsigned a, unsigned b);
@@ -572,16 +562,22 @@ namespace llvm {
     unsigned Renumber();
 
   public:
-    explicit ConnectedVNInfoEqClasses(LiveIntervals &lis) : lis_(lis) {}
+    explicit ConnectedVNInfoEqClasses(LiveIntervals &lis) : LIS(lis) {}
 
     /// Classify - Classify the values in LI into connected components.
     /// Return the number of connected components.
     unsigned Classify(const LiveInterval *LI);
 
-    // Distribute values in LIV[0] into a separate LiveInterval for each connected
-    // component. LIV must have a LiveInterval for each connected component.
-    // The LiveIntervals in Liv[1..] must be empty.
-    void Distribute(LiveInterval *LIV[]);
+    /// getEqClass - Classify creates equivalence classes numbered 0..N. Return
+    /// the equivalence class assigned the VNI.
+    unsigned getEqClass(const VNInfo *VNI) const { return EqClass[VNI->id]; }
+
+    /// Distribute - Distribute values in LIV[0] into a separate LiveInterval
+    /// for each connected component. LIV must have a LiveInterval for each
+    /// connected component. The LiveIntervals in Liv[1..] must be empty.
+    /// Instructions using LIV[0] are rewritten.
+    void Distribute(LiveInterval *LIV[], MachineRegisterInfo &MRI);
+
   };
 
 }

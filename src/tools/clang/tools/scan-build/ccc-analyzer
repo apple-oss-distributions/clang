@@ -115,6 +115,7 @@ sub ProcessClangFailure {
 ##----------------------------------------------------------------------------##
 
 sub GetCCArgs {
+  my $mode = shift;
   my $Args = shift;
   
   pipe (FROM_CHILD, TO_PARENT);
@@ -123,7 +124,7 @@ sub GetCCArgs {
     close FROM_CHILD;
     open(STDOUT,">&", \*TO_PARENT);
     open(STDERR,">&", \*TO_PARENT);
-    exec $Clang, "-###", "-fsyntax-only", @$Args;
+    exec $Clang, "-###", $mode, @$Args;
   }  
   close(TO_PARENT);
   my $line;
@@ -137,7 +138,7 @@ sub GetCCArgs {
   
   die "could not find clang line\n" if (!defined $line);
   # Strip the newline and initial whitspace
-  chomp $line;  
+  chomp $line;
   $line =~ s/^\s+//;
   my @items = quotewords('\s+', 0, $line);
   my $cmd = shift @items;
@@ -146,85 +147,80 @@ sub GetCCArgs {
 }
 
 sub Analyze {
-  my ($Clang, $Args, $AnalyzeArgs, $Lang, $Output, $Verbose, $HtmlDir,
-      $file, $Analyses) = @_;
-  
-  $Args = GetCCArgs($Args);
+  my ($Clang, $OriginalArgs, $AnalyzeArgs, $Lang, $Output, $Verbose, $HtmlDir,
+      $file) = @_;
 
-  my $RunAnalyzer = 0;
+  my @Args = @$OriginalArgs;
   my $Cmd;
   my @CmdArgs;
   my @CmdArgsSansAnalyses;
-  
+
   if ($Lang =~ /header/) {
     exit 0 if (!defined ($Output));
     $Cmd = 'cp';
-    push @CmdArgs,$file;
+    push @CmdArgs, $file;
     # Remove the PCH extension.
     $Output =~ s/[.]gch$//;
-    push @CmdArgs,$Output;
-    @CmdArgsSansAnalyses = @CmdArgs;    
+    push @CmdArgs, $Output;
+    @CmdArgsSansAnalyses = @CmdArgs;
   }
   else {
     $Cmd = $Clang;
-    push @CmdArgs, "-cc1";
-    push @CmdArgs,'-DIBOutlet=__attribute__((iboutlet))';
-    push @CmdArgs, @$Args;
-    @CmdArgsSansAnalyses = @CmdArgs;
-    push @CmdArgs,'-analyze';
-    push @CmdArgs,"-analyzer-display-progress";
-    push @CmdArgs,"-analyzer-eagerly-assume";
-    push @CmdArgs,"-analyzer-opt-analyze-nested-blocks";
-    push @CmdArgs,(split /\s/,$Analyses);
-    
-    if (defined $ENV{"CCC_EXPERIMENTAL_CHECKS"}) {
-      push @CmdArgs,"-analyzer-experimental-internal-checks";
-      push @CmdArgs,"-analyzer-experimental-checks";
+    if ($Lang eq "objective-c" || $Lang eq "objective-c++") {
+      push @Args,'-DIBOutlet=__attribute__((iboutlet))';
+      push @Args,'-DIBOutletCollection(ClassName)=__attribute__((iboutletcollection)))';
+      push @Args,'-DIBAction=void)__attribute__((ibaction)';
     }
-    
-    $RunAnalyzer = 1;
+
+    # Create arguments for doing regular parsing.
+    my $SyntaxArgs = GetCCArgs("-fsyntax-only", \@Args);
+    @CmdArgsSansAnalyses = @$SyntaxArgs;
+
+    # Create arguments for doing static analysis.
+    if (defined $ResultFile) {
+      push @Args, '-o', $ResultFile;
+    }
+    elsif (defined $HtmlDir) {
+      push @Args, '-o', $HtmlDir;
+    }
+    if ($Verbose) {
+      push @Args, "-Xclang", "-analyzer-display-progress";
+    }
+
+    foreach my $arg (@$AnalyzeArgs) {
+      push @Args, "-Xclang", $arg;
+    }
+
+    # Display Ubiviz graph?
+    if (defined $ENV{'CCC_UBI'}) {   
+      push @Args, "-Xclang", "-analyzer-viz-egraph-ubigraph";
+    }
+
+    my $AnalysisArgs = GetCCArgs("--analyze", \@Args);
+    @CmdArgs = @$AnalysisArgs;
   }
-  
-  # Add the analysis arguments passed down from scan-build.
-  foreach my $Arg (@$AnalyzeArgs) {
-    push @CmdArgs, $Arg;
-  }
-  
+
   my @PrintArgs;
   my $dir;
 
-  if ($RunAnalyzer) {
-    if (defined $ResultFile) {
-      push @CmdArgs,'-o';
-      push @CmdArgs, $ResultFile;
-    }
-    elsif (defined $HtmlDir) {
-      push @CmdArgs,'-o';
-      push @CmdArgs, $HtmlDir;
-    }
-  }
-  
   if ($Verbose) {
     $dir = getcwd();
     print STDERR "\n[LOCATION]: $dir\n";
     push @PrintArgs,"'$Cmd'";
-    foreach my $arg (@CmdArgs) { push @PrintArgs,"\'$arg\'"; }
+    foreach my $arg (@CmdArgs) {
+        push @PrintArgs,"\'$arg\'";
+    }
   }
-  
   if ($Verbose == 1) {
     # We MUST print to stderr.  Some clients use the stdout output of
     # gcc for various purposes. 
-    print STDERR join(' ',@PrintArgs);
+    print STDERR join(' ', @PrintArgs);
     print STDERR "\n";
   }
   elsif ($Verbose == 2) {
     print STDERR "#SHELL (cd '$dir' && @PrintArgs)\n";
   }
-  
-  if (defined $ENV{'CCC_UBI'}) {   
-    push @CmdArgs,"--analyzer-viz-egraph-ubigraph";
-  }
-  
+
   # Capture the STDERR of clang and send it to a temporary file.
   # Capture the STDOUT of clang and reroute it to ccc-analyzer's STDERR.
   # We save the output file in the 'crashes' directory if clang encounters
@@ -237,13 +233,13 @@ sub Analyze {
     open(STDERR,">&", \*TO_PARENT);
     exec $Cmd, @CmdArgs;
   }
-  
+
   close TO_PARENT;
   my ($ofh, $ofile) = tempfile("clang_output_XXXXXX", DIR => $HtmlDir);
   
   while (<FROM_CHILD>) {
     print $ofh $_;
-    print STDERR $_;    
+    print STDERR $_;
   }
 
   waitpid($pid,0);
@@ -266,11 +262,11 @@ sub Analyze {
       # Check if there were any unhandled attributes.
       if (open(CHILD, $ofile)) {
         my %attributes_not_handled;
-      
+
         # Don't flag warnings about the following attributes that we
         # know are currently not supported by Clang.
         $attributes_not_handled{"cdecl"} = 1;
-      
+
         my $ppfile;
         while (<CHILD>) {
           next if (! /warning: '([^\']+)' attribute ignored/);
@@ -369,9 +365,11 @@ my %LangMap = (
   'cp'  => 'c++',
   'cpp' => 'c++',
   'cc'  => 'c++',
+  'ii'  => 'c++',
   'i'   => 'c-cpp-output',
   'm'   => 'objective-c',
-  'mi'  => 'objective-c-cpp-output'
+  'mi'  => 'objective-c-cpp-output',
+  'mm'  => 'objective-c++'
 );
 
 my %UniqueOptions = (
@@ -384,13 +382,10 @@ my %UniqueOptions = (
 
 my %LangsAccepted = (
   "objective-c" => 1,
-  "c" => 1
+  "c" => 1,
+  "c++" => 1,
+  "objective-c++" => 1
 );
-
-if (defined $ENV{'CCC_ANALYZER_CPLUSPLUS'}) {
-  $LangsAccepted{"c++"} = 1;
-  $LangsAccepted{"objective-c++"} = 1;
-}
 
 ##----------------------------------------------------------------------------##
 #  Main Logic.
@@ -413,15 +408,12 @@ if ($Status) { exit($Status >> 8); }
 
 # Get the analysis options.
 my $Analyses = $ENV{'CCC_ANALYZER_ANALYSIS'};
-if (!defined($Analyses)) { $Analyses = '-analyzer-check-objc-mem'; }
 
 # Get the store model.
 my $StoreModel = $ENV{'CCC_ANALYZER_STORE_MODEL'};
-if (!defined $StoreModel) { $StoreModel = "region"; }
 
 # Get the constraints engine.
 my $ConstraintsModel = $ENV{'CCC_ANALYZER_CONSTRAINTS_MODEL'};
-if (!defined $ConstraintsModel) { $ConstraintsModel = "range"; }
 
 # Get the output format.
 my $OutputFormat = $ENV{'CCC_ANALYZER_OUTPUT_FORMAT'};
@@ -617,8 +609,7 @@ if ($Action eq 'compile' or $Action eq 'link') {
     my @AnalyzeArgs;    
     
     if ($FileLang ne 'unknown') {
-      push @CmdArgs,'-x';
-      push @CmdArgs,$FileLang;
+      push @CmdArgs, '-x', $FileLang;
     }
 
     if (defined $StoreModel) {
@@ -627,6 +618,10 @@ if ($Action eq 'compile' or $Action eq 'link') {
 
     if (defined $ConstraintsModel) {
       push @AnalyzeArgs, "-analyzer-constraints=$ConstraintsModel";
+    }
+    
+    if (defined $Analyses) {
+      push @AnalyzeArgs, split '\s+', $Analyses;
     }
 
     if (defined $OutputFormat) {
@@ -640,22 +635,21 @@ if ($Action eq 'compile' or $Action eq 'link') {
       }
     }
 
-    push @CmdArgs,@CompileOpts;
-    push @CmdArgs,$file;
+    push @CmdArgs, @CompileOpts;
+    push @CmdArgs, $file;
 
     if (scalar @Archs) {
       foreach my $arch (@Archs) {
         my @NewArgs;
-        push @NewArgs, '-arch';
-        push @NewArgs, $arch;
+        push @NewArgs, '-arch', $arch;
         push @NewArgs, @CmdArgs;
         Analyze($Clang, \@NewArgs, \@AnalyzeArgs, $FileLang, $Output,
-                $Verbose, $HtmlDir, $file, $Analyses);
+                $Verbose, $HtmlDir, $file);
       }
     }
     else {
       Analyze($Clang, \@CmdArgs, \@AnalyzeArgs, $FileLang, $Output,
-              $Verbose, $HtmlDir, $file, $Analyses);
+              $Verbose, $HtmlDir, $file);
     }
   }
 }

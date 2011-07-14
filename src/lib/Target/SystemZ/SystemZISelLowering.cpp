@@ -59,9 +59,6 @@ SystemZTargetLowering::SystemZTargetLowering(SystemZTargetMachine &tm) :
   // Compute derived properties from the register classes
   computeRegisterProperties();
 
-  // Set shifts properties
-  setShiftAmountType(MVT::i64);
-
   // Provide all sorts of operation actions
   setLoadExtAction(ISD::SEXTLOAD, MVT::i1, Promote);
   setLoadExtAction(ISD::ZEXTLOAD, MVT::i1, Promote);
@@ -147,8 +144,8 @@ SystemZTargetLowering::SystemZTargetLowering(SystemZTargetMachine &tm) :
   setOperationAction(ISD::FREM,             MVT::f64, Expand);
 
   // We have only 64-bit bitconverts
-  setOperationAction(ISD::BIT_CONVERT,      MVT::f32, Expand);
-  setOperationAction(ISD::BIT_CONVERT,      MVT::i32, Expand);
+  setOperationAction(ISD::BITCAST,          MVT::f32, Expand);
+  setOperationAction(ISD::BITCAST,          MVT::i32, Expand);
 
   setOperationAction(ISD::UINT_TO_FP,       MVT::i32, Expand);
   setOperationAction(ISD::UINT_TO_FP,       MVT::i64, Expand);
@@ -377,8 +374,8 @@ SystemZTargetLowering::LowerCCCCallTo(SDValue Chain, SDValue Callee,
                                       const SmallVectorImpl<ISD::InputArg> &Ins,
                                       DebugLoc dl, SelectionDAG &DAG,
                                       SmallVectorImpl<SDValue> &InVals) const {
-
   MachineFunction &MF = DAG.getMachineFunction();
+  const TargetFrameLowering *TFI = TM.getFrameLowering();
 
   // Offset to first argument stack slot.
   const unsigned FirstArgOffset = 160;
@@ -431,7 +428,7 @@ SystemZTargetLowering::LowerCCCCallTo(SDValue Chain, SDValue Callee,
       if (StackPtr.getNode() == 0)
         StackPtr =
           DAG.getCopyFromReg(Chain, dl,
-                             (RegInfo->hasFP(MF) ?
+                             (TFI->hasFP(MF) ?
                               SystemZ::R11D : SystemZ::R15D),
                              getPointerTy());
 
@@ -454,7 +451,7 @@ SystemZTargetLowering::LowerCCCCallTo(SDValue Chain, SDValue Callee,
 
   // Build a sequence of copy-to-reg nodes chained together with token chain and
   // flag operands which copy the outgoing args into registers.  The InFlag in
-  // necessary since all emited instructions must be stuck together.
+  // necessary since all emitted instructions must be stuck together.
   SDValue InFlag;
   for (unsigned i = 0, e = RegsToPass.size(); i != e; ++i) {
     Chain = DAG.getCopyToReg(Chain, dl, RegsToPass[i].first,
@@ -471,7 +468,7 @@ SystemZTargetLowering::LowerCCCCallTo(SDValue Chain, SDValue Callee,
     Callee = DAG.getTargetExternalSymbol(E->getSymbol(), getPointerTy());
 
   // Returns a chain & a flag for retval copy to use.
-  SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Flag);
+  SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
   SmallVector<SDValue, 8> Ops;
   Ops.push_back(Chain);
   Ops.push_back(Callee);
@@ -710,7 +707,7 @@ SDValue SystemZTargetLowering::LowerSELECT_CC(SDValue Op,
   SDValue SystemZCC;
   SDValue Flag = EmitCmp(LHS, RHS, CC, SystemZCC, DAG);
 
-  SDVTList VTs = DAG.getVTList(Op.getValueType(), MVT::Flag);
+  SDVTList VTs = DAG.getVTList(Op.getValueType(), MVT::Glue);
   SmallVector<SDValue, 4> Ops;
   Ops.push_back(TrueV);
   Ops.push_back(FalseV);

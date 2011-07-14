@@ -50,7 +50,10 @@ namespace {
       return UnknownModRefBehavior;
     }
 
-    virtual bool pointsToConstantMemory(const Location &Loc) { return false; }
+    virtual bool pointsToConstantMemory(const Location &Loc,
+                                        bool OrLocal) {
+      return false;
+    }
     virtual ModRefResult getModRefInfo(ImmutableCallSite CS,
                                        const Location &Loc) {
       return ModRef;
@@ -62,6 +65,7 @@ namespace {
 
     virtual void deleteValue(Value *V) {}
     virtual void copyValue(Value *From, Value *To) {}
+    virtual void addEscapingUse(Use &U) {}
     
     /// getAdjustedAnalysisPointer - This method is used when a pass implements
     /// an analysis interface through multiple inheritance.  If needed, it

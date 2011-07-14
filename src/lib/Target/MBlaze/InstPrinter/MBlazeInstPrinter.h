@@ -18,11 +18,12 @@
 
 namespace llvm {
   class MCOperand;
+  class TargetMachine;
 
   class MBlazeInstPrinter : public MCInstPrinter {
   public:
-    MBlazeInstPrinter(const MCAsmInfo &MAI) : MCInstPrinter(MAI) {
-    }
+    MBlazeInstPrinter(TargetMachine &TM, const MCAsmInfo &MAI)
+      : MCInstPrinter(MAI) {}
 
     virtual void printInst(const MCInst *MI, raw_ostream &O);
 
@@ -33,9 +34,6 @@ namespace llvm {
 
     void printOperand(const MCInst *MI, unsigned OpNo, raw_ostream &O,
                       const char *Modifier = 0);
-    void printPCRelImmOperand(const MCInst *MI, unsigned OpNo, raw_ostream &O);
-    void printSrcMemOperand(const MCInst *MI, unsigned OpNo, raw_ostream &O,
-                            const char *Modifier = 0);
     void printFSLImm(const MCInst *MI, int OpNo, raw_ostream &O);
     void printUnsignedImm(const MCInst *MI, int OpNo, raw_ostream &O);
     void printMemOperand(const MCInst *MI, int OpNo,raw_ostream &O,

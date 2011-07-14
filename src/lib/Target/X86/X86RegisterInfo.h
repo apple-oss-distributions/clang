@@ -91,6 +91,9 @@ public:
   getMatchingSuperRegClass(const TargetRegisterClass *A,
                            const TargetRegisterClass *B, unsigned Idx) const;
 
+  const TargetRegisterClass*
+  getLargestLegalSuperClass(const TargetRegisterClass *RC) const;
+
   /// getPointerRegClass - Returns a TargetRegisterClass used for pointer
   /// values.
   const TargetRegisterClass *getPointerRegClass(unsigned Kind = 0) const;
@@ -100,6 +103,9 @@ public:
   /// between a two registers of the specified class.
   const TargetRegisterClass *
   getCrossCopyRegClass(const TargetRegisterClass *RC) const;
+
+  unsigned getRegPressureLimit(const TargetRegisterClass *RC,
+                               MachineFunction &MF) const;
 
   /// getCalleeSavedRegs - Return a null-terminated list of all of the
   /// callee-save registers on this target.
@@ -111,13 +117,9 @@ public:
   /// register scavenger to determine what registers are free.
   BitVector getReservedRegs(const MachineFunction &MF) const;
 
-  bool hasFP(const MachineFunction &MF) const;
-
   bool canRealignStack(const MachineFunction &MF) const;
 
   bool needsStackRealignment(const MachineFunction &MF) const;
-
-  bool hasReservedCallFrame(const MachineFunction &MF) const;
 
   bool hasReservedSpillSlot(const MachineFunction &MF, unsigned Reg,
                             int &FrameIdx) const;
@@ -129,19 +131,12 @@ public:
   void eliminateFrameIndex(MachineBasicBlock::iterator MI,
                            int SPAdj, RegScavenger *RS = NULL) const;
 
-  void processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
-                                            RegScavenger *RS = NULL) const;
-
-  void emitCalleeSavedFrameMoves(MachineFunction &MF, MCSymbol *Label,
-                                 unsigned FramePtr) const;
-  void emitPrologue(MachineFunction &MF) const;
-  void emitEpilogue(MachineFunction &MF, MachineBasicBlock &MBB) const;
-
   // Debug information queries.
   unsigned getRARegister() const;
   unsigned getFrameRegister(const MachineFunction &MF) const;
-  int getFrameIndexOffset(const MachineFunction &MF, int FI) const;
-  void getInitialFrameState(std::vector<MachineMove> &Moves) const;
+  unsigned getStackRegister() const { return StackPtr; }
+  // FIXME: Move to FrameInfok
+  unsigned getSlotSize() const { return SlotSize; }
 
   // Exception handling queries.
   unsigned getEHExceptionRegister() const;

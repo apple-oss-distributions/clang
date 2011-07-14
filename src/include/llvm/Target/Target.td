@@ -1,10 +1,10 @@
 //===- Target.td - Target Independent TableGen interface ---*- tablegen -*-===//
-// 
+//
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
-// 
+//
 //===----------------------------------------------------------------------===//
 //
 // This file defines the target-independent interfaces which should be
@@ -32,22 +32,11 @@ class Register<string n> {
   string Namespace = "";
   string AsmName = n;
 
-  // SpillSize - If this value is set to a non-zero value, it is the size in
-  // bits of the spill slot required to hold this register.  If this value is
-  // set to zero, the information is inferred from any register classes the
-  // register belongs to.
-  int SpillSize = 0;
-
-  // SpillAlignment - This value is used to specify the alignment required for
-  // spilling the register.  Like SpillSize, this should only be explicitly
-  // specified if the register is not in a register class.
-  int SpillAlignment = 0;
-
   // Aliases - A list of registers that this register overlaps with.  A read or
   // modification of this register can potentially read or modify the aliased
   // registers.
   list<Register> Aliases = [];
-  
+
   // SubRegs - A list of registers that are parts of this register. Note these
   // are "immediate" sub-registers and the registers within the list do not
   // themselves overlap. e.g. For X86, EAX's SubRegs list contains only [AX],
@@ -78,13 +67,20 @@ class Register<string n> {
   // -1 indicates that the gcc number is undefined and -2 that register number
   // is invalid for this mode/flavour.
   list<int> DwarfNumbers = [];
+
+  // CostPerUse - Additional cost of instructions using this register compared
+  // to other registers in its class. The register allocator will try to
+  // minimize the number of instructions using a register with a CostPerUse.
+  // This is used by the x86-64 and ARM Thumb targets where some registers 
+  // require larger instruction encodings.
+  int CostPerUse = 0;
 }
 
 // RegisterWithSubRegs - This can be used to define instances of Register which
 // need to specify sub-registers.
 // List "subregs" specifies which registers are sub-registers to this one. This
 // is used to populate the SubRegs and AliasSet fields of TargetRegisterDesc.
-// This allows the code generator to be careful not to put two values with 
+// This allows the code generator to be careful not to put two values with
 // overlapping live ranges into registers which alias.
 class RegisterWithSubRegs<string n, list<Register> subregs> : Register<n> {
   let SubRegs = subregs;
@@ -101,7 +97,7 @@ class RegisterClass<string namespace, list<ValueType> regTypes, int alignment,
 
   // RegType - Specify the list ValueType of the registers in this register
   // class.  Note that all registers in a register class must have the same
-  // ValueTypes.  This is a list because some targets permit storing different 
+  // ValueTypes.  This is a list because some targets permit storing different
   // types in same register, for example vector values with 128-bit total size,
   // but different count/size of items, like SSE on x86.
   //
@@ -127,13 +123,13 @@ class RegisterClass<string namespace, list<ValueType> regTypes, int alignment,
   // allocation used by the register allocator.
   //
   list<Register> MemberList = regList;
-  
+
   // SubRegClasses - Specify the register class of subregisters as a list of
   // dags: (RegClass SubRegIndex, SubRegindex, ...)
   list<dag> SubRegClasses = [];
 
   // MethodProtos/MethodBodies - These members can be used to insert arbitrary
-  // code into a generated register class.   The normal usage of this is to 
+  // code into a generated register class.   The normal usage of this is to
   // overload virtual methods.
   code MethodProtos = [{}];
   code MethodBodies = [{}];
@@ -150,8 +146,8 @@ class DwarfRegNum<list<int> Numbers> {
   // These values can be determined by locating the <target>.h file in the
   // directory llvmgcc/gcc/config/<target>/ and looking for REGISTER_NAMES.  The
   // order of these names correspond to the enumeration used by gcc.  A value of
-  // -1 indicates that the gcc number is undefined and -2 that register number is 
-  // invalid for this mode/flavour.
+  // -1 indicates that the gcc number is undefined and -2 that register number
+  // is invalid for this mode/flavour.
   list<int> DwarfNumbers = Numbers;
 }
 
@@ -199,6 +195,8 @@ class Instruction {
   bit isBranch     = 0;     // Is this instruction a branch instruction?
   bit isIndirectBranch = 0; // Is this instruction an indirect branch?
   bit isCompare    = 0;     // Is this instruction a comparison instruction?
+  bit isMoveImm    = 0;     // Is this instruction a move immediate instruction?
+  bit isBitcast    = 0;     // Is this instruction a bitcast instruction?
   bit isBarrier    = 0;     // Can control flow fall through this instruction?
   bit isCall       = 0;     // Is this instruction a call instruction?
   bit canFoldAsLoad = 0;    // Can this be folded as a simple memory operand?
@@ -243,15 +241,25 @@ class Instruction {
   /// be encoded into the output machineinstr.
   string DisableEncoding = "";
 
+  string PostEncoderMethod = "";
+  string DecoderMethod = "";
+
   /// Target-specific flags. This becomes the TSFlags field in TargetInstrDesc.
   bits<64> TSFlags = 0;
+
+  ///@name Assembler Parser Support
+  ///@{
+
+  string AsmMatchConverter = "";
+
+  ///@}
 }
 
 /// Predicates - These are extra conditionals which are turned into instruction
 /// selector matching code. Currently each predicate is just a string.
 class Predicate<string cond> {
   string CondString = cond;
-  
+
   /// AssemblerMatcherPredicate - If this feature can be used by the assembler
   /// matcher, this is true.  Targets should set this by inheriting their
   /// feature from the AssemblerPredicate class in addition to Predicate.
@@ -267,9 +275,9 @@ class Requires<list<Predicate> preds> {
   list<Predicate> Predicates = preds;
 }
 
-/// ops definition - This is just a simple marker used to identify the operands
-/// list for an instruction. outs and ins are identical both syntatically and
-/// semantically, they are used to define def operands and use operands to
+/// ops definition - This is just a simple marker used to identify the operand
+/// list for an instruction. outs and ins are identical both syntactically and
+/// semanticallyr; they are used to define def operands and use operands to
 /// improve readibility. This should be used like this:
 ///     (outs R32:$dst), (ins R32:$src1, R32:$src2) or something similar.
 def ops;
@@ -331,18 +339,26 @@ class AsmOperandClass {
   /// signature should be:
   ///   void addFooOperands(MCInst &Inst, unsigned N) const;
   string RenderMethod = ?;
+
+  /// The name of the method on the target specific operand to call to custom
+  /// handle the operand parsing. This is useful when the operands do not relate
+  /// to immediates or registers and are very instruction specific (as flags to
+  /// set in a processor register, coprocessor number, ...).
+  string ParserMethod = ?;
 }
 
 def ImmAsmOperand : AsmOperandClass {
   let Name = "Imm";
 }
-   
+
 /// Operand Types - These provide the built-in operand types that may be used
 /// by a target.  Targets can optionally provide their own operand types as
 /// needed, though this should not be needed for RISC targets.
 class Operand<ValueType ty> {
   ValueType Type = ty;
   string PrintMethod = "printOperand";
+  string EncoderMethod = "";
+  string DecoderMethod = "";
   string AsmOperandLowerMethod = ?;
   dag MIOperandInfo = (ops);
 
@@ -414,6 +430,7 @@ def INLINEASM : Instruction {
   let OutOperandList = (outs);
   let InOperandList = (ins variable_ops);
   let AsmString = "";
+  let neverHasSideEffects = 1;  // Note side effect is encoded in an operand.
 }
 def PROLOG_LABEL : Instruction {
   let OutOperandList = (outs);
@@ -480,7 +497,7 @@ def DBG_VALUE : Instruction {
   let OutOperandList = (outs);
   let InOperandList = (ins variable_ops);
   let AsmString = "DBG_VALUE";
-  let isAsCheapAsAMove = 1;
+  let neverHasSideEffects = 1;
 }
 def REG_SEQUENCE : Instruction {
   let OutOperandList = (outs unknown:$dst);
@@ -511,9 +528,9 @@ class AsmParser {
   // name.
   string AsmParserClassName  = "AsmParser";
 
-  // AsmParserInstCleanup - If non-empty, this is the name of a custom function on the
-  // AsmParser class to call on every matched instruction. This can be used to
-  // perform target specific instruction post-processing.
+  // AsmParserInstCleanup - If non-empty, this is the name of a custom member
+  // function of the AsmParser class to call on every matched instruction.
+  // This can be used to perform target specific instruction post-processing.
   string AsmParserInstCleanup  = "";
 
   // Variant - AsmParsers can be of multiple different variants.  Variants are
@@ -562,7 +579,7 @@ class AssemblerPredicate {
 class MnemonicAlias<string From, string To> {
   string FromMnemonic = From;
   string ToMnemonic = To;
-  
+
   // Predicates - Predicates that must be true for this remapping to happen.
   list<Predicate> Predicates = [];
 }
@@ -570,12 +587,11 @@ class MnemonicAlias<string From, string To> {
 /// InstAlias - This defines an alternate assembly syntax that is allowed to
 /// match an instruction that has a different (more canonical) assembly
 /// representation.
-class InstAlias<dag Outs, dag Ins, string Asm, dag Result> {
-  dag OutOperandList = Outs;   // An dag containing the MI def operand list.
-  dag InOperandList = Ins;     // An dag containing the MI use operand list.
+class InstAlias<string Asm, dag Result, bit Emit = 0b1> {
   string AsmString = Asm;      // The .s format to match the instruction with.
   dag ResultInst = Result;     // The MCInst to generate.
-  
+  bit EmitAlias = Emit;        // Emit the alias instead of what's aliased.
+
   // Predicates - Predicates that must be true for this to match.
   list<Predicate> Predicates = [];
 }
@@ -600,15 +616,15 @@ class AsmWriter {
   // will specify which alternative to use.  For example "{x|y|z}" with Variant
   // == 1, will expand to "y".
   int Variant = 0;
-  
-  
+
+
   // FirstOperandColumn/OperandSpacing - If the assembler syntax uses a columnar
   // layout, the asmwriter can actually generate output in this columns (in
   // verbose-asm mode).  These two values indicate the width of the first column
   // (the "opcode" area) and the width to reserve for subsequent operands.  When
   // verbose asm mode is enabled, operands will be indented to respect this.
   int FirstOperandColumn = -1;
-  
+
   // OperandSpacing - Space between operand columns.
   int OperandSpacing = -1;
 
@@ -643,15 +659,15 @@ class SubtargetFeature<string n, string a,  string v, string d,
   // appropriate target chip.
   //
   string Name = n;
-  
+
   // Attribute - Attribute to be set by feature.
   //
   string Attribute = a;
-  
+
   // Value - Value the attribute to be set to by feature.
   //
   string Value = v;
-  
+
   // Desc - Feature description.  Used by command line (-mattr=) to display help
   // information.
   //
@@ -673,12 +689,12 @@ class Processor<string n, ProcessorItineraries pi, list<SubtargetFeature> f> {
   // appropriate target chip.
   //
   string Name = n;
-  
+
   // ProcItin - The scheduling information for the target processor.
   //
   ProcessorItineraries ProcItin = pi;
-  
-  // Features - list of 
+
+  // Features - list of
   list<SubtargetFeature> Features = f;
 }
 

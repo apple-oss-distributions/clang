@@ -29,7 +29,6 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
-#include <set>
 using namespace llvm;
 
 STATISTIC(NumInlined, "Number of functions inlined");
@@ -52,7 +51,8 @@ Inliner::Inliner(char &ID)
   : CallGraphSCCPass(ID), InlineThreshold(InlineLimit) {}
 
 Inliner::Inliner(char &ID, int Threshold) 
-  : CallGraphSCCPass(ID), InlineThreshold(Threshold) {}
+  : CallGraphSCCPass(ID), InlineThreshold(InlineLimit.getNumOccurrences() > 0 ?
+                                          InlineLimit : Threshold) {}
 
 /// getAnalysisUsage - For this class, we declare that we require and preserve
 /// the call graph.  If the derived class implements this method, it should
@@ -167,19 +167,21 @@ static bool InlineCallIfPossible(CallSite CS, InlineFunctionInfo &IFI,
       
       // Otherwise, we *can* reuse it, RAUW AI into AvailableAlloca and declare
       // success!
-      DEBUG(dbgs() << "    ***MERGED ALLOCA: " << *AI);
+      DEBUG(dbgs() << "    ***MERGED ALLOCA: " << *AI << "\n\t\tINTO: "
+                   << *AvailableAlloca << '\n');
       
       AI->replaceAllUsesWith(AvailableAlloca);
       AI->eraseFromParent();
       MergedAwayAlloca = true;
       ++NumMergedAllocas;
+      IFI.StaticAllocas[AllocaNo] = 0;
       break;
     }
 
     // If we already nuked the alloca, we're done with it.
     if (MergedAwayAlloca)
       continue;
-
+    
     // If we were unable to merge away the alloca either because there are no
     // allocas of the right type available or because we reused them all
     // already, remember that this alloca came from an inlined function and mark
@@ -249,20 +251,25 @@ bool Inliner::shouldInline(CallSite CS) {
   if (Caller->hasLocalLinkage()) {
     int TotalSecondaryCost = 0;
     bool outerCallsFound = false;
-    bool allOuterCallsWillBeInlined = true;
-    bool someOuterCallWouldNotBeInlined = false;
+    // This bool tracks what happens if we do NOT inline C into B.
+    bool callerWillBeRemoved = true;
+    // This bool tracks what happens if we DO inline C into B.
+    bool inliningPreventsSomeOuterInline = false;
     for (Value::use_iterator I = Caller->use_begin(), E =Caller->use_end(); 
          I != E; ++I) {
       CallSite CS2(*I);
 
       // If this isn't a call to Caller (it could be some other sort
-      // of reference) skip it.
-      if (!CS2 || CS2.getCalledFunction() != Caller)
+      // of reference) skip it.  Such references will prevent the caller
+      // from being removed.
+      if (!CS2 || CS2.getCalledFunction() != Caller) {
+        callerWillBeRemoved = false;
         continue;
+      }
 
       InlineCost IC2 = getInlineCost(CS2);
       if (IC2.isNever())
-        allOuterCallsWillBeInlined = false;
+        callerWillBeRemoved = false;
       if (IC2.isAlways() || IC2.isNever())
         continue;
 
@@ -272,14 +279,14 @@ bool Inliner::shouldInline(CallSite CS) {
       float FudgeFactor2 = getInlineFudgeFactor(CS2);
 
       if (Cost2 >= (int)(CurrentThreshold2 * FudgeFactor2))
-        allOuterCallsWillBeInlined = false;
+        callerWillBeRemoved = false;
 
       // See if we have this case.  We subtract off the penalty
       // for the call instruction, which we would be deleting.
       if (Cost2 < (int)(CurrentThreshold2 * FudgeFactor2) &&
           Cost2 + Cost - (InlineConstants::CallPenalty + 1) >= 
                 (int)(CurrentThreshold2 * FudgeFactor2)) {
-        someOuterCallWouldNotBeInlined = true;
+        inliningPreventsSomeOuterInline = true;
         TotalSecondaryCost += Cost2;
       }
     }
@@ -287,10 +294,10 @@ bool Inliner::shouldInline(CallSite CS) {
     // one is set very low by getInlineCost, in anticipation that Caller will
     // be removed entirely.  We did not account for this above unless there
     // is only one caller of Caller.
-    if (allOuterCallsWillBeInlined && Caller->use_begin() != Caller->use_end())
+    if (callerWillBeRemoved && Caller->use_begin() != Caller->use_end())
       TotalSecondaryCost += InlineConstants::LastCallToStaticBonus;
 
-    if (outerCallsFound && someOuterCallWouldNotBeInlined && 
+    if (outerCallsFound && inliningPreventsSomeOuterInline &&
         TotalSecondaryCost < Cost) {
       DEBUG(dbgs() << "    NOT Inlining: " << *CS.getInstruction() << 
            " Cost = " << Cost << 
@@ -416,7 +423,7 @@ bool Inliner::runOnSCC(CallGraphSCC &SCC) {
       
         // If this call site was obtained by inlining another function, verify
         // that the include path for the function did not include the callee
-        // itself.  If so, we'd be recursively inlinling the same function,
+        // itself.  If so, we'd be recursively inlining the same function,
         // which would provide the same callsites, which would cause us to
         // infinitely inline.
         int InlineHistoryID = CallSites[CSi].second;

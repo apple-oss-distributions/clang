@@ -17,6 +17,7 @@
 #include "llvm/Assembly/Writer.h"
 #include "llvm/LLVMContext.h"
 #include "llvm/Metadata.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/SCCIterator.h"
@@ -27,7 +28,7 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Threading.h"
+#include "llvm/Support/Threading.h"
 #include <algorithm>
 #include <cstdarg>
 using namespace llvm;
@@ -460,7 +461,7 @@ bool FunctionType::isValidArgumentType(const Type *ArgTy) {
 }
 
 FunctionType::FunctionType(const Type *Result,
-                           const std::vector<const Type*> &Params,
+                           ArrayRef<const Type*> Params,
                            bool IsVarArgs)
   : DerivedType(Result->getContext(), FunctionTyID), isVarArgs(IsVarArgs) {
   ContainedTys = reinterpret_cast<PATypeHandle*>(this+1);
@@ -483,7 +484,7 @@ FunctionType::FunctionType(const Type *Result,
 }
 
 StructType::StructType(LLVMContext &C, 
-                       const std::vector<const Type*> &Types, bool isPacked)
+                       ArrayRef<const Type*> Types, bool isPacked)
   : CompositeType(C, StructTyID) {
   ContainedTys = reinterpret_cast<PATypeHandle*>(this + 1);
   NumContainedTys = Types.size();
@@ -838,7 +839,7 @@ FunctionValType FunctionValType::get(const FunctionType *FT) {
 
 // FunctionType::get - The factory function for the FunctionType class...
 FunctionType *FunctionType::get(const Type *ReturnType,
-                                const std::vector<const Type*> &Params,
+                                ArrayRef<const Type*> Params,
                                 bool isVarArg) {
   FunctionValType VT(ReturnType, Params, isVarArg);
   FunctionType *FT = 0;
@@ -915,7 +916,7 @@ bool VectorType::isValidElementType(const Type *ElemTy) {
 //
 
 StructType *StructType::get(LLVMContext &Context,
-                            const std::vector<const Type*> &ETypes, 
+                            ArrayRef<const Type*> ETypes, 
                             bool isPacked) {
   StructValType STV(ETypes, isPacked);
   StructType *ST = 0;
@@ -1103,7 +1104,7 @@ void DerivedType::refineAbstractTypeTo(const Type *NewType) {
   while (!AbstractTypeUsers.empty() && NewTy != this) {
     AbstractTypeUser *User = AbstractTypeUsers.back();
 
-    unsigned OldSize = AbstractTypeUsers.size(); OldSize=OldSize;
+    unsigned OldSize = AbstractTypeUsers.size(); (void)OldSize;
 #ifdef DEBUG_MERGE_TYPES
     DEBUG(dbgs() << " REFINING user " << OldSize-1 << "[" << (void*)User
                  << "] of abstract type [" << (void*)this << " "
@@ -1130,7 +1131,7 @@ void DerivedType::notifyUsesThatTypeBecameConcrete() {
   DEBUG(dbgs() << "typeIsREFINED type: " << (void*)this << " " << *this <<"\n");
 #endif
 
-  unsigned OldSize = AbstractTypeUsers.size(); OldSize=OldSize;
+  unsigned OldSize = AbstractTypeUsers.size(); (void)OldSize;
   while (!AbstractTypeUsers.empty()) {
     AbstractTypeUser *ATU = AbstractTypeUsers.back();
     ATU->typeBecameConcrete(this);

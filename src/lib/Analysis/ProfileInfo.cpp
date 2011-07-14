@@ -309,9 +309,9 @@ void ProfileInfoT<Function,BasicBlock>::
   removeEdge(oldedge);
 }
 
-/// Replaces all occurences of RmBB in the ProfilingInfo with DestBB.
+/// Replaces all occurrences of RmBB in the ProfilingInfo with DestBB.
 /// This checks all edges of the function the blocks reside in and replaces the
-/// occurences of RmBB with DestBB.
+/// occurrences of RmBB with DestBB.
 template<>
 void ProfileInfoT<Function,BasicBlock>::
         replaceAllUses(const BasicBlock *RmBB, const BasicBlock *DestBB) {
@@ -812,7 +812,7 @@ void ProfileInfoT<Function,BasicBlock>::repair(const Function *F) {
       }
       if (iw < 0) continue;
 
-      // Check the recieving end of the path if it can handle the flow.
+      // Check the receiving end of the path if it can handle the flow.
       double ow = getExecutionCount(Dest);
       Processed.clear();
       for (succ_const_iterator NBB = succ_begin(BB), End = succ_end(BB);
@@ -889,7 +889,7 @@ void ProfileInfoT<Function,BasicBlock>::repair(const Function *F) {
     FI = Unvisited.begin(), FE = Unvisited.end();
     while(FI != FE && !FoundPath) {
       const BasicBlock *BB = *FI; ++FI;
-      const BasicBlock *Dest;
+      const BasicBlock *Dest = 0;
       Path P;
       bool BackEdgeFound = false;
       for (const_pred_iterator NBB = pred_begin(BB), End = pred_end(BB);

@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/ASTConsumers.h"
-#include "clang/Frontend/DocumentXML.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/FileManager.h"
@@ -24,7 +23,7 @@
 #include "llvm/Module.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Path.h"
 using namespace clang;
 
 //===----------------------------------------------------------------------===//
@@ -49,39 +48,6 @@ namespace {
 
 ASTConsumer *clang::CreateASTPrinter(llvm::raw_ostream* out) {
   return new ASTPrinter(out);
-}
-
-//===----------------------------------------------------------------------===//
-/// ASTPrinterXML - XML-printer of ASTs
-
-namespace {
-  class ASTPrinterXML : public ASTConsumer {
-    DocumentXML         Doc;
-
-  public:
-    ASTPrinterXML(llvm::raw_ostream& o) : Doc("CLANG_XML", o) {}
-
-    void Initialize(ASTContext &Context) {
-      Doc.initialize(Context);
-    }
-
-    virtual void HandleTranslationUnit(ASTContext &Ctx) {
-      Doc.addSubNode("TranslationUnit");
-      for (DeclContext::decl_iterator
-             D = Ctx.getTranslationUnitDecl()->decls_begin(),
-             DEnd = Ctx.getTranslationUnitDecl()->decls_end();
-           D != DEnd;
-           ++D)
-        Doc.PrintDecl(*D);
-      Doc.toParent();
-      Doc.finalize();
-    }
-  };
-} // end anonymous namespace
-
-
-ASTConsumer *clang::CreateASTPrinterXML(llvm::raw_ostream* out) {
-  return new ASTPrinterXML(out ? *out : llvm::outs());
 }
 
 ASTConsumer *clang::CreateASTDumper() {
@@ -354,13 +320,24 @@ void DeclContextPrinter::PrintDeclContext(const DeclContext* DC,
       PrintDeclContext(DC, Indentation+2);
       break;
     }
+    case Decl::IndirectField: {
+      IndirectFieldDecl* IFD = cast<IndirectFieldDecl>(*I);
+      Out << "<IndirectField> " << IFD << '\n';
+      break;
+    }
+    case Decl::Label: {
+      LabelDecl *LD = cast<LabelDecl>(*I);
+      Out << "<Label> " << LD << '\n';
+      break;
+    }
     case Decl::Field: {
-      FieldDecl* FD = cast<FieldDecl>(*I);
+      FieldDecl *FD = cast<FieldDecl>(*I);
       Out << "<field> " << FD << '\n';
       break;
     }
-    case Decl::Typedef: {
-      TypedefDecl* TD = cast<TypedefDecl>(*I);
+    case Decl::Typedef:
+    case Decl::TypeAlias: {
+      TypedefNameDecl* TD = cast<TypedefNameDecl>(*I);
       Out << "<typedef> " << TD << '\n';
       break;
     }
@@ -423,29 +400,21 @@ ASTConsumer *clang::CreateDeclContextPrinter() {
 }
 
 //===----------------------------------------------------------------------===//
-/// InheritanceViewer - C++ Inheritance Visualization
+/// ASTDumperXML - In-depth XML dumping.
 
 namespace {
-class InheritanceViewer : public ASTConsumer {
-  const std::string clsname;
+class ASTDumpXML : public ASTConsumer {
+  llvm::raw_ostream &OS;
+
 public:
-  InheritanceViewer(const std::string& cname) : clsname(cname) {}
+  ASTDumpXML(llvm::raw_ostream &OS) : OS(OS) {}
 
   void HandleTranslationUnit(ASTContext &C) {
-    for (ASTContext::type_iterator I=C.types_begin(),E=C.types_end(); I!=E; ++I)
-      if (RecordType *T = dyn_cast<RecordType>(*I)) {
-        if (CXXRecordDecl *D = dyn_cast<CXXRecordDecl>(T->getDecl())) {
-          // FIXME: This lookup needs to be generalized to handle namespaces and
-          // (when we support them) templates.
-          if (D->getNameAsString() == clsname) {
-            D->viewInheritance(C);
-          }
-        }
-      }
-  }
+    C.getTranslationUnitDecl()->dumpXML(OS);
+  }  
 };
 }
 
-ASTConsumer *clang::CreateInheritanceViewer(const std::string& clsname) {
-  return new InheritanceViewer(clsname);
+ASTConsumer *clang::CreateASTDumperXML(llvm::raw_ostream &OS) {
+  return new ASTDumpXML(OS);
 }

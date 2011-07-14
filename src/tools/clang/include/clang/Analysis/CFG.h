@@ -19,22 +19,27 @@
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/ADT/OwningPtr.h"
+#include "llvm/ADT/DenseMap.h"
 #include "clang/Analysis/Support/BumpVector.h"
 #include "clang/Basic/SourceLocation.h"
 #include <cassert>
+#include <iterator>
 
 namespace llvm {
   class raw_ostream;
 }
 
 namespace clang {
+  class CXXDestructorDecl;
   class Decl;
   class Stmt;
   class Expr;
   class FieldDecl;
   class VarDecl;
-  class CXXBaseOrMemberInitializer;
+  class CXXCtorInitializer;
   class CXXBaseSpecifier;
+  class CXXBindTemporaryExpr;
   class CFG;
   class PrinterHelper;
   class LangOptions;
@@ -45,46 +50,45 @@ class CFGElement {
 public:
   enum Kind {
     // main kind
+    Invalid,
     Statement,
-    StatementAsLValue,
     Initializer,
-    Dtor,
     // dtor kind
     AutomaticObjectDtor,
     BaseDtor,
     MemberDtor,
     TemporaryDtor,
-    DTOR_BEGIN = AutomaticObjectDtor
+    DTOR_BEGIN = AutomaticObjectDtor,
+    DTOR_END = TemporaryDtor
   };
 
 protected:
-  // The int bits are used to mark the main kind.
+  // The int bits are used to mark the kind.
   llvm::PointerIntPair<void *, 2> Data1;
-  // The int bits are used to mark the dtor kind.
   llvm::PointerIntPair<void *, 2> Data2;
 
-  CFGElement(void *Ptr, unsigned Int) : Data1(Ptr, Int) {}
-  CFGElement(void *Ptr1, unsigned Int1, void *Ptr2, unsigned Int2)
-      : Data1(Ptr1, Int1), Data2(Ptr2, Int2) {}
+  CFGElement(Kind kind, const void *Ptr1, const void *Ptr2 = 0)
+    : Data1(const_cast<void*>(Ptr1), ((unsigned) kind) & 0x3),
+      Data2(const_cast<void*>(Ptr2), (((unsigned) kind) >> 2) & 0x3) {}  
 
 public:
   CFGElement() {}
 
-  Kind getKind() const { return static_cast<Kind>(Data1.getInt()); }
-
-  Kind getDtorKind() const {
-    assert(getKind() == Dtor);
-    return static_cast<Kind>(Data2.getInt() + DTOR_BEGIN);
+  Kind getKind() const { 
+    unsigned x = Data2.getInt();
+    x <<= 2;
+    x |= Data1.getInt();
+    return (Kind) x;
   }
-
-  bool isValid() const { return Data1.getPointer(); }
+    
+  bool isValid() const { return getKind() != Invalid; }
 
   operator bool() const { return isValid(); }
-
-  template<class ElemTy> ElemTy getAs() const {
+  
+  template<class ElemTy> const ElemTy *getAs() const {
     if (llvm::isa<ElemTy>(this))
-      return *static_cast<const ElemTy*>(this);
-    return ElemTy();
+      return static_cast<const ElemTy*>(this);
+    return 0;
   }
 
   static bool classof(const CFGElement *E) { return true; }
@@ -92,19 +96,12 @@ public:
 
 class CFGStmt : public CFGElement {
 public:
-  CFGStmt() {}
-  CFGStmt(Stmt *S, bool asLValue) : CFGElement(S, asLValue) {}
+  CFGStmt(Stmt *S) : CFGElement(Statement, S) {}
 
   Stmt *getStmt() const { return static_cast<Stmt *>(Data1.getPointer()); }
 
-  operator Stmt*() const { return getStmt(); }
-
-  bool asLValue() const { 
-    return static_cast<Kind>(Data1.getInt()) == StatementAsLValue;
-  }
-
   static bool classof(const CFGElement *E) {
-    return E->getKind() == Statement || E->getKind() == StatementAsLValue;
+    return E->getKind() == Statement;
   }
 };
 
@@ -112,14 +109,12 @@ public:
 /// constructor's initialization list.
 class CFGInitializer : public CFGElement {
 public:
-  CFGInitializer() {}
-  CFGInitializer(CXXBaseOrMemberInitializer* I)
-      : CFGElement(I, Initializer) {}
+  CFGInitializer(CXXCtorInitializer *initializer)
+      : CFGElement(Initializer, initializer) {}
 
-  CXXBaseOrMemberInitializer* getInitializer() const {
-    return static_cast<CXXBaseOrMemberInitializer*>(Data1.getPointer());
+  CXXCtorInitializer* getInitializer() const {
+    return static_cast<CXXCtorInitializer*>(Data1.getPointer());
   }
-  operator CXXBaseOrMemberInitializer*() const { return getInitializer(); }
 
   static bool classof(const CFGElement *E) {
     return E->getKind() == Initializer;
@@ -130,14 +125,18 @@ public:
 /// by compiler on various occasions.
 class CFGImplicitDtor : public CFGElement {
 protected:
-  CFGImplicitDtor(unsigned K, void* P, void* S)
-      : CFGElement(P, Dtor, S, K - DTOR_BEGIN) {}
+  CFGImplicitDtor(Kind kind, const void *data1, const void *data2 = 0) 
+    : CFGElement(kind, data1, data2) {
+    assert(kind >= DTOR_BEGIN && kind <= DTOR_END);    
+  }
 
 public:
-  CFGImplicitDtor() {}
+  const CXXDestructorDecl *getDestructorDecl(ASTContext &astContext) const;
+  bool isNoReturn(ASTContext &astContext) const;
 
   static bool classof(const CFGElement *E) {
-    return E->getKind() == Dtor;
+    Kind kind = E->getKind();
+    return kind >= DTOR_BEGIN && kind <= DTOR_END;
   }
 };
 
@@ -146,21 +145,20 @@ public:
 /// of leaving its local scope.
 class CFGAutomaticObjDtor: public CFGImplicitDtor {
 public:
-  CFGAutomaticObjDtor() {}
-  CFGAutomaticObjDtor(VarDecl* VD, Stmt* S)
-      : CFGImplicitDtor(AutomaticObjectDtor, VD, S) {}
+  CFGAutomaticObjDtor(const VarDecl *var, const Stmt *stmt)
+      : CFGImplicitDtor(AutomaticObjectDtor, var, stmt) {}
 
-  VarDecl* getVarDecl() const {
+  const VarDecl *getVarDecl() const {
     return static_cast<VarDecl*>(Data1.getPointer());
   }
 
   // Get statement end of which triggered the destructor call.
-  Stmt* getTriggerStmt() const {
+  const Stmt *getTriggerStmt() const {
     return static_cast<Stmt*>(Data2.getPointer());
   }
 
-  static bool classof(const CFGElement *E) {
-    return E->getKind() == Dtor && E->getDtorKind() == AutomaticObjectDtor;
+  static bool classof(const CFGElement *elem) {
+    return elem->getKind() == AutomaticObjectDtor;
   }
 };
 
@@ -168,16 +166,15 @@ public:
 /// base object in destructor.
 class CFGBaseDtor : public CFGImplicitDtor {
 public:
-  CFGBaseDtor() {}
-  CFGBaseDtor(const CXXBaseSpecifier *BS)
-      : CFGImplicitDtor(BaseDtor, const_cast<CXXBaseSpecifier*>(BS), NULL) {}
+  CFGBaseDtor(const CXXBaseSpecifier *base)
+      : CFGImplicitDtor(BaseDtor, base) {}
 
   const CXXBaseSpecifier *getBaseSpecifier() const {
     return static_cast<const CXXBaseSpecifier*>(Data1.getPointer());
   }
 
   static bool classof(const CFGElement *E) {
-    return E->getKind() == Dtor && E->getDtorKind() == BaseDtor;
+    return E->getKind() == BaseDtor;
   }
 };
 
@@ -185,23 +182,31 @@ public:
 /// member object in destructor.
 class CFGMemberDtor : public CFGImplicitDtor {
 public:
-  CFGMemberDtor() {}
-  CFGMemberDtor(FieldDecl *FD)
-      : CFGImplicitDtor(MemberDtor, FD, NULL) {}
+  CFGMemberDtor(const FieldDecl *field)
+      : CFGImplicitDtor(MemberDtor, field, 0) {}
 
-  FieldDecl *getFieldDecl() const {
-    return static_cast<FieldDecl*>(Data1.getPointer());
+  const FieldDecl *getFieldDecl() const {
+    return static_cast<const FieldDecl*>(Data1.getPointer());
   }
 
   static bool classof(const CFGElement *E) {
-    return E->getKind() == Dtor && E->getDtorKind() == MemberDtor;
+    return E->getKind() == MemberDtor;
   }
 };
 
+/// CFGTemporaryDtor - Represents C++ object destructor implicitly generated
+/// at the end of full expression for temporary object.
 class CFGTemporaryDtor : public CFGImplicitDtor {
 public:
+  CFGTemporaryDtor(CXXBindTemporaryExpr *expr)
+      : CFGImplicitDtor(TemporaryDtor, expr, 0) {}
+
+  const CXXBindTemporaryExpr *getBindTemporaryExpr() const {
+    return static_cast<const CXXBindTemporaryExpr *>(Data1.getPointer());
+  }
+
   static bool classof(const CFGElement *E) {
-    return E->getKind() == Dtor && E->getDtorKind() == TemporaryDtor;
+    return E->getKind() == TemporaryDtor;
   }
 };
 
@@ -258,6 +263,8 @@ public:
 ///       if            Then Block;  Else Block
 ///     ? operator      LHS expression;  RHS expression
 ///     &&, ||          expression that uses result of && or ||, RHS
+///
+/// But note that any of that may be NULL in case of optimized-out edges.
 ///
 class CFGBlock {
   class ElementList {
@@ -463,8 +470,6 @@ public:
 
   const Stmt *getLoopTarget() const { return LoopTarget; }
 
-  bool hasBinaryBranchTerminator() const;
-
   Stmt* getLabel() { return Label; }
   const Stmt* getLabel() const { return Label; }
 
@@ -480,12 +485,13 @@ public:
     Succs.push_back(Block, C);
   }
   
-  void appendStmt(Stmt* Statement, BumpVectorContext &C, bool asLValue) {
-    Elements.push_back(CFGStmt(Statement, asLValue), C);
+  void appendStmt(Stmt* statement, BumpVectorContext &C) {
+    Elements.push_back(CFGStmt(statement), C);
   }
 
-  void appendInitializer(CXXBaseOrMemberInitializer *I, BumpVectorContext& C) {
-    Elements.push_back(CFGInitializer(I), C);
+  void appendInitializer(CXXCtorInitializer *initializer,
+                        BumpVectorContext& C) {
+    Elements.push_back(CFGInitializer(initializer), C);
   }
 
   void appendBaseDtor(const CXXBaseSpecifier *BS, BumpVectorContext &C) {
@@ -494,6 +500,10 @@ public:
 
   void appendMemberDtor(FieldDecl *FD, BumpVectorContext &C) {
     Elements.push_back(CFGMemberDtor(FD), C);
+  }
+  
+  void appendTemporaryDtor(CXXBindTemporaryExpr *E, BumpVectorContext &C) {
+    Elements.push_back(CFGTemporaryDtor(E), C);
   }
 
   // Destructors must be inserted in reversed order. So insertion is in two
@@ -524,13 +534,16 @@ public:
 
   class BuildOptions {
   public:
+    typedef llvm::DenseMap<const Stmt *, const CFGBlock*> ForcedBlkExprs;
+    ForcedBlkExprs **forcedBlkExprs;    
+
     bool PruneTriviallyFalseEdges:1;
     bool AddEHEdges:1;
     bool AddInitializers:1;
     bool AddImplicitDtors:1;
 
     BuildOptions()
-        : PruneTriviallyFalseEdges(true)
+        : forcedBlkExprs(0), PruneTriviallyFalseEdges(true)
         , AddEHEdges(false)
         , AddInitializers(false)
         , AddImplicitDtors(false) {}
@@ -539,7 +552,7 @@ public:
   /// buildCFG - Builds a CFG from an AST.  The responsibility to free the
   ///   constructed CFG belongs to the caller.
   static CFG* buildCFG(const Decl *D, Stmt* AST, ASTContext *C,
-      BuildOptions BO = BuildOptions());
+                       const BuildOptions &BO);
 
   /// createBlock - Create a new block in the CFG.  The CFG owns the block;
   ///  the caller should not directly free it.
@@ -594,8 +607,8 @@ public:
     for (const_iterator I=begin(), E=end(); I != E; ++I)
       for (CFGBlock::const_iterator BI=(*I)->begin(), BE=(*I)->end();
            BI != BE; ++BI) {
-        if (CFGStmt S = BI->getAs<CFGStmt>())
-          O(S);
+        if (const CFGStmt *stmt = BI->getAs<CFGStmt>())
+          O(stmt->getStmt());
       }
   }
 
@@ -611,7 +624,10 @@ public:
     operator unsigned() const { assert(Idx >=0); return (unsigned) Idx; }
   };
 
-  bool          isBlkExpr(const Stmt* S) { return getBlkExprNum(S); }
+  bool isBlkExpr(const Stmt* S) { return getBlkExprNum(S); }
+  bool isBlkExpr(const Stmt *S) const {
+    return const_cast<CFG*>(this)->isBlkExpr(S);
+  }
   BlkExprNumTy  getBlkExprNum(const Stmt* S);
   unsigned      getNumBlkExprs();
 

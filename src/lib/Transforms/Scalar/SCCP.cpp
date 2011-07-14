@@ -481,6 +481,19 @@ private:
     }
   }
 
+  /// InsertInOverdefinedPHIs - Insert an entry in the UsersOfOverdefinedPHIS
+  /// map for I and PN, but if one is there already, do not create another.
+  /// (Duplicate entries do not break anything directly, but can lead to
+  /// exponential growth of the table in rare cases.)
+  void InsertInOverdefinedPHIs(Instruction *I, PHINode *PN) {
+    std::multimap<PHINode*, Instruction*>::iterator J, E;
+    tie(J, E) = UsersOfOverdefinedPHIs.equal_range(PN);
+    for (; J != E; ++J)
+      if (J->second == I)
+        return;
+    UsersOfOverdefinedPHIs.insert(std::make_pair(PN, I));
+  }
+
 private:
   friend class InstVisitor<SCCPSolver>;
 
@@ -973,9 +986,9 @@ void SCCPSolver::visitBinaryOperator(Instruction &I) {
         if (Result.isConstant()) {
           markConstant(IV, &I, Result.getConstant());
           // Remember that this instruction is virtually using the PHI node
-          // operands.
-          UsersOfOverdefinedPHIs.insert(std::make_pair(PN1, &I));
-          UsersOfOverdefinedPHIs.insert(std::make_pair(PN2, &I));
+          // operands. 
+          InsertInOverdefinedPHIs(&I, PN1);
+          InsertInOverdefinedPHIs(&I, PN2);
           return;
         }
         
@@ -1056,8 +1069,8 @@ void SCCPSolver::visitCmpInst(CmpInst &I) {
           markConstant(&I, Result.getConstant());
           // Remember that this instruction is virtually using the PHI node
           // operands.
-          UsersOfOverdefinedPHIs.insert(std::make_pair(PN1, &I));
-          UsersOfOverdefinedPHIs.insert(std::make_pair(PN2, &I));
+          InsertInOverdefinedPHIs(&I, PN1);
+          InsertInOverdefinedPHIs(&I, PN2);
           return;
         }
         
@@ -1593,10 +1606,6 @@ namespace {
     // algorithm, and return true if the function was modified.
     //
     bool runOnFunction(Function &F);
-
-    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.setPreservesCFG();
-    }
   };
 } // end anonymous namespace
 
@@ -1980,7 +1989,7 @@ bool IPSCCP::runOnModule(Module &M) {
     ReturnsToZap[i]->setOperand(0, UndefValue::get(F->getReturnType()));
   }
     
-  // If we infered constant or undef values for globals variables, we can delete
+  // If we inferred constant or undef values for globals variables, we can delete
   // the global and any stores that remain to it.
   const DenseMap<GlobalVariable*, LatticeVal> &TG = Solver.getTrackedGlobals();
   for (DenseMap<GlobalVariable*, LatticeVal>::const_iterator I = TG.begin(),

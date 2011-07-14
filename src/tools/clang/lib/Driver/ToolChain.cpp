@@ -1,4 +1,4 @@
-//===--- ToolChain.cpp - Collections of tools for one platform ----------*-===//
+//===--- ToolChain.cpp - Collections of tools for one platform ------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -47,7 +47,7 @@ bool ToolChain::HasNativeLLVMSupport() const {
   return false;
 }
 
-/// getARMTargetCPU - Get the (LLVM) name of the ARM cpu we are targetting.
+/// getARMTargetCPU - Get the (LLVM) name of the ARM cpu we are targeting.
 //
 // FIXME: tblgen this.
 static const char *getARMTargetCPU(const ArgList &Args,
@@ -91,6 +91,8 @@ static const char *getARMTargetCPU(const ArgList &Args,
     return "arm1156t2-s";
   if (MArch == "armv7" || MArch == "armv7a" || MArch == "armv7-a")
     return "cortex-a8";
+  if (MArch == "armv7f" || MArch == "armv7-f")
+    return "cortex-a9-mp";
   if (MArch == "armv7r" || MArch == "armv7-r")
     return "cortex-r4";
   if (MArch == "armv7m" || MArch == "armv7-m")
@@ -101,6 +103,8 @@ static const char *getARMTargetCPU(const ArgList &Args,
     return "iwmmxt";
   if (MArch == "xscale")
     return "xscale";
+  if (MArch == "armv6m" || MArch == "armv6-m")
+    return "cortex-m0";
 
   // If all else failed, return the most base CPU LLVM supports.
   return "arm7tdmi";
@@ -137,6 +141,16 @@ static const char *getLLVMArchSuffixForARM(llvm::StringRef CPU) {
   if (CPU == "cortex-a8" || CPU == "cortex-a9")
     return "v7";
 
+  if (CPU == "cortex-a9-mp")
+    return "v7f";
+
+  if (CPU == "cortex-m3")
+    return "v7m";
+
+  if (CPU == "cortex-m0")
+    return "v6m";
+
+
   return "";
 }
 
@@ -156,7 +170,7 @@ std::string ToolChain::ComputeLLVMTriple(const ArgList &Args) const {
     llvm::StringRef Suffix =
       getLLVMArchSuffixForARM(getARMTargetCPU(Args, Triple));
     bool ThumbDefault =
-      (Suffix == "v7" && getTriple().getOS() == llvm::Triple::Darwin);
+      (Suffix.startswith("v7") && getTriple().getOS() == llvm::Triple::Darwin);
     std::string ArchName = "arm";
     if (Args.hasFlag(options::OPT_mthumb, options::OPT_mno_thumb, ThumbDefault))
       ArchName = "thumb";
@@ -168,10 +182,10 @@ std::string ToolChain::ComputeLLVMTriple(const ArgList &Args) const {
 }
 
 std::string ToolChain::ComputeEffectiveClangTriple(const ArgList &Args) const {
-  // Diagnose use of -mmacosx-version-min and -miphoneos-version-min on
-  // non-Darwin.
+  // Diagnose use of Darwin OS deployment target arguments on non-Darwin.
   if (Arg *A = Args.getLastArg(options::OPT_mmacosx_version_min_EQ,
-                               options::OPT_miphoneos_version_min_EQ))
+                               options::OPT_miphoneos_version_min_EQ,
+                               options::OPT_mios_simulator_version_min_EQ))
     getDriver().Diag(clang::diag::err_drv_clang_unsupported)
       << A->getAsString(Args);
 
@@ -198,7 +212,8 @@ void ToolChain::AddClangCXXStdlibIncludeArgs(const ArgList &Args,
 
   switch (Type) {
   case ToolChain::CST_Libcxx:
-    CmdArgs.push_back("-cxx-system-include");
+    CmdArgs.push_back("-nostdinc++");
+    CmdArgs.push_back("-cxx-isystem");
     CmdArgs.push_back("/usr/include/c++/v1");
     break;
 

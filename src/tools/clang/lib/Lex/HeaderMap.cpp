@@ -15,9 +15,10 @@
 #include "clang/Basic/FileManager.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include <cctype>
 #include <cstdio>
 using namespace clang;
 
@@ -75,14 +76,12 @@ static inline unsigned HashHMapKey(llvm::StringRef Str) {
 /// map.  If it doesn't look like a HeaderMap, it gives up and returns null.
 /// If it looks like a HeaderMap but is obviously corrupted, it puts a reason
 /// into the string error argument and returns null.
-const HeaderMap *HeaderMap::Create(const FileEntry *FE, FileManager &FM,
-                                   const FileSystemOptions &FSOpts) {
+const HeaderMap *HeaderMap::Create(const FileEntry *FE, FileManager &FM) {
   // If the file is too small to be a header map, ignore it.
   unsigned FileSize = FE->getSize();
   if (FileSize <= sizeof(HMapHeader)) return 0;
 
-  llvm::OwningPtr<const llvm::MemoryBuffer> FileBuffer(
-    FM.getBufferForFile(FE, FSOpts));
+  llvm::OwningPtr<const llvm::MemoryBuffer> FileBuffer(FM.getBufferForFile(FE));
   if (FileBuffer == 0) return 0;  // Unreadable file?
   const char *FileStart = FileBuffer->getBufferStart();
 
@@ -200,9 +199,8 @@ void HeaderMap::dump() const {
 
 /// LookupFile - Check to see if the specified relative filename is located in
 /// this HeaderMap.  If so, open it and return its FileEntry.
-const FileEntry *HeaderMap::LookupFile(llvm::StringRef Filename,
-                                       FileManager &FM,
-                                const FileSystemOptions &FileSystemOpts) const {
+const FileEntry *HeaderMap::LookupFile(
+    llvm::StringRef Filename, FileManager &FM) const {
   const HMapHeader &Hdr = getHeader();
   unsigned NumBuckets = getEndianAdjustedWord(Hdr.NumBuckets);
 
@@ -225,6 +223,6 @@ const FileEntry *HeaderMap::LookupFile(llvm::StringRef Filename,
     llvm::SmallString<1024> DestPath;
     DestPath += getString(B.Prefix);
     DestPath += getString(B.Suffix);
-    return FM.getFile(DestPath.begin(), DestPath.end(), FileSystemOpts);
+    return FM.getFile(DestPath.str());
   }
 }

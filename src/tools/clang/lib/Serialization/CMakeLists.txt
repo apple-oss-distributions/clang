@@ -1,9 +1,7 @@
-set(LLVM_NO_RTTI 1)
-
-set(LLVM_USED_LIBS clangFrontend)
+# TODO: This must need some dependencies, but it builds fine without them.
+#set(LLVM_USED_LIBS ???)
 
 add_clang_library(clangSerialization
-  GeneratePCH.cpp
   ASTCommon.cpp
   ASTReader.cpp
   ASTReaderDecl.cpp
@@ -11,6 +9,8 @@ add_clang_library(clangSerialization
   ASTWriter.cpp
   ASTWriterDecl.cpp
   ASTWriterStmt.cpp
+  ChainedIncludesSource.cpp
+  GeneratePCH.cpp
   )
 
 add_dependencies(clangSerialization

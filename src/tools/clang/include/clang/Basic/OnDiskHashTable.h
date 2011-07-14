@@ -15,10 +15,10 @@
 #define LLVM_CLANG_BASIC_ON_DISK_HASH_TABLE_H
 
 #include "llvm/Support/Allocator.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Host.h"
+#include "llvm/Support/Host.h"
 #include <cassert>
 #include <cstdlib>
 
@@ -320,7 +320,7 @@ public:
         InfoPtr->ReadKey((const unsigned char* const) Items, L.first);
 
       // If the key doesn't match just skip reading the value.
-      if (!Info::EqualKey(X, iKey)) {
+      if (!InfoPtr->EqualKey(X, iKey)) {
         Items += item_len;
         continue;
       }

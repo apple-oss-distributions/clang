@@ -19,8 +19,9 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/VectorExtras.h"
-#include <set>
 #include <map>
+#include <algorithm>
+#include <functional>
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -29,9 +30,10 @@ using namespace llvm;
 
 namespace {
 class DiagGroupParentMap {
+  RecordKeeper &Records;
   std::map<const Record*, std::vector<Record*> > Mapping;
 public:
-  DiagGroupParentMap() {
+  DiagGroupParentMap(RecordKeeper &records) : Records(records) {
     std::vector<Record*> DiagGroups
       = Records.getAllDerivedDefinitions("DiagGroup");
     for (unsigned i = 0, e = DiagGroups.size(); i != e; ++i) {
@@ -84,11 +86,12 @@ static std::string getDiagnosticCategory(const Record *R,
 
 namespace {
   class DiagCategoryIDMap {
+    RecordKeeper &Records;
     StringMap<unsigned> CategoryIDs;
     std::vector<std::string> CategoryStrings;
   public:
-    DiagCategoryIDMap() {
-      DiagGroupParentMap ParentInfo;
+    DiagCategoryIDMap(RecordKeeper &records) : Records(records) {
+      DiagGroupParentMap ParentInfo(Records);
       
       // The zero'th category is "".
       CategoryStrings.push_back("");
@@ -119,7 +122,6 @@ namespace {
 } // end anonymous namespace.
 
 
-
 //===----------------------------------------------------------------------===//
 // Warning Tables (.inc file) generation.
 //===----------------------------------------------------------------------===//
@@ -138,8 +140,8 @@ void ClangDiagsDefsEmitter::run(raw_ostream &OS) {
   const std::vector<Record*> &Diags =
     Records.getAllDerivedDefinitions("Diagnostic");
   
-  DiagCategoryIDMap CategoryIDs;
-  DiagGroupParentMap DGParentMap;
+  DiagCategoryIDMap CategoryIDs(Records);
+  DiagGroupParentMap DGParentMap(Records);
 
   for (unsigned i = 0, e = Diags.size(); i != e; ++i) {
     const Record &R = *Diags[i];
@@ -168,9 +170,23 @@ void ClangDiagsDefsEmitter::run(raw_ostream &OS) {
       OS << ", true";
     else
       OS << ", false";
-    
+
+    // Access control bit
+    if (R.getValueAsBit("AccessControl"))
+      OS << ", true";
+    else
+      OS << ", false";
+
     // Category number.
     OS << ", " << CategoryIDs.getID(getDiagnosticCategory(&R, DGParentMap));
+
+    // Brief
+    OS << ", \"";
+    OS.write_escaped(R.getValueAsString("Brief")) << '"';
+
+    // Explanation 
+    OS << ", \"";
+    OS.write_escaped(R.getValueAsString("Explanation")) << '"';
     OS << ")\n";
   }
 }
@@ -179,15 +195,17 @@ void ClangDiagsDefsEmitter::run(raw_ostream &OS) {
 // Warning Group Tables generation
 //===----------------------------------------------------------------------===//
 
+namespace {
 struct GroupInfo {
   std::vector<const Record*> DiagsInGroup;
   std::vector<std::string> SubGroups;
   unsigned IDNo;
 };
+} // end anonymous namespace.
 
 void ClangDiagGroupsEmitter::run(raw_ostream &OS) {
   // Compute a mapping from a DiagGroup to all of its parents.
-  DiagGroupParentMap DGParentMap;
+  DiagGroupParentMap DGParentMap(Records);
   
   // Invert the 1-[0/1] mapping of diags to group into a one to many mapping of
   // groups to diags in the group.
@@ -277,10 +295,56 @@ void ClangDiagGroupsEmitter::run(raw_ostream &OS) {
   OS << "#endif // GET_DIAG_TABLE\n\n";
   
   // Emit the category table next.
-  DiagCategoryIDMap CategoriesByID;
+  DiagCategoryIDMap CategoriesByID(Records);
   OS << "\n#ifdef GET_CATEGORY_TABLE\n";
   for (DiagCategoryIDMap::iterator I = CategoriesByID.begin(),
        E = CategoriesByID.end(); I != E; ++I)
     OS << "CATEGORY(\"" << *I << "\")\n";
   OS << "#endif // GET_CATEGORY_TABLE\n\n";
+}
+
+//===----------------------------------------------------------------------===//
+// Diagnostic name index generation
+//===----------------------------------------------------------------------===//
+
+namespace {
+struct RecordIndexElement
+{
+  RecordIndexElement() {}
+  explicit RecordIndexElement(Record const &R):
+    Name(R.getName()) {}
+  
+  std::string Name;
+};
+
+struct RecordIndexElementSorter :
+  public std::binary_function<RecordIndexElement, RecordIndexElement, bool> {
+  
+  bool operator()(RecordIndexElement const &Lhs,
+                  RecordIndexElement const &Rhs) const {
+    return Lhs.Name < Rhs.Name;
+  }
+  
+};
+
+} // end anonymous namespace.
+
+void ClangDiagsIndexNameEmitter::run(raw_ostream &OS) {
+  const std::vector<Record*> &Diags =
+    Records.getAllDerivedDefinitions("Diagnostic");
+  
+  std::vector<RecordIndexElement> Index;
+  Index.reserve(Diags.size());
+  for (unsigned i = 0, e = Diags.size(); i != e; ++i) {
+    const Record &R = *(Diags[i]);    
+    Index.push_back(RecordIndexElement(R));
+  }
+  
+  std::sort(Index.begin(), Index.end(), RecordIndexElementSorter());
+  
+  for (unsigned i = 0, e = Index.size(); i != e; ++i) {
+    const RecordIndexElement &R = Index[i];
+    
+    OS << "DIAG_NAME_INDEX(" << R.Name << ")\n";
+  }
 }

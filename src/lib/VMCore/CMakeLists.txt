@@ -9,6 +9,7 @@ add_llvm_library(LLVMCore
   Constants.cpp
   Core.cpp
   DebugLoc.cpp
+  DebugInfoProbe.cpp
   Dominators.cpp
   Function.cpp
   GVMaterializer.cpp
@@ -30,6 +31,7 @@ add_llvm_library(LLVMCore
   Type.cpp
   TypeSymbolTable.cpp
   Use.cpp
+  User.cpp
   Value.cpp
   ValueSymbolTable.cpp
   ValueTypes.cpp

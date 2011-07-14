@@ -24,11 +24,12 @@
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/Atomic.h"
 #include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Program.h"
+#include "llvm/Support/Program.h"
 #include <cstdlib>
 #include <cstdio>
 
@@ -44,31 +45,12 @@
 using namespace clang;
 using namespace clang::cxstring;
 
-namespace {
-  /// \brief Stored representation of a completion string.
-  ///
-  /// This is the representation behind a CXCompletionString.
-  class CXStoredCodeCompletionString : public CodeCompletionString {
-    unsigned Priority;
-    CXAvailabilityKind Availability;
-    
-  public:
-    CXStoredCodeCompletionString(unsigned Priority,
-                                 CXAvailabilityKind Availability) 
-      : Priority(Priority), Availability(Availability) { }
-    
-    unsigned getPriority() const { return Priority; }
-    CXAvailabilityKind getAvailability() const { return Availability; }
-  };
-}
-
 extern "C" {
 
 enum CXCompletionChunkKind
 clang_getCompletionChunkKind(CXCompletionString completion_string,
                              unsigned chunk_number) {
-  CXStoredCodeCompletionString *CCStr 
-    = (CXStoredCodeCompletionString *)completion_string;
+  CodeCompletionString *CCStr = (CodeCompletionString *)completion_string;
   if (!CCStr || chunk_number >= CCStr->size())
     return CXCompletionChunk_Text;
 
@@ -123,8 +105,7 @@ clang_getCompletionChunkKind(CXCompletionString completion_string,
 
 CXString clang_getCompletionChunkText(CXCompletionString completion_string,
                                       unsigned chunk_number) {
-  CXStoredCodeCompletionString *CCStr
-    = (CXStoredCodeCompletionString *)completion_string;
+  CodeCompletionString *CCStr = (CodeCompletionString *)completion_string;
   if (!CCStr || chunk_number >= CCStr->size())
     return createCXString((const char*)0);
 
@@ -164,8 +145,7 @@ CXString clang_getCompletionChunkText(CXCompletionString completion_string,
 CXCompletionString
 clang_getCompletionChunkCompletionString(CXCompletionString completion_string,
                                          unsigned chunk_number) {
-  CXStoredCodeCompletionString *CCStr 
-    = (CXStoredCodeCompletionString *)completion_string;
+  CodeCompletionString *CCStr = (CodeCompletionString *)completion_string;
   if (!CCStr || chunk_number >= CCStr->size())
     return 0;
 
@@ -202,28 +182,26 @@ clang_getCompletionChunkCompletionString(CXCompletionString completion_string,
 }
 
 unsigned clang_getNumCompletionChunks(CXCompletionString completion_string) {
-  CXStoredCodeCompletionString *CCStr
-    = (CXStoredCodeCompletionString *)completion_string;
+  CodeCompletionString *CCStr = (CodeCompletionString *)completion_string;
   return CCStr? CCStr->size() : 0;
 }
 
 unsigned clang_getCompletionPriority(CXCompletionString completion_string) {
-  CXStoredCodeCompletionString *CCStr
-    = (CXStoredCodeCompletionString *)completion_string;
+  CodeCompletionString *CCStr = (CodeCompletionString *)completion_string;
   return CCStr? CCStr->getPriority() : unsigned(CCP_Unlikely);
 }
   
 enum CXAvailabilityKind 
 clang_getCompletionAvailability(CXCompletionString completion_string) {
-  CXStoredCodeCompletionString *CCStr
-    = (CXStoredCodeCompletionString *)completion_string;
-  return CCStr? CCStr->getAvailability() : CXAvailability_Available;
+  CodeCompletionString *CCStr = (CodeCompletionString *)completion_string;
+  return CCStr? static_cast<CXAvailabilityKind>(CCStr->getAvailability())
+              : CXAvailability_Available;
 }
 
 /// \brief The CXCodeCompleteResults structure we allocate internally;
 /// the client only sees the initial CXCodeCompleteResults structure.
 struct AllocatedCXCodeCompleteResults : public CXCodeCompleteResults {
-  AllocatedCXCodeCompleteResults();
+  AllocatedCXCodeCompleteResults(const FileSystemOptions& FileSystemOpts);
   ~AllocatedCXCodeCompleteResults();
   
   /// \brief Diagnostics produced while performing code completion.
@@ -234,41 +212,52 @@ struct AllocatedCXCodeCompleteResults : public CXCodeCompleteResults {
   
   /// \brief Language options used to adjust source locations.
   LangOptions LangOpts;
-  
-  /// \brief File manager, used for diagnostics.
-  FileManager FileMgr;
 
   FileSystemOptions FileSystemOpts;
 
+  /// \brief File manager, used for diagnostics.
+  llvm::IntrusiveRefCntPtr<FileManager> FileMgr;
+
   /// \brief Source manager, used for diagnostics.
-  SourceManager SourceMgr;
+  llvm::IntrusiveRefCntPtr<SourceManager> SourceMgr;
   
   /// \brief Temporary files that should be removed once we have finished
   /// with the code-completion results.
   std::vector<llvm::sys::Path> TemporaryFiles;
 
-  /// \brief Temporary buffers that will be deleted once we have finished with the code-completion results.
+  /// \brief Temporary buffers that will be deleted once we have finished with
+  /// the code-completion results.
   llvm::SmallVector<const llvm::MemoryBuffer *, 1> TemporaryBuffers;
+  
+  /// \brief Allocator used to store globally cached code-completion results.
+  llvm::IntrusiveRefCntPtr<clang::GlobalCodeCompletionAllocator> 
+    CachedCompletionAllocator;
+  
+  /// \brief Allocator used to store code completion results.
+  clang::CodeCompletionAllocator CodeCompletionAllocator;
 };
 
 /// \brief Tracks the number of code-completion result objects that are 
 /// currently active.
 ///
 /// Used for debugging purposes only.
-static unsigned CodeCompletionResultObjects;
+static llvm::sys::cas_flag CodeCompletionResultObjects;
   
-AllocatedCXCodeCompleteResults::AllocatedCXCodeCompleteResults() 
-  : CXCodeCompleteResults(), Diag(new Diagnostic),
-    SourceMgr(*Diag, FileMgr, FileSystemOpts) { 
+AllocatedCXCodeCompleteResults::AllocatedCXCodeCompleteResults(
+                                      const FileSystemOptions& FileSystemOpts)
+  : CXCodeCompleteResults(),
+    Diag(new Diagnostic(
+                   llvm::IntrusiveRefCntPtr<DiagnosticIDs>(new DiagnosticIDs))),
+    FileSystemOpts(FileSystemOpts),
+    FileMgr(new FileManager(FileSystemOpts)),
+    SourceMgr(new SourceManager(*Diag, *FileMgr)) { 
   if (getenv("LIBCLANG_OBJTRACKING")) {
-    ++CodeCompletionResultObjects;
+    llvm::sys::AtomicIncrement(&CodeCompletionResultObjects);
     fprintf(stderr, "+++ %d completion results\n", CodeCompletionResultObjects);
   }    
 }
   
 AllocatedCXCodeCompleteResults::~AllocatedCXCodeCompleteResults() {
-  for (unsigned I = 0, N = NumResults; I != N; ++I)
-    delete (CXStoredCodeCompletionString *)Results[I].CompletionString;
   delete [] Results;
   
   for (unsigned I = 0, N = TemporaryFiles.size(); I != N; ++I)
@@ -277,7 +266,7 @@ AllocatedCXCodeCompleteResults::~AllocatedCXCodeCompleteResults() {
     delete TemporaryBuffers[I];
 
   if (getenv("LIBCLANG_OBJTRACKING")) {
-    --CodeCompletionResultObjects;
+    llvm::sys::AtomicDecrement(&CodeCompletionResultObjects);
     fprintf(stderr, "--- %d completion results\n", CodeCompletionResultObjects);
   }    
 }
@@ -288,9 +277,8 @@ namespace {
   class CaptureCompletionResults : public CodeCompleteConsumer {
     AllocatedCXCodeCompleteResults &AllocatedResults;
     llvm::SmallVector<CXCompletionResult, 16> StoredResults;
-    
   public:
-    explicit CaptureCompletionResults(AllocatedCXCodeCompleteResults &Results)
+    CaptureCompletionResults(AllocatedCXCodeCompleteResults &Results)
       : CodeCompleteConsumer(true, false, true, false), 
         AllocatedResults(Results) { }
     ~CaptureCompletionResults() { Finish(); }
@@ -301,10 +289,9 @@ namespace {
                                             unsigned NumResults) {
       StoredResults.reserve(StoredResults.size() + NumResults);
       for (unsigned I = 0; I != NumResults; ++I) {
-        CXStoredCodeCompletionString *StoredCompletion
-          = new CXStoredCodeCompletionString(Results[I].Priority,
-                                             Results[I].Availability);
-        (void)Results[I].CreateCodeCompletionString(S, StoredCompletion);
+        CodeCompletionString *StoredCompletion        
+          = Results[I].CreateCodeCompletionString(S, 
+                                      AllocatedResults.CodeCompletionAllocator);
         
         CXCompletionResult R;
         R.CursorKind = Results[I].CursorKind;
@@ -318,17 +305,19 @@ namespace {
                                            unsigned NumCandidates) {
       StoredResults.reserve(StoredResults.size() + NumCandidates);
       for (unsigned I = 0; I != NumCandidates; ++I) {
-        // FIXME: Set priority, availability appropriately.
-        CXStoredCodeCompletionString *StoredCompletion
-          = new CXStoredCodeCompletionString(1, CXAvailability_Available);
-        (void)Candidates[I].CreateSignatureString(CurrentArg, S, 
-                                                  StoredCompletion);
+        CodeCompletionString *StoredCompletion
+          = Candidates[I].CreateSignatureString(CurrentArg, S, 
+                                      AllocatedResults.CodeCompletionAllocator);
         
         CXCompletionResult R;
         R.CursorKind = CXCursor_NotImplemented;
         R.CompletionString = StoredCompletion;
         StoredResults.push_back(R);
       }
+    }
+    
+    virtual CodeCompletionAllocator &getAllocator() { 
+      return AllocatedResults.CodeCompletionAllocator;
     }
     
   private:
@@ -393,10 +382,11 @@ void clang_codeCompleteAt_Impl(void *UserData) {
   }
 
   // Parse the resulting source file to find code-completion results.
-  AllocatedCXCodeCompleteResults *Results = new AllocatedCXCodeCompleteResults;
+  AllocatedCXCodeCompleteResults *Results = 
+        new AllocatedCXCodeCompleteResults(AST->getFileSystemOpts());
   Results->Results = 0;
   Results->NumResults = 0;
-
+  
   // Create a code-completion consumer to capture the results.
   CaptureCompletionResults Capture(*Results);
 
@@ -406,9 +396,15 @@ void clang_codeCompleteAt_Impl(void *UserData) {
                     (options & CXCodeComplete_IncludeMacros),
                     (options & CXCodeComplete_IncludeCodePatterns),
                     Capture,
-                    *Results->Diag, Results->LangOpts, Results->SourceMgr,
-                    Results->FileMgr, Results->Diagnostics,
+                    *Results->Diag, Results->LangOpts, *Results->SourceMgr,
+                    *Results->FileMgr, Results->Diagnostics,
                     Results->TemporaryBuffers);
+  
+  // Keep a reference to the allocator used for cached global completions, so
+  // that we can be sure that the memory used by our code completion strings
+  // doesn't get freed due to subsequent reparses (while the code completion
+  // results are still active).
+  Results->CachedCompletionAllocator = AST->getCachedCompletionAllocator();
 
   
 
@@ -591,10 +587,10 @@ namespace {
   struct OrderCompletionResults {
     bool operator()(const CXCompletionResult &XR, 
                     const CXCompletionResult &YR) const {
-      CXStoredCodeCompletionString *X
-        = (CXStoredCodeCompletionString *)XR.CompletionString;
-      CXStoredCodeCompletionString *Y
-        = (CXStoredCodeCompletionString *)YR.CompletionString;
+      CodeCompletionString *X
+        = (CodeCompletionString *)XR.CompletionString;
+      CodeCompletionString *Y
+        = (CodeCompletionString *)YR.CompletionString;
       
       llvm::SmallString<256> XBuffer;
       llvm::StringRef XText = GetTypedName(X, XBuffer);

@@ -26,7 +26,7 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetFrameInfo.h"
+#include "llvm/Target/TargetFrameLowering.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 using namespace llvm;
@@ -34,7 +34,7 @@ using namespace llvm;
 JITDwarfEmitter::JITDwarfEmitter(JIT& theJit) : MMI(0), Jit(theJit) {}
 
 
-unsigned char* JITDwarfEmitter::EmitDwarfTable(MachineFunction& F, 
+unsigned char* JITDwarfEmitter::EmitDwarfTable(MachineFunction& F,
                                                JITCodeEmitter& jce,
                                                unsigned char* StartFunction,
                                                unsigned char* EndFunction,
@@ -43,13 +43,14 @@ unsigned char* JITDwarfEmitter::EmitDwarfTable(MachineFunction& F,
 
   const TargetMachine& TM = F.getTarget();
   TD = TM.getTargetData();
-  stackGrowthDirection = TM.getFrameInfo()->getStackGrowthDirection();
+  stackGrowthDirection = TM.getFrameLowering()->getStackGrowthDirection();
   RI = TM.getRegisterInfo();
+  TFI = TM.getFrameLowering();
   JCE = &jce;
-  
+
   unsigned char* ExceptionTable = EmitExceptionTable(&F, StartFunction,
                                                      EndFunction);
-      
+
   unsigned char* Result = 0;
 
   const std::vector<const Function *> Personalities = MMI->getPersonalities();
@@ -62,37 +63,37 @@ unsigned char* JITDwarfEmitter::EmitDwarfTable(MachineFunction& F,
 }
 
 
-void 
+void
 JITDwarfEmitter::EmitFrameMoves(intptr_t BaseLabelPtr,
                                 const std::vector<MachineMove> &Moves) const {
   unsigned PointerSize = TD->getPointerSize();
-  int stackGrowth = stackGrowthDirection == TargetFrameInfo::StackGrowsUp ?
+  int stackGrowth = stackGrowthDirection == TargetFrameLowering::StackGrowsUp ?
           PointerSize : -PointerSize;
   MCSymbol *BaseLabel = 0;
 
   for (unsigned i = 0, N = Moves.size(); i < N; ++i) {
     const MachineMove &Move = Moves[i];
     MCSymbol *Label = Move.getLabel();
-    
+
     // Throw out move if the label is invalid.
     if (Label && (*JCE->getLabelLocations())[Label] == 0)
       continue;
-    
+
     intptr_t LabelPtr = 0;
     if (Label) LabelPtr = JCE->getLabelAddress(Label);
 
     const MachineLocation &Dst = Move.getDestination();
     const MachineLocation &Src = Move.getSource();
-    
+
     // Advance row if new location.
     if (BaseLabelPtr && Label && BaseLabel != Label) {
       JCE->emitByte(dwarf::DW_CFA_advance_loc4);
       JCE->emitInt32(LabelPtr - BaseLabelPtr);
-      
-      BaseLabel = Label; 
+
+      BaseLabel = Label;
       BaseLabelPtr = LabelPtr;
     }
-    
+
     // If advancing cfa.
     if (Dst.isReg() && Dst.getReg() == MachineLocation::VirtualFP) {
       if (!Src.isReg()) {
@@ -102,7 +103,7 @@ JITDwarfEmitter::EmitFrameMoves(intptr_t BaseLabelPtr,
           JCE->emitByte(dwarf::DW_CFA_def_cfa);
           JCE->emitULEB128Bytes(RI->getDwarfRegNum(Src.getReg(), true));
         }
-        
+
         JCE->emitULEB128Bytes(-Src.getOffset());
       } else {
         llvm_unreachable("Machine move not supported yet.");
@@ -118,7 +119,7 @@ JITDwarfEmitter::EmitFrameMoves(intptr_t BaseLabelPtr,
     } else {
       unsigned Reg = RI->getDwarfRegNum(Src.getReg(), true);
       int Offset = Dst.getOffset() / stackGrowth;
-      
+
       if (Offset < 0) {
         JCE->emitByte(dwarf::DW_CFA_offset_extended_sf);
         JCE->emitULEB128Bytes(Reg);
@@ -381,7 +382,7 @@ unsigned char* JITDwarfEmitter::EmitExceptionTable(MachineFunction* MF,
 
   unsigned TypeOffset = sizeof(int8_t) + // Call site format
                         // Call-site table length
-                        MCAsmInfo::getULEB128Size(SizeSites) + 
+                        MCAsmInfo::getULEB128Size(SizeSites) +
                         SizeSites + SizeActions + SizeTypes;
 
   // Begin the exception table.
@@ -451,7 +452,7 @@ unsigned char* JITDwarfEmitter::EmitExceptionTable(MachineFunction* MF,
   // Emit the type ids.
   for (unsigned M = TypeInfos.size(); M; --M) {
     const GlobalVariable *GV = TypeInfos[M - 1];
-    
+
     if (GV) {
       if (TD->getPointerSize() == sizeof(int32_t))
         JCE->emitInt32((intptr_t)Jit.getOrEmitGlobalVariable(GV));
@@ -481,9 +482,9 @@ unsigned char* JITDwarfEmitter::EmitExceptionTable(MachineFunction* MF,
 unsigned char*
 JITDwarfEmitter::EmitCommonEHFrame(const Function* Personality) const {
   unsigned PointerSize = TD->getPointerSize();
-  int stackGrowth = stackGrowthDirection == TargetFrameInfo::StackGrowsUp ?
+  int stackGrowth = stackGrowthDirection == TargetFrameLowering::StackGrowsUp ?
           PointerSize : -PointerSize;
-  
+
   unsigned char* StartCommonPtr = (unsigned char*)JCE->getCurrentPCValue();
   // EH Common Frame header
   JCE->allocateSpace(4, 0);
@@ -498,13 +499,13 @@ JITDwarfEmitter::EmitCommonEHFrame(const Function* Personality) const {
   if (Personality) {
     // Augmentation Size: 3 small ULEBs of one byte each, and the personality
     // function which size is PointerSize.
-    JCE->emitULEB128Bytes(3 + PointerSize); 
-    
+    JCE->emitULEB128Bytes(3 + PointerSize);
+
     // We set the encoding of the personality as direct encoding because we use
     // the function pointer. The encoding is not relative because the current
     // PC value may be bigger than the personality function pointer.
     if (PointerSize == 4) {
-      JCE->emitByte(dwarf::DW_EH_PE_sdata4); 
+      JCE->emitByte(dwarf::DW_EH_PE_sdata4);
       JCE->emitInt32(((intptr_t)Jit.getPointerToGlobal(Personality)));
     } else {
       JCE->emitByte(dwarf::DW_EH_PE_sdata8);
@@ -523,7 +524,7 @@ JITDwarfEmitter::EmitCommonEHFrame(const Function* Personality) const {
   }
 
   std::vector<MachineMove> Moves;
-  RI->getInitialFrameState(Moves);
+  TFI->getInitialFrameState(Moves);
   EmitFrameMoves(0, Moves);
 
   JCE->emitAlignmentWithFill(PointerSize, dwarf::DW_CFA_nop);
@@ -539,11 +540,11 @@ JITDwarfEmitter::EmitCommonEHFrame(const Function* Personality) const {
 unsigned char*
 JITDwarfEmitter::EmitEHFrame(const Function* Personality,
                              unsigned char* StartCommonPtr,
-                             unsigned char* StartFunction, 
+                             unsigned char* StartFunction,
                              unsigned char* EndFunction,
                              unsigned char* ExceptionTable) const {
   unsigned PointerSize = TD->getPointerSize();
-  
+
   // EH frame header.
   unsigned char* StartEHPtr = (unsigned char*)JCE->getCurrentPCValue();
   JCE->allocateSpace(4, 0);
@@ -557,7 +558,7 @@ JITDwarfEmitter::EmitEHFrame(const Function* Personality,
   // specific data area in the exception table.
   if (Personality) {
     JCE->emitULEB128Bytes(PointerSize == 4 ? 4 : 8);
-        
+
     if (PointerSize == 4) {
       if (!MMI->getLandingPads().empty())
         JCE->emitInt32(ExceptionTable-(unsigned char*)JCE->getCurrentPCValue());
@@ -572,7 +573,7 @@ JITDwarfEmitter::EmitEHFrame(const Function* Personality,
   } else {
     JCE->emitULEB128Bytes(0);
   }
-      
+
   // Indicate locations of function specific  callee saved registers in
   // frame.
   EmitFrameMoves((intptr_t)StartFunction, MMI->getFrameMoves());
@@ -592,6 +593,6 @@ JITDwarfEmitter::EmitEHFrame(const Function* Personality,
     JCE->emitInt32(0);
     JCE->emitInt32(0);
   }
-  
+
   return StartEHPtr;
 }

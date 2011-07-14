@@ -44,6 +44,45 @@ static inline bool isARMLowRegister(unsigned Reg) {
   }
 }
 
+/// isARMArea1Register - Returns true if the register is a low register (r0-r7)
+/// or a stack/pc register that we should push/pop.
+static inline bool isARMArea1Register(unsigned Reg, bool isDarwin) {
+  using namespace ARM;
+  switch (Reg) {
+    case R0:  case R1:  case R2:  case R3:
+    case R4:  case R5:  case R6:  case R7:
+    case LR:  case SP:  case PC:
+      return true;
+    case R8:  case R9:  case R10: case R11:
+      // For darwin we want r7 and lr to be next to each other.
+      return !isDarwin;
+    default:
+      return false;
+  }
+}
+
+static inline bool isARMArea2Register(unsigned Reg, bool isDarwin) {
+  using namespace ARM;
+  switch (Reg) {
+    case R8: case R9: case R10: case R11:
+      // Darwin has this second area.
+      return isDarwin;
+    default:
+      return false;
+  }
+}
+
+static inline bool isARMArea3Register(unsigned Reg, bool isDarwin) {
+  using namespace ARM;
+  switch (Reg) {
+    case D15: case D14: case D13: case D12:
+    case D11: case D10: case D9:  case D8:
+      return true;
+    default:
+      return false;
+  }
+}
+
 class ARMBaseRegisterInfo : public ARMGenRegisterInfo {
 protected:
   const ARMBaseInstrInfo &TII;
@@ -89,6 +128,12 @@ public:
 
   const TargetRegisterClass *getPointerRegClass(unsigned Kind = 0) const;
 
+  const TargetRegisterClass*
+  getLargestLegalSuperClass(const TargetRegisterClass *RC) const;
+
+  unsigned getRegPressureLimit(const TargetRegisterClass *RC,
+                               MachineFunction &MF) const;
+
   std::pair<TargetRegisterClass::iterator,TargetRegisterClass::iterator>
   getAllocationOrder(const TargetRegisterClass *RC,
                      unsigned HintType, unsigned HintReg,
@@ -100,7 +145,8 @@ public:
   void UpdateRegAllocHint(unsigned Reg, unsigned NewReg,
                           MachineFunction &MF) const;
 
-  bool hasFP(const MachineFunction &MF) const;
+  virtual bool avoidWriteAfterWrite(const TargetRegisterClass *RC) const;
+
   bool hasBasePointer(const MachineFunction &MF) const;
 
   bool canRealignStack(const MachineFunction &MF) const;
@@ -116,17 +162,10 @@ public:
 
   bool cannotEliminateFrame(const MachineFunction &MF) const;
 
-  void processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
-                                            RegScavenger *RS = NULL) const;
-
   // Debug information queries.
   unsigned getRARegister() const;
   unsigned getFrameRegister(const MachineFunction &MF) const;
-  int getFrameIndexReference(const MachineFunction &MF, int FI,
-                             unsigned &FrameReg) const;
-  int ResolveFrameIndexReference(const MachineFunction &MF, int FI,
-                                 unsigned &FrameReg, int SPAdj) const;
-  int getFrameIndexOffset(const MachineFunction &MF, int FI) const;
+  unsigned getBaseRegister() const { return BasePtr; }
 
   // Exception handling queries.
   unsigned getEHExceptionRegister() const;
@@ -145,7 +184,8 @@ public:
                                  unsigned DestReg, unsigned SubIdx,
                                  int Val,
                                  ARMCC::CondCodes Pred = ARMCC::AL,
-                                 unsigned PredReg = 0) const;
+                                 unsigned PredReg = 0,
+                                 unsigned MIFlags = MachineInstr::NoFlags)const;
 
   /// Code Generation virtual methods...
   virtual bool isReservedReg(const MachineFunction &MF, unsigned Reg) const;
@@ -156,9 +196,6 @@ public:
 
   virtual bool requiresVirtualBaseRegisters(const MachineFunction &MF) const;
 
-  virtual bool hasReservedCallFrame(const MachineFunction &MF) const;
-  virtual bool canSimplifyCallFramePseudos(const MachineFunction &MF) const;
-
   virtual void eliminateCallFramePseudoInstr(MachineFunction &MF,
                                            MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator I) const;
@@ -166,12 +203,7 @@ public:
   virtual void eliminateFrameIndex(MachineBasicBlock::iterator II,
                                    int SPAdj, RegScavenger *RS = NULL) const;
 
-  virtual void emitPrologue(MachineFunction &MF) const;
-  virtual void emitEpilogue(MachineFunction &MF, MachineBasicBlock &MBB) const;
-
 private:
-  unsigned estimateRSStackSizeLimit(MachineFunction &MF) const;
-
   unsigned getRegisterPairEven(unsigned Reg, const MachineFunction &MF) const;
 
   unsigned getRegisterPairOdd(unsigned Reg, const MachineFunction &MF) const;

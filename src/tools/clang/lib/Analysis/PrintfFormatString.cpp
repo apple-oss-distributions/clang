@@ -100,6 +100,10 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
   for ( ; I != E; ++I) {
     switch (*I) {
       default: hasMore = false; break;
+      case '\'':
+        // FIXME: POSIX specific.  Always accept?
+        FS.setHasThousandsGrouping(I);
+        break;
       case '-': FS.setIsLeftJustified(I); break;
       case '+': FS.setHasPlusPrefix(I); break;
       case ' ': FS.setHasSpacePrefix(I); break;
@@ -185,7 +189,7 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
     case 's': k = ConversionSpecifier::sArg;      break;
     case 'u': k = ConversionSpecifier::uArg; break;
     case 'x': k = ConversionSpecifier::xArg; break;
-    // Mac OS X (unicode) specific
+    // POSIX specific.
     case 'C': k = ConversionSpecifier::CArg; break;
     case 'S': k = ConversionSpecifier::SArg; break;
     // Objective-C.
@@ -200,7 +204,7 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
 
   if (k == ConversionSpecifier::InvalidSpecifier) {
     // Assume the conversion takes one argument.
-    return !H.HandleInvalidPrintfConversionSpecifier(FS, Beg, I - Beg);
+    return !H.HandleInvalidPrintfConversionSpecifier(FS, Start, I - Start);
   }
   return PrintfSpecifierResult(Start, FS);
 }
@@ -277,7 +281,7 @@ const char *ConversionSpecifier::toString() const {
 
 ArgTypeResult PrintfSpecifier::getArgType(ASTContext &Ctx) const {
   const PrintfConversionSpecifier &CS = getConversionSpecifier();
-  
+
   if (!CS.consumesDataArgument())
     return ArgTypeResult::Invalid();
 
@@ -288,7 +292,7 @@ ArgTypeResult PrintfSpecifier::getArgType(ASTContext &Ctx) const {
       default:
         return ArgTypeResult::Invalid();
     }
-  
+
   if (CS.isIntArg())
     switch (LM.getKind()) {
       case LengthModifier::AsLongDouble:
@@ -377,8 +381,32 @@ bool PrintfSpecifier::fixType(QualType QT) {
 
   // Set length modifier
   switch (BT->getKind()) {
-  default:
-    // The rest of the conversions are either optional or for non-builtin types
+  case BuiltinType::Bool:
+  case BuiltinType::WChar_U:
+  case BuiltinType::WChar_S:
+  case BuiltinType::Char16:
+  case BuiltinType::Char32:
+  case BuiltinType::UInt128:
+  case BuiltinType::Int128:
+    // Integral types which are non-trivial to correct.
+    return false;
+
+  case BuiltinType::Void:
+  case BuiltinType::NullPtr:
+  case BuiltinType::ObjCId:
+  case BuiltinType::ObjCClass:
+  case BuiltinType::ObjCSel:
+  case BuiltinType::Dependent:
+  case BuiltinType::Overload:
+  case BuiltinType::BoundMember:
+  case BuiltinType::UnknownAny:
+    // Misc other stuff which doesn't make sense here.
+    return false;
+
+  case BuiltinType::UInt:
+  case BuiltinType::Int:
+  case BuiltinType::Float:
+  case BuiltinType::Double:
     LM.setKind(LengthModifier::None);
     break;
 
@@ -394,7 +422,6 @@ bool PrintfSpecifier::fixType(QualType QT) {
     LM.setKind(LengthModifier::AsShort);
     break;
 
-  case BuiltinType::WChar:
   case BuiltinType::Long:
   case BuiltinType::ULong:
     LM.setKind(LengthModifier::AsLong);
@@ -424,24 +451,19 @@ bool PrintfSpecifier::fixType(QualType QT) {
   else if (QT->isRealFloatingType()) {
     CS.setKind(ConversionSpecifier::fArg);
   }
-  else if (QT->isPointerType()) {
-    CS.setKind(ConversionSpecifier::pArg);
-    Precision.setHowSpecified(OptionalAmount::NotSpecified);
-    HasAlternativeForm = 0;
-    HasLeadingZeroes = 0;
-    HasPlusPrefix = 0;
-  }
   else if (QT->isSignedIntegerType()) {
     CS.setKind(ConversionSpecifier::dArg);
     HasAlternativeForm = 0;
   }
   else if (QT->isUnsignedIntegerType()) {
-    CS.setKind(ConversionSpecifier::uArg);
+    // Preserve the original formatting, e.g. 'X', 'o'.
+    if (!cast<PrintfConversionSpecifier>(CS).isUIntArg())
+      CS.setKind(ConversionSpecifier::uArg);
     HasAlternativeForm = 0;
     HasPlusPrefix = 0;
   }
   else {
-    return false;
+    assert(0 && "Unexpected type");
   }
 
   return true;
@@ -449,7 +471,7 @@ bool PrintfSpecifier::fixType(QualType QT) {
 
 void PrintfSpecifier::toString(llvm::raw_ostream &os) const {
   // Whilst some features have no defined order, we are using the order
-  // appearing in the C99 standard (ISO/IEC 9899:1999 (E) ¤7.19.6.1)
+  // appearing in the C99 standard (ISO/IEC 9899:1999 (E) 7.19.6.1)
   os << "%";
 
   // Positional args
@@ -582,6 +604,24 @@ bool PrintfSpecifier::hasValidLeftJustified() const {
 
   default:
     return true;
+  }
+}
+
+bool PrintfSpecifier::hasValidThousandsGroupingPrefix() const {
+  if (!HasThousandsGrouping)
+    return true;
+
+  switch (CS.getKind()) {
+    case ConversionSpecifier::dArg:
+    case ConversionSpecifier::iArg:
+    case ConversionSpecifier::uArg:
+    case ConversionSpecifier::fArg:
+    case ConversionSpecifier::FArg:
+    case ConversionSpecifier::gArg:
+    case ConversionSpecifier::GArg:
+      return true;
+    default:
+      return false;
   }
 }
 

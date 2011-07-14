@@ -39,7 +39,6 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-
 using namespace llvm;
 
 STATISTIC(NumHoisted,
@@ -109,7 +108,6 @@ namespace {
     const char *getPassName() const { return "Machine Instruction LICM"; }
 
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.setPreservesCFG();
       AU.addRequired<MachineLoopInfo>();
       AU.addRequired<MachineDominatorTree>();
       AU.addRequired<AliasAnalysis>();
@@ -170,6 +168,10 @@ namespace {
     /// 
     bool IsLoopInvariantInst(MachineInstr &I);
 
+    /// HasAnyPHIUse - Return true if the specified register is used by any
+    /// phi node.
+    bool HasAnyPHIUse(unsigned Reg) const;
+
     /// HasHighOperandLatency - Compute operand latency between a def of 'Reg'
     /// and an use in the current loop, return true if the target considered
     /// it 'high'.
@@ -208,10 +210,6 @@ namespace {
     /// UpdateRegPressure - Update estimate of register pressure after the
     /// specified instruction.
     void UpdateRegPressure(const MachineInstr *MI);
-
-    /// isLoadFromConstantMemory - Return true if the given instruction is a
-    /// load from constant memory.
-    bool isLoadFromConstantMemory(MachineInstr *MI);
 
     /// ExtractHoistableLoad - Unfold a load from the given machineinstr if
     /// the load itself could be hoisted. Return the unfolded and hoistable
@@ -299,7 +297,7 @@ bool MachineLICM::runOnMachineFunction(MachineFunction &MF) {
     RegLimit.resize(NumRC);
     for (TargetRegisterInfo::regclass_iterator I = TRI->regclass_begin(),
            E = TRI->regclass_end(); I != E; ++I)
-      RegLimit[(*I)->getID()] = TLI->getRegPressureLimit(*I, MF);
+      RegLimit[(*I)->getID()] = TRI->getRegPressureLimit(*I, MF);
   }
 
   // Get our Loop information...
@@ -623,7 +621,7 @@ void MachineLICM::InitRegPressure(MachineBasicBlock *BB) {
       if (!MO.isReg() || MO.isImplicit())
         continue;
       unsigned Reg = MO.getReg();
-      if (!Reg || TargetRegisterInfo::isPhysicalRegister(Reg))
+      if (!TargetRegisterInfo::isVirtualRegister(Reg))
         continue;
 
       bool isNew = RegSeen.insert(Reg);
@@ -656,7 +654,7 @@ void MachineLICM::UpdateRegPressure(const MachineInstr *MI) {
     if (!MO.isReg() || MO.isImplicit())
       continue;
     unsigned Reg = MO.getReg();
-    if (!Reg || TargetRegisterInfo::isPhysicalRegister(Reg))
+    if (!TargetRegisterInfo::isVirtualRegister(Reg))
       continue;
 
     bool isNew = RegSeen.insert(Reg);
@@ -763,35 +761,23 @@ bool MachineLICM::IsLoopInvariantInst(MachineInstr &I) {
 }
 
 
-/// HasPHIUses - Return true if the specified register has any PHI use.
-static bool HasPHIUses(unsigned Reg, MachineRegisterInfo *MRI) {
+/// HasAnyPHIUse - Return true if the specified register is used by any
+/// phi node.
+bool MachineLICM::HasAnyPHIUse(unsigned Reg) const {
   for (MachineRegisterInfo::use_iterator UI = MRI->use_begin(Reg),
          UE = MRI->use_end(); UI != UE; ++UI) {
     MachineInstr *UseMI = &*UI;
     if (UseMI->isPHI())
       return true;
+    // Look pass copies as well.
+    if (UseMI->isCopy()) {
+      unsigned Def = UseMI->getOperand(0).getReg();
+      if (TargetRegisterInfo::isVirtualRegister(Def) &&
+          HasAnyPHIUse(Def))
+        return true;
+    }
   }
   return false;
-}
-
-/// isLoadFromConstantMemory - Return true if the given instruction is a
-/// load from constant memory. Machine LICM will hoist these even if they are
-/// not re-materializable.
-bool MachineLICM::isLoadFromConstantMemory(MachineInstr *MI) {
-  if (!MI->getDesc().mayLoad()) return false;
-  if (!MI->hasOneMemOperand()) return false;
-  MachineMemOperand *MMO = *MI->memoperands_begin();
-  if (MMO->isVolatile()) return false;
-  if (!MMO->getValue()) return false;
-  const PseudoSourceValue *PSV = dyn_cast<PseudoSourceValue>(MMO->getValue());
-  if (PSV) {
-    MachineFunction &MF = *MI->getParent()->getParent();
-    return PSV->isConstant(MF.getFrameInfo());
-  } else {
-    return AA->pointsToConstantMemory(AliasAnalysis::Location(MMO->getValue(),
-                                                              MMO->getSize(),
-                                                              MMO->getTBAAInfo()));
-  }
 }
 
 /// HasHighOperandLatency - Compute operand latency between a def of 'Reg'
@@ -890,7 +876,7 @@ void MachineLICM::UpdateBackTraceRegPressure(const MachineInstr *MI) {
     if (!MO.isReg() || MO.isImplicit())
       continue;
     unsigned Reg = MO.getReg();
-    if (!Reg || TargetRegisterInfo::isPhysicalRegister(Reg))
+    if (!TargetRegisterInfo::isVirtualRegister(Reg))
       continue;
 
     const TargetRegisterClass *RC = MRI->getRegClass(Reg);
@@ -945,13 +931,15 @@ bool MachineLICM::IsProfitableToHoist(MachineInstr &MI) {
     // In low register pressure situation, we can be more aggressive about 
     // hoisting. Also, favors hoisting long latency instructions even in
     // moderately high pressure situation.
+    // FIXME: If there are long latency loop-invariant instructions inside the
+    // loop at this point, why didn't the optimizer's LICM hoist them?
     DenseMap<unsigned, int> Cost;
     for (unsigned i = 0, e = MI.getDesc().getNumOperands(); i != e; ++i) {
       const MachineOperand &MO = MI.getOperand(i);
       if (!MO.isReg() || MO.isImplicit())
         continue;
       unsigned Reg = MO.getReg();
-      if (!Reg || TargetRegisterInfo::isPhysicalRegister(Reg))
+      if (!TargetRegisterInfo::isVirtualRegister(Reg))
         continue;
       if (MO.isDef()) {
         if (HasHighOperandLatency(MI, i, Reg)) {
@@ -994,18 +982,17 @@ bool MachineLICM::IsProfitableToHoist(MachineInstr &MI) {
     // High register pressure situation, only hoist if the instruction is going to
     // be remat'ed.
     if (!TII->isTriviallyReMaterializable(&MI, AA) &&
-        !isLoadFromConstantMemory(&MI))
+        !MI.isInvariantLoad(AA))
       return false;
   }
 
-  // If result(s) of this instruction is used by PHIs, then don't hoist it.
-  // The presence of joins makes it difficult for current register allocator
-  // implementation to perform remat.
+  // If result(s) of this instruction is used by PHIs outside of the loop, then
+  // don't hoist it if the instruction because it will introduce an extra copy.
   for (unsigned i = 0, e = MI.getNumOperands(); i != e; ++i) {
     const MachineOperand &MO = MI.getOperand(i);
     if (!MO.isReg() || !MO.isDef())
       continue;
-    if (HasPHIUses(MO.getReg(), MRI))
+    if (HasAnyPHIUse(MO.getReg()))
       return false;
   }
 
@@ -1020,7 +1007,7 @@ MachineInstr *MachineLICM::ExtractHoistableLoad(MachineInstr *MI) {
   // If not, we may be able to unfold a load and hoist that.
   // First test whether the instruction is loading from an amenable
   // memory location.
-  if (!isLoadFromConstantMemory(MI))
+  if (!MI->isInvariantLoad(AA))
     return 0;
 
   // Next determine the register class for a temporary register.
@@ -1071,20 +1058,15 @@ MachineInstr *MachineLICM::ExtractHoistableLoad(MachineInstr *MI) {
 void MachineLICM::InitCSEMap(MachineBasicBlock *BB) {
   for (MachineBasicBlock::iterator I = BB->begin(),E = BB->end(); I != E; ++I) {
     const MachineInstr *MI = &*I;
-    // FIXME: For now, only hoist re-materilizable instructions. LICM will
-    // increase register pressure. We want to make sure it doesn't increase
-    // spilling.
-    if (TII->isTriviallyReMaterializable(MI, AA)) {
-      unsigned Opcode = MI->getOpcode();
-      DenseMap<unsigned, std::vector<const MachineInstr*> >::iterator
-        CI = CSEMap.find(Opcode);
-      if (CI != CSEMap.end())
-        CI->second.push_back(MI);
-      else {
-        std::vector<const MachineInstr*> CSEMIs;
-        CSEMIs.push_back(MI);
-        CSEMap.insert(std::make_pair(Opcode, CSEMIs));
-      }
+    unsigned Opcode = MI->getOpcode();
+    DenseMap<unsigned, std::vector<const MachineInstr*> >::iterator
+      CI = CSEMap.find(Opcode);
+    if (CI != CSEMap.end())
+      CI->second.push_back(MI);
+    else {
+      std::vector<const MachineInstr*> CSEMIs;
+      CSEMIs.push_back(MI);
+      CSEMap.insert(std::make_pair(Opcode, CSEMIs));
     }
   }
 }
@@ -1094,7 +1076,7 @@ MachineLICM::LookForDuplicate(const MachineInstr *MI,
                               std::vector<const MachineInstr*> &PrevMIs) {
   for (unsigned i = 0, e = PrevMIs.size(); i != e; ++i) {
     const MachineInstr *PrevMI = PrevMIs[i];
-    if (TII->produceSameValue(MI, PrevMI))
+    if (TII->produceSameValue(MI, PrevMI, (PreRegAlloc ? MRI : 0)))
       return PrevMI;
   }
   return 0;

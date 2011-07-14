@@ -1,15 +1,15 @@
 import os
-import platform
+import sys
 
 import Test
 import TestRunner
 import Util
 
-kIsWindows = platform.system() == 'Windows'
+kIsWindows = sys.platform in ['win32', 'cygwin']
 
 class GoogleTest(object):
     def __init__(self, test_sub_dir, test_suffix):
-        self.test_sub_dir = str(test_sub_dir).split(';')
+        self.test_sub_dir = os.path.normcase(str(test_sub_dir)).split(';')
         self.test_suffix = str(test_suffix)
 
         # On Windows, assume tests will also end in '.exe'.
@@ -59,8 +59,9 @@ class GoogleTest(object):
         source_path = testSuite.getSourcePath(path_in_suite)
         for filename in os.listdir(source_path):
             # Check for the one subdirectory (build directory) tests will be in.
-            if not filename in self.test_sub_dir:
-                continue
+            if not '.' in self.test_sub_dir:
+                if not os.path.normcase(filename) in self.test_sub_dir:
+                    continue
 
             filepath = os.path.join(source_path, filename)
             if not os.path.isdir(filepath):

@@ -24,8 +24,10 @@ class PTXTargetMachine;
 namespace PTXISD {
   enum NodeType {
     FIRST_NUMBER = ISD::BUILTIN_OP_END,
+    READ_PARAM,
     EXIT,
-    RET
+    RET,
+    COPY_ADDRESS
   };
 } // namespace PTXISD
 
@@ -38,6 +40,10 @@ class PTXTargetLowering : public TargetLowering {
     virtual unsigned getFunctionAlignment(const Function *F) const {
       return 2; }
 
+    virtual SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const;
+
+    virtual SDValue LowerSETCC(SDValue Op, SelectionDAG &DAG) const;
+    
     virtual SDValue
       LowerFormalArguments(SDValue Chain,
                            CallingConv::ID CallConv,
@@ -55,6 +61,11 @@ class PTXTargetLowering : public TargetLowering {
                   const SmallVectorImpl<SDValue> &OutVals,
                   DebugLoc dl,
                   SelectionDAG &DAG) const;
+    
+    virtual MVT::SimpleValueType getSetCCResultType(EVT VT) const;
+    
+  private:
+    SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
 }; // class PTXTargetLowering
 } // namespace llvm
 

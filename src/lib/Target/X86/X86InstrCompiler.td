@@ -193,9 +193,26 @@ def SETB_C64r : RI<0x19, MRMInitReg, (outs GR64:$dst), (ins), "",
 } // isCodeGenOnly
 
 
+def : Pat<(i16 (anyext (i8 (X86setcc_c X86_COND_B, EFLAGS)))),
+          (SETB_C16r)>;
+def : Pat<(i32 (anyext (i8 (X86setcc_c X86_COND_B, EFLAGS)))),
+          (SETB_C32r)>;
 def : Pat<(i64 (anyext (i8 (X86setcc_c X86_COND_B, EFLAGS)))),
           (SETB_C64r)>;
 
+def : Pat<(i16 (sext (i8 (X86setcc_c X86_COND_B, EFLAGS)))),
+          (SETB_C16r)>;
+def : Pat<(i32 (sext (i8 (X86setcc_c X86_COND_B, EFLAGS)))),
+          (SETB_C32r)>;
+def : Pat<(i64 (sext (i8 (X86setcc_c X86_COND_B, EFLAGS)))),
+          (SETB_C64r)>;
+
+// We canonicalize 'setb' to "(and (sbb reg,reg), 1)" on the hope that the and
+// will be eliminated and that the sbb can be extended up to a wider type.  When
+// this happens, it is great.  However, if we are left with an 8-bit sbb and an
+// and, we might as well just match it as a setb.
+def : Pat<(and (i8 (X86setcc_c X86_COND_B, EFLAGS)), 1),
+          (SETBr)>;
 
 //===----------------------------------------------------------------------===//
 // String Pseudo Instructions
@@ -244,8 +261,7 @@ let Defs = [EAX, ECX, EDX, FP0, FP1, FP2, FP3, FP4, FP5, FP6, ST0,
             XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, EFLAGS],
     Uses = [ESP] in
 def TLS_addr32 : I<0, Pseudo, (outs), (ins i32mem:$sym),
-                  "leal\t$sym, %eax; "
-                  "call\t___tls_get_addr@PLT",
+                  "# TLS_addr32",
                   [(X86tlsaddr tls32addr:$sym)]>,
                   Requires<[In32BitMode]>;
 
@@ -259,11 +275,7 @@ let Defs = [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11,
             XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15, EFLAGS],
     Uses = [RSP] in
 def TLS_addr64 : I<0, Pseudo, (outs), (ins i64mem:$sym),
-                   ".byte\t0x66; "
-                   "leaq\t$sym(%rip), %rdi; "
-                   ".word\t0x6666; "
-                   "rex64; "
-                   "call\t__tls_get_addr@PLT",
+                   "# TLS_addr64",
                   [(X86tlsaddr tls64addr:$sym)]>,
                   Requires<[In64BitMode]>;
 
@@ -282,7 +294,7 @@ def TLSCall_32 : I<0, Pseudo, (outs), (ins i32mem:$sym),
 // For x86_64, the address of the thunk is passed in %rdi, on return
 // the address of the variable is in %rax.  All other registers are preserved.
 let Defs = [RAX, EFLAGS],
-    Uses = [RDI],
+    Uses = [RSP, RDI],
     usesCustomInserter = 1 in
 def TLSCall_64 : I<0, Pseudo, (outs), (ins i64mem:$sym),
                   "# TLSCall_64",
@@ -837,38 +849,38 @@ def : Pat<(X86call (i64 texternalsym:$dst)),
 // tailcall stuff
 def : Pat<(X86tcret GR32_TC:$dst, imm:$off),
           (TCRETURNri GR32_TC:$dst, imm:$off)>,
-	  Requires<[In32BitMode]>;
+          Requires<[In32BitMode]>;
 
 // FIXME: This is disabled for 32-bit PIC mode because the global base
 // register which is part of the address mode may be assigned a
 // callee-saved register.
 def : Pat<(X86tcret (load addr:$dst), imm:$off),
           (TCRETURNmi addr:$dst, imm:$off)>,
-	  Requires<[In32BitMode, IsNotPIC]>;
+          Requires<[In32BitMode, IsNotPIC]>;
 
 def : Pat<(X86tcret (i32 tglobaladdr:$dst), imm:$off),
           (TCRETURNdi texternalsym:$dst, imm:$off)>,
-	  Requires<[In32BitMode]>;
+          Requires<[In32BitMode]>;
 
 def : Pat<(X86tcret (i32 texternalsym:$dst), imm:$off),
           (TCRETURNdi texternalsym:$dst, imm:$off)>,
-	  Requires<[In32BitMode]>;
+          Requires<[In32BitMode]>;
 
-def : Pat<(X86tcret GR64_TC:$dst, imm:$off),
-          (TCRETURNri64 GR64_TC:$dst, imm:$off)>,
-	  Requires<[In64BitMode]>;
+def : Pat<(X86tcret ptr_rc_tailcall:$dst, imm:$off),
+          (TCRETURNri64 ptr_rc_tailcall:$dst, imm:$off)>,
+          Requires<[In64BitMode]>;
 
 def : Pat<(X86tcret (load addr:$dst), imm:$off),
           (TCRETURNmi64 addr:$dst, imm:$off)>,
-	  Requires<[In64BitMode]>;
+          Requires<[In64BitMode]>;
 
 def : Pat<(X86tcret (i64 tglobaladdr:$dst), imm:$off),
           (TCRETURNdi64 tglobaladdr:$dst, imm:$off)>,
-	  Requires<[In64BitMode]>;
+          Requires<[In64BitMode]>;
 
 def : Pat<(X86tcret (i64 texternalsym:$dst), imm:$off),
           (TCRETURNdi64 texternalsym:$dst, imm:$off)>,
-	  Requires<[In64BitMode]>;
+          Requires<[In64BitMode]>;
 
 // Normal calls, with various flavors of addresses.
 def : Pat<(X86call (i32 tglobaladdr:$dst)),
@@ -877,43 +889,6 @@ def : Pat<(X86call (i32 texternalsym:$dst)),
           (CALLpcrel32 texternalsym:$dst)>;
 def : Pat<(X86call (i32 imm:$dst)),
           (CALLpcrel32 imm:$dst)>, Requires<[CallImmAddr]>;
-
-// X86 specific add which produces a flag.
-def : Pat<(addc GR32:$src1, GR32:$src2),
-          (ADD32rr GR32:$src1, GR32:$src2)>;
-def : Pat<(addc GR32:$src1, (load addr:$src2)),
-          (ADD32rm GR32:$src1, addr:$src2)>;
-def : Pat<(addc GR32:$src1, imm:$src2),
-          (ADD32ri GR32:$src1, imm:$src2)>;
-def : Pat<(addc GR32:$src1, i32immSExt8:$src2),
-          (ADD32ri8 GR32:$src1, i32immSExt8:$src2)>;
-
-def : Pat<(addc GR64:$src1, GR64:$src2),
-          (ADD64rr GR64:$src1, GR64:$src2)>;
-def : Pat<(addc GR64:$src1, (load addr:$src2)),
-          (ADD64rm GR64:$src1, addr:$src2)>;
-def : Pat<(addc GR64:$src1, i64immSExt8:$src2),
-          (ADD64ri8 GR64:$src1, i64immSExt8:$src2)>;
-def : Pat<(addc GR64:$src1, i64immSExt32:$src2),
-          (ADD64ri32 GR64:$src1, imm:$src2)>;
-
-def : Pat<(subc GR32:$src1, GR32:$src2),
-          (SUB32rr GR32:$src1, GR32:$src2)>;
-def : Pat<(subc GR32:$src1, (load addr:$src2)),
-          (SUB32rm GR32:$src1, addr:$src2)>;
-def : Pat<(subc GR32:$src1, imm:$src2),
-          (SUB32ri GR32:$src1, imm:$src2)>;
-def : Pat<(subc GR32:$src1, i32immSExt8:$src2),
-          (SUB32ri8 GR32:$src1, i32immSExt8:$src2)>;
-
-def : Pat<(subc GR64:$src1, GR64:$src2),
-          (SUB64rr GR64:$src1, GR64:$src2)>;
-def : Pat<(subc GR64:$src1, (load addr:$src2)),
-          (SUB64rm GR64:$src1, addr:$src2)>;
-def : Pat<(subc GR64:$src1, i64immSExt8:$src2),
-          (SUB64ri8 GR64:$src1, i64immSExt8:$src2)>;
-def : Pat<(subc GR64:$src1, imm:$src2),
-          (SUB64ri32 GR64:$src1, i64immSExt32:$src2)>;
 
 // Comparisons.
 
@@ -1043,8 +1018,9 @@ def or_is_add : PatFrag<(ops node:$lhs, node:$rhs), (or node:$lhs, node:$rhs),[{
 // (or x1, x2) -> (add x1, x2) if two operands are known not to share bits.
 let AddedComplexity = 5 in { // Try this before the selecting to OR
 
-let isCommutable = 1, isConvertibleToThreeAddress = 1,
+let isConvertibleToThreeAddress = 1,
     Constraints = "$src1 = $dst", Defs = [EFLAGS] in {
+let isCommutable = 1 in {
 def ADD16rr_DB  : I<0, Pseudo, (outs GR16:$dst), (ins GR16:$src1, GR16:$src2),
                     "", // orw/addw REG, REG
                     [(set GR16:$dst, (or_is_add GR16:$src1, GR16:$src2))]>;
@@ -1054,6 +1030,7 @@ def ADD32rr_DB  : I<0, Pseudo, (outs GR32:$dst), (ins GR32:$src1, GR32:$src2),
 def ADD64rr_DB  : I<0, Pseudo, (outs GR64:$dst), (ins GR64:$src1, GR64:$src2),
                     "", // orq/addq REG, REG
                     [(set GR64:$dst, (or_is_add GR64:$src1, GR64:$src2))]>;
+} // isCommutable
 
 // NOTE: These are order specific, we want the ri8 forms to be listed
 // first so that they are slightly preferred to the ri forms.
@@ -1647,4 +1624,3 @@ def : Pat<(and GR64:$src1, i64immSExt8:$src2),
           (AND64ri8 GR64:$src1, i64immSExt8:$src2)>;
 def : Pat<(and GR64:$src1, i64immSExt32:$src2),
           (AND64ri32 GR64:$src1, i64immSExt32:$src2)>;
-

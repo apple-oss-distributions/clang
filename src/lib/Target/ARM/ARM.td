@@ -46,24 +46,39 @@ def FeatureSlowFPBrcc : SubtargetFeature<"slow-fp-brcc", "SlowFPBrcc", "true",
 def FeatureVFPOnlySP : SubtargetFeature<"fp-only-sp", "FPOnlySP", "true",
                           "Floating point unit supports single precision only">;
 
-// Some processors have multiply-accumulate instructions that don't
-// play nicely with other VFP instructions, and it's generally better
+// Some processors have FP multiply-accumulate instructions that don't
+// play nicely with other VFP / NEON instructions, and it's generally better
 // to just not use them.
-// FIXME: Currently, this is only flagged for Cortex-A8. It may be true for
-// others as well. We should do more benchmarking and confirm one way or
-// the other.
-def FeatureHasSlowVMLx : SubtargetFeature<"vmlx", "SlowVMLx", "true",
-                                          "Disable VFP MAC instructions">;
+def FeatureHasSlowFPVMLx : SubtargetFeature<"slowfpvmlx", "SlowFPVMLx", "true",
+                                         "Disable VFP / NEON MAC instructions">;
+
+// Cortex-A8 / A9 Advanced SIMD has multiplier accumulator forwarding.
+def FeatureVMLxForwarding : SubtargetFeature<"vmlx-forwarding",
+                                       "HasVMLxForwarding", "true",
+                                       "Has multiplier accumulator forwarding">;
+
 // Some processors benefit from using NEON instructions for scalar
 // single-precision FP operations.
 def FeatureNEONForFP : SubtargetFeature<"neonfp", "UseNEONForSinglePrecisionFP",
                                         "true",
                                         "Use NEON for single precision FP">;
 
+
 // Disable 32-bit to 16-bit narrowing for experimentation.
 def FeaturePref32BitThumb : SubtargetFeature<"32bit", "Pref32BitThumb", "true",
                                              "Prefer 32-bit Thumb instrs">;
 
+/// Some instructions update CPSR partially, which can add false dependency for
+/// out-of-order implementation, e.g. Cortex-A9, unless each individual bit is
+/// mapped to a separate physical register. Avoid partial CPSR update for these
+/// processors.
+def FeatureAvoidPartialCPSR : SubtargetFeature<"avoid-partial-cpsr",
+                                               "AvoidCPSRPartialUpdate", "true",
+                                 "Avoid CPSR partial update for OOO execution">;
+
+// Multiprocessing extension.
+def FeatureMP : SubtargetFeature<"mp", "HasMPExtension", "true",
+                                 "Supports Multiprocessing extension">;
 
 // ARM architectures.
 def ArchV4T     : SubtargetFeature<"v4t", "ARMArchVersion", "V4T",
@@ -87,6 +102,9 @@ def ArchV7M     : SubtargetFeature<"v7m", "ARMArchVersion", "V7M",
                                    "ARM v7M",
                                    [FeatureThumb2, FeatureNoARM, FeatureDB,
                                     FeatureHWDiv]>;
+def ArchV7K     : SubtargetFeature<"v7k", "ARMArchVersion", "V7K",
+                                   "ARM v7K (Apple specific)",
+                                   [FeatureThumb2, FeatureDB]>;
 
 //===----------------------------------------------------------------------===//
 // ARM Processors supported.
@@ -99,9 +117,15 @@ def ProcOthers  : SubtargetFeature<"others", "ARMProcFamily", "Others",
                                    "One of the other ARM processor families">;
 def ProcA8      : SubtargetFeature<"a8", "ARMProcFamily", "CortexA8",
                                    "Cortex-A8 ARM processors",
-                                   [FeatureSlowFPBrcc, FeatureNEONForFP]>;
+                                   [FeatureSlowFPBrcc, FeatureNEONForFP,
+                                    FeatureHasSlowFPVMLx, FeatureVMLxForwarding,
+                                    FeatureT2XtPk]>;
 def ProcA9      : SubtargetFeature<"a9", "ARMProcFamily", "CortexA9",
-                                   "Cortex-A9 ARM processors">;
+                                   "Cortex-A9 ARM processors",
+                                   [FeatureVMLxForwarding,
+                                    FeatureT2XtPk, FeatureFP16,
+                                    FeatureAvoidPartialCPSR
+                                    ]>;
 
 class ProcNoItin<string Name, list<SubtargetFeature> Features>
  : Processor<Name, GenericItineraries, Features>;
@@ -147,25 +171,29 @@ def : ProcNoItin<"iwmmxt",          [ArchV5TE]>;
 // V6 Processors.
 def : Processor<"arm1136j-s",       ARMV6Itineraries, [ArchV6]>;
 def : Processor<"arm1136jf-s",      ARMV6Itineraries, [ArchV6, FeatureVFP2,
-                                                       FeatureHasSlowVMLx]>;
+                                                       FeatureHasSlowFPVMLx]>;
 def : Processor<"arm1176jz-s",      ARMV6Itineraries, [ArchV6]>;
-def : Processor<"arm1176jzf-s",     ARMV6Itineraries, [ArchV6, FeatureVFP2]>;
+def : Processor<"arm1176jzf-s",     ARMV6Itineraries, [ArchV6, FeatureVFP2,
+                                                       FeatureHasSlowFPVMLx]>;
 def : Processor<"mpcorenovfp",      ARMV6Itineraries, [ArchV6]>;
-def : Processor<"mpcore",           ARMV6Itineraries, [ArchV6, FeatureVFP2]>;
+def : Processor<"mpcore",           ARMV6Itineraries, [ArchV6, FeatureVFP2,
+                                                       FeatureHasSlowFPVMLx]>;
 
 // V6M Processors.
 def : Processor<"cortex-m0",        ARMV6Itineraries, [ArchV6M]>;
 
 // V6T2 Processors.
 def : Processor<"arm1156t2-s",      ARMV6Itineraries, [ArchV6T2]>;
-def : Processor<"arm1156t2f-s",     ARMV6Itineraries, [ArchV6T2, FeatureVFP2]>;
+def : Processor<"arm1156t2f-s",     ARMV6Itineraries, [ArchV6T2, FeatureVFP2,
+                                                       FeatureHasSlowFPVMLx]>;
 
 // V7 Processors.
 def : Processor<"cortex-a8",        CortexA8Itineraries,
-                                    [ArchV7A, ProcA8,
-                                     FeatureHasSlowVMLx, FeatureT2XtPk]>;
+                                    [ArchV7A, ProcA8]>;
 def : Processor<"cortex-a9",        CortexA9Itineraries,
-                                    [ArchV7A, ProcA9, FeatureT2XtPk]>;
+                                    [ArchV7A, ProcA9]>;
+def : Processor<"cortex-a9-mp",     CortexA9Itineraries,
+                                    [ArchV7A, ProcA9, FeatureMP]>;
 
 // V7M Processors.
 def : ProcNoItin<"cortex-m3",       [ArchV7M]>;

@@ -10,13 +10,17 @@
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclGroup.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include "clang/Frontend/FrontendPluginRegistry.h"
+#include "clang/Frontend/MultiplexConsumer.h"
 #include "clang/Parse/ParseAST.h"
 #include "clang/Serialization/ASTDeserializationListener.h"
+#include "clang/Serialization/ChainedIncludesSource.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -85,6 +89,39 @@ void FrontendAction::setCurrentFile(llvm::StringRef Value, InputKind Kind,
   CurrentASTUnit.reset(AST);
 }
 
+ASTConsumer* FrontendAction::CreateWrappedASTConsumer(CompilerInstance &CI,
+                                                      llvm::StringRef InFile) {
+  ASTConsumer* Consumer = CreateASTConsumer(CI, InFile);
+  if (!Consumer)
+    return 0;
+
+  if (CI.getFrontendOpts().AddPluginActions.size() == 0)
+    return Consumer;
+
+  // Make sure the non-plugin consumer is first, so that plugins can't
+  // modifiy the AST.
+  std::vector<ASTConsumer*> Consumers(1, Consumer);
+
+  for (size_t i = 0, e = CI.getFrontendOpts().AddPluginActions.size();
+       i != e; ++i) { 
+    // This is O(|plugins| * |add_plugins|), but since both numbers are
+    // way below 50 in practice, that's ok.
+    for (FrontendPluginRegistry::iterator
+        it = FrontendPluginRegistry::begin(),
+        ie = FrontendPluginRegistry::end();
+        it != ie; ++it) {
+      if (it->getName() == CI.getFrontendOpts().AddPluginActions[i]) {
+        llvm::OwningPtr<PluginASTAction> P(it->instantiate());
+        FrontendAction* c = P.get();
+        if (P->ParseArgs(CI, CI.getFrontendOpts().AddPluginArgs[i]))
+          Consumers.push_back(c->CreateASTConsumer(CI, InFile));
+      }
+    }
+  }
+
+  return new MultiplexConsumer(Consumers);
+}
+
 bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
                                      llvm::StringRef Filename,
                                      InputKind InputKind) {
@@ -122,7 +159,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
       goto failure;
 
     /// Create the AST consumer.
-    CI.setASTConsumer(CreateASTConsumer(CI, Filename));
+    CI.setASTConsumer(CreateWrappedASTConsumer(CI, Filename));
     if (!CI.hasASTConsumer())
       goto failure;
 
@@ -133,7 +170,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   if (!CI.hasFileManager())
     CI.createFileManager();
   if (!CI.hasSourceManager())
-    CI.createSourceManager(CI.getFileManager(), CI.getFileSystemOpts());
+    CI.createSourceManager(CI.getFileManager());
 
   // IR files bypass the rest of initialization.
   if (InputKind == IK_LLVM_IR) {
@@ -166,14 +203,23 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   if (!usesPreprocessorOnly()) {
     CI.createASTContext();
 
-    llvm::OwningPtr<ASTConsumer> Consumer(CreateASTConsumer(CI, Filename));
+    llvm::OwningPtr<ASTConsumer> Consumer(
+        CreateWrappedASTConsumer(CI, Filename));
     if (!Consumer)
       goto failure;
 
     CI.getASTContext().setASTMutationListener(Consumer->GetASTMutationListener());
 
-    /// Use PCH?
-    if (!CI.getPreprocessorOpts().ImplicitPCHInclude.empty()) {
+    if (!CI.getPreprocessorOpts().ChainedIncludes.empty()) {
+      // Convert headers to PCH and chain them.
+      llvm::OwningPtr<ExternalASTSource> source;
+      source.reset(ChainedIncludesSource::create(CI));
+      if (!source)
+        goto failure;
+      CI.getASTContext().setExternalSource(source);
+
+    } else if (!CI.getPreprocessorOpts().ImplicitPCHInclude.empty()) {
+      // Use PCH.
       assert(hasPCHSupport() && "This action does not have PCH support!");
       ASTDeserializationListener *DeserialListener
           = CI.getInvocation().getFrontendOpts().ChainedPCH ?
@@ -212,10 +258,10 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   // matching EndSourceFile().
   failure:
   if (isCurrentFileAST()) {
-    CI.takeASTContext();
-    CI.takePreprocessor();
-    CI.takeSourceManager();
-    CI.takeFileManager();
+    CI.setASTContext(0);
+    CI.setPreprocessor(0);
+    CI.setSourceManager(0);
+    CI.setFileManager(0);
   }
 
   CI.getDiagnosticClient().EndSourceFile();
@@ -253,6 +299,9 @@ void FrontendAction::Execute() {
 void FrontendAction::EndSourceFile() {
   CompilerInstance &CI = getCompilerInstance();
 
+  // Inform the diagnostic client we are done with this source file.
+  CI.getDiagnosticClient().EndSourceFile();
+
   // Finalize the action.
   EndSourceFileAction();
 
@@ -264,7 +313,7 @@ void FrontendAction::EndSourceFile() {
     CI.takeASTConsumer();
     if (!isCurrentFileAST()) {
       CI.takeSema();
-      CI.takeASTContext();
+      CI.resetAndLeakASTContext();
     }
   } else {
     if (!isCurrentFileAST()) {
@@ -289,17 +338,14 @@ void FrontendAction::EndSourceFile() {
 
   // Cleanup the output streams, and erase the output files if we encountered
   // an error.
-  CI.clearOutputFiles(/*EraseFiles=*/CI.getDiagnostics().getNumErrors());
-
-  // Inform the diagnostic client we are done with this source file.
-  CI.getDiagnosticClient().EndSourceFile();
+  CI.clearOutputFiles(/*EraseFiles=*/CI.getDiagnostics().hasErrorOccurred());
 
   if (isCurrentFileAST()) {
     CI.takeSema();
-    CI.takeASTContext();
-    CI.takePreprocessor();
-    CI.takeSourceManager();
-    CI.takeFileManager();
+    CI.resetAndLeakASTContext();
+    CI.resetAndLeakPreprocessor();
+    CI.resetAndLeakSourceManager();
+    CI.resetAndLeakFileManager();
   }
 
   setCompilerInstance(0);

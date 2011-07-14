@@ -1,20 +1,20 @@
-set(LLVM_NO_RTTI 1)
-
 set( LLVM_USED_LIBS
-  clangFrontendTool
-  clangFrontend
-  clangDriver
-  clangSerialization
-  clangCodeGen
-  clangParse
-  clangSema
-  clangChecker
-  clangAnalysis
-  clangIndex
-  clangRewrite
   clangAST
-  clangLex
+  clangAnalysis
   clangBasic
+  clangCodeGen
+  clangDriver
+  clangFrontend
+  clangFrontendTool
+  clangIndex
+  clangLex
+  clangParse
+  clangRewrite
+  clangSema
+  clangSerialization
+  clangStaticAnalyzerFrontend
+  clangStaticAnalyzerCheckers
+  clangStaticAnalyzerCore
   )
 
 set( LLVM_LINK_COMPONENTS
@@ -23,6 +23,7 @@ set( LLVM_LINK_COMPONENTS
   bitreader
   bitwriter
   codegen
+  instrumentation
   ipo
   selectiondag
   )
@@ -33,6 +34,8 @@ add_clang_executable(clang
   cc1as_main.cpp
   )
 
+set_target_properties(clang PROPERTIES VERSION ${CLANG_EXECUTABLE_VERSION})
+
 if(UNIX)
   set(CLANGXX_LINK_OR_COPY create_symlink)
 else()
@@ -40,11 +43,16 @@ else()
 endif()
 
 # Create the clang++ symlink in the build directory.
+set(clang_pp "${LLVM_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/clang++${CMAKE_EXECUTABLE_SUFFIX}")
 add_custom_target(clang++ ALL
   ${CMAKE_COMMAND} -E ${CLANGXX_LINK_OR_COPY}
     "${LLVM_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/clang${CMAKE_EXECUTABLE_SUFFIX}"
-    "${LLVM_BINARY_DIR}/bin/${CMAKE_CFG_INTDIR}/clang++${CMAKE_EXECUTABLE_SUFFIX}"
+    "${clang_pp}"
   DEPENDS clang)
+set_target_properties(clang++ PROPERTIES FOLDER "Clang executables")
+
+set_property(DIRECTORY APPEND
+  PROPERTY ADDITIONAL_MAKE_CLEAN_FILES ${clang_pp})
 
 install(TARGETS clang
   RUNTIME DESTINATION bin)

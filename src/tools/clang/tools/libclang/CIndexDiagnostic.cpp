@@ -220,7 +220,7 @@ CXString clang_getDiagnosticOption(CXDiagnostic Diag, CXString *Disable) {
     return createCXString("");
   
   unsigned ID = StoredDiag->Diag.getID();
-  if (const char *Option = Diagnostic::getWarningOptionForDiag(ID)) {
+  if (const char *Option = DiagnosticIDs::getWarningOptionForDiag(ID)) {
     if (Disable)
       *Disable = createCXString((llvm::Twine("-Wno-") + Option).str());
     return createCXString((llvm::Twine("-W") + Option).str());
@@ -233,7 +233,7 @@ CXString clang_getDiagnosticOption(CXDiagnostic Diag, CXString *Disable) {
   }
   
   bool EnabledByDefault;
-  if (Diagnostic::isBuiltinExtensionDiag(ID, EnabledByDefault) &&
+  if (DiagnosticIDs::isBuiltinExtensionDiag(ID, EnabledByDefault) &&
       !EnabledByDefault)
     return createCXString("-pedantic");
 
@@ -245,11 +245,11 @@ unsigned clang_getDiagnosticCategory(CXDiagnostic Diag) {
   if (!StoredDiag)
     return 0;
 
-  return Diagnostic::getCategoryNumberForDiag(StoredDiag->Diag.getID());
+  return DiagnosticIDs::getCategoryNumberForDiag(StoredDiag->Diag.getID());
 }
   
 CXString clang_getDiagnosticCategoryName(unsigned Category) {
-  return createCXString(Diagnostic::getCategoryNameFromID(Category));
+  return createCXString(DiagnosticIDs::getCategoryNameFromID(Category));
 }
   
 unsigned clang_getDiagnosticNumRanges(CXDiagnostic Diag) {

@@ -36,7 +36,8 @@ serialization::TypeIdxFromBuiltin(const BuiltinType *BT) {
   case BuiltinType::UInt128:    ID = PREDEF_TYPE_UINT128_ID;    break;
   case BuiltinType::Char_S:     ID = PREDEF_TYPE_CHAR_S_ID;     break;
   case BuiltinType::SChar:      ID = PREDEF_TYPE_SCHAR_ID;      break;
-  case BuiltinType::WChar:      ID = PREDEF_TYPE_WCHAR_ID;      break;
+  case BuiltinType::WChar_S:
+  case BuiltinType::WChar_U:    ID = PREDEF_TYPE_WCHAR_ID;      break;
   case BuiltinType::Short:      ID = PREDEF_TYPE_SHORT_ID;      break;
   case BuiltinType::Int:        ID = PREDEF_TYPE_INT_ID;        break;
   case BuiltinType::Long:       ID = PREDEF_TYPE_LONG_ID;       break;
@@ -49,13 +50,12 @@ serialization::TypeIdxFromBuiltin(const BuiltinType *BT) {
   case BuiltinType::Char16:     ID = PREDEF_TYPE_CHAR16_ID;     break;
   case BuiltinType::Char32:     ID = PREDEF_TYPE_CHAR32_ID;     break;
   case BuiltinType::Overload:   ID = PREDEF_TYPE_OVERLOAD_ID;   break;
+  case BuiltinType::BoundMember:ID = PREDEF_TYPE_BOUND_MEMBER;  break;
   case BuiltinType::Dependent:  ID = PREDEF_TYPE_DEPENDENT_ID;  break;
+  case BuiltinType::UnknownAny: ID = PREDEF_TYPE_UNKNOWN_ANY;   break;
   case BuiltinType::ObjCId:     ID = PREDEF_TYPE_OBJC_ID;       break;
   case BuiltinType::ObjCClass:  ID = PREDEF_TYPE_OBJC_CLASS;    break;
   case BuiltinType::ObjCSel:    ID = PREDEF_TYPE_OBJC_SEL;      break;
-  case BuiltinType::UndeducedAuto:
-    assert(0 && "Should not see undeduced auto here");
-    break;
   }
 
   return TypeIdx(ID);

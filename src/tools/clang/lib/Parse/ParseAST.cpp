@@ -21,29 +21,11 @@
 #include "clang/AST/ExternalASTSource.h"
 #include "clang/AST/Stmt.h"
 #include "clang/Parse/Parser.h"
+#include "llvm/ADT/OwningPtr.h"
+#include "llvm/Support/CrashRecoveryContext.h"
 #include <cstdio>
 
 using namespace clang;
-
-static void DumpRecordLayouts(ASTContext &C) {
-  for (ASTContext::type_iterator I = C.types_begin(), E = C.types_end();
-       I != E; ++I) {
-    const RecordType *RT = dyn_cast<RecordType>(*I);
-    if (!RT)
-      continue;
-
-    const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl());
-    if (!RD || RD->isImplicit() || RD->isDependentType() ||
-        RD->isInvalidDecl() || !RD->getDefinition())
-      continue;
-
-    // FIXME: Do we really need to hard code this?
-    if (RD->getQualifiedNameAsString() == "__va_list_tag")
-      continue;
-
-    C.DumpRecordLayout(RD, llvm::errs());
-  }
-}
 
 //===----------------------------------------------------------------------===//
 // Public interface to the file
@@ -57,8 +39,15 @@ void clang::ParseAST(Preprocessor &PP, ASTConsumer *Consumer,
                      ASTContext &Ctx, bool PrintStats,
                      bool CompleteTranslationUnit,
                      CodeCompleteConsumer *CompletionConsumer) {
-  Sema S(PP, Ctx, *Consumer, CompleteTranslationUnit, CompletionConsumer);
-  ParseAST(S, PrintStats);
+
+  llvm::OwningPtr<Sema> S(new Sema(PP, Ctx, *Consumer,
+                                   CompleteTranslationUnit,
+                                   CompletionConsumer));
+
+  // Recover resources if we crash before exiting this method.
+  llvm::CrashRecoveryContextCleanupRegistrar<Sema> CleaupSema(S.get());
+  
+  ParseAST(*S.get(), PrintStats);
 }
 
 void clang::ParseAST(Sema &S, bool PrintStats) {
@@ -70,7 +59,15 @@ void clang::ParseAST(Sema &S, bool PrintStats) {
 
   ASTConsumer *Consumer = &S.getASTConsumer();
 
-  Parser P(S.getPreprocessor(), S);
+  llvm::OwningPtr<Parser> ParseOP(new Parser(S.getPreprocessor(), S));
+  Parser &P = *ParseOP.get();
+
+  PrettyStackTraceParserEntry CrashInfo(P);
+
+  // Recover resources if we crash before exiting this method.
+  llvm::CrashRecoveryContextCleanupRegistrar<Parser>
+    CleaupParser(ParseOP.get());
+
   S.getPreprocessor().EnterMainSourceFile();
   P.Initialize();
   S.Initialize();
@@ -96,10 +93,6 @@ void clang::ParseAST(Sema &S, bool PrintStats) {
        I = S.WeakTopLevelDecls().begin(),
        E = S.WeakTopLevelDecls().end(); I != E; ++I)
     Consumer->HandleTopLevelDecl(DeclGroupRef(*I));
-  
-  // Dump record layouts, if requested.
-  if (S.getLangOptions().DumpRecordLayouts)
-    DumpRecordLayouts(S.getASTContext());
   
   Consumer->HandleTranslationUnit(S.getASTContext());
   

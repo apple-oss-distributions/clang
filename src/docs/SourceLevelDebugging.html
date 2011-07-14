@@ -8,7 +8,7 @@
 </head>
 <body>
 
-<div class="doc_title">Source Level Debugging with LLVM</div>
+<h1>Source Level Debugging with LLVM</h1>
 
 <table class="layout" style="width:100%">
   <tr class="layout">
@@ -68,26 +68,24 @@ height="369">
 
 
 <!-- *********************************************************************** -->
-<div class="doc_section"><a name="introduction">Introduction</a></div> 
+<h2><a name="introduction">Introduction</a></h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <p>This document is the central repository for all information pertaining to
    debug information in LLVM.  It describes the <a href="#format">actual format
    that the LLVM debug information</a> takes, which is useful for those
    interested in creating front-ends or dealing directly with the information.
    Further, this document provides specific examples of what debug information
-   for C/C++.</p>
-
-</div>
+   for C/C++ looks like.</p>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="phil">Philosophy behind LLVM debugging information</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>The idea of the LLVM debugging information is to capture how the important
    pieces of the source-language's Abstract Syntax Tree map onto LLVM code.
@@ -133,11 +131,11 @@ height="369">
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="consumers">Debug information consumers</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>The role of debug information is to provide meta information normally
    stripped away during the compilation process.  This meta information provides
@@ -157,11 +155,11 @@ height="369">
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="debugopt">Debugging optimized code</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>An extremely high priority of LLVM debugging information is to make it
    interact well with optimizations and analysis.  In particular, the LLVM debug
@@ -226,13 +224,15 @@ height="369">
 
 </div>
 
-<!-- *********************************************************************** -->
-<div class="doc_section">
-  <a name="format">Debugging information format</a>
 </div>
+
+<!-- *********************************************************************** -->
+<h2>
+  <a name="format">Debugging information format</a>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <p>LLVM debugging information has been carefully designed to make it possible
    for the optimizer to optimize the program and debugging information without
@@ -265,14 +265,12 @@ height="369">
    common to any source-language.  The <a href="#ccxx_frontend">next section</a>
    describes the data layout conventions used by the C and C++ front-ends.</p>
 
-</div>
-
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="debug_info_descriptors">Debug information descriptors</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>In consideration of the complexity and volume of debug information, LLVM
    provides a specification for well formed debug descriptors. </p>
@@ -312,14 +310,12 @@ height="369">
 
 <p>The details of the various descriptors follow.</p>  
 
-</div>
-
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_compile_units">Compile unit descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -346,16 +342,18 @@ height="369">
    that produced it.</p>
 
 <p>Compile unit descriptors provide the root context for objects declared in a
-   specific compilation unit. File descriptors are defined using this context.</p>
+   specific compilation unit. File descriptors are defined using this context.
+   These descriptors are collected by a named metadata 
+   <tt>!llvm.dbg.cu</tt>.
 
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_files">File descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -380,11 +378,11 @@ height="369">
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_global_variables">Global variable descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -407,16 +405,17 @@ height="369">
 </div>
 
 <p>These descriptors provide debug information about globals variables.  The
-provide details such as name, type and where the variable is defined.</p>
+provide details such as name, type and where the variable is defined. All
+global variables are collected by named metadata <tt>!llvm.dbg.gv</tt>.</p>
 
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_subprograms">Subprogram descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -432,30 +431,35 @@ provide details such as name, type and where the variable is defined.</p>
   i32,      ;; Line number where defined
   metadata, ;; Reference to type descriptor
   i1,       ;; True if the global is local to compile unit (static)
-  i1        ;; True if the global is defined in the compile unit (not extern)
-  i32       ;; Virtuality, e.g. dwarf::DW_VIRTUALITY__virtual
-  i32       ;; Index into a virtual function
+  i1,       ;; True if the global is defined in the compile unit (not extern)
+  i32,      ;; Virtuality, e.g. dwarf::DW_VIRTUALITY__virtual
+  i32,      ;; Index into a virtual function
   metadata, ;; indicates which base type contains the vtable pointer for the 
             ;; derived class
-  i1        ;; isArtificial
-  i1        ;; isOptimized
-  Function *;; Pointer to LLVM function
+  i1,       ;; isArtificial
+  i1,       ;; isOptimized
+  Function *,;; Pointer to LLVM function
+  metadata, ;; Lists function template parameters
+  metadata  ;; Function declaration descriptor
 }
 </pre>
 </div>
 
 <p>These descriptors provide debug information about functions, methods and
    subprograms.  They provide details such as name, return types and the source
-   location where the subprogram is defined.</p>
+   location where the subprogram is defined.
+   All subprogram descriptors are collected by a named metadata 
+   <tt>!llvm.dbg.sp</tt>.
+</p>
 
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_blocks">Block descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -463,7 +467,9 @@ provide details such as name, type and where the variable is defined.</p>
   i32,     ;; Tag = 11 + <a href="#LLVMDebugVersion">LLVMDebugVersion</a> (DW_TAG_lexical_block)
   metadata,;; Reference to context descriptor
   i32,     ;; Line number
-  i32      ;; Column number
+  i32,     ;; Column number
+  metadata,;; Reference to source file
+  i32      ;; Unique ID to identify blocks from a template function
 }
 </pre>
 </div>
@@ -475,11 +481,11 @@ provide details such as name, type and where the variable is defined.</p>
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_basic_type">Basic type descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -527,11 +533,11 @@ DW_ATE_unsigned_char = 8
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_derived_type">Derived type descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -544,7 +550,12 @@ DW_ATE_unsigned_char = 8
   i64,      ;; Size in bits
   i64,      ;; Alignment in bits
   i64,      ;; Offset in bits
-  metadata  ;; Reference to type derived from
+  metadata, ;; Reference to type derived from
+  metadata, ;; (optional) Name of the Objective C property assoicated with 
+            ;; Objective-C an ivar 
+  metadata, ;; (optional) Name of the Objective C property getter selector.
+  metadata, ;; (optional) Name of the Objective C property setter selector.
+  i32       ;; (optional) Objective C property attributes.
 }
 </pre>
 </div>
@@ -588,18 +599,17 @@ DW_TAG_restrict_type    = 55
    the bit offset if embedded in a <a href="#format_composite_type">composite
    type</a>.</p>
 
-<p>Note that the <tt>void *</tt> type is expressed as a
-   <tt>llvm.dbg.derivedtype.type</tt> with tag of <tt>DW_TAG_pointer_type</tt>
-   and <tt>NULL</tt> derived type.</p>
+<p>Note that the <tt>void *</tt> type is expressed as a type derived from NULL.
+</p>
 
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_composite_type">Composite type descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -645,7 +655,8 @@ DW_TAG_inheritance      = 28
 
 <p>The members of enumeration types (tag = <tt>DW_TAG_enumeration_type</tt>) are
    <a href="#format_enumeration">enumerator descriptors</a>, each representing
-   the definition of enumeration value for the set.</p>
+   the definition of enumeration value for the set. All enumeration type
+   descriptors are collected by named metadata <tt>!llvm.dbg.enum</tt>.</p>
 
 <p>The members of structure (tag = <tt>DW_TAG_structure_type</tt>) or union (tag
    = <tt>DW_TAG_union_type</tt>) types are any one of
@@ -681,15 +692,15 @@ DW_TAG_inheritance      = 28
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_subrange">Subrange descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
-%<a href="#format_subrange">llvm.dbg.subrange.type</a> = type {
+!42 = metadata !{
   i32,    ;; Tag = 33 + <a href="#LLVMDebugVersion">LLVMDebugVersion</a> (DW_TAG_subrange_type)
   i64,    ;; Low value
   i64     ;; High value
@@ -701,16 +712,17 @@ DW_TAG_inheritance      = 28
    <a href="#format_composite_type">composite type</a>.  The low value defines
    the lower bounds typically zero for C/C++.  The high value is the upper
    bounds.  Values are 64 bit.  High - low + 1 is the size of the array.  If low
-   == high the array will be unbounded.</p>
+   > high the array bounds are not included in generated debugging information.
+</p>
 
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_enumeration">Enumerator descriptors</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -730,11 +742,11 @@ DW_TAG_inheritance      = 28
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_variables">Local variables</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -743,7 +755,8 @@ DW_TAG_inheritance      = 28
   metadata, ;; Context
   metadata, ;; Name
   metadata, ;; Reference to file where defined
-  i32,      ;; Line number where defined
+  i32,      ;; 24 bit - Line number where defined
+            ;; 8 bit - Argument number. 1 indicates 1st argument.
   metadata  ;; Type descriptor
 }
 </pre>
@@ -772,42 +785,39 @@ DW_TAG_return_variable = 258
 
 </div>
 
-<!-- ======================================================================= -->
-<div class="doc_subsection">
-  <a name="format_common_intrinsics">Debugger intrinsic functions</a>
 </div>
 
-<div class="doc_text">
+<!-- ======================================================================= -->
+<h3>
+  <a name="format_common_intrinsics">Debugger intrinsic functions</a>
+</h3>
+
+<div>
 
 <p>LLVM uses several intrinsic functions (name prefixed with "llvm.dbg") to
    provide debug information at various points in generated code.</p>
 
-</div>
-
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_common_declare">llvm.dbg.declare</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 <pre>
   void %<a href="#format_common_declare">llvm.dbg.declare</a>(metadata, metadata)
 </pre>
 
 <p>This intrinsic provides information about a local element (ex. variable.) The
-   first argument is metadata holding alloca for the variable.</tt>. The
-   second argument is
-   the <tt>%<a href="#format_variables">llvm.dbg.variable</a></tt> containing
-   the description of the variable. </p>
-
+   first argument is metadata holding alloca for the variable. The
+   second argument is metadata containing description of the variable. </p>
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="format_common_value">llvm.dbg.value</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 <pre>
   void %<a href="#format_common_value">llvm.dbg.value</a>(metadata, i64, metadata)
 </pre>
@@ -815,18 +825,18 @@ DW_TAG_return_variable = 258
 <p>This intrinsic provides information when a user source variable is set to a
    new value.  The first argument is the new value (wrapped as metadata).  The
    second argument is the offset in the user source variable where the new value
-   is written.  The third argument is
-   the <tt>%<a href="#format_variables">llvm.dbg.variable</a></tt> containing
-   the description of the user source variable. </p>
+   is written.  The third argument is metadata containing description of the
+   user source variable. </p>
+</div>
 
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="format_common_lifetime">Object lifetimes and scoping</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 <p>In many languages, the local variables in functions can have their lifetimes
    or scopes limited to a subset of a function.  In the C family of languages,
    for example, variables are only live (readable and writable) within the
@@ -864,13 +874,13 @@ entry:
   %Y = alloca i32, align 4                        ; &lt;i32*&gt; [#uses=4]
   %Z = alloca i32, align 4                        ; &lt;i32*&gt; [#uses=3]
   %0 = bitcast i32* %X to {}*                     ; &lt;{}*&gt; [#uses=1]
-  call void @llvm.dbg.declare({}* %0, metadata !0), !dbg !7
+  call void @llvm.dbg.declare(metadata !{i32 * %X}, metadata !0), !dbg !7
   store i32 21, i32* %X, !dbg !8
   %1 = bitcast i32* %Y to {}*                     ; &lt;{}*&gt; [#uses=1]
-  call void @llvm.dbg.declare({}* %1, metadata !9), !dbg !10
+  call void @llvm.dbg.declare(metadata !{i32 * %Y}, metadata !9), !dbg !10
   store i32 22, i32* %Y, !dbg !11
   %2 = bitcast i32* %Z to {}*                     ; &lt;{}*&gt; [#uses=1]
-  call void @llvm.dbg.declare({}* %2, metadata !12), !dbg !14
+  call void @llvm.dbg.declare(metadata !{i32 * %Z}, metadata !12), !dbg !14
   store i32 23, i32* %Z, !dbg !15
   %tmp = load i32* %X, !dbg !16                   ; &lt;i32&gt; [#uses=1]
   %tmp1 = load i32* %Y, !dbg !16                  ; &lt;i32&gt; [#uses=1]
@@ -881,7 +891,7 @@ entry:
   ret void, !dbg !18
 }
 
-declare void @llvm.dbg.declare({}*, metadata) nounwind readnone
+declare void @llvm.dbg.declare(metadata, metadata) nounwind readnone
 
 !0 = metadata !{i32 459008, metadata !1, metadata !"X", 
                 metadata !3, i32 2, metadata !6}; [ DW_TAG_auto_variable ]
@@ -923,7 +933,7 @@ declare void @llvm.dbg.declare({}*, metadata) nounwind readnone
 
 <div class="doc_code">
 <pre>
-call void @llvm.dbg.declare({}* %0, metadata !0), !dbg !7   
+call void @llvm.dbg.declare(metadata, metadata !0), !dbg !7   
 </pre>
 </div>
 
@@ -958,7 +968,7 @@ call void @llvm.dbg.declare({}* %0, metadata !0), !dbg !7
 
 <div class="doc_code">
 <pre>
-call void @llvm.dbg.declare({}* %2, metadata !12), !dbg !14
+call void @llvm.dbg.declare(metadata, metadata !12), !dbg !14
 </pre>
 </div>
 
@@ -984,13 +994,15 @@ call void @llvm.dbg.declare({}* %2, metadata !12), !dbg !14
 
 </div>
 
-<!-- *********************************************************************** -->
-<div class="doc_section">
-  <a name="ccxx_frontend">C/C++ front-end specific debug information</a>
 </div>
+
+<!-- *********************************************************************** -->
+<h2>
+  <a name="ccxx_frontend">C/C++ front-end specific debug information</a>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <p>The C and C++ front-ends represent information about the program in a format
    that is effectively identical
@@ -1011,14 +1023,12 @@ call void @llvm.dbg.declare({}* %2, metadata !12), !dbg !14
 <p>The following sections provide examples of various C/C++ constructs and the
    debug information that would best describe those constructs.</p>
 
-</div>
-
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="ccxx_compile_units">C/C++ source file information</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>Given the source files <tt>MySource.cpp</tt> and <tt>MyHeader.h</tt> located
    in the directory <tt>/Users/mine/sources</tt>, the following code:</p>
@@ -1092,11 +1102,11 @@ using <tt>Instruction::getMetadata()</tt> and
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="ccxx_global_variable">C/C++ global variable information</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>Given an integer global variable declared as follows:</p>
 
@@ -1162,11 +1172,11 @@ int MyGlobal = 100;
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="ccxx_subprogram">C/C++ function information</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>Given a function declared as follows:</p>
 
@@ -1198,7 +1208,14 @@ int main(int argc, char *argv[]) {
   i32 1,             ;; Line number
   metadata !4,       ;; Type
   i1 false,          ;; Is local 
-  i1 true            ;; Is definition
+  i1 true,           ;; Is definition
+  i32 0,             ;; Virtuality attribute, e.g. pure virtual function
+  i32 0,             ;; Index into virtual table for C++ methods
+  i32 0,             ;; Type that holds virtual table.
+  i32 0,             ;; Flags
+  i1 false,          ;; True if this function is optimized
+  Function *,        ;; Pointer to llvm::Function
+  null               ;; Function template parameters
 }
 ;;
 ;; Define the subprogram itself.
@@ -1212,22 +1229,20 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="ccxx_basic_types">C/C++ basic types</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>The following are the basic type descriptors for C/C++ core types:</p>
 
-</div>
-
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_type_bool">bool</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1249,11 +1264,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_char">char</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1275,11 +1290,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_unsigned_char">unsigned char</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1301,11 +1316,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_short">short</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1327,11 +1342,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_unsigned_short">unsigned short</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1353,11 +1368,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_int">int</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1378,11 +1393,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_unsigned_int">unsigned int</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1404,11 +1419,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_long_long">long long</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1430,11 +1445,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_unsigned_long_long">unsigned long long</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1456,11 +1471,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_float">float</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1482,11 +1497,11 @@ define i32 @main(i32 %argc, i8** %argv) {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsubsection">
+<h4>
   <a name="ccxx_basic_double">double</a>
-</div>
+</h4>
 
-<div class="doc_text">
+<div>
 
 <div class="doc_code">
 <pre>
@@ -1507,12 +1522,14 @@ define i32 @main(i32 %argc, i8** %argv) {
 
 </div>
 
-<!-- ======================================================================= -->
-<div class="doc_subsection">
-  <a name="ccxx_derived_types">C/C++ derived types</a>
 </div>
 
-<div class="doc_text">
+<!-- ======================================================================= -->
+<h3>
+  <a name="ccxx_derived_types">C/C++ derived types</a>
+</h3>
+
+<div>
 
 <p>Given the following as an example of C/C++ derived type:</p>
 
@@ -1593,11 +1610,11 @@ typedef const int *IntPtr;
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="ccxx_composite_types">C/C++ struct/union types</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>Given the following as an example of C/C++ struct type:</p>
 
@@ -1706,11 +1723,11 @@ struct Color {
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="ccxx_enumeration_types">C/C++ enumeration types</a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
 <p>Given the following as an example of C/C++ enumeration type:</p>
 
@@ -1771,6 +1788,8 @@ enum Trees {
 
 </div>
 
+</div>
+
 <!-- *********************************************************************** -->
 
 <hr>
@@ -1781,8 +1800,8 @@ enum Trees {
   src="http://www.w3.org/Icons/valid-html401-blue" alt="Valid HTML 4.01"></a>
 
   <a href="mailto:sabre@nondot.org">Chris Lattner</a><br>
-  <a href="http://llvm.org">LLVM Compiler Infrastructure</a><br>
-  Last modified: $Date: 2010-10-04 09:51:59 -0700 (Mon, 04 Oct 2010) $
+  <a href="http://llvm.org/">LLVM Compiler Infrastructure</a><br>
+  Last modified: $Date$
 </address>
 
 </body>

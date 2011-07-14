@@ -34,6 +34,10 @@ namespace llvm {
 
       Wrapper,      // Wrapper - A wrapper node for TargetConstantPool,
                     // TargetExternalSymbol, and TargetGlobalAddress.
+      WrapperDYN,   // WrapperDYN - A wrapper node for TargetGlobalAddress in
+                    // DYN mode.
+      WrapperPIC,   // WrapperPIC - A wrapper node for TargetGlobalAddress in
+                    // PIC mode.
       WrapperJT,    // WrapperJT - A wrapper node for TargetJumpTable
 
       CALL,         // Function call.
@@ -53,7 +57,6 @@ namespace llvm {
       CMPFPw0,      // ARM VFP compare against zero instruction, sets FPSCR.
       FMSTAT,       // ARM fmstat instruction.
       CMOV,         // ARM conditional move instructions.
-      CNEG,         // ARM conditional negate instructions.
 
       BCC_i64,
 
@@ -81,13 +84,20 @@ namespace llvm {
 
       DYN_ALLOC,    // Dynamic allocation on the stack.
 
-      MEMBARRIER,   // Memory barrier
-      SYNCBARRIER,  // Memory sync barrier
-      
+      MEMBARRIER,   // Memory barrier (DMB)
+      MEMBARRIER_MCR, // Memory barrier (MCR)
+
+      PRELOAD,      // Preload
+
       VCEQ,         // Vector compare equal.
+      VCEQZ,        // Vector compare equal to zero.
       VCGE,         // Vector compare greater than or equal.
+      VCGEZ,        // Vector compare greater than or equal to zero.
+      VCLEZ,        // Vector compare less than or equal to zero.
       VCGEU,        // Vector compare unsigned greater than or equal.
       VCGT,         // Vector compare greater than.
+      VCGTZ,        // Vector compare greater than zero.
+      VCLTZ,        // Vector compare less than zero.
       VCGTU,        // Vector compare unsigned greater than.
       VTST,         // Vector test bits.
 
@@ -143,6 +153,8 @@ namespace llvm {
       VZIP,         // zip (interleave)
       VUZP,         // unzip (deinterleave)
       VTRN,         // transpose
+      VTBL1,        // 1-register shuffle with mask
+      VTBL2,        // 2-register shuffle with mask
 
       // Vector multiply long:
       VMULLs,       // ...signed
@@ -160,7 +172,41 @@ namespace llvm {
       FMIN,
 
       // Bit-field insert
-      BFI
+      BFI,
+
+      // Vector OR with immediate
+      VORRIMM,
+      // Vector AND with NOT of immediate
+      VBICIMM,
+
+      // Vector bitwise select
+      VBSL,
+
+      // Vector load N-element structure to all lanes:
+      VLD2DUP = ISD::FIRST_TARGET_MEMORY_OPCODE,
+      VLD3DUP,
+      VLD4DUP,
+
+      // NEON loads with post-increment base updates:
+      VLD1_UPD,
+      VLD2_UPD,
+      VLD3_UPD,
+      VLD4_UPD,
+      VLD2LN_UPD,
+      VLD3LN_UPD,
+      VLD4LN_UPD,
+      VLD2DUP_UPD,
+      VLD3DUP_UPD,
+      VLD4DUP_UPD,
+
+      // NEON stores with post-increment base updates:
+      VST1_UPD,
+      VST2_UPD,
+      VST3_UPD,
+      VST4_UPD,
+      VST2LN_UPD,
+      VST3LN_UPD,
+      VST4LN_UPD
     };
   }
 
@@ -192,13 +238,15 @@ namespace llvm {
     virtual void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue>&Results,
                                     SelectionDAG &DAG) const;
 
-    virtual SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const;
-
     virtual const char *getTargetNodeName(unsigned Opcode) const;
 
     virtual MachineBasicBlock *
       EmitInstrWithCustomInserter(MachineInstr *MI,
                                   MachineBasicBlock *MBB) const;
+
+    virtual SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+
+    bool isDesirableToTransformToIntegerOp(unsigned Opc, EVT VT) const;
 
     /// allowsUnalignedMemoryAccesses - Returns true if the target allows
     /// unaligned memory accesses. of the specified type.
@@ -215,6 +263,12 @@ namespace llvm {
     /// compare a register against the immediate without having to materialize
     /// the immediate into a register.
     virtual bool isLegalICmpImmediate(int64_t Imm) const;
+
+    /// isLegalAddImmediate - Return true if the specified immediate is legal
+    /// add immediate, that is the target has add instructions which can
+    /// add a register and the immediate without having to materialize
+    /// the immediate into a register.
+    virtual bool isLegalAddImmediate(int64_t Imm) const;
 
     /// getPreIndexedAddressParts - returns true by value, base pointer and
     /// offset pointer and addressing mode by reference if the node's address
@@ -240,7 +294,15 @@ namespace llvm {
                                                 unsigned Depth) const;
 
 
+    virtual bool ExpandInlineAsm(CallInst *CI) const;
+
     ConstraintType getConstraintType(const std::string &Constraint) const;
+
+    /// Examine constraint string and operand type and determine a weight value.
+    /// The operand object must already have been set up with the operand type.
+    ConstraintWeight getSingleConstraintMatchWeight(
+      AsmOperandInfo &info, const char *constraint) const;
+
     std::pair<unsigned, const TargetRegisterClass*>
       getRegForInlineAsmConstraint(const std::string &Constraint,
                                    EVT VT) const;
@@ -277,9 +339,6 @@ namespace llvm {
     virtual FastISel *createFastISel(FunctionLoweringInfo &funcInfo) const;
 
     Sched::Preference getSchedulingPreference(SDNode *N) const;
-
-    unsigned getRegPressureLimit(const TargetRegisterClass *RC,
-                                 MachineFunction &MF) const;
 
     bool isShuffleMaskLegal(const SmallVectorImpl<int> &M, EVT VT) const;
     bool isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const;
@@ -355,6 +414,10 @@ namespace llvm {
     SDValue LowerShiftRightParts(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerShiftLeftParts(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerFLT_ROUNDS_(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerBUILD_VECTOR(SDValue Op, SelectionDAG &DAG,
+                              const ARMSubtarget *ST) const;
+
+    SDValue ReconstructShuffle(SDValue Op, SelectionDAG &DAG) const;
 
     SDValue LowerCallResult(SDValue Chain, SDValue InFlag,
                             CallingConv::ID CallConv, bool isVarArg,
@@ -369,6 +432,13 @@ namespace llvm {
                            DebugLoc dl, SelectionDAG &DAG,
                            SmallVectorImpl<SDValue> &InVals) const;
 
+    void VarArgStyleRegisters(CCState &CCInfo, SelectionDAG &DAG,
+                              DebugLoc dl, SDValue &Chain, unsigned ArgOffset)
+      const;
+
+    void computeRegArea(CCState &CCInfo, MachineFunction &MF,
+                        unsigned &VARegSize, unsigned &VARegSaveSize) const;
+
     virtual SDValue
       LowerCall(SDValue Chain, SDValue Callee,
                 CallingConv::ID CallConv, bool isVarArg,
@@ -378,6 +448,9 @@ namespace llvm {
                 const SmallVectorImpl<ISD::InputArg> &Ins,
                 DebugLoc dl, SelectionDAG &DAG,
                 SmallVectorImpl<SDValue> &InVals) const;
+
+    /// HandleByVal - Target-specific cleanup for ByVal support.
+    virtual void HandleByVal(CCState *, unsigned &) const;
 
     /// IsEligibleForTailCallOptimization - Check whether the call is eligible
     /// for tail call optimization. Targets which want to do tail call
@@ -398,10 +471,15 @@ namespace llvm {
                   const SmallVectorImpl<SDValue> &OutVals,
                   DebugLoc dl, SelectionDAG &DAG) const;
 
+    virtual bool isUsedByReturnOnly(SDNode *N) const;
+
+    virtual bool mayBeEmittedAsTailCall(CallInst *CI) const;
+
     SDValue getARMCmp(SDValue LHS, SDValue RHS, ISD::CondCode CC,
                       SDValue &ARMcc, SelectionDAG &DAG, DebugLoc dl) const;
     SDValue getVFPCmp(SDValue LHS, SDValue RHS,
                       SelectionDAG &DAG, DebugLoc dl) const;
+    SDValue duplicateCmp(SDValue Cmp, SelectionDAG &DAG) const;
 
     SDValue OptimizeVFPBrcond(SDValue Op, SelectionDAG &DAG) const;
 
@@ -412,9 +490,22 @@ namespace llvm {
                                         MachineBasicBlock *BB,
                                         unsigned Size,
                                         unsigned BinOpcode) const;
+    MachineBasicBlock * EmitAtomicBinaryMinMax(MachineInstr *MI,
+                                               MachineBasicBlock *BB,
+                                               unsigned Size,
+                                               bool signExtend,
+                                               ARMCC::CondCodes Cond) const;
 
+    bool RemapAddSubWithFlags(MachineInstr *MI, MachineBasicBlock *BB) const;
   };
-  
+
+  enum NEONModImmType {
+    VMOVModImm,
+    VMVNModImm,
+    OtherModImm
+  };
+
+
   namespace ARM {
     FastISel *createFastISel(FunctionLoweringInfo &funcInfo);
   }

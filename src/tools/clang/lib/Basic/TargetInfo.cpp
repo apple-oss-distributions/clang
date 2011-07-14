@@ -11,12 +11,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/LangOptions.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
+#include <cctype>
 #include <cstdlib>
 using namespace clang;
+
+static const LangAS::Map DefaultAddrSpaceMap = { 0 };
 
 // TargetInfo Constructor.
 TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
@@ -25,6 +29,7 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
   TLSSupported = true;
   NoAsmVariants = false;
   PointerWidth = PointerAlign = 32;
+  BoolWidth = BoolAlign = 8;
   IntWidth = IntAlign = 32;
   LongWidth = LongAlign = 32;
   LongLongWidth = LongLongAlign = 64;
@@ -54,6 +59,7 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
   DescriptionString = "E-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
                       "i64:64:64-f32:32:32-f64:64:64-n32";
   UserLabelPrefix = "_";
+  MCountName = "mcount";
   HasAlignMac68kSupport = false;
 
   // Default to no types using fpret.
@@ -61,6 +67,13 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
 
   // Default to using the Itanium ABI.
   CXXABI = CXXABI_Itanium;
+
+  // Default to an empty address space map.
+  AddrSpaceMap = &DefaultAddrSpaceMap;
+
+  // Default to an unknown platform name.
+  PlatformName = "unknown";
+  PlatformMinVersion = VersionTuple();
 }
 
 // Out of line virtual dtor for TargetInfo.
@@ -132,7 +145,7 @@ unsigned TargetInfo::getTypeAlign(IntType T) const {
 
 /// isTypeSigned - Return whether an integer types is signed. Returns true if
 /// the type is signed; false otherwise.
-bool TargetInfo::isTypeSigned(IntType T) const {
+bool TargetInfo::isTypeSigned(IntType T) {
   switch (T) {
   default: assert(0 && "not an integer!");
   case SignedShort:
@@ -350,6 +363,15 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
         if (i >= NumOutputs)
           return false;
 
+        // A number must refer to an output only operand.
+        if (OutputConstraints[i].isReadWrite())
+          return false;
+
+        // If the constraint is already tied, it must be tied to the 
+        // same operand referenced to by the number.
+        if (Info.hasTiedOperand() && Info.getTiedOperand() != i)
+          return false;
+
         // The constraint should have the same info as the respective
         // output constraint.
         Info.setTiedOperand(i, OutputConstraints[i]);
@@ -363,6 +385,11 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
     case '[': {
       unsigned Index = 0;
       if (!resolveSymbolicName(Name, OutputConstraints, NumOutputs, Index))
+        return false;
+
+      // If the constraint is already tied, it must be tied to the 
+      // same operand referenced to by the number.
+      if (Info.hasTiedOperand() && Info.getTiedOperand() != Index)
         return false;
 
       Info.setTiedOperand(Index, OutputConstraints[Index]);
@@ -405,7 +432,7 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
     case ',': // multiple alternative constraint.  Ignore comma.
       break;
     case '?': // Disparage slightly code.
-    case '!': // Disparage severly.
+    case '!': // Disparage severely.
       break;  // Pass them.
     }
 

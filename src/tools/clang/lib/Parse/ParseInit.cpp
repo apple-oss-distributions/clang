@@ -310,8 +310,8 @@ ExprResult Parser::ParseInitializerWithPotentialDesignator() {
 /// [GNU]   '{' '}'
 ///
 ///       initializer-list:
-///         designation[opt] initializer
-///         initializer-list ',' designation[opt] initializer
+///         designation[opt] initializer ...[opt]
+///         initializer-list ',' designation[opt] initializer ...[opt]
 ///
 ExprResult Parser::ParseBraceInitializer() {
   InMessageExpressionRAIIObject InMessage(*this, false);
@@ -344,6 +344,9 @@ ExprResult Parser::ParseBraceInitializer() {
     else
       SubElt = ParseInitializer();
 
+    if (Tok.is(tok::ellipsis))
+      SubElt = Actions.ActOnPackExpansion(SubElt.get(), ConsumeToken());
+    
     // If we couldn't parse the subelement, bail out.
     if (!SubElt.isInvalid()) {
       InitExprs.push_back(SubElt.release());
@@ -351,7 +354,7 @@ ExprResult Parser::ParseBraceInitializer() {
       InitExprsOk = false;
 
       // We have two ways to try to recover from this error: if the code looks
-      // gramatically ok (i.e. we have a comma coming up) try to continue
+      // grammatically ok (i.e. we have a comma coming up) try to continue
       // parsing the rest of the initializer.  This allows us to emit
       // diagnostics for later elements that we find.  If we don't see a comma,
       // assume there is a parse error, and just skip to recover.

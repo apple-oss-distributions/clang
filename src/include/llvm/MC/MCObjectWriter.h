@@ -10,8 +10,9 @@
 #ifndef LLVM_MC_MCOBJECTWRITER_H
 #define LLVM_MC_MCOBJECTWRITER_H
 
+#include "llvm/ADT/Triple.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include <cassert>
 
 namespace llvm {
@@ -19,6 +20,9 @@ class MCAsmLayout;
 class MCAssembler;
 class MCFixup;
 class MCFragment;
+class MCSymbol;
+class MCSymbolData;
+class MCSymbolRefExpr;
 class MCValue;
 class raw_ostream;
 
@@ -61,7 +65,8 @@ public:
   ///
   /// This routine is called by the assembler after layout and relaxation is
   /// complete.
-  virtual void ExecutePostLayoutBinding(MCAssembler &Asm) = 0;
+  virtual void ExecutePostLayoutBinding(MCAssembler &Asm,
+                                        const MCAsmLayout &Layout) = 0;
 
   /// Record a relocation entry.
   ///
@@ -75,15 +80,24 @@ public:
                                 const MCFixup &Fixup, MCValue Target,
                                 uint64_t &FixedValue) = 0;
 
-  /// Check if a fixup is fully resolved.
+  /// \brief Check whether the difference (A - B) between two symbol
+  /// references is fully resolved.
   ///
-  /// This routine is used by the assembler to let the file format decide
-  /// if a fixup is not fully resolved. For example, one that crosses
-  /// two sections on ELF.
-  virtual bool IsFixupFullyResolved(const MCAssembler &Asm,
-                                    const MCValue Target,
-                                    bool IsPCRel,
-                                    const MCFragment *DF) const = 0;
+  /// Clients are not required to answer precisely and may conservatively return
+  /// false, even when a difference is fully resolved.
+  bool
+  IsSymbolRefDifferenceFullyResolved(const MCAssembler &Asm,
+                                     const MCSymbolRefExpr *A,
+                                     const MCSymbolRefExpr *B,
+                                     bool InSet) const;
+
+  virtual bool
+  IsSymbolRefDifferenceFullyResolvedImpl(const MCAssembler &Asm,
+                                         const MCSymbolData &DataA,
+                                         const MCFragment &FB,
+                                         bool InSet,
+                                         bool IsPCRel) const;
+
 
   /// Write the object file.
   ///

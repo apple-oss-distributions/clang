@@ -38,12 +38,6 @@ public:
   bool isLegalToSplitMBBAt(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator MBBI) const;
 
-  bool isProfitableToIfCvt(MachineBasicBlock &MBB, unsigned NumInstrs,
-                           float Prediction, float Confidence) const;
-  bool isProfitableToIfCvt(MachineBasicBlock &TMBB, unsigned NumTInstrs,
-                           MachineBasicBlock &FMBB, unsigned NumFInstrs,
-                           float Prediction, float Confidence) const;
-
   void copyPhysReg(MachineBasicBlock &MBB,
                    MachineBasicBlock::iterator I, DebugLoc DL,
                    unsigned DestReg, unsigned SrcReg,
@@ -71,9 +65,6 @@ public:
   /// always be able to get register info as well (through this method).
   ///
   const Thumb2RegisterInfo &getRegisterInfo() const { return RI; }
-
-  ScheduleHazardRecognizer *
-  CreateTargetPostRAHazardRecognizer(const InstrItineraryData *II) const;
 };
 
 /// getITInstrPredicate - Valid only in Thumb2 mode. This function is identical

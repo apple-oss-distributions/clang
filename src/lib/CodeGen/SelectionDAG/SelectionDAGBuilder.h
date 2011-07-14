@@ -23,7 +23,6 @@
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <vector>
-#include <set>
 
 namespace llvm {
 
@@ -60,7 +59,6 @@ class MDNode;
 class PHINode;
 class PtrToIntInst;
 class ReturnInst;
-class SDISelAsmOperandInfo;
 class SDDbgValue;
 class SExtInst;
 class SelectInst;
@@ -258,15 +256,16 @@ private:
 
   struct BitTestBlock {
     BitTestBlock(APInt F, APInt R, const Value* SV,
-                 unsigned Rg, bool E,
+                 unsigned Rg, EVT RgVT, bool E,
                  MachineBasicBlock* P, MachineBasicBlock* D,
                  const BitTestInfo& C):
-      First(F), Range(R), SValue(SV), Reg(Rg), Emitted(E),
+      First(F), Range(R), SValue(SV), Reg(Rg), RegVT(RgVT), Emitted(E),
       Parent(P), Default(D), Cases(C) { }
     APInt First;
     APInt Range;
     const Value *SValue;
     unsigned Reg;
+    EVT RegVT;
     bool Emitted;
     MachineBasicBlock *Parent;
     MachineBasicBlock *Default;
@@ -379,10 +378,6 @@ public:
     assert(N.getNode() == 0 && "Already set a value for this node!");
     N = NewN;
   }
-  
-  void GetRegistersForValue(SDISelAsmOperandInfo &OpInfo,
-                            std::set<unsigned> &OutputRegs, 
-                            std::set<unsigned> &InputRegs);
 
   void FindMergedConditions(const Value *Cond, MachineBasicBlock *TBB,
                             MachineBasicBlock *FBB, MachineBasicBlock *CurBB,
@@ -435,7 +430,8 @@ public:
   void visitSwitchCase(CaseBlock &CB,
                        MachineBasicBlock *SwitchBB);
   void visitBitTestHeader(BitTestBlock &B, MachineBasicBlock *SwitchBB);
-  void visitBitTestCase(MachineBasicBlock* NextMBB,
+  void visitBitTestCase(BitTestBlock &BB,
+                        MachineBasicBlock* NextMBB,
                         unsigned Reg,
                         BitTestCase &B,
                         MachineBasicBlock *SwitchBB);

@@ -46,7 +46,12 @@ void AliasSet::mergeSetIn(AliasSet &AS, AliasSetTracker &AST) {
     PointerRec *R = AS.getSomePointer();
 
     // If the pointers are not a must-alias pair, this set becomes a may alias.
-    if (AA.alias(L->getValue(), L->getSize(), R->getValue(), R->getSize())
+    if (AA.alias(AliasAnalysis::Location(L->getValue(),
+                                         L->getSize(),
+                                         L->getTBAAInfo()),
+                 AliasAnalysis::Location(R->getValue(),
+                                         R->getSize(),
+                                         R->getTBAAInfo()))
         != AliasAnalysis::MustAlias)
       AliasTy = MayAlias;
   }
@@ -100,7 +105,7 @@ void AliasSet::addPointer(AliasSetTracker &AST, PointerRec &Entry,
         AA.alias(AliasAnalysis::Location(P->getValue(), P->getSize(),
                                          P->getTBAAInfo()),
                  AliasAnalysis::Location(Entry.getValue(), Size, TBAAInfo));
-      if (Result == AliasAnalysis::MayAlias)
+      if (Result != AliasAnalysis::MustAlias)
         AliasTy = MayAlias;
       else                  // First entry of must alias must have maximum size!
         P->updateSizeAndTBAAInfo(Size, TBAAInfo);
@@ -124,7 +129,7 @@ void AliasSet::addCallSite(CallSite CS, AliasAnalysis &AA) {
   AliasAnalysis::ModRefBehavior Behavior = AA.getModRefBehavior(CS);
   if (Behavior == AliasAnalysis::DoesNotAccessMemory)
     return;
-  else if (Behavior == AliasAnalysis::OnlyReadsMemory) {
+  if (AliasAnalysis::onlyReadsMemory(Behavior)) {
     AliasTy = MayAlias;
     AccessTy |= Refs;
     return;
@@ -595,6 +600,10 @@ void AliasSetTracker::ASTCallbackVH::deleted() {
   assert(AST && "ASTCallbackVH called with a null AliasSetTracker!");
   AST->deleteValue(getValPtr());
   // this now dangles!
+}
+
+void AliasSetTracker::ASTCallbackVH::allUsesReplacedWith(Value *V) {
+  AST->copyValue(getValPtr(), V);
 }
 
 AliasSetTracker::ASTCallbackVH::ASTCallbackVH(Value *V, AliasSetTracker *ast)

@@ -13,6 +13,7 @@
 #include "X86DisassemblerTables.h"
 #include "X86RecognizableInstr.h"
 #include "ARMDecoderEmitter.h"
+#include "FixedLenDecoderEmitter.h"
 
 using namespace llvm;
 using namespace llvm::X86Disassembler;
@@ -39,12 +40,12 @@ using namespace llvm::X86Disassembler;
 ///   all cases as a 64-bit instruction with only OPSIZE set.  (The XS prefix
 ///   may have effects on its execution, but does not change the instruction
 ///   returned.)  This allows considerable space savings in other tables.
-/// - Four tables (ONEBYTE_SYM, TWOBYTE_SYM, THREEBYTE38_SYM, and
-///   THREEBYTE3A_SYM) contain the hierarchy that the decoder traverses while
-///   decoding an instruction.  At the lowest level of this hierarchy are
-///   instruction UIDs, 16-bit integers that can be used to uniquely identify
-///   the instruction and correspond exactly to its position in the list of
-///   CodeGenInstructions for the target.
+/// - Six tables (ONEBYTE_SYM, TWOBYTE_SYM, THREEBYTE38_SYM, THREEBYTE3A_SYM,
+///   THREEBYTEA6_SYM, and THREEBYTEA7_SYM contain the hierarchy that the
+///   decoder traverses while decoding an instruction.  At the lowest level of
+///   this hierarchy are instruction UIDs, 16-bit integers that can be used to
+///   uniquely identify the instruction and correspond exactly to its position
+///   in the list of CodeGenInstructions for the target.
 /// - One table (INSTRUCTIONS_SYM) contains information about the operands of
 ///   each instruction and how to decode them.
 ///
@@ -94,7 +95,7 @@ using namespace llvm::X86Disassembler;
 ///   instruction.
 
 void DisassemblerEmitter::run(raw_ostream &OS) {
-  CodeGenTarget Target;
+  CodeGenTarget Target(Records);
 
   OS << "/*===- TableGen'erated file "
      << "---------------------------------------*- C -*-===*\n"
@@ -127,11 +128,11 @@ void DisassemblerEmitter::run(raw_ostream &OS) {
   }
 
   // Fixed-instruction-length targets use a common disassembler.
+  // ARM use its own implementation for now.
   if (Target.getName() == "ARM") {
     ARMDecoderEmitter(Records).run(OS);
     return;
   }  
 
-  throw TGError(Target.getTargetRecord()->getLoc(),
-                "Unable to generate disassembler for this target");
+  FixedLenDecoderEmitter(Records).run(OS);
 }

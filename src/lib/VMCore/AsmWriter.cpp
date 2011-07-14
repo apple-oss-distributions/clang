@@ -32,6 +32,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CFG.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -39,8 +40,12 @@
 #include "llvm/Support/FormattedStream.h"
 #include <algorithm>
 #include <cctype>
-#include <map>
 using namespace llvm;
+
+static cl::opt<bool>
+EnableDebugInfoComment("enable-debug-info-comment", cl::Hidden,
+                       cl::desc("Enable debug info comments"));
+
 
 // Make virtual table appear in this compilation unit.
 AssemblyAnnotationWriter::~AssemblyAnnotationWriter() {}
@@ -89,7 +94,7 @@ enum PrefixType {
 /// prefixed with % (if the string only contains simple characters) or is
 /// surrounded with ""'s (if it has special chars in it).  Print it out.
 static void PrintLLVMName(raw_ostream &OS, StringRef Name, PrefixType Prefix) {
-  assert(Name.data() && "Cannot get empty name!");
+  assert(!Name.empty() && "Cannot get empty name!");
   switch (Prefix) {
   default: llvm_unreachable("Bad prefix!");
   case NoPrefix: break;
@@ -831,7 +836,8 @@ static void WriteOptimizationInfo(raw_ostream &Out, const User *U) {
       Out << " nuw";
     if (OBO->hasNoSignedWrap())
       Out << " nsw";
-  } else if (const SDivOperator *Div = dyn_cast<SDivOperator>(U)) {
+  } else if (const PossiblyExactOperator *Div =
+               dyn_cast<PossiblyExactOperator>(U)) {
     if (Div->isExact())
       Out << " exact";
   } else if (const GEPOperator *GEP = dyn_cast<GEPOperator>(U)) {
@@ -1074,7 +1080,7 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
     }
 
     if (CE->hasIndices()) {
-      const SmallVector<unsigned, 4> &Indices = CE->getIndices();
+      ArrayRef<unsigned> Indices = CE->getIndices();
       for (unsigned i = 0, e = Indices.size(); i != e; ++i)
         Out << ", " << Indices[i];
     }
@@ -1337,9 +1343,12 @@ void AssemblyWriter::printModule(const Module *M) {
       CurPos = NewLine+1;
       NewLine = Asm.find_first_of('\n', CurPos);
     }
-    Out << "module asm \"";
-    PrintEscapedString(std::string(Asm.begin()+CurPos, Asm.end()), Out);
-    Out << "\"\n";
+    std::string rest(Asm.begin()+CurPos, Asm.end());
+    if (!rest.empty()) {
+      Out << "module asm \"";
+      PrintEscapedString(rest, Out);
+      Out << "\"\n";
+    }
   }
 
   // Loop over the dependent libraries and emit them.
@@ -1459,6 +1468,7 @@ void AssemblyWriter::printGlobal(const GlobalVariable *GV) {
   if (GV->isThreadLocal()) Out << "thread_local ";
   if (unsigned AddressSpace = GV->getType()->getAddressSpace())
     Out << "addrspace(" << AddressSpace << ") ";
+  if (GV->hasUnnamedAddr()) Out << "unnamed_addr ";
   Out << (GV->isConstant() ? "constant " : "global ");
   TypePrinter.print(GV->getType()->getElementType(), Out);
 
@@ -1579,8 +1589,8 @@ void AssemblyWriter::printFunction(const Function *F) {
   case CallingConv::ARM_AAPCS:    Out << "arm_aapcscc "; break;
   case CallingConv::ARM_AAPCS_VFP:Out << "arm_aapcs_vfpcc "; break;
   case CallingConv::MSP430_INTR:  Out << "msp430_intrcc "; break;
-  case CallingConv::PTX_Kernel:   Out << "ptx_kernel"; break;
-  case CallingConv::PTX_Device:   Out << "ptx_device"; break;
+  case CallingConv::PTX_Kernel:   Out << "ptx_kernel "; break;
+  case CallingConv::PTX_Device:   Out << "ptx_device "; break;
   default: Out << "cc" << F->getCallingConv() << " "; break;
   }
 
@@ -1628,6 +1638,8 @@ void AssemblyWriter::printFunction(const Function *F) {
     Out << "...";  // Output varargs portion of signature!
   }
   Out << ')';
+  if (F->hasUnnamedAddr())
+    Out << " unnamed_addr";
   Attributes FnAttrs = Attrs.getFnAttributes();
   if (FnAttrs != Attribute::None)
     Out << ' ' << Attribute::getAsString(Attrs.getFnAttributes());
@@ -1723,6 +1735,18 @@ void AssemblyWriter::printBasicBlock(const BasicBlock *BB) {
   if (AnnotationWriter) AnnotationWriter->emitBasicBlockEndAnnot(BB, Out);
 }
 
+/// printDebugLoc - Print DebugLoc.
+static void printDebugLoc(const DebugLoc &DL, formatted_raw_ostream &OS) {
+  OS << DL.getLine() << ":" << DL.getCol();
+  if (MDNode *N = DL.getInlinedAt(getGlobalContext())) {
+    DebugLoc IDL = DebugLoc::getFromDILocation(N);
+    if (!IDL.isUnknown()) {
+      OS << "@";
+      printDebugLoc(IDL,OS);
+    }
+  }
+}
+
 /// printInfoComment - Print a little comment after the instruction indicating
 /// which slot it occupies.
 ///
@@ -1730,6 +1754,43 @@ void AssemblyWriter::printInfoComment(const Value &V) {
   if (AnnotationWriter) {
     AnnotationWriter->printInfoComment(V, Out);
     return;
+  } else if (EnableDebugInfoComment) {
+    bool Padded = false;
+    if (const Instruction *I = dyn_cast<Instruction>(&V)) {
+      const DebugLoc &DL = I->getDebugLoc();
+      if (!DL.isUnknown()) {
+        if (!Padded) {
+          Out.PadToColumn(50);
+          Padded = true;
+          Out << ";";
+        }
+        Out << " [debug line = ";
+        printDebugLoc(DL,Out);
+        Out << "]";
+      }
+      if (const DbgDeclareInst *DDI = dyn_cast<DbgDeclareInst>(I)) {
+        const MDNode *Var = DDI->getVariable();
+        if (!Padded) {
+          Out.PadToColumn(50);
+          Padded = true;
+          Out << ";";
+        }
+        if (Var && Var->getNumOperands() >= 2)
+          if (MDString *MDS = dyn_cast_or_null<MDString>(Var->getOperand(2)))
+            Out << " [debug variable = " << MDS->getString() << "]";
+      }
+      else if (const DbgValueInst *DVI = dyn_cast<DbgValueInst>(I)) {
+        const MDNode *Var = DVI->getVariable();
+        if (!Padded) {
+          Out.PadToColumn(50);
+          Padded = true;
+          Out << ";";
+        }
+        if (Var && Var->getNumOperands() >= 2)
+          if (MDString *MDS = dyn_cast_or_null<MDString>(Var->getOperand(2)))
+            Out << " [debug variable = " << MDS->getString() << "]";
+      }
+    }
   }
 }
 
@@ -2043,15 +2104,7 @@ static void WriteMDNodeComment(const MDNode *Node,
     return;
   
   Out.PadToColumn(50);
-  if (Tag == dwarf::DW_TAG_auto_variable)
-    Out << "; [ DW_TAG_auto_variable ]";
-  else if (Tag == dwarf::DW_TAG_arg_variable)
-    Out << "; [ DW_TAG_arg_variable ]";
-  else if (Tag == dwarf::DW_TAG_return_variable)
-    Out << "; [ DW_TAG_return_variable ]";
-  else if (Tag == dwarf::DW_TAG_vector_type)
-    Out << "; [ DW_TAG_vector_type ]";
-  else if (Tag == dwarf::DW_TAG_user_base)
+  if (Tag == dwarf::DW_TAG_user_base)
     Out << "; [ DW_TAG_user_base ]";
   else if (Tag.isIntN(32)) {
     if (const char *TagName = dwarf::TagString(Tag.getZExtValue()))

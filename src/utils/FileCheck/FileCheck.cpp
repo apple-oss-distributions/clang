@@ -16,13 +16,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/system_error.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include <algorithm>
@@ -129,26 +131,34 @@ bool Pattern::ParsePattern(StringRef PatternStr, SourceMgr &SM) {
   }
 
   // Paren value #0 is for the fully matched string.  Any new parenthesized
-  // values add from their.
+  // values add from there.
   unsigned CurParen = 1;
 
   // Otherwise, there is at least one regex piece.  Build up the regex pattern
   // by escaping scary characters in fixed strings, building up one big regex.
   while (!PatternStr.empty()) {
     // RegEx matches.
-    if (PatternStr.size() >= 2 &&
-        PatternStr[0] == '{' && PatternStr[1] == '{') {
+    if (PatternStr.startswith("{{")) {
 
       // Otherwise, this is the start of a regex match.  Scan for the }}.
       size_t End = PatternStr.find("}}");
       if (End == StringRef::npos) {
         SM.PrintMessage(SMLoc::getFromPointer(PatternStr.data()),
-                        "found start of regex string with no end '}}'", "error");
+                        "found start of regex string with no end '}}'","error");
         return true;
       }
 
+      // Enclose {{}} patterns in parens just like [[]] even though we're not
+      // capturing the result for any purpose.  This is required in case the
+      // expression contains an alternation like: CHECK:  abc{{x|z}}def.  We
+      // want this to turn into: "abc(x|z)def" not "abcx|zdef".
+      RegExStr += '(';
+      ++CurParen;
+
       if (AddRegExToRegEx(PatternStr.substr(2, End-2), CurParen, SM))
         return true;
+      RegExStr += ')';
+
       PatternStr = PatternStr.substr(End+2);
       continue;
     }
@@ -158,8 +168,7 @@ bool Pattern::ParsePattern(StringRef PatternStr, SourceMgr &SM) {
     // second form is [[foo]] which is a reference to foo.  The variable name
     // itself must be of the form "[a-zA-Z_][0-9a-zA-Z_]*", otherwise we reject
     // it.  This is to catch some common errors.
-    if (PatternStr.size() >= 2 &&
-        PatternStr[0] == '[' && PatternStr[1] == '[') {
+    if (PatternStr.startswith("[[")) {
       // Verify that it is terminated properly.
       size_t End = PatternStr.find("]]");
       if (End == StringRef::npos) {
@@ -183,10 +192,7 @@ bool Pattern::ParsePattern(StringRef PatternStr, SourceMgr &SM) {
 
       // Verify that the name is well formed.
       for (unsigned i = 0, e = Name.size(); i != e; ++i)
-        if (Name[i] != '_' &&
-            (Name[i] < 'a' || Name[i] > 'z') &&
-            (Name[i] < 'A' || Name[i] > 'Z') &&
-            (Name[i] < '0' || Name[i] > '9')) {
+        if (Name[i] != '_' && !isalnum(Name[i])) {
           SM.PrintMessage(SMLoc::getFromPointer(Name.data()+i),
                           "invalid name in named regex", "error");
           return true;
@@ -456,6 +462,11 @@ static MemoryBuffer *CanonicalizeInputFile(MemoryBuffer *MB) {
 
   for (const char *Ptr = MB->getBufferStart(), *End = MB->getBufferEnd();
        Ptr != End; ++Ptr) {
+    // Eliminate trailing dosish \r.
+    if (Ptr <= End - 2 && Ptr[0] == '\r' && Ptr[1] == '\n') {
+      continue;
+    }
+
     // If C is not a horizontal whitespace, skip it.
     if (*Ptr != ' ' && *Ptr != '\t') {
       NewFile.push_back(*Ptr);
@@ -483,14 +494,14 @@ static MemoryBuffer *CanonicalizeInputFile(MemoryBuffer *MB) {
 static bool ReadCheckFile(SourceMgr &SM,
                           std::vector<CheckString> &CheckStrings) {
   // Open the check file, and tell SourceMgr about it.
-  std::string ErrorStr;
-  MemoryBuffer *F =
-    MemoryBuffer::getFileOrSTDIN(CheckFilename.c_str(), &ErrorStr);
-  if (F == 0) {
+  OwningPtr<MemoryBuffer> File;
+  if (error_code ec =
+        MemoryBuffer::getFileOrSTDIN(CheckFilename.c_str(), File)) {
     errs() << "Could not open check file '" << CheckFilename << "': "
-           << ErrorStr << '\n';
+           << ec.message() << '\n';
     return true;
   }
+  MemoryBuffer *F = File.take();
 
   // If we want to canonicalize whitespace, strip excess whitespace from the
   // buffer containing the CHECK lines.
@@ -643,15 +654,20 @@ int main(int argc, char **argv) {
     return 2;
 
   // Open the file to check and add it to SourceMgr.
-  std::string ErrorStr;
-  MemoryBuffer *F =
-    MemoryBuffer::getFileOrSTDIN(InputFilename.c_str(), &ErrorStr);
-  if (F == 0) {
+  OwningPtr<MemoryBuffer> File;
+  if (error_code ec =
+        MemoryBuffer::getFileOrSTDIN(InputFilename.c_str(), File)) {
     errs() << "Could not open input file '" << InputFilename << "': "
-           << ErrorStr << '\n';
+           << ec.message() << '\n';
     return true;
   }
+  MemoryBuffer *F = File.take();
 
+  if (F->getBufferSize() == 0) {
+    errs() << "FileCheck error: '" << InputFilename << "' is empty.\n";
+    return 1;
+  }
+  
   // Remove duplicate spaces in the input file if requested.
   if (!NoCanonicalizeWhiteSpace)
     F = CanonicalizeInputFile(F);

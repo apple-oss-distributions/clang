@@ -1,4 +1,4 @@
-//===--- Compilation.cpp - Compilation Task Implementation --------------*-===//
+//===--- Compilation.cpp - Compilation Task Implementation ----------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -17,7 +17,7 @@
 #include "clang/Driver/ToolChain.h"
 
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Program.h"
+#include "llvm/Support/Program.h"
 #include <sys/stat.h>
 #include <errno.h>
 using namespace clang::driver;
@@ -100,6 +100,12 @@ bool Compilation::CleanupFileList(const ArgStringList &Files,
 
     llvm::sys::Path P(*it);
     std::string Error;
+
+    // Don't try to remove files which we don't have write access to (but may be
+    // able to remove). Underlying tools may have intentionally not overwritten
+    // them.
+    if (!P.canWrite())
+      continue;
 
     if (P.eraseFromDisk(false, &Error)) {
       // Failure is only failure if the file exists and is "regular". There is

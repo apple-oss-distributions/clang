@@ -145,7 +145,7 @@ Instruction *InstCombiner::visitLoadInst(LoadInst &LI) {
   // Attempt to improve the alignment.
   if (TD) {
     unsigned KnownAlign =
-      GetOrEnforceKnownAlignment(Op, TD->getPrefTypeAlignment(LI.getType()));
+      getOrEnforceKnownAlignment(Op, TD->getPrefTypeAlignment(LI.getType()),TD);
     unsigned LoadAlign = LI.getAlignment();
     unsigned EffectiveLoadAlign = LoadAlign != 0 ? LoadAlign :
       TD->getABITypeAlignment(LI.getType());
@@ -165,7 +165,7 @@ Instruction *InstCombiner::visitLoadInst(LoadInst &LI) {
   if (LI.isVolatile()) return 0;
   
   // Do really simple store-to-load forwarding and load CSE, to catch cases
-  // where there are several consequtive memory accesses to the same location,
+  // where there are several consecutive memory accesses to the same location,
   // separated by a few arithmetic operations.
   BasicBlock::iterator BBI = &LI;
   if (Value *AvailableVal = FindAvailableLoadedValue(Op, LI.getParent(), BBI,6))
@@ -364,34 +364,12 @@ static bool equivalentAddressValues(Value *A, Value *B) {
   return false;
 }
 
-// If this instruction has two uses, one of which is a llvm.dbg.declare,
-// return the llvm.dbg.declare.
-DbgDeclareInst *InstCombiner::hasOneUsePlusDeclare(Value *V) {
-  if (!V->hasNUses(2))
-    return 0;
-  for (Value::use_iterator UI = V->use_begin(), E = V->use_end();
-       UI != E; ++UI) {
-    User *U = *UI;
-    if (DbgDeclareInst *DI = dyn_cast<DbgDeclareInst>(U))
-      return DI;
-    if (isa<BitCastInst>(U) && U->hasOneUse()) {
-      if (DbgDeclareInst *DI = dyn_cast<DbgDeclareInst>(*U->use_begin()))
-        return DI;
-      }
-  }
-  return 0;
-}
-
 Instruction *InstCombiner::visitStoreInst(StoreInst &SI) {
   Value *Val = SI.getOperand(0);
   Value *Ptr = SI.getOperand(1);
 
   // If the RHS is an alloca with a single use, zapify the store, making the
   // alloca dead.
-  // If the RHS is an alloca with a two uses, the other one being a 
-  // llvm.dbg.declare, zapify the store and the declare, making the
-  // alloca dead.  We must do this to prevent declares from affecting
-  // codegen.
   if (!SI.isVolatile()) {
     if (Ptr->hasOneUse()) {
       if (isa<AllocaInst>(Ptr)) 
@@ -400,23 +378,16 @@ Instruction *InstCombiner::visitStoreInst(StoreInst &SI) {
         if (isa<AllocaInst>(GEP->getOperand(0))) {
           if (GEP->getOperand(0)->hasOneUse())
             return EraseInstFromFunction(SI);
-          if (DbgDeclareInst *DI = hasOneUsePlusDeclare(GEP->getOperand(0))) {
-            EraseInstFromFunction(*DI);
-            return EraseInstFromFunction(SI);
-          }
         }
       }
-    }
-    if (DbgDeclareInst *DI = hasOneUsePlusDeclare(Ptr)) {
-      EraseInstFromFunction(*DI);
-      return EraseInstFromFunction(SI);
     }
   }
 
   // Attempt to improve the alignment.
   if (TD) {
     unsigned KnownAlign =
-      GetOrEnforceKnownAlignment(Ptr, TD->getPrefTypeAlignment(Val->getType()));
+      getOrEnforceKnownAlignment(Ptr, TD->getPrefTypeAlignment(Val->getType()),
+                                 TD);
     unsigned StoreAlign = SI.getAlignment();
     unsigned EffectiveStoreAlign = StoreAlign != 0 ? StoreAlign :
       TD->getABITypeAlignment(Val->getType());
@@ -620,8 +591,7 @@ bool InstCombiner::SimplifyStoreAtEndOfBlock(StoreInst &SI) {
   // Insert a PHI node now if we need it.
   Value *MergedVal = OtherStore->getOperand(0);
   if (MergedVal != SI.getOperand(0)) {
-    PHINode *PN = PHINode::Create(MergedVal->getType(), "storemerge");
-    PN->reserveOperandSpace(2);
+    PHINode *PN = PHINode::Create(MergedVal->getType(), 2, "storemerge");
     PN->addIncoming(SI.getOperand(0), SI.getParent());
     PN->addIncoming(OtherStore->getOperand(0), OtherBB);
     MergedVal = InsertNewInstBefore(PN, DestBB->front());

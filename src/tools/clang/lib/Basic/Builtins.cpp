@@ -80,6 +80,10 @@ Builtin::Context::GetBuiltinNames(llvm::SmallVectorImpl<const char *> &Names,
       Names.push_back(TSRecords[i].Name);
 }
 
+void Builtin::Context::ForgetBuiltin(unsigned ID, IdentifierTable &Table) {
+  Table.get(GetRecord(ID).Name).setBuiltinID(0);
+}
+
 bool
 Builtin::Context::isPrintfLike(unsigned ID, unsigned &FormatIdx,
                                bool &HasVAListArg) {
@@ -116,5 +120,4 @@ Builtin::Context::isScanfLike(unsigned ID, unsigned &FormatIdx,
   FormatIdx = strtol(Scanf, 0, 10);
   return true;
 }
-
 

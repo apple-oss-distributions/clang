@@ -15,6 +15,7 @@ add_llvm_target(MSP430CodeGen
   MSP430ISelDAGToDAG.cpp
   MSP430ISelLowering.cpp
   MSP430InstrInfo.cpp
+  MSP430FrameLowering.cpp
   MSP430MCAsmInfo.cpp
   MSP430RegisterInfo.cpp
   MSP430Subtarget.cpp
@@ -23,3 +24,6 @@ add_llvm_target(MSP430CodeGen
   MSP430AsmPrinter.cpp
   MSP430MCInstLower.cpp
   )
+
+add_subdirectory(InstPrinter)
+add_subdirectory(TargetInfo)

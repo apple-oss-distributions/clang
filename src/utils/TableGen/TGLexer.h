@@ -14,8 +14,7 @@
 #ifndef TGLEXER_H
 #define TGLEXER_H
 
-#include "llvm/System/DataTypes.h"
-#include <vector>
+#include "llvm/Support/DataTypes.h"
 #include <string>
 #include <cassert>
 
@@ -36,7 +35,7 @@ namespace tgtok {
     l_brace, r_brace,   // { }
     l_paren, r_paren,   // ( )
     less, greater,      // < >
-    colon, semi,        // ; :
+    colon, semi,        // : ;
     comma, period,      // , .
     equal, question,    // = ?
     
@@ -46,7 +45,7 @@ namespace tgtok {
     
     // !keywords.
     XConcat, XSRA, XSRL, XSHL, XStrConcat, XCast, XSubst,
-    XForEach, XCar, XCdr, XNull, XIf, XEq,
+    XForEach, XHead, XTail, XEmpty, XIf, XEq,
 
     // Integer value.
     IntVal,

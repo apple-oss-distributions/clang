@@ -47,7 +47,7 @@
 #include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/Support/InstVisitor.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/System/Host.h"
+#include "llvm/Support/Host.h"
 #include "llvm/Config/config.h"
 #include <algorithm>
 // Some ms header decided to define setjmp as _setjmp, undo this for this file.
@@ -1755,7 +1755,7 @@ bool CWriter::doInitialization(Module &M) {
     TAsm = Match->createAsmInfo(Triple);
 #endif
   TAsm = new CBEMCAsmInfo();
-  TCtx = new MCContext(*TAsm);
+  TCtx = new MCContext(*TAsm, NULL);
   Mang = new Mangler(*TCtx, *TD);
 
   // Keep track of which functions are static ctors/dtors so they can have
@@ -2437,24 +2437,6 @@ void CWriter::visitReturnInst(ReturnInst &I) {
   if (I.getNumOperands() == 0 &&
       &*--I.getParent()->getParent()->end() == I.getParent() &&
       !I.getParent()->size() == 1) {
-    return;
-  }
-
-  if (I.getNumOperands() > 1) {
-    Out << "  {\n";
-    Out << "    ";
-    printType(Out, I.getParent()->getParent()->getReturnType());
-    Out << "   llvm_cbe_mrv_temp = {\n";
-    for (unsigned i = 0, e = I.getNumOperands(); i != e; ++i) {
-      Out << "      ";
-      writeOperand(I.getOperand(i));
-      if (i != e - 1)
-        Out << ",";
-      Out << "\n";
-    }
-    Out << "    };\n";
-    Out << "    return llvm_cbe_mrv_temp;\n";
-    Out << "  }\n";
     return;
   }
 
@@ -3193,7 +3175,7 @@ static std::string gccifyAsm(std::string asmstr) {
 //      handle communitivity
 void CWriter::visitInlineAsm(CallInst &CI) {
   InlineAsm* as = cast<InlineAsm>(CI.getCalledValue());
-  std::vector<InlineAsm::ConstraintInfo> Constraints = as->ParseConstraints();
+  InlineAsm::ConstraintInfoVector Constraints = as->ParseConstraints();
 
   std::vector<std::pair<Value*, int> > ResultVals;
   if (CI.getType() == Type::getVoidTy(CI.getContext()))
@@ -3213,7 +3195,7 @@ void CWriter::visitInlineAsm(CallInst &CI) {
   bool IsFirst = true;
 
   // Convert over all the output constraints.
-  for (std::vector<InlineAsm::ConstraintInfo>::iterator I = Constraints.begin(),
+  for (InlineAsm::ConstraintInfoVector::iterator I = Constraints.begin(),
        E = Constraints.end(); I != E; ++I) {
 
     if (I->Type != InlineAsm::isOutput) {
@@ -3255,7 +3237,7 @@ void CWriter::visitInlineAsm(CallInst &CI) {
   Out << "\n        :";
   IsFirst = true;
   ValueCount = 0;
-  for (std::vector<InlineAsm::ConstraintInfo>::iterator I = Constraints.begin(),
+  for (InlineAsm::ConstraintInfoVector::iterator I = Constraints.begin(),
        E = Constraints.end(); I != E; ++I) {
     if (I->Type != InlineAsm::isInput) {
       ++ValueCount;
@@ -3284,7 +3266,7 @@ void CWriter::visitInlineAsm(CallInst &CI) {
 
   // Convert over the clobber constraints.
   IsFirst = true;
-  for (std::vector<InlineAsm::ConstraintInfo>::iterator I = Constraints.begin(),
+  for (InlineAsm::ConstraintInfoVector::iterator I = Constraints.begin(),
        E = Constraints.end(); I != E; ++I) {
     if (I->Type != InlineAsm::isClobber)
       continue;  // Ignore non-input constraints.

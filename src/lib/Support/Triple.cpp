@@ -22,7 +22,7 @@ const char *Triple::getArchTypeName(ArchType Kind) {
   switch (Kind) {
   case InvalidArch: return "<invalid>";
   case UnknownArch: return "unknown";
-    
+
   case alpha:   return "alpha";
   case arm:     return "arm";
   case bfin:    return "bfin";
@@ -30,7 +30,6 @@ const char *Triple::getArchTypeName(ArchType Kind) {
   case mips:    return "mips";
   case mipsel:  return "mipsel";
   case msp430:  return "msp430";
-  case pic16:   return "pic16";
   case ppc64:   return "powerpc64";
   case ppc:     return "powerpc";
   case sparc:   return "sparc";
@@ -42,7 +41,8 @@ const char *Triple::getArchTypeName(ArchType Kind) {
   case x86_64:  return "x86_64";
   case xcore:   return "xcore";
   case mblaze:  return "mblaze";
-  case ptx:     return "ptx";
+  case ptx32:   return "ptx32";
+  case ptx64:   return "ptx64";
   }
 
   return "<invalid>";
@@ -75,7 +75,8 @@ const char *Triple::getArchTypePrefix(ArchType Kind) {
 
   case xcore:   return "xcore";
 
-  case ptx:     return "ptx";
+  case ptx32:   return "ptx";
+  case ptx64:   return "ptx";
   }
 }
 
@@ -85,6 +86,7 @@ const char *Triple::getVendorTypeName(VendorType Kind) {
 
   case Apple: return "apple";
   case PC: return "pc";
+  case SCEI: return "scei";
   }
 
   return "<invalid>";
@@ -99,10 +101,11 @@ const char *Triple::getOSTypeName(OSType Kind) {
   case Darwin: return "darwin";
   case DragonFly: return "dragonfly";
   case FreeBSD: return "freebsd";
+  case IOS: return "ios";
   case Linux: return "linux";
   case Lv2: return "lv2";
+  case MacOSX: return "macosx";
   case MinGW32: return "mingw32";
-  case MinGW64: return "mingw64";
   case NetBSD: return "netbsd";
   case OpenBSD: return "openbsd";
   case Psp: return "psp";
@@ -118,6 +121,10 @@ const char *Triple::getOSTypeName(OSType Kind) {
 const char *Triple::getEnvironmentTypeName(EnvironmentType Kind) {
   switch (Kind) {
   case UnknownEnvironment: return "unknown";
+  case GNU: return "gnu";
+  case GNUEABI: return "gnueabi";
+  case EABI: return "eabi";
+  case MachO: return "macho";
   }
 
   return "<invalid>";
@@ -138,8 +145,6 @@ Triple::ArchType Triple::getArchTypeForLLVMName(StringRef Name) {
     return mipsel;
   if (Name == "msp430")
     return msp430;
-  if (Name == "pic16")
-    return pic16;
   if (Name == "ppc64")
     return ppc64;
   if (Name == "ppc")
@@ -162,8 +167,10 @@ Triple::ArchType Triple::getArchTypeForLLVMName(StringRef Name) {
     return x86_64;
   if (Name == "xcore")
     return xcore;
-  if (Name == "ptx")
-    return ptx;
+  if (Name == "ptx32")
+    return ptx32;
+  if (Name == "ptx64")
+    return ptx64;
 
   return UnknownArch;
 }
@@ -199,18 +206,20 @@ Triple::ArchType Triple::getArchTypeForDarwinArchName(StringRef Str) {
 
   // This is derived from the driver driver.
   if (Str == "arm" || Str == "armv4t" || Str == "armv5" || Str == "xscale" ||
-      Str == "armv6" || Str == "armv7")
+      Str == "armv6" || Str == "armv7" || Str == "armv7f" || Str == "armv7k")
     return Triple::arm;
 
-  if (Str == "ptx")
-    return Triple::ptx;
+  if (Str == "ptx32")
+    return Triple::ptx32;
+  if (Str == "ptx64")
+    return Triple::ptx64;
 
   return Triple::UnknownArch;
 }
 
 // Returns architecture name that is understood by the target assembler.
 const char *Triple::getArchNameForAssembler() {
-  if (getOS() != Triple::Darwin && getVendor() != Triple::Apple)
+  if (!isOSDarwin() && getVendor() != Triple::Apple)
     return NULL;
 
   StringRef Str = getArchName();
@@ -228,30 +237,31 @@ const char *Triple::getArchNameForAssembler() {
     return "arm";
   if (Str == "armv4t" || Str == "thumbv4t")
     return "armv4t";
-  if (Str == "armv5" || Str == "armv5e" || Str == "thumbv5" || Str == "thumbv5e")
+  if (Str == "armv5" || Str == "armv5e" || Str == "thumbv5"
+      || Str == "thumbv5e")
     return "armv5";
   if (Str == "armv6" || Str == "thumbv6")
     return "armv6";
   if (Str == "armv7" || Str == "thumbv7")
     return "armv7";
-  if (Str == "ptx")
-    return "ptx";
+  if (Str == "ptx32")
+    return "ptx32";
+  if (Str == "ptx64")
+    return "ptx64";
   return NULL;
 }
 
 //
 
 Triple::ArchType Triple::ParseArch(StringRef ArchName) {
-  if (ArchName.size() == 4 && ArchName[0] == 'i' && 
-      ArchName[2] == '8' && ArchName[3] == '6' && 
+  if (ArchName.size() == 4 && ArchName[0] == 'i' &&
+      ArchName[2] == '8' && ArchName[3] == '6' &&
       ArchName[1] - '3' < 6) // i[3-9]86
     return x86;
   else if (ArchName == "amd64" || ArchName == "x86_64")
     return x86_64;
   else if (ArchName == "bfin")
     return bfin;
-  else if (ArchName == "pic16")
-    return pic16;
   else if (ArchName == "powerpc")
     return ppc;
   else if ((ArchName == "powerpc64") || (ArchName == "ppu"))
@@ -286,8 +296,10 @@ Triple::ArchType Triple::ParseArch(StringRef ArchName) {
     return tce;
   else if (ArchName == "xcore")
     return xcore;
-  else if (ArchName == "ptx")
-    return ptx;
+  else if (ArchName == "ptx32")
+    return ptx32;
+  else if (ArchName == "ptx64")
+    return ptx64;
   else
     return UnknownArch;
 }
@@ -297,6 +309,8 @@ Triple::VendorType Triple::ParseVendor(StringRef VendorName) {
     return Apple;
   else if (VendorName == "pc")
     return PC;
+  else if (VendorName == "scei")
+    return SCEI;
   else
     return UnknownVendor;
 }
@@ -312,14 +326,16 @@ Triple::OSType Triple::ParseOS(StringRef OSName) {
     return DragonFly;
   else if (OSName.startswith("freebsd"))
     return FreeBSD;
+  else if (OSName.startswith("ios"))
+    return IOS;
   else if (OSName.startswith("linux"))
     return Linux;
   else if (OSName.startswith("lv2"))
     return Lv2;
+  else if (OSName.startswith("macosx"))
+    return MacOSX;
   else if (OSName.startswith("mingw32"))
     return MinGW32;
-  else if (OSName.startswith("mingw64"))
-    return MinGW64;
   else if (OSName.startswith("netbsd"))
     return NetBSD;
   else if (OSName.startswith("openbsd"))
@@ -339,7 +355,16 @@ Triple::OSType Triple::ParseOS(StringRef OSName) {
 }
 
 Triple::EnvironmentType Triple::ParseEnvironment(StringRef EnvironmentName) {
-  return UnknownEnvironment;
+  if (EnvironmentName.startswith("eabi"))
+    return EABI;
+  else if (EnvironmentName.startswith("gnueabi"))
+    return GNUEABI;
+  else if (EnvironmentName.startswith("gnu"))
+    return GNU;
+  else if (EnvironmentName.startswith("macho"))
+    return MachO;
+  else
+    return UnknownEnvironment;
 }
 
 void Triple::Parse() const {
@@ -451,15 +476,16 @@ std::string Triple::normalize(StringRef Str) {
         do {
           // Insert one empty component at Idx.
           StringRef CurrentComponent(""); // The empty component.
-          for (unsigned i = Idx; i < Components.size(); ++i) {
-            // Skip over any fixed components.
-            while (i < array_lengthof(Found) && Found[i]) ++i;
+          for (unsigned i = Idx; i < Components.size();) {
             // Place the component at the new position, getting the component
             // that was at this position - it will be moved right.
             std::swap(CurrentComponent, Components[i]);
             // If it was placed on top of an empty component then we are done.
             if (CurrentComponent.empty())
               break;
+            // Advance to the next component, skipping any fixed components.
+            while (++i < array_lengthof(Found) && Found[i])
+              ;
           }
           // The last component was pushed off the end - append it.
           if (!CurrentComponent.empty())
@@ -516,67 +542,44 @@ StringRef Triple::getOSAndEnvironmentName() const {
 
 static unsigned EatNumber(StringRef &Str) {
   assert(!Str.empty() && Str[0] >= '0' && Str[0] <= '9' && "Not a number");
-  unsigned Result = Str[0]-'0';
-  
-  // Eat the digit.
-  Str = Str.substr(1);
-  
-  // Handle "darwin11".
-  if (Result == 1 && !Str.empty() && Str[0] >= '0' && Str[0] <= '9') {
+  unsigned Result = 0;
+
+  do {
+    // Consume the leading digit.
     Result = Result*10 + (Str[0] - '0');
+
     // Eat the digit.
     Str = Str.substr(1);
-  }
-  
+  } while (!Str.empty() && Str[0] >= '0' && Str[0] <= '9');
+
   return Result;
 }
 
-/// getDarwinNumber - Parse the 'darwin number' out of the specific target
-/// triple.  For example, if we have darwin8.5 return 8,5,0.  If any entry is
-/// not defined, return 0's.  This requires that the triple have an OSType of
-/// darwin before it is called.
-void Triple::getDarwinNumber(unsigned &Maj, unsigned &Min,
-                             unsigned &Revision) const {
-  assert(getOS() == Darwin && "Not a darwin target triple!");
+void Triple::getOSVersion(unsigned &Major, unsigned &Minor,
+                          unsigned &Micro) const {
   StringRef OSName = getOSName();
-  assert(OSName.startswith("darwin") && "Unknown darwin target triple!");
-  
-  // Strip off "darwin".
-  OSName = OSName.substr(6);
-  
-  Maj = Min = Revision = 0;
 
-  if (OSName.empty() || OSName[0] < '0' || OSName[0] > '9')
-    return;
+  // Assume that the OS portion of the triple starts with the canonical name.
+  StringRef OSTypeName = getOSTypeName(getOS());
+  if (OSName.startswith(OSTypeName))
+    OSName = OSName.substr(OSTypeName.size());
 
-  // The major version is the first digit.
-  Maj = EatNumber(OSName);
-  if (OSName.empty()) return;
-  
-  // Handle minor version: 10.4.9 -> darwin8.9.
-  if (OSName[0] != '.')
-    return;
-  
-  // Eat the '.'.
-  OSName = OSName.substr(1);
+  // Any unset version defaults to 0.
+  Major = Minor = Micro = 0;
 
-  if (OSName.empty() || OSName[0] < '0' || OSName[0] > '9')
-    return;
-  
-  Min = EatNumber(OSName);
-  if (OSName.empty()) return;
+  // Parse up to three components.
+  unsigned *Components[3] = { &Major, &Minor, &Micro };
+  for (unsigned i = 0; i != 3; ++i) {
+    if (OSName.empty() || OSName[0] < '0' || OSName[0] > '9')
+      break;
 
-  // Handle revision darwin8.9.1
-  if (OSName[0] != '.')
-    return;
-  
-  // Eat the '.'.
-  OSName = OSName.substr(1);
-  
-  if (OSName.empty() || OSName[0] < '0' || OSName[0] > '9')
-    return;
+    // Consume the leading number.
+    *Components[i] = EatNumber(OSName);
 
-  Revision = EatNumber(OSName);
+    // Consume the separator, if present.
+    if (OSName.startswith("."))
+      OSName = OSName.substr(1);
+  }
 }
 
 void Triple::setTriple(const Twine &Str) {

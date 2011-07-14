@@ -16,8 +16,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenTBAA.h"
-#include "Mangle.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Mangle.h"
 #include "llvm/LLVMContext.h"
 #include "llvm/Metadata.h"
 #include "llvm/Constants.h"
@@ -74,12 +74,34 @@ llvm::MDNode *CodeGenTBAA::getTBAAInfoForNamedType(llvm::StringRef NameStr,
   };
 
   // Create the mdnode.
-  return llvm::MDNode::get(VMContext, Ops, llvm::array_lengthof(Ops) - !Flags);
+  unsigned Len = llvm::array_lengthof(Ops) - !Flags;
+  return llvm::MDNode::get(VMContext, llvm::ArrayRef<llvm::Value*>(Ops, Len));
+}
+
+static bool TypeHasMayAlias(QualType QTy) {
+  // Tagged types have declarations, and therefore may have attributes.
+  if (const TagType *TTy = dyn_cast<TagType>(QTy))
+    return TTy->getDecl()->hasAttr<MayAliasAttr>();
+
+  // Typedef types have declarations, and therefore may have attributes.
+  if (const TypedefType *TTy = dyn_cast<TypedefType>(QTy)) {
+    if (TTy->getDecl()->hasAttr<MayAliasAttr>())
+      return true;
+    // Also, their underlying types may have relevant attributes.
+    return TypeHasMayAlias(TTy->desugar());
+  }
+
+  return false;
 }
 
 llvm::MDNode *
 CodeGenTBAA::getTBAAInfo(QualType QTy) {
-  Type *Ty = Context.getCanonicalType(QTy).getTypePtr();
+  // If the type has the may_alias attribute (even on a typedef), it is
+  // effectively in the general char alias class.
+  if (TypeHasMayAlias(QTy))
+    return getChar();
+
+  const Type *Ty = Context.getCanonicalType(QTy).getTypePtr();
 
   if (llvm::MDNode *N = MetadataCache[Ty])
     return N;
@@ -134,7 +156,7 @@ CodeGenTBAA::getTBAAInfo(QualType QTy) {
     // theoretically implement this by combining information about all the
     // members into a single identifying MDNode.
     if (!Features.CPlusPlus &&
-        ETy->getDecl()->getTypedefForAnonDecl())
+        ETy->getDecl()->getTypedefNameForAnonDecl())
       return MetadataCache[Ty] = getChar();
 
     // In C++ mode, types have linkage, so we can rely on the ODR and
@@ -148,7 +170,9 @@ CodeGenTBAA::getTBAAInfo(QualType QTy) {
     // TODO: This is using the RTTI name. Is there a better way to get
     // a unique string for a type?
     llvm::SmallString<256> OutName;
-    MContext.mangleCXXRTTIName(QualType(ETy, 0), OutName);
+    llvm::raw_svector_ostream Out(OutName);
+    MContext.mangleCXXRTTIName(QualType(ETy, 0), Out);
+    Out.flush();
     return MetadataCache[Ty] = getTBAAInfoForNamedType(OutName, getChar());
   }
 

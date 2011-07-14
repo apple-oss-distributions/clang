@@ -162,7 +162,8 @@ namespace {
 
 // FIXME: can we inherit this from ConstantExpr?
 template <>
-struct OperandTraits<ConstantPlaceHolder> : public FixedNumOperandTraits<1> {
+struct OperandTraits<ConstantPlaceHolder> :
+  public FixedNumOperandTraits<ConstantPlaceHolder, 1> {
 };
 }
 
@@ -297,11 +298,10 @@ void BitcodeReaderValueList::ResolveConstantForwardRefs() {
         NewC = ConstantStruct::get(Context, &NewOps[0], NewOps.size(),
                                          UserCS->getType()->isPacked());
       } else if (isa<ConstantVector>(UserC)) {
-        NewC = ConstantVector::get(&NewOps[0], NewOps.size());
+        NewC = ConstantVector::get(NewOps);
       } else {
         assert(isa<ConstantExpr>(UserC) && "Must be a ConstantExpr.");
-        NewC = cast<ConstantExpr>(UserC)->getWithOperands(&NewOps[0],
-                                                          NewOps.size());
+        NewC = cast<ConstantExpr>(UserC)->getWithOperands(NewOps);
       }
 
       UserC->replaceAllUsesWith(NewC);
@@ -349,7 +349,7 @@ Value *BitcodeReaderMDValueList::getValueFwdRef(unsigned Idx) {
   }
 
   // Create and return a placeholder, which will later be RAUW'd.
-  Value *V = MDNode::getTemporary(Context, 0, 0);
+  Value *V = MDNode::getTemporary(Context, ArrayRef<Value*>());
   MDValuePtrs[Idx] = V;
   return V;
 }
@@ -843,9 +843,7 @@ bool BitcodeReader::ParseMetadata() {
         else
           Elts.push_back(NULL);
       }
-      Value *V = MDNode::getWhenValsUnresolved(Context,
-                                               Elts.data(), Elts.size(),
-                                               IsFunctionLocal);
+      Value *V = MDNode::getWhenValsUnresolved(Context, Elts, IsFunctionLocal);
       IsFunctionLocal = false;
       MDValueList.AssignValue(V, NextMDValueNo++);
       break;
@@ -1084,13 +1082,17 @@ bool BitcodeReader::ParseConstants() {
         if (Record.size() >= 4) {
           if (Opc == Instruction::Add ||
               Opc == Instruction::Sub ||
-              Opc == Instruction::Mul) {
+              Opc == Instruction::Mul ||
+              Opc == Instruction::Shl) {
             if (Record[3] & (1 << bitc::OBO_NO_SIGNED_WRAP))
               Flags |= OverflowingBinaryOperator::NoSignedWrap;
             if (Record[3] & (1 << bitc::OBO_NO_UNSIGNED_WRAP))
               Flags |= OverflowingBinaryOperator::NoUnsignedWrap;
-          } else if (Opc == Instruction::SDiv) {
-            if (Record[3] & (1 << bitc::SDIV_EXACT))
+          } else if (Opc == Instruction::SDiv ||
+                     Opc == Instruction::UDiv ||
+                     Opc == Instruction::LShr ||
+                     Opc == Instruction::AShr) {
+            if (Record[3] & (1 << bitc::PEO_EXACT))
               Flags |= SDivOperator::IsExact;
           }
         }
@@ -1422,7 +1424,8 @@ bool BitcodeReader::ParseModule() {
       break;
     }
     // GLOBALVAR: [pointer type, isconst, initid,
-    //             linkage, alignment, section, visibility, threadlocal]
+    //             linkage, alignment, section, visibility, threadlocal,
+    //             unnamed_addr]
     case bitc::MODULE_CODE_GLOBALVAR: {
       if (Record.size() < 6)
         return Error("Invalid MODULE_CODE_GLOBALVAR record");
@@ -1449,6 +1452,10 @@ bool BitcodeReader::ParseModule() {
       if (Record.size() > 7)
         isThreadLocal = Record[7];
 
+      bool UnnamedAddr = false;
+      if (Record.size() > 8)
+        UnnamedAddr = Record[8];
+
       GlobalVariable *NewGV =
         new GlobalVariable(*TheModule, Ty, isConstant, Linkage, 0, "", 0,
                            isThreadLocal, AddressSpace);
@@ -1457,6 +1464,7 @@ bool BitcodeReader::ParseModule() {
         NewGV->setSection(Section);
       NewGV->setVisibility(Visibility);
       NewGV->setThreadLocal(isThreadLocal);
+      NewGV->setUnnamedAddr(UnnamedAddr);
 
       ValueList.push_back(NewGV);
 
@@ -1466,7 +1474,7 @@ bool BitcodeReader::ParseModule() {
       break;
     }
     // FUNCTION:  [type, callingconv, isproto, linkage, paramattr,
-    //             alignment, section, visibility, gc]
+    //             alignment, section, visibility, gc, unnamed_addr]
     case bitc::MODULE_CODE_FUNCTION: {
       if (Record.size() < 8)
         return Error("Invalid MODULE_CODE_FUNCTION record");
@@ -1499,6 +1507,10 @@ bool BitcodeReader::ParseModule() {
           return Error("Invalid GC ID");
         Func->setGC(GCTable[Record[8]-1].c_str());
       }
+      bool UnnamedAddr = false;
+      if (Record.size() > 9)
+        UnnamedAddr = Record[9];
+      Func->setUnnamedAddr(UnnamedAddr);
       ValueList.push_back(Func);
 
       // If this is a function with a body, remember the prototype we are
@@ -1889,13 +1901,17 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
       if (OpNum < Record.size()) {
         if (Opc == Instruction::Add ||
             Opc == Instruction::Sub ||
-            Opc == Instruction::Mul) {
+            Opc == Instruction::Mul ||
+            Opc == Instruction::Shl) {
           if (Record[OpNum] & (1 << bitc::OBO_NO_SIGNED_WRAP))
             cast<BinaryOperator>(I)->setHasNoSignedWrap(true);
           if (Record[OpNum] & (1 << bitc::OBO_NO_UNSIGNED_WRAP))
             cast<BinaryOperator>(I)->setHasNoUnsignedWrap(true);
-        } else if (Opc == Instruction::SDiv) {
-          if (Record[OpNum] & (1 << bitc::SDIV_EXACT))
+        } else if (Opc == Instruction::SDiv ||
+                   Opc == Instruction::UDiv ||
+                   Opc == Instruction::LShr ||
+                   Opc == Instruction::AShr) {
+          if (Record[OpNum] & (1 << bitc::PEO_EXACT))
             cast<BinaryOperator>(I)->setIsExact(true);
         }
       }
@@ -2269,9 +2285,8 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
       const Type *Ty = getTypeByID(Record[0]);
       if (!Ty) return Error("Invalid PHI record");
 
-      PHINode *PN = PHINode::Create(Ty);
+      PHINode *PN = PHINode::Create(Ty, (Record.size()-1)/2);
       InstructionList.push_back(PN);
-      PN->reserveOperandSpace((Record.size()-1)/2);
 
       for (unsigned i = 0, e = Record.size()-1; i != e; i += 2) {
         Value *V = getFnValueByID(Record[1+i], Ty);

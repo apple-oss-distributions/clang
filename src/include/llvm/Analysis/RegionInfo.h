@@ -28,9 +28,10 @@
 #define LLVM_ANALYSIS_REGION_INFO_H
 
 #include "llvm/ADT/PointerIntPair.h"
-#include "llvm/Analysis/Dominators.h"
+#include "llvm/Analysis/DominanceFrontier.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Support/Allocator.h"
+#include <map>
 
 namespace llvm {
 
@@ -145,7 +146,7 @@ inline Region* RegionNode::getNodeAs<Region>() const {
 /// two connections to the remaining graph. It can be used to analyze or
 /// optimize parts of the control flow graph.
 ///
-/// A <em> simple Region </em> is connected to the remaing graph by just two
+/// A <em> simple Region </em> is connected to the remaining graph by just two
 /// edges. One edge entering the Region and another one leaving the Region.
 ///
 /// An <em> extended Region </em> (or just Region) is a subgraph that can be
@@ -305,6 +306,20 @@ public:
   ///         NULL if such a basic block does not exist.
   Region *getExpandedRegion() const;
 
+  /// @brief Return the first block of this region's single entry edge,
+  ///        if existing.
+  ///
+  /// @return The BasicBlock starting this region's single entry edge,
+  ///         else NULL.
+  BasicBlock *getEnteringBlock() const;
+
+  /// @brief Return the first block of this region's single exit edge,
+  ///        if existing.
+  ///
+  /// @return The BasicBlock starting this region's single exit edge,
+  ///         else NULL.
+  BasicBlock *getExitingBlock() const;
+
   /// @brief Is this a simple region?
   ///
   /// A region is simple if it has exactly one exit and one entry edge.
@@ -321,12 +336,16 @@ public:
     return RI;
   }
 
+  /// PrintStyle - Print region in difference ways.
+  enum PrintStyle { PrintNone, PrintBB, PrintRN  };
+
   /// @brief Print the region.
   ///
   /// @param OS The output stream the Region is printed to.
   /// @param printTree Print also the tree of subregions.
   /// @param level The indentation level used for printing.
-  void print(raw_ostream& OS, bool printTree = true, unsigned level = 0) const;
+  void print(raw_ostream& OS, bool printTree = true, unsigned level = 0,
+             enum PrintStyle Style = PrintNone) const;
 
   /// @brief Print the region to stderr.
   void dump() const;
@@ -424,7 +443,7 @@ public:
 
   /// @brief Move all direct child nodes of this Region to another Region.
   ///
-  /// @param To The Region the child nodes will be transfered to.
+  /// @param To The Region the child nodes will be transferred to.
   void transferChildrenTo(Region *To);
 
   /// @brief Verify if the region is a correct region.

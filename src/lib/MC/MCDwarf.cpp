@@ -7,16 +7,22 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/FoldingSet.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCAssembler.h"
+#include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetAsmBackend.h"
+#include "llvm/Target/TargetAsmInfo.h"
 using namespace llvm;
 
 // Given a special op, return the address skip amount (in units of
@@ -60,7 +66,7 @@ static inline uint64_t ScaleAddrDelta(uint64_t AddrDelta)
 // and if there is information from the last .loc directive that has yet to have
 // a line entry made for it is made.
 //
-void MCLineEntry::Make(MCObjectStreamer *MCOS, const MCSection *Section) {
+void MCLineEntry::Make(MCStreamer *MCOS, const MCSection *Section) {
   if (!MCOS->getContext().getDwarfLocSeen())
     return;
 
@@ -80,16 +86,16 @@ void MCLineEntry::Make(MCObjectStreamer *MCOS, const MCSection *Section) {
 
   // Get the MCLineSection for this section, if one does not exist for this
   // section create it.
-  DenseMap<const MCSection *, MCLineSection *> &MCLineSections =
+  const DenseMap<const MCSection *, MCLineSection *> &MCLineSections =
     MCOS->getContext().getMCLineSections();
-  MCLineSection *LineSection = MCLineSections[Section];
+  MCLineSection *LineSection = MCLineSections.lookup(Section);
   if (!LineSection) {
     // Create a new MCLineSection.  This will be deleted after the dwarf line
     // table is created using it by iterating through the MCLineSections
     // DenseMap.
     LineSection = new MCLineSection;
     // Save a pointer to the new LineSection into the MCLineSections DenseMap.
-    MCLineSections[Section] = LineSection;
+    MCOS->getContext().addMCLineSection(Section, LineSection);
   }
 
   // Add the line entry to this section's entries.
@@ -99,75 +105,57 @@ void MCLineEntry::Make(MCObjectStreamer *MCOS, const MCSection *Section) {
 //
 // This helper routine returns an expression of End - Start + IntVal .
 // 
-static inline const MCExpr *MakeStartMinusEndExpr(MCObjectStreamer *MCOS,
-                                                  MCSymbol *Start,
-                                                  MCSymbol *End, int IntVal) {
+static inline const MCExpr *MakeStartMinusEndExpr(const MCStreamer &MCOS,
+                                                  const MCSymbol &Start,
+                                                  const MCSymbol &End,
+                                                  int IntVal) {
   MCSymbolRefExpr::VariantKind Variant = MCSymbolRefExpr::VK_None;
   const MCExpr *Res =
-    MCSymbolRefExpr::Create(End, Variant, MCOS->getContext());
+    MCSymbolRefExpr::Create(&End, Variant, MCOS.getContext());
   const MCExpr *RHS =
-    MCSymbolRefExpr::Create(Start, Variant, MCOS->getContext());
+    MCSymbolRefExpr::Create(&Start, Variant, MCOS.getContext());
   const MCExpr *Res1 =
-    MCBinaryExpr::Create(MCBinaryExpr::Sub, Res, RHS, MCOS->getContext());
+    MCBinaryExpr::Create(MCBinaryExpr::Sub, Res, RHS, MCOS.getContext());
   const MCExpr *Res2 =
-    MCConstantExpr::Create(IntVal, MCOS->getContext());
+    MCConstantExpr::Create(IntVal, MCOS.getContext());
   const MCExpr *Res3 =
-    MCBinaryExpr::Create(MCBinaryExpr::Sub, Res1, Res2, MCOS->getContext());
+    MCBinaryExpr::Create(MCBinaryExpr::Sub, Res1, Res2, MCOS.getContext());
   return Res3;
-}
-
-// 
-// This emits an "absolute" address used in the start of a dwarf line number
-// table.  This will result in a relocatation entry for the address.
-//
-static inline void EmitDwarfSetAddress(MCObjectStreamer *MCOS,
-                                       MCSymbol *Symbol) {
-  MCOS->EmitIntValue(dwarf::DW_LNS_extended_op, 1);
-
-  int sizeof_address = MCOS->getAssembler().getBackend().getPointerSize();
-  MCOS->EmitULEB128Value(sizeof_address + 1);
-
-  MCOS->EmitIntValue(dwarf::DW_LNE_set_address, 1);
-  MCOS->EmitSymbolValue(Symbol, sizeof_address);
 }
 
 //
 // This emits the Dwarf line table for the specified section from the entries
 // in the LineSection.
 //
-static inline bool EmitDwarfLineTable(MCObjectStreamer *MCOS,
+static inline void EmitDwarfLineTable(MCStreamer *MCOS,
                                       const MCSection *Section,
-                                      MCLineSection *LineSection,
-                                      const MCSection *DwarfLineSection) {
+                                      const MCLineSection *LineSection) {
   unsigned FileNum = 1;
   unsigned LastLine = 1;
   unsigned Column = 0;
   unsigned Flags = DWARF2_LINE_DEFAULT_IS_STMT ? DWARF2_FLAG_IS_STMT : 0;
   unsigned Isa = 0;
-  bool EmittedLineTable = false;
   MCSymbol *LastLabel = NULL;
-  MCSectionData &DLS =
-    MCOS->getAssembler().getOrCreateSectionData(*DwarfLineSection);
 
   // Loop through each MCLineEntry and encode the dwarf line number table.
-  for (MCLineSection::iterator
+  for (MCLineSection::const_iterator
          it = LineSection->getMCLineEntries()->begin(),
          ie = LineSection->getMCLineEntries()->end(); it != ie; ++it) {
 
     if (FileNum != it->getFileNum()) {
       FileNum = it->getFileNum();
       MCOS->EmitIntValue(dwarf::DW_LNS_set_file, 1);
-      MCOS->EmitULEB128Value(FileNum);
+      MCOS->EmitULEB128IntValue(FileNum);
     }
     if (Column != it->getColumn()) {
       Column = it->getColumn();
       MCOS->EmitIntValue(dwarf::DW_LNS_set_column, 1);
-      MCOS->EmitULEB128Value(Column);
+      MCOS->EmitULEB128IntValue(Column);
     }
     if (Isa != it->getIsa()) {
       Isa = it->getIsa();
       MCOS->EmitIntValue(dwarf::DW_LNS_set_isa, 1);
-      MCOS->EmitULEB128Value(Isa);
+      MCOS->EmitULEB128IntValue(Isa);
     }
     if ((it->getFlags() ^ Flags) & DWARF2_FLAG_IS_STMT) {
       Flags = it->getFlags();
@@ -180,29 +168,16 @@ static inline bool EmitDwarfLineTable(MCObjectStreamer *MCOS,
     if (it->getFlags() & DWARF2_FLAG_EPILOGUE_BEGIN)
       MCOS->EmitIntValue(dwarf::DW_LNS_set_epilogue_begin, 1);
 
-    int64_t LineDelta = it->getLine() - LastLine;
+    int64_t LineDelta = static_cast<int64_t>(it->getLine()) - LastLine;
     MCSymbol *Label = it->getLabel();
 
     // At this point we want to emit/create the sequence to encode the delta in
     // line numbers and the increment of the address from the previous Label
     // and the current Label.
-    if (LastLabel == NULL) {
-      // emit the sequence to set the address
-      EmitDwarfSetAddress(MCOS, Label);
-      // emit the sequence for the LineDelta (from 1) and a zero address delta.
-      MCDwarfLineAddr::Emit(MCOS, LineDelta, 0);
-    }
-    else {
-      // Create an expression for the address delta from the LastLabel and
-      // this Label (plus 0).
-      const MCExpr *AddrDelta = MakeStartMinusEndExpr(MCOS, LastLabel, Label,0);
-      // Create a Dwarf Line fragment for the LineDelta and AddrDelta.
-      new MCDwarfLineAddrFragment(LineDelta, *AddrDelta, &DLS);
-    }
+    MCOS->EmitDwarfAdvanceLineAddr(LineDelta, LastLabel, Label);
 
     LastLine = it->getLine();
     LastLabel = Label;
-    EmittedLineTable = true;
   }
 
   // Emit a DW_LNE_end_sequence for the end of the section.
@@ -213,55 +188,51 @@ static inline bool EmitDwarfLineTable(MCObjectStreamer *MCOS,
 
   // Switch to the section to be able to create a symbol at its end.
   MCOS->SwitchSection(Section);
+
+  MCContext &context = MCOS->getContext();
   // Create a symbol at the end of the section.
-  MCSymbol *SectionEnd = MCOS->getContext().CreateTempSymbol();
+  MCSymbol *SectionEnd = context.CreateTempSymbol();
   // Set the value of the symbol, as we are at the end of the section.
   MCOS->EmitLabel(SectionEnd);
 
   // Switch back the the dwarf line section.
-  MCOS->SwitchSection(DwarfLineSection);
-  // Create an expression for the address delta from the LastLabel and this
-  // SectionEnd label.
-  const MCExpr *AddrDelta = MakeStartMinusEndExpr(MCOS, LastLabel, SectionEnd,
-						  0);
-  // Create a Dwarf Line fragment for the LineDelta and AddrDelta.
-  new MCDwarfLineAddrFragment(INT64_MAX, *AddrDelta, &DLS);
+  MCOS->SwitchSection(context.getTargetAsmInfo().getDwarfLineSection());
 
-  return EmittedLineTable;
+  MCOS->EmitDwarfAdvanceLineAddr(INT64_MAX, LastLabel, SectionEnd);
 }
 
 //
 // This emits the Dwarf file and the line tables.
 //
-void MCDwarfFileTable::Emit(MCObjectStreamer *MCOS,
-                            const MCSection *DwarfLineSection) {
+void MCDwarfFileTable::Emit(MCStreamer *MCOS) {
+  MCContext &context = MCOS->getContext();
   // Switch to the section where the table will be emitted into.
-  MCOS->SwitchSection(DwarfLineSection);
+  MCOS->SwitchSection(context.getTargetAsmInfo().getDwarfLineSection());
 
   // Create a symbol at the beginning of this section.
-  MCSymbol *LineStartSym = MCOS->getContext().CreateTempSymbol();
+  MCSymbol *LineStartSym = context.CreateTempSymbol();
   // Set the value of the symbol, as we are at the start of the section.
   MCOS->EmitLabel(LineStartSym);
 
   // Create a symbol for the end of the section (to be set when we get there).
-  MCSymbol *LineEndSym = MCOS->getContext().CreateTempSymbol();
+  MCSymbol *LineEndSym = context.CreateTempSymbol();
 
   // The first 4 bytes is the total length of the information for this
   // compilation unit (not including these 4 bytes for the length).
-  MCOS->EmitValue(MakeStartMinusEndExpr(MCOS, LineStartSym, LineEndSym, 4),
-                  4, 0);
+  MCOS->EmitAbsValue(MakeStartMinusEndExpr(*MCOS, *LineStartSym, *LineEndSym,4),
+                     4);
 
   // Next 2 bytes is the Version, which is Dwarf 2.
   MCOS->EmitIntValue(2, 2);
 
   // Create a symbol for the end of the prologue (to be set when we get there).
-  MCSymbol *ProEndSym = MCOS->getContext().CreateTempSymbol(); // Lprologue_end
+  MCSymbol *ProEndSym = context.CreateTempSymbol(); // Lprologue_end
 
   // Length of the prologue, is the next 4 bytes.  Which is the start of the
   // section to the end of the prologue.  Not including the 4 bytes for the
   // total length, the 2 bytes for the version, and these 4 bytes for the
   // length of the prologue.
-  MCOS->EmitValue(MakeStartMinusEndExpr(MCOS, LineStartSym, ProEndSym,
+  MCOS->EmitAbsValue(MakeStartMinusEndExpr(*MCOS, *LineStartSym, *ProEndSym,
                                         (4 + 2 + 4)),
                   4, 0);
 
@@ -290,7 +261,7 @@ void MCDwarfFileTable::Emit(MCObjectStreamer *MCOS,
 
   // First the directory table.
   const std::vector<StringRef> &MCDwarfDirs =
-    MCOS->getContext().getMCDwarfDirs();
+    context.getMCDwarfDirs();
   for (unsigned i = 0; i < MCDwarfDirs.size(); i++) {
     MCOS->EmitBytes(MCDwarfDirs[i], 0); // the DirectoryName
     MCOS->EmitBytes(StringRef("\0", 1), 0); // the null term. of the string
@@ -303,7 +274,8 @@ void MCDwarfFileTable::Emit(MCObjectStreamer *MCOS,
   for (unsigned i = 1; i < MCDwarfFiles.size(); i++) {
     MCOS->EmitBytes(MCDwarfFiles[i]->getName(), 0); // FileName
     MCOS->EmitBytes(StringRef("\0", 1), 0); // the null term. of the string
-    MCOS->EmitULEB128Value(MCDwarfFiles[i]->getDirIndex()); // the Directory num
+    // the Directory num
+    MCOS->EmitULEB128IntValue(MCDwarfFiles[i]->getDirIndex());
     MCOS->EmitIntValue(0, 1); // last modification timestamp (always 0)
     MCOS->EmitIntValue(0, 1); // filesize (always 0)
   }
@@ -314,67 +286,37 @@ void MCDwarfFileTable::Emit(MCObjectStreamer *MCOS,
   MCOS->EmitLabel(ProEndSym);
 
   // Put out the line tables.
-  bool EmittedLineTable = false;
-  DenseMap<const MCSection *, MCLineSection *> &MCLineSections =
+  const DenseMap<const MCSection *, MCLineSection *> &MCLineSections =
     MCOS->getContext().getMCLineSections();
-  for (DenseMap<const MCSection *, MCLineSection *>::iterator it =
-	MCLineSections.begin(), ie = MCLineSections.end(); it != ie; ++it) {
-    EmittedLineTable = EmitDwarfLineTable(MCOS, it->first, it->second,
-                                          DwarfLineSection);
+  const std::vector<const MCSection *> &MCLineSectionOrder =
+    MCOS->getContext().getMCLineSectionOrder();
+  for (std::vector<const MCSection*>::const_iterator it =
+	MCLineSectionOrder.begin(), ie = MCLineSectionOrder.end(); it != ie;
+       ++it) {
+    const MCSection *Sec = *it;
+    const MCLineSection *Line = MCLineSections.lookup(Sec);
+    EmitDwarfLineTable(MCOS, Sec, Line);
 
     // Now delete the MCLineSections that were created in MCLineEntry::Make()
     // and used to emit the line table.
-    delete it->second;
+    delete Line;
   }
 
-  // If there are no line tables emited then we emit:
-  // The following DW_LNE_set_address sequence to set the address to zero and
-  // the DW_LNE_end_sequence.
-  if (EmittedLineTable == false) {
-    if (MCOS->getAssembler().getBackend().getPointerSize() == 8) {
-      // This is the DW_LNE_set_address sequence for 64-bit code.
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(9, 1);
-      MCOS->EmitIntValue(2, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-    }
-    else {
-      // This is the DW_LNE_set_address sequence for 32-bit code.
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(5, 1);
-      MCOS->EmitIntValue(2, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-      MCOS->EmitIntValue(0, 1);
-    }
+  if (MCOS->getContext().getAsmInfo().getLinkerRequiresNonEmptyDwarfLines()
+      && MCLineSectionOrder.begin() == MCLineSectionOrder.end()) {
+    // The darwin9 linker has a bug (see PR8715). For for 32-bit architectures
+    // it requires:  
+    // total_length >= prologue_length + 10
+    // We are 4 bytes short, since we have total_length = 51 and
+    // prologue_length = 45
 
-    // Lastly emit the DW_LNE_end_sequence which consists of 3 bytes '00 01 01'
-    // (00 is the code for extended opcodes, followed by a ULEB128 length of the
-    // extended opcode (01), and the DW_LNE_end_sequence (01).
-    MCOS->EmitIntValue(0, 1); // DW_LNS_extended_op
-    MCOS->EmitIntValue(1, 1); // ULEB128 length of the extended opcode
-    MCOS->EmitIntValue(1, 1); // DW_LNE_end_sequence
+    // The regular end_sequence should be sufficient.
+    MCDwarfLineAddr::Emit(MCOS, INT64_MAX, 0);
   }
 
   // This is the end of the section, so set the value of the symbol at the end
   // of this section (that was used in a previous expression).
   MCOS->EmitLabel(LineEndSym);
-}
-
-/// Utility function to compute the size of the encoding.
-uint64_t MCDwarfLineAddr::ComputeSize(int64_t LineDelta, uint64_t AddrDelta) {
-  SmallString<256> Tmp;
-  raw_svector_ostream OS(Tmp);
-  MCDwarfLineAddr::Encode(LineDelta, AddrDelta, OS);
-  return OS.GetNumBytesInBuffer();
 }
 
 /// Utility function to write the encoding to an object writer.
@@ -387,7 +329,7 @@ void MCDwarfLineAddr::Write(MCObjectWriter *OW, int64_t LineDelta,
 }
 
 /// Utility function to emit the encoding to a streamer.
-void MCDwarfLineAddr::Emit(MCObjectStreamer *MCOS, int64_t LineDelta,
+void MCDwarfLineAddr::Emit(MCStreamer *MCOS, int64_t LineDelta,
                            uint64_t AddrDelta) {
   SmallString<256> Tmp;
   raw_svector_ostream OS(Tmp);
@@ -488,3 +430,541 @@ void MCDwarfFile::dump() const {
   print(dbgs());
 }
 
+static int getDataAlignmentFactor(MCStreamer &streamer) {
+  MCContext &context = streamer.getContext();
+  const TargetAsmInfo &asmInfo = context.getTargetAsmInfo();
+  int size = asmInfo.getPointerSize();
+  if (asmInfo.getStackGrowthDirection() == TargetFrameLowering::StackGrowsUp)
+    return size;
+ else
+   return -size;
+}
+
+static unsigned getSizeForEncoding(MCStreamer &streamer,
+                                   unsigned symbolEncoding) {
+  MCContext &context = streamer.getContext();
+  const TargetAsmInfo &asmInfo = context.getTargetAsmInfo();
+  unsigned format = symbolEncoding & 0x0f;
+  switch (format) {
+  default:
+    assert(0 && "Unknown Encoding");
+  case dwarf::DW_EH_PE_absptr:
+  case dwarf::DW_EH_PE_signed:
+    return asmInfo.getPointerSize();
+  case dwarf::DW_EH_PE_udata2:
+  case dwarf::DW_EH_PE_sdata2:
+    return 2;
+  case dwarf::DW_EH_PE_udata4:
+  case dwarf::DW_EH_PE_sdata4:
+    return 4;
+  case dwarf::DW_EH_PE_udata8:
+  case dwarf::DW_EH_PE_sdata8:
+    return 8;
+  }
+}
+
+static void EmitSymbol(MCStreamer &streamer, const MCSymbol &symbol,
+                       unsigned symbolEncoding) {
+  MCContext &context = streamer.getContext();
+  const MCAsmInfo &asmInfo = context.getAsmInfo();
+  const MCExpr *v = asmInfo.getExprForFDESymbol(&symbol,
+                                                symbolEncoding,
+                                                streamer);
+  unsigned size = getSizeForEncoding(streamer, symbolEncoding);
+  streamer.EmitAbsValue(v, size);
+}
+
+static void EmitPersonality(MCStreamer &streamer, const MCSymbol &symbol,
+                            unsigned symbolEncoding) {
+  MCContext &context = streamer.getContext();
+  const MCAsmInfo &asmInfo = context.getAsmInfo();
+  const MCExpr *v = asmInfo.getExprForPersonalitySymbol(&symbol,
+                                                        symbolEncoding,
+                                                        streamer);
+  unsigned size = getSizeForEncoding(streamer, symbolEncoding);
+  streamer.EmitValue(v, size);
+}
+
+static const MachineLocation TranslateMachineLocation(
+                                                  const TargetAsmInfo &AsmInfo,
+                                                  const MachineLocation &Loc) {
+  unsigned Reg = Loc.getReg() == MachineLocation::VirtualFP ?
+    MachineLocation::VirtualFP :
+    unsigned(AsmInfo.getDwarfRegNum(Loc.getReg(), true));
+  const MachineLocation &NewLoc = Loc.isReg() ?
+    MachineLocation(Reg) : MachineLocation(Reg, Loc.getOffset());
+  return NewLoc;
+}
+
+namespace {
+  class FrameEmitterImpl {
+    int CFAOffset;
+    int CIENum;
+    bool UsingCFI;
+
+  public:
+    FrameEmitterImpl(bool usingCFI) : CFAOffset(0), CIENum(0),
+                     UsingCFI(usingCFI) {
+    }
+
+    const MCSymbol &EmitCIE(MCStreamer &streamer,
+                            const MCSymbol *personality,
+                            unsigned personalityEncoding,
+                            const MCSymbol *lsda,
+                            unsigned lsdaEncoding);
+    MCSymbol *EmitFDE(MCStreamer &streamer,
+                      const MCSymbol &cieStart,
+                      const MCDwarfFrameInfo &frame,
+                      bool forceLsda);
+    void EmitCFIInstructions(MCStreamer &streamer,
+                             const std::vector<MCCFIInstruction> &Instrs,
+                             MCSymbol *BaseLabel);
+    void EmitCFIInstruction(MCStreamer &Streamer,
+                            const MCCFIInstruction &Instr);
+  };
+}
+
+void FrameEmitterImpl::EmitCFIInstruction(MCStreamer &Streamer,
+                                          const MCCFIInstruction &Instr) {
+  int dataAlignmentFactor = getDataAlignmentFactor(Streamer);
+
+  switch (Instr.getOperation()) {
+  case MCCFIInstruction::Move:
+  case MCCFIInstruction::RelMove: {
+    const MachineLocation &Dst = Instr.getDestination();
+    const MachineLocation &Src = Instr.getSource();
+    const bool IsRelative = Instr.getOperation() == MCCFIInstruction::RelMove;
+
+    // If advancing cfa.
+    if (Dst.isReg() && Dst.getReg() == MachineLocation::VirtualFP) {
+      assert(!Src.isReg() && "Machine move not supported yet.");
+
+      if (Src.getReg() == MachineLocation::VirtualFP) {
+        Streamer.EmitIntValue(dwarf::DW_CFA_def_cfa_offset, 1);
+      } else {
+        Streamer.EmitIntValue(dwarf::DW_CFA_def_cfa, 1);
+        Streamer.EmitULEB128IntValue(Src.getReg());
+      }
+
+      if (IsRelative)
+        CFAOffset += Src.getOffset();
+      else
+        CFAOffset = -Src.getOffset();
+
+      Streamer.EmitULEB128IntValue(CFAOffset);
+      return;
+    }
+
+    if (Src.isReg() && Src.getReg() == MachineLocation::VirtualFP) {
+      assert(Dst.isReg() && "Machine move not supported yet.");
+      Streamer.EmitIntValue(dwarf::DW_CFA_def_cfa_register, 1);
+      Streamer.EmitULEB128IntValue(Dst.getReg());
+      return;
+    }
+
+    unsigned Reg = Src.getReg();
+
+    int Offset = Dst.getOffset();
+    if (IsRelative)
+      Offset -= CFAOffset;
+    Offset = Offset / dataAlignmentFactor;
+
+    if (Offset < 0) {
+      Streamer.EmitIntValue(dwarf::DW_CFA_offset_extended_sf, 1);
+      Streamer.EmitULEB128IntValue(Reg);
+      Streamer.EmitSLEB128IntValue(Offset);
+    } else if (Reg < 64) {
+      Streamer.EmitIntValue(dwarf::DW_CFA_offset + Reg, 1);
+      Streamer.EmitULEB128IntValue(Offset);
+    } else {
+      Streamer.EmitIntValue(dwarf::DW_CFA_offset_extended, 1);
+      Streamer.EmitULEB128IntValue(Reg);
+      Streamer.EmitULEB128IntValue(Offset);
+    }
+    return;
+  }
+  case MCCFIInstruction::Remember:
+    Streamer.EmitIntValue(dwarf::DW_CFA_remember_state, 1);
+    return;
+  case MCCFIInstruction::Restore:
+    Streamer.EmitIntValue(dwarf::DW_CFA_restore_state, 1);
+    return;
+  case MCCFIInstruction::SameValue: {
+    unsigned Reg = Instr.getDestination().getReg();
+    Streamer.EmitIntValue(dwarf::DW_CFA_same_value, 1);
+    Streamer.EmitULEB128IntValue(Reg);
+    return;
+  }
+  }
+  llvm_unreachable("Unhandled case in switch");
+}
+
+/// EmitFrameMoves - Emit frame instructions to describe the layout of the
+/// frame.
+void FrameEmitterImpl::EmitCFIInstructions(MCStreamer &streamer,
+                                    const std::vector<MCCFIInstruction> &Instrs,
+                                           MCSymbol *BaseLabel) {
+  for (unsigned i = 0, N = Instrs.size(); i < N; ++i) {
+    const MCCFIInstruction &Instr = Instrs[i];
+    MCSymbol *Label = Instr.getLabel();
+    // Throw out move if the label is invalid.
+    if (Label && !Label->isDefined()) continue; // Not emitted, in dead code.
+
+    // Advance row if new location.
+    if (BaseLabel && Label) {
+      MCSymbol *ThisSym = Label;
+      if (ThisSym != BaseLabel) {
+        streamer.EmitDwarfAdvanceFrameAddr(BaseLabel, ThisSym);
+        BaseLabel = ThisSym;
+      }
+    }
+
+    EmitCFIInstruction(streamer, Instr);
+  }
+}
+
+const MCSymbol &FrameEmitterImpl::EmitCIE(MCStreamer &streamer,
+                                          const MCSymbol *personality,
+                                          unsigned personalityEncoding,
+                                          const MCSymbol *lsda,
+                                          unsigned lsdaEncoding) {
+  MCContext &context = streamer.getContext();
+  const TargetAsmInfo &asmInfo = context.getTargetAsmInfo();
+  const MCSection &section = *asmInfo.getEHFrameSection();
+  streamer.SwitchSection(&section);
+
+  MCSymbol *sectionStart;
+  if (asmInfo.isFunctionEHFrameSymbolPrivate())
+    sectionStart = context.CreateTempSymbol();
+  else
+    sectionStart = context.GetOrCreateSymbol(Twine("EH_frame") + Twine(CIENum));
+
+  CIENum++;
+
+  MCSymbol *sectionEnd = streamer.getContext().CreateTempSymbol();
+
+  // Length
+  const MCExpr *Length = MakeStartMinusEndExpr(streamer, *sectionStart,
+                                               *sectionEnd, 4);
+  streamer.EmitLabel(sectionStart);
+  streamer.EmitAbsValue(Length, 4);
+
+  // CIE ID
+  streamer.EmitIntValue(0, 4);
+
+  // Version
+  streamer.EmitIntValue(dwarf::DW_CIE_VERSION, 1);
+
+  // Augmentation String
+  SmallString<8> Augmentation;
+  Augmentation += "z";
+  if (personality)
+    Augmentation += "P";
+  if (lsda)
+    Augmentation += "L";
+  Augmentation += "R";
+  streamer.EmitBytes(Augmentation.str(), 0);
+  streamer.EmitIntValue(0, 1);
+
+  // Code Alignment Factor
+  streamer.EmitULEB128IntValue(1);
+
+  // Data Alignment Factor
+  streamer.EmitSLEB128IntValue(getDataAlignmentFactor(streamer));
+
+  // Return Address Register
+  streamer.EmitULEB128IntValue(asmInfo.getDwarfRARegNum(true));
+
+  // Augmentation Data Length (optional)
+
+  unsigned augmentationLength = 0;
+  if (personality) {
+    // Personality Encoding
+    augmentationLength += 1;
+    // Personality
+    augmentationLength += getSizeForEncoding(streamer, personalityEncoding);
+  }
+  if (lsda) {
+    augmentationLength += 1;
+  }
+  // Encoding of the FDE pointers
+  augmentationLength += 1;
+
+  streamer.EmitULEB128IntValue(augmentationLength);
+
+  // Augmentation Data (optional)
+  if (personality) {
+    // Personality Encoding
+    streamer.EmitIntValue(personalityEncoding, 1);
+    // Personality
+    EmitPersonality(streamer, *personality, personalityEncoding);
+  }
+  if (lsda) {
+    // LSDA Encoding
+    streamer.EmitIntValue(lsdaEncoding, 1);
+  }
+  // Encoding of the FDE pointers
+  streamer.EmitIntValue(asmInfo.getFDEEncoding(UsingCFI), 1);
+
+  // Initial Instructions
+
+  const std::vector<MachineMove> Moves = asmInfo.getInitialFrameState();
+  std::vector<MCCFIInstruction> Instructions;
+
+  for (int i = 0, n = Moves.size(); i != n; ++i) {
+    MCSymbol *Label = Moves[i].getLabel();
+    const MachineLocation &Dst =
+      TranslateMachineLocation(asmInfo, Moves[i].getDestination());
+    const MachineLocation &Src =
+      TranslateMachineLocation(asmInfo, Moves[i].getSource());
+    MCCFIInstruction Inst(Label, Dst, Src);
+    Instructions.push_back(Inst);
+  }
+
+  EmitCFIInstructions(streamer, Instructions, NULL);
+
+  // Padding
+  streamer.EmitValueToAlignment(4);
+
+  streamer.EmitLabel(sectionEnd);
+  return *sectionStart;
+}
+
+MCSymbol *FrameEmitterImpl::EmitFDE(MCStreamer &streamer,
+                                    const MCSymbol &cieStart,
+                                    const MCDwarfFrameInfo &frame,
+                                    bool forceLsda) {
+  MCContext &context = streamer.getContext();
+  MCSymbol *fdeStart = context.CreateTempSymbol();
+  MCSymbol *fdeEnd = context.CreateTempSymbol();
+  const TargetAsmInfo &asmInfo = context.getTargetAsmInfo();
+
+  if (!asmInfo.isFunctionEHFrameSymbolPrivate()) {
+    MCSymbol *EHSym = context.GetOrCreateSymbol(
+      frame.Function->getName() + Twine(".eh"));
+    streamer.EmitEHSymAttributes(frame.Function, EHSym);
+    streamer.EmitLabel(EHSym);
+  }
+
+  // Length
+  const MCExpr *Length = MakeStartMinusEndExpr(streamer, *fdeStart, *fdeEnd, 0);
+  streamer.EmitAbsValue(Length, 4);
+
+  streamer.EmitLabel(fdeStart);
+  // CIE Pointer
+  const MCExpr *offset = MakeStartMinusEndExpr(streamer, cieStart, *fdeStart,
+                                               0);
+  streamer.EmitAbsValue(offset, 4);
+  unsigned fdeEncoding = asmInfo.getFDEEncoding(UsingCFI);
+  unsigned size = getSizeForEncoding(streamer, fdeEncoding);
+
+  // PC Begin
+  EmitSymbol(streamer, *frame.Begin, fdeEncoding);
+
+  // PC Range
+  const MCExpr *Range = MakeStartMinusEndExpr(streamer, *frame.Begin,
+                                              *frame.End, 0);
+  streamer.EmitAbsValue(Range, size);
+
+  // Augmentation Data Length
+  unsigned augmentationLength = 0;
+
+  if (frame.Lsda || forceLsda)
+    augmentationLength += getSizeForEncoding(streamer, frame.LsdaEncoding);
+
+  streamer.EmitULEB128IntValue(augmentationLength);
+
+  // Augmentation Data
+
+  // When running in "CodeGen compatibility mode" a FDE with no LSDA can be
+  // assigned to a CIE that requires one. In that case we output a 0 (as does
+  // CodeGen).
+  if (frame.Lsda)
+    EmitSymbol(streamer, *frame.Lsda, frame.LsdaEncoding);
+  else if (forceLsda)
+    streamer.EmitIntValue(0, getSizeForEncoding(streamer, frame.LsdaEncoding));
+
+  // Call Frame Instructions
+
+  EmitCFIInstructions(streamer, frame.Instructions, frame.Begin);
+
+  // Padding
+  streamer.EmitValueToAlignment(size);
+
+  return fdeEnd;
+}
+
+namespace {
+  struct CIEKey {
+    static const CIEKey getEmptyKey() { return CIEKey(0, 0, -1); }
+    static const CIEKey getTombstoneKey() { return CIEKey(0, -1, 0); }
+
+    CIEKey(const MCSymbol* Personality_, unsigned PersonalityEncoding_,
+           unsigned LsdaEncoding_) : Personality(Personality_),
+                                     PersonalityEncoding(PersonalityEncoding_),
+                                     LsdaEncoding(LsdaEncoding_) {
+    }
+    const MCSymbol* Personality;
+    unsigned PersonalityEncoding;
+    unsigned LsdaEncoding;
+  };
+}
+
+namespace llvm {
+  template <>
+  struct DenseMapInfo<CIEKey> {
+    static CIEKey getEmptyKey() {
+      return CIEKey::getEmptyKey();
+    }
+    static CIEKey getTombstoneKey() {
+      return CIEKey::getTombstoneKey();
+    }
+    static unsigned getHashValue(const CIEKey &Key) {
+      FoldingSetNodeID ID;
+      ID.AddPointer(Key.Personality);
+      ID.AddInteger(Key.PersonalityEncoding);
+      ID.AddInteger(Key.LsdaEncoding);
+      return ID.ComputeHash();
+    }
+    static bool isEqual(const CIEKey &LHS,
+                        const CIEKey &RHS) {
+      return LHS.Personality == RHS.Personality &&
+        LHS.PersonalityEncoding == RHS.PersonalityEncoding &&
+        LHS.LsdaEncoding == RHS.LsdaEncoding;
+    }
+  };
+}
+
+// This is an implementation of CIE and FDE emission that is bug by bug
+// compatible with the one in CodeGen. It is useful during the transition
+// to make it easy to compare the outputs, but should probably be removed
+// afterwards.
+void MCDwarfFrameEmitter::EmitDarwin(MCStreamer &streamer,
+                                     bool usingCFI) {
+  FrameEmitterImpl Emitter(usingCFI);
+  DenseMap<const MCSymbol*, const MCSymbol*> Personalities;
+  const MCSymbol *aCIE = NULL;
+  const MCDwarfFrameInfo *aFrame = NULL;
+
+  for (unsigned i = 0, n = streamer.getNumFrameInfos(); i < n; ++i) {
+    const MCDwarfFrameInfo &frame = streamer.getFrameInfo(i);
+    if (!frame.Personality)
+      continue;
+    if (Personalities.count(frame.Personality))
+      continue;
+
+    const MCSymbol *cieStart = &Emitter.EmitCIE(streamer, frame.Personality,
+                                                frame.PersonalityEncoding,
+                                                frame.Lsda,
+                                                frame.LsdaEncoding);
+    aCIE = cieStart;
+    aFrame = &frame;
+    Personalities[frame.Personality] = cieStart;
+  }
+
+  if (Personalities.empty()) {
+    const MCDwarfFrameInfo &frame = streamer.getFrameInfo(0);
+    aCIE = &Emitter.EmitCIE(streamer, frame.Personality,
+                            frame.PersonalityEncoding, frame.Lsda,
+                            frame.LsdaEncoding);
+    aFrame = &frame;
+  }
+
+  MCSymbol *fdeEnd = NULL;
+  for (unsigned i = 0, n = streamer.getNumFrameInfos(); i < n; ++i) {
+    const MCDwarfFrameInfo &frame = streamer.getFrameInfo(i);
+    const MCSymbol *cieStart = Personalities[frame.Personality];
+    bool hasLSDA;
+    if (!cieStart) {
+      cieStart = aCIE;
+      hasLSDA = aFrame->Lsda;
+    } else {
+      hasLSDA = true;
+    }
+
+    fdeEnd = Emitter.EmitFDE(streamer, *cieStart, frame,
+                             hasLSDA);
+    if (i != n - 1)
+      streamer.EmitLabel(fdeEnd);
+  }
+
+  const MCContext &context = streamer.getContext();
+  const TargetAsmInfo &asmInfo = context.getTargetAsmInfo();
+  streamer.EmitValueToAlignment(asmInfo.getPointerSize());
+  if (fdeEnd)
+    streamer.EmitLabel(fdeEnd);
+}
+
+void MCDwarfFrameEmitter::Emit(MCStreamer &streamer,
+                               bool usingCFI) {
+  const MCContext &context = streamer.getContext();
+  const TargetAsmInfo &asmInfo = context.getTargetAsmInfo();
+  if (!asmInfo.isFunctionEHFrameSymbolPrivate()) {
+    EmitDarwin(streamer, usingCFI);
+    return;
+  }
+
+  MCSymbol *fdeEnd = NULL;
+  DenseMap<CIEKey, const MCSymbol*> CIEStarts;
+  FrameEmitterImpl Emitter(usingCFI);
+
+  for (unsigned i = 0, n = streamer.getNumFrameInfos(); i < n; ++i) {
+    const MCDwarfFrameInfo &frame = streamer.getFrameInfo(i);
+    CIEKey key(frame.Personality, frame.PersonalityEncoding,
+               frame.LsdaEncoding);
+    const MCSymbol *&cieStart = CIEStarts[key];
+    if (!cieStart)
+      cieStart = &Emitter.EmitCIE(streamer, frame.Personality,
+                                  frame.PersonalityEncoding, frame.Lsda,
+                                  frame.LsdaEncoding);
+    fdeEnd = Emitter.EmitFDE(streamer, *cieStart, frame, false);
+    if (i != n - 1)
+      streamer.EmitLabel(fdeEnd);
+  }
+
+  streamer.EmitValueToAlignment(asmInfo.getPointerSize());
+  if (fdeEnd)
+    streamer.EmitLabel(fdeEnd);
+}
+
+void MCDwarfFrameEmitter::EmitAdvanceLoc(MCStreamer &Streamer,
+                                         uint64_t AddrDelta) {
+  SmallString<256> Tmp;
+  raw_svector_ostream OS(Tmp);
+  const TargetAsmInfo &AsmInfo = Streamer.getContext().getTargetAsmInfo();
+  MCDwarfFrameEmitter::EncodeAdvanceLoc(AddrDelta, OS, AsmInfo);
+  Streamer.EmitBytes(OS.str(), /*AddrSpace=*/0);
+}
+
+void MCDwarfFrameEmitter::EncodeAdvanceLoc(uint64_t AddrDelta,
+                                           raw_ostream &OS,
+                                           const TargetAsmInfo &AsmInfo) {
+  // This is a small hack to facilitate the transition to CFI on OS X. It
+  // relaxes all address advances which lets us produces identical output
+  // to the one produce by CodeGen.
+  const bool Relax = !AsmInfo.isFunctionEHFrameSymbolPrivate();
+
+  // FIXME: Assumes the code alignment factor is 1.
+  if (AddrDelta == 0) {
+  } else if (isUIntN(6, AddrDelta) && !Relax) {
+    uint8_t Opcode = dwarf::DW_CFA_advance_loc | AddrDelta;
+    OS << Opcode;
+  } else if (isUInt<8>(AddrDelta) && !Relax) {
+    OS << uint8_t(dwarf::DW_CFA_advance_loc1);
+    OS << uint8_t(AddrDelta);
+  } else if (isUInt<16>(AddrDelta) && !Relax) {
+    // FIXME: check what is the correct behavior on a big endian machine.
+    OS << uint8_t(dwarf::DW_CFA_advance_loc2);
+    OS << uint8_t( AddrDelta       & 0xff);
+    OS << uint8_t((AddrDelta >> 8) & 0xff);
+  } else {
+    // FIXME: check what is the correct behavior on a big endian machine.
+    assert(isUInt<32>(AddrDelta));
+    OS << uint8_t(dwarf::DW_CFA_advance_loc4);
+    OS << uint8_t( AddrDelta        & 0xff);
+    OS << uint8_t((AddrDelta >> 8)  & 0xff);
+    OS << uint8_t((AddrDelta >> 16) & 0xff);
+    OS << uint8_t((AddrDelta >> 24) & 0xff);
+
+  }
+}

@@ -14,8 +14,7 @@
 #ifndef LLVM_SUPPORT_MATHEXTRAS_H
 #define LLVM_SUPPORT_MATHEXTRAS_H
 
-#include "llvm/System/DataTypes.h"
-#include "llvm/System/SwapByteOrder.h"
+#include "llvm/Support/SwapByteOrder.h"
 
 namespace llvm {
 
@@ -77,6 +76,12 @@ inline bool isUIntN(unsigned N, uint64_t x) {
   return x == (x & (~0ULL >> (64 - N)));
 }
 
+/// isIntN - Checks if an signed integer fits into the given (dynamic)
+/// bit width.
+inline bool isIntN(unsigned N, int64_t x) {
+  return N >= 64 || (-(INT64_C(1)<<(N-1)) <= x && x < (INT64_C(1)<<(N-1)));
+}
+
 /// isMask_32 - This function returns true if the argument is a sequence of ones
 /// starting at the least significant bit with the remainder zero (32 bit
 /// version).   Ex. isMask_32(0x0000FFFFU) == true.
@@ -119,19 +124,19 @@ inline bool isPowerOf2_64(uint64_t Value) {
 /// ByteSwap_16 - This function returns a byte-swapped representation of the
 /// 16-bit argument, Value.
 inline uint16_t ByteSwap_16(uint16_t Value) {
-  return sys::SwapByteOrder(Value);
+  return sys::SwapByteOrder_16(Value);
 }
 
 /// ByteSwap_32 - This function returns a byte-swapped representation of the
 /// 32-bit argument, Value.
 inline uint32_t ByteSwap_32(uint32_t Value) {
-  return sys::SwapByteOrder(Value);
+  return sys::SwapByteOrder_32(Value);
 }
 
 /// ByteSwap_64 - This function returns a byte-swapped representation of the
 /// 64-bit argument, Value.
 inline uint64_t ByteSwap_64(uint64_t Value) {
-  return sys::SwapByteOrder(Value);
+  return sys::SwapByteOrder_64(Value);
 }
 
 /// CountLeadingZeros_32 - this function performs the platform optimal form of

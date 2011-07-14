@@ -31,7 +31,7 @@ namespace clang {
 class FileEntry;
 class PTHLexer;
 class Diagnostic;
-class StatSysCallCache;
+class FileSystemStatCache;
 
 class PTHManager : public IdentifierInfoLookup {
   friend class PTHLexer;
@@ -119,9 +119,7 @@ public:
 
   /// Create - This method creates PTHManager objects.  The 'file' argument
   ///  is the name of the PTH file.  This method returns NULL upon failure.
-  static PTHManager *Create(const std::string& file, FileManager &FileMgr,
-                            const FileSystemOptions &FSOpts,
-                            Diagnostic &Diags);
+  static PTHManager *Create(const std::string& file, Diagnostic &Diags);
 
   void setPreprocessor(Preprocessor *pp) { PP = pp; }
 
@@ -130,11 +128,11 @@ public:
   ///  It is the responsibility of the caller to 'delete' the returned object.
   PTHLexer *CreateLexer(FileID FID);
 
-  /// createStatCache - Returns a StatSysCallCache object for use with
+  /// createStatCache - Returns a FileSystemStatCache object for use with
   ///  FileManager objects.  These objects use the PTH data to speed up
   ///  calls to stat by memoizing their results from when the PTH file
   ///  was generated.
-  StatSysCallCache *createStatCache();
+  FileSystemStatCache *createStatCache();
 };
 
 }  // end namespace clang

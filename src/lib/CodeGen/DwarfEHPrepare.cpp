@@ -43,7 +43,7 @@ namespace {
     // The eh.selector intrinsic.
     Function *SelectorIntrinsic;
 
-    // _Unwind_Resume_or_Rethrow call.
+    // _Unwind_Resume_or_Rethrow or _Unwind_SjLj_Resume call.
     Constant *URoR;
 
     // The EH language-specific catch-all type.
@@ -82,18 +82,19 @@ namespace {
     /// FindAllURoRInvokes - Find all URoR invokes in the function.
     void FindAllURoRInvokes(SmallPtrSet<InvokeInst*, 32> &URoRInvokes);
 
-    /// HandleURoRInvokes - Handle invokes of "_Unwind_Resume_or_Rethrow"
-    /// calls. The "unwind" part of these invokes jump to a landing pad within
-    /// the current function. This is a candidate to merge the selector
-    /// associated with the URoR invoke with the one from the URoR's landing
-    /// pad.
+    /// HandleURoRInvokes - Handle invokes of "_Unwind_Resume_or_Rethrow" or
+    /// "_Unwind_SjLj_Resume" calls. The "unwind" part of these invokes jump to
+    /// a landing pad within the current function. This is a candidate to merge
+    /// the selector associated with the URoR invoke with the one from the
+    /// URoR's landing pad.
     bool HandleURoRInvokes();
 
     /// FindSelectorAndURoR - Find the eh.selector call and URoR call associated
     /// with the eh.exception call. This recursively looks past instructions
     /// which don't change the EH pointer value, like casts or PHI nodes.
     bool FindSelectorAndURoR(Instruction *Inst, bool &URoRInvoke,
-                             SmallPtrSet<IntrinsicInst*, 8> &SelCalls);
+                             SmallPtrSet<IntrinsicInst*, 8> &SelCalls,
+                             SmallPtrSet<PHINode*, 32> &SeenPHIs);
       
   public:
     static char ID; // Pass identification, replacement for typeid.
@@ -199,8 +200,8 @@ bool DwarfEHPrepare::CleanupSelectors(SmallPtrSet<IntrinsicInst*, 32> &Sels) {
 /// change the EH pointer value, like casts or PHI nodes.
 bool
 DwarfEHPrepare::FindSelectorAndURoR(Instruction *Inst, bool &URoRInvoke,
-                                    SmallPtrSet<IntrinsicInst*, 8> &SelCalls) {
-  SmallPtrSet<PHINode*, 32> SeenPHIs;
+                                    SmallPtrSet<IntrinsicInst*, 8> &SelCalls,
+                                    SmallPtrSet<PHINode*, 32> &SeenPHIs) {
   bool Changed = false;
 
   for (Value::use_iterator
@@ -215,21 +216,22 @@ DwarfEHPrepare::FindSelectorAndURoR(Instruction *Inst, bool &URoRInvoke,
       if (Invoke->getCalledFunction() == URoR)
         URoRInvoke = true;
     } else if (CastInst *CI = dyn_cast<CastInst>(II)) {
-      Changed |= FindSelectorAndURoR(CI, URoRInvoke, SelCalls);
+      Changed |= FindSelectorAndURoR(CI, URoRInvoke, SelCalls, SeenPHIs);
     } else if (PHINode *PN = dyn_cast<PHINode>(II)) {
       if (SeenPHIs.insert(PN))
         // Don't process a PHI node more than once.
-        Changed |= FindSelectorAndURoR(PN, URoRInvoke, SelCalls);
+        Changed |= FindSelectorAndURoR(PN, URoRInvoke, SelCalls, SeenPHIs);
     }
   }
 
   return Changed;
 }
 
-/// HandleURoRInvokes - Handle invokes of "_Unwind_Resume_or_Rethrow" calls. The
-/// "unwind" part of these invokes jump to a landing pad within the current
-/// function. This is a candidate to merge the selector associated with the URoR
-/// invoke with the one from the URoR's landing pad.
+/// HandleURoRInvokes - Handle invokes of "_Unwind_Resume_or_Rethrow" or
+/// "_Unwind_SjLj_Resume" calls. The "unwind" part of these invokes jump to a
+/// landing pad within the current function. This is a candidate to merge the
+/// selector associated with the URoR invoke with the one from the URoR's
+/// landing pad.
 bool DwarfEHPrepare::HandleURoRInvokes() {
   if (!EHCatchAllValue) {
     EHCatchAllValue =
@@ -249,7 +251,10 @@ bool DwarfEHPrepare::HandleURoRInvokes() {
 
   if (!URoR) {
     URoR = F->getParent()->getFunction("_Unwind_Resume_or_Rethrow");
-    if (!URoR) return CleanupSelectors(CatchAllSels);
+    if (!URoR) {
+      URoR = F->getParent()->getFunction("_Unwind_SjLj_Resume");
+      if (!URoR) return CleanupSelectors(CatchAllSels);
+    }
   }
 
   SmallPtrSet<InvokeInst*, 32> URoRInvokes;
@@ -290,7 +295,8 @@ bool DwarfEHPrepare::HandleURoRInvokes() {
 
       bool URoRInvoke = false;
       SmallPtrSet<IntrinsicInst*, 8> SelCalls;
-      Changed |= FindSelectorAndURoR(EHPtr, URoRInvoke, SelCalls);
+      SmallPtrSet<PHINode*, 32> SeenPHIs;
+      Changed |= FindSelectorAndURoR(EHPtr, URoRInvoke, SelCalls, SeenPHIs);
 
       if (URoRInvoke) {
         // This EH pointer is being used by an invoke of an URoR instruction and
@@ -433,8 +439,9 @@ bool DwarfEHPrepare::NormalizeLandingPads() {
       if (InVal == 0) {
         // Different unwind edges have different values.  Create a new PHI node
         // in NewBB.
-        PHINode *NewPN = PHINode::Create(PN->getType(), PN->getName()+".unwind",
-                                         NewBB);
+        PHINode *NewPN = PHINode::Create(PN->getType(),
+                                         PN->getNumIncomingValues(),
+                                         PN->getName()+".unwind", NewBB);
         // Add an entry for each unwind edge, using the value from the old PHI.
         for (pred_iterator PI = PB; PI != PE; ++PI)
           NewPN->addIncoming(PN->getIncomingValueForBlock(*PI), *PI);

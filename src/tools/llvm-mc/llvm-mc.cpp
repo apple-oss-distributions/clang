@@ -23,6 +23,10 @@
 #include "llvm/Target/TargetAsmParser.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetRegistry.h"
+#include "llvm/Target/SubtargetFeature.h" // FIXME.
+#include "llvm/Target/TargetAsmInfo.h"  // FIXME.
+#include "llvm/Target/TargetLowering.h"  // FIXME.
+#include "llvm/Target/TargetLoweringObjectFile.h"  // FIXME.
 #include "llvm/Target/TargetMachine.h"  // FIXME.
 #include "llvm/Target/TargetSelect.h"
 #include "llvm/ADT/OwningPtr.h"
@@ -34,8 +38,9 @@
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/system_error.h"
 #include "Disassembler.h"
 using namespace llvm;
 
@@ -62,6 +67,9 @@ OutputAsmVariant("output-asm-variant",
 
 static cl::opt<bool>
 RelaxAll("mc-relax-all", cl::desc("Relax all fixups"));
+
+static cl::opt<bool>
+NoExecStack("mc-no-exec-stack", cl::desc("File doesn't need an exec stack"));
 
 static cl::opt<bool>
 EnableLogging("enable-api-logging", cl::desc("Enable MC API logging"));
@@ -95,9 +103,19 @@ static cl::opt<std::string>
 TripleName("triple", cl::desc("Target triple to assemble for, "
                               "see -version for available targets"));
 
+static cl::opt<std::string>
+MCPU("mcpu",
+     cl::desc("Target a specific cpu type (-mcpu=help for details)"),
+     cl::value_desc("cpu-name"),
+     cl::init(""));
+
 static cl::opt<bool>
 NoInitialTextSection("n", cl::desc(
                    "Don't assume assembly file starts in the text section"));
+
+static cl::opt<bool>
+SaveTempLabels("L", cl::desc(
+                 "Don't discard temporary labels"));
 
 enum ActionType {
   AC_AsLex,
@@ -157,17 +175,12 @@ static tool_output_file *GetOutputStream() {
 }
 
 static int AsLexInput(const char *ProgName) {
-  std::string ErrorMessage;
-  MemoryBuffer *Buffer = MemoryBuffer::getFileOrSTDIN(InputFilename,
-                                                      &ErrorMessage);
-  if (Buffer == 0) {
-    errs() << ProgName << ": ";
-    if (ErrorMessage.size())
-      errs() << ErrorMessage << "\n";
-    else
-      errs() << "input file didn't read correctly.\n";
+  OwningPtr<MemoryBuffer> BufferPtr;
+  if (error_code ec = MemoryBuffer::getFileOrSTDIN(InputFilename, BufferPtr)) {
+    errs() << ProgName << ": " << ec.message() << '\n';
     return 1;
   }
+  MemoryBuffer *Buffer = BufferPtr.take();
 
   SourceMgr SrcMgr;
   
@@ -275,16 +288,12 @@ static int AssembleInput(const char *ProgName) {
   if (!TheTarget)
     return 1;
 
-  std::string Error;
-  MemoryBuffer *Buffer = MemoryBuffer::getFileOrSTDIN(InputFilename, &Error);
-  if (Buffer == 0) {
-    errs() << ProgName << ": ";
-    if (Error.size())
-      errs() << Error << "\n";
-    else
-      errs() << "input file didn't read correctly.\n";
+  OwningPtr<MemoryBuffer> BufferPtr;
+  if (error_code ec = MemoryBuffer::getFileOrSTDIN(InputFilename, BufferPtr)) {
+    errs() << ProgName << ": " << ec.message() << '\n';
     return 1;
   }
+  MemoryBuffer *Buffer = BufferPtr.take();
   
   SourceMgr SrcMgr;
   
@@ -299,16 +308,31 @@ static int AssembleInput(const char *ProgName) {
   llvm::OwningPtr<MCAsmInfo> MAI(TheTarget->createAsmInfo(TripleName));
   assert(MAI && "Unable to create target asm info!");
   
-  MCContext Ctx(*MAI);
+  // Package up features to be passed to target/subtarget
+  std::string FeaturesStr;
+  if (MCPU.size()) {
+    SubtargetFeatures Features;
+    Features.setCPU(MCPU);
+    FeaturesStr = Features.getString();
+  }
 
   // FIXME: We shouldn't need to do this (and link in codegen).
-  OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(TripleName, ""));
+  //        When we split this out, we should do it in a way that makes
+  //        it straightforward to switch subtargets on the fly (.e.g,
+  //        the .cpu and .code16 directives).
+  OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(TripleName,
+                                                             FeaturesStr));
 
   if (!TM) {
     errs() << ProgName << ": error: could not create target for triple '"
            << TripleName << "'.\n";
     return 1;
   }
+
+  const TargetAsmInfo *tai = new TargetAsmInfo(*TM);
+  MCContext Ctx(*MAI, tai);
+  if (SaveTempLabels)
+    Ctx.setAllowTemporaryLabels(false);
 
   OwningPtr<tool_output_file> Out(GetOutputStream());
   if (!Out)
@@ -317,15 +341,24 @@ static int AssembleInput(const char *ProgName) {
   formatted_raw_ostream FOS(Out->os());
   OwningPtr<MCStreamer> Str;
 
+  const TargetLoweringObjectFile &TLOF =
+    TM->getTargetLowering()->getObjFileLowering();
+  const_cast<TargetLoweringObjectFile&>(TLOF).Initialize(Ctx, *TM);
+
+  // FIXME: There is a bit of code duplication with addPassesToEmitFile.
   if (FileType == OFT_AssemblyFile) {
     MCInstPrinter *IP =
-      TheTarget->createMCInstPrinter(OutputAsmVariant, *MAI);
+      TheTarget->createMCInstPrinter(*TM, OutputAsmVariant, *MAI);
     MCCodeEmitter *CE = 0;
-    if (ShowEncoding)
+    TargetAsmBackend *TAB = 0;
+    if (ShowEncoding) {
       CE = TheTarget->createCodeEmitter(*TM, Ctx);
-    Str.reset(createAsmStreamer(Ctx, FOS,
-                                TM->getTargetData()->isLittleEndian(),
-                                /*asmverbose*/true, IP, CE, ShowInst));
+      TAB = TheTarget->createAsmBackend(TripleName);
+    }
+    Str.reset(TheTarget->createAsmStreamer(Ctx, FOS, /*asmverbose*/true,
+                                           /*useLoc*/ true,
+                                           /*useCFI*/ true, IP, CE, TAB,
+                                           ShowInst));
   } else if (FileType == OFT_Null) {
     Str.reset(createNullStreamer(Ctx));
   } else {
@@ -333,7 +366,8 @@ static int AssembleInput(const char *ProgName) {
     MCCodeEmitter *CE = TheTarget->createCodeEmitter(*TM, Ctx);
     TargetAsmBackend *TAB = TheTarget->createAsmBackend(TripleName);
     Str.reset(TheTarget->createObjectStreamer(TripleName, Ctx, *TAB,
-                                              FOS, CE, RelaxAll));
+                                              FOS, CE, RelaxAll,
+                                              NoExecStack));
   }
 
   if (EnableLogging) {
@@ -364,18 +398,10 @@ static int DisassembleInput(const char *ProgName, bool Enhanced) {
   const Target *TheTarget = GetTarget(ProgName);
   if (!TheTarget)
     return 0;
-  
-  std::string ErrorMessage;
-  
-  MemoryBuffer *Buffer = MemoryBuffer::getFileOrSTDIN(InputFilename,
-                                                      &ErrorMessage);
 
-  if (Buffer == 0) {
-    errs() << ProgName << ": ";
-    if (ErrorMessage.size())
-      errs() << ErrorMessage << "\n";
-    else
-      errs() << "input file didn't read correctly.\n";
+  OwningPtr<MemoryBuffer> Buffer;
+  if (error_code ec = MemoryBuffer::getFileOrSTDIN(InputFilename, Buffer)) {
+    errs() << ProgName << ": " << ec.message() << '\n';
     return 1;
   }
   
@@ -384,10 +410,34 @@ static int DisassembleInput(const char *ProgName, bool Enhanced) {
     return 1;
 
   int Res;
-  if (Enhanced)
-    Res = Disassembler::disassembleEnhanced(TripleName, *Buffer, Out->os());
-  else
-    Res = Disassembler::disassemble(*TheTarget, TripleName, *Buffer, Out->os());
+  if (Enhanced) {
+    Res =
+      Disassembler::disassembleEnhanced(TripleName, *Buffer.take(), Out->os());
+  } else {
+    // Package up features to be passed to target/subtarget
+    std::string FeaturesStr;
+    if (MCPU.size()) {
+      SubtargetFeatures Features;
+      Features.setCPU(MCPU);
+      FeaturesStr = Features.getString();
+    }
+
+    // FIXME: We shouldn't need to do this (and link in codegen).
+    //        When we split this out, we should do it in a way that makes
+    //        it straightforward to switch subtargets on the fly (.e.g,
+    //        the .cpu and .code16 directives).
+    OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(TripleName,
+                                                               FeaturesStr));
+
+    if (!TM) {
+      errs() << ProgName << ": error: could not create target for triple '"
+             << TripleName << "'.\n";
+      return 1;
+    }
+
+    Res = Disassembler::disassemble(*TheTarget, *TM, TripleName,
+                                    *Buffer.take(), Out->os());
+  }
 
   // Keep output if no errors.
   if (Res == 0) Out->keep();

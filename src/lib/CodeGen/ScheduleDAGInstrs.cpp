@@ -16,6 +16,7 @@
 #include "ScheduleDAGInstrs.h"
 #include "llvm/Operator.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -78,12 +79,12 @@ static const Value *getUnderlyingObjectFromInt(const Value *V) {
   } while (1);
 }
 
-/// getUnderlyingObject - This is a wrapper around Value::getUnderlyingObject
+/// getUnderlyingObject - This is a wrapper around GetUnderlyingObject
 /// and adds support for basic ptrtoint+arithmetic+inttoptr sequences.
 static const Value *getUnderlyingObject(const Value *V) {
   // First just call Value::getUnderlyingObject to let it do what it does.
   do {
-    V = V->getUnderlyingObject();
+    V = GetUnderlyingObject(V);
     // If it found an inttoptr, use special code to continue climing.
     if (Operator::getOpcode(V) != Instruction::IntToPtr)
       break;
@@ -238,6 +239,8 @@ void ScheduleDAGInstrs::BuildSchedGraph(AliasAnalysis *AA) {
            "Cannot schedule terminators or labels!");
     // Create the SUnit for this MI.
     SUnit *SU = NewSUnit(MI);
+    SU->isCall = TID.isCall();
+    SU->isCommutable = TID.isCommutable();
 
     // Assign the Latency field of SU using target-provided information.
     if (UnitLatencies)
@@ -368,7 +371,7 @@ void ScheduleDAGInstrs::BuildSchedGraph(AliasAnalysis *AA) {
                 // will be overlapped by work done outside the current
                 // scheduling region.
                 Latency -= std::min(Latency, Count);
-                // Add the artifical edge.
+                // Add the artificial edge.
                 ExitSU.addPred(SDep(SU, SDep::Order, Latency,
                                     /*Reg=*/0, /*isNormalMemory=*/false,
                                     /*isMustAlias=*/false,
@@ -407,7 +410,7 @@ void ScheduleDAGInstrs::BuildSchedGraph(AliasAnalysis *AA) {
     // produce more precise dependence information.
 #define STORE_LOAD_LATENCY 1
     unsigned TrueMemOrderLatency = 0;
-    if (TID.isCall() || TID.hasUnmodeledSideEffects() ||
+    if (TID.isCall() || MI->hasUnmodeledSideEffects() ||
         (MI->hasVolatileMemoryRef() && 
          (!TID.mayLoad() || !MI->isInvariantLoad(AA)))) {
       // Be conservative with these and add dependencies on all memory
@@ -564,9 +567,9 @@ void ScheduleDAGInstrs::ComputeLatency(SUnit *SU) {
     // extra time.
     if (SU->getInstr()->getDesc().mayLoad())
       SU->Latency += 2;
-  } else
-    SU->Latency =
-      InstrItins->getStageLatency(SU->getInstr()->getDesc().getSchedClass());
+  } else {
+    SU->Latency = TII->getInstrLatency(InstrItins, SU->getInstr());
+  }
 }
 
 void ScheduleDAGInstrs::ComputeOperandLatency(SUnit *Def, SUnit *Use, 

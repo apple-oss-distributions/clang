@@ -8,9 +8,9 @@
 </head>
 <body>
 
-<div class="doc_title">
+<h1>
   Getting Started with the LLVM System using Microsoft Visual Studio
-</div>
+</h1>
 
 <ul>
   <li><a href="#overview">Overview</a>
@@ -26,19 +26,17 @@
 </ul>
 
 <div class="doc_author">
-  <p>Written by:
-    <a href="mailto:jeffc@jolt-lang.org">Jeff Cohen</a>
-  </p>
+  <p>Written by: <a href="http://llvm.org/">The LLVM Team</a></p>
 </div>
 
 
 <!-- *********************************************************************** -->
-<div class="doc_section">
+<h2>
   <a name="overview"><b>Overview</b></a>
-</div>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
   <p>Welcome to LLVM on Windows! This document only covers LLVM on Windows using
   Visual Studio, not mingw or cygwin. In order to get started, you first need to
@@ -72,25 +70,23 @@
 </div>
 
 <!-- *********************************************************************** -->
-<div class="doc_section">
+<h2>
   <a name="requirements"><b>Requirements</b></a>
-</div>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
   <p>Before you begin to use the LLVM system, review the requirements given
   below.  This may save you some trouble by knowing ahead of time what hardware
   and software you will need.</p>
 
-</div>
-
 <!-- ======================================================================= -->
-<div class="doc_subsection">
+<h3>
   <a name="hardware"><b>Hardware</b></a>
-</div>
+</h3>
 
-<div class="doc_text">
+<div>
 
   <p>Any system that can adequately run Visual Studio .NET 2005 SP1 is fine.
   The LLVM source tree and object files, libraries and executables will consume
@@ -99,8 +95,8 @@
 </div>
 
 <!-- ======================================================================= -->
-<div class="doc_subsection"><a name="software"><b>Software</b></a></div>
-<div class="doc_text">
+<h3><a name="software"><b>Software</b></a></h3>
+<div>
 
   <p>You will need Visual Studio .NET 2005 SP1 or higher.  The VS2005 SP1
   beta and the normal VS2005 still have bugs that are not completely
@@ -112,20 +108,23 @@
 
   <p>If you would like to run the LLVM tests you will need
   <a href="http://www.python.org/">Python</a>. Versions 2.4-2.7 are known to
-  work.</p>
+  work. You will need <a href="http://gnuwin32.sourceforge.net/">"GnuWin32"</a>
+  tools, too.</p>
 
   <p>Do not install the LLVM directory tree into a path containing spaces (e.g.
   C:\Documents and Settings\...) as the configure step will fail.</p>
 
 </div>
 
-<!-- *********************************************************************** -->
-<div class="doc_section">
-  <a name="quickstart"><b>Getting Started</b></a>
 </div>
+
+<!-- *********************************************************************** -->
+<h2>
+  <a name="quickstart"><b>Getting Started</b></a>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <p>Here's the short story for getting up and running quickly with LLVM:</p>
 
@@ -191,6 +190,17 @@
     program will print the corresponding fibonacci value.</li>
   </ul></li>
 
+  <li>Test LLVM on Visual Studio:
+  <ul>
+    <li>If %PATH% does not contain GnuWin32, you may specify LLVM_LIT_TOOLS_DIR
+    on CMake for the path to GnuWin32.</li>
+    <li>You can run LLVM tests by merely building the project
+      "check". The test results will be shown in the VS output
+      window.</li>
+  </ul>
+  </li>
+
+  <!-- FIXME: Is it up-to-date? -->
   <li>Test LLVM:
   <ul>
     <li>The LLVM tests can be run by <tt>cd</tt>ing to the llvm source directory
@@ -205,25 +215,26 @@
     <p>Note that quite a few of these test will fail.</p>
     </li>
 
-    <li>A specific test or test directory can be run with:</li>
+    <li>A specific test or test directory can be run with:
 
 <div class="doc_code">
 <pre>
 % llvm-lit test/path/to/test
 </pre>
 </div>
-
+    </li>
+  </ul>
 </ol>
 
 </div>
 
 <!-- *********************************************************************** -->
-<div class="doc_section">
+<h2>
   <a name="tutorial">An Example Using the LLVM Tool Chain</a>
-</div>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <ol>
   <li><p>First, create a simple C file, name it 'hello.c':</p>
@@ -308,12 +319,12 @@ int main() {
 </div>
 
 <!-- *********************************************************************** -->
-<div class="doc_section">
+<h2>
   <a name="problems">Common Problems</a>
-</div>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <p>If you are having problems building or using LLVM, or if you have any other
 general questions about LLVM, please consult the <a href="FAQ.html">Frequently
@@ -322,12 +333,12 @@ Asked Questions</a> page.</p>
 </div>
 
 <!-- *********************************************************************** -->
-<div class="doc_section">
+<h2>
   <a name="links">Links</a>
-</div>
+</h2>
 <!-- *********************************************************************** -->
 
-<div class="doc_text">
+<div>
 
 <p>This document is just an <b>introduction</b> to how to use LLVM to do
 some simple things... there are many more interesting and complicated things
@@ -338,8 +349,6 @@ out:</p>
 <ul>
   <li><a href="http://llvm.org/">LLVM homepage</a></li>
   <li><a href="http://llvm.org/doxygen/">LLVM doxygen tree</a></li>
-  <li><a href="http://llvm.org/docs/Projects.html">Starting a Project
-      that Uses LLVM</a></li>
 </ul>
 
 </div>
@@ -353,9 +362,8 @@ out:</p>
   <a href="http://validator.w3.org/check/referer"><img
   src="http://www.w3.org/Icons/valid-html401-blue" alt="Valid HTML 4.01"></a>
 
-  <a href="mailto:jeffc@jolt-lang.org">Jeff Cohen</a><br>
-  <a href="http://llvm.org">The LLVM Compiler Infrastructure</a><br>
-  Last modified: $Date: 2010-09-18 01:32:32 -0700 (Sat, 18 Sep 2010) $
+  <a href="http://llvm.org/">The LLVM Compiler Infrastructure</a><br>
+  Last modified: $Date$
 </address>
 </body>
 </html>

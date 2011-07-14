@@ -18,7 +18,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include <cassert>
 
 namespace clang {
@@ -53,7 +53,7 @@ public:
   
     /// DiagArgumentsVal - The values for the various substitution positions. 
     /// This is used when the argument is not an std::string. The specific value 
-    /// is mangled into an intptr_t and the intepretation depends on exactly
+    /// is mangled into an intptr_t and the interpretation depends on exactly
     /// what sort of argument kind it is.
     intptr_t DiagArgumentsVal[MaxArguments];
   
@@ -75,7 +75,7 @@ public:
   /// \brief An allocator for Storage objects, which uses a small cache to 
   /// objects, used to reduce malloc()/free() traffic for partial diagnostics.
   class StorageAllocator {
-    static const unsigned NumCached = 4;
+    static const unsigned NumCached = 16;
     Storage Cached[NumCached];
     Storage *FreeList[NumCached];
     unsigned NumFreeListEntries;

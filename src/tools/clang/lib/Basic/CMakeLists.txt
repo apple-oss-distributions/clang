@@ -1,10 +1,12 @@
-set(LLVM_NO_RTTI 1)
+set(LLVM_LINK_COMPONENTS mc)
 
 add_clang_library(clangBasic
   Builtins.cpp
   ConvertUTF.c
   Diagnostic.cpp
+  DiagnosticIDs.cpp
   FileManager.cpp
+  FileSystemStatCache.cpp
   IdentifierTable.cpp
   SourceLocation.cpp
   SourceManager.cpp
@@ -12,6 +14,7 @@ add_clang_library(clangBasic
   Targets.cpp
   TokenKinds.cpp
   Version.cpp
+  VersionTuple.cpp
   )
 
 # Determine Subversion revision.
@@ -37,5 +40,6 @@ add_dependencies(clangBasic
                  ClangDiagnosticGroups
                  ClangDiagnosticLex
                  ClangDiagnosticParse
-                 ClangDiagnosticSema)
+                 ClangDiagnosticSema
+                 ClangDiagnosticIndexName)
                  

@@ -65,6 +65,9 @@ protected:
   ///
   bool HasX86_64;
 
+  /// HasPOPCNT - True if the processor supports POPCNT.
+  bool HasPOPCNT;
+
   /// HasSSE4A - True if the processor supports SSE4A instructions.
   bool HasSSE4A;
 
@@ -100,7 +103,7 @@ protected:
   /// Max. memset / memcpy size that is turned into rep/movs, rep/stos ops.
   ///
   unsigned MaxInlineSizeThreshold;
-  
+
   /// TargetTriple - What processor and OS we're targeting.
   Triple TargetTriple;
 
@@ -150,7 +153,10 @@ public:
   bool hasSSE4A() const { return HasSSE4A; }
   bool has3DNow() const { return X863DNowLevel >= ThreeDNow; }
   bool has3DNowA() const { return X863DNowLevel >= ThreeDNowA; }
+  bool hasPOPCNT() const { return HasPOPCNT; }
   bool hasAVX() const { return HasAVX; }
+  bool hasXMM() const { return hasSSE1() || hasAVX(); }
+  bool hasXMMInt() const { return hasSSE2() || hasAVX(); }
   bool hasAES() const { return HasAES; }
   bool hasCLMUL() const { return HasCLMUL; }
   bool hasFMA3() const { return HasFMA3; }
@@ -159,24 +165,30 @@ public:
   bool isUnalignedMemAccessFast() const { return IsUAMemFast; }
   bool hasVectorUAMem() const { return HasVectorUAMem; }
 
-  bool isTargetDarwin() const { return TargetTriple.getOS() == Triple::Darwin; }
-  
+  const Triple &getTargetTriple() const { return TargetTriple; }
+
+  bool isTargetDarwin() const { return TargetTriple.isOSDarwin(); }
+  bool isTargetFreeBSD() const {
+    return TargetTriple.getOS() == Triple::FreeBSD;
+  }
+  bool isTargetSolaris() const {
+    return TargetTriple.getOS() == Triple::Solaris;
+  }
+
   // ELF is a reasonably sane default and the only other X86 targets we
   // support are Darwin and Windows. Just use "not those".
-  bool isTargetELF() const { 
+  bool isTargetELF() const {
     return !isTargetDarwin() && !isTargetWindows() && !isTargetCygMing();
   }
   bool isTargetLinux() const { return TargetTriple.getOS() == Triple::Linux; }
 
   bool isTargetWindows() const { return TargetTriple.getOS() == Triple::Win32; }
-  bool isTargetMingw() const { 
-    return TargetTriple.getOS() == Triple::MinGW32 ||
-           TargetTriple.getOS() == Triple::MinGW64; }
+  bool isTargetMingw() const { return TargetTriple.getOS() == Triple::MinGW32; }
   bool isTargetCygwin() const { return TargetTriple.getOS() == Triple::Cygwin; }
   bool isTargetCygMing() const {
     return isTargetMingw() || isTargetCygwin();
   }
-  
+
   /// isTargetCOFF - Return true if this is any COFF/Windows target variant.
   bool isTargetCOFF() const {
     return isTargetMingw() || isTargetCygwin() || isTargetWindows();
@@ -184,6 +196,10 @@ public:
 
   bool isTargetWin64() const {
     return Is64Bit && (isTargetMingw() || isTargetWindows());
+  }
+
+  bool isTargetEnvMacho() const {
+    return isTargetDarwin() || (TargetTriple.getEnvironment() == Triple::MachO);
   }
 
   bool isTargetWin32() const {
@@ -204,13 +220,6 @@ public:
   bool isPICStyleStubAny() const {
     return PICStyle == PICStyles::StubDynamicNoPIC ||
            PICStyle == PICStyles::StubPIC; }
-
-  /// getDarwinVers - Return the darwin version number, 8 = Tiger, 9 = Leopard,
-  /// 10 = Snow Leopard, etc.
-  unsigned getDarwinVers() const {
-    if (isTargetDarwin()) return TargetTriple.getDarwinMajorNumber();
-    return 0;
-  }
 
   /// ClassifyGlobalReference - Classify a global variable reference for the
   /// current subtarget according to how we should reference it in a non-pcrel

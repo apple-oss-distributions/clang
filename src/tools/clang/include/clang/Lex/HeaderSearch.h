@@ -23,14 +23,16 @@ namespace clang {
 class ExternalIdentifierLookup;
 class FileEntry;
 class FileManager;
-class FileSystemOptions;
 class IdentifierInfo;
 
 /// HeaderFileInfo - The preprocessor keeps track of this information for each
 /// file that is #included.
 struct HeaderFileInfo {
   /// isImport - True if this is a #import'd or #pragma once file.
-  bool isImport : 1;
+  unsigned isImport : 1;
+
+  /// isPragmaOnce - True if this is  #pragma once file.
+  unsigned isPragmaOnce : 1;
 
   /// DirInfo - Keep track of whether this is a system header, and if so,
   /// whether it is C++ clean or not.  This can be set by the include paths or
@@ -38,9 +40,23 @@ struct HeaderFileInfo {
   /// SrcMgr::CharacteristicKind.
   unsigned DirInfo : 2;
 
+  /// \brief Whether this header file info was supplied by an external source.
+  unsigned External : 1;
+  
+  /// \brief Whether this structure is considered to already have been
+  /// "resolved", meaning that it was loaded from the external source.
+  unsigned Resolved : 1;
+  
   /// NumIncludes - This is the number of times the file has been included
   /// already.
   unsigned short NumIncludes;
+
+  /// \brief The ID number of the controlling macro.
+  ///
+  /// This ID number will be non-zero when there is a controlling
+  /// macro whose IdentifierInfo may not yet have been loaded from
+  /// external storage.
+  unsigned ControllingMacroID;
 
   /// ControllingMacro - If this file has a #ifndef XXX (or equivalent) guard
   /// that protects the entire contents of the file, this is the identifier
@@ -52,34 +68,47 @@ struct HeaderFileInfo {
   /// external storage.
   const IdentifierInfo *ControllingMacro;
 
-  /// \brief The ID number of the controlling macro.
-  ///
-  /// This ID number will be non-zero when there is a controlling
-  /// macro whose IdentifierInfo may not yet have been loaded from
-  /// external storage.
-  unsigned ControllingMacroID;
-
   HeaderFileInfo()
-    : isImport(false), DirInfo(SrcMgr::C_User),
-      NumIncludes(0), ControllingMacro(0), ControllingMacroID(0) {}
+    : isImport(false), isPragmaOnce(false), DirInfo(SrcMgr::C_User), 
+      External(false), Resolved(false), NumIncludes(0), ControllingMacroID(0), 
+      ControllingMacro(0)  {}
 
   /// \brief Retrieve the controlling macro for this header file, if
   /// any.
   const IdentifierInfo *getControllingMacro(ExternalIdentifierLookup *External);
+  
+  /// \brief Determine whether this is a non-default header file info, e.g.,
+  /// it corresponds to an actual header we've included or tried to include.
+  bool isNonDefault() const {
+    return isImport || isPragmaOnce || NumIncludes || ControllingMacro || 
+      ControllingMacroID;
+  }
 };
 
+/// \brief An external source of header file information, which may supply
+/// information about header files already included.
+class ExternalHeaderFileInfoSource {
+public:
+  virtual ~ExternalHeaderFileInfoSource();
+  
+  /// \brief Retrieve the header file information for the given file entry.
+  ///
+  /// \returns Header file information for the given file entry, with the
+  /// \c External bit set. If the file entry is not known, return a 
+  /// default-constructed \c HeaderFileInfo.
+  virtual HeaderFileInfo GetHeaderFileInfo(const FileEntry *FE) = 0;
+};
+  
 /// HeaderSearch - This class encapsulates the information needed to find the
 /// file referenced by a #include or #include_next, (sub-)framework lookup, etc.
 class HeaderSearch {
   FileManager &FileMgr;
-  const FileSystemOptions &FileSystemOpts;
-
   /// #include search path information.  Requests for #include "x" search the
   /// directory of the #including file first, then each directory in SearchDirs
   /// consequtively. Requests for <x> search the current dir first, then each
   /// directory in SearchDirs, starting at SystemDirIdx, consequtively.  If
   /// NoCurDirSearch is true, then the check for the file in the current
-  /// directory is supressed.
+  /// directory is suppressed.
   std::vector<DirectoryLookup> SearchDirs;
   unsigned SystemDirIdx;
   bool NoCurDirSearch;
@@ -110,6 +139,9 @@ class HeaderSearch {
   /// macros into IdentifierInfo pointers, as needed.
   ExternalIdentifierLookup *ExternalLookup;
 
+  /// \brief Entity used to look up stored header file information.
+  ExternalHeaderFileInfoSource *ExternalSource;
+  
   // Various statistics we track for performance analysis.
   unsigned NumIncluded;
   unsigned NumMultiIncludeFileOptzn;
@@ -120,11 +152,10 @@ class HeaderSearch {
   explicit HeaderSearch(const HeaderSearch&);
   void operator=(const HeaderSearch&);
 public:
-  HeaderSearch(FileManager &FM, const FileSystemOptions &FSOpts);
+  HeaderSearch(FileManager &FM);
   ~HeaderSearch();
 
   FileManager &getFileMgr() const { return FileMgr; }
-  const FileSystemOptions &getFileSystemOpts() const { return FileSystemOpts; }
 
   /// SetSearchPaths - Interface for setting the file search paths.
   ///
@@ -145,26 +176,53 @@ public:
     ExternalLookup = EIL;
   }
 
+  ExternalIdentifierLookup *getExternalLookup() const {
+    return ExternalLookup;
+  }
+  
+  /// \brief Set the external source of header information.
+  void SetExternalSource(ExternalHeaderFileInfoSource *ES) {
+    ExternalSource = ES;
+  }
+  
   /// LookupFile - Given a "foo" or <foo> reference, look up the indicated file,
-  /// return null on failure.  isAngled indicates whether the file reference is
-  /// a <> reference.  If successful, this returns 'UsedDir', the
-  /// DirectoryLookup member the file was found in, or null if not applicable.
-  /// If CurDir is non-null, the file was found in the specified directory
-  /// search location.  This is used to implement #include_next.  CurFileEnt, if
-  /// non-null, indicates where the #including file is, in case a relative
-  /// search is needed.
+  /// return null on failure.
+  ///
+  /// \returns If successful, this returns 'UsedDir', the DirectoryLookup member
+  /// the file was found in, or null if not applicable.
+  ///
+  /// \param isAngled indicates whether the file reference is a <> reference.
+  ///
+  /// \param CurDir If non-null, the file was found in the specified directory
+  /// search location.  This is used to implement #include_next.
+  ///
+  /// \param CurFileEnt If non-null, indicates where the #including file is, in
+  /// case a relative search is needed.
+  ///
+  /// \param SearchPath If non-null, will be set to the search path relative
+  /// to which the file was found. If the include path is absolute, SearchPath
+  /// will be set to an empty string.
+  ///
+  /// \param RelativePath If non-null, will be set to the path relative to
+  /// SearchPath at which the file was found. This only differs from the
+  /// Filename for framework includes.
   const FileEntry *LookupFile(llvm::StringRef Filename, bool isAngled,
                               const DirectoryLookup *FromDir,
                               const DirectoryLookup *&CurDir,
-                              const FileEntry *CurFileEnt);
+                              const FileEntry *CurFileEnt,
+                              llvm::SmallVectorImpl<char> *SearchPath,
+                              llvm::SmallVectorImpl<char> *RelativePath);
 
   /// LookupSubframeworkHeader - Look up a subframework for the specified
   /// #include file.  For example, if #include'ing <HIToolbox/HIToolbox.h> from
   /// within ".../Carbon.framework/Headers/Carbon.h", check to see if HIToolbox
   /// is a subframework within Carbon.framework.  If so, return the FileEntry
   /// for the designated file, otherwise return null.
-  const FileEntry *LookupSubframeworkHeader(llvm::StringRef Filename,
-                                            const FileEntry *RelativeFileEnt);
+  const FileEntry *LookupSubframeworkHeader(
+      llvm::StringRef Filename,
+      const FileEntry *RelativeFileEnt,
+      llvm::SmallVectorImpl<char> *SearchPath,
+      llvm::SmallVectorImpl<char> *RelativePath);
 
   /// LookupFrameworkCache - Look up the specified framework name in our
   /// framework cache, returning the DirectoryEntry it is in if we know,
@@ -188,7 +246,9 @@ public:
   /// MarkFileIncludeOnce - Mark the specified file as a "once only" file, e.g.
   /// due to #pragma once.
   void MarkFileIncludeOnce(const FileEntry *File) {
-    getFileInfo(File).isImport = true;
+    HeaderFileInfo &FI = getFileInfo(File);
+    FI.isImport = true;
+    FI.isPragmaOnce = true;
   }
 
   /// MarkFileSystemHeader - Mark the specified file as a system header, e.g.
@@ -211,6 +271,13 @@ public:
     getFileInfo(File).ControllingMacro = ControllingMacro;
   }
 
+  /// \brief Determine whether this file is intended to be safe from
+  /// multiple inclusions, e.g., it has #pragma once or a controlling
+  /// macro.
+  ///
+  /// This routine does not consider the effect of #import 
+  bool isFileMultipleIncludeGuarded(const FileEntry *File);
+
   /// CreateHeaderMap - This method returns a HeaderMap for the specified
   /// FileEntry, uniquing them through the the 'HeaderMaps' datastructure.
   const HeaderMap *CreateHeaderMap(const FileEntry *FE);
@@ -224,6 +291,17 @@ public:
 
   // Used by ASTReader.
   void setHeaderFileInfoForUID(HeaderFileInfo HFI, unsigned UID);
+
+  // Used by external tools
+  typedef std::vector<DirectoryLookup>::const_iterator search_dir_iterator;
+  search_dir_iterator search_dir_begin() const { return SearchDirs.begin(); }
+  search_dir_iterator search_dir_end() const { return SearchDirs.end(); }
+  unsigned search_dir_size() const { return SearchDirs.size(); }
+
+  search_dir_iterator system_dir_begin() const {
+    return SearchDirs.begin() + SystemDirIdx;
+  }
+  search_dir_iterator system_dir_end() const { return SearchDirs.end(); }
 
   void PrintStats();
 private:

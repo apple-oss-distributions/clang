@@ -1,6 +1,5 @@
-add_executable(KillTheDoctor
+add_llvm_utility(KillTheDoctor
   KillTheDoctor.cpp
-  system_error.cpp
   )
 
-target_link_libraries(KillTheDoctor LLVMSupport LLVMSystem)
+target_link_libraries(KillTheDoctor LLVMSupport)

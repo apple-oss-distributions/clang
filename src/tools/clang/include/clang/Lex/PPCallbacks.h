@@ -75,20 +75,36 @@ public:
   ///
   /// \param EndLoc The location of the last token within the inclusion
   /// directive.
+  ///
+  /// \param SearchPath Contains the search path which was used to find the file
+  /// in the file system. If the file was found via an absolute include path,
+  /// SearchPath will be empty. For framework includes, the SearchPath and
+  /// RelativePath will be split up. For example, if an include of "Some/Some.h"
+  /// is found via the framework path
+  /// "path/to/Frameworks/Some.framework/Headers/Some.h", SearchPath will be
+  /// "path/to/Frameworks/Some.framework/Headers" and RelativePath will be
+  /// "Some.h".
+  ///
+  /// \param RelativePath The path relative to SearchPath, at which the include
+  /// file was found. This is equal to FileName except for framework includes.
   virtual void InclusionDirective(SourceLocation HashLoc,
                                   const Token &IncludeTok,
                                   llvm::StringRef FileName,
                                   bool IsAngled,
                                   const FileEntry *File,
-                                  SourceLocation EndLoc) {    
+                                  SourceLocation EndLoc,
+                                  llvm::StringRef SearchPath,
+                                  llvm::StringRef RelativePath) {
   }
-                                  
+
   /// EndOfMainFile - This callback is invoked when the end of the main file is
   /// reach, no subsequent callbacks will be made.
   virtual void EndOfMainFile() {
   }
 
   /// Ident - This callback is invoked when a #ident or #sccs directive is read.
+  /// \param Loc The location of the directive.
+  /// \param str The text of the directive.
   ///
   virtual void Ident(SourceLocation Loc, const std::string &str) {
   }
@@ -102,6 +118,8 @@ public:
 
   /// PragmaMessage - This callback is invoked when a #pragma message directive
   /// is read.
+  /// \param Loc The location of the message directive.
+  /// \param str The text of the message directive.
   ///
   virtual void PragmaMessage(SourceLocation Loc, llvm::StringRef Str) {
   }
@@ -109,17 +127,48 @@ public:
   /// MacroExpands - This is called by
   /// Preprocessor::HandleMacroExpandedIdentifier when a macro invocation is
   /// found.
-  virtual void MacroExpands(const Token &Id, const MacroInfo* MI) {
+  virtual void MacroExpands(const Token &MacroNameTok, const MacroInfo* MI) {
   }
 
   /// MacroDefined - This hook is called whenever a macro definition is seen.
-  virtual void MacroDefined(const IdentifierInfo *II, const MacroInfo *MI) {
+  virtual void MacroDefined(const Token &MacroNameTok, const MacroInfo *MI) {
   }
 
   /// MacroUndefined - This hook is called whenever a macro #undef is seen.
   /// MI is released immediately following this callback.
-  virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
-                              const MacroInfo *MI) {
+  virtual void MacroUndefined(const Token &MacroNameTok, const MacroInfo *MI) {
+  }
+
+  /// If -- This hook is called whenever an #if is seen.
+  /// \param Range The SourceRange of the expression being tested.
+  // FIXME: better to pass in a list (or tree!) of Tokens.
+  virtual void If(SourceRange Range) {
+  }
+
+  /// Elif -- This hook is called whenever an #elif is seen.
+  /// \param Range The SourceRange of the expression being tested.
+  // FIXME: better to pass in a list (or tree!) of Tokens.
+  virtual void Elif(SourceRange Range) {
+  }
+
+  /// Ifdef -- This hook is called whenever an #ifdef is seen.
+  /// \param Loc The location of the token being tested.
+  /// \param II Information on the token being tested.
+  virtual void Ifdef(const Token &MacroNameTok) {
+  }
+
+  /// Ifndef -- This hook is called whenever an #ifndef is seen.
+  /// \param Loc The location of the token being tested.
+  /// \param II Information on the token being tested.
+  virtual void Ifndef(const Token &MacroNameTok) {
+  }
+
+  /// Else -- This hook is called whenever an #else is seen.
+  virtual void Else() {
+  }
+
+  /// Endif -- This hook is called whenever an #endif is seen.
+  virtual void Endif() {
   }
 };
 
@@ -148,6 +197,20 @@ public:
     Second->FileSkipped(ParentFile, FilenameTok, FileType);
   }
 
+  virtual void InclusionDirective(SourceLocation HashLoc,
+                                  const Token &IncludeTok,
+                                  llvm::StringRef FileName,
+                                  bool IsAngled,
+                                  const FileEntry *File,
+                                  SourceLocation EndLoc,
+                                  llvm::StringRef SearchPath,
+                                  llvm::StringRef RelativePath) {
+    First->InclusionDirective(HashLoc, IncludeTok, FileName, IsAngled, File,
+                              EndLoc, SearchPath, RelativePath);
+    Second->InclusionDirective(HashLoc, IncludeTok, FileName, IsAngled, File,
+                               EndLoc, SearchPath, RelativePath);
+  }
+
   virtual void EndOfMainFile() {
     First->EndOfMainFile();
     Second->EndOfMainFile();
@@ -169,20 +232,55 @@ public:
     Second->PragmaMessage(Loc, Str);
   }
 
-  virtual void MacroExpands(const Token &Id, const MacroInfo* MI) {
-    First->MacroExpands(Id, MI);
-    Second->MacroExpands(Id, MI);
+  virtual void MacroExpands(const Token &MacroNameTok, const MacroInfo* MI) {
+    First->MacroExpands(MacroNameTok, MI);
+    Second->MacroExpands(MacroNameTok, MI);
   }
 
-  virtual void MacroDefined(const IdentifierInfo *II, const MacroInfo *MI) {
-    First->MacroDefined(II, MI);
-    Second->MacroDefined(II, MI);
+  virtual void MacroDefined(const Token &MacroNameTok, const MacroInfo *MI) {
+    First->MacroDefined(MacroNameTok, MI);
+    Second->MacroDefined(MacroNameTok, MI);
   }
 
-  virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
-                              const MacroInfo *MI) {
-    First->MacroUndefined(Loc, II, MI);
-    Second->MacroUndefined(Loc, II, MI);
+  virtual void MacroUndefined(const Token &MacroNameTok, const MacroInfo *MI) {
+    First->MacroUndefined(MacroNameTok, MI);
+    Second->MacroUndefined(MacroNameTok, MI);
+  }
+
+  /// If -- This hook is called whenever an #if is seen.
+  virtual void If(SourceRange Range) {
+    First->If(Range);
+    Second->If(Range);
+  }
+
+  /// Elif -- This hook is called whenever an #if is seen.
+  virtual void Elif(SourceRange Range) {
+    First->Elif(Range);
+    Second->Elif(Range);
+  }
+
+  /// Ifdef -- This hook is called whenever an #ifdef is seen.
+  virtual void Ifdef(const Token &MacroNameTok) {
+    First->Ifdef(MacroNameTok);
+    Second->Ifdef(MacroNameTok);
+  }
+
+  /// Ifndef -- This hook is called whenever an #ifndef is seen.
+  virtual void Ifndef(const Token &MacroNameTok) {
+    First->Ifndef(MacroNameTok);
+    Second->Ifndef(MacroNameTok);
+  }
+
+  /// Else -- This hook is called whenever an #else is seen.
+  virtual void Else() {
+    First->Else();
+    Second->Else();
+  }
+
+  /// Endif -- This hook is called whenever an #endif is seen.
+  virtual void Endif() {
+    First->Endif();
+    Second->Endif();
   }
 };
 

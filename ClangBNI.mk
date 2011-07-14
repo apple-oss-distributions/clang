@@ -97,6 +97,10 @@ Post_Install_RootLinks := 1
 Post_Install_OpenSourceLicense := 1
 endif
 
+ifneq ($(Clang_Extra_Backends),)
+LLVM_Backends := $(LLVM_Backends),$(Clang_Extra_Backends)
+endif
+
 endif
 
 ##
@@ -127,11 +131,20 @@ ifeq ($(Clang_Version),)
 $(error "invalid setting for clang version: '$(Clang_Version)'")
 endif
 
-# Set RC_ProjectSourceVersion, if unspecified.
+# Set RC_ProjectSourceVersion, if unspecified, and a real target.
 ifeq ($(RC_ProjectSourceVersion),)
-RC_ProjectSourceVersion := 99999.99
-$(warning "setting dummy RC_ProjectSourceVersion: '$(RC_ProjectSourceVersion)'")
+ifeq ($(MAKECMDGOALS),installsrc)
+else ifeq ($(MAKECMDGOALS),clean)
+else
+$(error "B&I build variable RC_ProjectSourceVersion must be set")
 endif
+endif
+
+# Set the Clang_Tag based on RC_ProjectNameAndSourceVersion.
+ifeq ($(RC_ProjectNameAndSourceVersion),)
+RC_ProjectNameAndSourceVersion := "clang-$(RC_ProjectSourceVersion)"
+endif
+Clang_Tag := "tags/Apple/$(RC_ProjectNameAndSourceVersion)"
 
 # Select assertions mode.
 ifeq ($(Clang_Use_Assertions), 1)
@@ -140,6 +153,15 @@ else ifeq ($(Clang_Use_Assertions), 0)
 Assertions_Configure_Flag :=  --disable-assertions
 else
 $(error "invalid setting for clang assertions: '$(Clang_Use_Assertions)'")
+endif
+
+# Select optimized mode.
+ifeq ($(Clang_Use_Optimized), 1)
+Optimized_Configure_Flag :=  --enable-optimized
+else ifeq ($(Clang_Use_Optimized), 0)
+Optimized_Configure_Flag :=  --disable-optimized
+else
+$(error "invalid setting for clang optimized: '$(Clang_Use_Optimized)'")
 endif
 
 # Select whether to build everything (for testing purposes).
@@ -156,6 +178,7 @@ Clang_Make_Variables := $(Extra_Make_Variables) KEEP_SYMBOLS=1 \
                         CLANG_VENDOR=Apple \
                         CLANG_VENDOR_UTI=com.apple.compilers.llvm.clang
 Clang_Make_Variables += CLANG_VERSION=$(Clang_Version)
+Clang_Make_Variables += CLANG_REPOSITORY_STRING=$(Clang_Tag)
 Clang_Make_Variables += CLANG_ORDER_FILE=$(SRCROOT)/clang.order
 ifeq ($(Clang_Driver_Mode), Production)
 Clang_Make_Variables += CLANG_IS_PRODUCTION=1
@@ -226,6 +249,7 @@ Common_Configure_Flags = \
 		  --enable-optimized \
 		  --disable-timestamps \
 		  $(Assertions_Configure_Flag) \
+		  $(Optimized_Configure_Flag) \
                   --with-optimize-option="$(Clang_Optimize_Option)" \
 		  --without-llvmgcc --without-llvmgxx \
 		  --disable-bindings \

@@ -7,7 +7,7 @@ endif( NOT PERL_FOUND )
 
 set(PERL ${PERL_EXECUTABLE})
 set(VERSION PACKAGE_VERSION)
-set(PREFIX ${LLVM_BINARY_DIR}) # TODO: Root for `make install'.
+set(PREFIX ${CMAKE_INSTALL_PREFIX})
 set(abs_top_srcdir ${LLVM_MAIN_SRC_DIR})
 set(abs_top_builddir ${LLVM_BINARY_DIR})
 execute_process(COMMAND date
@@ -27,6 +27,7 @@ endif( IS_BIG_ENDIAN )
 set(SHLIBEXT ${LTDL_SHLIB_EXT})
 #EXEEXT already set.
 set(OS "${CMAKE_SYSTEM}")
+set(target "${TARGET_TRIPLE}")
 set(ARCH "${LLVM_NATIVE_ARCH}")
 
 get_system_libs(LLVM_SYSTEM_LIBS_LIST)
@@ -54,9 +55,9 @@ configure_file(
   @ONLY
 )
 
-set(LIBDEPS ${CMAKE_CURRENT_BINARY_DIR}/LibDeps.txt)
-set(LIBDEPS_TMP ${CMAKE_CURRENT_BINARY_DIR}/LibDeps.txt.tmp)
-set(FINAL_LIBDEPS ${CMAKE_CURRENT_BINARY_DIR}/FinalLibDeps.txt)
+set(LIBDEPS LibDeps.txt)
+set(LIBDEPS_TMP LibDeps.txt.tmp)
+set(FINAL_LIBDEPS FinalLibDeps.txt)
 set(LLVM_CONFIG ${LLVM_TOOLS_BINARY_DIR}/llvm-config)
 set(LLVM_CONFIG_IN ${CMAKE_CURRENT_BINARY_DIR}/llvm-config.in)
 
@@ -69,6 +70,8 @@ find_program(NM_PATH nm PATH_SUFFIXES /bin)
 if( NOT NM_PATH )
   message(FATAL_ERROR "`nm' not found")
 endif()
+
+get_property(llvm_libs GLOBAL PROPERTY LLVM_LIBS)
 
 add_custom_command(OUTPUT ${LIBDEPS_TMP}
   COMMAND ${PERL_EXECUTABLE} ${LLVM_MAIN_SRC_DIR}/utils/GenLibDeps.pl -flat ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/${CMAKE_CFG_INTDIR} ${NM_PATH} > ${LIBDEPS_TMP}
@@ -88,22 +91,34 @@ add_custom_command(OUTPUT ${FINAL_LIBDEPS}
   DEPENDS ${LIBDEPS}
   COMMENT "Checking for cyclic dependencies between LLVM libraries.")
 
-set(C_FLGS "${CMAKE_C_FLAGS_${uppercase_CMAKE_BUILD_TYPE}} ${LLVM_DEFINITIONS}")
-set(CXX_FLGS "${CMAKE_CXX_FLAGS_${uppercase_CMAKE_BUILD_TYPE}} ${LLVM_DEFINITIONS}")
-set(CPP_FLGS "${CMAKE_CPP_FLAGS_${uppercase_CMAKE_BUILD_TYPE}} ${LLVM_DEFINITIONS}")
+set(C_FLGS "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${uppercase_CMAKE_BUILD_TYPE}} ${LLVM_DEFINITIONS}")
+set(CXX_FLGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${uppercase_CMAKE_BUILD_TYPE}} ${LLVM_DEFINITIONS}")
+set(CPP_FLGS "${CMAKE_CPP_FLAGS} ${CMAKE_CPP_FLAGS_${uppercase_CMAKE_BUILD_TYPE}} ${LLVM_DEFINITIONS}")
+
+# We don't want certain flags on the output of
+# llvm-config --cflags --cxxflags
+macro(remove_option_from_llvm_config option)
+  llvm_replace_compiler_option(C_FLGS "${option}" "")
+  llvm_replace_compiler_option(CXX_FLGS "${option}" "")
+  llvm_replace_compiler_option(CPP_FLGS "${option}" "")
+endmacro(remove_option_from_llvm_config)
+remove_option_from_llvm_config("-pedantic")
+remove_option_from_llvm_config("-Wall")
+remove_option_from_llvm_config("-W")
 
 add_custom_command(OUTPUT ${LLVM_CONFIG}
-  COMMAND echo 's!@LLVM_CPPFLAGS@!${CPP_FLGS}!' > temp.sed
-  COMMAND echo 's!@LLVM_CFLAGS@!${C_FLGS}!' >> temp.sed
-  COMMAND echo 's!@LLVM_CXXFLAGS@!${CXX_FLGS}!' >> temp.sed
+  COMMAND echo s!@LLVM_CPPFLAGS@!${CPP_FLGS}! > temp.sed
+  COMMAND echo s!@LLVM_CFLAGS@!${C_FLGS}! >> temp.sed
+  COMMAND echo s!@LLVM_CXXFLAGS@!${CXX_FLGS}! >> temp.sed
   # TODO: Use general flags for linking! not just for shared libs:
-  COMMAND echo 's!@LLVM_LDFLAGS@!${CMAKE_SHARED_LINKER_FLAGS}!' >> temp.sed
-  COMMAND echo 's!@LIBS@!${LLVM_SYSTEM_LIBS}!' >> temp.sed
-  COMMAND echo 's!@LLVM_BUILDMODE@!${CMAKE_BUILD_TYPE}!' >> temp.sed
+  COMMAND echo s!@LLVM_LDFLAGS@!${CMAKE_SHARED_LINKER_FLAGS}! >> temp.sed
+  COMMAND echo s!@LIBS@!${LLVM_SYSTEM_LIBS}! >> temp.sed
+  COMMAND echo s!@LLVM_BUILDMODE@!${CMAKE_BUILD_TYPE}! >> temp.sed
   COMMAND sed -f temp.sed < ${LLVM_CONFIG_IN} > ${LLVM_CONFIG}
   COMMAND ${CMAKE_COMMAND} -E remove -f temp.sed
   COMMAND cat ${FINAL_LIBDEPS} >> ${LLVM_CONFIG}
   COMMAND chmod +x ${LLVM_CONFIG}
+  VERBATIM
   DEPENDS ${FINAL_LIBDEPS} ${LLVM_CONFIG_IN}
   COMMENT "Building llvm-config script."
   )
@@ -111,7 +126,7 @@ add_custom_command(OUTPUT ${LLVM_CONFIG}
 add_custom_target(llvm-config.target ALL
   DEPENDS ${LLVM_CONFIG})
 
-add_dependencies(llvm-config.target ${llvm_lib_targets})
+add_dependencies( llvm-config.target ${llvm_libs} )
 
 # Make sure that llvm-config builds before the llvm tools, so we have
 # LibDeps.txt and can use it for updating the hard-coded library
@@ -127,7 +142,7 @@ install(FILES ${LLVM_CONFIG}
 
 # Regeneration of library dependencies.
 
-# See the comments at the end of cmake/modules/LLVMConfig.cmake for
+# See the comments at the end of cmake/modules/LLVM-Config.cmake for
 # notes and guidelines.
 
 set(LLVMLibDeps ${LLVM_MAIN_SRC_DIR}/cmake/modules/LLVMLibDeps.cmake)

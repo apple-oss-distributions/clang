@@ -58,6 +58,16 @@ public:
   virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
                             Token &FirstToken);
 };
+  
+class PragmaMSStructHandler : public PragmaHandler {
+  Sema &Actions;
+public:
+  explicit PragmaMSStructHandler(Sema &A) : PragmaHandler("ms_struct"),
+  Actions(A) {}
+    
+  virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
+                            Token &FirstToken);
+};
 
 class PragmaUnusedHandler : public PragmaHandler {
   Sema &Actions;
@@ -79,6 +89,28 @@ public:
   virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
                             Token &FirstToken);
 };
+
+class PragmaOpenCLExtensionHandler : public PragmaHandler {
+  Sema &Actions;
+  Parser &parser;
+public:
+  PragmaOpenCLExtensionHandler(Sema &S, Parser& p) : 
+    PragmaHandler("EXTENSION"), Actions(S), parser(p) {}
+  virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
+                            Token &FirstToken);
+};
+  
+
+class PragmaFPContractHandler : public PragmaHandler {
+  Sema &Actions;
+  Parser &parser;
+public:
+  PragmaFPContractHandler(Sema &S, Parser& p) : 
+    PragmaHandler("FP_CONTRACT"), Actions(S), parser(p) {}
+  virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
+                            Token &FirstToken);
+};
+  
 
 }  // end namespace clang
 

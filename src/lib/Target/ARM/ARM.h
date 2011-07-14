@@ -28,6 +28,9 @@ class JITCodeEmitter;
 class formatted_raw_ostream;
 class MCCodeEmitter;
 class TargetAsmBackend;
+class MachineInstr;
+class ARMAsmPrinter;
+class MCInst;
 
 MCCodeEmitter *createARMMCCodeEmitter(const Target &,
                                       TargetMachine &TM,
@@ -46,10 +49,14 @@ FunctionPass *createARMExpandPseudoPass();
 FunctionPass *createARMGlobalMergePass(const TargetLowering* tli);
 FunctionPass *createARMConstantIslandPass();
 FunctionPass *createNEONMoveFixPass();
+FunctionPass *createMLxExpansionPass();
 FunctionPass *createThumb2ITBlockPass();
 FunctionPass *createThumb2SizeReductionPass();
 
 extern Target TheARMTarget, TheThumbTarget;
+
+void LowerARMMachineInstrToMCInst(const MachineInstr *MI, MCInst &OutMI,
+                                  ARMAsmPrinter &AP);
 
 } // end namespace llvm;
 

@@ -21,7 +21,7 @@
 
 namespace llvm {
   class SimpleRegisterCoalescing;
-  class LiveVariables;
+  class LiveDebugVariables;
   class TargetRegisterInfo;
   class TargetInstrInfo;
   class VirtRegMap;
@@ -44,6 +44,7 @@ namespace llvm {
     const TargetRegisterInfo* tri_;
     const TargetInstrInfo* tii_;
     LiveIntervals *li_;
+    LiveDebugVariables *ldv_;
     const MachineLoopInfo* loopInfo;
     AliasAnalysis *AA;
     
@@ -67,16 +68,6 @@ namespace llvm {
       initializeSimpleRegisterCoalescingPass(*PassRegistry::getPassRegistry());
     }
 
-    struct InstrSlots {
-      enum {
-        LOAD  = 0,
-        USE   = 1,
-        DEF   = 2,
-        STORE = 3,
-        NUM   = 4
-      };
-    };
-    
     virtual void getAnalysisUsage(AnalysisUsage &AU) const;
     virtual void releaseMemory();
 
@@ -142,8 +133,13 @@ namespace llvm {
 
     /// ReMaterializeTrivialDef - If the source of a copy is defined by a trivial
     /// computation, replace the copy by rematerialize the definition.
-    bool ReMaterializeTrivialDef(LiveInterval &SrcInt, unsigned DstReg,
-                                 unsigned DstSubIdx, MachineInstr *CopyMI);
+    /// If PreserveSrcInt is true, make sure SrcInt is valid after the call.
+    bool ReMaterializeTrivialDef(LiveInterval &SrcInt, bool PreserveSrcInt,
+                                 unsigned DstReg, unsigned DstSubIdx,
+                                 MachineInstr *CopyMI);
+
+    /// shouldJoinPhys - Return true if a physreg copy should be joined.
+    bool shouldJoinPhys(CoalescerPair &CP);
 
     /// isWinToJoinCrossClass - Return true if it's profitable to coalesce
     /// two virtual registers from different register classes.
@@ -183,6 +179,9 @@ namespace llvm {
     /// cycles Start and End or NULL if there are no uses.
     MachineOperand *lastRegisterUse(SlotIndex Start, SlotIndex End,
                                     unsigned Reg, SlotIndex &LastUseIdx) const;
+
+    /// markAsJoined - Remember that CopyMI has already been joined.
+    void markAsJoined(MachineInstr *CopyMI);
   };
 
 } // End llvm namespace

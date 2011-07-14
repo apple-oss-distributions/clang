@@ -15,15 +15,16 @@
 #include "clang/Parse/Parser.h"
 #include "clang/Sema/DeclSpec.h"
 #include "clang/Sema/Scope.h"
+#include "clang/AST/DeclTemplate.h"
 using namespace clang;
 
 /// ParseCXXInlineMethodDef - We parsed and verified that the specified
 /// Declarator is a well formed C++ inline method definition. Now lex its body
 /// and store its tokens for parsing after the C++ class is complete.
-Decl *Parser::ParseCXXInlineMethodDef(AccessSpecifier AS, Declarator &D,
-                                const ParsedTemplateInfo &TemplateInfo) {
-  assert(D.getTypeObject(0).Kind == DeclaratorChunk::Function &&
-         "This isn't a function declarator!");
+Decl *Parser::ParseCXXInlineMethodDef(AccessSpecifier AS, ParsingDeclarator &D,
+                                const ParsedTemplateInfo &TemplateInfo,
+                                const VirtSpecifiers& VS) {
+  assert(D.isFunctionDeclarator() && "This isn't a function declarator!");
   assert((Tok.is(tok::l_brace) || Tok.is(tok::colon) || Tok.is(tok::kw_try)) &&
          "Current token not a '{', ':' or 'try'!");
 
@@ -36,12 +37,46 @@ Decl *Parser::ParseCXXInlineMethodDef(AccessSpecifier AS, Declarator &D,
     // FIXME: Friend templates
     FnD = Actions.ActOnFriendFunctionDecl(getCurScope(), D, true,
                                           move(TemplateParams));
-  else // FIXME: pass template information through
+  else { // FIXME: pass template information through
     FnD = Actions.ActOnCXXMemberDeclarator(getCurScope(), AS, D,
-                                           move(TemplateParams), 0, 0,
-                                           /*IsDefinition*/true);
+                                           move(TemplateParams), 0, 
+                                           VS, 0, /*IsDefinition*/true);
+  }
 
   HandleMemberFunctionDefaultArgs(D, FnD);
+
+  D.complete(FnD);
+
+  // In delayed template parsing mode, if we are within a class template
+  // or if we are about to parse function member template then consume
+  // the tokens and store them for parsing at the end of the translation unit.
+  if (getLang().DelayedTemplateParsing && 
+      ((Actions.CurContext->isDependentContext() ||
+        TemplateInfo.Kind != ParsedTemplateInfo::NonTemplate) && 
+        !Actions.IsInsideALocalClassWithinATemplateFunction()) &&
+        !D.getDeclSpec().isFriendSpecified()) {
+
+    if (FnD) {
+      LateParsedTemplatedFunction *LPT =
+        new LateParsedTemplatedFunction(this, FnD);
+
+      FunctionDecl *FD = 0;
+      if (FunctionTemplateDecl *FunTmpl = dyn_cast<FunctionTemplateDecl>(FnD))
+        FD = FunTmpl->getTemplatedDecl();
+      else
+        FD = cast<FunctionDecl>(FnD);
+      Actions.CheckForFunctionRedefinition(FD);
+
+      LateParsedTemplateMap[FD] = LPT;
+      Actions.MarkAsLateParsedTemplate(FD);
+      LexTemplateFunctionForLateParsing(LPT->Toks);
+    } else {
+      CachedTokens Toks;
+      LexTemplateFunctionForLateParsing(Toks);
+    }
+
+    return FnD;
+  }
 
   // Consume the tokens and store them for later parsing.
 
@@ -82,6 +117,14 @@ Decl *Parser::ParseCXXInlineMethodDef(AccessSpecifier AS, Declarator &D,
       ConsumeAndStoreUntil(tok::l_brace, Toks, /*StopAtSemi=*/false);
       ConsumeAndStoreUntil(tok::r_brace, Toks, /*StopAtSemi=*/false);
     }
+  }
+
+
+  if (!FnD) {
+    // If semantic analysis could not build a function declaration,
+    // just throw away the late-parsed declaration.
+    delete getCurrentClass().LateParsedDeclarations.back();
+    getCurrentClass().LateParsedDeclarations.pop_back();
   }
 
   return FnD;
@@ -251,7 +294,7 @@ void Parser::ParseLexedMethodDef(LexedMethod &LM) {
   Actions.ActOnStartOfFunctionDef(getCurScope(), LM.D);
 
   if (Tok.is(tok::kw_try)) {
-    ParseFunctionTryBlock(LM.D);
+    ParseFunctionTryBlock(LM.D, FnScope);
     assert(!PP.getSourceManager().isBeforeInTranslationUnit(origLoc,
                                                          Tok.getLocation()) &&
            "ParseFunctionTryBlock went over the cached tokens!");
@@ -266,13 +309,14 @@ void Parser::ParseLexedMethodDef(LexedMethod &LM) {
 
     // Error recovery.
     if (!Tok.is(tok::l_brace)) {
+      FnScope.Exit();
       Actions.ActOnFinishFunctionBody(LM.D, 0);
       return;
     }
   } else
     Actions.ActOnDefaultCtorInitializers(LM.D);
 
-  ParseFunctionStatementBody(LM.D);
+  ParseFunctionStatementBody(LM.D, FnScope);
 
   if (Tok.getLocation() != origLoc) {
     // Due to parsing error, we either went over the cached tokens or

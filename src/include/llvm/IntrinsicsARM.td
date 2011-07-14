@@ -1,10 +1,10 @@
 //===- IntrinsicsARM.td - Defines ARM intrinsics -----------*- tablegen -*-===//
-// 
+//
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
-// 
+//
 //===----------------------------------------------------------------------===//
 //
 // This file defines all of the ARM-specific intrinsics.
@@ -47,6 +47,43 @@ let TargetPrefix = "arm" in {  // All intrinsics start with "llvm.arm.".
                                     [IntrNoMem]>;
   def int_arm_vcvtru    : Intrinsic<[llvm_float_ty], [llvm_anyfloat_ty],
                                     [IntrNoMem]>;
+}
+
+//===----------------------------------------------------------------------===//
+// Coprocessor
+
+let TargetPrefix = "arm" in {  // All intrinsics start with "llvm.arm.".
+  // Move to coprocessor
+  def int_arm_mcr : GCCBuiltin<"__builtin_arm_mcr">,
+     Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                    llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], []>;
+  def int_arm_mcr2 : GCCBuiltin<"__builtin_arm_mcr2">,
+     Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                    llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], []>;
+
+  // Move from coprocessor
+  def int_arm_mrc : GCCBuiltin<"__builtin_arm_mrc">,
+     Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                               llvm_i32_ty, llvm_i32_ty], []>;
+  def int_arm_mrc2 : GCCBuiltin<"__builtin_arm_mrc2">,
+     Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                               llvm_i32_ty, llvm_i32_ty], []>;
+
+  // Coprocessor data processing
+  def int_arm_cdp : GCCBuiltin<"__builtin_arm_cdp">,
+     Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                    llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], []>;
+  def int_arm_cdp2 : GCCBuiltin<"__builtin_arm_cdp2">,
+     Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                    llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], []>;
+
+  // Move from two registers to coprocessor
+  def int_arm_mcrr : GCCBuiltin<"__builtin_arm_mcrr">,
+     Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                    llvm_i32_ty, llvm_i32_ty], []>;
+  def int_arm_mcrr2 : GCCBuiltin<"__builtin_arm_mcrr2">,
+     Intrinsic<[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                    llvm_i32_ty, llvm_i32_ty], []>;
 }
 
 //===----------------------------------------------------------------------===//
@@ -129,8 +166,12 @@ let Properties = [IntrNoMem, Commutative] in {
   def int_arm_neon_vmulp : Neon_2Arg_Intrinsic;
   def int_arm_neon_vqdmulh : Neon_2Arg_Intrinsic;
   def int_arm_neon_vqrdmulh : Neon_2Arg_Intrinsic;
+  def int_arm_neon_vmulls : Neon_2Arg_Long_Intrinsic;
+  def int_arm_neon_vmullu : Neon_2Arg_Long_Intrinsic;
   def int_arm_neon_vmullp : Neon_2Arg_Long_Intrinsic;
   def int_arm_neon_vqdmull : Neon_2Arg_Long_Intrinsic;
+
+  // Vector Multiply and Accumulate/Subtract.
   def int_arm_neon_vqdmlal : Neon_3Arg_Long_Intrinsic;
   def int_arm_neon_vqdmlsl : Neon_3Arg_Long_Intrinsic;
 
@@ -285,6 +326,12 @@ def int_arm_neon_vcvtfp2fxs : Neon_CvtFPToFx_Intrinsic;
 def int_arm_neon_vcvtfp2fxu : Neon_CvtFPToFx_Intrinsic;
 def int_arm_neon_vcvtfxs2fp : Neon_CvtFxToFP_Intrinsic;
 def int_arm_neon_vcvtfxu2fp : Neon_CvtFxToFP_Intrinsic;
+
+// Vector Conversions Between Half-Precision and Single-Precision.
+def int_arm_neon_vcvtfp2hf
+    : Intrinsic<[llvm_v4i16_ty], [llvm_v4f32_ty], [IntrNoMem]>;
+def int_arm_neon_vcvthf2fp
+    : Intrinsic<[llvm_v4f32_ty], [llvm_v4i16_ty], [IntrNoMem]>;
 
 // Narrowing Saturating Vector Moves.
 def int_arm_neon_vqmovns : Neon_1Arg_Narrow_Intrinsic;

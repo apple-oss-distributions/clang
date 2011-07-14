@@ -17,7 +17,6 @@
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 
-#include "llvm/LLVMContext.h"
 #include "llvm/Module.h"
 #include "llvm/Config/config.h"
 #include "llvm/ADT/OwningPtr.h"
@@ -26,13 +25,18 @@
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Target/TargetSelect.h"
 using namespace clang;
 using namespace clang::driver;
 
-static llvm::sys::Path GetExecutablePath(const char *Argv0) {
+// This function isn't referenced outside its translation unit, but it
+// can't use the "static" keyword because its address is used for
+// GetMainExecutable (since some platforms don't support taking the
+// address of main, and some platforms can't implement GetMainExecutable
+// without being given the address of a function in the main executable).
+llvm::sys::Path GetExecutablePath(const char *Argv0) {
   // This just needs to be some symbol in the binary; C++ doesn't
   // allow taking the address of ::main however.
   void *MainAddr = (void*) (intptr_t) GetExecutablePath;
@@ -69,7 +73,8 @@ int main(int argc, const char **argv, char * const *envp) {
   TextDiagnosticPrinter *DiagClient =
     new TextDiagnosticPrinter(llvm::errs(), DiagnosticOptions());
 
-  Diagnostic Diags(DiagClient);
+  llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+  Diagnostic Diags(DiagID, DiagClient);
   Driver TheDriver(Path.str(), llvm::sys::getHostTriple(),
                    "a.out", /*IsProduction=*/false, /*CXXIsProduction=*/false,
                    Diags);
@@ -80,8 +85,7 @@ int main(int argc, const char **argv, char * const *envp) {
   // (basically, exactly one input, and the operation mode is hard wired).
   llvm::SmallVector<const char *, 16> Args(argv, argv + argc);
   Args.push_back("-fsyntax-only");
-  llvm::OwningPtr<Compilation> C(TheDriver.BuildCompilation(Args.size(),
-                                                            Args.data()));
+  llvm::OwningPtr<Compilation> C(TheDriver.BuildCompilation(Args));
   if (!C)
     return 0;
 
@@ -124,7 +128,6 @@ int main(int argc, const char **argv, char * const *envp) {
 
   // Create a compiler instance to handle the actual work.
   CompilerInstance Clang;
-  Clang.setLLVMContext(new llvm::LLVMContext);
   Clang.setInvocation(CI.take());
 
   // Create the compilers actual diagnostics engine.

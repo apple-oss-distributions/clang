@@ -1,7 +1,3 @@
-set(SHARED_LIBRARY TRUE)
-
-set(LLVM_NO_RTTI 1)
-
 set(LLVM_USED_LIBS
   clangFrontend
   clangDriver
@@ -13,12 +9,11 @@ set(LLVM_USED_LIBS
   clangBasic)
 
 set( LLVM_LINK_COMPONENTS
-  bitreader
+  support
   mc
-  core
   )
 
-add_clang_library(libclang
+set(SOURCES
   CIndex.cpp
   CIndexCXX.cpp
   CIndexCodeCompletion.cpp
@@ -30,35 +25,44 @@ add_clang_library(libclang
   CXString.cpp
   CXType.cpp
   ../../include/clang-c/Index.h
-)
+  )
 
-if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-  # dylib versioning information
-  # FIXME: Is there a more CMake-ish way to handle this?
-  set(LIBCLANG_VERSION 1 
-      CACHE STRING "Version number of the libclang library")
-  set(LIBCLANG_SUBVERSION 0
-      CACHE STRING "Minor version number of the libclang library")
-  set(LIBCLANG_LINK_FLAGS 
-      "-Wl,-current_version -Wl,${LIBCLANG_VERSION}.${LIBCLANG_SUBVERSION} -Wl,-compatibility_version -Wl,1")
-
-  set(LIBCLANG_LINK_FLAGS 
-      "${LIBCLANG_LINK_FLAGS} -Wl,-dead_strip -Wl,-seg1addr -Wl,0xE0000000")
+if( LLVM_ENABLE_PIC )
+  set(SHARED_LIBRARY TRUE)
+  add_clang_library(libclang ${SOURCES})
 
   set_target_properties(libclang
     PROPERTIES
-    LINK_FLAGS "${LIBCLANG_LINK_FLAGS}"
-    INSTALL_NAME_DIR "@executable_path/../lib")
+    OUTPUT_NAME "libclang"
+    VERSION ${LIBCLANG_LIBRARY_VERSION}
+    DEFINE_SYMBOL _CINDEX_LIB_)
+
+  if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+    set(LIBCLANG_LINK_FLAGS
+      "-Wl,-compatibility_version -Wl,1 -Wl,-dead_strip -Wl,-seg1addr -Wl,0xE0000000")
+    set_target_properties(libclang
+      PROPERTIES
+      LINK_FLAGS "${LIBCLANG_LINK_FLAGS}"
+      INSTALL_NAME_DIR "@executable_path/../lib")
+  endif()
+
+  if(MSVC)
+    # windows.h doesn't compile with /Za
+    get_target_property(NON_ANSI_COMPILE_FLAGS libclang COMPILE_FLAGS)
+    string(REPLACE "/Za" "" NON_ANSI_COMPILE_FLAGS ${NON_ANSI_COMPILE_FLAGS})
+    set_target_properties(libclang PROPERTIES
+      COMPILE_FLAGS ${NON_ANSI_COMPILE_FLAGS})
+  endif()
+
+  set(LIBCLANG_STATIC_TARGET_NAME libclang_static)
+else()
+  set(LIBCLANG_STATIC_TARGET_NAME libclang)
 endif()
 
-if(MSVC)
-  # windows.h doesn't compile with /Za
-  get_target_property(NON_ANSI_COMPILE_FLAGS libclang COMPILE_FLAGS)
-  string(REPLACE /Za "" NON_ANSI_COMPILE_FLAGS ${NON_ANSI_COMPILE_FLAGS})
-  set_target_properties(libclang PROPERTIES COMPILE_FLAGS ${NON_ANSI_COMPILE_FLAGS})
-endif(MSVC)
+if( NOT BUILD_SHARED_LIBS AND NOT WIN32 )
+  add_clang_library(${LIBCLANG_STATIC_TARGET_NAME} STATIC ${SOURCES})
 
-set_target_properties(libclang
-  PROPERTIES
-  LINKER_LANGUAGE CXX
-  DEFINE_SYMBOL _CINDEX_LIB_)
+  set_target_properties(${LIBCLANG_STATIC_TARGET_NAME}
+    PROPERTIES
+    OUTPUT_NAME "libclang")
+endif()

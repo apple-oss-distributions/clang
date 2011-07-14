@@ -22,8 +22,9 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
-#include <string>
 #include <cassert>
+#include <cctype>
+#include <string>
 
 namespace llvm {
   template <typename T> struct DenseMapInfo;
@@ -53,7 +54,7 @@ class IdentifierInfo {
   // Objective-C keyword ('protocol' in '@protocol') or builtin (__builtin_inf).
   // First NUM_OBJC_KEYWORDS values are for Objective-C, the remaining values
   // are for builtins.
-  unsigned ObjCOrBuiltinID    :10;
+  unsigned ObjCOrBuiltinID    :11;
   bool HasMacro               : 1; // True if there is a #define for this.
   bool IsExtension            : 1; // True if identifier is a lang extension.
   bool IsPoisoned             : 1; // True if identifier is poisoned.
@@ -63,7 +64,7 @@ class IdentifierInfo {
                                    // file and wasn't modified since.
   bool RevertedTokenID        : 1; // True if RevertTokenIDToIdentifier was
                                    // called.
-  // 7 bits left in 32-bit word.
+  // 6 bits left in 32-bit word.
   void *FETokenInfo;               // Managed by the language front-end.
   llvm::StringMapEntry<IdentifierInfo*> *Entry;
 
@@ -254,6 +255,25 @@ private:
   }
 };
 
+/// \brief an RAII object for [un]poisoning an identifier
+/// within a certain scope. II is allowed to be null, in
+/// which case, objects of this type have no effect.
+class PoisonIdentifierRAIIObject {
+  IdentifierInfo *const II;
+  const bool OldValue;
+public:
+  PoisonIdentifierRAIIObject(IdentifierInfo *II, bool NewValue)
+    : II(II), OldValue(II ? II->isPoisoned() : false) {
+    if(II)
+      II->setIsPoisoned(NewValue);
+  }
+
+  ~PoisonIdentifierRAIIObject() {
+    if(II)
+      II->setIsPoisoned(OldValue);
+  }
+};
+
 /// \brief An iterator that walks over all of the known identifiers
 /// in the lookup table.
 ///
@@ -324,7 +344,7 @@ public:
 
 /// IdentifierTable - This table implements an efficient mapping from strings to
 /// IdentifierInfo nodes.  It has no other purpose, but this is an
-/// extremely performance-critical piece of the code, as each occurrance of
+/// extremely performance-critical piece of the code, as each occurrence of
 /// every identifier goes through here when lexed.
 class IdentifierTable {
   // Shark shows that using MallocAllocator is *much* slower than using this
@@ -442,6 +462,52 @@ public:
   void AddKeywords(const LangOptions &LangOpts);
 };
 
+/// ObjCMethodFamily - A family of Objective-C methods.  These
+/// families have no inherent meaning in the language, but are
+/// nonetheless central enough in the existing implementations to
+/// merit direct AST support.  While, in theory, arbitrary methods can
+/// be considered to form families, we focus here on the methods
+/// involving allocation and retain-count management, as these are the
+/// most "core" and the most likely to be useful to diverse clients
+/// without extra information.
+///
+/// Both selectors and actual method declarations may be classified
+/// into families.  Method families may impose additional restrictions
+/// beyond their selector name; for example, a method called '_init'
+/// that returns void is not considered to be in the 'init' family
+/// (but would be if it returned 'id').  It is also possible to
+/// explicitly change or remove a method's family.  Therefore the
+/// method's family should be considered the single source of truth.
+enum ObjCMethodFamily {
+  /// \brief No particular method family.
+  OMF_None,
+
+  // Selectors in these families may have arbitrary arity, may be
+  // written with arbitrary leading underscores, and may have
+  // additional CamelCase "words" in their first selector chunk
+  // following the family name.
+  OMF_alloc,
+  OMF_copy,
+  OMF_init,
+  OMF_mutableCopy,
+  OMF_new,
+
+  // These families are singletons consisting only of the nullary
+  // selector with the given name.
+  OMF_autorelease,
+  OMF_dealloc,
+  OMF_release,
+  OMF_retain,
+  OMF_retainCount
+};
+
+/// Enough bits to store any enumerator in ObjCMethodFamily or
+/// InvalidObjCMethodFamily.
+enum { ObjCMethodFamilyBitWidth = 4 };
+
+/// An invalid value of ObjCMethodFamily.
+enum { InvalidObjCMethodFamily = (1 << ObjCMethodFamilyBitWidth) - 1 };
+
 /// Selector - This smart pointer class efficiently represents Objective-C
 /// method names. This class will either point to an IdentifierInfo or a
 /// MultiKeywordSelector (which is private). This enables us to optimize
@@ -477,6 +543,8 @@ class Selector {
   unsigned getIdentifierInfoFlag() const {
     return InfoPtr & ArgFlags;
   }
+
+  static ObjCMethodFamily getMethodFamilyImpl(Selector sel);
 
 public:
   friend class SelectorTable; // only the SelectorTable can create these
@@ -540,6 +608,11 @@ public:
   /// it as an std::string.
   std::string getAsString() const;
 
+  /// getMethodFamily - Derive the conventional family of this method.
+  ObjCMethodFamily getMethodFamily() const {
+    return getMethodFamilyImpl(*this);
+  }
+
   static Selector getEmptyMarker() {
     return Selector(uintptr_t(-1));
   }
@@ -569,6 +642,9 @@ public:
   Selector getNullarySelector(IdentifierInfo *ID) {
     return Selector(ID, 0);
   }
+
+  /// Return the total amount of memory allocated for managing selectors.
+  size_t getTotalMemory() const;
 
   /// constructSetterName - Return the setter name for the given
   /// identifier, i.e. "set" + Name where the initial character of Name

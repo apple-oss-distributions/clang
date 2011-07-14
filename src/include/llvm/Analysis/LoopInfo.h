@@ -41,6 +41,7 @@
 #include "llvm/Support/CFG.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <map>
 
 namespace llvm {
 
@@ -54,6 +55,7 @@ static void RemoveFromVector(std::vector<T*> &V, T *N) {
 class DominatorTree;
 class LoopInfo;
 class Loop;
+class PHINode;
 template<class N, class M> class LoopInfoBase;
 template<class N, class M> class LoopBase;
 
@@ -1020,6 +1022,27 @@ public:
   /// BasicBlocks to loops.
   void removeBlock(BasicBlock *BB) {
     LI.removeBlock(BB);
+  }
+
+  /// replacementPreservesLCSSAForm - Returns true if replacing From with To
+  /// everywhere is guaranteed to preserve LCSSA form.
+  bool replacementPreservesLCSSAForm(Instruction *From, Value *To) {
+    // Preserving LCSSA form is only problematic if the replacing value is an
+    // instruction.
+    Instruction *I = dyn_cast<Instruction>(To);
+    if (!I) return true;
+    // If both instructions are defined in the same basic block then replacement
+    // cannot break LCSSA form.
+    if (I->getParent() == From->getParent())
+      return true;
+    // If the instruction is not defined in a loop then it can safely replace
+    // anything.
+    Loop *ToLoop = getLoopFor(I->getParent());
+    if (!ToLoop) return true;
+    // If the replacing instruction is defined in the same loop as the original
+    // instruction, or in a loop that contains it as an inner loop, then using
+    // it as a replacement will not break LCSSA form.
+    return ToLoop->contains(getLoopFor(From->getParent()));
   }
 };
 

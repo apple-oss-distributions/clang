@@ -113,15 +113,17 @@ public:
   const unsigned       *OperandCycles;  ///< Array of operand cycles selected
   const unsigned       *Forwardings;    ///< Array of pipeline forwarding pathes
   const InstrItinerary *Itineraries;    ///< Array of itineraries selected
+  unsigned              IssueWidth;     ///< Max issue per cycle. 0=Unknown.
 
   /// Ctors.
   ///
   InstrItineraryData() : Stages(0), OperandCycles(0), Forwardings(0),
-                         Itineraries(0) {}
+                         Itineraries(0), IssueWidth(0) {}
+
   InstrItineraryData(const InstrStage *S, const unsigned *OS,
                      const unsigned *F, const InstrItinerary *I)
     : Stages(S), OperandCycles(OS), Forwardings(F), Itineraries(I) {}
-  
+
   /// isEmpty - Returns true if there are no itineraries.
   ///
   bool isEmpty() const { return Itineraries == 0; }
@@ -135,14 +137,14 @@ public:
   }
 
   /// beginStage - Return the first stage of the itinerary.
-  /// 
+  ///
   const InstrStage *beginStage(unsigned ItinClassIndx) const {
     unsigned StageIdx = Itineraries[ItinClassIndx].FirstStage;
     return Stages + StageIdx;
   }
 
   /// endStage - Return the last+1 stage of the itinerary.
-  /// 
+  ///
   const InstrStage *endStage(unsigned ItinClassIndx) const {
     unsigned StageIdx = Itineraries[ItinClassIndx].LastStage;
     return Stages + StageIdx;
@@ -153,9 +155,13 @@ public:
   /// in the itinerary.
   ///
   unsigned getStageLatency(unsigned ItinClassIndx) const {
-    // If the target doesn't provide itinerary information, use a
-    // simple non-zero default value for all instructions.
-    if (isEmpty())
+    // If the target doesn't provide itinerary information, use a simple
+    // non-zero default value for all instructions.  Some target's provide a
+    // dummy (Generic) itinerary which should be handled as if it's itinerary is
+    // empty. We identify this by looking for a reference to stage zero (invalid
+    // stage). This is different from beginStage == endState != 0, which could
+    // be used for zero-latency pseudo ops.
+    if (isEmpty() || Itineraries[ItinClassIndx].FirstStage == 0)
       return 1;
 
     // Calculate the maximum completion time for any stage.

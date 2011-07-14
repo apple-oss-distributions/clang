@@ -239,72 +239,80 @@ struct CompareConstantExpr : public ConstantExpr {
 };
 
 template <>
-struct OperandTraits<UnaryConstantExpr> : public FixedNumOperandTraits<1> {
+struct OperandTraits<UnaryConstantExpr> :
+  public FixedNumOperandTraits<UnaryConstantExpr, 1> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(UnaryConstantExpr, Value)
 
 template <>
-struct OperandTraits<BinaryConstantExpr> : public FixedNumOperandTraits<2> {
+struct OperandTraits<BinaryConstantExpr> :
+  public FixedNumOperandTraits<BinaryConstantExpr, 2> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BinaryConstantExpr, Value)
 
 template <>
-struct OperandTraits<SelectConstantExpr> : public FixedNumOperandTraits<3> {
+struct OperandTraits<SelectConstantExpr> :
+  public FixedNumOperandTraits<SelectConstantExpr, 3> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SelectConstantExpr, Value)
 
 template <>
-struct OperandTraits<ExtractElementConstantExpr> : public FixedNumOperandTraits<2> {
+struct OperandTraits<ExtractElementConstantExpr> :
+  public FixedNumOperandTraits<ExtractElementConstantExpr, 2> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementConstantExpr, Value)
 
 template <>
-struct OperandTraits<InsertElementConstantExpr> : public FixedNumOperandTraits<3> {
+struct OperandTraits<InsertElementConstantExpr> :
+  public FixedNumOperandTraits<InsertElementConstantExpr, 3> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertElementConstantExpr, Value)
 
 template <>
-struct OperandTraits<ShuffleVectorConstantExpr> : public FixedNumOperandTraits<3> {
+struct OperandTraits<ShuffleVectorConstantExpr> :
+    public FixedNumOperandTraits<ShuffleVectorConstantExpr, 3> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorConstantExpr, Value)
 
 template <>
-struct OperandTraits<ExtractValueConstantExpr> : public FixedNumOperandTraits<1> {
+struct OperandTraits<ExtractValueConstantExpr> :
+  public FixedNumOperandTraits<ExtractValueConstantExpr, 1> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractValueConstantExpr, Value)
 
 template <>
-struct OperandTraits<InsertValueConstantExpr> : public FixedNumOperandTraits<2> {
+struct OperandTraits<InsertValueConstantExpr> :
+  public FixedNumOperandTraits<InsertValueConstantExpr, 2> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertValueConstantExpr, Value)
 
 template <>
-struct OperandTraits<GetElementPtrConstantExpr> : public VariadicOperandTraits<1> {
+struct OperandTraits<GetElementPtrConstantExpr> :
+  public VariadicOperandTraits<GetElementPtrConstantExpr, 1> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GetElementPtrConstantExpr, Value)
 
 
 template <>
-struct OperandTraits<CompareConstantExpr> : public FixedNumOperandTraits<2> {
+struct OperandTraits<CompareConstantExpr> :
+  public FixedNumOperandTraits<CompareConstantExpr, 2> {
 };
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CompareConstantExpr, Value)
 
 struct ExprMapKeyType {
-  typedef SmallVector<unsigned, 4> IndexList;
-
   ExprMapKeyType(unsigned opc,
-      const std::vector<Constant*> &ops,
+      ArrayRef<Constant*> ops,
       unsigned short flags = 0,
       unsigned short optionalflags = 0,
-      const IndexList &inds = IndexList())
+      ArrayRef<unsigned> inds = ArrayRef<unsigned>())
         : opcode(opc), subclassoptionaldata(optionalflags), subclassdata(flags),
-        operands(ops), indices(inds) {}
+        operands(ops.begin(), ops.end()), indices(inds.begin(), inds.end()) {}
   uint8_t opcode;
   uint8_t subclassoptionaldata;
   uint16_t subclassdata;
   std::vector<Constant*> operands;
-  IndexList indices;
+  SmallVector<unsigned, 4> indices;
   bool operator==(const ExprMapKeyType& that) const {
     return this->opcode == that.opcode &&
            this->subclassdata == that.subclassdata &&
@@ -455,7 +463,7 @@ struct ConstantKeyData<ConstantExpr> {
         CE->isCompare() ? CE->getPredicate() : 0,
         CE->getRawSubclassOptionalData(),
         CE->hasIndices() ?
-          CE->getIndices() : SmallVector<unsigned, 4>());
+          CE->getIndices() : ArrayRef<unsigned>());
   }
 };
 

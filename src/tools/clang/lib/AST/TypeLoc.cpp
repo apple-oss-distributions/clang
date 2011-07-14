@@ -77,14 +77,15 @@ TypeLoc TypeLoc::getNextTypeLocImpl(TypeLoc TL) {
 /// \brief Initializes a type location, and all of its children
 /// recursively, as if the entire tree had been written in the
 /// given location.
-void TypeLoc::initializeImpl(TypeLoc TL, SourceLocation Loc) {
+void TypeLoc::initializeImpl(ASTContext &Context, TypeLoc TL, 
+                             SourceLocation Loc) {
   while (true) {
     switch (TL.getTypeLocClass()) {
 #define ABSTRACT_TYPELOC(CLASS, PARENT)
 #define TYPELOC(CLASS, PARENT)        \
     case CLASS: {                     \
       CLASS##TypeLoc TLCasted = cast<CLASS##TypeLoc>(TL); \
-      TLCasted.initializeLocal(Loc);  \
+      TLCasted.initializeLocal(Context, Loc);  \
       TL = TLCasted.getNextTypeLoc(); \
       if (!TL) return;                \
       continue;                       \
@@ -101,6 +102,8 @@ SourceLocation TypeLoc::getBeginLoc() const {
     // FIXME: Currently QualifiedTypeLoc does not have a source range
     // case Qualified:
     case Elaborated:
+    case DependentName:
+    case DependentTemplateSpecialization:
       break;
     default:
       TypeLoc Next = Cur.getNextTypeLoc();
@@ -115,18 +118,37 @@ SourceLocation TypeLoc::getBeginLoc() const {
 
 SourceLocation TypeLoc::getEndLoc() const {
   TypeLoc Cur = *this;
+  TypeLoc Last;
   while (true) {
     switch (Cur.getTypeLocClass()) {
     default:
+      if (!Last)
+	Last = Cur;
+      return Last.getLocalSourceRange().getEnd();
+    case Paren:
+    case ConstantArray:
+    case DependentSizedArray:
+    case IncompleteArray:
+    case VariableArray:
+    case FunctionProto:
+    case FunctionNoProto:
+      Last = Cur;
+      break;
+    case Pointer:
+    case BlockPointer:
+    case MemberPointer:
+    case LValueReference:
+    case RValueReference:
+    case PackExpansion:
+      if (!Last)
+	Last = Cur;
       break;
     case Qualified:
     case Elaborated:
-      Cur = Cur.getNextTypeLoc();
-      continue;
+      break;
     }
-    break;
+    Cur = Cur.getNextTypeLoc();
   }
-  return Cur.getLocalSourceRange().getEnd();
 }
 
 
@@ -187,11 +209,10 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
       return TST_char16;        
     case BuiltinType::Char32:
       return TST_char32;
-    case BuiltinType::WChar:
+    case BuiltinType::WChar_S:
+    case BuiltinType::WChar_U:
       return TST_wchar;
-    case BuiltinType::UndeducedAuto:
-      return TST_auto;
-        
+
     case BuiltinType::UChar:
     case BuiltinType::UShort:
     case BuiltinType::UInt:
@@ -213,6 +234,8 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
     case BuiltinType::NullPtr:
     case BuiltinType::Overload:
     case BuiltinType::Dependent:
+    case BuiltinType::BoundMember:
+    case BuiltinType::UnknownAny:
     case BuiltinType::ObjCId:
     case BuiltinType::ObjCClass:
     case BuiltinType::ObjCSel:
@@ -222,3 +245,90 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   
   return TST_unspecified;
 }
+
+TypeLoc TypeLoc::IgnoreParensImpl(TypeLoc TL) {
+  while (ParenTypeLoc* PTL = dyn_cast<ParenTypeLoc>(&TL))
+    TL = PTL->getInnerLoc();
+  return TL;
+}
+
+void ElaboratedTypeLoc::initializeLocal(ASTContext &Context, 
+                                        SourceLocation Loc) {
+  setKeywordLoc(Loc);
+  NestedNameSpecifierLocBuilder Builder;
+  Builder.MakeTrivial(Context, getTypePtr()->getQualifier(), Loc);
+  setQualifierLoc(Builder.getWithLocInContext(Context));
+}
+
+void DependentNameTypeLoc::initializeLocal(ASTContext &Context, 
+                                           SourceLocation Loc) {
+  setKeywordLoc(Loc);
+  NestedNameSpecifierLocBuilder Builder;
+  Builder.MakeTrivial(Context, getTypePtr()->getQualifier(), Loc);
+  setQualifierLoc(Builder.getWithLocInContext(Context));
+  setNameLoc(Loc);
+}
+
+void 
+DependentTemplateSpecializationTypeLoc::initializeLocal(ASTContext &Context, 
+                                                        SourceLocation Loc) {
+  setKeywordLoc(Loc);
+  if (getTypePtr()->getQualifier()) {
+    NestedNameSpecifierLocBuilder Builder;
+    Builder.MakeTrivial(Context, getTypePtr()->getQualifier(), Loc);
+    setQualifierLoc(Builder.getWithLocInContext(Context));
+  } else {
+    setQualifierLoc(NestedNameSpecifierLoc());
+  }
+  
+  setNameLoc(Loc);
+  setLAngleLoc(Loc);
+  setRAngleLoc(Loc);
+  TemplateSpecializationTypeLoc::initializeArgLocs(Context, getNumArgs(),
+                                                   getTypePtr()->getArgs(),
+                                                   getArgInfos(), Loc);
+}
+
+void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context, 
+                                                      unsigned NumArgs,
+                                                  const TemplateArgument *Args,
+                                              TemplateArgumentLocInfo *ArgInfos,
+                                                      SourceLocation Loc) {
+  for (unsigned i = 0, e = NumArgs; i != e; ++i) {
+    switch (Args[i].getKind()) {
+    case TemplateArgument::Null: 
+    case TemplateArgument::Declaration:
+    case TemplateArgument::Integral:
+    case TemplateArgument::Pack:
+    case TemplateArgument::Expression:
+      // FIXME: Can we do better for declarations and integral values?
+      ArgInfos[i] = TemplateArgumentLocInfo();
+      break;
+      
+    case TemplateArgument::Type:
+      ArgInfos[i] = TemplateArgumentLocInfo(
+                          Context.getTrivialTypeSourceInfo(Args[i].getAsType(), 
+                                                           Loc));
+      break;
+        
+    case TemplateArgument::Template:
+    case TemplateArgument::TemplateExpansion: {
+      NestedNameSpecifierLocBuilder Builder;
+      TemplateName Template = Args[i].getAsTemplate();
+      if (DependentTemplateName *DTN = Template.getAsDependentTemplateName())
+        Builder.MakeTrivial(Context, DTN->getQualifier(), Loc);
+      else if (QualifiedTemplateName *QTN = Template.getAsQualifiedTemplateName())
+        Builder.MakeTrivial(Context, QTN->getQualifier(), Loc);
+      
+      ArgInfos[i] = TemplateArgumentLocInfo(
+                                           Builder.getWithLocInContext(Context),
+                                            Loc, 
+                                Args[i].getKind() == TemplateArgument::Template
+                                            ? SourceLocation()
+                                            : Loc);
+      break;
+    }        
+    }
+  }
+}
+

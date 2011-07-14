@@ -59,18 +59,11 @@ namespace  {
           Visit(S);
 
           // Print out children.
-          Stmt::child_iterator CI = S->child_begin(), CE = S->child_end();
-          if (CI != CE) {
-            while (CI != CE) {
+          Stmt::child_range CI = S->children();
+          if (CI) {
+            while (CI) {
               OS << '\n';
               DumpSubTree(*CI++);
-            }
-            if (const ConditionalOperator *CO = 
-                  dyn_cast<ConditionalOperator>(S)) {
-              if (CO->getSAVE()) {
-                OS << '\n';
-                DumpSubTree(CO->getSAVE());
-              }
             }
           }
         }
@@ -90,25 +83,44 @@ namespace  {
     }
 
     void DumpType(QualType T) {
-      OS << "'" << T.getAsString() << "'";
+      SplitQualType T_split = T.split();
+      OS << "'" << QualType::getAsString(T_split) << "'";
 
       if (!T.isNull()) {
         // If the type is sugared, also dump a (shallow) desugared type.
-        QualType Simplified = T.getDesugaredType();
-        if (Simplified != T)
-          OS << ":'" << Simplified.getAsString() << "'";
+        SplitQualType D_split = T.getSplitDesugaredType();
+        if (T_split != D_split)
+          OS << ":'" << QualType::getAsString(D_split) << "'";
       }
     }
+    void DumpDeclRef(Decl *node);
     void DumpStmt(const Stmt *Node) {
       Indent();
       OS << "(" << Node->getStmtClassName()
          << " " << (void*)Node;
       DumpSourceRange(Node);
     }
+    void DumpValueKind(ExprValueKind K) {
+      switch (K) {
+      case VK_RValue: break;
+      case VK_LValue: OS << " lvalue"; break;
+      case VK_XValue: OS << " xvalue"; break;
+      }
+    }
+    void DumpObjectKind(ExprObjectKind K) {
+      switch (K) {
+      case OK_Ordinary: break;
+      case OK_BitField: OS << " bitfield"; break;
+      case OK_ObjCProperty: OS << " objcproperty"; break;
+      case OK_VectorComponent: OS << " vectorcomponent"; break;
+      }
+    }
     void DumpExpr(const Expr *Node) {
       DumpStmt(Node);
       OS << ' ';
       DumpType(Node->getType());
+      DumpValueKind(Node->getValueKind());
+      DumpObjectKind(Node->getObjectKind());
     }
     void DumpSourceRange(const Stmt *Node);
     void DumpLocation(SourceLocation Loc);
@@ -122,7 +134,6 @@ namespace  {
     // Exprs
     void VisitExpr(Expr *Node);
     void VisitCastExpr(CastExpr *Node);
-    void VisitImplicitCastExpr(ImplicitCastExpr *Node);
     void VisitDeclRefExpr(DeclRefExpr *Node);
     void VisitPredefinedExpr(PredefinedExpr *Node);
     void VisitCharacterLiteral(CharacterLiteral *Node);
@@ -130,13 +141,13 @@ namespace  {
     void VisitFloatingLiteral(FloatingLiteral *Node);
     void VisitStringLiteral(StringLiteral *Str);
     void VisitUnaryOperator(UnaryOperator *Node);
-    void VisitSizeOfAlignOfExpr(SizeOfAlignOfExpr *Node);
+    void VisitUnaryExprOrTypeTraitExpr(UnaryExprOrTypeTraitExpr *Node);
     void VisitMemberExpr(MemberExpr *Node);
     void VisitExtVectorElementExpr(ExtVectorElementExpr *Node);
     void VisitBinaryOperator(BinaryOperator *Node);
     void VisitCompoundAssignOperator(CompoundAssignOperator *Node);
     void VisitAddrLabelExpr(AddrLabelExpr *Node);
-    void VisitTypesCompatibleExpr(TypesCompatibleExpr *Node);
+    void VisitBlockExpr(BlockExpr *Node);
 
     // C++
     void VisitCXXNamedCastExpr(CXXNamedCastExpr *Node);
@@ -145,7 +156,7 @@ namespace  {
     void VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *Node);
     void VisitCXXConstructExpr(CXXConstructExpr *Node);
     void VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *Node);
-    void VisitCXXExprWithTemporaries(CXXExprWithTemporaries *Node);
+    void VisitExprWithCleanups(ExprWithCleanups *Node);
     void VisitUnresolvedLookupExpr(UnresolvedLookupExpr *Node);
     void DumpCXXTemporary(CXXTemporary *Temporary);
 
@@ -156,8 +167,6 @@ namespace  {
     void VisitObjCSelectorExpr(ObjCSelectorExpr *Node);
     void VisitObjCProtocolExpr(ObjCProtocolExpr *Node);
     void VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *Node);
-    void VisitObjCImplicitSetterGetterRefExpr(
-                                          ObjCImplicitSetterGetterRefExpr *Node);
     void VisitObjCIvarRefExpr(ObjCIvarRefExpr *Node);
   };
 }
@@ -227,6 +236,9 @@ void StmtDumper::DumpDeclarator(Decl *D) {
   if (TypedefDecl *localType = dyn_cast<TypedefDecl>(D)) {
     OS << "\"typedef " << localType->getUnderlyingType().getAsString()
        << ' ' << localType << '"';
+  } else if (TypeAliasDecl *localType = dyn_cast<TypeAliasDecl>(D)) {
+    OS << "\"using " << localType << " = "
+       << localType->getUnderlyingType().getAsString() << '"';
   } else if (ValueDecl *VD = dyn_cast<ValueDecl>(D)) {
     OS << "\"";
     // Emit storage class for vardecls.
@@ -270,9 +282,17 @@ void StmtDumper::DumpDeclarator(Decl *D) {
     // print using decl (e.g. "using std::string;")
     const char *tn = UD->isTypeName() ? "typename " : "";
     OS << '"' << UD->getDeclKindName() << tn;
-    UD->getTargetNestedNameDecl()->print(OS,
-        PrintingPolicy(UD->getASTContext().getLangOptions()));
+    UD->getQualifier()->print(OS,
+                        PrintingPolicy(UD->getASTContext().getLangOptions()));
     OS << ";\"";
+  } else if (LabelDecl *LD = dyn_cast<LabelDecl>(D)) {
+    OS << "label " << LD->getNameAsString();
+  } else if (StaticAssertDecl *SAD = dyn_cast<StaticAssertDecl>(D)) {
+    OS << "\"static_assert(\n";
+    DumpSubTree(SAD->getAssertExpr());
+    OS << ",\n";
+    DumpSubTree(SAD->getMessage());
+    OS << ");\"";
   } else {
     assert(0 && "Unexpected decl");
   }
@@ -344,39 +364,30 @@ void StmtDumper::VisitCastExpr(CastExpr *Node) {
   OS << ">";
 }
 
-void StmtDumper::VisitImplicitCastExpr(ImplicitCastExpr *Node) {
-  VisitCastExpr(Node);
-  switch (Node->getValueKind()) {
-  case VK_LValue:
-    OS << " lvalue";
-    break;
-  case VK_XValue:
-    OS << " xvalue";
-    break;
-  case VK_RValue:
-    break;
-  }
-}
-
 void StmtDumper::VisitDeclRefExpr(DeclRefExpr *Node) {
   DumpExpr(Node);
 
   OS << " ";
-  switch (Node->getDecl()->getKind()) {
-  default: OS << "Decl"; break;
-  case Decl::Function: OS << "FunctionDecl"; break;
-  case Decl::Var: OS << "Var"; break;
-  case Decl::ParmVar: OS << "ParmVar"; break;
-  case Decl::EnumConstant: OS << "EnumConstant"; break;
-  case Decl::Typedef: OS << "Typedef"; break;
-  case Decl::Record: OS << "Record"; break;
-  case Decl::Enum: OS << "Enum"; break;
-  case Decl::CXXRecord: OS << "CXXRecord"; break;
-  case Decl::ObjCInterface: OS << "ObjCInterface"; break;
-  case Decl::ObjCClass: OS << "ObjCClass"; break;
+  DumpDeclRef(Node->getDecl());
+  if (Node->getDecl() != Node->getFoundDecl()) {
+    OS << " (";
+    DumpDeclRef(Node->getFoundDecl());
+    OS << ")";
+  }
+}
+
+void StmtDumper::DumpDeclRef(Decl *d) {
+  OS << d->getDeclKindName() << ' ' << (void*) d;
+
+  if (NamedDecl *nd = dyn_cast<NamedDecl>(d)) {
+    OS << " '";
+    nd->getDeclName().printName(OS);
+    OS << "'";
   }
 
-  OS << "='" << Node->getDecl() << "' " << (void*)Node->getDecl();
+  if (ValueDecl *vd = dyn_cast<ValueDecl>(d)) {
+    OS << ' '; DumpType(vd->getType());
+  }
 }
 
 void StmtDumper::VisitUnresolvedLookupExpr(UnresolvedLookupExpr *Node) {
@@ -444,9 +455,19 @@ void StmtDumper::VisitUnaryOperator(UnaryOperator *Node) {
   OS << " " << (Node->isPostfix() ? "postfix" : "prefix")
      << " '" << UnaryOperator::getOpcodeStr(Node->getOpcode()) << "'";
 }
-void StmtDumper::VisitSizeOfAlignOfExpr(SizeOfAlignOfExpr *Node) {
+void StmtDumper::VisitUnaryExprOrTypeTraitExpr(UnaryExprOrTypeTraitExpr *Node) {
   DumpExpr(Node);
-  OS << " " << (Node->isSizeOf() ? "sizeof" : "alignof") << " ";
+  switch(Node->getKind()) {
+  case UETT_SizeOf:
+    OS << " sizeof ";
+    break;
+  case UETT_AlignOf:
+    OS << " __alignof ";
+    break;
+  case UETT_VecStep:
+    OS << " vec_step ";
+    break;
+  }
   if (Node->isArgumentType())
     DumpType(Node->getArgumentType());
 }
@@ -474,20 +495,36 @@ void StmtDumper::VisitCompoundAssignOperator(CompoundAssignOperator *Node) {
   DumpType(Node->getComputationResultType());
 }
 
+void StmtDumper::VisitBlockExpr(BlockExpr *Node) {
+  DumpExpr(Node);
+
+  IndentLevel++;
+  BlockDecl *block = Node->getBlockDecl();
+  if (block->capturesCXXThis()) {
+    OS << '\n'; Indent(); OS << "(capture this)";
+  }
+  for (BlockDecl::capture_iterator
+         i = block->capture_begin(), e = block->capture_end(); i != e; ++i) {
+    OS << '\n';
+    Indent();
+    OS << "(capture ";
+    if (i->isByRef()) OS << "byref ";
+    if (i->isNested()) OS << "nested ";
+    DumpDeclRef(i->getVariable());
+    if (i->hasCopyExpr()) DumpSubTree(i->getCopyExpr());
+    OS << ")";
+  }
+  IndentLevel--;
+
+  DumpSubTree(block->getBody());
+}
+
 // GNU extensions.
 
 void StmtDumper::VisitAddrLabelExpr(AddrLabelExpr *Node) {
   DumpExpr(Node);
   OS << " " << Node->getLabel()->getName()
      << " " << (void*)Node->getLabel();
-}
-
-void StmtDumper::VisitTypesCompatibleExpr(TypesCompatibleExpr *Node) {
-  DumpExpr(Node);
-  OS << " ";
-  DumpType(Node->getArgType1());
-  OS << " ";
-  DumpType(Node->getArgType2());
 }
 
 //===----------------------------------------------------------------------===//
@@ -534,7 +571,7 @@ void StmtDumper::VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *Node) {
   DumpCXXTemporary(Node->getTemporary());
 }
 
-void StmtDumper::VisitCXXExprWithTemporaries(CXXExprWithTemporaries *Node) {
+void StmtDumper::VisitExprWithCleanups(ExprWithCleanups *Node) {
   DumpExpr(Node);
   ++IndentLevel;
   for (unsigned i = 0, e = Node->getNumTemporaries(); i != e; ++i) {
@@ -605,27 +642,23 @@ void StmtDumper::VisitObjCProtocolExpr(ObjCProtocolExpr *Node) {
 
 void StmtDumper::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *Node) {
   DumpExpr(Node);
-  if (Node->isSuperReceiver())
-    OS << " Kind=PropertyRef Property=\"" << Node->getProperty() << '"'
-    << " super";
-  else
-    OS << " Kind=PropertyRef Property=\"" << Node->getProperty() << '"';
-}
+  if (Node->isImplicitProperty()) {
+    OS << " Kind=MethodRef Getter=\"";
+    if (Node->getImplicitPropertyGetter())
+      OS << Node->getImplicitPropertyGetter()->getSelector().getAsString();
+    else
+      OS << "(null)";
 
-void StmtDumper::VisitObjCImplicitSetterGetterRefExpr(
-                                        ObjCImplicitSetterGetterRefExpr *Node) {
-  DumpExpr(Node);
+    OS << "\" Setter=\"";
+    if (ObjCMethodDecl *Setter = Node->getImplicitPropertySetter())
+      OS << Setter->getSelector().getAsString();
+    else
+      OS << "(null)";
+    OS << "\"";
+  } else {
+    OS << " Kind=PropertyRef Property=\"" << Node->getExplicitProperty() << '"';
+  }
 
-  ObjCMethodDecl *Getter = Node->getGetterMethod();
-  ObjCMethodDecl *Setter = Node->getSetterMethod();
-  OS << " Kind=MethodRef Getter=\""
-     << Getter->getSelector().getAsString()
-     << "\" Setter=\"";
-  if (Setter)
-    OS << Setter->getSelector().getAsString();
-  else
-    OS << "(null)";
-  OS << "\"";
   if (Node->isSuperReceiver())
     OS << " super";
 }

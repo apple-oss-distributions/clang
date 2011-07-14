@@ -226,15 +226,17 @@ void Lint::visitCallSite(CallSite CS) {
                 "Undefined behavior: Call argument type mismatches "
                 "callee parameter type", &I);
 
-        // Check that noalias arguments don't alias other arguments. The
-        // AliasAnalysis API isn't expressive enough for what we really want
-        // to do. Known partial overlap is not distinguished from the case
-        // where nothing is known.
+        // Check that noalias arguments don't alias other arguments. This is
+        // not fully precise because we don't know the sizes of the dereferenced
+        // memory regions.
         if (Formal->hasNoAliasAttr() && Actual->getType()->isPointerTy())
-          for (CallSite::arg_iterator BI = CS.arg_begin(); BI != AE; ++BI) {
-            Assert1(AI == BI || AA->alias(*AI, *BI) != AliasAnalysis::MustAlias,
-                    "Unusual: noalias argument aliases another argument", &I);
-          }
+          for (CallSite::arg_iterator BI = CS.arg_begin(); BI != AE; ++BI)
+            if (AI != BI && (*BI)->getType()->isPointerTy()) {
+              AliasAnalysis::AliasResult Result = AA->alias(*AI, *BI);
+              Assert1(Result != AliasAnalysis::MustAlias &&
+                      Result != AliasAnalysis::PartialAlias,
+                      "Unusual: noalias argument aliases another argument", &I);
+            }
 
         // Check that an sret argument points to valid memory.
         if (Formal->hasStructRetAttr() && Actual->getType()->isPointerTy()) {
@@ -565,7 +567,7 @@ Value *Lint::findValueImpl(Value *V, bool OffsetOk,
   // TODO: Look through eliminable cast pairs.
   // TODO: Look through calls with unique return values.
   // TODO: Look through vector insert/extract/shuffle.
-  V = OffsetOk ? V->getUnderlyingObject() : V->stripPointerCasts();
+  V = OffsetOk ? GetUnderlyingObject(V, TD) : V->stripPointerCasts();
   if (LoadInst *L = dyn_cast<LoadInst>(V)) {
     BasicBlock::iterator BBI = L;
     BasicBlock *BB = L->getParent();
@@ -581,8 +583,9 @@ Value *Lint::findValueImpl(Value *V, bool OffsetOk,
       BBI = BB->end();
     }
   } else if (PHINode *PN = dyn_cast<PHINode>(V)) {
-    if (Value *W = PN->hasConstantValue(DT))
-      return findValueImpl(W, OffsetOk, Visited);
+    if (Value *W = PN->hasConstantValue())
+      if (W != V)
+        return findValueImpl(W, OffsetOk, Visited);
   } else if (CastInst *CI = dyn_cast<CastInst>(V)) {
     if (CI->isNoopCast(TD ? TD->getIntPtrType(V->getContext()) :
                             Type::getInt64Ty(V->getContext())))
@@ -603,7 +606,7 @@ Value *Lint::findValueImpl(Value *V, bool OffsetOk,
                                     Type::getInt64Ty(V->getContext())))
         return findValueImpl(CE->getOperand(0), OffsetOk, Visited);
     } else if (CE->getOpcode() == Instruction::ExtractValue) {
-      const SmallVector<unsigned, 4> &Indices = CE->getIndices();
+      ArrayRef<unsigned> Indices = CE->getIndices();
       if (Value *W = FindInsertedValue(CE->getOperand(0),
                                        Indices.begin(),
                                        Indices.end()))
@@ -614,9 +617,8 @@ Value *Lint::findValueImpl(Value *V, bool OffsetOk,
 
   // As a last resort, try SimplifyInstruction or constant folding.
   if (Instruction *Inst = dyn_cast<Instruction>(V)) {
-    if (Value *W = SimplifyInstruction(Inst, TD))
-      if (W != Inst)
-        return findValueImpl(W, OffsetOk, Visited);
+    if (Value *W = SimplifyInstruction(Inst, TD, DT))
+      return findValueImpl(W, OffsetOk, Visited);
   } else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(V)) {
     if (Value *W = ConstantFoldConstantExpression(CE, TD))
       if (W != V)

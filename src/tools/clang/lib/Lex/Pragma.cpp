@@ -110,7 +110,8 @@ void Preprocessor::HandlePragmaDirective(unsigned Introducer) {
   PragmaHandlers->HandlePragma(*this, PragmaIntroducerKind(Introducer), Tok);
 
   // If the pragma handler didn't read the rest of the line, consume it now.
-  if (CurPPLexer && CurPPLexer->ParsingPreprocessorDirective)
+  if ((CurTokenLexer && CurTokenLexer->isParsingPreprocessorDirective()) 
+   || (CurPPLexer && CurPPLexer->ParsingPreprocessorDirective))
     DiscardUntilEndOfDirective();
 }
 
@@ -174,7 +175,22 @@ void Preprocessor::Handle_Pragma(Token &Tok) {
     }
   }
   
-  Handle_Pragma(PIK__Pragma, StrVal, PragmaLoc, RParenLoc);
+  // Plop the string (including the newline and trailing null) into a buffer
+  // where we can lex it.
+  Token TmpTok;
+  TmpTok.startToken();
+  CreateString(&StrVal[0], StrVal.size(), TmpTok);
+  SourceLocation TokLoc = TmpTok.getLocation();
+
+  // Make and enter a lexer object so that we lex and expand the tokens just
+  // like any others.
+  Lexer *TL = Lexer::Create_PragmaLexer(TokLoc, PragmaLoc, RParenLoc,
+                                        StrVal.size(), *this);
+
+  EnterSourceFileWithLexer(TL, 0);
+
+  // With everything set up, lex this as a #pragma directive.
+  HandlePragmaDirective(PIK__Pragma);
 
   // Finally, return whatever came after the pragma directive.
   return Lex(Tok);
@@ -193,16 +209,16 @@ void Preprocessor::HandleMicrosoft__pragma(Token &Tok) {
     return;
   }
 
-  // Get the tokens enclosed within the __pragma().
+  // Get the tokens enclosed within the __pragma(), as well as the final ')'.
   llvm::SmallVector<Token, 32> PragmaToks;
   int NumParens = 0;
   Lex(Tok);
   while (Tok.isNot(tok::eof)) {
+    PragmaToks.push_back(Tok);
     if (Tok.is(tok::l_paren))
       NumParens++;
     else if (Tok.is(tok::r_paren) && NumParens-- == 0)
       break;
-    PragmaToks.push_back(Tok);
     Lex(Tok);
   }
 
@@ -211,45 +227,23 @@ void Preprocessor::HandleMicrosoft__pragma(Token &Tok) {
     return;
   }
 
-  // Build the pragma string.
-  std::string StrVal = " ";
-  for (llvm::SmallVector<Token, 32>::iterator I =
-       PragmaToks.begin(), E = PragmaToks.end(); I != E; ++I) {
-    StrVal += getSpelling(*I);
-  }
-  
-  SourceLocation RParenLoc = Tok.getLocation();
+  PragmaToks.front().setFlag(Token::LeadingSpace);
 
-  Handle_Pragma(PIK___pragma, StrVal, PragmaLoc, RParenLoc);
+  // Replace the ')' with an EOD to mark the end of the pragma.
+  PragmaToks.back().setKind(tok::eod);
+
+  Token *TokArray = new Token[PragmaToks.size()];
+  std::copy(PragmaToks.begin(), PragmaToks.end(), TokArray);
+
+  // Push the tokens onto the stack.
+  EnterTokenStream(TokArray, PragmaToks.size(), true, true);
+
+  // With everything set up, lex this as a #pragma directive.
+  HandlePragmaDirective(PIK___pragma);
 
   // Finally, return whatever came after the pragma directive.
   return Lex(Tok);
 }
-
-void Preprocessor::Handle_Pragma(unsigned Introducer,
-                                 const std::string &StrVal,
-                                 SourceLocation PragmaLoc,
-                                 SourceLocation RParenLoc) {
-
-  // Plop the string (including the newline and trailing null) into a buffer
-  // where we can lex it.
-  Token TmpTok;
-  TmpTok.startToken();
-  CreateString(&StrVal[0], StrVal.size(), TmpTok);
-  SourceLocation TokLoc = TmpTok.getLocation();
-
-  // Make and enter a lexer object so that we lex and expand the tokens just
-  // like any others.
-  Lexer *TL = Lexer::Create_PragmaLexer(TokLoc, PragmaLoc, RParenLoc,
-                                        StrVal.size(), *this);
-
-  EnterSourceFileWithLexer(TL, 0);
-
-  // With everything set up, lex this as a #pragma directive.
-  HandlePragmaDirective(Introducer);
-}
-
-
 
 /// HandlePragmaOnce - Handle #pragma once.  OnceTok is the 'once'.
 ///
@@ -289,10 +283,10 @@ void Preprocessor::HandlePragmaPoison(Token &PoisonTok) {
     if (CurPPLexer) CurPPLexer->LexingRawMode = false;
 
     // If we reached the end of line, we're done.
-    if (Tok.is(tok::eom)) return;
+    if (Tok.is(tok::eod)) return;
 
     // Can only poison identifiers.
-    if (Tok.isNot(tok::identifier)) {
+    if (Tok.isNot(tok::raw_identifier)) {
       Diag(Tok, diag::err_pp_invalid_poison);
       return;
     }
@@ -354,8 +348,8 @@ void Preprocessor::HandlePragmaDependency(Token &DependencyTok) {
   Token FilenameTok;
   CurPPLexer->LexIncludeFilename(FilenameTok);
 
-  // If the token kind is EOM, the error has already been diagnosed.
-  if (FilenameTok.is(tok::eom))
+  // If the token kind is EOD, the error has already been diagnosed.
+  if (FilenameTok.is(tok::eod))
     return;
 
   // Reserve a buffer to get the spelling.
@@ -374,7 +368,7 @@ void Preprocessor::HandlePragmaDependency(Token &DependencyTok) {
 
   // Search include directories for this file.
   const DirectoryLookup *CurDir;
-  const FileEntry *File = LookupFile(Filename, isAngled, 0, CurDir);
+  const FileEntry *File = LookupFile(Filename, isAngled, 0, CurDir, NULL, NULL);
   if (File == 0) {
     Diag(FilenameTok, diag::err_pp_file_not_found) << Filename;
     return;
@@ -387,7 +381,7 @@ void Preprocessor::HandlePragmaDependency(Token &DependencyTok) {
     // Lex tokens at the end of the message and include them in the message.
     std::string Message;
     Lex(DependencyTok);
-    while (DependencyTok.isNot(tok::eom)) {
+    while (DependencyTok.isNot(tok::eod)) {
       Message += getSpelling(DependencyTok) + " ";
       Lex(DependencyTok);
     }
@@ -476,7 +470,7 @@ void Preprocessor::HandlePragmaComment(Token &Tok) {
   }
   Lex(Tok);  // eat the r_paren.
 
-  if (Tok.isNot(tok::eom)) {
+  if (Tok.isNot(tok::eod)) {
     Diag(Tok.getLocation(), diag::err_pragma_comment_malformed);
     return;
   }
@@ -547,7 +541,7 @@ void Preprocessor::HandlePragmaMessage(Token &Tok) {
     Lex(Tok);  // eat the r_paren.
   }
 
-  if (Tok.isNot(tok::eom)) {
+  if (Tok.isNot(tok::eod)) {
     Diag(Tok.getLocation(), diag::err_pragma_message_malformed);
     return;
   }
@@ -599,7 +593,7 @@ IdentifierInfo *Preprocessor::ParsePragmaPushOrPopMacro(Token &Tok) {
   // Create a Token from the string.
   Token MacroTok;
   MacroTok.startToken();
-  MacroTok.setKind(tok::identifier);
+  MacroTok.setKind(tok::raw_identifier);
   CreateString(&StrVal[1], StrVal.size() - 2, MacroTok);
 
   // Get the IdentifierInfo of MacroToPushTok.
@@ -646,7 +640,11 @@ void Preprocessor::HandlePragmaPopMacro(Token &PopMacroTok) {
   if (iter != PragmaPushMacroInfo.end()) {
     // Release the MacroInfo currently associated with IdentInfo.
     MacroInfo *CurrentMI = getMacroInfo(IdentInfo);
-    if (CurrentMI) ReleaseMacroInfo(CurrentMI);
+    if (CurrentMI) {
+      if (CurrentMI->isWarnIfUnused())
+        WarnUnusedMacroLocs.erase(CurrentMI->getDefinitionLoc());
+      ReleaseMacroInfo(CurrentMI);
+    }
 
     // Get the MacroInfo we want to reinstall.
     MacroInfo *MacroToReInstall = iter->second.back();
@@ -717,6 +715,33 @@ void Preprocessor::RemovePragmaHandler(llvm::StringRef Namespace,
   // it.
   if (NS != PragmaHandlers && NS->IsEmpty())
     PragmaHandlers->RemovePragmaHandler(NS);
+}
+
+bool Preprocessor::LexOnOffSwitch(tok::OnOffSwitch &Result) {
+  Token Tok;
+  LexUnexpandedToken(Tok);
+
+  if (Tok.isNot(tok::identifier)) {
+    Diag(Tok, diag::ext_on_off_switch_syntax);
+    return true;
+  }
+  IdentifierInfo *II = Tok.getIdentifierInfo();
+  if (II->isStr("ON"))
+    Result = tok::OOS_ON;
+  else if (II->isStr("OFF"))
+    Result = tok::OOS_OFF;
+  else if (II->isStr("DEFAULT"))
+    Result = tok::OOS_DEFAULT;
+  else {
+    Diag(Tok, diag::ext_on_off_switch_syntax);
+    return true;
+  }
+
+  // Verify that this is followed by EOD.
+  LexUnexpandedToken(Tok);
+  if (Tok.isNot(tok::eod))
+    Diag(Tok, diag::ext_pragma_syntax_eod);
+  return false;
 }
 
 namespace {
@@ -810,6 +835,7 @@ public:
   explicit PragmaDiagnosticHandler() : PragmaHandler("diagnostic") {}
   virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
                             Token &DiagToken) {
+    SourceLocation DiagLoc = DiagToken.getLocation();
     Token Tok;
     PP.LexUnexpandedToken(Tok);
     if (Tok.isNot(tok::identifier)) {
@@ -828,12 +854,12 @@ public:
     else if (II->isStr("fatal"))
       Map = diag::MAP_FATAL;
     else if (II->isStr("pop")) {
-      if (!PP.getDiagnostics().popMappings())
+      if (!PP.getDiagnostics().popMappings(DiagLoc))
         PP.Diag(Tok, diag::warn_pragma_diagnostic_cannot_pop);
 
       return;
     } else if (II->isStr("push")) {
-      PP.getDiagnostics().pushMappings();
+      PP.getDiagnostics().pushMappings(DiagLoc);
       return;
     } else {
       PP.Diag(Tok, diag::warn_pragma_diagnostic_invalid);
@@ -857,7 +883,7 @@ public:
       PP.LexUnexpandedToken(Tok);
     }
 
-    if (Tok.isNot(tok::eom)) {
+    if (Tok.isNot(tok::eod)) {
       PP.Diag(Tok.getLocation(), diag::warn_pragma_diagnostic_invalid_token);
       return;
     }
@@ -883,7 +909,7 @@ public:
     }
 
     if (PP.getDiagnostics().setDiagnosticGroupMapping(WarningName.c_str()+2,
-                                                      Map))
+                                                      Map, DiagLoc))
       PP.Diag(StrToks[0].getLocation(),
               diag::warn_pragma_diagnostic_unknown_warning) << WarningName;
   }
@@ -930,57 +956,15 @@ struct PragmaPopMacroHandler : public PragmaHandler {
 
 // Pragma STDC implementations.
 
-enum STDCSetting {
-  STDC_ON, STDC_OFF, STDC_DEFAULT, STDC_INVALID
-};
-
-static STDCSetting LexOnOffSwitch(Preprocessor &PP) {
-  Token Tok;
-  PP.LexUnexpandedToken(Tok);
-
-  if (Tok.isNot(tok::identifier)) {
-    PP.Diag(Tok, diag::ext_stdc_pragma_syntax);
-    return STDC_INVALID;
-  }
-  IdentifierInfo *II = Tok.getIdentifierInfo();
-  STDCSetting Result;
-  if (II->isStr("ON"))
-    Result = STDC_ON;
-  else if (II->isStr("OFF"))
-    Result = STDC_OFF;
-  else if (II->isStr("DEFAULT"))
-    Result = STDC_DEFAULT;
-  else {
-    PP.Diag(Tok, diag::ext_stdc_pragma_syntax);
-    return STDC_INVALID;
-  }
-
-  // Verify that this is followed by EOM.
-  PP.LexUnexpandedToken(Tok);
-  if (Tok.isNot(tok::eom))
-    PP.Diag(Tok, diag::ext_stdc_pragma_syntax_eom);
-  return Result;
-}
-
-/// PragmaSTDC_FP_CONTRACTHandler - "#pragma STDC FP_CONTRACT ...".
-struct PragmaSTDC_FP_CONTRACTHandler : public PragmaHandler {
-  PragmaSTDC_FP_CONTRACTHandler() : PragmaHandler("FP_CONTRACT") {}
-  virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
-                            Token &Tok) {
-    // We just ignore the setting of FP_CONTRACT. Since we don't do contractions
-    // at all, our default is OFF and setting it to ON is an optimization hint
-    // we can safely ignore.  When we support -ffma or something, we would need
-    // to diagnose that we are ignoring FMA.
-    LexOnOffSwitch(PP);
-  }
-};
-
 /// PragmaSTDC_FENV_ACCESSHandler - "#pragma STDC FENV_ACCESS ...".
 struct PragmaSTDC_FENV_ACCESSHandler : public PragmaHandler {
   PragmaSTDC_FENV_ACCESSHandler() : PragmaHandler("FENV_ACCESS") {}
   virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
                             Token &Tok) {
-    if (LexOnOffSwitch(PP) == STDC_ON)
+    tok::OnOffSwitch OOS;
+    if (PP.LexOnOffSwitch(OOS))
+     return;
+    if (OOS == tok::OOS_ON)
       PP.Diag(Tok, diag::warn_stdc_fenv_access_not_supported);
   }
 };
@@ -991,7 +975,8 @@ struct PragmaSTDC_CX_LIMITED_RANGEHandler : public PragmaHandler {
     : PragmaHandler("CX_LIMITED_RANGE") {}
   virtual void HandlePragma(Preprocessor &PP, PragmaIntroducerKind Introducer,
                             Token &Tok) {
-    LexOnOffSwitch(PP);
+    tok::OnOffSwitch OOS;
+    PP.LexOnOffSwitch(OOS);
   }
 };
 
@@ -1029,7 +1014,6 @@ void Preprocessor::RegisterBuiltinPragmas() {
   AddPragmaHandler("clang", new PragmaDependencyHandler());
   AddPragmaHandler("clang", new PragmaDiagnosticHandler());
 
-  AddPragmaHandler("STDC", new PragmaSTDC_FP_CONTRACTHandler());
   AddPragmaHandler("STDC", new PragmaSTDC_FENV_ACCESSHandler());
   AddPragmaHandler("STDC", new PragmaSTDC_CX_LIMITED_RANGEHandler());
   AddPragmaHandler("STDC", new PragmaSTDC_UnknownHandler());

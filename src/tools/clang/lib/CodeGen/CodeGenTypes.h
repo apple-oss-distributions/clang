@@ -88,7 +88,7 @@ private:
   /// and maps llvm::Types to corresponding clang::Type. llvm::PATypeHolder is
   /// used instead of llvm::Type because it allows us to bypass potential
   /// dangling type pointers due to type refinement on llvm side.
-  llvm::DenseMap<Type *, llvm::PATypeHolder> TypeCache;
+  llvm::DenseMap<const Type *, llvm::PATypeHolder> TypeCache;
 
   /// ConvertNewType - Convert type T into a llvm::Type. Do not use this
   /// method directly because it does not do any type caching. This method
@@ -100,6 +100,11 @@ private:
   /// pointers that are referenced but have not been converted yet.  This is
   /// used to handle cyclic structures properly.
   void HandleLateResolvedPointers();
+
+  /// addRecordTypeName - Compute a name from the given record decl with an
+  /// optional suffix and name the given LLVM type using it.
+  void addRecordTypeName(const RecordDecl *RD, const llvm::Type *Ty,
+                         llvm::StringRef suffix);
 
 public:
   CodeGenTypes(ASTContext &Ctx, llvm::Module &M, const llvm::TargetData &TD,
@@ -143,11 +148,20 @@ public:
   /// and/or incomplete argument types, this will return the opaque type.
   const llvm::Type *GetFunctionTypeForVTable(GlobalDecl GD);
 
-  const CGRecordLayout &getCGRecordLayout(const RecordDecl*) const;
+  const CGRecordLayout &getCGRecordLayout(const RecordDecl*);
+
+  /// addBaseSubobjectTypeName - Add a type name for the base subobject of the
+  /// given record layout.
+  void addBaseSubobjectTypeName(const CXXRecordDecl *RD,
+                                const CGRecordLayout &layout);
 
   /// UpdateCompletedType - When we find the full definition for a TagDecl,
   /// replace the 'opaque' type we previously made for it if applicable.
   void UpdateCompletedType(const TagDecl *TD);
+
+  /// getNullaryFunctionInfo - Get the function info for a void()
+  /// function with standard CC.
+  const CGFunctionInfo &getNullaryFunctionInfo();
 
   /// getFunctionInfo - Get the function info for the specified function decl.
   const CGFunctionInfo &getFunctionInfo(GlobalDecl GD);

@@ -17,9 +17,7 @@ add_llvm_library(LLVMipo
   LowerSetJmp.cpp
   MergeFunctions.cpp
   PartialInlining.cpp
-  PartialSpecialization.cpp
   PruneEH.cpp
   StripDeadPrototypes.cpp
   StripSymbols.cpp
-  StructRetPromotion.cpp
   )

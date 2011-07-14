@@ -19,13 +19,33 @@
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Analysis/Analyses/LiveVariables.h"
 #include "clang/Analysis/Analyses/PseudoConstantAnalysis.h"
+#include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
 #include "clang/Analysis/AnalysisContext.h"
 #include "clang/Analysis/CFG.h"
+#include "clang/Analysis/CFGStmtMap.h"
 #include "clang/Analysis/Support/BumpVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace clang;
+
+AnalysisContext::AnalysisContext(const Decl *d,
+                                 idx::TranslationUnit *tu,
+                                 bool useUnoptimizedCFG,
+                                 bool addehedges,
+                                 bool addImplicitDtors,
+                                 bool addInitializers)
+  : D(d), TU(tu),
+    forcedBlkExprs(0),
+    builtCFG(false), builtCompleteCFG(false),
+    useUnoptimizedCFG(useUnoptimizedCFG),
+    ReferencedBlockVars(0)
+{
+  cfgBuildOptions.forcedBlkExprs = &forcedBlkExprs;
+  cfgBuildOptions.AddEHEdges = addehedges;
+  cfgBuildOptions.AddImplicitDtors = addImplicitDtors;
+  cfgBuildOptions.AddInitializers = addInitializers;
+}
 
 void AnalysisContextManager::clear() {
   for (ContextMap::iterator I = Contexts.begin(), E = Contexts.end(); I!=E; ++I)
@@ -54,76 +74,113 @@ const ImplicitParamDecl *AnalysisContext::getSelfDecl() const {
   return NULL;
 }
 
+void AnalysisContext::registerForcedBlockExpression(const Stmt *stmt) {
+  if (!forcedBlkExprs)
+    forcedBlkExprs = new CFG::BuildOptions::ForcedBlkExprs();
+  // Default construct an entry for 'stmt'.
+  if (const ParenExpr *pe = dyn_cast<ParenExpr>(stmt))
+    stmt = pe->IgnoreParens();
+  (void) (*forcedBlkExprs)[stmt];
+}
+
+const CFGBlock *
+AnalysisContext::getBlockForRegisteredExpression(const Stmt *stmt) {
+  assert(forcedBlkExprs);
+  if (const ParenExpr *pe = dyn_cast<ParenExpr>(stmt))
+    stmt = pe->IgnoreParens();
+  CFG::BuildOptions::ForcedBlkExprs::const_iterator itr = 
+    forcedBlkExprs->find(stmt);
+  assert(itr != forcedBlkExprs->end());
+  return itr->second;
+}
+
 CFG *AnalysisContext::getCFG() {
-  if (UseUnoptimizedCFG)
+  if (useUnoptimizedCFG)
     return getUnoptimizedCFG();
 
   if (!builtCFG) {
-    CFG::BuildOptions B;
-    B.AddEHEdges = AddEHEdges;
-    B.AddImplicitDtors = AddImplicitDtors;
-    B.AddInitializers = AddInitializers;
-    cfg = CFG::buildCFG(D, getBody(), &D->getASTContext(), B);
+    cfg.reset(CFG::buildCFG(D, getBody(),
+                            &D->getASTContext(), cfgBuildOptions));
     // Even when the cfg is not successfully built, we don't
     // want to try building it again.
     builtCFG = true;
   }
-  return cfg;
+  return cfg.get();
 }
 
 CFG *AnalysisContext::getUnoptimizedCFG() {
   if (!builtCompleteCFG) {
-    CFG::BuildOptions B;
+    CFG::BuildOptions B = cfgBuildOptions;
     B.PruneTriviallyFalseEdges = false;
-    B.AddEHEdges = AddEHEdges;
-    B.AddImplicitDtors = AddImplicitDtors;
-    B.AddInitializers = AddInitializers;
-    completeCFG = CFG::buildCFG(D, getBody(), &D->getASTContext(), B);
+    completeCFG.reset(CFG::buildCFG(D, getBody(), &D->getASTContext(), B));
     // Even when the cfg is not successfully built, we don't
     // want to try building it again.
     builtCompleteCFG = true;
   }
-  return completeCFG;
+  return completeCFG.get();
+}
+
+CFGStmtMap *AnalysisContext::getCFGStmtMap() {
+  if (cfgStmtMap)
+    return cfgStmtMap.get();
+  
+  if (CFG *c = getCFG()) {
+    cfgStmtMap.reset(CFGStmtMap::Build(c, &getParentMap()));
+    return cfgStmtMap.get();
+  }
+    
+  return 0;
+}
+
+CFGReverseBlockReachabilityAnalysis *AnalysisContext::getCFGReachablityAnalysis() {
+  if (CFA)
+    return CFA.get();
+  
+  if (CFG *c = getCFG()) {
+    CFA.reset(new CFGReverseBlockReachabilityAnalysis(*c));
+    return CFA.get();
+  }
+  
+  return 0;
+}
+
+void AnalysisContext::dumpCFG() {
+    getCFG()->dump(getASTContext().getLangOptions());
 }
 
 ParentMap &AnalysisContext::getParentMap() {
   if (!PM)
-    PM = new ParentMap(getBody());
+    PM.reset(new ParentMap(getBody()));
   return *PM;
 }
 
 PseudoConstantAnalysis *AnalysisContext::getPseudoConstantAnalysis() {
   if (!PCA)
-    PCA = new PseudoConstantAnalysis(getBody());
-  return PCA;
+    PCA.reset(new PseudoConstantAnalysis(getBody()));
+  return PCA.get();
 }
 
 LiveVariables *AnalysisContext::getLiveVariables() {
   if (!liveness) {
-    CFG *c = getCFG();
-    if (!c)
-      return 0;
-
-    liveness = new LiveVariables(*this);
-    liveness->runOnCFG(*c);
-    liveness->runOnAllBlocks(*c, 0, true);
+    if (CFG *c = getCFG()) {
+      liveness.reset(new LiveVariables(*this));
+      liveness->runOnCFG(*c);
+      liveness->runOnAllBlocks(*c, 0, true);
+    }
   }
 
-  return liveness;
+  return liveness.get();
 }
 
 LiveVariables *AnalysisContext::getRelaxedLiveVariables() {
-  if (!relaxedLiveness) {
-    CFG *c = getCFG();
-    if (!c)
-      return 0;
+  if (!relaxedLiveness)
+    if (CFG *c = getCFG()) {
+      relaxedLiveness.reset(new LiveVariables(*this, false));
+      relaxedLiveness->runOnCFG(*c);
+      relaxedLiveness->runOnAllBlocks(*c, 0, true);
+    }
 
-    relaxedLiveness = new LiveVariables(*this, false);
-    relaxedLiveness->runOnCFG(*c);
-    relaxedLiveness->runOnAllBlocks(*c, 0, true);
-  }
-
-  return relaxedLiveness;
+  return relaxedLiveness.get();
 }
 
 AnalysisContext *AnalysisContextManager::getContext(const Decl *D,
@@ -188,8 +245,8 @@ LocationContextManager::getLocationContext(AnalysisContext *ctx,
 const StackFrameContext*
 LocationContextManager::getStackFrame(AnalysisContext *ctx,
                                       const LocationContext *parent,
-                                      const Stmt *s, const CFGBlock *blk,
-                                      unsigned idx) {
+                                      const Stmt *s,
+                                      const CFGBlock *blk, unsigned idx) {
   llvm::FoldingSetNodeID ID;
   StackFrameContext::Profile(ID, ctx, parent, s, blk, idx);
   void *InsertPos;
@@ -269,7 +326,7 @@ public:
   }
 
   void VisitStmt(Stmt *S) {
-    for (Stmt::child_iterator I = S->child_begin(), E = S->child_end();I!=E;++I)
+    for (Stmt::child_range I = S->children(); I; ++I)
       if (Stmt *child = *I)
         Visit(child);
   }
@@ -340,12 +397,7 @@ AnalysisContext::getReferencedBlockVars(const BlockDecl *BD) {
 //===----------------------------------------------------------------------===//
 
 AnalysisContext::~AnalysisContext() {
-  delete cfg;
-  delete completeCFG;
-  delete liveness;
-  delete relaxedLiveness;
-  delete PM;
-  delete PCA;
+  delete forcedBlkExprs;
   delete ReferencedBlockVars;
 }
 

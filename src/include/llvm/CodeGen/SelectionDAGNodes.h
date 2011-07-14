@@ -29,7 +29,7 @@
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/Support/DebugLoc.h"
 #include <cassert>
 
@@ -524,24 +524,24 @@ public:
     return X;
   }
 
-  /// getFlaggedNode - If this node has a flag operand, return the node
-  /// to which the flag operand points. Otherwise return NULL.
-  SDNode *getFlaggedNode() const {
+  /// getGluedNode - If this node has a glue operand, return the node
+  /// to which the glue operand points. Otherwise return NULL.
+  SDNode *getGluedNode() const {
     if (getNumOperands() != 0 &&
-      getOperand(getNumOperands()-1).getValueType().getSimpleVT() == MVT::Flag)
+      getOperand(getNumOperands()-1).getValueType() == MVT::Glue)
       return getOperand(getNumOperands()-1).getNode();
     return 0;
   }
 
   // If this is a pseudo op, like copyfromreg, look to see if there is a
-  // real target node flagged to it.  If so, return the target node.
-  const SDNode *getFlaggedMachineNode() const {
+  // real target node glued to it.  If so, return the target node.
+  const SDNode *getGluedMachineNode() const {
     const SDNode *FoundNode = this;
 
-    // Climb up flag edges until a machine-opcode node is found, or the
+    // Climb up glue edges until a machine-opcode node is found, or the
     // end of the chain is reached.
     while (!FoundNode->isMachineOpcode()) {
-      const SDNode *N = FoundNode->getFlaggedNode();
+      const SDNode *N = FoundNode->getGluedNode();
       if (!N) break;
       FoundNode = N;
     }
@@ -549,11 +549,11 @@ public:
     return FoundNode;
   }
 
-  /// getFlaggedUser - If this node has a flag value with a user, return
+  /// getGluedUser - If this node has a glue value with a user, return
   /// the user (there is at most one). Otherwise return NULL.
-  SDNode *getFlaggedUser() const {
+  SDNode *getGluedUser() const {
     for (use_iterator UI = use_begin(), UE = use_end(); UI != UE; ++UI)
-      if (UI.getUse().get().getValueType() == MVT::Flag)
+      if (UI.getUse().get().getValueType() == MVT::Glue)
         return *UI;
     return 0;
   }
@@ -838,7 +838,7 @@ public:
 
 
 /// HandleSDNode - This class is used to form a handle around another node that
-/// is persistant and is updated across invocations of replaceAllUsesWith on its
+/// is persistent and is updated across invocations of replaceAllUsesWith on its
 /// operand.  This node should be directly created by end-users and not added to
 /// the AllNodes list.
 class HandleSDNode : public SDNode {

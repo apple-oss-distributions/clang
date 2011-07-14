@@ -19,6 +19,7 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/FileSystemStatCache.h"
 #include "llvm/Bitcode/BitstreamWriter.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
@@ -26,14 +27,15 @@
 using namespace clang;
 
 PCHGenerator::PCHGenerator(const Preprocessor &PP,
+                           const std::string &OutputFile,
                            bool Chaining,
                            const char *isysroot,
                            llvm::raw_ostream *OS)
-  : PP(PP), isysroot(isysroot), Out(OS), SemaPtr(0),
+  : PP(PP), OutputFile(OutputFile), isysroot(isysroot), Out(OS), SemaPtr(0),
     StatCalls(0), Stream(Buffer), Writer(Stream), Chaining(Chaining) {
   // Install a stat() listener to keep track of all of the stat()
   // calls.
-  StatCalls = new MemorizeStatCalls;
+  StatCalls = new MemorizeStatCalls();
   // If we have a chain, we want new stat calls only, so install the memorizer
   // *after* the already installed ASTReader's stat cache.
   PP.getFileManager().addStatCache(StatCalls,
@@ -49,7 +51,7 @@ void PCHGenerator::HandleTranslationUnit(ASTContext &Ctx) {
   
   // Emit the PCH file
   assert(SemaPtr && "No Sema?");
-  Writer.WriteAST(*SemaPtr, StatCalls, isysroot);
+  Writer.WriteAST(*SemaPtr, StatCalls, OutputFile, isysroot);
 
   // Write the generated bitstream to "Out".
   Out->write((char *)&Buffer.front(), Buffer.size());

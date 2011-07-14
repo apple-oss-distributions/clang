@@ -97,10 +97,41 @@ inline static const char *ARMCondCodeToString(ARMCC::CondCodes CC) {
   }
 }
 
+namespace ARM_PROC {
+  enum IMod {
+    IE = 2,
+    ID = 3
+  };
+
+  enum IFlags {
+    F = 1,
+    I = 2,
+    A = 4
+  };
+
+  inline static const char *IFlagsToString(unsigned val) {
+    switch (val) {
+    default: llvm_unreachable("Unknown iflags operand");
+    case F: return "f";
+    case I: return "i";
+    case A: return "a";
+    }
+  }
+
+  inline static const char *IModToString(unsigned val) {
+    switch (val) {
+    default: llvm_unreachable("Unknown imod operand");
+    case IE: return "ie";
+    case ID: return "id";
+    }
+  }
+}
+
 namespace ARM_MB {
   // The Memory Barrier Option constants map directly to the 4-bit encoding of
   // the option field for memory barrier operations.
   enum MemBOpt {
+    SY    = 15,
     ST    = 14,
     ISH   = 11,
     ISHST = 10,
@@ -113,6 +144,7 @@ namespace ARM_MB {
   inline static const char *MemBOptToString(unsigned val) {
     switch (val) {
     default: llvm_unreachable("Unknown memory operation");
+    case SY:    return "sy";
     case ST:    return "st";
     case ISH:   return "ish";
     case ISHST: return "ishst";
@@ -168,6 +200,59 @@ inline static unsigned getARMRegisterNumbering(unsigned Reg) {
 }
 
 namespace ARMII {
+
+  /// ARM Index Modes
+  enum IndexMode {
+    IndexModeNone  = 0,
+    IndexModePre   = 1,
+    IndexModePost  = 2,
+    IndexModeUpd   = 3
+  };
+
+  /// ARM Addressing Modes
+  enum AddrMode {
+    AddrModeNone    = 0,
+    AddrMode1       = 1,
+    AddrMode2       = 2,
+    AddrMode3       = 3,
+    AddrMode4       = 4,
+    AddrMode5       = 5,
+    AddrMode6       = 6,
+    AddrModeT1_1    = 7,
+    AddrModeT1_2    = 8,
+    AddrModeT1_4    = 9,
+    AddrModeT1_s    = 10, // i8 * 4 for pc and sp relative data
+    AddrModeT2_i12  = 11,
+    AddrModeT2_i8   = 12,
+    AddrModeT2_so   = 13,
+    AddrModeT2_pc   = 14, // +/- i12 for pc relative data
+    AddrModeT2_i8s4 = 15, // i8 * 4
+    AddrMode_i12    = 16
+  };
+
+  inline static const char *AddrModeToString(AddrMode addrmode) {
+    switch (addrmode) {
+    default: llvm_unreachable("Unknown memory operation");
+    case AddrModeNone:    return "AddrModeNone";
+    case AddrMode1:       return "AddrMode1";
+    case AddrMode2:       return "AddrMode2";
+    case AddrMode3:       return "AddrMode3";
+    case AddrMode4:       return "AddrMode4";
+    case AddrMode5:       return "AddrMode5";
+    case AddrMode6:       return "AddrMode6";
+    case AddrModeT1_1:    return "AddrModeT1_1";
+    case AddrModeT1_2:    return "AddrModeT1_2";
+    case AddrModeT1_4:    return "AddrModeT1_4";
+    case AddrModeT1_s:    return "AddrModeT1_s";
+    case AddrModeT2_i12:  return "AddrModeT2_i12";
+    case AddrModeT2_i8:   return "AddrModeT2_i8";
+    case AddrModeT2_so:   return "AddrModeT2_so";
+    case AddrModeT2_pc:   return "AddrModeT2_pc";
+    case AddrModeT2_i8s4: return "AddrModeT2_i8s4";
+    case AddrMode_i12:    return "AddrMode_i12";
+    }
+  }
+
   /// Target Operand Flag enum.
   enum TOF {
     //===------------------------------------------------------------------===//
@@ -182,6 +267,29 @@ namespace ARMII {
     /// MO_HI16 - On a symbol operand, this represents a relocation containing
     /// higher 16 bit of the address. Used only via movt instruction.
     MO_HI16,
+
+    /// MO_LO16_NONLAZY - On a symbol operand "FOO", this represents a
+    /// relocation containing lower 16 bit of the non-lazy-ptr indirect symbol,
+    /// i.e. "FOO$non_lazy_ptr".
+    /// Used only via movw instruction.
+    MO_LO16_NONLAZY,
+
+    /// MO_HI16_NONLAZY - On a symbol operand "FOO", this represents a
+    /// relocation containing lower 16 bit of the non-lazy-ptr indirect symbol,
+    /// i.e. "FOO$non_lazy_ptr". Used only via movt instruction.
+    MO_HI16_NONLAZY,
+
+    /// MO_LO16_NONLAZY_PIC - On a symbol operand "FOO", this represents a
+    /// relocation containing lower 16 bit of the PC relative address of the
+    /// non-lazy-ptr indirect symbol, i.e. "FOO$non_lazy_ptr - LABEL".
+    /// Used only via movw instruction.
+    MO_LO16_NONLAZY_PIC,
+
+    /// MO_HI16_NONLAZY_PIC - On a symbol operand "FOO", this represents a
+    /// relocation containing lower 16 bit of the PC relative address of the
+    /// non-lazy-ptr indirect symbol, i.e. "FOO$non_lazy_ptr - LABEL".
+    /// Used only via movt instruction.
+    MO_HI16_NONLAZY_PIC,
 
     /// MO_PLT - On a symbol operand, this represents an ELF PLT reference on a
     /// call operand.

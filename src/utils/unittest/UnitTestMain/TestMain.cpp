@@ -8,12 +8,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Config/config.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Signals.h"
 #include "gtest/gtest.h"
 
 
 #if defined(LLVM_ON_WIN32)
-# include <Windows.h>
+# include <windows.h>
 # if defined(_MSC_VER)
 #   include <crtdbg.h>
 # endif

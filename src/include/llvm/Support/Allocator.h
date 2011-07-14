@@ -16,13 +16,15 @@
 
 #include "llvm/Support/AlignOf.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <cstddef>
 
 namespace llvm {
+template <typename T> struct ReferenceAdder { typedef T& result; };
+template <typename T> struct ReferenceAdder<T&> { typedef T result; };
 
 class MallocAllocator {
 public:
@@ -175,6 +177,9 @@ public:
   unsigned GetNumSlabs() const;
 
   void PrintStats() const;
+  
+  /// Compute the total physical memory allocated by this allocator.
+  size_t getTotalMemory() const;
 };
 
 /// SpecificBumpPtrAllocator - Same as BumpPtrAllocator but allows only

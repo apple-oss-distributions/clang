@@ -13,6 +13,7 @@
 
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/FileSystemStatCache.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/OnDiskHashTable.h"
 #include "clang/Lex/LexDiagnostic.h"
@@ -25,7 +26,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include <sys/stat.h>
+#include "llvm/Support/system_error.h"
 using namespace clang;
 using namespace clang::io;
 
@@ -124,7 +125,7 @@ LexNextToken:
     return PP->Lex(Tok);
   }
 
-  if (TKind == tok::eom) {
+  if (TKind == tok::eod) {
     assert(ParsingPreprocessorDirective);
     ParsingPreprocessorDirective = false;
     return;
@@ -434,25 +435,23 @@ static void InvalidPTH(Diagnostic &Diags, const char *Msg) {
   Diags.Report(Diags.getCustomDiagID(Diagnostic::Error, Msg));
 }
 
-PTHManager* PTHManager::Create(const std::string& file, FileManager &FileMgr,
-                               const FileSystemOptions &FSOpts,
-                               Diagnostic &Diags) {
+PTHManager *PTHManager::Create(const std::string &file, Diagnostic &Diags) {
   // Memory map the PTH file.
-  llvm::OwningPtr<llvm::MemoryBuffer>
-  File(FileMgr.getBufferForFile(file, FSOpts));
+  llvm::OwningPtr<llvm::MemoryBuffer> File;
 
-  if (!File) {
+  if (llvm::MemoryBuffer::getFile(file, File)) {
+    // FIXME: Add ec.message() to this diag.
     Diags.Report(diag::err_invalid_pth_file) << file;
     return 0;
   }
 
   // Get the buffer ranges and check if there are at least three 32-bit
   // words at the end of the file.
-  const unsigned char* BufBeg = (unsigned char*)File->getBufferStart();
-  const unsigned char* BufEnd = (unsigned char*)File->getBufferEnd();
+  const unsigned char *BufBeg = (unsigned char*)File->getBufferStart();
+  const unsigned char *BufEnd = (unsigned char*)File->getBufferEnd();
 
   // Check the prologue of the file.
-  if ((BufEnd - BufBeg) < (signed) (sizeof("cfe-pth") + 3 + 4) ||
+  if ((BufEnd - BufBeg) < (signed)(sizeof("cfe-pth") + 3 + 4) ||
       memcmp(BufBeg, "cfe-pth", sizeof("cfe-pth") - 1) != 0) {
     Diags.Report(diag::err_invalid_pth_file) << file;
     return 0;
@@ -528,7 +527,7 @@ PTHManager* PTHManager::Create(const std::string& file, FileManager &FileMgr,
   // Get the number of IdentifierInfos and pre-allocate the identifier cache.
   uint32_t NumIds = ReadLE32(IData);
 
-  // Pre-allocate the peristent ID -> IdentifierInfo* cache.  We use calloc()
+  // Pre-allocate the persistent ID -> IdentifierInfo* cache.  We use calloc()
   // so that we in the best case only zero out memory once when the OS returns
   // us new pages.
   IdentifierInfo** PerIDCache = 0;
@@ -670,7 +669,7 @@ public:
   }
 };
 
-class PTHStatCache : public StatSysCallCache {
+class PTHStatCache : public FileSystemStatCache {
   typedef OnDiskChainedHashTable<PTHStatLookupTrait> CacheTy;
   CacheTy Cache;
 
@@ -681,29 +680,30 @@ public:
 
   ~PTHStatCache() {}
 
-  int stat(const char *path, struct stat *buf) {
+  LookupResult getStat(const char *Path, struct stat &StatBuf,
+                       int *FileDescriptor) {
     // Do the lookup for the file's data in the PTH file.
-    CacheTy::iterator I = Cache.find(path);
+    CacheTy::iterator I = Cache.find(Path);
 
     // If we don't get a hit in the PTH file just forward to 'stat'.
     if (I == Cache.end())
-      return StatSysCallCache::stat(path, buf);
+      return statChained(Path, StatBuf, FileDescriptor);
 
-    const PTHStatData& Data = *I;
+    const PTHStatData &Data = *I;
 
     if (!Data.hasStat)
-      return 1;
+      return CacheMissing;
 
-    buf->st_ino = Data.ino;
-    buf->st_dev = Data.dev;
-    buf->st_mtime = Data.mtime;
-    buf->st_mode = Data.mode;
-    buf->st_size = Data.size;
-    return 0;
+    StatBuf.st_ino = Data.ino;
+    StatBuf.st_dev = Data.dev;
+    StatBuf.st_mtime = Data.mtime;
+    StatBuf.st_mode = Data.mode;
+    StatBuf.st_size = Data.size;
+    return CacheExists;
   }
 };
 } // end anonymous namespace
 
-StatSysCallCache *PTHManager::createStatCache() {
+FileSystemStatCache *PTHManager::createStatCache() {
   return new PTHStatCache(*((PTHFileLookup*) FileLookup));
 }

@@ -29,7 +29,6 @@ class ConstantInt;
 class ConstantRange;
 class APInt;
 class LLVMContext;
-class DominatorTree;
 
 //===----------------------------------------------------------------------===//
 //                                AllocaInst Class
@@ -263,7 +262,7 @@ private:
 };
 
 template <>
-struct OperandTraits<StoreInst> : public FixedNumOperandTraits<2> {
+struct OperandTraits<StoreInst> : public FixedNumOperandTraits<StoreInst, 2> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(StoreInst, Value)
@@ -459,6 +458,9 @@ public:
                                     Value* const *Idx, unsigned NumIdx);
 
   static const Type *getIndexedType(const Type *Ptr,
+                                    Constant* const *Idx, unsigned NumIdx);
+
+  static const Type *getIndexedType(const Type *Ptr,
                                     uint64_t const *Idx, unsigned NumIdx);
 
   static const Type *getIndexedType(const Type *Ptr, Value *Idx);
@@ -525,7 +527,8 @@ public:
 };
 
 template <>
-struct OperandTraits<GetElementPtrInst> : public VariadicOperandTraits<1> {
+struct OperandTraits<GetElementPtrInst> :
+  public VariadicOperandTraits<GetElementPtrInst, 1> {
 };
 
 template<typename RandomAccessIterator>
@@ -581,7 +584,7 @@ DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GetElementPtrInst, Value)
 /// @brief Represent an integer comparison operator.
 class ICmpInst: public CmpInst {
 protected:
-  /// @brief Clone an indentical ICmpInst
+  /// @brief Clone an identical ICmpInst
   virtual ICmpInst *clone_impl() const;
 public:
   /// @brief Constructor with insert-before-instruction semantics.
@@ -732,7 +735,7 @@ public:
 /// @brief Represents a floating point comparison operator.
 class FCmpInst: public CmpInst {
 protected:
-  /// @brief Clone an indentical FCmpInst
+  /// @brief Clone an identical FCmpInst
   virtual FCmpInst *clone_impl() const;
 public:
   /// @brief Constructor with insert-before-instruction semantics.
@@ -1088,7 +1091,7 @@ private:
 };
 
 template <>
-struct OperandTraits<CallInst> : public VariadicOperandTraits<1> {
+struct OperandTraits<CallInst> : public VariadicOperandTraits<CallInst, 1> {
 };
 
 template<typename RandomAccessIterator>
@@ -1196,7 +1199,7 @@ public:
 };
 
 template <>
-struct OperandTraits<SelectInst> : public FixedNumOperandTraits<3> {
+struct OperandTraits<SelectInst> : public FixedNumOperandTraits<SelectInst, 3> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SelectInst, Value)
@@ -1293,7 +1296,8 @@ public:
 };
 
 template <>
-struct OperandTraits<ExtractElementInst> : public FixedNumOperandTraits<2> {
+struct OperandTraits<ExtractElementInst> :
+  public FixedNumOperandTraits<ExtractElementInst, 2> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementInst, Value)
@@ -1351,7 +1355,8 @@ public:
 };
 
 template <>
-struct OperandTraits<InsertElementInst> : public FixedNumOperandTraits<3> {
+struct OperandTraits<InsertElementInst> :
+  public FixedNumOperandTraits<InsertElementInst, 3> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertElementInst, Value)
@@ -1408,7 +1413,8 @@ public:
 };
 
 template <>
-struct OperandTraits<ShuffleVectorInst> : public FixedNumOperandTraits<3> {
+struct OperandTraits<ShuffleVectorInst> :
+  public FixedNumOperandTraits<ShuffleVectorInst, 3> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorInst, Value)
@@ -1451,8 +1457,7 @@ class ExtractValueInst : public UnaryInstruction {
   /// getIndexedType - Returns the type of the element that would be extracted
   /// with an extractvalue instruction with the specified parameters.
   ///
-  /// Null is returned if the indices are invalid for the specified
-  /// pointer type.
+  /// Null is returned if the indices are invalid for the specified type.
   ///
   static const Type *getIndexedType(const Type *Agg,
                                     const unsigned *Idx, unsigned NumIdx);
@@ -1535,8 +1540,7 @@ public:
   /// getIndexedType - Returns the type of the element that would be extracted
   /// with an extractvalue instruction with the specified parameters.
   ///
-  /// Null is returned if the indices are invalid for the specified
-  /// pointer type.
+  /// Null is returned if the indices are invalid for the specified type.
   ///
   template<typename RandomAccessIterator>
   static const Type *getIndexedType(const Type *Ptr,
@@ -1754,7 +1758,8 @@ public:
 };
 
 template <>
-struct OperandTraits<InsertValueInst> : public FixedNumOperandTraits<2> {
+struct OperandTraits<InsertValueInst> :
+  public FixedNumOperandTraits<InsertValueInst, 2> {
 };
 
 template<typename RandomAccessIterator>
@@ -1806,38 +1811,36 @@ class PHINode : public Instruction {
   void *operator new(size_t s) {
     return User::operator new(s, 0);
   }
-  explicit PHINode(const Type *Ty, const Twine &NameStr = "",
-                   Instruction *InsertBefore = 0)
+  explicit PHINode(const Type *Ty, unsigned NumReservedValues,
+                   const Twine &NameStr = "", Instruction *InsertBefore = 0)
     : Instruction(Ty, Instruction::PHI, 0, 0, InsertBefore),
-      ReservedSpace(0) {
+      ReservedSpace(NumReservedValues * 2) {
     setName(NameStr);
+    OperandList = allocHungoffUses(ReservedSpace);
   }
 
-  PHINode(const Type *Ty, const Twine &NameStr, BasicBlock *InsertAtEnd)
+  PHINode(const Type *Ty, unsigned NumReservedValues, const Twine &NameStr,
+          BasicBlock *InsertAtEnd)
     : Instruction(Ty, Instruction::PHI, 0, 0, InsertAtEnd),
-      ReservedSpace(0) {
+      ReservedSpace(NumReservedValues * 2) {
     setName(NameStr);
+    OperandList = allocHungoffUses(ReservedSpace);
   }
 protected:
   virtual PHINode *clone_impl() const;
 public:
-  static PHINode *Create(const Type *Ty, const Twine &NameStr = "",
+  /// Constructors - NumReservedValues is a hint for the number of incoming
+  /// edges that this phi node will have (use 0 if you really have no idea).
+  static PHINode *Create(const Type *Ty, unsigned NumReservedValues,
+                         const Twine &NameStr = "",
                          Instruction *InsertBefore = 0) {
-    return new PHINode(Ty, NameStr, InsertBefore);
+    return new PHINode(Ty, NumReservedValues, NameStr, InsertBefore);
   }
-  static PHINode *Create(const Type *Ty, const Twine &NameStr,
-                         BasicBlock *InsertAtEnd) {
-    return new PHINode(Ty, NameStr, InsertAtEnd);
+  static PHINode *Create(const Type *Ty, unsigned NumReservedValues, 
+                         const Twine &NameStr, BasicBlock *InsertAtEnd) {
+    return new PHINode(Ty, NumReservedValues, NameStr, InsertAtEnd);
   }
   ~PHINode();
-
-  /// reserveOperandSpace - This method can be used to avoid repeated
-  /// reallocation of PHI operand lists by reserving space for the correct
-  /// number of operands before adding them.  Unlike normal vector reserves,
-  /// this method can also be used to trim the operand space.
-  void reserveOperandSpace(unsigned NumValues) {
-    resizeOperands(NumValues*2);
-  }
 
   /// Provide fast operand accessors
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -1907,7 +1910,7 @@ public:
            "All operands to PHI node must be the same type as the PHI node!");
     unsigned OpNo = NumOperands;
     if (OpNo+2 > ReservedSpace)
-      resizeOperands(0);  // Get more space!
+      growOperands();  // Get more space!
     // Initialize some new operands.
     NumOperands = OpNo+2;
     OperandList[OpNo] = V;
@@ -1946,13 +1949,7 @@ public:
 
   /// hasConstantValue - If the specified PHI node always merges together the
   /// same value, return the value, otherwise return null.
-  ///
-  /// If the PHI has undef operands, but all the rest of the operands are
-  /// some unique value, return that value if it can be proved that the
-  /// value dominates the PHI. If DT is null, use a conservative check,
-  /// otherwise use DT to test for dominance.
-  ///
-  Value *hasConstantValue(DominatorTree *DT = 0) const;
+  Value *hasConstantValue() const;
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const PHINode *) { return true; }
@@ -1963,7 +1960,7 @@ public:
     return isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
  private:
-  void resizeOperands(unsigned NumOperands);
+  void growOperands();
 };
 
 template <>
@@ -2041,7 +2038,7 @@ public:
 };
 
 template <>
-struct OperandTraits<ReturnInst> : public VariadicOperandTraits<> {
+struct OperandTraits<ReturnInst> : public VariadicOperandTraits<ReturnInst> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ReturnInst, Value)
@@ -2077,21 +2074,19 @@ protected:
   virtual BranchInst *clone_impl() const;
 public:
   static BranchInst *Create(BasicBlock *IfTrue, Instruction *InsertBefore = 0) {
-    return new(1, true) BranchInst(IfTrue, InsertBefore);
+    return new(1) BranchInst(IfTrue, InsertBefore);
   }
   static BranchInst *Create(BasicBlock *IfTrue, BasicBlock *IfFalse,
                             Value *Cond, Instruction *InsertBefore = 0) {
     return new(3) BranchInst(IfTrue, IfFalse, Cond, InsertBefore);
   }
   static BranchInst *Create(BasicBlock *IfTrue, BasicBlock *InsertAtEnd) {
-    return new(1, true) BranchInst(IfTrue, InsertAtEnd);
+    return new(1) BranchInst(IfTrue, InsertAtEnd);
   }
   static BranchInst *Create(BasicBlock *IfTrue, BasicBlock *IfFalse,
                             Value *Cond, BasicBlock *InsertAtEnd) {
     return new(3) BranchInst(IfTrue, IfFalse, Cond, InsertAtEnd);
   }
-
-  ~BranchInst();
 
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -2107,19 +2102,6 @@ public:
   void setCondition(Value *V) {
     assert(isConditional() && "Cannot set condition of unconditional branch!");
     Op<-3>() = V;
-  }
-
-  // setUnconditionalDest - Change the current branch to an unconditional branch
-  // targeting the specified block.
-  // FIXME: Eliminate this ugly method.
-  void setUnconditionalDest(BasicBlock *Dest) {
-    Op<-1>() = (Value*)Dest;
-    if (isConditional()) {  // Convert this to an uncond branch.
-      Op<-2>() = 0;
-      Op<-3>() = 0;
-      NumOperands = 1;
-      OperandList = op_begin();
-    }
   }
 
   unsigned getNumSuccessors() const { return 1+isConditional(); }
@@ -2149,7 +2131,8 @@ private:
 };
 
 template <>
-struct OperandTraits<BranchInst> : public VariadicOperandTraits<1> {};
+struct OperandTraits<BranchInst> : public VariadicOperandTraits<BranchInst, 1> {
+};
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BranchInst, Value)
 
@@ -2168,8 +2151,8 @@ class SwitchInst : public TerminatorInst {
   // Operand[2n  ] = Value to match
   // Operand[2n+1] = BasicBlock to go to on match
   SwitchInst(const SwitchInst &SI);
-  void init(Value *Value, BasicBlock *Default, unsigned NumCases);
-  void resizeOperands(unsigned No);
+  void init(Value *Value, BasicBlock *Default, unsigned NumReserved);
+  void growOperands();
   // allocate space for exactly zero operands
   void *operator new(size_t s) {
     return User::operator new(s, 0);
@@ -2262,7 +2245,8 @@ public:
 
   /// removeCase - This method removes the specified successor from the switch
   /// instruction.  Note that this cannot be used to remove the default
-  /// destination (successor #0).
+  /// destination (successor #0). Also note that this operation may reorder the
+  /// remaining cases at index idx and above.
   ///
   void removeCase(unsigned idx);
 
@@ -2320,7 +2304,7 @@ class IndirectBrInst : public TerminatorInst {
   // Operand[2n+1] = BasicBlock to go to on match
   IndirectBrInst(const IndirectBrInst &IBI);
   void init(Value *Address, unsigned NumDests);
-  void resizeOperands(unsigned No);
+  void growOperands();
   // allocate space for exactly zero operands
   void *operator new(size_t s) {
     return User::operator new(s, 0);
@@ -2640,7 +2624,7 @@ private:
 };
 
 template <>
-struct OperandTraits<InvokeInst> : public VariadicOperandTraits<3> {
+struct OperandTraits<InvokeInst> : public VariadicOperandTraits<InvokeInst, 3> {
 };
 
 template<typename RandomAccessIterator>

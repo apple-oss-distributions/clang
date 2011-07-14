@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <cctype>
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -50,8 +51,8 @@ TargetInstrInfo::~TargetInstrInfo() {
 }
 
 unsigned
-TargetInstrInfo::getNumMicroOps(const MachineInstr *MI,
-                                const InstrItineraryData *ItinData) const {
+TargetInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
+                                const MachineInstr *MI) const {
   if (!ItinData || ItinData->isEmpty())
     return 1;
 
@@ -94,6 +95,26 @@ TargetInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
   return ItinData->getOperandLatency(DefClass, DefIdx, UseClass, UseIdx);
 }
 
+int TargetInstrInfo::getInstrLatency(const InstrItineraryData *ItinData,
+                                     const MachineInstr *MI,
+                                     unsigned *PredCost) const {
+  if (!ItinData || ItinData->isEmpty())
+    return 1;
+
+  return ItinData->getStageLatency(MI->getDesc().getSchedClass());
+}
+
+int TargetInstrInfo::getInstrLatency(const InstrItineraryData *ItinData,
+                                     SDNode *N) const {
+  if (!ItinData || ItinData->isEmpty())
+    return 1;
+
+  if (!N->isMachineOpcode())
+    return 1;
+
+  return ItinData->getStageLatency(get(N->getMachineOpcode()).getSchedClass());
+}
+
 bool TargetInstrInfo::hasLowDefLatency(const InstrItineraryData *ItinData,
                                        const MachineInstr *DefMI,
                                        unsigned DefIdx) const {
@@ -107,7 +128,7 @@ bool TargetInstrInfo::hasLowDefLatency(const InstrItineraryData *ItinData,
 
 /// insertNoop - Insert a noop into the instruction stream at the specified
 /// point.
-void TargetInstrInfo::insertNoop(MachineBasicBlock &MBB, 
+void TargetInstrInfo::insertNoop(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator MI) const {
   llvm_unreachable("Target didn't implement insertNoop!");
 }
@@ -116,7 +137,7 @@ void TargetInstrInfo::insertNoop(MachineBasicBlock &MBB,
 bool TargetInstrInfo::isUnpredicatedTerminator(const MachineInstr *MI) const {
   const TargetInstrDesc &TID = MI->getDesc();
   if (!TID.isTerminator()) return false;
-  
+
   // Conditional branch is a special case.
   if (TID.isBranch() && !TID.isBarrier())
     return true;
@@ -128,23 +149,24 @@ bool TargetInstrInfo::isUnpredicatedTerminator(const MachineInstr *MI) const {
 
 /// Measure the specified inline asm to determine an approximation of its
 /// length.
-/// Comments (which run till the next SeparatorChar or newline) do not
+/// Comments (which run till the next SeparatorString or newline) do not
 /// count as an instruction.
 /// Any other non-whitespace text is considered an instruction, with
-/// multiple instructions separated by SeparatorChar or newlines.
+/// multiple instructions separated by SeparatorString or newlines.
 /// Variable-length instructions are not handled here; this function
 /// may be overloaded in the target code to do that.
 unsigned TargetInstrInfo::getInlineAsmLength(const char *Str,
                                              const MCAsmInfo &MAI) const {
-  
-  
+
+
   // Count the number of instructions in the asm.
   bool atInsnStart = true;
   unsigned Length = 0;
   for (; *Str; ++Str) {
-    if (*Str == '\n' || *Str == MAI.getSeparatorChar())
+    if (*Str == '\n' || strncmp(Str, MAI.getSeparatorString(),
+                                strlen(MAI.getSeparatorString())) == 0)
       atInsnStart = true;
-    if (atInsnStart && !isspace(*Str)) {
+    if (atInsnStart && !std::isspace(*Str)) {
       Length += MAI.getMaxInstLength();
       atInsnStart = false;
     }
@@ -152,6 +174,6 @@ unsigned TargetInstrInfo::getInlineAsmLength(const char *Str,
                                strlen(MAI.getCommentString())) == 0)
       atInsnStart = false;
   }
-  
+
   return Length;
 }

@@ -19,6 +19,7 @@
 #include "llvm/LLVMContext.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 #include <string>
 
@@ -37,19 +38,20 @@ struct LTOCodeGenerator {
     bool                setDebugInfo(lto_debug_model, std::string& errMsg);
     bool                setCodePICModel(lto_codegen_model, std::string& errMsg);
     void                setCpu(const char *cpu);
-    void                setAssemblerPath(const char* path);
-    void                setAssemblerArgs(const char** args, int nargs);
     void                addMustPreserveSymbol(const char* sym);
     bool                writeMergedModules(const char* path, 
                                                            std::string& errMsg);
+    bool                compile_to_file(const char** name, std::string& errMsg);
     const void*         compile(size_t* length, std::string& errMsg);
     void                setCodeGenDebugOptions(const char *opts); 
 private:
-    bool                generateAssemblyCode(llvm::raw_ostream& out, 
-                                             std::string& errMsg);
-    bool                assemble(const std::string& asmPath, 
-                            const std::string& objPath, std::string& errMsg);
+    bool                generateObjectFile(llvm::raw_ostream& out, 
+                                           std::string& errMsg);
     void                applyScopeRestrictions();
+    void                applyRestriction(llvm::GlobalValue &GV,
+                                     std::vector<const char*> &mustPreserveList,
+                        llvm::SmallPtrSet<llvm::GlobalValue*, 8> &asmUsed,
+                                         llvm::Mangler &mangler);
     bool                determineTarget(std::string& errMsg);
     
     typedef llvm::StringMap<uint8_t> StringSet;
@@ -61,11 +63,11 @@ private:
     bool                        _scopeRestrictionsDone;
     lto_codegen_model           _codeModel;
     StringSet                   _mustPreserveSymbols;
+    StringSet                   _asmUndefinedRefs;
     llvm::MemoryBuffer*         _nativeObjectFile;
     std::vector<const char*>    _codegenOptions;
-    llvm::sys::Path*            _assemblerPath;
     std::string                 _mCpu;
-    std::vector<std::string>    _assemblerArgs;
+    std::string                 _nativeObjectPath;
 };
 
 #endif // LTO_CODE_GENERATOR_H

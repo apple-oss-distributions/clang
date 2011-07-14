@@ -69,6 +69,11 @@ td {
   </ul>
 </li>
 <li><a href="libIndex.html">The Index Library</a></li>
+<li><a href="#Howtos">Howto guides</a>
+  <ul>
+    <li><a href="#AddingAttributes">How to add an attribute</a></li>
+  </ul>
+</li>
 </ul>
 
 
@@ -146,15 +151,14 @@ diagnostic :).</p>
 pieces, this section describes them and talks about best practices when adding
 a new diagnostic.</p>
 
-<!-- ============================== -->
-<h4>The Diagnostic*Kinds.def files</h4>
-<!-- ============================== -->
+<!-- ============================= -->
+<h4>The Diagnostic*Kinds.td files</h4>
+<!-- ============================= -->
 
 <p>Diagnostics are created by adding an entry to one of the <tt>
-clang/Basic/Diagnostic*Kinds.def</tt> files, depending on what library will
-be using it.  This file encodes the unique ID of the 
-diagnostic (as an enum, the first argument), the severity of the diagnostic
-(second argument) and the English translation + format string.</p>
+clang/Basic/Diagnostic*Kinds.td</tt> files, depending on what library will
+be using it.  From this file, tblgen generates the unique ID of the diagnostic,
+the severity of the diagnostic and the English translation + format string.</p>
 
 <p>There is little sanity with the naming of the unique ID's right now.  Some
 start with err_, warn_, ext_ to encode the severity into the name.  Since the
@@ -238,7 +242,7 @@ are some simple format strings:</p>
 
 <ul>
 <li>Keep the string short.  It should ideally fit in the 80 column limit of the
-    <tt>DiagnosticKinds.def</tt> file.  This avoids the diagnostic wrapping when
+    <tt>DiagnosticKinds.td</tt> file.  This avoids the diagnostic wrapping when
     printed, and forces you to think about the important point you are conveying
     with the diagnostic.</li>
 <li>Take advantage of location information.  The user will be able to see the
@@ -253,7 +257,7 @@ are some simple format strings:</p>
 <p>Diagnostics should never take random English strings as arguments: you
 shouldn't use <tt>"you have a problem with %0"</tt> and pass in things like
 <tt>"your argument"</tt> or <tt>"your return value"</tt> as arguments. Doing
-this prevents <a href="translation">translating</a> the Clang diagnostics to
+this prevents <a href="#translation">translating</a> the Clang diagnostics to
 other languages (because they'll get random English words in their otherwise
 localized diagnostic).  The exceptions to this are C/C++ language keywords
 (e.g. auto, const, mutable, etc) and C/C++ operators (<tt>/=</tt>).  Note
@@ -368,10 +372,10 @@ of repetitive diagnostics and/or have an idea for a useful formatter, please
 bring it up on the cfe-dev mailing list.</p>
 
 <!-- ===================================================== -->
-<h4><a name="#producingdiag">Producing the Diagnostic</a></h4>
+<h4 id="producingdiag">Producing the Diagnostic</h4>
 <!-- ===================================================== -->
 
-<p>Now that you've created the diagnostic in the DiagnosticKinds.def file, you
+<p>Now that you've created the diagnostic in the DiagnosticKinds.td file, you
 need to write the code that detects the condition in question and emits the
 new diagnostic.  Various components of Clang (e.g. the preprocessor, Sema,
 etc) provide a helper function named "Diag".  It creates a diagnostic and
@@ -389,7 +393,7 @@ it.</p>
 
 <p>This shows that use of the Diag method: they take a location (a <a
 href="#SourceLocation">SourceLocation</a> object) and a diagnostic enum value
-(which matches the name from DiagnosticKinds.def).  If the diagnostic takes
+(which matches the name from DiagnosticKinds.td).  If the diagnostic takes
 arguments, they are specified with the &lt;&lt; operator: the first argument
 becomes %0, the second becomes %1, etc.  The diagnostic interface allows you to
 specify arguments of many different types, including <tt>int</tt> and
@@ -408,7 +412,7 @@ it is rendered.
 </p>
 
 <!-- ==================================================== -->
-<h4 id="code-modification-hints">Code Modification Hints</h4>
+<h4 id="fix-it-hints">Fix-It Hints</h4>
 <!-- ==================================================== -->
 
 <p>In some cases, the front end emits diagnostics when it is clear
@@ -418,14 +422,14 @@ deprecated syntax that is easily rewritten into a more modern form.
 Clang tries very hard to emit the diagnostic and recover gracefully
 in these and other cases.</p>
 
-<p>However, for these cases where the fix is obvious, the diagnostic 
-can be annotated with a code
-modification "hint" that describes how to change the code referenced
-by the diagnostic to fix the problem. For example, it might add the
-missing semicolon at the end of the statement or rewrite the use of a
-deprecated construct into something more palatable. Here is one such
-example C++ front end, where we warn about the right-shift operator
-changing meaning from C++98 to C++0x:</p>
+<p>However, for these cases where the fix is obvious, the diagnostic
+can be annotated with a hint (referred to as a "fix-it hint") that
+describes how to change the code referenced by the diagnostic to fix
+the problem. For example, it might add the missing semicolon at the
+end of the statement or rewrite the use of a deprecated construct
+into something more palatable. Here is one such example from the C++
+front end, where we warn about the right-shift operator changing
+meaning from C++98 to C++0x:</p>
 
 <pre>
 test.cpp:3:7: warning: use of right-shift operator ('&gt;&gt;') in template argument will require parentheses in C++0x
@@ -434,33 +438,31 @@ A&lt;100 &gt;&gt; 2&gt; *a;
   (       )
 </pre>
 
-<p>Here, the code modification hint is suggesting that parentheses be
-added, and showing exactly where those parentheses would be inserted
-into the source code. The code modification hints themselves describe
-what changes to make to the source code in an abstract manner, which
-the text diagnostic printer renders as a line of "insertions" below
-the caret line. <a href="#DiagnosticClient">Other diagnostic
-clients</a> might choose to render the code differently (e.g., as
-markup inline) or even give the user the ability to automatically fix
-the problem.</p>
+<p>Here, the fix-it hint is suggesting that parentheses be added,
+and showing exactly where those parentheses would be inserted into the
+source code. The fix-it hints themselves describe what changes to make
+to the source code in an abstract manner, which the text diagnostic
+printer renders as a line of "insertions" below the caret line. <a
+href="#DiagnosticClient">Other diagnostic clients</a> might choose
+to render the code differently (e.g., as markup inline) or even give
+the user the ability to automatically fix the problem.</p>
 
-<p>All code modification hints are described by the
-<code>CodeModificationHint</code> class, instances of which should be
-attached to the diagnostic using the &lt;&lt; operator in the same way
-that highlighted source ranges and arguments are passed to the
-diagnostic. Code modification hints can be created with one of three
-constructors:</p>
+<p>All fix-it hints are described by the <code>FixItHint</code> class,
+instances of which should be attached to the diagnostic using the
+&lt;&lt; operator in the same way that highlighted source ranges and
+arguments are passed to the diagnostic. Fix-it hints can be created
+with one of three constructors:</p>
 
 <dl>
-  <dt><code>CodeModificationHint::CreateInsertion(Loc, Code)</code></dt>
+  <dt><code>FixItHint::CreateInsertion(Loc, Code)</code></dt>
   <dd>Specifies that the given <code>Code</code> (a string) should be inserted
   before the source location <code>Loc</code>.</dd>
 
-  <dt><code>CodeModificationHint::CreateRemoval(Range)</code></dt>
+  <dt><code>FixItHint::CreateRemoval(Range)</code></dt>
   <dd>Specifies that the code in the given source <code>Range</code>
   should be removed.</dd>
 
-  <dt><code>CodeModificationHint::CreateReplacement(Range, Code)</code></dt>
+  <dt><code>FixItHint::CreateReplacement(Range, Code)</code></dt>
   <dd>Specifies that the code in the given source <code>Range</code>
   should be removed, and replaced with the given <code>Code</code> string.</dd>
 </dl>
@@ -565,7 +567,7 @@ x = foo + bar;
 representation, the 'last' location needs to be adjusted to point to
 (or past) the end of that token with either
 <code>Lexer::MeasureTokenLength()</code> or
-<code>Preprocessor::getLocForEndOfToken()</code>. For the rare cases
+<code>Lexer::getLocForEndOfToken()</code>. For the rare cases
 where character-level source ranges information is needed we use
 the <code>CharSourceRange</code> class.</p>
 
@@ -817,7 +819,7 @@ code is vectorized on X86 and PowerPC hosts).</p>
     within the filename.</li>
 <li>When parsing a preprocessor directive (after "<tt>#</tt>") the
     ParsingPreprocessorDirective mode is entered.  This changes the parser to
-    return EOM at a newline.</li>
+    return EOD at a newline.</li>
 <li>The Lexer uses a LangOptions object to know whether trigraphs are enabled,
     whether C++ or ObjC keywords are recognized, etc.</li>
 </ul>
@@ -1711,7 +1713,78 @@ interacts with constant evaluation:</p>
 </ul>
 
 
+<!-- ======================================================================= -->
+<h2 id="Howtos">How to change Clang</h2>
+<!-- ======================================================================= -->
 
+<!-- ======================================================================= -->
+<h3 id="AddingAttributes">How to add an attribute</h3>
+<!-- ======================================================================= -->
+
+<p>To add an attribute, you'll have to add it to the list of attributes, add it
+to the parsing phase, and look for it in the AST scan.
+<a href="http://llvm.org/viewvc/llvm-project?view=rev&revision=124217">r124217</a>
+has a good example of adding a warning attribute.</p>
+
+<p>(Beware that this hasn't been reviewed/fixed by the people who designed the
+attributes system yet.)</p>
+
+<h4><a
+href="http://llvm.org/viewvc/llvm-project/cfe/trunk/include/clang/Basic/Attr.td?view=markup">include/clang/Basic/Attr.td</a></h4>
+
+<p>Each attribute gets a <tt>def</tt> inheriting from <tt>Attr</tt> or one of
+its subclasses.  <tt>InheritableAttr</tt> means that the attribute also applies
+to subsequent declarations of the same name.</p>
+
+<p><tt>Spellings</tt> lists the strings that can appear in
+<tt>__attribute__((here))</tt> or <tt>[[here]]</tt>.  All such strings
+will be synonymous.  If you want to allow the <tt>[[]]</tt> C++0x
+syntax, you have to define a list of <tt>Namespaces</tt>, which will
+let users write <tt>[[namespace:spelling]]</tt>. Using the empty
+string for a namespace will allow users to write just the spelling
+with no "<tt>:</tt>".</p>
+
+<p><tt>Subjects</tt> restricts what kinds of AST node to which this attribute
+can appertain (roughly, attach).</p>
+
+<p><tt>Args</tt> names the arguments the attribute takes, in order. If
+<tt>Args</tt> is <tt>[StringArgument&lt;"Arg1">, IntArgument&lt;"Arg2">]</tt>
+then <tt>__attribute__((myattribute("Hello", 3)))</tt> will be a valid use.</p>
+
+<h4>Boilerplate</h4>
+
+<p>Add an element to the <tt>AttributeList::Kind</tt> enum in <a
+href="http://llvm.org/viewvc/llvm-project/cfe/trunk/include/clang/Sema/AttributeList.h?view=markup">include/clang/Sema/AttributeList.h</a>
+named <tt>AT_lower_with_underscores</tt>.  That is, a CamelCased
+<tt>AttributeName</tt> in <tt>Attr.td</tt> name should become
+<tt>AT_attribute_name</tt>.</p>
+
+<p>Add a case to the <tt>StringSwitch</tt> in <tt>AttributeList::getKind()</tt>
+in <a
+href="http://llvm.org/viewvc/llvm-project/cfe/trunk/lib/Sema/AttributeList.cpp?view=markup">lib/Sema/AttributeList.cpp</a>
+for each spelling of your attribute.  Less common attributes should come toward
+the end of that list.</p>
+
+<p>Write a new <tt>HandleYourAttr()</tt> function in <a
+href="http://llvm.org/viewvc/llvm-project/cfe/trunk/lib/Sema/SemaDeclAttr.cpp?view=markup">lib/Sema/SemaDeclAttr.cpp</a>,
+and add a case to the switch in <tt>ProcessNonInheritableDeclAttr()</tt> or
+<tt>ProcessInheritableDeclAttr()</tt> forwarding to it.</p>
+
+<p>If your attribute causes extra warnings to fire, define a <tt>DiagGroup</tt>
+in <a
+href="http://llvm.org/viewvc/llvm-project/cfe/trunk/include/clang/Basic/DiagnosticGroups.td?view=markup">include/clang/Basic/DiagnosticGroups.td</a>
+named after the attribute's <tt>Spelling</tt> with "_"s replaced by "-"s.  If
+you're only defining one diagnostic, you can skip <tt>DiagnosticGroups.td</tt>
+and use <tt>InGroup&lt;DiagGroup&lt;"your-attribute">></tt> directly in <a
+href="http://llvm.org/viewvc/llvm-project/cfe/trunk/include/clang/Basic/DiagnosticSemaKinds.td?view=markup">DiagnosticSemaKinds.td</a></p>
+
+<h4>The meat of your attribute</h4>
+
+<p>Find an appropriate place in Clang to do whatever your attribute needs to do.
+Check for the attribute's presence using <tt>Decl::getAttr&lt;YourAttr>()</tt>.</p>
+
+<p>Update the <a href="LanguageExtensions.html">Clang Language Extensions</a>
+document to describe your new attribute.</p>
 
 </div>
 </body>

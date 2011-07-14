@@ -21,6 +21,9 @@
 #include "llvm/Analysis/Dominators.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Target/TargetData.h"
+#include "llvm/Assembly/Writer.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -35,6 +38,15 @@ INITIALIZE_PASS_DEPENDENCY(DominatorTree)
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_PASS_END(IVUsers, "iv-users",
                       "Induction Variable Users", false, true)
+
+// IVUsers behavior currently depends on this temporary indvars mode. The
+// option must be defined upstream from its uses.
+namespace llvm {
+  bool DisableIVRewrite = false;
+}
+cl::opt<bool, true> DisableIVRewriteOpt(
+  "disable-iv-rewrite", cl::Hidden, cl::location(llvm::DisableIVRewrite),
+  cl::desc("Disable canonical induction variable rewriting"));
 
 Pass *llvm::createIVUsersPass() {
   return new IVUsers();
@@ -82,7 +94,15 @@ bool IVUsers::AddUsersIfInteresting(Instruction *I) {
     return false;   // Void and FP expressions cannot be reduced.
 
   // LSR is not APInt clean, do not touch integers bigger than 64-bits.
-  if (SE->getTypeSizeInBits(I->getType()) > 64)
+  // Also avoid creating IVs of non-native types. For example, we don't want a
+  // 64-bit IV in 32-bit code just because the loop has one 64-bit cast.
+  uint64_t Width = SE->getTypeSizeInBits(I->getType());
+  if (Width > 64 || (TD && !TD->isLegalInteger(Width)))
+    return false;
+
+  // We expect Sign/Zero extension to be eliminated from the IR before analyzing
+  // any downstream uses.
+  if (DisableIVRewrite && (isa<SExtInst>(I) || isa<ZExtInst>(I)))
     return false;
 
   if (!Processed.insert(I))
@@ -166,6 +186,7 @@ bool IVUsers::runOnLoop(Loop *l, LPPassManager &LPM) {
   LI = &getAnalysis<LoopInfo>();
   DT = &getAnalysis<DominatorTree>();
   SE = &getAnalysis<ScalarEvolution>();
+  TD = getAnalysisIfAvailable<TargetData>();
 
   // Find all uses of induction variables in this loop, and categorize
   // them by stride.  Start by finding all of the PHI nodes in the header for

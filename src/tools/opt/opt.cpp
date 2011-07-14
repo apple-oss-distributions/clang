@@ -18,14 +18,18 @@
 #include "llvm/CallGraphSCCPass.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/Assembly/PrintModulePass.h"
+#include "llvm/Analysis/DebugInfo.h"
 #include "llvm/Analysis/Verifier.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/RegionPass.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Target/TargetData.h"
+#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/Support/PassNameParser.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/IRReader.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -128,8 +132,12 @@ QuietA("quiet", cl::desc("Alias for -q"), cl::aliasopt(Quiet));
 static cl::opt<bool>
 AnalyzeOnly("analyze", cl::desc("Only perform analysis, no optimization"));
 
+static cl::opt<bool>
+PrintBreakpoints("print-breakpoints-for-testing",
+                 cl::desc("Print select breakpoints location for testing"));
+
 static cl::opt<std::string>
-DefaultDataLayout("default-data-layout", 
+DefaultDataLayout("default-data-layout",
           cl::desc("data layout string to use if not specified by module"),
           cl::value_desc("layout-string"), cl::init(""));
 
@@ -277,7 +285,7 @@ struct RegionPassPrinter : public RegionPass {
   RegionPassPrinter(const PassInfo *PI, raw_ostream &out) : RegionPass(ID),
     PassToPrint(PI), Out(out) {
     std::string PassToPrintName =  PassToPrint->getPassName();
-    PassName = "LoopPass Printer: " + PassToPrintName;
+    PassName = "RegionPass Printer: " + PassToPrintName;
   }
 
   virtual bool runOnRegion(Region *R, RGPassManager &RGM) {
@@ -292,7 +300,7 @@ struct RegionPassPrinter : public RegionPass {
     return false;
   }
 
-  virtual const char *getPassName() const { return "'Pass' Printer"; }
+  virtual const char *getPassName() const { return PassName.c_str(); }
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
     AU.addRequiredID(PassToPrint->getTypeInfo());
@@ -320,7 +328,7 @@ struct BasicBlockPassPrinter : public BasicBlockPass {
           << "': Pass " << PassToPrint->getPassName() << ":\n";
 
     // Get and print pass...
-    getAnalysisID<Pass>(PassToPrint->getTypeInfo()).print(Out, 
+    getAnalysisID<Pass>(PassToPrint->getTypeInfo()).print(Out,
             BB.getParent()->getParent());
     return false;
   }
@@ -334,6 +342,54 @@ struct BasicBlockPassPrinter : public BasicBlockPass {
 };
 
 char BasicBlockPassPrinter::ID = 0;
+
+struct BreakpointPrinter : public ModulePass {
+  raw_ostream &Out;
+  static char ID;
+
+  BreakpointPrinter(raw_ostream &out)
+    : ModulePass(ID), Out(out) {
+    }
+
+  void getContextName(DIDescriptor Context, std::string &N) {
+    if (Context.isNameSpace()) {
+      DINameSpace NS(Context);
+      if (!NS.getName().empty()) {
+        getContextName(NS.getContext(), N);
+        N = N + NS.getName().str() + "::";
+      }
+    } else if (Context.isType()) {
+      DIType TY(Context);
+      if (!TY.getName().empty()) {
+        getContextName(TY.getContext(), N);
+        N = N + TY.getName().str() + "::";
+      }
+    }
+  }
+
+  virtual bool runOnModule(Module &M) {
+    StringSet<> Processed;
+    if (NamedMDNode *NMD = M.getNamedMetadata("llvm.dbg.sp"))
+      for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i) {
+        std::string Name;
+        DISubprogram SP(NMD->getOperand(i));
+        if (SP.Verify())
+          getContextName(SP.getContext(), Name);
+        Name = Name + SP.getDisplayName().str();
+        if (!Name.empty() && Processed.insert(Name)) {
+          Out << Name << "\n";
+        }
+      }
+    return false;
+  }
+
+  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+    AU.setPreservesAll();
+  }
+};
+
+char BreakpointPrinter::ID = 0;
+
 inline void addPass(PassManagerBase &PM, Pass *P) {
   // Add the pass to the pass manager...
   PM.add(P);
@@ -355,9 +411,9 @@ void AddOptimizationPasses(PassManagerBase &MPM, PassManagerBase &FPM,
   if (DisableInline) {
     // No inlining pass
   } else if (OptLevel) {
-    unsigned Threshold = 200;
+    unsigned Threshold = 225;
     if (OptLevel > 2)
-      Threshold = 250;
+      Threshold = 275;
     InliningPass = createFunctionInliningPass(Threshold);
   } else {
     InliningPass = createAlwaysInlinerPass();
@@ -389,7 +445,7 @@ void AddStandardCompilePasses(PassManagerBase &PM) {
                              /*OptimizeSize=*/ false,
                              /*UnitAtATime=*/ true,
                              /*UnrollLoops=*/ true,
-                             /*SimplifyLibCalls=*/ true,
+                             !DisableSimplifyLibCalls,
                              /*HaveExceptions=*/ true,
                              InliningPass);
 }
@@ -418,17 +474,12 @@ int main(int argc, char **argv) {
   sys::PrintStackTraceOnErrorSignal();
   llvm::PrettyStackTraceProgram X(argc, argv);
 
-  if (AnalyzeOnly && NoOutput) {
-    errs() << argv[0] << ": analyze mode conflicts with no-output mode.\n";
-    return 1;
-  }
-  
   // Enable debug stream buffering.
   EnableDebugBuffering = true;
 
   llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
   LLVMContext &Context = getGlobalContext();
-  
+
   // Initialize passes
   PassRegistry &Registry = *PassRegistry::getPassRegistry();
   initializeCore(Registry);
@@ -440,9 +491,14 @@ int main(int argc, char **argv) {
   initializeInstCombine(Registry);
   initializeInstrumentation(Registry);
   initializeTarget(Registry);
-  
+
   cl::ParseCommandLineOptions(argc, argv,
     "llvm .bc -> .bc modular optimizer and analysis printer\n");
+
+  if (AnalyzeOnly && NoOutput) {
+    errs() << argv[0] << ": analyze mode conflicts with no-output mode.\n";
+    return 1;
+  }
 
   // Allocate a full target machine description only if necessary.
   // FIXME: The choice of target should be controllable on the command line.
@@ -487,11 +543,19 @@ int main(int argc, char **argv) {
       NoOutput = true;
 
   // Create a PassManager to hold and optimize the collection of passes we are
-  // about to build...
+  // about to build.
   //
   PassManager Passes;
 
-  // Add an appropriate TargetData instance for this module...
+  // Add an appropriate TargetLibraryInfo pass for the module's triple.
+  TargetLibraryInfo *TLI = new TargetLibraryInfo(Triple(M->getTargetTriple()));
+
+  // The -disable-simplify-libcalls flag actually disables all builtin optzns.
+  if (DisableSimplifyLibCalls)
+    TLI->disableAllFunctions();
+  Passes.add(TLI);
+
+  // Add an appropriate TargetData instance for this module.
   TargetData *TD = 0;
   const std::string &ModuleDataLayout = M.get()->getDataLayout();
   if (!ModuleDataLayout.empty())
@@ -507,6 +571,24 @@ int main(int argc, char **argv) {
     FPasses.reset(new PassManager());
     if (TD)
       FPasses->add(new TargetData(*TD));
+  }
+
+  if (PrintBreakpoints) {
+    // Default to standard output.
+    if (!Out) {
+      if (OutputFilename.empty())
+        OutputFilename = "-";
+
+      std::string ErrorInfo;
+      Out.reset(new tool_output_file(OutputFilename.c_str(), ErrorInfo,
+                                     raw_fd_ostream::F_Binary));
+      if (!ErrorInfo.empty()) {
+        errs() << ErrorInfo << '\n';
+        return 1;
+      }
+    }
+    Passes.add(new BreakpointPrinter(Out->os()));
+    NoOutput = true;
   }
 
   // If the -strip-debug command line option was specified, add it.  If
@@ -619,11 +701,14 @@ int main(int argc, char **argv) {
       Passes.add(createBitcodeWriterPass(Out->os()));
   }
 
+  // Before executing passes, print the final values of the LLVM options.
+  cl::PrintOptionValues();
+
   // Now that we have all of the passes ready, run them.
   Passes.run(*M.get());
 
   // Declare success.
-  if (!NoOutput)
+  if (!NoOutput || PrintBreakpoints)
     Out->keep();
 
   return 0;

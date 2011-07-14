@@ -43,7 +43,6 @@ TargetLoweringObjectFile::TargetLoweringObjectFile() : Ctx(0) {
   StaticCtorSection = 0;
   StaticDtorSection = 0;
   LSDASection = 0;
-  EHFrameSection = 0;
 
   CommDirectiveSupportsAlignment = true;
   DwarfAbbrevSection = 0;
@@ -121,6 +120,18 @@ static bool IsNullTerminatedString(const Constant *C) {
   return false;
 }
 
+MCSymbol *TargetLoweringObjectFile::
+getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
+                        MachineModuleInfo *MMI) const {
+  return Mang->getSymbol(GV);
+}
+
+void TargetLoweringObjectFile::emitPersonalityValue(MCStreamer &Streamer,
+                                                    const TargetMachine &TM,
+                                                    const MCSymbol *Sym) const {
+}
+
+
 /// getKindForGlobal - This is a top-level target-independent classifier for
 /// a global variable.  Given an global variable and information from TM, it
 /// classifies the global in a variety of ways that make various target
@@ -169,6 +180,12 @@ SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalValue *GV,
     switch (C->getRelocationInfo()) {
     default: assert(0 && "unknown relocation info kind");
     case Constant::NoRelocation:
+      // If the global is required to have a unique address, it can't be put
+      // into a mergable section: just drop it into the general read-only
+      // section instead.
+      if (!GVar->hasUnnamedAddr())
+        return SectionKind::getReadOnly();
+        
       // If initializer is a null-terminated string, put it in a "cstring"
       // section of the right width.
       if (const ArrayType *ATy = dyn_cast<ArrayType>(C->getType())) {
@@ -300,16 +317,15 @@ getExprForDwarfGlobalReference(const GlobalValue *GV, Mangler *Mang,
                                MachineModuleInfo *MMI, unsigned Encoding,
                                MCStreamer &Streamer) const {
   const MCSymbol *Sym = Mang->getSymbol(GV);
-  return getExprForDwarfReference(Sym, Mang, MMI, Encoding, Streamer);
+  return getExprForDwarfReference(Sym, Encoding, Streamer);
 }
 
 const MCExpr *TargetLoweringObjectFile::
-getExprForDwarfReference(const MCSymbol *Sym, Mangler *Mang,
-                         MachineModuleInfo *MMI, unsigned Encoding,
+getExprForDwarfReference(const MCSymbol *Sym, unsigned Encoding,
                          MCStreamer &Streamer) const {
   const MCExpr *Res = MCSymbolRefExpr::Create(Sym, getContext());
 
-  switch (Encoding & 0xF0) {
+  switch (Encoding & 0x70) {
   default:
     report_fatal_error("We do not support this DWARF encoding yet!");
   case dwarf::DW_EH_PE_absptr:
@@ -334,7 +350,7 @@ unsigned TargetLoweringObjectFile::getLSDAEncoding() const {
   return dwarf::DW_EH_PE_absptr;
 }
 
-unsigned TargetLoweringObjectFile::getFDEEncoding() const {
+unsigned TargetLoweringObjectFile::getFDEEncoding(bool CFI) const {
   return dwarf::DW_EH_PE_absptr;
 }
 

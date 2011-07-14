@@ -13,6 +13,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCAsmInfoDarwin.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCStreamer.h"
 using namespace llvm;
 
 MCAsmInfoDarwin::MCAsmInfoDarwin() {
@@ -37,8 +40,15 @@ MCAsmInfoDarwin::MCAsmInfoDarwin() {
   HasMachoZeroFillDirective = true;  // Uses .zerofill
   HasMachoTBSSDirective = true; // Uses .tbss
   HasStaticCtorDtorReferenceInStaticMode = true;
-  
+
+  // FIXME: Darwin 10 and newer don't need this.
+  LinkerRequiresNonEmptyDwarfLines = true;
+
+  // FIXME: Change this once MC is the system assembler.
+  HasAggressiveSymbolFolding = false;
+
   HiddenVisibilityAttr = MCSA_PrivateExtern;
+  HiddenDeclarationVisibilityAttr = MCSA_Invalid;
   // Doesn't support protected visibility.
   ProtectedVisibilityAttr = MCSA_Global;
   
@@ -49,4 +59,3 @@ MCAsmInfoDarwin::MCAsmInfoDarwin() {
   DwarfUsesAbsoluteLabelForStmtList = false;
   DwarfUsesLabelOffsetForRanges = false;
 }
-

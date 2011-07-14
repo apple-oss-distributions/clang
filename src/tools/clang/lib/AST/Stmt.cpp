@@ -84,6 +84,73 @@ bool Stmt::CollectingStats(bool Enable) {
   return StatSwitch;
 }
 
+namespace {
+  struct good {};
+  struct bad {};
+
+  // These silly little functions have to be static inline to suppress
+  // unused warnings, and they have to be defined to suppress other
+  // warnings.
+  static inline good is_good(good) { return good(); }
+
+  typedef Stmt::child_range children_t();
+  template <class T> good implements_children(children_t T::*) {
+    return good();
+  }
+  static inline bad implements_children(children_t Stmt::*) {
+    return bad();
+  }
+
+  typedef SourceRange getSourceRange_t() const;
+  template <class T> good implements_getSourceRange(getSourceRange_t T::*) {
+    return good();
+  }
+  static inline bad implements_getSourceRange(getSourceRange_t Stmt::*) {
+    return bad();
+  }
+
+#define ASSERT_IMPLEMENTS_children(type) \
+  (void) sizeof(is_good(implements_children(&type::children)))
+#define ASSERT_IMPLEMENTS_getSourceRange(type) \
+  (void) sizeof(is_good(implements_getSourceRange(&type::getSourceRange)))
+}
+
+/// Check whether the various Stmt classes implement their member
+/// functions.
+static inline void check_implementations() {
+#define ABSTRACT_STMT(type)
+#define STMT(type, base) \
+  ASSERT_IMPLEMENTS_children(type); \
+  ASSERT_IMPLEMENTS_getSourceRange(type);
+#include "clang/AST/StmtNodes.inc"
+}
+
+Stmt::child_range Stmt::children() {
+  switch (getStmtClass()) {
+  case Stmt::NoStmtClass: llvm_unreachable("statement without class");
+#define ABSTRACT_STMT(type)
+#define STMT(type, base) \
+  case Stmt::type##Class: \
+    return static_cast<type*>(this)->children();
+#include "clang/AST/StmtNodes.inc"
+  }
+  llvm_unreachable("unknown statement kind!");
+  return child_range();
+}
+
+SourceRange Stmt::getSourceRange() const {
+  switch (getStmtClass()) {
+  case Stmt::NoStmtClass: llvm_unreachable("statement without class");
+#define ABSTRACT_STMT(type)
+#define STMT(type, base) \
+  case Stmt::type##Class: \
+    return static_cast<const type*>(this)->getSourceRange();
+#include "clang/AST/StmtNodes.inc"
+  }
+  llvm_unreachable("unknown statement kind!");
+  return SourceRange();
+}
+
 void CompoundStmt::setStmts(ASTContext &C, Stmt **Stmts, unsigned NumStmts) {
   if (this->Body)
     C.Deallocate(Body);
@@ -94,7 +161,7 @@ void CompoundStmt::setStmts(ASTContext &C, Stmt **Stmts, unsigned NumStmts) {
 }
 
 const char *LabelStmt::getName() const {
-  return getID()->getNameStart();
+  return getDecl()->getIdentifier()->getNameStart();
 }
 
 // This is defined here to avoid polluting Stmt.h with importing Expr.h
@@ -151,6 +218,10 @@ unsigned AsmStmt::getNumPlusOperands() const {
 Expr *AsmStmt::getInputExpr(unsigned i) {
   return cast<Expr>(Exprs[i + NumOutputs]);
 }
+void AsmStmt::setInputExpr(unsigned i, Expr *E) {
+  Exprs[i + NumOutputs] = E;
+}
+
 
 /// getInputConstraint - Return the specified input constraint.  Unlike output
 /// constraints, these can be empty.
@@ -469,6 +540,40 @@ CXXTryStmt::CXXTryStmt(SourceLocation tryLoc, Stmt *tryBlock,
   std::copy(handlers, handlers + NumHandlers, Stmts + 1);
 }
 
+CXXForRangeStmt::CXXForRangeStmt(DeclStmt *Range, DeclStmt *BeginEndStmt,
+                                 Expr *Cond, Expr *Inc, DeclStmt *LoopVar,
+                                 Stmt *Body, SourceLocation FL,
+                                 SourceLocation CL, SourceLocation RPL)
+  : Stmt(CXXForRangeStmtClass), ForLoc(FL), ColonLoc(CL), RParenLoc(RPL) {
+  SubExprs[RANGE] = Range;
+  SubExprs[BEGINEND] = BeginEndStmt;
+  SubExprs[COND] = reinterpret_cast<Stmt*>(Cond);
+  SubExprs[INC] = reinterpret_cast<Stmt*>(Inc);
+  SubExprs[LOOPVAR] = LoopVar;
+  SubExprs[BODY] = Body;
+}
+
+Expr *CXXForRangeStmt::getRangeInit() {
+  DeclStmt *RangeStmt = getRangeStmt();
+  VarDecl *RangeDecl = dyn_cast_or_null<VarDecl>(RangeStmt->getSingleDecl());
+  assert(RangeDecl &&& "for-range should have a single var decl");
+  return RangeDecl->getInit();
+}
+
+const Expr *CXXForRangeStmt::getRangeInit() const {
+  return const_cast<CXXForRangeStmt*>(this)->getRangeInit();
+}
+
+VarDecl *CXXForRangeStmt::getLoopVariable() {
+  Decl *LV = cast<DeclStmt>(getLoopVarStmt())->getSingleDecl();
+  assert(LV && "No loop variable in CXXForRangeStmt");
+  return cast<VarDecl>(LV);
+}
+
+const VarDecl *CXXForRangeStmt::getLoopVariable() const {
+  return const_cast<CXXForRangeStmt*>(this)->getLoopVariable();
+}
+
 IfStmt::IfStmt(ASTContext &C, SourceLocation IL, VarDecl *var, Expr *cond, 
                Stmt *then, SourceLocation EL, Stmt *elsev)
   : Stmt(IfStmtClass), IfLoc(IL), ElseLoc(EL)
@@ -556,10 +661,15 @@ void SwitchStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
                                    V->getSourceRange().getEnd());
 }
 
+Stmt *SwitchCase::getSubStmt() {
+  if (isa<CaseStmt>(this))
+    return cast<CaseStmt>(this)->getSubStmt();
+  return cast<DefaultStmt>(this)->getSubStmt();
+}
+
 WhileStmt::WhileStmt(ASTContext &C, VarDecl *Var, Expr *cond, Stmt *body, 
                      SourceLocation WL)
-: Stmt(WhileStmtClass)
-{
+  : Stmt(WhileStmtClass) {
   setConditionVariable(C, Var);
   SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
   SubExprs[BODY] = body;
@@ -585,107 +695,13 @@ void WhileStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
                                    V->getSourceRange().getEnd());
 }
 
-//===----------------------------------------------------------------------===//
-//  Child Iterators for iterating over subexpressions/substatements
-//===----------------------------------------------------------------------===//
-
-// DeclStmt
-Stmt::child_iterator DeclStmt::child_begin() {
-  return StmtIterator(DG.begin(), DG.end());
-}
-
-Stmt::child_iterator DeclStmt::child_end() {
-  return StmtIterator(DG.end(), DG.end());
-}
-
-// NullStmt
-Stmt::child_iterator NullStmt::child_begin() { return child_iterator(); }
-Stmt::child_iterator NullStmt::child_end() { return child_iterator(); }
-
-// CompoundStmt
-Stmt::child_iterator CompoundStmt::child_begin() { return &Body[0]; }
-Stmt::child_iterator CompoundStmt::child_end() {
-  return &Body[0]+CompoundStmtBits.NumStmts;
-}
-
-// CaseStmt
-Stmt::child_iterator CaseStmt::child_begin() { return &SubExprs[0]; }
-Stmt::child_iterator CaseStmt::child_end() { return &SubExprs[END_EXPR]; }
-
-// DefaultStmt
-Stmt::child_iterator DefaultStmt::child_begin() { return &SubStmt; }
-Stmt::child_iterator DefaultStmt::child_end() { return &SubStmt+1; }
-
-// LabelStmt
-Stmt::child_iterator LabelStmt::child_begin() { return &SubStmt; }
-Stmt::child_iterator LabelStmt::child_end() { return &SubStmt+1; }
-
-// IfStmt
-Stmt::child_iterator IfStmt::child_begin() {
-  return &SubExprs[0];
-}
-Stmt::child_iterator IfStmt::child_end() {
-  return &SubExprs[0]+END_EXPR;
-}
-
-// SwitchStmt
-Stmt::child_iterator SwitchStmt::child_begin() {
-  return &SubExprs[0];
-}
-Stmt::child_iterator SwitchStmt::child_end() {
-  return &SubExprs[0]+END_EXPR;
-}
-
-// WhileStmt
-Stmt::child_iterator WhileStmt::child_begin() {
-  return &SubExprs[0];
-}
-Stmt::child_iterator WhileStmt::child_end() {
-  return &SubExprs[0]+END_EXPR;
-}
-
-// DoStmt
-Stmt::child_iterator DoStmt::child_begin() { return &SubExprs[0]; }
-Stmt::child_iterator DoStmt::child_end() { return &SubExprs[0]+END_EXPR; }
-
-// ForStmt
-Stmt::child_iterator ForStmt::child_begin() {
-  return &SubExprs[0];
-}
-Stmt::child_iterator ForStmt::child_end() {
-  return &SubExprs[0]+END_EXPR;
-}
-
-// ObjCForCollectionStmt
-Stmt::child_iterator ObjCForCollectionStmt::child_begin() {
-  return &SubExprs[0];
-}
-Stmt::child_iterator ObjCForCollectionStmt::child_end() {
-  return &SubExprs[0]+END_EXPR;
-}
-
-// GotoStmt
-Stmt::child_iterator GotoStmt::child_begin() { return child_iterator(); }
-Stmt::child_iterator GotoStmt::child_end() { return child_iterator(); }
-
 // IndirectGotoStmt
-LabelStmt *IndirectGotoStmt::getConstantTarget() {
+LabelDecl *IndirectGotoStmt::getConstantTarget() {
   if (AddrLabelExpr *E =
         dyn_cast<AddrLabelExpr>(getTarget()->IgnoreParenImpCasts()))
     return E->getLabel();
   return 0;
 }
-
-Stmt::child_iterator IndirectGotoStmt::child_begin() { return &Target; }
-Stmt::child_iterator IndirectGotoStmt::child_end() { return &Target+1; }
-
-// ContinueStmt
-Stmt::child_iterator ContinueStmt::child_begin() { return child_iterator(); }
-Stmt::child_iterator ContinueStmt::child_end() { return child_iterator(); }
-
-// BreakStmt
-Stmt::child_iterator BreakStmt::child_begin() { return child_iterator(); }
-Stmt::child_iterator BreakStmt::child_end() { return child_iterator(); }
 
 // ReturnStmt
 const Expr* ReturnStmt::getRetValue() const {
@@ -695,68 +711,60 @@ Expr* ReturnStmt::getRetValue() {
   return cast_or_null<Expr>(RetExpr);
 }
 
-Stmt::child_iterator ReturnStmt::child_begin() {
-  return &RetExpr;
-}
-Stmt::child_iterator ReturnStmt::child_end() {
-  return RetExpr ? &RetExpr+1 : &RetExpr;
-}
-
-// AsmStmt
-Stmt::child_iterator AsmStmt::child_begin() {
-  return NumOutputs + NumInputs == 0 ? 0 : &Exprs[0];
-}
-Stmt::child_iterator AsmStmt::child_end() {
-  return NumOutputs + NumInputs == 0 ? 0 : &Exprs[0] + NumOutputs + NumInputs;
+SEHTryStmt::SEHTryStmt(bool IsCXXTry,
+                       SourceLocation TryLoc,
+                       Stmt *TryBlock,
+                       Stmt *Handler)
+  : Stmt(SEHTryStmtClass),
+    IsCXXTry(IsCXXTry),
+    TryLoc(TryLoc)
+{
+  Children[TRY]     = TryBlock;
+  Children[HANDLER] = Handler;
 }
 
-// ObjCAtCatchStmt
-Stmt::child_iterator ObjCAtCatchStmt::child_begin() { return &Body; }
-Stmt::child_iterator ObjCAtCatchStmt::child_end() { return &Body + 1; }
-
-// ObjCAtFinallyStmt
-Stmt::child_iterator ObjCAtFinallyStmt::child_begin() { return &AtFinallyStmt; }
-Stmt::child_iterator ObjCAtFinallyStmt::child_end() { return &AtFinallyStmt+1; }
-
-// ObjCAtTryStmt
-Stmt::child_iterator ObjCAtTryStmt::child_begin() { return getStmts(); }
-
-Stmt::child_iterator ObjCAtTryStmt::child_end() {
-  return getStmts() + 1 + NumCatchStmts + HasFinally;
+SEHTryStmt* SEHTryStmt::Create(ASTContext &C,
+                               bool IsCXXTry,
+                               SourceLocation TryLoc,
+                               Stmt *TryBlock,
+                               Stmt *Handler) {
+  return new(C) SEHTryStmt(IsCXXTry,TryLoc,TryBlock,Handler);
 }
 
-// ObjCAtThrowStmt
-Stmt::child_iterator ObjCAtThrowStmt::child_begin() {
-  return &Throw;
+SEHExceptStmt* SEHTryStmt::getExceptHandler() const {
+  return dyn_cast<SEHExceptStmt>(getHandler());
 }
 
-Stmt::child_iterator ObjCAtThrowStmt::child_end() {
-  return &Throw+1;
+SEHFinallyStmt* SEHTryStmt::getFinallyHandler() const {
+  return dyn_cast<SEHFinallyStmt>(getHandler());
 }
 
-// ObjCAtSynchronizedStmt
-Stmt::child_iterator ObjCAtSynchronizedStmt::child_begin() {
-  return &SubStmts[0];
+SEHExceptStmt::SEHExceptStmt(SourceLocation Loc,
+                             Expr *FilterExpr,
+                             Stmt *Block)
+  : Stmt(SEHExceptStmtClass),
+    Loc(Loc)
+{
+  Children[FILTER_EXPR] = reinterpret_cast<Stmt*>(FilterExpr);
+  Children[BLOCK]       = Block;
 }
 
-Stmt::child_iterator ObjCAtSynchronizedStmt::child_end() {
-  return &SubStmts[0]+END_EXPR;
+SEHExceptStmt* SEHExceptStmt::Create(ASTContext &C,
+                                     SourceLocation Loc,
+                                     Expr *FilterExpr,
+                                     Stmt *Block) {
+  return new(C) SEHExceptStmt(Loc,FilterExpr,Block);
 }
 
-// CXXCatchStmt
-Stmt::child_iterator CXXCatchStmt::child_begin() {
-  return &HandlerBlock;
-}
+SEHFinallyStmt::SEHFinallyStmt(SourceLocation Loc,
+                               Stmt *Block)
+  : Stmt(SEHFinallyStmtClass),
+    Loc(Loc),
+    Block(Block)
+{}
 
-Stmt::child_iterator CXXCatchStmt::child_end() {
-  return &HandlerBlock + 1;
-}
-
-// CXXTryStmt
-Stmt::child_iterator CXXTryStmt::child_begin() {
-  return reinterpret_cast<Stmt **>(this + 1);
-}
-
-Stmt::child_iterator CXXTryStmt::child_end() {
-  return reinterpret_cast<Stmt **>(this + 1) + NumHandlers + 1;
+SEHFinallyStmt* SEHFinallyStmt::Create(ASTContext &C,
+                                       SourceLocation Loc,
+                                       Stmt *Block) {
+  return new(C)SEHFinallyStmt(Loc,Block);
 }

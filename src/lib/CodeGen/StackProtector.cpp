@@ -16,6 +16,7 @@
 
 #define DEBUG_TYPE "stack-protector"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/Analysis/Dominators.h"
 #include "llvm/Attributes.h"
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
@@ -45,6 +46,8 @@ namespace {
     Function *F;
     Module *M;
 
+    DominatorTree* DT;
+
     /// InsertStackProtectors - Insert code into the prologue and epilogue of
     /// the function.
     ///
@@ -70,6 +73,10 @@ namespace {
         initializeStackProtectorPass(*PassRegistry::getPassRegistry());
       }
 
+    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.addPreserved<DominatorTree>();
+    }
+
     virtual bool runOnFunction(Function &Fn);
   };
 } // end anonymous namespace
@@ -85,6 +92,7 @@ FunctionPass *llvm::createStackProtectorPass(const TargetLowering *tli) {
 bool StackProtector::runOnFunction(Function &Fn) {
   F = &Fn;
   M = F->getParent();
+  DT = getAnalysisIfAvailable<DominatorTree>();
 
   if (!RequiresStackProtector()) return false;
   
@@ -139,12 +147,12 @@ bool StackProtector::RequiresStackProtector() const {
 ///    value. It calls __stack_chk_fail if they differ.
 bool StackProtector::InsertStackProtectors() {
   BasicBlock *FailBB = 0;       // The basic block to jump to if check fails.
+  BasicBlock *FailBBDom = 0;    // FailBB's dominator.
   AllocaInst *AI = 0;           // Place on stack that stores the stack guard.
   Value *StackGuardVar = 0;  // The stack guard variable.
 
   for (Function::iterator I = F->begin(), E = F->end(); I != E; ) {
     BasicBlock *BB = I++;
-
     ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator());
     if (!RI) continue;
 
@@ -209,6 +217,11 @@ bool StackProtector::InsertStackProtectors() {
     // Split the basic block before the return instruction.
     BasicBlock *NewBB = BB->splitBasicBlock(RI, "SP_return");
 
+    if (DT && DT->isReachableFromEntry(BB)) {
+      DT->addNewBlock(NewBB, BB);
+      FailBBDom = FailBBDom ? DT->findNearestCommonDominator(FailBBDom, BB) :BB;
+    }
+
     // Remove default branch instruction to the new BB.
     BB->getTerminator()->eraseFromParent();
 
@@ -226,6 +239,9 @@ bool StackProtector::InsertStackProtectors() {
   // Return if we didn't modify any basic blocks. I.e., there are no return
   // statements in the function.
   if (!FailBB) return false;
+
+  if (DT && FailBBDom)
+    DT->addNewBlock(FailBB, FailBBDom);
 
   return true;
 }

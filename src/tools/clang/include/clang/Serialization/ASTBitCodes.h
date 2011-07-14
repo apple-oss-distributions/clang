@@ -19,7 +19,7 @@
 
 #include "clang/AST/Type.h"
 #include "llvm/Bitcode/BitCodes.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/ADT/DenseMap.h"
 
 namespace clang {
@@ -148,7 +148,10 @@ namespace clang {
       DECLTYPES_BLOCK_ID,
 
       /// \brief The block containing DECL_UPDATES records.
-      DECL_UPDATES_BLOCK_ID
+      DECL_UPDATES_BLOCK_ID,
+      
+      /// \brief The block containing the detailed preprocessing record.
+      PREPROCESSOR_DETAIL_BLOCK_ID
     };
 
     /// \brief Record types that occur within the AST block itself.
@@ -276,7 +279,9 @@ namespace clang {
       /// generate the AST file.
       ORIGINAL_FILE_NAME = 19,
 
-      /// Record #20 intentionally left blank.
+      /// \brief Record code for the file ID of the original file used to 
+      /// generate the AST file.
+      ORIGINAL_FILE_ID = 20,
       
       /// \brief Record code for the version control branch and revision
       /// information of the compiler used to build this AST file.
@@ -341,7 +346,33 @@ namespace clang {
       
       /// \brief Record code for the table of offsets to CXXBaseSpecifier
       /// sets.
-      CXX_BASE_SPECIFIER_OFFSETS = 37
+      CXX_BASE_SPECIFIER_OFFSETS = 37,
+
+      /// \brief Record code for #pragma diagnostic mappings.
+      DIAG_PRAGMA_MAPPINGS = 38,
+
+      /// \brief Record code for special CUDA declarations.
+      CUDA_SPECIAL_DECL_REFS = 39,
+      
+      /// \brief Record code for header search information.
+      HEADER_SEARCH_TABLE = 40,
+
+      /// \brief The directory that the PCH was originally created in.
+      ORIGINAL_PCH_DIR = 41,
+
+      /// \brief Record code for floating point #pragma options.
+      FP_PRAGMA_OPTIONS = 42,
+
+      /// \brief Record code for enabled OpenCL extensions.
+      OPENCL_EXTENSIONS = 43,
+
+      /// \brief The list of delegating constructor declarations.
+      DELEGATING_CTORS = 44,
+
+      /// \brief Record code for the table of offsets into the block
+      /// of file source-location information.
+      FILE_SOURCE_LOCATION_OFFSETS = 45
+
     };
 
     /// \brief Record types used within a source manager block.
@@ -380,20 +411,23 @@ namespace clang {
 
       /// \brief Describes one token.
       /// [PP_TOKEN, SLoc, Length, IdentInfoID, Kind, Flags]
-      PP_TOKEN = 3,
-
-      /// \brief Describes a macro instantiation within the preprocessing 
-      /// record.
-      PP_MACRO_INSTANTIATION = 4,
-      
-      /// \brief Describes a macro definition within the preprocessing record.
-      PP_MACRO_DEFINITION = 5,
-      
-      /// \brief Describes am inclusion directive within the preprocessing
-      /// record.
-      PP_INCLUSION_DIRECTIVE = 6
+      PP_TOKEN = 3
     };
 
+    /// \brief Record types used within a preprocessor detail block.
+    enum PreprocessorDetailRecordTypes {
+      /// \brief Describes a macro instantiation within the preprocessing 
+      /// record.
+      PPD_MACRO_INSTANTIATION = 0,
+      
+      /// \brief Describes a macro definition within the preprocessing record.
+      PPD_MACRO_DEFINITION = 1,
+      
+      /// \brief Describes an inclusion directive within the preprocessing
+      /// record.
+      PPD_INCLUSION_DIRECTIVE = 2
+    };
+    
     /// \defgroup ASTAST AST file AST constants
     ///
     /// The constants in this group describe various components of the
@@ -466,7 +500,11 @@ namespace clang {
       /// \brief The ObjC 'Class' type.
       PREDEF_TYPE_OBJC_CLASS    = 27,
       /// \brief The ObjC 'SEL' type.
-      PREDEF_TYPE_OBJC_SEL    = 28
+      PREDEF_TYPE_OBJC_SEL      = 28,
+      /// \brief The 'unknown any' placeholder type.
+      PREDEF_TYPE_UNKNOWN_ANY   = 29,
+      /// \brief The placeholder type for bound member functions.
+      PREDEF_TYPE_BOUND_MEMBER  = 30
     };
 
     /// \brief The number of predefined type IDs that are reserved for
@@ -546,7 +584,17 @@ namespace clang {
       /// \brief A DependentTemplateSpecializationType record.
       TYPE_DEPENDENT_TEMPLATE_SPECIALIZATION = 32,
       /// \brief A DependentSizedArrayType record.
-      TYPE_DEPENDENT_SIZED_ARRAY    = 33
+      TYPE_DEPENDENT_SIZED_ARRAY    = 33,
+      /// \brief A ParenType record.
+      TYPE_PAREN                    = 34,
+      /// \brief A PackExpansionType record.
+      TYPE_PACK_EXPANSION           = 35,
+      /// \brief An AttributedType record.
+      TYPE_ATTRIBUTED               = 36,
+      /// \brief A SubstTemplateTypeParmPackType record.
+      TYPE_SUBST_TEMPLATE_TYPE_PARM_PACK = 37,
+      /// \brief A AutoType record.
+      TYPE_AUTO                  = 38
     };
 
     /// \brief The type IDs for special types constructed by semantic
@@ -588,7 +636,11 @@ namespace clang {
       /// \brief NSConstantString type
       SPECIAL_TYPE_NS_CONSTANT_STRING          = 15,
       /// \brief Whether __[u]int128_t identifier is installed.
-      SPECIAL_TYPE_INT128_INSTALLED            = 16
+      SPECIAL_TYPE_INT128_INSTALLED            = 16,
+      /// \brief Cached "auto" deduction type.
+      SPECIAL_TYPE_AUTO_DEDUCT                 = 17,
+      /// \brief Cached "auto &&" deduction type.
+      SPECIAL_TYPE_AUTO_RREF_DEDUCT            = 18
     };
 
     /// \brief Record codes for each kind of declaration.
@@ -602,6 +654,8 @@ namespace clang {
       DECL_TRANSLATION_UNIT = 50,
       /// \brief A TypedefDecl record.
       DECL_TYPEDEF,
+      /// \brief A TypeAliasDecl record.
+      DECL_TYPEALIAS,
       /// \brief An EnumDecl record.
       DECL_ENUM,
       /// \brief A RecordDecl record.
@@ -665,7 +719,9 @@ namespace clang {
       /// IDs. This data is used when performing qualified name lookup
       /// into a DeclContext via DeclContext::lookup.
       DECL_CONTEXT_VISIBLE,
-      /// \brief A NamespaceDecl rcord.
+      /// \brief A LabelDecl record.
+      DECL_LABEL,
+      /// \brief A NamespaceDecl record.
       DECL_NAMESPACE,
       /// \brief A NamespaceAliasDecl record.
       DECL_NAMESPACE_ALIAS,
@@ -715,7 +771,12 @@ namespace clang {
       /// \brief A StaticAssertDecl record.
       DECL_STATIC_ASSERT,
       /// \brief A record containing CXXBaseSpecifiers.
-      DECL_CXX_BASE_SPECIFIERS
+      DECL_CXX_BASE_SPECIFIERS,
+      /// \brief A IndirectFieldDecl record.
+      DECL_INDIRECTFIELD,
+      /// \brief A NonTypeTemplateParmDecl record that stores an expanded
+      /// non-type template parameter pack.
+      DECL_EXPANDED_NON_TYPE_TEMPLATE_PARM_PACK
     };
 
     /// \brief Record codes for each kind of statement or expression.
@@ -821,8 +882,6 @@ namespace clang {
       EXPR_ADDR_LABEL,
       /// \brief A StmtExpr record.
       EXPR_STMT,
-      /// \brief A TypesCompatibleExpr record.
-      EXPR_TYPES_COMPATIBLE,
       /// \brief A ChooseExpr record.
       EXPR_CHOOSE,
       /// \brief A GNUNullExpr record.
@@ -833,6 +892,8 @@ namespace clang {
       EXPR_BLOCK,
       /// \brief A BlockDeclRef record.
       EXPR_BLOCK_DECL_REF,
+      /// \brief A GenericSelectionExpr record.
+      EXPR_GENERIC_SELECTION,
       
       // Objective-C
 
@@ -848,7 +909,7 @@ namespace clang {
       EXPR_OBJC_IVAR_REF_EXPR,
       /// \brief An ObjCPropertyRefExpr record.
       EXPR_OBJC_PROPERTY_REF_EXPR,
-      /// \brief An ObjCImplicitSetterGetterRefExpr record.
+      /// \brief UNUSED
       EXPR_OBJC_KVC_REF_EXPR,
       /// \brief An ObjCMessageExpr record.
       EXPR_OBJC_MESSAGE_EXPR,
@@ -874,6 +935,8 @@ namespace clang {
       STMT_CXX_CATCH,
       /// \brief A CXXTryStmt record.
       STMT_CXX_TRY,
+      /// \brief A CXXForRangeStmt record.
+      STMT_CXX_FOR_RANGE,
 
       /// \brief A CXXOperatorCallExpr record.
       EXPR_CXX_OPERATOR_CALL,
@@ -910,7 +973,7 @@ namespace clang {
       EXPR_CXX_DELETE,            // CXXDeleteExpr
       EXPR_CXX_PSEUDO_DESTRUCTOR, // CXXPseudoDestructorExpr
       
-      EXPR_CXX_EXPR_WITH_TEMPORARIES,    // CXXExprWithTemporaries
+      EXPR_EXPR_WITH_CLEANUPS,    // ExprWithCleanups
       
       EXPR_CXX_DEPENDENT_SCOPE_MEMBER,   // CXXDependentScopeMemberExpr
       EXPR_CXX_DEPENDENT_SCOPE_DECL_REF, // DependentScopeDeclRefExpr
@@ -919,7 +982,21 @@ namespace clang {
       EXPR_CXX_UNRESOLVED_LOOKUP,        // UnresolvedLookupExpr
 
       EXPR_CXX_UNARY_TYPE_TRAIT,  // UnaryTypeTraitExpr
-      EXPR_CXX_NOEXCEPT           // CXXNoexceptExpr
+      EXPR_CXX_EXPRESSION_TRAIT,  // ExpressionTraitExpr
+      EXPR_CXX_NOEXCEPT,          // CXXNoexceptExpr
+
+      EXPR_OPAQUE_VALUE,          // OpaqueValueExpr
+      EXPR_BINARY_CONDITIONAL_OPERATOR,  // BinaryConditionalOperator
+      EXPR_BINARY_TYPE_TRAIT,     // BinaryTypeTraitExpr
+      EXPR_ARRAY_TYPE_TRAIT,      // ArrayTypeTraitIntExpr
+      
+      EXPR_PACK_EXPANSION,        // PackExpansionExpr
+      EXPR_SIZEOF_PACK,           // SizeOfPackExpr
+      EXPR_SUBST_NON_TYPE_TEMPLATE_PARM_PACK,// SubstNonTypeTemplateParmPackExpr
+
+      // CUDA
+
+      EXPR_CUDA_KERNEL_CALL       // CUDAKernelCallExpr
     };
 
     /// \brief The kinds of designators that can occur in a
@@ -934,6 +1011,15 @@ namespace clang {
       DESIG_ARRAY       = 2,
       /// \brief GNU array range designator.
       DESIG_ARRAY_RANGE = 3
+    };
+
+    /// \brief The different kinds of data that can occur in a
+    /// CtorInitializer.
+    enum CtorInitializerType {
+      CTOR_INITIALIZER_BASE,
+      CTOR_INITIALIZER_DELEGATING,
+      CTOR_INITIALIZER_MEMBER,
+      CTOR_INITIALIZER_INDIRECT_MEMBER
     };
 
     /// @}

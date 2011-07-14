@@ -73,6 +73,8 @@ EDOperand::EDOperand(const EDDisassembler &disassembler,
     case kOperandTypeThumb2AddrModeImm8Offset:
     case kOperandTypeARMTBAddrMode:
     case kOperandTypeThumb2AddrModeImm8s4Offset:
+    case kOperandTypeARMAddrMode7:
+    case kOperandTypeThumb2AddrModeReg:
       numMCOperands = 1;
       break;
     case kOperandTypeThumb2SoReg:
@@ -152,9 +154,22 @@ int EDOperand::evaluate(uint64_t &result,
       uint64_t scaleAmount = Inst.Inst->getOperand(MCOpIndex+1).getImm();
       unsigned indexReg = Inst.Inst->getOperand(MCOpIndex+2).getReg();
       int64_t displacement = Inst.Inst->getOperand(MCOpIndex+3).getImm();
-      //unsigned segmentReg = Inst.Inst->getOperand(MCOpIndex+4).getReg();
-      
+    
       uint64_t addr = 0;
+        
+      unsigned segmentReg = Inst.Inst->getOperand(MCOpIndex+4).getReg();
+        
+      if (segmentReg != 0 && Disassembler.Key.Arch == Triple::x86_64) {
+        unsigned fsID = Disassembler.registerIDWithName("FS");
+        unsigned gsID = Disassembler.registerIDWithName("GS");
+        
+        if (segmentReg == fsID ||
+            segmentReg == gsID) {
+          uint64_t segmentBase;
+          if (!callback(&segmentBase, segmentReg, arg))
+            addr += segmentBase;        
+        }
+      }
         
       if (baseReg) {
         uint64_t baseVal;
@@ -175,7 +190,7 @@ int EDOperand::evaluate(uint64_t &result,
       result = addr;
       return 0;
     }
-    }
+    } // switch (operandType)
     break;
   case Triple::arm:
   case Triple::thumb:
@@ -183,15 +198,24 @@ int EDOperand::evaluate(uint64_t &result,
     default:
       return -1;
     case kOperandTypeImmediate:
+      if (!Inst.Inst->getOperand(MCOpIndex).isImm())
+        return -1;
+            
       result = Inst.Inst->getOperand(MCOpIndex).getImm();
       return 0;
     case kOperandTypeRegister:
     {
+      if (!Inst.Inst->getOperand(MCOpIndex).isReg())
+        return -1;
+        
       unsigned reg = Inst.Inst->getOperand(MCOpIndex).getReg();
       return callback(&result, reg, arg);
     }
     case kOperandTypeARMBranchTarget:
     {
+      if (!Inst.Inst->getOperand(MCOpIndex).isImm())
+        return -1;
+        
       int64_t displacement = Inst.Inst->getOperand(MCOpIndex).getImm();
       
       uint64_t pcVal;
@@ -203,6 +227,7 @@ int EDOperand::evaluate(uint64_t &result,
       return 0;
     }
     }
+    break;
   }
   
   return -1;
@@ -242,6 +267,7 @@ int EDOperand::isMemory() {
   case kOperandTypeARMAddrMode4:
   case kOperandTypeARMAddrMode5:
   case kOperandTypeARMAddrMode6:
+  case kOperandTypeARMAddrMode7:
   case kOperandTypeARMAddrModePC:
   case kOperandTypeARMBranchTarget:
   case kOperandTypeThumbAddrModeS1:
@@ -255,6 +281,7 @@ int EDOperand::isMemory() {
   case kOperandTypeThumb2AddrModeImm12:
   case kOperandTypeThumb2AddrModeSoReg:
   case kOperandTypeThumb2AddrModeImm8s4:
+  case kOperandTypeThumb2AddrModeReg:
     return 1;
   }
 }

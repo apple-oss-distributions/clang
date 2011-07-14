@@ -15,6 +15,7 @@
 #ifndef LLVM_TYPESCONTEXT_H
 #define LLVM_TYPESCONTEXT_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include <map>
 
@@ -157,8 +158,8 @@ class StructValType {
   std::vector<const Type*> ElTypes;
   bool packed;
 public:
-  StructValType(const std::vector<const Type*> &args, bool isPacked)
-    : ElTypes(args), packed(isPacked) {}
+  StructValType(ArrayRef<const Type*> args, bool isPacked)
+    : ElTypes(args.vec()), packed(isPacked) {}
 
   static StructValType get(const StructType *ST) {
     std::vector<const Type *> ElTypes;
@@ -187,8 +188,8 @@ class FunctionValType {
   std::vector<const Type*> ArgTypes;
   bool isVarArg;
 public:
-  FunctionValType(const Type *ret, const std::vector<const Type*> &args,
-                  bool isVA) : RetTy(ret), ArgTypes(args), isVarArg(isVA) {}
+  FunctionValType(const Type *ret, ArrayRef<const Type*> args, bool isVA)
+    : RetTy(ret), ArgTypes(args.vec()), isVarArg(isVA) {}
 
   static FunctionValType get(const FunctionType *FT);
 
@@ -317,7 +318,7 @@ public:
     // The old record is now out-of-date, because one of the children has been
     // updated.  Remove the obsolete entry from the map.
     unsigned NumErased = Map.erase(ValType::get(Ty));
-    assert(NumErased && "Element not found!"); NumErased = NumErased;
+    assert(NumErased && "Element not found!"); (void)NumErased;
 
     // Remember the structural hash for the type before we start hacking on it,
     // in case we need it later.
@@ -369,7 +370,7 @@ public:
 
         // Remove the old entry form TypesByHash.  If the hash values differ
         // now, remove it from the old place.  Otherwise, continue scanning
-        // withing this hashcode to reduce work.
+        // within this hashcode to reduce work.
         if (NewTypeHash != OldTypeHash) {
           RemoveFromTypesByHash(OldTypeHash, Ty);
         } else {

@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This provides C++ AST support targetting the Itanium C++ ABI, which is
+// This provides C++ AST support targeting the Itanium C++ ABI, which is
 // documented at:
 //  http://www.codesourcery.com/public/cxx-abi/abi.html
 //  http://www.codesourcery.com/public/cxx-abi/abi-eh.html
@@ -19,7 +19,10 @@
 
 #include "CXXABI.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/RecordLayout.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Type.h"
+#include "clang/Basic/TargetInfo.h"
 
 using namespace clang;
 
@@ -38,6 +41,20 @@ public:
 
   CallingConv getDefaultMethodCallConv() const {
     return CC_C;
+  }
+
+  // We cheat and just check that the class has a vtable pointer, and that it's
+  // only big enough to have a vtable pointer and nothing more (or less).
+  bool isNearlyEmpty(const CXXRecordDecl *RD) const {
+
+    // Check that the class has a vtable pointer.
+    if (!RD->isDynamicClass())
+      return false;
+
+    const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
+    CharUnits PointerSize = 
+      Context.toCharUnitsFromBits(Context.Target.getPointerWidth(0));
+    return Layout.getNonVirtualSize() == PointerSize;
   }
 };
 

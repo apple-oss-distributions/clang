@@ -25,7 +25,6 @@ namespace llvm {
 
 namespace clang {
   class ObjCPropertyRefExpr;
-  class ObjCImplicitSetterGetterRefExpr;
 
 namespace CodeGen {
   class CGBitFieldInfo;
@@ -109,10 +108,8 @@ class LValue {
     VectorElt,    // This is a vector element l-value (V[i]), use getVector*
     BitField,     // This is a bitfield l-value, use getBitfield*.
     ExtVectorElt, // This is an extended vector subset, use getExtVectorComp
-    PropertyRef,  // This is an Objective-C property reference, use
+    PropertyRef   // This is an Objective-C property reference, use
                   // getPropertyRefExpr
-    KVCRef        // This is an objective-c 'implicit' property ref,
-                  // use getKVCRefExpr
   } LVType;
 
   llvm::Value *V;
@@ -129,9 +126,6 @@ class LValue {
 
     // Obj-C property reference expression
     const ObjCPropertyRefExpr *PropertyRefExpr;
-
-    // ObjC 'implicit' property reference expression
-    const ObjCImplicitSetterGetterRefExpr *KVCRefExpr;
   };
 
   // 'const' is unused here
@@ -181,7 +175,6 @@ public:
   bool isBitField() const { return LVType == BitField; }
   bool isExtVectorElt() const { return LVType == ExtVectorElt; }
   bool isPropertyRef() const { return LVType == PropertyRef; }
-  bool isKVCRef() const { return LVType == KVCRef; }
 
   bool isVolatileQualified() const { return Quals.hasVolatile(); }
   bool isRestrictQualified() const { return Quals.hasRestrict(); }
@@ -249,21 +242,19 @@ public:
   }
 
   // property ref lvalue
+  llvm::Value *getPropertyRefBaseAddr() const {
+    assert(isPropertyRef());
+    return V;
+  }
   const ObjCPropertyRefExpr *getPropertyRefExpr() const {
     assert(isPropertyRef());
     return PropertyRefExpr;
   }
 
-  // 'implicit' property ref lvalue
-  const ObjCImplicitSetterGetterRefExpr *getKVCRefExpr() const {
-    assert(isKVCRef());
-    return KVCRefExpr;
-  }
-
   static LValue MakeAddr(llvm::Value *V, QualType T, unsigned Alignment,
                          ASTContext &Context,
                          llvm::MDNode *TBAAInfo = 0) {
-    Qualifiers Quals = Context.getCanonicalType(T).getQualifiers();
+    Qualifiers Quals = T.getQualifiers();
     Quals.setObjCGCAttr(Context.getObjCGCAttrKind(T));
 
     LValue R;
@@ -313,20 +304,12 @@ public:
   // the lvalue. However, this complicates the code a bit, and I haven't figured
   // out how to make it go wrong yet.
   static LValue MakePropertyRef(const ObjCPropertyRefExpr *E,
-                                unsigned CVR) {
+                                llvm::Value *Base) {
     LValue R;
     R.LVType = PropertyRef;
+    R.V = Base;
     R.PropertyRefExpr = E;
-    R.Initialize(Qualifiers::fromCVRMask(CVR));
-    return R;
-  }
-
-  static LValue MakeKVCRef(const ObjCImplicitSetterGetterRefExpr *E,
-                           unsigned CVR) {
-    LValue R;
-    R.LVType = KVCRef;
-    R.KVCRefExpr = E;
-    R.Initialize(Qualifiers::fromCVRMask(CVR));
+    R.Initialize(Qualifiers());
     return R;
   }
 };
@@ -340,6 +323,11 @@ class AggValueSlot {
   bool VolatileFlag : 1;
   bool LifetimeFlag : 1;
   bool RequiresGCollection : 1;
+  
+  /// IsZeroed - This is set to true if the destination is known to be zero
+  /// before the assignment into it.  This means that zero fields don't need to
+  /// be set.
+  bool IsZeroed : 1;
 
 public:
   /// ignored - Returns an aggregate value slot indicating that the
@@ -347,7 +335,7 @@ public:
   static AggValueSlot ignored() {
     AggValueSlot AV;
     AV.Addr = 0;
-    AV.VolatileFlag = AV.LifetimeFlag = AV.RequiresGCollection = 0;
+    AV.VolatileFlag = AV.LifetimeFlag = AV.RequiresGCollection = AV.IsZeroed =0;
     return AV;
   }
 
@@ -361,17 +349,19 @@ public:
   ///   somewhere that ObjC GC calls should be emitted for
   static AggValueSlot forAddr(llvm::Value *Addr, bool Volatile,
                               bool LifetimeExternallyManaged,
-                              bool RequiresGCollection=false) {
+                              bool RequiresGCollection = false,
+                              bool IsZeroed = false) {
     AggValueSlot AV;
     AV.Addr = Addr;
     AV.VolatileFlag = Volatile;
     AV.LifetimeFlag = LifetimeExternallyManaged;
     AV.RequiresGCollection = RequiresGCollection;
+    AV.IsZeroed = IsZeroed;
     return AV;
   }
 
   static AggValueSlot forLValue(LValue LV, bool LifetimeExternallyManaged,
-                                bool RequiresGCollection=false) {
+                                bool RequiresGCollection = false) {
     return forAddr(LV.getAddress(), LV.isVolatileQualified(),
                    LifetimeExternallyManaged, RequiresGCollection);
   }
@@ -403,6 +393,10 @@ public:
     return RValue::getAggregate(getAddr(), isVolatile());
   }
   
+  void setZeroed(bool V = true) { IsZeroed = V; }
+  bool isZeroed() const {
+    return IsZeroed;
+  }
 };
 
 }  // end namespace CodeGen

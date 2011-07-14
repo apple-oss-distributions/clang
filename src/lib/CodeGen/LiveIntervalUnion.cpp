@@ -15,73 +15,108 @@
 
 #define DEBUG_TYPE "regalloc"
 #include "LiveIntervalUnion.h"
+#include "llvm/ADT/SparseBitVector.h"
+#include "llvm/CodeGen/MachineLoopRanges.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include <algorithm>
+#include "llvm/Target/TargetRegisterInfo.h"
+
 using namespace llvm;
 
+
 // Merge a LiveInterval's segments. Guarantee no overlaps.
-//
-// Consider coalescing adjacent segments to save space, even though it makes
-// extraction more complicated.
-void LiveIntervalUnion::unify(LiveInterval &lvr) {
-  // Insert each of the virtual register's live segments into the map
-  SegmentIter segPos = segments_.begin();
-  for (LiveInterval::iterator lvrI = lvr.begin(), lvrEnd = lvr.end();
-       lvrI != lvrEnd; ++lvrI ) {
-    LiveSegment segment(lvrI->start, lvrI->end, lvr);
-    segPos = segments_.insert(segPos, segment);
-    assert(*segPos == segment && "need equal val for equal key");
-#ifndef NDEBUG
-    // check for overlap (inductively)
-    if (segPos != segments_.begin()) {
-      SegmentIter prevPos = segPos;
-      --prevPos;
-      assert(prevPos->end <= segment.start && "overlapping segments" );
-    }
-    SegmentIter nextPos = segPos;
-    ++nextPos;
-    if (nextPos != segments_.end())
-      assert(segment.end <= nextPos->start && "overlapping segments" );
-#endif // NDEBUG
+void LiveIntervalUnion::unify(LiveInterval &VirtReg) {
+  if (VirtReg.empty())
+    return;
+  ++Tag;
+
+  // Insert each of the virtual register's live segments into the map.
+  LiveInterval::iterator RegPos = VirtReg.begin();
+  LiveInterval::iterator RegEnd = VirtReg.end();
+  SegmentIter SegPos = Segments.find(RegPos->start);
+
+  while (SegPos.valid()) {
+    SegPos.insert(RegPos->start, RegPos->end, &VirtReg);
+    if (++RegPos == RegEnd)
+      return;
+    SegPos.advanceTo(RegPos->start);
+  }
+
+  // We have reached the end of Segments, so it is no longer necessary to search
+  // for the insertion position.
+  // It is faster to insert the end first.
+  --RegEnd;
+  SegPos.insert(RegEnd->start, RegEnd->end, &VirtReg);
+  for (; RegPos != RegEnd; ++RegPos, ++SegPos)
+    SegPos.insert(RegPos->start, RegPos->end, &VirtReg);
+}
+
+// Remove a live virtual register's segments from this union.
+void LiveIntervalUnion::extract(LiveInterval &VirtReg) {
+  if (VirtReg.empty())
+    return;
+  ++Tag;
+
+  // Remove each of the virtual register's live segments from the map.
+  LiveInterval::iterator RegPos = VirtReg.begin();
+  LiveInterval::iterator RegEnd = VirtReg.end();
+  SegmentIter SegPos = Segments.find(RegPos->start);
+
+  for (;;) {
+    assert(SegPos.value() == &VirtReg && "Inconsistent LiveInterval");
+    SegPos.erase();
+    if (!SegPos.valid())
+      return;
+
+    // Skip all segments that may have been coalesced.
+    RegPos = VirtReg.advanceTo(RegPos, SegPos.start());
+    if (RegPos == RegEnd)
+      return;
+
+    SegPos.advanceTo(RegPos->start);
   }
 }
 
-// Low-level helper to find the first segment in the range [segI,segEnd) that
-// intersects with a live virtual register segment, or segI.start >= lvr.end
-//
-// This logic is tied to the underlying LiveSegments data structure. For now, we
-// use a binary search within the vector to find the nearest starting position,
-// then reverse iterate to find the first overlap.
-//
-// Upon entry we have segI.start < lvrSeg.end
-// seg   |--...
-//        \   .
-// lvr ...-|
-// 
-// After binary search, we have segI.start >= lvrSeg.start:
-// seg   |--...
-//      /
-// lvr |--...
-//
-// Assuming intervals are disjoint, if an intersection exists, it must be the
-// segment found or immediately behind it. We continue reverse iterating to
-// return the first overlap.
-typedef LiveIntervalUnion::SegmentIter SegmentIter;
-static SegmentIter upperBound(SegmentIter segBegin,
-                       SegmentIter segEnd,
-                       const LiveRange &lvrSeg) {
-  assert(lvrSeg.end > segBegin->start && "segment iterator precondition");
-  // get the next LIU segment such that setg.start is not less than
-  // lvrSeg.start
-  SegmentIter segI = std::upper_bound(segBegin, segEnd, lvrSeg.start);
-  while (segI != segBegin) {
-    --segI;
-    if (lvrSeg.start >= segI->end)
-      return ++segI;
+void
+LiveIntervalUnion::print(raw_ostream &OS, const TargetRegisterInfo *TRI) const {
+  OS << "LIU " << PrintReg(RepReg, TRI);
+  if (empty()) {
+    OS << " empty\n";
+    return;
   }
-  return segI;
+  for (LiveSegments::const_iterator SI = Segments.begin(); SI.valid(); ++SI) {
+    OS << " [" << SI.start() << ' ' << SI.stop() << "):"
+       << PrintReg(SI.value()->reg, TRI);
+  }
+  OS << '\n';
 }
+
+void LiveIntervalUnion::InterferenceResult::print(raw_ostream &OS,
+                                          const TargetRegisterInfo *TRI) const {
+  OS << '[' << start() << ';' << stop() << "):"
+     << PrintReg(interference()->reg, TRI);
+}
+
+void LiveIntervalUnion::Query::print(raw_ostream &OS,
+                                     const TargetRegisterInfo *TRI) {
+  OS << "Interferences with ";
+  LiveUnion->print(OS, TRI);
+  InterferenceResult IR = firstInterference();
+  while (isInterference(IR)) {
+    OS << "  ";
+    IR.print(OS, TRI);
+    OS << '\n';
+    nextInterference(IR);
+  }
+}
+
+#ifndef NDEBUG
+// Verify the live intervals in this union and add them to the visited set.
+void LiveIntervalUnion::verify(LiveVirtRegBitSet& VisitedVRegs) {
+  for (SegmentIter SI = Segments.begin(); SI.valid(); ++SI)
+    VisitedVRegs.set(SI.value()->reg);
+}
+#endif //!NDEBUG
 
 // Private interface accessed by Query.
 //
@@ -89,76 +124,206 @@ static SegmentIter upperBound(SegmentIter segBegin,
 // (LiveInterval), and the other in this LiveIntervalUnion. The caller (Query)
 // is responsible for advancing the LiveIntervalUnion segments to find a
 // "notable" intersection, which requires query-specific logic.
-// 
+//
 // This design assumes only a fast mechanism for intersecting a single live
 // virtual register segment with a set of LiveIntervalUnion segments.  This may
-// be ok since most LVRs have very few segments.  If we had a data
+// be ok since most virtual registers have very few segments.  If we had a data
 // structure that optimizd MxN intersection of segments, then we would bypass
 // the loop that advances within the LiveInterval.
 //
-// If no intersection exists, set lvrI = lvrEnd, and set segI to the first
+// If no intersection exists, set VirtRegI = VirtRegEnd, and set SI to the first
 // segment whose start point is greater than LiveInterval's end point.
 //
 // Assumes that segments are sorted by start position in both
 // LiveInterval and LiveSegments.
-void LiveIntervalUnion::Query::findIntersection(InterferenceResult &ir) const {
-  LiveInterval::iterator lvrEnd = lvr_.end();
-  SegmentIter liuEnd = liu_.end();
-  while (ir.liuSegI_ != liuEnd) {
+void LiveIntervalUnion::Query::findIntersection(InterferenceResult &IR) const {
+  // Search until reaching the end of the LiveUnion segments.
+  LiveInterval::iterator VirtRegEnd = VirtReg->end();
+  if (IR.VirtRegI == VirtRegEnd)
+    return;
+  while (IR.LiveUnionI.valid()) {
     // Slowly advance the live virtual reg iterator until we surpass the next
-    // segment in this union. If this is ever used for coalescing of fixed
-    // registers and we have a LiveInterval with thousands of segments, then use
-    // upper bound instead.
-    while (ir.lvrSegI_ != lvrEnd && ir.lvrSegI_->end <= ir.liuSegI_->start)
-      ++ir.lvrSegI_;
-    if (ir.lvrSegI_ == lvrEnd)
+    // segment in LiveUnion.
+    //
+    // Note: If this is ever used for coalescing of fixed registers and we have
+    // a live vreg with thousands of segments, then change this code to use
+    // upperBound instead.
+    IR.VirtRegI = VirtReg->advanceTo(IR.VirtRegI, IR.LiveUnionI.start());
+    if (IR.VirtRegI == VirtRegEnd)
+      break; // Retain current (nonoverlapping) LiveUnionI
+
+    // VirtRegI may have advanced far beyond LiveUnionI, catch up.
+    IR.LiveUnionI.advanceTo(IR.VirtRegI->start);
+
+    // Check if no LiveUnionI exists with VirtRegI->Start < LiveUnionI.end
+    if (!IR.LiveUnionI.valid())
       break;
-    // lvrSegI_ may have advanced far beyond liuSegI_,
-    // do a fast intersection test to "catch up"
-    ir.liuSegI_ = upperBound(ir.liuSegI_, liuEnd, *ir.lvrSegI_);
-    // Check if no liuSegI_ exists with lvrSegI_->start < liuSegI_.end
-    if (ir.liuSegI_ == liuEnd)
-      break;
-    if (ir.liuSegI_->start < ir.lvrSegI_->end) {
-      assert(overlap(*ir.lvrSegI_, *ir.liuSegI_) && "upperBound postcondition");
+    if (IR.LiveUnionI.start() < IR.VirtRegI->end) {
+      assert(overlap(*IR.VirtRegI, IR.LiveUnionI) &&
+             "upperBound postcondition");
       break;
     }
   }
-  if (ir.liuSegI_ == liuEnd)
-    ir.lvrSegI_ = lvrEnd;
+  if (!IR.LiveUnionI.valid())
+    IR.VirtRegI = VirtRegEnd;
 }
 
 // Find the first intersection, and cache interference info
-// (retain segment iterators into both lvr_ and liu_).
-LiveIntervalUnion::InterferenceResult
+// (retain segment iterators into both VirtReg and LiveUnion).
+const LiveIntervalUnion::InterferenceResult &
 LiveIntervalUnion::Query::firstInterference() {
-  if (firstInterference_ != LiveIntervalUnion::InterferenceResult()) {
-    return firstInterference_;
+  if (CheckedFirstInterference)
+    return FirstInterference;
+  CheckedFirstInterference = true;
+  InterferenceResult &IR = FirstInterference;
+  IR.LiveUnionI.setMap(LiveUnion->getMap());
+
+  // Quickly skip interference check for empty sets.
+  if (VirtReg->empty() || LiveUnion->empty()) {
+    IR.VirtRegI = VirtReg->end();
+  } else if (VirtReg->beginIndex() < LiveUnion->startIndex()) {
+    // VirtReg starts first, perform double binary search.
+    IR.VirtRegI = VirtReg->find(LiveUnion->startIndex());
+    if (IR.VirtRegI != VirtReg->end())
+      IR.LiveUnionI.find(IR.VirtRegI->start);
+  } else {
+    // LiveUnion starts first, perform double binary search.
+    IR.LiveUnionI.find(VirtReg->beginIndex());
+    if (IR.LiveUnionI.valid())
+      IR.VirtRegI = VirtReg->find(IR.LiveUnionI.start());
+    else
+      IR.VirtRegI = VirtReg->end();
   }
-  firstInterference_ = InterferenceResult(lvr_.begin(), liu_.begin());
-  findIntersection(firstInterference_);
-  return firstInterference_;
+  findIntersection(FirstInterference);
+  assert((IR.VirtRegI == VirtReg->end() || IR.LiveUnionI.valid())
+         && "Uninitialized iterator");
+  return FirstInterference;
 }
 
 // Treat the result as an iterator and advance to the next interfering pair
 // of segments. This is a plain iterator with no filter.
-bool LiveIntervalUnion::Query::nextInterference(InterferenceResult &ir) const {
-  assert(isInterference(ir) && "iteration past end of interferences");
-  // Advance either the lvr or liu segment to ensure that we visit all unique
-  // overlapping pairs.
-  if (ir.lvrSegI_->end < ir.liuSegI_->end) {
-    if (++ir.lvrSegI_ == lvr_.end())
+bool LiveIntervalUnion::Query::nextInterference(InterferenceResult &IR) const {
+  assert(isInterference(IR) && "iteration past end of interferences");
+
+  // Advance either the VirtReg or LiveUnion segment to ensure that we visit all
+  // unique overlapping pairs.
+  if (IR.VirtRegI->end < IR.LiveUnionI.stop()) {
+    if (++IR.VirtRegI == VirtReg->end())
       return false;
   }
   else {
-    if (++ir.liuSegI_ == liu_.end()) {
-      ir.lvrSegI_ = lvr_.end();
+    if (!(++IR.LiveUnionI).valid()) {
+      IR.VirtRegI = VirtReg->end();
       return false;
     }
   }
-  if (overlap(*ir.lvrSegI_, *ir.liuSegI_))
+  // Short-circuit findIntersection() if possible.
+  if (overlap(*IR.VirtRegI, IR.LiveUnionI))
     return true;
-  // find the next intersection
-  findIntersection(ir);
-  return isInterference(ir);
+
+  // Find the next intersection.
+  findIntersection(IR);
+  return isInterference(IR);
+}
+
+// Scan the vector of interfering virtual registers in this union. Assume it's
+// quite small.
+bool LiveIntervalUnion::Query::isSeenInterference(LiveInterval *VirtReg) const {
+  SmallVectorImpl<LiveInterval*>::const_iterator I =
+    std::find(InterferingVRegs.begin(), InterferingVRegs.end(), VirtReg);
+  return I != InterferingVRegs.end();
+}
+
+// Count the number of virtual registers in this union that interfere with this
+// query's live virtual register.
+//
+// The number of times that we either advance IR.VirtRegI or call
+// LiveUnion.upperBound() will be no more than the number of holes in
+// VirtReg. So each invocation of collectInterferingVRegs() takes
+// time proportional to |VirtReg Holes| * time(LiveUnion.upperBound()).
+//
+// For comments on how to speed it up, see Query::findIntersection().
+unsigned LiveIntervalUnion::Query::
+collectInterferingVRegs(unsigned MaxInterferingRegs, float MaxWeight) {
+  InterferenceResult IR = firstInterference();
+  LiveInterval::iterator VirtRegEnd = VirtReg->end();
+  LiveInterval *RecentInterferingVReg = NULL;
+  if (IR.VirtRegI != VirtRegEnd) while (IR.LiveUnionI.valid()) {
+    // Advance the union's iterator to reach an unseen interfering vreg.
+    do {
+      if (IR.LiveUnionI.value() == RecentInterferingVReg)
+        continue;
+
+      if (!isSeenInterference(IR.LiveUnionI.value()))
+        break;
+
+      // Cache the most recent interfering vreg to bypass isSeenInterference.
+      RecentInterferingVReg = IR.LiveUnionI.value();
+
+    } while ((++IR.LiveUnionI).valid());
+    if (!IR.LiveUnionI.valid())
+      break;
+
+    // Advance the VirtReg iterator until surpassing the next segment in
+    // LiveUnion.
+    IR.VirtRegI = VirtReg->advanceTo(IR.VirtRegI, IR.LiveUnionI.start());
+    if (IR.VirtRegI == VirtRegEnd)
+      break;
+
+    // Check for intersection with the union's segment.
+    if (overlap(*IR.VirtRegI, IR.LiveUnionI)) {
+
+      if (!IR.LiveUnionI.value()->isSpillable())
+        SeenUnspillableVReg = true;
+
+      if (InterferingVRegs.size() == MaxInterferingRegs)
+        // Leave SeenAllInterferences set to false to indicate that at least one
+        // interference exists beyond those we collected.
+        return MaxInterferingRegs;
+
+      InterferingVRegs.push_back(IR.LiveUnionI.value());
+
+      // Cache the most recent interfering vreg to bypass isSeenInterference.
+      RecentInterferingVReg = IR.LiveUnionI.value();
+      ++IR.LiveUnionI;
+
+      // Stop collecting when the max weight is exceeded.
+      if (RecentInterferingVReg->weight >= MaxWeight)
+        return InterferingVRegs.size();
+
+      continue;
+    }
+    // VirtRegI may have advanced far beyond LiveUnionI,
+    // do a fast intersection test to "catch up"
+    IR.LiveUnionI.advanceTo(IR.VirtRegI->start);
+  }
+  SeenAllInterferences = true;
+  return InterferingVRegs.size();
+}
+
+bool LiveIntervalUnion::Query::checkLoopInterference(MachineLoopRange *Loop) {
+  // VirtReg is likely live throughout the loop, so start by checking LIU-Loop
+  // overlaps.
+  IntervalMapOverlaps<LiveIntervalUnion::Map, MachineLoopRange::Map>
+    Overlaps(LiveUnion->getMap(), Loop->getMap());
+  if (!Overlaps.valid())
+    return false;
+
+  // The loop is overlapping an LIU assignment. Check VirtReg as well.
+  LiveInterval::iterator VRI = VirtReg->find(Overlaps.start());
+
+  for (;;) {
+    if (VRI == VirtReg->end())
+      return false;
+    if (VRI->start < Overlaps.stop())
+      return true;
+
+    Overlaps.advanceTo(VRI->start);
+    if (!Overlaps.valid())
+      return false;
+    if (Overlaps.start() < VRI->end)
+      return true;
+
+    VRI = VirtReg->advanceTo(VRI, Overlaps.start());
+  }
 }

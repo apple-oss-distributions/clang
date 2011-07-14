@@ -86,13 +86,13 @@ namespace llvm {
       /// X86 bit-test instructions.
       BT,
 
-      /// X86 SetCC. Operand 0 is condition code, and operand 1 is the flag
-      /// operand produced by a CMP instruction.
+      /// X86 SetCC. Operand 0 is condition code, and operand 1 is the EFLAGS
+      /// operand, usually produced by a CMP instruction.
       SETCC,
 
       // Same as SETCC except it's materialized with a sbb and the value is all
       // one's or all zero's.
-      SETCC_CARRY,
+      SETCC_CARRY,  // R = carry_bit ? ~0 : 0
 
       /// X86 conditional moves. Operand 0 and operand 1 are the two values
       /// to select from. Operand 2 is the condition code, and operand 3 is the
@@ -160,6 +160,15 @@ namespace llvm {
       /// PSHUFB - Shuffle 16 8-bit values within a vector.
       PSHUFB,
 
+      /// PANDN - and with not'd value.
+      PANDN,
+
+      /// PSIGNB/W/D - Copy integer sign.
+      PSIGNB, PSIGNW, PSIGND,
+
+      /// PBLENDVB - Variable blend
+      PBLENDVB,
+
       /// FMAX, FMIN - Floating point max and min.
       ///
       FMAX, FMIN,
@@ -200,9 +209,11 @@ namespace llvm {
       PCMPEQB, PCMPEQW, PCMPEQD, PCMPEQQ,
       PCMPGTB, PCMPGTW, PCMPGTD, PCMPGTQ,
 
-      // ADD, SUB, SMUL, UMUL, etc. - Arithmetic operations with FLAGS results.
-      ADD, SUB, SMUL, UMUL,
+      // ADD, SUB, SMUL, etc. - Arithmetic operations with FLAGS results.
+      ADD, SUB, ADC, SBB, SMUL,
       INC, DEC, OR, XOR, AND,
+
+      UMUL, // LOW, HI, FLAGS = umul LHS, RHS
 
       // MUL_IMM - X86 specific multiply by immediate.
       MUL_IMM,
@@ -237,6 +248,10 @@ namespace llvm {
       MOVSS,
       UNPCKLPS,
       UNPCKLPD,
+      VUNPCKLPS,
+      VUNPCKLPD,
+      VUNPCKLPSY,
+      VUNPCKLPDY,
       UNPCKHPS,
       UNPCKHPD,
       PUNPCKLBW,
@@ -256,6 +271,12 @@ namespace llvm {
       // WIN_ALLOCA - Windows's _chkstk call to do stack probing.
       WIN_ALLOCA,
 
+      // Memory barrier
+      MEMBARRIER,
+      MFENCE,
+      SFENCE,
+      LFENCE,
+
       // ATOMADD64_DAG, ATOMSUB64_DAG, ATOMOR64_DAG, ATOMAND64_DAG,
       // ATOMXOR64_DAG, ATOMNAND64_DAG, ATOMSWAP64_DAG -
       // Atomic 64-bit binary operations.
@@ -266,12 +287,6 @@ namespace llvm {
       ATOMAND64_DAG,
       ATOMNAND64_DAG,
       ATOMSWAP64_DAG,
-
-      // Memory barrier
-      MEMBARRIER,
-      MFENCE,
-      SFENCE,
-      LFENCE,
 
       // LCMPXCHG_DAG, LCMPXCHG8_DAG - Compare and swap.
       LCMPXCHG_DAG,
@@ -397,6 +412,16 @@ namespace llvm {
     /// specifies a shuffle of elements that is suitable for input to PALIGNR.
     bool isPALIGNRMask(ShuffleVectorSDNode *N);
 
+    /// isVEXTRACTF128Index - Return true if the specified
+    /// EXTRACT_SUBVECTOR operand specifies a vector extract that is
+    /// suitable for input to VEXTRACTF128.
+    bool isVEXTRACTF128Index(SDNode *N);
+
+    /// isVINSERTF128Index - Return true if the specified
+    /// INSERT_SUBVECTOR operand specifies a subvector insert that is
+    /// suitable for input to VINSERTF128.
+    bool isVINSERTF128Index(SDNode *N);
+
     /// getShuffleSHUFImmediate - Return the appropriate immediate to shuffle
     /// the specified isShuffleMask VECTOR_SHUFFLE mask with PSHUF* and SHUFP*
     /// instructions.
@@ -414,6 +439,16 @@ namespace llvm {
     /// the specified VECTOR_SHUFFLE mask with the PALIGNR instruction.
     unsigned getShufflePALIGNRImmediate(SDNode *N);
 
+    /// getExtractVEXTRACTF128Immediate - Return the appropriate
+    /// immediate to extract the specified EXTRACT_SUBVECTOR index
+    /// with VEXTRACTF128 instructions.
+    unsigned getExtractVEXTRACTF128Immediate(SDNode *N);
+
+    /// getInsertVINSERTF128Immediate - Return the appropriate
+    /// immediate to insert at the specified INSERT_SUBVECTOR index
+    /// with VINSERTF128 instructions.
+    unsigned getInsertVINSERTF128Immediate(SDNode *N);
+
     /// isZeroNode - Returns true if Elt is a constant zero or a floating point
     /// constant +0.0.
     bool isZeroNode(SDValue Elt);
@@ -430,10 +465,9 @@ namespace llvm {
   public:
     explicit X86TargetLowering(X86TargetMachine &TM);
 
-    /// getPICBaseSymbol - Return the X86-32 PIC base.
-    MCSymbol *getPICBaseSymbol(const MachineFunction *MF, MCContext &Ctx) const;
-
     virtual unsigned getJumpTableEncoding() const;
+
+    virtual MVT getShiftAmountTy(EVT LHSTy) const { return MVT::i8; }
 
     virtual const MCExpr *
     LowerCustomJumpTableEntry(const MachineJumpTableInfo *MJTI,
@@ -542,10 +576,9 @@ namespace llvm {
 
     ConstraintType getConstraintType(const std::string &Constraint) const;
 
-    /// Examine constraint string and operand type and determine a weight value,
-    /// where: -1 = invalid match, and 0 = so-so match to 3 = good match.
+    /// Examine constraint string and operand type and determine a weight value.
     /// The operand object must already have been set up with the operand type.
-    virtual int getSingleConstraintMatchWeight(
+    virtual ConstraintWeight getSingleConstraintMatchWeight(
       AsmOperandInfo &info, const char *constraint) const;
 
     std::vector<unsigned>
@@ -644,9 +677,6 @@ namespace llvm {
     /// getFunctionAlignment - Return the Log2 alignment of this function.
     virtual unsigned getFunctionAlignment(const Function *F) const;
 
-    unsigned getRegPressureLimit(const TargetRegisterClass *RC,
-                                 MachineFunction &MF) const;
-
     /// getStackCookieLocation - Return true if the target stores stack
     /// protector cookies at a fixed offset in some non-standard address
     /// space, and populates the address space and offset as
@@ -718,7 +748,6 @@ namespace llvm {
                                 SDValue Chain, bool IsTailCall, bool Is64Bit,
                                 int FPDiff, DebugLoc dl) const;
 
-    CCAssignFn *CCAssignFnForNode(CallingConv::ID CallConv) const;
     unsigned GetAlignedArgumentStackSize(unsigned StackSize,
                                          SelectionDAG &DAG) const;
 
@@ -735,6 +764,8 @@ namespace llvm {
     SDValue LowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINSERT_VECTOR_ELT_SSE4(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSCALAR_TO_VECTOR(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerEXTRACT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerINSERT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGlobalAddress(const GlobalValue *GV, DebugLoc dl,
@@ -745,7 +776,7 @@ namespace llvm {
     SDValue LowerShift(SDValue Op, SelectionDAG &DAG) const;
     SDValue BuildFILD(SDValue Op, EVT SrcVT, SDValue Chain, SDValue StackSlot,
                       SelectionDAG &DAG) const;
-    SDValue LowerBIT_CONVERT(SDValue op, SelectionDAG &DAG) const;
+    SDValue LowerBITCAST(SDValue op, SelectionDAG &DAG) const;
     SDValue LowerSINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerUINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerUINT_TO_FP_i64(SDValue Op, SelectionDAG &DAG) const;
@@ -810,6 +841,14 @@ namespace llvm {
                   const SmallVectorImpl<SDValue> &OutVals,
                   DebugLoc dl, SelectionDAG &DAG) const;
 
+    virtual bool isUsedByReturnOnly(SDNode *N) const;
+
+    virtual bool mayBeEmittedAsTailCall(CallInst *CI) const;
+
+    virtual EVT
+    getTypeForExtArgOrReturn(LLVMContext &Context, EVT VT,
+                             ISD::NodeType ExtendKind) const;
+
     virtual bool
       CanLowerReturn(CallingConv::ID CallConv, bool isVarArg,
                      const SmallVectorImpl<ISD::OutputArg> &Outs,
@@ -825,6 +864,13 @@ namespace llvm {
     /// in memory or not.
     MachineBasicBlock *EmitPCMP(MachineInstr *BInstr, MachineBasicBlock *BB,
                                 unsigned argNum, bool inMem) const;
+
+    /// Utility functions to emit monitor and mwait instructions. These
+    /// need to make sure that the arguments to the intrinsic are in the
+    /// correct registers.
+    MachineBasicBlock *EmitMonitor(MachineInstr *MI,
+                                   MachineBasicBlock *BB) const;
+    MachineBasicBlock *EmitMwait(MachineInstr *MI, MachineBasicBlock *BB) const;
 
     /// Utility function to emit atomic bitwise operations (and, or, xor).
     /// It takes the bitwise instruction to expand, the associated machine basic
@@ -874,6 +920,9 @@ namespace llvm {
                                               MachineBasicBlock *BB) const;
 
     MachineBasicBlock *EmitLoweredTLSCall(MachineInstr *MI,
+                                          MachineBasicBlock *BB) const;
+
+    MachineBasicBlock *emitLoweredTLSAddr(MachineInstr *MI,
                                           MachineBasicBlock *BB) const;
 
     /// Emit nodes that will be selected as "test Op0,Op0", or something

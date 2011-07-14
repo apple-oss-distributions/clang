@@ -22,8 +22,9 @@
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Path.h"
 using namespace clang;
 
 // Append a #define line to Buf for Macro.  Macro should be of the form XXX,
@@ -47,33 +48,39 @@ static void DefineBuiltinMacro(MacroBuilder &Builder, llvm::StringRef Macro,
   }
 }
 
-std::string clang::NormalizeDashIncludePath(llvm::StringRef File) {
+std::string clang::NormalizeDashIncludePath(llvm::StringRef File,
+                                            FileManager &FileMgr) {
   // Implicit include paths should be resolved relative to the current
   // working directory first, and then use the regular header search
   // mechanism. The proper way to handle this is to have the
   // predefines buffer located at the current working directory, but
-  // it has not file entry. For now, workaround this by using an
+  // it has no file entry. For now, workaround this by using an
   // absolute path if we find the file here, and otherwise letting
   // header search handle it.
-  llvm::sys::Path Path(File);
-  Path.makeAbsolute();
-  if (!Path.exists())
+  llvm::SmallString<128> Path(File);
+  llvm::sys::fs::make_absolute(Path);
+  bool exists;
+  if (llvm::sys::fs::exists(Path.str(), exists) || !exists)
     Path = File;
+  else if (exists)
+    FileMgr.getFile(File);
 
   return Lexer::Stringify(Path.str());
 }
 
 /// AddImplicitInclude - Add an implicit #include of the specified file to the
 /// predefines buffer.
-static void AddImplicitInclude(MacroBuilder &Builder, llvm::StringRef File) {
+static void AddImplicitInclude(MacroBuilder &Builder, llvm::StringRef File,
+                               FileManager &FileMgr) {
   Builder.append("#include \"" +
-                 llvm::Twine(NormalizeDashIncludePath(File)) + "\"");
+                 llvm::Twine(NormalizeDashIncludePath(File, FileMgr)) + "\"");
 }
 
 static void AddImplicitIncludeMacros(MacroBuilder &Builder,
-                                     llvm::StringRef File) {
+                                     llvm::StringRef File,
+                                     FileManager &FileMgr) {
   Builder.append("#__include_macros \"" +
-                 llvm::Twine(NormalizeDashIncludePath(File)) + "\"");
+                 llvm::Twine(NormalizeDashIncludePath(File, FileMgr)) + "\"");
   // Marker token to stop the __include_macros fetch loop.
   Builder.append("##"); // ##?
 }
@@ -92,7 +99,7 @@ static void AddImplicitIncludePTH(MacroBuilder &Builder, Preprocessor &PP,
     return;
   }
 
-  AddImplicitInclude(Builder, OriginalFile);
+  AddImplicitInclude(Builder, OriginalFile, PP.getFileManager());
 }
 
 /// PickFP - This is used to pick a value based on the FP semantics of the
@@ -167,15 +174,10 @@ static void DefineFloatMacros(MacroBuilder &Builder, llvm::StringRef Prefix,
 /// signedness of 'isSigned' and with a value suffix of 'ValSuffix' (e.g. LL).
 static void DefineTypeSize(llvm::StringRef MacroName, unsigned TypeWidth,
                            llvm::StringRef ValSuffix, bool isSigned,
-                           MacroBuilder& Builder) {
-  long long MaxVal;
-  if (isSigned) {
-    assert(TypeWidth != 1);
-    MaxVal = ~0ULL >> (65-TypeWidth);
-  } else
-    MaxVal = ~0ULL >> (64-TypeWidth);
-
-  Builder.defineMacro(MacroName, llvm::Twine(MaxVal) + ValSuffix);
+                           MacroBuilder &Builder) {
+  llvm::APInt MaxVal = isSigned ? llvm::APInt::getSignedMaxValue(TypeWidth)
+                                : llvm::APInt::getMaxValue(TypeWidth);
+  Builder.defineMacro(MacroName, MaxVal.toString(10, isSigned) + ValSuffix);
 }
 
 /// DefineTypeSize - An overloaded helper that uses TargetInfo to determine
@@ -245,13 +247,18 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   Builder.defineMacro("__GNUC_PATCHLEVEL__", "1");
   Builder.defineMacro("__GNUC__", "4");
   Builder.defineMacro("__GXX_ABI_VERSION", "1002");
-  Builder.defineMacro("__VERSION__", "\"4.2.1 Compatible Clang Compiler\"");
+
+  // As sad as it is, enough software depends on the __VERSION__ for version
+  // checks that it is necessary to report 4.2.1 (the base GCC version we claim
+  // compatibility with) first.
+  Builder.defineMacro("__VERSION__", "\"4.2.1 Compatible " + 
+                      llvm::Twine(getClangFullCPPVersion()) + "\"");
 
   // Initialize language-specific preprocessor defines.
 
   // These should all be defined in the preprocessor according to the
   // current language configuration.
-  if (!LangOpts.Microsoft)
+  if (!LangOpts.Microsoft && !LangOpts.TraditionalCPP)
     Builder.defineMacro("__STDC__");
   if (LangOpts.AsmPreprocessor)
     Builder.defineMacro("__ASSEMBLER__");
@@ -311,8 +318,10 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (LangOpts.SjLjExceptions)
     Builder.defineMacro("__USING_SJLJ_EXCEPTIONS__");
 
-  if (LangOpts.CPlusPlus) {
+  if (LangOpts.Deprecated)
     Builder.defineMacro("__DEPRECATED");
+
+  if (LangOpts.CPlusPlus) {
     Builder.defineMacro("__GNUG__", "4");
     Builder.defineMacro("__GXX_WEAK__");
     if (LangOpts.GNUMode)
@@ -326,12 +335,6 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   }
 
   if (LangOpts.Microsoft) {
-    // Filter out some microsoft extensions when trying to parse in ms-compat
-    // mode.
-    Builder.defineMacro("__int8", "__INT8_TYPE__");
-    Builder.defineMacro("__int16", "__INT16_TYPE__");
-    Builder.defineMacro("__int32", "__INT32_TYPE__");
-    Builder.defineMacro("__int64", "__INT64_TYPE__");
     // Both __PRETTY_FUNCTION__ and __FUNCTION__ are GCC extensions, however
     // VC++ appears to only like __FUNCTION__.
     Builder.defineMacro("__PRETTY_FUNCTION__", "__FUNCTION__");
@@ -412,6 +415,9 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (!LangOpts.CharIsSigned)
     Builder.defineMacro("__CHAR_UNSIGNED__");
 
+  if (!TargetInfo::isTypeSigned(TI.getWIntType()))
+    Builder.defineMacro("__WINT_UNSIGNED__");
+
   // Define exact-width integer types for stdint.h
   Builder.defineMacro("__INT" + llvm::Twine(TI.getCharWidth()) + "_TYPE__",
                       "char");
@@ -469,6 +475,9 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (FEOpts.ProgramAction == frontend::RunAnalysis)
     Builder.defineMacro("__clang_analyzer__");
 
+  if (LangOpts.FastRelaxedMath)
+    Builder.defineMacro("__FAST_RELAXED_MATH__");
+
   // Get other target #defines.
   TI.getTargetDefines(LangOpts, Builder);
 }
@@ -478,7 +487,6 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
 static void InitializeFileRemapping(Diagnostic &Diags,
                                     SourceManager &SourceMgr,
                                     FileManager &FileMgr,
-                                    const FileSystemOptions &FSOpts,
                                     const PreprocessorOptions &InitOpts) {
   // Remap files in the source manager (with buffers).
   for (PreprocessorOptions::const_remapped_file_buffer_iterator
@@ -489,7 +497,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
     // Create the file entry for the file that we're mapping from.
     const FileEntry *FromFile = FileMgr.getVirtualFile(Remap->first,
                                                 Remap->second->getBufferSize(),
-                                                       0, FSOpts);
+                                                       0);
     if (!FromFile) {
       Diags.Report(diag::err_fe_remap_missing_from_file)
         << Remap->first;
@@ -511,7 +519,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
        Remap != RemapEnd;
        ++Remap) {
     // Find the file that we're mapping to.
-    const FileEntry *ToFile = FileMgr.getFile(Remap->second, FSOpts);
+    const FileEntry *ToFile = FileMgr.getFile(Remap->second);
     if (!ToFile) {
       Diags.Report(diag::err_fe_remap_missing_to_file)
       << Remap->first << Remap->second;
@@ -520,35 +528,26 @@ static void InitializeFileRemapping(Diagnostic &Diags,
     
     // Create the file entry for the file that we're mapping from.
     const FileEntry *FromFile = FileMgr.getVirtualFile(Remap->first,
-                                                       ToFile->getSize(),
-                                                       0, FSOpts);
+                                                       ToFile->getSize(), 0);
     if (!FromFile) {
       Diags.Report(diag::err_fe_remap_missing_from_file)
       << Remap->first;
       continue;
     }
     
-    // Load the contents of the file we're mapping to.
-    std::string ErrorStr;
-    const llvm::MemoryBuffer *Buffer
-    = FileMgr.getBufferForFile(ToFile->getName(), FSOpts, &ErrorStr);
-    if (!Buffer) {
-      Diags.Report(diag::err_fe_error_opening)
-        << Remap->second << ErrorStr;
-      continue;
-    }
-    
     // Override the contents of the "from" file with the contents of
     // the "to" file.
-    SourceMgr.overrideFileContents(FromFile, Buffer);
+    SourceMgr.overrideFileContents(FromFile, ToFile);
   }
+
+  SourceMgr.setOverridenFilesKeepOriginalName(
+                                        InitOpts.RemappedFilesKeepOriginalName);
 }
 
 /// InitializePreprocessor - Initialize the preprocessor getting it and the
 /// environment ready to process a single file. This returns true on error.
 ///
 void clang::InitializePreprocessor(Preprocessor &PP,
-                                   const FileSystemOptions &FSOpts,
                                    const PreprocessorOptions &InitOpts,
                                    const HeaderSearchOptions &HSOpts,
                                    const FrontendOptions &FEOpts) {
@@ -558,7 +557,7 @@ void clang::InitializePreprocessor(Preprocessor &PP,
   MacroBuilder Builder(Predefines);
 
   InitializeFileRemapping(PP.getDiagnostics(), PP.getSourceManager(),
-                          PP.getFileManager(), FSOpts, InitOpts);
+                          PP.getFileManager(), InitOpts);
 
   // Emit line markers for various builtin sections of the file.  We don't do
   // this in asm preprocessor mode, because "# 4" is not a line marker directive
@@ -588,7 +587,8 @@ void clang::InitializePreprocessor(Preprocessor &PP,
   // If -imacros are specified, include them now.  These are processed before
   // any -include directives.
   for (unsigned i = 0, e = InitOpts.MacroIncludes.size(); i != e; ++i)
-    AddImplicitIncludeMacros(Builder, InitOpts.MacroIncludes[i]);
+    AddImplicitIncludeMacros(Builder, InitOpts.MacroIncludes[i],
+                             PP.getFileManager());
 
   // Process -include directives.
   for (unsigned i = 0, e = InitOpts.Includes.size(); i != e; ++i) {
@@ -596,7 +596,7 @@ void clang::InitializePreprocessor(Preprocessor &PP,
     if (Path == InitOpts.ImplicitPTHInclude)
       AddImplicitIncludePTH(Builder, PP, Path);
     else
-      AddImplicitInclude(Builder, Path);
+      AddImplicitInclude(Builder, Path, PP.getFileManager());
   }
 
   // Exit the command line and go back to <built-in> (2 is LC_LEAVE).

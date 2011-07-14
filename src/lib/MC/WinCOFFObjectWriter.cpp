@@ -31,7 +31,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 
-#include "llvm/System/TimeValue.h"
+#include "llvm/Support/TimeValue.h"
 
 #include "../Target/X86/X86FixupKinds.h"
 
@@ -170,7 +170,7 @@ public:
 
   // MCObjectWriter interface implementation.
 
-  void ExecutePostLayoutBinding(MCAssembler &Asm);
+  void ExecutePostLayoutBinding(MCAssembler &Asm, const MCAsmLayout &Layout);
 
   void RecordRelocation(const MCAssembler &Asm,
                         const MCAsmLayout &Layout,
@@ -178,11 +178,6 @@ public:
                         const MCFixup &Fixup,
                         MCValue Target,
                         uint64_t &FixedValue);
-
-  virtual bool IsFixupFullyResolved(const MCAssembler &Asm,
-                                    const MCValue Target,
-                                    bool IsPCRel,
-                                    const MCFragment *DF) const;
 
   void WriteObject(MCAssembler &Asm, const MCAsmLayout &Layout);
 };
@@ -616,7 +611,8 @@ void WinCOFFObjectWriter::WriteRelocation(const COFF::relocation &R) {
 ////////////////////////////////////////////////////////////////////////////////
 // MCObjectWriter interface implementations
 
-void WinCOFFObjectWriter::ExecutePostLayoutBinding(MCAssembler &Asm) {
+void WinCOFFObjectWriter::ExecutePostLayoutBinding(MCAssembler &Asm,
+                                                   const MCAsmLayout &Layout) {
   // "Define" each section & symbol. This creates section & symbol
   // entries in the staging area.
 
@@ -651,22 +647,27 @@ void WinCOFFObjectWriter::RecordRelocation(const MCAssembler &Asm,
 
   COFFSection *coff_section = SectionMap[&SectionData->getSection()];
   COFFSymbol *coff_symbol = SymbolMap[&A_SD.getSymbol()];
+  const MCSymbolRefExpr *SymA = Target.getSymA();
+  const MCSymbolRefExpr *SymB = Target.getSymB();
+  const bool CrossSection = SymB &&
+    &SymA->getSymbol().getSection() != &SymB->getSymbol().getSection();
 
   if (Target.getSymB()) {
-    if (&Target.getSymA()->getSymbol().getSection()
-     != &Target.getSymB()->getSymbol().getSection()) {
-      llvm_unreachable("Symbol relative relocations are only allowed between "
-                       "symbols in the same section");
-    }
     const MCSymbol *B = &Target.getSymB()->getSymbol();
     MCSymbolData &B_SD = Asm.getSymbolData(*B);
 
-    FixedValue = Layout.getSymbolAddress(&A_SD) - Layout.getSymbolAddress(&B_SD);
+    // Offset of the symbol in the section
+    int64_t a = Layout.getSymbolOffset(&B_SD);
 
+    // Ofeset of the relocation in the section
+    int64_t b = Layout.getFragmentOffset(Fragment) + Fixup.getOffset();
+
+    FixedValue = b - a;
     // In the case where we have SymbA and SymB, we just need to store the delta
     // between the two symbols.  Update FixedValue to account for the delta, and
     // skip recording the relocation.
-    return;
+    if (!CrossSection)
+      return;
   } else {
     FixedValue = Target.getConstant();
   }
@@ -677,7 +678,7 @@ void WinCOFFObjectWriter::RecordRelocation(const MCAssembler &Asm,
   Reloc.Data.VirtualAddress = Layout.getFragmentOffset(Fragment);
 
   // Turn relocations for temporary symbols into section relocations.
-  if (coff_symbol->MCData->getSymbol().isTemporary()) {
+  if (coff_symbol->MCData->getSymbol().isTemporary() || CrossSection) {
     Reloc.Symb = coff_symbol->Section->Symbol;
     FixedValue += Layout.getFragmentOffset(coff_symbol->MCData->Fragment)
                 + coff_symbol->MCData->getOffset();
@@ -688,8 +689,13 @@ void WinCOFFObjectWriter::RecordRelocation(const MCAssembler &Asm,
 
   Reloc.Data.VirtualAddress += Fixup.getOffset();
 
-  switch ((unsigned)Fixup.getKind()) {
-  case X86::reloc_pcrel_4byte:
+  unsigned FixupKind = Fixup.getKind();
+
+  if (CrossSection)
+    FixupKind = FK_PCRel_4;
+
+  switch (FixupKind) {
+  case FK_PCRel_4:
   case X86::reloc_riprel_4byte:
   case X86::reloc_riprel_4byte_movq_load:
     Reloc.Data.Type = Is64Bit ? COFF::IMAGE_REL_AMD64_REL32
@@ -716,36 +722,6 @@ void WinCOFFObjectWriter::RecordRelocation(const MCAssembler &Asm,
   coff_section->Relocations.push_back(Reloc);
 }
 
-bool WinCOFFObjectWriter::IsFixupFullyResolved(const MCAssembler &Asm,
-                                               const MCValue Target,
-                                               bool IsPCRel,
-                                               const MCFragment *DF) const {
-  // If this is a PCrel relocation, find the section this fixup value is
-  // relative to.
-  const MCSection *BaseSection = 0;
-  if (IsPCRel) {
-    BaseSection = &DF->getParent()->getSection();
-    assert(BaseSection);
-  }
-
-  const MCSection *SectionA = 0;
-  const MCSymbol *SymbolA = 0;
-  if (const MCSymbolRefExpr *A = Target.getSymA()) {
-    SymbolA = &A->getSymbol();
-    SectionA = &SymbolA->getSection();
-  }
-
-  const MCSection *SectionB = 0;
-  if (const MCSymbolRefExpr *B = Target.getSymB()) {
-    SectionB = &B->getSymbol().getSection();
-  }
-
-  if (!BaseSection)
-    return SectionA == SectionB;
-
-  return !SectionB && BaseSection == SectionA;
-}
-
 void WinCOFFObjectWriter::WriteObject(MCAssembler &Asm,
                                       const MCAsmLayout &Layout) {
   // Assign symbol and section indexes and offsets.
@@ -753,7 +729,7 @@ void WinCOFFObjectWriter::WriteObject(MCAssembler &Asm,
 
   for (sections::iterator i = Sections.begin(),
                           e = Sections.end(); i != e; i++) {
-    if (Layout.getSectionSize((*i)->MCData) > 0) {
+    if (Layout.getSectionAddressSize((*i)->MCData) > 0) {
       MakeSectionReal(**i, ++Header.NumberOfSections);
     } else {
       (*i)->Number = -1;
@@ -873,7 +849,7 @@ void WinCOFFObjectWriter::WriteObject(MCAssembler &Asm,
         assert(OS.tell() == (*i)->Header.PointerToRawData &&
                "Section::PointerToRawData is insane!");
 
-        Asm.WriteSectionData(j, Layout, this);
+        Asm.WriteSectionData(j, Layout);
       }
 
       if ((*i)->Relocations.size() > 0) {

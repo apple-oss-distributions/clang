@@ -16,6 +16,7 @@
 
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/ADT/GraphTraits.h"
+#include <functional>
 
 namespace llvm {
 
@@ -224,6 +225,10 @@ public:
   /// this basic block is entered via an exception handler.
   void setIsLandingPad() { IsLandingPad = true; }
 
+  /// getLandingPadSuccessor - If this block has a successor that is a landing
+  /// pad, return it. Otherwise return NULL.
+  const MachineBasicBlock *getLandingPadSuccessor() const;
+
   // Code Layout methods.
   
   /// moveBefore/moveAfter - move 'this' block before or after the specified
@@ -290,10 +295,27 @@ public:
   /// Returns end() is there's no non-PHI instruction.
   iterator getFirstNonPHI();
 
+  /// SkipPHIsAndLabels - Return the first instruction in MBB after I that is
+  /// not a PHI or a label. This is the correct point to insert copies at the
+  /// beginning of a basic block.
+  iterator SkipPHIsAndLabels(iterator I);
+
   /// getFirstTerminator - returns an iterator to the first terminator
   /// instruction of this basic block. If a terminator does not exist,
   /// it returns end()
   iterator getFirstTerminator();
+
+  const_iterator getFirstTerminator() const {
+    return const_cast<MachineBasicBlock*>(this)->getFirstTerminator();
+  }
+
+  /// getLastNonDebugInstr - returns an iterator to the last non-debug
+  /// instruction in the basic block, or end()
+  iterator getLastNonDebugInstr();
+
+  const_iterator getLastNonDebugInstr() const {
+    return const_cast<MachineBasicBlock*>(this)->getLastNonDebugInstr();
+  }
 
   /// SplitCriticalEdge - Split the critical edge from this block to the
   /// given successor block, and return the newly created block, or null
@@ -397,6 +419,14 @@ private:   // Methods used to maintain doubly linked list of blocks...
 raw_ostream& operator<<(raw_ostream &OS, const MachineBasicBlock &MBB);
 
 void WriteAsOperand(raw_ostream &, const MachineBasicBlock*, bool t);
+
+// This is useful when building IndexedMaps keyed on basic block pointers.
+struct MBB2NumberFunctor :
+  public std::unary_function<const MachineBasicBlock*, unsigned> {
+  unsigned operator()(const MachineBasicBlock *MBB) const {
+    return MBB->getNumber();
+  }
+};
 
 //===--------------------------------------------------------------------===//
 // GraphTraits specializations for machine basic block graphs (machine-CFGs)

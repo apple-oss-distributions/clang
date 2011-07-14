@@ -78,6 +78,10 @@ const char *llvm::dwarf::TagString(unsigned Tag) {
   case DW_TAG_shared_type:               return "DW_TAG_shared_type";
   case DW_TAG_lo_user:                   return "DW_TAG_lo_user";
   case DW_TAG_hi_user:                   return "DW_TAG_hi_user";
+  case DW_TAG_auto_variable:             return "DW_TAG_auto_variable";
+  case DW_TAG_arg_variable:              return "DW_TAG_arg_variable";
+  case DW_TAG_return_variable:           return "DW_TAG_return_variable";
+  case DW_TAG_vector_type:               return "DW_TAG_vector_type";
   }
   return 0;
 }
@@ -199,6 +203,10 @@ const char *llvm::dwarf::AttributeString(unsigned Attribute) {
   case DW_AT_APPLE_major_runtime_vers:   return "DW_AT_APPLE_major_runtime_vers";
   case DW_AT_APPLE_runtime_class:        return "DW_AT_APPLE_runtime_class";
   case DW_AT_APPLE_omit_frame_ptr:       return "DW_AT_APPLE_omit_frame_ptr";
+  case DW_AT_APPLE_property_name:        return "DW_AT_APPLE_property_name";
+  case DW_AT_APPLE_property_getter:      return "DW_AT_APPLE_property_getter";
+  case DW_AT_APPLE_property_setter:      return "DW_AT_APPLE_property_setter";
+  case DW_AT_APPLE_property_attribute:   return "DW_AT_APPLE_property_attribute";
   }
   return 0;
 }
@@ -387,6 +395,7 @@ const char *llvm::dwarf::OperationEncodingString(unsigned Encoding) {
   case DW_OP_call_ref:                   return "DW_OP_call_ref";
   case DW_OP_form_tls_address:           return "DW_OP_form_tls_address";
   case DW_OP_call_frame_cfa:             return "DW_OP_call_frame_cfa";
+  case DW_OP_bit_piece:                  return "DW_OP_bit_piece";
   case DW_OP_lo_user:                    return "DW_OP_lo_user";
   case DW_OP_hi_user:                    return "DW_OP_hi_user";
   }

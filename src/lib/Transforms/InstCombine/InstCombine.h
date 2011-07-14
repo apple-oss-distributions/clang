@@ -11,6 +11,7 @@
 #define INSTCOMBINE_INSTCOMBINE_H
 
 #include "InstCombineWorklist.h"
+#include "llvm/Operator.h"
 #include "llvm/Pass.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Support/IRBuilder.h"
@@ -69,7 +70,6 @@ class LLVM_LIBRARY_VISIBILITY InstCombiner
                              : public FunctionPass,
                                public InstVisitor<InstCombiner, Instruction*> {
   TargetData *TD;
-  bool MustPreserveLCSSA;
   bool MadeIRChange;
 public:
   /// Worklist - All of the instructions that need to be simplified.
@@ -145,6 +145,8 @@ public:
                                               ConstantInt *RHS);
   Instruction *FoldICmpDivCst(ICmpInst &ICI, BinaryOperator *DivI,
                               ConstantInt *DivRHS);
+  Instruction *FoldICmpShrCst(ICmpInst &ICI, BinaryOperator *DivI,
+                              ConstantInt *DivRHS);
   Instruction *FoldICmpAddOpCst(ICmpInst &ICI, Value *X, ConstantInt *CI,
                                 ICmpInst::Predicate Pred, Value *TheAdd);
   Instruction *FoldGEPICmp(GEPOperator *GEPLHS, Value *RHS,
@@ -215,8 +217,8 @@ private:
   Instruction *transformCallThroughTrampoline(CallSite CS);
   Instruction *transformZExtICmp(ICmpInst *ICI, Instruction &CI,
                                  bool DoXform = true);
+  Instruction *transformSExtICmp(ICmpInst *ICI, Instruction &CI);
   bool WillNotOverflowSignedAdd(Value *LHS, Value *RHS);
-  DbgDeclareInst *hasOneUsePlusDeclare(Value *V);
   Value *EmitGEPOffset(User *GEP);
 
 public:
@@ -245,7 +247,10 @@ public:
     // segment of unreachable code, so just clobber the instruction.
     if (&I == V) 
       V = UndefValue::get(I.getType());
-      
+
+    DEBUG(errs() << "IC: Replacing " << I << "\n"
+                    "    with " << *V << '\n');
+
     I.replaceAllUsesWith(V);
     return &I;
   }
@@ -286,9 +291,16 @@ public:
 
 private:
 
-  /// SimplifyCommutative - This performs a few simplifications for 
-  /// commutative operators.
-  bool SimplifyCommutative(BinaryOperator &I);
+  /// SimplifyAssociativeOrCommutative - This performs a few simplifications for
+  /// operators which are associative or commutative.
+  bool SimplifyAssociativeOrCommutative(BinaryOperator &I);
+
+  /// SimplifyUsingDistributiveLaws - This tries to simplify binary operations
+  /// which some other binary operation distributes over either by factorizing
+  /// out common terms (eg "(A*B)+(A*C)" -> "A*(B+C)") or expanding out if this
+  /// results in simplifications (eg: "A & (B | C) -> (A&B) | (A&C)" if this is
+  /// a win).  Returns the simplified value, or null if it didn't simplify.
+  Value *SimplifyUsingDistributiveLaws(BinaryOperator &I);
 
   /// SimplifyDemandedUseBits - Attempts to replace V with a simpler value
   /// based on the demanded bits.
@@ -312,10 +324,7 @@ private:
   // into the PHI (which is only possible if all operands to the PHI are
   // constants).
   //
-  // If AllowAggressive is true, FoldOpIntoPhi will allow certain transforms
-  // that would normally be unprofitable because they strongly encourage jump
-  // threading.
-  Instruction *FoldOpIntoPhi(Instruction &I, bool AllowAggressive = false);
+  Instruction *FoldOpIntoPhi(Instruction &I);
 
   // FoldPHIArgOpIntoPHI - If all operands to a PHI node are the same "unary"
   // operator and they all are only used by the PHI, PHI together their
@@ -341,10 +350,6 @@ private:
 
 
   Value *EvaluateInDifferentType(Value *V, const Type *Ty, bool isSigned);
-
-  unsigned GetOrEnforceKnownAlignment(Value *V,
-                                      unsigned PrefAlign = 0);
-
 };
 
       

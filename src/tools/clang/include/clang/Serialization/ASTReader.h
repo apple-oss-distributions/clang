@@ -20,6 +20,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/Lex/ExternalPreprocessorSource.h"
+#include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/PreprocessingRecord.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/IdentifierTable.h"
@@ -31,7 +32,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Bitcode/BitstreamReader.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include <deque>
 #include <map>
 #include <string>
@@ -53,11 +54,11 @@ class Decl;
 class DeclContext;
 class NestedNameSpecifier;
 class CXXBaseSpecifier;
-class CXXBaseOrMemberInitializer;
+class CXXCtorInitializer;
 class GotoStmt;
-class LabelStmt;
 class MacroDefinition;
 class NamedDecl;
+class OpaqueValueExpr;
 class Preprocessor;
 class Sema;
 class SwitchCase;
@@ -67,8 +68,8 @@ class ASTDeclReader;
 class ASTStmtReader;
 class ASTIdentifierLookupTrait;
 class TypeLocReader;
-class FileSystemOptions;
 struct HeaderFileInfo;
+class VersionTuple;
 
 struct PCHPredefinesBlock {
   /// \brief The file ID for this predefines buffer in a PCH file.
@@ -116,7 +117,8 @@ public:
   /// \returns true to indicate the predefines are invalid or false otherwise.
   virtual bool ReadPredefinesBuffer(const PCHPredefinesBlocks &Buffers,
                                     llvm::StringRef OriginalFileName,
-                                    std::string &SuggestedPredefines) {
+                                    std::string &SuggestedPredefines,
+                                    FileManager &FileMgr) {
     return false;
   }
 
@@ -143,7 +145,8 @@ public:
   virtual bool ReadTargetTriple(llvm::StringRef Triple);
   virtual bool ReadPredefinesBuffer(const PCHPredefinesBlocks &Buffers,
                                     llvm::StringRef OriginalFileName,
-                                    std::string &SuggestedPredefines);
+                                    std::string &SuggestedPredefines,
+                                    FileManager &FileMgr);
   virtual void ReadHeaderFileInfo(const HeaderFileInfo &HFI, unsigned ID);
   virtual void ReadCounter(unsigned Value);
 
@@ -166,10 +169,12 @@ private:
 class ASTReader
   : public ExternalPreprocessorSource,
     public ExternalPreprocessingRecordSource,
+    public ExternalHeaderFileInfoSource,
     public ExternalSemaSource,
     public IdentifierInfoLookup,
     public ExternalIdentifierLookup,
-    public ExternalSLocEntrySource {
+    public ExternalSLocEntrySource 
+{
 public:
   enum ASTReadResult { Success, Failure, IgnorePCH };
   /// \brief Types of AST files.
@@ -194,7 +199,6 @@ private:
 
   SourceManager &SourceMgr;
   FileManager &FileMgr;
-  const FileSystemOptions &FileSystemOpts;
   Diagnostic &Diags;
 
   /// \brief The semantic analysis object that will be processing the
@@ -209,6 +213,10 @@ private:
       
   /// \brief The AST consumer.
   ASTConsumer *Consumer;
+
+  /// \brief AST buffers for chained PCHs created and stored in memory.
+  /// First (not depending on another) PCH in chain is in front.
+  std::vector<llvm::MemoryBuffer *> ASTBuffers;
 
   /// \brief Information that is needed for every module.
   struct PerFileData {
@@ -248,6 +256,13 @@ private:
     /// AST file.
     const uint32_t *SLocOffsets;
 
+    /// \brief The number of source location file entries in this AST file.
+    unsigned LocalNumSLocFileEntries;
+
+    /// \brief Offsets for all of the source location file entries in the
+    /// AST file.
+    const uint32_t *SLocFileOffsets;
+
     /// \brief The entire size of this module's source location offset range.
     unsigned LocalSLocSize;
 
@@ -263,7 +278,7 @@ private:
     /// stored.
     const uint32_t *IdentifierOffsets;
 
-    /// \brief Actual data for the on-disk hash table.
+    /// \brief Actual data for the on-disk hash table of identifiers.
     ///
     /// This pointer points into a memory buffer, where the on-disk hash
     /// table for identifiers actually lives.
@@ -282,13 +297,38 @@ private:
     /// \brief The offset of the start of the set of defined macros.
     uint64_t MacroStartOffset;
     
+    // === Detailed PreprocessingRecord ===
+    
+    /// \brief The cursor to the start of the (optional) detailed preprocessing 
+    /// record block.
+    llvm::BitstreamCursor PreprocessorDetailCursor;
+    
+    /// \brief The offset of the start of the preprocessor detail cursor.
+    uint64_t PreprocessorDetailStartOffset;
+    
     /// \brief The number of macro definitions in this file.
     unsigned LocalNumMacroDefinitions;
-
+    
     /// \brief Offsets of all of the macro definitions in the preprocessing
     /// record in the AST file.
     const uint32_t *MacroDefinitionOffsets;
 
+    // === Header search information ===
+    
+    /// \brief The number of local HeaderFileInfo structures.
+    unsigned LocalNumHeaderFileInfos;
+    
+    /// \brief Actual data for the on-disk hash table of header file 
+    /// information.
+    ///
+    /// This pointer points into a memory buffer, where the on-disk hash
+    /// table for header file information actually lives.
+    const char *HeaderFileInfoTableData;
+
+    /// \brief The on-disk hash table that contains information about each of
+    /// the header files.
+    void *HeaderFileInfoTable;
+    
     // === Selectors ===
 
     /// \brief The number of selectors new to this file.
@@ -568,7 +608,22 @@ private:
   /// The AST context tracks a few important types, such as va_list, directly.
   llvm::SmallVector<uint64_t, 16> SpecialTypes;
 
+  /// \brief The IDs of CUDA-specific declarations ASTContext stores directly.
+  ///
+  /// The AST context tracks a few important decls, currently cudaConfigureCall,
+  /// directly.
+  llvm::SmallVector<uint64_t, 2> CUDASpecialDeclRefs;
+
+  /// \brief The floating point pragma option settings.
+  llvm::SmallVector<uint64_t, 1> FPPragmaOptions;
+
+  /// \brief The OpenCL extension settings.
+  llvm::SmallVector<uint64_t, 1> OpenCLExtensions;
+
   //@}
+
+  /// \brief Diagnostic IDs and their mappings that the user changed.
+  llvm::SmallVector<uint64_t, 8> PragmaDiagMappings;
 
   /// \brief The original file name that was used to build the primary AST file,
   /// which may have been modified for relocatable-pch support.
@@ -577,6 +632,17 @@ private:
   /// \brief The actual original file name that was used to build the primary
   /// AST file.
   std::string ActualOriginalFileName;
+
+  /// \brief The file ID for the original file that was used to build the
+  /// primary AST file.
+  FileID OriginalFileID;
+  
+  /// \brief The directory that the PCH was originally created in. Used to
+  /// allow resolving headers even after headers+PCH was moved to a new path.
+  std::string OriginalDir;
+
+  /// \brief The directory that the PCH we are reading is stored in.
+  std::string CurrentDir;
 
   /// \brief Whether this precompiled header is a relocatable PCH file.
   bool RelocatablePCH;
@@ -598,21 +664,8 @@ private:
   /// switch statement can refer to them.
   std::map<unsigned, SwitchCase *> SwitchCaseStmts;
 
-  /// \brief Mapping from label statement IDs in the chain to label statements.
-  ///
-  /// Statements usually don't have IDs, but labeled statements need them, so
-  /// that goto statements and address-of-label expressions can refer to them.
-  std::map<unsigned, LabelStmt *> LabelStmts;
-
-  /// \brief Mapping from label IDs to the set of "goto" statements
-  /// that point to that label before the label itself has been
-  /// de-serialized.
-  std::multimap<unsigned, GotoStmt *> UnresolvedGotoStmts;
-
-  /// \brief Mapping from label IDs to the set of address label
-  /// expressions that point to that label before the label itself has
-  /// been de-serialized.
-  std::multimap<unsigned, AddrLabelExpr *> UnresolvedAddrLabelExprs;
+  /// \brief Mapping from opaque value IDs to OpaqueValueExprs.
+  std::map<unsigned, OpaqueValueExpr*> OpaqueValueExprs;
 
   /// \brief The number of stat() calls that hit/missed the stat
   /// cache.
@@ -738,6 +791,10 @@ private:
   /// \brief Reads a statement from the specified cursor.
   Stmt *ReadStmtFromStream(PerFileData &F);
 
+  /// \brief Get a FileEntry out of stored-in-PCH filename, making sure we take
+  /// into account all the necessary relocations.
+  const FileEntry *getFileEntry(llvm::StringRef filename);
+
   void MaybeAddSystemRootToFilename(std::string &Filename);
 
   ASTReadResult ReadASTCore(llvm::StringRef FileName, ASTFileType Type);
@@ -769,7 +826,9 @@ private:
   ///
   /// This routine should only be used for fatal errors that have to
   /// do with non-routine failures (e.g., corrupted AST file).
-  void Error(const char *Msg);
+  void Error(llvm::StringRef Msg);
+  void Error(unsigned DiagID, llvm::StringRef Arg1 = llvm::StringRef(),
+             llvm::StringRef Arg2 = llvm::StringRef());
 
   ASTReader(const ASTReader&); // do not implement
   ASTReader &operator=(const ASTReader &); // do not implement
@@ -827,7 +886,6 @@ public:
   /// underlying files in the file system may have changed, but
   /// parsing should still continue.
   ASTReader(SourceManager &SourceMgr, FileManager &FileMgr,
-            const FileSystemOptions &FileSystemOpts,
             Diagnostic &Diags, const char *isysroot = 0,
             bool DisableValidation = false, bool DisableStatCache = false);
   ~ASTReader();
@@ -835,6 +893,10 @@ public:
   /// \brief Load the precompiled header designated by the given file
   /// name.
   ASTReadResult ReadAST(const std::string &FileName, ASTFileType Type);
+
+  /// \brief Checks that no file that is stored in PCH is out-of-sync with
+  /// the actual file in the file system.
+  ASTReadResult validateFileEntries();
 
   /// \brief Set the AST callbacks listener.
   void setListener(ASTReaderListener *listener) {
@@ -850,6 +912,13 @@ public:
   /// \brief Sets and initializes the given Context.
   void InitializeContext(ASTContext &Context);
 
+  /// \brief Set AST buffers for chained PCHs created and stored in memory.
+  /// First (not depending on another) PCH in chain is first in array.
+  void setASTMemoryBuffers(llvm::MemoryBuffer **bufs, unsigned numBufs) {
+    ASTBuffers.clear();
+    ASTBuffers.insert(ASTBuffers.begin(), bufs, bufs + numBufs);
+  }
+
   /// \brief Retrieve the name of the named (primary) AST file
   const std::string &getFileName() const { return Chain[0]->FileName; }
 
@@ -860,7 +929,6 @@ public:
   /// the AST file, without actually loading the AST file.
   static std::string getOriginalSourceFile(const std::string &ASTFileName,
                                            FileManager &FileMgr,
-                                           const FileSystemOptions &FSOpts,
                                            Diagnostic &Diags);
 
   /// \brief Returns the suggested contents of the predefines buffer,
@@ -872,7 +940,12 @@ public:
   virtual void ReadPreprocessedEntities();
 
   /// \brief Read the preprocessed entity at the given offset.
-  virtual PreprocessedEntity *ReadPreprocessedEntity(uint64_t Offset);
+  virtual PreprocessedEntity *ReadPreprocessedEntityAtOffset(uint64_t Offset);
+
+  /// \brief Read the header file information for the given file entry.
+  virtual HeaderFileInfo GetHeaderFileInfo(const FileEntry *FE);
+
+  void ReadPragmaDiagnosticMappings(Diagnostic &Diag);
 
   /// \brief Returns the number of source locations found in the chain.
   unsigned getTotalNumSLocs() const {
@@ -1012,6 +1085,10 @@ public:
   /// \brief Print some statistics about AST usage.
   virtual void PrintStats();
 
+  /// Return the amount of memory used by memory buffers, breaking down
+  /// by heap-backed versus mmap'ed memory.
+  virtual void getMemoryBufferSizes(MemoryBufferSizes &sizes) const;
+
   /// \brief Initialize the semantic source with the Sema instance
   /// being used to perform semantic analysis on the abstract syntax
   /// tree.
@@ -1068,7 +1145,7 @@ public:
   }
 
   /// \brief Read the source location entry with index ID.
-  virtual void ReadSLocEntry(unsigned ID);
+  virtual bool ReadSLocEntry(unsigned ID);
 
   Selector DecodeSelector(unsigned Idx);
 
@@ -1093,8 +1170,13 @@ public:
   NestedNameSpecifier *ReadNestedNameSpecifier(const RecordData &Record,
                                                unsigned &Idx);
 
+  NestedNameSpecifierLoc ReadNestedNameSpecifierLoc(PerFileData &F, 
+                                                    const RecordData &Record,
+                                                    unsigned &Idx);
+
   /// \brief Read a template name.
-  TemplateName ReadTemplateName(const RecordData &Record, unsigned &Idx);
+  TemplateName ReadTemplateName(PerFileData &F, const RecordData &Record, 
+                                unsigned &Idx);
 
   /// \brief Read a template argument.
   TemplateArgument ReadTemplateArgument(PerFileData &F,
@@ -1119,10 +1201,10 @@ public:
   CXXBaseSpecifier ReadCXXBaseSpecifier(PerFileData &F,
                                         const RecordData &Record,unsigned &Idx);
 
-  /// \brief Read a CXXBaseOrMemberInitializer array.
-  std::pair<CXXBaseOrMemberInitializer **, unsigned>
-  ReadCXXBaseOrMemberInitializers(PerFileData &F,
-                                  const RecordData &Record, unsigned &Idx);
+  /// \brief Read a CXXCtorInitializer array.
+  std::pair<CXXCtorInitializer **, unsigned>
+  ReadCXXCtorInitializers(PerFileData &F, const RecordData &Record,
+                          unsigned &Idx);
 
   /// \brief Read a source location from raw form.
   SourceLocation ReadSourceLocation(PerFileData &Module, unsigned Raw) {
@@ -1152,6 +1234,9 @@ public:
   // \brief Read a string
   std::string ReadString(const RecordData &Record, unsigned &Idx);
 
+  /// \brief Read a version tuple.
+  VersionTuple ReadVersionTuple(const RecordData &Record, unsigned &Idx);
+
   CXXTemporary *ReadCXXTemporary(const RecordData &Record, unsigned &Idx);
       
   /// \brief Reads attributes from the current stream position.
@@ -1180,6 +1265,10 @@ public:
   /// \brief Reads the macro record located at the given offset.
   PreprocessedEntity *ReadMacroRecord(PerFileData &F, uint64_t Offset);
 
+  /// \brief Reads the preprocessed entity located at the current stream
+  /// position.
+  PreprocessedEntity *LoadPreprocessedEntity(PerFileData &F);
+      
   /// \brief Note that the identifier is a macro whose record will be loaded
   /// from the given AST file at the given (file-local) offset.
   void SetIdentifierIsMacro(IdentifierInfo *II, PerFileData &F,
@@ -1222,29 +1311,7 @@ public:
   /// \brief Retrieve the switch-case statement with the given ID.
   SwitchCase *getSwitchCaseWithID(unsigned ID);
 
-  /// \brief Record that the given label statement has been
-  /// deserialized and has the given ID.
-  void RecordLabelStmt(LabelStmt *S, unsigned ID);
-
   void ClearSwitchCaseIDs();
-
-  /// \brief Set the label of the given statement to the label
-  /// identified by ID.
-  ///
-  /// Depending on the order in which the label and other statements
-  /// referencing that label occur, this operation may complete
-  /// immediately (updating the statement) or it may queue the
-  /// statement to be back-patched later.
-  void SetLabelOf(GotoStmt *S, unsigned ID);
-
-  /// \brief Set the label of the given expression to the label
-  /// identified by ID.
-  ///
-  /// Depending on the order in which the label and other statements
-  /// referencing that label occur, this operation may complete
-  /// immediately (updating the statement) or it may queue the
-  /// statement to be back-patched later.
-  void SetLabelOf(AddrLabelExpr *S, unsigned ID);
 };
 
 /// \brief Helper class that saves the current stream position and

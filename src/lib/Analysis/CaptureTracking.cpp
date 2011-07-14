@@ -17,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/Constants.h"
 #include "llvm/Instructions.h"
 #include "llvm/Value.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -94,6 +95,9 @@ bool llvm::PointerMayBeCaptured(const Value *V,
     }
     case Instruction::Load:
       // Loading from a pointer does not cause it to be captured.
+      break;
+    case Instruction::VAArg:
+      // "va-arg" from a pointer does not cause it to be captured.
       break;
     case Instruction::Ret:
       if (ReturnCaptures)

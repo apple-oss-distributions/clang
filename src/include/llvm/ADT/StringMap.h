@@ -17,7 +17,6 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include <cstring>
-#include <string>
 
 namespace llvm {
   template<typename ValueT>
@@ -80,16 +79,6 @@ protected:
   }
   StringMapImpl(unsigned InitSize, unsigned ItemSize);
   void RehashTable();
-
-  /// ShouldRehash - Return true if the table should be rehashed after a new
-  /// element was recently inserted.
-  bool ShouldRehash() const {
-    // If the hash table is now more than 3/4 full, or if fewer than 1/8 of
-    // the buckets are empty (meaning that many are filled with tombstones),
-    // grow the table.
-    return NumItems*4 > NumBuckets*3 ||
-           NumBuckets-(NumItems+NumTombstones) < NumBuckets/8;
-  }
 
   /// LookupBucketFor - Look up the bucket that the specified string should end
   /// up in.  If it already exists as a key in the map, the Item pointer for the
@@ -242,9 +231,6 @@ public:
 };
 
 
-template <typename T> struct ReferenceAdder { typedef T& result; };
-template <typename T> struct ReferenceAdder<T&> { typedef T result; };
-
 /// StringMap - This is an unconventional map that is specialized for handling
 /// keys that are "strings", which are basically ranges of bytes. This does some
 /// funky memory allocation and hashing things to make it extremely efficient,
@@ -265,10 +251,12 @@ public:
     : StringMapImpl(static_cast<unsigned>(sizeof(MapEntryTy))) {
     assert(RHS.empty() &&
            "Copy ctor from non-empty stringmap not implemented yet!");
+    (void)RHS;
   }
   void operator=(const StringMap &RHS) {
     assert(RHS.empty() &&
            "assignment from non-empty stringmap not implemented yet!");
+    (void)RHS;
     clear();
   }
 
@@ -340,9 +328,9 @@ public:
       --NumTombstones;
     Bucket.Item = KeyValue;
     ++NumItems;
+    assert(NumItems + NumTombstones <= NumBuckets);
 
-    if (ShouldRehash())
-      RehashTable();
+    RehashTable();
     return true;
   }
 
@@ -360,6 +348,7 @@ public:
     }
 
     NumItems = 0;
+    NumTombstones = 0;
   }
 
   /// GetOrCreateValue - Look up the specified key in the table.  If a value
@@ -379,13 +368,13 @@ public:
     if (Bucket.Item == getTombstoneVal())
       --NumTombstones;
     ++NumItems;
+    assert(NumItems + NumTombstones <= NumBuckets);
 
     // Fill in the bucket for the hash table.  The FullHashValue was already
     // filled in by LookupBucketFor.
     Bucket.Item = NewItem;
 
-    if (ShouldRehash())
-      RehashTable();
+    RehashTable();
     return *NewItem;
   }
 

@@ -35,7 +35,7 @@ extern "C" {
   #define CINDEX_LINKAGE
 #endif
 
-/** \defgroup CINDEX C Interface to Clang
+/** \defgroup CINDEX libclang: C Interface to Clang
  *
  * The C Interface to Clang provides a relatively small API that exposes
  * facilities for parsing source code into an abstract syntax tree (AST),
@@ -220,6 +220,14 @@ CINDEX_LINKAGE CXString clang_getFileName(CXFile SFile);
  * \brief Retrieve the last modification time of the given file.
  */
 CINDEX_LINKAGE time_t clang_getFileTime(CXFile SFile);
+
+/**
+ * \brief Determine whether the given header is guarded against
+ * multiple inclusions, either with the conventional
+ * #ifndef/#define/#endif macro guards or with #pragma once.
+ */
+CINDEX_LINKAGE unsigned 
+clang_isFileMultipleIncludeGuarded(CXTranslationUnit tu, CXFile file);
 
 /**
  * \brief Retrieve a file handle within the given translation unit.
@@ -705,9 +713,20 @@ clang_getTranslationUnitSpelling(CXTranslationUnit CTUnit);
  *   '-fsyntax-only'
  *   '-o <output file>'  (both '-o' and '<output file>' are ignored)
  *
+ * \param CIdx The index object with which the translation unit will be
+ * associated.
  *
  * \param source_filename - The name of the source file to load, or NULL if the
- * source file is included in clang_command_line_args.
+ * source file is included in \p clang_command_line_args.
+ *
+ * \param num_clang_command_line_args The number of command-line arguments in
+ * \p clang_command_line_args.
+ *
+ * \param clang_command_line_args The command-line arguments that would be
+ * passed to the \c clang executable if it were being invoked out-of-process.
+ * These command-line options will be parsed and will affect how the translation
+ * unit is parsed. Note that the following options are ignored: '-c',
+ * '-emit-ast', '-fsyntex-only' (which is the default), and '-o <output file>'.
  *
  * \param num_unsaved_files the number of unsaved file entries in \p
  * unsaved_files.
@@ -717,13 +736,6 @@ clang_getTranslationUnitSpelling(CXTranslationUnit CTUnit);
  * those files.  The contents and name of these files (as specified by
  * CXUnsavedFile) are copied when necessary, so the client only needs to
  * guarantee their validity until the call to this function returns.
- *
- * \param diag_callback callback function that will receive any diagnostics
- * emitted while processing this source file. If NULL, diagnostics will be
- * suppressed.
- *
- * \param diag_client_data client data that will be passed to the diagnostic
- * callback function.
  */
 CINDEX_LINKAGE CXTranslationUnit clang_createTranslationUnitFromSourceFile(
                                          CXIndex CIdx,
@@ -817,7 +829,18 @@ enum CXTranslationUnit_Flags {
    * Note: this is a *temporary* option that is available only while
    * we are testing C++ precompiled preamble support.
    */
-  CXTranslationUnit_CXXChainedPCH = 0x20
+  CXTranslationUnit_CXXChainedPCH = 0x20,
+  
+  /**
+   * \brief Used to indicate that the "detailed" preprocessing record,
+   * if requested, should also contain nested macro instantiations.
+   *
+   * Nested macro instantiations (i.e., macro instantiations that occur
+   * inside another macro instantiation) can, in some code bases, require
+   * a large amount of storage to due preprocessor metaprogramming. Moreover,
+   * its fairly rare that this information is useful for libclang clients.
+   */
+  CXTranslationUnit_NestedMacroInstantiations = 0x40
 };
 
 /**
@@ -848,7 +871,7 @@ CINDEX_LINKAGE unsigned clang_defaultEditingTranslationUnitOptions(void);
  * associated.
  *
  * \param source_filename The name of the source file to load, or NULL if the
- * source file is included in \p clang_command_line_args.
+ * source file is included in \p command_line_args.
  *
  * \param command_line_args The command-line arguments that would be
  * passed to the \c clang executable if it were being invoked out-of-process.
@@ -1008,7 +1031,70 @@ CINDEX_LINKAGE int clang_reparseTranslationUnit(CXTranslationUnit TU,
                                                 unsigned num_unsaved_files,
                                           struct CXUnsavedFile *unsaved_files,
                                                 unsigned options);
-  
+
+/**
+  * \brief Categorizes how memory is being used by a translation unit.
+  */
+enum CXTUResourceUsageKind {
+  CXTUResourceUsage_AST = 1,
+  CXTUResourceUsage_Identifiers = 2,
+  CXTUResourceUsage_Selectors = 3,
+  CXTUResourceUsage_GlobalCompletionResults = 4,
+  CXTUResourceUsage_SourceManagerContentCache = 5,
+  CXTUResourceUsage_AST_SideTables = 6,
+  CXTUResourceUsage_SourceManager_Membuffer_Malloc = 7,
+  CXTUResourceUsage_SourceManager_Membuffer_MMap = 8,
+  CXTUResourceUsage_ExternalASTSource_Membuffer_Malloc = 9, 
+  CXTUResourceUsage_ExternalASTSource_Membuffer_MMap = 10, 
+  CXTUResourceUsage_Preprocessor = 11,
+  CXTUResourceUsage_PreprocessingRecord = 12,
+  CXTUResourceUsage_MEMORY_IN_BYTES_BEGIN = CXTUResourceUsage_AST,
+  CXTUResourceUsage_MEMORY_IN_BYTES_END =
+    CXTUResourceUsage_PreprocessingRecord,
+
+  CXTUResourceUsage_First = CXTUResourceUsage_AST,
+  CXTUResourceUsage_Last = CXTUResourceUsage_PreprocessingRecord
+};
+
+/**
+  * \brief Returns the human-readable null-terminated C string that represents
+  *  the name of the memory category.  This string should never be freed.
+  */
+CINDEX_LINKAGE
+const char *clang_getTUResourceUsageName(enum CXTUResourceUsageKind kind);
+
+typedef struct CXTUResourceUsageEntry {
+  /* \brief The memory usage category. */
+  enum CXTUResourceUsageKind kind;  
+  /* \brief Amount of resources used. 
+      The units will depend on the resource kind. */
+  unsigned long amount;
+} CXTUResourceUsageEntry;
+
+/**
+  * \brief The memory usage of a CXTranslationUnit, broken into categories.
+  */
+typedef struct CXTUResourceUsage {
+  /* \brief Private data member, used for queries. */
+  void *data;
+
+  /* \brief The number of entries in the 'entries' array. */
+  unsigned numEntries;
+
+  /* \brief An array of key-value pairs, representing the breakdown of memory
+            usage. */
+  CXTUResourceUsageEntry *entries;
+
+} CXTUResourceUsage;
+
+/**
+  * \brief Return the memory usage of a translation unit.  This object
+  *  should be released with clang_disposeCXTUResourceUsage().
+  */
+CINDEX_LINKAGE CXTUResourceUsage clang_getCXTUResourceUsage(CXTranslationUnit TU);
+
+CINDEX_LINKAGE void clang_disposeCXTUResourceUsage(CXTUResourceUsage usage);
+
 /**
  * @}
  */
@@ -1097,10 +1183,12 @@ enum CXCursorKind {
   CXCursor_NamespaceAlias                = 33,
   /** \brief A C++ using directive. */
   CXCursor_UsingDirective                = 34,
-  /** \brief A using declaration. */
+  /** \brief A C++ using declaration. */
   CXCursor_UsingDeclaration              = 35,
+  /** \brief A C++ alias declaration */
+  CXCursor_TypeAliasDecl                 = 36,
   CXCursor_FirstDecl                     = CXCursor_UnexposedDecl,
-  CXCursor_LastDecl                      = CXCursor_UsingDeclaration,
+  CXCursor_LastDecl                      = CXCursor_TypeAliasDecl,
 
   /* References */
   CXCursor_FirstRef                      = 40, /* Decl references */
@@ -1518,6 +1606,8 @@ CINDEX_LINKAGE unsigned clang_CXCursorSet_insert(CXCursorSet cset,
  * In the example above, both declarations of \c C::f have \c C as their
  * semantic context, while the lexical context of the first \c C::f is \c C
  * and the lexical context of the second \c C::f is the translation unit.
+ *
+ * For global declarations, the semantic parent is the translation unit.
  */
 CINDEX_LINKAGE CXCursor clang_getCursorSemanticParent(CXCursor cursor);
 
@@ -1551,6 +1641,9 @@ CINDEX_LINKAGE CXCursor clang_getCursorSemanticParent(CXCursor cursor);
  * In the example above, both declarations of \c C::f have \c C as their
  * semantic context, while the lexical context of the first \c C::f is \c C
  * and the lexical context of the second \c C::f is the translation unit.
+ *
+ * For declarations written in the global scope, the lexical parent is
+ * the translation unit.
  */
 CINDEX_LINKAGE CXCursor clang_getCursorLexicalParent(CXCursor cursor);
 
@@ -1773,6 +1866,24 @@ CINDEX_LINKAGE unsigned clang_equalTypes(CXType A, CXType B);
 CINDEX_LINKAGE CXType clang_getCanonicalType(CXType T);
 
 /**
+ *  \determine Determine whether a CXType has the "const" qualifier set, 
+ *  without looking through typedefs that may have added "const" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isConstQualifiedType(CXType T);
+
+/**
+ *  \determine Determine whether a CXType has the "volatile" qualifier set,
+ *  without looking through typedefs that may have added "volatile" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isVolatileQualifiedType(CXType T);
+
+/**
+ *  \determine Determine whether a CXType has the "restrict" qualifier set,
+ *  without looking through typedefs that may have added "restrict" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isRestrictQualifiedType(CXType T);
+
+/**
  * \brief For pointer types, returns the type of the pointee.
  *
  */
@@ -1783,6 +1894,10 @@ CINDEX_LINKAGE CXType clang_getPointeeType(CXType T);
  */
 CINDEX_LINKAGE CXCursor clang_getTypeDeclaration(CXType T);
 
+/**
+ * Returns the Objective-C type encoding for the specified declaration.
+ */
+CINDEX_LINKAGE CXString clang_getDeclObjCTypeEncoding(CXCursor C);
 
 /**
  * \brief Retrieve the spelling of a given CXTypeKind.
@@ -2840,12 +2955,15 @@ CXDiagnostic clang_codeCompleteGetDiagnostic(CXCodeCompleteResults *Results,
  */
 CINDEX_LINKAGE CXString clang_getClangVersion();
 
+  
 /**
- * \brief Return a version string, suitable for showing to a user, but not
- *        intended to be parsed (the format is not guaranteed to be stable).
+ * \brief Enable/disable crash recovery.
+ *
+ * \param Flag to indicate if crash recovery is enabled.  A non-zero value
+ *        enables crash recovery, while 0 disables it.
  */
-
-
+CINDEX_LINKAGE void clang_toggleCrashRecovery(unsigned isEnabled);
+  
  /**
   * \brief Visitor invoked for each file in a translation unit
   *        (used with clang_getInclusions()).

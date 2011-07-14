@@ -28,14 +28,31 @@ static QualType Desugar(ASTContext &Context, QualType QT, bool &ShouldAKA) {
     const Type *Ty = QC.strip(QT);
 
     // Don't aka just because we saw an elaborated type...
-    if (isa<ElaboratedType>(Ty)) {
-      QT = cast<ElaboratedType>(Ty)->desugar();
+    if (const ElaboratedType *ET = dyn_cast<ElaboratedType>(Ty)) {
+      QT = ET->desugar();
       continue;
     }
-
-    // ...or a substituted template type parameter.
-    if (isa<SubstTemplateTypeParmType>(Ty)) {
-      QT = cast<SubstTemplateTypeParmType>(Ty)->desugar();
+    // ... or a paren type ...
+    if (const ParenType *PT = dyn_cast<ParenType>(Ty)) {
+      QT = PT->desugar();
+      continue;
+    }
+    // ...or a substituted template type parameter ...
+    if (const SubstTemplateTypeParmType *ST =
+          dyn_cast<SubstTemplateTypeParmType>(Ty)) {
+      QT = ST->desugar();
+      continue;
+    }
+    // ...or an attributed type...
+    if (const AttributedType *AT = dyn_cast<AttributedType>(Ty)) {
+      QT = AT->desugar();
+      continue;
+    }
+    // ... or an auto type.
+    if (const AutoType *AT = dyn_cast<AutoType>(Ty)) {
+      if (!AT->isSugared())
+        break;
+      QT = AT->desugar();
       continue;
     }
 
@@ -83,7 +100,7 @@ break; \
     // Don't desugar through the primary typedef of an anonymous type.
     if (const TagType *UTT = Underlying->getAs<TagType>())
       if (const TypedefType *QTT = dyn_cast<TypedefType>(QT))
-        if (UTT->getDecl()->getTypedefForAnonDecl() == QTT->getDecl())
+        if (UTT->getDecl()->getTypedefNameForAnonDecl() == QTT->getDecl())
           break;
 
     // Record that we actually looked through an opaque type here.
@@ -99,9 +116,12 @@ break; \
   } else if (const LValueReferenceType *Ty = QT->getAs<LValueReferenceType>()) {
     QT = Context.getLValueReferenceType(Desugar(Context, Ty->getPointeeType(),
                                                 ShouldAKA));
+  } else if (const RValueReferenceType *Ty = QT->getAs<RValueReferenceType>()) {
+    QT = Context.getRValueReferenceType(Desugar(Context, Ty->getPointeeType(),
+                                                ShouldAKA));
   }
 
-  return QC.apply(QT);
+  return QC.apply(Context, QT);
 }
 
 /// \brief Convert the given type to a string suitable for printing as part of 

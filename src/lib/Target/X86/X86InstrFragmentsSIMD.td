@@ -43,6 +43,21 @@ def X86ucomi   : SDNode<"X86ISD::UCOMI",     SDTX86CmpTest>;
 def X86pshufb  : SDNode<"X86ISD::PSHUFB",
                  SDTypeProfile<1, 2, [SDTCisVT<0, v16i8>, SDTCisSameAs<0,1>,
                                       SDTCisSameAs<0,2>]>>;
+def X86pandn   : SDNode<"X86ISD::PANDN", 
+                 SDTypeProfile<1, 2, [SDTCisVT<0, v2i64>, SDTCisSameAs<0,1>,
+                                      SDTCisSameAs<0,2>]>>;
+def X86psignb  : SDNode<"X86ISD::PSIGNB", 
+                 SDTypeProfile<1, 2, [SDTCisVT<0, v16i8>, SDTCisSameAs<0,1>,
+                                      SDTCisSameAs<0,2>]>>;
+def X86psignw  : SDNode<"X86ISD::PSIGNW", 
+                 SDTypeProfile<1, 2, [SDTCisVT<0, v8i16>, SDTCisSameAs<0,1>,
+                                      SDTCisSameAs<0,2>]>>;
+def X86psignd  : SDNode<"X86ISD::PSIGND", 
+                 SDTypeProfile<1, 2, [SDTCisVT<0, v4i32>, SDTCisSameAs<0,1>,
+                                      SDTCisSameAs<0,2>]>>;
+def X86pblendv : SDNode<"X86ISD::PBLENDVB", 
+                 SDTypeProfile<1, 3, [SDTCisVT<0, v16i8>, SDTCisSameAs<0,1>,
+                                      SDTCisSameAs<0,2>, SDTCisSameAs<0,3>]>>;
 def X86pextrb  : SDNode<"X86ISD::PEXTRB",
                  SDTypeProfile<1, 2, [SDTCisVT<0, i32>, SDTCisPtrTy<2>]>>;
 def X86pextrw  : SDNode<"X86ISD::PEXTRW",
@@ -117,6 +132,8 @@ def X86Movlpd : SDNode<"X86ISD::MOVLPD", SDTShuff2Op>;
 
 def X86Unpcklps : SDNode<"X86ISD::UNPCKLPS", SDTShuff2Op>;
 def X86Unpcklpd : SDNode<"X86ISD::UNPCKLPD", SDTShuff2Op>;
+def X86Unpcklpsy : SDNode<"X86ISD::VUNPCKLPSY", SDTShuff2Op>;
+def X86Unpcklpdy : SDNode<"X86ISD::VUNPCKLPDY", SDTShuff2Op>;
 def X86Unpckhps : SDNode<"X86ISD::UNPCKHPS", SDTShuff2Op>;
 def X86Unpckhpd : SDNode<"X86ISD::UNPCKHPD", SDTShuff2Op>;
 
@@ -327,6 +344,18 @@ def SHUFFLE_get_palign_imm : SDNodeXForm<vector_shuffle, [{
   return getI8Imm(X86::getShufflePALIGNRImmediate(N));
 }]>;
 
+// EXTRACT_get_vextractf128_imm xform function: convert extract_subvector index
+// to VEXTRACTF128 imm.
+def EXTRACT_get_vextractf128_imm : SDNodeXForm<extract_subvector, [{
+  return getI8Imm(X86::getExtractVEXTRACTF128Immediate(N));
+}]>;
+
+// INSERT_get_vinsertf128_imm xform function: convert insert_subvector index to 
+// VINSERTF128 imm.
+def INSERT_get_vinsertf128_imm : SDNodeXForm<insert_subvector, [{
+  return getI8Imm(X86::getInsertVINSERTF128Immediate(N));
+}]>;
+
 def splat_lo : PatFrag<(ops node:$lhs, node:$rhs),
                        (vector_shuffle node:$lhs, node:$rhs), [{
   ShuffleVectorSDNode *SVOp = cast<ShuffleVectorSDNode>(N);
@@ -417,3 +446,16 @@ def palign : PatFrag<(ops node:$lhs, node:$rhs),
                      (vector_shuffle node:$lhs, node:$rhs), [{
   return X86::isPALIGNRMask(cast<ShuffleVectorSDNode>(N));
 }], SHUFFLE_get_palign_imm>;
+
+def vextractf128_extract : PatFrag<(ops node:$bigvec, node:$index),
+                                   (extract_subvector node:$bigvec,
+                                                      node:$index), [{
+  return X86::isVEXTRACTF128Index(N);
+}], EXTRACT_get_vextractf128_imm>;
+
+def vinsertf128_insert : PatFrag<(ops node:$bigvec, node:$smallvec,
+                                      node:$index),
+                                 (insert_subvector node:$bigvec, node:$smallvec,
+                                                   node:$index), [{
+  return X86::isVINSERTF128Index(N);
+}], INSERT_get_vinsertf128_imm>;

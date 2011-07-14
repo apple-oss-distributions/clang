@@ -16,8 +16,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Signals.h"
-#include "llvm/System/Threading.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Config/config.h"
 #include <cassert>
@@ -32,7 +32,6 @@
 #endif
 
 using namespace llvm;
-using namespace std;
 
 static fatal_error_handler_t ErrorHandler = 0;
 static void *ErrorHandlerUserData = 0;
@@ -55,6 +54,10 @@ void llvm::report_fatal_error(const char *Reason) {
 }
 
 void llvm::report_fatal_error(const std::string &Reason) {
+  report_fatal_error(Twine(Reason));
+}
+
+void llvm::report_fatal_error(StringRef Reason) {
   report_fatal_error(Twine(Reason));
 }
 

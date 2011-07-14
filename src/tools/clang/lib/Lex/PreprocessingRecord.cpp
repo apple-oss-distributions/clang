@@ -45,8 +45,9 @@ void PreprocessingRecord::MaybeLoadPreallocatedEntities() const {
   ExternalSource->ReadPreprocessedEntities();
 }
 
-PreprocessingRecord::PreprocessingRecord()
-  : ExternalSource(0), NumPreallocatedEntities(0), 
+PreprocessingRecord::PreprocessingRecord(bool IncludeNestedMacroInstantiations)
+  : IncludeNestedMacroInstantiations(IncludeNestedMacroInstantiations),
+    ExternalSource(0), NumPreallocatedEntities(0), 
     LoadedPreallocatedEntities(false)
 {
 }
@@ -120,6 +121,9 @@ MacroDefinition *PreprocessingRecord::findMacroDefinition(const MacroInfo *MI) {
 }
 
 void PreprocessingRecord::MacroExpands(const Token &Id, const MacroInfo* MI) {
+  if (!IncludeNestedMacroInstantiations && Id.getLocation().isMacroID())
+    return;
+
   if (MacroDefinition *Def = findMacroDefinition(MI))
     PreprocessedEntities.push_back(
                        new (*this) MacroInstantiation(Id.getIdentifierInfo(),
@@ -127,17 +131,18 @@ void PreprocessingRecord::MacroExpands(const Token &Id, const MacroInfo* MI) {
                                                       Def));
 }
 
-void PreprocessingRecord::MacroDefined(const IdentifierInfo *II, 
+void PreprocessingRecord::MacroDefined(const Token &Id,
                                        const MacroInfo *MI) {
   SourceRange R(MI->getDefinitionLoc(), MI->getDefinitionEndLoc());
   MacroDefinition *Def
-    = new (*this) MacroDefinition(II, MI->getDefinitionLoc(), R);
+      = new (*this) MacroDefinition(Id.getIdentifierInfo(),
+                                    MI->getDefinitionLoc(),
+                                    R);
   MacroDefinitions[MI] = Def;
   PreprocessedEntities.push_back(Def);
 }
 
-void PreprocessingRecord::MacroUndefined(SourceLocation Loc,
-                                         const IdentifierInfo *II,
+void PreprocessingRecord::MacroUndefined(const Token &Id,
                                          const MacroInfo *MI) {
   llvm::DenseMap<const MacroInfo *, MacroDefinition *>::iterator Pos
     = MacroDefinitions.find(MI);
@@ -145,12 +150,15 @@ void PreprocessingRecord::MacroUndefined(SourceLocation Loc,
     MacroDefinitions.erase(Pos);
 }
 
-void PreprocessingRecord::InclusionDirective(SourceLocation HashLoc,
-                                             const clang::Token &IncludeTok, 
-                                             llvm::StringRef FileName, 
-                                             bool IsAngled, 
-                                             const FileEntry *File,
-                                           clang::SourceLocation EndLoc) {
+void PreprocessingRecord::InclusionDirective(
+    SourceLocation HashLoc,
+    const clang::Token &IncludeTok,
+    llvm::StringRef FileName,
+    bool IsAngled,
+    const FileEntry *File,
+    clang::SourceLocation EndLoc,
+    llvm::StringRef SearchPath,
+    llvm::StringRef RelativePath) {
   InclusionDirective::InclusionKind Kind = InclusionDirective::Include;
   
   switch (IncludeTok.getIdentifierInfo()->getPPKeywordID()) {

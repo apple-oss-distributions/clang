@@ -19,14 +19,6 @@
 namespace llvm {
 
   class ARMELFWriterInfo : public TargetELFWriterInfo {
-
-    // ELF Relocation types for ARM
-    // FIXME: TODO(jasonwkim): [2010/09/17 14:52:25 PDT (Friday)]
-    // Come up with a better way to orgnize the 100+ ARM reloc types.
-
-    enum ARMRelocationType {
-    };
-
   public:
     ARMELFWriterInfo(TargetMachine &TM);
     virtual ~ARMELFWriterInfo();

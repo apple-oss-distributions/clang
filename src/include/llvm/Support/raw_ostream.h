@@ -15,7 +15,7 @@
 #define LLVM_SUPPORT_RAW_OSTREAM_H
 
 #include "llvm/ADT/StringRef.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 
 namespace llvm {
   class format_object_base;
@@ -165,7 +165,7 @@ public:
   }
 
   raw_ostream &operator<<(const char *Str) {
-    // Inline fast path, particulary for constant strings where a sufficiently
+    // Inline fast path, particularly for constant strings where a sufficiently
     // smart compiler will simplify strlen.
 
     return this->operator<<(StringRef(Str));
@@ -196,7 +196,7 @@ public:
 
   /// write_escaped - Output \arg Str, turning '\\', '\t', '\n', '"', and
   /// anything that doesn't satisfy std::isprint into an escape sequence.
-  raw_ostream &write_escaped(StringRef Str);
+  raw_ostream &write_escaped(StringRef Str, bool UseHexEscapes = false);
 
   raw_ostream &write(unsigned char C);
   raw_ostream &write(const char *Ptr, size_t Size);
@@ -301,6 +301,10 @@ class raw_fd_ostream : public raw_ostream {
   ///
   bool Error;
 
+  /// Controls whether the stream should attempt to use atomic writes, when
+  /// possible.
+  bool UseAtomicWrites;
+
   uint64_t pos;
 
   /// write_impl - See raw_ostream::write_impl.
@@ -358,8 +362,18 @@ public:
   void close();
 
   /// seek - Flushes the stream and repositions the underlying file descriptor
-  /// positition to the offset specified from the beginning of the file.
+  /// position to the offset specified from the beginning of the file.
   uint64_t seek(uint64_t off);
+
+  /// SetUseAtomicWrite - Set the stream to attempt to use atomic writes for
+  /// individual output routines where possible.
+  ///
+  /// Note that because raw_ostream's are typically buffered, this flag is only
+  /// sensible when used on unbuffered streams which will flush their output
+  /// immediately.
+  void SetUseAtomicWrites(bool Value) {
+    UseAtomicWrites = Value;
+  }
 
   virtual raw_ostream &changeColor(enum Colors colors, bool bold=false,
                                    bool bg=false);

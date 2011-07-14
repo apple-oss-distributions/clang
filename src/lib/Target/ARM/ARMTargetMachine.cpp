@@ -12,10 +12,11 @@
 
 #include "ARMTargetMachine.h"
 #include "ARMMCAsmInfo.h"
-#include "ARMFrameInfo.h"
+#include "ARMFrameLowering.h"
 #include "ARM.h"
 #include "llvm/PassManager.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Target/TargetRegistry.h"
@@ -23,33 +24,31 @@ using namespace llvm;
 
 static MCAsmInfo *createMCAsmInfo(const Target &T, StringRef TT) {
   Triple TheTriple(TT);
-  switch (TheTriple.getOS()) {
-  case Triple::Darwin:
+
+  if (TheTriple.isOSDarwin())
     return new ARMMCAsmInfoDarwin();
-  default:
-    return new ARMELFMCAsmInfo();
-  }
+
+  return new ARMELFMCAsmInfo();
 }
 
 // This is duplicated code. Refactor this.
 static MCStreamer *createMCStreamer(const Target &T, const std::string &TT,
                                     MCContext &Ctx, TargetAsmBackend &TAB,
-                                    raw_ostream &_OS,
-                                    MCCodeEmitter *_Emitter,
-                                    bool RelaxAll) {
+                                    raw_ostream &OS,
+                                    MCCodeEmitter *Emitter,
+                                    bool RelaxAll,
+                                    bool NoExecStack) {
   Triple TheTriple(TT);
-  switch (TheTriple.getOS()) {
-  case Triple::Darwin:
-    return createMachOStreamer(Ctx, TAB, _OS, _Emitter, RelaxAll);
-  case Triple::MinGW32:
-  case Triple::MinGW64:
-  case Triple::Cygwin:
-  case Triple::Win32:
+
+  if (TheTriple.isOSDarwin())
+    return createMachOStreamer(Ctx, TAB, OS, Emitter, RelaxAll);
+
+  if (TheTriple.isOSWindows()) {
     llvm_unreachable("ARM does not support Windows COFF format");
     return NULL;
-  default:
-    return createELFStreamer(Ctx, TAB, _OS, _Emitter, RelaxAll);
   }
+
+  return createELFStreamer(Ctx, TAB, OS, Emitter, RelaxAll, NoExecStack);
 }
 
 extern "C" void LLVMInitializeARMTarget() {
@@ -62,22 +61,16 @@ extern "C" void LLVMInitializeARMTarget() {
   RegisterAsmInfoFn B(TheThumbTarget, createMCAsmInfo);
 
   // Register the MC Code Emitter
-  TargetRegistry::RegisterCodeEmitter(TheARMTarget,
-                                      createARMMCCodeEmitter);
-  TargetRegistry::RegisterCodeEmitter(TheThumbTarget,
-                                      createARMMCCodeEmitter);
+  TargetRegistry::RegisterCodeEmitter(TheARMTarget, createARMMCCodeEmitter);
+  TargetRegistry::RegisterCodeEmitter(TheThumbTarget, createARMMCCodeEmitter);
 
   // Register the asm backend.
-  TargetRegistry::RegisterAsmBackend(TheARMTarget,
-                                     createARMAsmBackend);
-  TargetRegistry::RegisterAsmBackend(TheThumbTarget,
-                                     createARMAsmBackend);
+  TargetRegistry::RegisterAsmBackend(TheARMTarget, createARMAsmBackend);
+  TargetRegistry::RegisterAsmBackend(TheThumbTarget, createARMAsmBackend);
 
   // Register the object streamer.
-  TargetRegistry::RegisterObjectStreamer(TheARMTarget,
-                                         createMCStreamer);
-  TargetRegistry::RegisterObjectStreamer(TheThumbTarget,
-                                         createMCStreamer);
+  TargetRegistry::RegisterObjectStreamer(TheARMTarget, createMCStreamer);
+  TargetRegistry::RegisterObjectStreamer(TheThumbTarget, createMCStreamer);
 
 }
 
@@ -89,10 +82,8 @@ ARMBaseTargetMachine::ARMBaseTargetMachine(const Target &T,
                                            bool isThumb)
   : LLVMTargetMachine(T, TT),
     Subtarget(TT, FS, isThumb),
-    FrameInfo(Subtarget),
     JITInfo(),
-    InstrItins(Subtarget.getInstrItineraryData())
-{
+    InstrItins(Subtarget.getInstrItineraryData()) {
   DefRelocModel = getRelocationModel();
 }
 
@@ -106,7 +97,8 @@ ARMTargetMachine::ARMTargetMachine(const Target &T, const std::string &TT,
                            "v128:64:128-v64:64:64-n32")),
     ELFWriterInfo(*this),
     TLInfo(*this),
-    TSInfo(*this) {
+    TSInfo(*this),
+    FrameLowering(Subtarget) {
   if (!Subtarget.hasARMOps())
     report_fatal_error("CPU: '" + Subtarget.getCPUString() + "' does not "
                        "support ARM mode execution!");
@@ -127,7 +119,10 @@ ThumbTargetMachine::ThumbTargetMachine(const Target &T, const std::string &TT,
                            "v128:64:128-v64:64:64-a:0:32-n32")),
     ELFWriterInfo(*this),
     TLInfo(*this),
-    TSInfo(*this) {
+    TSInfo(*this),
+    FrameLowering(Subtarget.hasThumb2()
+              ? new ARMFrameLowering(Subtarget)
+              : (ARMFrameLowering*)new Thumb1FrameLowering(Subtarget)) {
 }
 
 // Pass Pipeline Configuration
@@ -150,6 +145,8 @@ bool ARMBaseTargetMachine::addPreRegAlloc(PassManagerBase &PM,
   // FIXME: temporarily disabling load / store optimization pass for Thumb1.
   if (OptLevel != CodeGenOpt::None && !Subtarget.isThumb1Only())
     PM.add(createARMLoadStoreOptimizationPass(true));
+  if (OptLevel != CodeGenOpt::None && Subtarget.isCortexA9())
+    PM.add(createMLxExpansionPass());
 
   return true;
 }
@@ -163,6 +160,7 @@ bool ARMBaseTargetMachine::addPreSched2(PassManagerBase &PM,
     if (Subtarget.hasNEON())
       PM.add(createNEONMoveFixPass());
   }
+
 
   // Expand some pseudo instructions into multiple instructions to allow
   // proper scheduling.
@@ -182,6 +180,7 @@ bool ARMBaseTargetMachine::addPreEmitPass(PassManagerBase &PM,
                                           CodeGenOpt::Level OptLevel) {
   if (Subtarget.isThumb2() && !Subtarget.prefers32BitThumb())
     PM.add(createThumb2SizeReductionPass());
+
 
   PM.add(createARMConstantIslandPass());
   return true;

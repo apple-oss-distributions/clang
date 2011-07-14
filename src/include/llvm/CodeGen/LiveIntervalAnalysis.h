@@ -75,14 +75,6 @@ namespace llvm {
     // Calculate the spill weight to assign to a single instruction.
     static float getSpillWeight(bool isDef, bool isUse, unsigned loopDepth);
 
-    // After summing the spill weights of all defs and uses, the final weight
-    // should be normalized, dividing the weight of the interval by its size.
-    // This encourages spilling of intervals that are large and have few uses,
-    // and discourages spilling of small intervals with many uses.
-    void normalizeSpillWeight(LiveInterval &li) {
-      li.weight /= getApproximateInstructionCount(li) + 25;
-    }
-
     typedef Reg2IntervalMap::iterator iterator;
     typedef Reg2IntervalMap::const_iterator const_iterator;
     const_iterator begin() const { return r2iMap_.begin(); }
@@ -163,12 +155,26 @@ namespace llvm {
     LiveRange addLiveRangeToEndOfBlock(unsigned reg,
                                        MachineInstr* startInst);
 
+    /// shrinkToUses - After removing some uses of a register, shrink its live
+    /// range to just the remaining uses. This method does not compute reaching
+    /// defs for new uses, and it doesn't remove dead defs.
+    /// Dead PHIDef values are marked as unused.
+    /// New dead machine instructions are added to the dead vector.
+    /// Return true if the interval may have been separated into multiple
+    /// connected components.
+    bool shrinkToUses(LiveInterval *li,
+                      SmallVectorImpl<MachineInstr*> *dead = 0);
+
     // Interval removal
 
     void removeInterval(unsigned Reg) {
       DenseMap<unsigned, LiveInterval*>::iterator I = r2iMap_.find(Reg);
       delete I->second;
       r2iMap_.erase(I);
+    }
+
+    SlotIndexes *getSlotIndexes() const {
+      return indexes_;
     }
 
     SlotIndex getZeroIndex() const {
@@ -270,7 +276,7 @@ namespace llvm {
     /// (if any is created) by reference. This is temporary.
     std::vector<LiveInterval*>
     addIntervalsForSpills(const LiveInterval& i,
-                          SmallVectorImpl<LiveInterval*> &SpillIs,
+                          const SmallVectorImpl<LiveInterval*> *SpillIs,
                           const MachineLoopInfo *loopInfo, VirtRegMap& vrm);
 
     /// spillPhysRegAroundRegDefsUses - Spill the specified physical register
@@ -283,7 +289,7 @@ namespace llvm {
     /// val# of the specified interval is re-materializable. Also returns true
     /// by reference if all of the defs are load instructions.
     bool isReMaterializable(const LiveInterval &li,
-                            SmallVectorImpl<LiveInterval*> &SpillIs,
+                            const SmallVectorImpl<LiveInterval*> *SpillIs,
                             bool &isLoad);
 
     /// isReMaterializable - Returns true if the definition MI of the specified
@@ -303,6 +309,16 @@ namespace llvm {
     /// intervalIsInOneMBB - Returns true if the specified interval is entirely
     /// within a single basic block.
     bool intervalIsInOneMBB(const LiveInterval &li) const;
+
+    /// getLastSplitPoint - Return the last possible insertion point in mbb for
+    /// spilling and splitting code. This is the first terminator, or the call
+    /// instruction if li is live into a landing pad successor.
+    MachineBasicBlock::iterator getLastSplitPoint(const LiveInterval &li,
+                                                  MachineBasicBlock *mbb) const;
+
+    /// addKillFlags - Add kill flags to any instruction that kills a virtual
+    /// register.
+    void addKillFlags();
 
   private:
     /// computeIntervals - Compute live intervals.
@@ -360,7 +376,7 @@ namespace llvm {
     /// by reference if the def is a load.
     bool isReMaterializable(const LiveInterval &li, const VNInfo *ValNo,
                             MachineInstr *MI,
-                            SmallVectorImpl<LiveInterval*> &SpillIs,
+                            const SmallVectorImpl<LiveInterval*> *SpillIs,
                             bool &isLoad);
 
     /// tryFoldMemoryOperand - Attempts to fold either a spill / restore from
@@ -440,9 +456,6 @@ namespace llvm {
         DenseMap<unsigned,std::vector<SRInfo> > &RestoreIdxes,
         DenseMap<unsigned,unsigned> &MBBVRegsMap,
         std::vector<LiveInterval*> &NewLIs);
-
-    // Normalize the spill weight of all the intervals in NewLIs.
-    void normalizeSpillWeights(std::vector<LiveInterval*> &NewLIs);
 
     static LiveInterval* createInterval(unsigned Reg);
 

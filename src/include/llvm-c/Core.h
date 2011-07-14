@@ -33,7 +33,7 @@
 #ifndef LLVM_C_CORE_H
 #define LLVM_C_CORE_H
 
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 
 #ifdef __cplusplus
 
@@ -322,12 +322,16 @@ void LLVMSetTarget(LLVMModuleRef M, const char *Triple);
 LLVMBool LLVMAddTypeName(LLVMModuleRef M, const char *Name, LLVMTypeRef Ty);
 void LLVMDeleteTypeName(LLVMModuleRef M, const char *Name);
 LLVMTypeRef LLVMGetTypeByName(LLVMModuleRef M, const char *Name);
+const char *LLVMGetTypeName(LLVMModuleRef M, LLVMTypeRef Ty);
 
 /** See Module::dump. */
 void LLVMDumpModule(LLVMModuleRef M);
 
 /** See Module::setModuleInlineAsm. */
 void LLVMSetModuleInlineAsm(LLVMModuleRef M, const char *Asm);
+
+/** See Module::getContext. */
+LLVMContextRef LLVMGetModuleContext(LLVMModuleRef M);
 
 /*===-- Types -------------------------------------------------------------===*/
 
@@ -547,6 +551,9 @@ LLVMValueRef LLVMMDNode(LLVMValueRef *Vals, unsigned Count);
 /* Operations on scalar constants */
 LLVMValueRef LLVMConstInt(LLVMTypeRef IntTy, unsigned long long N,
                           LLVMBool SignExtend);
+LLVMValueRef LLVMConstIntOfArbitraryPrecision(LLVMTypeRef IntTy,
+                                              unsigned NumWords,
+                                              const uint64_t Words[]);
 LLVMValueRef LLVMConstIntOfString(LLVMTypeRef IntTy, const char *Text,
                                   uint8_t Radix);
 LLVMValueRef LLVMConstIntOfStringAndSize(LLVMTypeRef IntTy, const char *Text,

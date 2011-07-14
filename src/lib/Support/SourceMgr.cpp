@@ -16,7 +16,9 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/system_error.h"
 using namespace llvm;
 
 namespace {
@@ -48,18 +50,18 @@ SourceMgr::~SourceMgr() {
 /// ~0, otherwise it returns the buffer ID of the stacked file.
 unsigned SourceMgr::AddIncludeFile(const std::string &Filename,
                                    SMLoc IncludeLoc) {
-
-  MemoryBuffer *NewBuf = MemoryBuffer::getFile(Filename.c_str());
+  OwningPtr<MemoryBuffer> NewBuf;
+  MemoryBuffer::getFile(Filename.c_str(), NewBuf);
 
   // If the file didn't exist directly, see if it's in an include path.
   for (unsigned i = 0, e = IncludeDirectories.size(); i != e && !NewBuf; ++i) {
     std::string IncFile = IncludeDirectories[i] + "/" + Filename;
-    NewBuf = MemoryBuffer::getFile(IncFile.c_str());
+    MemoryBuffer::getFile(IncFile.c_str(), NewBuf);
   }
 
   if (NewBuf == 0) return ~0U;
 
-  return AddNewSourceBuffer(NewBuf, IncludeLoc);
+  return AddNewSourceBuffer(NewBuf.take(), IncludeLoc);
 }
 
 
@@ -178,11 +180,10 @@ void SourceMgr::PrintMessage(SMLoc Loc, const Twine &Msg,
                              const char *Type, bool ShowLine) const {
   // Report the message with the diagnostic handler if present.
   if (DiagHandler) {
-    DiagHandler(GetMessage(Loc, Msg, Type, ShowLine),
-                DiagContext, DiagLocCookie);
+    DiagHandler(GetMessage(Loc, Msg, Type, ShowLine), DiagContext);
     return;
   }
-  
+
   raw_ostream &OS = errs();
 
   int CurBuf = FindBufferContainingLoc(Loc);

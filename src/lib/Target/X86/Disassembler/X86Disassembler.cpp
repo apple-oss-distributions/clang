@@ -168,16 +168,16 @@ static void translateImmediate(MCInst &mcInst, uint64_t immediate,
     switch (insn.displacementSize) {
     default:
       break;
-    case 8:
+    case 1:
       type = TYPE_MOFFS8;
       break;
-    case 16:
+    case 2:
       type = TYPE_MOFFS16;
       break;
-    case 32:
+    case 4:
       type = TYPE_MOFFS32;
       break;
-    case 64:
+    case 8:
       type = TYPE_MOFFS64;
       break;
     }
@@ -409,6 +409,7 @@ static bool translateRM(MCInst &mcInst, const OperandSpecifier &operand,
   case TYPE_XMM32:
   case TYPE_XMM64:
   case TYPE_XMM128:
+  case TYPE_XMM256:
   case TYPE_DEBUGREG:
   case TYPE_CONTROLREG:
     return translateRMRegister(mcInst, insn);
@@ -418,6 +419,7 @@ static bool translateRM(MCInst &mcInst, const OperandSpecifier &operand,
   case TYPE_M32:
   case TYPE_M64:
   case TYPE_M128:
+  case TYPE_M256:
   case TYPE_M512:
   case TYPE_Mv:
   case TYPE_M32FP:
@@ -499,6 +501,9 @@ static bool translateOperand(MCInst &mcInst, const OperandSpecifier &operand,
     return translateFPRegister(mcInst, insn.opcodeModifier);
   case ENCODING_Rv:
     translateRegister(mcInst, insn.opcodeRegister);
+    return false;
+  case ENCODING_VVVV:
+    translateRegister(mcInst, insn.vvvv);
     return false;
   case ENCODING_DUP:
     return translateOperand(mcInst,

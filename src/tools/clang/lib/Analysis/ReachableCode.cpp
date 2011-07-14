@@ -30,24 +30,26 @@ static SourceLocation GetUnreachableLoc(const CFGBlock &b, SourceRange &R1,
   unsigned sn = 0;
   R1 = R2 = SourceRange();
 
-top:
   if (sn < b.size()) {
-    CFGStmt CS = b[sn].getAs<CFGStmt>();
+    const CFGStmt *CS = b[sn].getAs<CFGStmt>();
     if (!CS)
-      goto top;
-    
-    S = CS.getStmt(); 
+      return SourceLocation();
+
+    S = CS->getStmt(); 
   } else if (b.getTerminator())
     S = b.getTerminator();
   else
     return SourceLocation();
+
+  if (const Expr *Ex = dyn_cast<Expr>(S))
+    S = Ex->IgnoreParenImpCasts();
 
   switch (S->getStmtClass()) {
     case Expr::BinaryOperatorClass: {
       const BinaryOperator *BO = cast<BinaryOperator>(S);
       if (BO->getOpcode() == BO_Comma) {
         if (sn+1 < b.size())
-          return b[sn+1].getAs<CFGStmt>().getStmt()->getLocStart();
+          return b[sn+1].getAs<CFGStmt>()->getStmt()->getLocStart();
         const CFGBlock *n = &b;
         while (1) {
           if (n->getTerminator())
@@ -58,7 +60,7 @@ top:
           if (n->pred_size() != 1)
             return SourceLocation();
           if (!n->empty())
-            return n[0][0].getAs<CFGStmt>().getStmt()->getLocStart();
+            return n[0][0].getAs<CFGStmt>()->getStmt()->getLocStart();
         }
       }
       R1 = BO->getLHS()->getSourceRange();
@@ -76,8 +78,10 @@ top:
       R2 = CAO->getRHS()->getSourceRange();
       return CAO->getOperatorLoc();
     }
+    case Expr::BinaryConditionalOperatorClass:
     case Expr::ConditionalOperatorClass: {
-      const ConditionalOperator *CO = cast<ConditionalOperator>(S);
+      const AbstractConditionalOperator *CO =
+        cast<AbstractConditionalOperator>(S);
       return CO->getQuestionLoc();
     }
     case Expr::MemberExprClass: {
@@ -101,9 +105,6 @@ top:
       R1 = CE->getSubExpr()->getSourceRange();
       return CE->getTypeBeginLoc();
     }
-    case Expr::ImplicitCastExprClass:
-      ++sn;
-      goto top;
     case Stmt::CXXTryStmtClass: {
       return cast<CXXTryStmt>(S)->getHandler(0)->getCatchLoc();
     }
@@ -192,7 +193,7 @@ unsigned ScanReachableFromBlock(const CFGBlock &Start,
   unsigned count = 0;
   llvm::SmallVector<const CFGBlock*, 32> WL;
 
-    // Prep work queue
+  // Prep work queue
   Reachable.set(Start.getBlockID());
   ++count;
   WL.push_back(&Start);

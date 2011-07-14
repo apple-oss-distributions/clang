@@ -29,8 +29,8 @@
 #include "llvm/Support/PluginLoader.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/ToolOutputFile.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Target/SubtargetFeature.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetMachine.h"
@@ -96,6 +96,11 @@ FileType("filetype", cl::init(TargetMachine::CGFT_AssemblyFile),
 cl::opt<bool> NoVerify("disable-verify", cl::Hidden,
                        cl::desc("Do not verify input module"));
 
+cl::opt<bool> DisableDotLoc("disable-dot-loc", cl::Hidden,
+                            cl::desc("Do not use .loc entries"));
+
+cl::opt<bool> DisableCFI("disable-cfi", cl::Hidden,
+                         cl::desc("Do not use .cfi_* directives"));
 
 static cl::opt<bool>
 DisableRedZone("disable-red-zone",
@@ -205,7 +210,7 @@ int main(int argc, char **argv) {
   InitializeAllAsmParsers();
 
   cl::ParseCommandLineOptions(argc, argv, "llvm system compiler\n");
-  
+
   // Load the module to be compiled...
   SMDiagnostic Err;
   std::auto_ptr<Module> M;
@@ -269,10 +274,21 @@ int main(int argc, char **argv) {
     FeaturesStr = Features.getString();
   }
 
-  std::auto_ptr<TargetMachine> 
+  std::auto_ptr<TargetMachine>
     target(TheTarget->createTargetMachine(TheTriple.getTriple(), FeaturesStr));
   assert(target.get() && "Could not allocate target machine!");
   TargetMachine &Target = *target.get();
+
+  if (DisableDotLoc)
+    Target.setMCUseLoc(false);
+
+  if (DisableCFI)
+    Target.setMCUseCFI(false);
+
+  // Disable .loc support for older OS X versions.
+  if (TheTriple.isMacOSX() &&
+      TheTriple.isMacOSXVersionLT(10, 6))
+    Target.setMCUseLoc(false);
 
   // Figure out where we are going to send the output...
   OwningPtr<tool_output_file> Out
@@ -320,6 +336,9 @@ int main(int argc, char **argv) {
              << " file type!\n";
       return 1;
     }
+
+    // Before executing passes, print the final values of the LLVM options.
+    cl::PrintOptionValues();
 
     PM.run(mod);
   }

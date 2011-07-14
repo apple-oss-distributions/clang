@@ -61,8 +61,7 @@ namespace llvm {
     static std::string getNodeLabel(CallGraphNode *Node, CallGraph *Graph) {
       if (Node->getFunction())
         return ((Value*)Node->getFunction())->getName();
-      else
-        return "external node";
+      return "external node";
     }
   };
 }
@@ -104,15 +103,11 @@ namespace {
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
       AU.setPreservesAll();
       AU.addRequired<DominatorTree>();
-      AU.addRequired<DominanceFrontier>();
 
     }
 
     virtual bool runOnFunction(Function &F) {
-      DominatorTree &DT = getAnalysis<DominatorTree>();
-      DT.dump();
-      DominanceFrontier &DF = getAnalysis<DominanceFrontier>();
-      DF.dump();
+      getAnalysis<DominatorTree>().dump();
       return false;
     }
   };

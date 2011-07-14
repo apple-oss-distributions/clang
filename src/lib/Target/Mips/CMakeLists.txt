@@ -11,10 +11,13 @@ tablegen(MipsGenCallingConv.inc -gen-callingconv)
 tablegen(MipsGenSubtarget.inc -gen-subtarget)
 
 add_llvm_target(MipsCodeGen
+  MipsAsmPrinter.cpp
   MipsDelaySlotFiller.cpp
+  MipsExpandPseudo.cpp
   MipsInstrInfo.cpp
   MipsISelDAGToDAG.cpp
   MipsISelLowering.cpp
+  MipsFrameLowering.cpp
   MipsMCAsmInfo.cpp
   MipsRegisterInfo.cpp
   MipsSubtarget.cpp
@@ -22,3 +25,5 @@ add_llvm_target(MipsCodeGen
   MipsTargetObjectFile.cpp
   MipsSelectionDAGInfo.cpp
   )
+
+add_subdirectory(TargetInfo)

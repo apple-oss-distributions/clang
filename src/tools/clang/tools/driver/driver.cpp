@@ -18,21 +18,27 @@
 #include "clang/Frontend/DiagnosticOptions.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/Config/config.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Path.h"
-#include "llvm/System/Program.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/system_error.h"
+#include "llvm/Target/TargetRegistry.h"
+#include "llvm/Target/TargetSelect.h"
+#include <cctype>
 using namespace clang;
 using namespace clang::driver;
 
@@ -181,8 +187,8 @@ static void ExpandArgsFromBuf(const char *Arg,
                               llvm::SmallVectorImpl<const char*> &ArgVector,
                               std::set<std::string> &SavedStrings) {
   const char *FName = Arg + 1;
-  llvm::MemoryBuffer *MemBuf = llvm::MemoryBuffer::getFile(FName);
-  if (!MemBuf) {
+  llvm::OwningPtr<llvm::MemoryBuffer> MemBuf;
+  if (llvm::MemoryBuffer::getFile(FName, MemBuf)) {
     ArgVector.push_back(SaveStringInSet(SavedStrings, Arg));
     return;
   }
@@ -233,7 +239,6 @@ static void ExpandArgsFromBuf(const char *Arg,
     }
     CurArg.push_back(*P);
   }
-  delete MemBuf;
 }
 
 static void ExpandArgv(int argc, const char **argv,
@@ -247,6 +252,85 @@ static void ExpandArgv(int argc, const char **argv,
     }
 
     ExpandArgsFromBuf(Arg, ArgVector, SavedStrings);
+  }
+}
+
+static void ParseProgName(llvm::SmallVectorImpl<const char *> &ArgVector,
+                          std::set<std::string> &SavedStrings,
+                          Driver &TheDriver)
+{
+  // Try to infer frontend type and default target from the program name.
+
+  // suffixes[] contains the list of known driver suffixes.
+  // Suffixes are compared against the program name in order.
+  // If there is a match, the frontend type is updated as necessary (CPP/C++).
+  // If there is no match, a second round is done after stripping the last
+  // hyphen and everything following it. This allows using something like
+  // "clang++-2.9".
+
+  // If there is a match in either the first or second round,
+  // the function tries to identify a target as prefix. E.g.
+  // "x86_64-linux-clang" as interpreted as suffix "clang" with
+  // target prefix "x86_64-linux". If such a target prefix is found,
+  // is gets added via -ccc-host-triple as implicit first argument.
+  static const struct {
+    const char *Suffix;
+    bool IsCXX;
+    bool IsCPP;
+  } suffixes [] = {
+    { "clang", false, false },
+    { "clang++", true, false },
+    { "clang-c++", true, false },
+    { "clang-cc", false, false },
+    { "clang-cpp", false, true },
+    { "clang-g++", true, false },
+    { "clang-gcc", false, false },
+    { "cc", false, false },
+    { "cpp", false, true },
+    { "++", true, false },
+  };
+  std::string ProgName(llvm::sys::path::stem(ArgVector[0]));
+  llvm::StringRef ProgNameRef(ProgName);
+  llvm::StringRef Prefix;
+
+  for (int Components = 2; Components; --Components) {
+    bool FoundMatch = false;
+    size_t i;
+
+    for (i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+      if (ProgNameRef.endswith(suffixes[i].Suffix)) {
+        FoundMatch = true;
+        if (suffixes[i].IsCXX)
+          TheDriver.CCCIsCXX = true;
+        if (suffixes[i].IsCPP)
+          TheDriver.CCCIsCPP = true;
+        break;
+      }
+    }
+
+    if (FoundMatch) {
+      llvm::StringRef::size_type LastComponent = ProgNameRef.rfind('-',
+        ProgNameRef.size() - strlen(suffixes[i].Suffix));
+      if (LastComponent != llvm::StringRef::npos)
+        Prefix = ProgNameRef.slice(0, LastComponent);
+      break;
+    }
+
+    llvm::StringRef::size_type LastComponent = ProgNameRef.rfind('-');
+    if (LastComponent == llvm::StringRef::npos)
+      break;
+    ProgNameRef = ProgNameRef.slice(0, LastComponent);
+  }
+
+  if (Prefix.empty())
+    return;
+
+  std::string IgnoredError;
+  if (llvm::TargetRegistry::lookupTarget(Prefix, IgnoredError)) {
+    ArgVector.insert(&ArgVector[1],
+      SaveStringInSet(SavedStrings, Prefix));
+    ArgVector.insert(&ArgVector[1],
+      SaveStringInSet(SavedStrings, std::string("-ccc-host-triple")));
   }
 }
 
@@ -287,8 +371,9 @@ int main(int argc_, const char **argv_) {
 
   TextDiagnosticPrinter *DiagClient
     = new TextDiagnosticPrinter(llvm::errs(), DiagnosticOptions());
-  DiagClient->setPrefix(Path.getBasename());
-  Diagnostic Diags(DiagClient);
+  DiagClient->setPrefix(llvm::sys::path::stem(Path.str()));
+  llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+  Diagnostic Diags(DiagID, DiagClient);
 
 #ifdef CLANG_IS_PRODUCTION
   const bool IsProduction = true;
@@ -308,38 +393,40 @@ int main(int argc_, const char **argv_) {
   // Attempt to find the original path used to invoke the driver, to determine
   // the installed path. We do this manually, because we want to support that
   // path being a symlink.
-  llvm::sys::Path InstalledPath(argv[0]);
+  {
+    llvm::SmallString<128> InstalledPath(argv[0]);
 
-  // Do a PATH lookup, if there are no directory components.
-  if (InstalledPath.getLast() == InstalledPath.str()) {
-    llvm::sys::Path Tmp =
-      llvm::sys::Program::FindProgramByName(InstalledPath.getLast());
-    if (!Tmp.empty())
-      InstalledPath = Tmp;
+    // Do a PATH lookup, if there are no directory components.
+    if (llvm::sys::path::filename(InstalledPath) == InstalledPath) {
+      llvm::sys::Path Tmp = llvm::sys::Program::FindProgramByName(
+        llvm::sys::path::filename(InstalledPath.str()));
+      if (!Tmp.empty())
+        InstalledPath = Tmp.str();
+    }
+    llvm::sys::fs::make_absolute(InstalledPath);
+    InstalledPath = llvm::sys::path::parent_path(InstalledPath);
+    bool exists;
+    if (!llvm::sys::fs::exists(InstalledPath.str(), exists) && exists)
+      TheDriver.setInstalledDir(InstalledPath);
   }
-  InstalledPath.makeAbsolute();
-  InstalledPath.eraseComponent();
-  if (InstalledPath.exists())
-    TheDriver.setInstalledDir(InstalledPath.str());
 
-  // Check for ".*++" or ".*++-[^-]*" to determine if we are a C++
-  // compiler. This matches things like "c++", "clang++", and "clang++-1.1".
-  //
-  // Note that we intentionally want to use argv[0] here, to support "clang++"
-  // being a symlink.
-  //
-  // We use *argv instead of argv[0] to work around a bogus g++ warning.
-  const char *progname = argv_[0];
-  std::string ProgName(llvm::sys::Path(progname).getBasename());
-  if (llvm::StringRef(ProgName).endswith("++") ||
-      llvm::StringRef(ProgName).rsplit('-').first.endswith("++")) {
-    TheDriver.CCCIsCXX = true;
-  }
+  llvm::InitializeAllTargets();
+  ParseProgName(argv, SavedStrings, TheDriver);
 
   // Handle CC_PRINT_OPTIONS and CC_PRINT_OPTIONS_FILE.
   TheDriver.CCPrintOptions = !!::getenv("CC_PRINT_OPTIONS");
   if (TheDriver.CCPrintOptions)
     TheDriver.CCPrintOptionsFilename = ::getenv("CC_PRINT_OPTIONS_FILE");
+
+  // Handle CC_PRINT_HEADERS and CC_PRINT_HEADERS_FILE.
+  TheDriver.CCPrintHeaders = !!::getenv("CC_PRINT_HEADERS");
+  if (TheDriver.CCPrintHeaders)
+    TheDriver.CCPrintHeadersFilename = ::getenv("CC_PRINT_HEADERS_FILE");
+
+  // Handle CC_LOG_DIAGNOSTICS and CC_LOG_DIAGNOSTICS_FILE.
+  TheDriver.CCLogDiagnostics = !!::getenv("CC_LOG_DIAGNOSTICS");
+  if (TheDriver.CCLogDiagnostics)
+    TheDriver.CCLogDiagnosticsFilename = ::getenv("CC_LOG_DIAGNOSTICS_FILE");
 
   // Handle QA_OVERRIDE_GCC3_OPTIONS and CCC_ADD_ARGS, used for editing a
   // command line behind the scenes.
@@ -367,8 +454,7 @@ int main(int argc_, const char **argv_) {
     argv.insert(&argv[1], ExtraArgs.begin(), ExtraArgs.end());
   }
 
-  llvm::OwningPtr<Compilation> C(TheDriver.BuildCompilation(argv.size(),
-                                                            &argv[0]));
+  llvm::OwningPtr<Compilation> C(TheDriver.BuildCompilation(argv));
   int Res = 0;
   if (C.get())
     Res = TheDriver.ExecuteCompilation(*C);

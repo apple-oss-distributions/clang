@@ -380,7 +380,7 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
 /// return false.
 static bool IsOperandAMemoryOperand(CallInst *CI, InlineAsm *IA, Value *OpVal,
                                     const TargetLowering &TLI) {
-  std::vector<TargetLowering::AsmOperandInfo> TargetConstraints = TLI.ParseConstraints(ImmutableCallSite(CI));
+  TargetLowering::AsmOperandInfoVector TargetConstraints = TLI.ParseConstraints(ImmutableCallSite(CI));
   for (unsigned i = 0, e = TargetConstraints.size(); i != e; ++i) {
     TargetLowering::AsmOperandInfo &OpInfo = TargetConstraints[i];
     
@@ -568,7 +568,7 @@ IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
                                   MemoryInst, Result);
     Matcher.IgnoreProfitability = true;
     bool Success = Matcher.MatchAddr(Address, 0);
-    Success = Success; assert(Success && "Couldn't select *anything*?");
+    (void)Success; assert(Success && "Couldn't select *anything*?");
 
     // If the match didn't cover I, then it won't be shared by it.
     if (std::find(MatchedAddrModeInsts.begin(), MatchedAddrModeInsts.end(),

@@ -14,6 +14,7 @@
 
 #include "llvm/PassManagers.h"
 #include "llvm/PassManager.h"
+#include "llvm/DebugInfoProbe.h"
 #include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/Assembly/Writer.h"
 #include "llvm/Support/CommandLine.h"
@@ -24,7 +25,8 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PassNameParser.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Mutex.h"
+#include "llvm/Support/Mutex.h"
+#include "llvm/ADT/StringMap.h"
 #include <algorithm>
 #include <cstdio>
 #include <map>
@@ -63,11 +65,13 @@ PassOptionList;
 // Print IR out before/after specified passes.
 static PassOptionList
 PrintBefore("print-before",
-            llvm::cl::desc("Print IR before specified passes"));
+            llvm::cl::desc("Print IR before specified passes"),
+            cl::Hidden);
 
 static PassOptionList
 PrintAfter("print-after",
-           llvm::cl::desc("Print IR after specified passes"));
+           llvm::cl::desc("Print IR after specified passes"),
+           cl::Hidden);
 
 static cl::opt<bool>
 PrintBeforeAll("print-before-all",
@@ -440,6 +444,20 @@ char PassManagerImpl::ID = 0;
 namespace {
 
 //===----------------------------------------------------------------------===//
+// DebugInfoProbe
+
+static DebugInfoProbeInfo *TheDebugProbe;
+static void createDebugInfoProbe() {
+  if (TheDebugProbe) return;
+      
+  // Constructed the first time this is called. This guarantees that the 
+  // object will be constructed, if -enable-debug-info-probe is set, 
+  // before static globals, thus it will be destroyed before them.
+  static ManagedStatic<DebugInfoProbeInfo> DIP;
+  TheDebugProbe = &*DIP;
+}
+
+//===----------------------------------------------------------------------===//
 /// TimingInfo Class - This class is used to calculate information about the
 /// amount of time each pass takes to execute.  This only happens when
 /// -time-passes is enabled on the command line.
@@ -500,6 +518,10 @@ PMTopLevelManager::PMTopLevelManager(PMDataManager *PMDM) {
 void
 PMTopLevelManager::setLastUser(const SmallVectorImpl<Pass *> &AnalysisPasses,
                                Pass *P) {
+  unsigned PDepth = 0;
+  if (P->getResolver())
+    PDepth = P->getResolver()->getPMDataManager().getDepth();
+
   for (SmallVectorImpl<Pass *>::const_iterator I = AnalysisPasses.begin(),
          E = AnalysisPasses.end(); I != E; ++I) {
     Pass *AP = *I;
@@ -508,13 +530,40 @@ PMTopLevelManager::setLastUser(const SmallVectorImpl<Pass *> &AnalysisPasses,
     if (P == AP)
       continue;
 
+    // Update the last users of passes that are required transitive by AP.
+    AnalysisUsage *AnUsage = findAnalysisUsage(AP);
+    const AnalysisUsage::VectorType &IDs = AnUsage->getRequiredTransitiveSet();
+    SmallVector<Pass *, 12> LastUses;
+    SmallVector<Pass *, 12> LastPMUses;
+    for (AnalysisUsage::VectorType::const_iterator I = IDs.begin(),
+         E = IDs.end(); I != E; ++I) {
+      Pass *AnalysisPass = findAnalysisPass(*I);
+      assert(AnalysisPass && "Expected analysis pass to exist.");
+      AnalysisResolver *AR = AnalysisPass->getResolver();
+      assert(AR && "Expected analysis resolver to exist.");
+      unsigned APDepth = AR->getPMDataManager().getDepth();
+
+      if (PDepth == APDepth)
+        LastUses.push_back(AnalysisPass);
+      else if (PDepth > APDepth)
+        LastPMUses.push_back(AnalysisPass);
+    }
+
+    setLastUser(LastUses, P);
+
+    // If this pass has a corresponding pass manager, push higher level
+    // analysis to this pass manager.
+    if (P->getResolver())
+      setLastUser(LastPMUses, P->getResolver()->getPMDataManager().getAsPass());
+
+
     // If AP is the last user of other passes then make P last user of
     // such passes.
     for (DenseMap<Pass *, Pass *>::iterator LUI = LastUser.begin(),
            LUE = LastUser.end(); LUI != LUE; ++LUI) {
       if (LUI->second == AP)
         // DenseMap iterator is not invalidated here because
-        // this is just updating exisitng entry.
+        // this is just updating existing entries.
         LastUser[LUI->first] = P;
     }
   }
@@ -675,6 +724,12 @@ void PMTopLevelManager::dumpArguments() const {
     return;
 
   dbgs() << "Pass Arguments: ";
+  for (SmallVector<ImmutablePass *, 8>::const_iterator I =
+       ImmutablePasses.begin(), E = ImmutablePasses.end(); I != E; ++I)
+    if (const PassInfo *PI =
+          PassRegistry::getPassRegistry()->getPassInfo((*I)->getPassID()))
+      if (!PI->isAnalysisGroup())
+        dbgs() << " -" << PI->getPassArgument();
   for (SmallVector<PMDataManager *, 8>::const_iterator I = PassManagers.begin(),
          E = PassManagers.end(); I != E; ++I)
     (*I)->dumpPassArguments();
@@ -927,7 +982,7 @@ void PMDataManager::add(Pass *P, bool ProcessAnalysis) {
       // Keep track of higher level analysis used by this manager.
       HigherLevelAnalysis.push_back(PRequired);
     } else
-      llvm_unreachable("Unable to accomodate Required Pass");
+      llvm_unreachable("Unable to accommodate Required Pass");
   }
 
   // Set P as P's last user until someone starts using P.
@@ -1391,6 +1446,7 @@ void FunctionPassManagerImpl::releaseMemoryOnTheFly() {
 bool FunctionPassManagerImpl::run(Function &F) {
   bool Changed = false;
   TimingInfo::createTheTimeInfo();
+  createDebugInfoProbe();
 
   initializeAllAnalysisInfo();
   for (unsigned Index = 0; Index < getNumContainedManagers(); ++Index)
@@ -1438,13 +1494,16 @@ bool FPPassManager::runOnFunction(Function &F) {
     dumpRequiredSet(FP);
 
     initializeAnalysisImpl(FP);
-
+    if (TheDebugProbe)
+      TheDebugProbe->initialize(FP, F);
     {
       PassManagerPrettyStackEntry X(FP, F);
       TimeRegion PassTimer(getPassTimer(FP));
 
       LocalChanged |= FP->runOnFunction(F);
     }
+    if (TheDebugProbe)
+      TheDebugProbe->finalize(FP, F);
 
     Changed |= LocalChanged;
     if (LocalChanged)
@@ -1592,6 +1651,7 @@ Pass* MPPassManager::getOnTheFlyPass(Pass *MP, AnalysisID PI, Function &F){
 bool PassManagerImpl::run(Module &M) {
   bool Changed = false;
   TimingInfo::createTheTimeInfo();
+  createDebugInfoProbe();
 
   dumpArguments();
   dumpPasses();
