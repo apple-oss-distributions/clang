@@ -80,13 +80,27 @@ public:
   void SetInsertPoint(Instruction *I) {
     BB = I->getParent();
     InsertPt = I;
+    SetCurrentDebugLocation(I->getDebugLoc());
   }
-  
+
   /// SetInsertPoint - This specifies that created instructions should be
   /// inserted at the specified point.
   void SetInsertPoint(BasicBlock *TheBB, BasicBlock::iterator IP) {
     BB = TheBB;
     InsertPt = IP;
+  }
+
+  /// SetInsertPoint(Use) - Find the nearest point that dominates this use, and
+  /// specify that created instructions should be inserted at this point.
+  void SetInsertPoint(Use &U) {
+    Instruction *UseInst = cast<Instruction>(U.getUser());
+    if (PHINode *Phi = dyn_cast<PHINode>(UseInst)) {
+      BasicBlock *PredBB = Phi->getIncomingBlock(U);
+      assert(U != PredBB->getTerminator() && "critical edge not split");
+      SetInsertPoint(PredBB, PredBB->getTerminator());
+      return;
+    }
+    SetInsertPoint(UseInst);
   }
 
   /// SetCurrentDebugLocation - Set location information used by debugging
@@ -105,6 +119,10 @@ public:
     if (!CurDbgLocation.isUnknown())
       I->setDebugLoc(CurDbgLocation);
   }
+
+  /// getCurrentFunctionReturnType - Get the return type of the current function
+  /// that we're emitting into.
+  const Type *getCurrentFunctionReturnType() const;
 
   /// InsertPoint - A saved insertion point.
   class InsertPoint {
@@ -193,7 +211,8 @@ public:
   ConstantInt *getInt64(uint64_t C) {
     return ConstantInt::get(getInt64Ty(), C);
   }
-  
+
+  /// getInt - Get a constant integer value.
   ConstantInt *getInt(const APInt &AI) {
     return ConstantInt::get(Context, AI);
   }
@@ -246,10 +265,10 @@ public:
     return Type::getInt8PtrTy(Context, AddrSpace);
   }
 
-  /// getCurrentFunctionReturnType - Get the return type of the current function
-  /// that we're emitting into.
-  const Type *getCurrentFunctionReturnType() const;
-  
+  //===--------------------------------------------------------------------===//
+  // Intrinsic creation methods
+  //===--------------------------------------------------------------------===//
+
   /// CreateMemSet - Create and insert a memset to the specified pointer and the
   /// specified value.  If the pointer isn't an i8*, it will be converted.  If a
   /// TBAA tag is specified, it will be added to the instruction.
@@ -257,7 +276,7 @@ public:
                          bool isVolatile = false, MDNode *TBAATag = 0) {
     return CreateMemSet(Ptr, Val, getInt64(Size), Align, isVolatile, TBAATag);
   }
-  
+
   CallInst *CreateMemSet(Value *Ptr, Value *Val, Value *Size, unsigned Align,
                          bool isVolatile = false, MDNode *TBAATag = 0);
 
@@ -268,7 +287,7 @@ public:
                          bool isVolatile = false, MDNode *TBAATag = 0) {
     return CreateMemCpy(Dst, Src, getInt64(Size), Align, isVolatile, TBAATag);
   }
-  
+
   CallInst *CreateMemCpy(Value *Dst, Value *Src, Value *Size, unsigned Align,
                          bool isVolatile = false, MDNode *TBAATag = 0);
 
@@ -279,9 +298,18 @@ public:
                           bool isVolatile = false, MDNode *TBAATag = 0) {
     return CreateMemMove(Dst, Src, getInt64(Size), Align, isVolatile, TBAATag);
   }
-  
+
   CallInst *CreateMemMove(Value *Dst, Value *Src, Value *Size, unsigned Align,
-                          bool isVolatile = false, MDNode *TBAATag = 0);  
+                          bool isVolatile = false, MDNode *TBAATag = 0);
+
+  /// CreateLifetimeStart - Create a lifetime.start intrinsic.  If the pointer
+  /// isn't i8* it will be converted.
+  CallInst *CreateLifetimeStart(Value *Ptr, ConstantInt *Size = 0);
+
+  /// CreateLifetimeEnd - Create a lifetime.end intrinsic.  If the pointer isn't
+  /// i8* it will be converted.
+  CallInst *CreateLifetimeEnd(Value *Ptr, ConstantInt *Size = 0);
+
 private:
   Value *getCastedInt8PtrValue(Value *Ptr);
 };
@@ -324,8 +352,15 @@ public:
   explicit IRBuilder(Instruction *IP)
     : IRBuilderBase(IP->getContext()), Folder() {
     SetInsertPoint(IP);
+    SetCurrentDebugLocation(IP->getDebugLoc());
   }
-  
+
+  explicit IRBuilder(Use &U)
+    : IRBuilderBase(U->getContext()), Folder() {
+    SetInsertPoint(U);
+    SetCurrentDebugLocation(cast<Instruction>(U.getUser())->getDebugLoc());
+  }
+
   IRBuilder(BasicBlock *TheBB, BasicBlock::iterator IP, const T& F)
     : IRBuilderBase(TheBB->getContext()), Folder(F) {
     SetInsertPoint(TheBB, IP);

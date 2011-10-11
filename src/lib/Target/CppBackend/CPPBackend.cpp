@@ -586,7 +586,6 @@ bool CppWriter::printTypeInternal(const Type* Ty) {
       nl(Out);
     }
     Out << "StructType* " << typeName << " = StructType::get("
-        << "mod->getContext(), "
         << typeName << "_fields, /*isPacked=*/"
         << (ST->isPacked() ? "true" : "false") << ");";
     nl(Out);
@@ -989,12 +988,12 @@ void CppWriter::printVariableUses(const GlobalVariable *GV) {
   nl(Out);
   printType(GV->getType());
   if (GV->hasInitializer()) {
-    Constant *Init = GV->getInitializer();
+    const Constant *Init = GV->getInitializer();
     printType(Init->getType());
-    if (Function *F = dyn_cast<Function>(Init)) {
+    if (const Function *F = dyn_cast<Function>(Init)) {
       nl(Out)<< "/ Function Declarations"; nl(Out);
       printFunctionHead(F);
-    } else if (GlobalVariable* gv = dyn_cast<GlobalVariable>(Init)) {
+    } else if (const GlobalVariable* gv = dyn_cast<GlobalVariable>(Init)) {
       nl(Out) << "// Global Variable Declarations"; nl(Out);
       printVariableHead(gv);
       
@@ -1353,9 +1352,10 @@ void CppWriter::printInstruction(const Instruction *I,
     printEscapedString(phi->getName());
     Out << "\", " << bbname << ");";
     nl(Out);
-    for (unsigned i = 0; i < phi->getNumOperands(); i+=2) {
+    for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
       Out << iName << "->addIncoming("
-          << opNames[i] << ", " << opNames[i+1] << ");";
+          << opNames[PHINode::getOperandNumForIncomingValue(i)] << ", "
+          << getOpName(phi->getIncomingBlock(i)) << ");";
       nl(Out);
     }
     break;

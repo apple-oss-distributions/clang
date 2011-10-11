@@ -221,6 +221,11 @@ static void PrintCursor(CXTranslationUnit TU, CXCursor Cursor) {
         break;
     }
     
+    if (clang_CXXMethod_isStatic(Cursor))
+      printf(" (static)");
+    if (clang_CXXMethod_isVirtual(Cursor))
+      printf(" (virtual)");
+    
     if (Cursor.kind == CXCursor_IBOutletCollectionAttr) {
       CXType T =
         clang_getCanonicalType(clang_getIBOutletCollectionType(Cursor));
@@ -1013,6 +1018,79 @@ void print_completion_result(CXCompletionResult *completion_result,
   fprintf(file, "\n");
 }
 
+void print_completion_contexts(unsigned long long contexts, FILE *file) {
+  fprintf(file, "Completion contexts:\n");
+  if (contexts == CXCompletionContext_Unknown) {
+    fprintf(file, "Unknown\n");
+  }
+  if (contexts & CXCompletionContext_AnyType) {
+    fprintf(file, "Any type\n");
+  }
+  if (contexts & CXCompletionContext_AnyValue) {
+    fprintf(file, "Any value\n");
+  }
+  if (contexts & CXCompletionContext_ObjCObjectValue) {
+    fprintf(file, "Objective-C object value\n");
+  }
+  if (contexts & CXCompletionContext_ObjCSelectorValue) {
+    fprintf(file, "Objective-C selector value\n");
+  }
+  if (contexts & CXCompletionContext_CXXClassTypeValue) {
+    fprintf(file, "C++ class type value\n");
+  }
+  if (contexts & CXCompletionContext_DotMemberAccess) {
+    fprintf(file, "Dot member access\n");
+  }
+  if (contexts & CXCompletionContext_ArrowMemberAccess) {
+    fprintf(file, "Arrow member access\n");
+  }
+  if (contexts & CXCompletionContext_ObjCPropertyAccess) {
+    fprintf(file, "Objective-C property access\n");
+  }
+  if (contexts & CXCompletionContext_EnumTag) {
+    fprintf(file, "Enum tag\n");
+  }
+  if (contexts & CXCompletionContext_UnionTag) {
+    fprintf(file, "Union tag\n");
+  }
+  if (contexts & CXCompletionContext_StructTag) {
+    fprintf(file, "Struct tag\n");
+  }
+  if (contexts & CXCompletionContext_ClassTag) {
+    fprintf(file, "Class name\n");
+  }
+  if (contexts & CXCompletionContext_Namespace) {
+    fprintf(file, "Namespace or namespace alias\n");
+  }
+  if (contexts & CXCompletionContext_NestedNameSpecifier) {
+    fprintf(file, "Nested name specifier\n");
+  }
+  if (contexts & CXCompletionContext_ObjCInterface) {
+    fprintf(file, "Objective-C interface\n");
+  }
+  if (contexts & CXCompletionContext_ObjCProtocol) {
+    fprintf(file, "Objective-C protocol\n");
+  }
+  if (contexts & CXCompletionContext_ObjCCategory) {
+    fprintf(file, "Objective-C category\n");
+  }
+  if (contexts & CXCompletionContext_ObjCInstanceMessage) {
+    fprintf(file, "Objective-C instance method\n");
+  }
+  if (contexts & CXCompletionContext_ObjCClassMessage) {
+    fprintf(file, "Objective-C class method\n");
+  }
+  if (contexts & CXCompletionContext_ObjCSelectorName) {
+    fprintf(file, "Objective-C selector name\n");
+  }
+  if (contexts & CXCompletionContext_MacroName) {
+    fprintf(file, "Macro name\n");
+  }
+  if (contexts & CXCompletionContext_NaturalLanguage) {
+    fprintf(file, "Natural language\n");
+  }
+}
+
 int my_stricmp(const char *s1, const char *s2) {
   while (*s1 && *s2) {
     int c1 = tolower((unsigned char)*s1), c2 = tolower((unsigned char)*s2);
@@ -1094,6 +1172,7 @@ int perform_code_completion(int argc, const char **argv, int timing_only) {
 
   if (results) {
     unsigned i, n = results->NumResults;
+    unsigned long long contexts;
     if (!timing_only) {      
       /* Sort the code-completion results based on the typed text. */
       clang_sortCodeCompletionResults(results->Results, results->NumResults);
@@ -1107,6 +1186,10 @@ int perform_code_completion(int argc, const char **argv, int timing_only) {
       PrintDiagnostic(diag);
       clang_disposeDiagnostic(diag);
     }
+    
+    contexts = clang_codeCompleteGetContexts(results);
+    print_completion_contexts(contexts, stdout);
+    
     clang_disposeCodeCompleteResults(results);
   }
   clang_disposeTranslationUnit(TU);
@@ -1512,12 +1595,36 @@ int write_pch_file(const char *filename, int argc, const char *argv[]) {
     return 1;
   }
 
-  if (clang_saveTranslationUnit(TU, filename, clang_defaultSaveOptions(TU)))
-    fprintf(stderr, "Unable to write PCH file %s\n", filename);
+  int result = 0;
+  
+  switch (clang_saveTranslationUnit(TU, filename, 
+                                    clang_defaultSaveOptions(TU))) {
+  case CXSaveError_None:
+    break;
+
+  case CXSaveError_TranslationErrors:
+    fprintf(stderr, "Unable to write PCH file %s: translation errors\n", 
+            filename);
+    result = 2;    
+    break;
+
+  case CXSaveError_InvalidTU:
+    fprintf(stderr, "Unable to write PCH file %s: invalid translation unit\n", 
+            filename);
+    result = 3;    
+    break;
+
+  case CXSaveError_Unknown:
+  default:
+    fprintf(stderr, "Unable to write PCH file %s: unknown error \n", filename);
+    result = 1;
+    break;
+  }
+  
   clang_disposeTranslationUnit(TU);
   free_remapped_files(unsaved_files, num_unsaved_files);
   clang_disposeIndex(Idx);
-  return 0;  
+  return result;
 }
 
 /******************************************************************************/

@@ -87,11 +87,8 @@ PHINode::PHINode(const PHINode &PN)
   : Instruction(PN.getType(), Instruction::PHI,
                 allocHungoffUses(PN.getNumOperands()), PN.getNumOperands()),
     ReservedSpace(PN.getNumOperands()) {
-  Use *OL = OperandList;
-  for (unsigned i = 0, e = PN.getNumOperands(); i != e; i+=2) {
-    OL[i] = PN.getOperand(i);
-    OL[i+1] = PN.getOperand(i+1);
-  }
+  std::copy(PN.op_begin(), PN.op_end(), op_begin());
+  std::copy(PN.block_begin(), PN.block_end(), block_begin());
   SubclassOptionalData = PN.SubclassOptionalData;
 }
 
@@ -99,31 +96,37 @@ PHINode::~PHINode() {
   dropHungoffUses();
 }
 
+Use *PHINode::allocHungoffUses(unsigned N) const {
+  // Allocate the array of Uses of the incoming values, followed by a pointer
+  // (with bottom bit set) to the User, followed by the array of pointers to
+  // the incoming basic blocks.
+  size_t size = N * sizeof(Use) + sizeof(Use::UserRef)
+    + N * sizeof(BasicBlock*);
+  Use *Begin = static_cast<Use*>(::operator new(size));
+  Use *End = Begin + N;
+  (void) new(End) Use::UserRef(const_cast<PHINode*>(this), 1);
+  return Use::initTags(Begin, End);
+}
+
 // removeIncomingValue - Remove an incoming value.  This is useful if a
 // predecessor basic block is deleted.
 Value *PHINode::removeIncomingValue(unsigned Idx, bool DeletePHIIfEmpty) {
-  unsigned NumOps = getNumOperands();
-  Use *OL = OperandList;
-  assert(Idx*2 < NumOps && "BB not in PHI node!");
-  Value *Removed = OL[Idx*2];
+  Value *Removed = getIncomingValue(Idx);
 
   // Move everything after this operand down.
   //
   // FIXME: we could just swap with the end of the list, then erase.  However,
-  // client might not expect this to happen.  The code as it is thrashes the
+  // clients might not expect this to happen.  The code as it is thrashes the
   // use/def lists, which is kinda lame.
-  for (unsigned i = (Idx+1)*2; i != NumOps; i += 2) {
-    OL[i-2] = OL[i];
-    OL[i-2+1] = OL[i+1];
-  }
+  std::copy(op_begin() + Idx + 1, op_end(), op_begin() + Idx);
+  std::copy(block_begin() + Idx + 1, block_end(), block_begin() + Idx);
 
   // Nuke the last value.
-  OL[NumOps-2].set(0);
-  OL[NumOps-2+1].set(0);
-  NumOperands = NumOps-2;
+  Op<-1>().set(0);
+  --NumOperands;
 
   // If the PHI node is dead, because it has zero entries, nuke it now.
-  if (NumOps == 2 && DeletePHIIfEmpty) {
+  if (getNumOperands() == 0 && DeletePHIIfEmpty) {
     // If anyone is using this PHI, make them use a dummy value instead...
     replaceAllUsesWith(UndefValue::get(getType()));
     eraseFromParent();
@@ -137,15 +140,18 @@ Value *PHINode::removeIncomingValue(unsigned Idx, bool DeletePHIIfEmpty) {
 ///
 void PHINode::growOperands() {
   unsigned e = getNumOperands();
-  // Multiply by 1.5 and round down so the result is still even.
-  unsigned NumOps = e + e / 4 * 2;
-  if (NumOps < 4) NumOps = 4;      // 4 op PHI nodes are VERY common.
+  unsigned NumOps = e + e / 2;
+  if (NumOps < 2) NumOps = 2;      // 2 op PHI nodes are VERY common.
+
+  Use *OldOps = op_begin();
+  BasicBlock **OldBlocks = block_begin();
 
   ReservedSpace = NumOps;
-  Use *OldOps = OperandList;
-  Use *NewOps = allocHungoffUses(NumOps);
-  std::copy(OldOps, OldOps + e, NewOps);
-  OperandList = NewOps;
+  OperandList = allocHungoffUses(ReservedSpace);
+
+  std::copy(OldOps, OldOps + e, op_begin());
+  std::copy(OldBlocks, OldBlocks + e, block_begin());
+
   Use::zap(OldOps, OldOps + e, true);
 }
 
@@ -2076,6 +2082,7 @@ unsigned CastInst::isEliminableCastPair(
 
 CastInst *CastInst::Create(Instruction::CastOps op, Value *S, const Type *Ty, 
   const Twine &Name, Instruction *InsertBefore) {
+  assert(castIsValid(op, S, Ty) && "Invalid cast!");
   // Construct and return the appropriate CastInst subclass
   switch (op) {
     case Trunc:    return new TruncInst    (S, Ty, Name, InsertBefore);
@@ -2098,6 +2105,7 @@ CastInst *CastInst::Create(Instruction::CastOps op, Value *S, const Type *Ty,
 
 CastInst *CastInst::Create(Instruction::CastOps op, Value *S, const Type *Ty,
   const Twine &Name, BasicBlock *InsertAtEnd) {
+  assert(castIsValid(op, S, Ty) && "Invalid cast!");
   // Construct and return the appropriate CastInst subclass
   switch (op) {
     case Trunc:    return new TruncInst    (S, Ty, Name, InsertAtEnd);
@@ -2254,60 +2262,56 @@ bool CastInst::isCastable(const Type *SrcTy, const Type *DestTy) {
   if (SrcTy == DestTy)
     return true;
 
+  if (const VectorType *SrcVecTy = dyn_cast<VectorType>(SrcTy))
+    if (const VectorType *DestVecTy = dyn_cast<VectorType>(DestTy))
+      if (SrcVecTy->getNumElements() == DestVecTy->getNumElements()) {
+        // An element by element cast.  Valid if casting the elements is valid.
+        SrcTy = SrcVecTy->getElementType();
+        DestTy = DestVecTy->getElementType();
+      }
+
   // Get the bit sizes, we'll need these
-  unsigned SrcBits = SrcTy->getScalarSizeInBits();   // 0 for ptr
-  unsigned DestBits = DestTy->getScalarSizeInBits(); // 0 for ptr
+  unsigned SrcBits = SrcTy->getPrimitiveSizeInBits();   // 0 for ptr
+  unsigned DestBits = DestTy->getPrimitiveSizeInBits(); // 0 for ptr
 
   // Run through the possibilities ...
-  if (DestTy->isIntegerTy()) {                   // Casting to integral
-    if (SrcTy->isIntegerTy()) {                  // Casting from integral
+  if (DestTy->isIntegerTy()) {               // Casting to integral
+    if (SrcTy->isIntegerTy()) {                // Casting from integral
         return true;
-    } else if (SrcTy->isFloatingPointTy()) {     // Casting from floating pt
+    } else if (SrcTy->isFloatingPointTy()) {   // Casting from floating pt
       return true;
-    } else if (const VectorType *PTy = dyn_cast<VectorType>(SrcTy)) {
-                                               // Casting from vector
-      return DestBits == PTy->getBitWidth();
+    } else if (SrcTy->isVectorTy()) {          // Casting from vector
+      return DestBits == SrcBits;
     } else {                                   // Casting from something else
       return SrcTy->isPointerTy();
     }
-  } else if (DestTy->isFloatingPointTy()) {      // Casting to floating pt
-    if (SrcTy->isIntegerTy()) {                  // Casting from integral
+  } else if (DestTy->isFloatingPointTy()) {  // Casting to floating pt
+    if (SrcTy->isIntegerTy()) {                // Casting from integral
       return true;
-    } else if (SrcTy->isFloatingPointTy()) {     // Casting from floating pt
+    } else if (SrcTy->isFloatingPointTy()) {   // Casting from floating pt
       return true;
-    } else if (const VectorType *PTy = dyn_cast<VectorType>(SrcTy)) {
-                                               // Casting from vector
-      return DestBits == PTy->getBitWidth();
+    } else if (SrcTy->isVectorTy()) {          // Casting from vector
+      return DestBits == SrcBits;
     } else {                                   // Casting from something else
       return false;
     }
-  } else if (const VectorType *DestPTy = dyn_cast<VectorType>(DestTy)) {
-                                                // Casting to vector
-    if (const VectorType *SrcPTy = dyn_cast<VectorType>(SrcTy)) {
-                                                // Casting from vector
-      return DestPTy->getBitWidth() == SrcPTy->getBitWidth();
-    } else if (DestPTy->getBitWidth() == SrcBits) {
-      return true;                              // float/int -> vector
-    } else if (SrcTy->isX86_MMXTy()) {
-      return DestPTy->getBitWidth() == 64;      // MMX to 64-bit vector
-    } else {
-      return false;
-    }
+  } else if (DestTy->isVectorTy()) {         // Casting to vector
+    return DestBits == SrcBits;
   } else if (DestTy->isPointerTy()) {        // Casting to pointer
-    if (SrcTy->isPointerTy()) {              // Casting from pointer
+    if (SrcTy->isPointerTy()) {                // Casting from pointer
       return true;
-    } else if (SrcTy->isIntegerTy()) {            // Casting from integral
+    } else if (SrcTy->isIntegerTy()) {         // Casting from integral
       return true;
-    } else {                                    // Casting from something else
+    } else {                                   // Casting from something else
       return false;
     }
   } else if (DestTy->isX86_MMXTy()) {
-    if (const VectorType *SrcPTy = dyn_cast<VectorType>(SrcTy)) {
-      return SrcPTy->getBitWidth() == 64;       // 64-bit vector to MMX
+    if (SrcTy->isVectorTy()) {
+      return DestBits == SrcBits;       // 64-bit vector to MMX
     } else {
       return false;
     }
-  } else {                                      // Casting to something else
+  } else {                                   // Casting to something else
     return false;
   }
 }
@@ -2322,13 +2326,26 @@ bool CastInst::isCastable(const Type *SrcTy, const Type *DestTy) {
 Instruction::CastOps
 CastInst::getCastOpcode(
   const Value *Src, bool SrcIsSigned, const Type *DestTy, bool DestIsSigned) {
-  // Get the bit sizes, we'll need these
   const Type *SrcTy = Src->getType();
-  unsigned SrcBits = SrcTy->getScalarSizeInBits();   // 0 for ptr
-  unsigned DestBits = DestTy->getScalarSizeInBits(); // 0 for ptr
 
   assert(SrcTy->isFirstClassType() && DestTy->isFirstClassType() &&
          "Only first class types are castable!");
+
+  if (SrcTy == DestTy)
+    return BitCast;
+
+  if (const VectorType *SrcVecTy = dyn_cast<VectorType>(SrcTy))
+    if (const VectorType *DestVecTy = dyn_cast<VectorType>(DestTy))
+      if (SrcVecTy->getNumElements() == DestVecTy->getNumElements()) {
+        // An element by element cast.  Find the appropriate opcode based on the
+        // element types.
+        SrcTy = SrcVecTy->getElementType();
+        DestTy = DestVecTy->getElementType();
+      }
+
+  // Get the bit sizes, we'll need these
+  unsigned SrcBits = SrcTy->getPrimitiveSizeInBits();   // 0 for ptr
+  unsigned DestBits = DestTy->getPrimitiveSizeInBits(); // 0 for ptr
 
   // Run through the possibilities ...
   if (DestTy->isIntegerTy()) {                      // Casting to integral
@@ -2348,10 +2365,9 @@ CastInst::getCastOpcode(
         return FPToSI;                              // FP -> sint
       else
         return FPToUI;                              // FP -> uint 
-    } else if (const VectorType *PTy = dyn_cast<VectorType>(SrcTy)) {
-      assert(DestBits == PTy->getBitWidth() &&
-               "Casting vector to integer of different width");
-      PTy = NULL;
+    } else if (SrcTy->isVectorTy()) {
+      assert(DestBits == SrcBits &&
+             "Casting vector to integer of different width");
       return BitCast;                             // Same size, no-op cast
     } else {
       assert(SrcTy->isPointerTy() &&
@@ -2372,29 +2388,17 @@ CastInst::getCastOpcode(
       } else  {
         return BitCast;                             // same size, no-op cast
       }
-    } else if (const VectorType *PTy = dyn_cast<VectorType>(SrcTy)) {
-      assert(DestBits == PTy->getBitWidth() &&
+    } else if (SrcTy->isVectorTy()) {
+      assert(DestBits == SrcBits &&
              "Casting vector to floating point of different width");
-      PTy = NULL;
       return BitCast;                             // same size, no-op cast
     } else {
       llvm_unreachable("Casting pointer or non-first class to float");
     }
-  } else if (const VectorType *DestPTy = dyn_cast<VectorType>(DestTy)) {
-    if (const VectorType *SrcPTy = dyn_cast<VectorType>(SrcTy)) {
-      assert(DestPTy->getBitWidth() == SrcPTy->getBitWidth() &&
-             "Casting vector to vector of different widths");
-      SrcPTy = NULL;
-      return BitCast;                             // vector -> vector
-    } else if (DestPTy->getBitWidth() == SrcBits) {
-      return BitCast;                               // float/int -> vector
-    } else if (SrcTy->isX86_MMXTy()) {
-      assert(DestPTy->getBitWidth()==64 &&
-             "Casting X86_MMX to vector of wrong width");
-      return BitCast;                             // MMX to 64-bit vector
-    } else {
-      assert(!"Illegal cast to vector (wrong type or size)");
-    }
+  } else if (DestTy->isVectorTy()) {
+    assert(DestBits == SrcBits &&
+           "Illegal cast to vector (wrong type or size)");
+    return BitCast;
   } else if (DestTy->isPointerTy()) {
     if (SrcTy->isPointerTy()) {
       return BitCast;                               // ptr -> ptr
@@ -2404,9 +2408,8 @@ CastInst::getCastOpcode(
       assert(!"Casting pointer to other than pointer or int");
     }
   } else if (DestTy->isX86_MMXTy()) {
-    if (isa<VectorType>(SrcTy)) {
-      assert(cast<VectorType>(SrcTy)->getBitWidth() == 64 &&
-             "Casting vector of wrong width to X86_MMX");
+    if (SrcTy->isVectorTy()) {
+      assert(DestBits == SrcBits && "Casting vector of wrong width to X86_MMX");
       return BitCast;                               // 64-bit vector to MMX
     } else {
       assert(!"Illegal cast to X86_MMX");
@@ -2442,46 +2445,40 @@ CastInst::castIsValid(Instruction::CastOps op, Value *S, const Type *DstTy) {
   unsigned SrcBitSize = SrcTy->getScalarSizeInBits();
   unsigned DstBitSize = DstTy->getScalarSizeInBits();
 
+  // If these are vector types, get the lengths of the vectors (using zero for
+  // scalar types means that checking that vector lengths match also checks that
+  // scalars are not being converted to vectors or vectors to scalars).
+  unsigned SrcLength = SrcTy->isVectorTy() ?
+    cast<VectorType>(SrcTy)->getNumElements() : 0;
+  unsigned DstLength = DstTy->isVectorTy() ?
+    cast<VectorType>(DstTy)->getNumElements() : 0;
+
   // Switch on the opcode provided
   switch (op) {
   default: return false; // This is an input error
   case Instruction::Trunc:
-    return SrcTy->isIntOrIntVectorTy() &&
-           DstTy->isIntOrIntVectorTy()&& SrcBitSize > DstBitSize;
+    return SrcTy->isIntOrIntVectorTy() && DstTy->isIntOrIntVectorTy() &&
+      SrcLength == DstLength && SrcBitSize > DstBitSize;
   case Instruction::ZExt:
-    return SrcTy->isIntOrIntVectorTy() &&
-           DstTy->isIntOrIntVectorTy()&& SrcBitSize < DstBitSize;
+    return SrcTy->isIntOrIntVectorTy() && DstTy->isIntOrIntVectorTy() &&
+      SrcLength == DstLength && SrcBitSize < DstBitSize;
   case Instruction::SExt: 
-    return SrcTy->isIntOrIntVectorTy() &&
-           DstTy->isIntOrIntVectorTy()&& SrcBitSize < DstBitSize;
+    return SrcTy->isIntOrIntVectorTy() && DstTy->isIntOrIntVectorTy() &&
+      SrcLength == DstLength && SrcBitSize < DstBitSize;
   case Instruction::FPTrunc:
-    return SrcTy->isFPOrFPVectorTy() &&
-           DstTy->isFPOrFPVectorTy() && 
-           SrcBitSize > DstBitSize;
+    return SrcTy->isFPOrFPVectorTy() && DstTy->isFPOrFPVectorTy() &&
+      SrcLength == DstLength && SrcBitSize > DstBitSize;
   case Instruction::FPExt:
-    return SrcTy->isFPOrFPVectorTy() &&
-           DstTy->isFPOrFPVectorTy() && 
-           SrcBitSize < DstBitSize;
+    return SrcTy->isFPOrFPVectorTy() && DstTy->isFPOrFPVectorTy() &&
+      SrcLength == DstLength && SrcBitSize < DstBitSize;
   case Instruction::UIToFP:
   case Instruction::SIToFP:
-    if (const VectorType *SVTy = dyn_cast<VectorType>(SrcTy)) {
-      if (const VectorType *DVTy = dyn_cast<VectorType>(DstTy)) {
-        return SVTy->getElementType()->isIntOrIntVectorTy() &&
-               DVTy->getElementType()->isFPOrFPVectorTy() &&
-               SVTy->getNumElements() == DVTy->getNumElements();
-      }
-    }
-    return SrcTy->isIntOrIntVectorTy() && DstTy->isFPOrFPVectorTy();
+    return SrcTy->isIntOrIntVectorTy() && DstTy->isFPOrFPVectorTy() &&
+      SrcLength == DstLength;
   case Instruction::FPToUI:
   case Instruction::FPToSI:
-    if (const VectorType *SVTy = dyn_cast<VectorType>(SrcTy)) {
-      if (const VectorType *DVTy = dyn_cast<VectorType>(DstTy)) {
-        return SVTy->getElementType()->isFPOrFPVectorTy() &&
-               DVTy->getElementType()->isIntOrIntVectorTy() &&
-               SVTy->getNumElements() == DVTy->getNumElements();
-      }
-    }
-    return SrcTy->isFPOrFPVectorTy() && DstTy->isIntOrIntVectorTy();
+    return SrcTy->isFPOrFPVectorTy() && DstTy->isIntOrIntVectorTy() &&
+      SrcLength == DstLength;
   case Instruction::PtrToInt:
     return SrcTy->isPointerTy() && DstTy->isIntegerTy();
   case Instruction::IntToPtr:

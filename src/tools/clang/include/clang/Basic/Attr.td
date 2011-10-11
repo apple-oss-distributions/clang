@@ -400,6 +400,16 @@ def ObjCNSObject : InheritableAttr {
   let Spellings = ["NSObject"];
 }
 
+def ObjCPreciseLifetime : Attr {
+  let Spellings = ["objc_precise_lifetime"];
+  let Subjects = [Var];
+}
+
+def ObjCReturnsInnerPointer : Attr {
+  let Spellings = ["objc_returns_inner_pointer"];
+  let Subjects = [ObjCMethod];
+}
+
 def Overloadable : Attr {
   let Spellings = ["overloadable"];
 }
@@ -477,6 +487,10 @@ def TransparentUnion : InheritableAttr {
 def Unavailable : InheritableAttr {
   let Spellings = ["unavailable"];
   let Args = [StringArgument<"Message">];
+}
+
+def ArcWeakrefUnavailable : InheritableAttr {
+  let Spellings = ["objc_arc_weak_reference_unavailable"];
 }
 
 def Unused : InheritableAttr {

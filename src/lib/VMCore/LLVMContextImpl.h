@@ -22,10 +22,10 @@
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/Metadata.h"
-#include "llvm/Assembly/Writer.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -139,27 +139,30 @@ public:
   // on Context destruction.
   SmallPtrSet<MDNode*, 1> NonUniquedMDNodes;
   
-  ConstantUniqueMap<char, Type, ConstantAggregateZero> AggZeroConstants;
+  ConstantUniqueMap<char, char, Type, ConstantAggregateZero> AggZeroConstants;
 
-  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayType,
-    ConstantArray, true /*largekey*/> ArrayConstantsTy;
+  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayRef<Constant*>,
+    ArrayType, ConstantArray, true /*largekey*/> ArrayConstantsTy;
   ArrayConstantsTy ArrayConstants;
   
-  typedef ConstantUniqueMap<std::vector<Constant*>, StructType,
-    ConstantStruct, true /*largekey*/> StructConstantsTy;
+  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayRef<Constant*>,
+    StructType, ConstantStruct, true /*largekey*/> StructConstantsTy;
   StructConstantsTy StructConstants;
   
-  typedef ConstantUniqueMap<std::vector<Constant*>, VectorType,
-                            ConstantVector> VectorConstantsTy;
+  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayRef<Constant*>,
+                            VectorType, ConstantVector> VectorConstantsTy;
   VectorConstantsTy VectorConstants;
   
-  ConstantUniqueMap<char, PointerType, ConstantPointerNull> NullPtrConstants;
-  ConstantUniqueMap<char, Type, UndefValue> UndefValueConstants;
+  ConstantUniqueMap<char, char, PointerType, ConstantPointerNull>
+    NullPtrConstants;
+  ConstantUniqueMap<char, char, Type, UndefValue> UndefValueConstants;
   
   DenseMap<std::pair<Function*, BasicBlock*> , BlockAddress*> BlockAddresses;
-  ConstantUniqueMap<ExprMapKeyType, Type, ConstantExpr> ExprConstants;
+  ConstantUniqueMap<ExprMapKeyType, const ExprMapKeyType&, Type, ConstantExpr>
+    ExprConstants;
 
-  ConstantUniqueMap<InlineAsmKeyType, PointerType, InlineAsm> InlineAsms;
+  ConstantUniqueMap<InlineAsmKeyType, const InlineAsmKeyType&, PointerType,
+                    InlineAsm> InlineAsms;
   
   ConstantInt *TheTrueVal;
   ConstantInt *TheFalseVal;
@@ -182,13 +185,6 @@ public:
   const IntegerType Int32Ty;
   const IntegerType Int64Ty;
 
-  // Concrete/Abstract TypeDescriptions - We lazily calculate type descriptions
-  // for types as they are needed.  Because resolution of types must invalidate
-  // all of the abstract type descriptions, we keep them in a separate map to
-  // make this easy.
-  TypePrinting ConcreteTypeDescriptions;
-  TypePrinting AbstractTypeDescriptions;
-  
   TypeMap<ArrayValType, ArrayType> ArrayTypes;
   TypeMap<VectorValType, VectorType> VectorTypes;
   TypeMap<PointerValType, PointerType> PointerTypes;

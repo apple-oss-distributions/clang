@@ -154,9 +154,10 @@ protected:
     unsigned ObjectKind : 2;
     unsigned TypeDependent : 1;
     unsigned ValueDependent : 1;
+    unsigned InstantiationDependent : 1;
     unsigned ContainsUnexpandedParameterPack : 1;
   };
-  enum { NumExprBits = 15 };
+  enum { NumExprBits = 16 };
 
   class DeclRefExprBitfields {
     friend class DeclRefExpr;
@@ -183,6 +184,13 @@ protected:
     unsigned NumPreArgs : 1;
   };
 
+  class ObjCIndirectCopyRestoreExprBitfields {
+    friend class ObjCIndirectCopyRestoreExpr;
+    unsigned : NumExprBits;
+
+    unsigned ShouldCopy : 1;
+  };
+
   union {
     // FIXME: this is wasteful on 64-bit platforms.
     void *Aligner;
@@ -193,6 +201,7 @@ protected:
     DeclRefExprBitfields DeclRefExprBits;
     CastExprBitfields CastExprBits;
     CallExprBitfields CallExprBits;
+    ObjCIndirectCopyRestoreExprBitfields ObjCIndirectCopyRestoreExprBits;
   };
 
   friend class ASTStmtReader;
@@ -284,6 +293,10 @@ public:
   ///   works on systems with GraphViz (Mac OS X) or dot+gv installed.
   void viewAST() const;
 
+  /// Skip past any implicit AST nodes which might surround this
+  /// statement, such as ExprWithCleanups or ImplicitCastExpr nodes.
+  Stmt *IgnoreImplicit();
+
   // Implement isa<T> support.
   static bool classof(const Stmt *) { return true; }
 
@@ -327,7 +340,7 @@ public:
   /// declaration pointers) or the exact representation of the statement as
   /// written in the source.
   void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context,
-               bool Canonical);
+               bool Canonical) const;
 };
 
 /// DeclStmt - Adaptor class for mixing declarations with statements and

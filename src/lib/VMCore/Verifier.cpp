@@ -1139,9 +1139,6 @@ void Verifier::visitPHINode(PHINode &PN) {
   for (unsigned i = 0, e = PN.getNumIncomingValues(); i != e; ++i) {
     Assert1(PN.getType() == PN.getIncomingValue(i)->getType(),
             "PHI node operands are not the same type as the result!", &PN);
-    Assert1(isa<BasicBlock>(PN.getOperand(
-                PHINode::getOperandNumForIncomingBlock(i))),
-            "PHI node incoming block is not a BasicBlock!", &PN);
   }
 
   // All other PHI node constraints are checked in the visitBasicBlock method.
@@ -1482,8 +1479,10 @@ void Verifier::visitInstruction(Instruction &I) {
         // PHI nodes differ from other nodes because they actually "use" the
         // value in the predecessor basic blocks they correspond to.
         BasicBlock *UseBlock = BB;
-        if (isa<PHINode>(I))
-          UseBlock = dyn_cast<BasicBlock>(I.getOperand(i+1));
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          unsigned j = PHINode::getIncomingValueNumForOperand(i);
+          UseBlock = PN->getIncomingBlock(j);
+        }
         Assert2(UseBlock, "Invoke operand is PHI node with bad incoming-BB",
                 Op, &I);
 
@@ -1515,10 +1514,11 @@ void Verifier::visitInstruction(Instruction &I) {
                 return;
               }
         }
-      } else if (isa<PHINode>(I)) {
+      } else if (PHINode *PN = dyn_cast<PHINode>(&I)) {
         // PHI nodes are more difficult than other nodes because they actually
         // "use" the value in the predecessor basic blocks they correspond to.
-        BasicBlock *PredBB = dyn_cast<BasicBlock>(I.getOperand(i+1));
+        unsigned j = PHINode::getIncomingValueNumForOperand(i);
+        BasicBlock *PredBB = PN->getIncomingBlock(j);
         Assert2(PredBB && (DT->dominates(OpBlock, PredBB) ||
                            !DT->isReachableFromEntry(PredBB)),
                 "Instruction does not dominate all uses!", Op, &I);
@@ -1644,6 +1644,9 @@ void Verifier::visitIntrinsicFunctionCall(Intrinsic::ID ID, CallInst &CI) {
   case Intrinsic::memset:
     Assert1(isa<ConstantInt>(CI.getArgOperand(3)),
             "alignment argument of memory intrinsics must be a constant int",
+            &CI);
+    Assert1(isa<ConstantInt>(CI.getArgOperand(4)),
+            "isvolatile argument of memory intrinsics must be a constant int",
             &CI);
     break;
   case Intrinsic::gcroot:

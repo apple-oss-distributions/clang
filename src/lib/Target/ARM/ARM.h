@@ -16,6 +16,7 @@
 #define TARGET_ARM_H
 
 #include "ARMBaseInfo.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include <cassert>
@@ -27,6 +28,7 @@ class FunctionPass;
 class JITCodeEmitter;
 class formatted_raw_ostream;
 class MCCodeEmitter;
+class MCObjectWriter;
 class TargetAsmBackend;
 class MachineInstr;
 class ARMAsmPrinter;
@@ -57,6 +59,12 @@ extern Target TheARMTarget, TheThumbTarget;
 
 void LowerARMMachineInstrToMCInst(const MachineInstr *MI, MCInst &OutMI,
                                   ARMAsmPrinter &AP);
+
+/// createARMMachObjectWriter - Construct an ARM Mach-O object writer.
+MCObjectWriter *createARMMachObjectWriter(raw_ostream &OS,
+                                          bool Is64Bit,
+                                          uint32_t CPUType,
+                                          uint32_t CPUSubtype);
 
 } // end namespace llvm;
 

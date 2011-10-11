@@ -1063,6 +1063,11 @@ SVal RegionStoreManager::RetrieveElement(Store store,
   //   return *y;
   // FIXME: This is a hack, and doesn't do anything really intelligent yet.
   const RegionRawOffset &O = R->getAsArrayOffset();
+  
+  // If we cannot reason about the offset, return an unknown value.
+  if (!O.getRegion())
+    return UnknownVal();
+  
   if (const TypedRegion *baseR = dyn_cast_or_null<TypedRegion>(O.getRegion())) {
     QualType baseT = baseR->getValueType();
     if (baseT->isScalarType()) {
@@ -1372,7 +1377,12 @@ StoreRef RegionStoreManager::setImplicitDefaultValue(Store store,
     V = svalBuilder.makeZeroVal(Ctx.IntTy);
   }
   else {
-    return StoreRef(store, *this);
+    // We can't represent values of this type, but we still need to set a value
+    // to record that the region has been initialized.
+    // If this assertion ever fires, a new case should be added above -- we
+    // should know how to default-initialize any value we can symbolicate.
+    assert(!SymbolManager::canSymbolicate(T) && "This type is representable");
+    V = UnknownVal();
   }
 
   return StoreRef(addBinding(B, R, BindingKey::Default,

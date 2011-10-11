@@ -43,7 +43,7 @@ namespace llvm {
   TargetAsmBackend *createPPCAsmBackend(const Target &, const std::string &);
   
   void LowerPPCMachineInstrToMCInst(const MachineInstr *MI, MCInst &OutMI,
-                                    AsmPrinter &AP);
+                                    AsmPrinter &AP, bool isDarwin);
   
   extern Target ThePPC32Target;
   extern Target ThePPC64Target;
@@ -84,10 +84,12 @@ namespace llvm {
 // Defines symbolic names for PowerPC registers.  This defines a mapping from
 // register name to register number.
 //
-#include "PPCGenRegisterNames.inc"
+#define GET_REGINFO_ENUM
+#include "PPCGenRegisterInfo.inc"
 
 // Defines symbolic names for the PowerPC instructions.
 //
-#include "PPCGenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "PPCGenInstrInfo.inc"
 
 #endif

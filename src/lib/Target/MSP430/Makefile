@@ -12,11 +12,10 @@ LIBRARYNAME = LLVMMSP430CodeGen
 TARGET = MSP430
 
 # Make sure that tblgen is run, first thing.
-BUILT_SOURCES = MSP430GenRegisterInfo.h.inc MSP430GenRegisterNames.inc \
-		MSP430GenRegisterInfo.inc MSP430GenInstrNames.inc \
-		MSP430GenInstrInfo.inc MSP430GenAsmWriter.inc \
+BUILT_SOURCES = MSP430GenRegisterInfo.inc MSP430GenInstrInfo.inc \
+		MSP430GenAsmWriter.inc \
 		MSP430GenDAGISel.inc MSP430GenCallingConv.inc \
-		MSP430GenSubtarget.inc
+		MSP430GenSubtargetInfo.inc
 
 DIRS = InstPrinter TargetInfo
 

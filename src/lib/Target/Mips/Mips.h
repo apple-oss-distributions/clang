@@ -26,6 +26,7 @@ namespace llvm {
   FunctionPass *createMipsISelDag(MipsTargetMachine &TM);
   FunctionPass *createMipsDelaySlotFillerPass(MipsTargetMachine &TM);
   FunctionPass *createMipsExpandPseudoPass(MipsTargetMachine &TM);
+  FunctionPass *createMipsEmitGPRestorePass(MipsTargetMachine &TM);
 
   extern Target TheMipsTarget;
   extern Target TheMipselTarget;
@@ -34,9 +35,11 @@ namespace llvm {
 
 // Defines symbolic names for Mips registers.  This defines a mapping from
 // register name to register number.
-#include "MipsGenRegisterNames.inc"
+#define GET_REGINFO_ENUM
+#include "MipsGenRegisterInfo.inc"
 
 // Defines symbolic names for the Mips instructions.
-#include "MipsGenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "MipsGenInstrInfo.inc"
 
 #endif

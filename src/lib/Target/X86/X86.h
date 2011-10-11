@@ -15,6 +15,7 @@
 #ifndef TARGET_X86_H
 #define TARGET_X86_H
 
+#include "MCTargetDesc/X86TargetDesc.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Target/TargetMachine.h"
 
@@ -84,17 +85,6 @@ MCObjectWriter *createX86MachObjectWriter(raw_ostream &OS,
                                           uint32_t CPUType,
                                           uint32_t CPUSubtype);
 
-extern Target TheX86_32Target, TheX86_64Target;
-
 } // End llvm namespace
-
-// Defines symbolic names for X86 registers.  This defines a mapping from
-// register name to register number.
-//
-#include "X86GenRegisterNames.inc"
-
-// Defines symbolic names for the X86 instructions.
-//
-#include "X86GenInstrNames.inc"
 
 #endif

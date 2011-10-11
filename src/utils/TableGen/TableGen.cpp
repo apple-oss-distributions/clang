@@ -26,8 +26,8 @@
 #include "DAGISelEmitter.h"
 #include "DisassemblerEmitter.h"
 #include "EDEmitter.h"
+#include "Error.h"
 #include "FastISelEmitter.h"
-#include "InstrEnumEmitter.h"
 #include "InstrInfoEmitter.h"
 #include "IntrinsicEmitter.h"
 #include "LLVMCConfigurationEmitter.h"
@@ -37,6 +37,7 @@
 #include "RegisterInfoEmitter.h"
 #include "ARMDecoderEmitter.h"
 #include "SubtargetEmitter.h"
+#include "SetTheory.h"
 #include "TGParser.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/Support/CommandLine.h"
@@ -52,8 +53,10 @@ using namespace llvm;
 enum ActionType {
   PrintRecords,
   GenEmitter,
-  GenRegisterEnums, GenRegister, GenRegisterHeader,
-  GenInstrEnums, GenInstrs, GenAsmWriter, GenAsmMatcher,
+  GenRegisterInfo,
+  GenInstrInfo,
+  GenAsmWriter,
+  GenAsmMatcher,
   GenARMDecoder,
   GenDisassembler,
   GenCallingConv,
@@ -80,7 +83,8 @@ enum ActionType {
   GenArmNeon,
   GenArmNeonSema,
   GenArmNeonTest,
-  PrintEnums
+  PrintEnums,
+  PrintSets
 };
 
 namespace {
@@ -90,15 +94,9 @@ namespace {
                                "Print all records to stdout (default)"),
                     clEnumValN(GenEmitter, "gen-emitter",
                                "Generate machine code emitter"),
-                    clEnumValN(GenRegisterEnums, "gen-register-enums",
-                               "Generate enum values for registers"),
-                    clEnumValN(GenRegister, "gen-register-desc",
-                               "Generate a register info description"),
-                    clEnumValN(GenRegisterHeader, "gen-register-desc-header",
-                               "Generate a register info description header"),
-                    clEnumValN(GenInstrEnums, "gen-instr-enums",
-                               "Generate enum values for instructions"),
-                    clEnumValN(GenInstrs, "gen-instr-desc",
+                    clEnumValN(GenRegisterInfo, "gen-register-info",
+                               "Generate registers and register classes info"),
+                    clEnumValN(GenInstrInfo, "gen-instr-info",
                                "Generate instruction descriptions"),
                     clEnumValN(GenCallingConv, "gen-callingconv",
                                "Generate calling convention descriptions"),
@@ -162,6 +160,8 @@ namespace {
                                "Generate ARM NEON tests for clang"),
                     clEnumValN(PrintEnums, "print-enums",
                                "Print enum values for a class"),
+                    clEnumValN(PrintSets, "print-sets",
+                               "Print expanded sets for testing DAG exprs"),
                     clEnumValEnd));
 
   cl::opt<std::string>
@@ -171,6 +171,10 @@ namespace {
   cl::opt<std::string>
   OutputFilename("o", cl::desc("Output filename"), cl::value_desc("filename"),
                  cl::init("-"));
+
+  cl::opt<std::string>
+  DependFilename("d", cl::desc("Dependency filename"), cl::value_desc("filename"),
+                 cl::init(""));
 
   cl::opt<std::string>
   InputFilename(cl::Positional, cl::desc("<input file>"), cl::init("-"));
@@ -186,40 +190,6 @@ namespace {
 }
 
 
-static SourceMgr SrcMgr;
-
-void llvm::PrintError(SMLoc ErrorLoc, const Twine &Msg) {
-  SrcMgr.PrintMessage(ErrorLoc, Msg, "error");
-}
-
-
-
-/// ParseFile - this function begins the parsing of the specified tablegen
-/// file.
-static bool ParseFile(const std::string &Filename,
-                      const std::vector<std::string> &IncludeDirs,
-                      SourceMgr &SrcMgr,
-                      RecordKeeper &Records) {
-  OwningPtr<MemoryBuffer> File;
-  if (error_code ec = MemoryBuffer::getFileOrSTDIN(Filename.c_str(), File)) {
-    errs() << "Could not open input file '" << Filename << "': "
-           << ec.message() <<"\n";
-    return true;
-  }
-  MemoryBuffer *F = File.take();
-
-  // Tell SrcMgr about this buffer, which is what TGParser will pick up.
-  SrcMgr.AddNewSourceBuffer(F, SMLoc());
-
-  // Record the location of the include directory so that the lexer can find
-  // it later.
-  SrcMgr.setIncludeDirs(IncludeDirs);
-
-  TGParser Parser(SrcMgr, Records);
-
-  return Parser.ParseFile();
-}
-
 int main(int argc, char **argv) {
   RecordKeeper Records;
 
@@ -228,19 +198,57 @@ int main(int argc, char **argv) {
   cl::ParseCommandLineOptions(argc, argv);
 
 
-  // Parse the input file.
-  if (ParseFile(InputFilename, IncludeDirs, SrcMgr, Records))
-    return 1;
-
-  std::string Error;
-  tool_output_file Out(OutputFilename.c_str(), Error);
-  if (!Error.empty()) {
-    errs() << argv[0] << ": error opening " << OutputFilename
-           << ":" << Error << "\n";
-    return 1;
-  }
-
   try {
+    // Parse the input file.
+    OwningPtr<MemoryBuffer> File;
+    if (error_code ec = MemoryBuffer::getFileOrSTDIN(InputFilename.c_str(), File)) {
+      errs() << "Could not open input file '" << InputFilename << "': "
+             << ec.message() <<"\n";
+      return 1;
+    }
+    MemoryBuffer *F = File.take();
+
+    // Tell SrcMgr about this buffer, which is what TGParser will pick up.
+    SrcMgr.AddNewSourceBuffer(F, SMLoc());
+
+    // Record the location of the include directory so that the lexer can find
+    // it later.
+    SrcMgr.setIncludeDirs(IncludeDirs);
+
+    TGParser Parser(SrcMgr, Records);
+
+    if (Parser.ParseFile())
+      return 1;
+
+    std::string Error;
+    tool_output_file Out(OutputFilename.c_str(), Error);
+    if (!Error.empty()) {
+      errs() << argv[0] << ": error opening " << OutputFilename
+        << ":" << Error << "\n";
+      return 1;
+    }
+    if (!DependFilename.empty()) {
+      if (OutputFilename == "-") {
+        errs() << argv[0] << ": the option -d must be used together with -o\n";
+        return 1;
+      }
+      tool_output_file DepOut(DependFilename.c_str(), Error);
+      if (!Error.empty()) {
+        errs() << argv[0] << ": error opening " << DependFilename
+          << ":" << Error << "\n";
+        return 1;
+      }
+      DepOut.os() << DependFilename << ":";
+      const std::vector<std::string> &Dependencies = Parser.getDependencies();
+      for (std::vector<std::string>::const_iterator I = Dependencies.begin(),
+                                                          E = Dependencies.end();
+           I != E; ++I) {
+        DepOut.os() << " " << (*I);
+      }
+      DepOut.os() << "\n";
+      DepOut.keep();
+    }
+
     switch (Action) {
     case PrintRecords:
       Out.os() << Records;           // No argument, dump all contents
@@ -248,20 +256,10 @@ int main(int argc, char **argv) {
     case GenEmitter:
       CodeEmitterGen(Records).run(Out.os());
       break;
-
-    case GenRegisterEnums:
-      RegisterInfoEmitter(Records).runEnums(Out.os());
-      break;
-    case GenRegister:
+    case GenRegisterInfo:
       RegisterInfoEmitter(Records).run(Out.os());
       break;
-    case GenRegisterHeader:
-      RegisterInfoEmitter(Records).runHeader(Out.os());
-      break;
-    case GenInstrEnums:
-      InstrEnumEmitter(Records).run(Out.os());
-      break;
-    case GenInstrs:
+    case GenInstrInfo:
       InstrInfoEmitter(Records).run(Out.os());
       break;
     case GenCallingConv:
@@ -360,6 +358,21 @@ int main(int argc, char **argv) {
       Out.os() << "\n";
       break;
     }
+    case PrintSets:
+    {
+      SetTheory Sets;
+      Sets.addFieldExpander("Set", "Elements");
+      std::vector<Record*> Recs = Records.getAllDerivedDefinitions("Set");
+      for (unsigned i = 0, e = Recs.size(); i != e; ++i) {
+        Out.os() << Recs[i]->getName() << " = [";
+        const std::vector<Record*> *Elts = Sets.expand(Recs[i]);
+        assert(Elts && "Couldn't expand Set instance");
+        for (unsigned ei = 0, ee = Elts->size(); ei != ee; ++ei)
+          Out.os() << ' ' << (*Elts)[ei]->getName();
+        Out.os() << " ]\n";
+      }
+      break;
+    }
     default:
       assert(1 && "Invalid Action");
       return 1;
@@ -370,13 +383,11 @@ int main(int argc, char **argv) {
     return 0;
 
   } catch (const TGError &Error) {
-    errs() << argv[0] << ": error:\n";
-    PrintError(Error.getLoc(), Error.getMessage());
-
+    PrintError(Error);
   } catch (const std::string &Error) {
-    errs() << argv[0] << ": " << Error << "\n";
+    PrintError(Error);
   } catch (const char *Error) {
-    errs() << argv[0] << ": " << Error << "\n";
+    PrintError(Error);
   } catch (...) {
     errs() << argv[0] << ": Unknown unexpected exception occurred.\n";
   }

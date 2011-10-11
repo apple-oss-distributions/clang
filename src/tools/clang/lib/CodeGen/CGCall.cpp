@@ -25,6 +25,8 @@
 #include "llvm/Attributes.h"
 #include "llvm/Support/CallSite.h"
 #include "llvm/Target/TargetData.h"
+#include "llvm/InlineAsm.h"
+#include "llvm/Transforms/Utils/Local.h"
 using namespace clang;
 using namespace CodeGen;
 
@@ -189,13 +191,15 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(const ObjCMethodDecl *MD) {
          e = MD->param_end(); i != e; ++i) {
     ArgTys.push_back(Context.getCanonicalParamType((*i)->getType()));
   }
-  return getFunctionInfo(GetReturnType(MD->getResultType()),
-                         ArgTys,
-                         FunctionType::ExtInfo(
-                             /*NoReturn*/ false,
-                             /*HasRegParm*/ false,
-                             /*RegParm*/ 0,
-                             getCallingConventionForDecl(MD)));
+
+  FunctionType::ExtInfo einfo;
+  einfo = einfo.withCallingConv(getCallingConventionForDecl(MD));
+
+  if (getContext().getLangOptions().ObjCAutoRefCount &&
+      MD->hasAttr<NSReturnsRetainedAttr>())
+    einfo = einfo.withProducesResult(true);
+
+  return getFunctionInfo(GetReturnType(MD->getResultType()), ArgTys, einfo);
 }
 
 const CGFunctionInfo &CodeGenTypes::getFunctionInfo(GlobalDecl GD) {
@@ -261,7 +265,8 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(CanQualType ResTy,
     return *FI;
 
   // Construct the function info.
-  FI = new CGFunctionInfo(CC, Info.getNoReturn(), Info.getHasRegParm(), Info.getRegParm(), ResTy,
+  FI = new CGFunctionInfo(CC, Info.getNoReturn(), Info.getProducesResult(),
+                          Info.getHasRegParm(), Info.getRegParm(), ResTy,
                           ArgTys.data(), ArgTys.size());
   FunctionInfos.InsertNode(FI, InsertPos);
 
@@ -290,13 +295,15 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(CanQualType ResTy,
 }
 
 CGFunctionInfo::CGFunctionInfo(unsigned _CallingConvention,
-                               bool _NoReturn, bool _HasRegParm, unsigned _RegParm,
+                               bool _NoReturn, bool returnsRetained,
+                               bool _HasRegParm, unsigned _RegParm,
                                CanQualType ResTy,
                                const CanQualType *ArgTys,
                                unsigned NumArgTys)
   : CallingConvention(_CallingConvention),
     EffectiveCallingConvention(_CallingConvention),
-    NoReturn(_NoReturn), HasRegParm(_HasRegParm), RegParm(_RegParm)
+    NoReturn(_NoReturn), ReturnsRetained(returnsRetained),
+    HasRegParm(_HasRegParm), RegParm(_RegParm)
 {
   NumArgs = NumArgTys;
 
@@ -309,10 +316,10 @@ CGFunctionInfo::CGFunctionInfo(unsigned _CallingConvention,
 
 /***/
 
-void CodeGenTypes::GetExpandedTypes(QualType Ty,
-                                    std::vector<const llvm::Type*> &ArgTys,
-                                    bool IsRecursive) {
-  const RecordType *RT = Ty->getAsStructureType();
+void CodeGenTypes::GetExpandedTypes(QualType type,
+                     llvm::SmallVectorImpl<const llvm::Type*> &expandedTypes,
+                                    bool isRecursive) {
+  const RecordType *RT = type->getAsStructureType();
   assert(RT && "Can only expand structure types.");
   const RecordDecl *RD = RT->getDecl();
   assert(!RD->hasFlexibleArrayMember() &&
@@ -324,11 +331,11 @@ void CodeGenTypes::GetExpandedTypes(QualType Ty,
     assert(!FD->isBitField() &&
            "Cannot expand structure with bit-field members.");
 
-    QualType FT = FD->getType();
-    if (CodeGenFunction::hasAggregateLLVMType(FT))
-      GetExpandedTypes(FT, ArgTys, IsRecursive);
+    QualType fieldType = FD->getType();
+    if (fieldType->isRecordType())
+      GetExpandedTypes(fieldType, expandedTypes, isRecursive);
     else
-      ArgTys.push_back(ConvertType(FT, IsRecursive));
+      expandedTypes.push_back(ConvertType(fieldType, isRecursive));
   }
 }
 
@@ -352,7 +359,7 @@ CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
     if (CodeGenFunction::hasAggregateLLVMType(FT)) {
       AI = ExpandTypeFromArgs(FT, LV, AI);
     } else {
-      EmitStoreThroughLValue(RValue::get(AI), LV, FT);
+      EmitStoreThroughLValue(RValue::get(AI), LV);
       ++AI;
     }
   }
@@ -379,7 +386,7 @@ CodeGenFunction::ExpandTypeToArgs(QualType Ty, RValue RV,
     if (CodeGenFunction::hasAggregateLLVMType(FT)) {
       ExpandTypeToArgs(FT, RValue::getAggregate(LV.getAddress()), Args);
     } else {
-      RValue RV = EmitLoadOfLValue(LV, FT);
+      RValue RV = EmitLoadOfLValue(LV);
       assert(RV.isScalar() &&
              "Unexpected non-scalar rvalue during struct expansion.");
       Args.push_back(RV.getScalarVal());
@@ -635,49 +642,49 @@ const llvm::FunctionType *CodeGenTypes::GetFunctionType(GlobalDecl GD) {
 }
 
 const llvm::FunctionType *
-CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI, bool IsVariadic,
-                              bool IsRecursive) {
-  std::vector<const llvm::Type*> ArgTys;
+CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI, bool isVariadic,
+                              bool isRecursive) {
+  llvm::SmallVector<const llvm::Type*, 8> argTypes;
+  const llvm::Type *resultType = 0;
 
-  const llvm::Type *ResultType = 0;
-
-  QualType RetTy = FI.getReturnType();
-  const ABIArgInfo &RetAI = FI.getReturnInfo();
-  switch (RetAI.getKind()) {
+  const ABIArgInfo &retAI = FI.getReturnInfo();
+  switch (retAI.getKind()) {
   case ABIArgInfo::Expand:
-    assert(0 && "Invalid ABI kind for return argument");
+    llvm_unreachable("Invalid ABI kind for return argument");
 
   case ABIArgInfo::Extend:
   case ABIArgInfo::Direct:
-    ResultType = RetAI.getCoerceToType();
+    resultType = retAI.getCoerceToType();
     break;
 
   case ABIArgInfo::Indirect: {
-    assert(!RetAI.getIndirectAlign() && "Align unused on indirect return.");
-    ResultType = llvm::Type::getVoidTy(getLLVMContext());
-    const llvm::Type *STy = ConvertType(RetTy, IsRecursive);
-    unsigned AS = Context.getTargetAddressSpace(RetTy);
-    ArgTys.push_back(llvm::PointerType::get(STy, AS));
+    assert(!retAI.getIndirectAlign() && "Align unused on indirect return.");
+    resultType = llvm::Type::getVoidTy(getLLVMContext());
+
+    QualType ret = FI.getReturnType();
+    const llvm::Type *ty = ConvertType(ret, isRecursive);
+    unsigned addressSpace = Context.getTargetAddressSpace(ret);
+    argTypes.push_back(llvm::PointerType::get(ty, addressSpace));
     break;
   }
 
   case ABIArgInfo::Ignore:
-    ResultType = llvm::Type::getVoidTy(getLLVMContext());
+    resultType = llvm::Type::getVoidTy(getLLVMContext());
     break;
   }
 
   for (CGFunctionInfo::const_arg_iterator it = FI.arg_begin(),
          ie = FI.arg_end(); it != ie; ++it) {
-    const ABIArgInfo &AI = it->info;
+    const ABIArgInfo &argAI = it->info;
 
-    switch (AI.getKind()) {
+    switch (argAI.getKind()) {
     case ABIArgInfo::Ignore:
       break;
 
     case ABIArgInfo::Indirect: {
       // indirect arguments are always on the stack, which is addr space #0.
-      const llvm::Type *LTy = ConvertTypeForMem(it->type, IsRecursive);
-      ArgTys.push_back(llvm::PointerType::getUnqual(LTy));
+      const llvm::Type *LTy = ConvertTypeForMem(it->type, isRecursive);
+      argTypes.push_back(LTy->getPointerTo());
       break;
     }
 
@@ -686,23 +693,23 @@ CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI, bool IsVariadic,
       // If the coerce-to type is a first class aggregate, flatten it.  Either
       // way is semantically identical, but fast-isel and the optimizer
       // generally likes scalar values better than FCAs.
-      const llvm::Type *ArgTy = AI.getCoerceToType();
-      if (const llvm::StructType *STy = dyn_cast<llvm::StructType>(ArgTy)) {
-        for (unsigned i = 0, e = STy->getNumElements(); i != e; ++i)
-          ArgTys.push_back(STy->getElementType(i));
+      const llvm::Type *argType = argAI.getCoerceToType();
+      if (const llvm::StructType *st = dyn_cast<llvm::StructType>(argType)) {
+        for (unsigned i = 0, e = st->getNumElements(); i != e; ++i)
+          argTypes.push_back(st->getElementType(i));
       } else {
-        ArgTys.push_back(ArgTy);
+        argTypes.push_back(argType);
       }
       break;
     }
 
     case ABIArgInfo::Expand:
-      GetExpandedTypes(it->type, ArgTys, IsRecursive);
+      GetExpandedTypes(it->type, argTypes, isRecursive);
       break;
     }
   }
 
-  return llvm::FunctionType::get(ResultType, ArgTys, IsVariadic);
+  return llvm::FunctionType::get(resultType, argTypes, isVariadic);
 }
 
 const llvm::Type *CodeGenTypes::GetFunctionTypeForVTable(GlobalDecl GD) {
@@ -809,9 +816,9 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
     // sense to do it here because parameters are so messed up.
     switch (AI.getKind()) {
     case ABIArgInfo::Extend:
-      if (ParamType->isSignedIntegerType())
+      if (ParamType->isSignedIntegerOrEnumerationType())
         Attributes |= llvm::Attribute::SExt;
-      else if (ParamType->isUnsignedIntegerType())
+      else if (ParamType->isUnsignedIntegerOrEnumerationType())
         Attributes |= llvm::Attribute::ZExt;
       // FALL THROUGH
     case ABIArgInfo::Direct:
@@ -845,12 +852,12 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
       continue;
 
     case ABIArgInfo::Expand: {
-      std::vector<const llvm::Type*> Tys;
+      llvm::SmallVector<const llvm::Type*, 8> types;
       // FIXME: This is rather inefficient. Do we ever actually need to do
       // anything here? The result should be just reconstructed on the other
       // side, so extension should be a non-issue.
-      getTypes().GetExpandedTypes(ParamType, Tys, false);
-      Index += Tys.size();
+      getTypes().GetExpandedTypes(ParamType, types, false);
+      Index += types.size();
       continue;
     }
     }
@@ -1067,6 +1074,95 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
   assert(AI == Fn->arg_end() && "Argument mismatch!");
 }
 
+/// Try to emit a fused autorelease of a return result.
+static llvm::Value *tryEmitFusedAutoreleaseOfResult(CodeGenFunction &CGF,
+                                                    llvm::Value *result) {
+  // We must be immediately followed the cast.
+  llvm::BasicBlock *BB = CGF.Builder.GetInsertBlock();
+  if (BB->empty()) return 0;
+  if (&BB->back() != result) return 0;
+
+  const llvm::Type *resultType = result->getType();
+
+  // result is in a BasicBlock and is therefore an Instruction.
+  llvm::Instruction *generator = cast<llvm::Instruction>(result);
+
+  llvm::SmallVector<llvm::Instruction*,4> insnsToKill;
+
+  // Look for:
+  //  %generator = bitcast %type1* %generator2 to %type2*
+  while (llvm::BitCastInst *bitcast = dyn_cast<llvm::BitCastInst>(generator)) {
+    // We would have emitted this as a constant if the operand weren't
+    // an Instruction.
+    generator = cast<llvm::Instruction>(bitcast->getOperand(0));
+
+    // Require the generator to be immediately followed by the cast.
+    if (generator->getNextNode() != bitcast)
+      return 0;
+
+    insnsToKill.push_back(bitcast);
+  }
+
+  // Look for:
+  //   %generator = call i8* @objc_retain(i8* %originalResult)
+  // or
+  //   %generator = call i8* @objc_retainAutoreleasedReturnValue(i8* %originalResult)
+  llvm::CallInst *call = dyn_cast<llvm::CallInst>(generator);
+  if (!call) return 0;
+
+  bool doRetainAutorelease;
+
+  if (call->getCalledValue() == CGF.CGM.getARCEntrypoints().objc_retain) {
+    doRetainAutorelease = true;
+  } else if (call->getCalledValue() == CGF.CGM.getARCEntrypoints()
+                                          .objc_retainAutoreleasedReturnValue) {
+    doRetainAutorelease = false;
+
+    // Look for an inline asm immediately preceding the call and kill it, too.
+    llvm::Instruction *prev = call->getPrevNode();
+    if (llvm::CallInst *asmCall = dyn_cast_or_null<llvm::CallInst>(prev))
+      if (asmCall->getCalledValue()
+            == CGF.CGM.getARCEntrypoints().retainAutoreleasedReturnValueMarker)
+        insnsToKill.push_back(prev);
+  } else {
+    return 0;
+  }
+
+  result = call->getArgOperand(0);
+  insnsToKill.push_back(call);
+
+  // Keep killing bitcasts, for sanity.  Note that we no longer care
+  // about precise ordering as long as there's exactly one use.
+  while (llvm::BitCastInst *bitcast = dyn_cast<llvm::BitCastInst>(result)) {
+    if (!bitcast->hasOneUse()) break;
+    insnsToKill.push_back(bitcast);
+    result = bitcast->getOperand(0);
+  }
+
+  // Delete all the unnecessary instructions, from latest to earliest.
+  for (llvm::SmallVectorImpl<llvm::Instruction*>::iterator
+         i = insnsToKill.begin(), e = insnsToKill.end(); i != e; ++i)
+    (*i)->eraseFromParent();
+
+  // Do the fused retain/autorelease if we were asked to.
+  if (doRetainAutorelease)
+    result = CGF.EmitARCRetainAutoreleaseReturnValue(result);
+
+  // Cast back to the result type.
+  return CGF.Builder.CreateBitCast(result, resultType);
+}
+
+/// Emit an ARC autorelease of the result of a function.
+static llvm::Value *emitAutoreleaseOfResult(CodeGenFunction &CGF,
+                                            llvm::Value *result) {
+  // At -O0, try to emit a fused retain/autorelease.
+  if (CGF.shouldUseFusedARCCalls())
+    if (llvm::Value *fused = tryEmitFusedAutoreleaseOfResult(CGF, result))
+      return fused;
+
+  return CGF.EmitARCAutoreleaseReturnValue(result);
+}
+
 void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI) {
   // Functions with no result always return void.
   if (ReturnValue == 0) {
@@ -1134,6 +1230,16 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI) {
 
       RV = CreateCoercedLoad(V, RetAI.getCoerceToType(), *this);
     }
+
+    // In ARC, end functions that return a retainable type with a call
+    // to objc_autoreleaseReturnValue.
+    if (AutoreleaseResult) {
+      assert(getLangOptions().ObjCAutoRefCount &&
+             !FI.isReturnsRetained() &&
+             RetTy->isObjCRetainableType());
+      RV = emitAutoreleaseOfResult(*this, RV);
+    }
+
     break;
 
   case ABIArgInfo::Ignore:
@@ -1183,11 +1289,164 @@ void CodeGenFunction::EmitDelegateCallArg(CallArgList &args,
   return args.add(RValue::get(value), type);
 }
 
+static bool isProvablyNull(llvm::Value *addr) {
+  return isa<llvm::ConstantPointerNull>(addr);
+}
+
+static bool isProvablyNonNull(llvm::Value *addr) {
+  return isa<llvm::AllocaInst>(addr);
+}
+
+/// Emit the actual writing-back of a writeback.
+static void emitWriteback(CodeGenFunction &CGF,
+                          const CallArgList::Writeback &writeback) {
+  llvm::Value *srcAddr = writeback.Address;
+  assert(!isProvablyNull(srcAddr) &&
+         "shouldn't have writeback for provably null argument");
+
+  llvm::BasicBlock *contBB = 0;
+
+  // If the argument wasn't provably non-null, we need to null check
+  // before doing the store.
+  bool provablyNonNull = isProvablyNonNull(srcAddr);
+  if (!provablyNonNull) {
+    llvm::BasicBlock *writebackBB = CGF.createBasicBlock("icr.writeback");
+    contBB = CGF.createBasicBlock("icr.done");
+
+    llvm::Value *isNull = CGF.Builder.CreateIsNull(srcAddr, "icr.isnull");
+    CGF.Builder.CreateCondBr(isNull, contBB, writebackBB);
+    CGF.EmitBlock(writebackBB);
+  }
+
+  // Load the value to writeback.
+  llvm::Value *value = CGF.Builder.CreateLoad(writeback.Temporary);
+
+  // Cast it back, in case we're writing an id to a Foo* or something.
+  value = CGF.Builder.CreateBitCast(value,
+               cast<llvm::PointerType>(srcAddr->getType())->getElementType(),
+                            "icr.writeback-cast");
+  
+  // Perform the writeback.
+  QualType srcAddrType = writeback.AddressType;
+  CGF.EmitStoreThroughLValue(RValue::get(value),
+                             CGF.MakeAddrLValue(srcAddr, srcAddrType));
+
+  // Jump to the continuation block.
+  if (!provablyNonNull)
+    CGF.EmitBlock(contBB);
+}
+
+static void emitWritebacks(CodeGenFunction &CGF,
+                           const CallArgList &args) {
+  for (CallArgList::writeback_iterator
+         i = args.writeback_begin(), e = args.writeback_end(); i != e; ++i)
+    emitWriteback(CGF, *i);
+}
+
+/// Emit an argument that's being passed call-by-writeback.  That is,
+/// we are passing the address of 
+static void emitWritebackArg(CodeGenFunction &CGF, CallArgList &args,
+                             const ObjCIndirectCopyRestoreExpr *CRE) {
+  llvm::Value *srcAddr = CGF.EmitScalarExpr(CRE->getSubExpr());
+
+  // The dest and src types don't necessarily match in LLVM terms
+  // because of the crazy ObjC compatibility rules.
+
+  const llvm::PointerType *destType =
+    cast<llvm::PointerType>(CGF.ConvertType(CRE->getType()));
+
+  // If the address is a constant null, just pass the appropriate null.
+  if (isProvablyNull(srcAddr)) {
+    args.add(RValue::get(llvm::ConstantPointerNull::get(destType)),
+             CRE->getType());
+    return;
+  }
+
+  QualType srcAddrType =
+    CRE->getSubExpr()->getType()->castAs<PointerType>()->getPointeeType();
+
+  // Create the temporary.
+  llvm::Value *temp = CGF.CreateTempAlloca(destType->getElementType(),
+                                           "icr.temp");
+
+  // Zero-initialize it if we're not doing a copy-initialization.
+  bool shouldCopy = CRE->shouldCopy();
+  if (!shouldCopy) {
+    llvm::Value *null =
+      llvm::ConstantPointerNull::get(
+        cast<llvm::PointerType>(destType->getElementType()));
+    CGF.Builder.CreateStore(null, temp);
+  }
+
+  llvm::BasicBlock *contBB = 0;
+
+  // If the address is *not* known to be non-null, we need to switch.
+  llvm::Value *finalArgument;
+
+  bool provablyNonNull = isProvablyNonNull(srcAddr);
+  if (provablyNonNull) {
+    finalArgument = temp;
+  } else {
+    llvm::Value *isNull = CGF.Builder.CreateIsNull(srcAddr, "icr.isnull");
+
+    finalArgument = CGF.Builder.CreateSelect(isNull, 
+                                   llvm::ConstantPointerNull::get(destType),
+                                             temp, "icr.argument");
+
+    // If we need to copy, then the load has to be conditional, which
+    // means we need control flow.
+    if (shouldCopy) {
+      contBB = CGF.createBasicBlock("icr.cont");
+      llvm::BasicBlock *copyBB = CGF.createBasicBlock("icr.copy");
+      CGF.Builder.CreateCondBr(isNull, contBB, copyBB);
+      CGF.EmitBlock(copyBB);
+    }
+  }
+
+  // Perform a copy if necessary.
+  if (shouldCopy) {
+    LValue srcLV = CGF.MakeAddrLValue(srcAddr, srcAddrType);
+    RValue srcRV = CGF.EmitLoadOfLValue(srcLV);
+    assert(srcRV.isScalar());
+
+    llvm::Value *src = srcRV.getScalarVal();
+    src = CGF.Builder.CreateBitCast(src, destType->getElementType(),
+                                    "icr.cast");
+
+    // Use an ordinary store, not a store-to-lvalue.
+    CGF.Builder.CreateStore(src, temp);
+  }
+
+  // Finish the control flow if we needed it.
+  if (shouldCopy && !provablyNonNull)
+    CGF.EmitBlock(contBB);
+
+  args.addWriteback(srcAddr, srcAddrType, temp);
+  args.add(RValue::get(finalArgument), CRE->getType());
+}
+
 void CodeGenFunction::EmitCallArg(CallArgList &args, const Expr *E,
                                   QualType type) {
+  if (const ObjCIndirectCopyRestoreExpr *CRE
+        = dyn_cast<ObjCIndirectCopyRestoreExpr>(E)) {
+    assert(getContext().getLangOptions().ObjCAutoRefCount);
+    assert(getContext().hasSameType(E->getType(), type));
+    return emitWritebackArg(*this, args, CRE);
+  }
+
   if (type->isReferenceType())
     return args.add(EmitReferenceBindingToExpr(E, /*InitializedDecl=*/0),
                     type);
+
+  if (hasAggregateLLVMType(type) && !E->getType()->isAnyComplexType() &&
+      isa<ImplicitCastExpr>(E) &&
+      cast<CastExpr>(E)->getCastKind() == CK_LValueToRValue) {
+    LValue L = EmitLValue(cast<CastExpr>(E)->getSubExpr());
+    assert(L.isSimple());
+    args.add(RValue::getAggregate(L.getAddress(), L.isVolatileQualified()),
+             type, /*NeedsCopy*/true);
+    return;
+  }
 
   args.add(EmitAnyExprToTemp(E), type);
 }
@@ -1242,20 +1501,44 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     const ABIArgInfo &ArgInfo = info_it->info;
     RValue RV = I->RV;
 
-    unsigned Alignment =
+    unsigned TypeAlign =
       getContext().getTypeAlignInChars(I->Ty).getQuantity();
     switch (ArgInfo.getKind()) {
     case ABIArgInfo::Indirect: {
       if (RV.isScalar() || RV.isComplex()) {
         // Make a temporary alloca to pass the argument.
-        Args.push_back(CreateMemTemp(I->Ty));
+        llvm::AllocaInst *AI = CreateMemTemp(I->Ty);
+        if (ArgInfo.getIndirectAlign() > AI->getAlignment())
+          AI->setAlignment(ArgInfo.getIndirectAlign());
+        Args.push_back(AI);
         if (RV.isScalar())
           EmitStoreOfScalar(RV.getScalarVal(), Args.back(), false,
-                            Alignment, I->Ty);
+                            TypeAlign, I->Ty);
         else
           StoreComplexToAddr(RV.getComplexVal(), Args.back(), false);
       } else {
-        Args.push_back(RV.getAggregateAddr());
+        // We want to avoid creating an unnecessary temporary+copy here;
+        // however, we need one in two cases:
+        // 1. If the argument is not byval, and we are required to copy the
+        //    source.  (This case doesn't occur on any common architecture.)
+        // 2. If the argument is byval, RV is not sufficiently aligned, and
+        //    we cannot force it to be sufficiently aligned.
+        llvm::Value *Addr = RV.getAggregateAddr();
+        unsigned Align = ArgInfo.getIndirectAlign();
+        const llvm::TargetData *TD = &CGM.getTargetData();
+        if ((!ArgInfo.getIndirectByVal() && I->NeedsCopy) ||
+            (ArgInfo.getIndirectByVal() && TypeAlign < Align &&
+             llvm::getOrEnforceKnownAlignment(Addr, Align, TD) < Align)) {
+          // Create an aligned temporary, and copy to it.
+          llvm::AllocaInst *AI = CreateMemTemp(I->Ty);
+          if (Align > AI->getAlignment())
+            AI->setAlignment(Align);
+          Args.push_back(AI);
+          EmitAggregateCopy(AI, Addr, I->Ty, RV.isVolatileQualified());
+        } else {
+          // Skip the extra memcpy call.
+          Args.push_back(Addr);
+        }
       }
       break;
     }
@@ -1279,7 +1562,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       llvm::Value *SrcPtr;
       if (RV.isScalar()) {
         SrcPtr = CreateMemTemp(I->Ty, "coerce");
-        EmitStoreOfScalar(RV.getScalarVal(), SrcPtr, false, Alignment, I->Ty);
+        EmitStoreOfScalar(RV.getScalarVal(), SrcPtr, false, TypeAlign, I->Ty);
       } else if (RV.isComplex()) {
         SrcPtr = CreateMemTemp(I->Ty, "coerce");
         StoreComplexToAddr(RV.getComplexVal(), SrcPtr, false);
@@ -1399,6 +1682,11 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   llvm::Instruction *CI = CS.getInstruction();
   if (Builder.isNamePreserving() && !CI->getType()->isVoidTy())
     CI->setName("call");
+
+  // Emit any writebacks immediately.  Arguably this should happen
+  // after any return-value munging.
+  if (CallArgs.hasWritebacks())
+    emitWritebacks(*this, CallArgs);
 
   switch (RetAI.getKind()) {
   case ABIArgInfo::Indirect: {

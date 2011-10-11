@@ -345,18 +345,7 @@ CodeGenFunction::EmitCXXOperatorMemberCallExpr(const CXXOperatorCallExpr *E,
     }
   }
 
-  const FunctionProtoType *FPT = MD->getType()->getAs<FunctionProtoType>();
-  const llvm::Type *Ty =
-    CGM.getTypes().GetFunctionType(CGM.getTypes().getFunctionInfo(MD),
-                                   FPT->isVariadic());
-  llvm::Value *Callee;
-  if (MD->isVirtual() && 
-      !canDevirtualizeMemberFunctionCalls(getContext(),
-                                           E->getArg(0), MD))
-    Callee = BuildVirtualCall(MD, This, Ty);
-  else
-    Callee = CGM.GetAddrOfFunction(MD, Ty);
-
+  llvm::Value *Callee = EmitCXXOperatorMemberCallee(E, MD, This);
   return EmitCXXMemberCall(MD, Callee, ReturnValue, This, /*VTT=*/0,
                            E->arg_begin() + 1, E->arg_end());
 }
@@ -403,7 +392,7 @@ CodeGenFunction::EmitCXXConstructExpr(const CXXConstructExpr *E,
                                E->arg_begin(), E->arg_end());
   }
   else {
-    CXXCtorType Type;
+    CXXCtorType Type = Ctor_Complete;
     bool ForVirtualBase = false;
 
     switch (E->getConstructionKind()) {
@@ -455,204 +444,256 @@ CodeGenFunction::EmitSynthesizedCXXCopyCtor(llvm::Value *Dest,
                                  E->arg_begin(), E->arg_end());
 }
 
-/// Check whether the given operator new[] is the global placement
-/// operator new[].
-static bool IsPlacementOperatorNewArray(ASTContext &Ctx,
-                                        const FunctionDecl *Fn) {
-  // Must be in global scope.  Note that allocation functions can't be
-  // declared in namespaces.
-  if (!Fn->getDeclContext()->getRedeclContext()->isFileContext())
-    return false;
-
-  // Signature must be void *operator new[](size_t, void*).
-  // The size_t is common to all operator new[]s.
-  if (Fn->getNumParams() != 2)
-    return false;
-
-  CanQualType ParamType = Ctx.getCanonicalType(Fn->getParamDecl(1)->getType());
-  return (ParamType == Ctx.VoidPtrTy);
-}
-
 static CharUnits CalculateCookiePadding(CodeGenFunction &CGF,
                                         const CXXNewExpr *E) {
   if (!E->isArray())
     return CharUnits::Zero();
 
-  // No cookie is required if the new operator being used is 
-  // ::operator new[](size_t, void*).
-  const FunctionDecl *OperatorNew = E->getOperatorNew();
-  if (IsPlacementOperatorNewArray(CGF.getContext(), OperatorNew))
+  // No cookie is required if the operator new[] being used is the
+  // reserved placement operator new[].
+  if (E->getOperatorNew()->isReservedGlobalPlacementOperator())
     return CharUnits::Zero();
 
   return CGF.CGM.getCXXABI().GetArrayCookieSize(E);
 }
 
-static llvm::Value *EmitCXXNewAllocSize(ASTContext &Context,
-                                        CodeGenFunction &CGF,
-                                        const CXXNewExpr *E,
-                                        llvm::Value *&NumElements,
-                                        llvm::Value *&SizeWithoutCookie) {
-  QualType ElemType = E->getAllocatedType();
+static llvm::Value *EmitCXXNewAllocSize(CodeGenFunction &CGF,
+                                        const CXXNewExpr *e,
+                                        llvm::Value *&numElements,
+                                        llvm::Value *&sizeWithoutCookie) {
+  QualType type = e->getAllocatedType();
 
-  const llvm::IntegerType *SizeTy =
-    cast<llvm::IntegerType>(CGF.ConvertType(CGF.getContext().getSizeType()));
-  
-  CharUnits TypeSize = CGF.getContext().getTypeSizeInChars(ElemType);
-
-  if (!E->isArray()) {
-    SizeWithoutCookie = llvm::ConstantInt::get(SizeTy, TypeSize.getQuantity());
-    return SizeWithoutCookie;
+  if (!e->isArray()) {
+    CharUnits typeSize = CGF.getContext().getTypeSizeInChars(type);
+    sizeWithoutCookie
+      = llvm::ConstantInt::get(CGF.SizeTy, typeSize.getQuantity());
+    return sizeWithoutCookie;
   }
 
+  // The width of size_t.
+  unsigned sizeWidth = CGF.SizeTy->getBitWidth();
+
   // Figure out the cookie size.
-  CharUnits CookieSize = CalculateCookiePadding(CGF, E);
+  llvm::APInt cookieSize(sizeWidth,
+                         CalculateCookiePadding(CGF, e).getQuantity());
 
   // Emit the array size expression.
   // We multiply the size of all dimensions for NumElements.
   // e.g for 'int[2][3]', ElemType is 'int' and NumElements is 6.
-  NumElements = CGF.EmitScalarExpr(E->getArraySize());
-  assert(NumElements->getType() == SizeTy && "element count not a size_t");
+  numElements = CGF.EmitScalarExpr(e->getArraySize());
+  assert(isa<llvm::IntegerType>(numElements->getType()));
 
-  uint64_t ArraySizeMultiplier = 1;
+  // The number of elements can be have an arbitrary integer type;
+  // essentially, we need to multiply it by a constant factor, add a
+  // cookie size, and verify that the result is representable as a
+  // size_t.  That's just a gloss, though, and it's wrong in one
+  // important way: if the count is negative, it's an error even if
+  // the cookie size would bring the total size >= 0.
+  bool isSigned 
+    = e->getArraySize()->getType()->isSignedIntegerOrEnumerationType();
+  const llvm::IntegerType *numElementsType
+    = cast<llvm::IntegerType>(numElements->getType());
+  unsigned numElementsWidth = numElementsType->getBitWidth();
+
+  // Compute the constant factor.
+  llvm::APInt arraySizeMultiplier(sizeWidth, 1);
   while (const ConstantArrayType *CAT
-             = CGF.getContext().getAsConstantArrayType(ElemType)) {
-    ElemType = CAT->getElementType();
-    ArraySizeMultiplier *= CAT->getSize().getZExtValue();
+             = CGF.getContext().getAsConstantArrayType(type)) {
+    type = CAT->getElementType();
+    arraySizeMultiplier *= CAT->getSize();
   }
 
-  llvm::Value *Size;
+  CharUnits typeSize = CGF.getContext().getTypeSizeInChars(type);
+  llvm::APInt typeSizeMultiplier(sizeWidth, typeSize.getQuantity());
+  typeSizeMultiplier *= arraySizeMultiplier;
+
+  // This will be a size_t.
+  llvm::Value *size;
   
   // If someone is doing 'new int[42]' there is no need to do a dynamic check.
   // Don't bloat the -O0 code.
-  if (llvm::ConstantInt *NumElementsC =
-        dyn_cast<llvm::ConstantInt>(NumElements)) {
-    llvm::APInt NEC = NumElementsC->getValue();
-    unsigned SizeWidth = NEC.getBitWidth();
+  if (llvm::ConstantInt *numElementsC =
+        dyn_cast<llvm::ConstantInt>(numElements)) {
+    const llvm::APInt &count = numElementsC->getValue();
 
-    // Determine if there is an overflow here by doing an extended multiply.
-    NEC = NEC.zext(SizeWidth*2);
-    llvm::APInt SC(SizeWidth*2, TypeSize.getQuantity());
-    SC *= NEC;
+    bool hasAnyOverflow = false;
 
-    if (!CookieSize.isZero()) {
-      // Save the current size without a cookie.  We don't care if an
-      // overflow's already happened because SizeWithoutCookie isn't
-      // used if the allocator returns null or throws, as it should
-      // always do on an overflow.
-      llvm::APInt SWC = SC.trunc(SizeWidth);
-      SizeWithoutCookie = llvm::ConstantInt::get(SizeTy, SWC);
+    // If 'count' was a negative number, it's an overflow.
+    if (isSigned && count.isNegative())
+      hasAnyOverflow = true;
 
-      // Add the cookie size.
-      SC += llvm::APInt(SizeWidth*2, CookieSize.getQuantity());
+    // We want to do all this arithmetic in size_t.  If numElements is
+    // wider than that, check whether it's already too big, and if so,
+    // overflow.
+    else if (numElementsWidth > sizeWidth &&
+             numElementsWidth - sizeWidth > count.countLeadingZeros())
+      hasAnyOverflow = true;
+
+    // Okay, compute a count at the right width.
+    llvm::APInt adjustedCount = count.zextOrTrunc(sizeWidth);
+
+    // Scale numElements by that.  This might overflow, but we don't
+    // care because it only overflows if allocationSize does, too, and
+    // if that overflows then we shouldn't use this.
+    numElements = llvm::ConstantInt::get(CGF.SizeTy,
+                                         adjustedCount * arraySizeMultiplier);
+
+    // Compute the size before cookie, and track whether it overflowed.
+    bool overflow;
+    llvm::APInt allocationSize
+      = adjustedCount.umul_ov(typeSizeMultiplier, overflow);
+    hasAnyOverflow |= overflow;
+
+    // Add in the cookie, and check whether it's overflowed.
+    if (cookieSize != 0) {
+      // Save the current size without a cookie.  This shouldn't be
+      // used if there was overflow.
+      sizeWithoutCookie = llvm::ConstantInt::get(CGF.SizeTy, allocationSize);
+
+      allocationSize = allocationSize.uadd_ov(cookieSize, overflow);
+      hasAnyOverflow |= overflow;
+    }
+
+    // On overflow, produce a -1 so operator new will fail.
+    if (hasAnyOverflow) {
+      size = llvm::Constant::getAllOnesValue(CGF.SizeTy);
+    } else {
+      size = llvm::ConstantInt::get(CGF.SizeTy, allocationSize);
+    }
+
+  // Otherwise, we might need to use the overflow intrinsics.
+  } else {
+    // There are up to four conditions we need to test for:
+    // 1) if isSigned, we need to check whether numElements is negative;
+    // 2) if numElementsWidth > sizeWidth, we need to check whether
+    //   numElements is larger than something representable in size_t;
+    // 3) we need to compute
+    //      sizeWithoutCookie := numElements * typeSizeMultiplier
+    //    and check whether it overflows; and
+    // 4) if we need a cookie, we need to compute
+    //      size := sizeWithoutCookie + cookieSize
+    //    and check whether it overflows.
+
+    llvm::Value *hasOverflow = 0;
+
+    // If numElementsWidth > sizeWidth, then one way or another, we're
+    // going to have to do a comparison for (2), and this happens to
+    // take care of (1), too.
+    if (numElementsWidth > sizeWidth) {
+      llvm::APInt threshold(numElementsWidth, 1);
+      threshold <<= sizeWidth;
+
+      llvm::Value *thresholdV
+        = llvm::ConstantInt::get(numElementsType, threshold);
+
+      hasOverflow = CGF.Builder.CreateICmpUGE(numElements, thresholdV);
+      numElements = CGF.Builder.CreateTrunc(numElements, CGF.SizeTy);
+
+    // Otherwise, if we're signed, we want to sext up to size_t.
+    } else if (isSigned) {
+      if (numElementsWidth < sizeWidth)
+        numElements = CGF.Builder.CreateSExt(numElements, CGF.SizeTy);
+      
+      // If there's a non-1 type size multiplier, then we can do the
+      // signedness check at the same time as we do the multiply
+      // because a negative number times anything will cause an
+      // unsigned overflow.  Otherwise, we have to do it here.
+      if (typeSizeMultiplier == 1)
+        hasOverflow = CGF.Builder.CreateICmpSLT(numElements,
+                                      llvm::ConstantInt::get(CGF.SizeTy, 0));
+
+    // Otherwise, zext up to size_t if necessary.
+    } else if (numElementsWidth < sizeWidth) {
+      numElements = CGF.Builder.CreateZExt(numElements, CGF.SizeTy);
+    }
+
+    assert(numElements->getType() == CGF.SizeTy);
+
+    size = numElements;
+
+    // Multiply by the type size if necessary.  This multiplier
+    // includes all the factors for nested arrays.
+    //
+    // This step also causes numElements to be scaled up by the
+    // nested-array factor if necessary.  Overflow on this computation
+    // can be ignored because the result shouldn't be used if
+    // allocation fails.
+    if (typeSizeMultiplier != 1) {
+      const llvm::Type *intrinsicTypes[] = { CGF.SizeTy };
+      llvm::Value *umul_with_overflow
+        = CGF.CGM.getIntrinsic(llvm::Intrinsic::umul_with_overflow,
+                               intrinsicTypes, 1);
+
+      llvm::Value *tsmV =
+        llvm::ConstantInt::get(CGF.SizeTy, typeSizeMultiplier);
+      llvm::Value *result =
+        CGF.Builder.CreateCall2(umul_with_overflow, size, tsmV);
+
+      llvm::Value *overflowed = CGF.Builder.CreateExtractValue(result, 1);
+      if (hasOverflow)
+        hasOverflow = CGF.Builder.CreateOr(hasOverflow, overflowed);
+      else
+        hasOverflow = overflowed;
+
+      size = CGF.Builder.CreateExtractValue(result, 0);
+
+      // Also scale up numElements by the array size multiplier.
+      if (arraySizeMultiplier != 1) {
+        // If the base element type size is 1, then we can re-use the
+        // multiply we just did.
+        if (typeSize.isOne()) {
+          assert(arraySizeMultiplier == typeSizeMultiplier);
+          numElements = size;
+
+        // Otherwise we need a separate multiply.
+        } else {
+          llvm::Value *asmV =
+            llvm::ConstantInt::get(CGF.SizeTy, arraySizeMultiplier);
+          numElements = CGF.Builder.CreateMul(numElements, asmV);
+        }
+      }
+    } else {
+      // numElements doesn't need to be scaled.
+      assert(arraySizeMultiplier == 1);
     }
     
-    if (SC.countLeadingZeros() >= SizeWidth) {
-      SC = SC.trunc(SizeWidth);
-      Size = llvm::ConstantInt::get(SizeTy, SC);
-    } else {
-      // On overflow, produce a -1 so operator new throws.
-      Size = llvm::Constant::getAllOnesValue(SizeTy);
+    // Add in the cookie size if necessary.
+    if (cookieSize != 0) {
+      sizeWithoutCookie = size;
+
+      const llvm::Type *intrinsicTypes[] = { CGF.SizeTy };
+      llvm::Value *uadd_with_overflow
+        = CGF.CGM.getIntrinsic(llvm::Intrinsic::uadd_with_overflow,
+                               intrinsicTypes, 1);
+
+      llvm::Value *cookieSizeV = llvm::ConstantInt::get(CGF.SizeTy, cookieSize);
+      llvm::Value *result =
+        CGF.Builder.CreateCall2(uadd_with_overflow, size, cookieSizeV);
+
+      llvm::Value *overflowed = CGF.Builder.CreateExtractValue(result, 1);
+      if (hasOverflow)
+        hasOverflow = CGF.Builder.CreateOr(hasOverflow, overflowed);
+      else
+        hasOverflow = overflowed;
+
+      size = CGF.Builder.CreateExtractValue(result, 0);
     }
 
-    // Scale NumElements while we're at it.
-    uint64_t N = NEC.getZExtValue() * ArraySizeMultiplier;
-    NumElements = llvm::ConstantInt::get(SizeTy, N);
-
-  // Otherwise, we don't need to do an overflow-checked multiplication if
-  // we're multiplying by one.
-  } else if (TypeSize.isOne()) {
-    assert(ArraySizeMultiplier == 1);
-
-    Size = NumElements;
-
-    // If we need a cookie, add its size in with an overflow check.
-    // This is maybe a little paranoid.
-    if (!CookieSize.isZero()) {
-      SizeWithoutCookie = Size;
-
-      llvm::Value *CookieSizeV
-        = llvm::ConstantInt::get(SizeTy, CookieSize.getQuantity());
-
-      const llvm::Type *Types[] = { SizeTy };
-      llvm::Value *UAddF
-        = CGF.CGM.getIntrinsic(llvm::Intrinsic::uadd_with_overflow, Types, 1);
-      llvm::Value *AddRes
-        = CGF.Builder.CreateCall2(UAddF, Size, CookieSizeV);
-
-      Size = CGF.Builder.CreateExtractValue(AddRes, 0);
-      llvm::Value *DidOverflow = CGF.Builder.CreateExtractValue(AddRes, 1);
-      Size = CGF.Builder.CreateSelect(DidOverflow,
-                                      llvm::ConstantInt::get(SizeTy, -1),
-                                      Size);
-    }
-
-  // Otherwise use the int.umul.with.overflow intrinsic.
-  } else {
-    llvm::Value *OutermostElementSize
-      = llvm::ConstantInt::get(SizeTy, TypeSize.getQuantity());
-
-    llvm::Value *NumOutermostElements = NumElements;
-
-    // Scale NumElements by the array size multiplier.  This might
-    // overflow, but only if the multiplication below also overflows,
-    // in which case this multiplication isn't used.
-    if (ArraySizeMultiplier != 1)
-      NumElements = CGF.Builder.CreateMul(NumElements,
-                         llvm::ConstantInt::get(SizeTy, ArraySizeMultiplier));
-
-    // The requested size of the outermost array is non-constant.
-    // Multiply that by the static size of the elements of that array;
-    // on unsigned overflow, set the size to -1 to trigger an
-    // exception from the allocation routine.  This is sufficient to
-    // prevent buffer overruns from the allocator returning a
-    // seemingly valid pointer to insufficient space.  This idea comes
-    // originally from MSVC, and GCC has an open bug requesting
-    // similar behavior:
-    //   http://gcc.gnu.org/bugzilla/show_bug.cgi?id=19351
-    //
-    // This will not be sufficient for C++0x, which requires a
-    // specific exception class (std::bad_array_new_length).
-    // That will require ABI support that has not yet been specified.
-    const llvm::Type *Types[] = { SizeTy };
-    llvm::Value *UMulF
-      = CGF.CGM.getIntrinsic(llvm::Intrinsic::umul_with_overflow, Types, 1);
-    llvm::Value *MulRes = CGF.Builder.CreateCall2(UMulF, NumOutermostElements,
-                                                  OutermostElementSize);
-
-    // The overflow bit.
-    llvm::Value *DidOverflow = CGF.Builder.CreateExtractValue(MulRes, 1);
-
-    // The result of the multiplication.
-    Size = CGF.Builder.CreateExtractValue(MulRes, 0);
-
-    // If we have a cookie, we need to add that size in, too.
-    if (!CookieSize.isZero()) {
-      SizeWithoutCookie = Size;
-
-      llvm::Value *CookieSizeV
-        = llvm::ConstantInt::get(SizeTy, CookieSize.getQuantity());
-      llvm::Value *UAddF
-        = CGF.CGM.getIntrinsic(llvm::Intrinsic::uadd_with_overflow, Types, 1);
-      llvm::Value *AddRes
-        = CGF.Builder.CreateCall2(UAddF, SizeWithoutCookie, CookieSizeV);
-
-      Size = CGF.Builder.CreateExtractValue(AddRes, 0);
-
-      llvm::Value *AddDidOverflow = CGF.Builder.CreateExtractValue(AddRes, 1);
-      DidOverflow = CGF.Builder.CreateOr(DidOverflow, AddDidOverflow);
-    }
-
-    Size = CGF.Builder.CreateSelect(DidOverflow,
-                                    llvm::ConstantInt::get(SizeTy, -1),
-                                    Size);
+    // If we had any possibility of dynamic overflow, make a select to
+    // overwrite 'size' with an all-ones value, which should cause
+    // operator new to throw.
+    if (hasOverflow)
+      size = CGF.Builder.CreateSelect(hasOverflow,
+                                 llvm::Constant::getAllOnesValue(CGF.SizeTy),
+                                      size);
   }
 
-  if (CookieSize.isZero())
-    SizeWithoutCookie = Size;
+  if (cookieSize == 0)
+    sizeWithoutCookie = size;
   else
-    assert(SizeWithoutCookie && "didn't set SizeWithoutCookie?");
+    assert(sizeWithoutCookie && "didn't set sizeWithoutCookie?");
 
-  return Size;
+  return size;
 }
 
 static void StoreAnyExprIntoOneUnit(CodeGenFunction &CGF, const CXXNewExpr *E,
@@ -666,16 +707,15 @@ static void StoreAnyExprIntoOneUnit(CodeGenFunction &CGF, const CXXNewExpr *E,
 
   unsigned Alignment =
     CGF.getContext().getTypeAlignInChars(AllocType).getQuantity();
-  if (!CGF.hasAggregateLLVMType(AllocType)) 
-    CGF.EmitStoreOfScalar(CGF.EmitScalarExpr(Init), NewPtr,
-                          AllocType.isVolatileQualified(), Alignment,
-                          AllocType);
+  if (!CGF.hasAggregateLLVMType(AllocType))
+    CGF.EmitScalarInit(Init, 0, CGF.MakeAddrLValue(NewPtr, AllocType, Alignment),
+                       false);
   else if (AllocType->isAnyComplexType())
     CGF.EmitComplexExprIntoAddr(Init, NewPtr, 
                                 AllocType.isVolatileQualified());
   else {
     AggValueSlot Slot
-      = AggValueSlot::forAddr(NewPtr, AllocType.isVolatileQualified(), true);
+      = AggValueSlot::forAddr(NewPtr, AllocType.getQualifiers(), true);
     CGF.EmitAggExpr(Init, Slot);
   }
 }
@@ -749,7 +789,7 @@ static void EmitNewInitializer(CodeGenFunction &CGF, const CXXNewExpr *E,
   if (E->isArray()) {
     if (CXXConstructorDecl *Ctor = E->getConstructor()) {
       bool RequiresZeroInitialization = false;
-      if (Ctor->getParent()->hasTrivialConstructor()) {
+      if (Ctor->getParent()->hasTrivialDefaultConstructor()) {
         // If new expression did not specify value-initialization, then there
         // is no initialization.
         if (!E->hasInitializer() || Ctor->getParent()->isEmpty())
@@ -980,8 +1020,7 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
   llvm::Value *numElements = 0;
   llvm::Value *allocSizeWithoutCookie = 0;
   llvm::Value *allocSize =
-    EmitCXXNewAllocSize(getContext(), *this, E, numElements,
-                        allocSizeWithoutCookie);
+    EmitCXXNewAllocSize(*this, E, numElements, allocSizeWithoutCookie);
   
   allocatorArgs.add(RValue::get(allocSize), sizeType);
 
@@ -1015,11 +1054,19 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
     EmitCallArg(allocatorArgs, *placementArg, placementArg->getType());
   }
 
-  // Emit the allocation call.
-  RValue RV =
-    EmitCall(CGM.getTypes().getFunctionInfo(allocatorArgs, allocatorType),
-             CGM.GetAddrOfFunction(allocator), ReturnValueSlot(),
-             allocatorArgs, allocator);
+  // Emit the allocation call.  If the allocator is a global placement
+  // operator, just "inline" it directly.
+  RValue RV;
+  if (allocator->isReservedGlobalPlacementOperator()) {
+    assert(allocatorArgs.size() == 2);
+    RV = allocatorArgs[1].RV;
+    // TODO: kill any unnecessary computations done for the size
+    // argument.
+  } else {
+    RV = EmitCall(CGM.getTypes().getFunctionInfo(allocatorArgs, allocatorType),
+                  CGM.GetAddrOfFunction(allocator), ReturnValueSlot(),
+                  allocatorArgs, allocator);
+  }
 
   // Emit a null check on the allocation result if the allocation
   // function is allowed to return null (because it has a non-throwing
@@ -1027,7 +1074,7 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
   // CXXNewExpr::shouldNullCheckAllocation()) and we have an
   // interesting initializer.
   bool nullCheck = allocatorType->isNothrow(getContext()) &&
-    !(allocType->isPODType() && !E->hasInitializer());
+    !(allocType.isPODType(getContext()) && !E->hasInitializer());
 
   llvm::BasicBlock *nullCheckBB = 0;
   llvm::BasicBlock *contBB = 0;
@@ -1064,7 +1111,8 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
   // If there's an operator delete, enter a cleanup to call it if an
   // exception is thrown.
   EHScopeStack::stable_iterator operatorDeleteCleanup;
-  if (E->getOperatorDelete()) {
+  if (E->getOperatorDelete() &&
+      !E->getOperatorDelete()->isReservedGlobalPlacementOperator()) {
     EnterNewDeleteCleanup(*this, E, allocation, allocSize, allocatorArgs);
     operatorDeleteCleanup = EHStack.stable_begin();
   }
@@ -1163,7 +1211,8 @@ namespace {
 static void EmitObjectDelete(CodeGenFunction &CGF,
                              const FunctionDecl *OperatorDelete,
                              llvm::Value *Ptr,
-                             QualType ElementType) {
+                             QualType ElementType,
+                             bool UseGlobalDelete) {
   // Find the destructor for the type, if applicable.  If the
   // destructor is virtual, we'll just emit the vcall and return.
   const CXXDestructorDecl *Dtor = 0;
@@ -1173,17 +1222,30 @@ static void EmitObjectDelete(CodeGenFunction &CGF,
       Dtor = RD->getDestructor();
 
       if (Dtor->isVirtual()) {
+        if (UseGlobalDelete) {
+          // If we're supposed to call the global delete, make sure we do so
+          // even if the destructor throws.
+          CGF.EHStack.pushCleanup<CallObjectDelete>(NormalAndEHCleanup,
+                                                    Ptr, OperatorDelete, 
+                                                    ElementType);
+        }
+        
         const llvm::Type *Ty =
           CGF.getTypes().GetFunctionType(CGF.getTypes().getFunctionInfo(Dtor,
                                                                Dtor_Complete),
                                          /*isVariadic=*/false);
           
         llvm::Value *Callee
-          = CGF.BuildVirtualCall(Dtor, Dtor_Deleting, Ptr, Ty);
+          = CGF.BuildVirtualCall(Dtor, 
+                                 UseGlobalDelete? Dtor_Complete : Dtor_Deleting,
+                                 Ptr, Ty);
         CGF.EmitCXXMemberCall(Dtor, Callee, ReturnValueSlot(), Ptr, /*VTT=*/0,
                               0, 0);
 
-        // The dtor took care of deleting the object.
+        if (UseGlobalDelete) {
+          CGF.PopCleanupBlock();
+        }
+        
         return;
       }
     }
@@ -1198,7 +1260,29 @@ static void EmitObjectDelete(CodeGenFunction &CGF,
   if (Dtor)
     CGF.EmitCXXDestructorCall(Dtor, Dtor_Complete,
                               /*ForVirtualBase=*/false, Ptr);
+  else if (CGF.getLangOptions().ObjCAutoRefCount &&
+           ElementType->isObjCLifetimeType()) {
+    switch (ElementType.getObjCLifetime()) {
+    case Qualifiers::OCL_None:
+    case Qualifiers::OCL_ExplicitNone:
+    case Qualifiers::OCL_Autoreleasing:
+      break;
 
+    case Qualifiers::OCL_Strong: {
+      // Load the pointer value.
+      llvm::Value *PtrValue = CGF.Builder.CreateLoad(Ptr, 
+                                             ElementType.isVolatileQualified());
+        
+      CGF.EmitARCRelease(PtrValue, /*precise*/ true);
+      break;
+    }
+        
+    case Qualifiers::OCL_Weak:
+      CGF.EmitARCDestroyWeak(Ptr);
+      break;
+    }
+  }
+           
   CGF.PopCleanupBlock();
 }
 
@@ -1290,6 +1374,65 @@ static void EmitArrayDelete(CodeGenFunction &CGF,
                             " for a class with destructor");
       CGF.EmitCXXAggrDestructorCall(RD->getDestructor(), NumElements, Ptr);
     }
+  } else if (CGF.getLangOptions().ObjCAutoRefCount &&
+             ElementType->isObjCLifetimeType() &&
+             (ElementType.getObjCLifetime() == Qualifiers::OCL_Strong ||
+              ElementType.getObjCLifetime() == Qualifiers::OCL_Weak)) {
+    bool IsStrong = ElementType.getObjCLifetime() == Qualifiers::OCL_Strong;
+    const llvm::Type *SizeLTy = CGF.ConvertType(CGF.getContext().getSizeType());
+    llvm::Value *One = llvm::ConstantInt::get(SizeLTy, 1);
+    
+    // Create a temporary for the loop index and initialize it with count of
+    // array elements.
+    llvm::Value *IndexPtr = CGF.CreateTempAlloca(SizeLTy, "loop.index");
+    
+    // Store the number of elements in the index pointer.
+    CGF.Builder.CreateStore(NumElements, IndexPtr);
+    
+    // Start the loop with a block that tests the condition.
+    llvm::BasicBlock *CondBlock = CGF.createBasicBlock("for.cond");
+    llvm::BasicBlock *AfterFor = CGF.createBasicBlock("for.end");
+    
+    CGF.EmitBlock(CondBlock);
+    
+    llvm::BasicBlock *ForBody = CGF.createBasicBlock("for.body");
+    
+    // Generate: if (loop-index != 0 fall to the loop body,
+    // otherwise, go to the block after the for-loop.
+    llvm::Value* zeroConstant = llvm::Constant::getNullValue(SizeLTy);
+    llvm::Value *Counter = CGF.Builder.CreateLoad(IndexPtr);
+    llvm::Value *IsNE = CGF.Builder.CreateICmpNE(Counter, zeroConstant,
+                                                 "isne");
+    // If the condition is true, execute the body.
+    CGF.Builder.CreateCondBr(IsNE, ForBody, AfterFor);
+    
+    CGF.EmitBlock(ForBody);
+    
+    llvm::BasicBlock *ContinueBlock = CGF.createBasicBlock("for.inc");
+    // Inside the loop body, emit the constructor call on the array element.
+    Counter = CGF.Builder.CreateLoad(IndexPtr);
+    Counter = CGF.Builder.CreateSub(Counter, One);
+    llvm::Value *Address = CGF.Builder.CreateInBoundsGEP(Ptr, Counter, 
+                                                         "arrayidx");
+    if (IsStrong)
+      CGF.EmitARCRelease(CGF.Builder.CreateLoad(Address, 
+                                          ElementType.isVolatileQualified()),
+                         /*precise*/ true);
+    else
+      CGF.EmitARCDestroyWeak(Address);
+    
+    CGF.EmitBlock(ContinueBlock);
+    
+    // Emit the decrement of the loop counter.
+    Counter = CGF.Builder.CreateLoad(IndexPtr);
+    Counter = CGF.Builder.CreateSub(Counter, One, "dec");
+    CGF.Builder.CreateStore(Counter, IndexPtr);
+    
+    // Finally, branch back up to the condition for the next iteration.
+    CGF.EmitBranch(CondBlock);
+    
+    // Emit the fall-through block.
+    CGF.EmitBlock(AfterFor, true);    
   }
 
   CGF.PopCleanupBlock();
@@ -1348,7 +1491,8 @@ void CodeGenFunction::EmitCXXDeleteExpr(const CXXDeleteExpr *E) {
   if (E->isArrayForm()) {
     EmitArrayDelete(*this, E, Ptr, DeleteTy);
   } else {
-    EmitObjectDelete(*this, E->getOperatorDelete(), Ptr, DeleteTy);
+    EmitObjectDelete(*this, E->getOperatorDelete(), Ptr, DeleteTy,
+                     E->isGlobalDelete());
   }
 
   EmitBlock(DeleteEnd);

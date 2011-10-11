@@ -35,8 +35,8 @@ AC_INIT([[llvm]],[[3.0svn]],[llvmbugs@cs.uiuc.edu])
 
 dnl Provide a copyright substitution and ensure the copyright notice is included
 dnl in the output of --version option of the generated configure script.
-AC_SUBST(LLVM_COPYRIGHT,["Copyright (c) 2003-2010 University of Illinois at Urbana-Champaign."])
-AC_COPYRIGHT([Copyright (c) 2003-2010 University of Illinois at Urbana-Champaign.])
+AC_SUBST(LLVM_COPYRIGHT,["Copyright (c) 2003-2011 University of Illinois at Urbana-Champaign."])
+AC_COPYRIGHT([Copyright (c) 2003-2011 University of Illinois at Urbana-Champaign.])
 
 dnl Indicate that we require autoconf 2.59 or later. Ths is needed because we
 dnl use some autoconf macros only available in 2.59.
@@ -297,6 +297,8 @@ AC_CACHE_CHECK([type of operating system we're going to target],
     llvm_cv_target_os_type="MingW" ;;
   *-*-haiku*)
     llvm_cv_target_os_type="Haiku" ;;
+  *-*-rtems*)
+    llvm_cv_target_os_type="RTEMS" ;;
   *-unknown-eabi*)
     llvm_cv_target_os_type="Freestanding" ;;
   *)
@@ -830,6 +832,17 @@ case "$withval" in
   *) EXTRA_OPTIONS=$withval ;;
 esac
 AC_SUBST(EXTRA_OPTIONS,$EXTRA_OPTIONS)
+
+dnl Specify extra linker build options
+AC_ARG_WITH(extra-ld-options,
+  AS_HELP_STRING([--with-extra-ld-options],
+                 [Specify additional options to link LLVM with]),,
+                 withval=default)
+case "$withval" in
+  default) EXTRA_LD_OPTIONS= ;;
+  *) EXTRA_LD_OPTIONS=$withval ;;
+esac
+AC_SUBST(EXTRA_LD_OPTIONS,$EXTRA_LD_OPTIONS)
 
 dnl Allow specific bindings to be specified for building (or not)
 AC_ARG_ENABLE([bindings],AS_HELP_STRING([--enable-bindings],
@@ -1528,7 +1541,7 @@ dnl Set the flags needed to emit LLVM IR and to disable optimizations
 dnl in llvmgcc
 if test "$llvm_cv_llvmgcc_dragonegg" = "yes" ; then
   LLVMCC_EMITIR_FLAG="-fplugin-arg-dragonegg-emit-ir"
-  LLVMCC_DISABLEOPT_FLAGS="-fplugin-arg-dragonegg-disable-llvm-optzns"
+  LLVMCC_DISABLEOPT_FLAGS="-fplugin-arg-dragonegg-llvm-ir-optimize=0"
 else
   LLVMCC_EMITIR_FLAG="-emit-llvm"
   LLVMCC_DISABLEOPT_FLAGS="-mllvm -disable-llvm-optzns"
@@ -1722,6 +1735,12 @@ AC_CONFIG_FILES([Makefile.config])
 
 dnl Configure the RPM spec file for LLVM
 AC_CONFIG_FILES([llvm.spec])
+
+dnl Configure doxygen's configuration file
+AC_CONFIG_FILES([docs/doxygen.cfg])
+if test -f ${srcdir}/tools/clang/README.txt; then
+  AC_CONFIG_FILES([tools/clang/docs/doxygen.cfg])
+fi
 
 dnl Configure llvmc's Base plugin
 AC_CONFIG_FILES([tools/llvmc/src/Base.td])

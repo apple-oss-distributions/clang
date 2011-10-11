@@ -45,6 +45,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Timer.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/CrashRecoveryContext.h"
 #include <cstdlib>
 #include <cstdio>
@@ -182,6 +183,10 @@ static unsigned getDeclShowContexts(NamedDecl *ND,
     // all types are available due to functional casts.
     if (LangOpts.CPlusPlus || isa<ObjCInterfaceDecl>(ND))
       Contexts |= (1 << (CodeCompletionContext::CCC_ObjCMessageReceiver - 1));
+    
+    // In Objective-C, you can only be a subclass of another Objective-C class
+    if (isa<ObjCInterfaceDecl>(ND))
+      Contexts |= (1 << (CodeCompletionContext::CCC_ObjCSuperclass - 1));
 
     // Deal with tag names.
     if (isa<EnumDecl>(ND)) {
@@ -208,6 +213,8 @@ static unsigned getDeclShowContexts(NamedDecl *ND,
              | (1 << (CodeCompletionContext::CCC_ObjCMessageReceiver - 1));
   } else if (isa<ObjCProtocolDecl>(ND)) {
     Contexts = (1 << (CodeCompletionContext::CCC_ObjCProtocolName - 1));
+  } else if (isa<ObjCCategoryDecl>(ND)) {
+    Contexts = (1 << (CodeCompletionContext::CCC_ObjCCategoryName - 1));
   } else if (isa<NamespaceDecl>(ND) || isa<NamespaceAliasDecl>(ND)) {
     Contexts = (1 << (CodeCompletionContext::CCC_Namespace - 1));
    
@@ -1150,16 +1157,19 @@ static llvm::MemoryBuffer *CreatePaddedMainFileBuffer(llvm::MemoryBuffer *Old,
 /// buffer that should be used in place of the main file when doing so.
 /// Otherwise, returns a NULL pointer.
 llvm::MemoryBuffer *ASTUnit::getMainBufferWithPrecompiledPreamble(
-                                          CompilerInvocation PreambleInvocation,
+                              const CompilerInvocation &PreambleInvocationIn,
                                                            bool AllowRebuild,
                                                            unsigned MaxLines) {
-  FrontendOptions &FrontendOpts = PreambleInvocation.getFrontendOpts();
+  
+  llvm::IntrusiveRefCntPtr<CompilerInvocation>
+    PreambleInvocation(new CompilerInvocation(PreambleInvocationIn));
+  FrontendOptions &FrontendOpts = PreambleInvocation->getFrontendOpts();
   PreprocessorOptions &PreprocessorOpts
-    = PreambleInvocation.getPreprocessorOpts();
+    = PreambleInvocation->getPreprocessorOpts();
 
   bool CreatedPreambleBuffer = false;
   std::pair<llvm::MemoryBuffer *, std::pair<unsigned, bool> > NewPreamble 
-    = ComputePreamble(PreambleInvocation, MaxLines, CreatedPreambleBuffer);
+    = ComputePreamble(*PreambleInvocation, MaxLines, CreatedPreambleBuffer);
 
   // If ComputePreamble() Take ownership of the
   llvm::OwningPtr<llvm::MemoryBuffer> OwnedPreambleBuffer;
@@ -1260,7 +1270,7 @@ llvm::MemoryBuffer *ASTUnit::getMainBufferWithPrecompiledPreamble(
         // have occurred in the preamble.
         getDiagnostics().Reset();
         ProcessWarningOptions(getDiagnostics(), 
-                              PreambleInvocation.getDiagnosticOpts());
+                              PreambleInvocation->getDiagnosticOpts());
         getDiagnostics().setNumWarnings(NumWarningsInPreamble);
         if (StoredDiagnostics.size() > NumStoredDiagnosticsInPreamble)
           StoredDiagnostics.erase(
@@ -1357,7 +1367,7 @@ llvm::MemoryBuffer *ASTUnit::getMainBufferWithPrecompiledPreamble(
   llvm::CrashRecoveryContextCleanupRegistrar<CompilerInstance>
     CICleanup(Clang.get());
 
-  Clang->setInvocation(&PreambleInvocation);
+  Clang->setInvocation(&*PreambleInvocation);
   OriginalSourceFile = Clang->getFrontendOpts().Inputs[0].second;
   
   // Set up diagnostics, capturing all of the diagnostics produced.
@@ -1899,7 +1909,7 @@ namespace {
   /// results from an ASTUnit with the code-completion results provided to it,
   /// then passes the result on to 
   class AugmentedCodeCompleteConsumer : public CodeCompleteConsumer {
-    unsigned NormalContexts;
+    unsigned long long NormalContexts;
     ASTUnit &AST;
     CodeCompleteConsumer &Next;
     
@@ -1913,22 +1923,24 @@ namespace {
       // Compute the set of contexts in which we will look when we don't have
       // any information about the specific context.
       NormalContexts 
-        = (1 << (CodeCompletionContext::CCC_TopLevel - 1))
-        | (1 << (CodeCompletionContext::CCC_ObjCInterface - 1))
-        | (1 << (CodeCompletionContext::CCC_ObjCImplementation - 1))
-        | (1 << (CodeCompletionContext::CCC_ObjCIvarList - 1))
-        | (1 << (CodeCompletionContext::CCC_Statement - 1))
-        | (1 << (CodeCompletionContext::CCC_Expression - 1))
-        | (1 << (CodeCompletionContext::CCC_ObjCMessageReceiver - 1))
-        | (1 << (CodeCompletionContext::CCC_MemberAccess - 1))
-        | (1 << (CodeCompletionContext::CCC_ObjCProtocolName - 1))
-        | (1 << (CodeCompletionContext::CCC_ParenthesizedExpression - 1))
-        | (1 << (CodeCompletionContext::CCC_Recovery - 1));
+        = (1LL << (CodeCompletionContext::CCC_TopLevel - 1))
+        | (1LL << (CodeCompletionContext::CCC_ObjCInterface - 1))
+        | (1LL << (CodeCompletionContext::CCC_ObjCImplementation - 1))
+        | (1LL << (CodeCompletionContext::CCC_ObjCIvarList - 1))
+        | (1LL << (CodeCompletionContext::CCC_Statement - 1))
+        | (1LL << (CodeCompletionContext::CCC_Expression - 1))
+        | (1LL << (CodeCompletionContext::CCC_ObjCMessageReceiver - 1))
+        | (1LL << (CodeCompletionContext::CCC_DotMemberAccess - 1))
+        | (1LL << (CodeCompletionContext::CCC_ArrowMemberAccess - 1))
+        | (1LL << (CodeCompletionContext::CCC_ObjCPropertyAccess - 1))
+        | (1LL << (CodeCompletionContext::CCC_ObjCProtocolName - 1))
+        | (1LL << (CodeCompletionContext::CCC_ParenthesizedExpression - 1))
+        | (1LL << (CodeCompletionContext::CCC_Recovery - 1));
 
       if (AST.getASTContext().getLangOptions().CPlusPlus)
-        NormalContexts |= (1 << (CodeCompletionContext::CCC_EnumTag - 1))
-                    | (1 << (CodeCompletionContext::CCC_UnionTag - 1))
-                    | (1 << (CodeCompletionContext::CCC_ClassOrStructTag - 1));
+        NormalContexts |= (1LL << (CodeCompletionContext::CCC_EnumTag - 1))
+                   | (1LL << (CodeCompletionContext::CCC_UnionTag - 1))
+                   | (1LL << (CodeCompletionContext::CCC_ClassOrStructTag - 1));
     }
     
     virtual void ProcessCodeCompleteResults(Sema &S, 
@@ -1966,12 +1978,15 @@ static void CalculateHiddenNames(const CodeCompletionContext &Context,
   case CodeCompletionContext::CCC_Statement:
   case CodeCompletionContext::CCC_Expression:
   case CodeCompletionContext::CCC_ObjCMessageReceiver:
-  case CodeCompletionContext::CCC_MemberAccess:
+  case CodeCompletionContext::CCC_DotMemberAccess:
+  case CodeCompletionContext::CCC_ArrowMemberAccess:
+  case CodeCompletionContext::CCC_ObjCPropertyAccess:
   case CodeCompletionContext::CCC_Namespace:
   case CodeCompletionContext::CCC_Type:
   case CodeCompletionContext::CCC_Name:
   case CodeCompletionContext::CCC_PotentiallyQualifiedName:
   case CodeCompletionContext::CCC_ParenthesizedExpression:
+  case CodeCompletionContext::CCC_ObjCSuperclass:
     break;
     
   case CodeCompletionContext::CCC_EnumTag:
@@ -1990,6 +2005,9 @@ static void CalculateHiddenNames(const CodeCompletionContext &Context,
   case CodeCompletionContext::CCC_TypeQualifiers:
   case CodeCompletionContext::CCC_Other:
   case CodeCompletionContext::CCC_OtherWithMacros:
+  case CodeCompletionContext::CCC_ObjCInstanceMessage:
+  case CodeCompletionContext::CCC_ObjCClassMessage:
+  case CodeCompletionContext::CCC_ObjCCategoryName:
     // We're looking for nothing, or we're looking for names that cannot
     // be hidden.
     return;
@@ -2284,21 +2302,42 @@ void ASTUnit::CodeComplete(llvm::StringRef File, unsigned Line, unsigned Column,
   }
 }
 
-bool ASTUnit::Save(llvm::StringRef File) {
-  if (getDiagnostics().hasErrorOccurred())
-    return true;
-  
+CXSaveError ASTUnit::Save(llvm::StringRef File) {
+  if (getDiagnostics().hasUnrecoverableErrorOccurred())
+    return CXSaveError_TranslationErrors;
+
+  // Write to a temporary file and later rename it to the actual file, to avoid
+  // possible race conditions.
+  llvm::sys::Path TempPath(File);
+  if (TempPath.makeUnique(/*reuse_current=*/false, /*ErrMsg*/0))
+    return CXSaveError_Unknown;
+  // makeUnique may or may not have created the file. Try deleting before
+  // opening so that we can use F_Excl for exclusive access.
+  TempPath.eraseFromDisk();
+
   // FIXME: Can we somehow regenerate the stat cache here, or do we need to 
   // unconditionally create a stat cache when we parse the file?
   std::string ErrorInfo;
-  llvm::raw_fd_ostream Out(File.str().c_str(), ErrorInfo,
-                           llvm::raw_fd_ostream::F_Binary);
+  llvm::raw_fd_ostream Out(TempPath.c_str(), ErrorInfo,
+                           llvm::raw_fd_ostream::F_Binary |
+                           // if TempPath already exists, we should not try to
+                           // overwrite it, we want to avoid race conditions.
+                           llvm::raw_fd_ostream::F_Excl);
   if (!ErrorInfo.empty() || Out.has_error())
-    return true;
+    return CXSaveError_Unknown;
 
   serialize(Out);
   Out.close();
-  return Out.has_error();
+  if (Out.has_error())
+    return CXSaveError_Unknown;
+
+  if (llvm::error_code ec = llvm::sys::fs::rename(TempPath.str(), File)) {
+    bool exists;
+    llvm::sys::fs::remove(TempPath.str(), exists);
+    return CXSaveError_Unknown;
+  }
+
+  return CXSaveError_None;
 }
 
 bool ASTUnit::serialize(llvm::raw_ostream &OS) {

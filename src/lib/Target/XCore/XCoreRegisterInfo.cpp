@@ -33,11 +33,14 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
+#define GET_REGINFO_MC_DESC
+#define GET_REGINFO_TARGET_DESC
+#include "XCoreGenRegisterInfo.inc"
+
 using namespace llvm;
 
 XCoreRegisterInfo::XCoreRegisterInfo(const TargetInstrInfo &tii)
-  : XCoreGenRegisterInfo(XCore::ADJCALLSTACKDOWN, XCore::ADJCALLSTACKUP),
-    TII(tii) {
+  : XCoreGenRegisterInfo(), TII(tii) {
 }
 
 // helper functions
@@ -68,8 +71,8 @@ unsigned XCoreRegisterInfo::getNumArgRegs(const MachineFunction *MF)
 }
 
 bool XCoreRegisterInfo::needsFrameMoves(const MachineFunction &MF) {
-  return MF.getMMI().hasDebugInfo() || !MF.getFunction()->doesNotThrow() ||
-          UnwindTablesMandatory;
+  return MF.getMMI().hasDebugInfo() ||
+    MF.getFunction()->needsUnwindTableEntry();
 }
 
 const unsigned* XCoreRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF)
@@ -315,6 +318,10 @@ int XCoreRegisterInfo::getDwarfRegNum(unsigned RegNum, bool isEH) const {
   return XCoreGenRegisterInfo::getDwarfRegNumFull(RegNum, 0);
 }
 
+int XCoreRegisterInfo::getLLVMRegNum(unsigned DwarfRegNo, bool isEH) const {
+  return XCoreGenRegisterInfo::getLLVMRegNumFull(DwarfRegNo,0);
+}
+
 unsigned XCoreRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
   const TargetFrameLowering *TFI = MF.getTarget().getFrameLowering();
 
@@ -324,6 +331,3 @@ unsigned XCoreRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
 unsigned XCoreRegisterInfo::getRARegister() const {
   return XCore::LR;
 }
-
-#include "XCoreGenRegisterInfo.inc"
-

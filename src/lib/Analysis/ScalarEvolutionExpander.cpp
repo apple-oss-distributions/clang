@@ -159,7 +159,8 @@ Value *SCEVExpander::InsertBinop(Instruction::BinaryOps Opcode,
   }
 
   // If we haven't found this binop, insert it.
-  Value *BO = Builder.CreateBinOp(Opcode, LHS, RHS, "tmp");
+  Instruction *BO = cast<Instruction>(Builder.CreateBinOp(Opcode, LHS, RHS, "tmp"));
+  BO->setDebugLoc(SaveInsertPt->getDebugLoc());
   rememberInstruction(BO);
 
   // Restore the original insert point.
@@ -935,7 +936,8 @@ SCEVExpander::getAddRecExprPHILiterally(const SCEVAddRecExpr *Normalized,
   BasicBlock *Header = L->getHeader();
   Builder.SetInsertPoint(Header, Header->begin());
   pred_iterator HPB = pred_begin(Header), HPE = pred_end(Header);
-  PHINode *PN = Builder.CreatePHI(ExpandTy, std::distance(HPB, HPE), "lsr.iv");
+  PHINode *PN = Builder.CreatePHI(ExpandTy, std::distance(HPB, HPE),
+                                  Twine(IVName) + ".iv");
   rememberInstruction(PN);
 
   // Create the step instructions and populate the PHI.
@@ -971,8 +973,8 @@ SCEVExpander::getAddRecExprPHILiterally(const SCEVAddRecExpr *Normalized,
       }
     } else {
       IncV = isNegative ?
-        Builder.CreateSub(PN, StepV, "lsr.iv.next") :
-        Builder.CreateAdd(PN, StepV, "lsr.iv.next");
+        Builder.CreateSub(PN, StepV, Twine(IVName) + ".iv.next") :
+        Builder.CreateAdd(PN, StepV, Twine(IVName) + ".iv.next");
       rememberInstruction(IncV);
     }
     PN->addIncoming(IncV, Pred);
@@ -1155,6 +1157,7 @@ Value *SCEVExpander::visitAddRecExpr(const SCEVAddRecExpr *S) {
         Instruction *Add = BinaryOperator::CreateAdd(CanonicalIV, One,
                                                      "indvar.next",
                                                      HP->getTerminator());
+        Add->setDebugLoc(HP->getTerminator()->getDebugLoc());
         rememberInstruction(Add);
         CanonicalIV->addIncoming(Add, HP);
       } else {

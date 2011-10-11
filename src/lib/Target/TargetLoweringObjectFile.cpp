@@ -43,6 +43,7 @@ TargetLoweringObjectFile::TargetLoweringObjectFile() : Ctx(0) {
   StaticCtorSection = 0;
   StaticDtorSection = 0;
   LSDASection = 0;
+  CompactUnwindSection = 0;
 
   CommDirectiveSupportsAlignment = true;
   DwarfAbbrevSection = 0;
@@ -58,7 +59,6 @@ TargetLoweringObjectFile::TargetLoweringObjectFile() : Ctx(0) {
   DwarfRangesSection = 0;
   DwarfMacroInfoSection = 0;
   
-  IsFunctionEHSymbolGlobal = false;
   IsFunctionEHFrameSymbolPrivate = true;
   SupportsWeakOmittedEHFrame = true;
 }
@@ -67,7 +67,7 @@ TargetLoweringObjectFile::~TargetLoweringObjectFile() {
 }
 
 static bool isSuitableForBSS(const GlobalVariable *GV) {
-  Constant *C = GV->getInitializer();
+  const Constant *C = GV->getInitializer();
 
   // Must have zero initializer.
   if (!C->isNullValue())
@@ -169,7 +169,7 @@ SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalValue *GV,
     return SectionKind::getBSS();
   }
 
-  Constant *C = GVar->getInitializer();
+  const Constant *C = GVar->getInitializer();
 
   // If the global is marked constant, we can put it into a mergable section,
   // a mergable string section, or general .data if it contains relocations.

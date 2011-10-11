@@ -39,9 +39,11 @@ namespace llvm {
 
 // Defines symbolic names for MBlaze registers.  This defines a mapping from
 // register name to register number.
-#include "MBlazeGenRegisterNames.inc"
+#define GET_REGINFO_ENUM
+#include "MBlazeGenRegisterInfo.inc"
 
 // Defines symbolic names for the MBlaze instructions.
-#include "MBlazeGenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "MBlazeGenInstrInfo.inc"
 
 #endif

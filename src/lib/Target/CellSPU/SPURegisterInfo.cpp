@@ -43,6 +43,10 @@
 #include "llvm/ADT/STLExtras.h"
 #include <cstdlib>
 
+#define GET_REGINFO_MC_DESC
+#define GET_REGINFO_TARGET_DESC
+#include "SPUGenRegisterInfo.inc"
+
 using namespace llvm;
 
 /// getRegisterNumbering - Given the enum value for some register, e.g.
@@ -185,9 +189,7 @@ unsigned SPURegisterInfo::getRegisterNumbering(unsigned RegEnum) {
 
 SPURegisterInfo::SPURegisterInfo(const SPUSubtarget &subtarget,
                                  const TargetInstrInfo &tii) :
-  SPUGenRegisterInfo(SPU::ADJCALLSTACKDOWN, SPU::ADJCALLSTACKUP),
-  Subtarget(subtarget),
-  TII(tii)
+  SPUGenRegisterInfo(), Subtarget(subtarget), TII(tii)
 {
 }
 
@@ -328,6 +330,10 @@ SPURegisterInfo::getDwarfRegNum(unsigned RegNum, bool isEH) const {
   return SPUGenRegisterInfo::getDwarfRegNumFull(RegNum, 0);
 }
 
+int SPURegisterInfo::getLLVMRegNum(unsigned RegNum, bool isEH) const {
+  return SPUGenRegisterInfo::getLLVMRegNumFull(RegNum, 0);
+}
+
 int
 SPURegisterInfo::convertDFormToXForm(int dFormOpcode) const
 {
@@ -367,5 +373,3 @@ SPURegisterInfo::findScratchRegister(MachineBasicBlock::iterator II,
   assert( Reg && "Register scavenger failed");
   return Reg;
 }
-
-#include "SPUGenRegisterInfo.inc"

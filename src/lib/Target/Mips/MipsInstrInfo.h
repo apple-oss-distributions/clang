@@ -19,6 +19,9 @@
 #include "llvm/Target/TargetInstrInfo.h"
 #include "MipsRegisterInfo.h"
 
+#define GET_INSTRINFO_HEADER
+#include "MipsGenInstrInfo.inc"
+
 namespace llvm {
 
 namespace Mips {
@@ -146,11 +149,25 @@ namespace MipsII {
     /// MO_ABS_HI/LO - Represents the hi or low part of an absolute symbol
     /// address.
     MO_ABS_HI,
-    MO_ABS_LO
+    MO_ABS_LO,
+
+    /// MO_TLSGD - Represents the offset into the global offset table at which
+    // the module ID and TSL block offset reside during execution (General
+    // Dynamic TLS).
+    MO_TLSGD,
+
+    /// MO_GOTTPREL - Represents the offset from the thread pointer (Initial
+    // Exec TLS).
+    MO_GOTTPREL,
+
+    /// MO_TPREL_HI/LO - Represents the hi and low part of the offset from
+    // the thread pointer (Local Exec TLS).
+    MO_TPREL_HI,
+    MO_TPREL_LO
   };
 }
 
-class MipsInstrInfo : public TargetInstrInfoImpl {
+class MipsInstrInfo : public MipsGenInstrInfo {
   MipsTargetMachine &TM;
   const MipsRegisterInfo RI;
 public:
@@ -209,6 +226,11 @@ public:
                                     unsigned DestReg, int FrameIndex,
                                     const TargetRegisterClass *RC,
                                     const TargetRegisterInfo *TRI) const;
+
+  virtual MachineInstr* emitFrameIndexDebugValue(MachineFunction &MF,
+                                                 int FrameIx, uint64_t Offset,
+                                                 const MDNode *MDPtr,
+                                                 DebugLoc DL) const;
 
   virtual
   bool ReverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const;

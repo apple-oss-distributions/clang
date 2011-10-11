@@ -571,8 +571,7 @@ ConstantArray::ConstantArray(const ArrayType *T,
   }
 }
 
-Constant *ConstantArray::get(const ArrayType *Ty, 
-                             const std::vector<Constant*> &V) {
+Constant *ConstantArray::get(const ArrayType *Ty, ArrayRef<Constant*> V) {
   for (unsigned i = 0, e = V.size(); i != e; ++i) {
     assert(V[i]->getType() == Ty->getElementType() &&
            "Wrong type in array element initializer");
@@ -590,13 +589,6 @@ Constant *ConstantArray::get(const ArrayType *Ty,
   }
   
   return ConstantAggregateZero::get(Ty);
-}
-
-
-Constant *ConstantArray::get(const ArrayType* T, Constant *const* Vals,
-                             unsigned NumVals) {
-  // FIXME: make this the primary ctor method.
-  return get(T, std::vector<Constant*>(Vals, Vals+NumVals));
 }
 
 /// ConstantArray::get(const string&) - Return an array that is initialized to
@@ -621,6 +613,27 @@ Constant *ConstantArray::get(LLVMContext &Context, StringRef Str,
   return get(ATy, ElementVals);
 }
 
+/// getTypeForElements - Return an anonymous struct type to use for a constant
+/// with the specified set of elements.  The list must not be empty.
+StructType *ConstantStruct::getTypeForElements(LLVMContext &Context,
+                                               ArrayRef<Constant*> V,
+                                               bool Packed) {
+  SmallVector<const Type*, 16> EltTypes;
+  for (unsigned i = 0, e = V.size(); i != e; ++i)
+    EltTypes.push_back(V[i]->getType());
+  
+  return StructType::get(Context, EltTypes, Packed);
+}
+
+
+StructType *ConstantStruct::getTypeForElements(ArrayRef<Constant*> V,
+                                               bool Packed) {
+  assert(!V.empty() &&
+         "ConstantStruct::getTypeForElements cannot be called on empty list");
+  return getTypeForElements(V[0]->getContext(), V, Packed);
+}
+
+
 ConstantStruct::ConstantStruct(const StructType *T,
                                const std::vector<Constant*> &V)
   : Constant(T, ConstantStructVal,
@@ -639,45 +652,26 @@ ConstantStruct::ConstantStruct(const StructType *T,
 }
 
 // ConstantStruct accessors.
-Constant *ConstantStruct::get(const StructType* T,
-                              const std::vector<Constant*>& V) {
-  LLVMContextImpl* pImpl = T->getContext().pImpl;
+Constant *ConstantStruct::get(const StructType *ST, ArrayRef<Constant*> V) {
+  assert(ST->getNumElements() == V.size() &&
+         "Incorrect # elements specified to ConstantStruct::get");
   
-  // Create a ConstantAggregateZero value if all elements are zeros...
+  // Create a ConstantAggregateZero value if all elements are zeros.
   for (unsigned i = 0, e = V.size(); i != e; ++i)
     if (!V[i]->isNullValue())
-      return pImpl->StructConstants.getOrCreate(T, V);
+      return ST->getContext().pImpl->StructConstants.getOrCreate(ST, V);
 
-  return ConstantAggregateZero::get(T);
+  return ConstantAggregateZero::get(ST);
 }
 
-Constant *ConstantStruct::get(LLVMContext &Context,
-                              const std::vector<Constant*>& V, bool packed) {
-  std::vector<const Type*> StructEls;
-  StructEls.reserve(V.size());
-  for (unsigned i = 0, e = V.size(); i != e; ++i)
-    StructEls.push_back(V[i]->getType());
-  return get(StructType::get(Context, StructEls, packed), V);
-}
-
-Constant *ConstantStruct::get(LLVMContext &Context,
-                              Constant *const *Vals, unsigned NumVals,
-                              bool Packed) {
-  // FIXME: make this the primary ctor method.
-  return get(Context, std::vector<Constant*>(Vals, Vals+NumVals), Packed);
-}
-
-Constant* ConstantStruct::get(LLVMContext &Context, bool Packed,
-                              Constant * Val, ...) {
+Constant* ConstantStruct::get(const StructType *T, ...) {
   va_list ap;
-  std::vector<Constant*> Values;
-  va_start(ap, Val);
-  while (Val) {
+  SmallVector<Constant*, 8> Values;
+  va_start(ap, T);
+  while (Constant *Val = va_arg(ap, llvm::Constant*))
     Values.push_back(Val);
-    Val = va_arg(ap, llvm::Constant*);
-  }
   va_end(ap);
-  return get(Context, Values, Packed);
+  return get(T, Values);
 }
 
 ConstantVector::ConstantVector(const VectorType *T,
@@ -696,9 +690,9 @@ ConstantVector::ConstantVector(const VectorType *T,
 }
 
 // ConstantVector accessors.
-Constant *ConstantVector::get(const VectorType *T,
-                              const std::vector<Constant*> &V) {
+Constant *ConstantVector::get(ArrayRef<Constant*> V) {
   assert(!V.empty() && "Vectors can't be empty");
+  const VectorType *T = VectorType::get(V.front()->getType(), V.size());
   LLVMContextImpl *pImpl = T->getContext().pImpl;
 
   // If this is an all-undef or all-zero vector, return a
@@ -721,12 +715,6 @@ Constant *ConstantVector::get(const VectorType *T,
     return UndefValue::get(T);
     
   return pImpl->VectorConstants.getOrCreate(T, V);
-}
-
-Constant *ConstantVector::get(ArrayRef<Constant*> V) {
-  // FIXME: make this the primary ctor method.
-  assert(!V.empty() && "Vectors cannot be empty");
-  return get(VectorType::get(V.front()->getType(), V.size()), V.vec());
 }
 
 // Utility function for determining if a ConstantExpr is a CastOp or not. This
@@ -1023,17 +1011,32 @@ bool ConstantArray::isCString() const {
 }
 
 
-/// getAsString - If the sub-element type of this array is i8
-/// then this method converts the array to an std::string and returns it.
-/// Otherwise, it asserts out.
+/// convertToString - Helper function for getAsString() and getAsCString().
+static std::string convertToString(const User *U, unsigned len)
+{
+  std::string Result;
+  Result.reserve(len);
+  for (unsigned i = 0; i != len; ++i)
+    Result.push_back((char)cast<ConstantInt>(U->getOperand(i))->getZExtValue());
+  return Result;
+}
+
+/// getAsString - If this array is isString(), then this method converts the
+/// array to an std::string and returns it.  Otherwise, it asserts out.
 ///
 std::string ConstantArray::getAsString() const {
   assert(isString() && "Not a string!");
-  std::string Result;
-  Result.reserve(getNumOperands());
-  for (unsigned i = 0, e = getNumOperands(); i != e; ++i)
-    Result.push_back((char)cast<ConstantInt>(getOperand(i))->getZExtValue());
-  return Result;
+  return convertToString(this, getNumOperands());
+}
+
+
+/// getAsCString - If this array is isCString(), then this method converts the
+/// array (without the trailing null byte) to an std::string and returns it.
+/// Otherwise, it asserts out.
+///
+std::string ConstantArray::getAsCString() const {
+  assert(isCString() && "Not a string!");
+  return convertToString(this, getNumOperands() - 1);
 }
 
 
@@ -1537,8 +1540,8 @@ Constant *ConstantExpr::getSizeOf(const Type* Ty) {
 Constant *ConstantExpr::getAlignOf(const Type* Ty) {
   // alignof is implemented as: (i64) gep ({i1,Ty}*)null, 0, 1
   // Note that a non-inbounds gep is used, as null isn't within any object.
-  const Type *AligningTy = StructType::get(Ty->getContext(),
-                                   Type::getInt1Ty(Ty->getContext()), Ty, NULL);
+  const Type *AligningTy = 
+    StructType::get(Type::getInt1Ty(Ty->getContext()), Ty, NULL);
   Constant *NullPtr = Constant::getNullValue(AligningTy->getPointerTo());
   Constant *Zero = ConstantInt::get(Type::getInt64Ty(Ty->getContext()), 0);
   Constant *One = ConstantInt::get(Type::getInt32Ty(Ty->getContext()), 1);
@@ -2116,7 +2119,7 @@ void ConstantVector::replaceUsesOfWithOnConstant(Value *From, Value *To,
     Values.push_back(Val);
   }
   
-  Constant *Replacement = get(cast<VectorType>(getRawType()), Values);
+  Constant *Replacement = get(Values);
   assert(Replacement != this && "I didn't contain From!");
   
   // Everyone using this now uses the replacement.

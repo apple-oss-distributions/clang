@@ -37,6 +37,7 @@ def ObjCAtFinallyStmt : Stmt;
 def ObjCAtThrowStmt : Stmt;
 def ObjCAtSynchronizedStmt : Stmt;
 def ObjCForCollectionStmt : Stmt;
+def ObjCAutoreleasePoolStmt : Stmt;
 
 // C++ statments
 def CXXCatchStmt : Stmt;
@@ -120,6 +121,7 @@ def CXXNoexceptExpr : DStmt<Expr>;
 def PackExpansionExpr : DStmt<Expr>;
 def SizeOfPackExpr : DStmt<Expr>;
 def SubstNonTypeTemplateParmPackExpr : DStmt<Expr>;
+def MaterializeTemporaryExpr : DStmt<Expr>;
 
 // Obj-C Expressions.
 def ObjCStringLiteral : DStmt<Expr>;
@@ -130,6 +132,10 @@ def ObjCProtocolExpr : DStmt<Expr>;
 def ObjCIvarRefExpr : DStmt<Expr>;
 def ObjCPropertyRefExpr : DStmt<Expr>;
 def ObjCIsaExpr : DStmt<Expr>;
+def ObjCIndirectCopyRestoreExpr : DStmt<Expr>;
+
+// Obj-C ARC Expressions.
+def ObjCBridgedCastExpr : DStmt<ExplicitCastExpr>;
 
 // CUDA Expressions.
 def CUDAKernelCallExpr : DStmt<CallExpr>;
@@ -146,3 +152,5 @@ def SEHTryStmt : Stmt;
 def SEHExceptStmt : Stmt;
 def SEHFinallyStmt : Stmt;
 
+// OpenCL Extensions.
+def AsTypeExpr : DStmt<Expr>;

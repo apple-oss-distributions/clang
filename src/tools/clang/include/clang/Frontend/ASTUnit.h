@@ -363,7 +363,7 @@ private:
                   unsigned MaxLines, bool &CreatedBuffer);
   
   llvm::MemoryBuffer *getMainBufferWithPrecompiledPreamble(
-                                         CompilerInvocation PreambleInvocation,
+                               const CompilerInvocation &PreambleInvocationIn,
                                                      bool AllowRebuild = true,
                                                         unsigned MaxLines = 0);
   void RealizeTopLevelDeclsFromPreamble();
@@ -680,8 +680,8 @@ public:
 
   /// \brief Save this translation unit to a file with the given name.
   ///
-  /// \returns True if an error occurred, false otherwise.
-  bool Save(llvm::StringRef File);
+  /// \returns An indication of whether the save was successful or not.
+  CXSaveError Save(llvm::StringRef File);
 
   /// \brief Serialize this translation unit with the given output stream.
   ///

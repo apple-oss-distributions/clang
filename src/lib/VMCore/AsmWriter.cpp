@@ -32,7 +32,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CFG.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -41,11 +40,6 @@
 #include <algorithm>
 #include <cctype>
 using namespace llvm;
-
-static cl::opt<bool>
-EnableDebugInfoComment("enable-debug-info-comment", cl::Hidden,
-                       cl::desc("Enable debug info comments"));
-
 
 // Make virtual table appear in this compilation unit.
 AssemblyAnnotationWriter::~AssemblyAnnotationWriter() {}
@@ -140,30 +134,45 @@ static void PrintLLVMName(raw_ostream &OS, const Value *V) {
 // TypePrinting Class: Type printing machinery
 //===----------------------------------------------------------------------===//
 
-static DenseMap<const Type *, std::string> &getTypeNamesMap(void *M) {
-  return *static_cast<DenseMap<const Type *, std::string>*>(M);
-}
+/// TypePrinting - Type printing machinery.
+namespace {
+class TypePrinting {
+  DenseMap<const Type *, std::string> TypeNames;
+  TypePrinting(const TypePrinting &);   // DO NOT IMPLEMENT
+  void operator=(const TypePrinting&);  // DO NOT IMPLEMENT
+public:
+  TypePrinting() {}
+  ~TypePrinting() {}
+  
+  void clear() {
+    TypeNames.clear();
+  }
+  
+  void print(const Type *Ty, raw_ostream &OS, bool IgnoreTopLevelName = false);
+  
+  void printAtLeastOneLevel(const Type *Ty, raw_ostream &OS) {
+    print(Ty, OS, true);
+  }
+  
+  /// hasTypeName - Return true if the type has a name in TypeNames, false
+  /// otherwise.
+  bool hasTypeName(const Type *Ty) const {
+    return TypeNames.count(Ty);
+  }
 
-void TypePrinting::clear() {
-  getTypeNamesMap(TypeNames).clear();
-}
-
-bool TypePrinting::hasTypeName(const Type *Ty) const {
-  return getTypeNamesMap(TypeNames).count(Ty);
-}
-
-void TypePrinting::addTypeName(const Type *Ty, const std::string &N) {
-  getTypeNamesMap(TypeNames).insert(std::make_pair(Ty, N));
-}
-
-
-TypePrinting::TypePrinting() {
-  TypeNames = new DenseMap<const Type *, std::string>();
-}
-
-TypePrinting::~TypePrinting() {
-  delete &getTypeNamesMap(TypeNames);
-}
+  
+  /// addTypeName - Add a name for the specified type if it doesn't already have
+  /// one.  This name will be printed instead of the structural version of the
+  /// type in order to make the output more concise.
+  void addTypeName(const Type *Ty, const std::string &N) {
+    TypeNames.insert(std::make_pair(Ty, N));
+  }
+  
+private:
+  void CalcTypeName(const Type *Ty, SmallVectorImpl<const Type *> &TypeStack,
+                    raw_ostream &OS, bool IgnoreTopLevelName = false);
+};
+} // end anonymous namespace.
 
 /// CalcTypeName - Write the specified type to the specified raw_ostream, making
 /// use of type names or up references to shorten the type name where possible.
@@ -172,7 +181,7 @@ void TypePrinting::CalcTypeName(const Type *Ty,
                                 raw_ostream &OS, bool IgnoreTopLevelName) {
   // Check to see if the type is named.
   if (!IgnoreTopLevelName) {
-    DenseMap<const Type *, std::string> &TM = getTypeNamesMap(TypeNames);
+    DenseMap<const Type *, std::string> &TM = TypeNames;
     DenseMap<const Type *, std::string>::iterator I = TM.find(Ty);
     if (I != TM.end()) {
       OS << I->second;
@@ -283,10 +292,9 @@ void TypePrinting::CalcTypeName(const Type *Ty,
 void TypePrinting::print(const Type *Ty, raw_ostream &OS,
                          bool IgnoreTopLevelName) {
   // Check to see if the type is named.
-  DenseMap<const Type*, std::string> &TM = getTypeNamesMap(TypeNames);
   if (!IgnoreTopLevelName) {
-    DenseMap<const Type*, std::string>::iterator I = TM.find(Ty);
-    if (I != TM.end()) {
+    DenseMap<const Type*, std::string>::iterator I = TypeNames.find(Ty);
+    if (I != TypeNames.end()) {
       OS << I->second;
       return;
     }
@@ -304,7 +312,7 @@ void TypePrinting::print(const Type *Ty, raw_ostream &OS,
 
   // Cache type name for later use.
   if (!IgnoreTopLevelName)
-    TM.insert(std::make_pair(Ty, TypeOS.str()));
+    TypeNames.insert(std::make_pair(Ty, TypeOS.str()));
 }
 
 namespace {
@@ -1401,7 +1409,25 @@ void AssemblyWriter::printModule(const Module *M) {
 }
 
 void AssemblyWriter::printNamedMDNode(const NamedMDNode *NMD) {
-  Out << "!" << NMD->getName() << " = !{";
+  Out << '!';
+  StringRef Name = NMD->getName();
+  if (Name.empty()) {
+    Out << "<empty name> ";
+  } else {
+    if (isalpha(Name[0]) || Name[0] == '-' || Name[0] == '$' ||
+        Name[0] == '.' || Name[0] == '_')
+      Out << Name[0];
+    else
+      Out << '\\' << hexdigit(Name[0] >> 4) << hexdigit(Name[0] & 0x0F);
+    for (unsigned i = 1, e = Name.size(); i != e; ++i) {
+      unsigned char C = Name[i];
+      if (isalnum(C) || C == '-' || C == '$' || C == '.' || C == '_')
+        Out << C;
+      else
+        Out << '\\' << hexdigit(C >> 4) << hexdigit(C & 0x0F);
+    }
+  }
+  Out << " = !{";
   for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i) {
     if (i) Out << ", ";
     int Slot = Machine.getMetadataSlot(NMD->getOperand(i));
@@ -1735,18 +1761,6 @@ void AssemblyWriter::printBasicBlock(const BasicBlock *BB) {
   if (AnnotationWriter) AnnotationWriter->emitBasicBlockEndAnnot(BB, Out);
 }
 
-/// printDebugLoc - Print DebugLoc.
-static void printDebugLoc(const DebugLoc &DL, formatted_raw_ostream &OS) {
-  OS << DL.getLine() << ":" << DL.getCol();
-  if (MDNode *N = DL.getInlinedAt(getGlobalContext())) {
-    DebugLoc IDL = DebugLoc::getFromDILocation(N);
-    if (!IDL.isUnknown()) {
-      OS << "@";
-      printDebugLoc(IDL,OS);
-    }
-  }
-}
-
 /// printInfoComment - Print a little comment after the instruction indicating
 /// which slot it occupies.
 ///
@@ -1754,43 +1768,6 @@ void AssemblyWriter::printInfoComment(const Value &V) {
   if (AnnotationWriter) {
     AnnotationWriter->printInfoComment(V, Out);
     return;
-  } else if (EnableDebugInfoComment) {
-    bool Padded = false;
-    if (const Instruction *I = dyn_cast<Instruction>(&V)) {
-      const DebugLoc &DL = I->getDebugLoc();
-      if (!DL.isUnknown()) {
-        if (!Padded) {
-          Out.PadToColumn(50);
-          Padded = true;
-          Out << ";";
-        }
-        Out << " [debug line = ";
-        printDebugLoc(DL,Out);
-        Out << "]";
-      }
-      if (const DbgDeclareInst *DDI = dyn_cast<DbgDeclareInst>(I)) {
-        const MDNode *Var = DDI->getVariable();
-        if (!Padded) {
-          Out.PadToColumn(50);
-          Padded = true;
-          Out << ";";
-        }
-        if (Var && Var->getNumOperands() >= 2)
-          if (MDString *MDS = dyn_cast_or_null<MDString>(Var->getOperand(2)))
-            Out << " [debug variable = " << MDS->getString() << "]";
-      }
-      else if (const DbgValueInst *DVI = dyn_cast<DbgValueInst>(I)) {
-        const MDNode *Var = DVI->getVariable();
-        if (!Padded) {
-          Out.PadToColumn(50);
-          Padded = true;
-          Out << ";";
-        }
-        if (Var && Var->getNumOperands() >= 2)
-          if (MDString *MDS = dyn_cast_or_null<MDString>(Var->getOperand(2)))
-            Out << " [debug variable = " << MDS->getString() << "]";
-      }
-    }
   }
 }
 
@@ -1873,16 +1850,16 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
       writeOperand(I.getOperand(i), true);
     }
     Out << ']';
-  } else if (isa<PHINode>(I)) {
+  } else if (const PHINode *PN = dyn_cast<PHINode>(&I)) {
     Out << ' ';
     TypePrinter.print(I.getType(), Out);
     Out << ' ';
 
-    for (unsigned op = 0, Eop = I.getNumOperands(); op < Eop; op += 2) {
+    for (unsigned op = 0, Eop = PN->getNumIncomingValues(); op < Eop; ++op) {
       if (op) Out << ", ";
       Out << "[ ";
-      writeOperand(I.getOperand(op  ), false); Out << ", ";
-      writeOperand(I.getOperand(op+1), false); Out << " ]";
+      writeOperand(PN->getIncomingValue(op), false); Out << ", ";
+      writeOperand(PN->getIncomingBlock(op), false); Out << " ]";
     }
   } else if (const ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(&I)) {
     Out << ' ';

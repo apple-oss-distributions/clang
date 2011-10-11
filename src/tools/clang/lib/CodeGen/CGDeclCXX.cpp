@@ -27,27 +27,26 @@ static void EmitDeclInit(CodeGenFunction &CGF, const VarDecl &D,
          "Should not call EmitDeclInit on a reference!");
   
   ASTContext &Context = CGF.getContext();
-    
-  const Expr *Init = D.getInit();
-  QualType T = D.getType();
-  bool isVolatile = Context.getCanonicalType(T).isVolatileQualified();
 
-  unsigned Alignment = Context.getDeclAlign(&D).getQuantity();
-  if (!CGF.hasAggregateLLVMType(T)) {
-    llvm::Value *V = CGF.EmitScalarExpr(Init);
+  unsigned alignment = Context.getDeclAlign(&D).getQuantity();
+  QualType type = D.getType();
+  LValue lv = CGF.MakeAddrLValue(DeclPtr, type, alignment);
+
+  const Expr *Init = D.getInit();
+  if (!CGF.hasAggregateLLVMType(type)) {
     CodeGenModule &CGM = CGF.CGM;
-    Qualifiers::GC GCAttr = CGM.getContext().getObjCGCAttrKind(T);
-    if (GCAttr == Qualifiers::Strong)
-      CGM.getObjCRuntime().EmitObjCGlobalAssign(CGF, V, DeclPtr,
-                                                D.isThreadSpecified());
-    else if (GCAttr == Qualifiers::Weak)
-      CGM.getObjCRuntime().EmitObjCWeakAssign(CGF, V, DeclPtr);
+    if (lv.isObjCStrong())
+      CGM.getObjCRuntime().EmitObjCGlobalAssign(CGF, CGF.EmitScalarExpr(Init),
+                                                DeclPtr, D.isThreadSpecified());
+    else if (lv.isObjCWeak())
+      CGM.getObjCRuntime().EmitObjCWeakAssign(CGF, CGF.EmitScalarExpr(Init),
+                                              DeclPtr);
     else
-      CGF.EmitStoreOfScalar(V, DeclPtr, isVolatile, Alignment, T);
-  } else if (T->isAnyComplexType()) {
-    CGF.EmitComplexExprIntoAddr(Init, DeclPtr, isVolatile);
+      CGF.EmitScalarInit(Init, &D, lv, false);
+  } else if (type->isAnyComplexType()) {
+    CGF.EmitComplexExprIntoAddr(Init, DeclPtr, lv.isVolatile());
   } else {
-    CGF.EmitAggExpr(Init, AggValueSlot::forAddr(DeclPtr, isVolatile, true));
+    CGF.EmitAggExpr(Init, AggValueSlot::forLValue(lv, true));
   }
 }
 
@@ -117,19 +116,13 @@ CodeGenFunction::EmitCXXGlobalDtorRegistration(llvm::Constant *DtorFn,
     return;
   }
 
-  std::vector<const llvm::Type *> Params;
-  Params.push_back(Int8PtrTy);
-
   // Get the destructor function type
   const llvm::Type *DtorFnTy =
     llvm::FunctionType::get(llvm::Type::getVoidTy(getLLVMContext()),
-                            Params, false);
+                            Int8PtrTy, false);
   DtorFnTy = llvm::PointerType::getUnqual(DtorFnTy);
 
-  Params.clear();
-  Params.push_back(DtorFnTy);
-  Params.push_back(Int8PtrTy);
-  Params.push_back(Int8PtrTy);
+  const llvm::Type *Params[] = { DtorFnTy, Int8PtrTy, Int8PtrTy };
 
   // Get the __cxa_atexit function type
   // extern "C" int __cxa_atexit ( void (*f)(void *), void *p, void *d );
@@ -248,6 +241,8 @@ CodeGenModule::EmitCXXGlobalInitFunc() {
                                                      &CXXGlobalInits[0],
                                                      CXXGlobalInits.size());
   AddGlobalCtor(Fn);
+  CXXGlobalInits.clear();
+  PrioritizedCXXGlobalInits.clear();
 }
 
 void CodeGenModule::EmitCXXGlobalDtorFunc() {
@@ -274,12 +269,11 @@ void CodeGenFunction::GenerateCXXGlobalVarDeclInitFunc(llvm::Function *Fn,
                 getTypes().getNullaryFunctionInfo(),
                 FunctionArgList(), SourceLocation());
 
-  // Use guarded initialization if the global variable is weak due to
-  // being a class template's static data member.  These will always
-  // have weak_odr linkage.
-  if (Addr->getLinkage() == llvm::GlobalValue::WeakODRLinkage &&
-      D->isStaticDataMember() &&
-      D->getInstantiatedFromStaticDataMember()) {
+  // Use guarded initialization if the global variable is weak. This
+  // occurs for, e.g., instantiated static data members and
+  // definitions explicitly marked weak.
+  if (Addr->getLinkage() == llvm::GlobalValue::WeakODRLinkage ||
+      Addr->getLinkage() == llvm::GlobalValue::WeakAnyLinkage) {
     EmitCXXGuardedInit(*D, Addr);
   } else {
     EmitCXXGlobalVarDeclInit(*D, Addr);
@@ -295,10 +289,21 @@ void CodeGenFunction::GenerateCXXGlobalInitFunc(llvm::Function *Fn,
                 getTypes().getNullaryFunctionInfo(),
                 FunctionArgList(), SourceLocation());
 
+  RunCleanupsScope Scope(*this);
+
+  // When building in Objective-C++ ARC mode, create an autorelease pool
+  // around the global initializers.
+  if (getLangOptions().ObjCAutoRefCount && getLangOptions().CPlusPlus) {    
+    llvm::Value *token = EmitObjCAutoreleasePoolPush();
+    EmitObjCAutoreleasePoolCleanup(token);
+  }
+  
   for (unsigned i = 0; i != NumDecls; ++i)
     if (Decls[i])
-      Builder.CreateCall(Decls[i]);
+      Builder.CreateCall(Decls[i]);    
 
+  Scope.ForceCleanup();
+  
   FinishFunction();
 }
 

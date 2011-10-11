@@ -31,10 +31,16 @@ using namespace clang;
 ///
 /// Called type-id in C++.
 TypeResult Parser::ParseTypeName(SourceRange *Range,
-                                 Declarator::TheContext Context) {
+                                 Declarator::TheContext Context,
+                                 ObjCDeclSpec *objcQuals,
+                                 AccessSpecifier AS,
+                                 Decl **OwnedType) {
   // Parse the common declaration-specifiers piece.
   DeclSpec DS(AttrFactory);
-  ParseSpecifierQualifierList(DS);
+  DS.setObjCQualifiers(objcQuals);
+  ParseSpecifierQualifierList(DS, AS);
+  if (OwnedType)
+    *OwnedType = DS.isTypeSpecOwned() ? DS.getRepAsDecl() : 0;
 
   // Parse the abstract-declarator, if present.
   Declarator DeclaratorInfo(DS, Context);
@@ -253,9 +259,17 @@ void Parser::ParseMicrosoftDeclSpec(ParsedAttributes &attrs) {
     SkipUntil(tok::r_paren, true); // skip until ) or ;
     return;
   }
+
   while (Tok.getIdentifierInfo()) {
     IdentifierInfo *AttrName = Tok.getIdentifierInfo();
     SourceLocation AttrNameLoc = ConsumeToken();
+    
+    // FIXME: Remove this when we have proper __declspec(property()) support.
+    // Just skip everything inside property().
+    if (AttrName->getName() == "property") {
+      ConsumeParen();
+      SkipUntil(tok::r_paren);
+    }
     if (Tok.is(tok::l_paren)) {
       ConsumeParen();
       // FIXME: This doesn't parse __declspec(property(get=get_func_name))
@@ -664,6 +678,7 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(StmtVector &Stmts,
   ParenBraceBracketBalancer BalancerRAIIObj(*this);
   
   Decl *SingleDecl = 0;
+  Decl *OwnedType = 0;
   switch (Tok.getKind()) {
   case tok::kw_template:
   case tok::kw_export:
@@ -686,7 +701,7 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(StmtVector &Stmts,
     break;
   case tok::kw_using:
     SingleDecl = ParseUsingDirectiveOrDeclaration(Context, ParsedTemplateInfo(),
-                                                  DeclEnd, attrs);
+                                                  DeclEnd, attrs, &OwnedType);
     break;
   case tok::kw_static_assert:
   case tok::kw__Static_assert:
@@ -698,8 +713,9 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(StmtVector &Stmts,
   }
   
   // This routine returns a DeclGroup, if the thing we parsed only contains a
-  // single decl, convert it now.
-  return Actions.ConvertDeclToDeclGroup(SingleDecl);
+  // single decl, convert it now. Alias declarations can also declare a type;
+  // include that too if it is present.
+  return Actions.ConvertDeclToDeclGroup(SingleDecl, OwnedType);
 }
 
 ///       simple-declaration: [C99 6.7: declaration] [C++ 7p1: dcl.dcl]
@@ -806,8 +822,10 @@ Parser::DeclGroupPtrTy Parser::ParseDeclGroup(ParsingDeclSpec &DS,
   // analyzed.
   if (FRI && Tok.is(tok::colon)) {
     FRI->ColonLoc = ConsumeToken();
-    // FIXME: handle braced-init-list here.
-    FRI->RangeExpr = ParseExpression();
+    if (Tok.is(tok::l_brace))
+      FRI->RangeExpr = ParseBraceInitializer();
+    else
+      FRI->RangeExpr = ParseExpression();
     Decl *ThisDecl = Actions.ActOnDeclarator(getCurScope(), D);
     Actions.ActOnCXXForRangeDecl(ThisDecl);
     Actions.FinalizeDeclaration(ThisDecl);
@@ -906,6 +924,7 @@ bool Parser::ParseAttributesAfterDeclarator(Declarator &D) {
 /// [C++]   '(' expression-list ')'
 /// [C++0x] '=' 'default'                                                [TODO]
 /// [C++0x] '=' 'delete'
+/// [C++0x] braced-init-list
 ///
 /// According to the standard grammar, =default and =delete are function
 /// definitions, but that definitely doesn't fit with the parser here.
@@ -960,12 +979,17 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
                                diag::err_invalid_equalequal_after_declarator)) {
     ConsumeToken();
     if (Tok.is(tok::kw_delete)) {
-      SourceLocation DelLoc = ConsumeToken();
-      
-      if (!getLang().CPlusPlus0x)
-        Diag(DelLoc, diag::warn_deleted_function_accepted_as_extension);
-
-      Actions.SetDeclDeleted(ThisDecl, DelLoc);
+      if (D.isFunctionDeclarator())
+        Diag(ConsumeToken(), diag::err_default_delete_in_multiple_declaration)
+          << 1 /* delete */;
+      else
+        Diag(ConsumeToken(), diag::err_deleted_non_function);
+    } else if (Tok.is(tok::kw_default)) {
+      if (D.isFunctionDeclarator())
+        Diag(Tok, diag::err_default_delete_in_multiple_declaration)
+          << 1 /* delete */;
+      else
+        Diag(ConsumeToken(), diag::err_default_special_members);
     } else {
       if (getLang().CPlusPlus && D.getCXXScopeSpec().isSet()) {
         EnterScope(0);
@@ -1028,6 +1052,26 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
                                             RParenLoc,
                                             TypeContainsAuto);
     }
+  } else if (getLang().CPlusPlus0x && Tok.is(tok::l_brace)) {
+    // Parse C++0x braced-init-list.
+    if (D.getCXXScopeSpec().isSet()) {
+      EnterScope(0);
+      Actions.ActOnCXXEnterDeclInitializer(getCurScope(), ThisDecl);
+    }
+
+    ExprResult Init(ParseBraceInitializer());
+
+    if (D.getCXXScopeSpec().isSet()) {
+      Actions.ActOnCXXExitDeclInitializer(getCurScope(), ThisDecl);
+      ExitScope();
+    }
+
+    if (Init.isInvalid()) {
+      Actions.ActOnInitializerError(ThisDecl);
+    } else
+      Actions.AddInitializerToDecl(ThisDecl, Init.take(),
+                                   /*DirectInit=*/true, TypeContainsAuto);
+
   } else {
     Actions.ActOnUninitializedDecl(ThisDecl, TypeContainsAuto);
   }
@@ -1043,10 +1087,10 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
 ///          type-qualifier specifier-qualifier-list[opt]
 /// [GNU]    attributes     specifier-qualifier-list[opt]
 ///
-void Parser::ParseSpecifierQualifierList(DeclSpec &DS) {
+void Parser::ParseSpecifierQualifierList(DeclSpec &DS, AccessSpecifier AS) {
   /// specifier-qualifier-list is a subset of declaration-specifiers.  Just
   /// parse declaration-specifiers and complain about extra stuff.
-  ParseDeclarationSpecifiers(DS);
+  ParseDeclarationSpecifiers(DS, ParsedTemplateInfo(), AS);
 
   // Validate declspec for type-name.
   unsigned Specs = DS.getParsedSpecifiers();
@@ -1358,8 +1402,7 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
         // Thus, if the template-name is actually the constructor
         // name, then the code is ill-formed; this interpretation is
         // reinforced by the NAD status of core issue 635. 
-        TemplateIdAnnotation *TemplateId
-          = static_cast<TemplateIdAnnotation *>(Next.getAnnotationValue());
+        TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Next);
         if ((DSContext == DSC_top_level ||
              (DSContext == DSC_class && DS.isFriendSpecified())) &&
             TemplateId->Name &&
@@ -1561,8 +1604,7 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
 
       // type-name
     case tok::annot_template_id: {
-      TemplateIdAnnotation *TemplateId
-        = static_cast<TemplateIdAnnotation *>(Tok.getAnnotationValue());
+      TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
       if (TemplateId->Kind != TNK_Type_template) {
         // This template-id does not refer to a type name, so we're
         // done with the type-specifiers.
@@ -1846,6 +1888,9 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
       ParseDecltypeSpecifier(DS);
       continue;
 
+    case tok::kw___underlying_type:
+      ParseUnderlyingTypeSpecifier(DS);
+
     // OpenCL qualifiers:
     case tok::kw_private: 
       if (!getLang().OpenCL)
@@ -2114,6 +2159,11 @@ bool Parser::ParseOptionalTypeSpecifier(DeclSpec &DS, bool& isInvalid,
   // C++0x decltype support.
   case tok::kw_decltype:
     ParseDecltypeSpecifier(DS);
+    return true;
+
+  // C++0x type traits support.
+  case tok::kw___underlying_type:
+    ParseUnderlyingTypeSpecifier(DS);
     return true;
 
   // OpenCL qualifiers:
@@ -2400,13 +2450,29 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
     Actions.CodeCompleteTag(getCurScope(), DeclSpec::TST_enum);
     ConsumeCodeCompletionToken();
   }
+
+  bool IsScopedEnum = false;
+  bool IsScopedUsingClassTag = false;
+
+  if (getLang().CPlusPlus0x &&
+      (Tok.is(tok::kw_class) || Tok.is(tok::kw_struct))) {
+    IsScopedEnum = true;
+    IsScopedUsingClassTag = Tok.is(tok::kw_class);
+    ConsumeToken();
+  }
   
   // If attributes exist after tag, parse them.
   ParsedAttributes attrs(AttrFactory);
   MaybeParseGNUAttributes(attrs);
 
+  bool AllowFixedUnderlyingType = getLang().CPlusPlus0x || getLang().Microsoft;
+
   CXXScopeSpec &SS = DS.getTypeSpecScope();
   if (getLang().CPlusPlus) {
+    // "enum foo : bar;" is not a potential typo for "enum foo::bar;"
+    // if a fixed underlying type is allowed.
+    ColonProtectionRAIIObject X(*this, AllowFixedUnderlyingType);
+    
     if (ParseOptionalCXXScopeSpecifier(SS, ParsedType(), false))
       return;
 
@@ -2419,17 +2485,6 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
         return;
       }
     }
-  }
-
-  bool AllowFixedUnderlyingType = getLang().CPlusPlus0x || getLang().Microsoft;
-  bool IsScopedEnum = false;
-  bool IsScopedUsingClassTag = false;
-
-  if (getLang().CPlusPlus0x &&
-      (Tok.is(tok::kw_class) || Tok.is(tok::kw_struct))) {
-    IsScopedEnum = true;
-    IsScopedUsingClassTag = Tok.is(tok::kw_class);
-    ConsumeToken();
   }
 
   // Must have either 'enum name' or 'enum {...}'.
@@ -2970,6 +3025,10 @@ bool Parser::isDeclarationSpecifier(bool DisambiguatingWithExpression) {
 
     // GNU attributes.
   case tok::kw___attribute:
+    return true;
+
+    // C++0x decltype.
+  case tok::kw_decltype:
     return true;
 
     // GNU ObjC bizarre protocol extension: <proto1,proto2> with implicit 'id'.

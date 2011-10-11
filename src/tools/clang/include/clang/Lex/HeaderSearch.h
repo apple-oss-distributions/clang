@@ -16,6 +16,7 @@
 
 #include "clang/Lex/DirectoryLookup.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include <vector>
 
 namespace clang {
@@ -47,6 +48,15 @@ struct HeaderFileInfo {
   /// "resolved", meaning that it was loaded from the external source.
   unsigned Resolved : 1;
   
+  /// \brief Whether this is a header inside a framework that is currently
+  /// being built. 
+  ///
+  /// When a framework is being built, the headers have not yet been placed
+  /// into the appropriate framework subdirectories, and therefore are
+  /// provided via a header map. This bit indicates when this is one of
+  /// those framework headers.
+  unsigned IndexHeaderMapHeader : 1;
+  
   /// NumIncludes - This is the number of times the file has been included
   /// already.
   unsigned short NumIncludes;
@@ -68,10 +78,14 @@ struct HeaderFileInfo {
   /// external storage.
   const IdentifierInfo *ControllingMacro;
 
+  /// \brief If this header came from a framework include, this is the name
+  /// of the framework.
+  llvm::StringRef Framework;
+  
   HeaderFileInfo()
     : isImport(false), isPragmaOnce(false), DirInfo(SrcMgr::C_User), 
-      External(false), Resolved(false), NumIncludes(0), ControllingMacroID(0), 
-      ControllingMacro(0)  {}
+      External(false), Resolved(false), IndexHeaderMapHeader(false),
+      NumIncludes(0), ControllingMacroID(0), ControllingMacro(0)  {}
 
   /// \brief Retrieve the controlling macro for this header file, if
   /// any.
@@ -105,11 +119,12 @@ class HeaderSearch {
   FileManager &FileMgr;
   /// #include search path information.  Requests for #include "x" search the
   /// directory of the #including file first, then each directory in SearchDirs
-  /// consequtively. Requests for <x> search the current dir first, then each
-  /// directory in SearchDirs, starting at SystemDirIdx, consequtively.  If
+  /// consecutively. Requests for <x> search the current dir first, then each
+  /// directory in SearchDirs, starting at AngledDirIdx, consecutively.  If
   /// NoCurDirSearch is true, then the check for the file in the current
   /// directory is suppressed.
   std::vector<DirectoryLookup> SearchDirs;
+  unsigned AngledDirIdx;
   unsigned SystemDirIdx;
   bool NoCurDirSearch;
 
@@ -135,6 +150,10 @@ class HeaderSearch {
   /// headermaps.  This vector owns the headermap.
   std::vector<std::pair<const FileEntry*, const HeaderMap*> > HeaderMaps;
 
+  /// \brief Uniqued set of framework names, which is used to track which 
+  /// headers were included as framework headers.
+  llvm::StringSet<llvm::BumpPtrAllocator> FrameworkNames;
+  
   /// \brief Entity used to resolve the identifier IDs of controlling
   /// macros into IdentifierInfo pointers, as needed.
   ExternalIdentifierLookup *ExternalLookup;
@@ -160,8 +179,12 @@ public:
   /// SetSearchPaths - Interface for setting the file search paths.
   ///
   void SetSearchPaths(const std::vector<DirectoryLookup> &dirs,
-                      unsigned systemDirIdx, bool noCurDirSearch) {
+                      unsigned angledDirIdx, unsigned systemDirIdx,
+                      bool noCurDirSearch) {
+    assert(angledDirIdx <= systemDirIdx && systemDirIdx <= dirs.size() &&
+        "Directory indicies are unordered");
     SearchDirs = dirs;
+    AngledDirIdx = angledDirIdx;
     SystemDirIdx = systemDirIdx;
     NoCurDirSearch = noCurDirSearch;
     //LookupFileCache.clear();
@@ -298,11 +321,28 @@ public:
   search_dir_iterator search_dir_end() const { return SearchDirs.end(); }
   unsigned search_dir_size() const { return SearchDirs.size(); }
 
+  search_dir_iterator quoted_dir_begin() const {
+    return SearchDirs.begin();
+  }
+  search_dir_iterator quoted_dir_end() const {
+    return SearchDirs.begin() + AngledDirIdx;
+  }
+
+  search_dir_iterator angled_dir_begin() const {
+    return SearchDirs.begin() + AngledDirIdx;
+  }
+  search_dir_iterator angled_dir_end() const {
+    return SearchDirs.begin() + SystemDirIdx;
+  }
+
   search_dir_iterator system_dir_begin() const {
     return SearchDirs.begin() + SystemDirIdx;
   }
   search_dir_iterator system_dir_end() const { return SearchDirs.end(); }
 
+  /// \brief Retrieve a uniqued framework name.
+  llvm::StringRef getUniqueFrameworkName(llvm::StringRef Framework);
+  
   void PrintStats();
 private:
 

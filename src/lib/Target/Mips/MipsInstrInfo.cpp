@@ -18,12 +18,15 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
+
+#define GET_INSTRINFO_CTOR
+#define GET_INSTRINFO_MC_DESC
 #include "MipsGenInstrInfo.inc"
 
 using namespace llvm;
 
 MipsInstrInfo::MipsInstrInfo(MipsTargetMachine &tm)
-  : TargetInstrInfoImpl(MipsInsts, array_lengthof(MipsInsts)),
+  : MipsGenInstrInfo(Mips::ADJCALLSTACKDOWN, Mips::ADJCALLSTACKUP),
     TM(tm), RI(*TM.getSubtargetImpl(), *this) {}
 
 static bool isZeroImm(const MachineOperand &op) {
@@ -214,6 +217,15 @@ loadRegFromStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
     llvm_unreachable("Register class not handled!");
 }
 
+MachineInstr*
+MipsInstrInfo::emitFrameIndexDebugValue(MachineFunction &MF, int FrameIx,
+                                        uint64_t Offset, const MDNode *MDPtr,
+                                        DebugLoc DL) const {
+  MachineInstrBuilder MIB = BuildMI(MF, DL, get(Mips::DBG_VALUE))
+    .addFrameIndex(FrameIx).addImm(0).addImm(Offset).addMetadata(MDPtr);
+  return &*MIB;
+}
+
 //===----------------------------------------------------------------------===//
 // Branch Analysis
 //===----------------------------------------------------------------------===//
@@ -341,8 +353,8 @@ void MipsInstrInfo::BuildCondBr(MachineBasicBlock &MBB,
                                 const SmallVectorImpl<MachineOperand>& Cond)
   const {
   unsigned Opc = Cond[0].getImm();
-  const TargetInstrDesc &TID = get(Opc);
-  MachineInstrBuilder MIB = BuildMI(&MBB, DL, TID);
+  const MCInstrDesc &MCID = get(Opc);
+  MachineInstrBuilder MIB = BuildMI(&MBB, DL, MCID);
 
   for (unsigned i = 1; i < Cond.size(); ++i)
     MIB.addReg(Cond[i].getReg());

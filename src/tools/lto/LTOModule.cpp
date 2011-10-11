@@ -29,7 +29,6 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/system_error.h"
 #include "llvm/Target/Mangler.h"
-#include "llvm/Target/SubtargetFeature.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -37,6 +36,7 @@
 #include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Target/TargetAsmParser.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegistry.h"
@@ -157,9 +157,10 @@ LTOModule *LTOModule::makeLTOModule(MemoryBuffer *buffer,
 
   // construct LTOModule, hand over ownership of module and target
   SubtargetFeatures Features;
-  Features.getDefaultSubtargetFeatures("" /* cpu */, llvm::Triple(Triple));
+  Features.getDefaultSubtargetFeatures(llvm::Triple(Triple));
   std::string FeatureStr = Features.getString();
-  TargetMachine *target = march->createTargetMachine(Triple, FeatureStr);
+  std::string CPU;
+  TargetMachine *target = march->createTargetMachine(Triple, CPU, FeatureStr);
   LTOModule *Ret = new LTOModule(m.take(), target);
   bool Err = Ret->ParseSymbols();
   if (Err) {
@@ -191,7 +192,7 @@ bool LTOModule::objcClassNameFromExpression(Constant *c, std::string &name) {
       Constant *cn = gvn->getInitializer();
       if (ConstantArray *ca = dyn_cast<ConstantArray>(cn)) {
         if (ca->isCString()) {
-          name = ".objc_class_name_" + ca->getAsString();
+          name = ".objc_class_name_" + ca->getAsCString();
           return true;
         }
       }
@@ -208,7 +209,7 @@ void LTOModule::addObjCClass(GlobalVariable *clgv) {
     if (objcClassNameFromExpression(c->getOperand(1), superclassName)) {
       NameAndAttributes info;
       StringMap<NameAndAttributes>::value_type &entry =
-        _undefines.GetOrCreateValue(superclassName.c_str());
+        _undefines.GetOrCreateValue(superclassName);
       if (!entry.getValue().name) {
         const char *symbolName = entry.getKey().data();
         info.name = symbolName;
@@ -220,7 +221,7 @@ void LTOModule::addObjCClass(GlobalVariable *clgv) {
     std::string className;
     if (objcClassNameFromExpression(c->getOperand(2), className)) {
       StringSet::value_type &entry =
-        _defines.GetOrCreateValue(className.c_str());
+        _defines.GetOrCreateValue(className);
       entry.setValue(1);
       NameAndAttributes info;
       info.name = entry.getKey().data();
@@ -243,7 +244,7 @@ void LTOModule::addObjCCategory(GlobalVariable *clgv) {
       NameAndAttributes info;
 
       StringMap<NameAndAttributes>::value_type &entry =
-        _undefines.GetOrCreateValue(targetclassName.c_str());
+        _undefines.GetOrCreateValue(targetclassName);
 
       if (entry.getValue().name)
         return;
@@ -264,7 +265,7 @@ void LTOModule::addObjCClassRef(GlobalVariable *clgv) {
     NameAndAttributes info;
 
     StringMap<NameAndAttributes>::value_type &entry =
-      _undefines.GetOrCreateValue(targetclassName.c_str());
+      _undefines.GetOrCreateValue(targetclassName);
     if (entry.getValue().name)
       return;
 
@@ -375,7 +376,7 @@ void LTOModule::addDefinedSymbol(GlobalValue *def, Mangler &mangler,
 
   // add to table of symbols
   NameAndAttributes info;
-  StringSet::value_type &entry = _defines.GetOrCreateValue(Buffer.c_str());
+  StringSet::value_type &entry = _defines.GetOrCreateValue(Buffer);
   entry.setValue(1);
 
   StringRef Name = entry.getKey();
@@ -436,7 +437,7 @@ void LTOModule::addPotentialUndefinedSymbol(GlobalValue *decl,
   mangler.getNameWithPrefix(name, decl, false);
 
   StringMap<NameAndAttributes>::value_type &entry =
-    _undefines.GetOrCreateValue(name.c_str());
+    _undefines.GetOrCreateValue(name);
 
   // we already have the symbol
   if (entry.getValue().name)

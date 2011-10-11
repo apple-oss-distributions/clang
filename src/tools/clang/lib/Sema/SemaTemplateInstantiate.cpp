@@ -13,6 +13,7 @@
 #include "clang/Sema/SemaInternal.h"
 #include "TreeTransform.h"
 #include "clang/Sema/DeclSpec.h"
+#include "clang/Sema/Initialization.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Template.h"
 #include "clang/Sema/TemplateDeduction.h"
@@ -58,9 +59,25 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
     Result.addOuterTemplateArguments(Innermost);
   
   DeclContext *Ctx = dyn_cast<DeclContext>(D);
-  if (!Ctx)
+  if (!Ctx) {
     Ctx = D->getDeclContext();
-
+    
+    // If we have a template template parameter with translation unit context,
+    // then we're performing substitution into a default template argument of
+    // this template template parameter before we've constructed the template
+    // that will own this template template parameter. In this case, we
+    // use empty template parameter lists for all of the outer templates
+    // to avoid performing any substitutions.
+    if (Ctx->isTranslationUnit()) {
+      if (TemplateTemplateParmDecl *TTP 
+                                      = dyn_cast<TemplateTemplateParmDecl>(D)) {
+        for (unsigned I = 0, N = TTP->getDepth() + 1; I != N; ++I)
+          Result.addOuterTemplateArguments(0, 0);
+        return Result;
+      }
+    }
+  }
+  
   while (!Ctx->isFileContext()) {
     // Add template arguments from a class template instantiation.
     if (ClassTemplateSpecializationDecl *Spec
@@ -446,10 +463,15 @@ void Sema::PrintInstantiationStack() {
         Diags.Report(Active->PointOfInstantiation, DiagID)
           << Function
           << Active->InstantiationRange;
-      } else {
+      } else if (VarDecl *VD = dyn_cast<VarDecl>(D)) {
         Diags.Report(Active->PointOfInstantiation,
                      diag::note_template_static_data_member_def_here)
-          << cast<VarDecl>(D)
+          << VD
+          << Active->InstantiationRange;
+      } else {
+        Diags.Report(Active->PointOfInstantiation,
+                     diag::note_template_type_alias_instantiation_here)
+          << cast<TypeAliasTemplateDecl>(D)
           << Active->InstantiationRange;
       }
       break;
@@ -785,7 +807,7 @@ bool TemplateInstantiator::AlreadyTransformed(QualType T) {
   if (T.isNull())
     return true;
   
-  if (T->isDependentType() || T->isVariablyModifiedType())
+  if (T->isInstantiationDependentType() || T->isVariablyModifiedType())
     return false;
   
   getSema().MarkDeclarationsReferencedInType(Loc, T);
@@ -918,7 +940,8 @@ TemplateInstantiator::RebuildElaboratedType(SourceLocation KeywordLoc,
     // like it's likely to produce a lot of spurious errors.
     if (Keyword != ETK_None && Keyword != ETK_Typename) {
       TagTypeKind Kind = TypeWithKeyword::getTagTypeKindForKeyword(Keyword);
-      if (!SemaRef.isAcceptableTagRedeclaration(TD, Kind, TagLocation, *Id)) {
+      if (!SemaRef.isAcceptableTagRedeclaration(TD, Kind, /*isDefinition*/false,
+                                                TagLocation, *Id)) {
         SemaRef.Diag(TagLocation, diag::err_use_with_wrong_tag)
           << Id
           << FixItHint::CreateReplacement(SourceRange(TagLocation),
@@ -968,15 +991,15 @@ TemplateName TemplateInstantiator::TransformTemplateName(CXXScopeSpec &SS,
       }
       
       TemplateName Template = Arg.getAsTemplate();
-      assert(!Template.isNull() && Template.getAsTemplateDecl() &&
-             "Wrong kind of template template argument");
-      
+      assert(!Template.isNull() && "Null template template argument");
+
       // We don't ever want to substitute for a qualified template name, since
       // the qualifier is handled separately. So, look through the qualified
       // template name to its underlying declaration.
       if (QualifiedTemplateName *QTN = Template.getAsQualifiedTemplateName())
         Template = TemplateName(QTN->getTemplateDecl());
-          
+
+      Template = getSema().Context.getSubstTemplateTemplateParm(TTP, Template);
       return Template;
     }
   }
@@ -1317,7 +1340,7 @@ TypeSourceInfo *Sema::SubstType(TypeSourceInfo *T,
          "Cannot perform an instantiation without some context on the "
          "instantiation stack");
   
-  if (!T->getType()->isDependentType() && 
+  if (!T->getType()->isInstantiationDependentType() && 
       !T->getType()->isVariablyModifiedType())
     return T;
 
@@ -1336,7 +1359,7 @@ TypeSourceInfo *Sema::SubstType(TypeLoc TL,
   if (TL.getType().isNull())
     return 0;
 
-  if (!TL.getType()->isDependentType() && 
+  if (!TL.getType()->isInstantiationDependentType() && 
       !TL.getType()->isVariablyModifiedType()) {
     // FIXME: Make a copy of the TypeLoc data here, so that we can
     // return a new TypeSourceInfo. Inefficient!
@@ -1365,7 +1388,7 @@ QualType Sema::SubstType(QualType T,
 
   // If T is not a dependent type or a variably-modified type, there
   // is nothing to do.
-  if (!T->isDependentType() && !T->isVariablyModifiedType())
+  if (!T->isInstantiationDependentType() && !T->isVariablyModifiedType())
     return T;
 
   TemplateInstantiator Instantiator(*this, TemplateArgs, Loc, Entity);
@@ -1373,7 +1396,8 @@ QualType Sema::SubstType(QualType T,
 }
 
 static bool NeedsInstantiationAsFunctionType(TypeSourceInfo *T) {
-  if (T->getType()->isDependentType() || T->getType()->isVariablyModifiedType())
+  if (T->getType()->isInstantiationDependentType() || 
+      T->getType()->isVariablyModifiedType())
     return true;
 
   TypeLoc TL = T->getTypeLoc().IgnoreParens();
@@ -1387,7 +1411,7 @@ static bool NeedsInstantiationAsFunctionType(TypeSourceInfo *T) {
     // The parameter's type as written might be dependent even if the
     // decayed type was not dependent.
     if (TypeSourceInfo *TSInfo = P->getTypeSourceInfo())
-      if (TSInfo->getType()->isDependentType())
+      if (TSInfo->getType()->isInstantiationDependentType())
         return true;
 
     // TODO: currently we always rebuild expressions.  When we
@@ -1735,6 +1759,8 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
 
   TemplateDeclInstantiator Instantiator(*this, Instantiation, TemplateArgs);
   llvm::SmallVector<Decl*, 4> Fields;
+  llvm::SmallVector<std::pair<FieldDecl*, FieldDecl*>, 4>
+    FieldsWithMemberInitializers;
   for (RecordDecl::decl_iterator Member = Pattern->decls_begin(),
          MemberEnd = Pattern->decls_end();
        Member != MemberEnd; ++Member) {
@@ -1757,9 +1783,13 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
 
     Decl *NewMember = Instantiator.Visit(*Member);
     if (NewMember) {
-      if (FieldDecl *Field = dyn_cast<FieldDecl>(NewMember))
+      if (FieldDecl *Field = dyn_cast<FieldDecl>(NewMember)) {
         Fields.push_back(Field);
-      else if (NewMember->isInvalidDecl())
+        FieldDecl *OldField = cast<FieldDecl>(*Member);
+        if (OldField->getInClassInitializer())
+          FieldsWithMemberInitializers.push_back(std::make_pair(OldField,
+                                                                Field));
+      } else if (NewMember->isInvalidDecl())
         Invalid = true;
     } else {
       // FIXME: Eventually, a NULL return will mean that one of the
@@ -1773,6 +1803,43 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
               Fields.data(), Fields.size(), SourceLocation(), SourceLocation(),
               0);
   CheckCompletedCXXClass(Instantiation);
+
+  // Attach any in-class member initializers now the class is complete.
+  for (unsigned I = 0, N = FieldsWithMemberInitializers.size(); I != N; ++I) {
+    FieldDecl *OldField = FieldsWithMemberInitializers[I].first;
+    FieldDecl *NewField = FieldsWithMemberInitializers[I].second;
+    Expr *OldInit = OldField->getInClassInitializer();
+    ExprResult NewInit = SubstExpr(OldInit, TemplateArgs);
+
+    // If the initialization is no longer dependent, check it now.
+    if ((OldField->getType()->isDependentType() || OldInit->isTypeDependent())
+        && !NewField->getType()->isDependentType()
+        && !NewInit.get()->isTypeDependent()) {
+      // FIXME: handle list-initialization
+      SourceLocation EqualLoc = NewField->getLocation();
+      NewInit = PerformCopyInitialization(
+        InitializedEntity::InitializeMember(NewField), EqualLoc,
+        NewInit.release());
+
+      if (!NewInit.isInvalid()) {
+        CheckImplicitConversions(NewInit.get(), EqualLoc);
+
+        // C++0x [class.base.init]p7:
+        //   The initialization of each base and member constitutes a
+        //   full-expression.
+        NewInit = MaybeCreateExprWithCleanups(NewInit);
+      }
+    }
+
+    if (NewInit.isInvalid())
+      NewField->setInvalidDecl();
+    else
+      NewField->setInClassInitializer(NewInit.release());
+  }
+
+  if (!FieldsWithMemberInitializers.empty())
+    ActOnFinishDelayedMemberInitializers(Instantiation);
+
   if (Instantiation->isInvalidDecl())
     Invalid = true;
   else {
@@ -2015,7 +2082,7 @@ Sema::InstantiateClassMembers(SourceLocation PointOfInstantiation,
             SuppressNew)
           continue;
         
-        if (Function->hasBody())
+        if (Function->isDefined())
           continue;
 
         if (TSK == TSK_ExplicitInstantiationDefinition) {
@@ -2025,7 +2092,7 @@ Sema::InstantiateClassMembers(SourceLocation PointOfInstantiation,
           //   specialization and is only an explicit instantiation definition 
           //   of members whose definition is visible at the point of 
           //   instantiation.
-          if (!Pattern->hasBody())
+          if (!Pattern->isDefined())
             continue;
         
           Function->setTemplateSpecializationKind(TSK, PointOfInstantiation);

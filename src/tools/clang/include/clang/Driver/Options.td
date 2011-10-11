@@ -112,6 +112,21 @@ def ccc_print_phases : Flag<"-ccc-print-phases">, CCCDebugOpt,
 def ccc_print_bindings : Flag<"-ccc-print-bindings">, CCCDebugOpt,
   HelpText<"Show bindings of tools to actions">;
 
+def ccc_arcmt_check : Flag<"-ccc-arcmt-check">, CCCDriverOpt,
+  HelpText<"Check for ARC migration issues that need manual handling">;
+def ccc_arcmt_modify : Flag<"-ccc-arcmt-modify">, CCCDriverOpt,
+  HelpText<"Apply modifications to files to conform to ARC">;
+def ccc_arrmt_check : Flag<"-ccc-arrmt-check">, Alias<ccc_arcmt_check>;
+def ccc_arrmt_modify : Flag<"-ccc-arrmt-modify">, Alias<ccc_arcmt_modify>;
+def ccc_arcmt_migrate : Separate<"-ccc-arcmt-migrate">, CCCDriverOpt,
+  HelpText<"Apply modifications and produces temporary files that conform to ARC">;
+def ccc_arcmt_migrate_EQ : Joined<"-ccc-arcmt-migrate=">, CCCDriverOpt,
+  Alias<ccc_arcmt_migrate>;
+def arcmt_migrate_report_output : Separate<"-arcmt-migrate-report-output">,
+  HelpText<"Output path for the plist report">;
+def arcmt_migrate_emit_arc_errors : Flag<"-arcmt-migrate-emit-errors">,
+  HelpText<"Emit ARC errors even if the migrator can fix them">;
+
 // Make sure all other -ccc- options are rejected.
 def ccc_ : Joined<"-ccc-">, Group<ccc_Group>, Flags<[Unsupported]>;
 
@@ -238,8 +253,8 @@ def emit_llvm : Flag<"-emit-llvm">,
 def exported__symbols__list : Separate<"-exported_symbols_list">;
 def e : JoinedOrSeparate<"-e">;
 def fPIC : Flag<"-fPIC">, Group<f_Group>;
-def fPIE : Flag<"-fPIE">, Group<f_Group>;
-def fno_PIE : Flag<"-fno-PIE">, Group<f_Group>;
+def fPIE : Flag<"-fPIE">, Group<f_Group>, Flags<[NoArgumentUnused]>;
+def fno_PIE : Flag<"-fno-PIE">, Group<f_Group>, Flags<[NoArgumentUnused]>;
 def faccess_control : Flag<"-faccess-control">, Group<f_Group>;
 def fallow_unsupported : Flag<"-fallow-unsupported">, Group<f_Group>;
 def fapple_kext : Flag<"-fapple-kext">, Group<f_Group>;
@@ -278,6 +293,7 @@ def fdiagnostics_parseable_fixits : Flag<"-fdiagnostics-parseable-fixits">, Grou
 def fdiagnostics_show_option : Flag<"-fdiagnostics-show-option">, Group<f_Group>;
 def fdiagnostics_show_name : Flag<"-fdiagnostics-show-name">, Group<f_Group>;
 def fdiagnostics_show_note_include_stack : Flag<"-fdiagnostics-show-note-include-stack">, Group<f_Group>;
+def fdiagnostics_format_EQ : Joined<"-fdiagnostics-format=">, Group<f_clang_Group>;
 def fdiagnostics_show_category_EQ : Joined<"-fdiagnostics-show-category=">, Group<f_clang_Group>;
 def fdollars_in_identifiers : Flag<"-fdollars-in-identifiers">, Group<f_Group>;
 def fdwarf2_cfi_asm : Flag<"-fdwarf2-cfi-asm">, Group<f_Group>;
@@ -298,6 +314,8 @@ def fno_for_scope : Flag<"-fno-for-scope">, Group<f_Group>;
 
 def ffreestanding : Flag<"-ffreestanding">, Group<f_Group>;
 def fgnu_keywords : Flag<"-fgnu-keywords">, Group<f_Group>;
+def fgnu89_inline : Flag<"-fgnu89-inline">, Group<f_Group>;
+def fno_gnu89_inline : Flag<"-fno-gnu89-inline">, Group<f_Group>;
 def fgnu_runtime : Flag<"-fgnu-runtime">, Group<f_Group>;
 def fheinous_gnu_extensions : Flag<"-fheinous-gnu-extensions">;
 def filelist : Separate<"-filelist">, Flags<[LinkerInput]>;
@@ -379,6 +397,10 @@ def fno_verbose_asm : Flag<"-fno-verbose-asm">, Group<f_Group>;
 def fno_working_directory : Flag<"-fno-working-directory">, Group<f_Group>;
 def fno_wrapv : Flag<"-fno-wrapv">, Group<f_Group>;
 def fno_zero_initialized_in_bss : Flag<"-fno-zero-initialized-in-bss">, Group<f_Group>;
+def fobjc_arc : Flag<"-fobjc-arc">, Group<f_Group>;
+def fno_objc_arc : Flag<"-fno-objc-arc">, Group<f_Group>;
+def fobjc_arc_exceptions : Flag<"-fobjc-arc-exceptions">, Group<f_Group>;
+def fno_objc_arc_exceptions : Flag<"-fno-objc-arc-exceptions">, Group<f_Group>;
 def fobjc_atdefs : Flag<"-fobjc-atdefs">, Group<clang_ignored_f_Group>;
 def fobjc_call_cxx_cdtors : Flag<"-fobjc-call-cxx-cdtors">, Group<clang_ignored_f_Group>;
 def fobjc_default_synthesize_properties : 
@@ -389,6 +411,10 @@ def fobjc_gc_only : Flag<"-fobjc-gc-only">, Group<f_Group>;
 def fobjc_gc : Flag<"-fobjc-gc">, Group<f_Group>;
 def fobjc_legacy_dispatch : Flag<"-fobjc-legacy-dispatch">, Group<f_Group>;
 def fobjc_new_property : Flag<"-fobjc-new-property">, Group<clang_ignored_f_Group>;
+def fobjc_infer_related_result_type : Flag<"-fobjc-infer-related-result-type">, 
+                                      Group<f_Group>;
+def fno_objc_infer_related_result_type : Flag<
+  "-fno-objc-infer-related-result-type">, Group<f_Group>;
 
 // Objective-C ABI options.
 def fobjc_abi_version_EQ : Joined<"-fobjc-abi-version=">, Group<f_Group>;
@@ -402,12 +428,13 @@ def fomit_frame_pointer : Flag<"-fomit-frame-pointer">, Group<f_Group>;
 def fopenmp : Flag<"-fopenmp">, Group<f_Group>;
 def force__cpusubtype__ALL : Flag<"-force_cpusubtype_ALL">;
 def force__flat__namespace : Flag<"-force_flat_namespace">;
+def force__load : Separate<"-force_load">;
 def foutput_class_dir_EQ : Joined<"-foutput-class-dir=">, Group<f_Group>;
 def fpascal_strings : Flag<"-fpascal-strings">, Group<f_Group>;
 def fpch_preprocess : Flag<"-fpch-preprocess">, Group<f_Group>;
 def fpic : Flag<"-fpic">, Group<f_Group>;
-def fpie : Flag<"-fpie">, Group<f_Group>;
-def fno_pie : Flag<"-fno-pie">, Group<f_Group>;
+def fpie : Flag<"-fpie">, Group<f_Group>, Flags<[NoArgumentUnused]>;
+def fno_pie : Flag<"-fno-pie">, Group<f_Group>, Flags<[NoArgumentUnused]>;
 def fprofile_arcs : Flag<"-fprofile-arcs">, Group<f_Group>;
 def fprofile_generate : Flag<"-fprofile-generate">, Group<f_Group>;
 def framework : Separate<"-framework">, Flags<[LinkerInput]>;
@@ -418,6 +445,7 @@ def fshort_enums : Flag<"-fshort-enums">, Group<f_Group>;
 def freorder_blocks : Flag<"-freorder-blocks">, Group<clang_ignored_f_Group>;
 def fshort_wchar : Flag<"-fshort-wchar">, Group<f_Group>;
 def fshow_overloads_EQ : Joined<"-fshow-overloads=">, Group<f_Group>;
+def fshow_column : Flag<"-fshow-column">, Group<f_Group>;
 def fshow_source_location : Flag<"-fshow-source-location">, Group<f_Group>;
 def fspell_checking : Flag<"-fspell-checking">, Group<f_Group>;
 def fsigned_bitfields : Flag<"-fsigned-bitfields">, Group<f_Group>;
@@ -472,6 +500,7 @@ def gused : Joined<"-gused">, Group<g_Group>;
 def g_Flag : Flag<"-g">, Group<g_Group>;
 def g_Joined : Joined<"-g">, Group<g_Group>;
 def headerpad__max__install__names : Joined<"-headerpad_max_install_names">;
+def index_header_map : Flag<"-index-header-map">;
 def idirafter : JoinedOrSeparate<"-idirafter">, Group<clang_i_Group>;
 def iframework : JoinedOrSeparate<"-iframework">, Group<clang_i_Group>;
 def imacros : JoinedOrSeparate<"-imacros">, Group<clang_i_Group>;
@@ -795,8 +824,8 @@ def _specs : Separate<"--specs">, Alias<specs_EQ>;
 def _static : Flag<"--static">, Alias<static>;
 def _std_EQ : Joined<"--std=">, Alias<std_EQ>;
 def _std : Separate<"--std">, Alias<std_EQ>;
-def _stdlib_EQ : Joined<"--stdlib=">, Alias<std_EQ>;
-def _stdlib : Separate<"--stdlib">, Alias<std_EQ>;
+def _stdlib_EQ : Joined<"--stdlib=">, Alias<stdlib_EQ>;
+def _stdlib : Separate<"--stdlib">, Alias<stdlib_EQ>;
 def _sysroot_EQ : Joined<"--sysroot=">;
 def _sysroot : Separate<"--sysroot">, Alias<_sysroot_EQ>;
 def _target_help : Flag<"--target-help">;

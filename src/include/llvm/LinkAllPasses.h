@@ -70,7 +70,7 @@ namespace {
       (void) llvm::createEdgeProfilerPass();
       (void) llvm::createOptimalEdgeProfilerPass();
       (void) llvm::createPathProfilerPass();
-      (void) llvm::createGCOVProfilerPass(true, true);
+      (void) llvm::createGCOVProfilerPass(true, true, false);
       (void) llvm::createFunctionInliningPass();
       (void) llvm::createAlwaysInlinerPass();
       (void) llvm::createGlobalDCEPass();
@@ -97,6 +97,10 @@ namespace {
       (void) llvm::createLowerSwitchPass();
       (void) llvm::createNoAAPass();
       (void) llvm::createNoProfileInfoPass();
+      (void) llvm::createObjCARCAliasAnalysisPass();
+      (void) llvm::createObjCARCExpandPass();
+      (void) llvm::createObjCARCContractPass();
+      (void) llvm::createObjCARCOptPass();
       (void) llvm::createProfileEstimatorPass();
       (void) llvm::createProfileVerifierPass();
       (void) llvm::createPathProfileVerifierPass();

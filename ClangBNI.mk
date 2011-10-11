@@ -23,6 +23,9 @@
 #
 #   Clang_Optimize_Option := ...
 #     The optimization flags to use.
+#
+#   Clang_Linker_Options := ...
+#     The linker flags to use.
 
 # This makefile currently supports the following build targets:
 #
@@ -251,6 +254,7 @@ Common_Configure_Flags = \
 		  $(Assertions_Configure_Flag) \
 		  $(Optimized_Configure_Flag) \
                   --with-optimize-option="$(Clang_Optimize_Option)" \
+                  --with-extra-ld-option="$(Clang_Linker_Options)" \
 		  --without-llvmgcc --without-llvmgxx \
 		  --disable-bindings \
 		  --disable-doxygen
@@ -509,6 +513,19 @@ installsrc:
 	@echo "Installing source..."
 	$(_v) $(MKDIR) "$(SRCROOT)"
 	$(_v) $(PAX) -rw . "$(SRCROOT)"
+	$(_v) if [ ! -z "$(LLVM_SEPARATE_SOURCES)" ]; then \
+		$(MKDIR) "$(SRCROOT)/src"; \
+		rsync -ar "$(LLVM_SEPARATE_SOURCES)/" "$(SRCROOT)/src/"; \
+	fi
+	$(_v) if [ ! -z "$(CLANG_SEPARATE_SOURCES)" ]; then \
+		$(MKDIR) "$(SRCROOT)/src/tools/clang"; \
+		rsync -ar "$(CLANG_SEPARATE_SOURCES)/" "$(SRCROOT)/src/tools/clang/"; \
+	fi
+	$(_v) if [ ! -z "$(COMPILERRT_SEPARATE_SOURCES)" ]; then \
+		$(MKDIR) "$(SRCROOT)/src/projects/compiler-rt"; \
+		rsync -ar "$(COMPILERRT_SEPARATE_SOURCES)/" "$(SRCROOT)/src/projects/compiler-rt/"; \
+	fi
+	$(_v) $(PAX) -rw . "$(SRCROOT)"
 	$(_v) $(FIND) "$(SRCROOT)" $(Find_Cruft) -depth -exec $(RMDIR) "{}" \;
 	$(_v) rm -rf "$(SRCROOT)"/src/test/*/
 	$(_v) rm -rf "$(SRCROOT)"/src/tools/clang/test/*/
@@ -544,6 +561,7 @@ install-clang_final: build-clang
 	./merge-lipo `for arch in $(RC_ARCHS) ; do echo $(OBJROOT)/install-$$arch ; done` $(DSTROOT)
 	$(_v) $(FIND) $(DSTROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
 	$(_v) $(FIND) $(SYMROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
+	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -type f -print | $(XARGS) -n 1 -P $(SYSCTL) dsymutil
 	$(_v) cd $(DSTROOT) && find . -path \*.dSYM/\* -print | cpio -pdml $(SYMROOT)
 	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -P $(SYSCTL) strip -S

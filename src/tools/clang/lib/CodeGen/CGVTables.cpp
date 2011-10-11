@@ -3165,7 +3165,7 @@ CodeGenVTables::CreateVTableInitializer(const CXXRecordDecl *RD,
   }
   
   llvm::ArrayType *ArrayType = llvm::ArrayType::get(Int8PtrTy, NumComponents);
-  return llvm::ConstantArray::get(ArrayType, Inits.data(), Inits.size());
+  return llvm::ConstantArray::get(ArrayType, Inits);
 }
 
 llvm::GlobalVariable *CodeGenVTables::GetAddrOfVTable(const CXXRecordDecl *RD) {
@@ -3175,7 +3175,7 @@ llvm::GlobalVariable *CodeGenVTables::GetAddrOfVTable(const CXXRecordDecl *RD) {
   Out.flush();
   llvm::StringRef Name = OutName.str();
 
-  ComputeVTableRelatedInformation(RD, true);
+  ComputeVTableRelatedInformation(RD, /*VTableRequired=*/true);
   
   const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGM.getLLVMContext());
   llvm::ArrayType *ArrayType = 

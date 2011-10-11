@@ -140,6 +140,11 @@ def femit_coverage_notes : Flag<"-femit-coverage-notes">,
   HelpText<"Emit a gcov coverage notes file when compiling.">;
 def femit_coverage_data: Flag<"-femit-coverage-data">,
   HelpText<"Instrument the program to emit gcov coverage data when run.">;
+def coverage_file : Separate<"-coverage-file">,
+  HelpText<"Emit coverage data to this filename. The extension will be replaced.">;
+def coverage_file_EQ : Joined<"-coverage-file=">, Alias<coverage_file>;
+def fuse_register_sized_bitfield_access: Flag<"-fuse-register-sized-bitfield-access">,
+  HelpText<"Use register sized accesses to bit-fields, when possible.">;
 def relaxed_aliasing : Flag<"-relaxed-aliasing">,
   HelpText<"Turn off Type Based Alias Analysis">;
 def masm_verbose : Flag<"-masm-verbose">,
@@ -154,6 +159,8 @@ def mfloat_abi : Separate<"-mfloat-abi">,
   HelpText<"The float ABI to use">;
 def mlimit_float_precision : Separate<"-mlimit-float-precision">,
   HelpText<"Limit float precision to the given value">;
+def mno_exec_stack : Flag<"-mnoexecstack">,
+  HelpText<"Mark the file as not needing an executable stack">;
 def mno_zero_initialized_in_bss : Flag<"-mno-zero-initialized-in-bss">,
   HelpText<"Do not put zero initialized data in the BSS">;
 def momit_leaf_frame_pointer : Flag<"-momit-leaf-frame-pointer">,
@@ -213,6 +220,8 @@ def diagnostic_log_file : Separate<"-diagnostic-log-file">,
   HelpText<"Filename (or -) to log diagnostics to">;
 def fno_show_column : Flag<"-fno-show-column">,
   HelpText<"Do not include column number on diagnostics">;
+def fshow_column : Flag<"-fshow-column">,
+  HelpText<"Include column number on diagnostics">;
 def fno_show_source_location : Flag<"-fno-show-source-location">,
   HelpText<"Do not include source location information with diagnostics">;
 def fshow_overloads_EQ : Joined<"-fshow-overloads=">,
@@ -242,6 +251,8 @@ def fdiagnostics_show_name : Flag<"-fdiagnostics-show-name">,
   HelpText<"Print diagnostic name">;
 def fdiagnostics_show_option : Flag<"-fdiagnostics-show-option">,
   HelpText<"Print option name with mappable diagnostics">;
+def fdiagnostics_format : Separate<"-fdiagnostics-format">,
+  HelpText<"Change diagnostic formatting to match IDE and command line tools">;
 def fdiagnostics_show_category : Separate<"-fdiagnostics-show-category">,
   HelpText<"Print diagnostic category">;
 def fdiagnostics_show_note_include_stack :
@@ -376,6 +387,19 @@ def create_module : Flag<"-create-module">,
   HelpText<"Create a module definition file">;
 }
 
+def arcmt_check : Flag<"-arcmt-check">,
+  HelpText<"Check for ARC migration issues that need manual handling">;
+def arcmt_modify : Flag<"-arcmt-modify">,
+  HelpText<"Apply modifications to files to conform to ARC">;
+def arcmt_migrate : Flag<"-arcmt-migrate">,
+  HelpText<"Apply modifications and produces temporary files that conform to ARC">;
+def arcmt_migrate_directory : Separate<"-arcmt-migrate-directory">,
+  HelpText<"Directory for temporary files produced during ARC migration">;
+def arcmt_migrate_report_output : Separate<"-arcmt-migrate-report-output">,
+  HelpText<"Output path for the plist report">;
+def arcmt_migrate_emit_arc_errors : Flag<"-arcmt-migrate-emit-errors">,
+  HelpText<"Emit ARC errors even if the migrator can fix them">;
+
 def import_module : Separate<"-import-module">,
   HelpText<"Import a module definition file">;
 
@@ -416,6 +440,8 @@ def fno_assume_sane_operator_new : Flag<"-fno-assume-sane-operator-new">,
   HelpText<"Don't assume that C++'s global operator new can't alias any pointer">;
 def fgnu_keywords : Flag<"-fgnu-keywords">,
   HelpText<"Allow GNU-extension keywords regardless of language standard">;
+def fgnu89_inline : Flag<"-fgnu89-inline">,
+  HelpText<"Use the gnu89 inline semantics">;
 def fno_gnu_keywords : Flag<"-fno-gnu-keywords">,
   HelpText<"Disallow GNU-extension keywords regardless of language standard">;
 def fdollars_in_identifiers : Flag<"-fdollars-in-identifiers">,
@@ -443,6 +469,8 @@ def fhidden_weak_vtables : Flag<"-fhidden-weak-vtables">,
   HelpText<"Generate weak vtables and RTTI with hidden visibility">;
 def std_EQ : Joined<"-std=">,
   HelpText<"Language standard to compile for">;
+def stdlib_EQ : Joined<"-stdlib=">,
+  HelpText<"C++ standard library to use">;
 def fmath_errno : Flag<"-fmath-errno">,
   HelpText<"Require math functions to indicate errors by setting errno">;
 def fms_extensions : Flag<"-fms-extensions">,
@@ -470,6 +498,18 @@ def fconstant_string_class : Separate<"-fconstant-string-class">,
   HelpText<"Specify the class to use for constant Objective-C string objects.">;
 def fno_constant_cfstrings : Flag<"-fno-constant-cfstrings">,
   HelpText<"Enable creation of CodeFoundation-type constant strings">;
+def fobjc_arc : Flag<"-fobjc-arc">,
+  HelpText<"Synthesize retain and release calls for Objective-C pointers">;
+def fobjc_arc_cxxlib_EQ : Joined<"-fobjc-arc-cxxlib=">,
+  HelpText<"Objective-C++ Automatic Reference Counting standard library kind">;
+def fobjc_arc_exceptions : Flag<"-fobjc-arc-exceptions">,
+  HelpText<"Use EH-safe code when synthesizing retains and releases in -fobjc-arc">;
+def fobjc_runtime_has_arc : Flag<"-fobjc-runtime-has-arc">,
+  HelpText<"The target Objective-C runtime provides ARC entrypoints">;
+def fobjc_runtime_has_weak : Flag<"-fobjc-runtime-has-weak">,
+  HelpText<"The target Objective-C runtime supports ARC weak operations">;
+def fobjc_runtime_has_terminate : Flag<"-fobjc-runtime-has-terminate">,
+  HelpText<"The target Objective-C runtime provides an objc_terminate entrypoint">;
 def fobjc_gc : Flag<"-fobjc-gc">,
   HelpText<"Enable Objective-C garbage collection">;
 def fobjc_gc_only : Flag<"-fobjc-gc-only">,
@@ -484,6 +524,10 @@ def print_ivar_layout : Flag<"-print-ivar-layout">,
   HelpText<"Enable Objective-C Ivar layout bitmap print trace">;
 def fobjc_nonfragile_abi : Flag<"-fobjc-nonfragile-abi">,
   HelpText<"enable objective-c's nonfragile abi">;
+def fno_objc_infer_related_result_type : Flag<
+    "-fno-objc-infer-related-result-type">,
+  HelpText<
+    "do not infer Objective-C related result type based on method family">;
 def ftrapv : Flag<"-ftrapv">,
   HelpText<"Trap on integer overflow">;
 def ftrapv_handler : Separate<"-ftrapv-handler">,
@@ -547,8 +591,6 @@ def fdeprecated_macro : Flag<"-fdeprecated-macro">,
   HelpText<"Defines the __DEPRECATED macro">;
 def fno_deprecated_macro : Flag<"-fno-deprecated-macro">,
   HelpText<"Undefines the __DEPRECATED macro">;
-def fno_check_delegating_ctor_cycles : Flag<"-fno-check-delegating-ctor-cycles">,
-  HelpText<"Turns off delegating constructor cycle detection">;
 
 //===----------------------------------------------------------------------===//
 // Header Search Options
@@ -566,6 +608,8 @@ def I : JoinedOrSeparate<"-I">, MetaVarName<"<directory>">,
   HelpText<"Add directory to include search path">;
 def idirafter : JoinedOrSeparate<"-idirafter">, MetaVarName<"<directory>">,
   HelpText<"Add directory to AFTER include search path">;
+def index_header_map : Flag<"-index-header-map">, 
+  HelpText<"Make the next included directory (-I or -F) an indexer header map">;
 def iquote : JoinedOrSeparate<"-iquote">, MetaVarName<"<directory>">,
   HelpText<"Add directory to QUOTE include search path">;
 def cxx_isystem : JoinedOrSeparate<"-cxx-isystem">, MetaVarName<"<directory>">,

@@ -22,6 +22,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
+#include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/StmtObjC.h"
@@ -319,12 +320,41 @@ bool Sema::CheckFunctionCall(FunctionDecl *FDecl, CallExpr *TheCall) {
   }
 
   // Memset/memcpy/memmove handling
-  if (FDecl->getLinkage() == ExternalLinkage &&
-      (!getLangOptions().CPlusPlus || FDecl->isExternC())) {
-    if (FnInfo->isStr("memset") || FnInfo->isStr("memcpy") || 
-        FnInfo->isStr("memmove"))
-      CheckMemsetcpymoveArguments(TheCall, FnInfo);
+  int CMF = -1;
+  switch (FDecl->getBuiltinID()) {
+  case Builtin::BI__builtin_memset:
+  case Builtin::BI__builtin___memset_chk:
+  case Builtin::BImemset:
+    CMF = CMF_Memset;
+    break;
+    
+  case Builtin::BI__builtin_memcpy:
+  case Builtin::BI__builtin___memcpy_chk:
+  case Builtin::BImemcpy:
+    CMF = CMF_Memcpy;
+    break;
+    
+  case Builtin::BI__builtin_memmove:
+  case Builtin::BI__builtin___memmove_chk:
+  case Builtin::BImemmove:
+    CMF = CMF_Memmove;
+    break;
+    
+  default:
+    if (FDecl->getLinkage() == ExternalLinkage &&
+        (!getLangOptions().CPlusPlus || FDecl->isExternC())) {
+      if (FnInfo->isStr("memset"))
+        CMF = CMF_Memset;
+      else if (FnInfo->isStr("memcpy"))
+        CMF = CMF_Memcpy;
+      else if (FnInfo->isStr("memmove"))
+        CMF = CMF_Memmove;
+    }
+    break;
   }
+   
+  if (CMF != -1)
+    CheckMemsetcpymoveArguments(TheCall, CheckedMemoryFunction(CMF), FnInfo);
 
   return false;
 }
@@ -382,18 +412,32 @@ Sema::SemaBuiltinAtomicOverloaded(ExprResult TheCallResult) {
   // casts here.
   // FIXME: We don't allow floating point scalars as input.
   Expr *FirstArg = TheCall->getArg(0);
-  if (!FirstArg->getType()->isPointerType()) {
+  const PointerType *pointerType = FirstArg->getType()->getAs<PointerType>();
+  if (!pointerType) {
     Diag(DRE->getLocStart(), diag::err_atomic_builtin_must_be_pointer)
       << FirstArg->getType() << FirstArg->getSourceRange();
     return ExprError();
   }
 
-  QualType ValType =
-    FirstArg->getType()->getAs<PointerType>()->getPointeeType();
+  QualType ValType = pointerType->getPointeeType();
   if (!ValType->isIntegerType() && !ValType->isAnyPointerType() &&
       !ValType->isBlockPointerType()) {
     Diag(DRE->getLocStart(), diag::err_atomic_builtin_must_be_pointer_intptr)
       << FirstArg->getType() << FirstArg->getSourceRange();
+    return ExprError();
+  }
+
+  switch (ValType.getObjCLifetime()) {
+  case Qualifiers::OCL_None:
+  case Qualifiers::OCL_ExplicitNone:
+    // okay
+    break;
+
+  case Qualifiers::OCL_Weak:
+  case Qualifiers::OCL_Strong:
+  case Qualifiers::OCL_Autoreleasing:
+    Diag(DRE->getLocStart(), diag::err_arc_atomic_ownership)
+      << ValType << FirstArg->getSourceRange();
     return ExprError();
   }
 
@@ -518,7 +562,8 @@ Sema::SemaBuiltinAtomicOverloaded(ExprResult TheCallResult) {
     CastKind Kind = CK_Invalid;
     ExprValueKind VK = VK_RValue;
     CXXCastPath BasePath;
-    Arg = CheckCastTypes(Arg.get()->getSourceRange(), ValType, Arg.take(), Kind, VK, BasePath);
+    Arg = CheckCastTypes(Arg.get()->getLocStart(), Arg.get()->getSourceRange(), 
+                         ValType, Arg.take(), Kind, VK, BasePath);
     if (Arg.isInvalid())
       return ExprError();
 
@@ -1812,38 +1857,114 @@ static bool isDynamicClassType(QualType T) {
   return false;
 }
 
+/// \brief If E is a sizeof expression, returns its argument expression,
+/// otherwise returns NULL.
+static const Expr *getSizeOfExprArg(const Expr* E) {
+  if (const UnaryExprOrTypeTraitExpr *SizeOf =
+      dyn_cast<UnaryExprOrTypeTraitExpr>(E))
+    if (SizeOf->getKind() == clang::UETT_SizeOf && !SizeOf->isArgumentType())
+      return SizeOf->getArgumentExpr()->IgnoreParenImpCasts();
+
+  return 0;
+}
+
+/// \brief If E is a sizeof expression, returns its argument type.
+static QualType getSizeOfArgType(const Expr* E) {
+  if (const UnaryExprOrTypeTraitExpr *SizeOf =
+      dyn_cast<UnaryExprOrTypeTraitExpr>(E))
+    if (SizeOf->getKind() == clang::UETT_SizeOf)
+      return SizeOf->getTypeOfArgument();
+
+  return QualType();
+}
+
 /// \brief Check for dangerous or invalid arguments to memset().
 ///
-/// This issues warnings on known problematic or dangerous or unspecified
+/// This issues warnings on known problematic, dangerous or unspecified
 /// arguments to the standard 'memset', 'memcpy', and 'memmove' function calls.
 ///
 /// \param Call The call expression to diagnose.
 void Sema::CheckMemsetcpymoveArguments(const CallExpr *Call,
-                                       const IdentifierInfo *FnName) {
+                                       CheckedMemoryFunction CMF,
+                                       IdentifierInfo *FnName) {
   // It is possible to have a non-standard definition of memset.  Validate
-  // we have the proper number of arguments, and if not, abort further
-  // checking.
-  if (Call->getNumArgs() != 3)
+  // we have enough arguments, and if not, abort further checking.
+  if (Call->getNumArgs() < 3)
     return;
 
-  unsigned LastArg = FnName->isStr("memset")? 1 : 2;
+  unsigned LastArg = (CMF == CMF_Memset? 1 : 2);
+  const Expr *LenExpr = Call->getArg(2)->IgnoreParenImpCasts();
+
+  // We have special checking when the length is a sizeof expression.
+  QualType SizeOfArgTy = getSizeOfArgType(LenExpr);
+  const Expr *SizeOfArg = getSizeOfExprArg(LenExpr);
+  llvm::FoldingSetNodeID SizeOfArgID;
+
   for (unsigned ArgIdx = 0; ArgIdx != LastArg; ++ArgIdx) {
     const Expr *Dest = Call->getArg(ArgIdx)->IgnoreParenImpCasts();
+    SourceRange ArgRange = Call->getArg(ArgIdx)->getSourceRange();
 
     QualType DestTy = Dest->getType();
     if (const PointerType *DestPtrTy = DestTy->getAs<PointerType>()) {
       QualType PointeeTy = DestPtrTy->getPointeeType();
+
+      // Never warn about void type pointers. This can be used to suppress
+      // false positives.
       if (PointeeTy->isVoidType())
         continue;
 
-      unsigned DiagID = 0;
+      // Catch "memset(p, 0, sizeof(p))" -- needs to be sizeof(*p). Do this by
+      // actually comparing the expressions for equality. Because computing the
+      // expression IDs can be expensive, we only do this if the diagnostic is
+      // enabled.
+      if (SizeOfArg &&
+          Diags.getDiagnosticLevel(diag::warn_sizeof_pointer_expr_memaccess,
+                                   SizeOfArg->getExprLoc())) {
+        // We only compute IDs for expressions if the warning is enabled, and
+        // cache the sizeof arg's ID.
+        if (SizeOfArgID == llvm::FoldingSetNodeID())
+          SizeOfArg->Profile(SizeOfArgID, Context, true);
+        llvm::FoldingSetNodeID DestID;
+        Dest->Profile(DestID, Context, true);
+        if (DestID == SizeOfArgID) {
+          unsigned ActionIdx = 0; // Default is to suggest dereferencing.
+          if (const UnaryOperator *UnaryOp = dyn_cast<UnaryOperator>(Dest))
+            if (UnaryOp->getOpcode() == UO_AddrOf)
+              ActionIdx = 1; // If its an address-of operator, just remove it.
+          if (Context.getTypeSize(PointeeTy) == Context.getCharWidth())
+            ActionIdx = 2; // If the pointee's size is sizeof(char),
+                           // suggest an explicit length.
+          DiagRuntimeBehavior(SizeOfArg->getExprLoc(), Dest,
+                              PDiag(diag::warn_sizeof_pointer_expr_memaccess)
+                                << FnName << ArgIdx << ActionIdx
+                                << Dest->getSourceRange()
+                                << SizeOfArg->getSourceRange());
+          break;
+        }
+      }
+
+      // Also check for cases where the sizeof argument is the exact same
+      // type as the memory argument, and where it points to a user-defined
+      // record type.
+      if (SizeOfArgTy != QualType()) {
+        if (PointeeTy->isRecordType() &&
+            Context.typesAreCompatible(SizeOfArgTy, DestTy)) {
+          DiagRuntimeBehavior(LenExpr->getExprLoc(), Dest,
+                              PDiag(diag::warn_sizeof_pointer_type_memaccess)
+                                << FnName << SizeOfArgTy << ArgIdx
+                                << PointeeTy << Dest->getSourceRange()
+                                << LenExpr->getSourceRange());
+          break;
+        }
+      }
+
+      unsigned DiagID;
+
       // Always complain about dynamic classes.
       if (isDynamicClassType(PointeeTy))
         DiagID = diag::warn_dyn_class_memaccess;
-      // Check the C++11 POD definition regardless of language mode; it is more
-      // relaxed than earlier definitions and we don't want spurious warnings.
-      else if (!PointeeTy->isCXX11PODType())
-        DiagID = diag::warn_non_pod_memaccess;
+      else if (PointeeTy.hasNonTrivialObjCLifetime() && CMF != CMF_Memset)
+        DiagID = diag::warn_arc_object_memaccess;
       else
         continue;
 
@@ -1853,10 +1974,9 @@ void Sema::CheckMemsetcpymoveArguments(const CallExpr *Call,
           << ArgIdx << FnName << PointeeTy 
           << Call->getCallee()->getSourceRange());
 
-      SourceRange ArgRange = Call->getArg(0)->getSourceRange();
       DiagRuntimeBehavior(
         Dest->getExprLoc(), Dest,
-        PDiag(diag::note_non_pod_memaccess_silence)
+        PDiag(diag::note_bad_memaccess_silence)
           << FixItHint::CreateInsertion(ArgRange.getBegin(), "(void*)"));
       break;
     }
@@ -1879,7 +1999,8 @@ Sema::CheckReturnStackAddr(Expr *RetValExp, QualType lhsType,
 
   // Perform checking for returned stack addresses, local blocks,
   // label addresses or references to temporaries.
-  if (lhsType->isPointerType() || lhsType->isBlockPointerType()) {
+  if (lhsType->isPointerType() ||
+      (!getLangOptions().ObjCAutoRefCount && lhsType->isBlockPointerType())) {
     stackE = EvalAddr(RetValExp, refVars);
   } else if (lhsType->isReferenceType()) {
     stackE = EvalVal(RetValExp, refVars);
@@ -2050,7 +2171,8 @@ static Expr *EvalAddr(Expr *E, llvm::SmallVectorImpl<DeclRefExpr *> &refVars) {
   // pointer values, and pointer-to-pointer conversions.
   case Stmt::ImplicitCastExprClass:
   case Stmt::CStyleCastExprClass:
-  case Stmt::CXXFunctionalCastExprClass: {
+  case Stmt::CXXFunctionalCastExprClass:
+  case Stmt::ObjCBridgedCastExprClass: {
     Expr* SubExpr = cast<CastExpr>(E)->getSubExpr();
     QualType T = SubExpr->getType();
 
@@ -2083,6 +2205,14 @@ static Expr *EvalAddr(Expr *E, llvm::SmallVectorImpl<DeclRefExpr *> &refVars) {
         return NULL;
   }
 
+  case Stmt::MaterializeTemporaryExprClass:
+    if (Expr *Result = EvalAddr(
+                         cast<MaterializeTemporaryExpr>(E)->GetTemporaryExpr(),
+                                refVars))
+      return Result;
+      
+    return E;
+      
   // Everything else: we simply don't reason about them.
   default:
     return NULL;
@@ -2183,6 +2313,14 @@ do {
 
     return EvalVal(M->getBase(), refVars);
   }
+
+  case Stmt::MaterializeTemporaryExprClass:
+    if (Expr *Result = EvalVal(
+                          cast<MaterializeTemporaryExpr>(E)->GetTemporaryExpr(),
+                               refVars))
+      return Result;
+      
+    return E;
 
   default:
     // Check that we don't return or take the address of a reference to a
@@ -2376,7 +2514,7 @@ IntRange GetValueRange(ASTContext &C, APValue &result, QualType Ty,
   // the sign right on this one case.  It would be nice if APValue
   // preserved this.
   assert(result.isLValue());
-  return IntRange(MaxWidth, Ty->isUnsignedIntegerType());
+  return IntRange(MaxWidth, Ty->isUnsignedIntegerOrEnumerationType());
 }
 
 /// Pseudo-evaluate the given integer expression, estimating the
@@ -2550,7 +2688,8 @@ IntRange GetExprRange(ASTContext &C, Expr *E, unsigned MaxWidth) {
     llvm::APSInt BitWidthAP = BitField->getBitWidth()->EvaluateAsInt(C);
     unsigned BitWidth = BitWidthAP.getZExtValue();
 
-    return IntRange(BitWidth, BitField->getType()->isUnsignedIntegerType());
+    return IntRange(BitWidth, 
+                    BitField->getType()->isUnsignedIntegerOrEnumerationType());
   }
 
   return IntRange::forValueOfType(C, E->getType());
@@ -2900,6 +3039,11 @@ void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
         return;
       return DiagnoseImpCast(S, E, T, CC, diag::warn_impcast_vector_scalar);
     }
+    
+    // If the vector cast is cast between two vectors of the same size, it is
+    // a bitcast, not a conversion.
+    if (S.Context.getTypeSize(Source) == S.Context.getTypeSize(Target))
+      return;
 
     Source = cast<VectorType>(Source)->getElementType().getTypePtr();
     Target = cast<VectorType>(Target)->getElementType().getTypePtr();
@@ -2967,6 +3111,13 @@ void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
   if (!Source->isIntegerType() || !Target->isIntegerType())
     return;
 
+  if ((E->isNullPointerConstant(S.Context, Expr::NPC_ValueDependentIsNotNull)
+           == Expr::NPCK_GNUNull) && Target->isIntegerType()) {
+    S.Diag(E->getExprLoc(), diag::warn_impcast_null_pointer_to_integer)
+        << E->getSourceRange() << clang::SourceRange(CC);
+    return;
+  }
+
   IntRange SourceRange = GetExprRange(S.Context, E);
   IntRange TargetRange = IntRange::forTargetOfCanonicalType(S.Context, Target);
 
@@ -2987,9 +3138,7 @@ void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
       return;
     }
 
-    // People want to build with -Wshorten-64-to-32 and not -Wconversion
-    // and by god we'll let them.
-    
+    // People want to build with -Wshorten-64-to-32 and not -Wconversion.
     if (isFromSystemMacro(S, CC))
       return;
     
@@ -3352,5 +3501,270 @@ void Sema::CheckArrayAccess(const Expr *expr) {
       default:
         return;
     }
+  }
+}
+
+//===--- CHECK: Objective-C retain cycles ----------------------------------//
+
+namespace {
+  struct RetainCycleOwner {
+    RetainCycleOwner() : Variable(0), Indirect(false) {}
+    VarDecl *Variable;
+    SourceRange Range;
+    SourceLocation Loc;
+    bool Indirect;
+
+    void setLocsFrom(Expr *e) {
+      Loc = e->getExprLoc();
+      Range = e->getSourceRange();
+    }
+  };
+}
+
+/// Consider whether capturing the given variable can possibly lead to
+/// a retain cycle.
+static bool considerVariable(VarDecl *var, Expr *ref, RetainCycleOwner &owner) {
+  // In ARC, it's captured strongly iff the variable has __strong
+  // lifetime.  In MRR, it's captured strongly if the variable is
+  // __block and has an appropriate type.
+  if (var->getType().getObjCLifetime() != Qualifiers::OCL_Strong)
+    return false;
+
+  owner.Variable = var;
+  owner.setLocsFrom(ref);
+  return true;
+}
+
+static bool findRetainCycleOwner(Expr *e, RetainCycleOwner &owner) {
+  while (true) {
+    e = e->IgnoreParens();
+    if (CastExpr *cast = dyn_cast<CastExpr>(e)) {
+      switch (cast->getCastKind()) {
+      case CK_BitCast:
+      case CK_LValueBitCast:
+      case CK_LValueToRValue:
+      case CK_ObjCReclaimReturnedObject:
+        e = cast->getSubExpr();
+        continue;
+
+      case CK_GetObjCProperty: {
+        // Bail out if this isn't a strong explicit property.
+        const ObjCPropertyRefExpr *pre = cast->getSubExpr()->getObjCProperty();
+        if (pre->isImplicitProperty()) return false;
+        ObjCPropertyDecl *property = pre->getExplicitProperty();
+        if (!(property->getPropertyAttributes() &
+              (ObjCPropertyDecl::OBJC_PR_retain |
+               ObjCPropertyDecl::OBJC_PR_copy |
+               ObjCPropertyDecl::OBJC_PR_strong)) &&
+            !(property->getPropertyIvarDecl() &&
+              property->getPropertyIvarDecl()->getType()
+                .getObjCLifetime() == Qualifiers::OCL_Strong))
+          return false;
+
+        owner.Indirect = true;
+        e = const_cast<Expr*>(pre->getBase());
+        continue;
+      }
+        
+      default:
+        return false;
+      }
+    }
+
+    if (ObjCIvarRefExpr *ref = dyn_cast<ObjCIvarRefExpr>(e)) {
+      ObjCIvarDecl *ivar = ref->getDecl();
+      if (ivar->getType().getObjCLifetime() != Qualifiers::OCL_Strong)
+        return false;
+
+      // Try to find a retain cycle in the base.
+      if (!findRetainCycleOwner(ref->getBase(), owner))
+        return false;
+
+      if (ref->isFreeIvar()) owner.setLocsFrom(ref);
+      owner.Indirect = true;
+      return true;
+    }
+
+    if (DeclRefExpr *ref = dyn_cast<DeclRefExpr>(e)) {
+      VarDecl *var = dyn_cast<VarDecl>(ref->getDecl());
+      if (!var) return false;
+      return considerVariable(var, ref, owner);
+    }
+
+    if (BlockDeclRefExpr *ref = dyn_cast<BlockDeclRefExpr>(e)) {
+      owner.Variable = ref->getDecl();
+      owner.setLocsFrom(ref);
+      return true;
+    }
+
+    if (MemberExpr *member = dyn_cast<MemberExpr>(e)) {
+      if (member->isArrow()) return false;
+
+      // Don't count this as an indirect ownership.
+      e = member->getBase();
+      continue;
+    }
+
+    // Array ivars?
+
+    return false;
+  }
+}
+
+namespace {
+  struct FindCaptureVisitor : EvaluatedExprVisitor<FindCaptureVisitor> {
+    FindCaptureVisitor(ASTContext &Context, VarDecl *variable)
+      : EvaluatedExprVisitor<FindCaptureVisitor>(Context),
+        Variable(variable), Capturer(0) {}
+
+    VarDecl *Variable;
+    Expr *Capturer;
+
+    void VisitDeclRefExpr(DeclRefExpr *ref) {
+      if (ref->getDecl() == Variable && !Capturer)
+        Capturer = ref;
+    }
+
+    void VisitBlockDeclRefExpr(BlockDeclRefExpr *ref) {
+      if (ref->getDecl() == Variable && !Capturer)
+        Capturer = ref;
+    }
+
+    void VisitObjCIvarRefExpr(ObjCIvarRefExpr *ref) {
+      if (Capturer) return;
+      Visit(ref->getBase());
+      if (Capturer && ref->isFreeIvar())
+        Capturer = ref;
+    }
+
+    void VisitBlockExpr(BlockExpr *block) {
+      // Look inside nested blocks 
+      if (block->getBlockDecl()->capturesVariable(Variable))
+        Visit(block->getBlockDecl()->getBody());
+    }
+  };
+}
+
+/// Check whether the given argument is a block which captures a
+/// variable.
+static Expr *findCapturingExpr(Sema &S, Expr *e, RetainCycleOwner &owner) {
+  assert(owner.Variable && owner.Loc.isValid());
+
+  e = e->IgnoreParenCasts();
+  BlockExpr *block = dyn_cast<BlockExpr>(e);
+  if (!block || !block->getBlockDecl()->capturesVariable(owner.Variable))
+    return 0;
+
+  FindCaptureVisitor visitor(S.Context, owner.Variable);
+  visitor.Visit(block->getBlockDecl()->getBody());
+  return visitor.Capturer;
+}
+
+static void diagnoseRetainCycle(Sema &S, Expr *capturer,
+                                RetainCycleOwner &owner) {
+  assert(capturer);
+  assert(owner.Variable && owner.Loc.isValid());
+
+  S.Diag(capturer->getExprLoc(), diag::warn_arc_retain_cycle)
+    << owner.Variable << capturer->getSourceRange();
+  S.Diag(owner.Loc, diag::note_arc_retain_cycle_owner)
+    << owner.Indirect << owner.Range;
+}
+
+/// Check for a keyword selector that starts with the word 'add' or
+/// 'set'.
+static bool isSetterLikeSelector(Selector sel) {
+  if (sel.isUnarySelector()) return false;
+
+  llvm::StringRef str = sel.getNameForSlot(0);
+  while (!str.empty() && str.front() == '_') str = str.substr(1);
+  if (str.startswith("set") || str.startswith("add"))
+    str = str.substr(3);
+  else
+    return false;
+
+  if (str.empty()) return true;
+  return !islower(str.front());
+}
+
+/// Check a message send to see if it's likely to cause a retain cycle.
+void Sema::checkRetainCycles(ObjCMessageExpr *msg) {
+  // Only check instance methods whose selector looks like a setter.
+  if (!msg->isInstanceMessage() || !isSetterLikeSelector(msg->getSelector()))
+    return;
+
+  // Try to find a variable that the receiver is strongly owned by.
+  RetainCycleOwner owner;
+  if (msg->getReceiverKind() == ObjCMessageExpr::Instance) {
+    if (!findRetainCycleOwner(msg->getInstanceReceiver(), owner))
+      return;
+  } else {
+    assert(msg->getReceiverKind() == ObjCMessageExpr::SuperInstance);
+    owner.Variable = getCurMethodDecl()->getSelfDecl();
+    owner.Loc = msg->getSuperLoc();
+    owner.Range = msg->getSuperLoc();
+  }
+
+  // Check whether the receiver is captured by any of the arguments.
+  for (unsigned i = 0, e = msg->getNumArgs(); i != e; ++i)
+    if (Expr *capturer = findCapturingExpr(*this, msg->getArg(i), owner))
+      return diagnoseRetainCycle(*this, capturer, owner);
+}
+
+/// Check a property assign to see if it's likely to cause a retain cycle.
+void Sema::checkRetainCycles(Expr *receiver, Expr *argument) {
+  RetainCycleOwner owner;
+  if (!findRetainCycleOwner(receiver, owner))
+    return;
+
+  if (Expr *capturer = findCapturingExpr(*this, argument, owner))
+    diagnoseRetainCycle(*this, capturer, owner);
+}
+
+bool Sema::checkUnsafeAssigns(SourceLocation Loc,
+                              QualType LHS, Expr *RHS) {
+  Qualifiers::ObjCLifetime LT = LHS.getObjCLifetime();
+  if (LT != Qualifiers::OCL_Weak && LT != Qualifiers::OCL_ExplicitNone)
+    return false;
+  // strip off any implicit cast added to get to the one arc-specific
+  while (ImplicitCastExpr *cast = dyn_cast<ImplicitCastExpr>(RHS)) {
+    if (cast->getCastKind() == CK_ObjCConsumeObject) {
+      Diag(Loc, diag::warn_arc_retained_assign)
+        << (LT == Qualifiers::OCL_ExplicitNone) 
+        << RHS->getSourceRange();
+      return true;
+    }
+    RHS = cast->getSubExpr();
+  }
+  return false;
+}
+
+void Sema::checkUnsafeExprAssigns(SourceLocation Loc,
+                              Expr *LHS, Expr *RHS) {
+  QualType LHSType = LHS->getType();
+  if (checkUnsafeAssigns(Loc, LHSType, RHS))
+    return;
+  Qualifiers::ObjCLifetime LT = LHSType.getObjCLifetime();
+  // FIXME. Check for other life times.
+  if (LT != Qualifiers::OCL_None)
+    return;
+  
+  if (ObjCPropertyRefExpr *PRE = dyn_cast<ObjCPropertyRefExpr>(LHS)) {
+    if (PRE->isImplicitProperty())
+      return;
+    const ObjCPropertyDecl *PD = PRE->getExplicitProperty();
+    if (!PD)
+      return;
+    
+    unsigned Attributes = PD->getPropertyAttributes();
+    if (Attributes & ObjCPropertyDecl::OBJC_PR_assign)
+      while (ImplicitCastExpr *cast = dyn_cast<ImplicitCastExpr>(RHS)) {
+        if (cast->getCastKind() == CK_ObjCConsumeObject) {
+          Diag(Loc, diag::warn_arc_retained_property_assign)
+          << RHS->getSourceRange();
+          return;
+        }
+        RHS = cast->getSubExpr();
+      }
   }
 }

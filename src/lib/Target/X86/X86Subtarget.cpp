@@ -7,21 +7,25 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements the X86 specific subclass of TargetSubtarget.
+// This file implements the X86 specific subclass of TargetSubtargetInfo.
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "subtarget"
 #include "X86Subtarget.h"
 #include "X86InstrInfo.h"
-#include "X86GenSubtarget.inc"
 #include "llvm/GlobalValue.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetOptions.h"
 #include "llvm/ADT/SmallVector.h"
+
+#define GET_SUBTARGETINFO_CTOR
+#define GET_SUBTARGETINFO_MC_DESC
+#define GET_SUBTARGETINFO_TARGET_DESC
+#include "X86GenSubtargetInfo.inc"
+
 using namespace llvm;
 
 #if defined(_MSC_VER)
@@ -265,6 +269,7 @@ void X86Subtarget::AutoDetectSubtargetFeatures() {
 
   HasCLMUL = IsIntel && ((ECX >> 1) & 0x1);
   HasFMA3  = IsIntel && ((ECX >> 12) & 0x1);
+  HasPOPCNT = IsIntel && ((ECX >> 23) & 0x1);
   HasAES   = IsIntel && ((ECX >> 25) & 0x1);
 
   if (IsIntel || IsAMD) {
@@ -284,9 +289,11 @@ void X86Subtarget::AutoDetectSubtargetFeatures() {
   }
 }
 
-X86Subtarget::X86Subtarget(const std::string &TT, const std::string &FS, 
-                           bool is64Bit)
-  : PICStyle(PICStyles::None)
+X86Subtarget::X86Subtarget(const std::string &TT, const std::string &CPU,
+                           const std::string &FS, 
+                           bool is64Bit, unsigned StackAlignOverride)
+  : X86GenSubtargetInfo()
+  , PICStyle(PICStyles::None)
   , X86SSELevel(NoMMXSSE)
   , X863DNowLevel(NoThreeDNow)
   , HasCMov(false)
@@ -307,15 +314,13 @@ X86Subtarget::X86Subtarget(const std::string &TT, const std::string &FS,
   , TargetTriple(TT)
   , Is64Bit(is64Bit) {
 
-  // default to hard float ABI
-  if (FloatABIType == FloatABI::Default)
-    FloatABIType = FloatABI::Hard;
-    
   // Determine default and user specified characteristics
-  if (!FS.empty()) {
+  if (!CPU.empty() || !FS.empty()) {
     // If feature string is not empty, parse features string.
-    std::string CPU = sys::getHostCPUName();
-    ParseSubtargetFeatures(FS, CPU);
+    std::string CPUName = CPU;
+    if (CPUName.empty())
+      CPUName = sys::getHostCPUName();
+    ParseSubtargetFeatures(FS, CPUName);
     // All X86-64 CPUs also have SSE2, however user might request no SSE via 
     // -mattr, so don't force SSELevel here.
     if (HasAVX)
@@ -345,33 +350,9 @@ X86Subtarget::X86Subtarget(const std::string &TT, const std::string &FS,
 
   // Stack alignment is 16 bytes on Darwin, FreeBSD, Linux and Solaris (both
   // 32 and 64 bit) and for all 64-bit targets.
-  if (isTargetDarwin() || isTargetFreeBSD() || isTargetLinux() ||
-      isTargetSolaris() || Is64Bit)
+  if (StackAlignOverride)
+    stackAlignment = StackAlignOverride;
+  else if (isTargetDarwin() || isTargetFreeBSD() || isTargetLinux() ||
+           isTargetSolaris() || Is64Bit)
     stackAlignment = 16;
-
-  if (StackAlignment)
-    stackAlignment = StackAlignment;
-}
-
-/// IsCalleePop - Determines whether the callee is required to pop its
-/// own arguments. Callee pop is necessary to support tail calls.
-bool X86Subtarget::IsCalleePop(bool IsVarArg,
-                               CallingConv::ID CallingConv) const {
-  if (IsVarArg)
-    return false;
-
-  switch (CallingConv) {
-  default:
-    return false;
-  case CallingConv::X86_StdCall:
-    return !is64Bit();
-  case CallingConv::X86_FastCall:
-    return !is64Bit();
-  case CallingConv::X86_ThisCall:
-    return !is64Bit();
-  case CallingConv::Fast:
-    return GuaranteedTailCallOpt;
-  case CallingConv::GHC:
-    return GuaranteedTailCallOpt;
-  }
 }

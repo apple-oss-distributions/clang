@@ -1,10 +1,12 @@
 clang_CXCursorSet_contains
 clang_CXCursorSet_insert
 clang_CXXMethod_isStatic
+clang_CXXMethod_isVirtual
 clang_annotateTokens
 clang_codeCompleteAt
 clang_codeCompleteGetDiagnostic
 clang_codeCompleteGetNumDiagnostics
+clang_codeCompleteGetContexts
 clang_constructUSR_ObjCCategory
 clang_constructUSR_ObjCClass
 clang_constructUSR_ObjCIvar
@@ -134,3 +136,7 @@ clang_toggleCrashRecovery
 clang_tokenize
 clang_visitChildren
 clang_visitChildrenWithBlock
+clang_getRemappings
+clang_remap_getNumFiles
+clang_remap_getFilenames
+clang_remap_dispose

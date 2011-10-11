@@ -57,8 +57,6 @@ FunctionPass *llvm::createRegisterAllocator(CodeGenOpt::Level OptLevel) {
 
   // This forces linking of the linear scan register allocator,
   // so -regalloc=linearscan still works in clang.
-  if (Ctor == createGreedyRegisterAllocator)
-    return createGreedyRegisterAllocator();
   if (Ctor == createLinearScanRegisterAllocator)
     return createLinearScanRegisterAllocator();
 
@@ -70,6 +68,6 @@ FunctionPass *llvm::createRegisterAllocator(CodeGenOpt::Level OptLevel) {
   case CodeGenOpt::None:
     return createFastRegisterAllocator();
   default:
-    return createLinearScanRegisterAllocator();
+    return createGreedyRegisterAllocator();
   }
 }

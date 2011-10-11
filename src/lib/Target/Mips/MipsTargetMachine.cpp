@@ -34,12 +34,14 @@ extern "C" void LLVMInitializeMipsTarget() {
 // an easier handling.
 // Using CodeModel::Large enables different CALL behavior.
 MipsTargetMachine::
-MipsTargetMachine(const Target &T, const std::string &TT, const std::string &FS,
+MipsTargetMachine(const Target &T, const std::string &TT,
+                  const std::string &CPU, const std::string &FS,
                   bool isLittle=false):
   LLVMTargetMachine(T, TT),
-  Subtarget(TT, FS, isLittle),
-  DataLayout(isLittle ? std::string("e-p:32:32:32-i8:8:32-i16:16:32-n32") :
-                        std::string("E-p:32:32:32-i8:8:32-i16:16:32-n32")),
+  Subtarget(TT, CPU, FS, isLittle),
+  DataLayout(isLittle ? 
+             std::string("e-p:32:32:32-i8:8:32-i16:16:32-i64:64:64-n32") :
+             std::string("E-p:32:32:32-i8:8:32-i16:16:32-i64:64:64-n32")),
   InstrInfo(*this),
   FrameLowering(Subtarget),
   TLInfo(*this), TSInfo(*this) {
@@ -54,8 +56,8 @@ MipsTargetMachine(const Target &T, const std::string &TT, const std::string &FS,
 
 MipselTargetMachine::
 MipselTargetMachine(const Target &T, const std::string &TT,
-                    const std::string &FS) :
-  MipsTargetMachine(T, TT, FS, true) {}
+                    const std::string &CPU, const std::string &FS) :
+  MipsTargetMachine(T, TT, CPU, FS, true) {}
 
 // Install an instruction selector pass using
 // the ISelDag to gen Mips code.
@@ -73,6 +75,12 @@ bool MipsTargetMachine::
 addPreEmitPass(PassManagerBase &PM, CodeGenOpt::Level OptLevel)
 {
   PM.add(createMipsDelaySlotFillerPass(*this));
+  return true;
+}
+
+bool MipsTargetMachine::
+addPreRegAlloc(PassManagerBase &PM, CodeGenOpt::Level OptLevel) {
+  PM.add(createMipsEmitGPRestorePass(*this));
   return true;
 }
 

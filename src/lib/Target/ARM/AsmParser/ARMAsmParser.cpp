@@ -15,6 +15,7 @@
 #include "llvm/MC/MCParser/MCAsmLexer.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCParser/MCParsedAsmOperand.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCExpr.h"
@@ -349,6 +350,22 @@ public:
   bool isCondCode() const { return Kind == CondCode; }
   bool isCCOut() const { return Kind == CCOut; }
   bool isImm() const { return Kind == Immediate; }
+  bool isImm0_255() const {
+    if (Kind != Immediate)
+      return false;
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(getImm());
+    if (!CE) return false;
+    int64_t Value = CE->getValue();
+    return Value >= 0 && Value < 256;
+  }
+  bool isT2SOImm() const {
+    if (Kind != Immediate)
+      return false;
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(getImm());
+    if (!CE) return false;
+    int64_t Value = CE->getValue();
+    return ARM_AM::getT2SOImmVal(Value) != -1;
+  }
   bool isReg() const { return Kind == Register; }
   bool isRegList() const { return Kind == RegisterList; }
   bool isDPRRegList() const { return Kind == DPRRegisterList; }
@@ -510,6 +527,16 @@ public:
   }
 
   void addImmOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    addExpr(Inst, getImm());
+  }
+
+  void addImm0_255Operands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    addExpr(Inst, getImm());
+  }
+
+  void addT2SOImmOperands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     addExpr(Inst, getImm());
   }
@@ -1240,6 +1267,8 @@ tryParseMSRMaskOperand(SmallVectorImpl<MCParsedAsmOperand*> &Operands) {
         FlagsVal = 0; // No flag
     }
   } else if (SpecReg == "cpsr" || SpecReg == "spsr") {
+    if (Flags == "all") // cpsr_all is an alias for cpsr_fc
+      Flags = "fc";
     for (int i = 0, e = Flags.size(); i != e; ++i) {
       unsigned Flag = StringSwitch<unsigned>(Flags.substr(i, 1))
       .Case("c", 1)
@@ -1758,7 +1787,7 @@ static StringRef SplitMnemonic(StringRef Mnemonic,
       Mnemonic == "vcle" ||
       (Mnemonic == "smlal" || Mnemonic == "umaal" || Mnemonic == "umlal" ||
        Mnemonic == "vabal" || Mnemonic == "vmlal" || Mnemonic == "vpadal" ||
-       Mnemonic == "vqdmlal"))
+       Mnemonic == "vqdmlal" || Mnemonic == "bics"))
     return Mnemonic;
 
   // First, split out any predication code.
@@ -1766,7 +1795,9 @@ static StringRef SplitMnemonic(StringRef Mnemonic,
     .Case("eq", ARMCC::EQ)
     .Case("ne", ARMCC::NE)
     .Case("hs", ARMCC::HS)
+    .Case("cs", ARMCC::HS)
     .Case("lo", ARMCC::LO)
+    .Case("cc", ARMCC::LO)
     .Case("mi", ARMCC::MI)
     .Case("pl", ARMCC::PL)
     .Case("vs", ARMCC::VS)
@@ -1821,16 +1852,18 @@ static StringRef SplitMnemonic(StringRef Mnemonic,
 void ARMAsmParser::
 GetMnemonicAcceptInfo(StringRef Mnemonic, bool &CanAcceptCarrySet,
                       bool &CanAcceptPredicationCode) {
+  bool isThumbOne = TM.getSubtarget<ARMSubtarget>().isThumb1Only();
   bool isThumb = TM.getSubtarget<ARMSubtarget>().isThumb();
 
   if (Mnemonic == "and" || Mnemonic == "lsl" || Mnemonic == "lsr" ||
       Mnemonic == "rrx" || Mnemonic == "ror" || Mnemonic == "sub" ||
       Mnemonic == "smull" || Mnemonic == "add" || Mnemonic == "adc" ||
       Mnemonic == "mul" || Mnemonic == "bic" || Mnemonic == "asr" ||
-      Mnemonic == "umlal" || Mnemonic == "orr" || Mnemonic == "mov" ||
+      Mnemonic == "umlal" || Mnemonic == "orr" || Mnemonic == "mvn" ||
       Mnemonic == "rsb" || Mnemonic == "rsc" || Mnemonic == "orn" ||
       Mnemonic == "sbc" || Mnemonic == "mla" || Mnemonic == "umull" ||
-      Mnemonic == "eor" || Mnemonic == "smlal" || Mnemonic == "mvn") {
+      Mnemonic == "eor" || Mnemonic == "smlal" ||
+      (Mnemonic == "mov" && !isThumbOne)) {
     CanAcceptCarrySet = true;
   } else {
     CanAcceptCarrySet = false;
@@ -2099,14 +2132,28 @@ bool ARMAsmParser::ParseDirectiveThumb(SMLoc L) {
 /// ParseDirectiveThumbFunc
 ///  ::= .thumbfunc symbol_name
 bool ARMAsmParser::ParseDirectiveThumbFunc(SMLoc L) {
-  const AsmToken &Tok = Parser.getTok();
-  if (Tok.isNot(AsmToken::Identifier) && Tok.isNot(AsmToken::String))
-    return Error(L, "unexpected token in .thumb_func directive");
-  StringRef Name = Tok.getString();
-  Parser.Lex(); // Consume the identifier token.
+  const MCAsmInfo &MAI = getParser().getStreamer().getContext().getAsmInfo();
+  bool isMachO = MAI.hasSubsectionsViaSymbols();
+  StringRef Name;
+
+  // Darwin asm has function name after .thumb_func direction
+  // ELF doesn't
+  if (isMachO) {
+    const AsmToken &Tok = Parser.getTok();
+    if (Tok.isNot(AsmToken::Identifier) && Tok.isNot(AsmToken::String))
+      return Error(L, "unexpected token in .thumb_func directive");
+    Name = Tok.getString();
+    Parser.Lex(); // Consume the identifier token.
+  }
+
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return Error(L, "unexpected token in directive");
   Parser.Lex();
+
+  // FIXME: assuming function name will be the line following .thumb_func
+  if (!isMachO) {
+    Name = Parser.getTok().getString();
+  }
 
   // Mark symbol as a thumb symbol.
   MCSymbol *Func = getParser().getContext().GetOrCreateSymbol(Name);

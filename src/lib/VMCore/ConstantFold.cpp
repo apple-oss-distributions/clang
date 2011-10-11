@@ -559,7 +559,7 @@ Constant *llvm::ConstantFoldCastInstruction(unsigned opc, Constant *V,
       for (unsigned i = 0, e = CV->getType()->getNumElements(); i != e; ++i)
         res.push_back(ConstantExpr::getCast(opc,
                                             CV->getOperand(i), DstEltTy));
-      return ConstantVector::get(DestVecTy, res);
+      return ConstantVector::get(res);
     }
 
   // We actually have to do a cast now. Perform the cast according to the
@@ -730,9 +730,12 @@ Constant *llvm::ConstantFoldSelectInstruction(Constant *Cond,
   }
 
 
+  if (isa<UndefValue>(Cond)) {
+    if (isa<UndefValue>(V1)) return V1;
+    return V2;
+  }
   if (isa<UndefValue>(V1)) return V2;
   if (isa<UndefValue>(V2)) return V1;
-  if (isa<UndefValue>(Cond)) return V1;
   if (V1 == V2) return V1;
 
   if (ConstantExpr *TrueVal = dyn_cast<ConstantExpr>(V1)) {
@@ -942,7 +945,7 @@ Constant *llvm::ConstantFoldInsertValueInstruction(Constant *Agg,
     }
     
     if (const StructType* ST = dyn_cast<StructType>(AggTy))
-      return ConstantStruct::get(ST->getContext(), Ops, ST->isPacked());
+      return ConstantStruct::get(ST, Ops);
     return ConstantArray::get(cast<ArrayType>(AggTy), Ops);
   }
   
@@ -973,7 +976,7 @@ Constant *llvm::ConstantFoldInsertValueInstruction(Constant *Agg,
     }
     
     if (const StructType *ST = dyn_cast<StructType>(AggTy))
-      return ConstantStruct::get(ST->getContext(), Ops, ST->isPacked());
+      return ConstantStruct::get(ST, Ops);
     return ConstantArray::get(cast<ArrayType>(AggTy), Ops);
   }
   
@@ -988,7 +991,7 @@ Constant *llvm::ConstantFoldInsertValueInstruction(Constant *Agg,
     }
     
     if (const StructType* ST = dyn_cast<StructType>(Agg->getType()))
-      return ConstantStruct::get(ST->getContext(), Ops, ST->isPacked());
+      return ConstantStruct::get(ST, Ops);
     return ConstantArray::get(cast<ArrayType>(Agg->getType()), Ops);
   }
 
@@ -1014,20 +1017,38 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
     case Instruction::Add:
     case Instruction::Sub:
       return UndefValue::get(C1->getType());
-    case Instruction::Mul:
     case Instruction::And:
+      if (isa<UndefValue>(C1) && isa<UndefValue>(C2)) // undef & undef -> undef
+        return C1;
+      return Constant::getNullValue(C1->getType());   // undef & X -> 0
+    case Instruction::Mul: {
+      ConstantInt *CI;
+      // X * undef -> undef   if X is odd or undef
+      if (((CI = dyn_cast<ConstantInt>(C1)) && CI->getValue()[0]) ||
+          ((CI = dyn_cast<ConstantInt>(C2)) && CI->getValue()[0]) ||
+          (isa<UndefValue>(C1) && isa<UndefValue>(C2)))
+        return UndefValue::get(C1->getType());
+
+      // X * undef -> 0       otherwise
       return Constant::getNullValue(C1->getType());
+    }
     case Instruction::UDiv:
     case Instruction::SDiv:
+      // undef / 1 -> undef
+      if (Opcode == Instruction::UDiv || Opcode == Instruction::SDiv)
+        if (ConstantInt *CI2 = dyn_cast<ConstantInt>(C2))
+          if (CI2->isOne())
+            return C1;
+      // FALL THROUGH
     case Instruction::URem:
     case Instruction::SRem:
       if (!isa<UndefValue>(C2))                    // undef / X -> 0
         return Constant::getNullValue(C1->getType());
       return C2;                                   // X / undef -> undef
     case Instruction::Or:                          // X | undef -> -1
-      if (const VectorType *PTy = dyn_cast<VectorType>(C1->getType()))
-        return Constant::getAllOnesValue(PTy);
-      return Constant::getAllOnesValue(C1->getType());
+      if (isa<UndefValue>(C1) && isa<UndefValue>(C2)) // undef | undef -> undef
+        return C1;
+      return Constant::getAllOnesValue(C1->getType()); // undef | X -> ~0
     case Instruction::LShr:
       if (isa<UndefValue>(C2) && isa<UndefValue>(C1))
         return C1;                                  // undef lshr undef -> undef
@@ -1041,6 +1062,8 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
       else
         return C1;                                  // X ashr undef --> X
     case Instruction::Shl:
+      if (isa<UndefValue>(C2) && isa<UndefValue>(C1))
+        return C1;                                  // undef shl undef -> undef
       // undef << X -> 0   or   X << undef -> 0
       return Constant::getNullValue(C1->getType());
     }
@@ -1831,7 +1854,9 @@ Constant *llvm::ConstantFoldCompareInstruction(unsigned short pred,
   if (isa<UndefValue>(C1) || isa<UndefValue>(C2)) {
     // For EQ and NE, we can always pick a value for the undef to make the
     // predicate pass or fail, so we can return undef.
-    if (ICmpInst::isEquality(ICmpInst::Predicate(pred)))
+    // Also, if both operands are undef, we can return undef.
+    if (ICmpInst::isEquality(ICmpInst::Predicate(pred)) ||
+        (isa<UndefValue>(C1) && isa<UndefValue>(C2)))
       return UndefValue::get(ResultTy);
     // Otherwise, pick the same value as the non-undef operand, and fold
     // it to true or false.

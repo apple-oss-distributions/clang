@@ -21,7 +21,6 @@
 #include "llvm/Analysis/Dominators.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Assembly/Writer.h"
 #include "llvm/ADT/STLExtras.h"
@@ -39,15 +38,6 @@ INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_PASS_END(IVUsers, "iv-users",
                       "Induction Variable Users", false, true)
 
-// IVUsers behavior currently depends on this temporary indvars mode. The
-// option must be defined upstream from its uses.
-namespace llvm {
-  bool DisableIVRewrite = false;
-}
-cl::opt<bool, true> DisableIVRewriteOpt(
-  "disable-iv-rewrite", cl::Hidden, cl::location(llvm::DisableIVRewrite),
-  cl::desc("Disable canonical induction variable rewriting"));
-
 Pass *llvm::createIVUsersPass() {
   return new IVUsers();
 }
@@ -56,17 +46,20 @@ Pass *llvm::createIVUsersPass() {
 /// used by the given expression, within the context of analyzing the
 /// given loop.
 static bool isInteresting(const SCEV *S, const Instruction *I, const Loop *L,
-                          ScalarEvolution *SE) {
+                          ScalarEvolution *SE, LoopInfo *LI) {
   // An addrec is interesting if it's affine or if it has an interesting start.
   if (const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S)) {
-    // Keep things simple. Don't touch loop-variant strides.
+    // Keep things simple. Don't touch loop-variant strides unless they're
+    // only used outside the loop and we can simplify them.
     if (AR->getLoop() == L)
-      return AR->isAffine() || !L->contains(I);
+      return AR->isAffine() ||
+             (!L->contains(I) &&
+              SE->getSCEVAtScope(AR, LI->getLoopFor(I->getParent())) != AR);
     // Otherwise recurse to see if the start value is interesting, and that
     // the step value is not interesting, since we don't yet know how to
     // do effective SCEV expansions for addrecs with interesting steps.
-    return isInteresting(AR->getStart(), I, L, SE) &&
-          !isInteresting(AR->getStepRecurrence(*SE), I, L, SE);
+    return isInteresting(AR->getStart(), I, L, SE, LI) &&
+          !isInteresting(AR->getStepRecurrence(*SE), I, L, SE, LI);
   }
 
   // An add is interesting if exactly one of its operands is interesting.
@@ -74,7 +67,7 @@ static bool isInteresting(const SCEV *S, const Instruction *I, const Loop *L,
     bool AnyInterestingYet = false;
     for (SCEVAddExpr::op_iterator OI = Add->op_begin(), OE = Add->op_end();
          OI != OE; ++OI)
-      if (isInteresting(*OI, I, L, SE)) {
+      if (isInteresting(*OI, I, L, SE, LI)) {
         if (AnyInterestingYet)
           return false;
         AnyInterestingYet = true;
@@ -100,11 +93,6 @@ bool IVUsers::AddUsersIfInteresting(Instruction *I) {
   if (Width > 64 || (TD && !TD->isLegalInteger(Width)))
     return false;
 
-  // We expect Sign/Zero extension to be eliminated from the IR before analyzing
-  // any downstream uses.
-  if (DisableIVRewrite && (isa<SExtInst>(I) || isa<ZExtInst>(I)))
-    return false;
-
   if (!Processed.insert(I))
     return true;    // Instruction already handled.
 
@@ -113,7 +101,7 @@ bool IVUsers::AddUsersIfInteresting(Instruction *I) {
 
   // If we've come to an uninteresting expression, stop the traversal and
   // call this a user.
-  if (!isInteresting(ISE, I, L, SE))
+  if (!isInteresting(ISE, I, L, SE, LI))
     return false;
 
   SmallPtrSet<Instruction *, 4> UniqueUsers;
@@ -141,8 +129,7 @@ bool IVUsers::AddUsersIfInteresting(Instruction *I) {
                      << "   OF SCEV: " << *ISE << '\n');
         AddUserToIVUsers = true;
       }
-    } else if (Processed.count(User) ||
-               !AddUsersIfInteresting(User)) {
+    } else if (Processed.count(User) || !AddUsersIfInteresting(User)) {
       DEBUG(dbgs() << "FOUND USER: " << *User << '\n'
                    << "   OF SCEV: " << *ISE << '\n');
       AddUserToIVUsers = true;
@@ -152,7 +139,9 @@ bool IVUsers::AddUsersIfInteresting(Instruction *I) {
       // Okay, we found a user that we cannot reduce.
       IVUses.push_back(new IVStrideUse(this, User, I));
       IVStrideUse &NewUse = IVUses.back();
-      // Transform the expression into a normalized form.
+      // Autodetect the post-inc loop set, populating NewUse.PostIncLoops.
+      // The regular return value here is discarded; instead of recording
+      // it, we just recompute it when we need it.
       ISE = TransformForPostIncUse(NormalizeAutodetect,
                                    ISE, User, I,
                                    NewUse.PostIncLoops,

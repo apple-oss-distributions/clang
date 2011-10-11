@@ -172,6 +172,8 @@ void AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
     }
   }
   Opts.LLVMArgs = Args->getAllArgValues(OPT_mllvm);
+  if (Args->hasArg(OPT_fatal_warnings))
+    Opts.LLVMArgs.push_back("-fatal-assembler-warnings");
   Opts.OutputPath = Args->getLastArgValue(OPT_o);
   if (Arg *A = Args->getLastArg(OPT_filetype)) {
     StringRef Name = A->getValue(*Args);
@@ -259,7 +261,8 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts, Diagnostic &Diags) {
     return false;
 
   // FIXME: We shouldn't need to do this (and link in codegen).
-  OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(Opts.Triple, ""));
+  OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(Opts.Triple,
+                                                             "", ""));
   if (!TM) {
     Diags.Report(diag::err_target_unknown_triple) << Opts.Triple;
     return false;

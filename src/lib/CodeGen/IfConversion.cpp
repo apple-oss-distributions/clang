@@ -18,8 +18,8 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
+#include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetInstrItineraries.h"
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
@@ -265,7 +265,7 @@ bool IfConverter::runOnMachineFunction(MachineFunction &MF) {
   if (!TII) return false;
 
   // Tail merge tend to expose more if-conversion opportunities.
-  BranchFolder BF(true);
+  BranchFolder BF(true, false);
   bool BFChange = BF.OptimizeFunction(MF, TII,
                                    MF.getTarget().getRegisterInfo(),
                                    getAnalysisIfAvailable<MachineModuleInfo>());
@@ -399,7 +399,7 @@ bool IfConverter::runOnMachineFunction(MachineFunction &MF) {
   BBAnalysis.clear();
 
   if (MadeChange && IfCvtBranchFold) {
-    BranchFolder BF(false);
+    BranchFolder BF(false, false);
     BF.OptimizeFunction(MF, TII,
                         MF.getTarget().getRegisterInfo(),
                         getAnalysisIfAvailable<MachineModuleInfo>());
@@ -651,12 +651,12 @@ void IfConverter::ScanInstructions(BBInfo &BBI) {
     if (I->isDebugValue())
       continue;
 
-    const TargetInstrDesc &TID = I->getDesc();
-    if (TID.isNotDuplicable())
+    const MCInstrDesc &MCID = I->getDesc();
+    if (MCID.isNotDuplicable())
       BBI.CannotBeCopied = true;
 
     bool isPredicated = TII->isPredicated(I);
-    bool isCondBr = BBI.IsBrAnalyzable && TID.isConditionalBranch();
+    bool isCondBr = BBI.IsBrAnalyzable && MCID.isConditionalBranch();
 
     if (!isCondBr) {
       if (!isPredicated) {
@@ -1414,9 +1414,9 @@ void IfConverter::CopyAndPredicateBlock(BBInfo &ToBBI, BBInfo &FromBBI,
 
   for (MachineBasicBlock::iterator I = FromBBI.BB->begin(),
          E = FromBBI.BB->end(); I != E; ++I) {
-    const TargetInstrDesc &TID = I->getDesc();
+    const MCInstrDesc &MCID = I->getDesc();
     // Do not copy the end of the block branches.
-    if (IgnoreBr && TID.isBranch())
+    if (IgnoreBr && MCID.isBranch())
       break;
 
     MachineInstr *MI = MF.CloneMachineInstr(I);

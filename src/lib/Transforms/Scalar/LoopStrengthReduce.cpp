@@ -2073,6 +2073,10 @@ void LSRInstance::CollectFixupsAndInitialFormulae() {
         // x == y  -->  x - y == 0
         const SCEV *N = SE.getSCEV(NV);
         if (SE.isLoopInvariant(N, L)) {
+          // S is normalized, so normalize N before folding it into S
+          // to keep the result normalized.
+          N = TransformForPostIncUse(Normalize, N, CI, 0,
+                                     LF.PostIncLoops, SE, DT);
           Kind = LSRUse::ICmpZero;
           S = SE.getMinusSCEV(N, S);
         }
@@ -2517,6 +2521,8 @@ void LSRInstance::GenerateICmpZeroScales(LSRUse &LU, unsigned LUIdx,
 
     // Check that multiplying with the unfolded offset doesn't overflow.
     if (F.UnfoldedOffset != 0) {
+      if (F.UnfoldedOffset == INT64_MIN && Factor == -1)
+        continue;
       F.UnfoldedOffset = (uint64_t)F.UnfoldedOffset * Factor;
       if (F.UnfoldedOffset / Factor != Base.UnfoldedOffset)
         continue;
@@ -3692,7 +3698,7 @@ LSRInstance::ImplementSolution(const SmallVectorImpl<const Formula *> &Solution,
   // we can remove them after we are done working.
   SmallVector<WeakVH, 16> DeadInsts;
 
-  SCEVExpander Rewriter(SE);
+  SCEVExpander Rewriter(SE, "lsr");
   Rewriter.disableCanonicalMode();
   Rewriter.setIVIncInsertPos(L, IVIncInsertPos);
 

@@ -49,8 +49,7 @@ DominatingValue<RValue>::saved_type::save(CodeGenFunction &CGF, RValue rv) {
   if (rv.isComplex()) {
     CodeGenFunction::ComplexPairTy V = rv.getComplexVal();
     const llvm::Type *ComplexTy =
-      llvm::StructType::get(CGF.getLLVMContext(),
-                            V.first->getType(), V.second->getType(),
+      llvm::StructType::get(V.first->getType(), V.second->getType(),
                             (void*) 0);
     llvm::Value *addr = CGF.CreateTempAlloca(ComplexTy, "saved-complex");
     CGF.StoreComplexToAddr(V, addr, /*volatile*/ false);
@@ -421,12 +420,12 @@ static llvm::BasicBlock *SimplifyCleanupEntry(CodeGenFunction &CGF,
   // Kill the branch.
   Br->eraseFromParent();
 
-  // Merge the blocks.
-  Pred->getInstList().splice(Pred->end(), Entry->getInstList());
-
   // Replace all uses of the entry with the predecessor, in case there
   // are phis in the cleanup.
   Entry->replaceAllUsesWith(Pred);
+
+  // Merge the blocks.
+  Pred->getInstList().splice(Pred->end(), Entry->getInstList());
 
   // Kill the entry block.
   Entry->eraseFromParent();

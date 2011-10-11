@@ -20,7 +20,7 @@ set_target_properties(UnitTests PROPERTIES FOLDER "Tests")
 
 include_directories(${LLVM_MAIN_SRC_DIR}/utils/unittest/googletest/include)
 add_definitions(-DGTEST_HAS_RTTI=0)
-if( CMAKE_COMPILER_IS_GNUCXX )
+if( LLVM_COMPILER_IS_GCC_COMPATIBLE )
   llvm_replace_compiler_option(CMAKE_CXX_FLAGS "-frtti" "-fno-rtti")
 elseif( MSVC )
   llvm_replace_compiler_option(CMAKE_CXX_FLAGS "/GR" "/GR-")
@@ -64,6 +64,7 @@ add_llvm_unittest(ADT
   ADT/ImmutableSetTest.cpp
   ADT/IntEqClassesTest.cpp
   ADT/IntervalMapTest.cpp
+  ADT/PackedVectorTest.cpp
   ADT/SmallBitVectorTest.cpp
   ADT/SmallStringTest.cpp
   ADT/SmallVectorTest.cpp

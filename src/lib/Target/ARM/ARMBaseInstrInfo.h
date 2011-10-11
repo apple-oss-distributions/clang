@@ -20,6 +20,9 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 
+#define GET_INSTRINFO_HEADER
+#include "ARMGenInstrInfo.inc"
+
 namespace llvm {
   class ARMSubtarget;
   class ARMBaseRegisterInfo;
@@ -172,7 +175,7 @@ namespace ARMII {
   };
 }
 
-class ARMBaseInstrInfo : public TargetInstrInfoImpl {
+class ARMBaseInstrInfo : public ARMGenInstrInfo {
   const ARMSubtarget &Subtarget;
 
 protected:
@@ -291,8 +294,8 @@ public:
                                        int64_t &Offset1, int64_t &Offset2)const;
 
   /// shouldScheduleLoadsNear - This is a used by the pre-regalloc scheduler to
-  /// determine (in conjunction with areLoadsFromSameBasePtr) if two loads should
-  /// be scheduled togther. On some targets if two loads are loading from
+  /// determine (in conjunction with areLoadsFromSameBasePtr) if two loads
+  /// should be scheduled togther. On some targets if two loads are loading from
   /// addresses in the same cache line, it's better if they are scheduled
   /// together. This function takes two integers that represent the load offsets
   /// from the common base address. It returns true if it decides it's desirable
@@ -353,25 +356,25 @@ public:
                         SDNode *UseNode, unsigned UseIdx) const;
 private:
   int getVLDMDefCycle(const InstrItineraryData *ItinData,
-                      const TargetInstrDesc &DefTID,
+                      const MCInstrDesc &DefMCID,
                       unsigned DefClass,
                       unsigned DefIdx, unsigned DefAlign) const;
   int getLDMDefCycle(const InstrItineraryData *ItinData,
-                     const TargetInstrDesc &DefTID,
+                     const MCInstrDesc &DefMCID,
                      unsigned DefClass,
                      unsigned DefIdx, unsigned DefAlign) const;
   int getVSTMUseCycle(const InstrItineraryData *ItinData,
-                      const TargetInstrDesc &UseTID,
+                      const MCInstrDesc &UseMCID,
                       unsigned UseClass,
                       unsigned UseIdx, unsigned UseAlign) const;
   int getSTMUseCycle(const InstrItineraryData *ItinData,
-                     const TargetInstrDesc &UseTID,
+                     const MCInstrDesc &UseMCID,
                      unsigned UseClass,
                      unsigned UseIdx, unsigned UseAlign) const;
   int getOperandLatency(const InstrItineraryData *ItinData,
-                        const TargetInstrDesc &DefTID,
+                        const MCInstrDesc &DefMCID,
                         unsigned DefIdx, unsigned DefAlign,
-                        const TargetInstrDesc &UseTID,
+                        const MCInstrDesc &UseMCID,
                         unsigned UseIdx, unsigned UseAlign) const;
 
   int getInstrLatency(const InstrItineraryData *ItinData,

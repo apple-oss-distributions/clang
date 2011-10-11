@@ -30,9 +30,11 @@ namespace llvm {
 
 // Defines symbolic names for Blackfin registers.  This defines a mapping from
 // register name to register number.
-#include "BlackfinGenRegisterNames.inc"
+#define GET_REGINFO_ENUM
+#include "BlackfinGenRegisterInfo.inc"
 
 // Defines symbolic names for the Blackfin instructions.
-#include "BlackfinGenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "BlackfinGenInstrInfo.inc"
 
 #endif

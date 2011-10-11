@@ -6,6 +6,21 @@
 
 Description := Static runtime libraries for clang/Darwin.
 
+# A function that ensures we don't try to build for architectures that we
+# don't have working toolchains for.
+CheckArches = \
+  $(shell \
+    result=""; \
+    for arch in $(1); do \
+      if $(CC) -arch $$arch -c -x c /dev/null \
+	  -o /dev/null > /dev/null 2> /dev/null; then \
+        result="$$result$$arch "; \
+      fi; \
+    done; \
+    echo $$result)
+
+###
+
 Configs :=
 UniversalArchs :=
 
@@ -13,23 +28,28 @@ UniversalArchs :=
 # still be referenced from Darwin system headers. This symbol is only ever
 # needed on i386.
 Configs += eprintf
-UniversalArchs.eprintf := i386
+UniversalArchs.eprintf := $(call CheckArches,i386)
 
 # Configuration for targetting 10.4. We need a few functions missing from
 # libgcc_s.10.4.dylib. We only build x86 slices since clang doesn't really
 # support targetting PowerPC.
 Configs += 10.4
-UniversalArchs.10.4 := i386 x86_64
+UniversalArchs.10.4 := $(call CheckArches,i386 x86_64)
 
 # Configuration for targetting iOS, for some ARMv6 functions, which must be
 # in the same linkage unit, and for a couple of other functions that didn't
 # make it into libSystem.
 Configs += ios
-UniversalArchs.ios := i386 x86_64 armv6 armv7
+UniversalArchs.ios := $(call CheckArches,i386 x86_64 armv6 armv7 armv7f armv7k)
+
+# Configuration for targetting OSX. These functions may not be in libSystem
+# so we should provide our own.
+Configs += osx
+UniversalArchs.osx := $(call CheckArches,i386 x86_64)
 
 # Configuration for use with kernel/kexts.
 Configs += cc_kext
-UniversalArchs.cc_kext := armv6 armv7 i386 x86_64
+UniversalArchs.cc_kext := $(call CheckArches,i386 x86_64 armv6 armv7 armv7f armv7k)
 
 ###
 
@@ -48,11 +68,6 @@ CFLAGS := -Wall -Werror -O3 -fomit-frame-pointer
 X86_DEPLOYMENT_ARGS := -mmacosx-version-min=10.4
 ARM_DEPLOYMENT_ARGS := -miphoneos-version-min=1.0
 
-# Workaround Lion OS headers being broken with iOS deployment targets.
-#
-# <rdar://problem/9413271>
-ARM_DEPLOYMENT_ARGS += "-D__AVAILABILITY_INTERNAL__IPHONE_4_3=__attribute__((unavailable))"
-
 # If an explicit ARM_SDK build variable is set, use that as the isysroot.
 ifneq ($(ARM_SDK),)
 ARM_DEPLOYMENT_ARGS += -isysroot $(ARM_SDK)
@@ -64,15 +79,21 @@ CFLAGS.ios.i386		:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
 CFLAGS.ios.x86_64	:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv6	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
+CFLAGS.ios.armv7f	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
+CFLAGS.ios.armv7k	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
+CFLAGS.osx.i386         := $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
+CFLAGS.osx.x86_64       := $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.i386	:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.x86_64	:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.armv6	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS) -mthumb
 CFLAGS.cc_kext.armv7	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS) -mthumb
+CFLAGS.cc_kext.armv7f	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.armv7k	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
 
 FUNCTIONS.eprintf := eprintf
 FUNCTIONS.10.4 := eprintf floatundidf floatundisf floatundixf
 
-FUNCTIONS.ios	    := divmodsi4 udivmodsi4
+FUNCTIONS.ios	    := divmodsi4 udivmodsi4 mulosi4 mulodi4 muloti4
 # On x86, the divmod functions reference divsi.
 FUNCTIONS.ios.i386   := $(FUNCTIONS.ios) \
                         divsi3 udivsi3
@@ -82,6 +103,8 @@ FUNCTIONS.ios.armv6 := $(FUNCTIONS.ios) \
                        sync_synchronize \
                        switch16 switch32 switch8 switchu8 \
                        save_vfp_d8_d15_regs restore_vfp_d8_d15_regs
+
+FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4
 
 CCKEXT_COMMON_FUNCTIONS := \
 	absvdi2 \
@@ -196,6 +219,8 @@ CCKEXT_ARM_FUNCTIONS := $(CCKEXT_COMMON_FUNCTIONS) \
 
 FUNCTIONS.cc_kext.armv6 := $(CCKEXT_ARM_FUNCTIONS)
 FUNCTIONS.cc_kext.armv7 := $(CCKEXT_ARM_FUNCTIONS)
+FUNCTIONS.cc_kext.armv7f := $(CCKEXT_ARM_FUNCTIONS)
+FUNCTIONS.cc_kext.armv7k := $(CCKEXT_ARM_FUNCTIONS)
 
 CCKEXT_X86_FUNCTIONS := $(CCKEXT_COMMON_FUNCTIONS) \
 	divxc3 \
@@ -274,6 +299,10 @@ FUNCTIONS.cc_kext.armv6 := \
 	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv6))
 FUNCTIONS.cc_kext.armv7 := \
 	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv7))
+FUNCTIONS.cc_kext.armv7f := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv7f))
+FUNCTIONS.cc_kext.armv7k := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv7k))
 FUNCTIONS.cc_kext.i386 := \
 	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.i386))
 FUNCTIONS.cc_kext.x86_64 := \

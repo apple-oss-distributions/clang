@@ -194,27 +194,31 @@ Constant *ShadowStackGC::GetFrameMap(Function &F) {
 
   // Truncate the ShadowStackDescriptor if some metadata is null.
   unsigned NumMeta = 0;
-  SmallVector<Constant*,16> Metadata;
+  SmallVector<Constant*, 16> Metadata;
   for (unsigned I = 0; I != Roots.size(); ++I) {
     Constant *C = cast<Constant>(Roots[I].first->getArgOperand(1));
     if (!C->isNullValue())
       NumMeta = I + 1;
     Metadata.push_back(ConstantExpr::getBitCast(C, VoidPtr));
   }
+  Metadata.resize(NumMeta);
 
+  const Type *Int32Ty = Type::getInt32Ty(F.getContext());
+  
   Constant *BaseElts[] = {
-    ConstantInt::get(Type::getInt32Ty(F.getContext()), Roots.size(), false),
-    ConstantInt::get(Type::getInt32Ty(F.getContext()), NumMeta, false),
+    ConstantInt::get(Int32Ty, Roots.size(), false),
+    ConstantInt::get(Int32Ty, NumMeta, false),
   };
 
   Constant *DescriptorElts[] = {
-    ConstantStruct::get(F.getContext(), BaseElts, 2, false),
-    ConstantArray::get(ArrayType::get(VoidPtr, NumMeta),
-                       Metadata.begin(), NumMeta)
+    ConstantStruct::get(StructType::get(Int32Ty, Int32Ty, NULL), BaseElts),
+    ConstantArray::get(ArrayType::get(VoidPtr, NumMeta), Metadata)
   };
 
-  Constant *FrameMap = ConstantStruct::get(F.getContext(), DescriptorElts, 2,
-                                           false);
+  Constant *FrameMap =
+    ConstantStruct::get(StructType::get(DescriptorElts[0]->getType(),
+                                        DescriptorElts[1]->getType(), NULL),
+                        DescriptorElts);
 
   std::string TypeName("gc_map.");
   TypeName += utostr(NumMeta);

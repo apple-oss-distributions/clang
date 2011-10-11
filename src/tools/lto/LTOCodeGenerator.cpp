@@ -14,7 +14,6 @@
 
 #include "LTOModule.h"
 #include "LTOCodeGenerator.h"
-
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/Linker.h"
@@ -27,8 +26,8 @@
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Target/Mangler.h"
-#include "llvm/Target/SubtargetFeature.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetMachine.h"
@@ -37,7 +36,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/StandardPasses.h"
+#include "llvm/Support/PassManagerBuilder.h"
 #include "llvm/Support/SystemUtils.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/Host.h"
@@ -263,9 +262,9 @@ bool LTOCodeGenerator::determineTarget(std::string& errMsg)
 
         // construct LTModule, hand over ownership of module and target
         SubtargetFeatures Features;
-        Features.getDefaultSubtargetFeatures(_mCpu, llvm::Triple(Triple));
+        Features.getDefaultSubtargetFeatures(llvm::Triple(Triple));
         std::string FeatureStr = Features.getString();
-        _target = march->createTargetMachine(Triple, FeatureStr);
+        _target = march->createTargetMachine(Triple, _mCpu, FeatureStr);
     }
     return false;
 }
@@ -355,9 +354,8 @@ void LTOCodeGenerator::applyScopeRestrictions() {
 }
 
 /// Optimize merged modules using various IPO passes
-bool LTOCodeGenerator::generateObjectFile(raw_ostream& out,
-                                          std::string& errMsg)
-{
+bool LTOCodeGenerator::generateObjectFile(raw_ostream &out,
+                                          std::string &errMsg) {
     if ( this->determineTarget(errMsg) ) 
         return true;
 
@@ -380,13 +378,13 @@ bool LTOCodeGenerator::generateObjectFile(raw_ostream& out,
     // Add an appropriate TargetData instance for this module...
     passes.add(new TargetData(*_target->getTargetData()));
     
-    createStandardLTOPasses(&passes, /*Internalize=*/ false, !DisableInline,
-                            /*VerifyEach=*/ false);
+    PassManagerBuilder().populateLTOPassManager(passes, /*Internalize=*/ false,
+                                                !DisableInline);
 
     // Make sure everything is still good.
     passes.add(createVerifierPass());
 
-    FunctionPassManager* codeGenPasses = new FunctionPassManager(mergedModule);
+    FunctionPassManager *codeGenPasses = new FunctionPassManager(mergedModule);
 
     codeGenPasses->add(new TargetData(*_target->getTargetData()));
 

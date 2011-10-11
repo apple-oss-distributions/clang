@@ -54,6 +54,7 @@ class Decl;
 class DeclContext;
 class NestedNameSpecifier;
 class CXXBaseSpecifier;
+class CXXConstructorDecl;
 class CXXCtorInitializer;
 class GotoStmt;
 class MacroDefinition;
@@ -571,6 +572,10 @@ private:
   /// generating warnings.
   llvm::SmallVector<uint64_t, 16> UnusedFileScopedDecls;
 
+  /// \brief A list of all the delegating constructors we've seen, to diagnose
+  /// cycles.
+  llvm::SmallVector<uint64_t, 4> DelegatingCtorDecls;
+
   /// \brief A snapshot of Sema's weak undeclared identifier tracking, for
   /// generating warnings.
   llvm::SmallVector<uint64_t, 64> WeakUndeclaredIdentifiers;
@@ -619,6 +624,9 @@ private:
 
   /// \brief The OpenCL extension settings.
   llvm::SmallVector<uint64_t, 1> OpenCLExtensions;
+
+  /// \brief A list of the namespaces we've seen.
+  llvm::SmallVector<uint64_t, 4> KnownNamespaces;
 
   //@}
 
@@ -1119,6 +1127,11 @@ public:
   /// instance and factory methods, respectively, with this selector.
   virtual std::pair<ObjCMethodList, ObjCMethodList>
     ReadMethodPool(Selector Sel);
+
+  /// \brief Load the set of namespaces that are known to the external source,
+  /// which will be used during typo correction.
+  virtual void ReadKnownNamespaces(
+                           llvm::SmallVectorImpl<NamespaceDecl *> &Namespaces);
 
   /// \brief Load a selector from disk, registering its ID if it exists.
   void LoadSelector(Selector Sel);

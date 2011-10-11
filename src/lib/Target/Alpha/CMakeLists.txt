@@ -1,14 +1,11 @@
 set(LLVM_TARGET_DEFINITIONS Alpha.td)
 
-tablegen(AlphaGenRegisterInfo.h.inc -gen-register-desc-header)
-tablegen(AlphaGenRegisterNames.inc -gen-register-enums)
-tablegen(AlphaGenRegisterInfo.inc -gen-register-desc)
-tablegen(AlphaGenInstrNames.inc -gen-instr-enums)
-tablegen(AlphaGenInstrInfo.inc -gen-instr-desc)
+tablegen(AlphaGenRegisterInfo.inc -gen-register-info)
+tablegen(AlphaGenInstrInfo.inc -gen-instr-info)
 tablegen(AlphaGenAsmWriter.inc -gen-asm-writer)
 tablegen(AlphaGenDAGISel.inc -gen-dag-isel)
 tablegen(AlphaGenCallingConv.inc -gen-callingconv)
-tablegen(AlphaGenSubtarget.inc -gen-subtarget)
+tablegen(AlphaGenSubtargetInfo.inc -gen-subtarget)
 
 add_llvm_target(AlphaCodeGen
   AlphaAsmPrinter.cpp

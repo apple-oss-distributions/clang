@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Lex/Lexer.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/SourceManagerInternals.h"
 #include "clang/Basic/Diagnostic.h"
@@ -169,11 +170,11 @@ const llvm::MemoryBuffer *ContentCache::getBuffer(Diagnostic &Diag,
   return Buffer.getPointer();
 }
 
-unsigned LineTableInfo::getLineTableFilenameID(const char *Ptr, unsigned Len) {
+unsigned LineTableInfo::getLineTableFilenameID(llvm::StringRef Name) {
   // Look up the filename in the string table, returning the pre-existing value
   // if it exists.
   llvm::StringMapEntry<unsigned> &Entry =
-    FilenameIDs.GetOrCreateValue(Ptr, Ptr+Len, ~0U);
+    FilenameIDs.GetOrCreateValue(Name, ~0U);
   if (Entry.getValue() != ~0U)
     return Entry.getValue();
 
@@ -277,10 +278,10 @@ void LineTableInfo::AddEntry(unsigned FID,
 
 /// getLineTableFilenameID - Return the uniqued ID for the specified filename.
 ///
-unsigned SourceManager::getLineTableFilenameID(const char *Ptr, unsigned Len) {
+unsigned SourceManager::getLineTableFilenameID(llvm::StringRef Name) {
   if (LineTable == 0)
     LineTable = new LineTableInfo();
-  return LineTable->getLineTableFilenameID(Ptr, Len);
+  return LineTable->getLineTableFilenameID(Name);
 }
 
 
@@ -749,18 +750,19 @@ SourceLocation SourceManager::getSpellingLocSlowCase(SourceLocation Loc) const {
 
 
 std::pair<FileID, unsigned>
-SourceManager::getDecomposedInstantiationLocSlowCase(const SrcMgr::SLocEntry *E,
-                                                     unsigned Offset) const {
+SourceManager::getDecomposedInstantiationLocSlowCase(
+                                             const SrcMgr::SLocEntry *E) const {
   // If this is an instantiation record, walk through all the instantiation
   // points.
   FileID FID;
   SourceLocation Loc;
+  unsigned Offset;
   do {
     Loc = E->getInstantiation().getInstantiationLocStart();
 
     FID = getFileID(Loc);
     E = &getSLocEntry(FID);
-    Offset += Loc.getOffset()-E->getOffset();
+    Offset = Loc.getOffset()-E->getOffset();
   } while (!Loc.isFileID());
 
   return std::make_pair(FID, Offset);
@@ -1213,6 +1215,60 @@ PresumedLoc SourceManager::getPresumedLoc(SourceLocation Loc) const {
   return PresumedLoc(Filename, LineNo, ColNo, IncludeLoc);
 }
 
+/// \brief Returns true if the given MacroID location points at the first
+/// token of the macro instantiation.
+bool SourceManager::isAtStartOfMacroInstantiation(SourceLocation loc,
+                                            const LangOptions &LangOpts) const {
+  assert(loc.isValid() && loc.isMacroID() && "Expected a valid macro loc");
+
+  std::pair<FileID, unsigned> infoLoc = getDecomposedLoc(loc);
+  // FIXME: If the token comes from the macro token paste operator ('##')
+  // this function will always return false;
+  if (infoLoc.second > 0)
+    return false; // Does not point at the start of token.
+
+  SourceLocation instLoc = 
+      getSLocEntry(infoLoc.first).getInstantiation().getInstantiationLocStart();
+  if (instLoc.isFileID())
+    return true; // No other macro instantiations, this is the first.
+
+  return isAtStartOfMacroInstantiation(instLoc, LangOpts);
+}
+
+/// \brief Returns true if the given MacroID location points at the last
+/// token of the macro instantiation.
+bool SourceManager::isAtEndOfMacroInstantiation(SourceLocation loc,
+                                            const LangOptions &LangOpts) const {
+  assert(loc.isValid() && loc.isMacroID() && "Expected a valid macro loc");
+
+  SourceLocation spellLoc = getSpellingLoc(loc);
+  unsigned tokLen = Lexer::MeasureTokenLength(spellLoc, *this, LangOpts);
+  if (tokLen == 0)
+    return false;
+
+  std::pair<FileID, unsigned> infoLoc = getDecomposedLoc(loc);
+  unsigned FID = infoLoc.first.ID;
+
+  unsigned NextOffset;
+  if (FID+1 == sloc_entry_size())
+    NextOffset = getNextOffset();
+  else
+    NextOffset = getSLocEntry(FID+1).getOffset();
+
+  // FIXME: If the token comes from the macro token paste operator ('##')
+  // or the stringify operator ('#') this function will always return false;
+  assert(loc.getOffset() + tokLen < NextOffset);
+  if (loc.getOffset() + tokLen < NextOffset-1)
+    return false; // Does not point to the last token.
+  
+  SourceLocation instLoc = 
+      getSLocEntry(infoLoc.first).getInstantiation().getInstantiationLocEnd();
+  if (instLoc.isFileID())
+    return true; // No other macro instantiations.
+
+  return isAtEndOfMacroInstantiation(instLoc, LangOpts);
+}
+
 //===----------------------------------------------------------------------===//
 // Other miscellaneous methods.
 //===----------------------------------------------------------------------===//
@@ -1407,8 +1463,6 @@ bool SourceManager::isBeforeInTranslationUnit(SourceLocation LHS,
   // reflect the order that the tokens, pointed to by these locations, were
   // instantiated (during parsing each token that is instantiated by a macro,
   // expands the SLocEntries).
-  if (LHS.isMacroID() && RHS.isMacroID())
-    return LHS.getOffset() < RHS.getOffset();
 
   std::pair<FileID, unsigned> LOffs = getDecomposedLoc(LHS);
   std::pair<FileID, unsigned> ROffs = getDecomposedLoc(RHS);
@@ -1495,7 +1549,9 @@ void SourceManager::PrintStats() const {
   llvm::errs() << "\n*** Source Manager Stats:\n";
   llvm::errs() << FileInfos.size() << " files mapped, " << MemBufferInfos.size()
                << " mem buffers mapped.\n";
-  llvm::errs() << SLocEntryTable.size() << " SLocEntry's allocated, "
+  llvm::errs() << SLocEntryTable.size() << " SLocEntry's allocated ("
+               << SLocEntryTable.capacity()*sizeof(SrcMgr::SLocEntry)
+               << " bytes of capacity), "
                << NextOffset << "B of Sloc address space used.\n";
 
   unsigned NumLineNumsComputed = 0;

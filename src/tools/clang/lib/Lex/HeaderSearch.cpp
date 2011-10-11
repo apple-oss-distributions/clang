@@ -37,6 +37,7 @@ ExternalHeaderFileInfoSource::~ExternalHeaderFileInfoSource() {}
 
 HeaderSearch::HeaderSearch(FileManager &FM)
     : FileMgr(FM), FrameworkMap(64) {
+  AngledDirIdx = 0;
   SystemDirIdx = 0;
   NoCurDirSearch = false;
 
@@ -122,10 +123,8 @@ const FileEntry *DirectoryLookup::LookupFile(
   llvm::SmallString<1024> TmpDir;
   if (isNormalDir()) {
     // Concatenate the requested file onto the directory.
-    // FIXME: Portability.  Filename concatenation should be in sys::Path.
-    TmpDir += getDir()->getName();
-    TmpDir.push_back('/');
-    TmpDir.append(Filename.begin(), Filename.end());
+    TmpDir = getDir()->getName();
+    llvm::sys::path::append(TmpDir, Filename);
     if (SearchPath != NULL) {
       llvm::StringRef SearchPathRef(getDir()->getName());
       SearchPath->clear();
@@ -280,7 +279,7 @@ const FileEntry *HeaderSearch::LookupFile(
     return FileMgr.getFile(Filename, /*openFile=*/true);
   }
 
-  // Step #0, unless disabled, check to see if the file is in the #includer's
+  // Unless disabled, check to see if the file is in the #includer's
   // directory.  This has to be based on CurFileEnt, not CurDir, because
   // CurFileEnt could be a #include of a subdirectory (#include "foo/bar.h") and
   // a subsequent include of "baz.h" should resolve to "whatever/foo/baz.h".
@@ -317,7 +316,7 @@ const FileEntry *HeaderSearch::LookupFile(
   CurDir = 0;
 
   // If this is a system #include, ignore the user #include locs.
-  unsigned i = isAngled ? SystemDirIdx : 0;
+  unsigned i = isAngled ? AngledDirIdx : 0;
 
   // If this is a #include_next request, start searching after the directory the
   // file was found in.
@@ -353,11 +352,46 @@ const FileEntry *HeaderSearch::LookupFile(
     CurDir = &SearchDirs[i];
 
     // This file is a system header or C++ unfriendly if the dir is.
-    getFileInfo(FE).DirInfo = CurDir->getDirCharacteristic();
+    HeaderFileInfo &HFI = getFileInfo(FE);
+    HFI.DirInfo = CurDir->getDirCharacteristic();
 
+    // If this file is found in a header map and uses the framework style of
+    // includes, then this header is part of a framework we're building.
+    if (CurDir->isIndexHeaderMap()) {
+      size_t SlashPos = Filename.find('/');
+      if (SlashPos != llvm::StringRef::npos) {
+        HFI.IndexHeaderMapHeader = 1;
+        HFI.Framework = getUniqueFrameworkName(llvm::StringRef(Filename.begin(), 
+                                                         SlashPos));
+      }
+    }
+    
     // Remember this location for the next lookup we do.
     CacheLookup.second = i;
     return FE;
+  }
+
+  // If we are including a file with a quoted include "foo.h" from inside
+  // a header in a framework that is currently being built, and we couldn't
+  // resolve "foo.h" any other way, change the include to <Foo/foo.h>, where
+  // "Foo" is the name of the framework in which the including header was found.
+  if (CurFileEnt && !isAngled && Filename.find('/') == llvm::StringRef::npos) {
+    HeaderFileInfo &IncludingHFI = getFileInfo(CurFileEnt);
+    if (IncludingHFI.IndexHeaderMapHeader) {
+      llvm::SmallString<128> ScratchFilename;
+      ScratchFilename += IncludingHFI.Framework;
+      ScratchFilename += '/';
+      ScratchFilename += Filename;
+      
+      const FileEntry *Result = LookupFile(ScratchFilename, /*isAngled=*/true,
+                                           FromDir, CurDir, CurFileEnt, 
+                                           SearchPath, RelativePath);
+      std::pair<unsigned, unsigned> &CacheLookup 
+        = LookupFileCache.GetOrCreateValue(Filename).getValue();
+      CacheLookup.second
+        = LookupFileCache.GetOrCreateValue(ScratchFilename).getValue().second;
+      return Result;
+    }
   }
 
   // Otherwise, didn't find it. Remember we didn't find this.
@@ -543,4 +577,6 @@ bool HeaderSearch::ShouldEnterIncludeFile(const FileEntry *File, bool isImport){
   return true;
 }
 
-
+llvm::StringRef HeaderSearch::getUniqueFrameworkName(llvm::StringRef Framework) {
+  return FrameworkNames.GetOrCreateValue(Framework).getKey();
+}

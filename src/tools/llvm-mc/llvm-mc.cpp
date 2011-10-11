@@ -19,11 +19,11 @@
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Target/TargetAsmBackend.h"
 #include "llvm/Target/TargetAsmParser.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetRegistry.h"
-#include "llvm/Target/SubtargetFeature.h" // FIXME.
 #include "llvm/Target/TargetAsmInfo.h"  // FIXME.
 #include "llvm/Target/TargetLowering.h"  // FIXME.
 #include "llvm/Target/TargetLoweringObjectFile.h"  // FIXME.
@@ -97,7 +97,7 @@ IncludeDirs("I", cl::desc("Directory of include files"),
 
 static cl::opt<std::string>
 ArchName("arch", cl::desc("Target arch to assemble for, "
-                            "see -version for available targets"));
+                          "see -version for available targets"));
 
 static cl::opt<std::string>
 TripleName("triple", cl::desc("Target triple to assemble for, "
@@ -110,12 +110,11 @@ MCPU("mcpu",
      cl::init(""));
 
 static cl::opt<bool>
-NoInitialTextSection("n", cl::desc(
-                   "Don't assume assembly file starts in the text section"));
+NoInitialTextSection("n", cl::desc("Don't assume assembly file starts "
+                                   "in the text section"));
 
 static cl::opt<bool>
-SaveTempLabels("L", cl::desc(
-                 "Don't discard temporary labels"));
+SaveTempLabels("L", cl::desc("Don't discard temporary labels"));
 
 enum ActionType {
   AC_AsLex,
@@ -183,10 +182,10 @@ static int AsLexInput(const char *ProgName) {
   MemoryBuffer *Buffer = BufferPtr.take();
 
   SourceMgr SrcMgr;
-  
+
   // Tell SrcMgr about this buffer, which is what TGParser will pick up.
   SrcMgr.AddNewSourceBuffer(Buffer, SMLoc());
-  
+
   // Record the location of the include directories so that the lexer can find
   // it later.
   SrcMgr.setIncludeDirs(IncludeDirs);
@@ -279,7 +278,7 @@ static int AsLexInput(const char *ProgName) {
 
   // Keep output if no errors.
   if (Error == 0) Out->keep();
- 
+
   return Error;
 }
 
@@ -294,33 +293,29 @@ static int AssembleInput(const char *ProgName) {
     return 1;
   }
   MemoryBuffer *Buffer = BufferPtr.take();
-  
+
   SourceMgr SrcMgr;
-  
+
   // Tell SrcMgr about this buffer, which is what the parser will pick up.
   SrcMgr.AddNewSourceBuffer(Buffer, SMLoc());
-  
+
   // Record the location of the include directories so that the lexer can find
   // it later.
   SrcMgr.setIncludeDirs(IncludeDirs);
-  
-  
+
+
   llvm::OwningPtr<MCAsmInfo> MAI(TheTarget->createAsmInfo(TripleName));
   assert(MAI && "Unable to create target asm info!");
-  
+
   // Package up features to be passed to target/subtarget
   std::string FeaturesStr;
-  if (MCPU.size()) {
-    SubtargetFeatures Features;
-    Features.setCPU(MCPU);
-    FeaturesStr = Features.getString();
-  }
 
   // FIXME: We shouldn't need to do this (and link in codegen).
   //        When we split this out, we should do it in a way that makes
   //        it straightforward to switch subtargets on the fly (.e.g,
   //        the .cpu and .code16 directives).
   OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(TripleName,
+                                                             MCPU,
                                                              FeaturesStr));
 
   if (!TM) {
@@ -378,7 +373,7 @@ static int AssembleInput(const char *ProgName) {
                                                    *Str.get(), *MAI));
   OwningPtr<TargetAsmParser> TAP(TheTarget->createAsmParser(*Parser, *TM));
   if (!TAP) {
-    errs() << ProgName 
+    errs() << ProgName
            << ": error: this target does not support assembly parsing.\n";
     return 1;
   }
@@ -404,7 +399,7 @@ static int DisassembleInput(const char *ProgName, bool Enhanced) {
     errs() << ProgName << ": " << ec.message() << '\n';
     return 1;
   }
-  
+
   OwningPtr<tool_output_file> Out(GetOutputStream());
   if (!Out)
     return 1;
@@ -416,17 +411,13 @@ static int DisassembleInput(const char *ProgName, bool Enhanced) {
   } else {
     // Package up features to be passed to target/subtarget
     std::string FeaturesStr;
-    if (MCPU.size()) {
-      SubtargetFeatures Features;
-      Features.setCPU(MCPU);
-      FeaturesStr = Features.getString();
-    }
 
     // FIXME: We shouldn't need to do this (and link in codegen).
     //        When we split this out, we should do it in a way that makes
     //        it straightforward to switch subtargets on the fly (.e.g,
     //        the .cpu and .code16 directives).
     OwningPtr<TargetMachine> TM(TheTarget->createTargetMachine(TripleName,
+                                                               MCPU, 
                                                                FeaturesStr));
 
     if (!TM) {
@@ -459,7 +450,7 @@ int main(int argc, char **argv) {
   llvm::InitializeAllAsmPrinters();
   llvm::InitializeAllAsmParsers();
   llvm::InitializeAllDisassemblers();
-  
+
   cl::ParseCommandLineOptions(argc, argv, "llvm machine code playground\n");
   TripleName = Triple::normalize(TripleName);
 
@@ -474,7 +465,7 @@ int main(int argc, char **argv) {
   case AC_EDisassemble:
     return DisassembleInput(argv[0], true);
   }
-  
+
   return 0;
 }
 

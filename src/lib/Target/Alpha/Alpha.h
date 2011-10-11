@@ -44,10 +44,13 @@ namespace llvm {
 // Defines symbolic names for Alpha registers.  This defines a mapping from
 // register name to register number.
 //
-#include "AlphaGenRegisterNames.inc"
+
+#define GET_REGINFO_ENUM
+#include "AlphaGenRegisterInfo.inc"
 
 // Defines symbolic names for the Alpha instructions.
 //
-#include "AlphaGenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "AlphaGenInstrInfo.inc"
 
 #endif

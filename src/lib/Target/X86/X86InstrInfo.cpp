@@ -13,7 +13,6 @@
 
 #include "X86InstrInfo.h"
 #include "X86.h"
-#include "X86GenInstrInfo.inc"
 #include "X86InstrBuilder.h"
 #include "X86MachineFunctionInfo.h"
 #include "X86Subtarget.h"
@@ -36,6 +35,10 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include <limits>
 
+#define GET_INSTRINFO_CTOR
+#define GET_INSTRINFO_MC_DESC
+#include "X86GenInstrInfo.inc"
+
 using namespace llvm;
 
 static cl::opt<bool>
@@ -52,7 +55,12 @@ ReMatPICStubLoad("remat-pic-stub-load",
                  cl::init(false), cl::Hidden);
 
 X86InstrInfo::X86InstrInfo(X86TargetMachine &tm)
-  : TargetInstrInfoImpl(X86Insts, array_lengthof(X86Insts)),
+  : X86GenInstrInfo((tm.getSubtarget<X86Subtarget>().is64Bit()
+                     ? X86::ADJCALLSTACKDOWN64
+                     : X86::ADJCALLSTACKDOWN32),
+                    (tm.getSubtarget<X86Subtarget>().is64Bit()
+                     ? X86::ADJCALLSTACKUP64
+                     : X86::ADJCALLSTACKUP32)),
     TM(tm), RI(tm, *this) {
   enum {
     TB_NOT_REVERSABLE = 1U << 31,
@@ -1689,13 +1697,13 @@ X86::CondCode X86::GetOppositeBranchCondition(X86::CondCode CC) {
 }
 
 bool X86InstrInfo::isUnpredicatedTerminator(const MachineInstr *MI) const {
-  const TargetInstrDesc &TID = MI->getDesc();
-  if (!TID.isTerminator()) return false;
+  const MCInstrDesc &MCID = MI->getDesc();
+  if (!MCID.isTerminator()) return false;
 
   // Conditional branch is a special case.
-  if (TID.isBranch() && !TID.isBarrier())
+  if (MCID.isBranch() && !MCID.isBarrier())
     return true;
-  if (!TID.isPredicable())
+  if (!MCID.isPredicable())
     return true;
   return !isPredicated(MI);
 }
@@ -1789,7 +1797,6 @@ bool X86InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
           .addMBB(UnCondBrIter->getOperand(0).getMBB());
         BuildMI(MBB, UnCondBrIter, MBB.findDebugLoc(I), get(X86::JMP_4))
           .addMBB(TargetBB);
-        MBB.addSuccessor(TargetBB);
 
         OldInst->eraseFromParent();
         UnCondBrIter->eraseFromParent();
@@ -2015,62 +2022,48 @@ static unsigned getLoadStoreRegOpcode(unsigned Reg,
                                       bool isStackAligned,
                                       const TargetMachine &TM,
                                       bool load) {
-  switch (RC->getID()) {
+  switch (RC->getSize()) {
   default:
-    llvm_unreachable("Unknown regclass");
-  case X86::GR64RegClassID:
-  case X86::GR64_ABCDRegClassID:
-  case X86::GR64_NOREXRegClassID:
-  case X86::GR64_NOREX_NOSPRegClassID:
-  case X86::GR64_NOSPRegClassID:
-  case X86::GR64_TCRegClassID:
-  case X86::GR64_TCW64RegClassID:
-    return load ? X86::MOV64rm : X86::MOV64mr;
-  case X86::GR32RegClassID:
-  case X86::GR32_ABCDRegClassID:
-  case X86::GR32_ADRegClassID:
-  case X86::GR32_NOREXRegClassID:
-  case X86::GR32_NOSPRegClassID:
-  case X86::GR32_TCRegClassID:
-    return load ? X86::MOV32rm : X86::MOV32mr;
-  case X86::GR16RegClassID:
-  case X86::GR16_ABCDRegClassID:
-  case X86::GR16_NOREXRegClassID:
-    return load ? X86::MOV16rm : X86::MOV16mr;
-  case X86::GR8RegClassID:
-    // Copying to or from a physical H register on x86-64 requires a NOREX
-    // move.  Otherwise use a normal move.
-    if (isHReg(Reg) &&
-        TM.getSubtarget<X86Subtarget>().is64Bit())
-      return load ? X86::MOV8rm_NOREX : X86::MOV8mr_NOREX;
-    else
-      return load ? X86::MOV8rm : X86::MOV8mr;
-  case X86::GR8_ABCD_LRegClassID:
-  case X86::GR8_NOREXRegClassID:
-    return load ? X86::MOV8rm :X86::MOV8mr;
-  case X86::GR8_ABCD_HRegClassID:
+    llvm_unreachable("Unknown spill size");
+  case 1:
+    assert(X86::GR8RegClass.hasSubClassEq(RC) && "Unknown 1-byte regclass");
     if (TM.getSubtarget<X86Subtarget>().is64Bit())
-      return load ? X86::MOV8rm_NOREX : X86::MOV8mr_NOREX;
-    else
-      return load ? X86::MOV8rm : X86::MOV8mr;
-  case X86::RFP80RegClassID:
+      // Copying to or from a physical H register on x86-64 requires a NOREX
+      // move.  Otherwise use a normal move.
+      if (isHReg(Reg) || X86::GR8_ABCD_HRegClass.hasSubClassEq(RC))
+        return load ? X86::MOV8rm_NOREX : X86::MOV8mr_NOREX;
+    return load ? X86::MOV8rm : X86::MOV8mr;
+  case 2:
+    assert(X86::GR16RegClass.hasSubClassEq(RC) && "Unknown 2-byte regclass");
+    return load ? X86::MOV16rm : X86::MOV16mr;
+  case 4:
+    if (X86::GR32RegClass.hasSubClassEq(RC))
+      return load ? X86::MOV32rm : X86::MOV32mr;
+    if (X86::FR32RegClass.hasSubClassEq(RC))
+      return load ? X86::MOVSSrm : X86::MOVSSmr;
+    if (X86::RFP32RegClass.hasSubClassEq(RC))
+      return load ? X86::LD_Fp32m : X86::ST_Fp32m;
+    llvm_unreachable("Unknown 4-byte regclass");
+  case 8:
+    if (X86::GR64RegClass.hasSubClassEq(RC))
+      return load ? X86::MOV64rm : X86::MOV64mr;
+    if (X86::FR64RegClass.hasSubClassEq(RC))
+      return load ? X86::MOVSDrm : X86::MOVSDmr;
+    if (X86::VR64RegClass.hasSubClassEq(RC))
+      return load ? X86::MMX_MOVQ64rm : X86::MMX_MOVQ64mr;
+    if (X86::RFP64RegClass.hasSubClassEq(RC))
+      return load ? X86::LD_Fp64m : X86::ST_Fp64m;
+    llvm_unreachable("Unknown 8-byte regclass");
+  case 10:
+    assert(X86::RFP80RegClass.hasSubClassEq(RC) && "Unknown 10-byte regclass");
     return load ? X86::LD_Fp80m : X86::ST_FpP80m;
-  case X86::RFP64RegClassID:
-    return load ? X86::LD_Fp64m : X86::ST_Fp64m;
-  case X86::RFP32RegClassID:
-    return load ? X86::LD_Fp32m : X86::ST_Fp32m;
-  case X86::FR32RegClassID:
-    return load ? X86::MOVSSrm : X86::MOVSSmr;
-  case X86::FR64RegClassID:
-    return load ? X86::MOVSDrm : X86::MOVSDmr;
-  case X86::VR128RegClassID:
+  case 16:
+    assert(X86::VR128RegClass.hasSubClassEq(RC) && "Unknown 16-byte regclass");
     // If stack is realigned we can use aligned stores.
     if (isStackAligned)
       return load ? X86::MOVAPSrm : X86::MOVAPSmr;
     else
       return load ? X86::MOVUPSrm : X86::MOVUPSmr;
-  case X86::VR64RegClassID:
-    return load ? X86::MMX_MOVQ64rm : X86::MMX_MOVQ64mr;
   }
 }
 
@@ -2097,7 +2090,8 @@ void X86InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
   const MachineFunction &MF = *MBB.getParent();
   assert(MF.getFrameInfo()->getObjectSize(FrameIdx) >= RC->getSize() &&
          "Stack slot too small for store");
-  bool isAligned = (RI.getStackAlignment() >= 16) || RI.canRealignStack(MF);
+  bool isAligned = (TM.getFrameLowering()->getStackAlignment() >= 16) ||
+    RI.canRealignStack(MF);
   unsigned Opc = getStoreRegOpcode(SrcReg, RC, isAligned, TM);
   DebugLoc DL = MBB.findDebugLoc(MI);
   addFrameReference(BuildMI(MBB, MI, DL, get(Opc)), FrameIdx)
@@ -2129,7 +2123,8 @@ void X86InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
                                         const TargetRegisterClass *RC,
                                         const TargetRegisterInfo *TRI) const {
   const MachineFunction &MF = *MBB.getParent();
-  bool isAligned = (RI.getStackAlignment() >= 16) || RI.canRealignStack(MF);
+  bool isAligned = (TM.getFrameLowering()->getStackAlignment() >= 16) ||
+    RI.canRealignStack(MF);
   unsigned Opc = getLoadRegOpcode(DestReg, RC, isAligned, TM);
   DebugLoc DL = MBB.findDebugLoc(MI);
   addFrameReference(BuildMI(MBB, MI, DL, get(Opc), DestReg), FrameIdx);
@@ -2238,7 +2233,7 @@ X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
   bool isTwoAddrFold = false;
   unsigned NumOps = MI->getDesc().getNumOperands();
   bool isTwoAddr = NumOps > 1 &&
-    MI->getDesc().getOperandConstraint(1, TOI::TIED_TO) != -1;
+    MI->getDesc().getOperandConstraint(1, MCOI::TIED_TO) != -1;
 
   // FIXME: AsmPrinter doesn't know how to handle
   // X86II::MO_GOT_ABSOLUTE_ADDRESS after folding.
@@ -2287,7 +2282,7 @@ X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
         return NULL;
       bool NarrowToMOV32rm = false;
       if (Size) {
-        unsigned RCSize =  MI->getDesc().OpInfo[i].getRegClass(&RI)->getSize();
+        unsigned RCSize = getRegClass(MI->getDesc(), i, &RI)->getSize();
         if (Size < RCSize) {
           // Check if it's safe to fold the load. If the size of the object is
           // narrower than the load width, then it's not.
@@ -2434,7 +2429,7 @@ MachineInstr* X86InstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
       Alignment = 4;
       break;
     default:
-      llvm_unreachable("Don't know how to fold this instruction!");
+      return 0;
     }
   if (Ops.size() == 2 && Ops[0] == 0 && Ops[1] == 1) {
     unsigned NewOpc = 0;
@@ -2556,7 +2551,7 @@ bool X86InstrInfo::canFoldMemoryOperand(const MachineInstr *MI,
   unsigned Opc = MI->getOpcode();
   unsigned NumOps = MI->getDesc().getNumOperands();
   bool isTwoAddr = NumOps > 1 &&
-    MI->getDesc().getOperandConstraint(1, TOI::TIED_TO) != -1;
+    MI->getDesc().getOperandConstraint(1, MCOI::TIED_TO) != -1;
 
   // Folding a memory location into the two-address part of a two-address
   // instruction is different than folding it other places.  It requires
@@ -2602,9 +2597,8 @@ bool X86InstrInfo::unfoldMemoryOperand(MachineFunction &MF, MachineInstr *MI,
     return false;
   UnfoldStore &= FoldedStore;
 
-  const TargetInstrDesc &TID = get(Opc);
-  const TargetOperandInfo &TOI = TID.OpInfo[Index];
-  const TargetRegisterClass *RC = TOI.getRegClass(&RI);
+  const MCInstrDesc &MCID = get(Opc);
+  const TargetRegisterClass *RC = getRegClass(MCID, Index, &RI);
   if (!MI->hasOneMemOperand() &&
       RC == &X86::VR128RegClass &&
       !TM.getSubtarget<X86Subtarget>().isUnalignedMemAccessFast())
@@ -2646,7 +2640,7 @@ bool X86InstrInfo::unfoldMemoryOperand(MachineFunction &MF, MachineInstr *MI,
   }
 
   // Emit the data processing instruction.
-  MachineInstr *DataMI = MF.CreateMachineInstr(TID, MI->getDebugLoc(), true);
+  MachineInstr *DataMI = MF.CreateMachineInstr(MCID, MI->getDebugLoc(), true);
   MachineInstrBuilder MIB(DataMI);
 
   if (FoldedStore)
@@ -2699,7 +2693,7 @@ bool X86InstrInfo::unfoldMemoryOperand(MachineFunction &MF, MachineInstr *MI,
 
   // Emit the store instruction.
   if (UnfoldStore) {
-    const TargetRegisterClass *DstRC = TID.OpInfo[0].getRegClass(&RI);
+    const TargetRegisterClass *DstRC = getRegClass(MCID, 0, &RI);
     std::pair<MachineInstr::mmo_iterator,
               MachineInstr::mmo_iterator> MMOs =
       MF.extractStoreMemRefs(MI->memoperands_begin(),
@@ -2724,9 +2718,9 @@ X86InstrInfo::unfoldMemoryOperand(SelectionDAG &DAG, SDNode *N,
   unsigned Index = I->second.second & 0xf;
   bool FoldedLoad = I->second.second & (1 << 4);
   bool FoldedStore = I->second.second & (1 << 5);
-  const TargetInstrDesc &TID = get(Opc);
-  const TargetRegisterClass *RC = TID.OpInfo[Index].getRegClass(&RI);
-  unsigned NumDefs = TID.NumDefs;
+  const MCInstrDesc &MCID = get(Opc);
+  const TargetRegisterClass *RC = getRegClass(MCID, Index, &RI);
+  unsigned NumDefs = MCID.NumDefs;
   std::vector<SDValue> AddrOps;
   std::vector<SDValue> BeforeOps;
   std::vector<SDValue> AfterOps;
@@ -2770,13 +2764,13 @@ X86InstrInfo::unfoldMemoryOperand(SelectionDAG &DAG, SDNode *N,
   // Emit the data processing instruction.
   std::vector<EVT> VTs;
   const TargetRegisterClass *DstRC = 0;
-  if (TID.getNumDefs() > 0) {
-    DstRC = TID.OpInfo[0].getRegClass(&RI);
+  if (MCID.getNumDefs() > 0) {
+    DstRC = getRegClass(MCID, 0, &RI);
     VTs.push_back(*DstRC->vt_begin());
   }
   for (unsigned i = 0, e = N->getNumValues(); i != e; ++i) {
     EVT VT = N->getValueType(i);
-    if (VT != MVT::Other && i >= (unsigned)TID.getNumDefs())
+    if (VT != MVT::Other && i >= (unsigned)MCID.getNumDefs())
       VTs.push_back(VT);
   }
   if (Load)

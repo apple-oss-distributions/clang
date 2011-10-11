@@ -1368,6 +1368,12 @@ public:
   ///
   std::vector<int64_t> getValueAsListOfInts(StringRef FieldName) const;
 
+  /// getValueAsListOfStrings - This method looks up the specified field and
+  /// returns its value as a vector of strings, throwing an exception if the
+  /// field does not exist or if the value is not the right type.
+  ///
+  std::vector<std::string> getValueAsListOfStrings(StringRef FieldName) const;
+
   /// getValueAsDef - This method looks up the specified field and returns its
   /// value as a Record, throwing an exception if the field does not exist or if
   /// the value is not the right type.
@@ -1486,21 +1492,7 @@ struct LessRecordFieldName {
   }
 };
 
-
-class TGError {
-  SMLoc Loc;
-  std::string Message;
-public:
-  TGError(SMLoc loc, const std::string &message) : Loc(loc), Message(message) {}
-
-  SMLoc getLoc() const { return Loc; }
-  const std::string &getMessage() const { return Message; }
-};
-
-
 raw_ostream &operator<<(raw_ostream &OS, const RecordKeeper &RK);
-
-void PrintError(SMLoc ErrorLoc, const Twine &Msg);
 
 } // End llvm namespace
 

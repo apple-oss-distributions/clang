@@ -175,7 +175,9 @@ bool ARMGlobalMerge::doInitialization(Module &M) {
       continue;
 
     // Ignore fancy-aligned globals for now.
-    if (I->getAlignment() != 0)
+    unsigned Alignment = I->getAlignment();
+    const Type *Ty = I->getType()->getElementType();
+    if (Alignment > TD->getABITypeAlignment(Ty))
       continue;
 
     // Ignore all 'special' globals.
@@ -183,7 +185,7 @@ bool ARMGlobalMerge::doInitialization(Module &M) {
         I->getName().startswith(".llvm."))
       continue;
 
-    if (TD->getTypeAllocSize(I->getType()->getElementType()) < MaxOffset) {
+    if (TD->getTypeAllocSize(Ty) < MaxOffset) {
       const TargetLoweringObjectFile &TLOF = TLI->getObjFileLowering();
       if (TLOF.getKindForGlobal(I, TLI->getTargetMachine()).isBSSLocal())
         BSSGlobals.push_back(I);

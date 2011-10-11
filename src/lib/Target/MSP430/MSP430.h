@@ -47,9 +47,11 @@ namespace llvm {
 
 // Defines symbolic names for MSP430 registers.
 // This defines a mapping from register name to register number.
-#include "MSP430GenRegisterNames.inc"
+#define GET_REGINFO_ENUM
+#include "MSP430GenRegisterInfo.inc"
 
 // Defines symbolic names for the MSP430 instructions.
-#include "MSP430GenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "MSP430GenInstrInfo.inc"
 
 #endif

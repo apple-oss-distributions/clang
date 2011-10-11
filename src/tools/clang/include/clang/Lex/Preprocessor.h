@@ -29,6 +29,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Allocator.h"
 #include <vector>
 
@@ -84,6 +85,7 @@ class Preprocessor : public llvm::RefCountedBase<Preprocessor> {
   IdentifierInfo *Ident_Pragma, *Ident__pragma;    // _Pragma, __pragma
   IdentifierInfo *Ident__VA_ARGS__;                // __VA_ARGS__
   IdentifierInfo *Ident__has_feature;              // __has_feature
+  IdentifierInfo *Ident__has_extension;            // __has_extension
   IdentifierInfo *Ident__has_builtin;              // __has_builtin
   IdentifierInfo *Ident__has_attribute;            // __has_attribute
   IdentifierInfo *Ident__has_include;              // __has_include
@@ -238,6 +240,14 @@ class Preprocessor : public llvm::RefCountedBase<Preprocessor> {
   enum { TokenLexerCacheSize = 8 };
   unsigned NumCachedTokenLexers;
   TokenLexer *TokenLexerCache[TokenLexerCacheSize];
+
+  /// \brief Keeps macro expanded tokens for TokenLexers.
+  //
+  /// Works like a stack; a TokenLexer adds the macro expanded tokens that is
+  /// going to lex in the cache and when it finishes the tokens are removed
+  /// from the end of the cache.
+  llvm::SmallVector<Token, 16> MacroExpandedTokens;
+  std::vector<std::pair<TokenLexer *, size_t> > MacroExpandingLexersStack;
 
   /// \brief A record of the macro definitions and instantiations that
   /// occurred during preprocessing. 
@@ -769,6 +779,8 @@ public:
 
   void PrintStats();
 
+  size_t getTotalMemory() const;
+
   /// HandleMicrosoftCommentPaste - When the macro expander pastes together a
   /// comment (/##/) in microsoft mode, this method handles updating the current
   /// state, returning the token on the next source line.
@@ -975,6 +987,16 @@ private:
   /// be expanded as a macro, handle it and return the next token as 'Tok'.  If
   /// the macro should not be expanded return true, otherwise return false.
   bool HandleMacroExpandedIdentifier(Token &Tok, MacroInfo *MI);
+
+  /// \brief Cache macro expanded tokens for TokenLexers.
+  //
+  /// Works like a stack; a TokenLexer adds the macro expanded tokens that is
+  /// going to lex in the cache and when it finishes the tokens are removed
+  /// from the end of the cache.
+  Token *cacheMacroExpandedTokens(TokenLexer *tokLexer,
+                                  llvm::ArrayRef<Token> tokens);
+  void removeCachedMacroExpandedTokensOfLastLexer();
+  friend void TokenLexer::ExpandFunctionArguments();
 
   /// isNextPPTokenLParen - Determine whether the next preprocessor token to be
   /// lexed is a '('.  If so, consume the token and return true, if not, this

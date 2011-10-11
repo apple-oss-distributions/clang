@@ -600,8 +600,10 @@ static unsigned GetBestDestForJumpOnUndef(BasicBlock *BB) {
   for (unsigned i = 1, e = BBTerm->getNumSuccessors(); i != e; ++i) {
     TestBB = BBTerm->getSuccessor(i);
     unsigned NumPreds = std::distance(pred_begin(TestBB), pred_end(TestBB));
-    if (NumPreds < MinNumPreds)
+    if (NumPreds < MinNumPreds) {
       MinSucc = i;
+      MinNumPreds = NumPreds;
+    }
   }
 
   return MinSucc;
@@ -706,7 +708,7 @@ bool JumpThreading::ProcessBlock(BasicBlock *BB) {
     DEBUG(dbgs() << "  In block '" << BB->getName()
           << "' folding terminator: " << *BB->getTerminator() << '\n');
     ++NumFolds;
-    ConstantFoldTerminator(BB);
+    ConstantFoldTerminator(BB, true);
     return true;
   }
 

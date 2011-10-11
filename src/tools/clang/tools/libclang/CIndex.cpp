@@ -350,6 +350,7 @@ public:
   bool VisitTypeOfExprTypeLoc(TypeOfExprTypeLoc TL);
   bool VisitPackExpansionTypeLoc(PackExpansionTypeLoc TL);
   bool VisitTypeOfTypeLoc(TypeOfTypeLoc TL);
+  bool VisitUnaryTransformTypeLoc(UnaryTransformTypeLoc TL);
   bool VisitDependentNameTypeLoc(DependentNameTypeLoc TL);
   bool VisitDependentTemplateSpecializationTypeLoc(
                                     DependentTemplateSpecializationTypeLoc TL);
@@ -790,7 +791,7 @@ bool CursorVisitor::VisitFunctionDecl(FunctionDecl *ND) {
     // FIXME: Attributes?
   }
   
-  if (ND->isThisDeclarationADefinition() && !ND->isLateTemplateParsed()) {
+  if (ND->doesThisDeclarationHaveABody() && !ND->isLateTemplateParsed()) {
     if (CXXConstructorDecl *Constructor = dyn_cast<CXXConstructorDecl>(ND)) {
       // Find the initializers that were written in the source.
       llvm::SmallVector<CXXCtorInitializer *, 4> WrittenInits;
@@ -1329,6 +1330,11 @@ bool CursorVisitor::VisitTemplateName(TemplateName Name, SourceLocation Loc) {
     return Visit(MakeCursorTemplateRef(
                                   Name.getAsQualifiedTemplateName()->getDecl(), 
                                        Loc, TU));
+
+  case TemplateName::SubstTemplateTemplateParm:
+    return Visit(MakeCursorTemplateRef(
+                         Name.getAsSubstTemplateTemplateParm()->getParameter(),
+                                       Loc, TU));
       
   case TemplateName::SubstTemplateTemplateParmPack:
     return Visit(MakeCursorTemplateRef(
@@ -1547,6 +1553,13 @@ bool CursorVisitor::VisitTypeOfExprTypeLoc(TypeOfExprTypeLoc TL) {
 }
 
 bool CursorVisitor::VisitTypeOfTypeLoc(TypeOfTypeLoc TL) {
+  if (TypeSourceInfo *TSInfo = TL.getUnderlyingTInfo())
+    return Visit(TSInfo->getTypeLoc());
+
+  return false;
+}
+
+bool CursorVisitor::VisitUnaryTransformTypeLoc(UnaryTransformTypeLoc TL) {
   if (TypeSourceInfo *TSInfo = TL.getUnderlyingTInfo())
     return Visit(TSInfo->getTypeLoc());
 
@@ -2366,7 +2379,8 @@ CXTranslationUnit clang_createTranslationUnit(CXIndex CIdx,
 unsigned clang_defaultEditingTranslationUnitOptions() {
   return CXTranslationUnit_PrecompiledPreamble | 
          CXTranslationUnit_CacheCompletionResults |
-         CXTranslationUnit_CXXPrecompiledPreamble;
+         CXTranslationUnit_CXXPrecompiledPreamble |
+         CXTranslationUnit_CXXChainedPCH;
 }
   
 CXTranslationUnit
@@ -2566,8 +2580,10 @@ CXTranslationUnit clang_parseTranslationUnit(CXIndex CIdx,
     fprintf(stderr, "}\n");
     
     return 0;
+  } else if (getenv("LIBCLANG_RESOURCE_USAGE")) {
+    PrintLibclangResourceUsage(PTUI.result);
   }
-
+  
   return PTUI.result;
 }
 
@@ -2578,9 +2594,12 @@ unsigned clang_defaultSaveOptions(CXTranslationUnit TU) {
 int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
                               unsigned options) {
   if (!TU)
-    return 1;
+    return CXSaveError_InvalidTU;
   
-  return static_cast<ASTUnit *>(TU->TUData)->Save(FileName);
+  CXSaveError result = static_cast<ASTUnit *>(TU->TUData)->Save(FileName);
+  if (getenv("LIBCLANG_RESOURCE_USAGE"))
+    PrintLibclangResourceUsage(TU);
+  return result;
 }
 
 void clang_disposeTranslationUnit(CXTranslationUnit CTUnit) {
@@ -2656,8 +2675,8 @@ int clang_reparseTranslationUnit(CXTranslationUnit TU,
     fprintf(stderr, "libclang: crash detected during reparsing\n");
     static_cast<ASTUnit *>(TU->TUData)->setUnsafeToFree(true);
     return 1;
-  }
-
+  } else if (getenv("LIBCLANG_RESOURCE_USAGE"))
+    PrintLibclangResourceUsage(TU);
 
   return RTUI.result;
 }
@@ -3368,18 +3387,45 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
   case CXCursor_UsingDeclaration:
     return createCXString("UsingDeclaration");
   case CXCursor_TypeAliasDecl:
-      return createCXString("TypeAliasDecl");
+    return createCXString("TypeAliasDecl");
+  case CXCursor_ObjCSynthesizeDecl:
+    return createCXString("ObjCSynthesizeDecl");
+  case CXCursor_ObjCDynamicDecl:
+    return createCXString("ObjCDynamicDecl");
   }
 
   llvm_unreachable("Unhandled CXCursorKind");
   return createCXString((const char*) 0);
 }
 
+struct GetCursorData {
+  SourceLocation TokenBeginLoc;
+  CXCursor &BestCursor;
+
+  GetCursorData(SourceLocation tokenBegin, CXCursor &outputCursor)
+    : TokenBeginLoc(tokenBegin), BestCursor(outputCursor) { }
+};
+
 enum CXChildVisitResult GetCursorVisitor(CXCursor cursor,
                                          CXCursor parent,
                                          CXClientData client_data) {
-  CXCursor *BestCursor = static_cast<CXCursor *>(client_data);
-  
+  GetCursorData *Data = static_cast<GetCursorData *>(client_data);
+  CXCursor *BestCursor = &Data->BestCursor;
+
+  if (clang_isExpression(cursor.kind) &&
+      clang_isDeclaration(BestCursor->kind)) {
+    Decl *D = getCursorDecl(*BestCursor);
+
+    // Avoid having the cursor of an expression replace the declaration cursor
+    // when the expression source range overlaps the declaration range.
+    // This can happen for C++ constructor expressions whose range generally
+    // include the variable declaration, e.g.:
+    //  MyCXXClass foo; // Make sure pointing at 'foo' returns a VarDecl cursor.
+    if (D->getLocation().isValid() && Data->TokenBeginLoc.isValid() &&
+        D->getLocation() == Data->TokenBeginLoc)
+      return CXChildVisit_Break;
+  }
+
   // If our current best cursor is the construction of a temporary object, 
   // don't replace that cursor with a type reference, because we want 
   // clang_getCursor() to point at the constructor.
@@ -3423,8 +3469,9 @@ CXCursor clang_getCursor(CXTranslationUnit TU, CXSourceLocation Loc) {
     // FIXME: Would be great to have a "hint" cursor, then walk from that
     // hint cursor upward until we find a cursor whose source range encloses
     // the region of interest, rather than starting from the translation unit.
+    GetCursorData ResultData(SLoc, Result);
     CXCursor Parent = clang_getTranslationUnitCursor(TU);
-    CursorVisitor CursorVis(TU, GetCursorVisitor, &Result,
+    CursorVisitor CursorVis(TU, GetCursorVisitor, &ResultData,
                             Decl::MaxPCHLevel, true, SourceLocation(SLoc));
     CursorVis.VisitChildren(Parent);
   }
@@ -3910,6 +3957,7 @@ CXCursor clang_getCursorDefinition(CXCursor C) {
   case Decl::Namespace:
   case Decl::Typedef:
   case Decl::TypeAlias:
+  case Decl::TypeAliasTemplate:
   case Decl::TemplateTypeParm:
   case Decl::EnumConstant:
   case Decl::Field:
@@ -4089,8 +4137,17 @@ CXCursor clang_getCanonicalCursor(CXCursor C) {
   if (!clang_isDeclaration(C.kind))
     return C;
   
-  if (Decl *D = getCursorDecl(C))
+  if (Decl *D = getCursorDecl(C)) {
+    if (ObjCCategoryImplDecl *CatImplD = dyn_cast<ObjCCategoryImplDecl>(D))
+      if (ObjCCategoryDecl *CatD = CatImplD->getCategoryDecl())
+        return MakeCXCursor(CatD, getCursorTU(C));
+
+    if (ObjCImplDecl *ImplD = dyn_cast<ObjCImplDecl>(D))
+      if (ObjCInterfaceDecl *IFD = ImplD->getClassInterface())
+        return MakeCXCursor(IFD, getCursorTU(C));
+
     return MakeCXCursor(D->getCanonicalDecl(), getCursorTU(C));
+  }
   
   return C;
 }
@@ -4608,6 +4665,24 @@ AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {
     break;
   }
 
+  // Avoid having the cursor of an expression "overwrite" the annotation of the
+  // variable declaration that it belongs to.
+  // This can happen for C++ constructor expressions whose range generally
+  // include the variable declaration, e.g.:
+  //  MyCXXClass foo; // Make sure we don't annotate 'foo' as a CallExpr cursor.
+  if (clang_isExpression(cursorK)) {
+    Expr *E = getCursorExpr(cursor);
+    if (Decl *D = getCursorParentDecl(cursor)) {
+      const unsigned I = NextToken();
+      if (E->getLocStart().isValid() && D->getLocation().isValid() &&
+          E->getLocStart() == D->getLocation() &&
+          E->getLocStart() == GetTokenLoc(I)) {
+        Cursors[I] = updateC;
+        AdvanceToken();
+      }
+    }
+  }
+
   // Visit children to get their cursor information.
   const unsigned BeforeChildren = NextToken();
   VisitChildren(cursor);
@@ -4779,6 +4854,7 @@ static void clang_annotateTokensImpl(void *UserData) {
               llvm::StringSwitch<bool>(II->getName())
               .Case("readonly", true)
               .Case("assign", true)
+              .Case("unsafe_unretained", true)
               .Case("readwrite", true)
               .Case("retain", true)
               .Case("copy", true)
@@ -4786,6 +4862,8 @@ static void clang_annotateTokensImpl(void *UserData) {
               .Case("atomic", true)
               .Case("getter", true)
               .Case("setter", true)
+              .Case("strong", true)
+              .Case("weak", true)
               .Default(false))
             Tokens[I].int_data[0] = CXToken_Keyword;
         }
@@ -5180,6 +5258,19 @@ unsigned clang_CXXMethod_isStatic(CXCursor C) {
   return (Method && Method->isStatic()) ? 1 : 0;
 }
 
+unsigned clang_CXXMethod_isVirtual(CXCursor C) {
+  if (!clang_isDeclaration(C.kind))
+    return 0;
+  
+  CXXMethodDecl *Method = 0;
+  Decl *D = cxcursor::getCursorDecl(C);
+  if (FunctionTemplateDecl *FunTmpl = dyn_cast_or_null<FunctionTemplateDecl>(D))
+    Method = dyn_cast<CXXMethodDecl>(FunTmpl->getTemplatedDecl());
+  else
+    Method = dyn_cast_or_null<CXXMethodDecl>(D);
+  return (Method && Method->isVirtual()) ? 1 : 0;
+}
+
 } // end: extern "C"
 
 //===----------------------------------------------------------------------===//
@@ -5323,10 +5414,9 @@ CXTUResourceUsage clang_getCXTUResourceUsage(CXTranslationUnit TU) {
   
   // How much memory is being used by the Preprocessor?
   Preprocessor &pp = astUnit->getPreprocessor();
-  const llvm::BumpPtrAllocator &ppAlloc = pp.getPreprocessorAllocator();
   createCXTUResourceUsageEntry(*entries,
                                CXTUResourceUsage_Preprocessor,
-                               ppAlloc.getTotalMemory());
+                               pp.getTotalMemory());
   
   if (PreprocessingRecord *pRec = pp.getPreprocessingRecord()) {
     createCXTUResourceUsageEntry(*entries,
@@ -5348,6 +5438,16 @@ void clang_disposeCXTUResourceUsage(CXTUResourceUsage usage) {
 }
 
 } // end extern "C"
+
+void clang::PrintLibclangResourceUsage(CXTranslationUnit TU) {
+  CXTUResourceUsage Usage = clang_getCXTUResourceUsage(TU);
+  for (unsigned I = 0; I != Usage.numEntries; ++I)
+    fprintf(stderr, "  %s: %lu\n", 
+            clang_getTUResourceUsageName(Usage.entries[I].kind),
+            Usage.entries[I].amount);
+  
+  clang_disposeCXTUResourceUsage(Usage);
+}
 
 //===----------------------------------------------------------------------===//
 // Misc. utility functions.

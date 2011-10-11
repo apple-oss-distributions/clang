@@ -40,11 +40,10 @@ namespace llvm {
   bool JITExceptionHandling;
   bool JITEmitDebugInfo;
   bool JITEmitDebugInfoToDisk;
-  bool UnwindTablesMandatory;
   Reloc::Model RelocationModel;
   CodeModel::Model CMModel;
   bool GuaranteedTailCallOpt;
-  unsigned StackAlignment;
+  unsigned StackAlignmentOverride;
   bool RealignStack;
   bool DisableJumpTables;
   bool StrongPHIElim;
@@ -143,11 +142,6 @@ EmitJitDebugInfoToDisk("jit-emit-debug-to-disk",
   cl::desc("Emit debug info objfiles to disk"),
   cl::location(JITEmitDebugInfoToDisk),
   cl::init(false));
-static cl::opt<bool, true>
-EnableUnwindTables("unwind-tables",
-  cl::desc("Generate unwinding tables for all functions"),
-  cl::location(UnwindTablesMandatory),
-  cl::init(false));
 
 static cl::opt<llvm::Reloc::Model, true>
 DefRelocationModel("relocation-model",
@@ -189,7 +183,7 @@ EnableGuaranteedTailCallOpt("tailcallopt",
 static cl::opt<unsigned, true>
 OverrideStackAlignment("stack-alignment",
   cl::desc("Override default stack alignment"),
-  cl::location(StackAlignment),
+  cl::location(StackAlignmentOverride),
   cl::init(0));
 static cl::opt<bool, true>
 EnableRealignStack("realign-stack",

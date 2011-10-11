@@ -76,7 +76,8 @@ void Lexer::InitLexer(const char *BufStart, const char *BufPtr,
   // skip the UTF-8 BOM if it's present.
   if (BufferStart == BufferPtr) {
     // Determine the size of the BOM.
-    size_t BOMLength = llvm::StringSwitch<size_t>(BufferStart)
+    llvm::StringRef Buf(BufferStart, BufferEnd - BufferStart);
+    size_t BOMLength = llvm::StringSwitch<size_t>(Buf)
       .StartsWith("\xEF\xBB\xBF", 3) // UTF-8 BOM
       .Default(0);
 
@@ -678,9 +679,17 @@ SourceLocation Lexer::AdvanceToTokenCharacter(SourceLocation TokStart,
 SourceLocation Lexer::getLocForEndOfToken(SourceLocation Loc, unsigned Offset,
                                           const SourceManager &SM,
                                           const LangOptions &Features) {
-  if (Loc.isInvalid() || !Loc.isFileID())
+  if (Loc.isInvalid())
     return SourceLocation();
-  
+
+  if (Loc.isMacroID()) {
+    if (Offset > 0 || !SM.isAtEndOfMacroInstantiation(Loc, Features))
+      return SourceLocation(); // Points inside the macro instantiation.
+
+    // Continue and find the location just after the macro instantiation.
+    Loc = SM.getInstantiationRange(Loc).second;
+  }
+
   unsigned Len = Lexer::MeasureTokenLength(Loc, SM, Features);
   if (Len > Offset)
     Len = Len - Offset;

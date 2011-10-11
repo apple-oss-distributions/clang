@@ -32,10 +32,12 @@ namespace llvm {
 // Defines symbolic names for XCore registers.  This defines a mapping from
 // register name to register number.
 //
-#include "XCoreGenRegisterNames.inc"
+#define GET_REGINFO_ENUM
+#include "XCoreGenRegisterInfo.inc"
 
 // Defines symbolic names for the XCore instructions.
 //
-#include "XCoreGenInstrNames.inc"
+#define GET_INSTRINFO_ENUM
+#include "XCoreGenInstrInfo.inc"
 
 #endif
