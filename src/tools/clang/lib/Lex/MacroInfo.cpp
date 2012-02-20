@@ -21,12 +21,14 @@ MacroInfo::MacroInfo(SourceLocation DefLoc) : Location(DefLoc) {
   IsGNUVarargs = false;
   IsBuiltinMacro = false;
   IsFromAST = false;
+  ChangedAfterLoad = false;
   IsDisabled = false;
   IsUsed = false;
   IsAllowRedefinitionsWithoutWarning = false;
   IsWarnIfUnused = false;
   IsDefinitionLengthCached = false;
-
+  IsPublic = true;
+  
   ArgumentList = 0;
   NumArguments = 0;
 }
@@ -40,12 +42,15 @@ MacroInfo::MacroInfo(const MacroInfo &MI, llvm::BumpPtrAllocator &PPAllocator) {
   IsGNUVarargs = MI.IsGNUVarargs;
   IsBuiltinMacro = MI.IsBuiltinMacro;
   IsFromAST = MI.IsFromAST;
+  ChangedAfterLoad = MI.ChangedAfterLoad;
   IsDisabled = MI.IsDisabled;
   IsUsed = MI.IsUsed;
   IsAllowRedefinitionsWithoutWarning = MI.IsAllowRedefinitionsWithoutWarning;
   IsWarnIfUnused = MI.IsWarnIfUnused;
   IsDefinitionLengthCached = MI.IsDefinitionLengthCached;
   DefinitionLength = MI.DefinitionLength;
+  IsPublic = MI.IsPublic;
+  
   ArgumentList = 0;
   NumArguments = 0;
   setArgumentList(MI.ArgumentList, MI.NumArguments, PPAllocator);
@@ -68,9 +73,9 @@ unsigned MacroInfo::getDefinitionLengthSlow(SourceManager &SM) const {
   assert((macroEnd.isFileID() || lastToken.is(tok::comment)) &&
          "Macro defined in macro?");
   std::pair<FileID, unsigned>
-      startInfo = SM.getDecomposedInstantiationLoc(macroStart);
+      startInfo = SM.getDecomposedExpansionLoc(macroStart);
   std::pair<FileID, unsigned>
-      endInfo = SM.getDecomposedInstantiationLoc(macroEnd);
+      endInfo = SM.getDecomposedExpansionLoc(macroEnd);
   assert(startInfo.first == endInfo.first &&
          "Macro definition spanning multiple FileIDs ?");
   assert(startInfo.second <= endInfo.second);

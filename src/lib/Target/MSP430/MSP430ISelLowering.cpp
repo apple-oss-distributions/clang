@@ -79,7 +79,7 @@ MSP430TargetLowering::MSP430TargetLowering(MSP430TargetMachine &tm) :
 
   setStackPointerRegisterToSaveRestore(MSP430::SPW);
   setBooleanContents(ZeroOrOneBooleanContent);
-  setSchedulingPreference(Sched::Latency);
+  setBooleanVectorContents(ZeroOrOneBooleanContent); // FIXME: Is this correct?
 
   // We have post-incremented loads / stores.
   setIndexedLoadAction(ISD::POST_INC, MVT::i8, Legal);
@@ -371,7 +371,7 @@ MSP430TargetLowering::LowerCCCArguments(SDValue Chain,
       SDValue FIN = DAG.getFrameIndex(FI, MVT::i16);
       InVals.push_back(DAG.getLoad(VA.getLocVT(), dl, Chain, FIN,
                                    MachinePointerInfo::getFixedStack(FI),
-                                   false, false, 0));
+                                   false, false, false, 0));
     }
   }
 
@@ -907,13 +907,13 @@ SDValue MSP430TargetLowering::LowerRETURNADDR(SDValue Op,
     return DAG.getLoad(getPointerTy(), dl, DAG.getEntryNode(),
                        DAG.getNode(ISD::ADD, dl, getPointerTy(),
                                    FrameAddr, Offset),
-                       MachinePointerInfo(), false, false, 0);
+                       MachinePointerInfo(), false, false, false, 0);
   }
 
   // Just load the return address.
   SDValue RetAddrFI = getReturnAddressFrameIndex(DAG);
   return DAG.getLoad(getPointerTy(), dl, DAG.getEntryNode(),
-                     RetAddrFI, MachinePointerInfo(), false, false, 0);
+                     RetAddrFI, MachinePointerInfo(), false, false, false, 0);
 }
 
 SDValue MSP430TargetLowering::LowerFRAMEADDR(SDValue Op,
@@ -929,7 +929,7 @@ SDValue MSP430TargetLowering::LowerFRAMEADDR(SDValue Op,
   while (Depth--)
     FrameAddr = DAG.getLoad(VT, dl, DAG.getEntryNode(), FrameAddr,
                             MachinePointerInfo(),
-                            false, false, 0);
+                            false, false, false, 0);
   return FrameAddr;
 }
 
@@ -987,8 +987,8 @@ const char *MSP430TargetLowering::getTargetNodeName(unsigned Opcode) const {
   }
 }
 
-bool MSP430TargetLowering::isTruncateFree(const Type *Ty1,
-                                          const Type *Ty2) const {
+bool MSP430TargetLowering::isTruncateFree(Type *Ty1,
+                                          Type *Ty2) const {
   if (!Ty1->isIntegerTy() || !Ty2->isIntegerTy())
     return false;
 
@@ -1002,7 +1002,7 @@ bool MSP430TargetLowering::isTruncateFree(EVT VT1, EVT VT2) const {
   return (VT1.getSizeInBits() > VT2.getSizeInBits());
 }
 
-bool MSP430TargetLowering::isZExtFree(const Type *Ty1, const Type *Ty2) const {
+bool MSP430TargetLowering::isZExtFree(Type *Ty1, Type *Ty2) const {
   // MSP430 implicitly zero-extends 8-bit results in 16-bit registers.
   return 0 && Ty1->isIntegerTy(8) && Ty2->isIntegerTy(16);
 }

@@ -38,7 +38,7 @@ void PragmaGCCVisibilityHandler::HandlePragma(Preprocessor &PP,
   SourceLocation VisLoc = VisTok.getLocation();
 
   Token Tok;
-  PP.Lex(Tok);
+  PP.LexUnexpandedToken(Tok);
 
   const IdentifierInfo *PushPop = Tok.getIdentifierInfo();
 
@@ -49,20 +49,20 @@ void PragmaGCCVisibilityHandler::HandlePragma(Preprocessor &PP,
     VisType = 0;
   } else if (PushPop && PushPop->isStr("push")) {
     IsPush = true;
-    PP.Lex(Tok);
+    PP.LexUnexpandedToken(Tok);
     if (Tok.isNot(tok::l_paren)) {
       PP.Diag(Tok.getLocation(), diag::warn_pragma_expected_lparen)
         << "visibility";
       return;
     }
-    PP.Lex(Tok);
+    PP.LexUnexpandedToken(Tok);
     VisType = Tok.getIdentifierInfo();
     if (!VisType) {
       PP.Diag(Tok.getLocation(), diag::warn_pragma_expected_identifier)
         << "visibility";
       return;
     }
-    PP.Lex(Tok);
+    PP.LexUnexpandedToken(Tok);
     if (Tok.isNot(tok::r_paren)) {
       PP.Diag(Tok.getLocation(), diag::warn_pragma_expected_rparen)
         << "visibility";
@@ -73,7 +73,7 @@ void PragmaGCCVisibilityHandler::HandlePragma(Preprocessor &PP,
       << "visibility";
     return;
   }
-  PP.Lex(Tok);
+  PP.LexUnexpandedToken(Tok);
   if (Tok.isNot(tok::eod)) {
     PP.Diag(Tok.getLocation(), diag::warn_pragma_extra_tokens_at_eol)
       << "visibility";
@@ -110,6 +110,12 @@ void PragmaPackHandler::HandlePragma(Preprocessor &PP,
       return;
 
     PP.Lex(Tok);
+
+    // In MSVC/gcc, #pragma pack(4) sets the alignment without affecting
+    // the push/pop stack.
+    // In Apple gcc, #pragma pack(4) is equivalent to #pragma pack(push, 4)
+    if (PP.getLangOptions().ApplePragmaPack)
+      Kind = Sema::PPK_Push;
   } else if (Tok.is(tok::identifier)) {
     const IdentifierInfo *II = Tok.getIdentifierInfo();
     if (II->isStr("show")) {
@@ -159,6 +165,11 @@ void PragmaPackHandler::HandlePragma(Preprocessor &PP,
         }
       }
     }
+  } else if (PP.getLangOptions().ApplePragmaPack) {
+    // In MSVC/gcc, #pragma pack() resets the alignment without affecting
+    // the push/pop stack.
+    // In Apple gcc #pragma pack() is equivalent to #pragma pack(pop).
+    Kind = Sema::PPK_Pop;
   }
 
   if (Tok.isNot(tok::r_paren)) {
@@ -297,7 +308,7 @@ void PragmaUnusedHandler::HandlePragma(Preprocessor &PP,
   }
 
   // Lex the declaration reference(s).
-  llvm::SmallVector<Token, 5> Identifiers;
+  SmallVector<Token, 5> Identifiers;
   SourceLocation RParenLoc;
   bool LexID = true;
 
@@ -451,8 +462,11 @@ PragmaOpenCLExtensionHandler::HandlePragma(Preprocessor &PP,
   }
 
   OpenCLOptions &f = Actions.getOpenCLOptions();
-  if (ename->isStr("all")) {
-#define OPENCLEXT(nm)   f.nm = state;
+  // OpenCL 1.1 9.1: "The all variant sets the behavior for all extensions,
+  // overriding all previously issued extension directives, but only if the
+  // behavior is set to disable."
+  if (state == 0 && ename->isStr("all")) {
+#define OPENCLEXT(nm)   f.nm = 0;
 #include "clang/Basic/OpenCLExtensions.def"
   }
 #define OPENCLEXT(nm) else if (ename->isStr(#nm)) { f.nm = state; }

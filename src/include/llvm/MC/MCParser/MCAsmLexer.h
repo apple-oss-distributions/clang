@@ -17,7 +17,6 @@
 namespace llvm {
 class MCAsmLexer;
 class MCInst;
-class Target;
 
 /// AsmToken - Target independent representation for an assembler token.
 class AsmToken {
@@ -36,7 +35,7 @@ public:
     // Real values.
     Real,
 
-    // Register values (stored in IntVal).  Only used by TargetAsmLexer.
+    // Register values (stored in IntVal).  Only used by MCTargetAsmLexer.
     Register,
 
     // No-value.
@@ -72,6 +71,7 @@ public:
   bool isNot(TokenKind K) const { return Kind != K; }
 
   SMLoc getLoc() const;
+  SMLoc getEndLoc() const;
 
   /// getStringContents - Get the contents of a string token (without quotes).
   StringRef getStringContents() const {

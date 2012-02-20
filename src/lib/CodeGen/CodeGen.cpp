@@ -27,6 +27,9 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
   initializeLiveIntervalsPass(Registry);
   initializeLiveStacksPass(Registry);
   initializeLiveVariablesPass(Registry);
+  initializeMachineBlockFrequencyInfoPass(Registry);
+  initializeMachineBlockPlacementPass(Registry);
+  initializeMachineBlockPlacementStatsPass(Registry);
   initializeMachineCSEPass(Registry);
   initializeMachineDominatorTreePass(Registry);
   initializeMachineLICMPass(Registry);

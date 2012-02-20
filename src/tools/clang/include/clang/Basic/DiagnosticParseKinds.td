@@ -23,14 +23,13 @@ let CategoryName = "Parse Issue" in {
 def ext_empty_source_file : Extension<"ISO C forbids an empty source file">;
 def ext_top_level_semi : Extension<
   "extra ';' outside of a function">;
+def warn_cxx98_compat_top_level_semi : Warning<
+  "extra ';' outside of a function is incompatible with C++98">,
+  InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def ext_extra_struct_semi : Extension<
   "extra ';' inside a %0">;
 def ext_extra_ivar_semi : Extension<
   "extra ';' inside instance variable list">;
-
-def auto_storage_class : ExtWarn<
-  "'auto' storage class specifier is redundant and will be "
-  "removed in future releases">;
 
 def ext_duplicate_declspec : Extension<"duplicate '%0' declaration specifier">;
 def ext_plain_complex : ExtWarn<
@@ -53,12 +52,15 @@ def err_friend_storage_spec : Error<"'%0' is invalid in friend declarations">;
 def ext_ident_list_in_param : Extension<
   "type-less parameter names in function declaration">;
 def ext_c99_variable_decl_in_for_loop : Extension<
-  "variable declaration in for loop is a C99-specific feature">;
+  "variable declaration in for loop is a C99-specific feature">, InGroup<C99>;
 def ext_c99_compound_literal : Extension<
-  "compound literals are a C99-specific feature">;
+  "compound literals are a C99-specific feature">, InGroup<C99>;
 def ext_enumerator_list_comma : Extension<
-  "commas at the end of enumerator lists are a %select{C99|C++0x}0-specific "
+  "commas at the end of enumerator lists are a %select{C99|C++11}0-specific "
   "feature">;
+def warn_cxx98_compat_enumerator_list_comma : Warning<
+  "commas at the end of enumerator lists are incompatible with C++98">,
+  InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def err_enumerator_list_missing_comma : Error<
   "missing ',' between enumerators">;
 def err_enumerator_unnamed_no_def : Error<
@@ -66,13 +68,26 @@ def err_enumerator_unnamed_no_def : Error<
 def ext_ms_enum_fixed_underlying_type : Extension<
   "enumeration types with a fixed underlying type are a Microsoft extension">, 
   InGroup<Microsoft>;
+def warn_cxx98_compat_enum_fixed_underlying_type : Warning<
+  "enumeration types with a fixed underlying type are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_alignof : Warning<
+  "alignof expressions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+
+def warn_microsoft_dependent_exists : Warning<
+  "dependent %select{__if_not_exists|__if_exists}0 declarations are ignored">, 
+  InGroup<DiagGroup<"microsoft-exists">>;
 
 def ext_c1x_generic_selection : Extension<
-  "generic selections are a C1X-specific feature">;
+  "generic selections are a C1X-specific feature">, InGroup<C1X>;
 def err_duplicate_default_assoc : Error<
   "duplicate default generic association">;
 def note_previous_default_assoc : Note<
   "previous default generic association is here">;
+
+def ext_c1x_alignas : Extension<
+  "_Alignas is a C1X-specific feature">, InGroup<C1X>;
 
 def ext_gnu_indirect_goto : Extension<
   "use of GNU indirect-goto extension">, InGroup<GNU>;
@@ -127,7 +142,8 @@ def err_function_declared_typedef : Error<
   "function definition declared 'typedef'">;
 def err_iboutletcollection_builtintype : Error<
   "type argument of iboutletcollection attribute cannot be a builtin type">;
-
+def err_iboutletcollection_with_protocol : Error<
+  "invalid argument of iboutletcollection attribute">;
 def err_at_defs_cxx : Error<"@defs is not supported in Objective-C++">;
 def err_at_in_class : Error<"unexpected '@' in member specification">;
 
@@ -188,16 +204,44 @@ def err_invalid_reference_qualifier_application : Error<
 def err_illegal_decl_reference_to_reference : Error<
   "%0 declared as a reference to a reference">;
 def ext_rvalue_reference : ExtWarn<
-  "rvalue references are a C++0x extension">, InGroup<CXX0x>;
+  "rvalue references are a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_rvalue_reference : Warning<
+  "rvalue references are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def ext_ref_qualifier : ExtWarn<
-  "reference qualifiers on functions are a C++0x extension">, InGroup<CXX0x>;
+  "reference qualifiers on functions are a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_ref_qualifier : Warning<
+  "reference qualifiers on functions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def ext_inline_namespace : ExtWarn<
-  "inline namespaces are a C++0x feature">, InGroup<CXX0x>;
+  "inline namespaces are a C++11 feature">, InGroup<CXX11>;
+def warn_cxx98_compat_inline_namespace : Warning<
+  "inline namespaces are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_generalized_initializer_lists : Error<
-  "generalized initializer lists are a C++0x extension unsupported in Clang">;
+  "generalized initializer lists are a C++11 extension unsupported in Clang">;
 def ext_generalized_initializer_lists : ExtWarn<
-  "generalized initializer lists are a C++0x extension unsupported in Clang">,
-  InGroup<CXX0x>;
+  "generalized initializer lists are a C++11 extension unsupported in Clang">,
+  InGroup<CXX11>;
+def warn_cxx98_compat_generalized_initializer_lists : Warning<
+  "generalized initializer lists are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_trailing_return_type : Warning<
+  "trailing return types are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def ext_auto_type_specifier : ExtWarn<
+  "'auto' type specifier is a C++11 extension">, InGroup<CXX11>;
+def warn_auto_storage_class : Warning<
+  "'auto' storage class specifier is redundant and incompatible with C++11">,
+  InGroup<CXX11Compat>, DefaultIgnore;
+def ext_auto_storage_class : ExtWarn<
+  "'auto' storage class specifier is not permitted in C++11, and will not "
+  "be supported in future releases">, InGroup<DiagGroup<"auto-storage-class">>;
+def ext_for_range : ExtWarn<
+  "range-based for loop is a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_for_range : Warning<
+  "range-based for loop is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_argument_required_after_attribute : Error<
   "argument required after attribute">;
 def err_missing_param : Error<"expected parameter declarator">;
@@ -205,7 +249,11 @@ def err_missing_comma_before_ellipsis : Error<
   "C requires a comma prior to the ellipsis in a variadic function type">;
 def err_unexpected_typedef_ident : Error<
   "unexpected type name %0: expected identifier">;
+def err_unexpected_scope_on_base_decltype : Error<
+  "unexpected namespace scope prior to decltype">;
 def err_expected_class_name : Error<"expected class name">;
+def err_expected_class_name_not_template : 
+  Error<"'typename' is redundant; base classes are implicitly types">;
 def err_unspecified_vla_size_with_static : Error<
   "'static' may not be used with an unspecified variable length array size">;
 
@@ -219,6 +267,9 @@ def err_typename_invalid_storageclass : Error<
   "type name does not allow storage class to be specified">;
 def err_typename_invalid_functionspec : Error<
   "type name does not allow function specifier to be specified">;
+def err_typename_identifiers_only : Error<
+  "typename is allowed for identifiers only">;
+  
 def err_invalid_decl_spec_combination : Error<
   "cannot combine with previous '%0' declaration specifier">;
 def err_invalid_vector_decl_spec_combination : Error<
@@ -250,7 +301,10 @@ def err_unexected_colon_in_nested_name_spec : Error<
 def err_bool_redeclaration : Error<
   "redeclaration of C++ built-in type 'bool'">;
 def ext_c1x_static_assert : Extension<
-  "_Static_assert is a C1X-specific feature">;
+  "_Static_assert is a C1X-specific feature">, InGroup<C1X>;
+def warn_cxx98_compat_static_assert : Warning<
+  "static_assert declarations are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 /// Objective-C parser diagnostics
 def err_expected_minus_or_plus : Error<
@@ -332,6 +386,9 @@ def ext_ellipsis_exception_spec : Extension<
   "exception specification of '...' is a Microsoft extension">;
 def err_dynamic_and_noexcept_specification : Error<
   "cannot have both throw() and noexcept() clause on the same function">;
+def warn_cxx98_compat_noexcept_decl : Warning<
+  "noexcept specifications are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_expected_catch : Error<"expected catch">;
 def err_expected_lbrace_or_comma : Error<"expected '{' or ','">;
 def err_using_namespace_in_class : Error<
@@ -342,6 +399,8 @@ def err_destructor_template_id : Error<
   "destructor name %0 does not refer to a template">;
 def err_default_arg_unparsed : Error<
   "unexpected end of default argument expression">;
+def err_parser_impl_limit_overflow : Error<
+  "parser recursion limit reached, program too complex">, DefaultFatal;
 
 // C++ derived classes
 def err_dup_virtual : Error<"duplicate 'virtual' in base specifier">;
@@ -349,6 +408,9 @@ def err_dup_virtual : Error<"duplicate 'virtual' in base specifier">;
 // C++ operator overloading
 def err_operator_string_not_empty : Error<
   "string literal after 'operator' must be '\"\"'">;
+def warn_cxx98_compat_literal_operator : Warning<
+  "literal operators are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 // Classes.
 def err_anon_type_definition : Error<
@@ -357,11 +419,24 @@ def err_default_delete_in_multiple_declaration : Error<
   "'= %select{default|delete}0' is a function definition and must occur in a "
   "standalone declaration">;
 
+def warn_cxx98_compat_noexcept_expr : Warning<
+  "noexcept expressions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_nullptr : Warning<
+  "'nullptr' is incompatible with C++98">, InGroup<CXX98Compat>, DefaultIgnore;
+
+def warn_cxx98_compat_alignas : Warning<"'alignas' is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_attribute : Warning<
+  "attributes are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_cxx0x_attribute_forbids_arguments : Error<
-  "C++0x attribute '%0' cannot have an argument list">;
+  "C++11 attribute '%0' cannot have an argument list">;
 def err_cxx0x_attribute_requires_arguments : Error<
-  "C++0x attribute '%0' must have an argument list">;
+  "C++11 attribute '%0' must have an argument list">;
 def err_attributes_not_allowed : Error<"an attribute list cannot appear here">;
+def err_alignas_pack_exp_unsupported : Error<
+  "pack expansions in alignment specifiers are not supported yet">;
 
 /// C++ Templates
 def err_expected_template : Error<"expected template">;
@@ -385,7 +460,10 @@ def err_two_right_angle_brackets_need_space : Error<
   "a space is required between consecutive right angle brackets (use '> >')">;
 def warn_cxx0x_right_shift_in_template_arg : Warning<
   "use of right-shift operator ('>>') in template argument will require "
-  "parentheses in C++0x">;
+  "parentheses in C++11">;
+def warn_cxx98_compat_two_right_angle_brackets : Warning<
+  "consecutive right angle brackets are incompatible with C++98 (use '> >')">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_multiple_template_declarators : Error<
     "%select{|a template declaration|an explicit template specialization|"
     "an explicit template instantiation}0 can "
@@ -401,6 +479,11 @@ def err_missing_dependent_template_keyword : Error<
 def warn_missing_dependent_template_keyword : ExtWarn<
   "use 'template' keyword to treat '%0' as a dependent template name">;
 
+def ext_extern_template : Extension<
+  "extern templates are a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_extern_template : Warning<
+  "extern templates are incompatible with C++98">,
+  InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def warn_static_inline_explicit_inst_ignored : Warning<
   "ignoring '%select{static|inline}0' keyword on explicit template "
   "instantiation">;
@@ -446,31 +529,46 @@ def err_missing_whitespace_digraph : Error<
   " which forms the digraph '<:' (aka '[') and a ':', did you mean '< ::'?">;
 
 def warn_deleted_function_accepted_as_extension: ExtWarn<
-  "deleted function definition accepted as a C++0x extension">, InGroup<CXX0x>;
+  "deleted function definition accepted as a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_deleted_function : Warning<
+  "deleted function definitions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def warn_defaulted_function_accepted_as_extension: ExtWarn<
-  "defaulted function definition accepted as a C++0x extension">,
-  InGroup<CXX0x>;
+  "defaulted function definition accepted as a C++11 extension">,
+  InGroup<CXX11>;
+def warn_cxx98_compat_defaulted_function : Warning<
+  "defaulted function definitions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
-// C++0x in-class member initialization
-def warn_nonstatic_member_init_accepted_as_extension: ExtWarn<
-  "in-class initialization of non-static data member accepted as a C++0x extension">,
-  InGroup<CXX0x>;
+// C++11 in-class member initialization
+def ext_nonstatic_member_init : ExtWarn<
+  "in-class initialization of non-static data member accepted as a C++11 extension">,
+  InGroup<CXX11>;
+def warn_cxx98_compat_nonstatic_member_init : Warning<
+  "in-class initialization of non-static data members is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_bitfield_member_init: Error<
   "bitfield member cannot have an in-class initializer">;
 def err_incomplete_array_member_init: Error<
   "array bound cannot be deduced from an in-class initializer">;
 
-// C++0x alias-declaration
+// C++11 alias-declaration
 def ext_alias_declaration : ExtWarn<
-  "alias declarations accepted as a C++0x extension">, InGroup<CXX0x>;
+  "alias declarations accepted as a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_alias_declaration : Warning<
+  "alias declarations are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_alias_declaration_not_identifier : Error<
   "name defined in alias declaration must be an identifier">;
 def err_alias_declaration_specialization : Error<
   "%select{partial specialization|explicit specialization|explicit instantiation}0 of alias templates is not permitted">;
     
-// C++0x override control
-def ext_override_control_keyword : Extension<
-  "'%0' keyword accepted as a C++0x extension">, InGroup<CXX0x>;
+// C++11 override control
+def ext_override_control_keyword : ExtWarn<
+  "'%0' keyword accepted as a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_override_control_keyword : Warning<
+  "'%0' keyword is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 def err_duplicate_virt_specifier : Error<
   "class member already marked '%0'">;
@@ -479,6 +577,9 @@ def err_duplicate_class_virt_specifier : Error<
 
 def err_scoped_enum_missing_identifier : Error<
   "scoped enumeration requires a name">;
+def warn_cxx98_compat_scoped_enum : Warning<
+  "scoped enumerations are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 def err_expected_parameter_pack : Error<
   "expected the name of a parameter pack">;
@@ -486,6 +587,18 @@ def err_paren_sizeof_parameter_pack : Error<
   "missing parentheses around the size of parameter pack %0">;
 def err_sizeof_parameter_pack : Error<
   "expected parenthesized parameter pack name in 'sizeof...' expression">;
+
+// C++11 lambda expressions
+def err_expected_comma_or_rsquare : Error<
+  "expected ',' or ']' in lambda capture list">;
+def err_this_captured_by_reference : Error<
+  "'this' cannot be captured by reference">;
+def err_expected_capture : Error<
+  "expected variable name or 'this' in lambda capture list">;
+def err_expected_lambda_body : Error<"expected body of lambda expression">;
+def warn_cxx98_compat_lambda : Warning<
+  "lambda expressions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 // Availability attribute
 def err_expected_version : Error<
@@ -559,6 +672,14 @@ def err_seh___except_filter : Error<
 
 def err_seh___finally_block : Error<
   "%0 only allowed in __finally block">;
-
+  
 } // end of Parse Issue category.
+
+let CategoryName = "Modules Issue" in {
+def err_module_expected_ident : Error<
+  "expected a module name after '__import_module__'">;
+def err_module_expected_semi : Error<
+  "expected a semicolon name after module name">;
+}
+
 } // end of Parser diagnostics

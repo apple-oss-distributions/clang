@@ -182,6 +182,13 @@ void StmtProfiler::VisitCXXForRangeStmt(const CXXForRangeStmt *S) {
   VisitStmt(S);
 }
 
+void StmtProfiler::VisitMSDependentExistsStmt(const MSDependentExistsStmt *S) {
+  VisitStmt(S);
+  ID.AddBoolean(S->isIfExists());
+  VisitNestedNameSpecifier(S->getQualifierLoc().getNestedNameSpecifier());
+  VisitName(S->getNameInfo().getName());
+}
+
 void StmtProfiler::VisitSEHTryStmt(const SEHTryStmt *S) {
   VisitStmt(S);
 }
@@ -252,7 +259,7 @@ void StmtProfiler::VisitIntegerLiteral(const IntegerLiteral *S) {
 
 void StmtProfiler::VisitCharacterLiteral(const CharacterLiteral *S) {
   VisitExpr(S);
-  ID.AddBoolean(S->isWide());
+  ID.AddInteger(S->getKind());
   ID.AddInteger(S->getValue());
 }
 
@@ -268,8 +275,8 @@ void StmtProfiler::VisitImaginaryLiteral(const ImaginaryLiteral *S) {
 
 void StmtProfiler::VisitStringLiteral(const StringLiteral *S) {
   VisitExpr(S);
-  ID.AddString(S->getString());
-  ID.AddBoolean(S->isWide());
+  ID.AddString(S->getBytes());
+  ID.AddInteger(S->getKind());
 }
 
 void StmtProfiler::VisitParenExpr(const ParenExpr *S) {
@@ -466,6 +473,20 @@ void StmtProfiler::VisitGenericSelectionExpr(const GenericSelectionExpr *S) {
       VisitType(T);
     VisitExpr(S->getAssocExpr(i));
   }
+}
+
+void StmtProfiler::VisitPseudoObjectExpr(const PseudoObjectExpr *S) {
+  VisitExpr(S);
+  for (PseudoObjectExpr::const_semantics_iterator
+         i = S->semantics_begin(), e = S->semantics_end(); i != e; ++i)
+    // Normally, we would not profile the source expressions of OVEs.
+    if (const OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(*i))
+      Visit(OVE->getSourceExpr());
+}
+
+void StmtProfiler::VisitAtomicExpr(const AtomicExpr *S) {
+  VisitExpr(S);
+  ID.AddInteger(S->getOp());
 }
 
 static Stmt::StmtClass DecodeOperatorCall(const CXXOperatorCallExpr *S,
@@ -909,6 +930,12 @@ void StmtProfiler::VisitSubstNonTypeTemplateParmPackExpr(
   VisitExpr(S);
   VisitDecl(S->getParameterPack());
   VisitTemplateArgument(S->getArgumentPack());
+}
+
+void StmtProfiler::VisitSubstNonTypeTemplateParmExpr(
+    const SubstNonTypeTemplateParmExpr *E) {
+  // Profile exactly as the replacement expression.
+  Visit(E->getReplacement());
 }
 
 void StmtProfiler::VisitMaterializeTemporaryExpr(

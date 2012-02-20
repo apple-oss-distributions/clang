@@ -23,7 +23,8 @@ def ext_expr_not_ice : Extension<
 
 // Semantic analysis of constant literals.
 def ext_predef_outside_function : Warning<
-  "predefined identifier is only valid inside function">;
+  "predefined identifier is only valid inside function">,
+  InGroup<DiagGroup<"predefined-identifier-outside-function">>;
 def warn_float_overflow : Warning<
   "magnitude of floating-point constant too large for type %0; maximum is %1">,
    InGroup<LiteralRange>;
@@ -102,7 +103,7 @@ def ext_flexible_array_init : Extension<
 def ext_anon_param_requires_type_specifier : Extension<
   "type specifier required for unnamed parameter, defaults to int">;
 def err_bad_variable_name : Error<
-  "'%0' cannot be the name of a variable or data member">;
+  "%0 cannot be the name of a variable or data member">;
 def err_bad_parameter_name : Error<
   "'%0' cannot be the name of a parameter">;
 def err_parameter_name_omitted : Error<"parameter name omitted">;
@@ -191,6 +192,9 @@ def err_using_decl_can_not_refer_to_namespace : Error<
   "using declaration can not refer to namespace">;
 def err_using_decl_constructor : Error<
   "using declaration can not refer to a constructor">;
+def warn_cxx98_compat_using_decl_constructor : Warning<
+  "inherited constructors are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_using_decl_destructor : Error<
   "using declaration can not refer to a destructor">;
 def err_using_decl_template_id : Error<
@@ -236,10 +240,10 @@ def err_maybe_falloff_nonvoid_block : Error<
 def err_falloff_nonvoid_block : Error<
   "control reaches end of non-void block">;
 def warn_suggest_noreturn_function : Warning<
-  "function could be attribute 'noreturn'">,
+  "%select{function|method}0 %1 could be declared with attribute 'noreturn'">,
   InGroup<DiagGroup<"missing-noreturn">>, DefaultIgnore;
 def warn_suggest_noreturn_block : Warning<
-  "block could be attribute 'noreturn'">,
+  "block could be declared with attribute 'noreturn'">,
   InGroup<DiagGroup<"missing-noreturn">>, DefaultIgnore;
 def warn_unreachable : Warning<"will never be executed">,
   InGroup<DiagGroup<"unreachable-code">>, DefaultIgnore;
@@ -264,8 +268,9 @@ def err_types_compatible_p_in_cplusplus : Error<
   "__builtin_types_compatible_p is not valid in C++">;
 def warn_builtin_unknown : Warning<"use of unknown builtin %0">, DefaultError;
 def warn_dyn_class_memaccess : Warning<
-  "%select{destination for|source of}0 this %1 call is a pointer to dynamic "
-  "class %2; vtable pointer will be overwritten">, 
+  "%select{destination for|source of|first operand of|second operand of}0 this "
+  "%1 call is a pointer to dynamic class %2; vtable pointer will be "
+  "%select{overwritten|copied|moved|compared}3">,
   InGroup<DiagGroup<"dynamic-class-memaccess">>;
 def note_bad_memaccess_silence : Note<
   "explicitly cast the pointer to silence this warning">;
@@ -278,18 +283,25 @@ def warn_sizeof_pointer_type_memaccess : Warning<
   "argument to 'sizeof' in %0 call is the same pointer type %1 as the "
   "%select{destination|source}2; expected %3 or an explicit length">,
   InGroup<DiagGroup<"sizeof-pointer-memaccess">>;
+def warn_strlcpycat_wrong_size : Warning<
+  "size argument in %0 call appears to be size of the source; expected the size of "
+  "the destination">,
+  InGroup<DiagGroup<"strlcpy-strlcat-size">>;
+def note_strlcpycat_wrong_size : Note<
+  "change size argument to be the size of the destination">;
 
 /// main()
 // static/inline main() are not errors in C, just in C++.
-def warn_unusual_main_decl : Warning<"'main' should not be declared "
-    "%select{static|inline|static or inline}0">;
-def err_unusual_main_decl : Error<"'main' is not allowed to be declared "
-    "%select{static|inline|static or inline}0">;
+def warn_static_main : Warning<"'main' should not be declared static">,
+    InGroup<Main>;
+def err_static_main : Error<"'main' is not allowed to be declared static">;
+def err_inline_main : Error<"'main' is not allowed to be declared inline">;
 def err_main_template_decl : Error<"'main' cannot be a template">;
 def err_main_returns_nonint : Error<"'main' must return 'int'">;
 def err_main_surplus_args : Error<"too many parameters (%0) for 'main': "
     "must be 0, 2, or 3">;
-def warn_main_one_arg : Warning<"only one parameter on 'main' declaration">;
+def warn_main_one_arg : Warning<"only one parameter on 'main' declaration">,
+    InGroup<Main>;
 def err_main_arg_wrong : Error<"%select{first|second|third|fourth}0 "
     "parameter of 'main' (%select{argument count|argument array|environment|"
     "platform-specific data}0) must be of type %1">;
@@ -303,6 +315,8 @@ def err_statically_allocated_object : Error<
 def err_object_cannot_be_passed_returned_by_value : Error<
   "interface type %1 cannot be %select{returned|passed}0 by value"
   "; did you forget * in %1">;
+def err_parameters_retval_cannot_have_fp16_type : Error<
+  "%select{parameters|function return value}0 cannot have __fp16 type; did you forget * ?">;
 def warn_enum_value_overflow : Warning<"overflow in enumeration value">;
 def warn_pragma_options_align_unsupported_option : Warning<
   "unsupported alignment option in '#pragma options align'">;
@@ -383,27 +397,75 @@ def note_undef_method_impl : Note<"method definition for %0 not found">;
 def note_required_for_protocol_at : 
   Note<"required for direct or indirect protocol %0">;
 
+def warn_conflicting_overriding_ret_types : Warning<
+  "conflicting return type in "
+  "declaration of %0: %1 vs %2">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
 def warn_conflicting_ret_types : Warning<
-  "conflicting return type in implementation of %0: %1 vs %2">;
+  "conflicting return type in "
+  "implementation of %0: %1 vs %2">;
+
+def warn_conflicting_overriding_ret_type_modifiers : Warning<
+  "conflicting distributed object modifiers on return type "
+  "in declaration of %0">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
 def warn_conflicting_ret_type_modifiers : Warning<
   "conflicting distributed object modifiers on return type "
   "in implementation of %0">,
   InGroup<DiagGroup<"distributed-object-modifiers">>;
+
+def warn_non_covariant_overriding_ret_types : Warning<
+  "conflicting return type in "
+  "declaration of %0: %1 vs %2">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
 def warn_non_covariant_ret_types : Warning<
-  "conflicting return type in implementation of %0: %1 vs %2">,
+  "conflicting return type in "
+  "implementation of %0: %1 vs %2">,
   InGroup<DiagGroup<"method-signatures">>, DefaultIgnore;
 
+def warn_conflicting_overriding_param_types : Warning<
+  "conflicting parameter types in "
+  "declaration of %0: %1 vs %2">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
 def warn_conflicting_param_types : Warning<
-  "conflicting parameter types in implementation of %0: %1 vs %2">;
+  "conflicting parameter types in "
+  "implementation of %0: %1 vs %2">;
 def warn_conflicting_param_modifiers : Warning<
   "conflicting distributed object modifiers on parameter type "
   "in implementation of %0">,
   InGroup<DiagGroup<"distributed-object-modifiers">>;
+
+def warn_conflicting_overriding_param_modifiers : Warning<
+  "conflicting distributed object modifiers on parameter type "
+  "in declaration of %0">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
+def warn_non_contravariant_overriding_param_types : Warning<
+  "conflicting parameter types in "
+  "declaration of %0: %1 vs %2">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
 def warn_non_contravariant_param_types : Warning<
-  "conflicting parameter types in implementation of %0: %1 vs %2">,
+  "conflicting parameter types in "
+  "implementation of %0: %1 vs %2">,
   InGroup<DiagGroup<"method-signatures">>, DefaultIgnore;
+
+def warn_conflicting_overriding_variadic :Warning<
+  "conflicting variadic declaration of method and its "
+  "implementation">,
+  InGroup<OverridingMethodMismatch>, DefaultIgnore;
+
 def warn_conflicting_variadic :Warning<
-  "conflicting variadic declaration of method and its implementation">;
+  "conflicting variadic declaration of method and its "
+  "implementation">;
+
+def warn_category_method_impl_match:Warning<
+  "category is implementing a method which will also be implemented"
+  " by its primary class">, InGroup<ObjCProtocolMethodImpl>;
 
 def warn_implements_nscopying : Warning<
 "default assign attribute on property %0 which implements "
@@ -437,12 +499,29 @@ def warn_property_attr_mismatch : Warning<
 def warn_objc_property_copy_missing_on_block : Warning<
     "'copy' attribute must be specified for the block property "
     "when -fobjc-gc-only is specified">;
+def warn_objc_property_retain_of_block : Warning<
+    "retain'ed block property does not copy the block "
+    "- use copy attribute instead">, InGroup<ObjCRetainBlockProperty>;
+def warn_objc_readonly_property_has_setter : Warning<
+    "setter cannot be specified for a readonly property">,
+    InGroup<ObjCReadonlyPropertyHasSetter>;
 def warn_atomic_property_rule : Warning<
-  "writable atomic property %0 cannot pair a synthesized setter/getter "
-  "with a user defined setter/getter">;
-def warn_ownin_getter_rule : Warning<
+  "writable atomic property %0 cannot pair a synthesized %select{getter|setter}1 "
+  "with a user defined %select{getter|setter}2">,
+  InGroup<DiagGroup<"atomic-property-with-user-defined-accessor">>;
+def note_atomic_property_fixup_suggest : Note<"setter and getter must both be "
+  "synthesized, or both be user defined,or the property must be nonatomic">;
+def warn_atomic_property_nontrivial_assign_op : Warning<
+  "atomic property of type %0 synthesizing setter using non-trivial assignment"
+  " operator">, InGroup<DiagGroup<"objc-property-atomic-setter-synthesis">>;
+def warn_owning_getter_rule : Warning<
   "property's synthesized getter follows Cocoa naming"
-  " convention for returning 'owned' objects">;
+  " convention for returning 'owned' objects">,
+  InGroup<DiagGroup<"objc-property-matches-cocoa-ownership-rule">>;
+def warn_auto_synthesizing_protocol_property :Warning<
+  "auto property synthesis will not synthesize property"
+  " declared in a protocol">,
+  InGroup<DiagGroup<"objc-protocol-property-synthesis">>;
 def warn_property_getter_owning_mismatch : Warning<
   "property declared as returning non-retained objects"
   "; getter returning retained objects">;
@@ -456,6 +535,9 @@ def warn_default_atomic_custom_getter_setter : Warning<
 def err_use_continuation_class : Error<
   "illegal redeclaration of property in continuation class %0"
   " (attribute must be 'readwrite', while its primary must be 'readonly')">;
+def warn_type_mismatch_continuation_class : Warning<
+  "type of property %0 in continuation class does not match "
+  "property type in primary class">, InGroup<ObjCContinuationPropertyType>;
 def err_use_continuation_class_redeclaration_readwrite : Error<
   "illegal redeclaration of 'readwrite' property in continuation class %0"
   " (perhaps you intended this to be a 'readwrite' redeclaration of a "
@@ -491,6 +573,8 @@ def err_arc_perform_selector_retains : Error<
 def warn_arc_perform_selector_leaks : Warning<
   "performSelector may cause a leak because its selector is unknown">,
   InGroup<DiagGroup<"arc-performSelector-leaks">>;
+def err_gc_weak_property_strong_type : Error<
+  "weak attribute declared on a __strong type property in GC mode">;
 
 def error_synthesized_ivar_yet_not_supported : Error<
   "instance variable synthesis not yet supported"
@@ -512,6 +596,12 @@ def error_property_implemented : Error<"property %0 is already implemented">;
 def warn_objc_property_attr_mutually_exclusive : Warning<
   "property attributes '%0' and '%1' are mutually exclusive">,
   InGroup<ReadOnlySetterAttrs>, DefaultIgnore;
+def warn_objc_missing_super_dealloc : Warning<
+  "method possibly missing a [super dealloc] call">,
+  InGroup<ObjCMissingSuperCalls>;
+def warn_objc_missing_super_finalize : Warning<
+  "method possibly missing a [super finalize] call">,
+  InGroup<ObjCMissingSuperCalls>;
 def warn_undeclared_selector : Warning<
   "undeclared selector %0">, InGroup<UndeclaredSelector>, DefaultIgnore;
 def warn_implicit_atomic_property : Warning<
@@ -539,13 +629,25 @@ def err_unexpected_friend : Error<
   "friends can only be classes or functions">;
 def ext_enum_friend : ExtWarn<
   "enumeration type %0 cannot be a friend">;
+def warn_cxx98_compat_enum_friend : Warning<
+  "befriending enumeration type %0 is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def ext_nonclass_type_friend : ExtWarn<
-  "non-class friend type %0 is a C++0x extension">, InGroup<CXX0x>;
+  "non-class friend type %0 is a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_nonclass_type_friend : Warning<
+  "non-class friend type %0 is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_friend_is_member : Error<
   "friends cannot be members of the declaring class">;
+def warn_cxx98_compat_friend_is_member : Warning<
+  "friend declaration naming a member of the declaring class is incompatible "
+  "with C++98">, InGroup<CXX98Compat>, DefaultIgnore;
 def ext_unelaborated_friend_type : ExtWarn<
   "specify '%select{struct|union|class|enum}0' to befriend %1; accepted "
-  "as a C++0x extension">, InGroup<CXX0x>;
+  "as a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_unelaborated_friend_type : Warning<
+  "befriending %1 without '%select{struct|union|class|enum}0' keyword is "
+  "incompatible with C++98">, InGroup<CXX98Compat>, DefaultIgnore;
 def err_qualified_friend_not_found : Error<
   "no function named %0 with type %1 was found in the specified scope">;
 def err_introducing_special_friend : Error<
@@ -555,9 +657,15 @@ def err_tagless_friend_type_template : Error<
   "friend type templates must use an elaborated type">;
 def err_no_matching_local_friend : Error<
   "no matching function found in local scope">;
+def err_no_matching_local_friend_suggest : Error<
+  "no matching function %0 found in local scope; did you mean %2">;
 def err_partial_specialization_friend : Error<
   "partial specialization cannot be declared as a friend">;
-
+def err_qualified_friend_def : Error<
+  "friend function definition cannot be qualified with '%0'">;
+def err_friend_def_in_local_class : Error<
+  "friend function cannot be defined in a local class">;
+  
 def err_abstract_type_in_decl : Error<
   "%select{return|parameter|variable|field}0 type %1 is an abstract class">;
 def err_allocation_of_abstract_type : Error<
@@ -707,6 +815,9 @@ def note_access_constrained_by_path : Note<
   " inheritance here">;
 def note_access_protected_restricted : Note<
   "object type %select{|%1 }0must derive from context type %2">;
+def warn_cxx98_compat_sfinae_access_control : Warning<
+  "substitution failure due to access control is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore, NoSFINAE;
   
 // C++ name lookup
 def err_incomplete_nested_name_spec : Error<
@@ -729,6 +840,9 @@ def err_incomplete_member_access : Error<
   "member access into incomplete type %0">;
 def err_incomplete_type : Error<
   "incomplete type %0 where a complete type is required">;
+def warn_cxx98_compat_enum_nested_name_spec : Warning<
+  "enumeration type in nested name specifier is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
   
 // C++ class members
 def err_storageclass_invalid_for_member : Error<
@@ -793,6 +907,11 @@ def err_illegal_union_or_anon_struct_member : Error<
   "%select{anonymous struct|union}0 member %1 has a non-trivial "
   "%select{constructor|copy constructor|move constructor|copy assignment "
   "operator|move assignment operator|destructor}2">;
+def warn_cxx98_compat_nontrivial_union_or_anon_struct_member : Warning<
+  "%select{anonymous struct|union}0 member %1 with a non-trivial "
+  "%select{constructor|copy constructor|move constructor|copy assignment "
+  "operator|move assignment operator|destructor}2 is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def note_nontrivial_has_virtual : Note<
   "because type %0 has a virtual %select{member function|base class}1">;
 def note_nontrivial_has_nontrivial : Note<
@@ -964,7 +1083,7 @@ def warn_maybe_uninit_var_captured_by_block : Warning<
   "variable %0 may be uninitialized when captured by block">,
   InGroup<UninitializedMaybe>, DefaultIgnore;
 def note_var_fixit_add_initialization : Note<
-  "add initialization to silence this warning">;
+  "initialize the variable %0 to silence this warning">;
 def err_init_incomplete_type : Error<"initialization of incomplete type %0">;
 
 def err_temp_copy_no_viable : Error<
@@ -991,12 +1110,26 @@ def err_temp_copy_deleted : Error<
   "of type %1 invokes deleted constructor">;
 def err_temp_copy_incomplete : Error<
   "copying a temporary object of incomplete type %0">;
+def warn_cxx98_compat_temp_copy : Warning<
+  "%select{copying variable|copying parameter|returning object|throwing "
+  "object|copying member subobject|copying array element|allocating object|"
+  "copying temporary|initializing base subobject|initializing vector element}1 "
+  "of type %2 when binding a reference to a temporary would %select{invoke "
+  "an inaccessible constructor|find no viable constructor|find ambiguous "
+  "constructors|invoke a deleted constructor}0 in C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
-// C++0x decltype
+// C++11 decltype
 def err_cannot_determine_declared_type_of_overloaded_function : Error<
     "cannot determine the type of an overloaded function">;
+def warn_cxx98_compat_decltype : Warning<
+  "'decltype' type specifier is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
     
-// C++0x auto
+// C++11 auto
+def warn_cxx98_compat_auto_type_specifier : Warning<
+  "'auto' type specifier is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_auto_variable_cannot_appear_in_own_initializer : Error<
   "variable %0 declared with 'auto' type cannot appear in its own initializer">;
 def err_illegal_decl_array_of_auto : Error<
@@ -1029,7 +1162,7 @@ def err_auto_new_deduction_failure : Error<
 def err_auto_different_deductions : Error<
   "'auto' deduced as %0 in declaration of %1 and deduced as %2 in declaration of %3">;
 
-// C++0x override control
+// C++11 override control
 def override_keyword_only_allowed_on_virtual_member_functions : Error<
   "only virtual member functions can be marked '%0'">;
 def err_function_marked_override_not_overriding : Error<
@@ -1037,16 +1170,16 @@ def err_function_marked_override_not_overriding : Error<
 def err_class_marked_final_used_as_base : Error<
   "base %0 is marked 'final'">;
 
-// C++0x attributes
+// C++11 attributes
 def err_repeat_attribute : Error<"'%0' attribute cannot be repeated">;
 
-// C++0x [[final]]
+// C++11 [[final]]
 def err_final_function_overridden : Error<
   "declaration of %0 overrides a 'final' function">;
 def err_final_base : Error<
   "derivation from 'final' %0">;
 
-// C++0x scoped enumerations
+// C++11 scoped enumerations
 def err_enum_invalid_underlying : Error<
   "non-integral type %0 is an invalid underlying type">;
 def err_enumerator_too_large : Error<
@@ -1067,9 +1200,12 @@ def err_only_enums_have_underlying_types : Error<
 def err_incomplete_type_no_underlying_type : Error<
   "an incomplete enumeration type has no underlying type yet">;
 
-// C++0x delegating constructors
-def err_delegation_0x_only : Error<
-  "delegating constructors are permitted only in C++0x">;
+// C++11 delegating constructors
+def err_delegating_ctor : Error<
+  "delegating constructors are permitted only in C++11">;
+def warn_cxx98_compat_delegating_ctor : Warning<
+  "delegating constructors are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_delegating_initializer_alone : Error<
   "an initializer for a delegating constructor must appear alone">;
 def warn_delegating_ctor_cycle : Warning<
@@ -1082,7 +1218,7 @@ def note_which_delegates_to : Note<
 def err_delegating_codegen_not_implemented : Error<
   "code generation for delegating constructors not implemented">;
 
-// C++0x range-based for loop
+// C++11 range-based for loop
 def err_for_range_decl_must_be_var : Error<
   "for range declaration must declare a variable">;
 def err_for_range_storage_class : Error<
@@ -1103,7 +1239,96 @@ def err_for_range_begin_end_types_differ : Error<
 def note_for_range_type : Note<"range has type %0">;
 def note_for_range_begin_end : Note<
   "selected '%select{begin|end}0' %select{function|template }1%2 with iterator type %3">;
-  
+
+// C++11 constexpr
+def warn_cxx98_compat_constexpr : Warning<
+  "'constexpr' specifier is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def err_invalid_constexpr : Error<
+  "%select{function parameter|typedef|non-static data member}0 "
+  "cannot be constexpr">;
+def err_constexpr_tag : Error<
+  "%select{class|struct|union|enum}0 cannot be marked constexpr">;
+def err_constexpr_dtor : Error<"destructor cannot be marked constexpr">;
+def err_constexpr_no_declarators : Error<
+  "constexpr can only be used in variable and function declarations">;
+def err_invalid_constexpr_var_decl : Error<
+  "constexpr variable declaration must be a definition">;
+def err_constexpr_static_mem_var_requires_init : Error<
+  "declaration of constexpr static data member %0 requires an initializer">;
+def err_constexpr_var_requires_const_init : Error<
+  "constexpr variable %0 must be initialized by a constant expression">;
+def err_constexpr_redecl_mismatch : Error<
+  "%select{non-constexpr declaration of %0 follows constexpr declaration"
+  "|constexpr declaration of %0 follows non-constexpr declaration}1">;
+def note_constexpr_redecl_mismatch : Note<
+  "previous declaration was %select{not |}0marked constexpr">;
+def err_constexpr_virtual : Error<"virtual function cannot be constexpr">;
+def note_constexpr_tmpl_virtual : Note<"function template instantiation is not "
+  "constexpr because it is virtual">;
+def err_constexpr_virtual_base : Error<"constexpr constructor not allowed in "
+  "%select{class|struct}0 with virtual base %plural{1:class|:classes}1">;
+def note_constexpr_tmpl_virtual_base : Note<"constructor template instantiation is "
+  "not constexpr because %select{class|struct}0 has virtual base "
+  "%plural{1:class|:classes}1">;
+def note_non_literal_virtual_base : Note<"%select{class|struct}0 with virtual "
+  "base %plural{1:class|:classes}1 is not a literal type">;
+def note_constexpr_virtual_base_here : Note<"virtual base class declared here">;
+def err_constexpr_non_literal_return : Error<
+  "constexpr function's return type %0 is not a literal type">;
+def note_constexpr_tmpl_non_literal_return : Note<
+  "function template instantiation is not constexpr because return type %0 is "
+  "not a literal type">;
+def err_constexpr_non_literal_param : Error<
+  "constexpr %select{function|constructor}1's %ordinal0 parameter type %2 is "
+  "not a literal type">;
+def note_constexpr_tmpl_non_literal_param : Note<
+  "%select{function|constructor}1 template instantiation is not constexpr "
+  "because %ordinal0 parameter type %2 is not a literal type">;
+def err_constexpr_body_invalid_stmt : Error<
+  "statement not allowed in constexpr %select{function|constructor}0">;
+def err_constexpr_type_definition : Error<
+  "types cannot be defined in a constexpr %select{function|constructor}0">;
+def err_constexpr_vla : Error<
+  "variably-modified type %0 cannot be used in a constexpr "
+  "%select{function|constructor}1">;
+def err_constexpr_var_declaration : Error<
+  "variables cannot be declared in a constexpr %select{function|constructor}0">;
+def err_constexpr_body_no_return : Error<
+  "no return statement in constexpr function">;
+def err_constexpr_body_multiple_return : Error<
+  "multiple return statements in constexpr function">;
+def note_constexpr_body_previous_return : Note<
+  "previous return statement is here">;
+def err_constexpr_function_try_block : Error<
+  "function try block not allowed in constexpr %select{function|constructor}0">;
+def err_constexpr_union_ctor_no_init : Error<
+  "constexpr union constructor does not initialize any member">;
+def err_constexpr_ctor_missing_init : Error<
+  "constexpr constructor must initialize all members">;
+def note_constexpr_ctor_missing_init : Note<
+  "member not initialized by constructor">;
+def err_constexpr_method_non_literal : Error<
+  "non-literal type %0 cannot have constexpr members">;
+def note_non_literal_no_constexpr_ctors : Note<
+  "%0 is not literal because it is not an aggregate and has no constexpr "
+  "constructors other than copy or move constructors">;
+def note_non_literal_base_class : Note<
+  "%0 is not literal because it has base class %1 of non-literal type">;
+def note_non_literal_field : Note<
+  "%0 is not literal because it has data member %1 of non-literal type %2">;
+def note_non_literal_user_provided_dtor : Note<
+  "%0 is not literal because it has a user-provided destructor">;
+def note_non_literal_nontrivial_dtor : Note<
+  "%0 is not literal because it has a non-trivial destructor">;
+def note_non_literal_mutable_field : Note<
+  "%0 is not literal because it has a mutable data member">;
+
+// C++11 char16_t/char32_t
+def warn_cxx98_compat_unicode_type : Warning<
+  "'%0' type specifier is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+ 
 // Objective-C++
 def err_objc_decls_may_only_appear_in_global_scope : Error<
   "Objective-C declarations may only appear in global scope">;
@@ -1120,11 +1345,8 @@ def err_attribute_wrong_number_arguments : Error<
   ":requires exactly %0 arguments}0">;
 def err_attribute_too_many_arguments : Error<
   "attribute takes no more than %0 argument%s0">;
-def err_iboutletcollection_type : Error<
-  "invalid type %0 as argument of iboutletcollection attribute">;
-def err_iboutletcollection_object_type : Error<
-  "%select{ivar|property}1 with iboutletcollection attribute must "
-  "have object type (invalid %0)">;
+def err_attribute_too_few_arguments : Error<
+  "attribute takes at least %0 argument%s0">;
 def err_attribute_missing_parameter_name : Error<
   "attribute requires unquoted parameter">;
 def err_attribute_invalid_vector_type : Error<"invalid vector element type %0">;
@@ -1132,6 +1354,10 @@ def err_attribute_bad_neon_vector_size : Error<
   "Neon vector size must be 64 or 128 bits">;
 def err_attribute_argument_not_int : Error<
   "'%0' attribute requires integer constant">;
+def err_attribute_argument_not_class : Error<
+  "%0 attribute requires arguments that are class type or point to class type">;
+def err_attribute_first_argument_not_int_or_bool : Error<
+  "%0 attribute first argument must be of int or bool type">;
 def err_attribute_argument_outof_range : Error<
   "init_priority attribute requires integer constant between "
   "101 and 65535 inclusive">;
@@ -1187,6 +1413,8 @@ def err_attribute_address_space_too_high : Error<
   "address space is larger than the maximum supported (%0)">;
 def err_attribute_address_multiple_qualifiers : Error<
   "multiple address spaces specified for type">;
+def err_attribute_address_function_type : Error<
+  "function type may not be qualified with an address space">;
 def err_as_qualified_auto_decl : Error<
   "automatic variable qualified with an address space">;
 def err_arg_with_address_space : Error<
@@ -1197,6 +1425,8 @@ def err_attr_objc_ownership_redundant : Error<
   "the type %0 already has retainment attributes set on it">;
 def err_attribute_not_string : Error<
   "argument to %0 attribute was not a string literal">;
+def err_only_annotate_after_access_spec : Error<
+  "access specifier can only have annotation attributes">;
 def err_attribute_section_invalid_for_target : Error<
   "argument to 'section' attribute is not valid for this target: %0">;
 def err_attribute_section_local_variable : Error<
@@ -1239,13 +1469,13 @@ def warn_attribute_wrong_decl_type : Warning<
   "parameters and methods|functions, methods and blocks|"
   "classes and virtual methods|functions, methods, and parameters|"
   "classes|virtual methods|class members|variables|methods|"
-  "variables, functions and labels}1">;
+  "variables, functions and labels|fields and global variables}1">;
 def err_attribute_wrong_decl_type : Error<
   "%0 attribute only applies to %select{functions|unions|"
   "variables and functions|functions and methods|parameters|"
   "parameters and methods|functions, methods and blocks|"
   "classes and virtual methods|functions, methods, and parameters|"
-  "classes|virtual methods|class members|variables|methods}1">;
+  "classes|virtual methods|class members|variables|methods|structs}1">;
 def warn_function_attribute_wrong_type : Warning<
   "'%0' only applies to function types; type here is %1">;
 def warn_pointer_attribute_wrong_type : Warning<
@@ -1269,6 +1499,9 @@ def err_cconv_varargs : Error<
 def err_regparm_mismatch : Error<"function declared with with regparm(%0) "
   "attribute was previously declared "
   "%plural{0:without the regparm|:with the regparm(%1)}1 attribute">;
+def err_returns_retained_mismatch : Error<
+  "function declared with the ns_returns_retained attribute "
+  "was previously declared without the ns_returns_retained attribute">;
 def err_objc_precise_lifetime_bad_type : Error<
   "objc_precise_lifetime only applies to retainable types; type here is %0">;
 def warn_objc_precise_lifetime_meaningless : Error<
@@ -1277,6 +1510,11 @@ def warn_objc_precise_lifetime_meaningless : Error<
 def warn_label_attribute_not_unused : Warning<
   "The only valid attribute for labels is 'unused'">;
 def err_invalid_pcs : Error<"Invalid PCS type">;
+def err_attribute_can_be_applied_only_to_value_decl : Error<
+  "%0 attribute can only be applied to value declarations">;
+def warn_attribute_not_on_decl : Error<
+  "%0 attribute ignored when parsing type">;
+
 
 // Availability attribute
 def warn_availability_unknown_platform : Warning<
@@ -1285,6 +1523,68 @@ def warn_availability_version_ordering : Warning<
   "feature cannot be %select{introduced|deprecated|obsoleted}0 in %1 version "
   "%2 before it was %select{introduced|deprecated|obsoleted}3 in version %4; "
   "attribute ignored">;
+  
+// Thread Safety Attributes
+// Errors when parsing the attributes
+def err_attribute_argument_out_of_range : Error<
+  "%0 attribute parameter %1 is out of bounds: "
+  "%plural{0:no parameters to index into|"
+  "1:can only be 1, since there is one parameter|"
+  ":must be between 1 and %2}2">;
+def err_attribute_argument_not_lockable : Error<
+  "%0 attribute requires arguments whose type is annotated "
+  "with 'lockable' attribute">;
+def err_attribute_decl_not_lockable : Error<
+  "%0 attribute can only be applied in a context annotated "
+  "with 'lockable' attribute">;
+def warn_unlock_but_no_lock : Warning<
+  "unlocking '%0' that was not locked">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_double_lock : Warning<
+  "locking '%0' that is already locked">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_no_unlock : Warning<
+  "mutex '%0' is still locked at the end of function">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+// FIXME: improve the error message about locks not in scope
+def warn_lock_at_end_of_scope : Warning<
+  "mutex '%0' is still locked at the end of its scope">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_expecting_lock_held_on_loop : Warning<
+  "expecting mutex '%0' to be locked at start of each loop">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_lock_exclusive_and_shared : Warning<
+  "mutex '%0' is locked exclusively and shared in the same scope">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def note_lock_exclusive_and_shared : Note<
+  "the other lock of mutex '%0' is here">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_variable_requires_lock : Warning<
+  "%select{reading|writing}2 variable '%0' requires locking "
+  "%select{'%1'|'%1' exclusively}2">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_var_deref_requires_lock : Warning<
+  "%select{reading|writing}2 the value pointed to by '%0' requires locking "
+  "%select{'%1'|'%1' exclusively}2">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_variable_requires_any_lock : Warning<
+  "%select{reading|writing}1 variable '%0' requires locking "
+  "%select{any mutex|any mutex exclusively}1">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_var_deref_requires_any_lock : Warning<
+  "%select{reading|writing}1 the value pointed to by '%0' requires locking "
+  "%select{any mutex|any mutex exclusively}1">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_fun_requires_lock : Warning<
+  "calling function '%0' requires %select{shared|exclusive}2 lock on '%1'">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_fun_excludes_mutex : Warning<
+  "cannot call function '%0' while mutex '%1' is locked">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+def warn_cannot_resolve_lock : Warning<
+  "cannot resolve lock expression">,
+  InGroup<ThreadSafety>, DefaultIgnore;
+
 
 def warn_impcast_vector_scalar : Warning<
   "implicit conversion turns vector to scalar: %0 to %1">,
@@ -1320,13 +1620,14 @@ def warn_impcast_literal_float_to_integer : Warning<
   "implicit conversion turns literal floating-point number into integer: "
   "%0 to %1">,
   InGroup<DiagGroup<"literal-conversion">>, DefaultIgnore;
-def note_fix_integral_float_as_integer : Note<
-  "this can be rewritten as an integer literal with the exact same value">;
+def warn_impcast_string_literal_to_bool : Warning<
+  "implicit conversion turns string literal into bool: %0 to %1">,
+  InGroup<DiagGroup<"string-conversion">>, DefaultIgnore;
 def warn_impcast_different_enum_types : Warning<
   "implicit conversion from enumeration type %0 to different enumeration type "
   "%1">, InGroup<DiagGroup<"conversion">>;
 def warn_impcast_bool_to_null_pointer : Warning<
-    "initialization of pointer of type %0 to NULL from a constant boolean "
+    "initialization of pointer of type %0 to null from a constant boolean "
     "expression">, InGroup<BoolConversions>;
 def warn_impcast_null_pointer_to_integer : Warning<
     "implicit conversion of NULL constant to integer">,
@@ -1399,6 +1700,12 @@ def warn_attribute_iboutlet : Warning<
   "%0 attribute can only be applied to instance variables or properties">;
 def warn_attribute_ibaction: Warning<
   "ibaction attribute can only be applied to Objective-C instance methods">;
+def err_iboutletcollection_type : Error<
+  "invalid type %0 as argument of iboutletcollection attribute">;
+def warn_iboutlet_object_type : Warning<
+  "%select{ivar|property}2 with %0 attribute must "
+  "be an object type (invalid %1)">,
+  InGroup<DiagGroup<"invalid-iboutlet">>;
 def err_attribute_overloadable_not_function : Error<
   "'overloadable' attribute can only be applied to a function">;
 def err_attribute_overloadable_missing : Error<
@@ -1414,6 +1721,8 @@ def warn_ns_attribute_wrong_return_type : Warning<
 def warn_ns_attribute_wrong_parameter_type : Warning<
   "%0 attribute only applies to %select{Objective-C object|pointer}1 "
   "parameters">;
+def err_ns_bridged_not_interface : Error<
+  "parameter of 'ns_bridged' attribute does not name an Objective-C class">;
 
 // Function Parameter Semantic Analysis.
 def err_param_with_void_type : Error<"argument may not have 'void' type">;
@@ -1573,6 +1882,16 @@ def note_ovl_candidate_bad_conv_incomplete : Note<"candidate "
     "function (the implicit move assignment operator)|"
     "constructor (inherited)}0%1 "
     "not viable: cannot convert argument of incomplete type %2 to %3">;
+def note_ovl_candidate_bad_list_argument : Note<"candidate "
+    "%select{function|function|constructor|"
+    "function |function |constructor |"
+    "constructor (the implicit default constructor)|"
+    "constructor (the implicit copy constructor)|"
+    "constructor (the implicit move constructor)|"
+    "function (the implicit copy assignment operator)|"
+    "function (the implicit move assignment operator)|"
+    "constructor (inherited)}0%1 "
+    "not viable: cannot convert initializer list argument to %3">;
 def note_ovl_candidate_bad_overload : Note<"candidate "
     "%select{function|function|constructor|"
     "function |function |constructor |"
@@ -1593,7 +1912,11 @@ def note_ovl_candidate_bad_conv : Note<"candidate "
     "function (the implicit move assignment operator)|"
     "constructor (inherited)}0%1"
     " not viable: no known conversion from %2 to %3 for "
-    "%select{%ordinal5 argument|object argument}4">;
+    "%select{%ordinal5 argument|object argument}4; "
+    "%select{|dereference the argument with *|"
+    "take the address of the argument with &|"
+    "remove *|"
+    "remove &}6">;
 def note_ovl_candidate_bad_arc_conv : Note<"candidate "
     "%select{function|function|constructor|"
     "function |function |constructor |"
@@ -1632,15 +1955,18 @@ def note_ovl_candidate_bad_ownership : Note<"candidate "
     "function |function |constructor |"
     "constructor (the implicit default constructor)|"
     "constructor (the implicit copy constructor)|"
+    "constructor (the implicit move constructor)|"
     "function (the implicit copy assignment operator)|"
+    "function (the implicit move assignment operator)|"
     "constructor (inherited)}0%1 not viable: "
     "%select{%ordinal6|'this'}5 argument (%2) has "
     "%select{no|__unsafe_unretained|__strong|__weak|__autoreleasing}3 ownership,"
     " but parameter has %select{no|__unsafe_unretained|__strong|__weak|"
     "__autoreleasing}4 ownership">;
 def note_ovl_candidate_bad_cvr_this : Note<"candidate "
-    "%select{|function|||function||||"
-    "function (the implicit copy assignment operator)|}0 not viable: "
+    "%select{|function|||function|||||"
+    "function (the implicit copy assignment operator)|"
+    "function (the implicit move assignment operator)|}0 not viable: "
     "'this' argument has type %2, but method is not marked "
     "%select{const|restrict|const or restrict|volatile|const or volatile|"
     "volatile or restrict|const, volatile, or restrict}3">;
@@ -1670,6 +1996,17 @@ def note_ovl_candidate_bad_base_to_derived_conv : Note<"candidate "
     "%select{base class pointer|superclass|base class object of type}2 %3 to "
     "%select{derived class pointer|subclass|derived class reference}2 %4 for "
     "%ordinal5 argument">;
+def note_ovl_candidate_bad_target : Note<
+    "candidate %select{function|function|constructor|"
+    "function |function |constructor |"
+    "constructor (the implicit default constructor)|"
+    "constructor (the implicit copy constructor)|"
+    "constructor (the implicit move constructor)|"
+    "function (the implicit copy assignment operator)|"
+    "function (the implicit move assignment operator)|"
+    "constructor (inherited)}0 not viable: call to "
+    "%select{__device__|__global__|__host__|__host__ __device__}1 function from"
+    " %select{__device__|__global__|__host__|__host__ __device__}2 function">;
 
 def note_ambiguous_type_conversion: Note<
     "because of ambiguity in conversion of %0 to %1">;
@@ -1706,9 +2043,13 @@ def err_ovl_no_viable_subscript :
     Error<"no viable overloaded operator[] for type %0">;
 def err_ovl_no_oper :
     Error<"type %0 does not provide a %select{subscript|call}1 operator">;
-def err_ovl_unresolvable :
-    Error<"cannot resolve overloaded function %0 from context">;
-  
+def err_ovl_unresolvable : Error<
+  "reference to overloaded function could not be resolved; "
+  "did you mean to call it%select{| with no arguments}0?">;
+def err_bound_member_function : Error<
+  "reference to non-static member function must be called"
+  "%select{|; did you mean to call it with no arguments?}0">;
+def note_possible_target_of_call : Note<"possible target for call">;
 
 def err_ovl_no_viable_object_call : Error<
   "no matching function for call to object of type %0">;
@@ -1773,8 +2114,11 @@ def note_template_param_prev_default_arg : Note<
 def err_template_param_default_arg_missing : Error<
   "template parameter missing a default argument">;
 def ext_template_parameter_default_in_function_template : ExtWarn<
-  "default template arguments for a function template are a C++0x extension">,
-  InGroup<CXX0x>;
+  "default template arguments for a function template are a C++11 extension">,
+  InGroup<CXX11>;
+def warn_cxx98_compat_template_parameter_default_in_function_template : Warning<
+  "default template arguments for a function template are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_template_parameter_default_template_member : Error<
   "cannot add a default template argument to the definition of a member of a "
   "class template">;
@@ -1786,6 +2130,9 @@ def err_template_template_parm_no_parms : Error<
 def err_template_variable : Error<"variable %0 declared as a template">;
 def err_template_variable_noparams : Error<
   "extraneous 'template<>' in declaration of variable %0">;
+def err_template_member : Error<"member %0 declared as a template">;
+def err_template_member_noparams : Error<
+  "extraneous 'template<>' in declaration of member %0">;
 def err_template_tag_noparams : Error<
   "extraneous 'template<>' in declaration of %0 %1">;
 def err_template_decl_ref : Error<
@@ -1812,6 +2159,12 @@ def ext_template_arg_local_type : ExtWarn<
   "template argument uses local type %0">, InGroup<LocalTypeTemplateArgs>;
 def ext_template_arg_unnamed_type : ExtWarn<
   "template argument uses unnamed type">, InGroup<UnnamedTypeTemplateArgs>;
+def warn_cxx98_compat_template_arg_local_type : Warning<
+  "local type %0 as template argument is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_template_arg_unnamed_type : Warning<
+  "unnamed type as template argument is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def note_template_unnamed_type_here : Note<
   "unnamed type used in template argument was declared here">;
 def err_template_arg_overload_type : Error<
@@ -1879,6 +2232,9 @@ def err_template_arg_not_pointer_to_member_form : Error<
   "non-type template argument is not a pointer to member constant">;
 def ext_template_arg_extra_parens : ExtWarn<
   "address non-type template argument cannot be surrounded by parentheses">;
+def warn_cxx98_compat_template_arg_extra_parens : Warning<
+  "redundant parentheses surrounding address non-type template argument are "
+  "incompatible with C++98">, InGroup<CXX98Compat>, DefaultIgnore;
 def err_pointer_to_member_type : Error<
   "invalid use of pointer to member type after %select{.*|->*}0">;
 def err_pointer_to_member_call_drops_quals : Error<
@@ -1904,11 +2260,6 @@ def err_template_spec_decl_out_of_scope_global : Error<
   "%select{class template|class template partial|function template|member "
   "function|static data member|member class}0 specialization of %1 must "
   "originally be declared in the global scope">;
-def ext_template_spec_decl_out_of_scope_global : ExtWarn<
-  "%select{class template|class template partial|function template|member "
-  "function|static data member|member class}0 specialization of %1 must "
-  "originally be declared in the global scope; accepted as a C++0x extension">,
-  InGroup<CXX0x>;
 def err_template_spec_decl_out_of_scope : Error<
   "%select{class template|class template partial|function template|member "
   "function|static data member|member class}0 specialization of %1 must "
@@ -1916,8 +2267,13 @@ def err_template_spec_decl_out_of_scope : Error<
 def ext_template_spec_decl_out_of_scope : ExtWarn<
   "%select{class template|class template partial|function template|member "
   "function|static data member|member class}0 specialization of %1 must "
-  "originally be declared in namespace %2; accepted as a C++0x extension">,
-  InGroup<CXX0x>;
+  "originally be declared in namespace %2; accepted as a C++11 extension">,
+  InGroup<CXX11>;
+def warn_cxx98_compat_template_spec_decl_out_of_scope : Warning<
+  "%select{class template|class template partial|function template|member "
+  "function|static data member|member class}0 specialization of %1 outside "
+  "namespace %2 is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_template_spec_redecl_out_of_scope : Error<
   "%select{class template|class template partial|function template|member "
   "function|static data member|member class}0 specialization of %1 not in a "
@@ -1943,6 +2299,9 @@ def err_not_class_template_specialization : Error<
   "parameter}0">;
 def err_function_specialization_in_class : Error<
   "cannot specialize a function %0 within class scope">;
+def ext_function_specialization_in_class : ExtWarn<
+  "explicit specialization of %0 within class scope is a Microsoft extension">,
+  InGroup<Microsoft>;
 def ext_explicit_specialization_storage_class : ExtWarn<
   "explicit specialization cannot have a storage class">;
 def err_explicit_specialization_inconsistent_storage_class : Error<
@@ -2080,8 +2439,12 @@ def note_previous_explicit_instantiation : Note<
     "previous explicit instantiation is here">;
 def ext_explicit_instantiation_after_specialization : Extension<
     "explicit instantiation of %0 that occurs after an explicit "
-    "specialization will be ignored (C++0x extension)">,
-    InGroup<CXX0x>;
+    "specialization will be ignored (C++11 extension)">,
+    InGroup<CXX11>;
+def warn_cxx98_compat_explicit_instantiation_after_specialization : Warning<
+    "explicit instantiation of %0 that occurs after an explicit "
+    "specialization is incompatible with C++98">,
+    InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def note_previous_template_specialization : Note<
     "previous template specialization is here">;
 def err_explicit_instantiation_enum : Error<
@@ -2098,10 +2461,10 @@ def err_explicit_instantiation_must_be_global : Error<
   "explicit instantiation of %0 must occur at global scope">;
 def warn_explicit_instantiation_out_of_scope_0x : Warning<
   "explicit instantiation of %0 not in a namespace enclosing %1">, 
-  InGroup<DiagGroup<"-Wc++0x-compat"> >;
+  InGroup<CXX11Compat>, DefaultIgnore;
 def warn_explicit_instantiation_must_be_global_0x : Warning<
   "explicit instantiation of %0 must occur at global scope">, 
-  InGroup<DiagGroup<"-Wc++0x-compat"> >;
+  InGroup<CXX11Compat>, DefaultIgnore;
   
 def err_explicit_instantiation_requires_name : Error<
   "explicit instantiation declaration requires a name">;
@@ -2126,14 +2489,19 @@ def note_explicit_instantiation_candidate : Note<
   "explicit instantiation candidate function template here %0">;
 def err_explicit_instantiation_inline : Error<
   "explicit instantiation cannot be 'inline'">;
+def warn_explicit_instantiation_inline_0x : Warning<
+  "explicit instantiation cannot be 'inline'">, InGroup<CXX11Compat>,
+  DefaultIgnore;
+def err_explicit_instantiation_constexpr : Error<
+  "explicit instantiation cannot be 'constexpr'">;
 def ext_explicit_instantiation_without_qualified_id : Extension<
   "qualifier in explicit instantiation of %q0 requires a template-id "
   "(a typedef is not permitted)">;
 def err_explicit_instantiation_unqualified_wrong_namespace : Error<
-  "explicit instantiation of %q0 must occur in %1">;
+  "explicit instantiation of %q0 must occur in namespace %1">;
 def warn_explicit_instantiation_unqualified_wrong_namespace_0x : Warning<
-  "explicit instantiation of %q0 must occur in %1">, 
-  InGroup<DiagGroup<"c++0x-compat"> >;
+  "explicit instantiation of %q0 must occur in namespace %1">,
+  InGroup<CXX11Compat>, DefaultIgnore;
 def err_explicit_instantiation_undefined_member : Error<
   "explicit instantiation of undefined %select{member class|member function|"
   "static data member}0 %1 of class template %2">;
@@ -2154,9 +2522,13 @@ def note_typename_refers_here : Note<
 def err_typename_missing : Error<
   "missing 'typename' prior to dependent type name '%0%1'">;
 def warn_typename_missing : ExtWarn<
-  "missing 'typename' prior to dependent type name '%0%1'">;
+  "missing 'typename' prior to dependent type name '%0%1'">,
+  InGroup<DiagGroup<"typename-missing">>;
 def ext_typename_outside_of_template : ExtWarn<
-  "'typename' occurs outside of a template">, InGroup<CXX0x>;
+  "'typename' occurs outside of a template">, InGroup<CXX11>;
+def warn_cxx98_compat_typename_outside_of_template : Warning<
+  "use of 'typename' outside of a template is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_typename_refers_to_using_value_decl : Error<
   "typename specifier refers to a dependent using declaration for a value "
   "%0 in %1">;
@@ -2174,7 +2546,10 @@ def note_referenced_class_template : Error<
 def err_template_kw_missing : Error<
   "missing 'template' keyword prior to dependent template name '%0%1'">;
 def ext_template_outside_of_template : ExtWarn<
-  "'template' keyword outside of a template">, InGroup<CXX0x>;
+  "'template' keyword outside of a template">, InGroup<CXX11>;
+def warn_cxx98_compat_template_outside_of_template : Warning<
+  "use of 'template' keyword outside of a template is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 def err_non_type_template_in_nested_name_specifier : Error<
   "qualified name refers into a specialization of function template '%0'">;
@@ -2184,7 +2559,7 @@ def note_template_declared_here : Note<
   "%select{function template|class template|type alias template|template template parameter}0 "
   "%1 declared here">;
 
-// C++0x Variadic Templates
+// C++11 Variadic Templates
 def err_template_param_pack_default_arg : Error<
   "template parameter pack cannot have a default argument">;
 def err_template_param_pack_must_be_last_template_parameter : Error<
@@ -2206,25 +2581,29 @@ def err_unexpanded_parameter_pack_0 : Error<
   "%select{expression|base type|declaration type|data member type|bit-field "
   "size|static assertion|fixed underlying type|enumerator value|"
   "using declaration|friend declaration|qualifier|initializer|default argument|"
-  "non-type template parameter type|exception type|partial specialization}0 "
+  "non-type template parameter type|exception type|partial specialization|"
+  "__if_exists name|__if_not_exists name}0 "
   "contains an unexpanded parameter pack">;
 def err_unexpanded_parameter_pack_1 : Error<
   "%select{expression|base type|declaration type|data member type|bit-field "
   "size|static assertion|fixed underlying type|enumerator value|"
   "using declaration|friend declaration|qualifier|initializer|default argument|"
-  "non-type template parameter type|exception type|partial specialization}0 "
+  "non-type template parameter type|exception type|partial specialization|"
+  "__if_exists name|__if_not_exists name}0 "
   "contains unexpanded parameter pack %1">;
 def err_unexpanded_parameter_pack_2 : Error<
   "%select{expression|base type|declaration type|data member type|bit-field "
   "size|static assertion|fixed underlying type|enumerator value|"
   "using declaration|friend declaration|qualifier|initializer|default argument|"
-  "non-type template parameter type|exception type|partial specialization}0 "
+  "non-type template parameter type|exception type|partial specialization|"
+  "__if_exists name|__if_not_exists name}0 "
   "contains unexpanded parameter packs %1 and %2">;
 def err_unexpanded_parameter_pack_3_or_more : Error<
   "%select{expression|base type|declaration type|data member type|bit-field "
   "size|static assertion|fixed underlying type|enumerator value|"
   "using declaration|friend declaration|qualifier|initializer|default argument|"
-  "non-type template parameter type|exception type|partial specialization}0 "
+  "non-type template parameter type|exception type|partial specialization|"
+  "__if_exists name|__if_not_exists name}0 "
   "contains unexpanded parameter packs %1, %2, ...">;
 
 def err_pack_expansion_without_parameter_packs : Error<
@@ -2252,6 +2631,9 @@ def err_unexpected_typedef : Error<
 def err_unexpected_namespace : Error<
   "unexpected namespace name %0: expected expression">;
 def err_undeclared_var_use : Error<"use of undeclared identifier %0">;
+def warn_found_via_dependent_bases_lookup : ExtWarn<"use of identifier %0 "
+   "found via unqualified lookup into dependent bases of class templates is a "
+   "Microsoft extension">, InGroup<Microsoft>;
 def note_dependent_var_use : Note<"must qualify identifier to find this "
     "declaration in dependent base class">;
 def err_not_found_by_two_phase_lookup : Error<"call to function %0 that is neither "
@@ -2277,9 +2659,11 @@ def note_unavailable_here : Note<
   "%select{declaration|function}0 has been explicitly marked "
   "%select{unavailable|deleted|deprecated}1 here">;
 def warn_not_enough_argument : Warning<
-  "not enough variable arguments in %0 declaration to fit a sentinel">;
+  "not enough variable arguments in %0 declaration to fit a sentinel">,
+  InGroup<Sentinel>;
 def warn_missing_sentinel : Warning <
-  "missing sentinel in %select{function call|method dispatch|block call}0">;
+  "missing sentinel in %select{function call|method dispatch|block call}0">,
+  InGroup<Sentinel>;
 def note_sentinel_here : Note<
   "%select{function|method|block}0 has been explicitly marked sentinel here">;
 def warn_missing_prototype : Warning<
@@ -2297,6 +2681,9 @@ def err_definition_of_explicitly_defaulted_member : Error<
 def err_redefinition_extern_inline : Error<
   "redefinition of a 'extern inline' function %0 is not supported in "
   "%select{C99 mode|C++}1">;
+def warn_cxx98_compat_friend_redefinition : Warning<
+  "friend function %0 would be implicitly redefined in C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 // This should eventually be an error.
 def warn_undefined_internal : Warning<
@@ -2417,11 +2804,16 @@ def ext_typecheck_zero_array_size : Extension<
   "zero size arrays are an extension">;
 def err_typecheck_zero_array_size : Error<
   "zero-length arrays are not permitted in C++">;
+def warn_typecheck_zero_static_array_size : Warning<
+  "'static' has no effect on zero-length arrays">,
+  InGroup<DiagGroup<"array-bounds">>;
 def err_at_least_one_initializer_needed_to_size_array : Error<
   "at least one initializer value required to size array">;
 def err_array_size_non_int : Error<"size of array has non-integer type %0">;
 def err_init_element_not_constant : Error<
   "initializer element is not a compile-time constant">;
+def err_local_cant_init : Error<
+  "'__local' variable cannot have an initializer">;
 def err_block_extern_cant_init : Error<
   "'extern' variable cannot have an initializer">;
 def warn_extern_init : Warning<"'extern' variable has an initializer">;
@@ -2448,10 +2840,33 @@ def warn_braces_around_scalar_init : Warning<
   "braces around scalar initializer">;
 def warn_many_braces_around_scalar_init : ExtWarn<
   "too many braces around scalar initializer">;
+def ext_complex_component_init : Extension<
+  "complex initialization specifying real and imaginary components "
+  "is an extension">, InGroup<DiagGroup<"complex-component-init">>;
 def err_empty_scalar_initializer : Error<"scalar initializer cannot be empty">;
+def warn_cxx98_compat_empty_scalar_initializer : Warning<
+  "scalar initialized from empty initializer list is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_illegal_initializer : Error<
   "illegal initializer (only variables can be initialized)">;
 def err_illegal_initializer_type : Error<"illegal initializer type %0">;
+def err_init_list_variable_narrowing : Warning<
+  "non-constant-expression cannot be narrowed from type %0 to %1 in "
+  "initializer list">,
+  InGroup<CXX11Narrowing>, DefaultError;
+def err_init_list_constant_narrowing : Warning<
+  "constant expression evaluates to %0 which cannot be narrowed to type %1">,
+  InGroup<CXX11Narrowing>, DefaultError;
+def warn_init_list_variable_narrowing : Warning<
+  "non-constant-expression cannot be narrowed from type %0 to %1 in "
+  "initializer list in C++11">,
+  InGroup<CXX11Narrowing>, DefaultIgnore;
+def warn_init_list_constant_narrowing : Warning<
+  "constant expression evaluates to %0 which cannot be narrowed to type %1 in "
+  "C++11">,
+  InGroup<CXX11Narrowing>, DefaultIgnore;
+def note_init_list_narrowing_override : Note<
+  "override this message by inserting an explicit cast">;
 def err_init_objc_class : Error<
   "cannot initialize Objective-C class type %0">;
 def err_implicit_empty_initializer : Error<
@@ -2479,6 +2894,9 @@ def warn_anon_bitfield_width_exceeds_type_size : Warning<
 def warn_missing_braces : Warning<
   "suggest braces around initialization of subobject">,
   InGroup<DiagGroup<"missing-braces">>, DefaultIgnore;
+def err_missing_braces : Error<
+  "cannot omit braces around initialization of subobject when using direct "
+  "list-initialization">;
 
 def err_redefinition_of_label : Error<"redefinition of label %0">;
 def err_undeclared_label_use : Error<"use of undeclared label %0">;
@@ -2486,17 +2904,30 @@ def warn_unused_label : Warning<"unused label %0">,
   InGroup<UnusedLabel>, DefaultIgnore;
 
 def err_goto_into_protected_scope : Error<"goto into protected scope">;
+def warn_goto_into_protected_scope : ExtWarn<"goto into protected scope">,
+  InGroup<Microsoft>;
+def warn_cxx98_compat_goto_into_protected_scope : Warning<
+  "goto would jump into protected scope in C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_switch_into_protected_scope : Error<
   "switch case is in protected scope">;
+def warn_cxx98_compat_switch_into_protected_scope : Warning<
+  "switch case would be in a protected scope in C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def err_indirect_goto_without_addrlabel : Error<
   "indirect goto in function with no address-of-label expressions">;
 def err_indirect_goto_in_protected_scope : Error<
   "indirect goto might cross protected scopes">;
+def warn_cxx98_compat_indirect_goto_in_protected_scope : Warning<
+  "indirect goto might cross protected scopes in C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 def note_indirect_goto_target : Note<"possible target of indirect goto">;
 def note_protected_by_variable_init : Note<
   "jump bypasses variable initialization">;
 def note_protected_by_variable_nontriv_destructor : Note<
   "jump bypasses variable with a non-trivial destructor">;
+def note_protected_by_variable_non_pod : Note<
+  "jump bypasses initialization of non-POD variable">;
 def note_protected_by_cleanup : Note<
   "jump bypasses initialization of variable with __attribute__((cleanup))">;
 def note_protected_by_vla_typedef : Note<
@@ -2572,11 +3003,13 @@ def err_flexible_array_empty_struct : Error<
 def err_flexible_array_has_nonpod_type : Error<
   "flexible array member %0 of non-POD element type %1">;
 def ext_flexible_array_in_struct : Extension<
-  "%0 may not be nested in a struct due to flexible array member">;
+  "%0 may not be nested in a struct due to flexible array member">,
+  InGroup<FlexibleArrayExtensions>;
 def ext_flexible_array_in_array : Extension<
-  "%0 may not be used as an array element due to flexible array member">;
-def err_flexible_array_init_nonempty : Error<
-  "non-empty initialization of flexible array member inside subobject">;
+  "%0 may not be used as an array element due to flexible array member">,
+  InGroup<FlexibleArrayExtensions>;
+def err_flexible_array_init : Error<
+  "initialization of flexible array member is not allowed">;
 def ext_flexible_array_empty_aggregate_ms : Extension<
   "flexible array member %0 in otherwise empty %select{struct|class}1 "
   "is a Microsoft extension">, InGroup<Microsoft>;
@@ -2589,9 +3022,12 @@ def ext_flexible_array_empty_aggregate_gnu : Extension<
 def ext_flexible_array_union_gnu : Extension<
   "flexible array member %0 in a union is a GNU extension">, InGroup<GNU>;
 
-let CategoryName = "Automatic Reference Counting Issue" in {
+let CategoryName = "ARC Issue" in {
 
 // ARC-mode diagnostics.
+
+let CategoryName = "ARC Weak References" in {
+
 def err_arc_weak_no_runtime : Error<
   "the current deployment target does not support automated __weak references">;
 def err_arc_unsupported_weak_class : Error<
@@ -2601,6 +3037,11 @@ def err_arc_weak_unavailable_assign : Error<
 def err_arc_convesion_of_weak_unavailable : Error<
   "%select{implicit conversion|cast}0 of weak-unavailable object of type %1 to"
   " a __weak object of type %2">;
+
+} // end "ARC Weak References" category
+
+let CategoryName = "ARC Restrictions" in {
+
 def err_arc_illegal_explicit_message : Error<
   "ARC forbids explicit message send of %0">;
 def err_arc_unused_init_message : Error<
@@ -2611,6 +3052,8 @@ def err_arc_mismatched_cast : Error<
   "%select{%2|a non-Objective-C pointer type %2|a block pointer|"
   "an Objective-C pointer|an indirect pointer to an Objective-C pointer}1"
   " to %3 is disallowed with ARC">;
+def err_arc_nolifetime_behavior : Error<
+  "explicit ownership qualifier on cast result has no effect">;
 def err_arc_objc_object_in_struct : Error<
   "ARC forbids Objective-C objects in structs or unions">;
 def err_arc_objc_property_default_assign_on_object : Error<
@@ -2620,6 +3063,9 @@ def err_arc_illegal_selector : Error<
   "ARC forbids use of %0 in a @selector">;
 def err_arc_illegal_method_def : Error<
   "ARC forbids implementation of %0">;
+  
+} // end "ARC Restrictions" category
+  
 def err_arc_lost_method_convention : Error<
   "method was declared as %select{an 'alloc'|a 'copy'|an 'init'|a 'new'}0 "
   "method, but its implementation doesn't match because %select{"
@@ -2632,8 +3078,10 @@ def note_arc_gained_method_convention : Note<
   "declaration in interface is not in the '%select{alloc|copy|init|new}0' "
   "family because %select{its result type is not an object pointer|"
   "its result type is unrelated to its receiver type}1">;
-def err_typecheck_arr_assign_self : Error<
+def err_typecheck_arc_assign_self : Error<
   "cannot assign to 'self' outside of a method in the init family">;
+def err_typecheck_arc_assign_self_class_method : Error<
+  "cannot assign to 'self' in a class method">;
 def err_typecheck_arr_assign_enumeration : Error<
   "fast enumeration variables can't be modified in ARC by default; "
   "declare the variable __strong to allow this">;
@@ -2684,8 +3132,7 @@ def err_arc_method_not_found : Error<
 def err_arc_receiver_forward_class : Error<
   "receiver %0 for class message is a forward declaration">;
 def err_arc_may_not_respond : Error<
-  "receiver type %0 for instance message does not declare a method with "
-  "selector %1">;
+  "no visible @interface for %0 declares the selector %1">;
 def err_arc_receiver_forward_instance : Error<
   "receiver type %0 for instance message is a forward declaration">;
 def err_arc_collection_forward : Error<
@@ -2693,12 +3140,18 @@ def err_arc_collection_forward : Error<
 def err_arc_multiple_method_decl : Error< 
   "multiple methods named %0 found with mismatched result, "
   "parameter type or attributes">;
+
+let CategoryName = "ARC Retain Cycle" in {
+
 def warn_arc_retain_cycle : Warning<
   "capturing %0 strongly in this block is likely to lead to a retain cycle">,
   InGroup<ARCRetainCycles>;
 def note_arc_retain_cycle_owner : Note<
   "block will be retained by %select{the captured object|an object strongly "
   "retained by the captured object}0">;
+
+} // end "ARC Retain Cycle" category
+
 def note_nontrivial_objc_ownership : Note<
   "because type %0 has %select{no|no|__strong|__weak|__autoreleasing}1 "
   "ownership">;
@@ -2706,17 +3159,25 @@ def warn_arc_object_memaccess : Warning<
   "%select{destination for|source of}0 this %1 call is a pointer to "
   "ownership-qualified type %2">, InGroup<ARCNonPodMemAccess>;
 
+let CategoryName = "ARC and @properties" in {
+
 def err_arc_strong_property_ownership : Error<
   "existing ivar %1 for strong property %0 may not be "
   "%select{|__unsafe_unretained||__weak}2">;
 def err_arc_assign_property_ownership : Error<
-  "existing ivar %1 for unsafe_unretained property %0 must be __unsafe_unretained">;
+  "existing ivar %1 for property %0 with %select{unsafe_unretained| assign}2 "
+  "attribute must be __unsafe_unretained">;
 def err_arc_inconsistent_property_ownership : Error<
-  "%select{strong|weak|unsafe_unretained}1 property %0 may not also be "
+  "%select{|unsafe_unretained|strong|weak}1 property %0 may not also be "
   "declared %select{|__unsafe_unretained|__strong|__weak|__autoreleasing}2">;
+
+} // end "ARC and @properties" category
+
 def err_arc_atomic_ownership : Error<
   "cannot perform atomic operation on a pointer to type %0: type has "
   "non-trivial ownership">;
+
+let CategoryName = "ARC Casting Rules" in {
 
 def err_arc_bridge_cast_incompatible : Error<
   "incompatible types casting %0 to %1 with a %select{__bridge|"
@@ -2726,14 +3187,17 @@ def err_arc_bridge_cast_wrong_kind : Error<
   "%select{Objective-C|block|C}2 pointer type %3 cannot use %select{__bridge|"
   "__bridge_transfer|__bridge_retained}4">;
 def err_arc_cast_requires_bridge : Error<
-  "cast of %select{Objective-C|block|C}0 pointer type %1 to "
-  "%select{Objective-C|block|C}2 pointer type %3 requires a bridged cast">;
+  "%select{cast|implicit conversion}0 of %select{Objective-C|block|C}1 "
+  "pointer type %2 to %select{Objective-C|block|C}3 pointer type %4 "
+  "requires a bridged cast">;
 def note_arc_bridge : Note<
   "use __bridge to convert directly (no change in ownership)">;
 def note_arc_bridge_transfer : Note<
   "use __bridge_transfer to transfer ownership of a +1 %0 into ARC">;
 def note_arc_bridge_retained : Note<
   "use __bridge_retained to make an ARC object available as a +1 %0">;
+
+} // ARC Casting category
 
 } // ARC category name
 
@@ -2773,6 +3237,10 @@ def err_block_with_return_type_requires_args : Error<
   "block with explicit return type requires argument list">;
 def err_func_def_incomplete_result : Error<
   "incomplete result type %0 in function definition">;
+def err_atomic_specifier_bad_type : Error<
+  "_Atomic cannot be applied to "
+  "%select{incomplete |array |function |reference |atomic |qualified |}0type "
+  "%1 %select{||||||which is not trivially copyable}0">;
 
 // Expressions.
 def ext_sizeof_function_type : Extension<
@@ -2796,7 +3264,8 @@ def err_offsetof_record_type : Error<
   "offsetof requires struct, union, or class type, %0 invalid">;
 def err_offsetof_array_type : Error<"offsetof requires array type, %0 invalid">;
 def ext_offsetof_extended_field_designator : Extension<
-  "using extended field designator is an extension">;
+  "using extended field designator is an extension">,
+  InGroup<DiagGroup<"extended-offsetof">>;
 def warn_offsetof_non_pod_type : ExtWarn<"offset of on non-POD type %0">,
   InGroup<InvalidOffsetof>;
 def err_offsetof_bitfield : Error<"cannot compute offset of bit-field %0">;
@@ -2807,8 +3276,10 @@ def warn_floatingpoint_eq : Warning<
 
 def warn_division_by_zero : Warning<"division by zero is undefined">;
 def warn_remainder_by_zero : Warning<"remainder by zero is undefined">;
-def warn_shift_negative : Warning<"shift count is negative">;
-def warn_shift_gt_typewidth : Warning<"shift count >= width of type">;
+def warn_shift_negative : Warning<"shift count is negative">,
+  InGroup<DiagGroup<"shift-count-negative">>;
+def warn_shift_gt_typewidth : Warning<"shift count >= width of type">,
+  InGroup<DiagGroup<"shift-count-overflow">>;
 def warn_shift_result_gt_typewidth : Warning<
   "signed shift result (%0) requires %1 bits to represent, but %2 only has "
   "%3 bits">, InGroup<DiagGroup<"shift-overflow">>;
@@ -2834,8 +3305,12 @@ def note_precedence_conditional_silence : Note<
   "place parentheses around the '%0' expression to silence this warning">;
 
 def warn_logical_instead_of_bitwise : Warning<
-  "use of logical %0 with constant operand; switch to bitwise %1 or "
-  "remove constant">, InGroup<DiagGroup<"constant-logical-operand">>;
+  "use of logical '%0' with constant operand">,
+  InGroup<DiagGroup<"constant-logical-operand">>;
+def note_logical_instead_of_bitwise_change_operator : Note<
+  "use '%0' for a bitwise operation">;
+def note_logical_instead_of_bitwise_remove_constant : Note<
+  "remove constant to silence this warning">;
 
 def warn_bitwise_and_in_bitwise_or : Warning<
   "'&' within '|'">, InGroup<BitwiseOpParentheses>;
@@ -2897,10 +3372,8 @@ def err_typecheck_member_reference_type : Error<
 def err_typecheck_member_reference_unknown : Error<
   "cannot refer to member %0 in %1 with '%select{.|->}2'">;
 def err_member_reference_needs_call : Error<
-  "base of member reference is %select{a function|an overloaded function}0; "
-  "perhaps you meant to call it%select{| with no arguments}1?">;
-def note_member_ref_possible_intended_overload : Note<
-  "possibly valid overload here">;
+  "base of member reference is a function; perhaps you meant to call "
+  "it%select{| with no arguments}?">;
 def warn_subscript_is_char : Warning<"array subscript is of type 'char'">,
   InGroup<CharSubscript>, DefaultIgnore;
 
@@ -2918,6 +3391,9 @@ def err_member_def_undefined_record : Error<
   "out-of-line definition of %0 from class %1 without definition">;
 def err_member_def_does_not_match : Error<
   "out-of-line definition of %0 does not match any declaration in %1">;
+def err_member_def_does_not_match_suggest : Error<
+  "out-of-line definition of %0 does not match any declaration in %1; "
+  "did you mean %2">;
 def err_member_def_does_not_match_ret_type : Error<
   "out-of-line definition of %q0 differs from the declaration in the return type">;
 def err_nonstatic_member_out_of_line : Error<
@@ -2936,6 +3412,12 @@ def warn_member_extra_qualification : Warning<
 def err_member_qualification : Error<
   "non-friend class member %0 cannot have a qualified name">;  
 def note_member_def_close_match : Note<"member declaration nearly matches">;
+def note_member_def_close_const_match : Note<
+  "member declaration does not match because "
+  "it %select{is|is not}0 const qualified">;
+def note_member_def_close_param_match : Note<
+  "type of %ordinal0 parameter of member declaration does not match "
+  "definition (%1 vs %2)">;
 def err_typecheck_ivar_variable_size : Error<
   "instance variables must have a constant size">;
 def err_ivar_reference_type : Error<
@@ -2952,7 +3434,8 @@ def err_typecheck_pointer_arith_void_type : Error<
 def err_typecheck_decl_incomplete_type : Error<
   "variable has incomplete type %0">;
 def ext_typecheck_decl_incomplete_type : ExtWarn<
-  "tentative definition of variable with internal linkage has incomplete non-array type %0">;
+  "tentative definition of variable with internal linkage has incomplete non-array type %0">,
+  InGroup<DiagGroup<"tentative-definition-incomplete-type">>;
 def err_tentative_def_incomplete_type : Error<
   "tentative definition has type %0 that is never completed">;
 def err_tentative_def_incomplete_type_arr : Error<
@@ -2983,7 +3466,8 @@ def warn_standalone_specifier : Warning<"'%0' ignored on this declaration">;
 def err_typecheck_sclass_func : Error<"illegal storage class on function">;
 def err_static_block_func : Error<
   "function declared in block scope cannot have 'static' storage class">;
-def err_typecheck_address_of : Error<"address of %0 requested">;
+def err_typecheck_address_of : Error<"address of %select{bit-field"
+  "|vector element|property expression|register variable}0 requested">;
 def ext_typecheck_addrof_void : Extension<
   "ISO C forbids taking the address of an expression of type 'void'">;
 def err_unqualified_pointer_member_function : Error<
@@ -3053,9 +3537,6 @@ def err_stmtexpr_file_scope : Error<
 def warn_mixed_sign_comparison : Warning<
   "comparison of integers of different signs: %0 and %1">,
   InGroup<SignCompare>, DefaultIgnore;
-def warn_mixed_sign_conditional : Warning<
-  "operands of ? are integers of different signs: %0 and %1">,
-  InGroup<SignCompare>, DefaultIgnore;
 def warn_lunsigned_always_true_comparison : Warning<
   "comparison of unsigned%select{| enum}2 expression %0 is always %1">,
   InGroup<TautologicalCompare>;
@@ -3067,6 +3548,10 @@ def warn_comparison_of_mixed_enum_types : Warning<
   InGroup<DiagGroup<"enum-compare">>;
 def warn_null_in_arithmetic_operation : Warning<
   "use of NULL in arithmetic operation">,
+  InGroup<DiagGroup<"null-arithmetic">>;
+def warn_null_in_comparison_operation : Warning<
+  "comparison between NULL and non-pointer "
+  "%select{(%1 and NULL)|(NULL and %1)}0">,
   InGroup<DiagGroup<"null-arithmetic">>;
 
 def err_invalid_this_use : Error<
@@ -3142,19 +3627,27 @@ def ext_gnu_ptr_func_arith : Extension<
   "arithmetic on%select{ a|}0 pointer%select{|s}0 to%select{ the|}2 function "
   "type%select{|s}2 %1%select{| and %3}2 is a GNU extension">,
   InGroup<PointerArith>;
-def error_readonly_property_assignment : Error<
-  "assigning to property with 'readonly' attribute not allowed">;
 def error_readonly_message_assignment : Error<
   "assigning to 'readonly' return result of an objective-c message not allowed">;
 def ext_integer_increment_complex : Extension<
   "ISO C does not support '++'/'--' on complex integer type %0">;
 def ext_integer_complement_complex : Extension<
   "ISO C does not support '~' for complex conjugation of %0">;
-def error_nosetter_property_assignment : Error<
-  "setter method is needed to assign to object using property" " assignment syntax">;
+def err_nosetter_property_assignment : Error<
+  "%select{assignment to readonly property|"
+  "no setter method %1 for assignment to property}0">;
+def err_nosetter_property_incdec : Error<
+  "%select{%select{increment|decrement}1 of readonly property|"
+  "no setter method %2 for %select{increment|decrement}1 of property}0">;
+def err_nogetter_property_compound_assignment : Error<
+  "a getter method is needed to perform a compound assignment on a property">;
+def err_nogetter_property_incdec : Error<
+  "no getter method %1 for %select{increment|decrement} of property">;
 def error_no_subobject_property_setting : Error<
   "expression is not assignable">;
-
+def err_qualified_objc_access : Error<
+  "%select{property|ivar}0 access cannot be qualified with '%1'">;
+  
 def ext_freestanding_complex : Extension<
   "complex numbers are an extension in a freestanding C99 implementation">;
 
@@ -3219,10 +3712,11 @@ def err_incomplete_type_objc_at_encode : Error<
 
 def warn_setter_getter_impl_required : Warning<
   "property %0 requires method %1 to be defined - "
-  "use @synthesize, @dynamic or provide a method implementation">;
+  "use @synthesize, @dynamic or provide a method implementation "
+  "in this class implementation">;
 def warn_setter_getter_impl_required_in_category : Warning<
   "property %0 requires method %1 to be defined - "
-  "use @dynamic or provide a method implementation in category">;
+  "use @dynamic or provide a method implementation in this category">;
 def note_property_impl_required : Note<
   "implementation is here">;
 def note_parameter_named_here : Note<
@@ -3257,6 +3751,9 @@ def err_bad_const_cast_dest : Error<
   "which is not a reference, pointer-to-object, or pointer-to-data-member">;
 def ext_cast_fn_obj : Extension<
   "cast between pointer-to-function and pointer-to-object is an extension">;
+def warn_cxx98_compat_cast_fn_obj : Warning<
+  "cast between pointer-to-function and pointer-to-object is incompatible with C++98">,
+  InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def err_bad_reinterpret_cast_small_int : Error<
   "cast from pointer to smaller type %2 loses information">;
 def err_bad_cxx_cast_vector_to_scalar_different_size : Error<
@@ -3340,8 +3837,12 @@ def err_array_size_ambiguous_conversion : Error<
   "enumeration type">;
 def ext_array_size_conversion : Extension<
   "implicit conversion from array size expression of type %0 to "
-  "%select{integral|enumeration}1 type %2 is a C++0x extension">,
-  InGroup<CXX0x>;
+  "%select{integral|enumeration}1 type %2 is a C++11 extension">,
+  InGroup<CXX11>;
+def warn_cxx98_compat_array_size_conversion : Warning<
+  "implicit conversion from array size expression of type %0 to "
+  "%select{integral|enumeration}1 type %2 is incompatible with C++98">,
+  InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def err_address_space_qualified_new : Error<
   "'new' cannot allocate objects of type %0 in address space '%1'">;
 def err_address_space_qualified_delete : Error<
@@ -3356,8 +3857,9 @@ def ext_delete_void_ptr_operand : ExtWarn<
 def err_ambiguous_delete_operand : Error<"ambiguous conversion of delete "
                                          "expression of type %0 to a pointer">;
 def warn_delete_incomplete : Warning<
-  "deleting pointer to incomplete type %0 may cause undefined behaviour">;
-def err_delete_incomplete_class_type : Warning<
+  "deleting pointer to incomplete type %0 may cause undefined behaviour">,
+  InGroup<DiagGroup<"delete-incomplete">>;
+def err_delete_incomplete_class_type : Error<
   "deleting incomplete class type %0; no conversions to pointer type">;
 def warn_delete_array_type : Warning<
   "'delete' applied to a pointer-to-array type %0 treated as delete[]">;
@@ -3371,9 +3873,11 @@ def err_decrement_bool : Error<"cannot decrement expression of type bool">;
 def warn_increment_bool : Warning<
   "incrementing expression of type bool is deprecated">, InGroup<Deprecated>;
 def ext_catch_incomplete_ptr : ExtWarn<
-  "ISO C++ forbids catching a pointer to incomplete type %0">;
+  "ISO C++ forbids catching a pointer to incomplete type %0">,
+  InGroup<CatchIncompleteExtension>;
 def ext_catch_incomplete_ref : ExtWarn<
-  "ISO C++ forbids catching a reference to incomplete type %0">;
+  "ISO C++ forbids catching a reference to incomplete type %0">,
+  InGroup<CatchIncompleteExtension>;
 def err_catch_incomplete : Error<"cannot catch incomplete type %0">;
 def err_catch_rvalue_ref : Error<"cannot catch exceptions by rvalue reference">;
 def err_qualified_catch_declarator : Error<
@@ -3399,6 +3903,9 @@ def warn_non_virtual_dtor : Warning<
 def warn_delete_non_virtual_dtor : Warning<
   "delete called on %0 that has virtual functions but non-virtual destructor">,
   InGroup<DeleteNonVirtualDtor>, DefaultIgnore;
+def warn_delete_abstract_non_virtual_dtor : Warning<
+  "delete called on %0 that is abstract but has non-virtual destructor">,
+  InGroup<DeleteNonVirtualDtor>;
 def warn_overloaded_virtual : Warning<
   "%q0 hides overloaded virtual %select{function|functions}1">,
   InGroup<OverloadedVirtual>, DefaultIgnore;
@@ -3472,8 +3979,6 @@ def err_not_tag_in_scope : Error<
 
 def err_cannot_form_pointer_to_member_of_reference_type : Error<
   "cannot form a pointer-to-member to member %0 of reference type %1">;
-def err_invalid_use_of_bound_member_func : Error<
-  "a bound member function may only be called">;
 def err_incomplete_object_call : Error<
   "incomplete type in call to object of type %0">;
 def err_incomplete_pointer_to_member_return : Error<
@@ -3494,7 +3999,7 @@ def note_condition_assign_silence : Note<
   "place parentheses around the assignment to silence this warning">;
 
 def warn_equality_with_extra_parens : Warning<"equality comparison with "
-  "extraneous parentheses">, InGroup<Parentheses>;
+  "extraneous parentheses">, InGroup<ParenthesesOnEquality>;
 def note_equality_comparison_to_assign : Note<
   "use '=' to turn this equality comparison into an assignment">;
 def note_equality_comparison_silence : Note<
@@ -3515,7 +4020,11 @@ def err_typecheck_convert_incompatible : Error<
   "%select{from incompatible type|to parameter of incompatible type|"
   "from a function with incompatible result type|to incompatible type|"
   "with an expression of incompatible type|to parameter of incompatible type|"
-  "to incompatible type}2 %1">;
+  "to incompatible type}2 %1; "
+  "%select{|dereference with *|"
+  "take the address with &|"
+  "remove *|"
+  "remove &}3">;
 def warn_incompatible_qualified_id : Warning<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
@@ -3528,13 +4037,21 @@ def ext_typecheck_convert_pointer_int : ExtWarn<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
   "%select{from|to parameter of type|from a function with result type|to type|"
-  "with an expression of type|to parameter of type|to type}2 %1">;
+  "with an expression of type|to parameter of type|to type}2 %1; "
+  "%select{|dereference with *|"
+  "take the address with &|"
+  "remove *|"
+  "remove &}3">;
 def ext_typecheck_convert_int_pointer : ExtWarn<
   "incompatible integer to pointer conversion "
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
   "%select{from|to parameter of type|from a function with result type|to type|"
-  "with an expression of type|to parameter of type|to type}2 %1">;
+  "with an expression of type|to parameter of type|to type}2 %1; "
+  "%select{|dereference with *|"
+  "take the address with &|"
+  "remove *|"
+  "remove &}3">;
 def ext_typecheck_convert_pointer_void_func : Extension<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
@@ -3553,20 +4070,26 @@ def ext_typecheck_convert_incompatible_pointer : ExtWarn<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
   "%select{from|to parameter of type|from a function with result type|to type|"
-  "with an expression of type|to parameter of type|to type}2 %1">,
-  InGroup<DiagGroup<"incompatible-pointer-types">>;
+  "with an expression of type|to parameter of type|to type}2 %1"
+  "%select{|dereference with *|"
+  "take the address with &|"
+  "remove *|"
+  "remove &}3">,
+  InGroup<IncompatiblePointerTypes>;
 def ext_typecheck_convert_discards_qualifiers : ExtWarn<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
   "%select{from|to parameter of type|from a function with result type|to type|"
   "with an expression of type|to parameter of type|to type}2 %1 discards "
-  "qualifiers">;
+  "qualifiers">,
+  InGroup<IncompatiblePointerTypes>;
 def ext_nested_pointer_qualifier_mismatch : ExtWarn<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "
   "%select{from|to parameter of type|from a function with result type|to type|"
   "with an expression of type|to parameter of type|to type}2 %1 discards "
-  "qualifiers in nested pointer types">;
+  "qualifiers in nested pointer types">,
+  InGroup<IncompatiblePointerTypes>;
 def warn_incompatible_vectors : Warning<
   "incompatible vector types "
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
@@ -3635,19 +4158,23 @@ def note_function_with_incomplete_return_type_declared_here : Note<
 def err_call_incomplete_argument : Error<
   "argument type %0 is incomplete">;
 def err_typecheck_call_too_few_args : Error<
-  "too few arguments to %select{function|block|method}0 call, "
+  "too few %select{|||execution configuration }0arguments to "
+  "%select{function|block|method|kernel function}0 call, "
   "expected %1, have %2">;
 def err_typecheck_call_too_few_args_at_least : Error<
-  "too few arguments to %select{function|block|method}0 call, "
+  "too few %select{|||execution configuration }0arguments to "
+  "%select{function|block|method|kernel function}0 call, "
   "expected at least %1, have %2">;
 def err_typecheck_call_too_many_args : Error<
-  "too many arguments to %select{function|block|method}0 call, "
+  "too many %select{|||execution configuration }0arguments to "
+  "%select{function|block|method|kernel function}0 call, "
   "expected %1, have %2">;
-def note_typecheck_call_too_many_args : Note<
-  "%0 declared here">;
 def err_typecheck_call_too_many_args_at_most : Error<
-  "too many arguments to %select{function|block|method}0 call, "
+  "too many %select{|||execution configuration }0arguments to "
+  "%select{function|block|method|kernel function}0 call, "
   "expected at most %1, have %2">;
+def note_callee_decl : Note<
+  "%0 declared here">;
 def warn_call_wrong_number_of_arguments : Warning<
   "too %select{few|many}0 arguments in call to %1">;
 def err_atomic_builtin_must_be_pointer : Error<
@@ -3658,6 +4185,15 @@ def err_atomic_builtin_must_be_pointer_intptr : Error<
 def err_atomic_builtin_pointer_size : Error<
   "first argument to atomic builtin must be a pointer to 1,2,4,8 or 16 byte "
   "type (%0 invalid)">;
+def err_atomic_op_needs_atomic : Error<
+  "first argument to atomic operation must be a pointer to _Atomic "
+  "type (%0 invalid)">;
+def err_atomic_op_needs_atomic_int_or_ptr : Error<
+  "first argument to atomic operation must be a pointer to atomic "
+  "integer or pointer (%0 invalid)">;
+def err_atomic_op_logical_needs_atomic_int : Error<
+  "first argument to logical atomic operation must be a pointer to atomic "
+  "integer (%0 invalid)">;
 
 def err_deleted_function_use : Error<"attempt to use a deleted function">;
 
@@ -3667,6 +4203,11 @@ def err_config_scalar_return : Error<
   "CUDA special function 'cudaConfigureCall' must have scalar return type">;
 def err_kern_call_not_global_function : Error<
   "kernel call to non-global function %0">;
+def err_global_call_not_config : Error<
+  "call to global function %0 not configured">;
+def err_ref_bad_target : Error<
+  "reference to %select{__device__|__global__|__host__|__host__ __device__}0 "
+  "function %1 in %select{__device__|__global__|__host__|__host__ __device__}2 function">;
 
 
 def err_cannot_pass_objc_interface_to_vararg : Error<
@@ -3677,6 +4218,10 @@ def warn_cannot_pass_non_pod_arg_to_vararg : Warning<
   "cannot pass object of %select{non-POD|non-trivial}0 type %1 through variadic"
   " %select{function|block|method|constructor}2; call will abort at runtime">,
   InGroup<DiagGroup<"non-pod-varargs">>, DefaultError;
+def warn_cxx98_compat_pass_non_pod_arg_to_vararg : Warning<
+  "passing object of trivial but non-POD type %0 through variadic"
+  " %select{function|block|method|constructor}1 is incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
 def err_typecheck_call_invalid_ordered_compare : Error<
   "ordered compare requires two args of floating point type (%0 and %1)">;
@@ -3710,9 +4255,11 @@ def ext_typecheck_cond_incompatible_operands_nonstandard : ExtWarn<
 def err_cast_selector_expr : Error<
   "cannot type cast @selector expression">;
 def warn_typecheck_cond_incompatible_pointers : ExtWarn<
-  "pointer type mismatch (%0 and %1)">;
+  "pointer type mismatch (%0 and %1)">,
+  InGroup<DiagGroup<"pointer-type-mismatch">>;
 def warn_typecheck_cond_pointer_integer_mismatch : ExtWarn<
-  "pointer/integer type mismatch in conditional expression (%0 and %1)">;
+  "pointer/integer type mismatch in conditional expression (%0 and %1)">,
+  InGroup<DiagGroup<"conditional-type-mismatch">>;
 def err_typecheck_choose_expr_requires_constant : Error<
   "'__builtin_choose_expr' requires a constant expression">;
 def ext_typecheck_expression_not_constant_but_accepted : Extension<
@@ -3729,6 +4276,14 @@ def warn_unused_property_expr : Warning<
 def warn_unused_call : Warning<
   "ignoring return value of function declared with %0 attribute">,
   InGroup<UnusedValue>;
+def warn_unused_result : Warning<
+  "ignoring return value of function declared with warn_unused_result "
+  "attribute">, InGroup<DiagGroup<"unused-result">>;
+def warn_unused_comparison : Warning<
+  "%select{equality|inequality}0 comparison result unused">,
+  InGroup<UnusedComparison>;
+def note_inequality_comparison_to_or_assign : Note<
+  "use '|=' to turn this inequality comparison into an or-assignment">;
 
 def err_incomplete_type_used_in_type_trait_expr : Error<
   "incomplete type %0 used in type trait expression">;
@@ -3812,11 +4367,18 @@ def err_not_direct_base_or_virtual : Error<
 
 def err_in_class_initializer_non_const : Error<
   "non-const static data member must be initialized out of line">;
+def err_in_class_initializer_volatile : Error<
+  "static const volatile data member must be initialized out of line">;
 def err_in_class_initializer_bad_type : Error<
   "static data member of type %0 must be initialized out of line">;
 def ext_in_class_initializer_float_type : ExtWarn<
-  "in-class initializer for static data member of type %0 "
-  "is a C++0x extension">, InGroup<CXX0xStaticNonIntegralInitializer>;
+  "in-class initializer for static data member of type %0 is a GNU extension">,
+  InGroup<GNU>;
+def note_in_class_initializer_float_type_constexpr : Note<
+  "use 'constexpr' specifier to silence this warning">;
+def err_in_class_initializer_literal_type : Error<
+  "in-class initializer for static data member of type %0 requires "
+  "'constexpr' specifier">;
 def err_in_class_initializer_non_constant : Error<
   "in-class initializer is not a constant expression">;
 
@@ -3955,7 +4517,13 @@ def err_literal_operator_outside_namespace : Error<
 // FIXME: This diagnostic sucks
 def err_literal_operator_params : Error<
   "parameter declaration for literal operator %0 is not valid">;
-
+def warn_user_literal_hexfloat : Warning<
+  "user-defined literal with suffix '%0' is preempted by C99 hexfloat "
+  "extension">, InGroup<UserDefinedLiterals>;
+def warn_user_literal_reserved : Warning<
+  "user-defined literals not starting with '_' are reserved by the "
+  "implementation">, InGroup<UserDefinedLiterals>;
+  
 // C++ conversion functions
 def err_conv_function_not_member : Error<
   "conversion function must be a non-static member function">;
@@ -3983,11 +4551,14 @@ def warn_conv_to_void_not_used : Warning<
 def warn_not_compound_assign : Warning<
   "use of unary operator that may be intended as compound assignment (%0=)">;
 
-// C++0x explicit conversion operators
-def warn_explicit_conversion_functions : Warning<
-  "explicit conversion functions are a C++0x extension">, InGroup<CXX0x>;
+// C++11 explicit conversion operators
+def ext_explicit_conversion_functions : ExtWarn<
+  "explicit conversion functions are a C++11 extension">, InGroup<CXX11>;
+def warn_cxx98_compat_explicit_conversion_functions : Warning<
+  "explicit conversion functions are incompatible with C++98">,
+  InGroup<CXX98Compat>, DefaultIgnore;
 
-// C++0x defaulted functions
+// C++11 defaulted functions
 def err_defaulted_default_ctor_params : Error<
   "an explicitly-defaulted default constructor must have no parameters">;
 def err_defaulted_copy_ctor_params : Error<
@@ -4014,8 +4585,34 @@ def err_defaulted_copy_assign_const_param : Error<
   "the parameter for this explicitly-defaulted copy assignment operator is "
   "const, but a member or base requires it to be non-const">;
 def err_defaulted_copy_assign_quals : Error<
-  "an explicitly-defaulted copy assignment operator may not have 'const' "
-  "or 'volatile' qualifiers">;
+  "an explicitly-defaulted copy assignment operator may not have 'const', "
+  "'constexpr' or 'volatile' qualifiers">;
+def err_defaulted_move_ctor_params : Error<
+  "an explicitly-defaulted move constructor must have exactly one parameter">;
+def err_defaulted_move_ctor_volatile_param : Error<
+  "the parameter for an explicitly-defaulted move constructor may not be "
+  "volatile">;
+def err_defaulted_move_ctor_const_param : Error<
+  "the parameter for an explicitly-defaulted move constructor may not be "
+  "const">;
+def err_defaulted_move_assign_params : Error<
+  "an explicitly-defaulted move assignment operator must have exactly one "
+  "parameter">;
+def err_defaulted_move_assign_return_type : Error<
+  "an explicitly-defaulted move assignment operator must return an unqualified "
+  "lvalue reference to its class type">;
+def err_defaulted_move_assign_not_ref : Error<
+  "the parameter for an explicitly-defaulted move assignment operator must be an "
+  "rvalue reference type">;
+def err_defaulted_move_assign_volatile_param : Error<
+  "the parameter for an explicitly-defaulted move assignment operator may not "
+  "be volatile">;
+def err_defaulted_move_assign_const_param : Error<
+  "the parameter for an explicitly-defaulted move assignment operator may not "
+  "be const">;
+def err_defaulted_move_assign_quals : Error<
+  "an explicitly-defaulted move assignment operator may not have 'const', "
+  "'constexpr' or 'volatile' qualifiers">;
 def err_incorrect_defaulted_exception_spec : Error<
   "exception specification of explicitly defaulted %select{default constructor|"
   "copy constructor|move constructor|copy assignment operator|move assignment "
@@ -4025,15 +4622,20 @@ def err_out_of_line_default_deletes : Error<
   "defaulting this %select{default constructor|copy constructor|move "
   "constructor|copy assignment operator|move assignment operator|destructor}0 "
   "would delete it after its first declaration">;
-def err_defaulted_move_unsupported : Error<
-  "defaulting move functions not yet supported">;
 
+def warn_ptr_arith_precedes_bounds : Warning<
+  "the pointer decremented by %0 refers before the beginning of the array">,
+  InGroup<DiagGroup<"array-bounds-pointer-arithmetic">>, DefaultIgnore;
+def warn_ptr_arith_exceeds_bounds : Warning<
+  "the pointer incremented by %0 refers past the end of the array (that "
+  "contains %1 element%s2)">,
+  InGroup<DiagGroup<"array-bounds-pointer-arithmetic">>, DefaultIgnore;
 def warn_array_index_precedes_bounds : Warning<
   "array index of '%0' indexes before the beginning of the array">,
   InGroup<DiagGroup<"array-bounds">>;
 def warn_array_index_exceeds_bounds : Warning<
-  "array index of '%0' indexes past the end of an array (that contains %1 elements)">,
-  InGroup<DiagGroup<"array-bounds">>;
+  "array index of '%0' indexes past the end of an array (that contains %1 "
+  "element%s2)">, InGroup<DiagGroup<"array-bounds">>;
 def note_array_index_out_of_bounds : Note<
   "array %0 declared here">;
 
@@ -4045,7 +4647,7 @@ def warn_printf_insufficient_data_args : Warning<
 def warn_printf_data_arg_not_used : Warning<
   "data argument not used by format string">, InGroup<FormatExtraArgs>;
 def warn_format_invalid_conversion : Warning<
-  "invalid conversion specifier '%0'">, InGroup<Format>;
+  "invalid conversion specifier '%0'">, InGroup<FormatInvalidSpecifier>;
 def warn_printf_incomplete_specifier : Warning<
   "incomplete format specifier">, InGroup<Format>;
 def warn_missing_format_string : Warning<
@@ -4068,9 +4670,11 @@ def warn_format_invalid_positional_specifier : Warning<
 def warn_format_mix_positional_nonpositional_args : Warning<
   "cannot mix positional and non-positional arguments in format string">,
   InGroup<Format>;
-def warn_null_arg : Warning<
-  "null passed to a callee which requires a non-null argument">,
-  InGroup<NonNull>;
+def warn_static_array_too_small : Warning<
+  "array argument is too small; contains %0 elements, callee requires at least %1">,
+  InGroup<DiagGroup<"array-bounds">>;
+def note_callee_static_array : Note<
+  "callee declares array parameter as static here">;
 def warn_empty_format_string : Warning<
   "format string is empty">, InGroup<FormatZeroLength>;
 def warn_format_string_is_wide_literal : Warning<
@@ -4097,23 +4701,46 @@ def warn_printf_ignored_flag: Warning<
 def warn_scanf_scanlist_incomplete : Warning<
   "no closing ']' for '%%[' in scanf format string">,
   InGroup<Format>;
-  
+def note_format_string_defined : Note<"format string is defined here">;
+ 
+def warn_null_arg : Warning<
+  "null passed to a callee which requires a non-null argument">,
+  InGroup<NonNull>;
+
 // CHECK: returning address/reference of stack memory
 def warn_ret_stack_addr : Warning<
-  "address of stack memory associated with local variable %0 returned">;
+  "address of stack memory associated with local variable %0 returned">,
+  InGroup<DiagGroup<"return-stack-address">>;
 def warn_ret_stack_ref : Warning<
-  "reference to stack memory associated with local variable %0 returned">;
+  "reference to stack memory associated with local variable %0 returned">,
+  InGroup<DiagGroup<"return-stack-address">>;
 def warn_ret_local_temp_addr : Warning<
-  "returning address of local temporary object">;
+  "returning address of local temporary object">,
+  InGroup<DiagGroup<"return-stack-address">>;
 def warn_ret_local_temp_ref : Warning<
-  "returning reference to local temporary object">;
+  "returning reference to local temporary object">,
+  InGroup<DiagGroup<"return-stack-address">>;
 def warn_ret_addr_label : Warning<
-  "returning address of label, which is local">;
+  "returning address of label, which is local">,
+  InGroup<DiagGroup<"return-stack-address">>;
 def err_ret_local_block : Error<
   "returning block that lives on the local stack">;
 def note_ref_var_local_bind : Note<
   "binding reference variable %0 here">;
 
+// Check for initializing a member variable with the address or a reference to
+// a constructor parameter.
+def warn_bind_ref_member_to_parameter : Warning<
+  "binding reference member %0 to stack allocated parameter %1">,
+  InGroup<DiagGroup<"dangling-field">>;
+def warn_init_ptr_member_to_parameter_addr : Warning<
+  "initializing pointer member %0 with the stack address of parameter %1">,
+  InGroup<DiagGroup<"dangling-field">>;
+def warn_bind_ref_member_to_temporary : Warning<
+  "binding reference member %0 to a temporary value">,
+  InGroup<DiagGroup<"dangling-field">>;
+def note_ref_or_ptr_member_declared_here : Note<
+  "%select{reference|pointer}0 member declared here">;
 
 // For non-floating point, expressions of the form x == x or x != x
 // should result in a warning, since these always evaluate to a constant.
@@ -4124,7 +4751,8 @@ def warn_comparison_always : Warning<
 
 def warn_stringcompare : Warning<
   "result of comparison against %select{a string literal|@encode}0 is "
-  "unspecified (use strncmp instead)">;
+  "unspecified (use strncmp instead)">,
+  InGroup<DiagGroup<"string-compare">>;
 
 // Generic selections.
 def err_assoc_type_incomplete : Error<
@@ -4152,13 +4780,18 @@ def err_return_in_block_expression : Error<
 def err_block_returning_array_function : Error<
   "block cannot return %select{array|function}0 type %1">;
 
+// Builtin annotation string.
+def err_builtin_annotation_not_string_constant : Error<
+  "__builtin_annotation requires a non wide string constant">;
 
 // CFString checking
 def err_cfstring_literal_not_string_constant : Error<
-  "CFString literal is not a string constant">;
+  "CFString literal is not a string constant">,
+  InGroup<DiagGroup<"CFString-literal">>;
 def warn_cfstring_truncated : Warning<
   "input conversion stopped due to an input byte that does not "
-  "belong to the input codeset UTF-8">;
+  "belong to the input codeset UTF-8">,
+  InGroup<DiagGroup<"CFString-literal">>;
 
 // Statements.
 def err_continue_not_in_loop : Error<
@@ -4222,6 +4855,12 @@ def err_second_parameter_to_va_arg_abstract: Error<
 def warn_second_parameter_to_va_arg_not_pod : Warning<
   "second argument to 'va_arg' is of non-POD type %0">,
   InGroup<DiagGroup<"non-pod-varargs">>, DefaultError;
+def warn_second_parameter_to_va_arg_ownership_qualified : Warning<
+  "second argument to 'va_arg' is of ARC ownership-qualified type %0">,
+  InGroup<DiagGroup<"non-pod-varargs">>, DefaultError;
+def warn_second_parameter_to_va_arg_never_compatible : Warning<
+  "second argument to 'va_arg' is of promotable type %0; this va_arg has "
+  "undefined behavior because arguments will be promoted to %1">;
 
 def warn_return_missing_expr : Warning<
   "non-void %select{function|method}1 %0 should return a value">, DefaultError,
@@ -4312,18 +4951,25 @@ def err_missing_param_declspec : Error<
 def err_objc_array_of_interfaces : Error<
   "array of interface %0 is invalid (probably should be an array of pointers)">;
 def ext_c99_array_usage : Extension<
-  "use of C99-specific array features, accepted as an extension">;
+  "use of C99-specific array features, accepted as an extension">, InGroup<C99>;
 def err_c99_array_usage_cxx : Error<
   "C99-specific array features are not permitted in C++">;
 def err_double_requires_fp64 : Error<
   "use of type 'double' requires cl_khr_fp64 extension to be enabled">;
+def err_nsconsumed_attribute_mismatch : Error<
+  "overriding method has mismatched ns_consumed attribute on its"
+  " parameter">;
+def err_nsreturns_retained_attribute_mismatch : Error<
+  "overriding method has mismatched ns_returns_%select{not_retained|retained}0"
+  " attributes">;
   
 def note_getter_unavailable : Note<
   "or because setter is declared here, but no getter method %0 is found">;
 def err_invalid_protocol_qualifiers : Error<
   "invalid protocol qualifiers on non-ObjC type">;
 def warn_ivar_use_hidden : Warning<
-  "local declaration of %0 hides instance variable">;
+  "local declaration of %0 hides instance variable">,
+   InGroup<DiagGroup<"shadow-ivar">>;
 def error_ivar_use_in_class_method : Error<
   "instance variable %0 accessed in class method">;
 def error_implicit_ivar_access : Error<
@@ -4334,10 +4980,14 @@ def error_protected_ivar_access : Error<"instance variable %0 is protected">,
   AccessControl;
 def warn_maynot_respond : Warning<"%0 may not respond to %1">;
 def warn_attribute_method_def : Warning<
-  "method attribute can only be specified on method declarations">;
+  "attributes on method implementation and its declaration must match">,
+  InGroup<DiagGroup<"mismatched-method-attributes">>;
 def ext_typecheck_base_super : Warning<
   "method parameter type %0 does not match "
   "super class method parameter type %1">, InGroup<SuperSubClassMismatch>, DefaultIgnore;
+def warn_missing_method_return_type : Warning<
+  "method has no return type specified; defaults to 'id'">,
+  InGroup<MissingMethodReturnType>, DefaultIgnore;
 
 // Spell-checking diagnostics
 def err_unknown_typename_suggest : Error<
@@ -4388,9 +5038,12 @@ def err_sizeof_pack_no_pack_name_suggest : Error<
 def note_parameter_pack_here : Note<"parameter pack %0 declared here">;
 
 def err_uncasted_use_of_unknown_any : Error<
-  "%0 has unknown type;  cast it to its declared type to use it">;
+  "%0 has unknown type; cast it to its declared type to use it">;
 def err_uncasted_call_of_unknown_any : Error<
-  "%0 has unknown return type;  cast the call to its declared return type">;
+  "%0 has unknown return type; cast the call to its declared return type">;
+def err_uncasted_send_to_unknown_any_method : Error<
+  "no known method %select{%objcinstance1|%objcclass1}0; cast the "
+  "message send to the method's return type">;
 def err_unsupported_unknown_any_decl : Error<
   "%0 has unknown type, which is unsupported for this kind of declaration">;
 def err_unsupported_unknown_any_expr : Error<
@@ -4402,6 +5055,8 @@ def err_unknown_any_addrof : Error<
   "can only be cast to a pointer type">;
 def err_unknown_any_var_function_type : Error<
   "variable %0 with unknown type cannot be given a function type">;
+def err_unknown_any_function : Error<
+  "function %0 with unknown type must be given a function type">;
 
 def err_filter_expression_integral : Error<
   "filter expression type should be an integral value not %0">;
@@ -4420,13 +5075,30 @@ def warn_related_result_type_compatibility_class : Warning<
 def warn_related_result_type_compatibility_protocol : Warning<
   "protocol method is expected to return an instance of the implementing "
   "class, but is declared to return %0">;
-def note_related_result_type_overridden : Note<
+def note_related_result_type_overridden_family : Note<
   "overridden method is part of the '%select{|alloc|copy|init|mutableCopy|"
-  "new|autorelease|dealloc|release|retain|retainCount|self}0' method family">;
+  "new|autorelease|dealloc|finalize|release|retain|retainCount|self}0' method "
+  "family">;
+def note_related_result_type_overridden : Note<
+  "overridden method returns an instance of its class type">;
 def note_related_result_type_inferred : Note<
   "%select{class|instance}0 method %1 is assumed to return an instance of "
   "its receiver type (%2)">;
 
+}
+
+let CategoryName = "Modules Issue" in {
+def err_module_private_follows_public : Error<
+  "__module_private__ declaration of %0 follows public declaration">;
+def err_module_private_specialization : Error<
+  "%select{template|partial|member}0 specialization cannot be "
+  "declared __module_private__">;
+def err_module_private_local : Error<
+  "%select{local variable|parameter|typedef}0 %1 cannot be declared "
+  "__module_private__">;
+def err_module_private_local_class : Error<
+  "local %select{struct|union|class|enum}0 cannot be declared "
+  "__module_private__">;
 }
 
 } // end of sema component.

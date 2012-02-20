@@ -164,8 +164,8 @@ public:
     return Position;
   }
   
-  llvm::StringRef getCharacters() const {
-    return llvm::StringRef(getStart(), getLength());
+  StringRef getCharacters() const {
+    return StringRef(getStart(), getLength());
   }
   
   bool consumesDataArgument() const {
@@ -199,7 +199,7 @@ protected:
 class ArgTypeResult {
 public:
   enum Kind { UnknownTy, InvalidTy, SpecificTy, ObjCPointerTy, CPointerTy,
-    CStrTy, WCStrTy, WIntTy };
+              AnyCharTy, CStrTy, WCStrTy, WIntTy };
 private:
   const Kind K;
   QualType T;
@@ -271,7 +271,7 @@ public:
 
   ArgTypeResult getArgType(ASTContext &Ctx) const;
 
-  void toString(llvm::raw_ostream &os) const;
+  void toString(raw_ostream &os) const;
 
   bool usesPositionalArg() const { return (bool) UsesPositionalArg; }
   unsigned getPositionalArgIndex() const {
@@ -463,9 +463,9 @@ public:
     /// Changes the specifier and length according to a QualType, retaining any
     /// flags or options. Returns true on success, or false when a conversion
     /// was not successful.
-  bool fixType(QualType QT);
+  bool fixType(QualType QT, const LangOptions &LangOpt);
 
-  void toString(llvm::raw_ostream &os) const;
+  void toString(raw_ostream &os) const;
 
     // Validation methods - to check if any element results in undefined behavior
   bool hasValidPlusPrefix() const;

@@ -107,12 +107,16 @@ class T8     { bits<5> Prefix = 13; }
 class TA     { bits<5> Prefix = 14; }
 class A6     { bits<5> Prefix = 15; }
 class A7     { bits<5> Prefix = 16; }
-class TF     { bits<5> Prefix = 17; }
+class T8XD   { bits<5> Prefix = 17; }
+class T8XS   { bits<5> Prefix = 18; }
+class TAXD   { bits<5> Prefix = 19; }
 class VEX    { bit hasVEXPrefix = 1; }
 class VEX_W  { bit hasVEX_WPrefix = 1; }
 class VEX_4V : VEX { bit hasVEX_4VPrefix = 1; }
+class VEX_4VOp3 : VEX { bit hasVEX_4VOp3Prefix = 1; }
 class VEX_I8IMM { bit hasVEX_i8ImmReg = 1; }
 class VEX_L  { bit hasVEX_L = 1; }
+class VEX_LIG { bit ignoresVEX_L = 1; }
 class Has3DNow0F0FOpcode  { bit has3DNow0F0FOpcode = 1; }
 
 class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
@@ -147,9 +151,12 @@ class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
   bit hasVEXPrefix = 0;     // Does this inst require a VEX prefix?
   bit hasVEX_WPrefix = 0;   // Does this inst set the VEX_W field?
   bit hasVEX_4VPrefix = 0;  // Does this inst require the VEX.VVVV field?
+  bit hasVEX_4VOp3Prefix = 0;  // Does this inst require the VEX.VVVV field to
+                               // encode the third operand?
   bit hasVEX_i8ImmReg = 0;  // Does this inst require the last source register
                             // to be encoded in a immediate field?
   bit hasVEX_L = 0;         // Does this inst use large (256-bit) registers?
+  bit ignoresVEX_L = 0;     // Does this instruction ignore the L-bit
   bit has3DNow0F0FOpcode =0;// Wacky 3dNow! encoding?
 
   // TSFlags layout should be kept in sync with X86InstrInfo.h.
@@ -167,9 +174,11 @@ class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
   let TSFlags{33}    = hasVEXPrefix;
   let TSFlags{34}    = hasVEX_WPrefix;
   let TSFlags{35}    = hasVEX_4VPrefix;
-  let TSFlags{36}    = hasVEX_i8ImmReg;
-  let TSFlags{37}    = hasVEX_L;
-  let TSFlags{38}    = has3DNow0F0FOpcode;
+  let TSFlags{36}    = hasVEX_4VOp3Prefix;
+  let TSFlags{37}    = hasVEX_i8ImmReg;
+  let TSFlags{38}    = hasVEX_L;
+  let TSFlags{39}    = ignoresVEX_L;
+  let TSFlags{40}    = has3DNow0F0FOpcode;
 }
 
 class PseudoI<dag oops, dag iops, list<dag> pattern>
@@ -323,6 +332,10 @@ class VPSI<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag> pattern>
       : I<o, F, outs, ins, !strconcat("v", asm), pattern, SSEPackedSingle>, TB,
         Requires<[HasAVX]>;
+class VoPSI<bits<8> o, Format F, dag outs, dag ins, string asm,
+            list<dag> pattern>
+      : I<o, F, outs, ins, asm, pattern, SSEPackedSingle>, TB,
+        Requires<[HasSSE1orAVX]>;
 
 // SSE2 Instruction Templates:
 // 
@@ -417,10 +430,10 @@ class SS428I<bits<8> o, Format F, dag outs, dag ins, string asm,
       : I<o, F, outs, ins, asm, pattern, SSEPackedInt>, T8,
         Requires<[HasSSE42]>;
 
-//   SS42FI - SSE 4.2 instructions with TF prefix.
+//   SS42FI - SSE 4.2 instructions with T8XD prefix.
 class SS42FI<bits<8> o, Format F, dag outs, dag ins, string asm,
               list<dag> pattern>
-      : I<o, F, outs, ins, asm, pattern>, TF, Requires<[HasSSE42]>;
+      : I<o, F, outs, ins, asm, pattern>, T8XD, Requires<[HasSSE42]>;
       
 //   SS42AI = SSE 4.2 instructions with TA prefix
 class SS42AI<bits<8> o, Format F, dag outs, dag ins, string asm,
@@ -442,6 +455,20 @@ class AVXAIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
       : Ii8<o, F, outs, ins, asm, pattern, SSEPackedInt>, TA, OpSize,
         Requires<[HasAVX]>;
 
+// AVX2 Instruction Templates:
+//   Instructions introduced in AVX2 (no SSE equivalent forms)
+//
+//   AVX28I - AVX2 instructions with T8 and OpSize prefix.
+//   AVX2AIi8 - AVX2 instructions with TA, OpSize prefix and ImmT = Imm8.
+class AVX28I<bits<8> o, Format F, dag outs, dag ins, string asm,
+            list<dag> pattern>
+      : I<o, F, outs, ins, asm, pattern, SSEPackedInt>, T8, OpSize,
+        Requires<[HasAVX2]>;
+class AVX2AIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
+              list<dag> pattern>
+      : Ii8<o, F, outs, ins, asm, pattern, SSEPackedInt>, TA, OpSize,
+        Requires<[HasAVX2]>;
+
 // AES Instruction Templates:
 //
 // AES8I
@@ -459,6 +486,11 @@ class AESAI<bits<8> o, Format F, dag outs, dag ins, string asm,
 // CLMUL Instruction Templates
 class CLMULIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
                list<dag>pattern>
+      : Ii8<o, F, outs, ins, asm, pattern, SSEPackedInt>, TA,
+        OpSize, Requires<[HasCLMUL]>;
+
+class AVXCLMULIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
+                  list<dag>pattern>
       : Ii8<o, F, outs, ins, asm, pattern, SSEPackedInt>, TA,
         OpSize, VEX_4V, Requires<[HasAVX, HasCLMUL]>;
 
@@ -496,6 +528,9 @@ class RSDI<bits<8> o, Format F, dag outs, dag ins, string asm,
 class RPDI<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag> pattern>
       : PDI<o, F, outs, ins, asm, pattern>, REX_W;
+class VRPDI<bits<8> o, Format F, dag outs, dag ins, string asm,
+           list<dag> pattern>
+      : VPDI<o, F, outs, ins, asm, pattern>, VEX_W;
 
 // MMX Instruction templates
 //

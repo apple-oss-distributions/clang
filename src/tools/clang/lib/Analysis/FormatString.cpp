@@ -183,13 +183,13 @@ clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
       return false;
     case 'h':
       ++I;
-      lmKind = (I != E && *I == 'h') ?
-      ++I, LengthModifier::AsChar : LengthModifier::AsShort;
+      lmKind = (I != E && *I == 'h') ? (++I, LengthModifier::AsChar)
+                                     : LengthModifier::AsShort;
       break;
     case 'l':
       ++I;
-      lmKind = (I != E && *I == 'l') ?
-      ++I, LengthModifier::AsLongLong : LengthModifier::AsLong;
+      lmKind = (I != E && *I == 'l') ? (++I, LengthModifier::AsLongLong)
+                                     : LengthModifier::AsLong;
       break;
     case 'j': lmKind = LengthModifier::AsIntMax;     ++I; break;
     case 'z': lmKind = LengthModifier::AsSizeT;      ++I; break;
@@ -209,16 +209,30 @@ clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
 bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
   switch (K) {
     case InvalidTy:
-      assert(false && "ArgTypeResult must be valid");
-      return true;
+      llvm_unreachable("ArgTypeResult must be valid");
 
     case UnknownTy:
       return true;
-
+      
+    case AnyCharTy: {
+      if (const BuiltinType *BT = argTy->getAs<BuiltinType>())
+        switch (BT->getKind()) {
+          default:
+            break;
+          case BuiltinType::Char_S:
+          case BuiltinType::SChar:
+          case BuiltinType::UChar:
+          case BuiltinType::Char_U:
+            return true;            
+        }
+      return false;
+    }
+      
     case SpecificTy: {
       argTy = C.getCanonicalType(argTy).getUnqualifiedType();
       if (T == argTy)
         return true;
+      // Check for "compatible types".
       if (const BuiltinType *BT = argTy->getAs<BuiltinType>())
         switch (BT->getKind()) {
           default:
@@ -227,7 +241,7 @@ bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
           case BuiltinType::SChar:
             return T == C.UnsignedCharTy;
           case BuiltinType::Char_U:
-          case BuiltinType::UChar:
+          case BuiltinType::UChar:                    
             return T == C.SignedCharTy;
           case BuiltinType::Short:
             return T == C.UnsignedShortTy;
@@ -311,10 +325,11 @@ bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
 QualType ArgTypeResult::getRepresentativeType(ASTContext &C) const {
   switch (K) {
     case InvalidTy:
-      assert(false && "No representative type for Invalid ArgTypeResult");
-      // Fall-through.
+      llvm_unreachable("No representative type for Invalid ArgTypeResult");
     case UnknownTy:
       return QualType();
+    case AnyCharTy:
+      return C.CharTy;
     case SpecificTy:
       return T;
     case CStrTy:
@@ -378,7 +393,7 @@ analyze_format_string::LengthModifier::toString() const {
 // Methods on OptionalAmount.
 //===----------------------------------------------------------------------===//
 
-void OptionalAmount::toString(llvm::raw_ostream &os) const {
+void OptionalAmount::toString(raw_ostream &os) const {
   switch (hs) {
   case Invalid:
   case NotSpecified:

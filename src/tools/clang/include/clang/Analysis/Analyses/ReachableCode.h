@@ -25,7 +25,7 @@ namespace llvm {
 }
 
 namespace clang {
-  class AnalysisContext;
+  class AnalysisDeclContext;
   class CFGBlock;
 }
 
@@ -45,10 +45,10 @@ public:
 
 /// ScanReachableFromBlock - Mark all blocks reachable from Start.
 /// Returns the total number of blocks that were marked reachable.  
-unsigned ScanReachableFromBlock(const CFGBlock &Start,
+unsigned ScanReachableFromBlock(const CFGBlock *Start,
                                 llvm::BitVector &Reachable);
 
-void FindUnreachableCode(AnalysisContext &AC, Callback &CB);
+void FindUnreachableCode(AnalysisDeclContext &AC, Callback &CB);
 
 }} // end namespace clang::reachable_code
 

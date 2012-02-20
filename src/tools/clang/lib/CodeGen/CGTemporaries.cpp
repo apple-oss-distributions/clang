@@ -16,9 +16,12 @@ using namespace clang;
 using namespace CodeGen;
 
 namespace {
-  struct DestroyTemporary {
-    static void Emit(CodeGenFunction &CGF, bool forEH,
-                     const CXXDestructorDecl *dtor, llvm::Value *addr) {
+  struct DestroyTemporary : EHScopeStack::Cleanup {
+    const CXXDestructorDecl *dtor;
+    llvm::Value *addr;
+    DestroyTemporary(const CXXDestructorDecl *dtor, llvm::Value *addr)
+      : dtor(dtor), addr(addr) {}
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       CGF.EmitCXXDestructorCall(dtor, Dtor_Complete, /*ForVirtualBase=*/false,
                                 addr);
     }
@@ -31,16 +34,4 @@ void CodeGenFunction::EmitCXXTemporary(const CXXTemporary *Temporary,
   pushFullExprCleanup<DestroyTemporary>(NormalAndEHCleanup,
                                         Temporary->getDestructor(),
                                         Ptr);
-}
-
-RValue
-CodeGenFunction::EmitExprWithCleanups(const ExprWithCleanups *E,
-                                      AggValueSlot Slot) {
-  RunCleanupsScope Scope(*this);
-  return EmitAnyExpr(E->getSubExpr(), Slot);
-}
-
-LValue CodeGenFunction::EmitExprWithCleanupsLValue(const ExprWithCleanups *E) {
-  RunCleanupsScope Scope(*this);
-  return EmitLValue(E->getSubExpr());
 }

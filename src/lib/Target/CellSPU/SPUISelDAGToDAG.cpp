@@ -16,7 +16,6 @@
 #include "SPUTargetMachine.h"
 #include "SPUHazardRecognizers.h"
 #include "SPUFrameLowering.h"
-#include "SPURegisterNames.h"
 #include "SPUTargetMachine.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -217,7 +216,7 @@ namespace {
       HandleSDNode Dummy(CurDAG->getLoad(vecVT, dl,
                                          CurDAG->getEntryNode(), CGPoolOffset,
                                          MachinePointerInfo::getConstantPool(),
-                                         false, false, Alignment));
+                                         false, false, false, Alignment));
       CurDAG->ReplaceAllUsesWith(SDValue(bvNode, 0), Dummy.getValue());
       if (SDNode *N = SelectCode(Dummy.getValue().getNode()))
         return N;

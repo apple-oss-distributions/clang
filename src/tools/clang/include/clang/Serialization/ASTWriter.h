@@ -24,6 +24,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Bitcode/BitstreamWriter.h"
 #include <map>
 #include <queue>
@@ -38,12 +39,12 @@ namespace llvm {
 namespace clang {
 
 class ASTContext;
-class ASTSerializationListener;
 class NestedNameSpecifier;
 class CXXBaseSpecifier;
 class CXXCtorInitializer;
 class FPOptions;
 class HeaderSearch;
+class IdentifierResolver;
 class MacroDefinition;
 class MemorizeStatCalls;
 class OpaqueValueExpr;
@@ -58,6 +59,8 @@ class SwitchCase;
 class TargetInfo;
 class VersionTuple;
 
+namespace SrcMgr { class SLocEntry; }
+
 /// \brief Writes an AST file containing the contents of a translation unit.
 ///
 /// The ASTWriter class produces a bitstream containing the serialized
@@ -67,20 +70,36 @@ class VersionTuple;
 class ASTWriter : public ASTDeserializationListener,
                   public ASTMutationListener {
 public:
-  typedef llvm::SmallVector<uint64_t, 64> RecordData;
-  typedef llvm::SmallVectorImpl<uint64_t> RecordDataImpl;
+  typedef SmallVector<uint64_t, 64> RecordData;
+  typedef SmallVectorImpl<uint64_t> RecordDataImpl;
 
   friend class ASTDeclWriter;
 private:
+  /// \brief Map that provides the ID numbers of each type within the
+  /// output stream, plus those deserialized from a chained PCH.
+  ///
+  /// The ID numbers of types are consecutive (in order of discovery)
+  /// and start at 1. 0 is reserved for NULL. When types are actually
+  /// stored in the stream, the ID number is shifted by 2 bits to
+  /// allow for the const/volatile qualifiers.
+  ///
+  /// Keys in the map never have const/volatile qualifiers.
+  typedef llvm::DenseMap<QualType, serialization::TypeIdx, 
+                         serialization::UnsafeQualTypeDenseMapInfo>
+    TypeIdxMap;
+
   /// \brief The bitstream writer used to emit this precompiled header.
   llvm::BitstreamWriter &Stream;
 
+  /// \brief The ASTContext we're writing.
+  ASTContext *Context;
+                    
   /// \brief The reader of existing AST files, if we're chaining.
   ASTReader *Chain;
-
-  /// \brief A listener object that receives notifications when certain 
-  /// entities are serialized.                    
-  ASTSerializationListener *SerializationListener;
+                   
+  /// \brief Indicates when the AST writing is actively performing 
+  /// serialization, rather than just queueing updates.
+  bool WritingAST;
                     
   /// \brief Stores a declaration or a type to be written to the AST file.
   class DeclOrType {
@@ -125,7 +144,25 @@ private:
 
   /// \brief Offset of each declaration in the bitstream, indexed by
   /// the declaration's ID.
-  std::vector<uint32_t> DeclOffsets;
+  std::vector<serialization::DeclOffset> DeclOffsets;
+
+  /// \brief Sorted (by file offset) vector of pairs of file offset/DeclID.
+  typedef SmallVector<std::pair<unsigned, serialization::DeclID>, 64>
+    LocDeclIDsTy;
+  struct DeclIDInFileInfo {
+    LocDeclIDsTy DeclIDs;
+    /// \brief Set when the DeclIDs vectors from all files are joined, this
+    /// indicates the index that this particular vector has in the global one.
+    unsigned FirstDeclIndex;
+  };
+  typedef llvm::DenseMap<const SrcMgr::SLocEntry *,
+                         DeclIDInFileInfo *> FileDeclIDsTy;
+
+  /// \brief Map from file SLocEntries to info about the file-level declarations
+  /// that it contains.
+  FileDeclIDsTy FileDeclIDs;
+
+  void associateDeclWithFile(const Decl *D, serialization::DeclID);
 
   /// \brief The first ID number we can use for our own types.
   serialization::TypeID FirstTypeID;
@@ -142,7 +179,7 @@ private:
   /// allow for the const/volatile qualifiers.
   ///
   /// Keys in the map never have const/volatile qualifiers.
-  serialization::TypeIdxMap TypeIdxs;
+  TypeIdxMap TypeIdxs;
 
   /// \brief Offset of each type in the bitstream, indexed by
   /// the type's ID.
@@ -189,23 +226,13 @@ private:
 
   /// \brief The set of identifiers that had macro definitions at some point.
   std::vector<const IdentifierInfo *> DeserializedMacroNames;
-                    
-  /// \brief The first ID number we can use for our own macro definitions.
-  serialization::MacroID FirstMacroID;
-  
-  /// \brief The decl ID that will be assigned to the next new macro definition.
-  serialization::MacroID NextMacroID;
   
   /// \brief Mapping from macro definitions (as they occur in the preprocessing
   /// record) to the macro IDs.
-  llvm::DenseMap<const MacroDefinition *, serialization::MacroID>
+  llvm::DenseMap<const MacroDefinition *, serialization::PreprocessedEntityID>
       MacroDefinitions;
-  
-  /// \brief Mapping from the macro definition indices in \c MacroDefinitions
-  /// to the corresponding offsets within the preprocessor block.
-  std::vector<uint32_t> MacroDefinitionOffsets;
 
-  typedef llvm::SmallVector<uint64_t, 2> UpdateRecord;
+  typedef SmallVector<uint64_t, 2> UpdateRecord;
   typedef llvm::DenseMap<const Decl *, UpdateRecord> DeclUpdateMap;
   /// \brief Mapping from declarations that came from a chained PCH to the
   /// record containing modifications to them.
@@ -228,7 +255,7 @@ private:
   /// headers. The declarations themselves are stored as declaration
   /// IDs, since they will be written out to an EXTERNAL_DEFINITIONS
   /// record.
-  llvm::SmallVector<uint64_t, 16> ExternalDefinitions;
+  SmallVector<uint64_t, 16> ExternalDefinitions;
 
   /// \brief DeclContexts that have received extensions since their serialized
   /// form.
@@ -242,28 +269,46 @@ private:
   /// \brief Decls that will be replaced in the current dependent AST file.
   DeclsToRewriteTy DeclsToRewrite;
 
+  struct ChainedObjCCategoriesData {
+    /// \brief The interface in the imported module.
+    const ObjCInterfaceDecl *Interface;
+    /// \brief The local tail category ID that got chained to the imported
+    /// interface.
+    const ObjCCategoryDecl *TailCategory;
+  };
+  /// \brief ObjC categories that got chained to an interface imported from
+  /// another module.
+  SmallVector<ChainedObjCCategoriesData, 16> LocalChainedObjCCategories;
+
+  struct ReplacedDeclInfo {
+    serialization::DeclID ID;
+    uint64_t Offset;
+    unsigned Loc;
+
+    ReplacedDeclInfo() : ID(0), Offset(0), Loc(0) {}
+    ReplacedDeclInfo(serialization::DeclID ID, uint64_t Offset,
+                     SourceLocation Loc)
+      : ID(ID), Offset(Offset), Loc(Loc.getRawEncoding()) {}
+  };
+
   /// \brief Decls that have been replaced in the current dependent AST file.
   ///
   /// When a decl changes fundamentally after being deserialized (this shouldn't
   /// happen, but the ObjC AST nodes are designed this way), it will be
   /// serialized again. In this case, it is registered here, so that the reader
   /// knows to read the updated version.
-  llvm::SmallVector<std::pair<serialization::DeclID, uint64_t>, 16>
-      ReplacedDecls;
+  SmallVector<ReplacedDeclInfo, 16> ReplacedDecls;
 
   /// \brief Statements that we've encountered while serializing a
   /// declaration or type.
-  llvm::SmallVector<Stmt *, 16> StmtsToEmit;
+  SmallVector<Stmt *, 16> StmtsToEmit;
 
   /// \brief Statements collection to use for ASTWriter::AddStmt().
   /// It will point to StmtsToEmit unless it is overriden. 
-  llvm::SmallVector<Stmt *, 16> *CollectedStmts;
+  SmallVector<Stmt *, 16> *CollectedStmts;
 
   /// \brief Mapping from SwitchCase statements to IDs.
   std::map<SwitchCase *, unsigned> SwitchCaseIDs;
-
-  /// \brief Mapping from OpaqueValueExpr expressions to IDs.
-  llvm::DenseMap<OpaqueValueExpr *, unsigned> OpaqueValues;
 
   /// \brief The number of statements written to the AST file.
   unsigned NumStatements;
@@ -280,7 +325,7 @@ private:
   unsigned NumVisibleDeclContexts;
 
   /// \brief The offset of each CXXBaseSpecifier set within the AST.
-  llvm::SmallVector<uint32_t, 4> CXXBaseSpecifiersOffsets;
+  SmallVector<uint32_t, 4> CXXBaseSpecifiersOffsets;
                     
   /// \brief The first ID number we can use for our own base specifiers.
   serialization::CXXBaseSpecifiersID FirstCXXBaseSpecifiersID;
@@ -306,34 +351,40 @@ private:
                     
   /// \brief Queue of C++ base specifiers to be written to the AST file,
   /// in the order they should be written.
-  llvm::SmallVector<QueuedCXXBaseSpecifiers, 2> CXXBaseSpecifiersToWrite;
+  SmallVector<QueuedCXXBaseSpecifiers, 2> CXXBaseSpecifiersToWrite;
                     
   /// \brief Write the given subexpression to the bitstream.
-  void WriteSubStmt(Stmt *S);
+  void WriteSubStmt(Stmt *S,
+                    llvm::DenseMap<Stmt *, uint64_t> &SubStmtEntries,
+                    llvm::DenseSet<Stmt *> &ParentStmts);
 
   void WriteBlockInfoBlock();
-  void WriteMetadata(ASTContext &Context, const char *isysroot,
+  void WriteMetadata(ASTContext &Context, StringRef isysroot,
                      const std::string &OutputFile);
   void WriteLanguageOptions(const LangOptions &LangOpts);
   void WriteStatCache(MemorizeStatCalls &StatCalls);
   void WriteSourceManagerBlock(SourceManager &SourceMgr,
                                const Preprocessor &PP,
-                               const char* isysroot);
-  void WritePreprocessor(const Preprocessor &PP);
-  void WriteHeaderSearch(HeaderSearch &HS, const char* isysroot);
+                               StringRef isysroot);
+  void WritePreprocessor(const Preprocessor &PP, bool IsModule);
+  void WriteHeaderSearch(const HeaderSearch &HS, StringRef isysroot);
   void WritePreprocessorDetail(PreprocessingRecord &PPRec);
-  void WritePragmaDiagnosticMappings(const Diagnostic &Diag);
+  void WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag);
   void WriteCXXBaseSpecifiersOffsets();
   void WriteType(QualType T);
   uint64_t WriteDeclContextLexicalBlock(ASTContext &Context, DeclContext *DC);
   uint64_t WriteDeclContextVisibleBlock(ASTContext &Context, DeclContext *DC);
   void WriteTypeDeclOffsets();
+  void WriteFileDeclIDsMap();
   void WriteSelectors(Sema &SemaRef);
   void WriteReferencedSelectorsPool(Sema &SemaRef);
-  void WriteIdentifierTable(Preprocessor &PP);
+  void WriteIdentifierTable(Preprocessor &PP, IdentifierResolver &IdResolver,
+                            bool IsModule);
   void WriteAttributes(const AttrVec &Attrs, RecordDataImpl &Record);
+  void ResolveDeclUpdatesBlocks();
   void WriteDeclUpdatesBlocks();
   void WriteDeclReplacementsBlock();
+  void WriteChainedObjCCategories();
   void WriteDeclContextVisibleUpdate(const DeclContext *DC);
   void WriteFPPragmaOptions(const FPOptions &Opts);
   void WriteOpenCLExtensions(Sema &SemaRef);
@@ -356,20 +407,14 @@ private:
   void WriteDecl(ASTContext &Context, Decl *D);
 
   void WriteASTCore(Sema &SemaRef, MemorizeStatCalls *StatCalls,
-                    const char* isysroot, const std::string &OutputFile);
-  void WriteASTChain(Sema &SemaRef, MemorizeStatCalls *StatCalls,
-                     const char* isysroot);
+                    StringRef isysroot, const std::string &OutputFile,
+                    bool IsModule);
   
 public:
   /// \brief Create a new precompiled header writer that outputs to
   /// the given bitstream.
   ASTWriter(llvm::BitstreamWriter &Stream);
-
-  /// \brief Set the listener that will receive notification of serialization
-  /// events.
-  void SetSerializationListener(ASTSerializationListener *Listener) {
-    SerializationListener = Listener;
-  }
+  ~ASTWriter();
                     
   /// \brief Write a precompiled header for the given semantic analysis.
   ///
@@ -379,14 +424,14 @@ public:
   /// \param StatCalls the object that cached all of the stat() calls made while
   /// searching for source files and headers.
   ///
-  /// \param isysroot if non-NULL, write a relocatable PCH file whose headers
-  /// are relative to the given system root.
+  /// \param IsModule Whether we're writing a module (otherwise, we're writing a
+  /// precompiled header).
   ///
-  /// \param PPRec Record of the preprocessing actions that occurred while
-  /// preprocessing this file, e.g., macro instantiations
+  /// \param isysroot if non-empty, write a relocatable file whose headers
+  /// are relative to the given system root.
   void WriteAST(Sema &SemaRef, MemorizeStatCalls *StatCalls,
                 const std::string &OutputFile,
-                const char* isysroot);
+                bool IsModule, StringRef isysroot);
 
   /// \brief Emit a source location.
   void AddSourceLocation(SourceLocation Loc, RecordDataImpl &Record);
@@ -432,10 +477,6 @@ public:
            "Identifier does not name a macro");
     return MacroOffsets[II];
   }
-
-  /// \brief Retrieve the ID number corresponding to the given macro 
-  /// definition.
-  serialization::MacroID getMacroDefinitionID(MacroDefinition *MD);
   
   /// \brief Emit a reference to a type.
   void AddTypeRef(QualType T, RecordDataImpl &Record);
@@ -447,7 +488,7 @@ public:
   serialization::TypeID getTypeID(QualType T) const;
 
   /// \brief Force a type to be emitted and get its index.
-  serialization::TypeIdx GetOrCreateTypeIdx(QualType T);
+  serialization::TypeIdx GetOrCreateTypeIdx( QualType T);
 
   /// \brief Determine the type index of an already-emitted type.
   serialization::TypeIdx getTypeIdx(QualType T) const;
@@ -523,7 +564,7 @@ public:
   void AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Record);
 
   /// \brief Add a string to the given record.
-  void AddString(llvm::StringRef Str, RecordDataImpl &Record);
+  void AddString(StringRef Str, RecordDataImpl &Record);
 
   /// \brief Add a version tuple to the given record
   void AddVersionTuple(const VersionTuple &Version, RecordDataImpl &Record);
@@ -535,8 +576,10 @@ public:
 
   void RewriteDecl(const Decl *D) {
     DeclsToRewrite.insert(D);
-    // Reset the flag, so that we don't add this decl multiple times.
-    const_cast<Decl *>(D)->setChangedSinceDeserialization(false);
+  }
+
+  bool isRewritten(const Decl *D) const {
+    return DeclsToRewrite.count(D);
   }
 
   /// \brief Note that the identifier II occurs at the given offset
@@ -575,9 +618,6 @@ public:
 
   void ClearSwitchCaseIDs();
 
-  /// \brief Retrieve the ID for the given opaque value expression.
-  unsigned getOpaqueValueID(OpaqueValueExpr *e);
-
   unsigned getDeclParmVarAbbrev() const { return DeclParmVarAbbrev; }
   unsigned getDeclRefExprAbbrev() const { return DeclRefExprAbbrev; }
   unsigned getCharacterLiteralAbbrev() const { return CharacterLiteralAbbrev; }
@@ -597,7 +637,8 @@ public:
   void TypeRead(serialization::TypeIdx Idx, QualType T);
   void DeclRead(serialization::DeclID ID, const Decl *D);
   void SelectorRead(serialization::SelectorID ID, Selector Sel);
-  void MacroDefinitionRead(serialization::MacroID ID, MacroDefinition *MD);
+  void MacroDefinitionRead(serialization::PreprocessedEntityID ID,
+                           MacroDefinition *MD);
 
   // ASTMutationListener implementation.
   virtual void CompletedTagDefinition(const TagDecl *D);
@@ -609,6 +650,13 @@ public:
                                               const FunctionDecl *D);
   virtual void CompletedImplicitDefinition(const FunctionDecl *D);
   virtual void StaticDataMemberInstantiated(const VarDecl *D);
+  virtual void AddedObjCCategoryToInterface(const ObjCCategoryDecl *CatD,
+                                            const ObjCInterfaceDecl *IFD);
+  virtual void CompletedObjCForwardRef(const ObjCContainerDecl *D);
+  virtual void AddedObjCPropertyInClassExtension(const ObjCPropertyDecl *Prop,
+                                            const ObjCPropertyDecl *OrigProp,
+                                            const ObjCCategoryDecl *ClassExt);
+  virtual void UpdatedAttributeList(const Decl *D);
 };
 
 /// \brief AST and semantic-analysis consumer that generates a
@@ -616,27 +664,27 @@ public:
 class PCHGenerator : public SemaConsumer {
   const Preprocessor &PP;
   std::string OutputFile;
-  const char *isysroot;
-  llvm::raw_ostream *Out;
+  bool IsModule;
+  std::string isysroot;
+  raw_ostream *Out;
   Sema *SemaPtr;
   MemorizeStatCalls *StatCalls; // owned by the FileManager
   std::vector<unsigned char> Buffer;
   llvm::BitstreamWriter Stream;
   ASTWriter Writer;
-  bool Chaining;
 
 protected:
   ASTWriter &getWriter() { return Writer; }
   const ASTWriter &getWriter() const { return Writer; }
 
 public:
-  PCHGenerator(const Preprocessor &PP, const std::string &OutputFile, bool Chaining,
-               const char *isysroot, llvm::raw_ostream *Out);
+  PCHGenerator(const Preprocessor &PP, StringRef OutputFile, 
+               bool IsModule,
+               StringRef isysroot, raw_ostream *Out);
   ~PCHGenerator();
   virtual void InitializeSema(Sema &S) { SemaPtr = &S; }
   virtual void HandleTranslationUnit(ASTContext &Ctx);
   virtual ASTMutationListener *GetASTMutationListener();
-  virtual ASTSerializationListener *GetASTSerializationListener();
   virtual ASTDeserializationListener *GetASTDeserializationListener();
 };
 

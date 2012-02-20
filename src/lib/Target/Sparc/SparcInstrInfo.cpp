@@ -12,17 +12,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "SparcInstrInfo.h"
-#include "SparcSubtarget.h"
 #include "Sparc.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
+#include "SparcMachineFunctionInfo.h"
+#include "SparcSubtarget.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "SparcMachineFunctionInfo.h"
+#include "llvm/Support/TargetRegistry.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 #define GET_INSTRINFO_CTOR
-#define GET_INSTRINFO_MC_DESC
 #include "SparcGenInstrInfo.inc"
 
 using namespace llvm;

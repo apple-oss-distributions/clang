@@ -13,7 +13,7 @@
 
 #include "SubtargetEmitter.h"
 #include "CodeGenTarget.h"
-#include "Record.h"
+#include "llvm/TableGen/Record.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Debug.h"
 #include <algorithm>
@@ -81,8 +81,8 @@ unsigned SubtargetEmitter::FeatureKeyValues(raw_ostream &OS) {
 
   // Begin feature table
   OS << "// Sorted (by key) array of values for CPU features.\n"
-     << "static const llvm::SubtargetFeatureKV "
-     << Target << "FeatureKV[] = {\n";
+     << "extern const llvm::SubtargetFeatureKV " << Target
+     << "FeatureKV[] = {\n";
 
   // For each feature
   unsigned NumFeatures = 0;
@@ -141,8 +141,8 @@ unsigned SubtargetEmitter::CPUKeyValues(raw_ostream &OS) {
 
   // Begin processor table
   OS << "// Sorted (by key) array of values for CPU subtype.\n"
-     << "static const llvm::SubtargetFeatureKV "
-     << Target << "SubTypeKV[] = {\n";
+     << "extern const llvm::SubtargetFeatureKV " << Target
+     << "SubTypeKV[] = {\n";
 
   // For each processor
   for (unsigned i = 0, N = ProcessorList.size(); i < N;) {
@@ -339,17 +339,17 @@ void SubtargetEmitter::EmitStageAndOperandCycleData(raw_ostream &OS,
   }
 
   // Begin stages table
-  std::string StageTable = "\nstatic const llvm::InstrStage " + Target +
-    "Stages[] = {\n";
+  std::string StageTable = "\nextern const llvm::InstrStage " + Target +
+                           "Stages[] = {\n";
   StageTable += "  { 0, 0, 0, llvm::InstrStage::Required }, // No itinerary\n";
 
   // Begin operand cycle table
-  std::string OperandCycleTable = "static const unsigned " + Target +
+  std::string OperandCycleTable = "extern const unsigned " + Target +
     "OperandCycles[] = {\n";
   OperandCycleTable += "  0, // No itinerary\n";
 
   // Begin pipeline bypass table
-  std::string BypassTable = "static const unsigned " + Target +
+  std::string BypassTable = "extern const unsigned " + Target +
     "ForwardingPathes[] = {\n";
   BypassTable += "  0, // No itinerary\n";
 
@@ -533,7 +533,7 @@ void SubtargetEmitter::EmitProcessorLookup(raw_ostream &OS) {
   // Begin processor table
   OS << "\n";
   OS << "// Sorted (by key) array of itineraries for CPU subtype.\n"
-     << "static const llvm::SubtargetInfoKV "
+     << "extern const llvm::SubtargetInfoKV "
      << Target << "ProcItinKV[] = {\n";
 
   // For each processor
@@ -605,8 +605,7 @@ void SubtargetEmitter::ParseFeaturesFunction(raw_ostream &OS,
      << "// subtarget options.\n"
      << "void llvm::";
   OS << Target;
-  OS << "Subtarget::ParseSubtargetFeatures(const std::string &FS,\n"
-     << "                                  const std::string &CPU) {\n"
+  OS << "Subtarget::ParseSubtargetFeatures(StringRef CPU, StringRef FS) {\n"
      << "  DEBUG(dbgs() << \"\\nFeatures:\" << FS);\n"
      << "  DEBUG(dbgs() << \"\\nCPU:\" << CPU);\n";
 
@@ -615,11 +614,7 @@ void SubtargetEmitter::ParseFeaturesFunction(raw_ostream &OS,
     return;
   }
 
-  OS << "  SubtargetFeatures Features(FS);\n"
-     << "  uint64_t Bits =  Features.getFeatureBits(CPU, "
-     << Target << "SubTypeKV, " << NumProcs << ",\n"
-     << "                                    " << Target << "FeatureKV, "
-     << NumFeatures << ");\n";
+  OS << "  uint64_t Bits = ReInitMCSubtargetInfo(CPU, FS);\n";
 
   for (unsigned i = 0; i < Features.size(); i++) {
     // Next record
@@ -629,10 +624,12 @@ void SubtargetEmitter::ParseFeaturesFunction(raw_ostream &OS,
     const std::string &Attribute = R->getValueAsString("Attribute");
 
     if (Value=="true" || Value=="false")
-      OS << "  if ((Bits & " << Target << "::" << Instance << ") != 0) "
+      OS << "  if ((Bits & " << Target << "::"
+         << Instance << ") != 0) "
          << Attribute << " = " << Value << ";\n";
     else
-      OS << "  if ((Bits & " << Target << "::" << Instance << ") != 0 && "
+      OS << "  if ((Bits & " << Target << "::"
+         << Instance << ") != 0 && "
          << Attribute << " < " << Value << ") "
          << Attribute << " = " << Value << ";\n";
   }
@@ -648,23 +645,36 @@ void SubtargetEmitter::run(raw_ostream &OS) {
 
   EmitSourceFileHeader("Subtarget Enumeration Source Fragment", OS);
 
+  OS << "\n#ifdef GET_SUBTARGETINFO_ENUM\n";
+  OS << "#undef GET_SUBTARGETINFO_ENUM\n";
+
+  OS << "namespace llvm {\n";
+  Enumeration(OS, "SubtargetFeature", true);
+  OS << "} // End llvm namespace \n";
+  OS << "#endif // GET_SUBTARGETINFO_ENUM\n\n";
+
   OS << "\n#ifdef GET_SUBTARGETINFO_MC_DESC\n";
   OS << "#undef GET_SUBTARGETINFO_MC_DESC\n";
 
   OS << "namespace llvm {\n";
-  Enumeration(OS, "SubtargetFeature", true);
-  OS<<"\n";
+#if 0
+  OS << "namespace {\n";
+#endif
   unsigned NumFeatures = FeatureKeyValues(OS);
-  OS<<"\n";
+  OS << "\n";
   unsigned NumProcs = CPUKeyValues(OS);
-  OS<<"\n";
+  OS << "\n";
   EmitData(OS);
-  OS<<"\n";
+  OS << "\n";
+#if 0
+  OS << "}\n";
+#endif
 
   // MCInstrInfo initialization routine.
   OS << "static inline void Init" << Target
-     << "MCSubtargetInfo(MCSubtargetInfo *II) {\n";
-  OS << "  II->InitMCSubtargetInfo(";
+     << "MCSubtargetInfo(MCSubtargetInfo *II, "
+     << "StringRef TT, StringRef CPU, StringRef FS) {\n";
+  OS << "  II->InitMCSubtargetInfo(TT, CPU, FS, ";
   if (NumFeatures)
     OS << Target << "FeatureKV, ";
   else
@@ -702,7 +712,8 @@ void SubtargetEmitter::run(raw_ostream &OS) {
   std::string ClassName = Target + "GenSubtargetInfo";
   OS << "namespace llvm {\n";
   OS << "struct " << ClassName << " : public TargetSubtargetInfo {\n"
-     << "  explicit " << ClassName << "();\n"
+     << "  explicit " << ClassName << "(StringRef TT, StringRef CPU, "
+     << "StringRef FS);\n"
      << "};\n";
   OS << "} // End llvm namespace \n";
 
@@ -712,9 +723,19 @@ void SubtargetEmitter::run(raw_ostream &OS) {
   OS << "#undef GET_SUBTARGETINFO_CTOR\n";
 
   OS << "namespace llvm {\n";
-  OS << ClassName << "::" << ClassName << "()\n"
+  OS << "extern const llvm::SubtargetFeatureKV " << Target << "FeatureKV[];\n";
+  OS << "extern const llvm::SubtargetFeatureKV " << Target << "SubTypeKV[];\n";
+  if (HasItineraries) {
+    OS << "extern const llvm::SubtargetInfoKV " << Target << "ProcItinKV[];\n";
+    OS << "extern const llvm::InstrStage " << Target << "Stages[];\n";
+    OS << "extern const unsigned " << Target << "OperandCycles[];\n";
+    OS << "extern const unsigned " << Target << "ForwardingPathes[];\n";
+  }
+
+  OS << ClassName << "::" << ClassName << "(StringRef TT, StringRef CPU, "
+     << "StringRef FS)\n"
      << "  : TargetSubtargetInfo() {\n"
-     << "  InitMCSubtargetInfo(";
+     << "  InitMCSubtargetInfo(TT, CPU, FS, ";
   if (NumFeatures)
     OS << Target << "FeatureKV, ";
   else

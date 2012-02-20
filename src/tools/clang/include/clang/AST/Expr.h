@@ -20,6 +20,7 @@
 #include "clang/AST/DeclAccessPair.h"
 #include "clang/AST/OperationKinds.h"
 #include "clang/AST/ASTVector.h"
+#include "clang/AST/TemplateBase.h"
 #include "clang/AST/UsuallyTinyPtrVector.h"
 #include "clang/Basic/TypeTraits.h"
 #include "llvm/ADT/APSInt.h"
@@ -41,12 +42,10 @@ namespace clang {
   class CXXOperatorCallExpr;
   class CXXMemberCallExpr;
   class ObjCPropertyRefExpr;
-  class TemplateArgumentLoc;
-  class TemplateArgumentListInfo;
   class OpaqueValueExpr;
 
 /// \brief A simple array of base specifiers.
-typedef llvm::SmallVector<CXXBaseSpecifier*, 4> CXXCastPath;
+typedef SmallVector<CXXBaseSpecifier*, 4> CXXCastPath;
 
 /// Expr - This represents one expression.  Note that Expr's are subclasses of
 /// Stmt.  This allows an expression to be transparently used any place a Stmt
@@ -391,6 +390,19 @@ public:
 
   /// \brief Returns whether this expression refers to a vector element.
   bool refersToVectorElement() const;
+
+  /// \brief Returns whether this expression has a placeholder type.
+  bool hasPlaceholderType() const {
+    return getType()->isPlaceholderType();
+  }
+
+  /// \brief Returns whether this expression has a specific placeholder type.
+  bool hasPlaceholderType(BuiltinType::Kind K) const {
+    assert(BuiltinType::isPlaceholderTypeKind(K));
+    if (const BuiltinType *BT = dyn_cast<BuiltinType>(getType()))
+      return BT->getKind() == K;
+    return false;
+  }
   
   /// isKnownToHaveBooleanValue - Return true if this is an integer expression
   /// that is known to return 0 or 1.  This happens for _Bool/bool expressions
@@ -413,11 +425,8 @@ public:
   /// initializer, which can be emitted at compile-time.
   bool isConstantInitializer(ASTContext &Ctx, bool ForRef) const;
 
-  /// EvalResult is a struct with detailed info about an evaluated expression.
-  struct EvalResult {
-    /// Val - This is the value the expression can be folded to.
-    APValue Val;
-
+  /// EvalStatus is a struct with detailed info about an evaluation in progress.
+  struct EvalStatus {
     /// HasSideEffects - Whether the evaluated expression has side effects.
     /// For example, (f() && 0) can be folded, but it still has side effects.
     bool HasSideEffects;
@@ -434,11 +443,8 @@ public:
     const Expr *DiagExpr;
     SourceLocation DiagLoc;
 
-    EvalResult() : HasSideEffects(false), Diag(0), DiagExpr(0) {}
+    EvalStatus() : HasSideEffects(false), Diag(0), DiagExpr(0) {}
 
-    // isGlobalLValue - Return true if the evaluated lvalue expression
-    // is global.
-    bool isGlobalLValue() const;
     // hasSideEffects - Return true if the evaluated expression has
     // side effects.
     bool hasSideEffects() const {
@@ -446,37 +452,53 @@ public:
     }
   };
 
-  /// Evaluate - Return true if this is a constant which we can fold using
-  /// any crazy technique (that has nothing to do with language standards) that
-  /// we want to.  If this function returns true, it returns the folded constant
-  /// in Result.
-  bool Evaluate(EvalResult &Result, const ASTContext &Ctx) const;
+  /// EvalResult is a struct with detailed info about an evaluated expression.
+  struct EvalResult : EvalStatus {
+    /// Val - This is the value the expression can be folded to.
+    APValue Val;
+
+    // isGlobalLValue - Return true if the evaluated lvalue expression
+    // is global.
+    bool isGlobalLValue() const;
+  };
+
+  /// EvaluateAsRValue - Return true if this is a constant which we can fold to
+  /// an rvalue using any crazy technique (that has nothing to do with language
+  /// standards) that we want to, even if the expression has side-effects. If
+  /// this function returns true, it returns the folded constant in Result. If
+  /// the expression is a glvalue, an lvalue-to-rvalue conversion will be
+  /// applied.
+  bool EvaluateAsRValue(EvalResult &Result, const ASTContext &Ctx) const;
 
   /// EvaluateAsBooleanCondition - Return true if this is a constant
   /// which we we can fold and convert to a boolean condition using
-  /// any crazy technique that we want to.
+  /// any crazy technique that we want to, even if the expression has
+  /// side-effects.
   bool EvaluateAsBooleanCondition(bool &Result, const ASTContext &Ctx) const;
 
-  /// isEvaluatable - Call Evaluate to see if this expression can be constant
-  /// folded, but discard the result.
+  /// EvaluateAsInt - Return true if this is a constant which we can fold and
+  /// convert to an integer without side-effects, using any crazy technique that
+  /// we want to.
+  bool EvaluateAsInt(llvm::APSInt &Result, const ASTContext &Ctx) const;
+
+  /// isEvaluatable - Call EvaluateAsRValue to see if this expression can be
+  /// constant folded without side-effects, but discard the result.
   bool isEvaluatable(const ASTContext &Ctx) const;
 
   /// HasSideEffects - This routine returns true for all those expressions
-  /// which must be evaluated each time and must not be optimized away 
+  /// which must be evaluated each time and must not be optimized away
   /// or evaluated at compile time. Example is a function call, volatile
   /// variable read.
   bool HasSideEffects(const ASTContext &Ctx) const;
-  
-  /// EvaluateAsInt - Call Evaluate and return the folded integer. This
-  /// must be called on an expression that constant folds to an integer.
-  llvm::APSInt EvaluateAsInt(const ASTContext &Ctx) const;
 
-  /// EvaluateAsLValue - Evaluate an expression to see if it's a lvalue
-  /// with link time known address.
+  /// EvaluateKnownConstInt - Call EvaluateAsRValue and return the folded
+  /// integer. This must be called on an expression that constant folds to an
+  /// integer.
+  llvm::APSInt EvaluateKnownConstInt(const ASTContext &Ctx) const;
+
+  /// EvaluateAsLValue - Evaluate an expression to see if we can fold it to an
+  /// lvalue with link time known address, with no side-effects.
   bool EvaluateAsLValue(EvalResult &Result, const ASTContext &Ctx) const;
-
-  /// EvaluateAsLValue - Evaluate an expression to see if it's a lvalue.
-  bool EvaluateAsAnyLValue(EvalResult &Result, const ASTContext &Ctx) const;
 
   /// \brief Enumeration used to describe the kind of Null pointer constant
   /// returned from \c isNullPointerConstant().
@@ -538,6 +560,10 @@ public:
   ///        the rules of C++ [expr.unary.noexcept].
   CanThrowResult CanThrow(ASTContext &C) const;
 
+  /// IgnoreImpCasts - Skip past any implicit casts which might
+  /// surround this expression.  Only skips ImplicitCastExprs.
+  Expr *IgnoreImpCasts();
+
   /// IgnoreImplicit - Skip past any implicit AST nodes which might
   /// surround this expression.
   Expr *IgnoreImplicit() { return cast<Expr>(Stmt::IgnoreImplicit()); }
@@ -596,7 +622,10 @@ public:
 
   /// \brief Whether this expression is an implicit reference to 'this' in C++.
   bool isImplicitCXXThis() const;
-  
+
+  const Expr *IgnoreImpCasts() const {
+    return const_cast<Expr*>(this)->IgnoreImpCasts();
+  }
   const Expr *IgnoreParens() const {
     return const_cast<Expr*>(this)->IgnoreParens();
   }
@@ -681,39 +710,6 @@ public:
   static bool classof(const OpaqueValueExpr *) { return true; }
 };
 
-/// \brief Represents an explicit template argument list in C++, e.g.,
-/// the "<int>" in "sort<int>".
-struct ExplicitTemplateArgumentList {
-  /// \brief The source location of the left angle bracket ('<');
-  SourceLocation LAngleLoc;
-  
-  /// \brief The source location of the right angle bracket ('>');
-  SourceLocation RAngleLoc;
-  
-  /// \brief The number of template arguments in TemplateArgs.
-  /// The actual template arguments (if any) are stored after the
-  /// ExplicitTemplateArgumentList structure.
-  unsigned NumTemplateArgs;
-  
-  /// \brief Retrieve the template arguments
-  TemplateArgumentLoc *getTemplateArgs() {
-    return reinterpret_cast<TemplateArgumentLoc *> (this + 1);
-  }
-  
-  /// \brief Retrieve the template arguments
-  const TemplateArgumentLoc *getTemplateArgs() const {
-    return reinterpret_cast<const TemplateArgumentLoc *> (this + 1);
-  }
-
-  void initializeFrom(const TemplateArgumentListInfo &List);
-  void initializeFrom(const TemplateArgumentListInfo &List,
-                      bool &Dependent, bool &InstantiationDependent,
-                      bool &ContainsUnexpandedParameterPack);
-  void copyInto(TemplateArgumentListInfo &List) const;
-  static std::size_t sizeFor(unsigned NumTemplateArgs);
-  static std::size_t sizeFor(const TemplateArgumentListInfo &List);
-};
-
 /// \brief A reference to a declared variable, function, enum, etc.
 /// [C99 6.5.1p2]
 ///
@@ -790,12 +786,14 @@ class DeclRefExpr : public Expr {
   void computeDependence();
 
 public:
-  DeclRefExpr(ValueDecl *D, QualType T, ExprValueKind VK, SourceLocation L)
+  DeclRefExpr(ValueDecl *D, QualType T, ExprValueKind VK, SourceLocation L,
+              const DeclarationNameLoc &LocInfo = DeclarationNameLoc())
     : Expr(DeclRefExprClass, T, VK, OK_Ordinary, false, false, false, false),
-      D(D), Loc(L) {
+      D(D), Loc(L), DNLoc(LocInfo) {
     DeclRefExprBits.HasQualifier = 0;
     DeclRefExprBits.HasExplicitTemplateArgs = 0;
     DeclRefExprBits.HasFoundDecl = 0;
+    DeclRefExprBits.HadMultipleCandidates = 0;
     computeDependence();
   }
 
@@ -879,29 +877,29 @@ public:
 
   /// \brief Retrieve the explicit template argument list that followed the
   /// member template name.
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs() {
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs() {
     assert(hasExplicitTemplateArgs());
     if (hasFoundDecl())
-      return *reinterpret_cast<ExplicitTemplateArgumentList *>(
+      return *reinterpret_cast<ASTTemplateArgumentListInfo *>(
         &getInternalFoundDecl() + 1);
 
     if (hasQualifier())
-      return *reinterpret_cast<ExplicitTemplateArgumentList *>(
+      return *reinterpret_cast<ASTTemplateArgumentListInfo *>(
         &getInternalQualifierLoc() + 1);
 
-    return *reinterpret_cast<ExplicitTemplateArgumentList *>(this + 1);
+    return *reinterpret_cast<ASTTemplateArgumentListInfo *>(this + 1);
   }
 
   /// \brief Retrieve the explicit template argument list that followed the
   /// member template name.
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     return const_cast<DeclRefExpr *>(this)->getExplicitTemplateArgs();
   }
 
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getExplicitTemplateArgsOpt() const {
+  const ASTTemplateArgumentListInfo *getExplicitTemplateArgsOpt() const {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -947,6 +945,18 @@ public:
       return SourceLocation();
 
     return getExplicitTemplateArgs().RAngleLoc;
+  }
+
+  /// \brief Returns true if this expression refers to a function that
+  /// was resolved from an overloaded set having size greater than 1.
+  bool hadMultipleCandidates() const {
+    return DeclRefExprBits.HadMultipleCandidates;
+  }
+  /// \brief Sets the flag telling whether this expression refers to
+  /// a function that was resolved from an overloaded set having size
+  /// greater than 1.
+  void setHadMultipleCandidates(bool V = true) {
+    DeclRefExprBits.HadMultipleCandidates = V;
   }
 
   static bool classof(const Stmt *T) {
@@ -1104,29 +1114,39 @@ public:
 };
 
 class CharacterLiteral : public Expr {
+public:
+  enum CharacterKind {
+    Ascii,
+    Wide,
+    UTF16,
+    UTF32
+  };
+
+private:
   unsigned Value;
   SourceLocation Loc;
-  bool IsWide;
+  unsigned Kind : 2;
 public:
   // type should be IntTy
-  CharacterLiteral(unsigned value, bool iswide, QualType type, SourceLocation l)
+  CharacterLiteral(unsigned value, CharacterKind kind, QualType type,
+                   SourceLocation l)
     : Expr(CharacterLiteralClass, type, VK_RValue, OK_Ordinary, false, false,
            false, false),
-      Value(value), Loc(l), IsWide(iswide) {
+      Value(value), Loc(l), Kind(kind) {
   }
 
   /// \brief Construct an empty character literal.
   CharacterLiteral(EmptyShell Empty) : Expr(CharacterLiteralClass, Empty) { }
 
   SourceLocation getLocation() const { return Loc; }
-  bool isWide() const { return IsWide; }
+  CharacterKind getKind() const { return static_cast<CharacterKind>(Kind); }
 
   SourceRange getSourceRange() const { return SourceRange(Loc); }
 
   unsigned getValue() const { return Value; }
 
   void setLocation(SourceLocation Location) { Loc = Location; }
-  void setWide(bool W) { IsWide = W; }
+  void setKind(CharacterKind kind) { Kind = kind; }
   void setValue(unsigned Val) { Value = Val; }
 
   static bool classof(const Stmt *T) {
@@ -1235,54 +1255,115 @@ public:
 /// In this case, getByteLength() will return 6, but the string literal will
 /// have type "char[2]".
 class StringLiteral : public Expr {
+public:
+  enum StringKind {
+    Ascii,
+    Wide,
+    UTF8,
+    UTF16,
+    UTF32
+  };
+
+private:
   friend class ASTStmtReader;
 
-  const char *StrData;
-  unsigned ByteLength;
-  bool IsWide;
-  bool IsPascal;
+  union {
+    const char *asChar;
+    const uint16_t *asUInt16;
+    const uint32_t *asUInt32;
+  } StrData;
+  unsigned Length;
+  unsigned CharByteWidth;
   unsigned NumConcatenated;
+  unsigned Kind : 3;
+  bool IsPascal : 1;
   SourceLocation TokLocs[1];
 
   StringLiteral(QualType Ty) :
     Expr(StringLiteralClass, Ty, VK_LValue, OK_Ordinary, false, false, false,
          false) {}
 
+  static int mapCharByteWidth(TargetInfo const &target,StringKind k);
+
 public:
   /// This is the "fully general" constructor that allows representation of
   /// strings formed from multiple concatenated tokens.
-  static StringLiteral *Create(ASTContext &C, llvm::StringRef Str, bool Wide,
+  static StringLiteral *Create(ASTContext &C, StringRef Str, StringKind Kind,
                                bool Pascal, QualType Ty,
                                const SourceLocation *Loc, unsigned NumStrs);
 
   /// Simple constructor for string literals made from one token.
-  static StringLiteral *Create(ASTContext &C, llvm::StringRef Str, bool Wide, 
-                               bool Pascal, QualType Ty, SourceLocation Loc) {
-    return Create(C, Str, Wide, Pascal, Ty, &Loc, 1);
+  static StringLiteral *Create(ASTContext &C, StringRef Str, StringKind Kind,
+                               bool Pascal, QualType Ty,
+                               SourceLocation Loc) {
+    return Create(C, Str, Kind, Pascal, Ty, &Loc, 1);
   }
 
   /// \brief Construct an empty string literal.
   static StringLiteral *CreateEmpty(ASTContext &C, unsigned NumStrs);
 
-  llvm::StringRef getString() const {
-    return llvm::StringRef(StrData, ByteLength);
+  StringRef getString() const {
+    assert(CharByteWidth==1
+           && "This function is used in places that assume strings use char");
+    return StringRef(StrData.asChar, getByteLength());
   }
 
-  unsigned getByteLength() const { return ByteLength; }
+  /// Allow clients that need the byte representation, such as ASTWriterStmt
+  /// ::VisitStringLiteral(), access.
+  StringRef getBytes() const {
+    // FIXME: StringRef may not be the right type to use as a result for this...
+    assert((CharByteWidth==1 || CharByteWidth==2 || CharByteWidth==4)
+           && "unsupported CharByteWidth");
+    if (CharByteWidth==4) {
+      return StringRef(reinterpret_cast<const char*>(StrData.asUInt32),
+                       getByteLength());
+    } else if (CharByteWidth==2) {
+      return StringRef(reinterpret_cast<const char*>(StrData.asUInt16),
+                       getByteLength());
+    } else {
+      return StringRef(StrData.asChar, getByteLength());
+    }
+  }
+
+  uint32_t getCodeUnit(size_t i) const {
+    assert(i<Length && "out of bounds access");
+    assert((CharByteWidth==1 || CharByteWidth==2 || CharByteWidth==4)
+           && "unsupported CharByteWidth");
+    if (CharByteWidth==4) {
+      return StrData.asUInt32[i];
+    } else if (CharByteWidth==2) {
+      return StrData.asUInt16[i];
+    } else {
+      return static_cast<unsigned char>(StrData.asChar[i]);
+    }
+  }
+
+  unsigned getByteLength() const { return CharByteWidth*Length; }
+  unsigned getLength() const { return Length; }
+  unsigned getCharByteWidth() const { return CharByteWidth; }
 
   /// \brief Sets the string data to the given string data.
-  void setString(ASTContext &C, llvm::StringRef Str);
+  void setString(ASTContext &C, StringRef Str,
+                 StringKind Kind, bool IsPascal);
 
-  bool isWide() const { return IsWide; }
-  bool isPascal() const { return IsPascal; }
+  StringKind getKind() const { return static_cast<StringKind>(Kind); }
   
+  
+  bool isAscii() const { return Kind == Ascii; }
+  bool isWide() const { return Kind == Wide; }
+  bool isUTF8() const { return Kind == UTF8; }
+  bool isUTF16() const { return Kind == UTF16; }
+  bool isUTF32() const { return Kind == UTF32; }
+  bool isPascal() const { return IsPascal; }
+
   bool containsNonAsciiOrNull() const {
-    llvm::StringRef Str = getString();
+    StringRef Str = getString();
     for (unsigned i = 0, e = Str.size(); i != e; ++i)
       if (!isascii(Str[i]) || !Str[i])
         return true;
     return false;
   }
+  
   /// getNumConcatenated - Get the number of string literal tokens that were
   /// concatenated in translation phase #6 to form this string literal.
   unsigned getNumConcatenated() const { return NumConcatenated; }
@@ -1421,12 +1502,26 @@ public:
 
   bool isPrefix() const { return isPrefix(getOpcode()); }
   bool isPostfix() const { return isPostfix(getOpcode()); }
+
+  static bool isIncrementOp(Opcode Op) {
+    return Op == UO_PreInc || Op == UO_PostInc;
+  }
   bool isIncrementOp() const {
-    return Opc == UO_PreInc || Opc == UO_PostInc;
+    return isIncrementOp(getOpcode());
   }
+
+  static bool isDecrementOp(Opcode Op) {
+    return Op == UO_PreDec || Op == UO_PostDec;
+  }
+  bool isDecrementOp() const {
+    return isDecrementOp(getOpcode());
+  }
+
+  static bool isIncrementDecrementOp(Opcode Op) { return Op <= UO_PreDec; }
   bool isIncrementDecrementOp() const {
-    return Opc <= UO_PreDec;
+    return isIncrementDecrementOp(getOpcode());
   }
+
   static bool isArithmeticOp(Opcode Op) {
     return Op >= UO_Plus && Op <= UO_LNot;
   }
@@ -1909,6 +2004,9 @@ public:
   Expr **getArgs() {
     return reinterpret_cast<Expr **>(SubExprs+getNumPreArgs()+PREARGS_START);
   }
+  const Expr *const *getArgs() const {
+    return const_cast<CallExpr*>(this)->getArgs();
+  }
   
   /// getArg - Return the specified argument.
   Expr *getArg(unsigned Arg) {
@@ -2021,6 +2119,10 @@ class MemberExpr : public Expr {
   /// the MemberNameQualifier structure.
   bool HasExplicitTemplateArgumentList : 1;
 
+  /// \brief True if this member expression refers to a method that
+  /// was resolved from an overloaded set having size greater than 1.
+  bool HadMultipleCandidates : 1;
+
   /// \brief Retrieve the qualifier that preceded the member name, if any.
   MemberNameQualifier *getMemberQualifier() {
     assert(HasQualifierOrFoundDecl);
@@ -2043,7 +2145,8 @@ public:
            base->containsUnexpandedParameterPack()),
       Base(base), MemberDecl(memberdecl), MemberLoc(NameInfo.getLoc()),
       MemberDNLoc(NameInfo.getInfo()), IsArrow(isarrow),
-      HasQualifierOrFoundDecl(false), HasExplicitTemplateArgumentList(false) {
+      HasQualifierOrFoundDecl(false), HasExplicitTemplateArgumentList(false),
+      HadMultipleCandidates(false) {
     assert(memberdecl->getDeclName() == NameInfo.getName());
   }
 
@@ -2060,7 +2163,8 @@ public:
            base->containsUnexpandedParameterPack()),
       Base(base), MemberDecl(memberdecl), MemberLoc(l), MemberDNLoc(),
       IsArrow(isarrow),
-      HasQualifierOrFoundDecl(false), HasExplicitTemplateArgumentList(false) {}
+      HasQualifierOrFoundDecl(false), HasExplicitTemplateArgumentList(false),
+      HadMultipleCandidates(false) {}
 
   static MemberExpr *Create(ASTContext &C, Expr *base, bool isarrow,
                             NestedNameSpecifierLoc QualifierLoc,
@@ -2128,26 +2232,26 @@ public:
   /// \brief Retrieve the explicit template argument list that
   /// follow the member template name.  This must only be called on an
   /// expression with explicit template arguments.
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs() {
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs() {
     assert(HasExplicitTemplateArgumentList);
     if (!HasQualifierOrFoundDecl)
-      return *reinterpret_cast<ExplicitTemplateArgumentList *>(this + 1);
+      return *reinterpret_cast<ASTTemplateArgumentListInfo *>(this + 1);
 
-    return *reinterpret_cast<ExplicitTemplateArgumentList *>(
+    return *reinterpret_cast<ASTTemplateArgumentListInfo *>(
                                                       getMemberQualifier() + 1);
   }
 
   /// \brief Retrieve the explicit template argument list that
   /// followed the member template name.  This must only be called on
   /// an expression with explicit template arguments.
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     return const_cast<MemberExpr *>(this)->getExplicitTemplateArgs();
   }
 
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getOptionalExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo *getOptionalExplicitTemplateArgs() const {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -2210,7 +2314,19 @@ public:
   bool isImplicitAccess() const {
     return getBase() && getBase()->isImplicitCXXThis();
   }
-  
+
+  /// \brief Returns true if this member expression refers to a method that
+  /// was resolved from an overloaded set having size greater than 1.
+  bool hadMultipleCandidates() const {
+    return HadMultipleCandidates;
+  }
+  /// \brief Sets the flag telling whether this expression refers to
+  /// a method that was resolved from an overloaded set having size
+  /// greater than 1.
+  void setHadMultipleCandidates(bool V = true) {
+    HadMultipleCandidates = V;
+  }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == MemberExprClass;
   }
@@ -2293,68 +2409,7 @@ public:
 private:
   Stmt *Op;
 
-  void CheckCastConsistency() const {
-#ifndef NDEBUG
-    switch (getCastKind()) {
-    case CK_DerivedToBase:
-    case CK_UncheckedDerivedToBase:
-    case CK_DerivedToBaseMemberPointer:
-    case CK_BaseToDerived:
-    case CK_BaseToDerivedMemberPointer:
-      assert(!path_empty() && "Cast kind should have a base path!");
-      break;
-
-    // These should not have an inheritance path.
-    case CK_BitCast:
-    case CK_Dynamic:
-    case CK_ToUnion:
-    case CK_ArrayToPointerDecay:
-    case CK_FunctionToPointerDecay:
-    case CK_NullToMemberPointer:
-    case CK_NullToPointer:
-    case CK_ConstructorConversion:
-    case CK_IntegralToPointer:
-    case CK_PointerToIntegral:
-    case CK_ToVoid:
-    case CK_VectorSplat:
-    case CK_IntegralCast:
-    case CK_IntegralToFloating:
-    case CK_FloatingToIntegral:
-    case CK_FloatingCast:
-    case CK_AnyPointerToObjCPointerCast:
-    case CK_AnyPointerToBlockPointerCast:
-    case CK_ObjCObjectLValueCast:
-    case CK_FloatingRealToComplex:
-    case CK_FloatingComplexToReal:
-    case CK_FloatingComplexCast:
-    case CK_FloatingComplexToIntegralComplex:
-    case CK_IntegralRealToComplex:
-    case CK_IntegralComplexToReal:
-    case CK_IntegralComplexCast:
-    case CK_IntegralComplexToFloatingComplex:
-    case CK_ObjCProduceObject:
-    case CK_ObjCConsumeObject:
-    case CK_ObjCReclaimReturnedObject:
-      assert(!getType()->isBooleanType() && "unheralded conversion to bool");
-      // fallthrough to check for null base path
-
-    case CK_Dependent:
-    case CK_LValueToRValue:
-    case CK_GetObjCProperty:
-    case CK_NoOp:
-    case CK_PointerToBoolean:
-    case CK_IntegralToBoolean:
-    case CK_FloatingToBoolean:
-    case CK_MemberPointerToBoolean:
-    case CK_FloatingComplexToBoolean:
-    case CK_IntegralComplexToBoolean:
-    case CK_LValueBitCast:            // -> bool&
-    case CK_UserDefinedConversion:    // operator bool()
-      assert(path_empty() && "Cast kind should not have a base path!");
-      break;
-    }
-#endif
-  }
+  void CheckCastConsistency() const;
 
   const CXXBaseSpecifier * const *path_buffer() const {
     return const_cast<CastExpr*>(this)->path_buffer();
@@ -2385,7 +2440,9 @@ protected:
     assert(kind != CK_Invalid && "creating cast with invalid cast kind");
     CastExprBits.Kind = kind;
     setBasePathSize(BasePathSize);
+#ifndef NDEBUG
     CheckCastConsistency();
+#endif
   }
 
   /// \brief Construct an empty cast.
@@ -2486,6 +2543,13 @@ public:
   }
   static bool classof(const ImplicitCastExpr *) { return true; }
 };
+
+inline Expr *Expr::IgnoreImpCasts() {
+  Expr *e = this;
+  while (ImplicitCastExpr *ice = dyn_cast<ImplicitCastExpr>(e))
+    e = ice->getSubExpr();
+  return e;
+}
 
 /// ExplicitCastExpr - An explicit cast written in the source
 /// code.
@@ -2690,6 +2754,13 @@ public:
   bool isCompoundAssignmentOp() const {
     return isCompoundAssignmentOp(getOpcode());
   }
+  static Opcode getOpForCompoundAssignment(Opcode Opc) {
+    assert(isCompoundAssignmentOp(Opc));
+    if (Opc >= BO_AndAssign)
+      return Opcode(unsigned(Opc) - BO_AndAssign + BO_And);
+    else
+      return Opcode(unsigned(Opc) - BO_MulAssign + BO_Mul);
+  }
 
   static bool isShiftAssignOp(Opcode Opc) {
     return Opc == BO_ShlAssign || Opc == BO_ShrAssign;
@@ -2731,7 +2802,7 @@ protected:
 
 /// CompoundAssignOperator - For compound assignments (e.g. +=), we keep
 /// track of the type the operation is performed in.  Due to the semantics of
-/// these operators, the operands are promoted, the aritmetic performed, an
+/// these operators, the operands are promoted, the arithmetic performed, an
 /// implicit conversion back to the result type done, then the assignment takes
 /// place.  This captures the intermediate type which the computation is done
 /// in.
@@ -3119,7 +3190,7 @@ public:
 
   unsigned getShuffleMaskIdx(ASTContext &Ctx, unsigned N) {
     assert((N < NumExprs - 2) && "Shuffle idx out of range!");
-    return getExpr(N+2)->EvaluateAsInt(Ctx).getZExtValue();
+    return getExpr(N+2)->EvaluateKnownConstInt(Ctx).getZExtValue();
   }
 
   // Iterators
@@ -3398,6 +3469,10 @@ public:
     return const_cast<InitListExpr *>(this)->getArrayFiller();
   }
   void setArrayFiller(Expr *filler);
+
+  /// \brief Return true if this is an array initializer and its array "filler"
+  /// has been set.
+  bool hasArrayFiller() const { return getArrayFiller(); }
 
   /// \brief If this initializes a union, specifies which field in the
   /// union to initialize.
@@ -4030,7 +4105,7 @@ public:
 
   /// getEncodedElementAccess - Encode the elements accessed into an llvm
   /// aggregate Constant of ConstantInt(s).
-  void getEncodedElementAccess(llvm::SmallVectorImpl<unsigned> &Elts) const;
+  void getEncodedElementAccess(SmallVectorImpl<unsigned> &Elts) const;
 
   SourceRange getSourceRange() const {
     return SourceRange(getBase()->getLocStart(), AccessorLoc);
@@ -4135,11 +4210,14 @@ public:
 /// AsTypeExpr - Clang builtin function __builtin_astype [OpenCL 6.2.4.2]
 /// This AST node provides support for reinterpreting a type to another
 /// type of the same size.
-class AsTypeExpr : public Expr {
+class AsTypeExpr : public Expr { // Should this be an ExplicitCastExpr?
 private:
-  Expr* SrcExpr;
-  QualType DstType;
+  Stmt *SrcExpr;
   SourceLocation BuiltinLoc, RParenLoc;
+
+  friend class ASTReader;
+  friend class ASTStmtReader;
+  explicit AsTypeExpr(EmptyShell Empty) : Expr(AsTypeExprClass, Empty) {}
   
 public:
   AsTypeExpr(Expr* SrcExpr, QualType DstType,
@@ -4152,15 +4230,16 @@ public:
             SrcExpr->isInstantiationDependent()),
            (DstType->containsUnexpandedParameterPack() ||
             SrcExpr->containsUnexpandedParameterPack())),
-  SrcExpr(SrcExpr), DstType(DstType),
-  BuiltinLoc(BuiltinLoc), RParenLoc(RParenLoc) {}
-  
-  /// \brief Build an empty __builtin_astype
-  explicit AsTypeExpr(EmptyShell Empty) : Expr(AsTypeExprClass, Empty) {}
+  SrcExpr(SrcExpr), BuiltinLoc(BuiltinLoc), RParenLoc(RParenLoc) {}
   
   /// getSrcExpr - Return the Expr to be converted.
-  Expr *getSrcExpr() const { return SrcExpr; }
-  QualType getDstType() const { return DstType; }
+  Expr *getSrcExpr() const { return cast<Expr>(SrcExpr); }
+
+  /// getBuiltinLoc - Return the location of the __builtin_astype token.
+  SourceLocation getBuiltinLoc() const { return BuiltinLoc; }
+
+  /// getRParenLoc - Return the location of final right parenthesis.
+  SourceLocation getRParenLoc() const { return RParenLoc; }
   
   SourceRange getSourceRange() const {
     return SourceRange(BuiltinLoc, RParenLoc);
@@ -4172,7 +4251,236 @@ public:
   static bool classof(const AsTypeExpr *) { return true; }
   
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() { return child_range(&SrcExpr, &SrcExpr+1); }
+};
+
+/// PseudoObjectExpr - An expression which accesses a pseudo-object
+/// l-value.  A pseudo-object is an abstract object, accesses to which
+/// are translated to calls.  The pseudo-object expression has a
+/// syntactic form, which shows how the expression was actually
+/// written in the source code, and a semantic form, which is a series
+/// of expressions to be executed in order which detail how the
+/// operation is actually evaluated.  Optionally, one of the semantic
+/// forms may also provide a result value for the expression.
+///
+/// If any of the semantic-form expressions is an OpaqueValueExpr,
+/// that OVE is required to have a source expression, and it is bound
+/// to the result of that source expression.  Such OVEs may appear
+/// only in subsequent semantic-form expressions and as
+/// sub-expressions of the syntactic form.
+///
+/// PseudoObjectExpr should be used only when an operation can be
+/// usefully described in terms of fairly simple rewrite rules on
+/// objects and functions that are meant to be used by end-developers.
+/// For example, under the Itanium ABI, dynamic casts are implemented
+/// as a call to a runtime function called __dynamic_cast; using this
+/// class to describe that would be inappropriate because that call is
+/// not really part of the user-visible semantics, and instead the
+/// cast is properly reflected in the AST and IR-generation has been
+/// taught to generate the call as necessary.  In contrast, an
+/// Objective-C property access is semantically defined to be
+/// equivalent to a particular message send, and this is very much
+/// part of the user model.  The name of this class encourages this
+/// modelling design.
+class PseudoObjectExpr : public Expr {
+  // PseudoObjectExprBits.NumSubExprs - The number of sub-expressions.
+  // Always at least two, because the first sub-expression is the
+  // syntactic form.
+
+  // PseudoObjectExprBits.ResultIndex - The index of the
+  // sub-expression holding the result.  0 means the result is void,
+  // which is unambiguous because it's the index of the syntactic
+  // form.  Note that this is therefore 1 higher than the value passed
+  // in to Create, which is an index within the semantic forms.
+  // Note also that ASTStmtWriter assumes this encoding.
+
+  Expr **getSubExprsBuffer() { return reinterpret_cast<Expr**>(this + 1); }
+  const Expr * const *getSubExprsBuffer() const {
+    return reinterpret_cast<const Expr * const *>(this + 1);
+  }
+
+  friend class ASTStmtReader;
+
+  PseudoObjectExpr(QualType type, ExprValueKind VK,
+                   Expr *syntactic, ArrayRef<Expr*> semantic,
+                   unsigned resultIndex);
+
+  PseudoObjectExpr(EmptyShell shell, unsigned numSemanticExprs);
+
+  unsigned getNumSubExprs() const {
+    return PseudoObjectExprBits.NumSubExprs;
+  }
+
+public:
+  /// NoResult - A value for the result index indicating that there is
+  /// no semantic result.
+  enum { NoResult = ~0U };
+
+  static PseudoObjectExpr *Create(ASTContext &Context, Expr *syntactic,
+                                  ArrayRef<Expr*> semantic,
+                                  unsigned resultIndex);
+
+  static PseudoObjectExpr *Create(ASTContext &Context, EmptyShell shell,
+                                  unsigned numSemanticExprs);
+
+  /// Return the syntactic form of this expression, i.e. the
+  /// expression it actually looks like.  Likely to be expressed in
+  /// terms of OpaqueValueExprs bound in the semantic form.
+  Expr *getSyntacticForm() { return getSubExprsBuffer()[0]; }
+  const Expr *getSyntacticForm() const { return getSubExprsBuffer()[0]; }
+
+  /// Return the index of the result-bearing expression into the semantics
+  /// expressions, or PseudoObjectExpr::NoResult if there is none.
+  unsigned getResultExprIndex() const {
+    if (PseudoObjectExprBits.ResultIndex == 0) return NoResult;
+    return PseudoObjectExprBits.ResultIndex - 1;
+  }
+
+  /// Return the result-bearing expression, or null if there is none.
+  Expr *getResultExpr() {
+    if (PseudoObjectExprBits.ResultIndex == 0)
+      return 0;
+    return getSubExprsBuffer()[PseudoObjectExprBits.ResultIndex];
+  }
+  const Expr *getResultExpr() const {
+    return const_cast<PseudoObjectExpr*>(this)->getResultExpr();
+  }
+
+  unsigned getNumSemanticExprs() const { return getNumSubExprs() - 1; }
+
+  typedef Expr * const *semantics_iterator;
+  typedef const Expr * const *const_semantics_iterator;
+  semantics_iterator semantics_begin() {
+    return getSubExprsBuffer() + 1;
+  }
+  const_semantics_iterator semantics_begin() const {
+    return getSubExprsBuffer() + 1;
+  }
+  semantics_iterator semantics_end() {
+    return getSubExprsBuffer() + getNumSubExprs();
+  }
+  const_semantics_iterator semantics_end() const {
+    return getSubExprsBuffer() + getNumSubExprs();
+  }
+  Expr *getSemanticExpr(unsigned index) {
+    assert(index + 1 < getNumSubExprs());
+    return getSubExprsBuffer()[index + 1];
+  }
+  const Expr *getSemanticExpr(unsigned index) const {
+    return const_cast<PseudoObjectExpr*>(this)->getSemanticExpr(index);
+  }
+
+  SourceLocation getExprLoc() const {
+    return getSyntacticForm()->getExprLoc();
+  }
+  SourceRange getSourceRange() const {
+    return getSyntacticForm()->getSourceRange();
+  }
+
+  child_range children() {
+    Stmt **cs = reinterpret_cast<Stmt**>(getSubExprsBuffer());
+    return child_range(cs, cs + getNumSubExprs());
+  }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == PseudoObjectExprClass;
+  }
+  static bool classof(const PseudoObjectExpr *) { return true; }
+};
+
+/// AtomicExpr - Variadic atomic builtins: __atomic_exchange, __atomic_fetch_*,
+/// __atomic_load, __atomic_store, and __atomic_compare_exchange_*, for the
+/// similarly-named C++0x instructions.  All of these instructions take one
+/// primary pointer and at least one memory order.
+class AtomicExpr : public Expr {
+public:
+  enum AtomicOp { Load, Store, CmpXchgStrong, CmpXchgWeak, Xchg,
+                  Add, Sub, And, Or, Xor };
+private:
+  enum { PTR, ORDER, VAL1, ORDER_FAIL, VAL2, END_EXPR };
+  Stmt* SubExprs[END_EXPR];
+  unsigned NumSubExprs;
+  SourceLocation BuiltinLoc, RParenLoc;
+  AtomicOp Op;
+
+public:
+  AtomicExpr(SourceLocation BLoc, Expr **args, unsigned nexpr, QualType t,
+             AtomicOp op, SourceLocation RP);
+
+  /// \brief Build an empty AtomicExpr.
+  explicit AtomicExpr(EmptyShell Empty) : Expr(AtomicExprClass, Empty) { }
+
+  Expr *getPtr() const {
+    return cast<Expr>(SubExprs[PTR]);
+  }
+  void setPtr(Expr *E) {
+    SubExprs[PTR] = E;
+  }
+  Expr *getOrder() const {
+    return cast<Expr>(SubExprs[ORDER]);
+  }
+  void setOrder(Expr *E) {
+    SubExprs[ORDER] = E;
+  }
+  Expr *getVal1() const {
+    assert(NumSubExprs >= 3);
+    return cast<Expr>(SubExprs[VAL1]);
+  }
+  void setVal1(Expr *E) {
+    assert(NumSubExprs >= 3);
+    SubExprs[VAL1] = E;
+  }
+  Expr *getOrderFail() const {
+    assert(NumSubExprs == 5);
+    return cast<Expr>(SubExprs[ORDER_FAIL]);
+  }
+  void setOrderFail(Expr *E) {
+    assert(NumSubExprs == 5);
+    SubExprs[ORDER_FAIL] = E;
+  }
+  Expr *getVal2() const {
+    assert(NumSubExprs == 5);
+    return cast<Expr>(SubExprs[VAL2]);
+  }
+  void setVal2(Expr *E) {
+    assert(NumSubExprs == 5);
+    SubExprs[VAL2] = E;
+  }
+
+  AtomicOp getOp() const { return Op; }
+  void setOp(AtomicOp op) { Op = op; }
+  unsigned getNumSubExprs() { return NumSubExprs; }
+  void setNumSubExprs(unsigned num) { NumSubExprs = num; }
+
+  Expr **getSubExprs() { return reinterpret_cast<Expr **>(SubExprs); }
+
+  bool isVolatile() const {
+    return getPtr()->getType()->getPointeeType().isVolatileQualified();
+  }
+
+  bool isCmpXChg() const {
+    return getOp() == AtomicExpr::CmpXchgStrong ||
+           getOp() == AtomicExpr::CmpXchgWeak;
+  }
+
+  SourceLocation getBuiltinLoc() const { return BuiltinLoc; }
+  void setBuiltinLoc(SourceLocation L) { BuiltinLoc = L; }
+
+  SourceLocation getRParenLoc() const { return RParenLoc; }
+  void setRParenLoc(SourceLocation L) { RParenLoc = L; }
+
+  SourceRange getSourceRange() const {
+    return SourceRange(BuiltinLoc, RParenLoc);
+  }
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == AtomicExprClass;
+  }
+  static bool classof(const AtomicExpr *) { return true; }
+
+  // Iterators
+  child_range children() {
+    return child_range(SubExprs, SubExprs+NumSubExprs);
+  }
 };
 }  // end namespace clang
 

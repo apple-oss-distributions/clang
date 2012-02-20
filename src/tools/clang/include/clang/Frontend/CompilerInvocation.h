@@ -28,21 +28,31 @@
 #include <string>
 #include <vector>
 
-namespace llvm {
-  template<typename T> class SmallVectorImpl;
-}
-
 namespace clang {
 
-class Diagnostic;
+class CompilerInvocation;
+class DiagnosticsEngine;
+  
+class CompilerInvocationBase : public llvm::RefCountedBase<CompilerInvocation> { 
+protected:
+  /// Options controlling the language variant.
+  llvm::IntrusiveRefCntPtr<LangOptions> LangOpts;
+public:
+  CompilerInvocationBase();
 
+  CompilerInvocationBase(const CompilerInvocationBase &X);
+  
+  LangOptions *getLangOpts() { return LangOpts.getPtr(); }
+  const LangOptions *getLangOpts() const { return LangOpts.getPtr(); }
+};
+  
 /// CompilerInvocation - Helper class for holding the data necessary to invoke
 /// the compiler.
 ///
 /// This class is designed to represent an abstract "invocation" of the
 /// compiler, including data such as the include paths, the code generation
 /// options, the warning flags, and so on.
-class CompilerInvocation : public llvm::RefCountedBase<CompilerInvocation> {
+class CompilerInvocation : public CompilerInvocationBase {
   /// Options controlling the static analyzer.
   AnalyzerOptions AnalyzerOpts;
 
@@ -63,9 +73,6 @@ class CompilerInvocation : public llvm::RefCountedBase<CompilerInvocation> {
 
   /// Options controlling the #include directive.
   HeaderSearchOptions HeaderSearchOpts;
-
-  /// Options controlling the language variant.
-  LangOptions LangOpts;
 
   /// Options controlling the preprocessor (aside from #include handling).
   PreprocessorOptions PreprocessorOpts;
@@ -92,7 +99,7 @@ public:
   static void CreateFromArgs(CompilerInvocation &Res,
                              const char* const *ArgBegin,
                              const char* const *ArgEnd,
-                             Diagnostic &Diags);
+                             DiagnosticsEngine &Diags);
 
   /// GetBuiltinIncludePath - Get the directory where the compiler headers
   /// reside, relative to the compiler binary (found by the passed in
@@ -115,7 +122,7 @@ public:
   /// \param LangStd - The input language standard.
   void setLangDefaults(InputKind IK,
                   LangStandard::Kind LangStd = LangStandard::lang_unspecified) {
-    setLangDefaults(LangOpts, IK, LangStd);
+    setLangDefaults(*getLangOpts(), IK, LangStd);
   }
 
   /// setLangDefaults - Set language defaults for the given input language and
@@ -126,6 +133,10 @@ public:
   /// \param LangStd - The input language standard.
   static void setLangDefaults(LangOptions &Opts, InputKind IK,
                    LangStandard::Kind LangStd = LangStandard::lang_unspecified);
+  
+  /// \brief Retrieve a module hash string that is suitable for uniquely 
+  /// identifying the conditions under which the module was built.
+  std::string getModuleHash() const;
   
   /// @}
   /// @name Option Subgroups
@@ -165,9 +176,6 @@ public:
   const FrontendOptions &getFrontendOpts() const {
     return FrontendOpts;
   }
-
-  LangOptions &getLangOpts() { return LangOpts; }
-  const LangOptions &getLangOpts() const { return LangOpts; }
 
   PreprocessorOptions &getPreprocessorOpts() { return PreprocessorOpts; }
   const PreprocessorOptions &getPreprocessorOpts() const {

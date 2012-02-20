@@ -32,6 +32,10 @@ E: dberlin@dberlin.org
 D: ET-Forest implementation.
 D: Sparse bitmap
 
+N: David Blaikie
+E: dblaikie@gmail.com
+D: General bug fixing/fit & finish, mostly in Clang
+
 N: Neil Booth
 E: neil@daikokuya.co.uk
 D: APFloat implementation.
@@ -139,6 +143,8 @@ N: James Grosbach
 E: grosbach@apple.com
 D: SjLj exception handling support
 D: General fixes and improvements for the ARM back-end
+D: MCJIT
+D: ARM integrated assembler and assembly parser
 
 N: Lang Hames
 E: lhames@gmail.com
@@ -241,6 +247,10 @@ E: duraid@octopus.com.au
 W: http://kinoko.c.u-tokyo.ac.jp/~duraid/
 D: IA64 backend, BigBlock register allocator
 
+N: John McCall
+E: rjmccall@apple.com
+D: Clang semantic analysis and IR generation
+
 N: Michael McCracken
 E: michael.mccracken@gmail.com
 D: Line number support for llvmgcc
@@ -257,6 +267,7 @@ N: Takumi Nakamura
 E: geek4civic@gmail.com
 E: chapuni@hf.rim.or.jp
 D: Cygwin and MinGW support.
+D: Win32 tweaks.
 S: Yokohama, Japan
 
 N: Edward O'Callaghan
@@ -274,6 +285,8 @@ N: Jakob Stoklund Olesen
 E: stoklund@2pi.dk
 D: Machine code verifier
 D: Blackfin backend
+D: Fast register allocator
+D: Greedy register allocator
 
 N: Richard Osborne
 E: richard@xmos.com
@@ -293,6 +306,10 @@ N: Wesley Peck
 E: peckw@wesleypeck.com
 W: http://wesleypeck.com/
 D: MicroBlaze backend
+
+N: Francois Pichet
+E: pichet2000@gmail.com
+D: MSVC support
 
 N: Vladimir Prus
 W: http://vladimir_prus.blogspot.com
@@ -352,6 +369,10 @@ D: Thread Local Storage implementation
 N: Xerxes Ranby
 E: xerxes@zafena.se
 D: Cmake dependency chain and various bug fixes
+
+N: Nadav Rotem
+E: nadav.rotem@intel.com
+D: Vector code generation improvements.
 
 N: Bill Wendling
 E: wendling@apple.com

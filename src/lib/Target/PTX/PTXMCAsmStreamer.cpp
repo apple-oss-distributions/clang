@@ -22,8 +22,8 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormattedStream.h"
+#include "llvm/Support/PathV2.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetAsmInfo.h"
 
 using namespace llvm;
 
@@ -101,7 +101,7 @@ public:
   /// @{
 
   virtual void ChangeSection(const MCSection *Section);
-  virtual void InitSections() {}
+  virtual void InitSections() { /* PTX does not use sections */ }
 
   virtual void EmitLabel(MCSymbol *Symbol);
 
@@ -115,7 +115,8 @@ public:
 
   virtual void EmitDwarfAdvanceLineAddr(int64_t LineDelta,
                                         const MCSymbol *LastLabel,
-                                        const MCSymbol *Label);
+                                        const MCSymbol *Label,
+                                        unsigned PointerSize);
 
   virtual void EmitSymbolAttribute(MCSymbol *Symbol, MCSymbolAttr Attribute);
 
@@ -132,7 +133,9 @@ public:
   ///
   /// @param Symbol - The common symbol to emit.
   /// @param Size - The size of the common symbol.
-  virtual void EmitLocalCommonSymbol(MCSymbol *Symbol, uint64_t Size);
+  /// @param ByteAlignment - The alignment of the common symbol in bytes.
+  virtual void EmitLocalCommonSymbol(MCSymbol *Symbol, uint64_t Size,
+                                     unsigned ByteAlignment);
 
   virtual void EmitZerofill(const MCSection *Section, MCSymbol *Symbol = 0,
                             unsigned Size = 0, unsigned ByteAlignment = 0);
@@ -163,7 +166,8 @@ public:
                                  unsigned char Value = 0);
 
   virtual void EmitFileDirective(StringRef Filename);
-  virtual bool EmitDwarfFileDirective(unsigned FileNo, StringRef Filename);
+  virtual bool EmitDwarfFileDirective(unsigned FileNo, StringRef Directory,
+                                      StringRef Filename);
 
   virtual void EmitInstruction(const MCInst &Inst);
 
@@ -233,7 +237,7 @@ void PTXMCAsmStreamer::ChangeSection(const MCSection *Section) {
 void PTXMCAsmStreamer::EmitLabel(MCSymbol *Symbol) {
   assert(Symbol->isUndefined() && "Cannot define a symbol twice!");
   assert(!Symbol->isVariable() && "Cannot emit a variable symbol!");
-  //assert(getCurrentSection() && "Cannot emit before setting section!");
+  assert(getCurrentSection() && "Cannot emit before setting section!");
 
   OS << *Symbol << MAI.getLabelSuffix();
   EmitEOL();
@@ -260,7 +264,8 @@ void PTXMCAsmStreamer::EmitWeakReference(MCSymbol *Alias,
 
 void PTXMCAsmStreamer::EmitDwarfAdvanceLineAddr(int64_t LineDelta,
                                                 const MCSymbol *LastLabel,
-                                                const MCSymbol *Label) {
+                                                const MCSymbol *Label,
+                                                unsigned PointerSize) {
   report_fatal_error("Unimplemented.");
 }
 
@@ -282,7 +287,8 @@ void PTXMCAsmStreamer::EmitELFSize(MCSymbol *Symbol, const MCExpr *Value) {}
 void PTXMCAsmStreamer::EmitCommonSymbol(MCSymbol *Symbol, uint64_t Size,
                                         unsigned ByteAlignment) {}
 
-void PTXMCAsmStreamer::EmitLocalCommonSymbol(MCSymbol *Symbol, uint64_t Size) {}
+void PTXMCAsmStreamer::EmitLocalCommonSymbol(MCSymbol *Symbol, uint64_t Size,
+                                             unsigned ByteAlignment) {}
 
 void PTXMCAsmStreamer::EmitZerofill(const MCSection *Section, MCSymbol *Symbol,
                                     unsigned Size, unsigned ByteAlignment) {}
@@ -367,7 +373,7 @@ void PTXMCAsmStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size,
     int64_t IntValue;
     if (!Value->EvaluateAsAbsolute(IntValue))
       report_fatal_error("Don't know how to emit this value.");
-    if (getContext().getTargetAsmInfo().isLittleEndian()) {
+    if (getContext().getAsmInfo().isLittleEndian()) {
       EmitIntValue((uint32_t)(IntValue >> 0 ), 4, AddrSpace);
       EmitIntValue((uint32_t)(IntValue >> 32), 4, AddrSpace);
     } else {
@@ -485,11 +491,20 @@ void PTXMCAsmStreamer::EmitFileDirective(StringRef Filename) {
 
 // FIXME: should we inherit from MCAsmStreamer?
 bool PTXMCAsmStreamer::EmitDwarfFileDirective(unsigned FileNo,
-                                              StringRef Filename){
+                                              StringRef Directory,
+                                              StringRef Filename) {
+  if (!Directory.empty()) {
+    if (sys::path::is_absolute(Filename))
+      return EmitDwarfFileDirective(FileNo, "", Filename);
+    SmallString<128> FullPathName = Directory;
+    sys::path::append(FullPathName, Filename);
+    return EmitDwarfFileDirective(FileNo, "", FullPathName);
+  }
+
   OS << "\t.file\t" << FileNo << ' ';
   PrintQuotedString(Filename, OS);
   EmitEOL();
-  return this->MCStreamer::EmitDwarfFileDirective(FileNo, Filename);
+  return this->MCStreamer::EmitDwarfFileDirective(FileNo, Directory, Filename);
 }
 
 void PTXMCAsmStreamer::AddEncodingComment(const MCInst &Inst) {}
@@ -509,7 +524,7 @@ void PTXMCAsmStreamer::EmitInstruction(const MCInst &Inst) {
 
   // If we have an AsmPrinter, use that to print, otherwise print the MCInst.
   if (InstPrinter)
-    InstPrinter->printInst(&Inst, OS);
+    InstPrinter->printInst(&Inst, OS, "");
   else
     Inst.print(OS, &MAI);
   EmitEOL();
@@ -531,8 +546,9 @@ namespace llvm {
   MCStreamer *createPTXAsmStreamer(MCContext &Context,
                                    formatted_raw_ostream &OS,
                                    bool isVerboseAsm, bool useLoc, bool useCFI,
+                                   bool useDwarfDirectory,
                                    MCInstPrinter *IP,
-                                   MCCodeEmitter *CE, TargetAsmBackend *TAB,
+                                   MCCodeEmitter *CE, MCAsmBackend *MAB,
                                    bool ShowInst) {
     return new PTXMCAsmStreamer(Context, OS, isVerboseAsm, useLoc,
                                 IP, CE, ShowInst);

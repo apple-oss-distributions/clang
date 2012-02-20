@@ -48,7 +48,9 @@ public:
   /// called by the parser to process every top-level Decl*. Note that D can be
   /// the head of a chain of Decls (e.g. for `int a, b` the chain will have two
   /// elements). Use Decl::getNextDeclarator() to walk the chain.
-  virtual void HandleTopLevelDecl(DeclGroupRef D);
+  ///
+  /// \returns true to continue parsing, or false to abort parsing.
+  virtual bool HandleTopLevelDecl(DeclGroupRef D);
 
   /// HandleInterestingDecl - Handle the specified interesting declaration. This
   /// is called by the AST reader when deserializing things that might interest
@@ -64,6 +66,11 @@ public:
   /// hack on the type, which can occur at any point in the file (because these
   /// can be defined in declspecs).
   virtual void HandleTagDeclDefinition(TagDecl *D) {}
+
+  /// \brief Handle the specified top-level declaration that occurred inside
+  /// and ObjC container.
+  /// The default implementation ignored them.
+  virtual void HandleTopLevelDeclInObjCContainer(DeclGroupRef D);
 
   /// CompleteTentativeDefinition - Callback invoked at the end of a translation
   /// unit to notify the consumer that the given tentative definition should be

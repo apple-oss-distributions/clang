@@ -17,6 +17,7 @@
 
 namespace llvm {
   class MachineFunction;
+  class StringRef;
 
   // Possible float ABI settings. Used with FloatABIType in TargetOptions.h.
   namespace FloatABI {
@@ -157,6 +158,8 @@ namespace llvm {
   /// should lower Intrinsic::trap to a call to the specified function name
   /// instead of an ISD::TRAP node.
   extern StringRef getTrapFunctionName();
+
+  extern bool EnableSegmentedStacks;
 
 } // End llvm namespace
 

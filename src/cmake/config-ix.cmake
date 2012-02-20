@@ -198,11 +198,6 @@ if( LLVM_USING_GLIBC )
   add_llvm_definitions( -D_GNU_SOURCE )
 endif()
 
-# Type checks
-check_type_exists(std::bidirectional_iterator<int,int> "iterator;iostream" HAVE_BI_ITERATOR)
-check_type_exists(std::iterator<int,int,int> iterator HAVE_STD_ITERATOR)
-check_type_exists(std::forward_iterator<int,int> iterator HAVE_FWD_ITERATOR)
-
 set(headers "")
 if (HAVE_SYS_TYPES_H)
   set(headers ${headers} "sys/types.h")
@@ -277,7 +272,7 @@ else()
   unset(HAVE_FFI_CALL CACHE)
 endif( LLVM_ENABLE_FFI )
 
-# Define LLVM_MULTITHREADED if gcc atomic builtins exists.
+# Define LLVM_HAS_ATOMICS if gcc or MSVC atomic builtins are supported.
 include(CheckAtomic)
 
 if( LLVM_ENABLE_PIC )
@@ -291,15 +286,14 @@ include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-Wno-variadic-macros" SUPPORTS_NO_VARIADIC_MACROS_FLAG)
 
 include(GetTargetTriple)
-get_target_triple(LLVM_HOSTTRIPLE)
+get_target_triple(LLVM_DEFAULT_TARGET_TRIPLE)
 
-# FIXME: We don't distinguish the target and the host. :(
-set(TARGET_TRIPLE "${LLVM_HOSTTRIPLE}")
+set(TARGET_TRIPLE "${LLVM_DEFAULT_TARGET_TRIPLE}")
 
 # Determine the native architecture.
 string(TOLOWER "${LLVM_TARGET_ARCH}" LLVM_NATIVE_ARCH)
 if( LLVM_NATIVE_ARCH STREQUAL "host" )
-  string(REGEX MATCH "^[^-]*" LLVM_NATIVE_ARCH ${LLVM_HOSTTRIPLE})
+  string(REGEX MATCH "^[^-]*" LLVM_NATIVE_ARCH ${LLVM_DEFAULT_TARGET_TRIPLE})
 endif ()
 
 if (LLVM_NATIVE_ARCH MATCHES "i[2-6]86")
@@ -314,8 +308,6 @@ elseif (LLVM_NATIVE_ARCH MATCHES "sparc")
   set(LLVM_NATIVE_ARCH Sparc)
 elseif (LLVM_NATIVE_ARCH MATCHES "powerpc")
   set(LLVM_NATIVE_ARCH PowerPC)
-elseif (LLVM_NATIVE_ARCH MATCHES "alpha")
-  set(LLVM_NATIVE_ARCH Alpha)
 elseif (LLVM_NATIVE_ARCH MATCHES "arm")
   set(LLVM_NATIVE_ARCH ARM)
 elseif (LLVM_NATIVE_ARCH MATCHES "mips")
@@ -336,6 +328,7 @@ else ()
   message(STATUS "Native target architecture is ${LLVM_NATIVE_ARCH}")
   set(LLVM_NATIVE_TARGET LLVMInitialize${LLVM_NATIVE_ARCH}Target)
   set(LLVM_NATIVE_TARGETINFO LLVMInitialize${LLVM_NATIVE_ARCH}TargetInfo)
+  set(LLVM_NATIVE_TARGETMC LLVMInitialize${LLVM_NATIVE_ARCH}TargetMC)
   set(LLVM_NATIVE_ASMPRINTER LLVMInitialize${LLVM_NATIVE_ARCH}AsmPrinter)
 endif ()
 

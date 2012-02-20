@@ -27,7 +27,7 @@ using namespace clang;
 namespace  {
   class StmtDumper : public StmtVisitor<StmtDumper> {
     SourceManager *SM;
-    llvm::raw_ostream &OS;
+    raw_ostream &OS;
     unsigned IndentLevel;
 
     /// MaxDepth - When doing a normal dump (not dumpAll) we only want to dump
@@ -41,7 +41,7 @@ namespace  {
     unsigned LastLocLine;
 
   public:
-    StmtDumper(SourceManager *sm, llvm::raw_ostream &os, unsigned maxDepth)
+    StmtDumper(SourceManager *sm, raw_ostream &os, unsigned maxDepth)
       : SM(sm), OS(os), IndentLevel(0-1), MaxDepth(maxDepth) {
       LastLocFilename = "";
       LastLocLine = ~0U;
@@ -148,6 +148,7 @@ namespace  {
     void VisitCompoundAssignOperator(CompoundAssignOperator *Node);
     void VisitAddrLabelExpr(AddrLabelExpr *Node);
     void VisitBlockExpr(BlockExpr *Node);
+    void VisitOpaqueValueExpr(OpaqueValueExpr *Node);
 
     // C++
     void VisitCXXNamedCastExpr(CXXNamedCastExpr *Node);
@@ -235,9 +236,9 @@ void StmtDumper::DumpDeclarator(Decl *D) {
   // nodes are where they need to be.
   if (TypedefDecl *localType = dyn_cast<TypedefDecl>(D)) {
     OS << "\"typedef " << localType->getUnderlyingType().getAsString()
-       << ' ' << localType << '"';
+       << ' ' << *localType << '"';
   } else if (TypeAliasDecl *localType = dyn_cast<TypeAliasDecl>(D)) {
-    OS << "\"using " << localType << " = "
+    OS << "\"using " << *localType << " = "
        << localType->getUnderlyingType().getAsString() << '"';
   } else if (ValueDecl *VD = dyn_cast<ValueDecl>(D)) {
     OS << "\"";
@@ -294,7 +295,7 @@ void StmtDumper::DumpDeclarator(Decl *D) {
     DumpSubTree(SAD->getMessage());
     OS << ");\"";
   } else {
-    assert(0 && "Unexpected decl");
+    llvm_unreachable("Unexpected decl");
   }
 }
 
@@ -333,7 +334,7 @@ void StmtDumper::VisitExpr(Expr *Node) {
   DumpExpr(Node);
 }
 
-static void DumpBasePath(llvm::raw_ostream &OS, CastExpr *Node) {
+static void DumpBasePath(raw_ostream &OS, CastExpr *Node) {
   if (Node->path_empty())
     return;
 
@@ -407,7 +408,7 @@ void StmtDumper::VisitObjCIvarRefExpr(ObjCIvarRefExpr *Node) {
   DumpExpr(Node);
 
   OS << " " << Node->getDecl()->getDeclKindName()
-     << "Decl='" << Node->getDecl()
+     << "Decl='" << *Node->getDecl()
      << "' " << (void*)Node->getDecl();
   if (Node->isFreeIvar())
     OS << " isFreeIvar";
@@ -416,7 +417,7 @@ void StmtDumper::VisitObjCIvarRefExpr(ObjCIvarRefExpr *Node) {
 void StmtDumper::VisitPredefinedExpr(PredefinedExpr *Node) {
   DumpExpr(Node);
   switch (Node->getIdentType()) {
-  default: assert(0 && "unknown case");
+  default: llvm_unreachable("unknown case");
   case PredefinedExpr::Func:           OS <<  " __func__"; break;
   case PredefinedExpr::Function:       OS <<  " __FUNCTION__"; break;
   case PredefinedExpr::PrettyFunction: OS <<  " __PRETTY_FUNCTION__";break;
@@ -425,7 +426,7 @@ void StmtDumper::VisitPredefinedExpr(PredefinedExpr *Node) {
 
 void StmtDumper::VisitCharacterLiteral(CharacterLiteral *Node) {
   DumpExpr(Node);
-  OS << Node->getValue();
+  OS << " " << Node->getValue();
 }
 
 void StmtDumper::VisitIntegerLiteral(IntegerLiteral *Node) {
@@ -443,8 +444,13 @@ void StmtDumper::VisitStringLiteral(StringLiteral *Str) {
   DumpExpr(Str);
   // FIXME: this doesn't print wstrings right.
   OS << " ";
-  if (Str->isWide())
-    OS << "L";
+  switch (Str->getKind()) {
+  case StringLiteral::Ascii: break; // No prefix
+  case StringLiteral::Wide:  OS << 'L'; break;
+  case StringLiteral::UTF8:  OS << "u8"; break;
+  case StringLiteral::UTF16: OS << 'u'; break;
+  case StringLiteral::UTF32: OS << 'U'; break;
+  }
   OS << '"';
   OS.write_escaped(Str->getString());
   OS << '"';
@@ -475,7 +481,7 @@ void StmtDumper::VisitUnaryExprOrTypeTraitExpr(UnaryExprOrTypeTraitExpr *Node) {
 void StmtDumper::VisitMemberExpr(MemberExpr *Node) {
   DumpExpr(Node);
   OS << " " << (Node->isArrow() ? "->" : ".")
-     << Node->getMemberDecl() << ' '
+     << *Node->getMemberDecl() << ' '
      << (void*)Node->getMemberDecl();
 }
 void StmtDumper::VisitExtVectorElementExpr(ExtVectorElementExpr *Node) {
@@ -519,6 +525,15 @@ void StmtDumper::VisitBlockExpr(BlockExpr *Node) {
   DumpSubTree(block->getBody());
 }
 
+void StmtDumper::VisitOpaqueValueExpr(OpaqueValueExpr *Node) {
+  DumpExpr(Node);
+
+  if (Expr *Source = Node->getSourceExpr()) {
+    OS << '\n';
+    DumpSubTree(Source);
+  }
+}
+
 // GNU extensions.
 
 void StmtDumper::VisitAddrLabelExpr(AddrLabelExpr *Node) {
@@ -552,7 +567,8 @@ void StmtDumper::VisitCXXThisExpr(CXXThisExpr *Node) {
 
 void StmtDumper::VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *Node) {
   DumpExpr(Node);
-  OS << " functional cast to " << Node->getTypeAsWritten().getAsString();
+  OS << " functional cast to " << Node->getTypeAsWritten().getAsString()
+     << " <" << Node->getCastKindName() << ">";
 }
 
 void StmtDumper::VisitCXXConstructExpr(CXXConstructExpr *Node) {
@@ -574,10 +590,12 @@ void StmtDumper::VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *Node) {
 void StmtDumper::VisitExprWithCleanups(ExprWithCleanups *Node) {
   DumpExpr(Node);
   ++IndentLevel;
-  for (unsigned i = 0, e = Node->getNumTemporaries(); i != e; ++i) {
+  for (unsigned i = 0, e = Node->getNumObjects(); i != e; ++i) {
     OS << "\n";
     Indent();
-    DumpCXXTemporary(Node->getTemporary(i));
+    OS << "(cleanup ";
+    DumpDeclRef(Node->getObject(i));
+    OS << ")";
   }
   --IndentLevel;
 }
@@ -637,7 +655,7 @@ void StmtDumper::VisitObjCSelectorExpr(ObjCSelectorExpr *Node) {
 void StmtDumper::VisitObjCProtocolExpr(ObjCProtocolExpr *Node) {
   DumpExpr(Node);
 
-  OS << ' ' << Node->getProtocol();
+  OS << ' ' <<* Node->getProtocol();
 }
 
 void StmtDumper::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *Node) {
@@ -656,7 +674,7 @@ void StmtDumper::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *Node) {
       OS << "(null)";
     OS << "\"";
   } else {
-    OS << " Kind=PropertyRef Property=\"" << Node->getExplicitProperty() << '"';
+    OS << " Kind=PropertyRef Property=\"" << *Node->getExplicitProperty() <<'"';
   }
 
   if (Node->isSuperReceiver())
@@ -674,7 +692,7 @@ void Stmt::dump(SourceManager &SM) const {
   dump(llvm::errs(), SM);
 }
 
-void Stmt::dump(llvm::raw_ostream &OS, SourceManager &SM) const {
+void Stmt::dump(raw_ostream &OS, SourceManager &SM) const {
   StmtDumper P(&SM, OS, 4);
   P.DumpSubTree(const_cast<Stmt*>(this));
   OS << "\n";

@@ -28,7 +28,6 @@
 using namespace clang;
 using namespace arcmt;
 using namespace trans;
-using llvm::StringRef;
 
 namespace {
 
@@ -40,6 +39,9 @@ public:
   ARCAssignChecker(MigrationPass &pass) : Pass(pass) { }
 
   bool VisitBinaryOperator(BinaryOperator *Exp) {
+    if (Exp->getType()->isDependentType())
+      return true;
+
     Expr *E = Exp->getLHS();
     SourceLocation OrigLoc = E->getExprLoc();
     SourceLocation Loc = OrigLoc;

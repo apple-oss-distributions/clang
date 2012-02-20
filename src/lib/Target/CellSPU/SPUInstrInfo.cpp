@@ -11,19 +11,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "SPURegisterNames.h"
 #include "SPUInstrInfo.h"
 #include "SPUInstrBuilder.h"
 #include "SPUTargetMachine.h"
 #include "SPUHazardRecognizers.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/MC/MCContext.h"
 
 #define GET_INSTRINFO_CTOR
-#define GET_INSTRINFO_MC_DESC
 #include "SPUGenInstrInfo.inc"
 
 using namespace llvm;
@@ -291,6 +290,8 @@ static void removeHBR( MachineBasicBlock &MBB) {
     if (I->getOpcode() == SPU::HBRA ||
         I->getOpcode() == SPU::HBR_LABEL){
       I=MBB.erase(I);
+      if (I == MBB.end())
+        break;
     }
   }
 }

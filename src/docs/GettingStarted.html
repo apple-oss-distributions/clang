@@ -516,9 +516,8 @@ href="GCCFEBuildInstrs.html">try to compile it</a> on your platform.</p>
 
 <p>LLVM is very demanding of the host C++ compiler, and as such tends to expose
 bugs in the compiler.  In particular, several versions of GCC crash when trying
-to compile LLVM.  We routinely use GCC 3.3.3, 3.4.0, and Apple 4.0.1 
-successfully with them (however, see important notes below).  Other versions 
-of GCC will probably work as well.  GCC versions listed
+to compile LLVM.  We routinely use GCC 4.2 (and higher) or Clang.  
+Other versions of GCC will probably work as well.  GCC versions listed
 here are known to not work.  If you are using one of these versions, please try
 to upgrade your GCC to something more recent.  If you run into a problem with a
 version of GCC not listed here, please <a href="mailto:llvmdev@cs.uiuc.edu">let
@@ -802,9 +801,151 @@ instructions</a> to successfully get and build the LLVM GCC front-end.</p>
   now mirrors reflect only <tt>trunk</tt> for each project. You can do the
   read-only GIT clone of LLVM via:</p>
 
-<pre>
-% git clone http://llvm.org/git/llvm.git
+<pre class="doc_code">
+git clone http://llvm.org/git/llvm.git
 </pre>
+
+<p>If you want to check out clang too, run:</p>
+
+<pre class="doc_code">
+git clone http://llvm.org/git/llvm.git
+cd llvm/tools
+git clone http://llvm.org/git/clang.git
+</pre>
+
+<p>
+Since the upstream repository is in Subversion, you should use
+<tt>&quot;git pull --rebase&quot;</tt>
+instead of <tt>&quot;git pull&quot;</tt> to avoid generating a non-linear
+history in your clone.
+To configure <tt>&quot;git pull&quot;</tt> to pass <tt>--rebase</tt> by default
+on the master branch, run the following command:
+</p>
+
+<pre class="doc_code">
+git config branch.master.rebase true
+</pre>
+
+<h4>Sending patches with Git</h4>
+<div>
+<p>
+Please read <a href="DeveloperPolicy.html#patches">Developer Policy</a>, too.
+</p>
+
+<p>
+Assume <tt>master</tt> points the upstream and <tt>mybranch</tt> points your
+working branch, and <tt>mybranch</tt> is rebased onto <tt>master</tt>.
+At first you may check sanity of whitespaces:
+</p>
+
+<pre class="doc_code">
+git diff --check master..mybranch
+</pre>
+
+<p>
+The easiest way to generate a patch is as below:
+</p>
+
+<pre class="doc_code">
+git diff master..mybranch &gt; /path/to/mybranch.diff
+</pre>
+
+<p>
+It is a little different from svn-generated diff. git-diff-generated diff has
+prefixes like <tt>a/</tt> and <tt>b/</tt>. Don't worry, most developers might
+know it could be accepted with <tt>patch -p1 -N</tt>.
+</p>
+
+<p>
+But you may generate patchset with git-format-patch. It generates
+by-each-commit patchset. To generate patch files to attach to your article:
+</p>
+
+<pre class="doc_code">
+git format-patch --no-attach master..mybranch -o /path/to/your/patchset
+</pre>
+
+<p>
+If you would like to send patches directly, you may use git-send-email or
+git-imap-send. Here is an example to generate the patchset in Gmail's [Drafts].
+</p>
+
+<pre class="doc_code">
+git format-patch --attach master..mybranch --stdout | git imap-send
+</pre>
+
+<p>
+Then, your .git/config should have [imap] sections.
+</p>
+
+<pre class="doc_code">
+[imap]
+        host = imaps://imap.gmail.com
+        user = <em>your.gmail.account</em>@gmail.com
+        pass = <em>himitsu!</em>
+        port = 993
+        sslverify = false
+; in English
+        folder = "[Gmail]/Drafts"
+; example for Japanese, "Modified UTF-7" encoded.
+        folder = "[Gmail]/&amp;Tgtm+DBN-"
+; example for Traditional Chinese
+        folder = "[Gmail]/&amp;g0l6Pw-"
+</pre>
+
+</div>
+
+<h4>For developers to work with git-svn</h4>
+<div>
+
+<p>To set up clone from which you can submit code using
+   <tt>git-svn</tt>, run:</p>
+
+<pre class="doc_code">
+git clone http://llvm.org/git/llvm.git
+cd llvm
+git svn init https://llvm.org/svn/llvm-project/llvm/trunk --username=&lt;username>
+git config svn-remote.svn.fetch :refs/remotes/origin/master
+git svn rebase -l  # -l avoids fetching ahead of the git mirror.
+
+# If you have clang too:
+cd tools
+git clone http://llvm.org/git/clang.git
+cd clang
+git svn init https://llvm.org/svn/llvm-project/cfe/trunk --username=&lt;username>
+git config svn-remote.svn.fetch :refs/remotes/origin/master
+git svn rebase -l
+</pre>
+
+<p>To update this clone without generating git-svn tags that conflict
+with the upstream git repo, run:</p>
+
+<pre class="doc_code">
+git fetch && (cd tools/clang && git fetch)  # Get matching revisions of both trees.
+git checkout master
+git svn rebase -l
+(cd tools/clang &&
+ git checkout master &&
+ git svn rebase -l)
+</pre>
+
+<p>This leaves your working directories on their master branches, so
+you'll need to <tt>checkout</tt> each working branch individually and
+<tt>rebase</tt> it on top of its parent branch.  (Note: This script is
+intended for relative newbies to git.  If you have more experience,
+you can likely improve on it.)</p>
+
+<p>The git-svn metadata can get out of sync after you mess around with
+branches and <code>dcommit</code>. When that happens, <code>git svn
+dcommit</code> stops working, complaining about files with uncommitted
+changes. The fix is to rebuild the metadata:</p>
+
+<pre class="doc_code">
+rm -rf .git/svn
+git svn rebase -l
+</pre>
+
+</div>
 
 </div>
 
@@ -1362,13 +1503,9 @@ different <a href="#tools">tools</a>.</p>
   at runtime in both interpreted and JIT compiled fashions.</dd>
 
   <dt><tt><b>llvm/lib/Support/</b></tt></dt>
-  <dd> This directory contains the source code that corresponds to the header 
-  files located in <tt>llvm/include/Support/</tt>.</dd>
-
-  <!--FIXME: obsoleted -->
-  <dt><tt><b>llvm/lib/System/</b></tt></dt>
-  <dd>This directory contains the operating system abstraction layer that
-  shields LLVM from platform-specific coding.</dd>
+  <dd> This directory contains the source code that corresponds to the header
+  files located in <tt>llvm/include/ADT/</tt>
+  and <tt>llvm/include/Support/</tt>.</dd>
 </dl>
 
 </div>
@@ -1455,16 +1592,6 @@ information is in the <a href="CommandGuide/index.html">Command Guide</a>.</p>
   href="HowToSubmitABug.html">HowToSubmitABug.html</a> for more information
   on using <tt>bugpoint</tt>.</dd>
 
-  <dt><tt><b>llvmc</b></tt></dt>
-  <dd>The LLVM Compiler Driver. This program can
-  be configured to utilize both LLVM and non-LLVM compilation tools to enable
-  pre-processing, translation, optimization, assembly, and linking of programs
-  all from one command line. <tt>llvmc</tt> also takes care of processing the
-  dependent libraries found in bitcode. This reduces the need to get the
-  traditional <tt>-l&lt;name&gt;</tt> options right on the command line. Please
-  note that this tool, while functional, is still experimental and not feature
-  complete.</dd>
-
   <dt><tt><b>llvm-ar</b></tt></dt>
   <dd>The archiver produces an archive containing
   the given LLVM bitcode files, optionally with an index for faster
@@ -1480,9 +1607,9 @@ information is in the <a href="CommandGuide/index.html">Command Guide</a>.</p>
 
   <dt><tt><b>llvm-ld</b></tt></dt>
   <dd><tt>llvm-ld</tt> is a general purpose and extensible linker for LLVM. 
-  This is the linker invoked by <tt>llvmc</tt>. It performs standard link time
-  optimizations and allows optimization modules to be loaded and run so that 
-  language specific optimizations can be applied at link time.</dd>
+  It performs standard link time optimizations and allows optimization
+  modules to be loaded and run so that language specific optimizations can 
+  be applied at link time.</dd>
 
   <dt><tt><b>llvm-link</b></tt></dt>
   <dd><tt>llvm-link</tt>, not surprisingly, links multiple LLVM modules into 

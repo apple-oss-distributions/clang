@@ -173,6 +173,11 @@ static void deleteIfDeadInstruction(Value *V, ScalarEvolution &SE) {
 bool LoopIdiomRecognize::runOnLoop(Loop *L, LPPassManager &LPM) {
   CurLoop = L;
 
+  // Disable loop idiom recognition if the function's name is a common idiom. 
+  StringRef Name = L->getHeader()->getParent()->getName();
+  if (Name == "memset" || Name == "memcpy")
+    return false;
+
   // The trip count of the loop must be analyzable.
   SE = &getAnalysis<ScalarEvolution>();
   if (!SE->hasLoopInvariantBackedgeTakenCount(L))
@@ -262,7 +267,7 @@ bool LoopIdiomRecognize::runOnLoopBlock(BasicBlock *BB, const SCEV *BECount,
 
 /// processLoopStore - See if this store can be promoted to a memset or memcpy.
 bool LoopIdiomRecognize::processLoopStore(StoreInst *SI, const SCEV *BECount) {
-  if (SI->isVolatile()) return false;
+  if (!SI->isSimple()) return false;
 
   Value *StoredVal = SI->getValueOperand();
   Value *StorePtr = SI->getPointerOperand();
@@ -309,7 +314,7 @@ bool LoopIdiomRecognize::processLoopStore(StoreInst *SI, const SCEV *BECount) {
     const SCEVAddRecExpr *LoadEv =
       dyn_cast<SCEVAddRecExpr>(SE->getSCEV(LI->getOperand(0)));
     if (LoadEv && LoadEv->getLoop() == CurLoop && LoadEv->isAffine() &&
-        StoreEv->getOperand(1) == LoadEv->getOperand(1) && !LI->isVolatile())
+        StoreEv->getOperand(1) == LoadEv->getOperand(1) && LI->isSimple())
       if (processLoopStoreOfLoopLoad(SI, StoreSize, StoreEv, LoadEv, BECount))
         return true;
   }
@@ -458,7 +463,7 @@ processLoopStridedStore(Value *DestPtr, unsigned StoreSize,
     SplatValue = 0;
   } else {
     // Otherwise, this isn't an idiom we can transform.  For example, we can't
-    // do anything with a 3-byte store, for example.
+    // do anything with a 3-byte store.
     return false;
   }
 
@@ -493,7 +498,7 @@ processLoopStridedStore(Value *DestPtr, unsigned StoreSize,
 
   // The # stored bytes is (BECount+1)*Size.  Expand the trip count out to
   // pointer size if it isn't already.
-  const Type *IntPtr = TD->getIntPtrType(DestPtr->getContext());
+  Type *IntPtr = TD->getIntPtrType(DestPtr->getContext());
   BECount = SE->getTruncateOrZeroExtend(BECount, IntPtr);
 
   const SCEV *NumBytesS = SE->getAddExpr(BECount, SE->getConstant(IntPtr, 1),
@@ -599,7 +604,7 @@ processLoopStoreOfLoopLoad(StoreInst *SI, unsigned StoreSize,
 
   // The # stored bytes is (BECount+1)*Size.  Expand the trip count out to
   // pointer size if it isn't already.
-  const Type *IntPtr = TD->getIntPtrType(SI->getContext());
+  Type *IntPtr = TD->getIntPtrType(SI->getContext());
   BECount = SE->getTruncateOrZeroExtend(BECount, IntPtr);
 
   const SCEV *NumBytesS = SE->getAddExpr(BECount, SE->getConstant(IntPtr, 1),

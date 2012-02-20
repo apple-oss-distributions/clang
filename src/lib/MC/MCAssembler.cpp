@@ -18,6 +18,7 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/MC/MCDwarf.h"
+#include "llvm/MC/MCAsmBackend.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
@@ -25,8 +26,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetRegistry.h"
-#include "llvm/Target/TargetAsmBackend.h"
+#include "llvm/Support/TargetRegistry.h"
 
 using namespace llvm;
 
@@ -118,7 +118,7 @@ uint64_t MCAsmLayout::getSymbolOffset(const MCSymbolData *SD) const {
     if (Target.getSymB() && Target.getSymB()->getSymbol().isUndefined())
       report_fatal_error("unable to evaluate offset to undefined symbol '" +
                          Target.getSymB()->getSymbol().getName() + "'");
-      
+
     uint64_t Offset = Target.getConstant();
     if (Target.getSymA())
       Offset += getSymbolOffset(&Assembler.getSymbolData(
@@ -194,7 +194,7 @@ MCSymbolData::MCSymbolData(const MCSymbol &_Symbol, MCFragment *_Fragment,
 
 /* *** */
 
-MCAssembler::MCAssembler(MCContext &Context_, TargetAsmBackend &Backend_,
+MCAssembler::MCAssembler(MCContext &Context_, MCAsmBackend &Backend_,
                          MCCodeEmitter &Emitter_, MCObjectWriter &Writer_,
                          raw_ostream &OS_)
   : Context(Context_), Backend(Backend_), Emitter(Emitter_), Writer(Writer_),
@@ -295,7 +295,7 @@ bool MCAssembler::EvaluateFixup(const MCAsmLayout &Layout,
 
   if (IsPCRel) {
     uint32_t Offset = Layout.getFragmentOffset(DF) + Fixup.getOffset();
-    
+
     // A number of ARM fixups in Thumb mode require that the effective PC
     // address be determined as the 32-bit aligned version of the actual offset.
     if (ShouldAlignPC) Offset &= ~0x3;

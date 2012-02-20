@@ -157,6 +157,7 @@ void MipsFrameLowering::emitPrologue(MachineFunction &MF) const {
     (MFI->getObjectOffset(MipsFI->getGPFI()) + RegSize) :
     MipsFI->getMaxCallFrameSize();
   unsigned StackSize = AlignOffset(LocalVarAreaOffset, StackAlign) +
+    AlignOffset(MipsFI->getRegSaveAreaSize(), StackAlign) +
     AlignOffset(MFI->getStackSize(), StackAlign);
 
    // Update stack size
@@ -254,9 +255,15 @@ void MipsFrameLowering::emitPrologue(MachineFunction &MF) const {
   }
 
   // Restore GP from the saved stack location
-  if (MipsFI->needGPSaveRestore())
-    BuildMI(MBB, MBBI, dl, TII.get(Mips::CPRESTORE))
-      .addImm(MFI->getObjectOffset(MipsFI->getGPFI()));
+  if (MipsFI->needGPSaveRestore()) {
+    unsigned Offset = MFI->getObjectOffset(MipsFI->getGPFI());
+    BuildMI(MBB, MBBI, dl, TII.get(Mips::CPRESTORE)).addImm(Offset);
+
+    if (Offset >= 0x8000) {
+      BuildMI(MBB, llvm::prior(MBBI), dl, TII.get(Mips::MACRO));
+      BuildMI(MBB, MBBI, dl, TII.get(Mips::NOMACRO));
+    }
+  }
 }
 
 void MipsFrameLowering::emitEpilogue(MachineFunction &MF,
@@ -298,13 +305,6 @@ void MipsFrameLowering::emitEpilogue(MachineFunction &MF,
     if (ATUsed)
       BuildMI(MBB, MBBI, dl, TII.get(Mips::ATMACRO));
   }
-}
-
-void
-MipsFrameLowering::getInitialFrameState(std::vector<MachineMove> &Moves) const {
-  MachineLocation Dst(MachineLocation::VirtualFP);
-  MachineLocation Src(Mips::SP, 0);
-  Moves.push_back(MachineMove(0, Dst, Src));
 }
 
 void MipsFrameLowering::

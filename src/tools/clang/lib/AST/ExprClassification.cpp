@@ -162,9 +162,13 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::SubstNonTypeTemplateParmPackExprClass:
   case Expr::AsTypeExprClass:
   case Expr::ObjCIndirectCopyRestoreExprClass:
+  case Expr::AtomicExprClass:
     return Cl::CL_PRValue;
 
     // Next come the complicated cases.
+  case Expr::SubstNonTypeTemplateParmExprClass:
+    return ClassifyInternal(Ctx,
+                 cast<SubstNonTypeTemplateParmExpr>(E)->getReplacement());
 
     // C++ [expr.sub]p1: The result is an lvalue of type "T".
     // However, subscripting vector types is more like member access.
@@ -227,6 +231,11 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::OpaqueValueExprClass:
     return ClassifyExprValueKind(Lang, E,
                                  cast<OpaqueValueExpr>(E)->getValueKind());
+
+    // Pseudo-object expressions can produce l-values with reference magic.
+  case Expr::PseudoObjectExprClass:
+    return ClassifyExprValueKind(Lang, E,
+                                 cast<PseudoObjectExpr>(E)->getValueKind());
 
     // Implicit casts are lvalues if they're lvalue casts. Other than that, we
     // only specifically record class temporaries.
@@ -390,7 +399,7 @@ static Cl::Kinds ClassifyUnnamed(ASTContext &Ctx, QualType T) {
 
   // C++ [expr.call]p10: A function call is an lvalue if the result type is an
   //   lvalue reference type or an rvalue reference to function type, an xvalue
-  //   if the result type is an rvalue refernence to object type, and a prvalue
+  //   if the result type is an rvalue reference to object type, and a prvalue
   //   otherwise.
   if (T->isLValueReferenceType())
     return Cl::CL_LValue;
@@ -476,14 +485,16 @@ static Cl::Kinds ClassifyBinaryOp(ASTContext &Ctx, const BinaryOperator *E) {
   //   is a pointer to a data member is of the same value category as its first
   //   operand.
   if (E->getOpcode() == BO_PtrMemD)
-    return (E->getType()->isFunctionType() || E->getType() == Ctx.BoundMemberTy)
+    return (E->getType()->isFunctionType() ||
+            E->hasPlaceholderType(BuiltinType::BoundMember))
              ? Cl::CL_MemberFunction 
              : ClassifyInternal(Ctx, E->getLHS());
 
   // C++ [expr.mptr.oper]p6: The result of an ->* expression is an lvalue if its
   //   second operand is a pointer to data member and a prvalue otherwise.
   if (E->getOpcode() == BO_PtrMemI)
-    return (E->getType()->isFunctionType() || E->getType() == Ctx.BoundMemberTy)
+    return (E->getType()->isFunctionType() ||
+            E->hasPlaceholderType(BuiltinType::BoundMember))
              ? Cl::CL_MemberFunction 
              : Cl::CL_LValue;
 

@@ -17,6 +17,7 @@
 #include "clang/Lex/DirectoryLookup.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/Allocator.h"
 #include <vector>
 
 namespace clang {
@@ -80,7 +81,7 @@ struct HeaderFileInfo {
 
   /// \brief If this header came from a framework include, this is the name
   /// of the framework.
-  llvm::StringRef Framework;
+  StringRef Framework;
   
   HeaderFileInfo()
     : isImport(false), isPragmaOnce(false), DirInfo(SrcMgr::C_User), 
@@ -128,6 +129,12 @@ class HeaderSearch {
   unsigned SystemDirIdx;
   bool NoCurDirSearch;
 
+  /// \brief The path to the module cache.
+  std::string ModuleCachePath;
+  
+  /// \brief The name of the module we're building.
+  std::string BuildingModule;
+  
   /// FileInfo - This contains all of the preprocessor-specific data about files
   /// that are included.  The vector is indexed by the FileEntry's UID.
   ///
@@ -139,12 +146,14 @@ class HeaderSearch {
   /// and this value doesn't match the current query, the cache has to be
   /// ignored.  The second value is the entry in SearchDirs that satisfied the
   /// query.
-  llvm::StringMap<std::pair<unsigned, unsigned> > LookupFileCache;
+  llvm::StringMap<std::pair<unsigned, unsigned>, llvm::BumpPtrAllocator>
+    LookupFileCache;
 
 
   /// FrameworkMap - This is a collection mapping a framework or subframework
   /// name like "Carbon" to the Carbon.framework directory.
-  llvm::StringMap<const DirectoryEntry *> FrameworkMap;
+  llvm::StringMap<const DirectoryEntry *, llvm::BumpPtrAllocator>
+    FrameworkMap;
 
   /// HeaderMaps - This is a mapping from FileEntry -> HeaderMap, uniquing
   /// headermaps.  This vector owns the headermap.
@@ -190,6 +199,13 @@ public:
     //LookupFileCache.clear();
   }
 
+  /// \brief Set the path to the module cache and the name of the module
+  /// we're building
+  void configureModules(StringRef CachePath, StringRef BuildingModule) {
+    ModuleCachePath = CachePath;
+    this->BuildingModule = BuildingModule;
+  }
+  
   /// ClearFileInfo - Forget everything we know about headers so far.
   void ClearFileInfo() {
     FileInfo.clear();
@@ -229,12 +245,17 @@ public:
   /// \param RelativePath If non-null, will be set to the path relative to
   /// SearchPath at which the file was found. This only differs from the
   /// Filename for framework includes.
-  const FileEntry *LookupFile(llvm::StringRef Filename, bool isAngled,
+  ///
+  /// \param SuggestedModule If non-null, and the file found is semantically
+  /// part of a known module, this will be set to the name of the module that
+  /// could be imported instead of preprocessing/parsing the file found.
+  const FileEntry *LookupFile(StringRef Filename, bool isAngled,
                               const DirectoryLookup *FromDir,
                               const DirectoryLookup *&CurDir,
                               const FileEntry *CurFileEnt,
-                              llvm::SmallVectorImpl<char> *SearchPath,
-                              llvm::SmallVectorImpl<char> *RelativePath);
+                              SmallVectorImpl<char> *SearchPath,
+                              SmallVectorImpl<char> *RelativePath,
+                              StringRef *SuggestedModule);
 
   /// LookupSubframeworkHeader - Look up a subframework for the specified
   /// #include file.  For example, if #include'ing <HIToolbox/HIToolbox.h> from
@@ -242,15 +263,15 @@ public:
   /// is a subframework within Carbon.framework.  If so, return the FileEntry
   /// for the designated file, otherwise return null.
   const FileEntry *LookupSubframeworkHeader(
-      llvm::StringRef Filename,
+      StringRef Filename,
       const FileEntry *RelativeFileEnt,
-      llvm::SmallVectorImpl<char> *SearchPath,
-      llvm::SmallVectorImpl<char> *RelativePath);
+      SmallVectorImpl<char> *SearchPath,
+      SmallVectorImpl<char> *RelativePath);
 
   /// LookupFrameworkCache - Look up the specified framework name in our
   /// framework cache, returning the DirectoryEntry it is in if we know,
   /// otherwise, return null.
-  const DirectoryEntry *&LookupFrameworkCache(llvm::StringRef FWName) {
+  const DirectoryEntry *&LookupFrameworkCache(StringRef FWName) {
     return FrameworkMap.GetOrCreateValue(FWName).getValue();
   }
 
@@ -305,15 +326,35 @@ public:
   /// FileEntry, uniquing them through the the 'HeaderMaps' datastructure.
   const HeaderMap *CreateHeaderMap(const FileEntry *FE);
 
+  /// \brief Search in the module cache path for a module with the given
+  /// name.
+  ///
+  /// \param If non-NULL, will be set to the module file name we expected to
+  /// find (regardless of whether it was actually found or not).
+  ///
+  /// \param UmbrellaHeader If non-NULL, and no module was found in the module
+  /// cache, this routine will search in the framework paths to determine
+  /// whether a module can be built from an umbrella header. If so, the pointee
+  /// will be set to the path of the umbrella header.
+  ///
+  /// \returns A file describing the named module, if available, or NULL to
+  /// indicate that the module could not be found.
+  const FileEntry *lookupModule(StringRef ModuleName,
+                                std::string *ModuleFileName = 0,
+                                std::string *UmbrellaHeader = 0);
+  
   void IncrementFrameworkLookupCount() { ++NumFrameworkLookups; }
-
-  typedef std::vector<HeaderFileInfo>::const_iterator header_file_iterator;
-  header_file_iterator header_file_begin() const { return FileInfo.begin(); }
-  header_file_iterator header_file_end() const { return FileInfo.end(); }
+  
   unsigned header_file_size() const { return FileInfo.size(); }
 
   // Used by ASTReader.
   void setHeaderFileInfoForUID(HeaderFileInfo HFI, unsigned UID);
+
+  /// getFileInfo - Return the HeaderFileInfo structure for the specified
+  /// FileEntry.
+  const HeaderFileInfo &getFileInfo(const FileEntry *FE) const {
+    return const_cast<HeaderSearch*>(this)->getFileInfo(FE);
+  }
 
   // Used by external tools
   typedef std::vector<DirectoryLookup>::const_iterator search_dir_iterator;
@@ -341,9 +382,12 @@ public:
   search_dir_iterator system_dir_end() const { return SearchDirs.end(); }
 
   /// \brief Retrieve a uniqued framework name.
-  llvm::StringRef getUniqueFrameworkName(llvm::StringRef Framework);
+  StringRef getUniqueFrameworkName(StringRef Framework);
   
   void PrintStats();
+  
+  size_t getTotalMemory() const;
+
 private:
 
   /// getFileInfo - Return the HeaderFileInfo structure for the specified

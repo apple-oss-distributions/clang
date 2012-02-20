@@ -32,10 +32,19 @@ add_llvm_library(gtest
   googletest/gtest-death-test.cc
   googletest/gtest-filepath.cc
   googletest/gtest-port.cc
+  googletest/gtest-printers.cc
   googletest/gtest-test-part.cc
   googletest/gtest-typed-test.cc
   )
 
 add_llvm_library(gtest_main
   UnitTestMain/TestMain.cpp
+  )
+
+add_llvm_library_dependencies(gtest
+  LLVMSupport
+  )
+
+add_llvm_library_dependencies(gtest_main
+  gtest
   )

@@ -54,7 +54,7 @@ static int64_t GetOffsetFromIndex(const GetElementPtrInst *GEP, unsigned Idx,
     if (OpC->isZero()) continue;  // No offset.
 
     // Handle struct indices, which add their field offset to the pointer.
-    if (const StructType *STy = dyn_cast<StructType>(*GTI)) {
+    if (StructType *STy = dyn_cast<StructType>(*GTI)) {
       Offset += TD.getStructLayout(STy)->getElementOffset(OpC->getZExtValue());
       continue;
     }
@@ -147,8 +147,8 @@ struct MemsetRange {
 } // end anon namespace
 
 bool MemsetRange::isProfitableToUseMemset(const TargetData &TD) const {
-  // If we found more than 8 stores to merge or 64 bytes, use memset.
-  if (TheStores.size() >= 8 || End-Start >= 64) return true;
+  // If we found more than 4 stores to merge or 16 bytes, use memset.
+  if (TheStores.size() >= 4 || End-Start >= 16) return true;
 
   // If there is nothing to merge, don't do anything.
   if (TheStores.size() < 2) return false;
@@ -384,7 +384,7 @@ Instruction *MemCpyOpt::tryMergingIntoMemset(Instruction *StartInst,
     
     if (StoreInst *NextStore = dyn_cast<StoreInst>(BI)) {
       // If this is a store, see if we can merge it in.
-      if (NextStore->isVolatile()) break;
+      if (!NextStore->isSimple()) break;
     
       // Check to see if this stored value is of the same byte-splattable value.
       if (ByteVal != isBytewiseValue(NextStore->getOperand(0)))
@@ -448,7 +448,7 @@ Instruction *MemCpyOpt::tryMergingIntoMemset(Instruction *StartInst,
     // Determine alignment
     unsigned Alignment = Range.Alignment;
     if (Alignment == 0) {
-      const Type *EltType = 
+      Type *EltType = 
         cast<PointerType>(StartPtr->getType())->getElementType();
       Alignment = TD->getABITypeAlignment(EltType);
     }
@@ -479,7 +479,7 @@ Instruction *MemCpyOpt::tryMergingIntoMemset(Instruction *StartInst,
 
 
 bool MemCpyOpt::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
-  if (SI->isVolatile()) return false;
+  if (!SI->isSimple()) return false;
   
   if (TD == 0) return false;
 
@@ -487,7 +487,7 @@ bool MemCpyOpt::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
   // happen to be using a load-store pair to implement it, rather than
   // a memcpy.
   if (LoadInst *LI = dyn_cast<LoadInst>(SI->getOperand(0))) {
-    if (!LI->isVolatile() && LI->hasOneUse() &&
+    if (LI->isSimple() && LI->hasOneUse() &&
         LI->getParent() == SI->getParent()) {
       MemDepResult ldep = MD->getDependency(LI);
       CallInst *C = 0;
@@ -616,7 +616,7 @@ bool MemCpyOpt::performCallSlotOptzn(Instruction *cpy,
     if (!A->hasStructRetAttr())
       return false;
 
-    const Type *StructTy = cast<PointerType>(A->getType())->getElementType();
+    Type *StructTy = cast<PointerType>(A->getType())->getElementType();
     uint64_t destSize = TD->getTypeAllocSize(StructTy);
 
     if (destSize < srcSize)
@@ -806,21 +806,26 @@ bool MemCpyOpt::processMemCpy(MemCpyInst *M) {
   //   a) memcpy-memcpy xform which exposes redundance for DSE.
   //   b) call-memcpy xform for return slot optimization.
   MemDepResult DepInfo = MD->getDependency(M);
-  if (!DepInfo.isClobber())
-    return false;
-  
-  if (MemCpyInst *MDep = dyn_cast<MemCpyInst>(DepInfo.getInst()))
-    return processMemCpyMemCpyDependence(M, MDep, CopySize->getZExtValue());
-    
-  if (CallInst *C = dyn_cast<CallInst>(DepInfo.getInst())) {
-    if (performCallSlotOptzn(M, M->getDest(), M->getSource(),
-                             CopySize->getZExtValue(), C)) {
-      MD->removeInstruction(M);
-      M->eraseFromParent();
-      return true;
+  if (DepInfo.isClobber()) {
+    if (CallInst *C = dyn_cast<CallInst>(DepInfo.getInst())) {
+      if (performCallSlotOptzn(M, M->getDest(), M->getSource(),
+                               CopySize->getZExtValue(), C)) {
+        MD->removeInstruction(M);
+        M->eraseFromParent();
+        return true;
+      }
     }
   }
   
+  AliasAnalysis &AA = getAnalysis<AliasAnalysis>();
+  AliasAnalysis::Location SrcLoc = AA.getLocationForSource(M);
+  MemDepResult SrcDepInfo = MD->getPointerDependencyFrom(SrcLoc, true,
+                                                         M, M->getParent());
+  if (SrcDepInfo.isClobber()) {
+    if (MemCpyInst *MDep = dyn_cast<MemCpyInst>(SrcDepInfo.getInst()))
+      return processMemCpyMemCpyDependence(M, MDep, CopySize->getZExtValue());
+  }
+
   return false;
 }
 
@@ -840,11 +845,11 @@ bool MemCpyOpt::processMemMove(MemMoveInst *M) {
   
   // If not, then we know we can transform this.
   Module *Mod = M->getParent()->getParent()->getParent();
-  const Type *ArgTys[3] = { M->getRawDest()->getType(),
-                            M->getRawSource()->getType(),
-                            M->getLength()->getType() };
+  Type *ArgTys[3] = { M->getRawDest()->getType(),
+                      M->getRawSource()->getType(),
+                      M->getLength()->getType() };
   M->setCalledFunction(Intrinsic::getDeclaration(Mod, Intrinsic::memcpy,
-                                                 ArgTys, 3));
+                                                 ArgTys));
 
   // MemDep may have over conservative information about this instruction, just
   // conservatively flush it from the cache.
@@ -860,7 +865,7 @@ bool MemCpyOpt::processByValArgument(CallSite CS, unsigned ArgNo) {
 
   // Find out what feeds this byval argument.
   Value *ByValArg = CS.getArgument(ArgNo);
-  const Type *ByValTy =cast<PointerType>(ByValArg->getType())->getElementType();
+  Type *ByValTy = cast<PointerType>(ByValArg->getType())->getElementType();
   uint64_t ByValSize = TD->getTypeAllocSize(ByValTy);
   MemDepResult DepInfo =
     MD->getPointerDependencyFrom(AliasAnalysis::Location(ByValArg, ByValSize),

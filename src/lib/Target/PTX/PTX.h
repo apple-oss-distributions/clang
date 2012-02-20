@@ -15,26 +15,15 @@
 #ifndef PTX_H
 #define PTX_H
 
+#include "MCTargetDesc/PTXBaseInfo.h"
 #include "llvm/Target/TargetMachine.h"
 
 namespace llvm {
+  class MachineInstr;
+  class MCInst;
+  class PTXAsmPrinter;
   class PTXTargetMachine;
   class FunctionPass;
-
-  namespace PTX {
-    enum StateSpace {
-      GLOBAL = 0, // default to global state space
-      CONSTANT = 1,
-      LOCAL = 2,
-      PARAMETER = 3,
-      SHARED = 4
-    };
-
-    enum Predicate {
-      PRED_NORMAL = 0,
-      PRED_NEGATE = 1
-    };
-  } // namespace PTX
 
   FunctionPass *createPTXISelDag(PTXTargetMachine &TM,
                                  CodeGenOpt::Level OptLevel);
@@ -42,16 +31,14 @@ namespace llvm {
   FunctionPass *createPTXMFInfoExtract(PTXTargetMachine &TM,
                                        CodeGenOpt::Level OptLevel);
 
-  extern Target ThePTX32Target;
-  extern Target ThePTX64Target;
+  FunctionPass *createPTXFPRoundingModePass(PTXTargetMachine &TM,
+                                            CodeGenOpt::Level OptLevel);
+
+  FunctionPass *createPTXRegisterAllocator();
+
+  void LowerPTXMachineInstrToMCInst(const MachineInstr *MI, MCInst &OutMI,
+                                    PTXAsmPrinter &AP);
+
 } // namespace llvm;
-
-// Defines symbolic names for PTX registers.
-#define GET_REGINFO_ENUM
-#include "PTXGenRegisterInfo.inc"
-
-// Defines symbolic names for the PTX instructions.
-#define GET_INSTRINFO_ENUM
-#include "PTXGenInstrInfo.inc"
 
 #endif // PTX_H

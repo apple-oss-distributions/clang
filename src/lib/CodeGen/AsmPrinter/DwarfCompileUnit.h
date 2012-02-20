@@ -29,7 +29,7 @@ class ConstantInt;
 class DbgVariable;
 
 //===----------------------------------------------------------------------===//
-/// CompileUnit - This dwarf writer support class manages information associate
+/// CompileUnit - This dwarf writer support class manages information associated
 /// with a source file.
 class CompileUnit {
   /// ID - File identifier for source.
@@ -56,16 +56,24 @@ class CompileUnit {
   /// descriptors to debug information entries using a DIEEntry proxy.
   DenseMap<const MDNode *, DIEEntry *> MDNodeToDIEEntryMap;
 
-  /// Globals - A map of globally visible named entities for this unit.
-  ///
-  StringMap<DIE*> Globals;
-
   /// GlobalTypes - A map of globally visible types for this unit.
   ///
   StringMap<DIE*> GlobalTypes;
 
+  /// AccelNames - A map of names for the name accelerator table.
+  ///
+  StringMap<std::vector<DIE*> > AccelNames;
+  StringMap<std::vector<DIE*> > AccelObjC;
+  StringMap<std::vector<DIE*> > AccelNamespace;
+  StringMap<std::vector<std::pair<DIE*, unsigned> > > AccelTypes;
+
   /// DIEBlocks - A list of all the DIEBlocks in use.
   std::vector<DIEBlock *> DIEBlocks;
+
+  /// ContainingTypeMap - This map is used to keep track of subprogram DIEs that
+  /// need DW_AT_containing_type attribute. This attribute points to a DIE that
+  /// corresponds to the MDNode mapped with the subprogram DIE.
+  DenseMap<DIE *, const MDNode *> ContainingTypeMap;
 
 public:
   CompileUnit(unsigned I, DIE *D, AsmPrinter *A, DwarfDebug *DW);
@@ -74,21 +82,49 @@ public:
   // Accessors.
   unsigned getID()                  const { return ID; }
   DIE* getCUDie()                   const { return CUDie.get(); }
-  const StringMap<DIE*> &getGlobals()     const { return Globals; }
   const StringMap<DIE*> &getGlobalTypes() const { return GlobalTypes; }
 
+  const StringMap<std::vector<DIE*> > &getAccelNames() const {
+    return AccelNames;
+  }
+  const StringMap<std::vector<DIE*> > &getAccelObjC() const {
+    return AccelObjC;
+  }
+  const StringMap<std::vector<DIE*> > &getAccelNamespace() const {
+    return AccelNamespace;
+  }
+  const StringMap<std::vector<std::pair<DIE*, unsigned > > >
+  &getAccelTypes() const {
+    return AccelTypes;
+  }
+  
   /// hasContent - Return true if this compile unit has something to write out.
   ///
   bool hasContent() const { return !CUDie->getChildren().empty(); }
-
-  /// addGlobal - Add a new global entity to the compile unit.
-  ///
-  void addGlobal(StringRef Name, DIE *Die) { Globals[Name] = Die; }
 
   /// addGlobalType - Add a new global type to the compile unit.
   ///
   void addGlobalType(DIType Ty);
 
+
+  /// addAccelName - Add a new name to the name accelerator table.
+  void addAccelName(StringRef Name, DIE *Die) {
+    std::vector<DIE*> &DIEs = AccelNames[Name];
+    DIEs.push_back(Die);
+  }
+  void addAccelObjC(StringRef Name, DIE *Die) {
+    std::vector<DIE*> &DIEs = AccelObjC[Name];
+    DIEs.push_back(Die);
+  }
+  void addAccelNamespace(StringRef Name, DIE *Die) {
+    std::vector<DIE*> &DIEs = AccelNamespace[Name];
+    DIEs.push_back(Die);
+  }
+  void addAccelType(StringRef Name, std::pair<DIE *, unsigned> Die) {
+    std::vector<std::pair<DIE*, unsigned > > &DIEs = AccelTypes[Name];
+    DIEs.push_back(Die);
+  }
+  
   /// getDIE - Returns the debug information entry map slot for the
   /// specified debug variable.
   DIE *getDIE(const MDNode *N) { return MDNodeToDieMap.lookup(N); }
@@ -145,8 +181,7 @@ public:
 
   /// addString - Add a string attribute data and value.
   ///
-  void addString(DIE *Die, unsigned Attribute, unsigned Form,
-                 const StringRef Str);
+  void addString(DIE *Die, unsigned Attribute, const StringRef Str);
 
   /// addLabel - Add a Dwarf label attribute data and value.
   ///
@@ -226,9 +261,12 @@ public:
   /// getOrCreateNameSpace - Create a DIE for DINameSpace.
   DIE *getOrCreateNameSpace(DINameSpace NS);
 
+  /// getOrCreateSubprogramDIE - Create new DIE using SP.
+  DIE *getOrCreateSubprogramDIE(DISubprogram SP);
+
   /// getOrCreateTypeDIE - Find existing DIE or create new DIE for the
   /// given DIType.
-  DIE *getOrCreateTypeDIE(DIType Ty);
+  DIE *getOrCreateTypeDIE(const MDNode *N);
 
   /// getOrCreateTemplateTypeParameterDIE - Find existing DIE or create new DIE 
   /// for the given DITemplateTypeParameter.
@@ -241,6 +279,9 @@ public:
   /// createDIEEntry - Creates a new DIEEntry to be a proxy for a debug
   /// information entry.
   DIEEntry *createDIEEntry(DIE *Entry);
+
+  /// createGlobalVariableDIE - create global variable DIE.
+  void createGlobalVariableDIE(const MDNode *N);
 
   void addPubTypes(DISubprogram SP);
 
@@ -265,6 +306,13 @@ public:
 
   /// constructEnumTypeDIE - Construct enum type DIE from DIEnumerator.
   DIE *constructEnumTypeDIE(DIEnumerator ETy);
+
+  /// constructContainingTypeDIEs - Construct DIEs for types that contain
+  /// vtables.
+  void constructContainingTypeDIEs();
+
+  /// constructVariableDIE - Construct a DIE for the given DbgVariable.
+  DIE *constructVariableDIE(DbgVariable *DV, bool isScopeAbstract);
 
   /// createMemberDIE - Create new member DIE.
   DIE *createMemberDIE(DIDerivedType DT);

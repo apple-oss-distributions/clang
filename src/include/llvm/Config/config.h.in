@@ -3,6 +3,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+/* Bug report URL. */
+#undef BUG_REPORT_URL
+
 /* Relative directory for resource files */
 #undef CLANG_RESOURCE_DIR
 
@@ -540,14 +543,17 @@
 /* Installation directory for data files */
 #undef LLVM_DATADIR
 
+/* Target triple LLVM will generate code for by default */
+#undef LLVM_DEFAULT_TARGET_TRIPLE
+
 /* Installation directory for documentation */
 #undef LLVM_DOCSDIR
 
 /* Installation directory for config files */
 #undef LLVM_ETCDIR
 
-/* Host triple we were built on */
-#undef LLVM_HOSTTRIPLE
+/* Has gcc/MSVC atomic intrinsics */
+#undef LLVM_HAS_ATOMICS
 
 /* Installation directory for include files */
 #undef LLVM_INCLUDEDIR
@@ -560,9 +566,6 @@
 
 /* Installation directory for man pages */
 #undef LLVM_MANDIR
-
-/* Build multithreading support into LLVM */
-#undef LLVM_MULTITHREADED
 
 /* LLVM architecture name for the native architecture, if available */
 #undef LLVM_NATIVE_ARCH
@@ -578,6 +581,9 @@
 
 /* LLVM name for the native TargetInfo init function, if available */
 #undef LLVM_NATIVE_TARGETINFO
+
+/* LLVM name for the native target MC init function, if available */
+#undef LLVM_NATIVE_TARGETMC
 
 /* Define if this is Unixish platform */
 #undef LLVM_ON_UNIX

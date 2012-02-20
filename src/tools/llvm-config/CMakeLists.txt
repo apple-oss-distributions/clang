@@ -48,6 +48,7 @@ set(LLVM_CXXFLAGS "@LLVM_CXXFLAGS@")
 set(LLVM_LDFLAGS "@LLVM_LDFLAGS@")
 set(LIBS "@LIBS@")
 set(LLVM_BUILDMODE "@LLVM_BUILDMODE@")
+set(LLVM_OBJ_SUFFIX "@LLVM_OBJ_SUFFIX@")
 
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/llvm-config.in.in
@@ -114,6 +115,7 @@ add_custom_command(OUTPUT ${LLVM_CONFIG}
   COMMAND echo s!@LLVM_LDFLAGS@!${CMAKE_SHARED_LINKER_FLAGS}! >> temp.sed
   COMMAND echo s!@LIBS@!${LLVM_SYSTEM_LIBS}! >> temp.sed
   COMMAND echo s!@LLVM_BUILDMODE@!${CMAKE_BUILD_TYPE}! >> temp.sed
+  COMMAND echo s!@LLVM_OBJ_SUFFIX@!! >> temp.sed
   COMMAND sed -f temp.sed < ${LLVM_CONFIG_IN} > ${LLVM_CONFIG}
   COMMAND ${CMAKE_COMMAND} -E remove -f temp.sed
   COMMAND cat ${FINAL_LIBDEPS} >> ${LLVM_CONFIG}
@@ -126,39 +128,11 @@ add_custom_command(OUTPUT ${LLVM_CONFIG}
 add_custom_target(llvm-config.target ALL
   DEPENDS ${LLVM_CONFIG})
 
-add_dependencies( llvm-config.target ${llvm_libs} )
-
-# Make sure that llvm-config builds before the llvm tools, so we have
-# LibDeps.txt and can use it for updating the hard-coded library
-# dependencies on cmake/modules/LLVMLibDeps.cmake when the tools'
-# build fail due to outdated dependencies:
-set(LLVM_COMMON_DEPENDS ${LLVM_COMMON_DEPENDS} llvm-config.target)
+# Ensure we build llvm-config after we build all of the libraries so that we
+# have their full dependencies.
+add_dependencies(llvm-config.target ${llvm_libs})
 
 install(FILES ${LLVM_CONFIG}
   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
   WORLD_READ WORLD_EXECUTE
   DESTINATION bin)
-
-
-# Regeneration of library dependencies.
-
-# See the comments at the end of cmake/modules/LLVM-Config.cmake for
-# notes and guidelines.
-
-set(LLVMLibDeps ${LLVM_MAIN_SRC_DIR}/cmake/modules/LLVMLibDeps.cmake)
-set(LLVMLibDeps_TMP ${CMAKE_CURRENT_BINARY_DIR}/LLVMLibDeps.cmake.tmp)
-
-add_custom_command(OUTPUT ${LLVMLibDeps_TMP}
-  COMMAND sed -e s'@\\.a@@g' -e s'@\\.so@@g' -e 's@libLLVM@LLVM@g' -e 's@: @ @' -e 's@\\\(.*\\\)@set\(MSVC_LIB_DEPS_\\1\)@' ${FINAL_LIBDEPS} > ${LLVMLibDeps_TMP}
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LLVMLibDeps_TMP} ${LLVMLibDeps}
-  DEPENDS ${FINAL_LIBDEPS}
-  COMMENT "Updating cmake library dependencies file ${LLVMLibDeps}"
-  )
-
-if( LLVM_TARGETS_TO_BUILD STREQUAL LLVM_ALL_TARGETS )
-  add_custom_target(llvmlibdeps.target ALL DEPENDS ${LLVMLibDeps_TMP})
-  add_dependencies(llvmlibdeps.target llvm-config.target)
-  set(LLVM_COMMON_DEPENDS ${LLVM_COMMON_DEPENDS} llvmlibdeps.target)
-endif()
-
-set(LLVM_COMMON_DEPENDS ${LLVM_COMMON_DEPENDS} PARENT_SCOPE)

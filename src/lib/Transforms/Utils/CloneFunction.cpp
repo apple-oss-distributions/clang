@@ -113,8 +113,23 @@ void llvm::CloneFunctionInto(Function *NewFunc, const Function *OldFunc,
 
     // Create a new basic block and copy instructions into it!
     BasicBlock *CBB = CloneBasicBlock(&BB, VMap, NameSuffix, NewFunc, CodeInfo);
-    VMap[&BB] = CBB;                       // Add basic block mapping.
 
+    // Add basic block mapping.
+    VMap[&BB] = CBB;
+
+    // It is only legal to clone a function if a block address within that
+    // function is never referenced outside of the function.  Given that, we
+    // want to map block addresses from the old function to block addresses in
+    // the clone. (This is different from the generic ValueMapper
+    // implementation, which generates an invalid blockaddress when
+    // cloning a function.)
+    if (BB.hasAddressTaken()) {
+      Constant *OldBBAddr = BlockAddress::get(const_cast<Function*>(OldFunc),
+                                              const_cast<BasicBlock*>(&BB));
+      VMap[OldBBAddr] = BlockAddress::get(NewFunc, CBB);                                         
+    }
+
+    // Note return instructions for the caller.
     if (ReturnInst *RI = dyn_cast<ReturnInst>(CBB->getTerminator()))
       Returns.push_back(RI);
   }
@@ -140,7 +155,7 @@ void llvm::CloneFunctionInto(Function *NewFunc, const Function *OldFunc,
 Function *llvm::CloneFunction(const Function *F, ValueToValueMapTy &VMap,
                               bool ModuleLevelChanges,
                               ClonedCodeInfo *CodeInfo) {
-  std::vector<const Type*> ArgTypes;
+  std::vector<Type*> ArgTypes;
 
   // The user might be deleting arguments to the function by specifying them in
   // the VMap.  If so, we need to not add the arguments to the arg ty vector
@@ -223,6 +238,22 @@ void PruningFunctionCloner::CloneBlock(const BasicBlock *BB,
   BasicBlock *NewBB;
   BBEntry = NewBB = BasicBlock::Create(BB->getContext());
   if (BB->hasName()) NewBB->setName(BB->getName()+NameSuffix);
+
+  // It is only legal to clone a function if a block address within that
+  // function is never referenced outside of the function.  Given that, we
+  // want to map block addresses from the old function to block addresses in
+  // the clone. (This is different from the generic ValueMapper
+  // implementation, which generates an invalid blockaddress when
+  // cloning a function.)
+  //
+  // Note that we don't need to fix the mapping for unreachable blocks;
+  // the default mapping there is safe.
+  if (BB->hasAddressTaken()) {
+    Constant *OldBBAddr = BlockAddress::get(const_cast<Function*>(OldFunc),
+                                            const_cast<BasicBlock*>(BB));
+    VMap[OldBBAddr] = BlockAddress::get(NewFunc, NewBB);
+  }
+    
 
   bool hasCalls = false, hasDynamicAllocas = false, hasStaticAllocas = false;
   
@@ -331,27 +362,10 @@ ConstantFoldMappedInstruction(const Instruction *I) {
                                            TD);
 
   if (const LoadInst *LI = dyn_cast<LoadInst>(I))
-    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Ops[0]))
-      if (!LI->isVolatile() && CE->getOpcode() == Instruction::GetElementPtr)
-        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(CE->getOperand(0)))
-          if (GV->isConstant() && GV->hasDefinitiveInitializer())
-            return ConstantFoldLoadThroughGEPConstantExpr(GV->getInitializer(),
-                                                          CE);
+    if (!LI->isVolatile())
+      return ConstantFoldLoadFromConstPtr(Ops[0], TD);
 
-  return ConstantFoldInstOperands(I->getOpcode(), I->getType(), &Ops[0],
-                                  Ops.size(), TD);
-}
-
-static DebugLoc
-UpdateInlinedAtInfo(const DebugLoc &InsnDL, const DebugLoc &TheCallDL,
-                    LLVMContext &Ctx) {
-  DebugLoc NewLoc = TheCallDL;
-  if (MDNode *IA = InsnDL.getInlinedAt(Ctx))
-    NewLoc = UpdateInlinedAtInfo(DebugLoc::getFromDILocation(IA), TheCallDL,
-                                 Ctx);
-
-  return DebugLoc::get(InsnDL.getLine(), InsnDL.getCol(),
-                       InsnDL.getScope(Ctx), NewLoc.getAsMDNode(Ctx));
+  return ConstantFoldInstOperands(I->getOpcode(), I->getType(), Ops, TD);
 }
 
 /// CloneAndPruneFunctionInto - This works exactly like CloneFunctionInto,
@@ -418,50 +432,14 @@ void llvm::CloneAndPruneFunctionInto(Function *NewFunc, const Function *OldFunc,
     if (PHINode *PN = dyn_cast<PHINode>(I)) {
       // Skip over all PHI nodes, remembering them for later.
       BasicBlock::const_iterator OldI = BI->begin();
-      for (; (PN = dyn_cast<PHINode>(I)); ++I, ++OldI) {
-        if (I->hasMetadata()) {
-          if (!TheCallDL.isUnknown()) {
-            DebugLoc IDL = I->getDebugLoc();
-            if (!IDL.isUnknown()) {
-              DebugLoc NewDL = UpdateInlinedAtInfo(IDL, TheCallDL,
-                                                   I->getContext());
-              I->setDebugLoc(NewDL);
-            }
-          } else {
-            // The cloned instruction has dbg info but the call instruction
-            // does not have dbg info. Remove dbg info from cloned instruction.
-            I->setDebugLoc(DebugLoc());
-          }
-        }
+      for (; (PN = dyn_cast<PHINode>(I)); ++I, ++OldI)
         PHIToResolve.push_back(cast<PHINode>(OldI));
-      }
     }
-    
-    // FIXME:
-    // FIXME:
-    // FIXME: Unclone all this metadata stuff.
-    // FIXME:
-    // FIXME:
     
     // Otherwise, remap the rest of the instructions normally.
-    for (; I != NewBB->end(); ++I) {
-      if (I->hasMetadata()) {
-        if (!TheCallDL.isUnknown()) {
-          DebugLoc IDL = I->getDebugLoc();
-          if (!IDL.isUnknown()) {
-            DebugLoc NewDL = UpdateInlinedAtInfo(IDL, TheCallDL,
-                                                 I->getContext());
-            I->setDebugLoc(NewDL);
-          }
-        } else {
-          // The cloned instruction has dbg info but the call instruction
-          // does not have dbg info. Remove dbg info from cloned instruction.
-          I->setDebugLoc(DebugLoc());
-        }
-      }
+    for (; I != NewBB->end(); ++I)
       RemapInstruction(I, VMap,
                        ModuleLevelChanges ? RF_None : RF_NoModuleLevelChanges);
-    }
   }
   
   // Defer PHI resolution until rest of function is resolved, PHI resolution

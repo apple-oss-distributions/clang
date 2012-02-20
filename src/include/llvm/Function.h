@@ -117,19 +117,19 @@ private:
   /// function is automatically inserted into the end of the function list for
   /// the module.
   ///
-  Function(const FunctionType *Ty, LinkageTypes Linkage,
+  Function(FunctionType *Ty, LinkageTypes Linkage,
            const Twine &N = "", Module *M = 0);
 
 public:
-  static Function *Create(const FunctionType *Ty, LinkageTypes Linkage,
+  static Function *Create(FunctionType *Ty, LinkageTypes Linkage,
                           const Twine &N = "", Module *M = 0) {
     return new(0) Function(Ty, Linkage, N, M);
   }
 
   ~Function();
 
-  const Type *getReturnType() const;           // Return the type of the ret val
-  const FunctionType *getFunctionType() const; // Return the FunctionType for me
+  Type *getReturnType() const;           // Return the type of the ret val
+  FunctionType *getFunctionType() const; // Return the FunctionType for me
 
   /// getContext - Return a pointer to the LLVMContext associated with this 
   /// function, or NULL if this function is not bound to a context yet.
@@ -138,12 +138,6 @@ public:
   /// isVarArg - Return true if this function takes a variable number of
   /// arguments.
   bool isVarArg() const;
-
-  /// isDeclaration - Is the body of this function unknown? (The basic block 
-  /// list is empty if so.) This is true for function declarations, but not 
-  /// true for function definitions.
-  ///
-  virtual bool isDeclaration() const { return BasicBlocks.empty(); }
 
   /// getIntrinsicID - This method returns the ID number of the specified
   /// function, or Intrinsic::not_intrinsic if the function is not an
@@ -430,6 +424,12 @@ public:
   /// offending user for diagnostic purposes.
   ///
   bool hasAddressTaken(const User** = 0) const;
+
+  /// isDefTriviallyDead - Return true if it is trivially safe to remove
+  /// this function definition from the module (because it isn't externally
+  /// visible, does not have its address taken, and has no callers).  To make
+  /// this more accurate, call removeDeadConstantUsers first.
+  bool isDefTriviallyDead() const;
 
   /// callsFunctionThatReturnsTwice - Return true if the function has a call to
   /// setjmp or other function that gcc recognizes as "returning twice".

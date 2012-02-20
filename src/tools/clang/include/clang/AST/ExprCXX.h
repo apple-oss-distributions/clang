@@ -807,37 +807,41 @@ private:
 
   SourceLocation Loc;
   SourceRange ParenRange;
+  unsigned NumArgs : 16;
   bool Elidable : 1;
+  bool HadMultipleCandidates : 1;
   bool ZeroInitialization : 1;
   unsigned ConstructKind : 2;
   Stmt **Args;
-  unsigned NumArgs;
 
 protected:
   CXXConstructExpr(ASTContext &C, StmtClass SC, QualType T,
                    SourceLocation Loc,
                    CXXConstructorDecl *d, bool elidable,
                    Expr **args, unsigned numargs,
+                   bool HadMultipleCandidates,
                    bool ZeroInitialization = false,
                    ConstructionKind ConstructKind = CK_Complete,
                    SourceRange ParenRange = SourceRange());
 
   /// \brief Construct an empty C++ construction expression.
   CXXConstructExpr(StmtClass SC, EmptyShell Empty)
-    : Expr(SC, Empty), Constructor(0), Elidable(0), ZeroInitialization(0),
-      ConstructKind(0), Args(0), NumArgs(0) { }
+    : Expr(SC, Empty), Constructor(0), NumArgs(0), Elidable(0),
+      HadMultipleCandidates(false), ZeroInitialization(0),
+      ConstructKind(0), Args(0) { }
 
 public:
   /// \brief Construct an empty C++ construction expression.
   explicit CXXConstructExpr(EmptyShell Empty)
     : Expr(CXXConstructExprClass, Empty), Constructor(0),
-      Elidable(0), ZeroInitialization(0),
-      ConstructKind(0), Args(0), NumArgs(0) { }
+      NumArgs(0), Elidable(0), HadMultipleCandidates(false),
+      ZeroInitialization(0), ConstructKind(0), Args(0) { }
 
   static CXXConstructExpr *Create(ASTContext &C, QualType T,
                                   SourceLocation Loc,
                                   CXXConstructorDecl *D, bool Elidable,
                                   Expr **Args, unsigned NumArgs,
+                                  bool HadMultipleCandidates,
                                   bool ZeroInitialization = false,
                                   ConstructionKind ConstructKind = CK_Complete,
                                   SourceRange ParenRange = SourceRange());
@@ -852,7 +856,12 @@ public:
   /// \brief Whether this construction is elidable.
   bool isElidable() const { return Elidable; }
   void setElidable(bool E) { Elidable = E; }
-  
+
+  /// \brief Whether the referred constructor was resolved from
+  /// an overloaded set having size greater than 1.
+  bool hadMultipleCandidates() const { return HadMultipleCandidates; }
+  void setHadMultipleCandidates(bool V) { HadMultipleCandidates = V; }
+
   /// \brief Whether this construction first requires
   /// zero-initialization before the initializer is called.
   bool requiresZeroInitialization() const { return ZeroInitialization; }
@@ -980,6 +989,7 @@ public:
                          TypeSourceInfo *Type,
                          Expr **Args,unsigned NumArgs,
                          SourceRange parenRange,
+                         bool HadMultipleCandidates,
                          bool ZeroInitialization = false);
   explicit CXXTemporaryObjectExpr(EmptyShell Empty)
     : CXXConstructExpr(CXXTemporaryObjectExprClass, Empty), Type() { }
@@ -1049,8 +1059,11 @@ class CXXNewExpr : public Expr {
   // If this is an array allocation, does the usual deallocation
   // function for the allocated type want to know the allocated size?
   bool UsualArrayDeleteWantsSize : 1;
+  // Whether the referred constructor (if any) was resolved from an
+  // overload set having size greater than 1.
+  bool HadMultipleCandidates : 1;
   // The number of placement new arguments.
-  unsigned NumPlacementArgs : 14;
+  unsigned NumPlacementArgs : 13;
   // The number of constructor arguments. This may be 1 even for non-class
   // types; use the pseudo copy constructor.
   unsigned NumConstructorArgs : 14;
@@ -1086,6 +1099,7 @@ public:
              SourceRange TypeIdParens,
              Expr *arraySize, CXXConstructorDecl *constructor, bool initializer,
              Expr **constructorArgs, unsigned numConsArgs,
+             bool HadMultipleCandidates,
              FunctionDecl *operatorDelete, bool usualArrayDeleteWantsSize,
              QualType ty, TypeSourceInfo *AllocatedTypeInfo,
              SourceLocation startLoc, SourceLocation endLoc,
@@ -1173,6 +1187,11 @@ public:
     assert(i < NumConstructorArgs && "Index out of range");
     return cast<Expr>(SubExprs[Array + NumPlacementArgs + i]);
   }
+
+  /// \brief Whether the new expression refers a constructor that was
+  /// resolved from an overloaded set having size greater than 1.
+  bool hadMultipleCandidates() const { return HadMultipleCandidates; }
+  void setHadMultipleCandidates(bool V) { HadMultipleCandidates = V; }
 
   typedef ExprIterator arg_iterator;
   typedef ConstExprIterator const_arg_iterator;
@@ -1842,16 +1861,16 @@ public:
   /// template argument list, e.g. f<int>.
   bool hasExplicitTemplateArgs() const { return HasExplicitTemplateArgs; }
 
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs(); // defined far below
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs(); // defined far below
 
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     return const_cast<OverloadExpr*>(this)->getExplicitTemplateArgs();
   }
 
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getOptionalExplicitTemplateArgs() {
+  const ASTTemplateArgumentListInfo *getOptionalExplicitTemplateArgs() {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -1969,21 +1988,21 @@ public:
   // nodes, users are *forbidden* from calling these methods on objects
   // without explicit template arguments.
 
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs() {
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs() {
     assert(hasExplicitTemplateArgs());
-    return *reinterpret_cast<ExplicitTemplateArgumentList*>(this + 1);
+    return *reinterpret_cast<ASTTemplateArgumentListInfo*>(this + 1);
   }
 
   /// Gets a reference to the explicit template argument list.
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     assert(hasExplicitTemplateArgs());
-    return *reinterpret_cast<const ExplicitTemplateArgumentList*>(this + 1);
+    return *reinterpret_cast<const ASTTemplateArgumentListInfo*>(this + 1);
   }
 
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getOptionalExplicitTemplateArgs() {
+  const ASTTemplateArgumentListInfo *getOptionalExplicitTemplateArgs() {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -2094,21 +2113,21 @@ public:
   // nodes, users are *forbidden* from calling these methods on objects
   // without explicit template arguments.
 
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs() {
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs() {
     assert(hasExplicitTemplateArgs());
-    return *reinterpret_cast<ExplicitTemplateArgumentList*>(this + 1);
+    return *reinterpret_cast<ASTTemplateArgumentListInfo*>(this + 1);
   }
 
   /// Gets a reference to the explicit template argument list.
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     assert(hasExplicitTemplateArgs());
-    return *reinterpret_cast<const ExplicitTemplateArgumentList*>(this + 1);
+    return *reinterpret_cast<const ASTTemplateArgumentListInfo*>(this + 1);
   }
 
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getOptionalExplicitTemplateArgs() {
+  const ASTTemplateArgumentListInfo *getOptionalExplicitTemplateArgs() {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -2156,43 +2175,58 @@ public:
 /// Represents an expression --- generally a full-expression --- which
 /// introduces cleanups to be run at the end of the sub-expression's
 /// evaluation.  The most common source of expression-introduced
-/// cleanups is temporary objects in C++, but several other C++
-/// expressions can create cleanups.
+/// cleanups is temporary objects in C++, but several other kinds of
+/// expressions can create cleanups, including basically every
+/// call in ARC that returns an Objective-C pointer.
+///
+/// This expression also tracks whether the sub-expression contains a
+/// potentially-evaluated block literal.  The lifetime of a block
+/// literal is the extent of the enclosing scope.
 class ExprWithCleanups : public Expr {
+public:
+  /// The type of objects that are kept in the cleanup.
+  /// It's useful to remember the set of blocks;  we could also
+  /// remember the set of temporaries, but there's currently
+  /// no need.
+  typedef BlockDecl *CleanupObject;
+
+private:
   Stmt *SubExpr;
 
-  CXXTemporary **Temps;
-  unsigned NumTemps;
+  ExprWithCleanups(EmptyShell, unsigned NumObjects);
+  ExprWithCleanups(Expr *SubExpr, ArrayRef<CleanupObject> Objects);
 
-  ExprWithCleanups(ASTContext &C, Expr *SubExpr,
-                   CXXTemporary **Temps, unsigned NumTemps);
-  
+  CleanupObject *getObjectsBuffer() {
+    return reinterpret_cast<CleanupObject*>(this + 1);
+  }
+  const CleanupObject *getObjectsBuffer() const {
+    return reinterpret_cast<const CleanupObject*>(this + 1);
+  }
+  friend class ASTStmtReader;
+
 public:
-  ExprWithCleanups(EmptyShell Empty)
-    : Expr(ExprWithCleanupsClass, Empty),
-      SubExpr(0), Temps(0), NumTemps(0) {}
-                         
-  static ExprWithCleanups *Create(ASTContext &C, Expr *SubExpr,
-                                        CXXTemporary **Temps, 
-                                        unsigned NumTemps);
+  static ExprWithCleanups *Create(ASTContext &C, EmptyShell empty,
+                                  unsigned numObjects);
 
-  unsigned getNumTemporaries() const { return NumTemps; }
-  void setNumTemporaries(ASTContext &C, unsigned N);
-    
-  CXXTemporary *getTemporary(unsigned i) {
-    assert(i < NumTemps && "Index out of range");
-    return Temps[i];
+  static ExprWithCleanups *Create(ASTContext &C, Expr *subexpr,
+                                  ArrayRef<CleanupObject> objects);
+
+  ArrayRef<CleanupObject> getObjects() const {
+    return ArrayRef<CleanupObject>(getObjectsBuffer(), getNumObjects());
   }
-  const CXXTemporary *getTemporary(unsigned i) const {
-    return const_cast<ExprWithCleanups*>(this)->getTemporary(i);
-  }
-  void setTemporary(unsigned i, CXXTemporary *T) {
-    assert(i < NumTemps && "Index out of range");
-    Temps[i] = T;
+
+  unsigned getNumObjects() const { return ExprWithCleanupsBits.NumObjects; }
+
+  CleanupObject getObject(unsigned i) const {
+    assert(i < getNumObjects() && "Index out of range");
+    return getObjects()[i];
   }
 
   Expr *getSubExpr() { return cast<Expr>(SubExpr); }
   const Expr *getSubExpr() const { return cast<Expr>(SubExpr); }
+
+  /// setSubExpr - As with any mutator of the AST, be very careful
+  /// when modifying an existing AST to preserve its invariants.
   void setSubExpr(Expr *E) { SubExpr = E; }
 
   SourceRange getSourceRange() const { 
@@ -2470,14 +2504,14 @@ public:
 
   /// \brief Retrieve the explicit template argument list that followed the
   /// member template name, if any.
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs() {
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs() {
     assert(HasExplicitTemplateArgs);
-    return *reinterpret_cast<ExplicitTemplateArgumentList *>(this + 1);
+    return *reinterpret_cast<ASTTemplateArgumentListInfo *>(this + 1);
   }
 
   /// \brief Retrieve the explicit template argument list that followed the
   /// member template name, if any.
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     return const_cast<CXXDependentScopeMemberExpr *>(this)
              ->getExplicitTemplateArgs();
   }
@@ -2485,7 +2519,7 @@ public:
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getOptionalExplicitTemplateArgs() {
+  const ASTTemplateArgumentListInfo *getOptionalExplicitTemplateArgs() {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -2663,22 +2697,22 @@ public:
 
   /// \brief Retrieve the explicit template argument list that followed the
   /// member template name.
-  ExplicitTemplateArgumentList &getExplicitTemplateArgs() {
+  ASTTemplateArgumentListInfo &getExplicitTemplateArgs() {
     assert(hasExplicitTemplateArgs());
-    return *reinterpret_cast<ExplicitTemplateArgumentList *>(this + 1);
+    return *reinterpret_cast<ASTTemplateArgumentListInfo *>(this + 1);
   }
 
   /// \brief Retrieve the explicit template argument list that followed the
   /// member template name, if any.
-  const ExplicitTemplateArgumentList &getExplicitTemplateArgs() const {
+  const ASTTemplateArgumentListInfo &getExplicitTemplateArgs() const {
     assert(hasExplicitTemplateArgs());
-    return *reinterpret_cast<const ExplicitTemplateArgumentList *>(this + 1);
+    return *reinterpret_cast<const ASTTemplateArgumentListInfo *>(this + 1);
   }
 
   /// \brief Retrieves the optional explicit template arguments.
   /// This points to the same data as getExplicitTemplateArgs(), but
   /// returns null if there are no explicit template arguments.
-  const ExplicitTemplateArgumentList *getOptionalExplicitTemplateArgs() {
+  const ASTTemplateArgumentListInfo *getOptionalExplicitTemplateArgs() {
     if (!hasExplicitTemplateArgs()) return 0;
     return &getExplicitTemplateArgs();
   }
@@ -2856,7 +2890,7 @@ public:
   }
 };
   
-inline ExplicitTemplateArgumentList &OverloadExpr::getExplicitTemplateArgs() {
+inline ASTTemplateArgumentListInfo &OverloadExpr::getExplicitTemplateArgs() {
   if (isa<UnresolvedLookupExpr>(this))
     return cast<UnresolvedLookupExpr>(this)->getExplicitTemplateArgs();
   else
@@ -2957,6 +2991,53 @@ public:
   child_range children() { return child_range(); }
 };
 
+/// \brief Represents a reference to a non-type template parameter
+/// that has been substituted with a template argument.
+class SubstNonTypeTemplateParmExpr : public Expr {
+  /// \brief The replaced parameter.
+  NonTypeTemplateParmDecl *Param;
+
+  /// \brief The replacement expression.
+  Stmt *Replacement;
+
+  /// \brief The location of the non-type template parameter reference.
+  SourceLocation NameLoc;
+
+  friend class ASTReader;
+  friend class ASTStmtReader;
+  explicit SubstNonTypeTemplateParmExpr(EmptyShell Empty) 
+    : Expr(SubstNonTypeTemplateParmExprClass, Empty) { }
+
+public:
+  SubstNonTypeTemplateParmExpr(QualType type, 
+                               ExprValueKind valueKind,
+                               SourceLocation loc,
+                               NonTypeTemplateParmDecl *param,
+                               Expr *replacement)
+    : Expr(SubstNonTypeTemplateParmExprClass, type, valueKind, OK_Ordinary,
+           replacement->isTypeDependent(), replacement->isValueDependent(),
+           replacement->isInstantiationDependent(),
+           replacement->containsUnexpandedParameterPack()),
+      Param(param), Replacement(replacement), NameLoc(loc) {}
+
+  SourceLocation getNameLoc() const { return NameLoc; }
+  SourceRange getSourceRange() const { return NameLoc; }
+
+  Expr *getReplacement() const { return cast<Expr>(Replacement); }
+    
+  NonTypeTemplateParmDecl *getParameter() const { return Param; }
+
+  static bool classof(const Stmt *s) {
+    return s->getStmtClass() == SubstNonTypeTemplateParmExprClass;
+  }
+  static bool classof(const SubstNonTypeTemplateParmExpr *) { 
+    return true; 
+  }
+  
+  // Iterators
+  child_range children() { return child_range(&Replacement, &Replacement+1); }
+};
+
 /// \brief Represents a reference to a non-type template parameter pack that
 /// has been substituted with a non-template argument pack.
 ///
@@ -2983,17 +3064,16 @@ class SubstNonTypeTemplateParmPackExpr : public Expr {
   /// \brief The location of the non-type template parameter pack reference.
   SourceLocation NameLoc;
   
+  friend class ASTReader;
   friend class ASTStmtReader;
-  friend class ASTStmtWriter;
+  explicit SubstNonTypeTemplateParmPackExpr(EmptyShell Empty) 
+    : Expr(SubstNonTypeTemplateParmPackExprClass, Empty) { }
   
 public:
   SubstNonTypeTemplateParmPackExpr(QualType T, 
                                    NonTypeTemplateParmDecl *Param,
                                    SourceLocation NameLoc,
                                    const TemplateArgument &ArgPack);
-  
-  SubstNonTypeTemplateParmPackExpr(EmptyShell Empty) 
-    : Expr(SubstNonTypeTemplateParmPackExprClass, Empty) { }
   
   /// \brief Retrieve the non-type template parameter pack being substituted.
   NonTypeTemplateParmDecl *getParameterPack() const { return Param; }

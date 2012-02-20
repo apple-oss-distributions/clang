@@ -12,18 +12,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "PTXSubtarget.h"
+#include "PTX.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/TargetRegistry.h"
 
-#define GET_SUBTARGETINFO_CTOR
-#define GET_SUBTARGETINFO_MC_DESC
 #define GET_SUBTARGETINFO_TARGET_DESC
+#define GET_SUBTARGETINFO_CTOR
 #include "PTXGenSubtargetInfo.inc"
 
 using namespace llvm;
 
 PTXSubtarget::PTXSubtarget(const std::string &TT, const std::string &CPU,
                            const std::string &FS, bool is64Bit)
-  : PTXGenSubtargetInfo(),
+  : PTXGenSubtargetInfo(TT, CPU, FS),
     PTXTarget(PTX_COMPUTE_1_0),
     PTXVersion(PTX_VERSION_2_0),
     SupportsDouble(false),
@@ -32,7 +33,7 @@ PTXSubtarget::PTXSubtarget(const std::string &TT, const std::string &CPU,
   std::string TARGET = CPU;
   if (TARGET.empty())
     TARGET = "generic";
-  ParseSubtargetFeatures(FS, TARGET);
+  ParseSubtargetFeatures(TARGET, FS);
 }
 
 std::string PTXSubtarget::getTargetString() const {

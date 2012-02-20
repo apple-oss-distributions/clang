@@ -15,9 +15,6 @@
 #   Clang_Driver_Mode := {Production, Development}
 #     Enable/disable the "production" driver mode.
 #
-#   Clang_Enable_CXX := {0, 1}
-#     When in production driver mode, enable C++ support.
-#
 #   Clang_Extra_Options := ...
 #     Additional options to pass to make.
 #
@@ -31,7 +28,6 @@
 #
 #   install-clang	 - Build the Clang compiler.
 #   install-cross	 - Build the Clang compiler, for ARM.
-#   install-libclang	 - Build the libclang dylib.
 #   install-clang-links	 - Install links from a platforms subdirectory to the
 #                          root clang.
 #
@@ -44,8 +40,10 @@
 ##
 # Variable defaults.
 
-# Install to /Developer by default.
-Default_Install_Root := /Developer
+# Install to $DT_TOOLCHAIN_DIR if it is set, otherwise $DEVELOPER_DIR.
+DEVELOPER_DIR ?= /Developer
+DT_TOOLCHAIN_DIR ?= $(DEVELOPER_DIR)
+Default_Install_Root := $(DT_TOOLCHAIN_DIR)
 # Don't install root links or license.
 Post_Install_RootLinks := 0
 Post_Install_OpenSourceLicense := 0
@@ -72,19 +70,6 @@ Extra_Make_Variables += CLANG_NO_RUNTIME=1
 # Never bootstrap.
 Clang_Enable_Bootstrap := 0
 
-else ifeq ($(MAKECMDGOALS),install-libclang)
-
-# Install to 'clang-ide' subdirectory.
-Install_Path_Suffix := usr/clang-ide
-# Only include x86 backend.
-LLVM_Backends := x86
-# Don't build compiler-rt.
-Extra_Make_Variables += CLANG_NO_RUNTIME=1
-# Use install-clang-c install target.
-LLVM_Install_Target := install-clang-c
-# Never bootstrap.
-Clang_Enable_Bootstrap := 0
-
 else ifeq ($(MAKECMDGOALS),install-clang-links)
 
 # Dummy project which only installs compiler links from the INSTALL_LOCATION to
@@ -96,7 +81,6 @@ else
 
 # Install root links and license when no install location is set.
 ifeq ($(INSTALL_LOCATION),)
-Post_Install_RootLinks := 1
 Post_Install_OpenSourceLicense := 1
 endif
 
@@ -186,14 +170,6 @@ Clang_Make_Variables += CLANG_ORDER_FILE=$(SRCROOT)/clang.order
 ifeq ($(Clang_Driver_Mode), Production)
 Clang_Make_Variables += CLANG_IS_PRODUCTION=1
 
-ifeq ($(Clang_Enable_CXX), 1)
-Clang_Make_Variables += CLANGXX_IS_PRODUCTION=1
-else ifeq ($(Clang_Enable_CXX), 0)
-# ... this is the default ...
-else
-$(error "invalid setting for clang enable C++: '$(Clang_Enable_CXX)'")
-endif
-
 # Set LLVM_VERSION_INFO make variable. We do this here because setting it in the
 # CC options for configure ends up breaking tests that can't be bothered to
 # quote things properly, and that is too hard to fix.
@@ -249,7 +225,6 @@ Extra_Options := $(Clang_Extra_Options)
 # Set configure flags.
 Common_Configure_Flags = \
 		  --enable-targets=$(LLVM_Backends) \
-		  --enable-optimized \
 		  --disable-timestamps \
 		  $(Assertions_Configure_Flag) \
 		  $(Optimized_Configure_Flag) \
@@ -257,33 +232,23 @@ Common_Configure_Flags = \
                   --with-extra-ld-option="$(Clang_Linker_Options)" \
 		  --without-llvmgcc --without-llvmgxx \
 		  --disable-bindings \
-		  --disable-doxygen
+		  --disable-doxygen \
+		  --with-bug-report-url="http://developer.apple.com/bugreporter/"
 Stage1_Configure_Flags = $(Common_Configure_Flags) \
                   --with-extra-options="$(Extra_Options)"
 Configure_Flags = $(Common_Configure_Flags) \
+                  --with-internal-prefix="$(Install_Prefix)/local" \
                   --with-extra-options="$(Extra_Options) $(Clang_Final_Extra_Options)"
 
-# Determine the /Developer/usr/bin/clang major build version number
-SysClangMajorBuildVersion := \
-  $(shell /Developer/usr/bin/clang -v 2>&1 | \
-	head -1 | \
-	sed -e "s@.*\(clang-[0-9]*\).*@\1@" \
-	    -e "s@\$$@-@" | \
-	cut -d- -f2 | \
-	cut -d. -f1)
-ifneq (x$(SysClangMajorBuildVersion),x)
-ifeq ($(shell test $(SysClangMajorBuildVersion) -ge 115 && echo OK),OK)
-CC := /Developer/usr/bin/clang
-CXX := /Developer/usr/bin/clang++
-endif
-endif
+CC := $(shell xcrun -find clang)
+CXX := $(shell xcrun -find clang++)
 
 # Set stage1 compiler.
 Stage1_CC := $(CC)
 Stage1_CXX := $(CXX)
 
 # Set up any additional Clang install targets.
-Extra_Clang_Install_Targets := install-lto-h
+Extra_Clang_Install_Targets := install-lto-h install-clang-diagnostic
 
 # Install /usr/... symlinks?
 ifeq ($(Post_Install_RootLinks),1)
@@ -488,8 +453,8 @@ Sources		= $(SRCROOT)/src
 Configure	= $(Sources)/configure
 Install_Flags	= DESTDIR=$(OBJROOT)/install-$$arch ONLY_MAN_DOCS=1
 
-OSV		= $(DSTROOT)/usr/local/OpenSourceVersions
-OSL		= $(DSTROOT)/usr/local/OpenSourceLicenses
+OSV		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceVersions
+OSL		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceLicenses
 
 ##
 # Cross-builds need wrapper scripts on the path, so have a local directory
@@ -525,25 +490,28 @@ installsrc:
 		$(MKDIR) "$(SRCROOT)/src/projects/compiler-rt"; \
 		rsync -ar "$(COMPILERRT_SEPARATE_SOURCES)/" "$(SRCROOT)/src/projects/compiler-rt/"; \
 	fi
+	$(_v) if [ ! -z "$(LIBCXX_SEPARATE_SOURCES)" ]; then \
+		$(MKDIR) "$(SRCROOT)/src/projects/libcxx"; \
+		rsync -ar "$(LIBCXX_SEPARATE_SOURCES)/" "$(SRCROOT)/src/projects/libcxx/"; \
+	fi
 	$(_v) $(PAX) -rw . "$(SRCROOT)"
 	$(_v) $(FIND) "$(SRCROOT)" $(Find_Cruft) -depth -exec $(RMDIR) "{}" \;
 	$(_v) rm -rf "$(SRCROOT)"/src/test/*/
 	$(_v) rm -rf "$(SRCROOT)"/src/tools/clang/test/*/
+	$(_v) rm -rf "$(SRCROOT)"/src/projects/libcxx/test/*/
 
 installhdrs:
 
 ##
 # Standard Clang Build Support
 
-.PHONY: install-clang install-libclang
+.PHONY: install-clang
 .PHONY: install-clang_final build-clang build-clang_final build-clang_stage1
 .PHONY: configure-clang_final configure-clang_singlestage configure-clang_stage2
 .PHONY: configure-clang_stage1
 .PHONY: install-clang-rootlinks install-clang-opensourcelicense
 
 install-clang: install-clang_final $(Extra_Clang_Install_Targets)
-
-install-libclang: install-clang_final $(Extra_Clang_Install_Targets)
 
 install-clang_final: build-clang
 	$(_v) for arch in $(RC_ARCHS) ; do \
@@ -559,6 +527,13 @@ install-clang_final: build-clang
 		rm -rf $(OBJROOT)/install-$$arch$(Install_Prefix)/lib/clang/*/lib; \
 	done
 	./merge-lipo `for arch in $(RC_ARCHS) ; do echo $(OBJROOT)/install-$$arch ; done` $(DSTROOT)
+	$(_v) ln -sf clang $(DSTROOT)/$(Install_Prefix)/bin/cc
+	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/cc.1
+	$(_v) if [ -f $(DSTROOT)/$(Install_Prefix)/bin/clang++ ]; then \
+	  ln -sf clang++ $(DSTROOT)/$(Install_Prefix)/bin/c++; \
+	  ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1; \
+	  ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1;\
+	fi
 	$(_v) $(FIND) $(DSTROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
 	$(_v) $(FIND) $(SYMROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
@@ -621,7 +596,6 @@ install-clang-rootlinks: install-clang_final
 	cp $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang.1 $(DSTROOT)/usr/share/man/man1/
 	if [ -f $(DSTROOT)/$(Install_Prefix)/bin/clang++ ]; then \
 	  ln -sf ../../$(Install_Prefix)/bin/clang++ $(DSTROOT)/usr/bin/clang++; \
-	  ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1; \
 	  ln -sf clang.1 $(DSTROOT)/usr/share/man/man1/clang++.1; \
 	fi
 	if [ -f $(DSTROOT)/$(Install_Prefix)/lib/libLTO.dylib ]; then \
@@ -639,13 +613,15 @@ install-clang-opensourcelicense: install-clang_final
 install-clang-links:
 	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/bin
 	ln -sf ../../../../../usr/bin/clang $(DSTROOT)/$(Install_Prefix)/bin/clang
-ifeq ($(Clang_Enable_CXX), 1)
 	ln -sf ../../../../../usr/bin/clang++ $(DSTROOT)/$(Install_Prefix)/bin/clang++
-endif
 
 install-lto-h:
 	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
 	$(INSTALL_FILE) $(Sources)/include/llvm-c/lto.h $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
+
+install-clang-diagnostic:
+	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/local/bin
+	$(INSTALL) $(Sources)/utils/clang-parse-diagnostics-file $(DSTROOT)/$(Install_Prefix)/local/bin/
 
 ##
 # Cross Compilation Build Support
@@ -668,6 +644,7 @@ install-cross: build-cross
 	./merge-lipo `for arch in $(RC_ARCHS) ; do echo $(OBJROOT)/install-$$arch ; done` $(DSTROOT)
 	$(_v) $(FIND) $(DSTROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
 	$(_v) $(FIND) $(SYMROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
+	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -type f -print | $(XARGS) -n 1 -P $(SYSCTL) dsymutil
 	$(_v) cd $(DSTROOT) && find . -path \*.dSYM/\* -print | cpio -pdml $(SYMROOT)
 	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -P $(SYSCTL) strip -S
@@ -677,7 +654,7 @@ install-cross: build-cross
 build-cross: configure-cross
 	$(_v) for arch in $(RC_ARCHS) ; do \
 		echo "Building (Cross) for $$arch..." && \
-		$(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch $(Build_Target) CFLAGS="-arch $$arch $(CFLAGS)" CXXFLAGS="-arch $$arch $(CXXFLAGS)" OPTIONAL_DIRS= || exit 1; \
+		$(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch $(Build_Target) CFLAGS="-arch $$arch $(CFLAGS)" CXXFLAGS="-arch $$arch $(CXXFLAGS)" || exit 1; \
 	done
 
 configure-cross: setup-tools-cross
@@ -693,8 +670,7 @@ configure-cross: setup-tools-cross
 	done
 
 # A cross-compiler configure will expect to find tools under names like
-# arm-apple-darwin10-gcc, so make sure we have them. Note that -marm
-# is added to the gcc/g++ command line due to rdar://7353031
+# arm-apple-darwin10-gcc, so make sure we have them.
 setup-tools-cross:
 	$(_v) $(MKDIR) $(OBJROOT)/bin
 	$(_v) for prog in ar nm ranlib strip lipo ld as ; do \
@@ -704,11 +680,12 @@ setup-tools-cross:
 	  chmod a+x $(OBJROOT)/bin/arm-apple-darwin10-$$prog || exit 1; \
 	done
 	$(_v) for prog in gcc g++ ; do \
+	  ccprog=`echo $$prog | sed -e 's/gcc/cc/' -e 's/g/c/'` && \
 	  echo '#!/bin/sh' > $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
-	  echo "ARCH='-arch armv6'" >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
+	  echo "ARCH='-arch armv7'" >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
 	  echo 'for i in $$@ ; do if [ "$$i" == "-arch" ] ; then ARCH= ; fi ; done' >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
-	  echo 'exec '`xcrun -find $$prog` \
-	    ' $$ARCH -isysroot '$(SDKROOT)' "$$@" -marm' \
+	  echo 'exec '`xcrun -sdk $(SDKROOT) -find $$ccprog` \
+	    ' $$ARCH -isysroot '$(SDKROOT)' "$$@"' \
 	    >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
 	  chmod a+x $(OBJROOT)/bin/arm-apple-darwin10-$$prog || exit 1 ; \
 	done

@@ -77,6 +77,10 @@ def ImplicitValueInitExpr : DStmt<Expr>;
 def ParenListExpr : DStmt<Expr>;
 def VAArgExpr : DStmt<Expr>;
 def GenericSelectionExpr : DStmt<Expr>;
+def PseudoObjectExpr : DStmt<Expr>;
+
+// Atomic expressions
+def AtomicExpr : DStmt<Expr>;
 
 // GNU Extensions.
 def AddrLabelExpr : DStmt<Expr>;
@@ -120,6 +124,7 @@ def UnresolvedMemberExpr : DStmt<OverloadExpr>;
 def CXXNoexceptExpr : DStmt<Expr>;
 def PackExpansionExpr : DStmt<Expr>;
 def SizeOfPackExpr : DStmt<Expr>;
+def SubstNonTypeTemplateParmExpr : DStmt<Expr>;
 def SubstNonTypeTemplateParmPackExpr : DStmt<Expr>;
 def MaterializeTemporaryExpr : DStmt<Expr>;
 
@@ -151,6 +156,7 @@ def CXXUuidofExpr : DStmt<Expr>;
 def SEHTryStmt : Stmt;
 def SEHExceptStmt : Stmt;
 def SEHFinallyStmt : Stmt;
+def MSDependentExistsStmt : Stmt;
 
 // OpenCL Extensions.
 def AsTypeExpr : DStmt<Expr>;

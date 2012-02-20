@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/CodeGen/CodeGenAction.h"
+#include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/AST/ASTConsumer.h"
@@ -18,9 +19,11 @@
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "llvm/LLVMContext.h"
+#include "llvm/Linker.h"
 #include "llvm/Module.h"
 #include "llvm/Pass.h"
 #include "llvm/ADT/OwningPtr.h"
+#include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/Support/IRReader.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
@@ -30,36 +33,44 @@ using namespace llvm;
 
 namespace clang {
   class BackendConsumer : public ASTConsumer {
-    Diagnostic &Diags;
+    DiagnosticsEngine &Diags;
     BackendAction Action;
     const CodeGenOptions &CodeGenOpts;
     const TargetOptions &TargetOpts;
-    llvm::raw_ostream *AsmOutStream;
+    const LangOptions &LangOpts;
+    raw_ostream *AsmOutStream;
     ASTContext *Context;
 
     Timer LLVMIRGeneration;
 
     llvm::OwningPtr<CodeGenerator> Gen;
 
-    llvm::OwningPtr<llvm::Module> TheModule;
+    llvm::OwningPtr<llvm::Module> TheModule, LinkModule;
 
   public:
-    BackendConsumer(BackendAction action, Diagnostic &_Diags,
+    BackendConsumer(BackendAction action, DiagnosticsEngine &_Diags,
                     const CodeGenOptions &compopts,
-                    const TargetOptions &targetopts, bool TimePasses,
-                    const std::string &infile, llvm::raw_ostream *OS,
+                    const TargetOptions &targetopts,
+                    const LangOptions &langopts,
+                    bool TimePasses,
+                    const std::string &infile,
+                    llvm::Module *LinkModule,
+                    raw_ostream *OS,
                     LLVMContext &C) :
       Diags(_Diags),
       Action(action),
       CodeGenOpts(compopts),
       TargetOpts(targetopts),
+      LangOpts(langopts),
       AsmOutStream(OS),
       LLVMIRGeneration("LLVM IR Generation Time"),
-      Gen(CreateLLVMCodeGen(Diags, infile, compopts, C)) {
+      Gen(CreateLLVMCodeGen(Diags, infile, compopts, C)),
+      LinkModule(LinkModule) {
       llvm::TimePassesIsEnabled = TimePasses;
     }
 
     llvm::Module *takeModule() { return TheModule.take(); }
+    llvm::Module *takeLinkModule() { return LinkModule.take(); }
 
     virtual void Initialize(ASTContext &Ctx) {
       Context = &Ctx;
@@ -75,7 +86,7 @@ namespace clang {
         LLVMIRGeneration.stopTimer();
     }
 
-    virtual void HandleTopLevelDecl(DeclGroupRef D) {
+    virtual bool HandleTopLevelDecl(DeclGroupRef D) {
       PrettyStackTraceDecl CrashInfo(*D.begin(), SourceLocation(),
                                      Context->getSourceManager(),
                                      "LLVM IR generation of declaration");
@@ -87,6 +98,8 @@ namespace clang {
 
       if (llvm::TimePassesIsEnabled)
         LLVMIRGeneration.stopTimer();
+
+      return true;
     }
 
     virtual void HandleTranslationUnit(ASTContext &C) {
@@ -118,6 +131,17 @@ namespace clang {
       assert(TheModule.get() == M &&
              "Unexpected module change during IR generation");
 
+      // Link LinkModule into this module if present, preserving its validity.
+      if (LinkModule) {
+        std::string ErrorMsg;
+        if (Linker::LinkModules(M, LinkModule.get(), Linker::PreserveSource,
+                                &ErrorMsg)) {
+          Diags.Report(diag::err_fe_cannot_link_module)
+            << LinkModule->getModuleIdentifier() << ErrorMsg;
+          return;
+        }
+      }
+
       // Install an inline asm handler so that diagnostics get printed through
       // our diagnostics hooks.
       LLVMContext &Ctx = TheModule->getContext();
@@ -126,7 +150,7 @@ namespace clang {
       void *OldContext = Ctx.getInlineAsmDiagnosticContext();
       Ctx.setInlineAsmDiagnosticHandler(InlineAsmDiagHandler, this);
 
-      EmitBackendOutput(Diags, CodeGenOpts, TargetOpts,
+      EmitBackendOutput(Diags, CodeGenOpts, TargetOpts, LangOpts,
                         TheModule.get(), Action, AsmOutStream);
       
       Ctx.setInlineAsmDiagnosticHandler(OldHandler, OldContext);
@@ -181,7 +205,7 @@ static FullSourceLoc ConvertBackendLocation(const llvm::SMDiagnostic &D,
   // Translate the offset into the file.
   unsigned Offset = D.getLoc().getPointer()  - LBuf->getBufferStart();
   SourceLocation NewLoc =
-  CSM.getLocForStartOfFile(FID).getFileLocWithOffset(Offset);
+  CSM.getLocForStartOfFile(FID).getLocWithOffset(Offset);
   return FullSourceLoc(NewLoc, CSM);
 }
 
@@ -195,7 +219,7 @@ void BackendConsumer::InlineAsmDiagHandler2(const llvm::SMDiagnostic &D,
   // we re-format the SMDiagnostic in terms of a clang diagnostic.
 
   // Strip "error: " off the start of the message string.
-  llvm::StringRef Message = D.getMessage();
+  StringRef Message = D.getMessage();
   if (Message.startswith("error: "))
     Message = Message.substr(7);
 
@@ -211,8 +235,17 @@ void BackendConsumer::InlineAsmDiagHandler2(const llvm::SMDiagnostic &D,
   if (LocCookie.isValid()) {
     Diags.Report(LocCookie, diag::err_fe_inline_asm).AddString(Message);
     
-    if (D.getLoc().isValid())
-      Diags.Report(Loc, diag::note_fe_inline_asm_here);
+    if (D.getLoc().isValid()) {
+      DiagnosticBuilder B = Diags.Report(Loc, diag::note_fe_inline_asm_here);
+      // Convert the SMDiagnostic ranges into SourceRange and attach them
+      // to the diagnostic.
+      for (unsigned i = 0, e = D.getRanges().size(); i != e; ++i) {
+        std::pair<unsigned, unsigned> Range = D.getRanges()[i];
+        unsigned Column = D.getColumnNo();
+        B << SourceRange(Loc.getLocWithOffset(Range.first - Column),
+                         Loc.getLocWithOffset(Range.second - Column));
+      }
+    }
     return;
   }
   
@@ -225,7 +258,8 @@ void BackendConsumer::InlineAsmDiagHandler2(const llvm::SMDiagnostic &D,
 //
 
 CodeGenAction::CodeGenAction(unsigned _Act, LLVMContext *_VMContext)
-  : Act(_Act), VMContext(_VMContext ? _VMContext : new LLVMContext),
+  : Act(_Act), LinkModule(0),
+    VMContext(_VMContext ? _VMContext : new LLVMContext),
     OwnsVMContext(!_VMContext) {}
 
 CodeGenAction::~CodeGenAction() {
@@ -241,6 +275,10 @@ void CodeGenAction::EndSourceFileAction() {
   if (!getCompilerInstance().hasASTConsumer())
     return;
 
+  // If we were given a link module, release consumer's ownership of it.
+  if (LinkModule)
+    BEConsumer->takeLinkModule();
+
   // Steal the module from the consumer.
   TheModule.reset(BEConsumer->takeModule());
 }
@@ -255,7 +293,7 @@ llvm::LLVMContext *CodeGenAction::takeLLVMContext() {
 }
 
 static raw_ostream *GetOutputStream(CompilerInstance &CI,
-                                    llvm::StringRef InFile,
+                                    StringRef InFile,
                                     BackendAction Action) {
   switch (Action) {
   case Backend_EmitAssembly:
@@ -271,22 +309,46 @@ static raw_ostream *GetOutputStream(CompilerInstance &CI,
     return CI.createDefaultOutputFile(true, InFile, "o");
   }
 
-  assert(0 && "Invalid action!");
-  return 0;
+  llvm_unreachable("Invalid action!");
 }
 
 ASTConsumer *CodeGenAction::CreateASTConsumer(CompilerInstance &CI,
-                                              llvm::StringRef InFile) {
+                                              StringRef InFile) {
   BackendAction BA = static_cast<BackendAction>(Act);
-  llvm::OwningPtr<llvm::raw_ostream> OS(GetOutputStream(CI, InFile, BA));
+  llvm::OwningPtr<raw_ostream> OS(GetOutputStream(CI, InFile, BA));
   if (BA != Backend_EmitNothing && !OS)
     return 0;
+
+  llvm::Module *LinkModuleToUse = LinkModule;
+
+  // If we were not given a link module, and the user requested that one be
+  // loaded from bitcode, do so now.
+  const std::string &LinkBCFile = CI.getCodeGenOpts().LinkBitcodeFile;
+  if (!LinkModuleToUse && !LinkBCFile.empty()) {
+    std::string ErrorStr;
+
+    llvm::MemoryBuffer *BCBuf =
+      CI.getFileManager().getBufferForFile(LinkBCFile, &ErrorStr);
+    if (!BCBuf) {
+      CI.getDiagnostics().Report(diag::err_cannot_open_file)
+        << LinkBCFile << ErrorStr;
+      return 0;
+    }
+
+    LinkModuleToUse = getLazyBitcodeModule(BCBuf, *VMContext, &ErrorStr);
+    if (!LinkModuleToUse) {
+      CI.getDiagnostics().Report(diag::err_cannot_open_file)
+        << LinkBCFile << ErrorStr;
+      return 0;
+    }
+  }
 
   BEConsumer = 
       new BackendConsumer(BA, CI.getDiagnostics(),
                           CI.getCodeGenOpts(), CI.getTargetOpts(),
-                          CI.getFrontendOpts().ShowTimers, InFile, OS.take(),
-                          *VMContext);
+                          CI.getLangOpts(),
+                          CI.getFrontendOpts().ShowTimers, InFile,
+                          LinkModuleToUse, OS.take(), *VMContext);
   return BEConsumer;
 }
 
@@ -315,24 +377,25 @@ void CodeGenAction::ExecuteAction() {
     TheModule.reset(ParseIR(MainFileCopy, Err, *VMContext));
     if (!TheModule) {
       // Translate from the diagnostic info to the SourceManager location.
-      SourceLocation Loc = SM.getLocation(
+      SourceLocation Loc = SM.translateFileLineCol(
         SM.getFileEntryForID(SM.getMainFileID()), Err.getLineNo(),
         Err.getColumnNo() + 1);
 
       // Get a custom diagnostic for the error. We strip off a leading
       // diagnostic code if there is one.
-      llvm::StringRef Msg = Err.getMessage();
+      StringRef Msg = Err.getMessage();
       if (Msg.startswith("error: "))
         Msg = Msg.substr(7);
-      unsigned DiagID = CI.getDiagnostics().getCustomDiagID(Diagnostic::Error,
-                                                            Msg);
+      unsigned DiagID = CI.getDiagnostics().getCustomDiagID(
+          DiagnosticsEngine::Error, Msg);
 
       CI.getDiagnostics().Report(Loc, DiagID);
       return;
     }
 
     EmitBackendOutput(CI.getDiagnostics(), CI.getCodeGenOpts(),
-                      CI.getTargetOpts(), TheModule.get(),
+                      CI.getTargetOpts(), CI.getLangOpts(),
+                      TheModule.get(),
                       BA, OS);
     return;
   }

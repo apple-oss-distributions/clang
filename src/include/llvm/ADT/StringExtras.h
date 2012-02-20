@@ -16,6 +16,7 @@
 
 #include "llvm/Support/DataTypes.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/StringRef.h"
 #include <cctype>
 #include <cstdio>
@@ -114,22 +115,6 @@ static inline std::string ftostr(const APFloat& V) {
   else if (&V.getSemantics() == &APFloat::IEEEsingle)
     return ftostr((double)V.convertToFloat());
   return "<unknown format in ftostr>"; // error
-}
-
-static inline std::string LowercaseString(const std::string &S) {
-  std::string result(S);
-  for (unsigned i = 0; i < S.length(); ++i)
-    if (isupper(result[i]))
-      result[i] = char(tolower(result[i]));
-  return result;
-}
-
-static inline std::string UppercaseString(const std::string &S) {
-  std::string result(S);
-  for (unsigned i = 0; i < S.length(); ++i)
-    if (islower(result[i]))
-      result[i] = char(toupper(result[i]));
-  return result;
 }
 
 /// StrInStrNoCase - Portable version of strcasestr.  Locates the first

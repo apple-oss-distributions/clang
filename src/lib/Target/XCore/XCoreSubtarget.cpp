@@ -13,16 +13,16 @@
 
 #include "XCoreSubtarget.h"
 #include "XCore.h"
+#include "llvm/Support/TargetRegistry.h"
 
-#define GET_SUBTARGETINFO_CTOR
-#define GET_SUBTARGETINFO_MC_DESC
 #define GET_SUBTARGETINFO_TARGET_DESC
+#define GET_SUBTARGETINFO_CTOR
 #include "XCoreGenSubtargetInfo.inc"
 
 using namespace llvm;
 
 XCoreSubtarget::XCoreSubtarget(const std::string &TT,
                                const std::string &CPU, const std::string &FS)
-  : XCoreGenSubtargetInfo()
+  : XCoreGenSubtargetInfo(TT, CPU, FS)
 {
 }

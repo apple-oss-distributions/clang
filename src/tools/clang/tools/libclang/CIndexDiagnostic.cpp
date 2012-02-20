@@ -26,7 +26,48 @@
 using namespace clang;
 using namespace clang::cxloc;
 using namespace clang::cxstring;
+using namespace clang::cxdiag;
 using namespace llvm;
+
+
+CXDiagnosticSetImpl::~CXDiagnosticSetImpl() {
+  for (std::vector<CXDiagnosticImpl *>::iterator it = Diagnostics.begin(),
+       et = Diagnostics.end();
+       it != et; ++it) {
+    delete *it;
+  }
+}
+
+CXDiagnosticImpl::~CXDiagnosticImpl() {}
+
+CXDiagnosticSetImpl *cxdiag::lazyCreateDiags(CXTranslationUnit TU,
+                                             bool checkIfChanged) {
+  ASTUnit *AU = static_cast<ASTUnit *>(TU->TUData);
+
+  if (TU->Diagnostics && checkIfChanged) {
+    CXDiagnosticSetImpl *
+      Set = static_cast<CXDiagnosticSetImpl*>(TU->Diagnostics);
+    if (AU->stored_diag_size() != Set->getNumDiagnostics()) {
+      // Diagnostics in the ASTUnit were updated, reset the associated
+      // diagnostics.
+      delete Set;
+      TU->Diagnostics = 0;
+    }
+  }
+
+  if (!TU->Diagnostics) {
+    CXDiagnosticSetImpl *Set = new CXDiagnosticSetImpl();
+    TU->Diagnostics = Set;
+    
+    for (ASTUnit::stored_diag_iterator it = AU->stored_diag_begin(),
+         ei = AU->stored_diag_end(); it != ei; ++it) {
+      CXStoredDiagnostic *D =
+        new CXStoredDiagnostic(*it, AU->getASTContext().getLangOptions());
+      Set->appendDiagnostic(D);
+    }
+  }
+  return static_cast<CXDiagnosticSetImpl*>(TU->Diagnostics);
+}
 
 //-----------------------------------------------------------------------------
 // C Interface Routines
@@ -34,22 +75,32 @@ using namespace llvm;
 extern "C" {
 
 unsigned clang_getNumDiagnostics(CXTranslationUnit Unit) {
-  ASTUnit *CXXUnit = static_cast<ASTUnit *>(Unit->TUData);
-  return CXXUnit? CXXUnit->stored_diag_size() : 0;
+  if (!Unit->TUData)
+    return 0;
+  return lazyCreateDiags(Unit, /*checkIfChanged=*/true)->getNumDiagnostics();
 }
 
 CXDiagnostic clang_getDiagnostic(CXTranslationUnit Unit, unsigned Index) {
-  ASTUnit *CXXUnit = static_cast<ASTUnit *>(Unit->TUData);
-  if (!CXXUnit || Index >= CXXUnit->stored_diag_size())
+  CXDiagnosticSet D = clang_getDiagnosticSetFromTU(Unit);
+  if (!D)
     return 0;
 
-  return new CXStoredDiagnostic(CXXUnit->stored_diag_begin()[Index],
-                                CXXUnit->getASTContext().getLangOptions());
+  CXDiagnosticSetImpl *Diags = static_cast<CXDiagnosticSetImpl*>(D);
+  if (Index >= Diags->getNumDiagnostics())
+    return 0;
+
+  return Diags->getDiagnostic(Index);
+}
+  
+CXDiagnosticSet clang_getDiagnosticSetFromTU(CXTranslationUnit Unit) {
+  if (!Unit->TUData)
+    return 0;
+  return static_cast<CXDiagnostic>(lazyCreateDiags(Unit));
 }
 
 void clang_disposeDiagnostic(CXDiagnostic Diagnostic) {
-  CXStoredDiagnostic *Stored = static_cast<CXStoredDiagnostic *>(Diagnostic);
-  delete Stored;
+  // No-op.  Kept as a legacy API.  CXDiagnostics are now managed
+  // by the enclosing CXDiagnosticSet.
 }
 
 CXString clang_formatDiagnostic(CXDiagnostic Diagnostic, unsigned Options) {
@@ -106,7 +157,7 @@ CXString clang_formatDiagnostic(CXDiagnostic Diagnostic, unsigned Options) {
 
   /* Print warning/error/etc. */
   switch (Severity) {
-  case CXDiagnostic_Ignored: assert(0 && "impossible"); break;
+  case CXDiagnostic_Ignored: llvm_unreachable("impossible");
   case CXDiagnostic_Note: Out << "note: "; break;
   case CXDiagnostic_Warning: Out << "warning: "; break;
   case CXDiagnostic_Error: Out << "error: "; break;
@@ -177,76 +228,37 @@ unsigned clang_defaultDiagnosticDisplayOptions() {
 }
 
 enum CXDiagnosticSeverity clang_getDiagnosticSeverity(CXDiagnostic Diag) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag)
-    return CXDiagnostic_Ignored;
-
-  switch (StoredDiag->Diag.getLevel()) {
-  case Diagnostic::Ignored: return CXDiagnostic_Ignored;
-  case Diagnostic::Note:    return CXDiagnostic_Note;
-  case Diagnostic::Warning: return CXDiagnostic_Warning;
-  case Diagnostic::Error:   return CXDiagnostic_Error;
-  case Diagnostic::Fatal:   return CXDiagnostic_Fatal;
-  }
-
-  llvm_unreachable("Invalid diagnostic level");
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl*>(Diag))
+    return D->getSeverity();
   return CXDiagnostic_Ignored;
 }
 
 CXSourceLocation clang_getDiagnosticLocation(CXDiagnostic Diag) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag || StoredDiag->Diag.getLocation().isInvalid())
-    return clang_getNullLocation();
-
-  return translateSourceLocation(StoredDiag->Diag.getLocation().getManager(),
-                                 StoredDiag->LangOpts,
-                                 StoredDiag->Diag.getLocation());
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl*>(Diag))
+    return D->getLocation();
+  return clang_getNullLocation();
 }
 
 CXString clang_getDiagnosticSpelling(CXDiagnostic Diag) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag)
-    return createCXString("");
-
-  return createCXString(StoredDiag->Diag.getMessage(), false);
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag))
+    return D->getSpelling();
+  return createCXString("");
 }
 
 CXString clang_getDiagnosticOption(CXDiagnostic Diag, CXString *Disable) {
   if (Disable)
     *Disable = createCXString("");
-  
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag)
-    return createCXString("");
-  
-  unsigned ID = StoredDiag->Diag.getID();
-  llvm::StringRef Option = DiagnosticIDs::getWarningOptionForDiag(ID);
-  if (!Option.empty()) {
-    if (Disable)
-      *Disable = createCXString((llvm::Twine("-Wno-") + Option).str());
-    return createCXString((llvm::Twine("-W") + Option).str());
-  }
-  
-  if (ID == diag::fatal_too_many_errors) {
-    if (Disable)
-      *Disable = createCXString("-ferror-limit=0");
-    return createCXString("-ferror-limit=");
-  }
-  
-  bool EnabledByDefault;
-  if (DiagnosticIDs::isBuiltinExtensionDiag(ID, EnabledByDefault) &&
-      !EnabledByDefault)
-    return createCXString("-pedantic");
+
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag))
+    return D->getDiagnosticOption(Disable);
 
   return createCXString("");
 }
 
 unsigned clang_getDiagnosticCategory(CXDiagnostic Diag) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag)
-    return 0;
-
-  return DiagnosticIDs::getCategoryNumberForDiag(StoredDiag->Diag.getID());
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag))
+    return D->getCategory();
+  return 0;
 }
   
 CXString clang_getDiagnosticCategoryName(unsigned Category) {
@@ -254,56 +266,61 @@ CXString clang_getDiagnosticCategoryName(unsigned Category) {
 }
   
 unsigned clang_getDiagnosticNumRanges(CXDiagnostic Diag) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag || StoredDiag->Diag.getLocation().isInvalid())
-    return 0;
-
-  return StoredDiag->Diag.range_size();
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag))
+    return D->getNumRanges();
+  return 0;
 }
 
 CXSourceRange clang_getDiagnosticRange(CXDiagnostic Diag, unsigned Range) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag || Range >= StoredDiag->Diag.range_size() ||
-      StoredDiag->Diag.getLocation().isInvalid())
+  CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag);  
+  if (!D || Range >= D->getNumRanges())
     return clang_getNullRange();
-
-  return translateSourceRange(StoredDiag->Diag.getLocation().getManager(),
-                              StoredDiag->LangOpts,
-                              StoredDiag->Diag.range_begin()[Range]);
+  return D->getRange(Range);
 }
 
 unsigned clang_getDiagnosticNumFixIts(CXDiagnostic Diag) {
-  CXStoredDiagnostic *StoredDiag = static_cast<CXStoredDiagnostic *>(Diag);
-  if (!StoredDiag)
-    return 0;
-
-  return StoredDiag->Diag.fixit_size();
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag))
+    return D->getNumFixIts();
+  return 0;
 }
 
-CXString clang_getDiagnosticFixIt(CXDiagnostic Diagnostic, unsigned FixIt,
+CXString clang_getDiagnosticFixIt(CXDiagnostic Diag, unsigned FixIt,
                                   CXSourceRange *ReplacementRange) {
-  CXStoredDiagnostic *StoredDiag
-    = static_cast<CXStoredDiagnostic *>(Diagnostic);
-  if (!StoredDiag || FixIt >= StoredDiag->Diag.fixit_size() ||
-      StoredDiag->Diag.getLocation().isInvalid()) {
+  CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag);
+  if (!D || FixIt >= D->getNumFixIts()) {
     if (ReplacementRange)
       *ReplacementRange = clang_getNullRange();
-
     return createCXString("");
   }
+  return D->getFixIt(FixIt, ReplacementRange);
+}
 
-  const FixItHint &Hint = StoredDiag->Diag.fixit_begin()[FixIt];
-  if (ReplacementRange) {
-    // Create a range that covers the entire replacement (or
-    // removal) range, adjusting the end of the range to point to
-    // the end of the token.
-    *ReplacementRange
-        = translateSourceRange(StoredDiag->Diag.getLocation().getManager(),
-                                StoredDiag->LangOpts,
-                                Hint.RemoveRange);
+void clang_disposeDiagnosticSet(CXDiagnosticSet Diags) {
+  CXDiagnosticSetImpl *D = static_cast<CXDiagnosticSetImpl*>(Diags);
+  if (D->isExternallyManaged())
+    delete D;
+}
+  
+CXDiagnostic clang_getDiagnosticInSet(CXDiagnosticSet Diags,
+                                      unsigned Index) {
+  if (CXDiagnosticSetImpl *D = static_cast<CXDiagnosticSetImpl*>(Diags))
+    if (Index < D->getNumDiagnostics())
+      return D->getDiagnostic(Index);
+  return 0;  
+}
+  
+CXDiagnosticSet clang_getChildDiagnostics(CXDiagnostic Diag) {
+  if (CXDiagnosticImpl *D = static_cast<CXDiagnosticImpl *>(Diag)) {
+    CXDiagnosticSetImpl &ChildDiags = D->getChildDiagnostics();
+    return ChildDiags.empty() ? 0 : (CXDiagnosticSet) &ChildDiags;
   }
+  return 0;
+}
 
-  return createCXString(Hint.CodeToInsert);
+unsigned clang_getNumDiagnosticsInSet(CXDiagnosticSet Diags) {
+  if (CXDiagnosticSetImpl *D = static_cast<CXDiagnosticSetImpl*>(Diags))
+    return D->getNumDiagnostics();
+  return 0;
 }
 
 } // end extern "C"

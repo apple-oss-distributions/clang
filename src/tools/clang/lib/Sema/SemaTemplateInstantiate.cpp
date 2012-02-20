@@ -98,8 +98,9 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
     // Add template arguments from a function template specialization.
     else if (FunctionDecl *Function = dyn_cast<FunctionDecl>(Ctx)) {
       if (!RelativeToPrimary &&
-          Function->getTemplateSpecializationKind() 
-                                                  == TSK_ExplicitSpecialization)
+          (Function->getTemplateSpecializationKind() == 
+                                                  TSK_ExplicitSpecialization &&
+           !Function->getClassScopeSpecializationPattern()))
         break;
           
       if (const TemplateArgumentList *TemplateArgs
@@ -428,7 +429,7 @@ void Sema::PrintInstantiationStack() {
 
   // FIXME: In all of these cases, we need to show the template arguments
   unsigned InstantiationIdx = 0;
-  for (llvm::SmallVector<ActiveTemplateInstantiation, 16>::reverse_iterator
+  for (SmallVector<ActiveTemplateInstantiation, 16>::reverse_iterator
          Active = ActiveTemplateInstantiations.rbegin(),
          ActiveEnd = ActiveTemplateInstantiations.rend();
        Active != ActiveEnd;
@@ -483,7 +484,7 @@ void Sema::PrintInstantiationStack() {
         = TemplateSpecializationType::PrintTemplateArgumentList(
                                                          Active->TemplateArgs,
                                                       Active->NumTemplateArgs,
-                                                      Context.PrintingPolicy);
+                                                      getPrintingPolicy());
       Diags.Report(Active->PointOfInstantiation,
                    diag::note_default_arg_instantiation_here)
         << (Template->getNameAsString() + TemplateArgsStr)
@@ -537,7 +538,7 @@ void Sema::PrintInstantiationStack() {
         = TemplateSpecializationType::PrintTemplateArgumentList(
                                                          Active->TemplateArgs,
                                                       Active->NumTemplateArgs,
-                                                      Context.PrintingPolicy);
+                                                      getPrintingPolicy());
       Diags.Report(Active->PointOfInstantiation,
                    diag::note_default_function_arg_instantiation_here)
         << (FD->getNameAsString() + TemplateArgsStr)
@@ -591,7 +592,6 @@ void Sema::PrintInstantiationStack() {
 }
 
 llvm::Optional<TemplateDeductionInfo *> Sema::isSFINAEContext() const {
-  using llvm::SmallVector;
   if (InNonInstantiationSFINAEContext)
     return llvm::Optional<TemplateDeductionInfo *>(0);
 
@@ -681,14 +681,12 @@ namespace {
 
     bool TryExpandParameterPacks(SourceLocation EllipsisLoc,
                                  SourceRange PatternRange,
-                                 const UnexpandedParameterPack *Unexpanded,
-                                 unsigned NumUnexpanded,
+                             llvm::ArrayRef<UnexpandedParameterPack> Unexpanded,
                                  bool &ShouldExpand,
                                  bool &RetainExpansion,
                                  llvm::Optional<unsigned> &NumExpansions) {
       return getSema().CheckParameterPacksForExpansion(EllipsisLoc, 
                                                        PatternRange, Unexpanded,
-                                                       NumUnexpanded, 
                                                        TemplateArgs, 
                                                        ShouldExpand,
                                                        RetainExpansion,
@@ -800,6 +798,11 @@ namespace {
       getSema().CallsUndergoingInstantiation.pop_back();
       return move(Result);
     }
+
+  private:
+    ExprResult transformNonTypeTemplateParmRef(NonTypeTemplateParmDecl *parm,
+                                               SourceLocation loc,
+                                               const TemplateArgument &arg);
   };
 }
 
@@ -1078,46 +1081,65 @@ TemplateInstantiator::TransformTemplateParmRefExpr(DeclRefExpr *E,
     Arg = Arg.pack_begin()[getSema().ArgumentPackSubstitutionIndex];
   }
 
+  return transformNonTypeTemplateParmRef(NTTP, E->getLocation(), Arg);
+}
+
+ExprResult TemplateInstantiator::transformNonTypeTemplateParmRef(
+                                                 NonTypeTemplateParmDecl *parm,
+                                                 SourceLocation loc,
+                                                 const TemplateArgument &arg) {
+  ExprResult result;
+  QualType type;
+
   // The template argument itself might be an expression, in which
   // case we just return that expression.
-  if (Arg.getKind() == TemplateArgument::Expression)
-    return SemaRef.Owned(Arg.getAsExpr());
+  if (arg.getKind() == TemplateArgument::Expression) {
+    Expr *argExpr = arg.getAsExpr();
+    result = SemaRef.Owned(argExpr);
+    type = argExpr->getType();
 
-  if (Arg.getKind() == TemplateArgument::Declaration) {
-    ValueDecl *VD = cast<ValueDecl>(Arg.getAsDecl());
+  } else if (arg.getKind() == TemplateArgument::Declaration) {
+    ValueDecl *VD = cast<ValueDecl>(arg.getAsDecl());
 
     // Find the instantiation of the template argument.  This is
     // required for nested templates.
     VD = cast_or_null<ValueDecl>(
-                            getSema().FindInstantiatedDecl(E->getLocation(),
-                                                           VD, TemplateArgs));
+                       getSema().FindInstantiatedDecl(loc, VD, TemplateArgs));
     if (!VD)
       return ExprError();
 
     // Derive the type we want the substituted decl to have.  This had
     // better be non-dependent, or these checks will have serious problems.
-    QualType TargetType;
-    if (NTTP->isExpandedParameterPack())
-      TargetType = NTTP->getExpansionType(
-                                      getSema().ArgumentPackSubstitutionIndex);
-    else if (NTTP->isParameterPack() && 
-             isa<PackExpansionType>(NTTP->getType())) {
-      TargetType = SemaRef.SubstType(
-                        cast<PackExpansionType>(NTTP->getType())->getPattern(),
-                                     TemplateArgs, E->getLocation(), 
-                                     NTTP->getDeclName());
-    } else
-      TargetType = SemaRef.SubstType(NTTP->getType(), TemplateArgs, 
-                                     E->getLocation(), NTTP->getDeclName());
-    assert(!TargetType.isNull() && "type substitution failed for param type");
-    assert(!TargetType->isDependentType() && "param type still dependent");
-    return SemaRef.BuildExpressionFromDeclTemplateArgument(Arg,
-                                                           TargetType,
-                                                           E->getLocation());
-  }
+    if (parm->isExpandedParameterPack()) {
+      type = parm->getExpansionType(SemaRef.ArgumentPackSubstitutionIndex);
+    } else if (parm->isParameterPack() && 
+               isa<PackExpansionType>(parm->getType())) {
+      type = SemaRef.SubstType(
+                        cast<PackExpansionType>(parm->getType())->getPattern(),
+                                     TemplateArgs, loc, parm->getDeclName());
+    } else {
+      type = SemaRef.SubstType(parm->getType(), TemplateArgs, 
+                               loc, parm->getDeclName());
+    }
+    assert(!type.isNull() && "type substitution failed for param type");
+    assert(!type->isDependentType() && "param type still dependent");
+    result = SemaRef.BuildExpressionFromDeclTemplateArgument(arg, type, loc);
 
-  return SemaRef.BuildExpressionFromIntegralTemplateArgument(Arg, 
-                                                E->getSourceRange().getBegin());
+    if (!result.isInvalid()) type = result.get()->getType();
+  } else {
+    result = SemaRef.BuildExpressionFromIntegralTemplateArgument(arg, loc);
+
+    // Note that this type can be different from the type of 'result',
+    // e.g. if it's an enum type.
+    type = arg.getIntegralType();
+  }
+  if (result.isInvalid()) return ExprError();
+
+  Expr *resultExpr = result.take();
+  return SemaRef.Owned(new (SemaRef.Context)
+                SubstNonTypeTemplateParmExpr(type,
+                                             resultExpr->getValueKind(),
+                                             loc, parm, resultExpr));
 }
                                                    
 ExprResult 
@@ -1133,36 +1155,9 @@ TemplateInstantiator::TransformSubstNonTypeTemplateParmPackExpr(
   assert(Index < ArgPack.pack_size() && "Substitution index out-of-range");
   
   const TemplateArgument &Arg = ArgPack.pack_begin()[Index];
-  if (Arg.getKind() == TemplateArgument::Expression)
-    return SemaRef.Owned(Arg.getAsExpr());
-  
-  if (Arg.getKind() == TemplateArgument::Declaration) {
-    ValueDecl *VD = cast<ValueDecl>(Arg.getAsDecl());
-    
-    // Find the instantiation of the template argument.  This is
-    // required for nested templates.
-    VD = cast_or_null<ValueDecl>(
-                   getSema().FindInstantiatedDecl(E->getParameterPackLocation(),
-                                                  VD, TemplateArgs));
-    if (!VD)
-      return ExprError();
-
-    QualType T;
-    NonTypeTemplateParmDecl *NTTP = E->getParameterPack();
-    if (NTTP->isExpandedParameterPack())
-      T = NTTP->getExpansionType(getSema().ArgumentPackSubstitutionIndex);
-    else if (const PackExpansionType *Expansion 
-                                = dyn_cast<PackExpansionType>(NTTP->getType()))
-      T = SemaRef.SubstType(Expansion->getPattern(), TemplateArgs, 
-                            E->getParameterPackLocation(), NTTP->getDeclName());
-    else
-      T = E->getType();
-    return SemaRef.BuildExpressionFromDeclTemplateArgument(Arg, T,
-                                                 E->getParameterPackLocation());
-  }
-    
-  return SemaRef.BuildExpressionFromIntegralTemplateArgument(Arg, 
-                                                 E->getParameterPackLocation());
+  return transformNonTypeTemplateParmRef(E->getParameterPack(),
+                                         E->getParameterPackLocation(),
+                                         Arg);
 }
 
 ExprResult
@@ -1538,8 +1533,8 @@ ParmVarDecl *Sema::SubstParmVarDecl(ParmVarDecl *OldParm,
 bool Sema::SubstParmTypes(SourceLocation Loc, 
                           ParmVarDecl **Params, unsigned NumParams,
                           const MultiLevelTemplateArgumentList &TemplateArgs,
-                          llvm::SmallVectorImpl<QualType> &ParamTypes,
-                          llvm::SmallVectorImpl<ParmVarDecl *> *OutParams) {
+                          SmallVectorImpl<QualType> &ParamTypes,
+                          SmallVectorImpl<ParmVarDecl *> *OutParams) {
   assert(!ActiveTemplateInstantiations.empty() &&
          "Cannot perform an instantiation without some context on the "
          "instantiation stack");
@@ -1561,7 +1556,7 @@ Sema::SubstBaseSpecifiers(CXXRecordDecl *Instantiation,
                           CXXRecordDecl *Pattern,
                           const MultiLevelTemplateArgumentList &TemplateArgs) {
   bool Invalid = false;
-  llvm::SmallVector<CXXBaseSpecifier*, 4> InstantiatedBases;
+  SmallVector<CXXBaseSpecifier*, 4> InstantiatedBases;
   for (ClassTemplateSpecializationDecl::base_class_iterator
          Base = Pattern->bases_begin(), BaseEnd = Pattern->bases_end();
        Base != BaseEnd; ++Base) {
@@ -1575,7 +1570,7 @@ Sema::SubstBaseSpecifiers(CXXRecordDecl *Instantiation,
     if (Base->isPackExpansion()) {
       // This is a pack expansion. See whether we should expand it now, or
       // wait until later.
-      llvm::SmallVector<UnexpandedParameterPack, 2> Unexpanded;
+      SmallVector<UnexpandedParameterPack, 2> Unexpanded;
       collectUnexpandedParameterPacks(Base->getTypeSourceInfo()->getTypeLoc(),
                                       Unexpanded);
       bool ShouldExpand = false;
@@ -1583,7 +1578,7 @@ Sema::SubstBaseSpecifiers(CXXRecordDecl *Instantiation,
       llvm::Optional<unsigned> NumExpansions;
       if (CheckParameterPacksForExpansion(Base->getEllipsisLoc(), 
                                           Base->getSourceRange(),
-                                          Unexpanded.data(), Unexpanded.size(),
+                                          Unexpanded,
                                           TemplateArgs, ShouldExpand, 
                                           RetainExpansion,
                                           NumExpansions)) {
@@ -1758,8 +1753,8 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
     Invalid = true;
 
   TemplateDeclInstantiator Instantiator(*this, Instantiation, TemplateArgs);
-  llvm::SmallVector<Decl*, 4> Fields;
-  llvm::SmallVector<std::pair<FieldDecl*, FieldDecl*>, 4>
+  SmallVector<Decl*, 4> Fields;
+  SmallVector<std::pair<FieldDecl*, FieldDecl*>, 4>
     FieldsWithMemberInitializers;
   for (RecordDecl::decl_iterator Member = Pattern->decls_begin(),
          MemberEnd = Pattern->decls_end();
@@ -1799,9 +1794,8 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
   }
 
   // Finish checking fields.
-  ActOnFields(0, Instantiation->getLocation(), Instantiation,
-              Fields.data(), Fields.size(), SourceLocation(), SourceLocation(),
-              0);
+  ActOnFields(0, Instantiation->getLocation(), Instantiation, Fields, 
+              SourceLocation(), SourceLocation(), 0);
   CheckCompletedCXXClass(Instantiation);
 
   // Attach any in-class member initializers now the class is complete.
@@ -1809,36 +1803,23 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
     FieldDecl *OldField = FieldsWithMemberInitializers[I].first;
     FieldDecl *NewField = FieldsWithMemberInitializers[I].second;
     Expr *OldInit = OldField->getInClassInitializer();
-    ExprResult NewInit = SubstExpr(OldInit, TemplateArgs);
 
-    // If the initialization is no longer dependent, check it now.
-    if ((OldField->getType()->isDependentType() || OldInit->isTypeDependent())
-        && !NewField->getType()->isDependentType()
-        && !NewInit.get()->isTypeDependent()) {
-      // FIXME: handle list-initialization
-      SourceLocation EqualLoc = NewField->getLocation();
-      NewInit = PerformCopyInitialization(
-        InitializedEntity::InitializeMember(NewField), EqualLoc,
-        NewInit.release());
-
-      if (!NewInit.isInvalid()) {
-        CheckImplicitConversions(NewInit.get(), EqualLoc);
-
-        // C++0x [class.base.init]p7:
-        //   The initialization of each base and member constitutes a
-        //   full-expression.
-        NewInit = MaybeCreateExprWithCleanups(NewInit);
-      }
-    }
-
-    if (NewInit.isInvalid())
+    SourceLocation LParenLoc, RParenLoc;
+    ASTOwningVector<Expr*> NewArgs(*this);
+    if (InstantiateInitializer(OldInit, TemplateArgs, LParenLoc, NewArgs,
+                               RParenLoc))
       NewField->setInvalidDecl();
-    else
-      NewField->setInClassInitializer(NewInit.release());
+    else {
+      assert(NewArgs.size() == 1 && "wrong number of in-class initializers");
+      ActOnCXXInClassMemberInitializer(NewField, LParenLoc, NewArgs[0]);
+    }
   }
 
   if (!FieldsWithMemberInitializers.empty())
     ActOnFinishDelayedMemberInitializers(Instantiation);
+
+  if (TSK == TSK_ImplicitInstantiation)
+    Instantiation->setRBraceLoc(Pattern->getRBraceLoc());
 
   if (Instantiation->isInvalidDecl())
     Invalid = true;
@@ -1932,8 +1913,8 @@ Sema::InstantiateClassTemplateSpecialization(
   //   specialization with the template argument lists of the partial
   //   specializations.
   typedef PartialSpecMatchResult MatchResult;
-  llvm::SmallVector<MatchResult, 4> Matched;
-  llvm::SmallVector<ClassTemplatePartialSpecializationDecl *, 4> PartialSpecs;
+  SmallVector<MatchResult, 4> Matched;
+  SmallVector<ClassTemplatePartialSpecializationDecl *, 4> PartialSpecs;
   Template->getPartialSpecializations(PartialSpecs);
   for (unsigned I = 0, N = PartialSpecs.size(); I != N; ++I) {
     ClassTemplatePartialSpecializationDecl *Partial = PartialSpecs[I];
@@ -1955,10 +1936,10 @@ Sema::InstantiateClassTemplateSpecialization(
   // If we're dealing with a member template where the template parameters
   // have been instantiated, this provides the original template parameters
   // from which the member template's parameters were instantiated.
-  llvm::SmallVector<const NamedDecl *, 4> InstantiatedTemplateParameters;
+  SmallVector<const NamedDecl *, 4> InstantiatedTemplateParameters;
   
   if (Matched.size() >= 1) {
-    llvm::SmallVector<MatchResult, 4>::iterator Best = Matched.begin();
+    SmallVector<MatchResult, 4>::iterator Best = Matched.begin();
     if (Matched.size() == 1) {
       //   -- If exactly one matching specialization is found, the
       //      instantiation is generated from that specialization.
@@ -1971,7 +1952,7 @@ Sema::InstantiateClassTemplateSpecialization(
       //      specialized than all of the other matching
       //      specializations, then the use of the class template is
       //      ambiguous and the program is ill-formed.
-      for (llvm::SmallVector<MatchResult, 4>::iterator P = Best + 1,
+      for (SmallVector<MatchResult, 4>::iterator P = Best + 1,
                                                     PEnd = Matched.end();
            P != PEnd; ++P) {
         if (getMoreSpecializedPartialSpecialization(P->Partial, Best->Partial,
@@ -1983,7 +1964,7 @@ Sema::InstantiateClassTemplateSpecialization(
       // Determine if the best partial specialization is more specialized than
       // the others.
       bool Ambiguous = false;
-      for (llvm::SmallVector<MatchResult, 4>::iterator P = Matched.begin(),
+      for (SmallVector<MatchResult, 4>::iterator P = Matched.begin(),
                                                     PEnd = Matched.end();
            P != PEnd; ++P) {
         if (P != Best &&
@@ -2002,7 +1983,7 @@ Sema::InstantiateClassTemplateSpecialization(
           << ClassTemplateSpec;
         
         // Print the matching partial specializations.
-        for (llvm::SmallVector<MatchResult, 4>::iterator P = Matched.begin(),
+        for (SmallVector<MatchResult, 4>::iterator P = Matched.begin(),
                                                       PEnd = Matched.end();
              P != PEnd; ++P)
           Diag(P->Partial->getLocation(), diag::note_partial_spec_match)
@@ -2241,7 +2222,7 @@ Sema::SubstExpr(Expr *E, const MultiLevelTemplateArgumentList &TemplateArgs) {
 
 bool Sema::SubstExprs(Expr **Exprs, unsigned NumExprs, bool IsCall,
                       const MultiLevelTemplateArgumentList &TemplateArgs,
-                      llvm::SmallVectorImpl<Expr *> &Outputs) {
+                      SmallVectorImpl<Expr *> &Outputs) {
   if (NumExprs == 0)
     return false;
   

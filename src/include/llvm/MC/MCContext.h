@@ -26,10 +26,11 @@ namespace llvm {
   class MCLabel;
   class MCDwarfFile;
   class MCDwarfLoc;
+  class MCObjectFileInfo;
+  class MCRegisterInfo;
   class MCLineSection;
   class StringRef;
   class Twine;
-  class TargetAsmInfo;
   class MCSectionMachO;
   class MCSectionELF;
 
@@ -46,7 +47,11 @@ namespace llvm {
     /// The MCAsmInfo for this target.
     const MCAsmInfo &MAI;
 
-    const TargetAsmInfo *TAI;
+    /// The MCRegisterInfo for this target.
+    const MCRegisterInfo &MRI;
+
+    /// The MCObjectFileInfo for this target.
+    const MCObjectFileInfo *MOFI;
 
     /// Allocator - Allocator object used for creating machine code objects.
     ///
@@ -93,6 +98,17 @@ namespace llvm {
     MCDwarfLoc CurrentDwarfLoc;
     bool DwarfLocSeen;
 
+    /// Generate dwarf debugging info for assembly source files.
+    bool GenDwarfForAssembly;
+
+    /// The current dwarf file number when generate dwarf debugging info for
+    /// assembly source files.
+    unsigned GenDwarfFileNumber;
+
+    /// The default initial text section that we generate dwarf debugging line
+    /// info for when generating dwarf assembly source files.
+    const MCSection *GenDwarfSection;
+
     /// Honor temporary labels, this is useful for debugging semantic
     /// differences between temporary and non-temporary labels (primarily on
     /// Darwin).
@@ -110,12 +126,15 @@ namespace llvm {
     MCSymbol *CreateSymbol(StringRef Name);
 
   public:
-    explicit MCContext(const MCAsmInfo &MAI, const TargetAsmInfo *TAI);
+    explicit MCContext(const MCAsmInfo &MAI, const MCRegisterInfo &MRI,
+                       const MCObjectFileInfo *MOFI);
     ~MCContext();
 
     const MCAsmInfo &getAsmInfo() const { return MAI; }
 
-    const TargetAsmInfo &getTargetAsmInfo() const { return *TAI; }
+    const MCRegisterInfo &getRegisterInfo() const { return MRI; }
+
+    const MCObjectFileInfo *getObjectFileInfo() const { return MOFI; }
 
     void setAllowTemporaryLabels(bool Value) { AllowTemporaryLabels = Value; }
 
@@ -196,7 +215,8 @@ namespace llvm {
     /// @{
 
     /// GetDwarfFile - creates an entry in the dwarf file and directory tables.
-    unsigned GetDwarfFile(StringRef FileName, unsigned FileNumber);
+    unsigned GetDwarfFile(StringRef Directory, StringRef FileName,
+                          unsigned FileNumber);
 
     bool isValidDwarfFileNumber(unsigned FileNumber);
 
@@ -242,6 +262,13 @@ namespace llvm {
 
     bool getDwarfLocSeen() { return DwarfLocSeen; }
     const MCDwarfLoc &getCurrentDwarfLoc() { return CurrentDwarfLoc; }
+
+    bool getGenDwarfForAssembly() { return GenDwarfForAssembly; }
+    void setGenDwarfForAssembly(bool Value) { GenDwarfForAssembly = Value; }
+    unsigned getGenDwarfFileNumber() { return GenDwarfFileNumber; }
+    unsigned nextGenDwarfFileNumber() { return ++GenDwarfFileNumber; }
+    const MCSection *getGenDwarfSection() { return GenDwarfSection; }
+    void setGenDwarfSection(const MCSection *Sec) { GenDwarfSection = Sec; }
 
     /// @}
 

@@ -15,10 +15,10 @@
 #include "MBlaze.h"
 #include "MBlazeRegisterInfo.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/TargetRegistry.h"
 
-#define GET_SUBTARGETINFO_CTOR
-#define GET_SUBTARGETINFO_MC_DESC
 #define GET_SUBTARGETINFO_TARGET_DESC
+#define GET_SUBTARGETINFO_CTOR
 #include "MBlazeGenSubtargetInfo.inc"
 
 using namespace llvm;
@@ -26,7 +26,7 @@ using namespace llvm;
 MBlazeSubtarget::MBlazeSubtarget(const std::string &TT,
                                  const std::string &CPU,
                                  const std::string &FS):
-  MBlazeGenSubtargetInfo(),
+  MBlazeGenSubtargetInfo(TT, CPU, FS),
   HasBarrel(false), HasDiv(false), HasMul(false), HasPatCmp(false),
   HasFPU(false), HasMul64(false), HasSqrt(false)
 {
@@ -34,7 +34,7 @@ MBlazeSubtarget::MBlazeSubtarget(const std::string &TT,
   std::string CPUName = CPU;
   if (CPUName.empty())
     CPUName = "mblaze";
-  ParseSubtargetFeatures(FS, CPUName);
+  ParseSubtargetFeatures(CPUName, FS);
 
   // Only use instruction scheduling if the selected CPU has an instruction
   // itinerary (the default CPU is the only one that doesn't).
@@ -61,4 +61,3 @@ enablePostRAScheduler(CodeGenOpt::Level OptLevel,
   CriticalPathRCs.push_back(&MBlaze::GPRRegClass);
   return HasItin && OptLevel >= CodeGenOpt::Default;
 }
-

@@ -38,16 +38,6 @@ bool Path::operator<(const Path& that) const {
   return path < that.path;
 }
 
-Path
-Path::GetLLVMConfigDir() {
-  Path result;
-#ifdef LLVM_ETCDIR
-  if (result.set(LLVM_ETCDIR))
-    return result;
-#endif
-  return GetLLVMDefaultConfigDir();
-}
-
 LLVMFileType
 sys::IdentifyFileType(const char *magic, unsigned length) {
   assert(magic && "Invalid magic number string");
@@ -121,7 +111,7 @@ sys::IdentifyFileType(const char *magic, unsigned length) {
         case 7: return Mach_O_DynamicLinker_FileType;
         case 8: return Mach_O_Bundle_FileType;
         case 9: return Mach_O_DynamicallyLinkedSharedLibStub_FileType;
-        case 10: break; // FIXME: MH_DSYM companion file with only debug.
+        case 10: return Mach_O_DSYMCompanion_FileType;
       }
       break;
     }

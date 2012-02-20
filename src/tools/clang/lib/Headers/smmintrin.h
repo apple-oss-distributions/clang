@@ -63,17 +63,15 @@
 #define _mm_round_sd(X, Y, M)   __builtin_ia32_roundsd((X), (Y), (M))
 
 /* SSE4 Packed Blending Intrinsics.  */
-static __inline__ __m128d __attribute__((__always_inline__, __nodebug__))
-_mm_blend_pd (__m128d __V1, __m128d __V2, const int __M)
-{
-  return (__m128d) __builtin_ia32_blendpd ((__v2df)__V1, (__v2df)__V2, __M);
-}
+#define _mm_blend_pd(V1, V2, M) __extension__ ({ \
+  __m128d __V1 = (V1); \
+  __m128d __V2 = (V2); \
+  (__m128d) __builtin_ia32_blendpd ((__v2df)__V1, (__v2df)__V2, M); })
 
-static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
-_mm_blend_ps (__m128 __V1, __m128 __V2, const int __M)
-{
-  return (__m128) __builtin_ia32_blendps ((__v4sf)__V1, (__v4sf)__V2, __M);
-}
+#define _mm_blend_ps(V1, V2, M) __extension__ ({ \
+  __m128 __V1 = (V1); \
+  __m128 __V2 = (V2); \
+  (__m128) __builtin_ia32_blendps ((__v4sf)__V1, (__v4sf)__V2, M); })
 
 static __inline__ __m128d __attribute__((__always_inline__, __nodebug__))
 _mm_blendv_pd (__m128d __V1, __m128d __V2, __m128d __M)
@@ -96,11 +94,10 @@ _mm_blendv_epi8 (__m128i __V1, __m128i __V2, __m128i __M)
                                                (__v16qi)__M);
 }
 
-static __inline__  __m128i __attribute__((__always_inline__, __nodebug__))
-_mm_blend_epi16 (__m128i __V1, __m128i __V2, const int __M)
-{
-  return (__m128i) __builtin_ia32_pblendw128 ((__v8hi)__V1, (__v8hi)__V2, __M);
-}
+#define _mm_blend_epi16(V1, V2, M) __extension__ ({ \
+  __m128i __V1 = (V1); \
+  __m128i __V2 = (V2); \
+  (__m128i) __builtin_ia32_pblendw128 ((__v8hi)__V1, (__v8hi)__V2, M); })
 
 /* SSE4 Dword Multiply Instructions.  */
 static __inline__  __m128i __attribute__((__always_inline__, __nodebug__))
@@ -242,7 +239,7 @@ _mm_testnzc_si128(__m128i __M, __m128i __V)
 
 #define _mm_test_all_ones(V) _mm_testc_si128((V), _mm_cmpeq_epi32((V), (V)))
 #define _mm_test_mix_ones_zeros(M, V) _mm_testnzc_si128((M), (V))
-#define _mm_test_all_zeros(M, V) _mm_testz_si128 ((V), (V))
+#define _mm_test_all_zeros(M, V) _mm_testz_si128 ((M), (V))
 
 /* SSE4 64-bit Packed Integer Comparisons.  */
 static __inline__ __m128i __attribute__((__always_inline__, __nodebug__))
@@ -371,20 +368,20 @@ _mm_packus_epi32(__m128i __V1, __m128i __V2)
 
 #define _mm_cmpestrm(A, LA, B, LB, M) \
      __builtin_ia32_pcmpestrm128((A), (LA), (B), (LB), (M))
-#define _mm_cmpestri(X, LX, Y, LY, M) \
+#define _mm_cmpestri(A, LA, B, LB, M) \
      __builtin_ia32_pcmpestri128((A), (LA), (B), (LB), (M))
      
 /* SSE4.2 Packed Comparison Intrinsics and EFlag Reading.  */
-#define _mm_cmpistra(A, LA, B, LB, M) \
-     __builtin_ia32_pcmpistria128((A), (LA), (B), (LB), (M))
-#define _mm_cmpistrc(A, LA, B, LB, M) \
-     __builtin_ia32_pcmpistric128((A), (LA), (B), (LB), (M))
-#define _mm_cmpistro(A, LA, B, LB, M) \
-     __builtin_ia32_pcmpistrio128((A), (LA), (B), (LB), (M))
-#define _mm_cmpistrs(A, LA, B, LB, M) \
-     __builtin_ia32_pcmpistris128((A), (LA), (B), (LB), (M))
-#define _mm_cmpistrz(A, LA, B, LB, M) \
-     __builtin_ia32_pcmpistriz128((A), (LA), (B), (LB), (M))
+#define _mm_cmpistra(A, B, M) \
+     __builtin_ia32_pcmpistria128((A), (B), (M))
+#define _mm_cmpistrc(A, B, M) \
+     __builtin_ia32_pcmpistric128((A), (B), (M))
+#define _mm_cmpistro(A, B, M) \
+     __builtin_ia32_pcmpistrio128((A), (B), (M))
+#define _mm_cmpistrs(A, B, M) \
+     __builtin_ia32_pcmpistris128((A), (B), (M))
+#define _mm_cmpistrz(A, B, M) \
+     __builtin_ia32_pcmpistriz128((A), (B), (M))
 
 #define _mm_cmpestra(A, LA, B, LB, M) \
      __builtin_ia32_pcmpestria128((A), (LA), (B), (LB), (M))

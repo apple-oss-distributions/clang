@@ -21,9 +21,9 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/TargetRegistry.h"
 
 #define GET_INSTRINFO_CTOR
-#define GET_INSTRINFO_MC_DESC
 #include "MSP430GenInstrInfo.inc"
 
 using namespace llvm;

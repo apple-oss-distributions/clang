@@ -14,6 +14,7 @@
 #include "CGDebugInfo.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
+#include "CGOpenCLRuntime.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/Decl.h"
@@ -46,7 +47,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::Field:
   case Decl::IndirectField:
   case Decl::ObjCIvar:
-  case Decl::ObjCAtDefsField:      
+  case Decl::ObjCAtDefsField:
   case Decl::ParmVar:
   case Decl::ImplicitParam:
   case Decl::ClassTemplate:
@@ -70,7 +71,8 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::Friend:
   case Decl::FriendTemplate:
   case Decl::Block:
-    assert(0 && "Declaration should not be in declstmts!");
+  case Decl::ClassScopeFunctionSpecialization:
+    llvm_unreachable("Declaration should not be in declstmts!");
   case Decl::Function:  // void X();
   case Decl::Record:    // struct/union/class X;
   case Decl::Enum:      // enum X;
@@ -112,7 +114,7 @@ void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
   case SC_Register:
     return EmitAutoVarDecl(D);
   case SC_Static: {
-    llvm::GlobalValue::LinkageTypes Linkage = 
+    llvm::GlobalValue::LinkageTypes Linkage =
       llvm::GlobalValue::InternalLinkage;
 
     // If the function definition has some sort of weak linkage, its
@@ -123,26 +125,28 @@ void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
     if (getContext().getLangOptions().CPlusPlus)
       if (llvm::GlobalValue::isWeakForLinker(CurFn->getLinkage()))
         Linkage = CurFn->getLinkage();
-    
+
     return EmitStaticVarDecl(D, Linkage);
   }
   case SC_Extern:
   case SC_PrivateExtern:
     // Don't emit it now, allow it to be emitted lazily on its first use.
     return;
+  case SC_OpenCLWorkGroupLocal:
+    return CGM.getOpenCLRuntime().EmitWorkGroupLocalVarDecl(*this, D);
   }
 
-  assert(0 && "Unknown storage class");
+  llvm_unreachable("Unknown storage class");
 }
 
 static std::string GetStaticDeclName(CodeGenFunction &CGF, const VarDecl &D,
                                      const char *Separator) {
   CodeGenModule &CGM = CGF.CGM;
   if (CGF.getContext().getLangOptions().CPlusPlus) {
-    llvm::StringRef Name = CGM.getMangledName(&D);
+    StringRef Name = CGM.getMangledName(&D);
     return Name.str();
   }
-  
+
   std::string ContextName;
   if (!CGF.CurFuncDecl) {
     // Better be in a block declared in global scope.
@@ -154,15 +158,15 @@ static std::string GetStaticDeclName(CodeGenFunction &CGF, const VarDecl &D,
       ContextName = Name.getString();
     }
     else
-      assert(0 && "Unknown context for block static var decl");
+      llvm_unreachable("Unknown context for block static var decl");
   } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CGF.CurFuncDecl)) {
-    llvm::StringRef Name = CGM.getMangledName(FD);
+    StringRef Name = CGM.getMangledName(FD);
     ContextName = Name.str();
   } else if (isa<ObjCMethodDecl>(CGF.CurFuncDecl))
     ContextName = CGF.CurFn->getName();
   else
-    assert(0 && "Unknown context for static var decl");
-  
+    llvm_unreachable("Unknown context for static var decl");
+
   return ContextName + Separator + D.getNameAsString();
 }
 
@@ -175,7 +179,7 @@ CodeGenFunction::CreateStaticVarDecl(const VarDecl &D,
 
   std::string Name = GetStaticDeclName(*this, D, Separator);
 
-  const llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(Ty);
+  llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(Ty);
   llvm::GlobalVariable *GV =
     new llvm::GlobalVariable(CGM.getModule(), LTy,
                              Ty.isConstant(getContext()), Linkage,
@@ -203,7 +207,7 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
     if (!getContext().getLangOptions().CPlusPlus)
       CGM.ErrorUnsupported(D.getInit(), "constant l-value expression");
     else if (Builder.GetInsertBlock()) {
-      // Since we have a static initializer, this global variable can't 
+      // Since we have a static initializer, this global variable can't
       // be constant.
       GV->setConstant(false);
 
@@ -218,7 +222,7 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
   // in the LLVM type system.)
   if (GV->getType()->getElementType() != Init->getType()) {
     llvm::GlobalVariable *OldGV = GV;
-    
+
     GV = new llvm::GlobalVariable(CGM.getModule(), Init->getType(),
                                   OldGV->isConstant(),
                                   OldGV->getLinkage(), Init, "",
@@ -226,19 +230,19 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
                                   D.isThreadSpecified(),
                            CGM.getContext().getTargetAddressSpace(D.getType()));
     GV->setVisibility(OldGV->getVisibility());
-    
+
     // Steal the name of the old global
     GV->takeName(OldGV);
-    
+
     // Replace all uses of the old global with the new global
     llvm::Constant *NewPtrForOldDecl =
     llvm::ConstantExpr::getBitCast(GV, OldGV->getType());
     OldGV->replaceAllUsesWith(NewPtrForOldDecl);
-    
+
     // Erase the old global, since it is no longer used.
     OldGV->eraseFromParent();
   }
-  
+
   GV->setInitializer(Init);
   return GV;
 }
@@ -259,7 +263,7 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   // Make sure to evaluate VLA bounds now so that we have them for later.
   if (D.getType()->isVariablyModifiedType())
     EmitVariablyModifiedType(D.getType());
-  
+
   // Local static block variables must be treated as globals as they may be
   // referenced in their RHS initializer block-literal expresion.
   CGM.setStaticLocalDeclAddress(&D, GV);
@@ -270,14 +274,8 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
 
   GV->setAlignment(getContext().getDeclAlign(&D).getQuantity());
 
-  // FIXME: Merge attribute handling.
-  if (const AnnotateAttr *AA = D.getAttr<AnnotateAttr>()) {
-    SourceManager &SM = CGM.getContext().getSourceManager();
-    llvm::Constant *Ann =
-      CGM.EmitAnnotateAttr(GV, AA,
-                           SM.getInstantiationLineNumber(D.getLocation()));
-    CGM.AddAnnotation(Ann);
-  }
+  if (D.hasAttr<AnnotateAttr>())
+    CGM.AddGlobalAnnotations(&D, GV);
 
   if (const SectionAttr *SA = D.getAttr<SectionAttr>())
     GV->setSection(SA->getName());
@@ -290,8 +288,8 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   //
   // FIXME: It is really dangerous to store this in the map; if anyone
   // RAUW's the GV uses of this constant will be invalid.
-  const llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(D.getType());
-  const llvm::Type *LPtrTy =
+  llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(D.getType());
+  llvm::Type *LPtrTy =
     LTy->getPointerTo(CGM.getContext().getTargetAddressSpace(D.getType()));
   DMEntry = llvm::ConstantExpr::getBitCast(GV, LPtrTy);
 
@@ -304,38 +302,40 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
 }
 
 namespace {
-  struct CallArrayDtor : EHScopeStack::Cleanup {
-    CallArrayDtor(const CXXDestructorDecl *Dtor, 
-                  const ConstantArrayType *Type,
-                  llvm::Value *Loc)
-      : Dtor(Dtor), Type(Type), Loc(Loc) {}
+  struct DestroyObject : EHScopeStack::Cleanup {
+    DestroyObject(llvm::Value *addr, QualType type,
+                  CodeGenFunction::Destroyer *destroyer,
+                  bool useEHCleanupForArray)
+      : addr(addr), type(type), destroyer(*destroyer),
+        useEHCleanupForArray(useEHCleanupForArray) {}
 
-    const CXXDestructorDecl *Dtor;
-    const ConstantArrayType *Type;
-    llvm::Value *Loc;
+    llvm::Value *addr;
+    QualType type;
+    CodeGenFunction::Destroyer &destroyer;
+    bool useEHCleanupForArray;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
-      QualType BaseElementTy = CGF.getContext().getBaseElementType(Type);
-      const llvm::Type *BasePtr = CGF.ConvertType(BaseElementTy);
-      BasePtr = llvm::PointerType::getUnqual(BasePtr);
-      llvm::Value *BaseAddrPtr = CGF.Builder.CreateBitCast(Loc, BasePtr);
-      CGF.EmitCXXAggrDestructorCall(Dtor, Type, BaseAddrPtr);
+    void Emit(CodeGenFunction &CGF, Flags flags) {
+      // Don't use an EH cleanup recursively from an EH cleanup.
+      bool useEHCleanupForArray =
+        flags.isForNormalCleanup() && this->useEHCleanupForArray;
+
+      CGF.emitDestroy(addr, type, destroyer, useEHCleanupForArray);
     }
   };
 
-  struct CallVarDtor : EHScopeStack::Cleanup {
-    CallVarDtor(const CXXDestructorDecl *Dtor,
-                llvm::Value *NRVOFlag,
-                llvm::Value *Loc)
-      : Dtor(Dtor), NRVOFlag(NRVOFlag), Loc(Loc) {}
+  struct DestroyNRVOVariable : EHScopeStack::Cleanup {
+    DestroyNRVOVariable(llvm::Value *addr,
+                        const CXXDestructorDecl *Dtor,
+                        llvm::Value *NRVOFlag)
+      : Dtor(Dtor), NRVOFlag(NRVOFlag), Loc(addr) {}
 
     const CXXDestructorDecl *Dtor;
     llvm::Value *NRVOFlag;
     llvm::Value *Loc;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       // Along the exceptions path we always execute the dtor.
-      bool NRVO = !IsForEH && NRVOFlag;
+      bool NRVO = flags.isForNormalCleanup() && NRVOFlag;
 
       llvm::BasicBlock *SkipDtorBB = 0;
       if (NRVO) {
@@ -346,7 +346,7 @@ namespace {
         CGF.Builder.CreateCondBr(DidNRVO, SkipDtorBB, RunDtorBB);
         CGF.EmitBlock(RunDtorBB);
       }
-          
+
       CGF.EmitCXXDestructorCall(Dtor, Dtor_Complete,
                                 /*ForVirtualBase=*/false, Loc);
 
@@ -357,8 +357,8 @@ namespace {
   struct CallStackRestore : EHScopeStack::Cleanup {
     llvm::Value *Stack;
     CallStackRestore(llvm::Value *Stack) : Stack(Stack) {}
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
-      llvm::Value *V = CGF.Builder.CreateLoad(Stack, "tmp");
+    void Emit(CodeGenFunction &CGF, Flags flags) {
+      llvm::Value *V = CGF.Builder.CreateLoad(Stack);
       llvm::Value *F = CGF.CGM.getIntrinsic(llvm::Intrinsic::stackrestore);
       CGF.Builder.CreateCall(F, V);
     }
@@ -368,7 +368,7 @@ namespace {
     const VarDecl &Var;
     ExtendGCLifetime(const VarDecl *var) : Var(*var) {}
 
-    void Emit(CodeGenFunction &CGF, bool forEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       // Compute the address of the local variable, in case it's a
       // byref or something.
       DeclRefExpr DRE(const_cast<VarDecl*>(&Var), Var.getType(), VK_LValue,
@@ -382,12 +382,12 @@ namespace {
     llvm::Constant *CleanupFn;
     const CGFunctionInfo &FnInfo;
     const VarDecl &Var;
-    
+
     CallCleanupFunction(llvm::Constant *CleanupFn, const CGFunctionInfo *Info,
                         const VarDecl *Var)
       : CleanupFn(CleanupFn), FnInfo(*Info), Var(*Var) {}
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       DeclRefExpr DRE(const_cast<VarDecl*>(&Var), Var.getType(), VK_LValue,
                       SourceLocation());
       // Compute the address of the local variable, in case it's a byref
@@ -426,19 +426,26 @@ static void EmitAutoVarWithLifetime(CodeGenFunction &CGF, const VarDecl &var,
     break;
 
   case Qualifiers::OCL_Strong: {
-    CGF.PushARCReleaseCleanup(CGF.getARCCleanupKind(),
-                              var.getType(), addr,
-                              var.hasAttr<ObjCPreciseLifetimeAttr>());
+    CodeGenFunction::Destroyer &destroyer =
+      (var.hasAttr<ObjCPreciseLifetimeAttr>()
+       ? CodeGenFunction::destroyARCStrongPrecise
+       : CodeGenFunction::destroyARCStrongImprecise);
+
+    CleanupKind cleanupKind = CGF.getARCCleanupKind();
+    CGF.pushDestroy(cleanupKind, addr, var.getType(), destroyer,
+                    cleanupKind & EHCleanup);
     break;
   }
   case Qualifiers::OCL_Autoreleasing:
     // nothing to do
     break;
- 
+
   case Qualifiers::OCL_Weak:
     // __weak objects always get EH cleanups; otherwise, exceptions
     // could cause really nasty crashes instead of mere leaks.
-    CGF.PushARCWeakReleaseCleanup(NormalAndEHCleanup, var.getType(), addr);
+    CGF.pushDestroy(NormalAndEHCleanup, addr, var.getType(),
+                    CodeGenFunction::destroyARCWeak,
+                    /*useEHCleanup*/ true);
     break;
   }
 }
@@ -489,9 +496,11 @@ void CodeGenFunction::EmitScalarInit(const Expr *init,
 
   // If we're emitting a value with lifetime, we have to do the
   // initialization *before* we leave the cleanup scopes.
-  CodeGenFunction::RunCleanupsScope Scope(*this);
-  if (const ExprWithCleanups *ewc = dyn_cast<ExprWithCleanups>(init))
+  if (const ExprWithCleanups *ewc = dyn_cast<ExprWithCleanups>(init)) {
+    enterFullExpression(ewc);
     init = ewc->getSubExpr();
+  }
+  CodeGenFunction::RunCleanupsScope Scope(*this);
 
   // We have to maintain the illusion that the variable is
   // zero-initialized.  If the variable might be accessed in its
@@ -510,12 +519,12 @@ void CodeGenFunction::EmitScalarInit(const Expr *init,
                                    getByRefValueLLVMField(cast<VarDecl>(D))));
     }
 
-    const llvm::PointerType *ty
+    llvm::PointerType *ty
       = cast<llvm::PointerType>(tempLV.getAddress()->getType());
     ty = cast<llvm::PointerType>(ty->getElementType());
 
     llvm::Value *zero = llvm::ConstantPointerNull::get(ty);
-    
+
     // If __weak, we want to use a barrier under certain conditions.
     if (lifetime == Qualifiers::OCL_Weak)
       EmitARCInitWeak(tempLV.getAddress(), zero);
@@ -604,7 +613,7 @@ void CodeGenFunction::EmitScalarInit(llvm::Value *init, LValue lvalue) {
     break;
   }
 
-  EmitStoreOfScalar(init, lvalue);  
+  EmitStoreOfScalar(init, lvalue);
 }
 
 /// canEmitInitWithFewStoresAfterMemset - Decide whether we can emit the
@@ -631,7 +640,7 @@ static bool canEmitInitWithFewStoresAfterMemset(llvm::Constant *Init,
     }
     return true;
   }
-  
+
   // Anything else is hard and scary.
   return false;
 }
@@ -646,7 +655,7 @@ static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
       isa<llvm::ConstantPointerNull>(Init) ||
       isa<llvm::UndefValue>(Init))
     return;
-  
+
   if (isa<llvm::ConstantInt>(Init) || isa<llvm::ConstantFP>(Init) ||
       isa<llvm::ConstantVector>(Init) || isa<llvm::BlockAddress>(Init) ||
       isa<llvm::ConstantExpr>(Init)) {
@@ -654,14 +663,14 @@ static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
       Builder.CreateStore(Init, Loc, isVolatile);
     return;
   }
-  
+
   assert((isa<llvm::ConstantStruct>(Init) || isa<llvm::ConstantArray>(Init)) &&
          "Unknown value type!");
-  
+
   for (unsigned i = 0, e = Init->getNumOperands(); i != e; ++i) {
     llvm::Constant *Elt = cast<llvm::Constant>(Init->getOperand(i));
     if (Elt->isNullValue()) continue;
-    
+
     // Otherwise, get a pointer to the element and emit it.
     emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
                                  isVolatile, Builder);
@@ -685,8 +694,8 @@ static bool shouldUseMemSetPlusStoresToInitialize(llvm::Constant *Init,
   // plopping in more stores.
   unsigned StoreBudget = 6;
   uint64_t SizeLimit = 32;
-  
-  return GlobalSize > SizeLimit && 
+
+  return GlobalSize > SizeLimit &&
          canEmitInitWithFewStoresAfterMemset(Init, StoreBudget);
 }
 
@@ -721,7 +730,7 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
   llvm::Value *DeclPtr;
   if (Ty->isConstantSizeType()) {
     if (!Target.useGlobalsForAutomaticVariables()) {
-      bool NRVO = getContext().getLangOptions().ElideConstructors && 
+      bool NRVO = getContext().getLangOptions().ElideConstructors &&
                   D.isNRVOVariable();
 
       // If this value is a POD array or struct with a statically
@@ -731,7 +740,7 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
       // arrays as long as the initialization is trivial (e.g. if they
       // have a non-trivial destructor, but not a non-trivial constructor).
       if (D.getInit() &&
-          (Ty->isArrayType() || Ty->isRecordType()) && 
+          (Ty->isArrayType() || Ty->isRecordType()) &&
           (Ty.isPODType(getContext()) ||
            getContext().getBaseElementType(Ty)->isObjCObjectPointerType()) &&
           D.getInit()->isConstantInitializer(getContext(), false)) {
@@ -750,27 +759,27 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
         // Otherwise, tell the initialization code that we're in this case.
         emission.IsConstantAggregate = true;
       }
-      
+
       // A normal fixed sized variable becomes an alloca in the entry block,
       // unless it's an NRVO variable.
-      const llvm::Type *LTy = ConvertTypeForMem(Ty);
-      
+      llvm::Type *LTy = ConvertTypeForMem(Ty);
+
       if (NRVO) {
         // The named return value optimization: allocate this variable in the
         // return slot, so that we can elide the copy when returning this
         // variable (C++0x [class.copy]p34).
         DeclPtr = ReturnValue;
-        
+
         if (const RecordType *RecordTy = Ty->getAs<RecordType>()) {
           if (!cast<CXXRecordDecl>(RecordTy->getDecl())->hasTrivialDestructor()) {
             // Create a flag that is used to indicate when the NRVO was applied
-            // to this variable. Set it to zero to indicate that NRVO was not 
+            // to this variable. Set it to zero to indicate that NRVO was not
             // applied.
             llvm::Value *Zero = Builder.getFalse();
             llvm::Value *NRVOFlag = CreateTempAlloca(Zero->getType(), "nrvo");
             EnsureInsertPoint();
             Builder.CreateStore(Zero, NRVOFlag);
-            
+
             // Record the NRVO flag for this variable.
             NRVOFlags[&D] = NRVOFlag;
             emission.NRVOFlag = NRVOFlag;
@@ -779,13 +788,13 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
       } else {
         if (isByRef)
           LTy = BuildByRefType(&D);
-        
+
         llvm::AllocaInst *Alloc = CreateTempAlloca(LTy);
         Alloc->setName(D.getNameAsString());
 
         CharUnits allocaAlignment = alignment;
         if (isByRef)
-          allocaAlignment = std::max(allocaAlignment, 
+          allocaAlignment = std::max(allocaAlignment,
               getContext().toCharUnitsFromBits(Target.getPointerAlign(0)));
         Alloc->setAlignment(allocaAlignment.getQuantity());
         DeclPtr = Alloc;
@@ -820,7 +829,7 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
     QualType elementType;
     llvm::tie(elementCount, elementType) = getVLASize(Ty);
 
-    const llvm::Type *llvmTy = ConvertTypeForMem(elementType);
+    llvm::Type *llvmTy = ConvertTypeForMem(elementType);
 
     // Allocate memory for the array.
     llvm::AllocaInst *vla = Builder.CreateAlloca(llvmTy, elementCount, "vla");
@@ -844,6 +853,9 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
         DI->EmitDeclareOfAutoVariable(&D, DeclPtr, Builder);
     }
 
+  if (D.hasAttr<AnnotateAttr>())
+      EmitVarAnnotations(&D, emission.Address);
+
   return emission;
 }
 
@@ -866,6 +878,32 @@ static bool isCapturedBy(const VarDecl &var, const Expr *e) {
     return false;
   }
 
+  if (const StmtExpr *SE = dyn_cast<StmtExpr>(e)) {
+    const CompoundStmt *CS = SE->getSubStmt();
+    for (CompoundStmt::const_body_iterator BI = CS->body_begin(),
+	   BE = CS->body_end(); BI != BE; ++BI)
+      if (Expr *E = dyn_cast<Expr>((*BI))) {
+        if (isCapturedBy(var, E))
+            return true;
+      }
+      else if (DeclStmt *DS = dyn_cast<DeclStmt>((*BI))) {
+          // special case declarations
+          for (DeclStmt::decl_iterator I = DS->decl_begin(), E = DS->decl_end();
+               I != E; ++I) {
+              if (VarDecl *VD = dyn_cast<VarDecl>((*I))) {
+                Expr *Init = VD->getInit();
+                if (Init && isCapturedBy(var, Init))
+                  return true;
+              }
+          }
+      }
+      else
+        // FIXME. Make safe assumption assuming arbitrary statements cause capturing.
+        // Later, provide code to poke into statements for capture analysis.
+        return true;
+    return false;
+  }
+
   for (Stmt::const_child_range children = e->children(); children; ++children)
     if (isCapturedBy(var, cast<Expr>(*children)))
       return true;
@@ -878,14 +916,14 @@ static bool isCapturedBy(const VarDecl &var, const Expr *e) {
 static bool isTrivialInitializer(const Expr *Init) {
   if (!Init)
     return true;
-  
+
   if (const CXXConstructExpr *Construct = dyn_cast<CXXConstructExpr>(Init))
     if (CXXConstructorDecl *Constructor = Construct->getConstructor())
       if (Constructor->isTrivial() &&
           Constructor->isDefaultConstructor() &&
           !Construct->requiresZeroInitialization())
         return true;
-      
+
   return false;
 }
 void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
@@ -913,7 +951,6 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
 
   if (isTrivialInitializer(Init))
     return;
-  
 
   CharUnits alignment = emission.Alignment;
 
@@ -926,7 +963,7 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
     capturedByInit ? emission.Address : emission.getObjectAddress(*this);
 
   if (!emission.IsConstantAggregate) {
-    LValue lv = MakeAddrLValue(Loc, type, alignment.getQuantity());
+    LValue lv = MakeAddrLValue(Loc, type, alignment);
     lv.setNonGC(true);
     return EmitExprAsInit(Init, &D, lv, capturedByInit);
   }
@@ -941,16 +978,16 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
   assert(constant != 0 && "Wasn't a simple constant init?");
 
   llvm::Value *SizeVal =
-    llvm::ConstantInt::get(IntPtrTy, 
+    llvm::ConstantInt::get(IntPtrTy,
                            getContext().getTypeSizeInChars(type).getQuantity());
 
-  const llvm::Type *BP = Int8PtrTy;
+  llvm::Type *BP = Int8PtrTy;
   if (Loc->getType() != BP)
-    Loc = Builder.CreateBitCast(Loc, BP, "tmp");
+    Loc = Builder.CreateBitCast(Loc, BP);
 
   // If the initializer is all or mostly zeros, codegen with memset then do
   // a few stores afterward.
-  if (shouldUseMemSetPlusStoresToInitialize(constant, 
+  if (shouldUseMemSetPlusStoresToInitialize(constant,
                 CGM.getTargetData().getTypeAllocSize(constant->getType()))) {
     Builder.CreateMemSet(Loc, llvm::ConstantInt::get(Int8Ty, 0), SizeVal,
                          alignment.getQuantity(), isVolatile);
@@ -959,19 +996,19 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
       emitStoresForInitAfterMemset(constant, Loc, isVolatile, Builder);
     }
   } else {
-    // Otherwise, create a temporary global with the initializer then 
+    // Otherwise, create a temporary global with the initializer then
     // memcpy from the global to the alloca.
     std::string Name = GetStaticDeclName(*this, D, ".");
     llvm::GlobalVariable *GV =
       new llvm::GlobalVariable(CGM.getModule(), constant->getType(), true,
-                               llvm::GlobalValue::InternalLinkage,
+                               llvm::GlobalValue::PrivateLinkage,
                                constant, Name, 0, false, 0);
     GV->setAlignment(alignment.getQuantity());
     GV->setUnnamedAddr(true);
-        
+
     llvm::Value *SrcPtr = GV;
     if (SrcPtr->getType() != BP)
-      SrcPtr = Builder.CreateBitCast(SrcPtr, BP, "tmp");
+      SrcPtr = Builder.CreateBitCast(SrcPtr, BP);
 
     Builder.CreateMemCpy(Loc, SrcPtr, SizeVal, alignment.getQuantity(),
                          isVolatile);
@@ -998,7 +1035,7 @@ void CodeGenFunction::EmitExprAsInit(const Expr *init,
 
   if (type->isReferenceType()) {
     RValue rvalue = EmitReferenceBindingToExpr(init, D);
-    if (capturedByInit) 
+    if (capturedByInit)
       drillIntoBlockVariable(*this, lvalue, cast<VarDecl>(D));
     EmitStoreThroughLValue(rvalue, lvalue);
   } else if (!hasAggregateLLVMType(type)) {
@@ -1010,8 +1047,69 @@ void CodeGenFunction::EmitExprAsInit(const Expr *init,
     StoreComplexToAddr(complex, lvalue.getAddress(), lvalue.isVolatile());
   } else {
     // TODO: how can we delay here if D is captured by its initializer?
-    EmitAggExpr(init, AggValueSlot::forLValue(lvalue, true, false));
+    EmitAggExpr(init, AggValueSlot::forLValue(lvalue,
+                                              AggValueSlot::IsDestructed,
+                                         AggValueSlot::DoesNotNeedGCBarriers,
+                                              AggValueSlot::IsNotAliased));
   }
+}
+
+/// Enter a destroy cleanup for the given local variable.
+void CodeGenFunction::emitAutoVarTypeCleanup(
+                            const CodeGenFunction::AutoVarEmission &emission,
+                            QualType::DestructionKind dtorKind) {
+  assert(dtorKind != QualType::DK_none);
+
+  // Note that for __block variables, we want to destroy the
+  // original stack object, not the possibly forwarded object.
+  llvm::Value *addr = emission.getObjectAddress(*this);
+
+  const VarDecl *var = emission.Variable;
+  QualType type = var->getType();
+
+  CleanupKind cleanupKind = NormalAndEHCleanup;
+  CodeGenFunction::Destroyer *destroyer = 0;
+
+  switch (dtorKind) {
+  case QualType::DK_none:
+    llvm_unreachable("no cleanup for trivially-destructible variable");
+
+  case QualType::DK_cxx_destructor:
+    // If there's an NRVO flag on the emission, we need a different
+    // cleanup.
+    if (emission.NRVOFlag) {
+      assert(!type->isArrayType());
+      CXXDestructorDecl *dtor = type->getAsCXXRecordDecl()->getDestructor();
+      EHStack.pushCleanup<DestroyNRVOVariable>(cleanupKind, addr, dtor,
+                                               emission.NRVOFlag);
+      return;
+    }
+    break;
+
+  case QualType::DK_objc_strong_lifetime:
+    // Suppress cleanups for pseudo-strong variables.
+    if (var->isARCPseudoStrong()) return;
+
+    // Otherwise, consider whether to use an EH cleanup or not.
+    cleanupKind = getARCCleanupKind();
+
+    // Use the imprecise destroyer by default.
+    if (!var->hasAttr<ObjCPreciseLifetimeAttr>())
+      destroyer = CodeGenFunction::destroyARCStrongImprecise;
+    break;
+
+  case QualType::DK_objc_weak_lifetime:
+    break;
+  }
+
+  // If we haven't chosen a more specific destroyer, use the default.
+  if (!destroyer) destroyer = &getDestroyer(dtorKind);
+
+  // Use an EH cleanup in array destructors iff the destructor itself
+  // is being pushed as an EH cleanup.
+  bool useEHCleanup = (cleanupKind & EHCleanup);
+  EHStack.pushCleanup<DestroyObject>(cleanupKind, addr, type, destroyer,
+                                     useEHCleanup);
 }
 
 void CodeGenFunction::EmitAutoVarCleanups(const AutoVarEmission &emission) {
@@ -1022,47 +1120,12 @@ void CodeGenFunction::EmitAutoVarCleanups(const AutoVarEmission &emission) {
 
   const VarDecl &D = *emission.Variable;
 
-  // Handle C++ or ARC destruction of variables.
-  if (getLangOptions().CPlusPlus) {
-    QualType type = D.getType();
-    QualType baseType = getContext().getBaseElementType(type);
-    if (const RecordType *RT = baseType->getAs<RecordType>()) {
-      CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(RT->getDecl());
-      if (!ClassDecl->hasTrivialDestructor()) {
-        // Note: We suppress the destructor call when the corresponding NRVO
-        // flag has been set.
-
-        // Note that for __block variables, we want to destroy the
-        // original stack object, not the possible forwarded object.
-        llvm::Value *Loc = emission.getObjectAddress(*this);
-        
-        const CXXDestructorDecl *D = ClassDecl->getDestructor();
-        assert(D && "EmitLocalBlockVarDecl - destructor is nul");
-        
-        if (type != baseType) {
-          const ConstantArrayType *Array = 
-            getContext().getAsConstantArrayType(type);
-          assert(Array && "types changed without array?");
-          EHStack.pushCleanup<CallArrayDtor>(NormalAndEHCleanup,
-                                             D, Array, Loc);
-        } else {
-          EHStack.pushCleanup<CallVarDtor>(NormalAndEHCleanup,
-                                           D, emission.NRVOFlag, Loc);
-        }
-      }
-    }
-  }
-
-  if (Qualifiers::ObjCLifetime lifetime
-        = D.getType().getQualifiers().getObjCLifetime()) {
-    if (!D.isARCPseudoStrong()) {
-      llvm::Value *loc = emission.getObjectAddress(*this);
-      EmitAutoVarWithLifetime(*this, D, loc, lifetime);
-    }
-  }
+  // Check the type for a cleanup.
+  if (QualType::DestructionKind dtorKind = D.getType().isDestructedType())
+    emitAutoVarTypeCleanup(emission, dtorKind);
 
   // In GC mode, honor objc_precise_lifetime.
-  if (getLangOptions().getGCMode() != LangOptions::NonGC &&
+  if (getLangOptions().getGC() != LangOptions::NonGC &&
       D.hasAttr<ObjCPreciseLifetimeAttr>()) {
     EHStack.pushCleanup<ExtendGCLifetime>(NormalCleanup, &D);
   }
@@ -1084,6 +1147,253 @@ void CodeGenFunction::EmitAutoVarCleanups(const AutoVarEmission &emission) {
     enterByrefCleanup(emission);
 }
 
+CodeGenFunction::Destroyer &
+CodeGenFunction::getDestroyer(QualType::DestructionKind kind) {
+  // This is surprisingly compiler-dependent.  GCC 4.2 can't bind
+  // references to functions directly in returns, and using '*&foo'
+  // confuses MSVC.  Luckily, the following code pattern works in both.
+  Destroyer *destroyer = 0;
+  switch (kind) {
+  case QualType::DK_none: llvm_unreachable("no destroyer for trivial dtor");
+  case QualType::DK_cxx_destructor:
+    destroyer = &destroyCXXObject;
+    break;
+  case QualType::DK_objc_strong_lifetime:
+    destroyer = &destroyARCStrongPrecise;
+    break;
+  case QualType::DK_objc_weak_lifetime:
+    destroyer = &destroyARCWeak;
+    break;
+  }
+  return *destroyer;
+}
+
+/// pushDestroy - Push the standard destructor for the given type.
+void CodeGenFunction::pushDestroy(QualType::DestructionKind dtorKind,
+                                  llvm::Value *addr, QualType type) {
+  assert(dtorKind && "cannot push destructor for trivial type");
+
+  CleanupKind cleanupKind = getCleanupKind(dtorKind);
+  pushDestroy(cleanupKind, addr, type, getDestroyer(dtorKind),
+              cleanupKind & EHCleanup);
+}
+
+void CodeGenFunction::pushDestroy(CleanupKind cleanupKind, llvm::Value *addr,
+                                  QualType type, Destroyer &destroyer,
+                                  bool useEHCleanupForArray) {
+  pushFullExprCleanup<DestroyObject>(cleanupKind, addr, type,
+                                     destroyer, useEHCleanupForArray);
+}
+
+/// emitDestroy - Immediately perform the destruction of the given
+/// object.
+///
+/// \param addr - the address of the object; a type*
+/// \param type - the type of the object; if an array type, all
+///   objects are destroyed in reverse order
+/// \param destroyer - the function to call to destroy individual
+///   elements
+/// \param useEHCleanupForArray - whether an EH cleanup should be
+///   used when destroying array elements, in case one of the
+///   destructions throws an exception
+void CodeGenFunction::emitDestroy(llvm::Value *addr, QualType type,
+                                  Destroyer &destroyer,
+                                  bool useEHCleanupForArray) {
+  const ArrayType *arrayType = getContext().getAsArrayType(type);
+  if (!arrayType)
+    return destroyer(*this, addr, type);
+
+  llvm::Value *begin = addr;
+  llvm::Value *length = emitArrayLength(arrayType, type, begin);
+
+  // Normally we have to check whether the array is zero-length.
+  bool checkZeroLength = true;
+
+  // But if the array length is constant, we can suppress that.
+  if (llvm::ConstantInt *constLength = dyn_cast<llvm::ConstantInt>(length)) {
+    // ...and if it's constant zero, we can just skip the entire thing.
+    if (constLength->isZero()) return;
+    checkZeroLength = false;
+  }
+
+  llvm::Value *end = Builder.CreateInBoundsGEP(begin, length);
+  emitArrayDestroy(begin, end, type, destroyer,
+                   checkZeroLength, useEHCleanupForArray);
+}
+
+/// emitArrayDestroy - Destroys all the elements of the given array,
+/// beginning from last to first.  The array cannot be zero-length.
+///
+/// \param begin - a type* denoting the first element of the array
+/// \param end - a type* denoting one past the end of the array
+/// \param type - the element type of the array
+/// \param destroyer - the function to call to destroy elements
+/// \param useEHCleanup - whether to push an EH cleanup to destroy
+///   the remaining elements in case the destruction of a single
+///   element throws
+void CodeGenFunction::emitArrayDestroy(llvm::Value *begin,
+                                       llvm::Value *end,
+                                       QualType type,
+                                       Destroyer &destroyer,
+                                       bool checkZeroLength,
+                                       bool useEHCleanup) {
+  assert(!type->isArrayType());
+
+  // The basic structure here is a do-while loop, because we don't
+  // need to check for the zero-element case.
+  llvm::BasicBlock *bodyBB = createBasicBlock("arraydestroy.body");
+  llvm::BasicBlock *doneBB = createBasicBlock("arraydestroy.done");
+
+  if (checkZeroLength) {
+    llvm::Value *isEmpty = Builder.CreateICmpEQ(begin, end,
+                                                "arraydestroy.isempty");
+    Builder.CreateCondBr(isEmpty, doneBB, bodyBB);
+  }
+
+  // Enter the loop body, making that address the current address.
+  llvm::BasicBlock *entryBB = Builder.GetInsertBlock();
+  EmitBlock(bodyBB);
+  llvm::PHINode *elementPast =
+    Builder.CreatePHI(begin->getType(), 2, "arraydestroy.elementPast");
+  elementPast->addIncoming(end, entryBB);
+
+  // Shift the address back by one element.
+  llvm::Value *negativeOne = llvm::ConstantInt::get(SizeTy, -1, true);
+  llvm::Value *element = Builder.CreateInBoundsGEP(elementPast, negativeOne,
+                                                   "arraydestroy.element");
+
+  if (useEHCleanup)
+    pushRegularPartialArrayCleanup(begin, element, type, destroyer);
+
+  // Perform the actual destruction there.
+  destroyer(*this, element, type);
+
+  if (useEHCleanup)
+    PopCleanupBlock();
+
+  // Check whether we've reached the end.
+  llvm::Value *done = Builder.CreateICmpEQ(element, begin, "arraydestroy.done");
+  Builder.CreateCondBr(done, doneBB, bodyBB);
+  elementPast->addIncoming(element, Builder.GetInsertBlock());
+
+  // Done.
+  EmitBlock(doneBB);
+}
+
+/// Perform partial array destruction as if in an EH cleanup.  Unlike
+/// emitArrayDestroy, the element type here may still be an array type.
+static void emitPartialArrayDestroy(CodeGenFunction &CGF,
+                                    llvm::Value *begin, llvm::Value *end,
+                                    QualType type,
+                                    CodeGenFunction::Destroyer &destroyer) {
+  // If the element type is itself an array, drill down.
+  unsigned arrayDepth = 0;
+  while (const ArrayType *arrayType = CGF.getContext().getAsArrayType(type)) {
+    // VLAs don't require a GEP index to walk into.
+    if (!isa<VariableArrayType>(arrayType))
+      arrayDepth++;
+    type = arrayType->getElementType();
+  }
+
+  if (arrayDepth) {
+    llvm::Value *zero = llvm::ConstantInt::get(CGF.SizeTy, arrayDepth+1);
+
+    SmallVector<llvm::Value*,4> gepIndices(arrayDepth, zero);
+    begin = CGF.Builder.CreateInBoundsGEP(begin, gepIndices, "pad.arraybegin");
+    end = CGF.Builder.CreateInBoundsGEP(end, gepIndices, "pad.arrayend");
+  }
+
+  // Destroy the array.  We don't ever need an EH cleanup because we
+  // assume that we're in an EH cleanup ourselves, so a throwing
+  // destructor causes an immediate terminate.
+  CGF.emitArrayDestroy(begin, end, type, destroyer,
+                       /*checkZeroLength*/ true, /*useEHCleanup*/ false);
+}
+
+namespace {
+  /// RegularPartialArrayDestroy - a cleanup which performs a partial
+  /// array destroy where the end pointer is regularly determined and
+  /// does not need to be loaded from a local.
+  class RegularPartialArrayDestroy : public EHScopeStack::Cleanup {
+    llvm::Value *ArrayBegin;
+    llvm::Value *ArrayEnd;
+    QualType ElementType;
+    CodeGenFunction::Destroyer &Destroyer;
+  public:
+    RegularPartialArrayDestroy(llvm::Value *arrayBegin, llvm::Value *arrayEnd,
+                               QualType elementType,
+                               CodeGenFunction::Destroyer *destroyer)
+      : ArrayBegin(arrayBegin), ArrayEnd(arrayEnd),
+        ElementType(elementType), Destroyer(*destroyer) {}
+
+    void Emit(CodeGenFunction &CGF, Flags flags) {
+      emitPartialArrayDestroy(CGF, ArrayBegin, ArrayEnd,
+                              ElementType, Destroyer);
+    }
+  };
+
+  /// IrregularPartialArrayDestroy - a cleanup which performs a
+  /// partial array destroy where the end pointer is irregularly
+  /// determined and must be loaded from a local.
+  class IrregularPartialArrayDestroy : public EHScopeStack::Cleanup {
+    llvm::Value *ArrayBegin;
+    llvm::Value *ArrayEndPointer;
+    QualType ElementType;
+    CodeGenFunction::Destroyer &Destroyer;
+  public:
+    IrregularPartialArrayDestroy(llvm::Value *arrayBegin,
+                                 llvm::Value *arrayEndPointer,
+                                 QualType elementType,
+                                 CodeGenFunction::Destroyer *destroyer)
+      : ArrayBegin(arrayBegin), ArrayEndPointer(arrayEndPointer),
+        ElementType(elementType), Destroyer(*destroyer) {}
+
+    void Emit(CodeGenFunction &CGF, Flags flags) {
+      llvm::Value *arrayEnd = CGF.Builder.CreateLoad(ArrayEndPointer);
+      emitPartialArrayDestroy(CGF, ArrayBegin, arrayEnd,
+                              ElementType, Destroyer);
+    }
+  };
+}
+
+/// pushIrregularPartialArrayCleanup - Push an EH cleanup to destroy
+/// already-constructed elements of the given array.  The cleanup
+/// may be popped with DeactivateCleanupBlock or PopCleanupBlock.
+///
+/// \param elementType - the immediate element type of the array;
+///   possibly still an array type
+/// \param array - a value of type elementType*
+/// \param destructionKind - the kind of destruction required
+/// \param initializedElementCount - a value of type size_t* holding
+///   the number of successfully-constructed elements
+void CodeGenFunction::pushIrregularPartialArrayCleanup(llvm::Value *arrayBegin,
+                                                 llvm::Value *arrayEndPointer,
+                                                       QualType elementType,
+                                                       Destroyer &destroyer) {
+  pushFullExprCleanup<IrregularPartialArrayDestroy>(EHCleanup,
+                                                    arrayBegin, arrayEndPointer,
+                                                    elementType, &destroyer);
+}
+
+/// pushRegularPartialArrayCleanup - Push an EH cleanup to destroy
+/// already-constructed elements of the given array.  The cleanup
+/// may be popped with DeactivateCleanupBlock or PopCleanupBlock.
+///
+/// \param elementType - the immediate element type of the array;
+///   possibly still an array type
+/// \param array - a value of type elementType*
+/// \param destructionKind - the kind of destruction required
+/// \param initializedElementCount - a value of type size_t* holding
+///   the number of successfully-constructed elements
+void CodeGenFunction::pushRegularPartialArrayCleanup(llvm::Value *arrayBegin,
+                                                     llvm::Value *arrayEnd,
+                                                     QualType elementType,
+                                                     Destroyer &destroyer) {
+  pushFullExprCleanup<RegularPartialArrayDestroy>(EHCleanup,
+                                                  arrayBegin, arrayEnd,
+                                                  elementType, &destroyer);
+}
+
 namespace {
   /// A cleanup to perform a release of an object at the end of a
   /// function.  This is used to balance out the incoming +1 of a
@@ -1094,7 +1404,7 @@ namespace {
 
     llvm::Value *Param;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       CGF.EmitARCRelease(Param, /*precise*/ false);
     }
   };
@@ -1134,7 +1444,10 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
     DeclPtr = Arg;
   } else {
     // Otherwise, create a temporary to hold the value.
-    DeclPtr = CreateMemTemp(Ty, D.getName() + ".addr");
+    llvm::AllocaInst *Alloc = CreateTempAlloca(ConvertTypeForMem(Ty),
+                                               D.getName() + ".addr");
+    Alloc->setAlignment(getContext().getDeclAlign(&D).getQuantity());
+    DeclPtr = Alloc;
 
     bool doStore = true;
 
@@ -1183,7 +1496,7 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
     // Store the initial value into the alloca.
     if (doStore) {
       LValue lv = MakeAddrLValue(DeclPtr, Ty,
-                                 getContext().getDeclAlign(&D).getQuantity());
+                                 getContext().getDeclAlign(&D));
       EmitStoreOfScalar(Arg, lv);
     }
   }
@@ -1195,4 +1508,7 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
   // Emit debug info for param declaration.
   if (CGDebugInfo *DI = getDebugInfo())
     DI->EmitDeclareOfArgVariable(&D, DeclPtr, ArgNo, Builder);
+
+  if (D.hasAttr<AnnotateAttr>())
+      EmitVarAnnotations(&D, DeclPtr);
 }

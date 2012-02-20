@@ -13,25 +13,17 @@
 
 #include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
-BranchProbability::BranchProbability(uint32_t n, uint32_t d) {
-  assert(d > 0 && "Denomiator cannot be 0!");
-  assert(n <= d && "Probability cannot be bigger than 1!");
-  N = n;
-  D = d;
-}
-
-raw_ostream &BranchProbability::print(raw_ostream &OS) const {
-  OS << N << " / " << D << " = " << ((double)N / D);
-  return OS;
+void BranchProbability::print(raw_ostream &OS) const {
+  OS << N << " / " << D << " = " << format("%g%%", ((double)N / D) * 100.0);
 }
 
 void BranchProbability::dump() const {
-  print(dbgs());
-  dbgs() << "\n";
+  dbgs() << *this << '\n';
 }
 
 namespace llvm {

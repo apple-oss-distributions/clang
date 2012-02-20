@@ -218,7 +218,7 @@ bool NestedNameSpecifier::containsUnexpandedParameterPack() const {
 /// \brief Print this nested name specifier to the given output
 /// stream.
 void
-NestedNameSpecifier::print(llvm::raw_ostream &OS,
+NestedNameSpecifier::print(raw_ostream &OS,
                            const PrintingPolicy &Policy) const {
   if (getPrefix())
     getPrefix()->print(OS, Policy);
@@ -229,6 +229,9 @@ NestedNameSpecifier::print(llvm::raw_ostream &OS,
     break;
 
   case Namespace:
+    if (getAsNamespace()->isAnonymousNamespace())
+      return;
+      
     OS << getAsNamespace()->getName();
     break;
 
@@ -569,7 +572,7 @@ void NestedNameSpecifierLocBuilder::MakeTrivial(ASTContext &Context,
   // Construct bogus (but well-formed) source information for the 
   // nested-name-specifier.
   BufferSize = 0;
-  llvm::SmallVector<NestedNameSpecifier *, 4> Stack;
+  SmallVector<NestedNameSpecifier *, 4> Stack;
   for (NestedNameSpecifier *NNS = Qualifier; NNS; NNS = NNS->getPrefix())
     Stack.push_back(NNS);
   while (!Stack.empty()) {

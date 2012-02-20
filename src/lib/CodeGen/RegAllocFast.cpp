@@ -530,16 +530,10 @@ void RAFast::allocVirtReg(MachineInstr *MI, LiveRegEntry &LRE, unsigned Hint) {
     return assignVirtToPhysReg(LRE, BestReg);
   }
 
-  // Nothing we can do.
-  std::string msg;
-  raw_string_ostream Msg(msg);
-  Msg << "Ran out of registers during register allocation!";
-  if (MI->isInlineAsm()) {
-    Msg << "\nPlease check your inline asm statement for "
-        << "invalid constraints:\n";
-    MI->print(Msg, TM);
-  }
-  report_fatal_error(Msg.str());
+  // Nothing we can do. Report an error and keep going with a bad allocation.
+  MI->emitError("ran out of registers during register allocation");
+  definePhysReg(MI, *AO.begin(), regFree);
+  assignVirtToPhysReg(LRE, *AO.begin());
 }
 
 /// defineVirtReg - Allocate a register for VirtReg and mark it as dirty.
@@ -688,7 +682,7 @@ void RAFast::handleThroughOperands(MachineInstr *MI,
   }
 
   SmallVector<unsigned, 8> PartialDefs;
-  DEBUG(dbgs() << "Allocating tied uses and early clobbers.\n");
+  DEBUG(dbgs() << "Allocating tied uses.\n");
   for (unsigned i = 0, e = MI->getNumOperands(); i != e; ++i) {
     MachineOperand &MO = MI->getOperand(i);
     if (!MO.isReg()) continue;
@@ -710,13 +704,22 @@ void RAFast::handleThroughOperands(MachineInstr *MI,
       // That would confuse the later phys-def processing pass.
       LiveRegMap::iterator LRI = reloadVirtReg(MI, i, Reg, 0);
       PartialDefs.push_back(LRI->second.PhysReg);
-    } else if (MO.isEarlyClobber()) {
-      // Note: defineVirtReg may invalidate MO.
-      LiveRegMap::iterator LRI = defineVirtReg(MI, i, Reg, 0);
-      unsigned PhysReg = LRI->second.PhysReg;
-      if (setPhysReg(MI, i, PhysReg))
-        VirtDead.push_back(Reg);
     }
+  }
+
+  DEBUG(dbgs() << "Allocating early clobbers.\n");
+  for (unsigned i = 0, e = MI->getNumOperands(); i != e; ++i) {
+    MachineOperand &MO = MI->getOperand(i);
+    if (!MO.isReg()) continue;
+    unsigned Reg = MO.getReg();
+    if (!TargetRegisterInfo::isVirtualRegister(Reg)) continue;
+    if (!MO.isEarlyClobber())
+      continue;
+    // Note: defineVirtReg may invalidate MO.
+    LiveRegMap::iterator LRI = defineVirtReg(MI, i, Reg, 0);
+    unsigned PhysReg = LRI->second.PhysReg;
+    if (setPhysReg(MI, i, PhysReg))
+      VirtDead.push_back(Reg);
   }
 
   // Restore UsedInInstr to a state usable for allocating normal virtual uses.
@@ -821,7 +824,6 @@ void RAFast::AllocateBasicBlock() {
           if (!MO.isReg()) continue;
           unsigned Reg = MO.getReg();
           if (!TargetRegisterInfo::isVirtualRegister(Reg)) continue;
-          LiveDbgValueMap[Reg].push_back(MI);
           LiveRegMap::iterator LRI = LiveVirtRegs.find(Reg);
           if (LRI != LiveVirtRegs.end())
             setPhysReg(MI, i, LRI->second.PhysReg);
@@ -855,6 +857,7 @@ void RAFast::AllocateBasicBlock() {
               }
             }
           }
+          LiveDbgValueMap[Reg].push_back(MI);
         }
       }
       // Next instruction.

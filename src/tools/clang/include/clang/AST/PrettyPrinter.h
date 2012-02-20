@@ -15,10 +15,7 @@
 #define LLVM_CLANG_AST_PRETTY_PRINTER_H
 
 #include "clang/Basic/LangOptions.h"
-
-namespace llvm {
-  class raw_ostream;
-}
+#include "clang/Basic/LLVM.h"
 
 namespace clang {
 
@@ -29,7 +26,7 @@ class LangOptions;
 class PrinterHelper {
 public:
   virtual ~PrinterHelper();
-  virtual bool handledStmt(Stmt* E, llvm::raw_ostream& OS) = 0;
+  virtual bool handledStmt(Stmt* E, raw_ostream& OS) = 0;
 };
 
 /// \brief Describes how types, statements, expressions, and
@@ -39,15 +36,16 @@ struct PrintingPolicy {
   PrintingPolicy(const LangOptions &LO)
     : Indentation(2), LangOpts(LO), SuppressSpecifiers(false),
       SuppressTagKeyword(false), SuppressTag(false), SuppressScope(false),
-      SuppressInitializers(false),
+      SuppressUnwrittenScope(false), SuppressInitializers(false),
       Dump(false), ConstantArraySizeAsWritten(false),
-      AnonymousTagLocations(true), SuppressStrongLifetime(false) { }
+      AnonymousTagLocations(true), SuppressStrongLifetime(false),
+      Bool(LO.Bool) { }
 
   /// \brief The number of spaces to use to indent each line.
   unsigned Indentation : 8;
 
   /// \brief What language we're printing.
-  const LangOptions LangOpts;
+  LangOptions LangOpts;
 
   /// \brief Whether we should suppress printing of the actual specifiers for
   /// the given type or declaration.
@@ -88,6 +86,10 @@ struct PrintingPolicy {
   /// \brief Suppresses printing of scope specifiers.
   bool SuppressScope : 1;
 
+  /// \brief Suppress printing parts of scope specifiers that don't need
+  /// to be written, e.g., for inline or anonymous namespaces.
+  bool SuppressUnwrittenScope : 1;
+  
   /// \brief Suppress printing of variable initializers.
   ///
   /// This flag is used when printing the loop variable in a for-range
@@ -133,6 +135,10 @@ struct PrintingPolicy {
   /// \brief When true, suppress printing of the __strong lifetime qualifier in
   /// ARC.
   unsigned SuppressStrongLifetime : 1;
+  
+  /// \brief Whether we can use 'bool' rather than '_Bool', even if the language
+  /// doesn't actually have 'bool' (because, e.g., it is defined as a macro).
+  unsigned Bool : 1;
 };
 
 } // end namespace clang

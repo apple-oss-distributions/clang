@@ -363,10 +363,10 @@ class CXXRecordDecl : public RecordDecl {
     ///        default constructor.
     bool HasTrivialDefaultConstructor : 1;
 
-    /// HasConstExprNonCopyMoveConstructor - True when this class has at least
+    /// HasConstexprNonCopyMoveConstructor - True when this class has at least
     /// one constexpr constructor which is neither the copy nor move
     /// constructor.
-    bool HasConstExprNonCopyMoveConstructor : 1;
+    bool HasConstexprNonCopyMoveConstructor : 1;
 
     /// HasTrivialCopyConstructor - True when this class has a trivial copy
     /// constructor.
@@ -468,6 +468,14 @@ class CXXRecordDecl : public RecordDecl {
     /// \brief Whether we have already declared a destructor within the class.
     bool DeclaredDestructor : 1;
 
+    /// \brief Whether an implicit move constructor was attempted to be declared
+    /// but would have been deleted.
+    bool FailedImplicitMoveConstructor : 1;
+
+    /// \brief Whether an implicit move assignment operator was attempted to be
+    /// declared but would have been deleted.
+    bool FailedImplicitMoveAssignment : 1;
+
     /// NumBases - The number of base class specifiers in Bases.
     unsigned NumBases;
     
@@ -546,6 +554,8 @@ class CXXRecordDecl : public RecordDecl {
 
   void markedVirtualFunctionPure();
   friend void FunctionDecl::setPure(bool);
+  
+  friend class ASTNodeImporter;
   
 protected:
   CXXRecordDecl(Kind K, TagKind TK, DeclContext *DC,
@@ -780,6 +790,33 @@ public:
     return data().DeclaredMoveConstructor;
   }
 
+  /// \brief Determine whether implicit move constructor generation for this
+  /// class has failed before.
+  bool hasFailedImplicitMoveConstructor() const {
+    return data().FailedImplicitMoveConstructor;
+  }
+
+  /// \brief Set whether implicit move constructor generation for this class
+  /// has failed before.
+  void setFailedImplicitMoveConstructor(bool Failed = true) {
+    data().FailedImplicitMoveConstructor = Failed;
+  }
+
+  /// \brief Determine whether this class should get an implicit move
+  /// constructor or if any existing special member function inhibits this.
+  ///
+  /// Covers all bullets of C++0x [class.copy]p9 except the last, that the
+  /// constructor wouldn't be deleted, which is only looked up from a cached
+  /// result.
+  bool needsImplicitMoveConstructor() const {
+    return !hasFailedImplicitMoveConstructor() &&
+           !hasDeclaredMoveConstructor() &&
+           !hasUserDeclaredCopyConstructor() &&
+           !hasUserDeclaredCopyAssignment() &&
+           !hasUserDeclaredMoveAssignment() &&
+           !hasUserDeclaredDestructor();
+  }
+
   /// hasUserDeclaredCopyAssignment - Whether this class has a
   /// user-declared copy assignment operator. When false, a copy
   /// assigment operator will be implicitly declared.
@@ -805,6 +842,33 @@ public:
   /// declared move assignment operator.
   bool hasDeclaredMoveAssignment() const {
     return data().DeclaredMoveAssignment;
+  }
+
+  /// \brief Determine whether implicit move assignment generation for this
+  /// class has failed before.
+  bool hasFailedImplicitMoveAssignment() const {
+    return data().FailedImplicitMoveAssignment;
+  }
+
+  /// \brief Set whether implicit move assignment generation for this class
+  /// has failed before.
+  void setFailedImplicitMoveAssignment(bool Failed = true) {
+    data().FailedImplicitMoveAssignment = Failed;
+  }
+
+  /// \brief Determine whether this class should get an implicit move
+  /// assignment operator or if any existing special member function inhibits
+  /// this.
+  ///
+  /// Covers all bullets of C++0x [class.copy]p20 except the last, that the
+  /// constructor wouldn't be deleted.
+  bool needsImplicitMoveAssignment() const {
+    return !hasFailedImplicitMoveAssignment() &&
+           !hasDeclaredMoveAssignment() &&
+           !hasUserDeclaredCopyConstructor() &&
+           !hasUserDeclaredCopyAssignment() &&
+           !hasUserDeclaredMoveConstructor() &&
+           !hasUserDeclaredDestructor();
   }
 
   /// hasUserDeclaredDestructor - Whether this class has a
@@ -889,10 +953,10 @@ public:
              data().DeclaredDefaultConstructor);
   }
 
-  // hasConstExprNonCopyMoveConstructor - Whether this class has at least one
-  // constexpr constructor other than the copy or move constructors
-  bool hasConstExprNonCopyMoveConstructor() const {
-    return data().HasConstExprNonCopyMoveConstructor;
+  // hasConstexprNonCopyMoveConstructor - Whether this class has at least one
+  // constexpr constructor other than the copy or move constructors.
+  bool hasConstexprNonCopyMoveConstructor() const {
+    return data().HasConstexprNonCopyMoveConstructor;
   }
 
   // hasTrivialCopyConstructor - Whether this class has a trivial copy
@@ -940,6 +1004,25 @@ public:
   //    is trivially copiable.
   bool isTrivial() const {
     return isTriviallyCopyable() && hasTrivialDefaultConstructor();
+  }
+
+  // isLiteral - Whether this class is a literal type.
+  //
+  // C++0x [basic.types]p10
+  //   A class type that has all the following properties:
+  //     -- a trivial destructor
+  //     -- every constructor call and full-expression in the
+  //        brace-or-equal-intializers for non-static data members (if any) is
+  //        a constant expression.
+  //     -- it is an aggregate type or has at least one constexpr constructor or
+  //        constructor template that is not a copy or move constructor, and
+  //     -- all non-static data members and base classes of literal types
+  //
+  // We resolve DR1361 by ignoring the second bullet.
+  bool isLiteral() const {
+    return hasTrivialDestructor() &&
+           (isAggregate() || hasConstexprNonCopyMoveConstructor()) &&
+           !hasNonLiteralTypeFieldsOrBases();
   }
 
   /// \brief If this record is an instantiation of a member class,
@@ -1237,10 +1320,10 @@ protected:
                 const DeclarationNameInfo &NameInfo,
                 QualType T, TypeSourceInfo *TInfo,
                 bool isStatic, StorageClass SCAsWritten, bool isInline,
-                SourceLocation EndLocation)
+                bool isConstexpr, SourceLocation EndLocation)
     : FunctionDecl(DK, RD, StartLoc, NameInfo, T, TInfo,
                    (isStatic ? SC_Static : SC_None),
-                   SCAsWritten, isInline) {
+                   SCAsWritten, isInline, isConstexpr) {
       if (EndLocation.isValid())
         setRangeEnd(EndLocation);
     }
@@ -1253,6 +1336,7 @@ public:
                                bool isStatic,
                                StorageClass SCAsWritten,
                                bool isInline,
+                               bool isConstexpr,
                                SourceLocation EndLocation);
 
   bool isStatic() const { return getStorageClass() == SC_Static; }
@@ -1333,6 +1417,7 @@ public:
   ///   void g() &&;
   ///   void h();
   /// };
+  /// \endcode
   RefQualifierKind getRefQualifier() const {
     return getType()->getAs<FunctionProtoType>()->getRefQualifier();
   }
@@ -1362,11 +1447,10 @@ public:
 /// };
 /// @endcode
 class CXXCtorInitializer {
-  /// \brief Either the base class name (stored as a TypeSourceInfo*), an normal
-  /// field (FieldDecl), anonymous field (IndirectFieldDecl*), or target
-  /// constructor (CXXConstructorDecl*) being initialized.
-  llvm::PointerUnion4<TypeSourceInfo *, FieldDecl *, IndirectFieldDecl *,
-                      CXXConstructorDecl *>
+  /// \brief Either the base class name/delegating constructor type (stored as
+  /// a TypeSourceInfo*), an normal field (FieldDecl), or an anonymous field 
+  /// (IndirectFieldDecl*) being initialized.
+  llvm::PointerUnion3<TypeSourceInfo *, FieldDecl *, IndirectFieldDecl *>
     Initializee;
   
   /// \brief The source location for the field name or, for a base initializer
@@ -1387,6 +1471,10 @@ class CXXCtorInitializer {
   /// RParenLoc - Location of the right paren of the ctor-initializer.
   SourceLocation RParenLoc;
 
+  /// \brief If the initializee is a type, whether that type makes this
+  /// a delegating initialization.
+  bool IsDelegating : 1;
+  
   /// IsVirtual - If the initializer is a base initializer, this keeps track
   /// of whether the base is virtual or not.
   bool IsVirtual : 1;
@@ -1400,7 +1488,7 @@ class CXXCtorInitializer {
   /// original sources, counting from 0; otherwise, if IsWritten is false,
   /// it stores the number of array index variables stored after this
   /// object in memory.
-  unsigned SourceOrderOrNumArrayIndices : 14;
+  unsigned SourceOrderOrNumArrayIndices : 13;
 
   CXXCtorInitializer(ASTContext &Context, FieldDecl *Member,
                      SourceLocation MemberLoc, SourceLocation L, Expr *Init,
@@ -1427,8 +1515,8 @@ public:
 
   /// CXXCtorInitializer - Creates a new delegating Initializer.
   explicit
-  CXXCtorInitializer(ASTContext &Context, SourceLocation D, SourceLocation L,
-                     CXXConstructorDecl *Target, Expr *Init, SourceLocation R);
+  CXXCtorInitializer(ASTContext &Context, TypeSourceInfo *TInfo,
+                     SourceLocation L, Expr *Init, SourceLocation R);
 
   /// \brief Creates a new member initializer that optionally contains 
   /// array indices used to describe an elementwise initialization.
@@ -1439,7 +1527,9 @@ public:
   
   /// isBaseInitializer - Returns true when this initializer is
   /// initializing a base class.
-  bool isBaseInitializer() const { return Initializee.is<TypeSourceInfo*>(); }
+  bool isBaseInitializer() const { 
+    return Initializee.is<TypeSourceInfo*>() && !IsDelegating; 
+  }
 
   /// isMemberInitializer - Returns true when this initializer is
   /// initializing a non-static data member.
@@ -1463,7 +1553,7 @@ public:
   /// isDelegatingInitializer - Returns true when this initializer is creating
   /// a delegating constructor.
   bool isDelegatingInitializer() const {
-    return Initializee.is<CXXConstructorDecl *>();
+    return Initializee.is<TypeSourceInfo*>() && IsDelegating; 
   }
 
   /// \brief Determine whether this initializer is a pack expansion.
@@ -1493,8 +1583,9 @@ public:
     return IsVirtual;
   }
 
-  /// \brief Returns the declarator information for a base class initializer.
-  TypeSourceInfo *getBaseClassInfo() const {
+  /// \brief Returns the declarator information for a base class or delegating
+  /// initializer.
+  TypeSourceInfo *getTypeSourceInfo() const {
     return Initializee.dyn_cast<TypeSourceInfo *>();
   }
   
@@ -1519,13 +1610,6 @@ public:
   IndirectFieldDecl *getIndirectMember() const {
     if (isIndirectMemberInitializer())
       return Initializee.get<IndirectFieldDecl*>();
-    else
-      return 0;
-  }
-
-  CXXConstructorDecl *getTargetConstructor() const {
-    if (isDelegatingInitializer())
-      return Initializee.get<CXXConstructorDecl*>();
     else
       return 0;
   }
@@ -1630,9 +1714,9 @@ class CXXConstructorDecl : public CXXMethodDecl {
                      const DeclarationNameInfo &NameInfo,
                      QualType T, TypeSourceInfo *TInfo,
                      bool isExplicitSpecified, bool isInline, 
-                     bool isImplicitlyDeclared)
+                     bool isImplicitlyDeclared, bool isConstexpr)
     : CXXMethodDecl(CXXConstructor, RD, StartLoc, NameInfo, T, TInfo, false,
-                    SC_None, isInline, SourceLocation()),
+                    SC_None, isInline, isConstexpr, SourceLocation()),
       IsExplicitSpecified(isExplicitSpecified), ImplicitlyDefined(false),
       CtorInitializers(0), NumCtorInitializers(0) {
     setImplicit(isImplicitlyDeclared);
@@ -1645,7 +1729,8 @@ public:
                                     const DeclarationNameInfo &NameInfo,
                                     QualType T, TypeSourceInfo *TInfo,
                                     bool isExplicit,
-                                    bool isInline, bool isImplicitlyDeclared);
+                                    bool isInline, bool isImplicitlyDeclared,
+                                    bool isConstexpr);
 
   /// isExplicitSpecified - Whether this constructor declaration has the
   /// 'explicit' keyword specified.
@@ -1737,11 +1822,7 @@ public:
 
   /// getTargetConstructor - When this constructor delegates to
   /// another, retrieve the target
-  CXXConstructorDecl *getTargetConstructor() const {
-    assert(isDelegatingConstructor() &&
-           "A non-delegating constructor has no target");
-    return CtorInitializers[0]->getTargetConstructor();
-  }
+  CXXConstructorDecl *getTargetConstructor() const;
 
   /// isDefaultConstructor - Whether this constructor is a default
   /// constructor (C++ [class.ctor]p5), which can be used to
@@ -1853,7 +1934,7 @@ class CXXDestructorDecl : public CXXMethodDecl {
                     QualType T, TypeSourceInfo *TInfo,
                     bool isInline, bool isImplicitlyDeclared)
     : CXXMethodDecl(CXXDestructor, RD, StartLoc, NameInfo, T, TInfo, false,
-                    SC_None, isInline, SourceLocation()),
+                    SC_None, isInline, /*isConstexpr=*/false, SourceLocation()),
       ImplicitlyDefined(false), OperatorDelete(0) {
     setImplicit(isImplicitlyDeclared);
   }
@@ -1916,9 +1997,9 @@ class CXXConversionDecl : public CXXMethodDecl {
                     const DeclarationNameInfo &NameInfo,
                     QualType T, TypeSourceInfo *TInfo,
                     bool isInline, bool isExplicitSpecified,
-                    SourceLocation EndLocation)
+                    bool isConstexpr, SourceLocation EndLocation)
     : CXXMethodDecl(CXXConversion, RD, StartLoc, NameInfo, T, TInfo, false,
-                    SC_None, isInline, EndLocation),
+                    SC_None, isInline, isConstexpr, EndLocation),
       IsExplicitSpecified(isExplicitSpecified) { }
 
 public:
@@ -1928,6 +2009,7 @@ public:
                                    const DeclarationNameInfo &NameInfo,
                                    QualType T, TypeSourceInfo *TInfo,
                                    bool isInline, bool isExplicit,
+                                   bool isConstexpr,
                                    SourceLocation EndLocation);
 
   /// IsExplicitSpecified - Whether this conversion function declaration is 

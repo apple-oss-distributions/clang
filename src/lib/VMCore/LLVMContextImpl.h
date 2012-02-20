@@ -15,10 +15,9 @@
 #ifndef LLVM_LLVMCONTEXT_IMPL_H
 #define LLVM_LLVMCONTEXT_IMPL_H
 
+#include "llvm/LLVMContext.h"
 #include "ConstantsContext.h"
 #include "LeaksContext.h"
-#include "TypesContext.h"
-#include "llvm/LLVMContext.h"
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/Metadata.h"
@@ -43,8 +42,8 @@ class Value;
 struct DenseMapAPIntKeyInfo {
   struct KeyTy {
     APInt val;
-    const Type* type;
-    KeyTy(const APInt& V, const Type* Ty) : val(V), type(Ty) {}
+    Type* type;
+    KeyTy(const APInt& V, Type* Ty) : val(V), type(Ty) {}
     KeyTy(const KeyTy& that) : val(that.val), type(that.type) {}
     bool operator==(const KeyTy& that) const {
       return type == that.type && this->val == that.val;
@@ -170,34 +169,27 @@ public:
   LeakDetectorImpl<Value> LLVMObjects;
   
   // Basic type instances.
-  const Type VoidTy;
-  const Type LabelTy;
-  const Type FloatTy;
-  const Type DoubleTy;
-  const Type MetadataTy;
-  const Type X86_FP80Ty;
-  const Type FP128Ty;
-  const Type PPC_FP128Ty;
-  const Type X86_MMXTy;
-  const IntegerType Int1Ty;
-  const IntegerType Int8Ty;
-  const IntegerType Int16Ty;
-  const IntegerType Int32Ty;
-  const IntegerType Int64Ty;
+  Type VoidTy, LabelTy, FloatTy, DoubleTy, MetadataTy;
+  Type X86_FP80Ty, FP128Ty, PPC_FP128Ty, X86_MMXTy;
+  IntegerType Int1Ty, Int8Ty, Int16Ty, Int32Ty, Int64Ty;
 
-  TypeMap<ArrayValType, ArrayType> ArrayTypes;
-  TypeMap<VectorValType, VectorType> VectorTypes;
-  TypeMap<PointerValType, PointerType> PointerTypes;
-  TypeMap<FunctionValType, FunctionType> FunctionTypes;
-  TypeMap<StructValType, StructType> StructTypes;
-  TypeMap<IntegerValType, IntegerType> IntegerTypes;
-
-  // Opaque types are not structurally uniqued, so don't use TypeMap.
-  typedef SmallPtrSet<const OpaqueType*, 8> OpaqueTypesTy;
-  OpaqueTypesTy OpaqueTypes;
-
-  /// Used as an abstract type that will never be resolved.
-  OpaqueType *const AlwaysOpaqueTy;
+  
+  /// TypeAllocator - All dynamically allocated types are allocated from this.
+  /// They live forever until the context is torn down.
+  BumpPtrAllocator TypeAllocator;
+  
+  DenseMap<unsigned, IntegerType*> IntegerTypes;
+  
+  // TODO: Optimize FunctionTypes/AnonStructTypes!
+  std::map<std::vector<Type*>, FunctionType*> FunctionTypes;
+  std::map<std::vector<Type*>, StructType*> AnonStructTypes;
+  StringMap<StructType*> NamedStructTypes;
+  unsigned NamedStructTypesUniqueID;
+    
+  DenseMap<std::pair<Type *, uint64_t>, ArrayType*> ArrayTypes;
+  DenseMap<std::pair<Type *, unsigned>, VectorType*> VectorTypes;
+  DenseMap<Type*, PointerType*> PointerTypes;  // Pointers in AddrSpace = 0
+  DenseMap<std::pair<Type*, unsigned>, PointerType*> ASPointerTypes;
 
 
   /// ValueHandles - This map keeps track of all of the value handles that are

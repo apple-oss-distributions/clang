@@ -18,9 +18,8 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/ADT/SmallVector.h"
 
-#define GET_SUBTARGETINFO_CTOR
-#define GET_SUBTARGETINFO_MC_DESC
 #define GET_SUBTARGETINFO_TARGET_DESC
+#define GET_SUBTARGETINFO_CTOR
 #include "ARMGenSubtargetInfo.inc"
 
 using namespace llvm;
@@ -38,17 +37,25 @@ StrictAlign("arm-strict-align", cl::Hidden,
 
 
 ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
-                           const std::string &FS, bool isT)
-  : ARMGenSubtargetInfo()
-  , ARMArchVersion(V4)
+                           const std::string &FS)
+  : ARMGenSubtargetInfo(TT, CPU, FS)
   , ARMProcFamily(Others)
-  , ARMFPUType(None)
+  , HasV4TOps(false)
+  , HasV5TOps(false)
+  , HasV5TEOps(false)
+  , HasV6Ops(false)
+  , HasV6T2Ops(false)
+  , HasV7Ops(false)
+  , HasVFPv2(false)
+  , HasVFPv3(false)
+  , HasNEON(false)
   , UseNEONForSinglePrecisionFP(false)
   , SlowFPVMLx(false)
   , HasVMLxForwarding(false)
   , SlowFPBrcc(false)
-  , IsThumb(isT)
-  , ThumbMode(Thumb1)
+  , InThumbMode(false)
+  , HasThumb2(false)
+  , IsMClass(false)
   , NoARM(false)
   , PostRAScheduler(false)
   , IsR9Reserved(ReserveR9)
@@ -70,78 +77,25 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   , TargetTriple(TT)
   , TargetABI(ARM_ABI_APCS) {
   // Determine default and user specified characteristics
-
-  // When no arch is specified either by CPU or by attributes, make the default
-  // ARMv4T.
-  const char *ARMArchFeature = "";
   if (CPUString.empty())
     CPUString = "generic";
-  if (CPUString == "generic" && (FS.empty() || FS == "generic")) {
-    ARMArchVersion = V4T;
-    ARMArchFeature = "+v4t";
-  }
-
-  // Set the boolean corresponding to the current target triple, or the default
-  // if one cannot be determined, to true.
-  unsigned Len = TT.length();
-  unsigned Idx = 0;
-
-  if (Len >= 5 && TT.substr(0, 4) == "armv")
-    Idx = 4;
-  else if (Len >= 6 && TT.substr(0, 5) == "thumb") {
-    IsThumb = true;
-    if (Len >= 7 && TT[5] == 'v')
-      Idx = 6;
-  }
-  if (Idx) {
-    unsigned SubVer = TT[Idx];
-    if (SubVer >= '7' && SubVer <= '9') {
-      ARMArchVersion = V7A;
-      ARMArchFeature = "+v7a";
-      if (Len >= Idx+2 && TT[Idx+1] == 'm') {
-        ARMArchVersion = V7M;
-        ARMArchFeature = "+v7m";
-      } else if (Len >= Idx+3 && TT[Idx+1] == 'e'&& TT[Idx+2] == 'm') {
-        ARMArchVersion = V7EM;
-        ARMArchFeature = "+v7em";
-      }
-    } else if (SubVer == '6') {
-      ARMArchVersion = V6;
-      ARMArchFeature = "+v6";
-      if (Len >= Idx+3 && TT[Idx+1] == 't' && TT[Idx+2] == '2') {
-        ARMArchVersion = V6T2;
-        ARMArchFeature = "+v6t2";
-      }
-    } else if (SubVer == '5') {
-      ARMArchVersion = V5T;
-      ARMArchFeature = "+v5t";
-      if (Len >= Idx+3 && TT[Idx+1] == 't' && TT[Idx+2] == 'e') {
-        ARMArchVersion = V5TE;
-        ARMArchFeature = "+v5te";
-      }
-    } else if (SubVer == '4') {
-      if (Len >= Idx+2 && TT[Idx+1] == 't') {
-        ARMArchVersion = V4T;
-        ARMArchFeature = "+v4t";
-      } else {
-        ARMArchVersion = V4;
-        ARMArchFeature = "";
-      }
-    }
-  }
-
-  if (TT.find("eabi") != std::string::npos)
-    TargetABI = ARM_ABI_AAPCS;
 
   // Insert the architecture feature derived from the target triple into the
   // feature string. This is important for setting features that are implied
   // based on the architecture version.
-  std::string FSWithArch = std::string(ARMArchFeature);
-  if (FSWithArch.empty())
-    FSWithArch = FS;
-  else if (!FS.empty())
-    FSWithArch = FSWithArch + "," + FS;
-  ParseSubtargetFeatures(FSWithArch, CPUString);
+  std::string ArchFS = ARM_MC::ParseARMTriple(TT);
+  if (!FS.empty()) {
+    if (!ArchFS.empty())
+      ArchFS = ArchFS + "," + FS;
+    else
+      ArchFS = FS;
+  }
+  ParseSubtargetFeatures(CPUString, ArchFS);
+
+  // Thumb2 implies at least V6T2. FIXME: Fix tests to explicitly specify a
+  // ARM version or CPU and then remove this.
+  if (!HasV6T2Ops && hasThumb2())
+    HasV4TOps = HasV5TOps = HasV5TEOps = HasV6Ops = HasV6T2Ops = true;
 
   // Initialize scheduling itinerary for the specified CPU.
   InstrItins = getInstrItineraryForCPU(CPUString);
@@ -149,11 +103,8 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   // After parsing Itineraries, set ItinData.IssueWidth.
   computeIssueWidth();
 
-  // Thumb2 implies at least V6T2.
-  if (ARMArchVersion >= V6T2)
-    ThumbMode = Thumb2;
-  else if (ThumbMode >= Thumb2)
-    ARMArchVersion = V6T2;
+  if (TT.find("eabi") != std::string::npos)
+    TargetABI = ARM_ABI_AAPCS;
 
   if (isAAPCS_ABI())
     stackAlignment = 8;
@@ -161,7 +112,7 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   if (!isTargetDarwin())
     UseMovt = hasV6T2Ops();
   else {
-    IsR9Reserved = ReserveR9 | (ARMArchVersion < V6);
+    IsR9Reserved = ReserveR9 | !HasV6Ops;
     UseMovt = DarwinUseMOVT && hasV6T2Ops();
     const Triple &T = getTargetTriple();
     SupportsTailCall = T.getOS() == Triple::IOS && !T.isOSVersionLT(5, 0);

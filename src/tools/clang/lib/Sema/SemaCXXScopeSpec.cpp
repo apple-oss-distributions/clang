@@ -137,8 +137,7 @@ DeclContext *Sema::computeDeclContext(const CXXScopeSpec &SS,
 
   switch (NNS->getKind()) {
   case NestedNameSpecifier::Identifier:
-    assert(false && "Dependent nested-name-specifier has no DeclContext");
-    break;
+    llvm_unreachable("Dependent nested-name-specifier has no DeclContext");
 
   case NestedNameSpecifier::Namespace:
     return NNS->getAsNamespace();
@@ -238,7 +237,7 @@ bool Sema::RequireCompleteDeclContext(CXXScopeSpec &SS,
     // until we see a definition, so awkwardly pull out this special
     // case.
     if (const EnumType *enumType = dyn_cast_or_null<EnumType>(tagType)) {
-      if (!enumType->getDecl()->isDefinition()) {
+      if (!enumType->getDecl()->isCompleteDefinition()) {
         Diag(loc, diag::err_incomplete_nested_name_spec)
           << type << SS.getRange();
         SS.SetInvalid(SS.getRange());
@@ -269,7 +268,7 @@ bool Sema::isAcceptableNestedNameSpecifier(NamedDecl *SD) {
   if (!isa<TypeDecl>(SD))
     return false;
 
-  // Determine whether we have a class (or, in C++0x, an enum) or
+  // Determine whether we have a class (or, in C++11, an enum) or
   // a typedef thereof. If so, build the nested-name-specifier.
   QualType T = Context.getTypeDeclType(cast<TypeDecl>(SD));
   if (T->isDependentType())
@@ -597,6 +596,9 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
       llvm_unreachable("Unhandled TypeDecl node in nested-name-specifier");
     }
 
+    if (T->isEnumeralType())
+      Diag(IdentifierLoc, diag::warn_cxx98_compat_enum_nested_name_spec);
+
     SS.Extend(Context, SourceLocation(), TLB.getTypeLocInContext(Context, T),
               CCLoc);
     return false;
@@ -613,6 +615,31 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
   if (Found.empty()) {
     Found.clear(LookupOrdinaryName);
     LookupName(Found, S);
+  }
+
+  // In Microsoft mode, if we are within a templated function and we can't
+  // resolve Identifier, then extend the SS with Identifier. This will have 
+  // the effect of resolving Identifier during template instantiation. 
+  // The goal is to be able to resolve a function call whose
+  // nested-name-specifier is located inside a dependent base class.
+  // Example: 
+  //
+  // class C {
+  // public:
+  //    static void foo2() {  }
+  // };
+  // template <class T> class A { public: typedef C D; };
+  //
+  // template <class T> class B : public A<T> {
+  // public:
+  //   void foo() { D::foo2(); }
+  // };
+  if (getLangOptions().MicrosoftExt) {
+    DeclContext *DC = LookupCtx ? LookupCtx : CurContext;
+    if (DC->isDependentContext() && DC->isFunctionOrMethod()) {
+      SS.Extend(Context, &Identifier, IdentifierLoc, CCLoc);
+      return false;
+    }
   }
 
   unsigned DiagID;

@@ -14,15 +14,19 @@
 #ifndef LLVM_CLANG_AST_APVALUE_H
 #define LLVM_CLANG_AST_APVALUE_H
 
+#include "clang/Basic/LLVM.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/APFloat.h"
 
 namespace clang {
   class CharUnits;
+  class DiagnosticBuilder;
   class Expr;
+  class Decl;
 
 /// APValue - This class implements a discriminated union of [uninitialized]
-/// [APSInt] [APFloat], [Complex APSInt] [Complex APFloat], [Expr + Offset].
+/// [APSInt] [APFloat], [Complex APSInt] [Complex APFloat], [Expr + Offset],
+/// [Vector: N * APValue], [Array: N * APValue]
 class APValue {
   typedef llvm::APSInt APSInt;
   typedef llvm::APFloat APFloat;
@@ -34,8 +38,15 @@ public:
     ComplexInt,
     ComplexFloat,
     LValue,
-    Vector
+    Vector,
+    Array
   };
+  union LValuePathEntry {
+    const Decl *BaseOrMember;
+    uint64_t ArrayIndex;
+  };
+  struct NoLValuePath {};
+  struct UninitArray {};
 private:
   ValueKind Kind;
 
@@ -47,12 +58,18 @@ private:
     APFloat Real, Imag;
     ComplexAPFloat() : Real(0.0), Imag(0.0) {}
   };
-
+  struct LV;
   struct Vec {
     APValue *Elts;
     unsigned NumElts;
     Vec() : Elts(0), NumElts(0) {}
     ~Vec() { delete[] Elts; }
+  };
+  struct Arr {
+    APValue *Elts;
+    unsigned NumElts, ArrSize;
+    Arr(unsigned NumElts, unsigned ArrSize);
+    ~Arr();
   };
 
   enum {
@@ -85,10 +102,18 @@ public:
   APValue(const APValue &RHS) : Kind(Uninitialized) {
     *this = RHS;
   }
-  APValue(const Expr* B, const CharUnits &O) : Kind(Uninitialized) {
-    MakeLValue(); setLValue(B, O);
+  APValue(const Expr *B, const CharUnits &O, NoLValuePath N)
+      : Kind(Uninitialized) {
+    MakeLValue(); setLValue(B, O, N);
   }
-  APValue(const Expr* B);
+  APValue(const Expr *B, const CharUnits &O, ArrayRef<LValuePathEntry> Path)
+      : Kind(Uninitialized) {
+    MakeLValue(); setLValue(B, O, Path);
+  }
+  APValue(const Expr *B);
+  APValue(UninitArray, unsigned InitElts, unsigned Size) : Kind(Uninitialized) {
+    MakeArray(InitElts, Size);
+  }
 
   ~APValue() {
     MakeUninit();
@@ -102,8 +127,9 @@ public:
   bool isComplexFloat() const { return Kind == ComplexFloat; }
   bool isLValue() const { return Kind == LValue; }
   bool isVector() const { return Kind == Vector; }
+  bool isArray() const { return Kind == Array; }
 
-  void print(llvm::raw_ostream &OS) const;
+  void print(raw_ostream &OS) const;
   void dump() const;
 
   APSInt &getInt() {
@@ -120,19 +146,6 @@ public:
   }
   const APFloat &getFloat() const {
     return const_cast<APValue*>(this)->getFloat();
-  }
-
-  APValue &getVectorElt(unsigned i) {
-    assert(isVector() && "Invalid accessor");
-    return ((Vec*)(char*)Data)->Elts[i];
-  }
-  const APValue &getVectorElt(unsigned i) const {
-    assert(isVector() && "Invalid accessor");
-    return ((const Vec*)(const char*)Data)->Elts[i];
-  }
-  unsigned getVectorLength() const {
-    assert(isVector() && "Invalid accessor");
-    return ((const Vec*)(const void *)Data)->NumElts;
   }
 
   APSInt &getComplexIntReal() {
@@ -168,7 +181,53 @@ public:
   }
 
   const Expr* getLValueBase() const;
-  CharUnits getLValueOffset() const;
+  CharUnits &getLValueOffset();
+  const CharUnits &getLValueOffset() const {
+    return const_cast<APValue*>(this)->getLValueOffset();
+  }
+  bool hasLValuePath() const;
+  ArrayRef<LValuePathEntry> getLValuePath() const;
+
+  APValue &getVectorElt(unsigned I) {
+    assert(isVector() && "Invalid accessor");
+    assert(I < getVectorLength() && "Index out of range");
+    return ((Vec*)(char*)Data)->Elts[I];
+  }
+  const APValue &getVectorElt(unsigned I) const {
+    return const_cast<APValue*>(this)->getVectorElt(I);
+  }
+  unsigned getVectorLength() const {
+    assert(isVector() && "Invalid accessor");
+    return ((const Vec*)(const void *)Data)->NumElts;
+  }
+
+  APValue &getArrayInitializedElt(unsigned I) {
+    assert(isArray() && "Invalid accessor");
+    assert(I < getArrayInitializedElts() && "Index out of range");
+    return ((Arr*)(char*)Data)->Elts[I];
+  }
+  const APValue &getArrayInitializedElt(unsigned I) const {
+    return const_cast<APValue*>(this)->getArrayInitializedElt(I);
+  }
+  bool hasArrayFiller() const {
+    return getArrayInitializedElts() != getArraySize();
+  }
+  APValue &getArrayFiller() {
+    assert(isArray() && "Invalid accessor");
+    assert(hasArrayFiller() && "No array filler");
+    return ((Arr*)(char*)Data)->Elts[getArrayInitializedElts()];
+  }
+  const APValue &getArrayFiller() const {
+    return const_cast<APValue*>(this)->getArrayFiller();
+  }
+  unsigned getArrayInitializedElts() const {
+    assert(isArray() && "Invalid accessor");
+    return ((const Arr*)(const void *)Data)->NumElts;
+  }
+  unsigned getArraySize() const {
+    assert(isArray() && "Invalid accessor");
+    return ((const Arr*)(const void *)Data)->ArrSize;
+  }
 
   void setInt(const APSInt &I) {
     assert(isInt() && "Invalid accessor");
@@ -199,7 +258,9 @@ public:
     ((ComplexAPFloat*)(char*)Data)->Real = R;
     ((ComplexAPFloat*)(char*)Data)->Imag = I;
   }
-  void setLValue(const Expr *B, const CharUnits &O);
+  void setLValue(const Expr *B, const CharUnits &O, NoLValuePath);
+  void setLValue(const Expr *B, const CharUnits &O,
+                 ArrayRef<LValuePathEntry> Path);
 
   const APValue &operator=(const APValue &RHS);
 
@@ -231,12 +292,17 @@ private:
     Kind = ComplexFloat;
   }
   void MakeLValue();
+  void MakeArray(unsigned InitElts, unsigned Size);
 };
 
-inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const APValue &V) {
+inline raw_ostream &operator<<(raw_ostream &OS, const APValue &V) {
   V.print(OS);
   return OS;
 }
+
+// Writes a concise representation of V to DB, in a single << operation.
+const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
+                                    const APValue &V);
 
 } // end namespace clang.
 

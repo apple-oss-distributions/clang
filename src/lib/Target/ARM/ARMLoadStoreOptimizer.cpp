@@ -14,10 +14,10 @@
 
 #define DEBUG_TYPE "arm-ldst-opt"
 #include "ARM.h"
-#include "ARMAddressingModes.h"
 #include "ARMBaseInstrInfo.h"
 #include "ARMMachineFunctionInfo.h"
 #include "ARMRegisterInfo.h"
+#include "MCTargetDesc/ARMAddressingModes.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/Function.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetMachine.h"
@@ -61,6 +62,7 @@ namespace {
 
     const TargetInstrInfo *TII;
     const TargetRegisterInfo *TRI;
+    const ARMSubtarget *STI;
     ARMFunctionInfo *AFI;
     RegScavenger *RS;
     bool isThumb2;
@@ -763,9 +765,9 @@ static unsigned getPreIndexedLoadStoreOpcode(unsigned Opc,
                                              ARM_AM::AddrOpc Mode) {
   switch (Opc) {
   case ARM::LDRi12:
-    return ARM::LDR_PRE;
+    return ARM::LDR_PRE_IMM;
   case ARM::STRi12:
-    return ARM::STR_PRE;
+    return ARM::STR_PRE_IMM;
   case ARM::VLDRS:
     return Mode == ARM_AM::add ? ARM::VLDMSIA_UPD : ARM::VLDMSDB_UPD;
   case ARM::VLDRD:
@@ -789,9 +791,9 @@ static unsigned getPostIndexedLoadStoreOpcode(unsigned Opc,
                                               ARM_AM::AddrOpc Mode) {
   switch (Opc) {
   case ARM::LDRi12:
-    return ARM::LDR_POST;
+    return ARM::LDR_POST_IMM;
   case ARM::STRi12:
-    return ARM::STR_POST;
+    return ARM::STR_POST_IMM;
   case ARM::VLDRS:
     return Mode == ARM_AM::add ? ARM::VLDMSIA_UPD : ARM::VLDMSDB_UPD;
   case ARM::VLDRD:
@@ -892,12 +894,6 @@ bool ARMLoadStoreOpt::MergeBaseUpdateLoadStore(MachineBasicBlock &MBB,
   if (!DoMerge)
     return false;
 
-  unsigned Offset = 0;
-  if (isAM2)
-    Offset = ARM_AM::getAM2Opc(AddSub, Bytes, ARM_AM::no_shift);
-  else if (!isAM5)
-    Offset = AddSub == ARM_AM::sub ? -Bytes : Bytes;
-
   if (isAM5) {
     // VLDM[SD}_UPD, VSTM[SD]_UPD
     // (There are no base-updating versions of VLDR/VSTR instructions, but the
@@ -911,28 +907,44 @@ bool ARMLoadStoreOpt::MergeBaseUpdateLoadStore(MachineBasicBlock &MBB,
       .addReg(MO.getReg(), (isLd ? getDefRegState(true) :
                             getKillRegState(MO.isKill())));
   } else if (isLd) {
-    if (isAM2)
-      // LDR_PRE, LDR_POST,
-      BuildMI(MBB, MBBI, dl, TII->get(NewOpc), MI->getOperand(0).getReg())
-        .addReg(Base, RegState::Define)
-        .addReg(Base).addReg(0).addImm(Offset).addImm(Pred).addReg(PredReg);
-    else
+    if (isAM2) {
+      // LDR_PRE, LDR_POST
+      if (NewOpc == ARM::LDR_PRE_IMM || NewOpc == ARM::LDRB_PRE_IMM) {
+        int Offset = AddSub == ARM_AM::sub ? -Bytes : Bytes;
+        BuildMI(MBB, MBBI, dl, TII->get(NewOpc), MI->getOperand(0).getReg())
+          .addReg(Base, RegState::Define)
+          .addReg(Base).addImm(Offset).addImm(Pred).addReg(PredReg);
+      } else {
+        int Offset = ARM_AM::getAM2Opc(AddSub, Bytes, ARM_AM::no_shift);
+        BuildMI(MBB, MBBI, dl, TII->get(NewOpc), MI->getOperand(0).getReg())
+          .addReg(Base, RegState::Define)
+          .addReg(Base).addReg(0).addImm(Offset).addImm(Pred).addReg(PredReg);
+      }
+    } else {
+      int Offset = AddSub == ARM_AM::sub ? -Bytes : Bytes;
       // t2LDR_PRE, t2LDR_POST
       BuildMI(MBB, MBBI, dl, TII->get(NewOpc), MI->getOperand(0).getReg())
         .addReg(Base, RegState::Define)
         .addReg(Base).addImm(Offset).addImm(Pred).addReg(PredReg);
+    }
   } else {
     MachineOperand &MO = MI->getOperand(0);
-    if (isAM2)
+    // FIXME: post-indexed stores use am2offset_imm, which still encodes
+    // the vestigal zero-reg offset register. When that's fixed, this clause
+    // can be removed entirely.
+    if (isAM2 && NewOpc == ARM::STR_POST_IMM) {
+      int Offset = ARM_AM::getAM2Opc(AddSub, Bytes, ARM_AM::no_shift);
       // STR_PRE, STR_POST
       BuildMI(MBB, MBBI, dl, TII->get(NewOpc), Base)
         .addReg(MO.getReg(), getKillRegState(MO.isKill()))
         .addReg(Base).addReg(0).addImm(Offset).addImm(Pred).addReg(PredReg);
-    else
+    } else {
+      int Offset = AddSub == ARM_AM::sub ? -Bytes : Bytes;
       // t2STR_PRE, t2STR_POST
       BuildMI(MBB, MBBI, dl, TII->get(NewOpc), Base)
         .addReg(MO.getReg(), getKillRegState(MO.isKill()))
         .addReg(Base).addImm(Offset).addImm(Pred).addReg(PredReg);
+    }
   }
   MBB.erase(MBBI);
 
@@ -1060,11 +1072,17 @@ bool ARMLoadStoreOpt::FixInvalidRegPairOp(MachineBasicBlock &MBB,
   unsigned Opcode = MI->getOpcode();
   if (Opcode == ARM::LDRD || Opcode == ARM::STRD ||
       Opcode == ARM::t2LDRDi8 || Opcode == ARM::t2STRDi8) {
+    const MachineOperand &BaseOp = MI->getOperand(2);
+    unsigned BaseReg = BaseOp.getReg();
     unsigned EvenReg = MI->getOperand(0).getReg();
     unsigned OddReg  = MI->getOperand(1).getReg();
     unsigned EvenRegNum = TRI->getDwarfRegNum(EvenReg, false);
     unsigned OddRegNum  = TRI->getDwarfRegNum(OddReg, false);
-    if ((EvenRegNum & 1) == 0 && (EvenRegNum + 1) == OddRegNum)
+    // ARM errata 602117: LDRD with base in list may result in incorrect base
+    // register when interrupted or faulted.
+    bool Errata602117 = EvenReg == BaseReg && STI->isCortexM3();
+    if (!Errata602117 &&
+        ((EvenRegNum & 1) == 0 && (EvenRegNum + 1) == OddRegNum))
       return false;
 
     MachineBasicBlock::iterator NewBBI = MBBI;
@@ -1076,8 +1094,6 @@ bool ARMLoadStoreOpt::FixInvalidRegPairOp(MachineBasicBlock &MBB,
     bool OddDeadKill  = isLd ?
       MI->getOperand(1).isDead() : MI->getOperand(1).isKill();
     bool OddUndef = MI->getOperand(1).isUndef();
-    const MachineOperand &BaseOp = MI->getOperand(2);
-    unsigned BaseReg = BaseOp.getReg();
     bool BaseKill = BaseOp.isKill();
     bool BaseUndef = BaseOp.isUndef();
     bool OffKill = isT2 ? false : MI->getOperand(3).isKill();
@@ -1369,6 +1385,7 @@ bool ARMLoadStoreOpt::runOnMachineFunction(MachineFunction &Fn) {
   AFI = Fn.getInfo<ARMFunctionInfo>();
   TII = TM.getInstrInfo();
   TRI = TM.getRegisterInfo();
+  STI = &TM.getSubtarget<ARMSubtarget>();
   RS = new RegScavenger();
   isThumb2 = AFI->isThumb2Function();
 

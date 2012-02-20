@@ -33,7 +33,7 @@
 
 #include "llvm/Support/TimeValue.h"
 
-#include "../Target/X86/X86FixupKinds.h"
+#include "../Target/X86/MCTargetDesc/X86FixupKinds.h"
 
 #include <cstdio>
 
@@ -281,6 +281,7 @@ StringTable::StringTable() {
   // The string table data begins with the length of the entire string table
   // including the length header. Allocate space for this header.
   Data.resize(4);
+  update_length();
 }
 
 size_t StringTable::size() const {

@@ -14,6 +14,8 @@
 #ifndef LLVM_DEFAULT_PASS_SUPPORT_H
 #define LLVM_DEFAULT_PASS_SUPPORT_H
 
+#include <llvm/PassSupport.h>
+
 namespace llvm {
 
 class PassManagerBase;
@@ -29,7 +31,6 @@ extern unsigned char ConstantMergeID;
 extern unsigned char CorrelatedValuePropagationID;
 extern unsigned char DeadArgEliminationID;
 extern unsigned char DeadStoreEliminationID;
-extern unsigned char DeadTypeEliminationID;
 extern unsigned char EarlyCSEID;
 extern unsigned char FunctionAttrsID;
 extern unsigned char FunctionInliningID;

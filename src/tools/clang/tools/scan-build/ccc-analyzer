@@ -55,7 +55,10 @@ my $ResultFile;
 
 # Remove any stale files at exit.
 END { 
-  if (defined $CleanupFile && -z $CleanupFile) {
+  if (defined $ResultFile && -z $ResultFile) {
+    `rm -f $ResultFile`;
+  }
+  if (defined $CleanupFile) {
     `rm -f $CleanupFile`;
   }
 }
@@ -75,8 +78,8 @@ sub GetPPExt {
 # Set this to 1 if we want to include 'parser rejects' files.
 my $IncludeParserRejects = 0;
 my $ParserRejects = "Parser Rejects";
-
 my $AttributeIgnored = "Attribute Ignored";
+my $OtherError = "Other Error";
 
 sub ProcessClangFailure {
   my ($Clang, $Lang, $file, $Args, $HtmlDir, $ErrorType, $ofile) = @_;
@@ -89,6 +92,9 @@ sub ProcessClangFailure {
   }
   elsif ($ErrorType eq $AttributeIgnored) {
     $prefix = "clang_attribute_ignored";
+  }
+  elsif ($ErrorType eq $OtherError) {
+    $prefix = "clang_other_error";
   }
 
   # Generate the preprocessed file with Clang.
@@ -256,6 +262,9 @@ sub Analyze {
       if ($IncludeParserRejects && !($file =~/conftest/)) {
         ProcessClangFailure($Clang, $Lang, $file, \@CmdArgsSansAnalyses,
                             $HtmlDir, $ParserRejects, $ofile);
+      } else {
+        ProcessClangFailure($Clang, $Lang, $file, \@CmdArgsSansAnalyses,
+                            $HtmlDir, $OtherError, $ofile);      	
       }
     }
     else {
@@ -365,9 +374,11 @@ my %LangMap = (
   'cp'  => 'c++',
   'cpp' => 'c++',
   'cc'  => 'c++',
+  'ii'  => 'c++',
   'i'   => 'c-cpp-output',
   'm'   => 'objective-c',
-  'mi'  => 'objective-c-cpp-output'
+  'mi'  => 'objective-c-cpp-output',
+  'mm'  => 'objective-c++'
 );
 
 my %UniqueOptions = (
@@ -380,13 +391,10 @@ my %UniqueOptions = (
 
 my %LangsAccepted = (
   "objective-c" => 1,
-  "c" => 1
+  "c" => 1,
+  "c++" => 1,
+  "objective-c++" => 1
 );
-
-if (defined $ENV{'CCC_ANALYZER_CPLUSPLUS'}) {
-  $LangsAccepted{"c++"} = 1;
-  $LangsAccepted{"objective-c++"} = 1;
-}
 
 ##----------------------------------------------------------------------------##
 #  Main Logic.
@@ -621,9 +629,9 @@ if ($Action eq 'compile' or $Action eq 'link') {
       push @AnalyzeArgs, "-analyzer-constraints=$ConstraintsModel";
     }
     
-#    if (defined $Analyses) {
-#      push @AnalyzeArgs, split '\s+', $Analyses;
-#    }
+    if (defined $Analyses) {
+      push @AnalyzeArgs, split '\s+', $Analyses;
+    }
 
     if (defined $OutputFormat) {
       push @AnalyzeArgs, "-analyzer-output=" . $OutputFormat;
@@ -632,7 +640,10 @@ if ($Action eq 'compile' or $Action eq 'link') {
         my ($h, $f) = tempfile("report-XXXXXX", SUFFIX => ".plist",
                                DIR => $HtmlDir);
         $ResultFile = $f;
-        $CleanupFile = $f;
+        # If the HtmlDir is not set, we sould clean up the plist files.
+        if (!defined $HtmlDir || -z $HtmlDir) {
+        	$CleanupFile = $f; 
+        }
       }
     }
 

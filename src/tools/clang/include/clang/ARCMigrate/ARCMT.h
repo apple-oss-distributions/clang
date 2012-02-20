@@ -15,7 +15,7 @@
 
 namespace clang {
   class ASTContext;
-  class DiagnosticClient;
+  class DiagnosticConsumer;
 
 namespace arcmt {
   class MigrationPass;
@@ -37,18 +37,18 @@ namespace arcmt {
 ///
 /// \returns false if no error is produced, true otherwise.
 bool checkForManualIssues(CompilerInvocation &CI,
-                          llvm::StringRef Filename, InputKind Kind,
-                          DiagnosticClient *DiagClient,
+                          StringRef Filename, InputKind Kind,
+                          DiagnosticConsumer *DiagClient,
                           bool emitPremigrationARCErrors = false,
-                          llvm::StringRef plistOut = llvm::StringRef());
+                          StringRef plistOut = StringRef());
 
 /// \brief Works similar to checkForManualIssues but instead of checking, it
 /// applies automatic modifications to source files to conform to ARC.
 ///
 /// \returns false if no error is produced, true otherwise.
 bool applyTransformations(CompilerInvocation &origCI,
-                          llvm::StringRef Filename, InputKind Kind,
-                          DiagnosticClient *DiagClient);
+                          StringRef Filename, InputKind Kind,
+                          DiagnosticConsumer *DiagClient);
 
 /// \brief Applies automatic modifications and produces temporary files
 /// and metadata into the \arg outputDir path.
@@ -62,32 +62,32 @@ bool applyTransformations(CompilerInvocation &origCI,
 ///
 /// \returns false if no error is produced, true otherwise.
 bool migrateWithTemporaryFiles(CompilerInvocation &origCI,
-                               llvm::StringRef Filename, InputKind Kind,
-                               DiagnosticClient *DiagClient,
-                               llvm::StringRef outputDir,
+                               StringRef Filename, InputKind Kind,
+                               DiagnosticConsumer *DiagClient,
+                               StringRef outputDir,
                                bool emitPremigrationARCErrors,
-                               llvm::StringRef plistOut);
+                               StringRef plistOut);
 
 /// \brief Get the set of file remappings from the \arg outputDir path that
 /// migrateWithTemporaryFiles produced.
 ///
 /// \returns false if no error is produced, true otherwise.
 bool getFileRemappings(std::vector<std::pair<std::string,std::string> > &remap,
-                       llvm::StringRef outputDir,
-                       DiagnosticClient *DiagClient);
+                       StringRef outputDir,
+                       DiagnosticConsumer *DiagClient);
 
 typedef void (*TransformFn)(MigrationPass &pass);
 
-std::vector<TransformFn> getAllTransformations();
+std::vector<TransformFn> getAllTransformations(LangOptions::GCMode OrigGCMode);
 
 class MigrationProcess {
   CompilerInvocation OrigCI;
-  DiagnosticClient *DiagClient;
+  DiagnosticConsumer *DiagClient;
   FileRemapper Remapper;
 
 public:
-  MigrationProcess(const CompilerInvocation &CI, DiagnosticClient *diagClient,
-                   llvm::StringRef outputDir = llvm::StringRef());
+  MigrationProcess(const CompilerInvocation &CI, DiagnosticConsumer *diagClient,
+                   StringRef outputDir = StringRef());
 
   class RewriteListener {
   public:
@@ -96,7 +96,7 @@ public:
     virtual void start(ASTContext &Ctx) { }
     virtual void finish() { }
 
-    virtual void insert(SourceLocation loc, llvm::StringRef text) { }
+    virtual void insert(SourceLocation loc, StringRef text) { }
     virtual void remove(CharSourceRange range) { }
   };
 

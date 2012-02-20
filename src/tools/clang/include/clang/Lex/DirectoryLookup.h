@@ -14,12 +14,9 @@
 #ifndef LLVM_CLANG_LEX_DIRECTORYLOOKUP_H
 #define LLVM_CLANG_LEX_DIRECTORYLOOKUP_H
 
+#include "clang/Basic/LLVM.h"
 #include "clang/Basic/SourceManager.h"
 
-namespace llvm {
-  class StringRef;
-  template <typename T> class SmallVectorImpl;
-}
 namespace clang {
 class HeaderMap;
 class DirectoryEntry;
@@ -143,15 +140,25 @@ public:
   /// \param RelativePath If not NULL, will be set to the path relative to
   /// SearchPath at which the file was found. This only differs from the
   /// Filename for framework includes.
-  const FileEntry *LookupFile(llvm::StringRef Filename, HeaderSearch &HS,
-                              llvm::SmallVectorImpl<char> *SearchPath,
-                              llvm::SmallVectorImpl<char> *RelativePath) const;
+  ///
+  /// \param BuildingModule The name of the module we're currently building.
+  ///
+  /// \param SuggestedModule If non-null, and the file found is semantically
+  /// part of a known module, this will be set to the name of the module that
+  /// could be imported instead of preprocessing/parsing the file found.
+  const FileEntry *LookupFile(StringRef Filename, HeaderSearch &HS,
+                              SmallVectorImpl<char> *SearchPath,
+                              SmallVectorImpl<char> *RelativePath,
+                              StringRef BuildingModule,
+                              StringRef *SuggestedModule) const;
 
 private:
   const FileEntry *DoFrameworkLookup(
-      llvm::StringRef Filename, HeaderSearch &HS,
-      llvm::SmallVectorImpl<char> *SearchPath,
-      llvm::SmallVectorImpl<char> *RelativePath) const;
+      StringRef Filename, HeaderSearch &HS,
+      SmallVectorImpl<char> *SearchPath,
+      SmallVectorImpl<char> *RelativePath,
+      StringRef BuildingModule,
+      StringRef *SuggestedModule) const;
 
 };
 

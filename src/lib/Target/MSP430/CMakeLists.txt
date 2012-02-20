@@ -1,11 +1,12 @@
 set(LLVM_TARGET_DEFINITIONS MSP430.td)
 
-tablegen(MSP430GenRegisterInfo.inc -gen-register-info)
-tablegen(MSP430GenInstrInfo.inc -gen-instr-info)
-tablegen(MSP430GenAsmWriter.inc -gen-asm-writer)
-tablegen(MSP430GenDAGISel.inc -gen-dag-isel)
-tablegen(MSP430GenCallingConv.inc -gen-callingconv)
-tablegen(MSP430GenSubtargetInfo.inc -gen-subtarget)
+tablegen(LLVM MSP430GenRegisterInfo.inc -gen-register-info)
+tablegen(LLVM MSP430GenInstrInfo.inc -gen-instr-info)
+tablegen(LLVM MSP430GenAsmWriter.inc -gen-asm-writer)
+tablegen(LLVM MSP430GenDAGISel.inc -gen-dag-isel)
+tablegen(LLVM MSP430GenCallingConv.inc -gen-callingconv)
+tablegen(LLVM MSP430GenSubtargetInfo.inc -gen-subtarget)
+add_public_tablegen_target(MSP430CommonTableGen)
 
 add_llvm_target(MSP430CodeGen
   MSP430BranchSelector.cpp
@@ -13,7 +14,6 @@ add_llvm_target(MSP430CodeGen
   MSP430ISelLowering.cpp
   MSP430InstrInfo.cpp
   MSP430FrameLowering.cpp
-  MSP430MCAsmInfo.cpp
   MSP430RegisterInfo.cpp
   MSP430Subtarget.cpp
   MSP430TargetMachine.cpp
@@ -22,5 +22,19 @@ add_llvm_target(MSP430CodeGen
   MSP430MCInstLower.cpp
   )
 
+add_llvm_library_dependencies(LLVMMSP430CodeGen
+  LLVMAsmPrinter
+  LLVMCodeGen
+  LLVMCore
+  LLVMMC
+  LLVMMSP430AsmPrinter
+  LLVMMSP430Desc
+  LLVMMSP430Info
+  LLVMSelectionDAG
+  LLVMSupport
+  LLVMTarget
+  )
+
 add_subdirectory(InstPrinter)
 add_subdirectory(TargetInfo)
+add_subdirectory(MCTargetDesc)

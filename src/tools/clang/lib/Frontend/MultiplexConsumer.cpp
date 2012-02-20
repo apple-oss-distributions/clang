@@ -37,7 +37,7 @@ public:
   virtual void TypeRead(serialization::TypeIdx Idx, QualType T);
   virtual void DeclRead(serialization::DeclID ID, const Decl *D);
   virtual void SelectorRead(serialization::SelectorID iD, Selector Sel);
-  virtual void MacroDefinitionRead(serialization::MacroID, 
+  virtual void MacroDefinitionRead(serialization::PreprocessedEntityID, 
                                    MacroDefinition *MD);
 private:
   std::vector<ASTDeserializationListener*> Listeners;
@@ -79,7 +79,7 @@ void MultiplexASTDeserializationListener::SelectorRead(
 }
 
 void MultiplexASTDeserializationListener::MacroDefinitionRead(
-    serialization::MacroID ID, MacroDefinition *MD) {
+    serialization::PreprocessedEntityID ID, MacroDefinition *MD) {
   for (size_t i = 0, e = Listeners.size(); i != e; ++i)
     Listeners[i]->MacroDefinitionRead(ID, MD);
 }
@@ -183,9 +183,11 @@ void MultiplexConsumer::Initialize(ASTContext &Context) {
     Consumers[i]->Initialize(Context);
 }
 
-void MultiplexConsumer::HandleTopLevelDecl(DeclGroupRef D) {
+bool MultiplexConsumer::HandleTopLevelDecl(DeclGroupRef D) {
+  bool Continue = true;
   for (size_t i = 0, e = Consumers.size(); i != e; ++i)
-    Consumers[i]->HandleTopLevelDecl(D);
+    Continue = Continue && Consumers[i]->HandleTopLevelDecl(D);
+  return Continue;
 }
 
 void MultiplexConsumer::HandleInterestingDecl(DeclGroupRef D) {
@@ -201,6 +203,11 @@ void MultiplexConsumer::HandleTranslationUnit(ASTContext &Ctx) {
 void MultiplexConsumer::HandleTagDeclDefinition(TagDecl *D) {
   for (size_t i = 0, e = Consumers.size(); i != e; ++i)
     Consumers[i]->HandleTagDeclDefinition(D);
+}
+
+void MultiplexConsumer::HandleTopLevelDeclInObjCContainer(DeclGroupRef D) {
+  for (size_t i = 0, e = Consumers.size(); i != e; ++i)
+    Consumers[i]->HandleTopLevelDeclInObjCContainer(D);
 }
 
 void MultiplexConsumer::CompleteTentativeDefinition(VarDecl *D) {

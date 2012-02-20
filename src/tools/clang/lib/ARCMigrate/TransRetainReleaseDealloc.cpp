@@ -25,7 +25,6 @@
 using namespace clang;
 using namespace arcmt;
 using namespace trans;
-using llvm::StringRef;
 
 namespace {
 
@@ -37,13 +36,15 @@ class RetainReleaseDeallocRemover :
   ExprSet Removables;
   llvm::OwningPtr<ParentMap> StmtMap;
 
-  Selector DelegateSel;
+  Selector DelegateSel, FinalizeSel;
 
 public:
   RetainReleaseDeallocRemover(MigrationPass &pass)
     : Body(0), Pass(pass) {
     DelegateSel =
         Pass.Ctx.Selectors.getNullarySelector(&Pass.Ctx.Idents.get("delegate"));
+    FinalizeSel =
+        Pass.Ctx.Selectors.getNullarySelector(&Pass.Ctx.Idents.get("finalize"));
   }
 
   void transformBody(Stmt *body) {
@@ -56,6 +57,8 @@ public:
   bool VisitObjCMessageExpr(ObjCMessageExpr *E) {
     switch (E->getMethodFamily()) {
     default:
+      if (E->isInstanceMessage() && E->getSelector() == FinalizeSel)
+        break;
       return true;
     case OMF_autorelease:
       if (isRemovable(E)) {
@@ -157,11 +160,13 @@ private:
     if (!E) return false;
 
     E = E->IgnoreParenCasts();
+
+    // Also look through property-getter sugar.
+    if (PseudoObjectExpr *pseudoOp = dyn_cast<PseudoObjectExpr>(E))
+      E = pseudoOp->getResultExpr()->IgnoreImplicit();
+
     if (ObjCMessageExpr *ME = dyn_cast<ObjCMessageExpr>(E))
       return (ME->isInstanceMessage() && ME->getSelector() == DelegateSel);
-
-    if (ObjCPropertyRefExpr *propE = dyn_cast<ObjCPropertyRefExpr>(E))
-      return propE->getGetterSelector() == DelegateSel;
 
     return false;
   }
@@ -212,7 +217,7 @@ private:
 
 } // anonymous namespace
 
-void trans::removeRetainReleaseDealloc(MigrationPass &pass) {
+void trans::removeRetainReleaseDeallocFinalize(MigrationPass &pass) {
   BodyTransform<RetainReleaseDeallocRemover> trans(pass);
   trans.TraverseDecl(pass.Ctx.getTranslationUnitDecl());
 }

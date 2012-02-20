@@ -12,17 +12,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "SparcSubtarget.h"
+#include "Sparc.h"
+#include "llvm/Support/TargetRegistry.h"
 
-#define GET_SUBTARGETINFO_CTOR
-#define GET_SUBTARGETINFO_MC_DESC
 #define GET_SUBTARGETINFO_TARGET_DESC
+#define GET_SUBTARGETINFO_CTOR
 #include "SparcGenSubtargetInfo.inc"
 
 using namespace llvm;
 
 SparcSubtarget::SparcSubtarget(const std::string &TT, const std::string &CPU,
                                const std::string &FS,  bool is64Bit) :
-  SparcGenSubtargetInfo(),
+  SparcGenSubtargetInfo(TT, CPU, FS),
   IsV9(false),
   V8DeprecatedInsts(false),
   IsVIS(false),
@@ -39,5 +40,5 @@ SparcSubtarget::SparcSubtarget(const std::string &TT, const std::string &CPU,
   IsV9 = CPUName == "v9";
 
   // Parse features string.
-  ParseSubtargetFeatures(FS, CPUName);
+  ParseSubtargetFeatures(CPUName, FS);
 }

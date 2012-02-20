@@ -11,10 +11,62 @@
 #include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 
 using namespace llvm;
+
+void
+MCSubtargetInfo::InitMCSubtargetInfo(StringRef TT, StringRef CPU, StringRef FS,
+                                     const SubtargetFeatureKV *PF,
+                                     const SubtargetFeatureKV *PD,
+                                     const SubtargetInfoKV *PI,
+                                     const InstrStage *IS,
+                                     const unsigned *OC,
+                                     const unsigned *FP,
+                                     unsigned NF, unsigned NP) {
+  TargetTriple = TT;
+  ProcFeatures = PF;
+  ProcDesc = PD;
+  ProcItins = PI;
+  Stages = IS;
+  OperandCycles = OC;
+  ForwardingPathes = FP;
+  NumFeatures = NF;
+  NumProcs = NP;
+
+  SubtargetFeatures Features(FS);
+  FeatureBits = Features.getFeatureBits(CPU, ProcDesc, NumProcs,
+                                        ProcFeatures, NumFeatures);
+}
+
+
+/// ReInitMCSubtargetInfo - Change CPU (and optionally supplemented with
+/// feature string) and recompute feature bits.
+uint64_t MCSubtargetInfo::ReInitMCSubtargetInfo(StringRef CPU, StringRef FS) {
+  SubtargetFeatures Features(FS);
+  FeatureBits = Features.getFeatureBits(CPU, ProcDesc, NumProcs,
+                                        ProcFeatures, NumFeatures);
+  return FeatureBits;
+}
+
+/// ToggleFeature - Toggle a feature and returns the re-computed feature
+/// bits. This version does not change the implied bits.
+uint64_t MCSubtargetInfo::ToggleFeature(uint64_t FB) {
+  FeatureBits ^= FB;
+  return FeatureBits;
+}
+
+/// ToggleFeature - Toggle a feature and returns the re-computed feature
+/// bits. This version will also change all implied bits.
+uint64_t MCSubtargetInfo::ToggleFeature(StringRef FS) {
+  SubtargetFeatures Features;
+  FeatureBits = Features.ToggleFeature(FeatureBits, FS,
+                                       ProcFeatures, NumFeatures);
+  return FeatureBits;
+}
+
 
 InstrItineraryData
 MCSubtargetInfo::getInstrItineraryForCPU(StringRef CPU) const {

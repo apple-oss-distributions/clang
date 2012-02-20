@@ -25,100 +25,9 @@
 namespace llvm {
 
 namespace Mips {
-
-  // Mips Branch Codes
-  enum FPBranchCode {
-    BRANCH_F,
-    BRANCH_T,
-    BRANCH_FL,
-    BRANCH_TL,
-    BRANCH_INVALID
-  };
-
-  // Mips Condition Codes
-  enum CondCode {
-    // To be used with float branch True
-    FCOND_F,
-    FCOND_UN,
-    FCOND_OEQ,
-    FCOND_UEQ,
-    FCOND_OLT,
-    FCOND_ULT,
-    FCOND_OLE,
-    FCOND_ULE,
-    FCOND_SF,
-    FCOND_NGLE,
-    FCOND_SEQ,
-    FCOND_NGL,
-    FCOND_LT,
-    FCOND_NGE,
-    FCOND_LE,
-    FCOND_NGT,
-
-    // To be used with float branch False
-    // This conditions have the same mnemonic as the
-    // above ones, but are used with a branch False;
-    FCOND_T,
-    FCOND_OR,
-    FCOND_UNE,
-    FCOND_ONE,
-    FCOND_UGE,
-    FCOND_OGE,
-    FCOND_UGT,
-    FCOND_OGT,
-    FCOND_ST,
-    FCOND_GLE,
-    FCOND_SNE,
-    FCOND_GL,
-    FCOND_NLT,
-    FCOND_GE,
-    FCOND_NLE,
-    FCOND_GT
-  };
-
   /// GetOppositeBranchOpc - Return the inverse of the specified
   /// opcode, e.g. turning BEQ to BNE.
   unsigned GetOppositeBranchOpc(unsigned Opc);
-
-  /// MipsCCToString - Map each FP condition code to its string
-  inline static const char *MipsFCCToString(Mips::CondCode CC)
-  {
-    switch (CC) {
-      default: llvm_unreachable("Unknown condition code");
-      case FCOND_F:
-      case FCOND_T:   return "f";
-      case FCOND_UN:
-      case FCOND_OR:  return "un";
-      case FCOND_OEQ:
-      case FCOND_UNE: return "eq";
-      case FCOND_UEQ:
-      case FCOND_ONE: return "ueq";
-      case FCOND_OLT:
-      case FCOND_UGE: return "olt";
-      case FCOND_ULT:
-      case FCOND_OGE: return "ult";
-      case FCOND_OLE:
-      case FCOND_UGT: return "ole";
-      case FCOND_ULE:
-      case FCOND_OGT: return "ule";
-      case FCOND_SF:
-      case FCOND_ST:  return "sf";
-      case FCOND_NGLE:
-      case FCOND_GLE: return "ngle";
-      case FCOND_SEQ:
-      case FCOND_SNE: return "seq";
-      case FCOND_NGL:
-      case FCOND_GL:  return "ngl";
-      case FCOND_LT:
-      case FCOND_NLT: return "lt";
-      case FCOND_NGE:
-      case FCOND_GE:  return "nge";
-      case FCOND_LE:
-      case FCOND_NLE: return "le";
-      case FCOND_NGT:
-      case FCOND_GT:  return "ngt";
-    }
-  }
 }
 
 /// MipsII - This namespace holds all of the target specific flags that
@@ -163,12 +72,47 @@ namespace MipsII {
     /// MO_TPREL_HI/LO - Represents the hi and low part of the offset from
     // the thread pointer (Local Exec TLS).
     MO_TPREL_HI,
-    MO_TPREL_LO
+    MO_TPREL_LO,
+
+    // N32/64 Flags.
+    MO_GPOFF_HI,
+    MO_GPOFF_LO,
+    MO_GOT_DISP,
+    MO_GOT_PAGE,
+    MO_GOT_OFST
+  };
+
+  enum {
+    //===------------------------------------------------------------------===//
+    // Instruction encodings.  These are the standard/most common forms for
+    // Mips instructions.
+    //
+
+    // Pseudo - This represents an instruction that is a pseudo instruction
+    // or one that has not been implemented yet.  It is illegal to code generate
+    // it, but tolerated for intermediate implementation stages.
+    Pseudo   = 0,
+
+    /// FrmR - This form is for instructions of the format R.
+    FrmR  = 1,
+    /// FrmI - This form is for instructions of the format I.
+    FrmI  = 2,
+    /// FrmJ - This form is for instructions of the format J.
+    FrmJ  = 3,
+    /// FrmFR - This form is for instructions of the format FR.
+    FrmFR = 4,
+    /// FrmFI - This form is for instructions of the format FI.
+    FrmFI = 5,
+    /// FrmOther - This form is for instructions that have no specific format.
+    FrmOther = 6,
+
+    FormMask = 15
   };
 }
 
 class MipsInstrInfo : public MipsGenInstrInfo {
   MipsTargetMachine &TM;
+  bool IsN64;
   const MipsRegisterInfo RI;
 public:
   explicit MipsInstrInfo(MipsTargetMachine &TM);
@@ -177,7 +121,7 @@ public:
   /// such, whenever a client has an instance of instruction info, it should
   /// always be able to get register info as well (through this method).
   ///
-  virtual const MipsRegisterInfo &getRegisterInfo() const { return RI; }
+  virtual const MipsRegisterInfo &getRegisterInfo() const;
 
   /// isLoadFromStackSlot - If the specified machine instruction is a direct
   /// load from a stack slot, return the virtual or physical register number of

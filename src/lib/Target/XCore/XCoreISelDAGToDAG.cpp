@@ -120,7 +120,7 @@ bool XCoreDAGToDAGISel::SelectADDRdpii(SDValue Addr, SDValue &Base,
     ConstantSDNode *CN = 0;
     if ((Addr.getOperand(0).getOpcode() == XCoreISD::DPRelativeWrapper)
       && (CN = dyn_cast<ConstantSDNode>(Addr.getOperand(1)))
-      && (CN->getSExtValue() % 4 == 0)) {
+      && (CN->getSExtValue() % 4 == 0 && CN->getSExtValue() >= 0)) {
       // Constant word offset from a object in the data region
       Base = Addr.getOperand(0).getOperand(0);
       Offset = CurDAG->getTargetConstant(CN->getSExtValue(), MVT::i32);
@@ -141,7 +141,7 @@ bool XCoreDAGToDAGISel::SelectADDRcpii(SDValue Addr, SDValue &Base,
     ConstantSDNode *CN = 0;
     if ((Addr.getOperand(0).getOpcode() == XCoreISD::CPRelativeWrapper)
       && (CN = dyn_cast<ConstantSDNode>(Addr.getOperand(1)))
-      && (CN->getSExtValue() % 4 == 0)) {
+      && (CN->getSExtValue() % 4 == 0 && CN->getSExtValue() >= 0)) {
       // Constant word offset from a object in the data region
       Base = Addr.getOperand(0).getOperand(0);
       Offset = CurDAG->getTargetConstant(CN->getSExtValue(), MVT::i32);
@@ -169,9 +169,14 @@ SDNode *XCoreDAGToDAGISel::Select(SDNode *N) {
         CurDAG->getTargetConstantPool(ConstantInt::get(
                               Type::getInt32Ty(*CurDAG->getContext()), Val),
                                       TLI.getPointerTy());
-      return CurDAG->getMachineNode(XCore::LDWCP_lru6, dl, MVT::i32, 
-                                    MVT::Other, CPIdx, 
-                                    CurDAG->getEntryNode());
+      SDNode *node = CurDAG->getMachineNode(XCore::LDWCP_lru6, dl, MVT::i32,
+                                            MVT::Other, CPIdx,
+                                            CurDAG->getEntryNode());
+      MachineSDNode::mmo_iterator MemOp = MF->allocateMemRefsArray(1);
+      MemOp[0] = MF->getMachineMemOperand(
+        MachinePointerInfo::getConstantPool(), MachineMemOperand::MOLoad, 4, 4);      
+      cast<MachineSDNode>(node)->setMemRefs(MemOp, MemOp + 1);
+      return node;
     }
     break;
   }

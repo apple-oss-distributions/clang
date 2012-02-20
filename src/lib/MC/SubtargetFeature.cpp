@@ -13,8 +13,8 @@
 
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/StringExtras.h"
 #include <algorithm>
 #include <cassert>
 #include <cctype>
@@ -114,7 +114,7 @@ void SubtargetFeatures::AddFeature(const StringRef String,
   // Don't add empty features
   if (!String.empty()) {
     // Convert to lowercase, prepend flag and add to vector
-    Features.push_back(PrependFlag(LowercaseString(String), IsEnabled));
+    Features.push_back(PrependFlag(String.lower(), IsEnabled));
   }
 }
 
@@ -154,21 +154,19 @@ static void Help(const SubtargetFeatureKV *CPUTable, size_t CPUTableSize,
   // Print the CPU table.
   errs() << "Available CPUs for this target:\n\n";
   for (size_t i = 0; i != CPUTableSize; i++)
-    errs() << "  " << CPUTable[i].Key
-         << std::string(MaxCPULen - std::strlen(CPUTable[i].Key), ' ')
-         << " - " << CPUTable[i].Desc << ".\n";
-  errs() << "\n";
-  
+    errs() << format("  %-*s - %s.\n",
+                     MaxCPULen, CPUTable[i].Key, CPUTable[i].Desc);
+  errs() << '\n';
+
   // Print the Feature table.
   errs() << "Available features for this target:\n\n";
   for (size_t i = 0; i != FeatTableSize; i++)
-    errs() << "  " << FeatTable[i].Key
-         << std::string(MaxFeatLen - std::strlen(FeatTable[i].Key), ' ')
-         << " - " << FeatTable[i].Desc << ".\n";
-  errs() << "\n";
-  
+    errs() << format("  %-*s - %s.\n",
+                     MaxFeatLen, FeatTable[i].Key, FeatTable[i].Desc);
+  errs() << '\n';
+
   errs() << "Use +feature to enable a feature, or -feature to disable it.\n"
-       << "For example, llc -mcpu=mycpu -mattr=+feature1,-feature2\n";
+            "For example, llc -mcpu=mycpu -mattr=+feature1,-feature2\n";
   std::exit(1);
 }
 
@@ -224,6 +222,38 @@ void ClearImpliedBits(uint64_t &Bits, const SubtargetFeatureKV *FeatureEntry,
   }
 }
 
+/// ToggleFeature - Toggle a feature and returns the newly updated feature
+/// bits.
+uint64_t
+SubtargetFeatures::ToggleFeature(uint64_t Bits, const StringRef Feature,
+                                 const SubtargetFeatureKV *FeatureTable,
+                                 size_t FeatureTableSize) {
+  // Find feature in table.
+  const SubtargetFeatureKV *FeatureEntry =
+    Find(StripFlag(Feature), FeatureTable, FeatureTableSize);
+  // If there is a match
+  if (FeatureEntry) {
+    if ((Bits & FeatureEntry->Value) == FeatureEntry->Value) {
+      Bits &= ~FeatureEntry->Value;
+
+      // For each feature that implies this, clear it.
+      ClearImpliedBits(Bits, FeatureEntry, FeatureTable, FeatureTableSize);
+    } else {
+      Bits |=  FeatureEntry->Value;
+
+      // For each feature that this implies, set it.
+      SetImpliedBits(Bits, FeatureEntry, FeatureTable, FeatureTableSize);
+    }
+  } else {
+    errs() << "'" << Feature
+           << "' is not a recognized feature for this target"
+           << " (ignoring feature)\n";
+  }
+
+  return Bits;
+}
+           
+
 /// getFeatureBits - Get feature bits a CPU.
 ///
 uint64_t SubtargetFeatures::getFeatureBits(const StringRef CPU,
@@ -231,8 +261,9 @@ uint64_t SubtargetFeatures::getFeatureBits(const StringRef CPU,
                                          size_t CPUTableSize,
                                          const SubtargetFeatureKV *FeatureTable,
                                          size_t FeatureTableSize) {
-  assert(CPUTable && "missing CPU table");
-  assert(FeatureTable && "missing features table");
+  if (!FeatureTableSize || !CPUTableSize)
+    return 0;
+
 #ifndef NDEBUG
   for (size_t i = 1; i < CPUTableSize; i++) {
     assert(strcmp(CPUTable[i - 1].Key, CPUTable[i].Key) < 0 &&
@@ -249,24 +280,27 @@ uint64_t SubtargetFeatures::getFeatureBits(const StringRef CPU,
   if (CPU == "help")
     Help(CPUTable, CPUTableSize, FeatureTable, FeatureTableSize);
   
-  // Find CPU entry
-  const SubtargetFeatureKV *CPUEntry = Find(CPU, CPUTable, CPUTableSize);
-  // If there is a match
-  if (CPUEntry) {
-    // Set base feature bits
-    Bits = CPUEntry->Value;
+  // Find CPU entry if CPU name is specified.
+  if (!CPU.empty()) {
+    const SubtargetFeatureKV *CPUEntry = Find(CPU, CPUTable, CPUTableSize);
+    // If there is a match
+    if (CPUEntry) {
+      // Set base feature bits
+      Bits = CPUEntry->Value;
 
-    // Set the feature implied by this CPU feature, if any.
-    for (size_t i = 0; i < FeatureTableSize; ++i) {
-      const SubtargetFeatureKV &FE = FeatureTable[i];
-      if (CPUEntry->Value & FE.Value)
-        SetImpliedBits(Bits, &FE, FeatureTable, FeatureTableSize);
+      // Set the feature implied by this CPU feature, if any.
+      for (size_t i = 0; i < FeatureTableSize; ++i) {
+        const SubtargetFeatureKV &FE = FeatureTable[i];
+        if (CPUEntry->Value & FE.Value)
+          SetImpliedBits(Bits, &FE, FeatureTable, FeatureTableSize);
+      }
+    } else {
+      errs() << "'" << CPU
+             << "' is not a recognized processor for this target"
+             << " (ignoring processor)\n";
     }
-  } else {
-    errs() << "'" << CPU
-           << "' is not a recognized processor for this target"
-           << " (ignoring processor)\n";
   }
+
   // Iterate through each feature
   for (size_t i = 0, E = Features.size(); i < E; i++) {
     const StringRef Feature = Features[i];

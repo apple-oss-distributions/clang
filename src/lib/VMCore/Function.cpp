@@ -17,6 +17,7 @@
 #include "llvm/LLVMContext.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/Support/CallSite.h"
+#include "llvm/Support/InstIterator.h"
 #include "llvm/Support/LeakDetector.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/StringPool.h"
@@ -38,7 +39,7 @@ template class llvm::SymbolTableListTraits<BasicBlock, Function>;
 // Argument Implementation
 //===----------------------------------------------------------------------===//
 
-Argument::Argument(const Type *Ty, const Twine &Name, Function *Par)
+Argument::Argument(Type *Ty, const Twine &Name, Function *Par)
   : Value(Ty, Value::ArgumentVal) {
   Parent = 0;
 
@@ -134,7 +135,7 @@ LLVMContext &Function::getContext() const {
   return getType()->getContext();
 }
 
-const FunctionType *Function::getFunctionType() const {
+FunctionType *Function::getFunctionType() const {
   return cast<FunctionType>(getType()->getElementType());
 }
 
@@ -142,7 +143,7 @@ bool Function::isVarArg() const {
   return getFunctionType()->isVarArg();
 }
 
-const Type *Function::getReturnType() const {
+Type *Function::getReturnType() const {
   return getFunctionType()->getReturnType();
 }
 
@@ -158,12 +159,12 @@ void Function::eraseFromParent() {
 // Function Implementation
 //===----------------------------------------------------------------------===//
 
-Function::Function(const FunctionType *Ty, LinkageTypes Linkage,
+Function::Function(FunctionType *Ty, LinkageTypes Linkage,
                    const Twine &name, Module *ParentModule)
   : GlobalValue(PointerType::getUnqual(Ty), 
                 Value::FunctionVal, 0, 0, Linkage, name) {
   assert(FunctionType::isValidReturnType(getReturnType()) &&
-         !getReturnType()->isOpaqueTy() && "invalid return type");
+         "invalid return type");
   SymTab = new ValueSymbolTable();
 
   // If the function has arguments, mark them as lazily built.
@@ -195,7 +196,7 @@ Function::~Function() {
 
 void Function::BuildLazyArguments() const {
   // Create the arguments vector, all arguments start out unnamed.
-  const FunctionType *FT = getFunctionType();
+  FunctionType *FT = getFunctionType();
   for (unsigned i = 0, e = FT->getNumParams(); i != e; ++i) {
     assert(!FT->getParamType(i)->isVoidTy() &&
            "Cannot have void typed arguments!");
@@ -333,7 +334,7 @@ unsigned Function::getIntrinsicID() const {
   return 0;
 }
 
-std::string Intrinsic::getName(ID id, const Type **Tys, unsigned numTys) { 
+std::string Intrinsic::getName(ID id, ArrayRef<Type*> Tys) {
   assert(id < num_intrinsics && "Invalid intrinsic ID!");
   static const char * const Table[] = {
     "not_intrinsic",
@@ -341,11 +342,11 @@ std::string Intrinsic::getName(ID id, const Type **Tys, unsigned numTys) {
 #include "llvm/Intrinsics.gen"
 #undef GET_INTRINSIC_NAME_TABLE
   };
-  if (numTys == 0)
+  if (Tys.empty())
     return Table[id];
   std::string Result(Table[id]);
-  for (unsigned i = 0; i < numTys; ++i) {
-    if (const PointerType* PTyp = dyn_cast<PointerType>(Tys[i])) {
+  for (unsigned i = 0; i < Tys.size(); ++i) {
+    if (PointerType* PTyp = dyn_cast<PointerType>(Tys[i])) {
       Result += ".p" + llvm::utostr(PTyp->getAddressSpace()) + 
                 EVT::getEVT(PTyp->getElementType()).getEVTString();
     }
@@ -355,11 +356,10 @@ std::string Intrinsic::getName(ID id, const Type **Tys, unsigned numTys) {
   return Result;
 }
 
-const FunctionType *Intrinsic::getType(LLVMContext &Context,
-                                       ID id, const Type **Tys, 
-                                       unsigned numTys) {
-  const Type *ResultTy = NULL;
-  std::vector<const Type*> ArgTys;
+FunctionType *Intrinsic::getType(LLVMContext &Context,
+                                       ID id, ArrayRef<Type*> Tys) {
+  Type *ResultTy = NULL;
+  SmallVector<Type*, 8> ArgTys;
   bool IsVarArg = false;
   
 #define GET_INTRINSIC_GENERATOR
@@ -384,14 +384,12 @@ bool Intrinsic::isOverloaded(ID id) {
 #include "llvm/Intrinsics.gen"
 #undef GET_INTRINSIC_ATTRIBUTES
 
-Function *Intrinsic::getDeclaration(Module *M, ID id, const Type **Tys, 
-                                    unsigned numTys) {
+Function *Intrinsic::getDeclaration(Module *M, ID id, ArrayRef<Type*> Tys) {
   // There can never be multiple globals with the same name of different types,
   // because intrinsics must be a specific type.
   return
-    cast<Function>(M->getOrInsertFunction(getName(id, Tys, numTys),
-                                          getType(M->getContext(),
-                                                  id, Tys, numTys)));
+    cast<Function>(M->getOrInsertFunction(getName(id, Tys),
+                                          getType(M->getContext(), id, Tys)));
 }
 
 // This defines the "Intrinsic::getIntrinsicForGCCBuiltin()" method.
@@ -404,6 +402,7 @@ Function *Intrinsic::getDeclaration(Module *M, ID id, const Type **Tys,
 bool Function::hasAddressTaken(const User* *PutOffender) const {
   for (Value::const_use_iterator I = use_begin(), E = use_end(); I != E; ++I) {
     const User *U = *I;
+    // FIXME: Check for blockaddress, which does not take the address.
     if (!isa<CallInst>(U) && !isa<InvokeInst>(U))
       return PutOffender ? (*PutOffender = U, true) : true;
     ImmutableCallSite CS(cast<Instruction>(U));
@@ -413,34 +412,31 @@ bool Function::hasAddressTaken(const User* *PutOffender) const {
   return false;
 }
 
+bool Function::isDefTriviallyDead() const {
+  // Check the linkage
+  if (!hasLinkOnceLinkage() && !hasLocalLinkage() &&
+      !hasAvailableExternallyLinkage())
+    return false;
+
+  // Check if the function is used by anything other than a blockaddress.
+  for (Value::const_use_iterator I = use_begin(), E = use_end(); I != E; ++I)
+    if (!isa<BlockAddress>(*I))
+      return false;
+
+  return true;
+}
+
 /// callsFunctionThatReturnsTwice - Return true if the function has a call to
 /// setjmp or other function that gcc recognizes as "returning twice".
-///
-/// FIXME: Remove after <rdar://problem/8031714> is fixed.
-/// FIXME: Is the above FIXME valid?
 bool Function::callsFunctionThatReturnsTwice() const {
-  const Module *M = this->getParent();
-  static const char *ReturnsTwiceFns[] = {
-    "_setjmp",
-    "setjmp",
-    "sigsetjmp",
-    "setjmp_syscall",
-    "savectx",
-    "qsetjmp",
-    "vfork",
-    "getcontext"
-  };
-
-  for (unsigned I = 0; I < array_lengthof(ReturnsTwiceFns); ++I)
-    if (const Function *Callee = M->getFunction(ReturnsTwiceFns[I])) {
-      if (!Callee->use_empty())
-        for (Value::const_use_iterator
-               I = Callee->use_begin(), E = Callee->use_end();
-             I != E; ++I)
-          if (const CallInst *CI = dyn_cast<CallInst>(*I))
-            if (CI->getParent()->getParent() == this)
-              return true;
-    }
+  for (const_inst_iterator
+         I = inst_begin(this), E = inst_end(this); I != E; ++I) {
+    const CallInst* callInst = dyn_cast<CallInst>(&*I);
+    if (!callInst)
+      continue;
+    if (callInst->canReturnTwice())
+      return true;
+  }
 
   return false;
 }

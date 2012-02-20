@@ -123,6 +123,7 @@ public:
   void dump() const;
 };
 
+template <> struct isPodLike<MCOperand> { static const bool value = true; };
 
 /// MCInst - Instances of this class represent a single low-level machine
 /// instruction.
@@ -142,6 +143,16 @@ public:
 
   void addOperand(const MCOperand &Op) {
     Operands.push_back(Op);
+  }
+
+  void clear() { Operands.clear(); }
+  size_t size() { return Operands.size(); }
+
+  typedef SmallVector<MCOperand, 8>::iterator iterator;
+  iterator begin() { return Operands.begin(); }
+  iterator end()   { return Operands.end();   }
+  iterator insert(iterator I, const MCOperand &Op) {
+    return Operands.insert(I, Op);
   }
 
   void print(raw_ostream &OS, const MCAsmInfo *MAI) const;

@@ -7,6 +7,7 @@ add_llvm_library(LLVMScalarOpts
   DCE.cpp
   DeadStoreElimination.cpp
   EarlyCSE.cpp
+  GlobalMerge.cpp
   GVN.cpp
   IndVarSimplify.cpp
   JumpThreading.cpp
@@ -29,6 +30,14 @@ add_llvm_library(LLVMScalarOpts
   SimplifyCFGPass.cpp
   SimplifyLibCalls.cpp
   Sink.cpp
-  TailDuplication.cpp
   TailRecursionElimination.cpp
+  )
+
+add_llvm_library_dependencies(LLVMScalarOpts
+  LLVMAnalysis
+  LLVMCore
+  LLVMInstCombine
+  LLVMSupport
+  LLVMTarget
+  LLVMTransformUtils
   )

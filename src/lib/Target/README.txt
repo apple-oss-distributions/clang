@@ -1762,7 +1762,6 @@ case it choses instead to keep the max operation obvious.
 
 //===---------------------------------------------------------------------===//
 
-Switch lowering generates less than ideal code for the following switch:
 define void @a(i32 %x) nounwind {
 entry:
   switch i32 %x, label %if.end [
@@ -1783,19 +1782,15 @@ declare void @foo()
 Generated code on x86-64 (other platforms give similar results):
 a:
 	cmpl	$5, %edi
-	ja	.LBB0_2
-	movl	%edi, %eax
-	movl	$47, %ecx
-	btq	%rax, %rcx
-	jb	.LBB0_3
+	ja	LBB2_2
+	cmpl	$4, %edi
+	jne	LBB2_3
 .LBB0_2:
 	ret
 .LBB0_3:
 	jmp	foo  # TAILCALL
 
-The movl+movl+btq+jb could be simplified to a cmpl+jne.
-
-Or, if we wanted to be really clever, we could simplify the whole thing to
+If we wanted to be really clever, we could simplify the whole thing to
 something like the following, which eliminates a branch:
 	xorl    $1, %edi
 	cmpl	$4, %edi
@@ -2351,5 +2346,15 @@ store_bit_field).  The rem should be replaced with a multiply and subtract:
 Similarly for udiv/urem.  Note that this shouldn't be done on X86 or ARM,
 which can do this in a single operation (instruction or libcall).  It is
 probably best to do this in the code generator.
+
+//===---------------------------------------------------------------------===//
+
+unsigned foo(unsigned x, unsigned y) { return (x & y) == 0 || x == 0; }
+should fold to (x & y) == 0.
+
+//===---------------------------------------------------------------------===//
+
+unsigned foo(unsigned x, unsigned y) { return x > y && x != 0; }
+should fold to x > y.
 
 //===---------------------------------------------------------------------===//

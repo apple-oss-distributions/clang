@@ -1174,30 +1174,31 @@ Instruction *InstCombiner::visitAnd(BinaryOperator &I) {
         ((A == C && B == D) || (A == D && B == C)))
       return BinaryOperator::CreateXor(A, B);
     
-    if (Op0->hasOneUse() &&
-        match(Op0, m_Xor(m_Value(A), m_Value(B)))) {
-      if (A == Op1) {                                // (A^B)&A -> A&(A^B)
-        I.swapOperands();     // Simplify below
-        std::swap(Op0, Op1);
-      } else if (B == Op1) {                         // (A^B)&B -> B&(B^A)
-        cast<BinaryOperator>(Op0)->swapOperands();
-        I.swapOperands();     // Simplify below
-        std::swap(Op0, Op1);
+    // A&(A^B) => A & ~B
+    {
+      Value *tmpOp0 = Op0;
+      Value *tmpOp1 = Op1;
+      if (Op0->hasOneUse() &&
+          match(Op0, m_Xor(m_Value(A), m_Value(B)))) {
+        if (A == Op1 || B == Op1 ) {
+          tmpOp1 = Op0;
+          tmpOp0 = Op1;
+          // Simplify below
+        }
       }
-    }
 
-    if (Op1->hasOneUse() &&
-        match(Op1, m_Xor(m_Value(A), m_Value(B)))) {
-      if (B == Op0) {                                // B&(A^B) -> B&(B^A)
-        cast<BinaryOperator>(Op1)->swapOperands();
-        std::swap(A, B);
+      if (tmpOp1->hasOneUse() &&
+          match(tmpOp1, m_Xor(m_Value(A), m_Value(B)))) {
+        if (B == tmpOp0) {
+          std::swap(A, B);
+        }
+        // Notice that the patten (A&(~B)) is actually (A&(-1^B)), so if
+        // A is originally -1 (or a vector of -1 and undefs), then we enter
+        // an endless loop. By checking that A is non-constant we ensure that
+        // we will never get to the loop.
+        if (A == tmpOp0 && !isa<Constant>(A)) // A&(A^B) -> A & ~B
+          return BinaryOperator::CreateAnd(A, Builder->CreateNot(B));
       }
-      // Notice that the patten (A&(~B)) is actually (A&(-1^B)), so if
-      // A is originally -1 (or a vector of -1 and undefs), then we enter
-      // an endless loop. By checking that A is non-constant we ensure that
-      // we will never get to the loop.
-      if (A == Op0 && !isa<Constant>(A)) // A&(A^B) -> A & ~B
-        return BinaryOperator::CreateAnd(A, Builder->CreateNot(B, "tmp"));
     }
 
     // (A&((~A)|B)) -> A&B
@@ -1224,7 +1225,7 @@ Instruction *InstCombiner::visitAnd(BinaryOperator &I) {
   // fold (and (cast A), (cast B)) -> (cast (and A, B))
   if (CastInst *Op0C = dyn_cast<CastInst>(Op0))
     if (CastInst *Op1C = dyn_cast<CastInst>(Op1)) {
-      const Type *SrcTy = Op0C->getOperand(0)->getType();
+      Type *SrcTy = Op0C->getOperand(0)->getType();
       if (Op0C->getOpcode() == Op1C->getOpcode() && // same cast kind ?
           SrcTy == Op1C->getOperand(0)->getType() &&
           SrcTy->isIntOrIntVectorTy()) {
@@ -1400,7 +1401,7 @@ static bool CollectBSwapParts(Value *V, int OverallLeftShift, uint32_t ByteMask,
 /// MatchBSwap - Given an OR instruction, check to see if this is a bswap idiom.
 /// If so, insert the new bswap intrinsic and return it.
 Instruction *InstCombiner::MatchBSwap(BinaryOperator &I) {
-  const IntegerType *ITy = dyn_cast<IntegerType>(I.getType());
+  IntegerType *ITy = dyn_cast<IntegerType>(I.getType());
   if (!ITy || ITy->getBitWidth() % 16 || 
       // ByteMask only allows up to 32-byte values.
       ITy->getBitWidth() > 32*8) 
@@ -1424,9 +1425,8 @@ Instruction *InstCombiner::MatchBSwap(BinaryOperator &I) {
   for (unsigned i = 1, e = ByteValues.size(); i != e; ++i)
     if (ByteValues[i] != V)
       return 0;
-  const Type *Tys[] = { ITy };
   Module *M = I.getParent()->getParent()->getParent();
-  Function *F = Intrinsic::getDeclaration(M, Intrinsic::bswap, Tys, 1);
+  Function *F = Intrinsic::getDeclaration(M, Intrinsic::bswap, ITy);
   return CallInst::Create(F, V);
 }
 
@@ -2009,7 +2009,7 @@ Instruction *InstCombiner::visitOr(BinaryOperator &I) {
   if (CastInst *Op0C = dyn_cast<CastInst>(Op0)) {
     CastInst *Op1C = dyn_cast<CastInst>(Op1);
     if (Op1C && Op0C->getOpcode() == Op1C->getOpcode()) {// same cast kind ?
-      const Type *SrcTy = Op0C->getOperand(0)->getType();
+      Type *SrcTy = Op0C->getOperand(0)->getType();
       if (SrcTy == Op1C->getOperand(0)->getType() &&
           SrcTy->isIntOrIntVectorTy()) {
         Value *Op0COp = Op0C->getOperand(0), *Op1COp = Op1C->getOperand(0);
@@ -2228,14 +2228,14 @@ Instruction *InstCombiner::visitXor(BinaryOperator &I) {
       if (A == Op1)                                  // (B|A)^B == (A|B)^B
         std::swap(A, B);
       if (B == Op1)                                  // (A|B)^B == A & ~B
-        return BinaryOperator::CreateAnd(A, Builder->CreateNot(Op1, "tmp"));
+        return BinaryOperator::CreateAnd(A, Builder->CreateNot(Op1));
     } else if (match(Op0I, m_And(m_Value(A), m_Value(B))) && 
                Op0I->hasOneUse()){
       if (A == Op1)                                        // (A&B)^A -> (B&A)^A
         std::swap(A, B);
       if (B == Op1 &&                                      // (B&A)^A == ~B & A
           !isa<ConstantInt>(Op1)) {  // Canonical form is (B&C)^C
-        return BinaryOperator::CreateAnd(Builder->CreateNot(A, "tmp"), Op1);
+        return BinaryOperator::CreateAnd(Builder->CreateNot(A), Op1);
       }
     }
   }
@@ -2289,7 +2289,7 @@ Instruction *InstCombiner::visitXor(BinaryOperator &I) {
   if (CastInst *Op0C = dyn_cast<CastInst>(Op0)) {
     if (CastInst *Op1C = dyn_cast<CastInst>(Op1))
       if (Op0C->getOpcode() == Op1C->getOpcode()) { // same cast kind?
-        const Type *SrcTy = Op0C->getOperand(0)->getType();
+        Type *SrcTy = Op0C->getOperand(0)->getType();
         if (SrcTy == Op1C->getOperand(0)->getType() && SrcTy->isIntegerTy() &&
             // Only do this if the casts both really cause code to be generated.
             ShouldOptimizeCast(Op0C->getOpcode(), Op0C->getOperand(0), 

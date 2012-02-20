@@ -22,7 +22,6 @@
 #include "SpillPlacement.h"
 #include "SplitKit.h"
 #include "VirtRegMap.h"
-#include "RegisterCoalescer.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Function.h"
@@ -34,11 +33,11 @@
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
-#include "llvm/CodeGen/MachineLoopRanges.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -51,6 +50,15 @@ using namespace llvm;
 STATISTIC(NumGlobalSplits, "Number of split global live ranges");
 STATISTIC(NumLocalSplits,  "Number of split local live ranges");
 STATISTIC(NumEvicted,      "Number of interferences evicted");
+
+static cl::opt<SplitEditor::ComplementSpillMode>
+SplitSpillMode("split-spill-mode", cl::Hidden,
+  cl::desc("Spill mode for splitting live ranges"),
+  cl::values(clEnumValN(SplitEditor::SM_Partition, "default", "Default"),
+             clEnumValN(SplitEditor::SM_Size,  "size",  "Optimize for size"),
+             clEnumValN(SplitEditor::SM_Speed, "speed", "Optimize for speed"),
+             clEnumValEnd),
+  cl::init(SplitEditor::SM_Partition));
 
 static RegisterRegAlloc greedyRegAlloc("greedy", "greedy register allocator",
                                        createGreedyRegisterAllocator);
@@ -68,7 +76,6 @@ class RAGreedy : public MachineFunctionPass,
   LiveStacks *LS;
   MachineDominatorTree *DomTree;
   MachineLoopInfo *Loops;
-  MachineLoopRanges *LoopRanges;
   EdgeBundles *Bundles;
   SpillPlacement *SpillPlacer;
   LiveDebugVariables *DebugVars;
@@ -76,6 +83,7 @@ class RAGreedy : public MachineFunctionPass,
   // state
   std::auto_ptr<Spiller> SpillerInstance;
   std::priority_queue<std::pair<unsigned, unsigned> > Queue;
+  unsigned NextCascade;
 
   // Live ranges pass through a number of stages as we try to allocate them.
   // Some of the stages may also create new live ranges:
@@ -91,39 +99,73 @@ class RAGreedy : public MachineFunctionPass,
   // range splitting algorithm terminates, something that is otherwise hard to
   // ensure.
   enum LiveRangeStage {
-    RS_New,      ///< Never seen before.
-    RS_First,    ///< First time in the queue.
-    RS_Second,   ///< Second time in the queue.
-    RS_Global,   ///< Produced by global splitting.
-    RS_Local,    ///< Produced by local splitting.
-    RS_Spill     ///< Produced by spilling.
+    /// Newly created live range that has never been queued.
+    RS_New,
+
+    /// Only attempt assignment and eviction. Then requeue as RS_Split.
+    RS_Assign,
+
+    /// Attempt live range splitting if assignment is impossible.
+    RS_Split,
+
+    /// Attempt more aggressive live range splitting that is guaranteed to make
+    /// progress.  This is used for split products that may not be making
+    /// progress.
+    RS_Split2,
+
+    /// Live range will be spilled.  No more splitting will be attempted.
+    RS_Spill,
+
+    /// There is nothing more we can do to this live range.  Abort compilation
+    /// if it can't be assigned.
+    RS_Done
   };
 
   static const char *const StageName[];
 
-  IndexedMap<unsigned char, VirtReg2IndexFunctor> LRStage;
+  // RegInfo - Keep additional information about each live range.
+  struct RegInfo {
+    LiveRangeStage Stage;
+
+    // Cascade - Eviction loop prevention. See canEvictInterference().
+    unsigned Cascade;
+
+    RegInfo() : Stage(RS_New), Cascade(0) {}
+  };
+
+  IndexedMap<RegInfo, VirtReg2IndexFunctor> ExtraRegInfo;
 
   LiveRangeStage getStage(const LiveInterval &VirtReg) const {
-    return LiveRangeStage(LRStage[VirtReg.reg]);
+    return ExtraRegInfo[VirtReg.reg].Stage;
+  }
+
+  void setStage(const LiveInterval &VirtReg, LiveRangeStage Stage) {
+    ExtraRegInfo.resize(MRI->getNumVirtRegs());
+    ExtraRegInfo[VirtReg.reg].Stage = Stage;
   }
 
   template<typename Iterator>
   void setStage(Iterator Begin, Iterator End, LiveRangeStage NewStage) {
-    LRStage.resize(MRI->getNumVirtRegs());
+    ExtraRegInfo.resize(MRI->getNumVirtRegs());
     for (;Begin != End; ++Begin) {
       unsigned Reg = (*Begin)->reg;
-      if (LRStage[Reg] == RS_New)
-        LRStage[Reg] = NewStage;
+      if (ExtraRegInfo[Reg].Stage == RS_New)
+        ExtraRegInfo[Reg].Stage = NewStage;
     }
   }
 
-  // Eviction. Sometimes an assigned live range can be evicted without
-  // conditions, but other times it must be split after being evicted to avoid
-  // infinite loops.
-  enum CanEvict {
-    CE_Never,    ///< Can never evict.
-    CE_Always,   ///< Can always evict.
-    CE_WithSplit ///< Can evict only if range is also split or spilled.
+  /// Cost of evicting interference.
+  struct EvictionCost {
+    unsigned BrokenHints; ///< Total number of broken hints.
+    float MaxWeight;      ///< Maximum spill weight evicted.
+
+    EvictionCost(unsigned B = 0) : BrokenHints(B), MaxWeight(0) {}
+
+    bool operator<(const EvictionCost &O) const {
+      if (BrokenHints != O.BrokenHints)
+        return BrokenHints < O.BrokenHints;
+      return MaxWeight < O.MaxWeight;
+    }
   };
 
   // splitting state.
@@ -138,14 +180,37 @@ class RAGreedy : public MachineFunctionPass,
 
   /// Global live range splitting candidate info.
   struct GlobalSplitCandidate {
+    // Register intended for assignment, or 0.
     unsigned PhysReg;
+
+    // SplitKit interval index for this candidate.
+    unsigned IntvIdx;
+
+    // Interference for PhysReg.
+    InterferenceCache::Cursor Intf;
+
+    // Bundles where this candidate should be live.
     BitVector LiveBundles;
     SmallVector<unsigned, 8> ActiveBlocks;
 
-    void reset(unsigned Reg) {
+    void reset(InterferenceCache &Cache, unsigned Reg) {
       PhysReg = Reg;
+      IntvIdx = 0;
+      Intf.setPhysReg(Cache, Reg);
       LiveBundles.clear();
       ActiveBlocks.clear();
+    }
+
+    // Set B[i] = C for every live bundle where B[i] was NoCand.
+    unsigned getBundles(SmallVectorImpl<unsigned> &B, unsigned C) {
+      unsigned Count = 0;
+      for (int i = LiveBundles.find_first(); i >= 0;
+           i = LiveBundles.find_next(i))
+        if (B[i] == NoCand) {
+          B[i] = C;
+          Count++;
+        }
+      return Count;
     }
   };
 
@@ -153,6 +218,12 @@ class RAGreedy : public MachineFunctionPass,
   /// This vector never shrinks, but grows to the size of the largest register
   /// class.
   SmallVector<GlobalSplitCandidate, 32> GlobalCand;
+
+  enum { NoCand = ~0u };
+
+  /// Candidate map. Each edge bundle is assigned to a GlobalCand entry, or to
+  /// NoCand which indicates the stack interval.
+  SmallVector<unsigned, 32> BundleCand;
 
 public:
   RAGreedy();
@@ -185,13 +256,15 @@ private:
   float calcSpillCost();
   bool addSplitConstraints(InterferenceCache::Cursor, float&);
   void addThroughConstraints(InterferenceCache::Cursor, ArrayRef<unsigned>);
-  void growRegion(GlobalSplitCandidate &Cand, InterferenceCache::Cursor);
-  float calcGlobalSplitCost(GlobalSplitCandidate&, InterferenceCache::Cursor);
-  void splitAroundRegion(LiveInterval&, GlobalSplitCandidate&,
-                         SmallVectorImpl<LiveInterval*>&);
+  void growRegion(GlobalSplitCandidate &Cand);
+  float calcGlobalSplitCost(GlobalSplitCandidate&);
+  bool calcCompactRegion(GlobalSplitCandidate&);
+  void splitAroundRegion(LiveRangeEdit&, ArrayRef<unsigned>);
   void calcGapWeights(unsigned, SmallVectorImpl<float>&);
-  CanEvict canEvict(LiveInterval &A, LiveInterval &B);
-  bool canEvictInterference(LiveInterval&, unsigned, float&);
+  bool shouldEvict(LiveInterval &A, bool, LiveInterval &B, bool);
+  bool canEvictInterference(LiveInterval&, unsigned, bool, EvictionCost&);
+  void evictInterference(LiveInterval&, unsigned,
+                         SmallVectorImpl<LiveInterval*>&);
 
   unsigned tryAssign(LiveInterval&, AllocationOrder&,
                      SmallVectorImpl<LiveInterval*>&);
@@ -199,6 +272,8 @@ private:
                     SmallVectorImpl<LiveInterval*>&, unsigned = ~0u);
   unsigned tryRegionSplit(LiveInterval&, AllocationOrder&,
                           SmallVectorImpl<LiveInterval*>&);
+  unsigned tryBlockSplit(LiveInterval&, AllocationOrder&,
+                         SmallVectorImpl<LiveInterval*>&);
   unsigned tryLocalSplit(LiveInterval&, AllocationOrder&,
     SmallVectorImpl<LiveInterval*>&);
   unsigned trySplit(LiveInterval&, AllocationOrder&,
@@ -210,12 +285,12 @@ char RAGreedy::ID = 0;
 
 #ifndef NDEBUG
 const char *const RAGreedy::StageName[] = {
-  "RS_New",
-  "RS_First",
-  "RS_Second",
-  "RS_Global",
-  "RS_Local",
-  "RS_Spill"
+    "RS_New",
+    "RS_Assign",
+    "RS_Split",
+    "RS_Split2",
+    "RS_Spill",
+    "RS_Done"
 };
 #endif
 
@@ -228,7 +303,7 @@ FunctionPass* llvm::createGreedyRegisterAllocator() {
   return new RAGreedy();
 }
 
-RAGreedy::RAGreedy(): MachineFunctionPass(ID), LRStage(RS_New) {
+RAGreedy::RAGreedy(): MachineFunctionPass(ID) {
   initializeLiveDebugVariablesPass(*PassRegistry::getPassRegistry());
   initializeSlotIndexesPass(*PassRegistry::getPassRegistry());
   initializeLiveIntervalsPass(*PassRegistry::getPassRegistry());
@@ -239,7 +314,6 @@ RAGreedy::RAGreedy(): MachineFunctionPass(ID), LRStage(RS_New) {
   initializeLiveStacksPass(*PassRegistry::getPassRegistry());
   initializeMachineDominatorTreePass(*PassRegistry::getPassRegistry());
   initializeMachineLoopInfoPass(*PassRegistry::getPassRegistry());
-  initializeMachineLoopRangesPass(*PassRegistry::getPassRegistry());
   initializeVirtRegMapPass(*PassRegistry::getPassRegistry());
   initializeEdgeBundlesPass(*PassRegistry::getPassRegistry());
   initializeSpillPlacementPass(*PassRegistry::getPassRegistry());
@@ -256,7 +330,7 @@ void RAGreedy::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addPreserved<LiveDebugVariables>();
   if (StrongPHIElim)
     AU.addRequiredID(StrongPHIEliminationID);
-  AU.addRequiredTransitive<RegisterCoalescer>();
+  AU.addRequiredTransitiveID(RegisterCoalescerPassID);
   AU.addRequired<CalculateSpillWeights>();
   AU.addRequired<LiveStacks>();
   AU.addPreserved<LiveStacks>();
@@ -264,8 +338,6 @@ void RAGreedy::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addPreserved<MachineDominatorTree>();
   AU.addRequired<MachineLoopInfo>();
   AU.addPreserved<MachineLoopInfo>();
-  AU.addRequired<MachineLoopRanges>();
-  AU.addPreserved<MachineLoopRanges>();
   AU.addRequired<VirtRegMap>();
   AU.addPreserved<VirtRegMap>();
   AU.addRequired<EdgeBundles>();
@@ -305,16 +377,22 @@ void RAGreedy::LRE_WillShrinkVirtReg(unsigned VirtReg) {
 }
 
 void RAGreedy::LRE_DidCloneVirtReg(unsigned New, unsigned Old) {
+  // Cloning a register we haven't even heard about yet?  Just ignore it.
+  if (!ExtraRegInfo.inBounds(Old))
+    return;
+
   // LRE may clone a virtual register because dead code elimination causes it to
-  // be split into connected components. Ensure that the new register gets the
+  // be split into connected components. The new components are much smaller
+  // than the original, so they should get a new chance at being assigned.
   // same stage as the parent.
-  LRStage.grow(New);
-  LRStage[New] = LRStage[Old];
+  ExtraRegInfo[Old].Stage = RS_Assign;
+  ExtraRegInfo.grow(New);
+  ExtraRegInfo[New] = ExtraRegInfo[Old];
 }
 
 void RAGreedy::releaseMemory() {
   SpillerInstance.reset(0);
-  LRStage.clear();
+  ExtraRegInfo.clear();
   GlobalCand.clear();
   RegAllocBase::releaseMemory();
 }
@@ -328,18 +406,17 @@ void RAGreedy::enqueue(LiveInterval *LI) {
          "Can only enqueue virtual registers");
   unsigned Prio;
 
-  LRStage.grow(Reg);
-  if (LRStage[Reg] == RS_New)
-    LRStage[Reg] = RS_First;
+  ExtraRegInfo.grow(Reg);
+  if (ExtraRegInfo[Reg].Stage == RS_New)
+    ExtraRegInfo[Reg].Stage = RS_Assign;
 
-  if (LRStage[Reg] == RS_Second)
+  if (ExtraRegInfo[Reg].Stage == RS_Split) {
     // Unsplit ranges that couldn't be allocated immediately are deferred until
-    // everything else has been allocated. Long ranges are allocated last so
-    // they are split against realistic interference.
-    Prio = (1u << 31) - Size;
-  else {
-    // Everything else is allocated in long->short order. Long ranges that don't
-    // fit should be spilled ASAP so they don't create interference.
+    // everything else has been allocated.
+    Prio = Size;
+  } else {
+    // Everything is allocated in long->short order. Long ranges that don't fit
+    // should be spilled (or split) ASAP so they don't create interference.
     Prio = (1u << 31) + Size;
 
     // Boost ranges that have a physical register hint.
@@ -375,7 +452,21 @@ unsigned RAGreedy::tryAssign(LiveInterval &VirtReg,
   if (!PhysReg || Order.isHint(PhysReg))
     return PhysReg;
 
-  // PhysReg is available. Try to evict interference from a cheaper alternative.
+  // PhysReg is available, but there may be a better choice.
+
+  // If we missed a simple hint, try to cheaply evict interference from the
+  // preferred register.
+  if (unsigned Hint = MRI->getSimpleHint(VirtReg.reg))
+    if (Order.isHint(Hint)) {
+      DEBUG(dbgs() << "missed hint " << PrintReg(Hint, TRI) << '\n');
+      EvictionCost MaxCost(1);
+      if (canEvictInterference(VirtReg, Hint, true, MaxCost)) {
+        evictInterference(VirtReg, Hint, NewVRegs);
+        return Hint;
+      }
+    }
+
+  // Try to evict interference from a cheaper alternative.
   unsigned Cost = TRI->getCostPerUse(PhysReg);
 
   // Most registers have 0 additional cost.
@@ -393,31 +484,58 @@ unsigned RAGreedy::tryAssign(LiveInterval &VirtReg,
 //                         Interference eviction
 //===----------------------------------------------------------------------===//
 
-/// canEvict - determine if A can evict the assigned live range B. The eviction
-/// policy defined by this function together with the allocation order defined
-/// by enqueue() decides which registers ultimately end up being split and
-/// spilled.
+/// shouldEvict - determine if A should evict the assigned live range B. The
+/// eviction policy defined by this function together with the allocation order
+/// defined by enqueue() decides which registers ultimately end up being split
+/// and spilled.
 ///
-/// This function must define a non-circular relation when it returns CE_Always,
-/// otherwise infinite eviction loops are possible. When evicting a <= RS_Second
-/// range, it is possible to return CE_WithSplit which forces the evicted
-/// register to be split or spilled before it can evict anything again. That
-/// guarantees progress.
-RAGreedy::CanEvict RAGreedy::canEvict(LiveInterval &A, LiveInterval &B) {
-  return A.weight > B.weight ? CE_Always : CE_Never;
+/// Cascade numbers are used to prevent infinite loops if this function is a
+/// cyclic relation.
+///
+/// @param A          The live range to be assigned.
+/// @param IsHint     True when A is about to be assigned to its preferred
+///                   register.
+/// @param B          The live range to be evicted.
+/// @param BreaksHint True when B is already assigned to its preferred register.
+bool RAGreedy::shouldEvict(LiveInterval &A, bool IsHint,
+                           LiveInterval &B, bool BreaksHint) {
+  bool CanSplit = getStage(B) < RS_Spill;
+
+  // Be fairly aggressive about following hints as long as the evictee can be
+  // split.
+  if (CanSplit && IsHint && !BreaksHint)
+    return true;
+
+  return A.weight > B.weight;
 }
 
-/// canEvict - Return true if all interferences between VirtReg and PhysReg can
-/// be evicted.
-/// Return false if any interference is heavier than MaxWeight.
-/// On return, set MaxWeight to the maximal spill weight of an interference.
+/// canEvictInterference - Return true if all interferences between VirtReg and
+/// PhysReg can be evicted.  When OnlyCheap is set, don't do anything
+///
+/// @param VirtReg Live range that is about to be assigned.
+/// @param PhysReg Desired register for assignment.
+/// @prarm IsHint  True when PhysReg is VirtReg's preferred register.
+/// @param MaxCost Only look for cheaper candidates and update with new cost
+///                when returning true.
+/// @returns True when interference can be evicted cheaper than MaxCost.
 bool RAGreedy::canEvictInterference(LiveInterval &VirtReg, unsigned PhysReg,
-                                    float &MaxWeight) {
-  float Weight = 0;
+                                    bool IsHint, EvictionCost &MaxCost) {
+  // Find VirtReg's cascade number. This will be unassigned if VirtReg was never
+  // involved in an eviction before. If a cascade number was assigned, deny
+  // evicting anything with the same or a newer cascade number. This prevents
+  // infinite eviction loops.
+  //
+  // This works out so a register without a cascade number is allowed to evict
+  // anything, and it can be evicted by anything.
+  unsigned Cascade = ExtraRegInfo[VirtReg.reg].Cascade;
+  if (!Cascade)
+    Cascade = NextCascade;
+
+  EvictionCost Cost;
   for (const unsigned *AliasI = TRI->getOverlaps(PhysReg); *AliasI; ++AliasI) {
     LiveIntervalUnion::Query &Q = query(VirtReg, *AliasI);
     // If there is 10 or more interferences, chances are one is heavier.
-    if (Q.collectInterferingVRegs(10, MaxWeight) >= 10)
+    if (Q.collectInterferingVRegs(10) >= 10)
       return false;
 
     // Check if any interfering live range is heavier than MaxWeight.
@@ -425,23 +543,67 @@ bool RAGreedy::canEvictInterference(LiveInterval &VirtReg, unsigned PhysReg,
       LiveInterval *Intf = Q.interferingVRegs()[i - 1];
       if (TargetRegisterInfo::isPhysicalRegister(Intf->reg))
         return false;
-      if (Intf->weight >= MaxWeight)
+      // Never evict spill products. They cannot split or spill.
+      if (getStage(*Intf) == RS_Done)
         return false;
-      switch (canEvict(VirtReg, *Intf)) {
-      case CE_Always:
-        break;
-      case CE_Never:
-        return false;
-      case CE_WithSplit:
-        if (getStage(*Intf) > RS_Second)
+      // Once a live range becomes small enough, it is urgent that we find a
+      // register for it. This is indicated by an infinite spill weight. These
+      // urgent live ranges get to evict almost anything.
+      bool Urgent = !VirtReg.isSpillable() && Intf->isSpillable();
+      // Only evict older cascades or live ranges without a cascade.
+      unsigned IntfCascade = ExtraRegInfo[Intf->reg].Cascade;
+      if (Cascade <= IntfCascade) {
+        if (!Urgent)
           return false;
-        break;
+        // We permit breaking cascades for urgent evictions. It should be the
+        // last resort, though, so make it really expensive.
+        Cost.BrokenHints += 10;
       }
-      Weight = std::max(Weight, Intf->weight);
+      // Would this break a satisfied hint?
+      bool BreaksHint = VRM->hasPreferredPhys(Intf->reg);
+      // Update eviction cost.
+      Cost.BrokenHints += BreaksHint;
+      Cost.MaxWeight = std::max(Cost.MaxWeight, Intf->weight);
+      // Abort if this would be too expensive.
+      if (!(Cost < MaxCost))
+        return false;
+      // Finally, apply the eviction policy for non-urgent evictions.
+      if (!Urgent && !shouldEvict(VirtReg, IsHint, *Intf, BreaksHint))
+        return false;
     }
   }
-  MaxWeight = Weight;
+  MaxCost = Cost;
   return true;
+}
+
+/// evictInterference - Evict any interferring registers that prevent VirtReg
+/// from being assigned to Physreg. This assumes that canEvictInterference
+/// returned true.
+void RAGreedy::evictInterference(LiveInterval &VirtReg, unsigned PhysReg,
+                                 SmallVectorImpl<LiveInterval*> &NewVRegs) {
+  // Make sure that VirtReg has a cascade number, and assign that cascade
+  // number to every evicted register. These live ranges than then only be
+  // evicted by a newer cascade, preventing infinite loops.
+  unsigned Cascade = ExtraRegInfo[VirtReg.reg].Cascade;
+  if (!Cascade)
+    Cascade = ExtraRegInfo[VirtReg.reg].Cascade = NextCascade++;
+
+  DEBUG(dbgs() << "evicting " << PrintReg(PhysReg, TRI)
+               << " interference: Cascade " << Cascade << '\n');
+  for (const unsigned *AliasI = TRI->getOverlaps(PhysReg); *AliasI; ++AliasI) {
+    LiveIntervalUnion::Query &Q = query(VirtReg, *AliasI);
+    assert(Q.seenAllInterferences() && "Didn't check all interfererences.");
+    for (unsigned i = 0, e = Q.interferingVRegs().size(); i != e; ++i) {
+      LiveInterval *Intf = Q.interferingVRegs()[i];
+      unassign(*Intf, VRM->getPhys(Intf->reg));
+      assert((ExtraRegInfo[Intf->reg].Cascade < Cascade ||
+              VirtReg.isSpillable() < Intf->isSpillable()) &&
+             "Cannot decrease cascade number, illegal eviction");
+      ExtraRegInfo[Intf->reg].Cascade = Cascade;
+      ++NumEvicted;
+      NewVRegs.push_back(Intf);
+    }
+  }
 }
 
 /// tryEvict - Try to evict all interferences for a physreg.
@@ -454,31 +616,37 @@ unsigned RAGreedy::tryEvict(LiveInterval &VirtReg,
                             unsigned CostPerUseLimit) {
   NamedRegionTimer T("Evict", TimerGroupName, TimePassesIsEnabled);
 
-  // Keep track of the lightest single interference seen so far.
-  float BestWeight = HUGE_VALF;
+  // Keep track of the cheapest interference seen so far.
+  EvictionCost BestCost(~0u);
   unsigned BestPhys = 0;
+
+  // When we are just looking for a reduced cost per use, don't break any
+  // hints, and only evict smaller spill weights.
+  if (CostPerUseLimit < ~0u) {
+    BestCost.BrokenHints = 0;
+    BestCost.MaxWeight = VirtReg.weight;
+  }
 
   Order.rewind();
   while (unsigned PhysReg = Order.next()) {
     if (TRI->getCostPerUse(PhysReg) >= CostPerUseLimit)
       continue;
-    // The first use of a register in a function has cost 1.
-    if (CostPerUseLimit == 1 && !MRI->isPhysRegUsed(PhysReg))
-      continue;
+    // The first use of a callee-saved register in a function has cost 1.
+    // Don't start using a CSR when the CostPerUseLimit is low.
+    if (CostPerUseLimit == 1)
+     if (unsigned CSR = RegClassInfo.getLastCalleeSavedAlias(PhysReg))
+       if (!MRI->isPhysRegUsed(CSR)) {
+         DEBUG(dbgs() << PrintReg(PhysReg, TRI) << " would clobber CSR "
+                      << PrintReg(CSR, TRI) << '\n');
+         continue;
+       }
 
-    float Weight = BestWeight;
-    if (!canEvictInterference(VirtReg, PhysReg, Weight))
-      continue;
-
-    // This is an eviction candidate.
-    DEBUG(dbgs() << PrintReg(PhysReg, TRI) << " interference = "
-                 << Weight << '\n');
-    if (BestPhys && Weight >= BestWeight)
+    if (!canEvictInterference(VirtReg, PhysReg, false, BestCost))
       continue;
 
     // Best so far.
     BestPhys = PhysReg;
-    BestWeight = Weight;
+
     // Stop if the hint can be used.
     if (Order.isHint(PhysReg))
       break;
@@ -487,22 +655,7 @@ unsigned RAGreedy::tryEvict(LiveInterval &VirtReg,
   if (!BestPhys)
     return 0;
 
-  DEBUG(dbgs() << "evicting " << PrintReg(BestPhys, TRI) << " interference\n");
-  for (const unsigned *AliasI = TRI->getOverlaps(BestPhys); *AliasI; ++AliasI) {
-    LiveIntervalUnion::Query &Q = query(VirtReg, *AliasI);
-    assert(Q.seenAllInterferences() && "Didn't check all interfererences.");
-    for (unsigned i = 0, e = Q.interferingVRegs().size(); i != e; ++i) {
-      LiveInterval *Intf = Q.interferingVRegs()[i];
-      unassign(*Intf, VRM->getPhys(Intf->reg));
-      ++NumEvicted;
-      NewVRegs.push_back(Intf);
-      // Prevent looping by forcing the evicted ranges to be split before they
-      // can evict anything else.
-      if (getStage(*Intf) < RS_Second &&
-          canEvict(VirtReg, *Intf) == CE_WithSplit)
-        LRStage[Intf->reg] = RS_Second;
-    }
-  }
+  evictInterference(VirtReg, BestPhys, NewVRegs);
   return BestPhys;
 }
 
@@ -531,6 +684,7 @@ bool RAGreedy::addSplitConstraints(InterferenceCache::Cursor Intf,
     Intf.moveToBlock(BC.Number);
     BC.Entry = BI.LiveIn ? SpillPlacement::PrefReg : SpillPlacement::DontCare;
     BC.Exit = BI.LiveOut ? SpillPlacement::PrefReg : SpillPlacement::DontCare;
+    BC.ChangesValue = BI.FirstDef;
 
     if (!Intf.hasInterference())
       continue;
@@ -542,9 +696,9 @@ bool RAGreedy::addSplitConstraints(InterferenceCache::Cursor Intf,
     if (BI.LiveIn) {
       if (Intf.first() <= Indexes->getMBBStartIdx(BC.Number))
         BC.Entry = SpillPlacement::MustSpill, ++Ins;
-      else if (Intf.first() < BI.FirstUse)
+      else if (Intf.first() < BI.FirstInstr)
         BC.Entry = SpillPlacement::PrefSpill, ++Ins;
-      else if (Intf.first() < BI.LastUse)
+      else if (Intf.first() < BI.LastInstr)
         ++Ins;
     }
 
@@ -552,9 +706,9 @@ bool RAGreedy::addSplitConstraints(InterferenceCache::Cursor Intf,
     if (BI.LiveOut) {
       if (Intf.last() >= SA->getLastSplitPoint(BC.Number))
         BC.Exit = SpillPlacement::MustSpill, ++Ins;
-      else if (Intf.last() > BI.LastUse)
+      else if (Intf.last() > BI.LastInstr)
         BC.Exit = SpillPlacement::PrefSpill, ++Ins;
-      else if (Intf.last() > BI.FirstUse)
+      else if (Intf.last() > BI.FirstInstr)
         ++Ins;
     }
 
@@ -588,7 +742,7 @@ void RAGreedy::addThroughConstraints(InterferenceCache::Cursor Intf,
       assert(T < GroupSize && "Array overflow");
       TBS[T] = Number;
       if (++T == GroupSize) {
-        SpillPlacer->addLinks(ArrayRef<unsigned>(TBS, T));
+        SpillPlacer->addLinks(makeArrayRef(TBS, T));
         T = 0;
       }
       continue;
@@ -618,11 +772,10 @@ void RAGreedy::addThroughConstraints(InterferenceCache::Cursor Intf,
 
   ArrayRef<SpillPlacement::BlockConstraint> Array(BCS, B);
   SpillPlacer->addConstraints(Array);
-  SpillPlacer->addLinks(ArrayRef<unsigned>(TBS, T));
+  SpillPlacer->addLinks(makeArrayRef(TBS, T));
 }
 
-void RAGreedy::growRegion(GlobalSplitCandidate &Cand,
-                          InterferenceCache::Cursor Intf) {
+void RAGreedy::growRegion(GlobalSplitCandidate &Cand) {
   // Keep track of through blocks that have not been added to SpillPlacer.
   BitVector Todo = SA->getThroughBlocks();
   SmallVectorImpl<unsigned> &ActiveBlocks = Cand.ActiveBlocks;
@@ -654,8 +807,16 @@ void RAGreedy::growRegion(GlobalSplitCandidate &Cand,
     // Any new blocks to add?
     if (ActiveBlocks.size() == AddedTo)
       break;
-    addThroughConstraints(Intf,
-                          ArrayRef<unsigned>(ActiveBlocks).slice(AddedTo));
+
+    // Compute through constraints from the interference, or assume that all
+    // through blocks prefer spilling when forming compact regions.
+    ArrayRef<unsigned> NewBlocks = makeArrayRef(ActiveBlocks).slice(AddedTo);
+    if (Cand.PhysReg)
+      addThroughConstraints(Cand.Intf, NewBlocks);
+    else
+      // Provide a strong negative bias on through blocks to prevent unwanted
+      // liveness on loop backedges.
+      SpillPlacer->addPrefSpill(NewBlocks, /* Strong= */ true);
     AddedTo = ActiveBlocks.size();
 
     // Perhaps iterating can enable more bundles?
@@ -664,11 +825,55 @@ void RAGreedy::growRegion(GlobalSplitCandidate &Cand,
   DEBUG(dbgs() << ", v=" << Visited);
 }
 
+/// calcCompactRegion - Compute the set of edge bundles that should be live
+/// when splitting the current live range into compact regions.  Compact
+/// regions can be computed without looking at interference.  They are the
+/// regions formed by removing all the live-through blocks from the live range.
+///
+/// Returns false if the current live range is already compact, or if the
+/// compact regions would form single block regions anyway.
+bool RAGreedy::calcCompactRegion(GlobalSplitCandidate &Cand) {
+  // Without any through blocks, the live range is already compact.
+  if (!SA->getNumThroughBlocks())
+    return false;
+
+  // Compact regions don't correspond to any physreg.
+  Cand.reset(IntfCache, 0);
+
+  DEBUG(dbgs() << "Compact region bundles");
+
+  // Use the spill placer to determine the live bundles. GrowRegion pretends
+  // that all the through blocks have interference when PhysReg is unset.
+  SpillPlacer->prepare(Cand.LiveBundles);
+
+  // The static split cost will be zero since Cand.Intf reports no interference.
+  float Cost;
+  if (!addSplitConstraints(Cand.Intf, Cost)) {
+    DEBUG(dbgs() << ", none.\n");
+    return false;
+  }
+
+  growRegion(Cand);
+  SpillPlacer->finish();
+
+  if (!Cand.LiveBundles.any()) {
+    DEBUG(dbgs() << ", none.\n");
+    return false;
+  }
+
+  DEBUG({
+    for (int i = Cand.LiveBundles.find_first(); i>=0;
+         i = Cand.LiveBundles.find_next(i))
+    dbgs() << " EB#" << i;
+    dbgs() << ".\n";
+  });
+  return true;
+}
+
 /// calcSpillCost - Compute how expensive it would be to split the live range in
 /// SA around all use blocks instead of forming bundle regions.
 float RAGreedy::calcSpillCost() {
   float Cost = 0;
-  const LiveInterval &LI = SA->getParent();
   ArrayRef<SplitAnalysis::BlockInfo> UseBlocks = SA->getUseBlocks();
   for (unsigned i = 0; i != UseBlocks.size(); ++i) {
     const SplitAnalysis::BlockInfo &BI = UseBlocks[i];
@@ -677,16 +882,8 @@ float RAGreedy::calcSpillCost() {
     Cost += SpillPlacer->getBlockFrequency(Number);
 
     // Unless the value is redefined in the block.
-    if (BI.LiveIn && BI.LiveOut) {
-      SlotIndex Start, Stop;
-      tie(Start, Stop) = Indexes->getMBBRange(Number);
-      LiveInterval::const_iterator I = LI.find(Start);
-      assert(I != LI.end() && "Expected live-in value");
-      // Is there a different live-out value? If so, we need an extra spill
-      // instruction.
-      if (I->end < Stop)
-        Cost += SpillPlacer->getBlockFrequency(Number);
-    }
+    if (BI.LiveIn && BI.LiveOut && BI.FirstDef)
+      Cost += SpillPlacer->getBlockFrequency(Number);
   }
   return Cost;
 }
@@ -695,8 +892,7 @@ float RAGreedy::calcSpillCost() {
 /// pattern in LiveBundles. This cost should be added to the local cost of the
 /// interference pattern in SplitConstraints.
 ///
-float RAGreedy::calcGlobalSplitCost(GlobalSplitCandidate &Cand,
-                                    InterferenceCache::Cursor Intf) {
+float RAGreedy::calcGlobalSplitCost(GlobalSplitCandidate &Cand) {
   float GlobalCost = 0;
   const BitVector &LiveBundles = Cand.LiveBundles;
   ArrayRef<SplitAnalysis::BlockInfo> UseBlocks = SA->getUseBlocks();
@@ -723,8 +919,8 @@ float RAGreedy::calcGlobalSplitCost(GlobalSplitCandidate &Cand,
       continue;
     if (RegIn && RegOut) {
       // We need double spill code if this block has interference.
-      Intf.moveToBlock(Number);
-      if (Intf.hasInterference())
+      Cand.Intf.moveToBlock(Number);
+      if (Cand.Intf.hasInterference())
         GlobalCost += 2*SpillPlacer->getBlockFrequency(Number);
       continue;
     }
@@ -734,368 +930,117 @@ float RAGreedy::calcGlobalSplitCost(GlobalSplitCandidate &Cand,
   return GlobalCost;
 }
 
-/// splitAroundRegion - Split VirtReg around the region determined by
-/// LiveBundles. Make an effort to avoid interference from PhysReg.
+/// splitAroundRegion - Split the current live range around the regions
+/// determined by BundleCand and GlobalCand.
 ///
-/// The 'register' interval is going to contain as many uses as possible while
-/// avoiding interference. The 'stack' interval is the complement constructed by
-/// SplitEditor. It will contain the rest.
+/// Before calling this function, GlobalCand and BundleCand must be initialized
+/// so each bundle is assigned to a valid candidate, or NoCand for the
+/// stack-bound bundles.  The shared SA/SE SplitAnalysis and SplitEditor
+/// objects must be initialized for the current live range, and intervals
+/// created for the used candidates.
 ///
-void RAGreedy::splitAroundRegion(LiveInterval &VirtReg,
-                                 GlobalSplitCandidate &Cand,
-                                 SmallVectorImpl<LiveInterval*> &NewVRegs) {
-  const BitVector &LiveBundles = Cand.LiveBundles;
+/// @param LREdit    The LiveRangeEdit object handling the current split.
+/// @param UsedCands List of used GlobalCand entries. Every BundleCand value
+///                  must appear in this list.
+void RAGreedy::splitAroundRegion(LiveRangeEdit &LREdit,
+                                 ArrayRef<unsigned> UsedCands) {
+  // These are the intervals created for new global ranges. We may create more
+  // intervals for local ranges.
+  const unsigned NumGlobalIntvs = LREdit.size();
+  DEBUG(dbgs() << "splitAroundRegion with " << NumGlobalIntvs << " globals.\n");
+  assert(NumGlobalIntvs && "No global intervals configured");
 
-  DEBUG({
-    dbgs() << "Splitting around region for " << PrintReg(Cand.PhysReg, TRI)
-           << " with bundles";
-    for (int i = LiveBundles.find_first(); i>=0; i = LiveBundles.find_next(i))
-      dbgs() << " EB#" << i;
-    dbgs() << ".\n";
-  });
-
-  InterferenceCache::Cursor Intf(IntfCache, Cand.PhysReg);
-  LiveRangeEdit LREdit(VirtReg, NewVRegs, this);
-  SE->reset(LREdit);
-
-  // Create the main cross-block interval.
-  const unsigned MainIntv = SE->openIntv();
+  // Isolate even single instructions when dealing with a proper sub-class.
+  // That guarantees register class inflation for the stack interval because it
+  // is all copies.
+  unsigned Reg = SA->getParent().reg;
+  bool SingleInstrs = RegClassInfo.isProperSubClass(MRI->getRegClass(Reg));
 
   // First handle all the blocks with uses.
   ArrayRef<SplitAnalysis::BlockInfo> UseBlocks = SA->getUseBlocks();
   for (unsigned i = 0; i != UseBlocks.size(); ++i) {
     const SplitAnalysis::BlockInfo &BI = UseBlocks[i];
-    bool RegIn  = BI.LiveIn &&
-                  LiveBundles[Bundles->getBundle(BI.MBB->getNumber(), 0)];
-    bool RegOut = BI.LiveOut &&
-                  LiveBundles[Bundles->getBundle(BI.MBB->getNumber(), 1)];
+    unsigned Number = BI.MBB->getNumber();
+    unsigned IntvIn = 0, IntvOut = 0;
+    SlotIndex IntfIn, IntfOut;
+    if (BI.LiveIn) {
+      unsigned CandIn = BundleCand[Bundles->getBundle(Number, 0)];
+      if (CandIn != NoCand) {
+        GlobalSplitCandidate &Cand = GlobalCand[CandIn];
+        IntvIn = Cand.IntvIdx;
+        Cand.Intf.moveToBlock(Number);
+        IntfIn = Cand.Intf.first();
+      }
+    }
+    if (BI.LiveOut) {
+      unsigned CandOut = BundleCand[Bundles->getBundle(Number, 1)];
+      if (CandOut != NoCand) {
+        GlobalSplitCandidate &Cand = GlobalCand[CandOut];
+        IntvOut = Cand.IntvIdx;
+        Cand.Intf.moveToBlock(Number);
+        IntfOut = Cand.Intf.last();
+      }
+    }
 
     // Create separate intervals for isolated blocks with multiple uses.
-    //
-    //     |---o---o---|    Enter and leave on the stack.
-    //     ____-----____    Create local interval for uses.
-    //
-    //     |   o---o---|    Defined in block, leave on stack.
-    //         -----____    Create local interval for uses.
-    //
-    //     |---o---x   |    Enter on stack, killed in block.
-    //     ____-----        Create local interval for uses.
-    //
-    if (!RegIn && !RegOut) {
+    if (!IntvIn && !IntvOut) {
       DEBUG(dbgs() << "BB#" << BI.MBB->getNumber() << " isolated.\n");
-      if (!BI.isOneInstr()) {
+      if (SA->shouldSplitSingleBlock(BI, SingleInstrs))
         SE->splitSingleBlock(BI);
-        SE->selectIntv(MainIntv);
-      }
       continue;
     }
 
-    SlotIndex Start, Stop;
-    tie(Start, Stop) = Indexes->getMBBRange(BI.MBB);
-    Intf.moveToBlock(BI.MBB->getNumber());
-    DEBUG(dbgs() << "EB#" << Bundles->getBundle(BI.MBB->getNumber(), 0)
-                 << (BI.LiveIn ? (RegIn ? " => " : " -> ") : "    ")
-                 << "BB#" << BI.MBB->getNumber()
-                 << (BI.LiveOut ? (RegOut ? " => " : " -> ") : "    ")
-                 << " EB#" << Bundles->getBundle(BI.MBB->getNumber(), 1)
-                 << " [" << Start << ';'
-                 << SA->getLastSplitPoint(BI.MBB->getNumber()) << '-' << Stop
-                 << ") uses [" << BI.FirstUse << ';' << BI.LastUse
-                 << ") intf [" << Intf.first() << ';' << Intf.last() << ')');
-
-    // The interference interval should either be invalid or overlap MBB.
-    assert((!Intf.hasInterference() || Intf.first() < Stop)
-           && "Bad interference");
-    assert((!Intf.hasInterference() || Intf.last() > Start)
-           && "Bad interference");
-
-    // We are now ready to decide where to split in the current block.  There
-    // are many variables guiding the decision:
-    //
-    // - RegIn / RegOut: The global splitting algorithm's decisions for our
-    //   ingoing and outgoing bundles.
-    //
-    // - BI.BlockIn / BI.BlockOut: Is the live range live-in and/or live-out
-    //   from this block.
-    //
-    // - Intf.hasInterference(): Is there interference in this block.
-    //
-    // - Intf.first() / Inft.last(): The range of interference.
-    //
-    // The live range should be split such that MainIntv is live-in when RegIn
-    // is set, and live-out when RegOut is set.  MainIntv should never overlap
-    // the interference, and the stack interval should never have more than one
-    // use per block.
-
-    // No splits can be inserted after LastSplitPoint, overlap instead.
-    SlotIndex LastSplitPoint = Stop;
-    if (BI.LiveOut)
-      LastSplitPoint = SA->getLastSplitPoint(BI.MBB->getNumber());
-
-    // At this point, we know that either RegIn or RegOut is set. We dealt with
-    // the all-stack case above.
-
-    // Blocks without interference are relatively easy.
-    if (!Intf.hasInterference()) {
-      DEBUG(dbgs() << ", no interference.\n");
-      SE->selectIntv(MainIntv);
-      // The easiest case has MainIntv live through.
-      //
-      //     |---o---o---|    Live-in, live-out.
-      //     =============    Use MainIntv everywhere.
-      //
-      SlotIndex From = Start, To = Stop;
-
-      // Block entry. Reload before the first use if MainIntv is not live-in.
-      //
-      //     |---o--    Enter on stack.
-      //     ____===    Reload before first use.
-      //
-      //     |   o--    Defined in block.
-      //         ===    Use MainIntv from def.
-      //
-      if (!RegIn)
-        From = SE->enterIntvBefore(BI.FirstUse);
-
-      // Block exit. Handle cases where MainIntv is not live-out.
-      if (!BI.LiveOut)
-        //
-        //     --x   |    Killed in block.
-        //     ===        Use MainIntv up to kill.
-        //
-        To = SE->leaveIntvAfter(BI.LastUse);
-      else if (!RegOut) {
-        //
-        //     --o---|    Live-out on stack.
-        //     ===____    Use MainIntv up to last use, switch to stack.
-        //
-        //     -----o|    Live-out on stack, last use after last split point.
-        //     ======     Extend MainIntv to last use, overlapping.
-        //       \____    Copy to stack interval before last split point.
-        //
-        if (BI.LastUse < LastSplitPoint)
-          To = SE->leaveIntvAfter(BI.LastUse);
-        else {
-          // The last use is after the last split point, it is probably an
-          // indirect branch.
-          To = SE->leaveIntvBefore(LastSplitPoint);
-          // Run a double interval from the split to the last use.  This makes
-          // it possible to spill the complement without affecting the indirect
-          // branch.
-          SE->overlapIntv(To, BI.LastUse);
-        }
-      }
-
-      // Paint in MainIntv liveness for this block.
-      SE->useIntv(From, To);
-      continue;
-    }
-
-    // We are now looking at a block with interference, and we know that either
-    // RegIn or RegOut is set.
-    assert(Intf.hasInterference() && (RegIn || RegOut) && "Bad invariant");
-
-    // If the live range is not live through the block, it is possible that the
-    // interference doesn't even overlap.  Deal with those cases first.  Since
-    // no copy instructions are required, we can tolerate interference starting
-    // or ending at the same instruction that kills or defines our live range.
-
-    // Live-in, killed before interference.
-    //
-    //               ~~~    Interference after kill.
-    //     |---o---x   |    Killed in block.
-    //     =========        Use MainIntv everywhere.
-    //
-    if (RegIn && !BI.LiveOut && BI.LastUse <= Intf.first()) {
-      DEBUG(dbgs() << ", live-in, killed before interference.\n");
-      SE->selectIntv(MainIntv);
-      SlotIndex To = SE->leaveIntvAfter(BI.LastUse);
-      SE->useIntv(Start, To);
-      continue;
-    }
-
-    // Live-out, defined after interference.
-    //
-    //     ~~~              Interference before def.
-    //     |   o---o---|    Defined in block.
-    //         =========    Use MainIntv everywhere.
-    //
-    if (RegOut && !BI.LiveIn && BI.FirstUse >= Intf.last()) {
-      DEBUG(dbgs() << ", live-out, defined after interference.\n");
-      SE->selectIntv(MainIntv);
-      SlotIndex From = SE->enterIntvBefore(BI.FirstUse);
-      SE->useIntv(From, Stop);
-      continue;
-    }
-
-    // The interference is now known to overlap the live range, but it may
-    // still be easy to avoid if all the interference is on one side of the
-    // uses, and we enter or leave on the stack.
-
-    // Live-out on stack, interference after last use.
-    //
-    //               ~~~    Interference after last use.
-    //     |---o---o---|    Live-out on stack.
-    //     =========____    Leave MainIntv after last use.
-    //
-    //                 ~    Interference after last use.
-    //     |---o---o--o|    Live-out on stack, late last use.
-    //     =========____    Copy to stack after LSP, overlap MainIntv.
-    //
-    if (!RegOut && Intf.first() > BI.LastUse.getBoundaryIndex()) {
-      assert(RegIn && "Stack-in, stack-out should already be handled");
-      if (BI.LastUse < LastSplitPoint) {
-        DEBUG(dbgs() << ", live-in, stack-out, interference after last use.\n");
-        SE->selectIntv(MainIntv);
-        SlotIndex To = SE->leaveIntvAfter(BI.LastUse);
-        assert(To <= Intf.first() && "Expected to avoid interference");
-        SE->useIntv(Start, To);
-      } else {
-        DEBUG(dbgs() << ", live-in, stack-out, avoid last split point\n");
-        SE->selectIntv(MainIntv);
-        SlotIndex To = SE->leaveIntvBefore(LastSplitPoint);
-        assert(To <= Intf.first() && "Expected to avoid interference");
-        SE->overlapIntv(To, BI.LastUse);
-        SE->useIntv(Start, To);
-      }
-      continue;
-    }
-
-    // Live-in on stack, interference before first use.
-    //
-    //     ~~~              Interference before first use.
-    //     |---o---o---|    Live-in on stack.
-    //     ____=========    Enter MainIntv before first use.
-    //
-    if (!RegIn && Intf.last() < BI.FirstUse.getBaseIndex()) {
-      assert(RegOut && "Stack-in, stack-out should already be handled");
-      DEBUG(dbgs() << ", stack-in, interference before first use.\n");
-      SE->selectIntv(MainIntv);
-      SlotIndex From = SE->enterIntvBefore(BI.FirstUse);
-      assert(From >= Intf.last() && "Expected to avoid interference");
-      SE->useIntv(From, Stop);
-      continue;
-    }
-
-    // The interference is overlapping somewhere we wanted to use MainIntv. That
-    // means we need to create a local interval that can be allocated a
-    // different register.
-    DEBUG(dbgs() << ", creating local interval.\n");
-    unsigned LocalIntv = SE->openIntv();
-
-    // We may be creating copies directly between MainIntv and LocalIntv,
-    // bypassing the stack interval. When we do that, we should never use the
-    // leaveIntv* methods as they define values in the stack interval. By
-    // starting from the end of the block and working our way backwards, we can
-    // get by with only enterIntv* methods.
-    //
-    // When selecting split points, we generally try to maximize the stack
-    // interval as long at it contains no uses, maximize the main interval as
-    // long as it doesn't overlap interference, and minimize the local interval
-    // that we don't know how to allocate yet.
-
-    // Handle the block exit, set Pos to the first handled slot.
-    SlotIndex Pos = BI.LastUse;
-    if (RegOut) {
-      assert(Intf.last() < LastSplitPoint && "Cannot be live-out in register");
-      // Create a snippet of MainIntv that is live-out.
-      //
-      //     ~~~        Interference overlapping uses.
-      //     --o---|    Live-out in MainIntv.
-      //     ----===    Switch from LocalIntv to MainIntv after interference.
-      //
-      SE->selectIntv(MainIntv);
-      Pos = SE->enterIntvAfter(Intf.last());
-      assert(Pos >= Intf.last() && "Expected to avoid interference");
-      SE->useIntv(Pos, Stop);
-      SE->selectIntv(LocalIntv);
-    } else if (BI.LiveOut) {
-      if (BI.LastUse < LastSplitPoint) {
-        // Live-out on the stack.
-        //
-        //     ~~~        Interference overlapping uses.
-        //     --o---|    Live-out on stack.
-        //     ---____    Switch from LocalIntv to stack after last use.
-        //
-        Pos = SE->leaveIntvAfter(BI.LastUse);
-      } else {
-        // Live-out on the stack, last use after last split point.
-        //
-        //     ~~~        Interference overlapping uses.
-        //     --o--o|    Live-out on stack, late use.
-        //     ------     Copy to stack before LSP, overlap LocalIntv.
-        //         \__
-        //
-        Pos = SE->leaveIntvBefore(LastSplitPoint);
-        // We need to overlap LocalIntv so it can reach LastUse.
-        SE->overlapIntv(Pos, BI.LastUse);
-      }
-    }
-
-    // When not live-out, leave Pos at LastUse. We have handled everything from
-    // Pos to Stop. Find the starting point for LocalIntv.
-    assert(SE->currentIntv() == LocalIntv && "Expecting local interval");
-
-    if (RegIn) {
-      assert(Start < Intf.first() && "Cannot be live-in with interference");
-      // Live-in in MainIntv, only use LocalIntv for interference.
-      //
-      //         ~~~    Interference overlapping uses.
-      //     |---o--    Live-in in MainIntv.
-      //     ====---    Switch to LocalIntv before interference.
-      //
-      SlotIndex Switch = SE->enterIntvBefore(std::min(Pos, Intf.first()));
-      assert(Switch <= Intf.first() && "Expected to avoid interference");
-      SE->useIntv(Switch, Pos);
-      SE->selectIntv(MainIntv);
-      SE->useIntv(Start, Switch);
-    } else {
-      // Live-in on stack, enter LocalIntv before first use.
-      //
-      //         ~~~    Interference overlapping uses.
-      //     |---o--    Live-in in MainIntv.
-      //     ____---    Reload to LocalIntv before interference.
-      //
-      // Defined in block.
-      //
-      //         ~~~    Interference overlapping uses.
-      //     |   o--    Defined in block.
-      //         ---    Begin LocalIntv at first use.
-      //
-      SlotIndex Switch = SE->enterIntvBefore(std::min(Pos, BI.FirstUse));
-      SE->useIntv(Switch, Pos);
-    }
+    if (IntvIn && IntvOut)
+      SE->splitLiveThroughBlock(Number, IntvIn, IntfIn, IntvOut, IntfOut);
+    else if (IntvIn)
+      SE->splitRegInBlock(BI, IntvIn, IntfIn);
+    else
+      SE->splitRegOutBlock(BI, IntvOut, IntfOut);
   }
 
-  // Handle live-through blocks.
-  SE->selectIntv(MainIntv);
-  for (unsigned i = 0, e = Cand.ActiveBlocks.size(); i != e; ++i) {
-    unsigned Number = Cand.ActiveBlocks[i];
-    bool RegIn  = LiveBundles[Bundles->getBundle(Number, 0)];
-    bool RegOut = LiveBundles[Bundles->getBundle(Number, 1)];
-    DEBUG(dbgs() << "Live through BB#" << Number << '\n');
-    if (RegIn && RegOut) {
-      Intf.moveToBlock(Number);
-      if (!Intf.hasInterference()) {
-        SE->useIntv(Indexes->getMBBStartIdx(Number),
-                    Indexes->getMBBEndIdx(Number));
+  // Handle live-through blocks. The relevant live-through blocks are stored in
+  // the ActiveBlocks list with each candidate. We need to filter out
+  // duplicates.
+  BitVector Todo = SA->getThroughBlocks();
+  for (unsigned c = 0; c != UsedCands.size(); ++c) {
+    ArrayRef<unsigned> Blocks = GlobalCand[UsedCands[c]].ActiveBlocks;
+    for (unsigned i = 0, e = Blocks.size(); i != e; ++i) {
+      unsigned Number = Blocks[i];
+      if (!Todo.test(Number))
         continue;
+      Todo.reset(Number);
+
+      unsigned IntvIn = 0, IntvOut = 0;
+      SlotIndex IntfIn, IntfOut;
+
+      unsigned CandIn = BundleCand[Bundles->getBundle(Number, 0)];
+      if (CandIn != NoCand) {
+        GlobalSplitCandidate &Cand = GlobalCand[CandIn];
+        IntvIn = Cand.IntvIdx;
+        Cand.Intf.moveToBlock(Number);
+        IntfIn = Cand.Intf.first();
       }
+
+      unsigned CandOut = BundleCand[Bundles->getBundle(Number, 1)];
+      if (CandOut != NoCand) {
+        GlobalSplitCandidate &Cand = GlobalCand[CandOut];
+        IntvOut = Cand.IntvIdx;
+        Cand.Intf.moveToBlock(Number);
+        IntfOut = Cand.Intf.last();
+      }
+      if (!IntvIn && !IntvOut)
+        continue;
+      SE->splitLiveThroughBlock(Number, IntvIn, IntfIn, IntvOut, IntfOut);
     }
-    MachineBasicBlock *MBB = MF->getBlockNumbered(Number);
-    if (RegIn)
-      SE->leaveIntvAtTop(*MBB);
-    if (RegOut)
-      SE->enterIntvAtEnd(*MBB);
   }
 
   ++NumGlobalSplits;
 
   SmallVector<unsigned, 8> IntvMap;
   SE->finish(&IntvMap);
-  DebugVars->splitRegister(VirtReg.reg, LREdit.regs());
+  DebugVars->splitRegister(Reg, LREdit.regs());
 
-  LRStage.resize(MRI->getNumVirtRegs());
+  ExtraRegInfo.resize(MRI->getNumVirtRegs());
   unsigned OrigBlocks = SA->getNumLiveBlocks();
 
   // Sort out the new intervals created by splitting. We get four kinds:
@@ -1104,27 +1049,27 @@ void RAGreedy::splitAroundRegion(LiveInterval &VirtReg,
   // - Block-local splits are candidates for local splitting.
   // - DCE leftovers should go back on the queue.
   for (unsigned i = 0, e = LREdit.size(); i != e; ++i) {
-    unsigned Reg = LREdit.get(i)->reg;
+    LiveInterval &Reg = *LREdit.get(i);
 
     // Ignore old intervals from DCE.
-    if (LRStage[Reg] != RS_New)
+    if (getStage(Reg) != RS_New)
       continue;
 
     // Remainder interval. Don't try splitting again, spill if it doesn't
     // allocate.
     if (IntvMap[i] == 0) {
-      LRStage[Reg] = RS_Global;
+      setStage(Reg, RS_Spill);
       continue;
     }
 
-    // Main interval. Allow repeated splitting as long as the number of live
+    // Global intervals. Allow repeated splitting as long as the number of live
     // blocks is strictly decreasing.
-    if (IntvMap[i] == MainIntv) {
-      if (SA->countLiveBlocks(LREdit.get(i)) >= OrigBlocks) {
+    if (IntvMap[i] < NumGlobalIntvs) {
+      if (SA->countLiveBlocks(&Reg) >= OrigBlocks) {
         DEBUG(dbgs() << "Main interval covers the same " << OrigBlocks
                      << " blocks as original.\n");
         // Don't allow repeated splitting as a safe guard against looping.
-        LRStage[Reg] = RS_Global;
+        setStage(Reg, RS_Split2);
       }
       continue;
     }
@@ -1139,21 +1084,52 @@ void RAGreedy::splitAroundRegion(LiveInterval &VirtReg,
 
 unsigned RAGreedy::tryRegionSplit(LiveInterval &VirtReg, AllocationOrder &Order,
                                   SmallVectorImpl<LiveInterval*> &NewVRegs) {
-  float BestCost = Hysteresis * calcSpillCost();
-  DEBUG(dbgs() << "Cost of isolating all blocks = " << BestCost << '\n');
-  const unsigned NoCand = ~0u;
+  unsigned NumCands = 0;
   unsigned BestCand = NoCand;
+  float BestCost;
+  SmallVector<unsigned, 8> UsedCands;
+
+  // Check if we can split this live range around a compact region.
+  bool HasCompact = calcCompactRegion(GlobalCand.front());
+  if (HasCompact) {
+    // Yes, keep GlobalCand[0] as the compact region candidate.
+    NumCands = 1;
+    BestCost = HUGE_VALF;
+  } else {
+    // No benefit from the compact region, our fallback will be per-block
+    // splitting. Make sure we find a solution that is cheaper than spilling.
+    BestCost = Hysteresis * calcSpillCost();
+    DEBUG(dbgs() << "Cost of isolating all blocks = " << BestCost << '\n');
+  }
 
   Order.rewind();
-  for (unsigned Cand = 0; unsigned PhysReg = Order.next(); ++Cand) {
-    if (GlobalCand.size() <= Cand)
-      GlobalCand.resize(Cand+1);
-    GlobalCand[Cand].reset(PhysReg);
+  while (unsigned PhysReg = Order.next()) {
+    // Discard bad candidates before we run out of interference cache cursors.
+    // This will only affect register classes with a lot of registers (>32).
+    if (NumCands == IntfCache.getMaxCursors()) {
+      unsigned WorstCount = ~0u;
+      unsigned Worst = 0;
+      for (unsigned i = 0; i != NumCands; ++i) {
+        if (i == BestCand || !GlobalCand[i].PhysReg)
+          continue;
+        unsigned Count = GlobalCand[i].LiveBundles.count();
+        if (Count < WorstCount)
+          Worst = i, WorstCount = Count;
+      }
+      --NumCands;
+      GlobalCand[Worst] = GlobalCand[NumCands];
+      if (BestCand == NumCands)
+        BestCand = Worst;
+    }
 
-    SpillPlacer->prepare(GlobalCand[Cand].LiveBundles);
+    if (GlobalCand.size() <= NumCands)
+      GlobalCand.resize(NumCands+1);
+    GlobalSplitCandidate &Cand = GlobalCand[NumCands];
+    Cand.reset(IntfCache, PhysReg);
+
+    SpillPlacer->prepare(Cand.LiveBundles);
     float Cost;
-    InterferenceCache::Cursor Intf(IntfCache, PhysReg);
-    if (!addSplitConstraints(Intf, Cost)) {
+    if (!addSplitConstraints(Cand.Intf, Cost)) {
       DEBUG(dbgs() << PrintReg(PhysReg, TRI) << "\tno positive bundles\n");
       continue;
     }
@@ -1168,37 +1144,117 @@ unsigned RAGreedy::tryRegionSplit(LiveInterval &VirtReg, AllocationOrder &Order,
       });
       continue;
     }
-    growRegion(GlobalCand[Cand], Intf);
+    growRegion(Cand);
 
     SpillPlacer->finish();
 
     // No live bundles, defer to splitSingleBlocks().
-    if (!GlobalCand[Cand].LiveBundles.any()) {
+    if (!Cand.LiveBundles.any()) {
       DEBUG(dbgs() << " no bundles.\n");
       continue;
     }
 
-    Cost += calcGlobalSplitCost(GlobalCand[Cand], Intf);
+    Cost += calcGlobalSplitCost(Cand);
     DEBUG({
       dbgs() << ", total = " << Cost << " with bundles";
-      for (int i = GlobalCand[Cand].LiveBundles.find_first(); i>=0;
-           i = GlobalCand[Cand].LiveBundles.find_next(i))
+      for (int i = Cand.LiveBundles.find_first(); i>=0;
+           i = Cand.LiveBundles.find_next(i))
         dbgs() << " EB#" << i;
       dbgs() << ".\n";
     });
     if (Cost < BestCost) {
-      BestCand = Cand;
+      BestCand = NumCands;
       BestCost = Hysteresis * Cost; // Prevent rounding effects.
+    }
+    ++NumCands;
+  }
+
+  // No solutions found, fall back to single block splitting.
+  if (!HasCompact && BestCand == NoCand)
+    return 0;
+
+  // Prepare split editor.
+  LiveRangeEdit LREdit(VirtReg, NewVRegs, this);
+  SE->reset(LREdit, SplitSpillMode);
+
+  // Assign all edge bundles to the preferred candidate, or NoCand.
+  BundleCand.assign(Bundles->getNumBundles(), NoCand);
+
+  // Assign bundles for the best candidate region.
+  if (BestCand != NoCand) {
+    GlobalSplitCandidate &Cand = GlobalCand[BestCand];
+    if (unsigned B = Cand.getBundles(BundleCand, BestCand)) {
+      UsedCands.push_back(BestCand);
+      Cand.IntvIdx = SE->openIntv();
+      DEBUG(dbgs() << "Split for " << PrintReg(Cand.PhysReg, TRI) << " in "
+                   << B << " bundles, intv " << Cand.IntvIdx << ".\n");
+      (void)B;
     }
   }
 
-  if (BestCand == NoCand)
-    return 0;
+  // Assign bundles for the compact region.
+  if (HasCompact) {
+    GlobalSplitCandidate &Cand = GlobalCand.front();
+    assert(!Cand.PhysReg && "Compact region has no physreg");
+    if (unsigned B = Cand.getBundles(BundleCand, 0)) {
+      UsedCands.push_back(0);
+      Cand.IntvIdx = SE->openIntv();
+      DEBUG(dbgs() << "Split for compact region in " << B << " bundles, intv "
+                   << Cand.IntvIdx << ".\n");
+      (void)B;
+    }
+  }
 
-  splitAroundRegion(VirtReg, GlobalCand[BestCand], NewVRegs);
+  splitAroundRegion(LREdit, UsedCands);
   return 0;
 }
 
+
+//===----------------------------------------------------------------------===//
+//                            Per-Block Splitting
+//===----------------------------------------------------------------------===//
+
+/// tryBlockSplit - Split a global live range around every block with uses. This
+/// creates a lot of local live ranges, that will be split by tryLocalSplit if
+/// they don't allocate.
+unsigned RAGreedy::tryBlockSplit(LiveInterval &VirtReg, AllocationOrder &Order,
+                                 SmallVectorImpl<LiveInterval*> &NewVRegs) {
+  assert(&SA->getParent() == &VirtReg && "Live range wasn't analyzed");
+  unsigned Reg = VirtReg.reg;
+  bool SingleInstrs = RegClassInfo.isProperSubClass(MRI->getRegClass(Reg));
+  LiveRangeEdit LREdit(VirtReg, NewVRegs, this);
+  SE->reset(LREdit, SplitSpillMode);
+  ArrayRef<SplitAnalysis::BlockInfo> UseBlocks = SA->getUseBlocks();
+  for (unsigned i = 0; i != UseBlocks.size(); ++i) {
+    const SplitAnalysis::BlockInfo &BI = UseBlocks[i];
+    if (SA->shouldSplitSingleBlock(BI, SingleInstrs))
+      SE->splitSingleBlock(BI);
+  }
+  // No blocks were split.
+  if (LREdit.empty())
+    return 0;
+
+  // We did split for some blocks.
+  SmallVector<unsigned, 8> IntvMap;
+  SE->finish(&IntvMap);
+
+  // Tell LiveDebugVariables about the new ranges.
+  DebugVars->splitRegister(Reg, LREdit.regs());
+
+  ExtraRegInfo.resize(MRI->getNumVirtRegs());
+
+  // Sort out the new intervals created by splitting. The remainder interval
+  // goes straight to spilling, the new local ranges get to stay RS_New.
+  for (unsigned i = 0, e = LREdit.size(); i != e; ++i) {
+    LiveInterval &LI = *LREdit.get(i);
+    if (getStage(LI) == RS_New && IntvMap[i] == 0)
+      setStage(LI, RS_Spill);
+  }
+
+  if (VerifyEnabled)
+    MF->verify(this, "After splitting live range around basic blocks");
+  return 0;
+}
 
 //===----------------------------------------------------------------------===//
 //                             Local Splitting
@@ -1218,8 +1274,10 @@ void RAGreedy::calcGapWeights(unsigned PhysReg,
   const unsigned NumGaps = Uses.size()-1;
 
   // Start and end points for the interference check.
-  SlotIndex StartIdx = BI.LiveIn ? BI.FirstUse.getBaseIndex() : BI.FirstUse;
-  SlotIndex StopIdx = BI.LiveOut ? BI.LastUse.getBoundaryIndex() : BI.LastUse;
+  SlotIndex StartIdx =
+    BI.LiveIn ? BI.FirstInstr.getBaseIndex() : BI.FirstInstr;
+  SlotIndex StopIdx =
+    BI.LiveOut ? BI.LastInstr.getBoundaryIndex() : BI.LastInstr;
 
   GapWeight.assign(NumGaps, 0.0f);
 
@@ -1229,8 +1287,8 @@ void RAGreedy::calcGapWeights(unsigned PhysReg,
            .checkInterference())
       continue;
 
-    // We know that VirtReg is a continuous interval from FirstUse to LastUse,
-    // so we don't need InterferenceQuery.
+    // We know that VirtReg is a continuous interval from FirstInstr to
+    // LastInstr, so we don't need InterferenceQuery.
     //
     // Interference that overlaps an instruction is counted in both gaps
     // surrounding the instruction. The exception is interference before
@@ -1270,8 +1328,8 @@ unsigned RAGreedy::tryLocalSplit(LiveInterval &VirtReg, AllocationOrder &Order,
   // while only covering a single block - A phi-def can use undef values from
   // predecessors, and the block could be a single-block loop.
   // We don't bother doing anything clever about such a case, we simply assume
-  // that the interval is continuous from FirstUse to LastUse. We should make
-  // sure that we don't do anything illegal to such an interval, though.
+  // that the interval is continuous from FirstInstr to LastInstr. We should
+  // make sure that we don't do anything illegal to such an interval, though.
 
   const SmallVectorImpl<SlotIndex> &Uses = SA->UseSlots;
   if (Uses.size() <= 2)
@@ -1293,17 +1351,17 @@ unsigned RAGreedy::tryLocalSplit(LiveInterval &VirtReg, AllocationOrder &Order,
   //
   // Instead we use these rules:
   //
-  // 1. Allow any split for ranges with getStage() < RS_Local. (Except for the
+  // 1. Allow any split for ranges with getStage() < RS_Split2. (Except for the
   //    noop split, of course).
-  // 2. Require progress be made for ranges with getStage() >= RS_Local. All
+  // 2. Require progress be made for ranges with getStage() == RS_Split2. All
   //    the new ranges must have fewer instructions than before the split.
-  // 3. New ranges with the same number of instructions are marked RS_Local,
+  // 3. New ranges with the same number of instructions are marked RS_Split2,
   //    smaller ranges are marked RS_New.
   //
   // These rules allow a 3 -> 2+3 split once, which we need. They also prevent
   // excessive splitting and infinite loops.
   //
-  bool ProgressRequired = getStage(VirtReg) >= RS_Local;
+  bool ProgressRequired = getStage(VirtReg) >= RS_Split2;
 
   // Best split candidate.
   unsigned BestBefore = NumGaps;
@@ -1422,7 +1480,7 @@ unsigned RAGreedy::tryLocalSplit(LiveInterval &VirtReg, AllocationOrder &Order,
   DebugVars->splitRegister(VirtReg.reg, LREdit.regs());
 
   // If the new range has the same number of instructions as before, mark it as
-  // RS_Local so the next split will be forced to make progress. Otherwise,
+  // RS_Split2 so the next split will be forced to make progress. Otherwise,
   // leave the new intervals as RS_New so they can compete.
   bool LiveBefore = BestBefore != 0 || BI.LiveIn;
   bool LiveAfter = BestAfter != NumGaps || BI.LiveOut;
@@ -1430,10 +1488,9 @@ unsigned RAGreedy::tryLocalSplit(LiveInterval &VirtReg, AllocationOrder &Order,
   if (NewGaps >= NumGaps) {
     DEBUG(dbgs() << "Tagging non-progress ranges: ");
     assert(!ProgressRequired && "Didn't make progress when it was required.");
-    LRStage.resize(MRI->getNumVirtRegs());
     for (unsigned i = 0, e = IntvMap.size(); i != e; ++i)
       if (IntvMap[i] == 1) {
-        LRStage[LREdit.get(i)->reg] = RS_Local;
+        setStage(*LREdit.get(i), RS_Split2);
         DEBUG(dbgs() << PrintReg(LREdit.get(i)->reg));
       }
     DEBUG(dbgs() << '\n');
@@ -1452,6 +1509,10 @@ unsigned RAGreedy::tryLocalSplit(LiveInterval &VirtReg, AllocationOrder &Order,
 /// @return Physreg when VirtReg may be assigned and/or new NewVRegs.
 unsigned RAGreedy::trySplit(LiveInterval &VirtReg, AllocationOrder &Order,
                             SmallVectorImpl<LiveInterval*>&NewVRegs) {
+  // Ranges must be Split2 or less.
+  if (getStage(VirtReg) >= RS_Spill)
+    return 0;
+
   // Local intervals are handled separately.
   if (LIS->intervalIsInOneMBB(VirtReg)) {
     NamedRegionTimer T("Local Splitting", TimerGroupName, TimePassesIsEnabled);
@@ -1460,11 +1521,6 @@ unsigned RAGreedy::trySplit(LiveInterval &VirtReg, AllocationOrder &Order,
   }
 
   NamedRegionTimer T("Global Splitting", TimerGroupName, TimePassesIsEnabled);
-
-  // Don't iterate global splitting.
-  // Move straight to spilling if this range was produced by a global split.
-  if (getStage(VirtReg) >= RS_Global)
-    return 0;
 
   SA->analyze(&VirtReg);
 
@@ -1479,24 +1535,17 @@ unsigned RAGreedy::trySplit(LiveInterval &VirtReg, AllocationOrder &Order,
       return PhysReg;
   }
 
-  // First try to split around a region spanning multiple blocks.
-  unsigned PhysReg = tryRegionSplit(VirtReg, Order, NewVRegs);
-  if (PhysReg || !NewVRegs.empty())
-    return PhysReg;
-
-  // Then isolate blocks with multiple uses.
-  SplitAnalysis::BlockPtrSet Blocks;
-  if (SA->getMultiUseBlocks(Blocks)) {
-    LiveRangeEdit LREdit(VirtReg, NewVRegs, this);
-    SE->reset(LREdit);
-    SE->splitSingleBlocks(Blocks);
-    setStage(NewVRegs.begin(), NewVRegs.end(), RS_Global);
-    if (VerifyEnabled)
-      MF->verify(this, "After splitting live range around basic blocks");
+  // First try to split around a region spanning multiple blocks. RS_Split2
+  // ranges already made dubious progress with region splitting, so they go
+  // straight to single block splitting.
+  if (getStage(VirtReg) < RS_Split2) {
+    unsigned PhysReg = tryRegionSplit(VirtReg, Order, NewVRegs);
+    if (PhysReg || !NewVRegs.empty())
+      return PhysReg;
   }
 
-  // Don't assign any physregs.
-  return 0;
+  // Then isolate blocks.
+  return tryBlockSplit(VirtReg, Order, NewVRegs);
 }
 
 
@@ -1512,12 +1561,13 @@ unsigned RAGreedy::selectOrSplit(LiveInterval &VirtReg,
     return PhysReg;
 
   LiveRangeStage Stage = getStage(VirtReg);
-  DEBUG(dbgs() << StageName[Stage] << '\n');
+  DEBUG(dbgs() << StageName[Stage]
+               << " Cascade " << ExtraRegInfo[VirtReg.reg].Cascade << '\n');
 
   // Try to evict a less worthy live range, but only for ranges from the primary
-  // queue. The RS_Second ranges already failed to do this, and they should not
+  // queue. The RS_Split ranges already failed to do this, and they should not
   // get a second chance until they have been split.
-  if (Stage != RS_Second)
+  if (Stage != RS_Split)
     if (unsigned PhysReg = tryEvict(VirtReg, Order, NewVRegs))
       return PhysReg;
 
@@ -1526,8 +1576,8 @@ unsigned RAGreedy::selectOrSplit(LiveInterval &VirtReg,
   // The first time we see a live range, don't try to split or spill.
   // Wait until the second time, when all smaller ranges have been allocated.
   // This gives a better picture of the interference to split around.
-  if (Stage == RS_First) {
-    LRStage[VirtReg.reg] = RS_Second;
+  if (Stage < RS_Split) {
+    setStage(VirtReg, RS_Split);
     DEBUG(dbgs() << "wait for second round\n");
     NewVRegs.push_back(&VirtReg);
     return 0;
@@ -1535,7 +1585,7 @@ unsigned RAGreedy::selectOrSplit(LiveInterval &VirtReg,
 
   // If we couldn't allocate a register from spilling, there is probably some
   // invalid inline assembly. The base class wil report it.
-  if (Stage >= RS_Spill)
+  if (Stage >= RS_Done || !VirtReg.isSpillable())
     return ~0u;
 
   // Try splitting VirtReg or interferences.
@@ -1547,7 +1597,7 @@ unsigned RAGreedy::selectOrSplit(LiveInterval &VirtReg,
   NamedRegionTimer T("Spiller", TimerGroupName, TimePassesIsEnabled);
   LiveRangeEdit LRE(VirtReg, NewVRegs, this);
   spiller().spill(LRE);
-  setStage(NewVRegs.begin(), NewVRegs.end(), RS_Spill);
+  setStage(NewVRegs.begin(), NewVRegs.end(), RS_Done);
 
   if (VerifyEnabled)
     MF->verify(this, "After spilling");
@@ -1571,16 +1621,17 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
   DomTree = &getAnalysis<MachineDominatorTree>();
   SpillerInstance.reset(createInlineSpiller(*this, *MF, *VRM));
   Loops = &getAnalysis<MachineLoopInfo>();
-  LoopRanges = &getAnalysis<MachineLoopRanges>();
   Bundles = &getAnalysis<EdgeBundles>();
   SpillPlacer = &getAnalysis<SpillPlacement>();
   DebugVars = &getAnalysis<LiveDebugVariables>();
 
   SA.reset(new SplitAnalysis(*VRM, *LIS, *Loops));
   SE.reset(new SplitEditor(*SA, *LIS, *VRM, *DomTree));
-  LRStage.clear();
-  LRStage.resize(MRI->getNumVirtRegs());
+  ExtraRegInfo.clear();
+  ExtraRegInfo.resize(MRI->getNumVirtRegs());
+  NextCascade = 1;
   IntfCache.init(MF, &PhysReg2LiveUnion[0], Indexes, TRI);
+  GlobalCand.resize(32);  // This will grow as needed.
 
   allocatePhysRegs();
   addMBBLiveIns(MF);
@@ -1593,7 +1644,10 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
   }
 
   // Write out new DBG_VALUE instructions.
-  DebugVars->emitDebugValues(VRM);
+  {
+    NamedRegionTimer T("Emit Debug Info", TimerGroupName, TimePassesIsEnabled);
+    DebugVars->emitDebugValues(VRM);
+  }
 
   // The pass output is in VirtRegMap. Release all the transient data.
   releaseMemory();

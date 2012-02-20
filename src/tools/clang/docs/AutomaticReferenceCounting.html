@@ -580,8 +580,9 @@ respectively, is poor form.</p>
 <p>In general, a program which attempts to implicitly or explicitly
 convert a value of retainable object pointer type to any
 non-retainable type, or vice-versa, is ill-formed.  For example, an
-Objective-C object pointer shall not be converted to <tt>intptr_t</tt>
-or <tt>void*</tt>.  The <a href="#objects.operands.casts">bridged
+Objective-C object pointer shall not be converted to <tt>void*</tt>. 
+As an exception, cast to <tt>intptr_t</tt> is allowed becuase such 
+casts are not transferring ownership. The <a href="#objects.operands.casts">bridged
 casts</a> may be used to perform these conversions where
 necessary.</p>
 
@@ -685,6 +686,43 @@ type.</p>
 <p>If an ownership qualifier appears anywhere else in a declarator, it
 applies to the type there.</p>
 
+<div id="ownership.spelling.property">
+<h1>Property declarations</h1>
+
+<p>A property of retainable object pointer type may have ownership.
+If the property's type is ownership-qualified, then the property has
+that ownership.  If the property has one of the following modifiers,
+then the property has the corresponding ownership.  A property is
+ill-formed if it has conflicting sources of ownership, or if it has
+redundant ownership modifiers, or if it has <tt>__autoreleasing</tt>
+ownership.</p>
+
+<ul>
+<li><tt>assign</tt> implies <tt>__unsafe_unretained</tt> ownership.</li>
+<li><tt>copy</tt> implies <tt>__strong</tt> ownership, as well as the
+  usual behavior of copy semantics on the setter.</li>
+<li><tt>retain</tt> implies <tt>__strong</tt> ownership.</li>
+<li><tt>strong</tt> implies <tt>__strong</tt> ownership.</li>
+<li><tt>unsafe_unretained</tt> implies <tt>__unsafe_unretained</tt>
+  ownership.</li>
+<li><tt>weak</tt> implies <tt>__weak</tt> ownership.</li>
+</ul>
+
+<p>With the exception of <tt>weak</tt>, these modifiers are available
+in non-ARC modes.</p>
+
+<p>A property's specified ownership is preserved in its metadata, but
+otherwise the meaning is purely conventional unless the property is
+synthesized.  If a property is synthesized, then the
+<span class="term">associated instance variable</span> is the
+instance variable which is named, possibly implicitly, by the
+<tt>@synthesize</tt> declaration.  If the associated instance variable
+already exists, then its ownership qualification must equal the
+ownership of the property; otherwise, the instance variable is created
+with that ownership qualification.</p>
+
+</div> <!-- ownership.spelling.property -->
+
 </div> <!-- ownership.spelling -->
 
 <div id="ownership.semantics">
@@ -769,8 +807,39 @@ lvalues, moving is equivalent to reading the object.</p>
 <div id="ownership.restrictions">
 <h1>Restrictions</h1>
 
+<div id="ownership.restrictions.weak">
+<h1>Weak-unavailable types</h1>
+
+<p>It is explicitly permitted for Objective-C classes to not
+support <tt>__weak</tt> references.  It is undefined behavior to
+perform an operation with weak assignment semantics with a pointer to
+an Objective-C object whose class does not support <tt>__weak</tt>
+references.</p>
+
+<div class="rationale"><p>Rationale: historically, it has been
+possible for a class to provide its own reference-count implementation
+by overriding <tt>retain</tt>, <tt>release</tt>, etc.  However, weak
+references to an object require coordination with its class's
+reference-count implementation because, among other things, weak loads
+and stores must be atomic with respect to the final release.
+Therefore, existing custom reference-count implementations will
+generally not support weak references without additional effort.  This
+is unavoidable without breaking binary compatibility.</p></div>
+
+<p>A class may indicate that it does not support weak references by
+providing the <tt>objc_arc_weak_unavailable</tt> attribute on the
+class's interface declaration.  A retainable object pointer type
+is <span class="term">weak-unavailable</span> if is a pointer to an
+(optionally protocol-qualified) Objective-C class <tt>T</tt>
+where <tt>T</tt> or one of its superclasses has
+the <tt>objc_arc_weak_unavailable</tt> attribute.  A program is
+ill-formed if it applies the <tt>__weak</tt> ownership qualifier to a
+weak-unavailable type or if the value operand of a weak assignment
+operation has a weak-unavailable type.</p>
+</div> <!-- ownership.restrictions.weak -->
+
 <div id="ownership.restrictions.autoreleasing">
-<h1>Storage duration of<tt> __autoreleasing</tt> objects</h1>
+<h1>Storage duration of <tt>__autoreleasing</tt> objects</h1>
 
 <p>A program is ill-formed if it declares an <tt>__autoreleasing</tt>
 object of non-automatic storage duration.</p>
@@ -937,7 +1006,7 @@ with a <tt>void*</tt> or an <tt>__unsafe_unretained</tt>
 object.</p></div>
 
 <p>This restriction does not apply in Objective-C++.  However,
-nontrivally ownership-qualified types are considered non-POD: in C++0x
+nontrivally ownership-qualified types are considered non-POD: in C++11
 terms, they are not trivially default constructible, copy
 constructible, move constructible, copy assignable, move assignable,
 or destructible.  It is a violation of C++ One Definition Rule to use
@@ -1140,9 +1209,15 @@ annotating the method with either of
 the <tt>ns_returns_autoreleased</tt> or
 <tt>ns_returns_not_retained</tt> attributes.</p>
 
+<p>Properties also follow same naming rules as methods. This means that 
+those in the <tt>alloc</tt>, <tt>copy</tt>, <tt>mutableCopy</tt>,
+and <tt>new</tt> families provide access to 
+<a href="#objects.operands.retained_returns">retained objects</a>. 
+This can be overridden by annotating the property with 
+<tt>ns_returns_not_retained</tt> attribute.</p>
+
 <div id="family.semantics.init">
 <h1>Semantics of <tt>init</tt></h1>
-
 <p>Methods in the <tt>init</tt> family implicitly
 <a href="#objects.operands.consumed">consume</a> their <tt>self</tt>
 parameter and <a href="#objects.operands.retained_returns">return a
@@ -1407,9 +1482,12 @@ implementation.</p></div>
 <p>The <tt>self</tt> parameter variable of an Objective-C method is
 never actually retained by the implementation.  It is undefined
 behavior, or at least dangerous, to cause an object to be deallocated
-during a message send to that object.  To make this
-safe, <tt>self</tt> is implicitly <tt>const</tt> unless the method is
-in the <a href="#family.semantics.init"><tt>init</tt> family</a>.</p>
+during a message send to that object.</p>
+
+<p>To make this safe, for Objective-C instance methods <tt>self</tt> is
+implicitly <tt>const</tt> unless the method is in the <a
+href="#family.semantics.init"><tt>init</tt> family</a>. Further, <tt>self</tt>
+is <b>always</b> implicitly <tt>const</tt> within a class method.</p>
 
 <div class="rationale"><p>Rationale: the cost of
 retaining <tt>self</tt> in all methods was found to be prohibitive, as

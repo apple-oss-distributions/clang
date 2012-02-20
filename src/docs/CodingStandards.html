@@ -2,6 +2,7 @@
                       "http://www.w3.org/TR/html4/strict.dtd">
 <html>
 <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
   <link rel="stylesheet" href="llvm.css" type="text/css">
   <title>LLVM Coding Standards</title>
 </head>
@@ -854,8 +855,12 @@ rules:</p>
 
 <ul>
 <li><p><b>Type names</b> (including classes, structs, enums, typedefs, etc)
-  should be nouns and start with an upper-case letter (e.g.
-  <tt>TextFileReader</tt>).</p></li>
+    should be nouns and start with an upper-case letter (e.g.
+    <tt>TextFileReader</tt>).</p></li>
+
+<li><p><b>Variable names</b> should be nouns (as they represent state).  The
+    name should be camel case, and start with an upper case letter (e.g.
+    <tt>Leader</tt> or <tt>Boats</tt>).</p></li>
   
 <li><p><b>Function names</b> should be verb phrases (as they represent
     actions), and command-like function should be imperative.  The name should

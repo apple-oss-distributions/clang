@@ -50,9 +50,15 @@ if(SUPPORTS_NO_VARIADIC_MACROS_FLAG)
   add_definitions("-Wno-variadic-macros")
 endif()
 
+add_clang_unittest(AST
+  AST/APValueTest.cpp
+  USED_LIBS gtest gtest_main clangAST
+ )
+
 add_clang_unittest(Basic
   Basic/FileManagerTest.cpp
-  USED_LIBS gtest gtest_main clangBasic
+  Basic/SourceManagerTest.cpp
+  USED_LIBS gtest gtest_main clangLex
  )
 
 add_clang_unittest(Frontend

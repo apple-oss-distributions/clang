@@ -11,20 +11,18 @@
 #include "clang/Lex/Lexer.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/FileManager.h"
-
 using namespace clang;
 using namespace arcmt;
-using llvm::StringRef;
 
 // FIXME: This duplicates significant functionality from PlistDiagnostics.cpp,
 // it would be jolly good if there was a reusable PlistWriter or something.
 
 typedef llvm::DenseMap<FileID, unsigned> FIDMap;
 
-static void AddFID(FIDMap &FIDs, llvm::SmallVectorImpl<FileID> &V,
+static void AddFID(FIDMap &FIDs, SmallVectorImpl<FileID> &V,
                    const SourceManager &SM, SourceLocation L) {
 
-  FileID FID = SM.getFileID(SM.getInstantiationLoc(L));
+  FileID FID = SM.getFileID(SM.getExpansionLoc(L));
   FIDMap::iterator I = FIDs.find(FID);
   if (I != FIDs.end()) return;
   FIDs[FID] = V.size();
@@ -33,23 +31,23 @@ static void AddFID(FIDMap &FIDs, llvm::SmallVectorImpl<FileID> &V,
 
 static unsigned GetFID(const FIDMap& FIDs, const SourceManager &SM,
                        SourceLocation L) {
-  FileID FID = SM.getFileID(SM.getInstantiationLoc(L));
+  FileID FID = SM.getFileID(SM.getExpansionLoc(L));
   FIDMap::const_iterator I = FIDs.find(FID);
   assert(I != FIDs.end());
   return I->second;
 }
 
-static llvm::raw_ostream& Indent(llvm::raw_ostream& o, const unsigned indent) {
+static raw_ostream& Indent(raw_ostream& o, const unsigned indent) {
   for (unsigned i = 0; i < indent; ++i) o << ' ';
   return o;
 }
 
-static void EmitLocation(llvm::raw_ostream& o, const SourceManager &SM,
+static void EmitLocation(raw_ostream& o, const SourceManager &SM,
                          const LangOptions &LangOpts,
                          SourceLocation L, const FIDMap &FM,
                          unsigned indent, bool extend = false) {
 
-  FullSourceLoc Loc(SM.getInstantiationLoc(L), const_cast<SourceManager&>(SM));
+  FullSourceLoc Loc(SM.getExpansionLoc(L), const_cast<SourceManager&>(SM));
 
   // Add in the length of the token, so that we cover multi-char tokens.
   unsigned offset =
@@ -57,15 +55,15 @@ static void EmitLocation(llvm::raw_ostream& o, const SourceManager &SM,
 
   Indent(o, indent) << "<dict>\n";
   Indent(o, indent) << " <key>line</key><integer>"
-                    << Loc.getInstantiationLineNumber() << "</integer>\n";
+                    << Loc.getExpansionLineNumber() << "</integer>\n";
   Indent(o, indent) << " <key>col</key><integer>"
-                    << Loc.getInstantiationColumnNumber() + offset << "</integer>\n";
+                    << Loc.getExpansionColumnNumber() + offset << "</integer>\n";
   Indent(o, indent) << " <key>file</key><integer>"
                     << GetFID(FM, SM, Loc) << "</integer>\n";
   Indent(o, indent) << "</dict>\n";
 }
 
-static void EmitRange(llvm::raw_ostream& o, const SourceManager &SM,
+static void EmitRange(raw_ostream& o, const SourceManager &SM,
                       const LangOptions &LangOpts,
                       CharSourceRange R, const FIDMap &FM,
                       unsigned indent) {
@@ -75,7 +73,7 @@ static void EmitRange(llvm::raw_ostream& o, const SourceManager &SM,
   Indent(o, indent) << "</array>\n";
 }
 
-static llvm::raw_ostream& EmitString(llvm::raw_ostream& o,
+static raw_ostream& EmitString(raw_ostream& o,
                                      StringRef s) {
   o << "<string>";
   for (StringRef::const_iterator I=s.begin(), E=s.end(); I!=E; ++I) {
@@ -94,7 +92,7 @@ static llvm::raw_ostream& EmitString(llvm::raw_ostream& o,
 }
 
 void arcmt::writeARCDiagsToPlist(const std::string &outPath,
-                                 llvm::ArrayRef<StoredDiagnostic> diags,
+                                 ArrayRef<StoredDiagnostic> diags,
                                  SourceManager &SM,
                                  const LangOptions &LangOpts) {
   DiagnosticIDs DiagIDs;
@@ -102,9 +100,9 @@ void arcmt::writeARCDiagsToPlist(const std::string &outPath,
   // Build up a set of FIDs that we use by scanning the locations and
   // ranges of the diagnostics.
   FIDMap FM;
-  llvm::SmallVector<FileID, 10> Fids;
+  SmallVector<FileID, 10> Fids;
 
-  for (llvm::ArrayRef<StoredDiagnostic>::iterator
+  for (ArrayRef<StoredDiagnostic>::iterator
          I = diags.begin(), E = diags.end(); I != E; ++I) {
     const StoredDiagnostic &D = *I;
 
@@ -137,7 +135,7 @@ void arcmt::writeARCDiagsToPlist(const std::string &outPath,
        " <key>files</key>\n"
        " <array>\n";
 
-  for (llvm::SmallVectorImpl<FileID>::iterator I=Fids.begin(), E=Fids.end();
+  for (SmallVectorImpl<FileID>::iterator I=Fids.begin(), E=Fids.end();
        I!=E; ++I) {
     o << "  ";
     EmitString(o, SM.getFileEntryForID(*I)->getName()) << '\n';
@@ -147,12 +145,12 @@ void arcmt::writeARCDiagsToPlist(const std::string &outPath,
        " <key>diagnostics</key>\n"
        " <array>\n";
 
-  for (llvm::ArrayRef<StoredDiagnostic>::iterator
+  for (ArrayRef<StoredDiagnostic>::iterator
          DI = diags.begin(), DE = diags.end(); DI != DE; ++DI) {
     
     const StoredDiagnostic &D = *DI;
 
-    if (D.getLevel() == Diagnostic::Ignored)
+    if (D.getLevel() == DiagnosticsEngine::Ignored)
       continue;
 
     o << "  <dict>\n";
@@ -164,9 +162,9 @@ void arcmt::writeARCDiagsToPlist(const std::string &outPath,
     EmitString(o, DiagIDs.getCategoryNameFromID(
                           DiagIDs.getCategoryNumberForDiag(D.getID()))) << '\n';
     o << "   <key>type</key>";
-    if (D.getLevel() >= Diagnostic::Error)
+    if (D.getLevel() >= DiagnosticsEngine::Error)
       EmitString(o, "error") << '\n';
-    else if (D.getLevel() == Diagnostic::Warning)
+    else if (D.getLevel() == DiagnosticsEngine::Warning)
       EmitString(o, "warning") << '\n';
     else
       EmitString(o, "note") << '\n';

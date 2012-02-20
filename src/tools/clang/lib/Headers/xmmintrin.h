@@ -501,31 +501,45 @@ _mm_cvtss_f32(__m128 a)
 static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
 _mm_loadh_pi(__m128 a, const __m64 *p)
 {
-  __m128 b;
-  b[0] = *(float*)p;
-  b[1] = *((float*)p+1);
-  return __builtin_shufflevector(a, b, 0, 1, 4, 5);
+  typedef float __mm_loadh_pi_v2f32 __attribute__((__vector_size__(8)));
+  struct __mm_loadh_pi_struct {
+    __mm_loadh_pi_v2f32 u;
+  } __attribute__((__packed__, __may_alias__));
+  __mm_loadh_pi_v2f32 b = ((struct __mm_loadh_pi_struct*)p)->u;
+  __m128 bb = __builtin_shufflevector(b, b, 0, 1, 0, 1);
+  return __builtin_shufflevector(a, bb, 0, 1, 4, 5);
 }
 
 static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
 _mm_loadl_pi(__m128 a, const __m64 *p)
 {
-  __m128 b;
-  b[0] = *(float*)p;
-  b[1] = *((float*)p+1);
-  return __builtin_shufflevector(a, b, 4, 5, 2, 3);
+  typedef float __mm_loadl_pi_v2f32 __attribute__((__vector_size__(8)));
+  struct __mm_loadl_pi_struct {
+    __mm_loadl_pi_v2f32 u;
+  } __attribute__((__packed__, __may_alias__));
+  __mm_loadl_pi_v2f32 b = ((struct __mm_loadl_pi_struct*)p)->u;
+  __m128 bb = __builtin_shufflevector(b, b, 0, 1, 0, 1);
+  return __builtin_shufflevector(a, bb, 4, 5, 2, 3);
 }
 
 static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
 _mm_load_ss(const float *p)
 {
-  return (__m128){ *p, 0, 0, 0 };
+  struct __mm_load_ss_struct {
+    float u;
+  } __attribute__((__packed__, __may_alias__));
+  float u = ((struct __mm_load_ss_struct*)p)->u;
+  return (__m128){ u, 0, 0, 0 };
 }
 
 static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
 _mm_load1_ps(const float *p)
 {
-  return (__m128){ *p, *p, *p, *p };
+  struct __mm_load1_ps_struct {
+    float u;
+  } __attribute__((__packed__, __may_alias__));
+  float u = ((struct __mm_load1_ps_struct*)p)->u;
+  return (__m128){ u, u, u, u };
 }
 
 #define        _mm_load_ps1(p) _mm_load1_ps(p)
@@ -541,7 +555,7 @@ _mm_loadu_ps(const float *p)
 {
   struct __loadu_ps {
     __m128 v;
-  } __attribute__((packed, may_alias));
+  } __attribute__((__packed__, __may_alias__));
   return ((struct __loadu_ps*)p)->v;
 }
 
@@ -604,7 +618,10 @@ _mm_storel_pi(__m64 *p, __m128 a)
 static __inline__ void __attribute__((__always_inline__))
 _mm_store_ss(float *p, __m128 a)
 {
-  *p = a[0];
+  struct __mm_store_ss_struct {
+    float u;
+  } __attribute__((__packed__, __may_alias__));
+  ((struct __mm_store_ss_struct*)p)->u = a[0];
 }
 
 static __inline__ void __attribute__((__always_inline__, __nodebug__))
@@ -718,8 +735,9 @@ _mm_mulhi_pu16(__m64 a, __m64 b)
   return (__m64)__builtin_ia32_pmulhuw((__v4hi)a, (__v4hi)b);  
 }
 
-#define _mm_shuffle_pi16(a, n) \
-  ((__m64)__builtin_ia32_pshufw(a, n))
+#define _mm_shuffle_pi16(a, n) __extension__ ({ \
+  __m64 __a = (a); \
+  (__m64)__builtin_ia32_pshufw((__v4hi)__a, (n)); })
 
 static __inline__ void __attribute__((__always_inline__, __nodebug__))
 _mm_maskmove_si64(__m64 d, __m64 n, char *p)
@@ -757,11 +775,13 @@ _mm_setcsr(unsigned int i)
   __builtin_ia32_ldmxcsr(i);
 }
 
-#define _mm_shuffle_ps(a, b, mask) \
-        (__builtin_shufflevector((__v4sf)(a), (__v4sf)(b),                \
-                                 (mask) & 0x3, ((mask) & 0xc) >> 2, \
-                                 (((mask) & 0x30) >> 4) + 4, \
-                                 (((mask) & 0xc0) >> 6) + 4))
+#define _mm_shuffle_ps(a, b, mask) __extension__ ({ \
+  __m128 __a = (a); \
+  __m128 __b = (b); \
+  (__m128)__builtin_shufflevector((__v4sf)__a, (__v4sf)__b, \
+                                  (mask) & 0x3, ((mask) & 0xc) >> 2, \
+                                  (((mask) & 0x30) >> 4) + 4, \
+                                  (((mask) & 0xc0) >> 6) + 4); })
 
 static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
 _mm_unpackhi_ps(__m128 a, __m128 b)
@@ -918,7 +938,7 @@ _mm_movemask_ps(__m128 a)
 
 #define _MM_FLUSH_ZERO_MASK   (0x8000)
 #define _MM_FLUSH_ZERO_ON     (0x8000)
-#define _MM_FLUSH_ZERO_OFF    (0x8000)
+#define _MM_FLUSH_ZERO_OFF    (0x0000)
 
 #define _MM_GET_EXCEPTION_MASK() (_mm_getcsr() & _MM_MASK_MASK)
 #define _MM_GET_EXCEPTION_STATE() (_mm_getcsr() & _MM_EXCEPT_MASK)

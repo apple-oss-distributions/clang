@@ -19,14 +19,12 @@
 namespace llvm {
 
 class MCOperand;
-class TargetMachine;
 
 class PPCInstPrinter : public MCInstPrinter {
   // 0 -> AIX, 1 -> Darwin.
   unsigned SyntaxVariant;
 public:
-  PPCInstPrinter(TargetMachine &TM, const MCAsmInfo &MAI,
-                 unsigned syntaxVariant)
+  PPCInstPrinter(const MCAsmInfo &MAI, unsigned syntaxVariant)
     : MCInstPrinter(MAI), SyntaxVariant(syntaxVariant) {}
   
   bool isDarwinSyntax() const {
@@ -34,7 +32,7 @@ public:
   }
   
   virtual void printRegName(raw_ostream &OS, unsigned RegNo) const;
-  virtual void printInst(const MCInst *MI, raw_ostream &O);
+  virtual void printInst(const MCInst *MI, raw_ostream &O, StringRef Annot);
   virtual StringRef getOpcodeName(unsigned Opcode) const;
   
   static const char *getInstructionName(unsigned Opcode);

@@ -14,7 +14,7 @@
 
 #include "InstrInfoEmitter.h"
 #include "CodeGenTarget.h"
-#include "Record.h"
+#include "llvm/TableGen/Record.h"
 #include "llvm/ADT/StringExtras.h"
 #include <algorithm>
 using namespace llvm;
@@ -121,6 +121,11 @@ InstrInfoEmitter::GetOperandInfo(const CodeGenInstruction &Inst) {
                     " << 16) | (1 << MCOI::TIED_TO))";
       }
 
+      // Fill in operand type.
+      Res += ", MCOI::";
+      assert(!Inst.Operands[i].OperandType.empty() && "Invalid operand type.");
+      Res += Inst.Operands[i].OperandType;
+
       Result.push_back(Res);
     }
   }
@@ -198,8 +203,7 @@ void InstrInfoEmitter::run(raw_ostream &OS) {
 
   // Emit all of the MCInstrDesc records in their ENUM ordering.
   //
-  OS << "\nstatic const MCInstrDesc " << TargetName
-     << "Insts[] = {\n";
+  OS << "\nextern const MCInstrDesc " << TargetName << "Insts[] = {\n";
   const std::vector<const CodeGenInstruction*> &NumberedInstructions =
     Target.getInstructionsByEnumValue();
 
@@ -235,6 +239,7 @@ void InstrInfoEmitter::run(raw_ostream &OS) {
   OS << "#undef GET_INSTRINFO_CTOR\n";
 
   OS << "namespace llvm {\n";
+  OS << "extern const MCInstrDesc " << TargetName << "Insts[];\n";
   OS << ClassName << "::" << ClassName << "(int SO, int DO)\n"
      << "  : TargetInstrInfoImpl(SO, DO) {\n"
      << "  InitMCInstrInfo(" << TargetName << "Insts, "
@@ -257,10 +262,13 @@ void InstrInfoEmitter::emitRecord(const CodeGenInstruction &Inst, unsigned Num,
 
   OS << "  { ";
   OS << Num << ",\t" << MinOperands << ",\t"
-     << Inst.Operands.NumDefs << ",\t" << getItinClassNumber(Inst.TheDef)
-     << ",\t\"" << Inst.TheDef->getName() << "\", 0";
+     << Inst.Operands.NumDefs << ",\t"
+     << getItinClassNumber(Inst.TheDef) << ",\t"
+     << Inst.TheDef->getValueAsInt("Size") << ",\t\""
+     << Inst.TheDef->getName() << "\", 0";
 
   // Emit all of the target indepedent flags...
+  if (Inst.isPseudo)           OS << "|(1<<MCID::Pseudo)";
   if (Inst.isReturn)           OS << "|(1<<MCID::Return)";
   if (Inst.isBranch)           OS << "|(1<<MCID::Branch)";
   if (Inst.isIndirectBranch)   OS << "|(1<<MCID::IndirectBranch)";
@@ -281,6 +289,7 @@ void InstrInfoEmitter::emitRecord(const CodeGenInstruction &Inst, unsigned Num,
   if (Inst.isNotDuplicable)    OS << "|(1<<MCID::NotDuplicable)";
   if (Inst.Operands.hasOptionalDef) OS << "|(1<<MCID::HasOptionalDef)";
   if (Inst.usesCustomInserter) OS << "|(1<<MCID::UsesCustomInserter)";
+  if (Inst.hasPostISelHook)    OS << "|(1<<MCID::HasPostISelHook)";
   if (Inst.Operands.isVariadic)OS << "|(1<<MCID::Variadic)";
   if (Inst.hasSideEffects)     OS << "|(1<<MCID::UnmodeledSideEffects)";
   if (Inst.isAsCheapAsAMove)   OS << "|(1<<MCID::CheapAsAMove)";

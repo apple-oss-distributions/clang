@@ -12,7 +12,8 @@ CheckArches = \
   $(shell \
     result=""; \
     for arch in $(1); do \
-      if $(CC) -arch $$arch -c -x c /dev/null \
+      if $(CC) -arch $$arch -c \
+	  $(ProjSrcRoot)/make/platform/clang_darwin_test_input.c \
 	  -o /dev/null > /dev/null 2> /dev/null; then \
         result="$$result$$arch "; \
       fi; \
@@ -20,6 +21,8 @@ CheckArches = \
     echo $$result)
 
 ###
+
+CC := clang
 
 Configs :=
 UniversalArchs :=
@@ -51,9 +54,26 @@ UniversalArchs.osx := $(call CheckArches,i386 x86_64)
 Configs += cc_kext
 UniversalArchs.cc_kext := $(call CheckArches,i386 x86_64 armv6 armv7 armv7f armv7k)
 
-###
+# Configurations which define the profiling support functions.
+Configs += profile_osx
+UniversalArchs.profile_osx := $(call CheckArches,i386 x86_64)
+Configs += profile_ios
+UniversalArchs.profile_ios := $(call CheckArches,i386 x86_64 armv6 armv7 armv7f armv7k)
 
-CC := gcc
+# If RC_SUPPORTED_ARCHS is defined, treat it as a list of the architectures we
+# are intended to support and limit what we try to build to that.
+#
+# We make sure to remove empty configs if we end up dropping all the requested
+# archs for a particular config.
+ifneq ($(RC_SUPPORTED_ARCHS),)
+$(foreach config,$(Configs),\
+  $(call Set,UniversalArchs.$(config),\
+	$(filter $(RC_SUPPORTED_ARCHS),$(UniversalArchs.$(config))))\
+  $(if $(UniversalArchs.$(config)),,\
+	$(call Set,Configs,$(filter-out $(config),$(Configs)))))
+endif
+
+###
 
 # Forcibly strip off any -arch, as that totally breaks our universal support.
 override CC := $(subst -arch ,-arch_,$(CC))
@@ -65,30 +85,39 @@ CFLAGS := -Wall -Werror -O3 -fomit-frame-pointer
 # never depend on the environmental overrides. We simply set them to minimum
 # supported deployment target -- nothing in the compiler-rt libraries should
 # actually depend on the deployment target.
-X86_DEPLOYMENT_ARGS := -mmacosx-version-min=10.4
-ARM_DEPLOYMENT_ARGS := -miphoneos-version-min=1.0
+OSX_DEPLOYMENT_ARGS := -mmacosx-version-min=10.4
+IOS_DEPLOYMENT_ARGS := -miphoneos-version-min=1.0
+IOSSIM_DEPLOYMENT_ARGS := -miphoneos-version-min=1.0
 
-# If an explicit ARM_SDK build variable is set, use that as the isysroot.
-ifneq ($(ARM_SDK),)
-ARM_DEPLOYMENT_ARGS += -isysroot $(ARM_SDK)
-endif
+# Use our stub SDK as the sysroot to support more portable building.
+OSX_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
+IOS_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
+IOSSIM_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
 
-CFLAGS.eprintf		:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.10.4		:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.ios.i386		:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.ios.x86_64	:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.ios.armv6	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
-CFLAGS.ios.armv7	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
-CFLAGS.ios.armv7f	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
-CFLAGS.ios.armv7k	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
-CFLAGS.osx.i386         := $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.osx.x86_64       := $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.i386	:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.x86_64	:= $(CFLAGS) $(X86_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.armv6	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS) -mthumb
-CFLAGS.cc_kext.armv7	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS) -mthumb
-CFLAGS.cc_kext.armv7f	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.armv7k	:= $(CFLAGS) $(ARM_DEPLOYMENT_ARGS)
+CFLAGS.eprintf		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.10.4		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.ios.i386		:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.ios.x86_64	:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.ios.armv6	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.ios.armv7	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.ios.armv7f	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.ios.armv7k	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.osx.i386		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.osx.x86_64	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.i386	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.x86_64	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.armv6	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS) -mthumb
+CFLAGS.cc_kext.armv7	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.armv7f	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.armv7k	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.profile_osx.i386   := $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.profile_osx.x86_64 := $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.i386   := $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.x86_64 := $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.armv6  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.armv7  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.armv7f := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.armv7k := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 
 FUNCTIONS.eprintf := eprintf
 FUNCTIONS.10.4 := eprintf floatundidf floatundisf floatundixf
@@ -105,6 +134,9 @@ FUNCTIONS.ios.armv6 := $(FUNCTIONS.ios) \
                        save_vfp_d8_d15_regs restore_vfp_d8_d15_regs
 
 FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4
+
+FUNCTIONS.profile_osx := GCDAProfiling
+FUNCTIONS.profile_ios := GCDAProfiling
 
 CCKEXT_COMMON_FUNCTIONS := \
 	absvdi2 \
@@ -217,10 +249,44 @@ CCKEXT_ARM_FUNCTIONS := $(CCKEXT_COMMON_FUNCTIONS) \
 	unorddf2 \
 	unordsf2
 
-FUNCTIONS.cc_kext.armv6 := $(CCKEXT_ARM_FUNCTIONS)
-FUNCTIONS.cc_kext.armv7 := $(CCKEXT_ARM_FUNCTIONS)
-FUNCTIONS.cc_kext.armv7f := $(CCKEXT_ARM_FUNCTIONS)
-FUNCTIONS.cc_kext.armv7k := $(CCKEXT_ARM_FUNCTIONS)
+CCKEXT_ARMVFP_FUNCTIONS := $(CCKEXT_ARM_FUNCTIONS) \
+	adddf3vfp \
+	addsf3vfp \
+	divdf3vfp \
+	divsf3vfp \
+	eqdf2vfp \
+	eqsf2vfp \
+	extendsfdf2vfp \
+	fixdfsivfp \
+	fixsfsivfp \
+	fixunsdfsivfp \
+	fixunssfsivfp \
+	floatsidfvfp \
+	floatsisfvfp \
+	floatunssidfvfp \
+	floatunssisfvfp \
+	gedf2vfp \
+	gesf2vfp \
+	gtdf2vfp \
+	gtsf2vfp \
+	ledf2vfp \
+	lesf2vfp \
+	ltdf2vfp \
+	ltsf2vfp \
+	muldf3vfp \
+	mulsf3vfp \
+	nedf2vfp \
+	nesf2vfp \
+	subdf3vfp \
+	subsf3vfp \
+	truncdfsf2vfp \
+	unorddf2vfp \
+	unordsf2vfp
+
+FUNCTIONS.cc_kext.armv6 := $(CCKEXT_ARMVFP_FUNCTIONS)
+FUNCTIONS.cc_kext.armv7 := $(CCKEXT_ARMVFP_FUNCTIONS)
+FUNCTIONS.cc_kext.armv7f := $(CCKEXT_ARMVFP_FUNCTIONS)
+FUNCTIONS.cc_kext.armv7k := $(CCKEXT_ARMVFP_FUNCTIONS)
 
 CCKEXT_X86_FUNCTIONS := $(CCKEXT_COMMON_FUNCTIONS) \
 	divxc3 \

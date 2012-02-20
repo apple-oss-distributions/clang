@@ -13,19 +13,20 @@
 
 #include "MSP430Subtarget.h"
 #include "MSP430.h"
+#include "llvm/Support/TargetRegistry.h"
 
-#define GET_SUBTARGETINFO_CTOR
-#define GET_SUBTARGETINFO_MC_DESC
 #define GET_SUBTARGETINFO_TARGET_DESC
+#define GET_SUBTARGETINFO_CTOR
 #include "MSP430GenSubtargetInfo.inc"
 
 using namespace llvm;
 
 MSP430Subtarget::MSP430Subtarget(const std::string &TT,
-                                 const std::string &CPUIgnored,
-                                 const std::string &FS) {
-  std::string CPU = "generic";
+                                 const std::string &CPU,
+                                 const std::string &FS) :
+  MSP430GenSubtargetInfo(TT, CPU, FS) {
+  std::string CPUName = "generic";
 
   // Parse features string.
-  ParseSubtargetFeatures(FS, CPU);
+  ParseSubtargetFeatures(CPUName, FS);
 }

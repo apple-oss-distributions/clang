@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements SlotIndex and related classes. The purpuse of SlotIndex
+// This file implements SlotIndex and related classes. The purpose of SlotIndex
 // is to describe a position at which a register can become live, or cease to
 // be live.
 //
@@ -139,6 +139,9 @@ namespace llvm {
     bool isValid() const {
       return lie.getPointer();
     }
+
+    /// Return true for a valid index.
+    operator bool() const { return isValid(); }
 
     /// Print this index to the given raw_ostream.
     void print(raw_ostream &os) const;

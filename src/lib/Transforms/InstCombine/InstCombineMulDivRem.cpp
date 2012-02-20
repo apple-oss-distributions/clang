@@ -38,7 +38,7 @@ static Value *simplifyValueKnownNonZero(Value *V, InstCombiner &IC) {
                       m_Value(B))) &&
       // The "1" can be any value known to be a power of 2.
       isPowerOfTwo(PowerOf2, IC.getTargetData())) {
-    A = IC.Builder->CreateSub(A, B, "tmp");
+    A = IC.Builder->CreateSub(A, B);
     return IC.Builder->CreateShl(PowerOf2, A);
   }
   
@@ -131,7 +131,7 @@ Instruction *InstCombiner::visitMul(BinaryOperator &I) {
     { Value *X; ConstantInt *C1;
       if (Op0->hasOneUse() &&
           match(Op0, m_Add(m_Value(X), m_ConstantInt(C1)))) {
-        Value *Add = Builder->CreateMul(X, CI, "tmp");
+        Value *Add = Builder->CreateMul(X, CI);
         return BinaryOperator::CreateAdd(Add, Builder->CreateMul(C1, CI));
       }
     }
@@ -244,7 +244,7 @@ Instruction *InstCombiner::visitMul(BinaryOperator &I) {
 
     if (BoolCast) {
       Value *V = Builder->CreateSub(Constant::getNullValue(I.getType()),
-                                    BoolCast, "tmp");
+                                    BoolCast);
       return BinaryOperator::CreateAnd(V, OtherOp);
     }
   }
@@ -421,7 +421,7 @@ Instruction *InstCombiner::commonIDivTransforms(BinaryOperator &I) {
 
 /// dyn_castZExtVal - Checks if V is a zext or constant that can
 /// be truncated to Ty without losing bits.
-static Value *dyn_castZExtVal(Value *V, const Type *Ty) {
+static Value *dyn_castZExtVal(Value *V, Type *Ty) {
   if (ZExtInst *Z = dyn_cast<ZExtInst>(V)) {
     if (Z->getSrcTy() == Ty)
       return Z->getOperand(0);
@@ -441,19 +441,23 @@ Instruction *InstCombiner::visitUDiv(BinaryOperator &I) {
   // Handle the integer div common cases
   if (Instruction *Common = commonIDivTransforms(I))
     return Common;
-
-  if (ConstantInt *C = dyn_cast<ConstantInt>(Op1)) {
+  
+  { 
     // X udiv 2^C -> X >> C
     // Check to see if this is an unsigned division with an exact power of 2,
     // if so, convert to a right shift.
-    if (C->getValue().isPowerOf2()) { // 0 not included in isPowerOf2
+    const APInt *C;
+    if (match(Op1, m_Power2(C))) {
       BinaryOperator *LShr =
-        BinaryOperator::CreateLShr(Op0, 
-            ConstantInt::get(Op0->getType(), C->getValue().logBase2()));
+      BinaryOperator::CreateLShr(Op0, 
+                                 ConstantInt::get(Op0->getType(), 
+                                                  C->logBase2()));
       if (I.isExact()) LShr->setIsExact();
       return LShr;
     }
+  }
 
+  if (ConstantInt *C = dyn_cast<ConstantInt>(Op1)) {
     // X udiv C, where C >= signbit
     if (C->getValue().isNegative()) {
       Value *IC = Builder->CreateICmpULT(Op0, C);
@@ -466,8 +470,7 @@ Instruction *InstCombiner::visitUDiv(BinaryOperator &I) {
   { const APInt *CI; Value *N;
     if (match(Op1, m_Shl(m_Power2(CI), m_Value(N)))) {
       if (*CI != 1)
-        N = Builder->CreateAdd(N, ConstantInt::get(I.getType(), CI->logBase2()),
-                               "tmp");
+        N = Builder->CreateAdd(N, ConstantInt::get(I.getType(),CI->logBase2()));
       if (I.isExact())
         return BinaryOperator::CreateExactLShr(Op0, N);
       return BinaryOperator::CreateLShr(Op0, N);
@@ -630,7 +633,7 @@ Instruction *InstCombiner::visitURem(BinaryOperator &I) {
   // Turn A % (C << N), where C is 2^k, into A & ((C << N)-1)  
   if (match(Op1, m_Shl(m_Power2(), m_Value()))) {
     Constant *N1 = Constant::getAllOnesValue(I.getType());
-    Value *Add = Builder->CreateAdd(Op1, N1, "tmp");
+    Value *Add = Builder->CreateAdd(Op1, N1);
     return BinaryOperator::CreateAnd(Op0, Add);
   }
 
@@ -691,14 +694,14 @@ Instruction *InstCombiner::visitSRem(BinaryOperator &I) {
     bool hasNegative = false;
     for (unsigned i = 0; !hasNegative && i != VWidth; ++i)
       if (ConstantInt *RHS = dyn_cast<ConstantInt>(RHSV->getOperand(i)))
-        if (RHS->getValue().isNegative())
+        if (RHS->isNegative())
           hasNegative = true;
 
     if (hasNegative) {
       std::vector<Constant *> Elts(VWidth);
       for (unsigned i = 0; i != VWidth; ++i) {
         if (ConstantInt *RHS = dyn_cast<ConstantInt>(RHSV->getOperand(i))) {
-          if (RHS->getValue().isNegative())
+          if (RHS->isNegative())
             Elts[i] = cast<ConstantInt>(ConstantExpr::getNeg(RHS));
           else
             Elts[i] = RHS;

@@ -15,6 +15,7 @@
 #ifndef LLVM_ANALYSIS_VALUETRACKING_H
 #define LLVM_ANALYSIS_VALUETRACKING_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/DataTypes.h"
 #include <string>
 
@@ -47,8 +48,10 @@ namespace llvm {
   /// isPowerOfTwo - Return true if the given value is known to have exactly one
   /// bit set when defined. For vectors return true if every element is known to
   /// be a power of two when defined.  Supports values with integer or pointer
-  /// type and vectors of integers.
-  bool isPowerOfTwo(Value *V, const TargetData *TD = 0, unsigned Depth = 0);
+  /// type and vectors of integers.  If 'OrZero' is set then returns true if the
+  /// given value is either a power of two or zero.
+  bool isPowerOfTwo(Value *V, const TargetData *TD = 0, bool OrZero = false,
+                    unsigned Depth = 0);
 
   /// isKnownNonZero - Return true if the given value is known to be non-zero
   /// when defined.  For vectors return true if every element is known to be
@@ -108,18 +111,9 @@ namespace llvm {
   /// If InsertBefore is not null, this function will duplicate (modified)
   /// insertvalues when a part of a nested struct is extracted.
   Value *FindInsertedValue(Value *V,
-                           const unsigned *idx_begin,
-                           const unsigned *idx_end,
+                           ArrayRef<unsigned> idx_range,
                            Instruction *InsertBefore = 0);
 
-  /// This is a convenience wrapper for finding values indexed by a single index
-  /// only.
-  inline Value *FindInsertedValue(Value *V, const unsigned Idx,
-                                  Instruction *InsertBefore = 0) {
-    const unsigned Idxs[1] = { Idx };
-    return FindInsertedValue(V, &Idxs[0], &Idxs[1], InsertBefore);
-  }
-  
   /// GetPointerBaseWithConstantOffset - Analyze the specified pointer to see if
   /// it can be expressed as a base pointer plus a constant offset.  Return the
   /// base and offset to the caller.

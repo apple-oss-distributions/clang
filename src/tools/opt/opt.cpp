@@ -35,11 +35,11 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PluginLoader.h"
 #include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/PassManagerBuilder.h"
 #include "llvm/Support/SystemUtils.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/LinkAllPasses.h"
 #include "llvm/LinkAllVMCore.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include <memory>
 #include <algorithm>
 using namespace llvm;
@@ -431,8 +431,6 @@ static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
 static void AddStandardCompilePasses(PassManagerBase &PM) {
   PM.add(createVerifierPass());                  // Verify that input is correct
 
-  addPass(PM, createLowerSetJmpPass());          // Lower llvm.setjmp/.longjmp
-
   // If the -strip-debug command line option was specified, do it.
   if (StripDebug)
     addPass(PM, createStripSymbolsPass(true));
@@ -507,7 +505,7 @@ int main(int argc, char **argv) {
   M.reset(ParseIRFile(InputFilename, Err, Context));
 
   if (M.get() == 0) {
-    Err.Print(argv[0], errs());
+    Err.print(argv[0], errs());
     return 1;
   }
 

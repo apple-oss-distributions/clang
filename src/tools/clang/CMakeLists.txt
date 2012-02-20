@@ -19,8 +19,12 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
     endif()
   endif()
 
-  if( NOT EXISTS "${CLANG_PATH_TO_LLVM_BUILD}/bin/tblgen${CMAKE_EXECUTABLE_SUFFIX}" )
-    message(FATAL_ERROR "Please set CLANG_PATH_TO_LLVM_BUILD to a directory containing a LLVM build.")
+  if( NOT EXISTS "${CLANG_PATH_TO_LLVM_BUILD}/bin/llvm-tblgen${CMAKE_EXECUTABLE_SUFFIX}" )
+    # Looking for bin/Debug/llvm-tblgen is a complete hack. How can we get
+    # around this?
+    if( NOT EXISTS "${CLANG_PATH_TO_LLVM_BUILD}/bin/Debug/llvm-tblgen${CMAKE_EXECUTABLE_SUFFIX}" )
+      message(FATAL_ERROR "Please set CLANG_PATH_TO_LLVM_BUILD to a directory containing a LLVM build.")
+    endif()
   endif()
 
   list(APPEND CMAKE_MODULE_PATH "${CLANG_PATH_TO_LLVM_BUILD}/share/llvm/cmake")
@@ -42,7 +46,12 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
   include_directories("${PATH_TO_LLVM_BUILD}/include" "${LLVM_MAIN_INCLUDE_DIR}")
   link_directories("${PATH_TO_LLVM_BUILD}/lib")
 
-  set(LLVM_TABLEGEN_EXE "${PATH_TO_LLVM_BUILD}/bin/tblgen")
+  if( EXISTS "${CLANG_PATH_TO_LLVM_BUILD}/bin/llvm-tblgen${CMAKE_EXECUTABLE_SUFFIX}" )
+    set(LLVM_TABLEGEN_EXE "${PATH_TO_LLVM_BUILD}/bin/llvm-tblgen${CMAKE_EXECUTABLE_SUFFIX}")
+  else()
+    # FIXME: This is an utter hack.
+    set(LLVM_TABLEGEN_EXE "${PATH_TO_LLVM_BUILD}/bin/Debug/llvm-tblgen${CMAKE_EXECUTABLE_SUFFIX}")
+  endif()
 
   set( CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin )
   set( CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib )
@@ -144,7 +153,7 @@ function(clang_tablegen)
   endif()
 
   set( LLVM_TARGET_DEFINITIONS ${CTG_SOURCE} )
-  tablegen( ${CTG_DEFAULT_ARGS} )
+  tablegen( CLANG ${CTG_DEFAULT_ARGS} )
 
   list( GET CTG_DEFAULT_ARGS 0 output_file )
   if( CTG_TARGET )
@@ -235,6 +244,7 @@ set(LIBCLANG_LIBRARY_VERSION
     "Version number that will be placed into the libclang library , in the form XX.YY")
 mark_as_advanced(CLANG_EXECUTABLE_VERSION LIBCLANG_LIBRARY_VERSION)
 
+add_subdirectory(utils/TableGen)
 
 option(CLANG_BUILD_EXAMPLES "Build CLANG example programs." OFF)
 if(CLANG_BUILD_EXAMPLES)
@@ -263,3 +273,6 @@ if( CLANG_BUILT_STANDALONE AND MSVC_VERSION EQUAL 1600 )
     file(APPEND "${CLANG_SLN_FILENAME}" "\n# This should be regenerated!\n")
   endif()
 endif()
+
+set(BUG_REPORT_URL "http://llvm.org/bugs/" CACHE STRING
+  "Default URL where bug reports are to be submitted.")
