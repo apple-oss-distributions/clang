@@ -97,7 +97,7 @@ IdentifierResolver::IdDeclInfo::ReplaceDecl(NamedDecl *Old, NamedDecl *New) {
 //===----------------------------------------------------------------------===//
 
 IdentifierResolver::IdentifierResolver(Preprocessor &PP)
-  : LangOpt(PP.getLangOptions()), PP(PP),
+  : LangOpt(PP.getLangOpts()), PP(PP),
     IdDeclInfos(new IdDeclInfoMap) {
 }
 
@@ -113,7 +113,7 @@ bool IdentifierResolver::isDeclInScope(Decl *D, DeclContext *Ctx,
                              bool ExplicitInstantiationOrSpecialization) const {
   Ctx = Ctx->getRedeclContext();
 
-  if (Ctx->isFunctionOrMethod()) {
+  if (Ctx->isFunctionOrMethod() || S->isFunctionPrototypeScope()) {
     // Ignore the scopes associated within transparent declaration contexts.
     while (S->getEntity() &&
            ((DeclContext *)S->getEntity())->isTransparentContext())
@@ -202,10 +202,6 @@ void IdentifierResolver::InsertDeclAfter(iterator Pos, NamedDecl *D) {
     return;
   }
 
-  if (IdentifierInfo *II = Name.getAsIdentifierInfo())
-    if (II->isFromAST())
-      II->setChangedSinceDeserialization();
-  
   // General case: insert the declaration at the appropriate point in the 
   // list, which already has at least two elements.
   IdDeclInfo *IDI = toIdDeclInfo(Ptr);
@@ -318,21 +314,12 @@ static DeclMatchKind compareDeclarations(NamedDecl *Existing, NamedDecl *New) {
     return DMK_Ignore;
   }
   
-  // If the declarations are both Objective-C classes, and one is a forward
-  // declaration and the other is not, take the full definition.
-  // FIXME: At some point, we'll actually have to detect collisions better.
-  // This logic, however, belongs in the AST reader, not here.
-  if (ObjCInterfaceDecl *ExistingIFace = dyn_cast<ObjCInterfaceDecl>(Existing))
-    if (ObjCInterfaceDecl *NewIFace = dyn_cast<ObjCInterfaceDecl>(New))
-      if (ExistingIFace->isForwardDecl() != NewIFace->isForwardDecl())
-        return ExistingIFace->isForwardDecl()? DMK_Replace : DMK_Ignore;
-        
   return DMK_Different;
 }
 
 bool IdentifierResolver::tryAddTopLevelDecl(NamedDecl *D, DeclarationName Name){
   if (IdentifierInfo *II = Name.getAsIdentifierInfo())
-    updatingIdentifier(*II);
+    readingIdentifier(*II);
   
   void *Ptr = Name.getFETokenInfo<void>();
     

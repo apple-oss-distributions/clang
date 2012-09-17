@@ -191,19 +191,12 @@ RValue CodeGenFunction::EmitCompoundStmt(const CompoundStmt &S, bool GetLast,
   PrettyStackTraceLoc CrashInfo(getContext().getSourceManager(),S.getLBracLoc(),
                              "LLVM IR generation of compound statement ('{}')");
 
-  CGDebugInfo *DI = getDebugInfo();
-  if (DI)
-    DI->EmitLexicalBlockStart(Builder, S.getLBracLoc());
-
-  // Keep track of the current cleanup stack depth.
-  RunCleanupsScope Scope(*this);
+  // Keep track of the current cleanup stack depth, including debug scopes.
+  LexicalScope Scope(*this, S.getSourceRange());
 
   for (CompoundStmt::const_body_iterator I = S.body_begin(),
        E = S.body_end()-GetLast; I != E; ++I)
     EmitStmt(*I);
-
-  if (DI)
-    DI->EmitLexicalBlockEnd(Builder, S.getRBracLoc());
 
   RValue RV;
   if (!GetLast)
@@ -878,6 +871,16 @@ void CodeGenFunction::EmitCaseStmtRange(const CaseStmt &S) {
 }
 
 void CodeGenFunction::EmitCaseStmt(const CaseStmt &S) {
+  // If there is no enclosing switch instance that we're aware of, then this
+  // case statement and its block can be elided.  This situation only happens
+  // when we've constant-folded the switch, are emitting the constant case,
+  // and part of the constant case includes another case statement.  For 
+  // instance: switch (4) { case 4: do { case 5: } while (1); }
+  if (!SwitchInsn) {
+    EmitStmt(S.getSubStmt());
+    return;
+  }
+
   // Handle case ranges.
   if (S.getRHS()) {
     EmitCaseStmtRange(S);
@@ -1152,6 +1155,10 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   if (S.getConditionVariable())
     EmitAutoVarDecl(*S.getConditionVariable());
 
+  // Handle nested switch statements.
+  llvm::SwitchInst *SavedSwitchInsn = SwitchInsn;
+  llvm::BasicBlock *SavedCRBlock = CaseRangeBlock;
+
   // See if we can constant fold the condition of the switch and therefore only
   // emit the live case statement (if any) of the switch.
   llvm::APInt ConstantCondValue;
@@ -1161,19 +1168,25 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
                                    getContext())) {
       RunCleanupsScope ExecutedScope(*this);
 
+      // At this point, we are no longer "within" a switch instance, so
+      // we can temporarily enforce this to ensure that any embedded case
+      // statements are not emitted.
+      SwitchInsn = 0;
+
       // Okay, we can dead code eliminate everything except this case.  Emit the
       // specified series of statements and we're good.
       for (unsigned i = 0, e = CaseStmts.size(); i != e; ++i)
         EmitStmt(CaseStmts[i]);
+
+      // Now we want to restore the saved switch instance so that nested switches
+      // continue to function properly
+      SwitchInsn = SavedSwitchInsn;
+
       return;
     }
   }
     
   llvm::Value *CondV = EmitScalarExpr(S.getCond());
-
-  // Handle nested switch statements.
-  llvm::SwitchInst *SavedSwitchInsn = SwitchInsn;
-  llvm::BasicBlock *SavedCRBlock = CaseRangeBlock;
 
   // Create basic block to hold stuff that comes after switch
   // statement. We also need to create a default block now so that
@@ -1201,7 +1214,7 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
 
   // Update the default block in case explicit case range tests have
   // been chained on top.
-  SwitchInsn->setSuccessor(0, CaseRangeBlock);
+  SwitchInsn->setDefaultDest(CaseRangeBlock);
 
   // If a default was never emitted:
   if (!DefaultBlock->getParent()) {
@@ -1357,7 +1370,7 @@ static llvm::MDNode *getAsmSrcLocInfo(const StringLiteral *Str,
   StringRef StrVal = Str->getString();
   if (!StrVal.empty()) {
     const SourceManager &SM = CGF.CGM.getContext().getSourceManager();
-    const LangOptions &LangOpts = CGF.CGM.getLangOptions();
+    const LangOptions &LangOpts = CGF.CGM.getLangOpts();
     
     // Add the location of the start of each subsequent line of the asm to the
     // MDNode.
@@ -1492,6 +1505,11 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
       llvm::Value *Arg = EmitAsmInputLValue(S, Info, Dest, InputExpr->getType(),
                                             InOutConstraints);
 
+      if (llvm::Type* AdjTy =
+            getTargetHooks().adjustInlineAsmType(*this, OutputConstraint,
+                                                 Arg->getType()))
+        Arg = Builder.CreateBitCast(Arg, AdjTy);
+
       if (Info.allowsRegister())
         InOutConstraints += llvm::utostr(i);
       else
@@ -1550,7 +1568,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
         }
       }
     }
-    if (llvm::Type* AdjTy = 
+    if (llvm::Type* AdjTy =
               getTargetHooks().adjustInlineAsmType(*this, InputConstraint,
                                                    Arg->getType()))
       Arg = Builder.CreateBitCast(Arg, AdjTy);
@@ -1592,7 +1610,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
   llvm::Type *ResultType;
   if (ResultRegTypes.empty())
-    ResultType = llvm::Type::getVoidTy(getLLVMContext());
+    ResultType = VoidTy;
   else if (ResultRegTypes.size() == 1)
     ResultType = ResultRegTypes[0];
   else

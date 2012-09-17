@@ -21,7 +21,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "LegalizeTypes.h"
-#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -405,6 +404,10 @@ void DAGTypeLegalizer::SplitVectorResult(SDNode *N, unsigned ResNo) {
         N->dump(&DAG);
         dbgs() << "\n");
   SDValue Lo, Hi;
+  
+  // See if the target wants to custom expand this node.
+  if (CustomLowerNode(N, N->getValueType(ResNo), true))
+    return;
 
   switch (N->getOpcode()) {
   default:
@@ -442,8 +445,10 @@ void DAGTypeLegalizer::SplitVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::ANY_EXTEND:
   case ISD::CONVERT_RNDSAT:
   case ISD::CTLZ:
-  case ISD::CTPOP:
   case ISD::CTTZ:
+  case ISD::CTLZ_ZERO_UNDEF:
+  case ISD::CTTZ_ZERO_UNDEF:
+  case ISD::CTPOP:
   case ISD::FABS:
   case ISD::FCEIL:
   case ISD::FCOS:
@@ -1564,12 +1569,15 @@ SDValue DAGTypeLegalizer::WidenVecRes_BITCAST(SDNode *N) {
   DebugLoc dl = N->getDebugLoc();
 
   switch (getTypeAction(InVT)) {
-  default:
-    assert(false && "Unknown type action!");
-    break;
   case TargetLowering::TypeLegal:
     break;
   case TargetLowering::TypePromoteInteger:
+    // If the incoming type is a vector that is being promoted, then
+    // we know that the elements are arranged differently and that we
+    // must perform the conversion using a stack slot.
+    if (InVT.isVector())
+      break;
+
     // If the InOp is promoted to the same size, convert it.  Otherwise,
     // fall out of the switch and widen the promoted input.
     InOp = GetPromotedInteger(InOp);
@@ -2325,19 +2333,37 @@ SDValue DAGTypeLegalizer::GenWidenVectorLoads(SmallVector<SDValue, 16> &LdChain,
     BasePtr = DAG.getNode(ISD::ADD, dl, BasePtr.getValueType(), BasePtr,
                           DAG.getIntPtrConstant(Increment));
 
+    SDValue L;
     if (LdWidth < NewVTWidth) {
       // Our current type we are using is too large, find a better size
       NewVT = FindMemType(DAG, TLI, LdWidth, WidenVT, LdAlign, WidthDiff);
       NewVTWidth = NewVT.getSizeInBits();
-    }
-
-    SDValue LdOp = DAG.getLoad(NewVT, dl, Chain, BasePtr,
+      L = DAG.getLoad(NewVT, dl, Chain, BasePtr,
                                LD->getPointerInfo().getWithOffset(Offset),
                                isVolatile,
                                isNonTemporal, isInvariant,
                                MinAlign(Align, Increment));
-    LdChain.push_back(LdOp.getValue(1));
-    LdOps.push_back(LdOp);
+      LdChain.push_back(L.getValue(1));
+      if (L->getValueType(0).isVector()) {
+        SmallVector<SDValue, 16> Loads;
+        Loads.push_back(L);
+        unsigned size = L->getValueSizeInBits(0);
+        while (size < LdOp->getValueSizeInBits(0)) {
+          Loads.push_back(DAG.getUNDEF(L->getValueType(0)));
+          size += L->getValueSizeInBits(0);
+        }
+        L = DAG.getNode(ISD::CONCAT_VECTORS, dl, LdOp->getValueType(0),
+                        &Loads[0], Loads.size());
+      }
+    } else {
+      L = DAG.getLoad(NewVT, dl, Chain, BasePtr,
+                      LD->getPointerInfo().getWithOffset(Offset), isVolatile,
+                      isNonTemporal, isInvariant, MinAlign(Align, Increment));
+      LdChain.push_back(L.getValue(1));
+    }
+
+    LdOps.push_back(L);
+
 
     LdWidth -= NewVTWidth;
   }

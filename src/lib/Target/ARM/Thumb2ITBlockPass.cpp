@@ -1,4 +1,4 @@
-//===-- Thumb2ITBlockPass.cpp - Insert Thumb IT blocks ----------*- C++ -*-===//
+//===-- Thumb2ITBlockPass.cpp - Insert Thumb-2 IT blocks ------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,6 +13,7 @@
 #include "Thumb2InstrInfo.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineInstrBundle.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
@@ -141,7 +142,7 @@ Thumb2ITBlockPass::MoveCopyOutOfITBlock(MachineInstr *MI,
   //   rsb   r2, 0
   //
   const MCInstrDesc &MCID = MI->getDesc();
-  if (MCID.hasOptionalDef() &&
+  if (MI->hasOptionalDef() &&
       MI->getOperand(MCID.getNumOperands() - 1).getReg() == ARM::CPSR)
     return false;
 
@@ -198,7 +199,7 @@ bool Thumb2ITBlockPass::InsertITInstructions(MachineBasicBlock &MBB) {
     // Branches, including tricky ones like LDM_RET, need to end an IT
     // block so check the instruction we just put in the block.
     for (; MBBI != E && Pos &&
-           (!MI->getDesc().isBranch() && !MI->getDesc().isReturn()) ; ++MBBI) {
+           (!MI->isBranch() && !MI->isReturn()) ; ++MBBI) {
       if (MBBI->isDebugValue())
         continue;
 
@@ -236,6 +237,10 @@ bool Thumb2ITBlockPass::InsertITInstructions(MachineBasicBlock &MBB) {
 
     // Last instruction in IT block kills ITSTATE.
     LastITMI->findRegisterUseOperand(ARM::ITSTATE)->setIsKill();
+
+    // Finalize the bundle.
+    MachineBasicBlock::instr_iterator LI = LastITMI;
+    finalizeBundle(MBB, InsertPos.getInstrIterator(), llvm::next(LI));
 
     Modified = true;
     ++NumITs;

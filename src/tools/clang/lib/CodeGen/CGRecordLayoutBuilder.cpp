@@ -531,6 +531,7 @@ void CGRecordLayoutBuilder::LayoutUnion(const RecordDecl *D) {
   CharUnits unionAlign = CharUnits::Zero();
 
   bool hasOnlyZeroSizedBitFields = true;
+  bool checkedFirstFieldZeroInit = false;
 
   unsigned fieldNo = 0;
   for (RecordDecl::field_iterator field = D->field_begin(),
@@ -541,6 +542,11 @@ void CGRecordLayoutBuilder::LayoutUnion(const RecordDecl *D) {
 
     if (!fieldType)
       continue;
+
+    if (field->getDeclName() && !checkedFirstFieldZeroInit) {
+      CheckZeroInitializable(field->getType());
+      checkedFirstFieldZeroInit = true;
+    }
 
     hasOnlyZeroSizedBitFields = false;
 
@@ -714,7 +720,13 @@ CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
       llvm::FunctionType::get(llvm::Type::getInt32Ty(Types.getLLVMContext()),
                               /*isVarArg=*/true);
     llvm::Type *VTableTy = FunctionType->getPointerTo();
-    
+
+    if (getTypeAlignment(VTableTy) > Alignment) {
+      // FIXME: Should we allow this to happen in Sema?
+      assert(!Packed && "Alignment is wrong even with packed struct!");
+      return false;
+    }
+
     assert(NextFieldOffset.isZero() &&
            "VTable pointer must come first!");
     AppendField(CharUnits::Zero(), VTableTy->getPointerTo());
@@ -965,7 +977,7 @@ void CGRecordLayoutBuilder::CheckZeroInitializable(QualType T) {
     return;
 
   // Can only have member pointers if we're compiling C++.
-  if (!Types.getContext().getLangOptions().CPlusPlus)
+  if (!Types.getContext().getLangOpts().CPlusPlus)
     return;
 
   const Type *elementType = T->getBaseElementTypeUnsafe();
@@ -991,7 +1003,7 @@ CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D,
 
   // If we're in C++, compute the base subobject type.
   llvm::StructType *BaseTy = 0;
-  if (isa<CXXRecordDecl>(D)) {
+  if (isa<CXXRecordDecl>(D) && !D->isUnion()) {
     BaseTy = Builder.BaseSubobjectType;
     if (!BaseTy) BaseTy = Ty;
   }
@@ -1010,7 +1022,7 @@ CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D,
   RL->BitFields.swap(Builder.BitFields);
 
   // Dump the layout, if requested.
-  if (getContext().getLangOptions().DumpRecordLayouts) {
+  if (getContext().getLangOpts().DumpRecordLayouts) {
     llvm::errs() << "\n*** Dumping IRgen Record Layout\n";
     llvm::errs() << "Record: ";
     D->dump();

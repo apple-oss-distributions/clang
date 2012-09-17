@@ -54,7 +54,8 @@ public:
 
 class CXDiagnosticImpl {
 public:
-  enum Kind { StoredDiagnosticKind, LoadedDiagnosticKind };
+  enum Kind { StoredDiagnosticKind, LoadedDiagnosticKind,
+              CustomNoteDiagnosticKind };
   
   virtual ~CXDiagnosticImpl();
   
@@ -72,7 +73,10 @@ public:
   
   /// \brief Return the category of the diagnostic.
   virtual unsigned getCategory() const = 0;
-  
+
+  /// \brief Return the category string of the diagnostic.
+  virtual CXString getCategoryText() const = 0;
+
   /// \brief Return the number of source ranges for the diagnostic.
   virtual unsigned getNumRanges() const = 0;
   
@@ -131,6 +135,9 @@ struct CXStoredDiagnostic : public CXDiagnosticImpl {
   /// \brief Return the category of the diagnostic.
   virtual unsigned getCategory() const;
   
+  /// \brief Return the category string of the diagnostic.
+  virtual CXString getCategoryText() const;
+
   /// \brief Return the number of source ranges for the diagnostic.
   virtual unsigned getNumRanges() const;
   

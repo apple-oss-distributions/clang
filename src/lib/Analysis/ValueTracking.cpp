@@ -63,13 +63,14 @@ void llvm::ComputeMaskedBits(Value *V, const APInt &Mask,
   assert(V && "No Value?");
   assert(Depth <= MaxDepth && "Limit Search Depth");
   unsigned BitWidth = Mask.getBitWidth();
-  assert((V->getType()->isIntOrIntVectorTy() || V->getType()->isPointerTy())
-         && "Not integer or pointer type!");
+  assert((V->getType()->isIntOrIntVectorTy() ||
+          V->getType()->getScalarType()->isPointerTy()) &&
+         "Not integer or pointer type!");
   assert((!TD ||
           TD->getTypeSizeInBits(V->getType()->getScalarType()) == BitWidth) &&
          (!V->getType()->isIntOrIntVectorTy() ||
           V->getType()->getScalarSizeInBits() == BitWidth) &&
-         KnownZero.getBitWidth() == BitWidth && 
+         KnownZero.getBitWidth() == BitWidth &&
          KnownOne.getBitWidth() == BitWidth &&
          "V, Mask, KnownOne and KnownZero should have same BitWidth");
 
@@ -87,30 +88,37 @@ void llvm::ComputeMaskedBits(Value *V, const APInt &Mask,
     return;
   }
   // Handle a constant vector by taking the intersection of the known bits of
-  // each element.
-  if (ConstantVector *CV = dyn_cast<ConstantVector>(V)) {
+  // each element.  There is no real need to handle ConstantVector here, because
+  // we don't handle undef in any particularly useful way.
+  if (ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(V)) {
+    // We know that CDS must be a vector of integers. Take the intersection of
+    // each element.
     KnownZero.setAllBits(); KnownOne.setAllBits();
-    for (unsigned i = 0, e = CV->getNumOperands(); i != e; ++i) {
-      APInt KnownZero2(BitWidth, 0), KnownOne2(BitWidth, 0);
-      ComputeMaskedBits(CV->getOperand(i), Mask, KnownZero2, KnownOne2,
-                        TD, Depth);
-      KnownZero &= KnownZero2;
-      KnownOne &= KnownOne2;
+    APInt Elt(KnownZero.getBitWidth(), 0);
+    for (unsigned i = 0, e = CDS->getNumElements(); i != e; ++i) {
+      Elt = CDS->getElementAsInteger(i);
+      KnownZero &= ~Elt;
+      KnownOne &= Elt;      
     }
     return;
   }
+  
   // The address of an aligned GlobalValue has trailing zeros.
   if (GlobalValue *GV = dyn_cast<GlobalValue>(V)) {
     unsigned Align = GV->getAlignment();
-    if (Align == 0 && TD && GV->getType()->getElementType()->isSized()) {
-      Type *ObjectType = GV->getType()->getElementType();
-      // If the object is defined in the current Module, we'll be giving
-      // it the preferred alignment. Otherwise, we have to assume that it
-      // may only have the minimum ABI alignment.
-      if (!GV->isDeclaration() && !GV->mayBeOverridden())
-        Align = TD->getPrefTypeAlignment(ObjectType);
-      else
-        Align = TD->getABITypeAlignment(ObjectType);
+    if (Align == 0 && TD) {
+      if (GlobalVariable *GVar = dyn_cast<GlobalVariable>(GV)) {
+        Type *ObjectType = GVar->getType()->getElementType();
+        if (ObjectType->isSized()) {
+          // If the object is defined in the current Module, we'll be giving
+          // it the preferred alignment. Otherwise, we have to assume that it
+          // may only have the minimum ABI alignment.
+          if (!GVar->isDeclaration() && !GVar->isWeakForLinker())
+            Align = TD->getPreferredAlignment(GVar);
+          else
+            Align = TD->getABITypeAlignment(ObjectType);
+        }
+      }
     }
     if (Align > 0)
       KnownZero = Mask & APInt::getLowBitsSet(BitWidth,
@@ -248,9 +256,14 @@ void llvm::ComputeMaskedBits(Value *V, const APInt &Mask,
                 APInt::getHighBitsSet(BitWidth, LeadZ);
     KnownZero &= Mask;
 
-    if (isKnownNonNegative)
+    // Only make use of no-wrap flags if we failed to compute the sign bit
+    // directly.  This matters if the multiplication always overflows, in
+    // which case we prefer to follow the result of the direct computation,
+    // though as the program is invoking undefined behaviour we can choose
+    // whatever we like here.
+    if (isKnownNonNegative && !KnownOne.isNegative())
       KnownZero.setBit(BitWidth - 1);
-    else if (isKnownNegative)
+    else if (isKnownNegative && !KnownZero.isNegative())
       KnownOne.setBit(BitWidth - 1);
 
     return;
@@ -536,7 +549,7 @@ void llvm::ComputeMaskedBits(Value *V, const APInt &Mask,
                         Depth+1);
       // If it's known zero, our sign bit is also zero.
       if (LHSKnownZero.isNegative())
-        KnownZero |= LHSKnownZero;
+        KnownZero.setBit(BitWidth - 1);
     }
 
     break;
@@ -680,8 +693,8 @@ void llvm::ComputeMaskedBits(Value *V, const APInt &Mask,
       if (P->hasConstantValue() == P)
         break;
 
-      KnownZero = APInt::getAllOnesValue(BitWidth);
-      KnownOne = APInt::getAllOnesValue(BitWidth);
+      KnownZero = Mask;
+      KnownOne = Mask;
       for (unsigned i = 0, e = P->getNumIncomingValues(); i != e; ++i) {
         // Skip direct self references.
         if (P->getIncomingValue(i) == P) continue;
@@ -706,16 +719,23 @@ void llvm::ComputeMaskedBits(Value *V, const APInt &Mask,
     if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
       switch (II->getIntrinsicID()) {
       default: break;
-      case Intrinsic::ctpop:
       case Intrinsic::ctlz:
       case Intrinsic::cttz: {
         unsigned LowBits = Log2_32(BitWidth)+1;
-        KnownZero = APInt::getHighBitsSet(BitWidth, BitWidth - LowBits);
+        // If this call is undefined for 0, the result will be less than 2^n.
+        if (II->getArgOperand(1) == ConstantInt::getTrue(II->getContext()))
+          LowBits -= 1;
+        KnownZero = Mask & APInt::getHighBitsSet(BitWidth, BitWidth - LowBits);
+        break;
+      }
+      case Intrinsic::ctpop: {
+        unsigned LowBits = Log2_32(BitWidth)+1;
+        KnownZero = Mask & APInt::getHighBitsSet(BitWidth, BitWidth - LowBits);
         break;
       }
       case Intrinsic::x86_sse42_crc32_64_8:
       case Intrinsic::x86_sse42_crc32_64_64:
-        KnownZero = APInt::getHighBitsSet(64, 32);
+        KnownZero = Mask & APInt::getHighBitsSet(64, 32);
         break;
       }
     }
@@ -796,11 +816,9 @@ bool llvm::isPowerOfTwo(Value *V, const TargetData *TD, bool OrZero,
   // An exact divide or right shift can only shift off zero bits, so the result
   // is a power of two only if the first operand is a power of two and not
   // copying a sign bit (sdiv int_min, 2).
-  if (match(V, m_LShr(m_Value(), m_Value())) ||
-      match(V, m_UDiv(m_Value(), m_Value()))) {
-    PossiblyExactOperator *PEO = cast<PossiblyExactOperator>(V);
-    if (PEO->isExact())
-      return isPowerOfTwo(PEO->getOperand(0), TD, OrZero, Depth);
+  if (match(V, m_Exact(m_LShr(m_Value(), m_Value()))) ||
+      match(V, m_Exact(m_UDiv(m_Value(), m_Value())))) {
+    return isPowerOfTwo(cast<Operator>(V)->getOperand(0), TD, OrZero, Depth);
   }
 
   return false;
@@ -864,10 +882,8 @@ bool llvm::isKnownNonZero(Value *V, const TargetData *TD, unsigned Depth) {
       return true;
   }
   // div exact can only produce a zero if the dividend is zero.
-  else if (match(V, m_IDiv(m_Value(X), m_Value()))) {
-    PossiblyExactOperator *BO = cast<PossiblyExactOperator>(V);
-    if (BO->isExact())
-      return isKnownNonZero(X, TD, Depth);
+  else if (match(V, m_Exact(m_IDiv(m_Value(X), m_Value())))) {
+    return isKnownNonZero(X, TD, Depth);
   }
   // X + Y.
   else if (match(V, m_Add(m_Value(X), m_Value(Y)))) {
@@ -981,30 +997,28 @@ unsigned llvm::ComputeNumSignBits(Value *V, const TargetData *TD,
     Tmp = TyBits - U->getOperand(0)->getType()->getScalarSizeInBits();
     return ComputeNumSignBits(U->getOperand(0), TD, Depth+1) + Tmp;
     
-  case Instruction::AShr:
+  case Instruction::AShr: {
     Tmp = ComputeNumSignBits(U->getOperand(0), TD, Depth+1);
-    // ashr X, C   -> adds C sign bits.
-    if (ConstantInt *C = dyn_cast<ConstantInt>(U->getOperand(1))) {
-      Tmp += C->getZExtValue();
+    // ashr X, C   -> adds C sign bits.  Vectors too.
+    const APInt *ShAmt;
+    if (match(U->getOperand(1), m_APInt(ShAmt))) {
+      Tmp += ShAmt->getZExtValue();
       if (Tmp > TyBits) Tmp = TyBits;
     }
-    // vector ashr X, <C, C, C, C>  -> adds C sign bits
-    if (ConstantVector *C = dyn_cast<ConstantVector>(U->getOperand(1))) {
-      if (ConstantInt *CI = dyn_cast_or_null<ConstantInt>(C->getSplatValue())) {
-        Tmp += CI->getZExtValue();
-        if (Tmp > TyBits) Tmp = TyBits;
-      }
-    }
     return Tmp;
-  case Instruction::Shl:
-    if (ConstantInt *C = dyn_cast<ConstantInt>(U->getOperand(1))) {
+  }
+  case Instruction::Shl: {
+    const APInt *ShAmt;
+    if (match(U->getOperand(1), m_APInt(ShAmt))) {
       // shl destroys sign bits.
       Tmp = ComputeNumSignBits(U->getOperand(0), TD, Depth+1);
-      if (C->getZExtValue() >= TyBits ||      // Bad shift.
-          C->getZExtValue() >= Tmp) break;    // Shifted all sign bits out.
-      return Tmp - C->getZExtValue();
+      Tmp2 = ShAmt->getZExtValue();
+      if (Tmp2 >= TyBits ||      // Bad shift.
+          Tmp2 >= Tmp) break;    // Shifted all sign bits out.
+      return Tmp - Tmp2;
     }
     break;
+  }
   case Instruction::And:
   case Instruction::Or:
   case Instruction::Xor:    // NOT is handled here.
@@ -1346,23 +1360,21 @@ Value *llvm::isBytewiseValue(Value *V) {
     }
   }
   
-  // A ConstantArray is splatable if all its members are equal and also
-  // splatable.
-  if (ConstantArray *CA = dyn_cast<ConstantArray>(V)) {
-    if (CA->getNumOperands() == 0)
-      return 0;
-    
-    Value *Val = isBytewiseValue(CA->getOperand(0));
+  // A ConstantDataArray/Vector is splatable if all its members are equal and
+  // also splatable.
+  if (ConstantDataSequential *CA = dyn_cast<ConstantDataSequential>(V)) {
+    Value *Elt = CA->getElementAsConstant(0);
+    Value *Val = isBytewiseValue(Elt);
     if (!Val)
       return 0;
     
-    for (unsigned I = 1, E = CA->getNumOperands(); I != E; ++I)
-      if (CA->getOperand(I-1) != CA->getOperand(I))
+    for (unsigned I = 1, E = CA->getNumElements(); I != E; ++I)
+      if (CA->getElementAsConstant(I) != Elt)
         return 0;
     
     return Val;
   }
-  
+
   // Conceptually, we could handle things like:
   //   %a = zext i8 %X to i16
   //   %b = shl i16 %a, 8
@@ -1459,50 +1471,44 @@ static Value *BuildSubAggregate(Value *From, ArrayRef<unsigned> idx_range,
 Value *llvm::FindInsertedValue(Value *V, ArrayRef<unsigned> idx_range,
                                Instruction *InsertBefore) {
   // Nothing to index? Just return V then (this is useful at the end of our
-  // recursion)
+  // recursion).
   if (idx_range.empty())
     return V;
-  // We have indices, so V should have an indexable type
-  assert((V->getType()->isStructTy() || V->getType()->isArrayTy())
-         && "Not looking at a struct or array?");
-  assert(ExtractValueInst::getIndexedType(V->getType(), idx_range)
-         && "Invalid indices for type?");
-  CompositeType *PTy = cast<CompositeType>(V->getType());
+  // We have indices, so V should have an indexable type.
+  assert((V->getType()->isStructTy() || V->getType()->isArrayTy()) &&
+         "Not looking at a struct or array?");
+  assert(ExtractValueInst::getIndexedType(V->getType(), idx_range) &&
+         "Invalid indices for type?");
 
-  if (isa<UndefValue>(V))
-    return UndefValue::get(ExtractValueInst::getIndexedType(PTy,
-                                                              idx_range));
-  else if (isa<ConstantAggregateZero>(V))
-    return Constant::getNullValue(ExtractValueInst::getIndexedType(PTy, 
-                                                                  idx_range));
-  else if (Constant *C = dyn_cast<Constant>(V)) {
-    if (isa<ConstantArray>(C) || isa<ConstantStruct>(C))
-      // Recursively process this constant
-      return FindInsertedValue(C->getOperand(idx_range[0]), idx_range.slice(1),
-                               InsertBefore);
-  } else if (InsertValueInst *I = dyn_cast<InsertValueInst>(V)) {
+  if (Constant *C = dyn_cast<Constant>(V)) {
+    C = C->getAggregateElement(idx_range[0]);
+    if (C == 0) return 0;
+    return FindInsertedValue(C, idx_range.slice(1), InsertBefore);
+  }
+    
+  if (InsertValueInst *I = dyn_cast<InsertValueInst>(V)) {
     // Loop the indices for the insertvalue instruction in parallel with the
     // requested indices
     const unsigned *req_idx = idx_range.begin();
     for (const unsigned *i = I->idx_begin(), *e = I->idx_end();
          i != e; ++i, ++req_idx) {
       if (req_idx == idx_range.end()) {
-        if (InsertBefore)
-          // The requested index identifies a part of a nested aggregate. Handle
-          // this specially. For example,
-          // %A = insertvalue { i32, {i32, i32 } } undef, i32 10, 1, 0
-          // %B = insertvalue { i32, {i32, i32 } } %A, i32 11, 1, 1
-          // %C = extractvalue {i32, { i32, i32 } } %B, 1
-          // This can be changed into
-          // %A = insertvalue {i32, i32 } undef, i32 10, 0
-          // %C = insertvalue {i32, i32 } %A, i32 11, 1
-          // which allows the unused 0,0 element from the nested struct to be
-          // removed.
-          return BuildSubAggregate(V, makeArrayRef(idx_range.begin(), req_idx),
-                                   InsertBefore);
-        else
-          // We can't handle this without inserting insertvalues
+        // We can't handle this without inserting insertvalues
+        if (!InsertBefore)
           return 0;
+
+        // The requested index identifies a part of a nested aggregate. Handle
+        // this specially. For example,
+        // %A = insertvalue { i32, {i32, i32 } } undef, i32 10, 1, 0
+        // %B = insertvalue { i32, {i32, i32 } } %A, i32 11, 1, 1
+        // %C = extractvalue {i32, { i32, i32 } } %B, 1
+        // This can be changed into
+        // %A = insertvalue {i32, i32 } undef, i32 10, 0
+        // %C = insertvalue {i32, i32 } %A, i32 11, 1
+        // which allows the unused 0,0 element from the nested struct to be
+        // removed.
+        return BuildSubAggregate(V, makeArrayRef(idx_range.begin(), req_idx),
+                                 InsertBefore);
       }
       
       // This insert value inserts something else than what we are looking for.
@@ -1518,7 +1524,9 @@ Value *llvm::FindInsertedValue(Value *V, ArrayRef<unsigned> idx_range,
     return FindInsertedValue(I->getInsertedValueOperand(),
                              makeArrayRef(req_idx, idx_range.end()),
                              InsertBefore);
-  } else if (ExtractValueInst *I = dyn_cast<ExtractValueInst>(V)) {
+  }
+  
+  if (ExtractValueInst *I = dyn_cast<ExtractValueInst>(V)) {
     // If we're extracting a value from an aggregrate that was extracted from
     // something else, we can extract from that something else directly instead.
     // However, we will need to chain I's indices with the requested indices.
@@ -1550,7 +1558,8 @@ Value *llvm::FindInsertedValue(Value *V, ArrayRef<unsigned> idx_range,
 Value *llvm::GetPointerBaseWithConstantOffset(Value *Ptr, int64_t &Offset,
                                               const TargetData &TD) {
   Operator *PtrOp = dyn_cast<Operator>(Ptr);
-  if (PtrOp == 0) return Ptr;
+  if (PtrOp == 0 || Ptr->getType()->isVectorTy())
+    return Ptr;
   
   // Just look through bitcasts.
   if (PtrOp->getOpcode() == Instruction::BitCast)
@@ -1585,33 +1594,19 @@ Value *llvm::GetPointerBaseWithConstantOffset(Value *Ptr, int64_t &Offset,
 }
 
 
-/// GetConstantStringInfo - This function computes the length of a
+/// getConstantStringInfo - This function computes the length of a
 /// null-terminated C string pointed to by V.  If successful, it returns true
 /// and returns the string in Str.  If unsuccessful, it returns false.
-bool llvm::GetConstantStringInfo(const Value *V, std::string &Str,
-                                 uint64_t Offset, bool StopAtNul) {
-  // If V is NULL then return false;
-  if (V == NULL) return false;
+bool llvm::getConstantStringInfo(const Value *V, StringRef &Str,
+                                 uint64_t Offset, bool TrimAtNul) {
+  assert(V);
 
-  // Look through bitcast instructions.
-  if (const BitCastInst *BCI = dyn_cast<BitCastInst>(V))
-    return GetConstantStringInfo(BCI->getOperand(0), Str, Offset, StopAtNul);
+  // Look through bitcast instructions and geps.
+  V = V->stripPointerCasts();
   
-  // If the value is not a GEP instruction nor a constant expression with a
-  // GEP instruction, then return false because ConstantArray can't occur
-  // any other way.
-  const User *GEP = 0;
-  if (const GetElementPtrInst *GEPI = dyn_cast<GetElementPtrInst>(V)) {
-    GEP = GEPI;
-  } else if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(V)) {
-    if (CE->getOpcode() == Instruction::BitCast)
-      return GetConstantStringInfo(CE->getOperand(0), Str, Offset, StopAtNul);
-    if (CE->getOpcode() != Instruction::GetElementPtr)
-      return false;
-    GEP = CE;
-  }
-  
-  if (GEP) {
+  // If the value is a GEP instructionor  constant expression, treat it as an
+  // offset.
+  if (const GEPOperator *GEP = dyn_cast<GEPOperator>(V)) {
     // Make sure the GEP has exactly three arguments.
     if (GEP->getNumOperands() != 3)
       return false;
@@ -1636,51 +1631,48 @@ bool llvm::GetConstantStringInfo(const Value *V, std::string &Str,
       StartIdx = CI->getZExtValue();
     else
       return false;
-    return GetConstantStringInfo(GEP->getOperand(0), Str, StartIdx+Offset,
-                                 StopAtNul);
+    return getConstantStringInfo(GEP->getOperand(0), Str, StartIdx+Offset);
   }
 
   // The GEP instruction, constant or instruction, must reference a global
   // variable that is a constant and is initialized. The referenced constant
   // initializer is the array that we'll use for optimization.
-  const GlobalVariable* GV = dyn_cast<GlobalVariable>(V);
+  const GlobalVariable *GV = dyn_cast<GlobalVariable>(V);
   if (!GV || !GV->isConstant() || !GV->hasDefinitiveInitializer())
     return false;
-  const Constant *GlobalInit = GV->getInitializer();
-  
+
   // Handle the all-zeros case
-  if (GlobalInit->isNullValue()) {
+  if (GV->getInitializer()->isNullValue()) {
     // This is a degenerate case. The initializer is constant zero so the
     // length of the string must be zero.
-    Str.clear();
+    Str = "";
     return true;
   }
   
   // Must be a Constant Array
-  const ConstantArray *Array = dyn_cast<ConstantArray>(GlobalInit);
-  if (Array == 0 || !Array->getType()->getElementType()->isIntegerTy(8))
+  const ConstantDataArray *Array =
+    dyn_cast<ConstantDataArray>(GV->getInitializer());
+  if (Array == 0 || !Array->isString())
     return false;
   
   // Get the number of elements in the array
-  uint64_t NumElts = Array->getType()->getNumElements();
-  
+  uint64_t NumElts = Array->getType()->getArrayNumElements();
+
+  // Start out with the entire array in the StringRef.
+  Str = Array->getAsString();
+
   if (Offset > NumElts)
     return false;
   
-  // Traverse the constant array from 'Offset' which is the place the GEP refers
-  // to in the array.
-  Str.reserve(NumElts-Offset);
-  for (unsigned i = Offset; i != NumElts; ++i) {
-    const Constant *Elt = Array->getOperand(i);
-    const ConstantInt *CI = dyn_cast<ConstantInt>(Elt);
-    if (!CI) // This array isn't suitable, non-int initializer.
-      return false;
-    if (StopAtNul && CI->isZero())
-      return true; // we found end of string, success!
-    Str += (char)CI->getZExtValue();
-  }
+  // Skip over 'offset' bytes.
+  Str = Str.substr(Offset);
   
-  // The array isn't null terminated, but maybe this is a memcpy, not a strcpy.
+  if (TrimAtNul) {
+    // Trim off the \0 and anything after it.  If the array is not nul
+    // terminated, we just return the whole end of string.  The client may know
+    // some other way that the string is length-bound.
+    Str = Str.substr(0, Str.find('\0'));
+  }
   return true;
 }
 
@@ -1692,8 +1684,7 @@ bool llvm::GetConstantStringInfo(const Value *V, std::string &Str,
 /// the specified pointer, return 'len+1'.  If we can't, return 0.
 static uint64_t GetStringLengthH(Value *V, SmallPtrSet<PHINode*, 32> &PHIs) {
   // Look through noop bitcast instructions.
-  if (BitCastInst *BCI = dyn_cast<BitCastInst>(V))
-    return GetStringLengthH(BCI->getOperand(0), PHIs);
+  V = V->stripPointerCasts();
 
   // If this is a PHI node, there are two cases: either we have already seen it
   // or we haven't.
@@ -1729,83 +1720,13 @@ static uint64_t GetStringLengthH(Value *V, SmallPtrSet<PHINode*, 32> &PHIs) {
     if (Len1 != Len2) return 0;
     return Len1;
   }
-
-  // As a special-case, "@string = constant i8 0" is also a string with zero
-  // length, not wrapped in a bitcast or GEP.
-  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(V)) {
-    if (GV->isConstant() && GV->hasDefinitiveInitializer())
-      if (GV->getInitializer()->isNullValue()) return 1;
-    return 0;
-  }
-
-  // If the value is not a GEP instruction nor a constant expression with a
-  // GEP instruction, then return unknown.
-  User *GEP = 0;
-  if (GetElementPtrInst *GEPI = dyn_cast<GetElementPtrInst>(V)) {
-    GEP = GEPI;
-  } else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(V)) {
-    if (CE->getOpcode() != Instruction::GetElementPtr)
-      return 0;
-    GEP = CE;
-  } else {
-    return 0;
-  }
-
-  // Make sure the GEP has exactly three arguments.
-  if (GEP->getNumOperands() != 3)
+  
+  // Otherwise, see if we can read the string.
+  StringRef StrData;
+  if (!getConstantStringInfo(V, StrData))
     return 0;
 
-  // Check to make sure that the first operand of the GEP is an integer and
-  // has value 0 so that we are sure we're indexing into the initializer.
-  if (ConstantInt *Idx = dyn_cast<ConstantInt>(GEP->getOperand(1))) {
-    if (!Idx->isZero())
-      return 0;
-  } else
-    return 0;
-
-  // If the second index isn't a ConstantInt, then this is a variable index
-  // into the array.  If this occurs, we can't say anything meaningful about
-  // the string.
-  uint64_t StartIdx = 0;
-  if (ConstantInt *CI = dyn_cast<ConstantInt>(GEP->getOperand(2)))
-    StartIdx = CI->getZExtValue();
-  else
-    return 0;
-
-  // The GEP instruction, constant or instruction, must reference a global
-  // variable that is a constant and is initialized. The referenced constant
-  // initializer is the array that we'll use for optimization.
-  GlobalVariable* GV = dyn_cast<GlobalVariable>(GEP->getOperand(0));
-  if (!GV || !GV->isConstant() || !GV->hasInitializer() ||
-      GV->mayBeOverridden())
-    return 0;
-  Constant *GlobalInit = GV->getInitializer();
-
-  // Handle the ConstantAggregateZero case, which is a degenerate case. The
-  // initializer is constant zero so the length of the string must be zero.
-  if (isa<ConstantAggregateZero>(GlobalInit))
-    return 1;  // Len = 0 offset by 1.
-
-  // Must be a Constant Array
-  ConstantArray *Array = dyn_cast<ConstantArray>(GlobalInit);
-  if (!Array || !Array->getType()->getElementType()->isIntegerTy(8))
-    return false;
-
-  // Get the number of elements in the array
-  uint64_t NumElts = Array->getType()->getNumElements();
-
-  // Traverse the constant array from StartIdx (derived above) which is
-  // the place the GEP refers to in the array.
-  for (unsigned i = StartIdx; i != NumElts; ++i) {
-    Constant *Elt = Array->getOperand(i);
-    ConstantInt *CI = dyn_cast<ConstantInt>(Elt);
-    if (!CI) // This array isn't suitable, non-int initializer.
-      return 0;
-    if (CI->isZero())
-      return i-StartIdx+1; // We found end of string, success!
-  }
-
-  return 0; // The array isn't null terminated, conservatively return 'unknown'.
+  return StrData.size()+1;
 }
 
 /// GetStringLength - If we can compute the length of the string pointed to by
@@ -1863,4 +1784,88 @@ bool llvm::onlyUsedByLifetimeMarkers(const Value *V) {
       return false;
   }
   return true;
+}
+
+bool llvm::isSafeToSpeculativelyExecute(const Value *V,
+                                        const TargetData *TD) {
+  const Operator *Inst = dyn_cast<Operator>(V);
+  if (!Inst)
+    return false;
+
+  for (unsigned i = 0, e = Inst->getNumOperands(); i != e; ++i)
+    if (Constant *C = dyn_cast<Constant>(Inst->getOperand(i)))
+      if (C->canTrap())
+        return false;
+
+  switch (Inst->getOpcode()) {
+  default:
+    return true;
+  case Instruction::UDiv:
+  case Instruction::URem:
+    // x / y is undefined if y == 0, but calcuations like x / 3 are safe.
+    return isKnownNonZero(Inst->getOperand(1), TD);
+  case Instruction::SDiv:
+  case Instruction::SRem: {
+    Value *Op = Inst->getOperand(1);
+    // x / y is undefined if y == 0
+    if (!isKnownNonZero(Op, TD))
+      return false;
+    // x / y might be undefined if y == -1
+    unsigned BitWidth = getBitWidth(Op->getType(), TD);
+    if (BitWidth == 0)
+      return false;
+    APInt KnownZero(BitWidth, 0);
+    APInt KnownOne(BitWidth, 0);
+    ComputeMaskedBits(Op, APInt::getAllOnesValue(BitWidth),
+                      KnownZero, KnownOne, TD);
+    return !!KnownZero;
+  }
+  case Instruction::Load: {
+    const LoadInst *LI = cast<LoadInst>(Inst);
+    if (!LI->isUnordered())
+      return false;
+    return LI->getPointerOperand()->isDereferenceablePointer();
+  }
+  case Instruction::Call: {
+   if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(Inst)) {
+     switch (II->getIntrinsicID()) {
+       case Intrinsic::bswap:
+       case Intrinsic::ctlz:
+       case Intrinsic::ctpop:
+       case Intrinsic::cttz:
+       case Intrinsic::objectsize:
+       case Intrinsic::sadd_with_overflow:
+       case Intrinsic::smul_with_overflow:
+       case Intrinsic::ssub_with_overflow:
+       case Intrinsic::uadd_with_overflow:
+       case Intrinsic::umul_with_overflow:
+       case Intrinsic::usub_with_overflow:
+         return true;
+       // TODO: some fp intrinsics are marked as having the same error handling
+       // as libm. They're safe to speculate when they won't error.
+       // TODO: are convert_{from,to}_fp16 safe?
+       // TODO: can we list target-specific intrinsics here?
+       default: break;
+     }
+   }
+    return false; // The called function could have undefined behavior or
+                  // side-effects, even if marked readnone nounwind.
+  }
+  case Instruction::VAArg:
+  case Instruction::Alloca:
+  case Instruction::Invoke:
+  case Instruction::PHI:
+  case Instruction::Store:
+  case Instruction::Ret:
+  case Instruction::Br:
+  case Instruction::IndirectBr:
+  case Instruction::Switch:
+  case Instruction::Unreachable:
+  case Instruction::Fence:
+  case Instruction::LandingPad:
+  case Instruction::AtomicRMW:
+  case Instruction::AtomicCmpXchg:
+  case Instruction::Resume:
+    return false; // Misc instructions which have effects
+  }
 }

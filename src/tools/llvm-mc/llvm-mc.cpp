@@ -70,9 +70,6 @@ RelaxAll("mc-relax-all", cl::desc("Relax all fixups"));
 static cl::opt<bool>
 NoExecStack("mc-no-exec-stack", cl::desc("File doesn't need an exec stack"));
 
-static cl::opt<bool>
-EnableLogging("enable-api-logging", cl::desc("Enable MC API logging"));
-
 enum OutputFileType {
   OFT_Null,
   OFT_AssemblyFile,
@@ -234,6 +231,17 @@ static tool_output_file *GetOutputStream() {
   return Out;
 }
 
+static std::string DwarfDebugFlags;
+static void setDwarfDebugFlags(int argc, char **argv) {
+  if (!getenv("RC_DEBUG_OPTIONS"))
+    return;
+  for (int i = 0; i < argc; i++) {
+    DwarfDebugFlags += argv[i];
+    if (i + 1 < argc)
+      DwarfDebugFlags += " ";
+  }
+}
+
 static int AsLexInput(const char *ProgName) {
   OwningPtr<MemoryBuffer> BufferPtr;
   if (error_code ec = MemoryBuffer::getFileOrSTDIN(InputFilename, BufferPtr)) {
@@ -375,13 +383,15 @@ static int AssembleInput(const char *ProgName) {
   // FIXME: This is not pretty. MCContext has a ptr to MCObjectFileInfo and
   // MCObjectFileInfo needs a MCContext reference in order to initialize itself.
   OwningPtr<MCObjectFileInfo> MOFI(new MCObjectFileInfo());
-  MCContext Ctx(*MAI, *MRI, MOFI.get());
+  MCContext Ctx(*MAI, *MRI, MOFI.get(), &SrcMgr);
   MOFI->InitMCObjectFileInfo(TripleName, RelocModel, CMModel, Ctx);
 
   if (SaveTempLabels)
     Ctx.setAllowTemporaryLabels(false);
 
   Ctx.setGenDwarfForAssembly(GenDwarfForAssembly);
+  if (!DwarfDebugFlags.empty()) 
+    Ctx.setDwarfDebugFlags(StringRef(DwarfDebugFlags));
 
   // Package up features to be passed to target/subtarget
   std::string FeaturesStr;
@@ -418,7 +428,7 @@ static int AssembleInput(const char *ProgName) {
                                            /*useCFI*/ true,
                                            /*useDwarfDirectory*/ true,
                                            IP, CE, MAB, ShowInst));
-                                           
+
   } else if (FileType == OFT_Null) {
     Str.reset(createNullStreamer(Ctx));
   } else {
@@ -428,10 +438,6 @@ static int AssembleInput(const char *ProgName) {
     Str.reset(TheTarget->createMCObjectStreamer(TripleName, Ctx, *MAB,
                                                 FOS, CE, RelaxAll,
                                                 NoExecStack));
-  }
-
-  if (EnableLogging) {
-    Str.reset(createLoggingStreamer(Str.take(), errs()));
   }
 
   OwningPtr<MCAsmParser> Parser(createMCAsmParser(SrcMgr, Ctx,
@@ -508,9 +514,9 @@ int main(int argc, char **argv) {
 
   cl::ParseCommandLineOptions(argc, argv, "llvm machine code playground\n");
   TripleName = Triple::normalize(TripleName);
+  setDwarfDebugFlags(argc, argv);
 
   switch (Action) {
-  default:
   case AC_AsLex:
     return AsLexInput(argv[0]);
   case AC_Assemble:
@@ -520,6 +526,4 @@ int main(int argc, char **argv) {
   case AC_EDisassemble:
     return DisassembleInput(argv[0], true);
   }
-
-  return 0;
 }

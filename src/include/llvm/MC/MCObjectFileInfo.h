@@ -19,10 +19,10 @@
 #include "llvm/MC/SectionKind.h"
 
 namespace llvm {
-class MCContext;
-class MCSection;
-class Triple;
-  
+  class MCContext;
+  class MCSection;
+  class Triple;
+
 class MCObjectFileInfo {  
 protected:
   /// CommDirectiveSupportsAlignment - True if .comm supports alignment.  This
@@ -47,6 +47,8 @@ protected:
   unsigned FDEEncoding;
   unsigned FDECFIEncoding;
   unsigned TTypeEncoding;
+  // Section flags for eh_frame
+  unsigned EHSectionFlags;
 
   /// TextSection - Section directive for standard text.
   ///
@@ -109,7 +111,7 @@ protected:
   const MCSection *TLSExtraDataSection;
   
   /// TLSDataSection - Section directive for Thread Local data.
-  /// ELF and MachO only.
+  /// ELF, MachO and COFF.
   const MCSection *TLSDataSection;        // Defaults to ".tdata".
 
   /// TLSBSSSection - Section directive for Thread Local uninitialized data.
@@ -163,7 +165,7 @@ protected:
   const MCSection *DrectveSection;
   const MCSection *PDataSection;
   const MCSection *XDataSection;
-  
+
 public:
   void InitMCObjectFileInfo(StringRef TT, Reloc::Model RM, CodeModel::Model CM,
                             MCContext &ctx);
@@ -188,8 +190,6 @@ public:
   const MCSection *getTextSection() const { return TextSection; }
   const MCSection *getDataSection() const { return DataSection; }
   const MCSection *getBSSSection() const { return BSSSection; }
-  const MCSection *getStaticCtorSection() const { return StaticCtorSection; }
-  const MCSection *getStaticDtorSection() const { return StaticDtorSection; }
   const MCSection *getLSDASection() const { return LSDASection; }
   const MCSection *getCompactUnwindSection() const{
     return CompactUnwindSection;

@@ -84,7 +84,6 @@ CXDiagnosticSeverity CXLoadedDiagnostic::getSeverity() const {
   }
   
   llvm_unreachable("Invalid diagnostic level");
-  return CXDiagnostic_Ignored;
 }
 
 static CXSourceLocation makeLocation(const CXLoadedDiagnostic::Location *DLoc) {
@@ -118,6 +117,10 @@ CXString CXLoadedDiagnostic::getDiagnosticOption(CXString *Disable) const {
 
 unsigned CXLoadedDiagnostic::getCategory() const {
   return category;
+}
+
+CXString CXLoadedDiagnostic::getCategoryText() const {
+  return cxstring::createCXString(CategoryText);
 }
 
 unsigned CXLoadedDiagnostic::getNumRanges() const {
@@ -258,7 +261,7 @@ CXDiagnosticSet DiagLoader::load(const char *file) {
   FileSystemOptions FO;
   FileManager FileMgr(FO);
 
-  llvm::OwningPtr<llvm::MemoryBuffer> Buffer;
+  OwningPtr<llvm::MemoryBuffer> Buffer;
   Buffer.reset(FileMgr.getBufferForFile(file));
 
   if (!Buffer) {
@@ -283,7 +286,7 @@ CXDiagnosticSet DiagLoader::load(const char *file) {
     return 0;
   }
 
-  llvm::OwningPtr<CXLoadedDiagnosticSetImpl>
+  OwningPtr<CXLoadedDiagnosticSetImpl>
     Diags(new CXLoadedDiagnosticSetImpl());
 
   while (true) {
@@ -297,7 +300,6 @@ CXDiagnosticSet DiagLoader::load(const char *file) {
         return 0;
       case Read_Record:
         llvm_unreachable("Top-level does not have records");
-        return 0;
       case Read_BlockEnd:
         continue;
       case Read_BlockBegin:
@@ -545,7 +547,7 @@ LoadResult DiagLoader::readDiagnosticBlock(llvm::BitstreamCursor &Stream,
     return Failure;
   }
   
-  llvm::OwningPtr<CXLoadedDiagnostic> D(new CXLoadedDiagnostic());
+  OwningPtr<CXLoadedDiagnostic> D(new CXLoadedDiagnostic());
   RecordData Record;
   
   while (true) {
@@ -555,7 +557,6 @@ LoadResult DiagLoader::readDiagnosticBlock(llvm::BitstreamCursor &Stream,
     switch (Res) {
       case Read_EndOfStream:
         llvm_unreachable("EndOfStream handled in readToNextRecordOrBlock");
-        return Failure;
       case Read_Failure:
         return Failure;
       case Read_BlockBegin: {
@@ -653,6 +654,7 @@ LoadResult DiagLoader::readDiagnosticBlock(llvm::BitstreamCursor &Stream,
         D->category = Record[offset++];
         unsigned diagFlag = Record[offset++];
         D->DiagOption = diagFlag ? TopDiags.WarningFlags[diagFlag] : "";
+        D->CategoryText = D->category ? TopDiags.Categories[D->category] : "";
         D->Spelling = TopDiags.makeString(BlobStart, BlobLen);
         continue;
       }

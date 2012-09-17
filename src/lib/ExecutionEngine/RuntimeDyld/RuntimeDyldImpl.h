@@ -1,4 +1,4 @@
-//===-- RuntimeDyldImpl.h - Run-time dynamic linker for MC-JIT ------*- C++ -*-===//
+//===-- RuntimeDyldImpl.h - Run-time dynamic linker for MC-JIT --*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -15,12 +15,11 @@
 #define LLVM_RUNTIME_DYLD_IMPL_H
 
 #include "llvm/ExecutionEngine/RuntimeDyld.h"
-#include "llvm/Object/MachOObject.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/Support/Format.h"
 #include "llvm/Support/Memory.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/system_error.h"
@@ -29,7 +28,6 @@
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
-using namespace llvm::object;
 
 namespace llvm {
 class RuntimeDyldImpl {
@@ -40,17 +38,22 @@ protected:
   // The MemoryManager to load objects into.
   RTDyldMemoryManager *MemMgr;
 
-  // FIXME: This all assumes we're dealing with external symbols for anything
-  //        explicitly referenced. I.e., we can index by name and things
-  //        will work out. In practice, this may not be the case, so we
-  //        should find a way to effectively generalize.
+  // For each section, we have a MemoryBlock of it's data.
+  // Indexed by SectionID.
+  SmallVector<sys::MemoryBlock, 32> Sections;
+  // For each section, the address it will be considered to live at for
+  // relocations. The same as the pointer to the above memory block for hosted
+  // JITs. Indexed by SectionID.
+  SmallVector<uint64_t, 32> SectionLoadAddress;
 
-  // For each function, we have a MemoryBlock of it's instruction data.
-  StringMap<sys::MemoryBlock> Functions;
+  // Keep a map of starting local address to the SectionID which references it.
+  // Lookup function for when we assign virtual addresses.
+  DenseMap<void *, unsigned> SectionLocalMemToID;
 
   // Master symbol table. As modules are loaded and external symbols are
-  // resolved, their addresses are stored here.
-  StringMap<uint8_t*> SymbolTable;
+  // resolved, their addresses are stored here as a SectionID/Offset pair.
+  typedef std::pair<unsigned, uint64_t> SymbolLoc;
+  StringMap<SymbolLoc> SymbolTable;
 
   bool HasError;
   std::string ErrorStr;
@@ -62,6 +65,9 @@ protected:
     return true;
   }
 
+  uint8_t *getSectionAddress(unsigned SectionID) {
+    return (uint8_t*)Sections[SectionID].base();
+  }
   void extractFunction(StringRef Name, uint8_t *StartAddress,
                        uint8_t *EndAddress);
 
@@ -75,12 +81,17 @@ public:
   void *getSymbolAddress(StringRef Name) {
     // FIXME: Just look up as a function for now. Overly simple of course.
     // Work in progress.
-    return SymbolTable.lookup(Name);
+    if (SymbolTable.find(Name) == SymbolTable.end())
+      return 0;
+    SymbolLoc Loc = SymbolTable.lookup(Name);
+    return getSectionAddress(Loc.first) + Loc.second;
   }
 
-  void resolveRelocations();
+  virtual void resolveRelocations();
 
-  virtual void reassignSymbolAddress(StringRef Name, uint8_t *Addr) = 0;
+  virtual void reassignSectionAddress(unsigned SectionID, uint64_t Addr) = 0;
+
+  void mapSectionAddress(void *LocalAddress, uint64_t TargetAddress);
 
   // Is the linker in an error state?
   bool hasError() { return HasError; }
@@ -92,58 +103,6 @@ public:
   StringRef getErrorString() { return ErrorStr; }
 
   virtual bool isCompatibleFormat(const MemoryBuffer *InputBuffer) const = 0;
-};
-
-
-class RuntimeDyldMachO : public RuntimeDyldImpl {
-
-  // For each symbol, keep a list of relocations based on it. Anytime
-  // its address is reassigned (the JIT re-compiled the function, e.g.),
-  // the relocations get re-resolved.
-  struct RelocationEntry {
-    std::string Target;     // Object this relocation is contained in.
-    uint64_t    Offset;     // Offset into the object for the relocation.
-    uint32_t    Data;       // Second word of the raw macho relocation entry.
-    int64_t     Addend;     // Addend encoded in the instruction itself, if any.
-    bool        isResolved; // Has this relocation been resolved previously?
-
-    RelocationEntry(StringRef t, uint64_t offset, uint32_t data, int64_t addend)
-      : Target(t), Offset(offset), Data(data), Addend(addend),
-        isResolved(false) {}
-  };
-  typedef SmallVector<RelocationEntry, 4> RelocationList;
-  StringMap<RelocationList> Relocations;
-
-  // FIXME: Also keep a map of all the relocations contained in an object. Use
-  // this to dynamically answer whether all of the relocations in it have
-  // been resolved or not.
-
-  bool resolveRelocation(uint8_t *Address, uint8_t *Value, bool isPCRel,
-                         unsigned Type, unsigned Size);
-  bool resolveX86_64Relocation(uintptr_t Address, uintptr_t Value, bool isPCRel,
-                               unsigned Type, unsigned Size);
-  bool resolveARMRelocation(uintptr_t Address, uintptr_t Value, bool isPCRel,
-                            unsigned Type, unsigned Size);
-
-  bool loadSegment32(const MachOObject *Obj,
-                     const MachOObject::LoadCommandInfo *SegmentLCI,
-                     const InMemoryStruct<macho::SymtabLoadCommand> &SymtabLC);
-  bool loadSegment64(const MachOObject *Obj,
-                     const MachOObject::LoadCommandInfo *SegmentLCI,
-                     const InMemoryStruct<macho::SymtabLoadCommand> &SymtabLC);
-
-public:
-  RuntimeDyldMachO(RTDyldMemoryManager *mm) : RuntimeDyldImpl(mm) {}
-
-  bool loadObject(MemoryBuffer *InputBuffer);
-
-  void reassignSymbolAddress(StringRef Name, uint8_t *Addr);
-
-  static bool isKnownFormat(const MemoryBuffer *InputBuffer);
-
-  bool isCompatibleFormat(const MemoryBuffer *InputBuffer) const {
-    return isKnownFormat(InputBuffer);
-  }
 };
 
 } // end namespace llvm

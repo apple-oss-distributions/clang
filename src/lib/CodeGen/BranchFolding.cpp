@@ -61,29 +61,33 @@ TailMergeSize("tail-merge-size",
 
 namespace {
   /// BranchFolderPass - Wrap branch folder in a machine function pass.
-  class BranchFolderPass : public MachineFunctionPass,
-                           public BranchFolder {
+  class BranchFolderPass : public MachineFunctionPass {
   public:
     static char ID;
-    explicit BranchFolderPass(bool defaultEnableTailMerge)
-      : MachineFunctionPass(ID), BranchFolder(defaultEnableTailMerge, true) {}
+    explicit BranchFolderPass(): MachineFunctionPass(ID) {}
 
     virtual bool runOnMachineFunction(MachineFunction &MF);
-    virtual const char *getPassName() const { return "Control Flow Optimizer"; }
+
+    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.addRequired<TargetPassConfig>();
+      MachineFunctionPass::getAnalysisUsage(AU);
+    }
   };
 }
 
 char BranchFolderPass::ID = 0;
+char &llvm::BranchFolderPassID = BranchFolderPass::ID;
 
-FunctionPass *llvm::createBranchFoldingPass(bool DefaultEnableTailMerge) {
-  return new BranchFolderPass(DefaultEnableTailMerge);
-}
+INITIALIZE_PASS(BranchFolderPass, "branch-folder",
+                "Control Flow Optimizer", false, false)
 
 bool BranchFolderPass::runOnMachineFunction(MachineFunction &MF) {
-  return OptimizeFunction(MF,
-                          MF.getTarget().getInstrInfo(),
-                          MF.getTarget().getRegisterInfo(),
-                          getAnalysisIfAvailable<MachineModuleInfo>());
+  TargetPassConfig *PassConfig = &getAnalysis<TargetPassConfig>();
+  BranchFolder Folder(PassConfig->getEnableTailMerge(), /*CommonHoist=*/true);
+  return Folder.OptimizeFunction(MF,
+                                 MF.getTarget().getInstrInfo(),
+                                 MF.getTarget().getRegisterInfo(),
+                                 getAnalysisIfAvailable<MachineModuleInfo>());
 }
 
 
@@ -208,7 +212,7 @@ bool BranchFolder::OptimizeFunction(MachineFunction &MF,
     delete RS;
     return MadeChange;
   }
-  
+
   // Walk the function to find jump tables that are live.
   BitVector JTIsLive(JTI->getJumpTables().size());
   for (MachineFunction::iterator BB = MF.begin(), E = MF.end();
@@ -432,10 +436,9 @@ static unsigned EstimateRuntime(MachineBasicBlock::iterator I,
   for (; I != E; ++I) {
     if (I->isDebugValue())
       continue;
-    const MCInstrDesc &MCID = I->getDesc();
-    if (MCID.isCall())
+    if (I->isCall())
       Time += 10;
-    else if (MCID.mayLoad() || MCID.mayStore())
+    else if (I->mayLoad() || I->mayStore())
       Time += 2;
     else
       ++Time;
@@ -484,8 +487,9 @@ BranchFolder::MergePotentialsElt::operator<(const MergePotentialsElt &o) const {
     // an object with itself.
 #ifndef _GLIBCXX_DEBUG
     llvm_unreachable("Predecessor appears twice");
-#endif
+#else
     return false;
+#endif
   }
 }
 
@@ -502,7 +506,7 @@ static unsigned CountTerminators(MachineBasicBlock *MBB,
       break;
     }
     --I;
-    if (!I->getDesc().isTerminator()) break;
+    if (!I->isTerminator()) break;
     ++NumTerms;
   }
   return NumTerms;
@@ -550,8 +554,8 @@ static bool ProfitableToMerge(MachineBasicBlock *MBB1,
   // heuristics.
   unsigned EffectiveTailLen = CommonTailLen;
   if (SuccBB && MBB1 != PredBB && MBB2 != PredBB &&
-      !MBB1->back().getDesc().isBarrier() &&
-      !MBB2->back().getDesc().isBarrier())
+      !MBB1->back().isBarrier() &&
+      !MBB2->back().isBarrier())
     ++EffectiveTailLen;
 
   // Check if the common tail is long enough to be worthwhile.
@@ -927,8 +931,9 @@ bool BranchFolder::TailMergeBlocks(MachineFunction &MF) {
       if (MergePotentials.size() >= 2)
         MadeChange |= TryTailMergeBlocks(IBB, PredBB);
       // Reinsert an unconditional branch if needed.
-      // The 1 below can occur as a result of removing blocks in TryTailMergeBlocks.
-      PredBB = prior(I);      // this may have been changed in TryTailMergeBlocks
+      // The 1 below can occur as a result of removing blocks in
+      // TryTailMergeBlocks.
+      PredBB = prior(I);     // this may have been changed in TryTailMergeBlocks
       if (MergePotentials.size() == 1 &&
           MergePotentials.begin()->getBlock() != PredBB)
         FixTail(MergePotentials.begin()->getBlock(), IBB, TII);
@@ -983,7 +988,7 @@ static bool IsBranchOnlyBlock(MachineBasicBlock *MBB) {
     if (!MBBI->isDebugValue())
       break;
   }
-  return (MBBI->getDesc().isBranch());
+  return (MBBI->isBranch());
 }
 
 /// IsBetterFallthrough - Return true if it would be clearly better to
@@ -1011,7 +1016,7 @@ static bool IsBetterFallthrough(MachineBasicBlock *MBB1,
   MachineBasicBlock::iterator MBB2I = --MBB2->end();
   while (MBB2I->isDebugValue())
     --MBB2I;
-  return MBB2I->getDesc().isCall() && !MBB1I->getDesc().isCall();
+  return MBB2I->isCall() && !MBB1I->isCall();
 }
 
 /// OptimizeBlock - Analyze and optimize control flow related to the specified
@@ -1094,7 +1099,7 @@ ReoptimizeBlock:
         MachineBasicBlock::iterator PrevBBIter = PrevBB.end();
         --PrevBBIter;
         MachineBasicBlock::iterator MBBIter = MBB->begin();
-        // Check if DBG_VALUE at the end of PrevBB is identical to the 
+        // Check if DBG_VALUE at the end of PrevBB is identical to the
         // DBG_VALUE at the beginning of MBB.
         while (PrevBBIter != PrevBB.begin() && MBBIter != MBB->end()
                && PrevBBIter->isDebugValue() && MBBIter->isDebugValue()) {
@@ -1106,7 +1111,7 @@ ReoptimizeBlock:
         }
       }
       PrevBB.splice(PrevBB.end(), MBB, MBB->begin(), MBB->end());
-      PrevBB.removeSuccessor(PrevBB.succ_begin());;
+      PrevBB.removeSuccessor(PrevBB.succ_begin());
       assert(PrevBB.succ_empty());
       PrevBB.transferSuccessors(MBB);
       MadeChange = true;
@@ -1472,6 +1477,9 @@ MachineBasicBlock::iterator findHoistingInsertPosAndDeps(MachineBasicBlock *MBB,
   bool IsDef = false;
   for (unsigned i = 0, e = PI->getNumOperands(); !IsDef && i != e; ++i) {
     const MachineOperand &MO = PI->getOperand(i);
+    // If PI has a regmask operand, it is probably a call. Separate away.
+    if (MO.isRegMask())
+      return Loc;
     if (!MO.isReg() || MO.isUse())
       continue;
     unsigned Reg = MO.getReg();
@@ -1584,6 +1592,11 @@ bool BranchFolder::HoistCommonCodeInSuccs(MachineBasicBlock *MBB) {
     bool IsSafe = true;
     for (unsigned i = 0, e = TIB->getNumOperands(); i != e; ++i) {
       MachineOperand &MO = TIB->getOperand(i);
+      // Don't attempt to hoist instructions with register masks.
+      if (MO.isRegMask()) {
+        IsSafe = false;
+        break;
+      }
       if (!MO.isReg())
         continue;
       unsigned Reg = MO.getReg();
@@ -1618,6 +1631,11 @@ bool BranchFolder::HoistCommonCodeInSuccs(MachineBasicBlock *MBB) {
           IsSafe = false;
           break;
         }
+
+        if (MO.isKill() && Uses.count(Reg))
+          // Kills a register that's read by the instruction at the point of
+          // insertion. Remove the kill marker.
+          MO.setIsKill(false);
       }
     }
     if (!IsSafe)
@@ -1652,7 +1670,7 @@ bool BranchFolder::HoistCommonCodeInSuccs(MachineBasicBlock *MBB) {
         LocalDefsSet.insert(*OR);
     }
 
-    HasDups = true;;
+    HasDups = true;
     ++TIB;
     ++FIB;
   }

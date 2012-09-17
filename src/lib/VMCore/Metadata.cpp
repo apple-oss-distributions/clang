@@ -29,6 +29,8 @@ using namespace llvm;
 // MDString implementation.
 //
 
+void MDString::anchor() { }
+
 MDString::MDString(LLVMContext &C, StringRef S)
   : Value(Type::getMetadataTy(C), Value::MDStringVal), Str(S) {}
 
@@ -83,6 +85,11 @@ static MDNodeOperand *getOperandPtr(MDNode *N, unsigned Op) {
   // Use <= instead of < to permit a one-past-the-end address.
   assert(Op <= N->getNumOperands() && "Invalid operand number");
   return reinterpret_cast<MDNodeOperand*>(N+1)+Op;
+}
+
+void MDNode::replaceOperandWith(unsigned i, Value *Val) {
+  MDNodeOperand *Op = getOperandPtr(this, i);
+  replaceOperand(Op, Val);
 }
 
 MDNode::MDNode(LLVMContext &C, ArrayRef<Value*> Vals, bool isFunctionLocal)
@@ -161,12 +168,13 @@ static const Function *assertLocalFunction(const MDNode *N) {
 const Function *MDNode::getFunction() const {
 #ifndef NDEBUG
   return assertLocalFunction(this);
-#endif
+#else
   if (!isFunctionLocal()) return NULL;
   for (unsigned i = 0, e = getNumOperands(); i != e; ++i)
     if (const Function *F = getFunctionForValue(getOperand(i)))
       return F;
   return NULL;
+#endif
 }
 
 // destroy - Delete this node.  Only when there are no uses.
@@ -425,12 +433,12 @@ StringRef NamedMDNode::getName() const {
 // Instruction Metadata method implementations.
 //
 
-void Instruction::setMetadata(const char *Kind, MDNode *Node) {
+void Instruction::setMetadata(StringRef Kind, MDNode *Node) {
   if (Node == 0 && !hasMetadata()) return;
   setMetadata(getContext().getMDKindID(Kind), Node);
 }
 
-MDNode *Instruction::getMetadataImpl(const char *Kind) const {
+MDNode *Instruction::getMetadataImpl(StringRef Kind) const {
   return getMetadataImpl(getContext().getMDKindID(Kind));
 }
 
@@ -468,9 +476,11 @@ void Instruction::setMetadata(unsigned KindID, MDNode *Node) {
   }
 
   // Otherwise, we're removing metadata from an instruction.
-  assert(hasMetadataHashEntry() &&
-         getContext().pImpl->MetadataStore.count(this) &&
+  assert((hasMetadataHashEntry() ==
+          getContext().pImpl->MetadataStore.count(this)) &&
          "HasMetadata bit out of date!");
+  if (!hasMetadataHashEntry())
+    return;  // Nothing to remove!
   LLVMContextImpl::MDMapTy &Info = getContext().pImpl->MetadataStore[this];
 
   // Common case is removing the only entry.

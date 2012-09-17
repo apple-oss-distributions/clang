@@ -1409,10 +1409,10 @@ codecvt<wchar_t, char, mbstate_t>::do_in(state_type& st,
                 case 0:
                     ++frm;
                     break;
-                case -1:
+                case size_t(-1):
                     frm_nxt = frm;
                     return error;
-                case -2:
+                case size_t(-2):
                     frm_nxt = frm;
                     return partial;
                 default:
@@ -1515,8 +1515,8 @@ codecvt<wchar_t, char, mbstate_t>::do_length(state_type& st,
             ++nbytes;
             ++frm;
             break;
-        case -1:
-        case -2:
+        case size_t(-1):
+        case size_t(-2):
             return nbytes;
         default:
             nbytes += n;
@@ -4072,7 +4072,7 @@ numpunct_byname<char>::__init(const char* nm)
     {
         __locale_unique_ptr loc(newlocale(LC_ALL_MASK, nm, 0), freelocale);
 #ifndef _LIBCPP_NO_EXCEPTIONS
-        if (loc == 0)
+        if (loc == nullptr)
             throw runtime_error("numpunct_byname<char>::numpunct_byname"
                                 " failed to construct for " + string(nm));
 #endif  // _LIBCPP_NO_EXCEPTIONS
@@ -4115,7 +4115,7 @@ numpunct_byname<wchar_t>::__init(const char* nm)
     {
         __locale_unique_ptr loc(newlocale(LC_ALL_MASK, nm, 0), freelocale);
 #ifndef _LIBCPP_NO_EXCEPTIONS
-        if (loc == 0)
+        if (loc == nullptr)
             throw runtime_error("numpunct_byname<char>::numpunct_byname"
                                 " failed to construct for " + string(nm));
 #endif  // _LIBCPP_NO_EXCEPTIONS
@@ -4547,11 +4547,13 @@ __time_get::~__time_get()
     freelocale(__loc_);
 }
 
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+
 template <>
 string
 __time_get_storage<char>::__analyze(char fmt, const ctype<char>& ct)
 {
-    tm t;
+    tm t = {0};
     t.tm_sec = 59;
     t.tm_min = 55;
     t.tm_hour = 23;
@@ -4692,13 +4694,12 @@ __time_get_storage<char>::__analyze(char fmt, const ctype<char>& ct)
 }
 
 #pragma clang diagnostic ignored "-Wmissing-braces"
-#pragma clang diagnostic ignored "-Wmissing-field-initializers"
 
 template <>
 wstring
 __time_get_storage<wchar_t>::__analyze(char fmt, const ctype<wchar_t>& ct)
 {
-    tm t;
+    tm t = {0};
     t.tm_sec = 59;
     t.tm_min = 55;
     t.tm_hour = 23;
@@ -5505,7 +5506,7 @@ moneypunct_byname<char, false>::init(const char* nm)
     typedef moneypunct<char, false> base;
     __locale_unique_ptr loc(newlocale(LC_ALL_MASK, nm, 0), freelocale);
 #ifndef _LIBCPP_NO_EXCEPTIONS
-    if (loc == 0)
+    if (loc == nullptr)
         throw runtime_error("moneypunct_byname"
                             " failed to construct for " + string(nm));
 #endif  // _LIBCPP_NO_EXCEPTIONS
@@ -5547,7 +5548,7 @@ moneypunct_byname<char, true>::init(const char* nm)
     typedef moneypunct<char, true> base;
     __locale_unique_ptr loc(newlocale(LC_ALL_MASK, nm, 0), freelocale);
 #ifndef _LIBCPP_NO_EXCEPTIONS
-    if (loc == 0)
+    if (loc == nullptr)
         throw runtime_error("moneypunct_byname"
                             " failed to construct for " + string(nm));
 #endif  // _LIBCPP_NO_EXCEPTIONS
@@ -5602,7 +5603,7 @@ moneypunct_byname<wchar_t, false>::init(const char* nm)
     typedef moneypunct<wchar_t, false> base;
     __locale_unique_ptr loc(newlocale(LC_ALL_MASK, nm, 0), freelocale);
 #ifndef _LIBCPP_NO_EXCEPTIONS
-    if (loc == 0)
+    if (loc == nullptr)
         throw runtime_error("moneypunct_byname"
                             " failed to construct for " + string(nm));
 #endif  // _LIBCPP_NO_EXCEPTIONS
@@ -5679,7 +5680,7 @@ moneypunct_byname<wchar_t, true>::init(const char* nm)
     typedef moneypunct<wchar_t, true> base;
     __locale_unique_ptr loc(newlocale(LC_ALL_MASK, nm, 0), freelocale);
 #ifndef _LIBCPP_NO_EXCEPTIONS
-    if (loc == 0)
+    if (loc == nullptr)
         throw runtime_error("moneypunct_byname"
                             " failed to construct for " + string(nm));
 #endif  // _LIBCPP_NO_EXCEPTIONS

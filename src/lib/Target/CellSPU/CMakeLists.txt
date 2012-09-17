@@ -16,23 +16,12 @@ add_llvm_target(CellSPUCodeGen
   SPUISelDAGToDAG.cpp
   SPUISelLowering.cpp
   SPUFrameLowering.cpp
+  SPUMachineFunction.cpp
   SPURegisterInfo.cpp
   SPUSubtarget.cpp
   SPUTargetMachine.cpp
   SPUSelectionDAGInfo.cpp
   SPUNopFiller.cpp
-  )
-
-add_llvm_library_dependencies(LLVMCellSPUCodeGen
-  LLVMAsmPrinter
-  LLVMCellSPUDesc
-  LLVMCellSPUInfo
-  LLVMCodeGen
-  LLVMCore
-  LLVMMC
-  LLVMSelectionDAG
-  LLVMSupport
-  LLVMTarget
   )
 
 add_subdirectory(TargetInfo)

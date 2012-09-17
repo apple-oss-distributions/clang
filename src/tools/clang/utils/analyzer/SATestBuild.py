@@ -72,11 +72,21 @@ SBOutputDirReferencePrefix = "Ref"
 
 # The list of checkers used during analyzes.
 # Currently, consists of all the non experimental checkers.
-Checkers="core,deadcode,cplusplus,security,unix,osx,cocoa"
+Checkers="experimental.security.taint,core,deadcode,cplusplus,security,unix,osx,cocoa"
 
 Verbose = 1
 
 IsReferenceBuild = False
+
+# Make sure we flush the output after every print statement.
+class flushfile(object):
+    def __init__(self, f):
+        self.f = f
+    def write(self, x):
+        self.f.write(x)
+        self.f.flush()
+
+sys.stdout = flushfile(sys.stdout)
 
 def getProjectMapPath():
     ProjectMapPath = os.path.join(os.path.abspath(os.curdir), 
@@ -122,7 +132,7 @@ def runScanBuild(Dir, SBOutputDir, PBuildLogFile):
     if not os.path.exists(BuildScriptPath):
         print "Error: build script is not defined: %s" % BuildScriptPath
         sys.exit(-1)       
-    SBOptions = "-plist -o " + SBOutputDir + " "
+    SBOptions = "-plist-html -o " + SBOutputDir + " "
     SBOptions += "-enable-checker " + Checkers + " "  
     try:
         SBCommandFile = open(BuildScriptPath, "r")
@@ -298,8 +308,7 @@ def checkBuild(SBOutputDir):
     finally:
         SummaryLog.close()
     
-    print "Error: analysis failed. See ", \
-          os.path.join(SBOutputDir, FailuresSummaryFileName)
+    print "Error: analysis failed. See ", SummaryPath
     sys.exit(-1)       
 
 # Auxiliary object to discard stdout.
@@ -359,10 +368,36 @@ def runCmpResults(Dir):
     print "Diagnostic comparison complete (time: %.2f)." % (time.time()-TBegin) 
     return (NumDiffs > 0)
     
-def testProject(ID, InIsReferenceBuild, IsScanBuild , Dir=None):
-    global IsReferenceBuild
-    IsReferenceBuild = InIsReferenceBuild
+def updateSVN(Mode, ProjectsMap):
+    try:
+        ProjectsMap.seek(0)    
+        for I in csv.reader(ProjectsMap):
+            ProjName = I[0] 
+            Path = os.path.join(ProjName, getSBOutputDirName())
+    
+            if Mode == "delete":
+                Command = "svn delete %s" % (Path,)
+            else:
+                Command = "svn add %s" % (Path,)
 
+            if Verbose == 1:        
+                print "  Executing: %s" % (Command,)
+                check_call(Command, shell=True)    
+    
+        if Mode == "delete":
+            CommitCommand = "svn commit -m \"[analyzer tests] Remove " \
+                            "reference results.\""     
+        else:
+            CommitCommand = "svn commit -m \"[analyzer tests] Add new " \
+                            "reference results.\""
+        if Verbose == 1:        
+            print "  Executing: %s" % (CommitCommand,)
+            check_call(CommitCommand, shell=True)    
+    except:
+        print "Error: SVN update failed."
+        sys.exit(-1)
+        
+def testProject(ID, IsScanBuild, Dir=None):
     print " \n\n--- Building project %s" % (ID,)
 
     TBegin = time.time() 
@@ -373,8 +408,9 @@ def testProject(ID, InIsReferenceBuild, IsScanBuild , Dir=None):
         print "  Build directory: %s." % (Dir,)
     
     # Set the build results directory.
-    SBOutputDir = os.path.join(Dir, getSBOutputDirName())
-        
+    RelOutputDir = getSBOutputDirName()
+    SBOutputDir = os.path.join(Dir, RelOutputDir)
+                
     buildProject(Dir, SBOutputDir, IsScanBuild)    
 
     checkBuild(SBOutputDir)
@@ -385,20 +421,36 @@ def testProject(ID, InIsReferenceBuild, IsScanBuild , Dir=None):
     print "Completed tests for project %s (time: %.2f)." % \
           (ID, (time.time()-TBegin))
     
-def testAll(InIsReferenceBuild = False):
-    
+def testAll(InIsReferenceBuild = False, UpdateSVN = False):
+    global IsReferenceBuild
+    IsReferenceBuild = InIsReferenceBuild
+
     PMapFile = open(getProjectMapPath(), "rb")
-    try:
-        PMapReader = csv.reader(PMapFile)
-        for I in PMapReader:
+    try:        
+        # Validate the input.
+        for I in csv.reader(PMapFile):
             if (len(I) != 2) :
                 print "Error: Rows in the ProjectMapFile should have 3 entries."
                 raise Exception()
             if (not ((I[1] == "1") | (I[1] == "0"))):
                 print "Error: Second entry in the ProjectMapFile should be 0 or 1."
                 raise Exception()              
-            testProject(I[0], InIsReferenceBuild, int(I[1]))
-            sys.stdout.flush()
+
+        # When we are regenerating the reference results, we might need to 
+        # update svn. Remove reference results from SVN.
+        if UpdateSVN == True:
+            assert(InIsReferenceBuild == True);
+            updateSVN("delete",  PMapFile);
+            
+        # Test the projects.
+        PMapFile.seek(0)    
+        for I in csv.reader(PMapFile):
+            testProject(I[0], int(I[1]))
+
+        # Add reference results to SVN.
+        if UpdateSVN == True:
+            updateSVN("add",  PMapFile);
+
     except:
         print "Error occurred. Premature termination."
         raise                            
@@ -406,4 +458,18 @@ def testAll(InIsReferenceBuild = False):
         PMapFile.close()    
             
 if __name__ == '__main__':
-    testAll()
+    IsReference = False
+    UpdateSVN = False
+    if len(sys.argv) >= 2:
+        if sys.argv[1] == "-r":
+            IsReference = True
+        elif sys.argv[1] == "-rs":
+            IsReference = True
+            UpdateSVN = True
+        else:     
+          print >> sys.stderr, 'Usage: ', sys.argv[0],\
+                             '[-r|-rs]' \
+                             'Use -r to regenerate reference output' \
+                             'Use -rs to regenerate reference output and update svn'
+
+    testAll(IsReference, UpdateSVN)

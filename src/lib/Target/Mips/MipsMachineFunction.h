@@ -16,7 +16,6 @@
 
 #include <utility>
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/VectorExtras.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 
@@ -25,8 +24,8 @@ namespace llvm {
 /// MipsFunctionInfo - This class is derived from MachineFunction private
 /// Mips target-specific information for each MachineFunction.
 class MipsFunctionInfo : public MachineFunctionInfo {
+  virtual void anchor();
 
-private:
   MachineFunction& MF;
   /// SRetReturnReg - Some subtargets require that sret lowering includes
   /// returning the value of the returned struct in a register. This field
@@ -45,22 +44,18 @@ private:
   // InArgFIRange: Range of indices of all frame objects created during call to
   //               LowerFormalArguments.
   // OutArgFIRange: Range of indices of all frame objects created during call to
-  //                LowerCall except for the frame object for restoring $gp. 
+  //                LowerCall except for the frame object for restoring $gp.
   std::pair<int, int> InArgFIRange, OutArgFIRange;
-  int GPFI; // Index of the frame object for restoring $gp 
-  mutable int DynAllocFI; // Frame index of dynamically allocated stack area.   
+  int GPFI; // Index of the frame object for restoring $gp
+  mutable int DynAllocFI; // Frame index of dynamically allocated stack area.
   unsigned MaxCallFrameSize;
-
-  // Size of area on callee's stack frame which is used to save va_arg or 
-  // byval arguments passed in registers.
-  unsigned RegSaveAreaSize;
 
 public:
   MipsFunctionInfo(MachineFunction& MF)
   : MF(MF), SRetReturnReg(0), GlobalBaseReg(0),
     VarArgsFrameIndex(0), InArgFIRange(std::make_pair(-1, 0)),
     OutArgFIRange(std::make_pair(-1, 0)), GPFI(0), DynAllocFI(0),
-    MaxCallFrameSize(0), RegSaveAreaSize(0)
+    MaxCallFrameSize(0)
   {}
 
   bool isInArgFI(int FI) const {
@@ -68,7 +63,7 @@ public:
   }
   void setLastInArgFI(int FI) { InArgFIRange.second = FI; }
 
-  bool isOutArgFI(int FI) const { 
+  bool isOutArgFI(int FI) const {
     return FI <= OutArgFIRange.first && FI >= OutArgFIRange.second;
   }
   void extendOutArgFIRange(int FirstFI, int LastFI) {
@@ -96,19 +91,15 @@ public:
   unsigned getSRetReturnReg() const { return SRetReturnReg; }
   void setSRetReturnReg(unsigned Reg) { SRetReturnReg = Reg; }
 
-  unsigned getGlobalBaseReg() const { return GlobalBaseReg; }
-  void setGlobalBaseReg(unsigned Reg) { GlobalBaseReg = Reg; }
+  bool globalBaseRegFixed() const;
+  bool globalBaseRegSet() const;
+  unsigned getGlobalBaseReg();
 
   int getVarArgsFrameIndex() const { return VarArgsFrameIndex; }
   void setVarArgsFrameIndex(int Index) { VarArgsFrameIndex = Index; }
 
   unsigned getMaxCallFrameSize() const { return MaxCallFrameSize; }
   void setMaxCallFrameSize(unsigned S) { MaxCallFrameSize = S; }
-
-  unsigned getRegSaveAreaSize() const { return RegSaveAreaSize; }
-  void setRegSaveAreaSize(unsigned S) {
-    if (RegSaveAreaSize < S) RegSaveAreaSize = S;
-  }
 };
 
 } // end of namespace llvm

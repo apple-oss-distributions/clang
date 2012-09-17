@@ -100,10 +100,10 @@ public:
 template <typename T>
 class SmallVectorTemplateCommon : public SmallVectorBase {
 protected:
-  void setEnd(T *P) { this->EndX = P; }
-public:
   SmallVectorTemplateCommon(size_t Size) : SmallVectorBase(Size) {}
 
+  void setEnd(T *P) { this->EndX = P; }
+public:
   typedef size_t size_type;
   typedef ptrdiff_t difference_type;
   typedef T value_type;
@@ -174,7 +174,7 @@ public:
 /// implementations that are designed to work with non-POD-like T's.
 template <typename T, bool isPodLike>
 class SmallVectorTemplateBase : public SmallVectorTemplateCommon<T> {
-public:
+protected:
   SmallVectorTemplateBase(size_t Size) : SmallVectorTemplateCommon<T>(Size) {}
 
   static void destroy_range(T *S, T *E) {
@@ -194,6 +194,23 @@ public:
   /// grow - double the size of the allocated memory, guaranteeing space for at
   /// least one more element or MinSize if specified.
   void grow(size_t MinSize = 0);
+  
+public:
+  void push_back(const T &Elt) {
+    if (this->EndX < this->CapacityX) {
+    Retry:
+      new (this->end()) T(Elt);
+      this->setEnd(this->end()+1);
+      return;
+    }
+    this->grow();
+    goto Retry;
+  }
+  
+  void pop_back() {
+    this->setEnd(this->end()-1);
+    this->end()->~T();
+  }
 };
 
 // Define this out-of-line to dissuade the C++ compiler from inlining it.
@@ -226,7 +243,7 @@ void SmallVectorTemplateBase<T, isPodLike>::grow(size_t MinSize) {
 /// implementations that are designed to work with POD-like T's.
 template <typename T>
 class SmallVectorTemplateBase<T, true> : public SmallVectorTemplateCommon<T> {
-public:
+protected:
   SmallVectorTemplateBase(size_t Size) : SmallVectorTemplateCommon<T>(Size) {}
 
   // No need to do a destroy loop for POD's.
@@ -255,6 +272,21 @@ public:
   void grow(size_t MinSize = 0) {
     this->grow_pod(MinSize*sizeof(T), sizeof(T));
   }
+public:
+  void push_back(const T &Elt) {
+    if (this->EndX < this->CapacityX) {
+    Retry:
+      *this->end() = Elt;
+      this->setEnd(this->end()+1);
+      return;
+    }
+    this->grow();
+    goto Retry;
+  }
+  
+  void pop_back() {
+    this->setEnd(this->end()-1);
+  }
 };
 
 
@@ -270,11 +302,13 @@ public:
   typedef typename SuperClass::iterator iterator;
   typedef typename SuperClass::size_type size_type;
 
+protected:
   // Default ctor - Initialize to empty.
   explicit SmallVectorImpl(unsigned N)
     : SmallVectorTemplateBase<T, isPodLike<T>::value>(N*sizeof(T)) {
   }
 
+public:
   ~SmallVectorImpl() {
     // Destroy the constructed elements in the vector.
     this->destroy_range(this->begin(), this->end());
@@ -297,7 +331,7 @@ public:
     } else if (N > this->size()) {
       if (this->capacity() < N)
         this->grow(N);
-      this->construct_range(this->end(), this->begin()+N, T());
+      std::uninitialized_fill(this->end(), this->begin()+N, T());
       this->setEnd(this->begin()+N);
     }
   }
@@ -309,7 +343,7 @@ public:
     } else if (N > this->size()) {
       if (this->capacity() < N)
         this->grow(N);
-      construct_range(this->end(), this->begin()+N, NV);
+      std::uninitialized_fill(this->end(), this->begin()+N, NV);
       this->setEnd(this->begin()+N);
     }
   }
@@ -319,25 +353,9 @@ public:
       this->grow(N);
   }
 
-  void push_back(const T &Elt) {
-    if (this->EndX < this->CapacityX) {
-    Retry:
-      new (this->end()) T(Elt);
-      this->setEnd(this->end()+1);
-      return;
-    }
-    this->grow();
-    goto Retry;
-  }
-
-  void pop_back() {
-    this->setEnd(this->end()-1);
-    this->end()->~T();
-  }
-
   T pop_back_val() {
     T Result = this->back();
-    pop_back();
+    this->pop_back();
     return Result;
   }
 
@@ -376,7 +394,7 @@ public:
     if (this->capacity() < NumElts)
       this->grow(NumElts);
     this->setEnd(this->begin()+NumElts);
-    construct_range(this->begin(), this->end(), Elt);
+    std::uninitialized_fill(this->begin(), this->end(), Elt);
   }
 
   iterator erase(iterator I) {
@@ -384,7 +402,7 @@ public:
     // Shift all elts down one.
     std::copy(I+1, this->end(), I);
     // Drop the last elt.
-    pop_back();
+    this->pop_back();
     return(N);
   }
 
@@ -400,7 +418,7 @@ public:
 
   iterator insert(iterator I, const T &Elt) {
     if (I == this->end()) {  // Important special case for empty vector.
-      push_back(Elt);
+      this->push_back(Elt);
       return this->end()-1;
     }
 
@@ -554,12 +572,6 @@ public:
     assert(N <= this->capacity());
     this->setEnd(this->begin() + N);
   }
-
-private:
-  static void construct_range(T *S, T *E, const T &Elt) {
-    for (; S != E; ++S)
-      new (S) T(Elt);
-  }
 };
 
 
@@ -686,9 +698,7 @@ public:
 
   explicit SmallVector(unsigned Size, const T &Value = T())
     : SmallVectorImpl<T>(NumTsAvailable) {
-    this->reserve(Size);
-    while (Size--)
-      this->push_back(Value);
+    this->assign(Size, Value);
   }
 
   template<typename ItTy>
@@ -718,9 +728,7 @@ public:
 
   explicit SmallVector(unsigned Size, const T &Value = T())
     : SmallVectorImpl<T>(0) {
-    this->reserve(Size);
-    while (Size--)
-      this->push_back(Value);
+    this->assign(Size, Value);
   }
 
   template<typename ItTy>

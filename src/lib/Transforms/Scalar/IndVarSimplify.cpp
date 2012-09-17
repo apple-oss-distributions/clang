@@ -58,18 +58,16 @@ STATISTIC(NumLFTR        , "Number of loop exit tests replaced");
 STATISTIC(NumElimExt     , "Number of IV sign/zero extends eliminated");
 STATISTIC(NumElimIV      , "Number of congruent IVs eliminated");
 
-namespace llvm {
-  cl::opt<bool> EnableIVRewrite(
-    "enable-iv-rewrite", cl::Hidden,
-    cl::desc("Enable canonical induction variable rewriting"));
+static cl::opt<bool> EnableIVRewrite(
+  "enable-iv-rewrite", cl::Hidden,
+  cl::desc("Enable canonical induction variable rewriting"));
 
-  // Trip count verification can be enabled by default under NDEBUG if we
-  // implement a strong expression equivalence checker in SCEV. Until then, we
-  // use the verify-indvars flag, which may assert in some cases.
-  cl::opt<bool> VerifyIndvars(
-    "verify-indvars", cl::Hidden,
-    cl::desc("Verify the ScalarEvolution result after running indvars"));
-}
+// Trip count verification can be enabled by default under NDEBUG if we
+// implement a strong expression equivalence checker in SCEV. Until then, we
+// use the verify-indvars flag, which may assert in some cases.
+static cl::opt<bool> VerifyIndvars(
+  "verify-indvars", cl::Hidden,
+  cl::desc("Verify the ScalarEvolution result after running indvars"));
 
 namespace {
   class IndVarSimplify : public LoopPass {
@@ -180,6 +178,11 @@ bool IndVarSimplify::isValidRewrite(Value *FromVal, Value *ToVal) {
     // base of a recurrence. This handles the case in which SCEV expansion
     // converts a pointer type recurrence into a nonrecurrent pointer base
     // indexed by an integer recurrence.
+
+    // If the GEP base pointer is a vector of pointers, abort.
+    if (!FromPtr->getType()->isPointerTy() || !ToPtr->getType()->isPointerTy())
+      return false;
+
     const SCEV *FromBase = SE->getPointerBase(SE->getSCEV(FromPtr));
     const SCEV *ToBase = SE->getPointerBase(SE->getSCEV(ToPtr));
     if (FromBase == ToBase)
@@ -843,7 +846,7 @@ protected:
 
   const SCEVAddRecExpr* GetExtendedOperandRecurrence(NarrowIVDefUse DU);
 
-  Instruction *WidenIVUse(NarrowIVDefUse DU);
+  Instruction *WidenIVUse(NarrowIVDefUse DU, SCEVExpander &Rewriter);
 
   void pushNarrowIVUsers(Instruction *NarrowDef, Instruction *WideDef);
 };
@@ -917,7 +920,6 @@ Instruction *WidenIV::CloneIVUser(NarrowIVDefUse DU) {
     }
     return WideBO;
   }
-  llvm_unreachable(0);
 }
 
 /// No-wrap operations can transfer sign extension of their result to their
@@ -946,9 +948,13 @@ const SCEVAddRecExpr* WidenIV::GetExtendedOperandRecurrence(NarrowIVDefUse DU) {
   else
     return 0;
 
+  // When creating this AddExpr, don't apply the current operations NSW or NUW
+  // flags. This instruction may be guarded by control flow that the no-wrap
+  // behavior depends on. Non-control-equivalent instructions can be mapped to
+  // the same SCEV expression, and it would be incorrect to transfer NSW/NUW
+  // semantics to those operations.
   const SCEVAddRecExpr *AddRec = dyn_cast<SCEVAddRecExpr>(
-    SE->getAddExpr(SE->getSCEV(DU.WideDef), ExtendOperExpr,
-                   IsSigned ? SCEV::FlagNSW : SCEV::FlagNUW));
+    SE->getAddExpr(SE->getSCEV(DU.WideDef), ExtendOperExpr));
 
   if (!AddRec || AddRec->getLoop() != L)
     return 0;
@@ -983,7 +989,7 @@ const SCEVAddRecExpr *WidenIV::GetWideRecurrence(Instruction *NarrowUse) {
 
 /// WidenIVUse - Determine whether an individual user of the narrow IV can be
 /// widened. If so, return the wide clone of the user.
-Instruction *WidenIV::WidenIVUse(NarrowIVDefUse DU) {
+Instruction *WidenIV::WidenIVUse(NarrowIVDefUse DU, SCEVExpander &Rewriter) {
 
   // Stop traversing the def-use chain at inner-loop phis or post-loop phis.
   if (isa<PHINode>(DU.NarrowUse) &&
@@ -1051,7 +1057,7 @@ Instruction *WidenIV::WidenIVUse(NarrowIVDefUse DU) {
   // NarrowUse.
   Instruction *WideUse = 0;
   if (WideAddRec == WideIncExpr
-      && SCEVExpander::hoistStep(WideInc, DU.NarrowUse, DT))
+      && Rewriter.hoistIVInc(WideInc, DU.NarrowUse))
     WideUse = WideInc;
   else {
     WideUse = CloneIVUser(DU);
@@ -1156,7 +1162,7 @@ PHINode *WidenIV::CreateWideIV(SCEVExpander &Rewriter) {
 
     // Process a def-use edge. This may replace the use, so don't hold a
     // use_iterator across it.
-    Instruction *WideUse = WidenIVUse(DU);
+    Instruction *WideUse = WidenIVUse(DU, Rewriter);
 
     // Follow all def-use edges from the previous narrow use.
     if (WideUse)
@@ -1231,7 +1237,11 @@ void IndVarSimplify::SimplifyAndExtend(Loop *L,
 /// BackedgeTakenInfo. If these expressions have not been reduced, then
 /// expanding them may incur additional cost (albeit in the loop preheader).
 static bool isHighCostExpansion(const SCEV *S, BranchInst *BI,
+                                SmallPtrSet<const SCEV*, 8> &Processed,
                                 ScalarEvolution *SE) {
+  if (!Processed.insert(S))
+    return false;
+
   // If the backedge-taken count is a UDiv, it's very likely a UDiv that
   // ScalarEvolution's HowFarToZero or HowManyLessThans produced to compute a
   // precise expression, rather than a UDiv from the user's code. If we can't
@@ -1259,7 +1269,7 @@ static bool isHighCostExpansion(const SCEV *S, BranchInst *BI,
   if (const SCEVAddExpr *Add = dyn_cast<SCEVAddExpr>(S)) {
     for (SCEVAddExpr::op_iterator I = Add->op_begin(), E = Add->op_end();
          I != E; ++I) {
-      if (isHighCostExpansion(*I, BI, SE))
+      if (isHighCostExpansion(*I, BI, Processed, SE))
         return true;
     }
     return false;
@@ -1270,8 +1280,8 @@ static bool isHighCostExpansion(const SCEV *S, BranchInst *BI,
   if (isa<SCEVSMaxExpr>(S) || isa<SCEVUMaxExpr>(S))
     return true;
 
-  // If we haven't recognized an expensive SCEV patter, assume its an expression
-  // produced by program code.
+  // If we haven't recognized an expensive SCEV pattern, assume it's an
+  // expression produced by program code.
   return false;
 }
 
@@ -1302,7 +1312,8 @@ static bool canExpandBackedgeTakenCount(Loop *L, ScalarEvolution *SE) {
   if (!BI)
     return false;
 
-  if (isHighCostExpansion(BackedgeTakenCount, BI, SE))
+  SmallPtrSet<const SCEV*, 8> Processed;
+  if (isHighCostExpansion(BackedgeTakenCount, BI, Processed, SE))
     return false;
 
   return true;

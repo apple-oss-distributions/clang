@@ -58,7 +58,7 @@ namespace clang {
     TST_underlyingType, // __underlying_type for C++0x
     TST_auto,         // C++0x auto
     TST_unknown_anytype, // __unknown_anytype extension
-    TST_atomic,       // C1X _Atomic
+    TST_atomic,       // C11 _Atomic
     TST_error         // erroneous type
   };
   
@@ -113,7 +113,12 @@ namespace clang {
 
     /// An Objective C property is a logical field of an Objective-C
     /// object which is read and written via Objective C method calls.
-    OK_ObjCProperty
+    OK_ObjCProperty,
+    
+    /// An Objective C array/dictionary subscripting which reads an object
+    /// or writes at the subscripted array/dictionary element via
+    /// Objective C method calls.
+    OK_ObjCSubscript
   };
 
   // \brief Describes the kind of template specialization that a

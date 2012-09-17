@@ -1,4 +1,4 @@
-//=====---- ARMSubtarget.h - Define Subtarget for the ARM -----*- C++ -*--====//
+//===-- ARMSubtarget.h - Define Subtarget for the ARM ----------*- C++ -*--===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -45,10 +45,11 @@ protected:
   bool HasV6T2Ops;
   bool HasV7Ops;
 
-  /// HasVFPv2, HasVFPv3, HasNEON - Specify what floating point ISAs are
-  /// supported.
+  /// HasVFPv2, HasVFPv3, HasVFPv4, HasNEON - Specify what
+  /// floating point ISAs are supported.
   bool HasVFPv2;
   bool HasVFPv3;
+  bool HasVFPv4;
   bool HasNEON;
 
   /// UseNEONForSinglePrecisionFP - if the NEONFP attribute has been
@@ -124,6 +125,10 @@ protected:
   /// CPSR setting instruction.
   bool AvoidCPSRPartialUpdate;
 
+  /// HasRAS - Some processors perform return stack prediction. CodeGen should
+  /// avoid issue "normal" call instructions to callees which do not return.
+  bool HasRAS;
+
   /// HasMPExtension - True if the subtarget supports Multiprocessing
   /// extension (ARMv7 only).
   bool HasMPExtension;
@@ -198,6 +203,7 @@ protected:
 
   bool hasVFP2() const { return HasVFPv2; }
   bool hasVFP3() const { return HasVFPv3; }
+  bool hasVFP4() const { return HasVFPv4; }
   bool hasNEON() const { return HasNEON;  }
   bool useNEONForSinglePrecisionFP() const {
     return hasNEON() && UseNEONForSinglePrecisionFP; }
@@ -211,6 +217,7 @@ protected:
   bool isFPOnlySP() const { return FPOnlySP; }
   bool prefers32BitThumb() const { return Pref32BitThumb; }
   bool avoidCPSRPartialUpdate() const { return AvoidCPSRPartialUpdate; }
+  bool hasRAS() const { return HasRAS; }
   bool hasMPExtension() const { return HasMPExtension; }
   bool hasThumb2DSP() const { return Thumb2DSP; }
 
@@ -219,6 +226,7 @@ protected:
 
   const Triple &getTargetTriple() const { return TargetTriple; }
 
+  bool isTargetIOS() const { return TargetTriple.getOS() == Triple::IOS; }
   bool isTargetDarwin() const { return TargetTriple.isOSDarwin(); }
   bool isTargetNaCl() const {
     return TargetTriple.getOS() == Triple::NativeClient;

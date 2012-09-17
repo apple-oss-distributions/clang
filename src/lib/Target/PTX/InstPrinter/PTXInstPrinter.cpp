@@ -38,7 +38,50 @@ StringRef PTXInstPrinter::getOpcodeName(unsigned Opcode) const {
 }
 
 void PTXInstPrinter::printRegName(raw_ostream &OS, unsigned RegNo) const {
-  OS << getRegisterName(RegNo);
+  // Decode the register number into type and offset
+  unsigned RegSpace  = RegNo & 0x7;
+  unsigned RegType   = (RegNo >> 3) & 0x7;
+  unsigned RegOffset = RegNo >> 6;
+
+  // Print the register
+  OS << "%";
+
+  switch (RegSpace) {
+  default:
+    llvm_unreachable("Unknown register space!");
+  case PTXRegisterSpace::Reg:
+    switch (RegType) {
+    default:
+      llvm_unreachable("Unknown register type!");
+    case PTXRegisterType::Pred:
+      OS << "p";
+      break;
+    case PTXRegisterType::B16:
+      OS << "rh";
+      break;
+    case PTXRegisterType::B32:
+      OS << "r";
+      break;
+    case PTXRegisterType::B64:
+      OS << "rd";
+      break;
+    case PTXRegisterType::F32:
+      OS << "f";
+      break;
+    case PTXRegisterType::F64:
+      OS << "fd";
+      break;
+    }
+    break;
+  case PTXRegisterSpace::Return:
+    OS << "ret";
+    break;
+  case PTXRegisterSpace::Argument:
+    OS << "arg";
+    break;
+  }
+
+  OS << RegOffset;
 }
 
 void PTXInstPrinter::printInst(const MCInst *MI, raw_ostream &O,
@@ -96,9 +139,23 @@ void PTXInstPrinter::printCall(const MCInst *MI, raw_ostream &O) {
     O << "), ";
   }
 
-  O << *(MI->getOperand(Index++).getExpr()) << ", (";
-
+  const MCExpr* Expr = MI->getOperand(Index++).getExpr();
   unsigned NumArgs = MI->getOperand(Index++).getImm();
+  
+  // if the function call is to printf or puts, change to vprintf
+  if (const MCSymbolRefExpr *SymRefExpr = dyn_cast<MCSymbolRefExpr>(Expr)) {
+    const MCSymbol &Sym = SymRefExpr->getSymbol();
+    if (Sym.getName() == "printf" || Sym.getName() == "puts") {
+      O << "vprintf";
+    } else {
+      O << Sym.getName();
+    }
+  } else {
+    O << *Expr;
+  }
+  
+  O << ", (";
+
   if (NumArgs > 0) {
     printOperand(MI, Index++, O);
     for (unsigned i = 1; i < NumArgs; ++i) {
@@ -125,6 +182,8 @@ void PTXInstPrinter::printOperand(const MCInst *MI, unsigned OpNo,
     } else {
       O << "0000000000000000";
     }
+  } else if (Op.isReg()) {
+    printRegName(O, Op.getReg());
   } else {
     assert(Op.isExpr() && "unknown operand kind in printOperand");
     const MCExpr *Expr = Op.getExpr();
@@ -156,7 +215,6 @@ void PTXInstPrinter::printRoundingMode(const MCInst *MI, unsigned OpNo,
     llvm_unreachable("Unknown rounding mode!");
   case PTXRoundingMode::RndDefault:
     llvm_unreachable("FP rounding-mode pass did not handle instruction!");
-    break;
   case PTXRoundingMode::RndNone:
     // Do not print anything.
     break;

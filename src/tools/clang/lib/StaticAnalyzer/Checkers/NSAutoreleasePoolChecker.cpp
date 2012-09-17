@@ -32,7 +32,7 @@ using namespace ento;
 namespace {
 class NSAutoreleasePoolChecker
   : public Checker<check::PreObjCMessage> {
-  mutable llvm::OwningPtr<BugType> BT;
+  mutable OwningPtr<BugType> BT;
   mutable Selector releaseS;
 
 public:
@@ -84,6 +84,6 @@ void NSAutoreleasePoolChecker::checkPreObjCMessage(ObjCMessage msg,
 }
 
 void ento::registerNSAutoreleasePoolChecker(CheckerManager &mgr) {
-  if (mgr.getLangOptions().getGC() != LangOptions::NonGC)
+  if (mgr.getLangOpts().getGC() != LangOptions::NonGC)
     mgr.registerChecker<NSAutoreleasePoolChecker>();
 }

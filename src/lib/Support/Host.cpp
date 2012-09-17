@@ -61,6 +61,8 @@ static bool GetX86CpuIDAndInfo(unsigned value, unsigned *rEAX,
     *rECX = registers[2];
     *rEDX = registers[3];
     return false;
+  #else
+    return true;
   #endif
 #elif defined(i386) || defined(__i386__) || defined(__x86__) || defined(_M_IX86)
   #if defined(__GNUC__)
@@ -87,9 +89,14 @@ static bool GetX86CpuIDAndInfo(unsigned value, unsigned *rEAX,
       mov   dword ptr [esi],edx
     }
     return false;
+// pedantic #else returns to appease -Wunreachable-code (so we don't generate
+// postprocessed code that looks like "return true; return false;")
+  #else
+    return true;
   #endif
-#endif
+#else
   return true;
+#endif
 }
 
 static void DetectX86FamilyModel(unsigned EAX, unsigned &Family,
@@ -223,11 +230,15 @@ std::string sys::getHostCPUName() {
       case 45:
         return "corei7-avx";
 
+      // Ivy Bridge:
+      case 58:
+        return "core-avx-i";
+
       case 28: // Intel Atom processor. All processors are manufactured using
                // the 45 nm process
         return "atom";
 
-      default: return "i686";
+      default: return (Em64T) ? "x86-64" : "i686";
       }
     case 15: {
       switch (Model) {
@@ -298,6 +309,10 @@ std::string sys::getHostCPUName() {
         }
       case 16:
         return "amdfam10";
+      case 20:
+        return "btver1";
+      case 21:
+        return "bdver1";
     default:
       return "generic";
     }

@@ -75,7 +75,7 @@ public:
                                                  &pass.Ctx.Idents.get("drain"));
   }
 
-  void transformBody(Stmt *body) {
+  void transformBody(Stmt *body, Decl *ParentD) {
     Body = body;
     TraverseStmt(body);
   }
@@ -260,10 +260,6 @@ private:
     }
 
     bool VisitDeclRefExpr(DeclRefExpr *E) {
-      return checkRef(E->getLocation(), E->getDecl()->getLocation());
-    }
-
-    bool VisitBlockDeclRefExpr(BlockDeclRefExpr *E) {
       return checkRef(E->getLocation(), E->getDecl()->getLocation());
     }
 

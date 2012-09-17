@@ -536,12 +536,7 @@ struct _LIBCPP_VISIBLE greater : binary_function<_Tp, _Tp, bool>
         {return __x > __y;}
 };
 
-template <class _Tp>
-struct _LIBCPP_VISIBLE less : binary_function<_Tp, _Tp, bool>
-{
-    _LIBCPP_INLINE_VISIBILITY bool operator()(const _Tp& __x, const _Tp& __y) const
-        {return __x < __y;}
-};
+// less in <__functional_base>
 
 template <class _Tp>
 struct _LIBCPP_VISIBLE greater_equal : binary_function<_Tp, _Tp, bool>
@@ -994,9 +989,23 @@ class __func<_Fp, _Alloc, _Rp(_ArgTypes...)>
     __compressed_pair<_Fp, _Alloc> __f_;
 public:
     _LIBCPP_INLINE_VISIBILITY
-    explicit __func(_Fp __f) : __f_(_VSTD::move(__f)) {}
+    explicit __func(_Fp&& __f)
+        : __f_(piecewise_construct, _VSTD::forward_as_tuple(_VSTD::move(__f)),
+                                    _VSTD::forward_as_tuple()) {}
     _LIBCPP_INLINE_VISIBILITY
-    explicit __func(_Fp __f, _Alloc __a) : __f_(_VSTD::move(__f), _VSTD::move(__a)) {}
+    explicit __func(const _Fp& __f, const _Alloc& __a)
+        : __f_(piecewise_construct, _VSTD::forward_as_tuple(__f),
+                                    _VSTD::forward_as_tuple(__a)) {}
+
+    _LIBCPP_INLINE_VISIBILITY
+    explicit __func(const _Fp& __f, _Alloc&& __a)
+        : __f_(piecewise_construct, _VSTD::forward_as_tuple(__f),
+                                    _VSTD::forward_as_tuple(_VSTD::move(__a))) {}
+
+    _LIBCPP_INLINE_VISIBILITY
+    explicit __func(_Fp&& __f, _Alloc&& __a)
+        : __f_(piecewise_construct, _VSTD::forward_as_tuple(_VSTD::move(__f)),
+                                    _VSTD::forward_as_tuple(_VSTD::move(__a))) {}
     virtual __base<_Rp(_ArgTypes...)>* __clone() const;
     virtual void __clone(__base<_Rp(_ArgTypes...)>*) const;
     virtual void destroy() _NOEXCEPT;
@@ -1168,7 +1177,7 @@ public:
 
     // function capacity:
     _LIBCPP_INLINE_VISIBILITY
-    /*explicit*/ operator bool() const _NOEXCEPT {return __f_;}
+        _LIBCPP_EXPLICIT operator bool() const _NOEXCEPT {return __f_;}
 
     // deleted overloads close possible hole in the type system
     template<class _R2, class... _ArgTypes2>
@@ -1698,7 +1707,11 @@ public:
 
 #endif  // _LIBCPP_HAS_NO_DEFAULTED_FUNCTIONS
 
-    template <class _Gp, class ..._BA>
+    template <class _Gp, class ..._BA,
+              class = typename enable_if
+                               <
+                                  is_constructible<_Fd, _Gp>::value
+                               >::type>
       _LIBCPP_INLINE_VISIBILITY
       explicit __bind(_Gp&& __f, _BA&& ...__bound_args)
         : __f_(_VSTD::forward<_Gp>(__f)),

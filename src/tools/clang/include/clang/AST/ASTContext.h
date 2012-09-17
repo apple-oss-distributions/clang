@@ -21,6 +21,7 @@
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/VersionTuple.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/LambdaMangleContext.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/TemplateName.h"
@@ -55,6 +56,7 @@ namespace clang {
   class CXXABI;
   // Decls
   class DeclContext;
+  class CXXConversionDecl;
   class CXXMethodDecl;
   class CXXRecordDecl;
   class Decl;
@@ -80,7 +82,7 @@ namespace clang {
 
 /// ASTContext - This class holds long-lived AST nodes (such as types and
 /// decls) that can be referred to throughout the semantic analysis of a file.
-class ASTContext : public llvm::RefCountedBase<ASTContext> {
+class ASTContext : public RefCountedBase<ASTContext> {
   ASTContext &this_() { return *this; }
 
   mutable std::vector<Type*> Types;
@@ -202,11 +204,12 @@ class ASTContext : public llvm::RefCountedBase<ASTContext> {
   /// \brief The typedef for the predefined 'SEL' type.
   mutable TypedefDecl *ObjCSelDecl;
 
-  QualType ObjCProtoType;
-
   /// \brief The typedef for the predefined 'Class' type.
   mutable TypedefDecl *ObjCClassDecl;
-  
+
+  /// \brief The typedef for the predefined 'Protocol' class in Objective-C.
+  mutable ObjCInterfaceDecl *ObjCProtocolClassDecl;
+
   // Typedefs which may be provided defining the structure of Objective-C
   // pseudo-builtins
   QualType ObjCIdRedefinitionType;
@@ -215,6 +218,8 @@ class ASTContext : public llvm::RefCountedBase<ASTContext> {
 
   QualType ObjCConstantStringType;
   mutable RecordDecl *CFConstantStringTypeDecl;
+  
+  QualType ObjCNSStringType;
 
   /// \brief The typedef declaration for the Objective-C "instancetype" type.
   TypedefDecl *ObjCInstanceTypeDecl;
@@ -227,6 +232,9 @@ class ASTContext : public llvm::RefCountedBase<ASTContext> {
 
   /// \brief The type for the C sigjmp_buf type.
   TypeDecl *sigjmp_bufDecl;
+
+  /// \brief The type for the C ucontext_t type.
+  TypeDecl *ucontext_tDecl;
 
   /// \brief Type for the Block descriptor for Blocks CodeGen.
   ///
@@ -317,11 +325,18 @@ class ASTContext : public llvm::RefCountedBase<ASTContext> {
   typedef UsuallyTinyPtrVector<const CXXMethodDecl> CXXMethodVector;
   llvm::DenseMap<const CXXMethodDecl *, CXXMethodVector> OverriddenMethods;
 
+  /// \brief Mapping from each declaration context to its corresponding lambda 
+  /// mangling context.
+  llvm::DenseMap<const DeclContext *, LambdaMangleContext> LambdaMangleContexts;
+  
   /// \brief Mapping that stores parameterIndex values for ParmVarDecls
   /// when that value exceeds the bitfield size of
   /// ParmVarDeclBits.ParameterIndex.
   typedef llvm::DenseMap<const VarDecl *, unsigned> ParameterIndexTable;
   ParameterIndexTable ParamIndices;  
+  
+  ImportDecl *FirstLocalImport;
+  ImportDecl *LastLocalImport;
   
   TranslationUnitDecl *TUDecl;
 
@@ -342,7 +357,7 @@ class ASTContext : public llvm::RefCountedBase<ASTContext> {
   PartialDiagnostic::StorageAllocator DiagAllocator;
 
   /// \brief The current C++ ABI.
-  llvm::OwningPtr<CXXABI> ABI;
+  OwningPtr<CXXABI> ABI;
   CXXABI *createCXXABI(const TargetInfo &T);
 
   /// \brief The logical -> physical address space map.
@@ -351,7 +366,8 @@ class ASTContext : public llvm::RefCountedBase<ASTContext> {
   friend class ASTDeclReader;
   friend class ASTReader;
   friend class ASTWriter;
-  
+  friend class CXXRecordDecl;
+
   const TargetInfo *Target;
   clang::PrintingPolicy PrintingPolicy;
   
@@ -360,7 +376,7 @@ public:
   SelectorTable &Selectors;
   Builtin::Context &BuiltinInfo;
   mutable DeclarationNameTable DeclarationNames;
-  llvm::OwningPtr<ExternalASTSource> ExternalSource;
+  OwningPtr<ExternalASTSource> ExternalSource;
   ASTMutationListener *Listener;
 
   clang::PrintingPolicy getPrintingPolicy() const { return PrintingPolicy; }
@@ -390,7 +406,7 @@ public:
 
   const TargetInfo &getTargetInfo() const { return *Target; }
   
-  const LangOptions& getLangOptions() const { return LangOpts; }
+  const LangOptions& getLangOpts() const { return LangOpts; }
 
   DiagnosticsEngine &getDiagnostics() const;
 
@@ -478,6 +494,56 @@ public:
   void addOverriddenMethod(const CXXMethodDecl *Method, 
                            const CXXMethodDecl *Overridden);
   
+  /// \brief Notify the AST context that a new import declaration has been
+  /// parsed or implicitly created within this translation unit.
+  void addedLocalImportDecl(ImportDecl *Import);
+
+  static ImportDecl *getNextLocalImport(ImportDecl *Import) {
+    return Import->NextLocalImport;
+  }
+  
+  /// \brief Iterator that visits import declarations.
+  class import_iterator {
+    ImportDecl *Import;
+    
+  public:
+    typedef ImportDecl               *value_type;
+    typedef ImportDecl               *reference;
+    typedef ImportDecl               *pointer;
+    typedef int                       difference_type;
+    typedef std::forward_iterator_tag iterator_category;
+    
+    import_iterator() : Import() { }
+    explicit import_iterator(ImportDecl *Import) : Import(Import) { }
+    
+    reference operator*() const { return Import; }
+    pointer operator->() const { return Import; }
+    
+    import_iterator &operator++() {
+      Import = ASTContext::getNextLocalImport(Import);
+      return *this;
+    }
+
+    import_iterator operator++(int) {
+      import_iterator Other(*this);
+      ++(*this);
+      return Other;
+    }
+    
+    friend bool operator==(import_iterator X, import_iterator Y) {
+      return X.Import == Y.Import;
+    }
+
+    friend bool operator!=(import_iterator X, import_iterator Y) {
+      return X.Import != Y.Import;
+    }
+  };
+  
+  import_iterator local_import_begin() const { 
+    return import_iterator(FirstLocalImport); 
+  }
+  import_iterator local_import_end() const { return import_iterator(); }
+  
   TranslationUnitDecl *getTranslationUnitDecl() const { return TUDecl; }
 
 
@@ -498,6 +564,7 @@ public:
   CanQualType DependentTy, OverloadTy, BoundMemberTy, UnknownAnyTy;
   CanQualType PseudoObjectTy, ARCUnbridgedCastTy;
   CanQualType ObjCBuiltinIdTy, ObjCBuiltinClassTy, ObjCBuiltinSelTy;
+  CanQualType ObjCBuiltinBoolTy;
 
   // Types for deductions in C++0x [stmt.ranged]'s desugaring. Built on demand.
   mutable QualType AutoDeductTy;     // Deduction against 'auto'.
@@ -516,7 +583,7 @@ public:
   /// The external AST source provides the ability to load parts of
   /// the abstract syntax tree as needed from some external storage,
   /// e.g., a precompiled header.
-  void setExternalSource(llvm::OwningPtr<ExternalASTSource> &Source);
+  void setExternalSource(OwningPtr<ExternalASTSource> &Source);
 
   /// \brief Retrieve a pointer to the external AST source associated
   /// with this AST context, if any.
@@ -797,7 +864,8 @@ public:
   QualType getPackExpansionType(QualType Pattern,
                                 llvm::Optional<unsigned> NumExpansions);
 
-  QualType getObjCInterfaceType(const ObjCInterfaceDecl *Decl) const;
+  QualType getObjCInterfaceType(const ObjCInterfaceDecl *Decl,
+                                ObjCInterfaceDecl *PrevDecl = 0) const;
 
   QualType getObjCObjectType(QualType Base,
                              ObjCProtocolDecl * const *Protocols,
@@ -812,7 +880,7 @@ public:
   QualType getTypeOfType(QualType t) const;
 
   /// getDecltypeType - C++0x decltype.
-  QualType getDecltypeType(Expr *e) const;
+  QualType getDecltypeType(Expr *e, QualType UnderlyingType) const;
 
   /// getUnaryTransformType - unary type transforms
   QualType getUnaryTransformType(QualType BaseType, QualType UnderlyingType,
@@ -879,6 +947,14 @@ public:
     return ObjCConstantStringType;
   }
 
+  QualType getObjCNSStringType() const {
+    return ObjCNSStringType;
+  }
+  
+  void setObjCNSStringType(QualType T) {
+    ObjCNSStringType = T;
+  }
+  
   /// \brief Retrieve the type that 'id' has been defined to, which may be
   /// different from the built-in 'id' if 'id' has been typedef'd.
   QualType getObjCIdRedefinitionType() const {
@@ -963,9 +1039,21 @@ public:
     return QualType();
   }
 
+  /// \brief Set the type for the C ucontext_t type.
+  void setucontext_tDecl(TypeDecl *ucontext_tDecl) {
+    this->ucontext_tDecl = ucontext_tDecl;
+  }
+
+  /// \brief Retrieve the C ucontext_t type.
+  QualType getucontext_tType() const {
+    if (ucontext_tDecl)
+      return getTypeDeclType(ucontext_tDecl);
+    return QualType();
+  }
+
   /// \brief The result type of logical operations, '<', '>', '!=', etc.
   QualType getLogicalOperationType() const {
-    return getLangOptions().CPlusPlus ? BoolTy : IntTy;
+    return getLangOpts().CPlusPlus ? BoolTy : IntTy;
   }
 
   /// getObjCEncodingForType - Emit the ObjC type encoding for the
@@ -1035,9 +1123,6 @@ public:
     return getTypeDeclType(getObjCSelDecl());
   }
 
-  void setObjCProtoType(QualType QT);
-  QualType getObjCProtoType() const { return ObjCProtoType; }
-
   /// \brief Retrieve the typedef declaration corresponding to the predefined
   /// Objective-C 'Class' type.
   TypedefDecl *getObjCClassDecl() const;
@@ -1049,6 +1134,15 @@ public:
     return getTypeDeclType(getObjCClassDecl());
   }
 
+  /// \brief Retrieve the Objective-C class declaration corresponding to 
+  /// the predefined 'Protocol' class.
+  ObjCInterfaceDecl *getObjCProtocolDecl() const;
+  
+  /// \brief Retrieve the type of the Objective-C "Protocol" class.
+  QualType getObjCProtoType() const {
+    return getObjCInterfaceType(getObjCProtocolDecl());
+  }
+  
   void setBuiltinVaListType(QualType T);
   QualType getBuiltinVaListType() const { return BuiltinVaListType; }
 
@@ -1056,6 +1150,11 @@ public:
   /// volatile, or restrict qualifiers.
   QualType getCVRQualifiedType(QualType T, unsigned CVR) const {
     return getQualifiedType(T, Qualifiers::fromCVRMask(CVR));
+  }
+
+  /// getQualifiedType - Un-split a SplitQualType.
+  QualType getQualifiedType(SplitQualType split) const {
+    return getQualifiedType(split.Ty, split.Quals);
   }
 
   /// getQualifiedType - Returns a type with additional qualifiers.
@@ -1108,7 +1207,8 @@ public:
   enum GetBuiltinTypeError {
     GE_None,              //< No error
     GE_Missing_stdio,     //< Missing a type from <stdio.h>
-    GE_Missing_setjmp     //< Missing a type from <setjmp.h>
+    GE_Missing_setjmp,    //< Missing a type from <setjmp.h>
+    GE_Missing_ucontext   //< Missing a type from <ucontext.h>
   };
 
   /// GetBuiltinType - Return the type for the specified builtin.  If 
@@ -1223,7 +1323,8 @@ public:
   const ASTRecordLayout &getASTObjCInterfaceLayout(const ObjCInterfaceDecl *D)
     const;
 
-  void DumpRecordLayout(const RecordDecl *RD, raw_ostream &OS) const;
+  void DumpRecordLayout(const RecordDecl *RD, raw_ostream &OS,
+                        bool Simple = false) const;
 
   /// getASTObjCImplementationLayout - Get or compute information about
   /// the layout of the specified Objective-C implementation. This may
@@ -1238,6 +1339,9 @@ public:
   /// ...the first non-pure virtual function that is not inline at the point
   /// of class definition.
   const CXXMethodDecl *getKeyFunction(const CXXRecordDecl *RD);
+
+  /// Get the offset of a FieldDecl or IndirectFieldDecl, in bits.
+  uint64_t getFieldOffset(const ValueDecl *FD) const;
 
   bool isNearlyEmpty(const CXXRecordDecl *RD) const;
 
@@ -1583,6 +1687,8 @@ public:
     return Res;
   }
 
+  bool isSentinelNullExpr(const Expr *E);
+
   /// \brief Get the implementation of ObjCInterfaceDecl,or NULL if none exists.
   ObjCImplementationDecl *getObjCImplementation(ObjCInterfaceDecl *D);
   /// \brief Get the implementation of ObjCCategoryDecl, or NULL if none exists.
@@ -1669,6 +1775,8 @@ public:
   /// it is not used.
   bool DeclMustBeEmitted(const Decl *D);
 
+  /// \brief Retrieve the lambda mangling number for a lambda expression.
+  unsigned getLambdaManglingNumber(CXXMethodDecl *CallOperator);
   
   /// \brief Used by ParmVarDecl to store on the side the
   /// index of the parameter when it exceeds the size of the normal bitfield.
@@ -1800,13 +1908,19 @@ static inline Selector GetUnarySelector(StringRef name, ASTContext& Ctx) {
 }  // end namespace clang
 
 // operator new and delete aren't allowed inside namespaces.
-// The throw specifications are mandated by the standard.
+
 /// @brief Placement new for using the ASTContext's allocator.
 ///
 /// This placement form of operator new uses the ASTContext's allocator for
-/// obtaining memory. It is a non-throwing new, which means that it returns
-/// null on error. (If that is what the allocator does. The current does, so if
-/// this ever changes, this operator will have to be changed, too.)
+/// obtaining memory.
+///
+/// IMPORTANT: These are also declared in clang/AST/Attr.h! Any changes here
+/// need to also be made there.
+///
+/// We intentionally avoid using a nothrow specification here so that the calls
+/// to this operator will not perform a null check on the result -- the
+/// underlying allocator never returns null pointers.
+///
 /// Usage looks like this (assuming there's an ASTContext 'Context' in scope):
 /// @code
 /// // Default alignment (8)
@@ -1824,7 +1938,7 @@ static inline Selector GetUnarySelector(StringRef name, ASTContext& Ctx) {
 ///                  allocator supports it).
 /// @return The allocated memory. Could be NULL.
 inline void *operator new(size_t Bytes, const clang::ASTContext &C,
-                          size_t Alignment) throw () {
+                          size_t Alignment) {
   return C.Allocate(Bytes, Alignment);
 }
 /// @brief Placement delete companion to the new above.
@@ -1833,14 +1947,17 @@ inline void *operator new(size_t Bytes, const clang::ASTContext &C,
 /// invoking it directly; see the new operator for more details. This operator
 /// is called implicitly by the compiler if a placement new expression using
 /// the ASTContext throws in the object constructor.
-inline void operator delete(void *Ptr, const clang::ASTContext &C, size_t)
-              throw () {
+inline void operator delete(void *Ptr, const clang::ASTContext &C, size_t) {
   C.Deallocate(Ptr);
 }
 
 /// This placement form of operator new[] uses the ASTContext's allocator for
-/// obtaining memory. It is a non-throwing new[], which means that it returns
-/// null on error.
+/// obtaining memory.
+///
+/// We intentionally avoid using a nothrow specification here so that the calls
+/// to this operator will not perform a null check on the result -- the
+/// underlying allocator never returns null pointers.
+///
 /// Usage looks like this (assuming there's an ASTContext 'Context' in scope):
 /// @code
 /// // Default alignment (8)
@@ -1858,7 +1975,7 @@ inline void operator delete(void *Ptr, const clang::ASTContext &C, size_t)
 ///                  allocator supports it).
 /// @return The allocated memory. Could be NULL.
 inline void *operator new[](size_t Bytes, const clang::ASTContext& C,
-                            size_t Alignment = 8) throw () {
+                            size_t Alignment = 8) {
   return C.Allocate(Bytes, Alignment);
 }
 
@@ -1868,8 +1985,7 @@ inline void *operator new[](size_t Bytes, const clang::ASTContext& C,
 /// invoking it directly; see the new[] operator for more details. This operator
 /// is called implicitly by the compiler if a placement new[] expression using
 /// the ASTContext throws in the object constructor.
-inline void operator delete[](void *Ptr, const clang::ASTContext &C, size_t)
-              throw () {
+inline void operator delete[](void *Ptr, const clang::ASTContext &C, size_t) {
   C.Deallocate(Ptr);
 }
 

@@ -26,8 +26,8 @@ using namespace ento;
 namespace {
 class StackAddrEscapeChecker : public Checker< check::PreStmt<ReturnStmt>,
                                                check::EndPath > {
-  mutable llvm::OwningPtr<BuiltinBug> BT_stackleak;
-  mutable llvm::OwningPtr<BuiltinBug> BT_returnstack;
+  mutable OwningPtr<BuiltinBug> BT_stackleak;
+  mutable OwningPtr<BuiltinBug> BT_returnstack;
 
 public:
   void checkPreStmt(const ReturnStmt *RS, CheckerContext &C) const;
@@ -100,7 +100,7 @@ void StackAddrEscapeChecker::EmitStackError(CheckerContext &C, const MemRegion *
                  new BuiltinBug("Return of address to stack-allocated memory"));
 
   // Generate a report for this bug.
-  llvm::SmallString<512> buf;
+  SmallString<512> buf;
   llvm::raw_svector_ostream os(buf);
   SourceRange range = GenName(os, R, C.getSourceManager());
   os << " returned to caller";
@@ -113,31 +113,39 @@ void StackAddrEscapeChecker::EmitStackError(CheckerContext &C, const MemRegion *
 }
 
 void StackAddrEscapeChecker::checkPreStmt(const ReturnStmt *RS,
-                                        CheckerContext &C) const {
+                                          CheckerContext &C) const {
   
   const Expr *RetE = RS->getRetValue();
   if (!RetE)
     return;
  
-  SVal V = C.getState()->getSVal(RetE);
+  SVal V = C.getState()->getSVal(RetE, C.getLocationContext());
   const MemRegion *R = V.getAsRegion();
 
-  if (!R || !R->hasStackStorage())
-    return;  
-  
-  if (R->hasStackStorage()) {
-    // Automatic reference counting automatically copies blocks.
-    if (C.getASTContext().getLangOptions().ObjCAutoRefCount &&
-        isa<BlockDataRegion>(R))
-      return;
-
-    EmitStackError(C, R, RetE);
+  if (!R)
     return;
-  }
+  
+  const StackSpaceRegion *SS =
+    dyn_cast_or_null<StackSpaceRegion>(R->getMemorySpace());
+    
+  if (!SS)
+    return;
+
+  // Return stack memory in an ancestor stack frame is fine.
+  const StackFrameContext *SFC = SS->getStackFrame();
+  if (SFC != C.getLocationContext()->getCurrentStackFrame())
+    return;
+
+  // Automatic reference counting automatically copies blocks.
+  if (C.getASTContext().getLangOpts().ObjCAutoRefCount &&
+      isa<BlockDataRegion>(R))
+    return;
+
+  EmitStackError(C, R, RetE);
 }
 
 void StackAddrEscapeChecker::checkEndPath(CheckerContext &Ctx) const {
-  const ProgramState *state = Ctx.getState();
+  ProgramStateRef state = Ctx.getState();
 
   // Iterate over all bindings to global variables and see if it contains
   // a memory region in the stack space.
@@ -165,7 +173,7 @@ void StackAddrEscapeChecker::checkEndPath(CheckerContext &Ctx) const {
         
       // Under automated retain release, it is okay to assign a block
       // directly to a global variable.
-      if (Ctx.getASTContext().getLangOptions().ObjCAutoRefCount &&
+      if (Ctx.getASTContext().getLangOpts().ObjCAutoRefCount &&
           isa<BlockDataRegion>(vR))
         return true;
 
@@ -201,7 +209,7 @@ void StackAddrEscapeChecker::checkEndPath(CheckerContext &Ctx) const {
   
   for (unsigned i = 0, e = cb.V.size(); i != e; ++i) {
     // Generate a report for this bug.
-    llvm::SmallString<512> buf;
+    SmallString<512> buf;
     llvm::raw_svector_ostream os(buf);
     SourceRange range = GenName(os, cb.V[i].second,
                                 Ctx.getSourceManager());

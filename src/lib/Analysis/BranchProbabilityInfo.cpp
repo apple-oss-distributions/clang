@@ -65,8 +65,9 @@ static const uint32_t UR_TAKEN_WEIGHT = 1;
 ///
 /// This is the weight for a branch not being taken toward a block that
 /// terminates (eventually) in unreachable. Such a branch is essentially never
-/// taken.
-static const uint32_t UR_NONTAKEN_WEIGHT = 1023;
+/// taken. Set the weight to an absurdly high value so that nested loops don't
+/// easily subsume it.
+static const uint32_t UR_NONTAKEN_WEIGHT = 1024*1024 - 1;
 
 static const uint32_t PH_TAKEN_WEIGHT = 20;
 static const uint32_t PH_NONTAKEN_WEIGHT = 12;
@@ -480,8 +481,8 @@ getEdgeWeight(const BasicBlock *Src, const BasicBlock *Dst) const {
 void BranchProbabilityInfo::
 setEdgeWeight(const BasicBlock *Src, const BasicBlock *Dst, uint32_t Weight) {
   Weights[std::make_pair(Src, Dst)] = Weight;
-  DEBUG(dbgs() << "set edge " << Src->getNameStr() << " -> "
-               << Dst->getNameStr() << " weight to " << Weight
+  DEBUG(dbgs() << "set edge " << Src->getName() << " -> "
+               << Dst->getName() << " weight to " << Weight
                << (isEdgeHot(Src, Dst) ? " [is HOT now]\n" : "\n"));
 }
 
@@ -501,7 +502,7 @@ BranchProbabilityInfo::printEdgeProbability(raw_ostream &OS,
                                             const BasicBlock *Dst) const {
 
   const BranchProbability Prob = getEdgeProbability(Src, Dst);
-  OS << "edge " << Src->getNameStr() << " -> " << Dst->getNameStr()
+  OS << "edge " << Src->getName() << " -> " << Dst->getName()
      << " probability is " << Prob
      << (isEdgeHot(Src, Dst) ? " [HOT edge]\n" : "\n");
 

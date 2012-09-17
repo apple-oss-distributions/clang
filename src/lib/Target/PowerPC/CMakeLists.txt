@@ -21,24 +21,11 @@ add_llvm_target(PowerPCCodeGen
   PPCFrameLowering.cpp
   PPCJITInfo.cpp
   PPCMCInstLower.cpp
+  PPCMachineFunctionInfo.cpp
   PPCRegisterInfo.cpp
   PPCSubtarget.cpp
   PPCTargetMachine.cpp
   PPCSelectionDAGInfo.cpp
-  )
-
-add_llvm_library_dependencies(LLVMPowerPCCodeGen
-  LLVMAnalysis
-  LLVMAsmPrinter
-  LLVMCodeGen
-  LLVMCore
-  LLVMMC
-  LLVMPowerPCAsmPrinter
-  LLVMPowerPCDesc
-  LLVMPowerPCInfo
-  LLVMSelectionDAG
-  LLVMSupport
-  LLVMTarget
   )
 
 add_subdirectory(InstPrinter)

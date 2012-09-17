@@ -1,4 +1,4 @@
-//======- Thumb1FrameLowering.cpp - Thumb1 Frame Information ---*- C++ -*-====//
+//===-- Thumb1FrameLowering.cpp - Thumb1 Frame Information ----------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -101,7 +101,7 @@ void Thumb1FrameLowering::emitPrologue(MachineFunction &MF) const {
     case ARM::R11:
       if (Reg == FramePtr)
         FramePtrSpillFI = FI;
-      if (STI.isTargetDarwin()) {
+      if (STI.isTargetIOS()) {
         AFI->addGPRCalleeSavedArea2Frame(FI);
         GPRCS2Size += 4;
       } else {
@@ -278,8 +278,11 @@ void Thumb1FrameLowering::emitEpilogue(MachineFunction &MF,
 
     emitSPUpdate(MBB, MBBI, TII, dl, *RegInfo, VARegSaveSize);
 
-    AddDefaultPred(BuildMI(MBB, MBBI, dl, TII.get(ARM::tBX_RET_vararg))
-      .addReg(ARM::R3, RegState::Kill));
+    MachineInstrBuilder MIB =
+      BuildMI(MBB, MBBI, dl, TII.get(ARM::tBX_RET_vararg))
+      .addReg(ARM::R3, RegState::Kill);
+    AddDefaultPred(MIB);
+    MIB->copyImplicitOps(&*MBBI);
     // erase the old tBX_RET instruction
     MBB.erase(MBBI);
   }
@@ -350,6 +353,7 @@ restoreCalleeSavedRegisters(MachineBasicBlock &MBB,
         continue;
       Reg = ARM::PC;
       (*MIB).setDesc(TII.get(ARM::tPOP_RET));
+      MIB->copyImplicitOps(&*MI);
       MI = MBB.erase(MI);
     }
     MIB.addReg(Reg, getDefRegState(true));

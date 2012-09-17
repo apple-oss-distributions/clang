@@ -35,6 +35,16 @@ public:
   RTDyldMemoryManager() {}
   virtual ~RTDyldMemoryManager();
 
+  /// allocateCodeSection - Allocate a memory block of (at least) the given
+  /// size suitable for executable code.
+  virtual uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment,
+                                       unsigned SectionID) = 0;
+
+  /// allocateDataSection - Allocate a memory block of (at least) the given
+  /// size suitable for data.
+  virtual uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
+                                       unsigned SectionID) = 0;
+
   // Allocate ActualSize bytes, or more, for the named function. Return
   // a pointer to the allocated memory and update Size to reflect how much
   // memory was acutally allocated.
@@ -54,6 +64,10 @@ class RuntimeDyld {
   // interface.
   RuntimeDyldImpl *Dyld;
   RTDyldMemoryManager *MM;
+protected:
+  // Change the address associated with a section when resolving relocations.
+  // Any relocations already associated with the symbol will be re-resolved.
+  void reassignSectionAddress(unsigned SectionID, uint64_t Addr);
 public:
   RuntimeDyld(RTDyldMemoryManager*);
   ~RuntimeDyld();
@@ -65,9 +79,13 @@ public:
   void *getSymbolAddress(StringRef Name);
   // Resolve the relocations for all symbols we currently know about.
   void resolveRelocations();
-  // Change the address associated with a symbol when resolving relocations.
-  // Any relocations already associated with the symbol will be re-resolved.
-  void reassignSymbolAddress(StringRef Name, uint8_t *Addr);
+
+  /// mapSectionAddress - map a section to its target address space value.
+  /// Map the address of a JIT section as returned from the memory manager
+  /// to the address in the target process as the running code will see it.
+  /// This is the address which will be used for relocation resolution.
+  void mapSectionAddress(void *LocalAddress, uint64_t TargetAddress);
+
   StringRef getErrorString();
 };
 

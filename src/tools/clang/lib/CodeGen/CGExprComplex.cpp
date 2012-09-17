@@ -111,8 +111,17 @@ public:
   }
 
   // l-values.
-  ComplexPairTy VisitDeclRefExpr(const Expr *E) { return EmitLoadOfLValue(E); }
-  ComplexPairTy VisitBlockDeclRefExpr(const Expr *E) { return EmitLoadOfLValue(E); }
+  ComplexPairTy VisitDeclRefExpr(DeclRefExpr *E) {
+    if (CodeGenFunction::ConstantEmission result = CGF.tryEmitAsConstant(E)) {
+      if (result.isReference())
+        return EmitLoadOfLValue(result.getReferenceLValue(CGF, E));
+
+      llvm::ConstantStruct *pair =
+        cast<llvm::ConstantStruct>(result.getValue());
+      return ComplexPairTy(pair->getOperand(0), pair->getOperand(1));
+    }
+    return EmitLoadOfLValue(E);
+  }
   ComplexPairTy VisitObjCIvarRefExpr(ObjCIvarRefExpr *E) {
     return EmitLoadOfLValue(E);
   }
@@ -261,6 +270,10 @@ public:
 
   ComplexPairTy VisitInitListExpr(InitListExpr *E);
 
+  ComplexPairTy VisitCompoundLiteralExpr(CompoundLiteralExpr *E) {
+    return EmitLoadOfLValue(E);
+  }
+
   ComplexPairTy VisitVAArgExpr(VAArgExpr *E);
 
   ComplexPairTy VisitAtomicExpr(AtomicExpr *E) {
@@ -358,6 +371,10 @@ ComplexPairTy ComplexExprEmitter::EmitCast(CastExpr::CastKind CK, Expr *Op,
   switch (CK) {
   case CK_Dependent: llvm_unreachable("dependent cast kind in IR gen!");
 
+  // Atomic to non-atomic casts may be more than a no-op for some platforms and
+  // for some types.
+  case CK_AtomicToNonAtomic:
+  case CK_NonAtomicToAtomic:
   case CK_NoOp:
   case CK_LValueToRValue:
   case CK_UserDefinedConversion:
@@ -384,6 +401,7 @@ ComplexPairTy ComplexExprEmitter::EmitCast(CastExpr::CastKind CK, Expr *Op,
   case CK_BaseToDerivedMemberPointer:
   case CK_DerivedToBaseMemberPointer:
   case CK_MemberPointerToBoolean:
+  case CK_ReinterpretMemberPointer:
   case CK_ConstructorConversion:
   case CK_IntegralToPointer:
   case CK_PointerToIntegral:
@@ -408,6 +426,7 @@ ComplexPairTy ComplexExprEmitter::EmitCast(CastExpr::CastKind CK, Expr *Op,
   case CK_ARCConsumeObject:
   case CK_ARCReclaimReturnedObject:
   case CK_ARCExtendBlockObject:
+  case CK_CopyAndAutoreleaseBlockObject:
     llvm_unreachable("invalid cast kind for complex value");
 
   case CK_FloatingRealToComplex:
@@ -621,7 +640,7 @@ EmitCompoundAssign(const CompoundAssignOperator *E,
   LValue LV = EmitCompoundAssignLValue(E, Func, Val);
 
   // The result of an assignment in C is the assigned r-value.
-  if (!CGF.getContext().getLangOptions().CPlusPlus)
+  if (!CGF.getContext().getLangOpts().CPlusPlus)
     return Val;
 
   // If the lvalue is non-volatile, return the computed value of the assignment.
@@ -656,7 +675,7 @@ ComplexPairTy ComplexExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   LValue LV = EmitBinAssignLValue(E, Val);
 
   // The result of an assignment in C is the assigned r-value.
-  if (!CGF.getContext().getLangOptions().CPlusPlus)
+  if (!CGF.getContext().getLangOpts().CPlusPlus)
     return Val;
 
   // If the lvalue is non-volatile, return the computed value of the assignment.
@@ -813,7 +832,6 @@ EmitComplexCompoundAssignmentLValue(const CompoundAssignOperator *E) {
 
   default:
     llvm_unreachable("unexpected complex compound assignment");
-    Op = 0;
   }
 
   ComplexPairTy Val; // ignored

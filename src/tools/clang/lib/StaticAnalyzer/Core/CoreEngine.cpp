@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#define DEBUG_TYPE "CoreEngine"
+
 #include "clang/StaticAnalyzer/Core/PathSensitive/AnalysisManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CoreEngine.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
@@ -20,8 +22,15 @@
 #include "clang/AST/StmtCXX.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Statistic.h"
+
 using namespace clang;
 using namespace ento;
+
+STATISTIC(NumReachedMaxSteps,
+            "The # of times we reached the max number of steps.");
+STATISTIC(NumPathsExplored,
+            "The # of paths explored by the analyzer.");
 
 //===----------------------------------------------------------------------===//
 // Worklist classes for exploration of reachable states.
@@ -152,7 +161,7 @@ WorkList* WorkList::makeBFSBlockDFSContents() {
 
 /// ExecuteWorkList - Run the worklist algorithm for a maximum number of steps.
 bool CoreEngine::ExecuteWorkList(const LocationContext *L, unsigned Steps,
-                                   const ProgramState *InitState) {
+                                   ProgramStateRef InitState) {
 
   if (G->num_roots() == 0) { // Initialize the analysis by constructing
     // the root if none exists.
@@ -164,6 +173,11 @@ bool CoreEngine::ExecuteWorkList(const LocationContext *L, unsigned Steps,
 
     assert (Entry->succ_size() == 1 &&
             "Entry block must have 1 successor.");
+
+    // Mark the entry block as visited.
+    FunctionSummaries->markVisitedBasicBlock(Entry->getBlockID(),
+                                             L->getDecl(),
+                                             L->getCFG()->getNumBlockIDs());
 
     // Get the solitary successor.
     const CFGBlock *Succ = *(Entry->succ_begin());
@@ -187,8 +201,10 @@ bool CoreEngine::ExecuteWorkList(const LocationContext *L, unsigned Steps,
 
   while (WList->hasWork()) {
     if (!UnlimitedSteps) {
-      if (Steps == 0)
+      if (Steps == 0) {
+        NumReachedMaxSteps++;
         break;
+      }
       --Steps;
     }
 
@@ -200,68 +216,80 @@ bool CoreEngine::ExecuteWorkList(const LocationContext *L, unsigned Steps,
     // Retrieve the node.
     ExplodedNode *Node = WU.getNode();
 
-    // Dispatch on the location type.
-    switch (Node->getLocation().getKind()) {
-      case ProgramPoint::BlockEdgeKind:
-        HandleBlockEdge(cast<BlockEdge>(Node->getLocation()), Node);
-        break;
-
-      case ProgramPoint::BlockEntranceKind:
-        HandleBlockEntrance(cast<BlockEntrance>(Node->getLocation()), Node);
-        break;
-
-      case ProgramPoint::BlockExitKind:
-        assert (false && "BlockExit location never occur in forward analysis.");
-        break;
-
-      case ProgramPoint::CallEnterKind:
-        HandleCallEnter(cast<CallEnter>(Node->getLocation()), WU.getBlock(), 
-                        WU.getIndex(), Node);
-        break;
-
-      case ProgramPoint::CallExitKind:
-        HandleCallExit(cast<CallExit>(Node->getLocation()), Node);
-        break;
-
-      default:
-        assert(isa<PostStmt>(Node->getLocation()) || 
-               isa<PostInitializer>(Node->getLocation()));
-        HandlePostStmt(WU.getBlock(), WU.getIndex(), Node);
-        break;
-    }
+    dispatchWorkItem(Node, Node->getLocation(), WU);
   }
-
   SubEng.processEndWorklist(hasWorkRemaining());
   return WList->hasWork();
 }
 
-void CoreEngine::ExecuteWorkListWithInitialState(const LocationContext *L, 
-                                                 unsigned Steps,
-                                                 const ProgramState *InitState, 
-                                                 ExplodedNodeSet &Dst) {
-  ExecuteWorkList(L, Steps, InitState);
-  for (SmallVectorImpl<ExplodedNode*>::iterator I = G->EndNodes.begin(), 
-                                           E = G->EndNodes.end(); I != E; ++I) {
-    Dst.Add(*I);
+void CoreEngine::dispatchWorkItem(ExplodedNode* Pred, ProgramPoint Loc,
+                                  const WorkListUnit& WU) {
+  // Dispatch on the location type.
+  switch (Loc.getKind()) {
+    case ProgramPoint::BlockEdgeKind:
+      HandleBlockEdge(cast<BlockEdge>(Loc), Pred);
+      break;
+
+    case ProgramPoint::BlockEntranceKind:
+      HandleBlockEntrance(cast<BlockEntrance>(Loc), Pred);
+      break;
+
+    case ProgramPoint::BlockExitKind:
+      assert (false && "BlockExit location never occur in forward analysis.");
+      break;
+
+    case ProgramPoint::CallEnterKind: {
+      CallEnter CEnter = cast<CallEnter>(Loc);
+      if (AnalyzedCallees)
+        if (const CallExpr* CE =
+            dyn_cast_or_null<CallExpr>(CEnter.getCallExpr()))
+          if (const Decl *CD = CE->getCalleeDecl())
+            AnalyzedCallees->insert(CD);
+      SubEng.processCallEnter(CEnter, Pred);
+      break;
+    }
+
+    case ProgramPoint::CallExitBeginKind:
+      SubEng.processCallExit(Pred);
+      break;
+
+    case ProgramPoint::EpsilonKind: {
+      assert(Pred->hasSinglePred() &&
+             "Assume epsilon has exactly one predecessor by construction");
+      ExplodedNode *PNode = Pred->getFirstPred();
+      dispatchWorkItem(Pred, PNode->getLocation(), WU);
+      break;
+    }
+    default:
+      assert(isa<PostStmt>(Loc) ||
+             isa<PostInitializer>(Loc));
+      HandlePostStmt(WU.getBlock(), WU.getIndex(), Pred);
+      break;
   }
 }
 
-void CoreEngine::HandleCallEnter(const CallEnter &L, const CFGBlock *Block,
-                                   unsigned Index, ExplodedNode *Pred) {
-  CallEnterNodeBuilder Builder(*this, Pred, L.getCallExpr(), 
-                                 L.getCalleeContext(), Block, Index);
-  SubEng.processCallEnter(Builder);
-}
-
-void CoreEngine::HandleCallExit(const CallExit &L, ExplodedNode *Pred) {
-  CallExitNodeBuilder Builder(*this, Pred);
-  SubEng.processCallExit(Builder);
+bool CoreEngine::ExecuteWorkListWithInitialState(const LocationContext *L,
+                                                 unsigned Steps,
+                                                 ProgramStateRef InitState, 
+                                                 ExplodedNodeSet &Dst) {
+  bool DidNotFinish = ExecuteWorkList(L, Steps, InitState);
+  for (ExplodedGraph::eop_iterator I = G->eop_begin(), 
+                                   E = G->eop_end(); I != E; ++I) {
+    Dst.Add(*I);
+  }
+  return DidNotFinish;
 }
 
 void CoreEngine::HandleBlockEdge(const BlockEdge &L, ExplodedNode *Pred) {
 
   const CFGBlock *Blk = L.getDst();
   NodeBuilderContext BuilderCtx(*this, Blk, Pred);
+
+  // Mark this block as visited.
+  const LocationContext *LC = Pred->getLocationContext();
+  FunctionSummaries->markVisitedBasicBlock(Blk->getBlockID(),
+                                           LC->getDecl(),
+                                           LC->getCFG()->getNumBlockIDs());
 
   // Check if we are entering the EXIT block.
   if (Blk == &(L.getLocationContext()->getCFG()->getExit())) {
@@ -280,7 +308,7 @@ void CoreEngine::HandleBlockEdge(const BlockEdge &L, ExplodedNode *Pred) {
   ExplodedNodeSet dstNodes;
   BlockEntrance BE(Blk, Pred->getLocationContext());
   NodeBuilderWithSinks nodeBuilder(Pred, dstNodes, BuilderCtx, BE);
-  SubEng.processCFGBlockEntrance(nodeBuilder);
+  SubEng.processCFGBlockEntrance(L, nodeBuilder);
 
   // Auto-generate a node.
   if (!nodeBuilder.hasGeneratedNodes()) {
@@ -289,23 +317,17 @@ void CoreEngine::HandleBlockEdge(const BlockEdge &L, ExplodedNode *Pred) {
 
   // Enqueue nodes onto the worklist.
   enqueue(dstNodes);
-
-  // Make sink nodes as exhausted.
-  const SmallVectorImpl<ExplodedNode*> &Sinks =  nodeBuilder.getSinks();
-  for (SmallVectorImpl<ExplodedNode*>::const_iterator
-         I =Sinks.begin(), E = Sinks.end(); I != E; ++I) {
-    blocksExhausted.push_back(std::make_pair(L, *I));
-  }
 }
 
 void CoreEngine::HandleBlockEntrance(const BlockEntrance &L,
                                        ExplodedNode *Pred) {
 
   // Increment the block counter.
+  const LocationContext *LC = Pred->getLocationContext();
+  unsigned BlockId = L.getBlock()->getBlockID();
   BlockCounter Counter = WList->getBlockCounter();
-  Counter = BCounterFactory.IncrementCount(Counter, 
-                             Pred->getLocationContext()->getCurrentStackFrame(),
-                                           L.getBlock()->getBlockID());
+  Counter = BCounterFactory.IncrementCount(Counter, LC->getCurrentStackFrame(),
+                                           BlockId);
   WList->setBlockCounter(Counter);
 
   // Process the entrance of the block.
@@ -341,6 +363,19 @@ void CoreEngine::HandleBlockExit(const CFGBlock * B, ExplodedNode *Pred) {
         HandleBranch(cast<ChooseExpr>(Term)->getCond(), Term, B, Pred);
         return;
 
+      case Stmt::CXXTryStmtClass: {
+        // Generate a node for each of the successors.
+        // Our logic for EH analysis can certainly be improved.
+        for (CFGBlock::const_succ_iterator it = B->succ_begin(),
+             et = B->succ_end(); it != et; ++it) {
+          if (const CFGBlock *succ = *it) {
+            generateNode(BlockEdge(B, succ, Pred->getLocationContext()),
+                         Pred->State, Pred);
+          }
+        }
+        return;
+      }
+        
       case Stmt::DoStmtClass:
         HandleBranch(cast<DoStmt>(Term)->getCond(), Term, B, Pred);
         return;
@@ -437,7 +472,7 @@ void CoreEngine::HandlePostStmt(const CFGBlock *B, unsigned StmtIdx,
 /// generateNode - Utility method to generate nodes, hook up successors,
 ///  and add nodes to the worklist.
 void CoreEngine::generateNode(const ProgramPoint &Loc,
-                              const ProgramState *State,
+                              ProgramStateRef State,
                               ExplodedNode *Pred) {
 
   bool IsNew;
@@ -473,6 +508,11 @@ void CoreEngine::enqueueStmtNode(ExplodedNode *N,
     return;
   }
 
+  if (isa<EpsilonPoint>(N->getLocation())) {
+    WList->enqueue(N, Block, Idx);
+    return;
+  }
+
   const CFGStmt *CS = (*Block)[Idx].getAs<CFGStmt>();
   const Stmt *St = CS ? CS->getStmt() : 0;
   PostStmt Loc(St, N->getLocationContext());
@@ -492,14 +532,14 @@ void CoreEngine::enqueueStmtNode(ExplodedNode *N,
     WList->enqueue(Succ, Block, Idx+1);
 }
 
-ExplodedNode *CoreEngine::generateCallExitNode(ExplodedNode *N) {
-  // Create a CallExit node and enqueue it.
+ExplodedNode *CoreEngine::generateCallExitBeginNode(ExplodedNode *N) {
+  // Create a CallExitBegin node and enqueue it.
   const StackFrameContext *LocCtx
                          = cast<StackFrameContext>(N->getLocationContext());
   const Stmt *CE = LocCtx->getCallSite();
 
   // Use the the callee location context.
-  CallExit Loc(CE, LocCtx);
+  CallExitBegin Loc(CE, LocCtx);
 
   bool isNew;
   ExplodedNode *Node = G->getNode(Loc, N->getState(), false, &isNew);
@@ -526,19 +566,24 @@ void CoreEngine::enqueue(ExplodedNodeSet &Set,
 void CoreEngine::enqueueEndOfFunction(ExplodedNodeSet &Set) {
   for (ExplodedNodeSet::iterator I = Set.begin(), E = Set.end(); I != E; ++I) {
     ExplodedNode *N = *I;
-    // If we are in an inlined call, generate CallExit node.
+    // If we are in an inlined call, generate CallExitBegin node.
     if (N->getLocationContext()->getParent()) {
-      N = generateCallExitNode(N);
+      N = generateCallExitBeginNode(N);
       if (N)
         WList->enqueue(N);
-    } else
+    } else {
+      // TODO: We should run remove dead bindings here.
       G->addEndOfPath(N);
+      NumPathsExplored++;
+    }
   }
 }
 
 
+void NodeBuilder::anchor() { }
+
 ExplodedNode* NodeBuilder::generateNodeImpl(const ProgramPoint &Loc,
-                                            const ProgramState *State,
+                                            ProgramStateRef State,
                                             ExplodedNode *FromN,
                                             bool MarkAsSink) {
   HasGeneratedNodes = true;
@@ -556,6 +601,8 @@ ExplodedNode* NodeBuilder::generateNodeImpl(const ProgramPoint &Loc,
   return N;
 }
 
+void NodeBuilderWithSinks::anchor() { }
+
 StmtNodeBuilder::~StmtNodeBuilder() {
   if (EnclosingBldr)
     for (ExplodedNodeSet::iterator I = Frontier.begin(),
@@ -563,7 +610,9 @@ StmtNodeBuilder::~StmtNodeBuilder() {
       EnclosingBldr->addNodes(*I);
 }
 
-ExplodedNode *BranchNodeBuilder::generateNode(const ProgramState *State,
+void BranchNodeBuilder::anchor() { }
+
+ExplodedNode *BranchNodeBuilder::generateNode(ProgramStateRef State,
                                               bool branch,
                                               ExplodedNode *NodePred) {
   // If the branch has been marked infeasible we should not generate a node.
@@ -578,7 +627,7 @@ ExplodedNode *BranchNodeBuilder::generateNode(const ProgramState *State,
 
 ExplodedNode*
 IndirectGotoNodeBuilder::generateNode(const iterator &I,
-                                      const ProgramState *St,
+                                      ProgramStateRef St,
                                       bool IsSink) {
   bool IsNew;
   ExplodedNode *Succ = Eng.G->getNode(BlockEdge(Src, I.getBlock(),
@@ -598,7 +647,7 @@ IndirectGotoNodeBuilder::generateNode(const iterator &I,
 
 ExplodedNode*
 SwitchNodeBuilder::generateCaseStmtNode(const iterator &I,
-                                        const ProgramState *St) {
+                                        ProgramStateRef St) {
 
   bool IsNew;
   ExplodedNode *Succ = Eng.G->getNode(BlockEdge(Src, I.getBlock(),
@@ -614,7 +663,7 @@ SwitchNodeBuilder::generateCaseStmtNode(const iterator &I,
 
 
 ExplodedNode*
-SwitchNodeBuilder::generateDefaultCaseNode(const ProgramState *St,
+SwitchNodeBuilder::generateDefaultCaseNode(ProgramStateRef St,
                                            bool IsSink) {
   // Get the block for the default case.
   assert(Src->succ_rbegin() != Src->succ_rend());
@@ -638,81 +687,4 @@ SwitchNodeBuilder::generateDefaultCaseNode(const ProgramState *St,
     Eng.WList->enqueue(Succ);
 
   return Succ;
-}
-
-void CallEnterNodeBuilder::generateNode(const ProgramState *state) {
-  // Check if the callee is in the same translation unit.
-  if (CalleeCtx->getTranslationUnit() != 
-      Pred->getLocationContext()->getTranslationUnit()) {
-    // Create a new engine. We must be careful that the new engine should not
-    // reference data structures owned by the old engine.
-
-    AnalysisManager &OldMgr = Eng.SubEng.getAnalysisManager();
-    
-    // Get the callee's translation unit.
-    idx::TranslationUnit *TU = CalleeCtx->getTranslationUnit();
-
-    // Create a new AnalysisManager with components of the callee's
-    // TranslationUnit.
-    // The Diagnostic is  actually shared when we create ASTUnits from AST files.
-    AnalysisManager AMgr(TU->getASTContext(), TU->getDiagnostic(), OldMgr);
-
-    // Create the new engine.
-    // FIXME: This cast isn't really safe.
-    bool GCEnabled = static_cast<ExprEngine&>(Eng.SubEng).isObjCGCEnabled();
-    ExprEngine NewEng(AMgr, GCEnabled);
-
-    // Create the new LocationContext.
-    AnalysisDeclContext *NewAnaCtx =
-      AMgr.getAnalysisDeclContext(CalleeCtx->getDecl(), 
-                              CalleeCtx->getTranslationUnit());
-
-    const StackFrameContext *OldLocCtx = CalleeCtx;
-    const StackFrameContext *NewLocCtx =
-      NewAnaCtx->getStackFrame(OldLocCtx->getParent(),
-                               OldLocCtx->getCallSite(),
-                               OldLocCtx->getCallSiteBlock(), 
-                               OldLocCtx->getIndex());
-
-    // Now create an initial state for the new engine.
-    const ProgramState *NewState =
-      NewEng.getStateManager().MarshalState(state, NewLocCtx);
-    ExplodedNodeSet ReturnNodes;
-    NewEng.ExecuteWorkListWithInitialState(NewLocCtx, AMgr.getMaxNodes(), 
-                                           NewState, ReturnNodes);
-    return;
-  }
-
-  // Get the callee entry block.
-  const CFGBlock *Entry = &(CalleeCtx->getCFG()->getEntry());
-  assert(Entry->empty());
-  assert(Entry->succ_size() == 1);
-
-  // Get the solitary successor.
-  const CFGBlock *SuccB = *(Entry->succ_begin());
-
-  // Construct an edge representing the starting location in the callee.
-  BlockEdge Loc(Entry, SuccB, CalleeCtx);
-
-  bool isNew;
-  ExplodedNode *Node = Eng.G->getNode(Loc, state, false, &isNew);
-  Node->addPredecessor(const_cast<ExplodedNode*>(Pred), *Eng.G);
-
-  if (isNew)
-    Eng.WList->enqueue(Node);
-}
-
-void CallExitNodeBuilder::generateNode(const ProgramState *state) {
-  // Get the callee's location context.
-  const StackFrameContext *LocCtx 
-                         = cast<StackFrameContext>(Pred->getLocationContext());
-  // When exiting an implicit automatic obj dtor call, the callsite is the Stmt
-  // that triggers the dtor.
-  PostStmt Loc(LocCtx->getCallSite(), LocCtx->getParent());
-  bool isNew;
-  ExplodedNode *Node = Eng.G->getNode(Loc, state, false, &isNew);
-  Node->addPredecessor(const_cast<ExplodedNode*>(Pred), *Eng.G);
-  if (isNew)
-    Eng.WList->enqueue(Node, LocCtx->getCallSiteBlock(),
-                       LocCtx->getIndex() + 1);
 }

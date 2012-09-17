@@ -9,14 +9,14 @@
 
 #include "IndexingContext.h"
 
-#include "clang/AST/RecursiveASTVisitor.h"
+#include "RecursiveASTVisitor.h"
 
 using namespace clang;
 using namespace cxindex;
 
 namespace {
 
-class TypeIndexer : public RecursiveASTVisitor<TypeIndexer> {
+class TypeIndexer : public cxindex::RecursiveASTVisitor<TypeIndexer> {
   IndexingContext &IndexCtx;
   const NamedDecl *Parent;
   const DeclContext *ParentDC;
@@ -68,6 +68,26 @@ public:
       IndexCtx.handleReference(TL.getProtocol(i), TL.getProtocolLoc(i),
                                Parent, ParentDC);
     }
+    return true;
+  }
+
+  bool VisitTemplateSpecializationTypeLoc(TemplateSpecializationTypeLoc TL) {
+    if (const TemplateSpecializationType *T = TL.getTypePtr()) {
+      if (IndexCtx.shouldIndexImplicitTemplateInsts()) {
+        if (CXXRecordDecl *RD = T->getAsCXXRecordDecl())
+          IndexCtx.handleReference(RD, TL.getTemplateNameLoc(),
+                                   Parent, ParentDC);
+      } else {
+        if (const TemplateDecl *D = T->getTemplateName().getAsTemplateDecl())
+          IndexCtx.handleReference(D, TL.getTemplateNameLoc(),
+                                   Parent, ParentDC);
+      }
+    }
+    return true;
+  }
+
+  bool TraverseStmt(Stmt *S) {
+    IndexCtx.indexBody(S, Parent, ParentDC);
     return true;
   }
 };

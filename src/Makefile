@@ -27,7 +27,7 @@ LEVEL := .
 ifneq ($(findstring llvmCore, $(RC_ProjectName)),llvmCore)  # Normal build (not "Apple-style").
 
 ifeq ($(BUILD_DIRS_ONLY),1)
-  DIRS := lib/Support lib/TableGen utils
+  DIRS := lib/Support lib/TableGen utils tools/llvm-config
   OPTIONAL_DIRS := tools/clang/utils/TableGen
 else
   DIRS := lib/Support lib/TableGen utils lib/VMCore lib tools/llvm-shlib \
@@ -120,11 +120,14 @@ cross-compile-build-tools:
 	 $(MAKE) -C BuildTools \
 	  BUILD_DIRS_ONLY=1 \
 	  UNIVERSAL= \
+	  TARGET_NATIVE_ARCH="$(TARGET_NATIVE_ARCH)" \
+	  TARGETS_TO_BUILD="$(TARGETS_TO_BUILD)" \
 	  ENABLE_OPTIMIZED=$(ENABLE_OPTIMIZED) \
 	  ENABLE_PROFILING=$(ENABLE_PROFILING) \
 	  ENABLE_COVERAGE=$(ENABLE_COVERAGE) \
 	  DISABLE_ASSERTIONS=$(DISABLE_ASSERTIONS) \
 	  ENABLE_EXPENSIVE_CHECKS=$(ENABLE_EXPENSIVE_CHECKS) \
+	  ENABLE_LIBCPP=$(ENABLE_LIBCPP) \
 	  CFLAGS= \
 	  CXXFLAGS= \
 	) || exit 1;
@@ -172,11 +175,18 @@ all-local:: clean-diagnostics
 endif
 
 #------------------------------------------------------------------------
-# Make sure the generated headers are up-to-date. This must be kept in
-# sync with the AC_CONFIG_HEADER invocations in autoconf/configure.ac
+# Make sure the generated files are up-to-date. This must be kept in
+# sync with the AC_CONFIG_HEADER and AC_CONFIG_FILE invocations in
+# autoconf/configure.ac.
+# Note that Makefile.config is covered by its own separate rule
+# in Makefile.rules where it can be reused by sub-projects.
 #------------------------------------------------------------------------
 FilesToConfig := \
+  bindings/ocaml/llvm/META.llvm \
+  docs/doxygen.cfg \
+  llvm.spec \
   include/llvm/Config/config.h \
+  include/llvm/Config/llvm-config.h \
   include/llvm/Config/Targets.def \
   include/llvm/Config/AsmPrinters.def \
   include/llvm/Config/AsmParsers.def \

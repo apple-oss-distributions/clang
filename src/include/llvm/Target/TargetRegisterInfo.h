@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/CallingConv.h"
 #include <cassert>
 #include <functional>
 
@@ -35,23 +36,16 @@ class TargetRegisterClass {
 public:
   typedef const unsigned* iterator;
   typedef const unsigned* const_iterator;
-  typedef const EVT* vt_iterator;
+  typedef const MVT::SimpleValueType* vt_iterator;
   typedef const TargetRegisterClass* const * sc_iterator;
-private:
+
+  // Instance variables filled by tablegen, do not use!
   const MCRegisterClass *MC;
   const vt_iterator VTs;
   const unsigned *SubClassMask;
   const sc_iterator SuperClasses;
   const sc_iterator SuperRegClasses;
-public:
-  TargetRegisterClass(const MCRegisterClass *MC, const EVT *vts,
-                      const unsigned *subcm,
-                      const TargetRegisterClass * const *supcs,
-                      const TargetRegisterClass * const *superregcs)
-    : MC(MC), VTs(vts), SubClassMask(subcm), SuperClasses(supcs),
-      SuperRegClasses(superregcs) {}
-
-  virtual ~TargetRegisterClass() {}     // Allow subclasses
+  ArrayRef<unsigned> (*OrderFunc)(const MachineFunction&);
 
   /// getID() - Return the register class ID number.
   ///
@@ -108,7 +102,7 @@ public:
   ///
   bool hasType(EVT vt) const {
     for(int i = 0; VTs[i] != MVT::Other; ++i)
-      if (VTs[i] == vt)
+      if (EVT(VTs[i]) == vt)
         return true;
     return false;
   }
@@ -196,9 +190,8 @@ public:
   ///
   /// By default, this method returns all registers in the class.
   ///
-  virtual
   ArrayRef<unsigned> getRawAllocationOrder(const MachineFunction &MF) const {
-    return makeArrayRef(begin(), getNumRegs());
+    return OrderFunc ? OrderFunc(MF) : makeArrayRef(begin(), getNumRegs());
   }
 };
 
@@ -356,26 +349,39 @@ public:
   /// getCalleeSavedRegs - Return a null-terminated list of all of the
   /// callee saved registers on this target. The register should be in the
   /// order of desired callee-save stack frame offset. The first register is
-  /// closed to the incoming stack pointer if stack grows down, and vice versa.
+  /// closest to the incoming stack pointer if stack grows down, and vice versa.
+  ///
   virtual const unsigned* getCalleeSavedRegs(const MachineFunction *MF = 0)
                                                                       const = 0;
 
+  /// getCallPreservedMask - Return a mask of call-preserved registers for the
+  /// given calling convention on the current sub-target.  The mask should
+  /// include all call-preserved aliases.  This is used by the register
+  /// allocator to determine which registers can be live across a call.
+  ///
+  /// The mask is an array containing (TRI::getNumRegs()+31)/32 entries.
+  /// A set bit indicates that all bits of the corresponding register are
+  /// preserved across the function call.  The bit mask is expected to be
+  /// sub-register complete, i.e. if A is preserved, so are all its
+  /// sub-registers.
+  ///
+  /// Bits are numbered from the LSB, so the bit for physical register Reg can
+  /// be found as (Mask[Reg / 32] >> Reg % 32) & 1.
+  ///
+  /// A NULL pointer means that no register mask will be used, and call
+  /// instructions should use implicit-def operands to indicate call clobbered
+  /// registers.
+  ///
+  virtual const uint32_t *getCallPreservedMask(CallingConv::ID) const {
+    // The default mask clobbers everything.  All targets should override.
+    return 0;
+  }
 
   /// getReservedRegs - Returns a bitset indexed by physical register number
   /// indicating if a register is a special register that has particular uses
   /// and should be considered unavailable at all times, e.g. SP, RA. This is
   /// used by register scavenger to determine what registers are free.
   virtual BitVector getReservedRegs(const MachineFunction &MF) const = 0;
-
-  /// getSubReg - Returns the physical register number of sub-register "Index"
-  /// for physical register RegNo. Return zero if the sub-register does not
-  /// exist.
-  virtual unsigned getSubReg(unsigned RegNo, unsigned Index) const = 0;
-
-  /// getSubRegIndex - For a given register pair, return the sub-register index
-  /// if the second register is a sub-register of the first. Return zero
-  /// otherwise.
-  virtual unsigned getSubRegIndex(unsigned RegNo, unsigned SubRegNo) const = 0;
 
   /// getMatchingSuperReg - Return a super-register of the specified register
   /// Reg so its sub-register of index SubIdx is Reg.
@@ -402,11 +408,11 @@ public:
   /// getMatchingSuperRegClass - Return a subclass of the specified register
   /// class A so that each register in it has a sub-register of the
   /// specified sub-register index which is in the specified register class B.
+  ///
+  /// TableGen will synthesize missing A sub-classes.
   virtual const TargetRegisterClass *
   getMatchingSuperRegClass(const TargetRegisterClass *A,
-                           const TargetRegisterClass *B, unsigned Idx) const {
-    return 0;
-  }
+                           const TargetRegisterClass *B, unsigned Idx) const =0;
 
   /// getSubClassWithSubReg - Returns the largest legal sub-class of RC that
   /// supports the sub-register index Idx.
@@ -419,6 +425,7 @@ public:
   /// supported by the full GR32 register class in 64-bit mode, but only by the
   /// GR32_ABCD regiister class in 32-bit mode.
   ///
+  /// TableGen will synthesize missing RC sub-classes.
   virtual const TargetRegisterClass *
   getSubClassWithSubReg(const TargetRegisterClass *RC, unsigned Idx) const =0;
 
@@ -469,8 +476,7 @@ public:
   /// values.  If a target supports multiple different pointer register classes,
   /// kind specifies which one is indicated.
   virtual const TargetRegisterClass *getPointerRegClass(unsigned Kind=0) const {
-    assert(0 && "Target didn't implement getPointerRegClass!");
-    return 0; // Must return a value in order to compile with VS 2005
+    llvm_unreachable("Target didn't implement getPointerRegClass!");
   }
 
   /// getCrossCopyRegClass - Returns a legal register class to copy a register
@@ -607,22 +613,22 @@ public:
   virtual void materializeFrameBaseRegister(MachineBasicBlock *MBB,
                                             unsigned BaseReg, int FrameIdx,
                                             int64_t Offset) const {
-    assert(0 && "materializeFrameBaseRegister does not exist on this target");
+    llvm_unreachable("materializeFrameBaseRegister does not exist on this "
+                     "target");
   }
 
   /// resolveFrameIndex - Resolve a frame index operand of an instruction
   /// to reference the indicated base register plus offset instead.
   virtual void resolveFrameIndex(MachineBasicBlock::iterator I,
                                  unsigned BaseReg, int64_t Offset) const {
-    assert(0 && "resolveFrameIndex does not exist on this target");
+    llvm_unreachable("resolveFrameIndex does not exist on this target");
   }
 
   /// isFrameOffsetLegal - Determine whether a given offset immediate is
   /// encodable to resolve a frame index.
   virtual bool isFrameOffsetLegal(const MachineInstr *MI,
                                   int64_t Offset) const {
-    assert(0 && "isFrameOffsetLegal does not exist on this target");
-    return false; // Must return a value in order to compile with VS 2005
+    llvm_unreachable("isFrameOffsetLegal does not exist on this target");
   }
 
   /// eliminateCallFramePseudoInstr - This method is called during prolog/epilog
@@ -636,7 +642,8 @@ public:
   eliminateCallFramePseudoInstr(MachineFunction &MF,
                                 MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator MI) const {
-    assert(0 && "Call Frame Pseudo Instructions do not exist on this target!");
+    llvm_unreachable("Call Frame Pseudo Instructions do not exist on this "
+                     "target!");
   }
 
 

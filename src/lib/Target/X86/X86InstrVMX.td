@@ -1,10 +1,10 @@
-//===- X86InstrVMX.td - VMX Instruction Set Extension ------*- tablegen -*-===//
-// 
+//===-- X86InstrVMX.td - VMX Instruction Set Extension -----*- tablegen -*-===//
+//
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
-// 
+//
 //===----------------------------------------------------------------------===//
 //
 // This file describes the instructions that make up the Intel VMX instruction
@@ -33,6 +33,8 @@ def INVVPID64 : I<0x81, MRMSrcMem, (outs), (ins GR64:$src1, i128mem:$src2),
 def VMCALL : I<0x01, MRM_C1, (outs), (ins), "vmcall", []>, TB;
 def VMCLEARm : I<0xC7, MRM6m, (outs), (ins i64mem:$vmcs),
   "vmclear\t$vmcs", []>, OpSize, TB;
+// OF 01 D4
+def VMFUNC : I<0x01, MRM_D4, (outs), (ins), "vmfunc", []>, TB;
 // 0F 01 C2
 def VMLAUNCH : I<0x01, MRM_C2, (outs), (ins), "vmlaunch", []>, TB;
 // 0F 01 C3
@@ -60,5 +62,5 @@ def VMWRITE32rr : I<0x79, MRMSrcReg, (outs GR32:$dst), (ins GR32:$src),
 // 0F 01 C4
 def VMXOFF : I<0x01, MRM_C4, (outs), (ins), "vmxoff", []>, TB;
 def VMXON : I<0xC7, MRM6m, (outs), (ins i64mem:$vmxon),
-  "vmxon\t{$vmxon}", []>, XS;
+  "vmxon\t$vmxon", []>, XS;
 

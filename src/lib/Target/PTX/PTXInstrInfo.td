@@ -1,4 +1,4 @@
-//===- PTXInstrInfo.td - PTX Instruction defs -----------------*- tblgen-*-===//
+//===-- PTXInstrInfo.td - PTX Instruction defs --------------*- tablegen-*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -680,6 +680,12 @@ let isReMaterializable = 1, isAsCheapAsAMove = 1 in {
   def MOVaddr64
     : InstPTX<(outs RegI64:$d), (ins i64imm:$a), "mov.u64\t$d, $a",
               [(set RegI64:$d, (PTXcopyaddress tglobaladdr:$a))]>;
+  def MOVframe32
+    : InstPTX<(outs RegI32:$d), (ins i32imm:$a), "cvta.local.u32\t$d, $a",
+              [(set RegI32:$d, (PTXcopyaddress frameindex:$a))]>;
+  def MOVframe64
+    : InstPTX<(outs RegI64:$d), (ins i64imm:$a), "cvta.local.u64\t$d, $a",
+              [(set RegI64:$d, (PTXcopyaddress frameindex:$a))]>;
 }
 
 // PTX cvt instructions
@@ -819,17 +825,17 @@ let hasSideEffects = 1 in {
 ///===- Parameter Passing Pseudo-Instructions -----------------------------===//
 
 def READPARAMPRED : InstPTX<(outs RegPred:$a), (ins i32imm:$b),
-                            "mov.pred\t$a, %param$b", []>;
+                            "mov.pred\t$a, %arg$b", []>;
 def READPARAMI16  : InstPTX<(outs RegI16:$a), (ins i32imm:$b),
-                            "mov.b16\t$a, %param$b", []>;
+                            "mov.b16\t$a, %arg$b", []>;
 def READPARAMI32  : InstPTX<(outs RegI32:$a), (ins i32imm:$b),
-                            "mov.b32\t$a, %param$b", []>;
+                            "mov.b32\t$a, %arg$b", []>;
 def READPARAMI64  : InstPTX<(outs RegI64:$a), (ins i32imm:$b),
-                            "mov.b64\t$a, %param$b", []>;
+                            "mov.b64\t$a, %arg$b", []>;
 def READPARAMF32  : InstPTX<(outs RegF32:$a), (ins i32imm:$b),
-                            "mov.f32\t$a, %param$b", []>;
+                            "mov.f32\t$a, %arg$b", []>;
 def READPARAMF64  : InstPTX<(outs RegF64:$a), (ins i32imm:$b),
-                            "mov.f64\t$a, %param$b", []>;
+                            "mov.f64\t$a, %arg$b", []>;
 
 def WRITEPARAMPRED : InstPTX<(outs), (ins RegPred:$a), "//w", []>;
 def WRITEPARAMI16  : InstPTX<(outs), (ins RegI16:$a), "//w", []>;

@@ -59,9 +59,6 @@ void RegScavenger::initRegState() {
   // All registers started out unused.
   RegsAvailable.set();
 
-  // Reserved registers are always used.
-  RegsAvailable ^= ReservedRegs;
-
   if (!MBB)
     return;
 
@@ -90,13 +87,15 @@ void RegScavenger::enterBasicBlock(MachineBasicBlock *mbb) {
   if (!MBB) {
     NumPhysRegs = TRI->getNumRegs();
     RegsAvailable.resize(NumPhysRegs);
+    KillRegs.resize(NumPhysRegs);
+    DefRegs.resize(NumPhysRegs);
 
     // Create reserved registers bitvector.
     ReservedRegs = TRI->getReservedRegs(MF);
 
     // Create callee-saved registers bitvector.
     CalleeSavedRegs.resize(NumPhysRegs);
-    const unsigned *CSRegs = TRI->getCalleeSavedRegs();
+    const unsigned *CSRegs = TRI->getCalleeSavedRegs(&MF);
     if (CSRegs != NULL)
       for (unsigned i = 0; CSRegs[i]; ++i)
         CalleeSavedRegs.set(CSRegs[i]);
@@ -111,12 +110,6 @@ void RegScavenger::enterBasicBlock(MachineBasicBlock *mbb) {
 void RegScavenger::addRegWithSubRegs(BitVector &BV, unsigned Reg) {
   BV.set(Reg);
   for (const unsigned *R = TRI->getSubRegisters(Reg); *R; R++)
-    BV.set(*R);
-}
-
-void RegScavenger::addRegWithAliases(BitVector &BV, unsigned Reg) {
-  BV.set(Reg);
-  for (const unsigned *R = TRI->getAliasSet(Reg); *R; R++)
     BV.set(*R);
 }
 
@@ -148,12 +141,12 @@ void RegScavenger::forward() {
   // predicated, conservatively assume "kill" markers do not actually kill the
   // register. Similarly ignores "dead" markers.
   bool isPred = TII->isPredicated(MI);
-  BitVector EarlyClobberRegs(NumPhysRegs);
-  BitVector KillRegs(NumPhysRegs);
-  BitVector DefRegs(NumPhysRegs);
-  BitVector DeadRegs(NumPhysRegs);
+  KillRegs.reset();
+  DefRegs.reset();
   for (unsigned i = 0, e = MI->getNumOperands(); i != e; ++i) {
     const MachineOperand &MO = MI->getOperand(i);
+    if (MO.isRegMask())
+      (isPred ? DefRegs : KillRegs).setBitsNotInMask(MO.getRegMask());
     if (!MO.isReg())
       continue;
     unsigned Reg = MO.getReg();
@@ -164,21 +157,19 @@ void RegScavenger::forward() {
       // Ignore undef uses.
       if (MO.isUndef())
         continue;
-      // Two-address operands implicitly kill.
-      if (!isPred && (MO.isKill() || MI->isRegTiedToDefOperand(i)))
+      if (!isPred && MO.isKill())
         addRegWithSubRegs(KillRegs, Reg);
     } else {
       assert(MO.isDef());
       if (!isPred && MO.isDead())
-        addRegWithSubRegs(DeadRegs, Reg);
+        addRegWithSubRegs(KillRegs, Reg);
       else
         addRegWithSubRegs(DefRegs, Reg);
-      if (MO.isEarlyClobber())
-        addRegWithAliases(EarlyClobberRegs, Reg);
     }
   }
 
   // Verify uses and defs.
+#ifndef NDEBUG
   for (unsigned i = 0, e = MI->getNumOperands(); i != e; ++i) {
     const MachineOperand &MO = MI->getOperand(i);
     if (!MO.isReg())
@@ -205,11 +196,12 @@ void RegScavenger::forward() {
             SubUsed = true;
             break;
           }
-        assert(SubUsed && "Using an undefined register!");
+        if (!SubUsed) {
+          MBB->getParent()->verify(NULL, "In Register Scavenger");
+          llvm_unreachable("Using an undefined register!");
+        }
         (void)SubUsed;
       }
-      assert((!EarlyClobberRegs.test(Reg) || MI->isRegTiedToDefOperand(i)) &&
-             "Using an early clobbered register!");
     } else {
       assert(MO.isDef());
 #if 0
@@ -221,18 +213,20 @@ void RegScavenger::forward() {
 #endif
     }
   }
+#endif // NDEBUG
 
   // Commit the changes.
   setUnused(KillRegs);
-  setUnused(DeadRegs);
   setUsed(DefRegs);
 }
 
 void RegScavenger::getRegsUsed(BitVector &used, bool includeReserved) {
+  used = RegsAvailable;
+  used.flip();
   if (includeReserved)
-    used = ~RegsAvailable;
+    used |= ReservedRegs;
   else
-    used = ~RegsAvailable & ~ReservedRegs;
+    used.reset(ReservedRegs);
 }
 
 unsigned RegScavenger::FindUnusedReg(const TargetRegisterClass *RC) const {
@@ -286,6 +280,8 @@ unsigned RegScavenger::findSurvivorReg(MachineBasicBlock::iterator StartMI,
     // Remove any candidates touched by instruction.
     for (unsigned i = 0, e = MI->getNumOperands(); i != e; ++i) {
       const MachineOperand &MO = MI->getOperand(i);
+      if (MO.isRegMask())
+        Candidates.clearBitsNotInMask(MO.getRegMask());
       if (!MO.isReg() || MO.isUndef() || !MO.getReg())
         continue;
       if (TargetRegisterInfo::isVirtualRegister(MO.getReg())) {
@@ -347,9 +343,9 @@ unsigned RegScavenger::scavengeRegister(const TargetRegisterClass *RC,
   // RegsAvailable, as RegsAvailable does not take aliases into account.
   // That's what getRegsAvailable() is for.
   BitVector Available = getRegsAvailable(RC);
-
-  if ((Candidates & Available).any())
-     Candidates &= Available;
+  Available &= Candidates;
+  if (Available.any())
+    Candidates = Available;
 
   // Find the register whose use is furthest away.
   MachineBasicBlock::iterator UseMI;

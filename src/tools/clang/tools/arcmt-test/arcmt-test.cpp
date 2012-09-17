@@ -107,8 +107,8 @@ static bool checkForMigration(StringRef resourcesPath,
                               ArrayRef<const char *> Args) {
   DiagnosticConsumer *DiagClient =
     new TextDiagnosticPrinter(llvm::errs(), DiagnosticOptions());
-  llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+  IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+  IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
       new DiagnosticsEngine(DiagID, DiagClient));
   // Chain in -verify checker, if requested.
   VerifyDiagnosticConsumer *verifyDiag = 0;
@@ -118,7 +118,8 @@ static bool checkForMigration(StringRef resourcesPath,
   }
 
   CompilerInvocation CI;
-  CompilerInvocation::CreateFromArgs(CI, Args.begin(), Args.end(), *Diags);
+  if (!CompilerInvocation::CreateFromArgs(CI, Args.begin(), Args.end(), *Diags))
+    return true;
 
   if (CI.getFrontendOpts().Inputs.empty()) {
     llvm::errs() << "error: no input files\n";
@@ -128,17 +129,14 @@ static bool checkForMigration(StringRef resourcesPath,
   if (!CI.getLangOpts()->ObjC1)
     return false;
 
-  arcmt::checkForManualIssues(CI,
-                              CI.getFrontendOpts().Inputs[0].second,
-                              CI.getFrontendOpts().Inputs[0].first,
+  arcmt::checkForManualIssues(CI, CI.getFrontendOpts().Inputs[0], 
                               Diags->getClient());
   return Diags->getClient()->getNumErrors() > 0;
 }
 
 static void printResult(FileRemapper &remapper, raw_ostream &OS) {
-  CompilerInvocation CI;
-  remapper.applyMappings(CI);
-  PreprocessorOptions &PPOpts = CI.getPreprocessorOpts();
+  PreprocessorOptions PPOpts;
+  remapper.applyMappings(PPOpts);
   // The changed files will be in memory buffers, print them.
   for (unsigned i = 0, e = PPOpts.RemappedFileBuffers.size(); i != e; ++i) {
     const llvm::MemoryBuffer *mem = PPOpts.RemappedFileBuffers[i].second;
@@ -154,13 +152,14 @@ static bool performTransformations(StringRef resourcesPath,
 
   DiagnosticConsumer *DiagClient =
     new TextDiagnosticPrinter(llvm::errs(), DiagnosticOptions());
-  llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> TopDiags(
+  IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+  IntrusiveRefCntPtr<DiagnosticsEngine> TopDiags(
       new DiagnosticsEngine(DiagID, DiagClient));
 
   CompilerInvocation origCI;
-  CompilerInvocation::CreateFromArgs(origCI, Args.begin(), Args.end(),
-                                     *TopDiags);
+  if (!CompilerInvocation::CreateFromArgs(origCI, Args.begin(), Args.end(),
+                                     *TopDiags))
+    return true;
 
   if (origCI.getFrontendOpts().Inputs.empty()) {
     llvm::errs() << "error: no input files\n";
@@ -173,10 +172,11 @@ static bool performTransformations(StringRef resourcesPath,
   MigrationProcess migration(origCI, DiagClient);
 
   std::vector<TransformFn>
-    transforms = arcmt::getAllTransformations(origCI.getLangOpts()->getGC());
+    transforms = arcmt::getAllTransformations(origCI.getLangOpts()->getGC(),
+                                 origCI.getMigratorOpts().NoFinalizeRemoval);
   assert(!transforms.empty());
 
-  llvm::OwningPtr<PrintTransforms> transformPrinter;
+  OwningPtr<PrintTransforms> transformPrinter;
   if (OutputTransformations)
     transformPrinter.reset(new PrintTransforms(llvm::outs()));
 
@@ -318,7 +318,7 @@ static void printSourceLocation(SourceLocation loc, ASTContext &Ctx,
 static void printSourceRange(CharSourceRange range, ASTContext &Ctx,
                              raw_ostream &OS) {
   SourceManager &SM = Ctx.getSourceManager();
-  const LangOptions &langOpts = Ctx.getLangOptions();
+  const LangOptions &langOpts = Ctx.getLangOpts();
 
   PresumedLoc PL = SM.getPresumedLoc(range.getBegin());
 
@@ -352,7 +352,7 @@ int main(int argc, const char **argv) {
     if (StringRef(argv[optargc]) == "--args")
       break;
   }
-  llvm::cl::ParseCommandLineOptions(optargc, const_cast<char **>(argv), "arcmt-test");
+  llvm::cl::ParseCommandLineOptions(optargc, argv, "arcmt-test");
 
   if (VerifyTransformedFiles) {
     if (ResultFiles.empty()) {

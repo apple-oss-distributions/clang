@@ -1,4 +1,4 @@
-//===--- LiveRangeEdit.cpp - Basic tools for editing a register live range --===//
+//===-- LiveRangeEdit.cpp - Basic tools for editing a register live range -===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -28,6 +28,8 @@ using namespace llvm;
 STATISTIC(NumDCEDeleted,     "Number of instructions deleted by DCE");
 STATISTIC(NumDCEFoldedLoads, "Number of single use loads folded after DCE");
 STATISTIC(NumFracRanges,     "Number of live ranges fractured by DCE");
+
+void LiveRangeEdit::Delegate::anchor() { }
 
 LiveInterval &LiveRangeEdit::createFrom(unsigned OldReg,
                                         LiveIntervals &LIS,
@@ -83,8 +85,8 @@ bool LiveRangeEdit::allUsesAvailableAt(const MachineInstr *OrigMI,
                                        SlotIndex OrigIdx,
                                        SlotIndex UseIdx,
                                        LiveIntervals &lis) {
-  OrigIdx = OrigIdx.getUseIndex();
-  UseIdx = UseIdx.getUseIndex();
+  OrigIdx = OrigIdx.getRegSlot(true);
+  UseIdx = UseIdx.getRegSlot(true);
   for (unsigned i = 0, e = OrigMI->getNumOperands(); i != e; ++i) {
     const MachineOperand &MO = OrigMI->getOperand(i);
     if (!MO.isReg() || !MO.getReg() || MO.isDef())
@@ -92,11 +94,6 @@ bool LiveRangeEdit::allUsesAvailableAt(const MachineInstr *OrigMI,
     // Reserved registers are OK.
     if (MO.isUndef() || !lis.hasInterval(MO.getReg()))
       continue;
-    // We cannot depend on virtual registers in uselessRegs_.
-    if (uselessRegs_)
-      for (unsigned ui = 0, ue = uselessRegs_->size(); ui != ue; ++ui)
-        if ((*uselessRegs_)[ui]->reg == MO.getReg())
-          return false;
 
     LiveInterval &li = lis.getInterval(MO.getReg());
     const VNInfo *OVNI = li.getVNInfoAt(OrigIdx);
@@ -129,7 +126,7 @@ bool LiveRangeEdit::canRematerializeAt(Remat &RM,
   }
 
   // If only cheap remats were requested, bail out early.
-  if (cheapAsAMove && !RM.OrigMI->getDesc().isAsCheapAsAMove())
+  if (cheapAsAMove && !RM.OrigMI->isAsCheapAsAMove())
     return false;
 
   // Verify that all used registers are available with the same values.
@@ -151,7 +148,7 @@ SlotIndex LiveRangeEdit::rematerializeAt(MachineBasicBlock &MBB,
   tii.reMaterialize(MBB, MI, DestReg, 0, RM.OrigMI, tri);
   rematted_.insert(RM.ParentVNI);
   return lis.getSlotIndexes()->insertMachineInstrInMaps(--MI, Late)
-           .getDefIndex();
+           .getRegSlot();
 }
 
 void LiveRangeEdit::eraseVirtReg(unsigned Reg, LiveIntervals &LIS) {
@@ -174,7 +171,7 @@ bool LiveRangeEdit::foldAsLoad(LiveInterval *LI,
     if (MO.isDef()) {
       if (DefMI && DefMI != MI)
         return false;
-      if (!MI->getDesc().canFoldAsLoad())
+      if (!MI->canFoldAsLoad())
         return false;
       DefMI = MI;
     } else if (!MO.isUndef()) {
@@ -222,7 +219,7 @@ void LiveRangeEdit::eliminateDeadDefs(SmallVectorImpl<MachineInstr*> &Dead,
     while (!Dead.empty()) {
       MachineInstr *MI = Dead.pop_back_val();
       assert(MI->allDefsAreDead() && "Def isn't really dead");
-      SlotIndex Idx = LIS.getInstructionIndex(MI).getDefIndex();
+      SlotIndex Idx = LIS.getInstructionIndex(MI).getRegSlot();
 
       // Never delete inline asm.
       if (MI->isInlineAsm()) {

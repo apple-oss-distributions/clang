@@ -119,7 +119,7 @@ static bool isInCLinkageSpecification(const Decl *D) {
 
 bool MicrosoftMangleContext::shouldMangleDeclName(const NamedDecl *D) {
   // In C, functions with no attributes never need to be mangled. Fastpath them.
-  if (!getASTContext().getLangOptions().CPlusPlus && !D->hasAttrs())
+  if (!getASTContext().getLangOpts().CPlusPlus && !D->hasAttrs())
     return false;
 
   // Any decl can be declared with __asm("foo") on it, and this takes precedence
@@ -136,7 +136,7 @@ bool MicrosoftMangleContext::shouldMangleDeclName(const NamedDecl *D) {
     return true;
 
   // Otherwise, no mangling is done outside C++ mode.
-  if (!getASTContext().getLangOptions().CPlusPlus)
+  if (!getASTContext().getLangOpts().CPlusPlus)
     return false;
 
   // Variables at global scope with internal linkage are not mangled.
@@ -335,10 +335,12 @@ MicrosoftCXXNameMangler::mangleUnqualifiedName(const NamedDecl *ND,
       llvm_unreachable("Can't mangle Objective-C selector names here!");
       
     case DeclarationName::CXXConstructorName:
-      llvm_unreachable("Can't mangle constructors yet!");
+      Out << "?0";
+      break;
       
     case DeclarationName::CXXDestructorName:
-      llvm_unreachable("Can't mangle destructors yet!");
+      Out << "?1";
+      break;
       
     case DeclarationName::CXXConversionFunctionName:
       // <operator-name> ::= ?B # (cast)
@@ -1168,13 +1170,15 @@ void MicrosoftMangleContext::mangleCXXRTTIName(QualType T,
 }
 void MicrosoftMangleContext::mangleCXXCtor(const CXXConstructorDecl *D,
                                            CXXCtorType Type,
-                                           raw_ostream &) {
-  llvm_unreachable("Can't yet mangle constructors!");
+                                           raw_ostream & Out) {
+  MicrosoftCXXNameMangler mangler(*this, Out);
+  mangler.mangle(D);
 }
 void MicrosoftMangleContext::mangleCXXDtor(const CXXDestructorDecl *D,
                                            CXXDtorType Type,
-                                           raw_ostream &) {
-  llvm_unreachable("Can't yet mangle destructors!");
+                                           raw_ostream & Out) {
+  MicrosoftCXXNameMangler mangler(*this, Out);
+  mangler.mangle(D);
 }
 void MicrosoftMangleContext::mangleReferenceTemporary(const clang::VarDecl *,
                                                       raw_ostream &) {

@@ -71,7 +71,11 @@ unsigned ContentCache::getSize() const {
 
 void ContentCache::replaceBuffer(const llvm::MemoryBuffer *B,
                                  bool DoNotFree) {
-  assert(B != Buffer.getPointer());
+  if (B && B == Buffer.getPointer()) {
+    assert(0 && "Replacing with the same buffer");
+    Buffer.setInt(DoNotFree? DoNotFreeFlag : 0);
+    return;
+  }
   
   if (shouldFreeBuffer())
     delete Buffer.getPointer();
@@ -366,7 +370,8 @@ LineTableInfo &SourceManager::getLineTable() {
 SourceManager::SourceManager(DiagnosticsEngine &Diag, FileManager &FileMgr)
   : Diag(Diag), FileMgr(FileMgr), OverridenFilesKeepOriginalName(true),
     ExternalSLocEntries(0), LineTable(0), NumLinearScans(0),
-    NumBinaryProbes(0), FakeBufferForRecovery(0) {
+    NumBinaryProbes(0), FakeBufferForRecovery(0),
+    FakeContentCacheForRecovery(0) {
   clearIDTables();
   Diag.setSourceManager(this);
 }
@@ -378,16 +383,21 @@ SourceManager::~SourceManager() {
   // content cache objects are bump pointer allocated, we just have to run the
   // dtors, but we call the deallocate method for completeness.
   for (unsigned i = 0, e = MemBufferInfos.size(); i != e; ++i) {
-    MemBufferInfos[i]->~ContentCache();
-    ContentCacheAlloc.Deallocate(MemBufferInfos[i]);
+    if (MemBufferInfos[i]) {
+      MemBufferInfos[i]->~ContentCache();
+      ContentCacheAlloc.Deallocate(MemBufferInfos[i]);
+    }
   }
   for (llvm::DenseMap<const FileEntry*, SrcMgr::ContentCache*>::iterator
        I = FileInfos.begin(), E = FileInfos.end(); I != E; ++I) {
-    I->second->~ContentCache();
-    ContentCacheAlloc.Deallocate(I->second);
+    if (I->second) {
+      I->second->~ContentCache();
+      ContentCacheAlloc.Deallocate(I->second);
+    }
   }
   
   delete FakeBufferForRecovery;
+  delete FakeContentCacheForRecovery;
 
   for (llvm::DenseMap<FileID, MacroArgsMap *>::iterator
          I = MacroArgsCacheMap.begin(),E = MacroArgsCacheMap.end(); I!=E; ++I) {
@@ -430,16 +440,20 @@ SourceManager::getOrCreateContentCache(const FileEntry *FileEnt) {
   EntryAlign = std::max(8U, EntryAlign);
   Entry = ContentCacheAlloc.Allocate<ContentCache>(1, EntryAlign);
 
-  // If the file contents are overridden with contents from another file,
-  // pass that file to ContentCache.
-  llvm::DenseMap<const FileEntry *, const FileEntry *>::iterator
-      overI = OverriddenFiles.find(FileEnt);
-  if (overI == OverriddenFiles.end())
+  if (OverriddenFilesInfo) {
+    // If the file contents are overridden with contents from another file,
+    // pass that file to ContentCache.
+    llvm::DenseMap<const FileEntry *, const FileEntry *>::iterator
+        overI = OverriddenFilesInfo->OverriddenFiles.find(FileEnt);
+    if (overI == OverriddenFilesInfo->OverriddenFiles.end())
+      new (Entry) ContentCache(FileEnt);
+    else
+      new (Entry) ContentCache(OverridenFilesKeepOriginalName ? FileEnt
+                                                              : overI->second,
+                               overI->second);
+  } else {
     new (Entry) ContentCache(FileEnt);
-  else
-    new (Entry) ContentCache(OverridenFilesKeepOriginalName ? FileEnt
-                                                            : overI->second,
-                             overI->second);
+  }
 
   return Entry;
 }
@@ -459,6 +473,25 @@ SourceManager::createMemBufferContentCache(const MemoryBuffer *Buffer) {
   MemBufferInfos.push_back(Entry);
   Entry->setBuffer(Buffer);
   return Entry;
+}
+
+const SrcMgr::SLocEntry &SourceManager::loadSLocEntry(unsigned Index,
+                                                      bool *Invalid) const {
+  assert(!SLocEntryLoaded[Index]);
+  if (ExternalSLocEntries->ReadSLocEntry(-(static_cast<int>(Index) + 2))) {
+    if (Invalid)
+      *Invalid = true;
+    // If the file of the SLocEntry changed we could still have loaded it.
+    if (!SLocEntryLoaded[Index]) {
+      // Try to recover; create a SLocEntry so the rest of clang can handle it.
+      LoadedSLocEntryTable[Index] = SLocEntry::get(0,
+                                 FileInfo::get(SourceLocation(),
+                                               getFakeContentCacheForRecovery(),
+                                               SrcMgr::C_User));
+    }
+  }
+
+  return LoadedSLocEntryTable[Index];
 }
 
 std::pair<int, unsigned>
@@ -481,6 +514,18 @@ const llvm::MemoryBuffer *SourceManager::getFakeBufferForRecovery() const {
       = llvm::MemoryBuffer::getMemBuffer("<<<INVALID BUFFER>>");
   
   return FakeBufferForRecovery;
+}
+
+/// \brief As part of recovering from missing or changed content, produce a
+/// fake content cache.
+const SrcMgr::ContentCache *
+SourceManager::getFakeContentCacheForRecovery() const {
+  if (!FakeContentCacheForRecovery) {
+    FakeContentCacheForRecovery = new ContentCache();
+    FakeContentCacheForRecovery->replaceBuffer(getFakeBufferForRecovery(),
+                                               /*DoNotFree=*/true);
+  }
+  return FakeContentCacheForRecovery;
 }
 
 //===----------------------------------------------------------------------===//
@@ -580,6 +625,9 @@ void SourceManager::overrideFileContents(const FileEntry *SourceFile,
   assert(IR && "getOrCreateContentCache() cannot return NULL");
 
   const_cast<SrcMgr::ContentCache *>(IR)->replaceBuffer(Buffer, DoNotFree);
+  const_cast<SrcMgr::ContentCache *>(IR)->BufferOverridden = true;
+
+  getOverriddenFilesInfo().OverriddenFilesWithBuffer.insert(SourceFile);
 }
 
 void SourceManager::overrideFileContents(const FileEntry *SourceFile,
@@ -590,7 +638,20 @@ void SourceManager::overrideFileContents(const FileEntry *SourceFile,
   assert(FileInfos.count(SourceFile) == 0 &&
          "This function should be called at the initialization stage, before "
          "any parsing occurs.");
-  OverriddenFiles[SourceFile] = NewFile;
+  getOverriddenFilesInfo().OverriddenFiles[SourceFile] = NewFile;
+}
+
+void SourceManager::disableFileContentsOverride(const FileEntry *File) {
+  if (!isFileOverridden(File))
+    return;
+
+  const SrcMgr::ContentCache *IR = getOrCreateContentCache(File);
+  const_cast<SrcMgr::ContentCache *>(IR)->replaceBuffer(0);
+  const_cast<SrcMgr::ContentCache *>(IR)->ContentsEntry = IR->OrigEntry;
+
+  assert(OverriddenFilesInfo);
+  OverriddenFilesInfo->OverriddenFiles.erase(File);
+  OverriddenFilesInfo->OverriddenFilesWithBuffer.erase(File);
 }
 
 StringRef SourceManager::getBufferData(FileID FID, bool *Invalid) const {
@@ -946,13 +1007,20 @@ const char *SourceManager::getCharacterData(SourceLocation SL,
 unsigned SourceManager::getColumnNumber(FileID FID, unsigned FilePos,
                                         bool *Invalid) const {
   bool MyInvalid = false;
-  const char *Buf = getBuffer(FID, &MyInvalid)->getBufferStart();
+  const llvm::MemoryBuffer *MemBuf = getBuffer(FID, &MyInvalid);
   if (Invalid)
     *Invalid = MyInvalid;
 
   if (MyInvalid)
     return 1;
 
+  if (FilePos >= MemBuf->getBufferSize()) {
+    if (Invalid)
+      *Invalid = MyInvalid;
+    return 1;
+  }
+
+  const char *Buf = MemBuf->getBufferStart();
   unsigned LineStart = FilePos;
   while (LineStart && Buf[LineStart-1] != '\n' && Buf[LineStart-1] != '\r')
     --LineStart;
@@ -1508,9 +1576,10 @@ SourceLocation SourceManager::translateLineCol(FileID FID,
     return FileLoc.getLocWithOffset(Size);
   }
 
+  const llvm::MemoryBuffer *Buffer = Content->getBuffer(Diag, *this);
   unsigned FilePos = Content->SourceLineCache[Line - 1];
-  const char *Buf = Content->getBuffer(Diag, *this)->getBufferStart() + FilePos;
-  unsigned BufLength = Content->getBuffer(Diag, *this)->getBufferEnd() - Buf;
+  const char *Buf = Buffer->getBufferStart() + FilePos;
+  unsigned BufLength = Buffer->getBufferSize() - FilePos;
   if (BufLength == 0)
     return FileLoc.getLocWithOffset(FilePos);
 
@@ -1800,10 +1869,14 @@ SourceManager::MemoryBufferSizes SourceManager::getMemoryBufferSizes() const {
 }
 
 size_t SourceManager::getDataStructureSizes() const {
-  return llvm::capacity_in_bytes(MemBufferInfos)
+  size_t size = llvm::capacity_in_bytes(MemBufferInfos)
     + llvm::capacity_in_bytes(LocalSLocEntryTable)
     + llvm::capacity_in_bytes(LoadedSLocEntryTable)
     + llvm::capacity_in_bytes(SLocEntryLoaded)
-    + llvm::capacity_in_bytes(FileInfos)
-    + llvm::capacity_in_bytes(OverriddenFiles);
+    + llvm::capacity_in_bytes(FileInfos);
+  
+  if (OverriddenFilesInfo)
+    size += llvm::capacity_in_bytes(OverriddenFilesInfo->OverriddenFiles);
+
+  return size;
 }

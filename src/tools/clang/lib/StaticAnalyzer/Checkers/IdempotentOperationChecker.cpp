@@ -57,6 +57,7 @@
 #include "clang/AST/Stmt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -141,10 +142,10 @@ void IdempotentOperationChecker::checkPreStmt(const BinaryOperator *B,
         || containsNonLocalVarDecl(RHS);
   }
 
-  const ProgramState *state = C.getState();
-
-  SVal LHSVal = state->getSVal(LHS);
-  SVal RHSVal = state->getSVal(RHS);
+  ProgramStateRef state = C.getState();
+  const LocationContext *LCtx = C.getLocationContext();
+  SVal LHSVal = state->getSVal(LHS, LCtx);
+  SVal RHSVal = state->getSVal(RHS, LCtx);
 
   // If either value is unknown, we can't be 100% sure of all paths.
   if (LHSVal.isUnknownOrUndef() || RHSVal.isUnknownOrUndef()) {
@@ -375,7 +376,7 @@ void IdempotentOperationChecker::checkEndAnalysis(ExplodedGraph &G,
     }
 
     // Select the error message and SourceRanges to report.
-    llvm::SmallString<128> buf;
+    SmallString<128> buf;
     llvm::raw_svector_ostream os(buf);
     bool LHSRelevant = false, RHSRelevant = false;
     switch (A) {
@@ -649,7 +650,6 @@ bool IdempotentOperationChecker::CanVary(const Expr *Ex,
   case Stmt::InitListExprClass:
   case Stmt::DesignatedInitExprClass:
   case Stmt::BlockExprClass:
-  case Stmt::BlockDeclRefExprClass:
     return false;
 
   // Cases requiring custom logic

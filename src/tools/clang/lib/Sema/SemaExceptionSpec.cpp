@@ -20,6 +20,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallString.h"
 
 namespace clang {
 
@@ -50,7 +51,8 @@ bool Sema::CheckSpecifiedExceptionType(QualType T, const SourceRange &Range) {
   // C++ 15.4p2: A type denoted in an exception-specification shall not denote
   //   an incomplete type.
   if (RequireCompleteType(Range.getBegin(), T,
-      PDiag(diag::err_incomplete_in_exception_spec) << /*direct*/0 << Range))
+                          diag::err_incomplete_in_exception_spec,
+                          /*direct*/0, Range))
     return true;
 
   // C++ 15.4p2: A type denoted in an exception-specification shall not denote
@@ -70,8 +72,9 @@ bool Sema::CheckSpecifiedExceptionType(QualType T, const SourceRange &Range) {
   if (T->isRecordType() && T->getAs<RecordType>()->isBeingDefined())
     return false;
     
-  if (!T->isVoidType() && RequireCompleteType(Range.getBegin(), T,
-      PDiag(diag::err_incomplete_in_exception_spec) << kind << Range))
+  if (!T->isVoidType() &&
+      RequireCompleteType(Range.getBegin(), T,
+                          diag::err_incomplete_in_exception_spec, kind, Range))
     return true;
 
   return false;
@@ -101,7 +104,7 @@ bool Sema::CheckEquivalentExceptionSpec(FunctionDecl *Old, FunctionDecl *New) {
   bool MissingExceptionSpecification = false;
   bool MissingEmptyExceptionSpecification = false;
   unsigned DiagID = diag::err_mismatched_exception_spec;
-  if (getLangOptions().MicrosoftExt)
+  if (getLangOpts().MicrosoftExt)
     DiagID = diag::warn_mismatched_exception_spec; 
   
   if (!CheckEquivalentExceptionSpec(PDiag(DiagID),
@@ -170,7 +173,7 @@ bool Sema::CheckEquivalentExceptionSpec(FunctionDecl *Old, FunctionDecl *New) {
 
     // If exceptions are disabled, suppress the warning about missing
     // exception specifications for new and delete operators.
-    if (!getLangOptions().CXXExceptions) {
+    if (!getLangOpts().CXXExceptions) {
       switch (New->getDeclName().getCXXOverloadedOperator()) {
       case OO_New:
       case OO_Array_New:
@@ -186,7 +189,7 @@ bool Sema::CheckEquivalentExceptionSpec(FunctionDecl *Old, FunctionDecl *New) {
     } 
 
     // Warn about the lack of exception specification.
-    llvm::SmallString<128> ExceptionSpecString;
+    SmallString<128> ExceptionSpecString;
     llvm::raw_svector_ostream OS(ExceptionSpecString);
     switch (OldProto->getExceptionSpecType()) {
     case EST_DynamicNone:
@@ -264,7 +267,7 @@ bool Sema::CheckEquivalentExceptionSpec(
     const FunctionProtoType *Old, SourceLocation OldLoc,
     const FunctionProtoType *New, SourceLocation NewLoc) {
   unsigned DiagID = diag::err_mismatched_exception_spec;
-  if (getLangOptions().MicrosoftExt)
+  if (getLangOpts().MicrosoftExt)
     DiagID = diag::warn_mismatched_exception_spec; 
   return CheckEquivalentExceptionSpec(
                                       PDiag(DiagID),
@@ -285,7 +288,7 @@ bool Sema::CheckEquivalentExceptionSpec(const PartialDiagnostic &DiagID,
                                         bool AllowNoexceptAllMatchWithNoSpec,
                                         bool IsOperatorNew) {
   // Just completely ignore this under -fno-exceptions.
-  if (!getLangOptions().CXXExceptions)
+  if (!getLangOpts().CXXExceptions)
     return false;
 
   if (MissingExceptionSpecification)
@@ -379,7 +382,7 @@ bool Sema::CheckEquivalentExceptionSpec(const PartialDiagnostic &DiagID,
   // As a special compatibility feature, under C++0x we accept no spec and
   // throw(std::bad_alloc) as equivalent for operator new and operator new[].
   // This is because the implicit declaration changed, but old code would break.
-  if (getLangOptions().CPlusPlus0x && IsOperatorNew) {
+  if (getLangOpts().CPlusPlus0x && IsOperatorNew) {
     const FunctionProtoType *WithExceptions = 0;
     if (OldEST == EST_None && NewEST == EST_Dynamic)
       WithExceptions = New;
@@ -473,7 +476,7 @@ bool Sema::CheckExceptionSpecSubset(
     const FunctionProtoType *Subset, SourceLocation SubLoc) {
 
   // Just auto-succeed under -fno-exceptions.
-  if (!getLangOptions().CXXExceptions)
+  if (!getLangOpts().CXXExceptions)
     return false;
 
   // FIXME: As usual, we could be more specific in our error messages, but
@@ -611,10 +614,8 @@ bool Sema::CheckExceptionSpecSubset(
       case AR_inaccessible: continue;
       case AR_dependent:
         llvm_unreachable("access check dependent for unprivileged context");
-        break;
       case AR_delayed:
         llvm_unreachable("access check delayed in non-declaration");
-        break;
       }
 
       Contained = true;
@@ -703,7 +704,7 @@ bool Sema::CheckExceptionSpecCompatibility(Expr *From, QualType ToType)
 
 bool Sema::CheckOverridingFunctionExceptionSpec(const CXXMethodDecl *New,
                                                 const CXXMethodDecl *Old) {
-  if (getLangOptions().CPlusPlus0x && isa<CXXDestructorDecl>(New)) {
+  if (getLangOpts().CPlusPlus0x && isa<CXXDestructorDecl>(New)) {
     // Don't check uninstantiated template destructors at all. We can only
     // synthesize correct specs after the template is instantiated.
     if (New->getParent()->isDependentType())
@@ -717,7 +718,7 @@ bool Sema::CheckOverridingFunctionExceptionSpec(const CXXMethodDecl *New,
     }
   }
   unsigned DiagID = diag::err_override_exception_spec;
-  if (getLangOptions().MicrosoftExt)
+  if (getLangOpts().MicrosoftExt)
     DiagID = diag::warn_override_exception_spec;
   return CheckExceptionSpecSubset(PDiag(DiagID),
                                   PDiag(diag::note_overridden_virtual_function),
@@ -727,4 +728,4 @@ bool Sema::CheckOverridingFunctionExceptionSpec(const CXXMethodDecl *New,
                                   New->getLocation());
 }
 
-} // end namespace clang
+}

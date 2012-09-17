@@ -22,13 +22,18 @@
 #include "llvm/PassManager.h"
 #include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/Verifier.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Vectorize.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ManagedStatic.h"
 
 using namespace llvm;
+
+static cl::opt<bool>
+RunVectorization("vectorize", cl::desc("Run vectorization passes"));
 
 PassManagerBuilder::PassManagerBuilder() {
     OptLevel = 2;
@@ -38,6 +43,7 @@ PassManagerBuilder::PassManagerBuilder() {
     DisableSimplifyLibCalls = false;
     DisableUnitAtATime = false;
     DisableUnrollLoops = false;
+    Vectorize = RunVectorization;
 }
 
 PassManagerBuilder::~PassManagerBuilder() {
@@ -101,6 +107,7 @@ void PassManagerBuilder::populateModulePassManager(PassManagerBase &MPM) {
       MPM.add(Inliner);
       Inliner = 0;
     }
+    addExtensionsToPM(EP_EnabledOnOptLevel0, MPM);
     return;
   }
 
@@ -110,6 +117,8 @@ void PassManagerBuilder::populateModulePassManager(PassManagerBase &MPM) {
   addInitialAliasAnalysisPasses(MPM);
 
   if (!DisableUnitAtATime) {
+    addExtensionsToPM(EP_ModuleOptimizerEarly, MPM);
+
     MPM.add(createGlobalOptimizerPass());     // Optimize out global vars
 
     MPM.add(createIPSCCPPass());              // IP SCCP
@@ -169,6 +178,13 @@ void PassManagerBuilder::populateModulePassManager(PassManagerBase &MPM) {
   MPM.add(createDeadStoreEliminationPass());  // Delete dead stores
 
   addExtensionsToPM(EP_ScalarOptimizerLate, MPM);
+
+  if (Vectorize) {
+    MPM.add(createBBVectorizePass());
+    MPM.add(createInstructionCombiningPass());
+    if (OptLevel > 1)
+      MPM.add(createGVNPass());                 // Remove redundancies
+  }
 
   MPM.add(createAggressiveDCEPass());         // Delete dead instructions
   MPM.add(createCFGSimplificationPass());     // Merge & remove BBs
@@ -340,4 +356,3 @@ void LLVMPassManagerBuilderPopulateLTOPassManager(LLVMPassManagerBuilderRef PMB,
   PassManagerBase *LPM = unwrap(PM);
   Builder->populateLTOPassManager(*LPM, Internalize, RunInliner);
 }
-

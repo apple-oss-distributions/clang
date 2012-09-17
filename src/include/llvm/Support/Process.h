@@ -1,4 +1,4 @@
-//===- llvm/Support/Process.h ------------------------------------*- C++ -*-===//
+//===- llvm/Support/Process.h -----------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -139,8 +139,9 @@ namespace sys {
       /// Resets the terminals colors, or returns an escape sequence to do so.
       static const char *ResetColor();
 
-      /// Change the program working directory to that given by \arg Path.
-      static void SetWorkingDirectory(std::string Path);
+      /// Get the result of a process wide random number generator. The
+      /// generator will be automatically seeded in non-deterministic fashion.
+      static unsigned GetRandomNumber();
     /// @}
   };
 }

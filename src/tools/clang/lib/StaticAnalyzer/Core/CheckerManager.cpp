@@ -138,13 +138,15 @@ namespace {
     const CheckersTy &Checkers;
     const Stmt *S;
     ExprEngine &Eng;
+    bool wasInlined;
 
     CheckersTy::const_iterator checkers_begin() { return Checkers.begin(); }
     CheckersTy::const_iterator checkers_end() { return Checkers.end(); }
 
     CheckStmtContext(bool isPreVisit, const CheckersTy &checkers,
-                     const Stmt *s, ExprEngine &eng)
-      : IsPreVisit(isPreVisit), Checkers(checkers), S(s), Eng(eng) { }
+                     const Stmt *s, ExprEngine &eng, bool wasInlined = false)
+      : IsPreVisit(isPreVisit), Checkers(checkers), S(s), Eng(eng),
+        wasInlined(wasInlined) {}
 
     void runChecker(CheckerManager::CheckStmtFunc checkFn,
                     NodeBuilder &Bldr, ExplodedNode *Pred) {
@@ -153,8 +155,7 @@ namespace {
                                            ProgramPoint::PostStmtKind;
       const ProgramPoint &L = ProgramPoint::getProgramPoint(S, K,
                                 Pred->getLocationContext(), checkFn.Checker);
-      CheckerContext C(Bldr, Eng, Pred, L);
-
+      CheckerContext C(Bldr, Eng, Pred, L, wasInlined);
       checkFn(S, C);
     }
   };
@@ -165,9 +166,10 @@ void CheckerManager::runCheckersForStmt(bool isPreVisit,
                                         ExplodedNodeSet &Dst,
                                         const ExplodedNodeSet &Src,
                                         const Stmt *S,
-                                        ExprEngine &Eng) {
+                                        ExprEngine &Eng,
+                                        bool wasInlined) {
   CheckStmtContext C(isPreVisit, *getCachedStmtCheckersFor(S, isPreVisit),
-                     S, Eng);
+                     S, Eng, wasInlined);
   expandGraphWithCheckers(C, Dst, Src);
 }
 
@@ -190,8 +192,10 @@ namespace {
                     NodeBuilder &Bldr, ExplodedNode *Pred) {
       ProgramPoint::Kind K =  IsPreVisit ? ProgramPoint::PreStmtKind :
                                            ProgramPoint::PostStmtKind;
-      const ProgramPoint &L = ProgramPoint::getProgramPoint(Msg.getOriginExpr(),
-                                K, Pred->getLocationContext(), checkFn.Checker);
+      const ProgramPoint &L =
+        ProgramPoint::getProgramPoint(Msg.getMessageExpr(),
+                                      K, Pred->getLocationContext(),
+                                      checkFn.Checker);
       CheckerContext C(Bldr, Eng, Pred, L);
 
       checkFn(Msg, C);
@@ -218,25 +222,30 @@ namespace {
     const CheckersTy &Checkers;
     SVal Loc;
     bool IsLoad;
-    const Stmt *S;
+    const Stmt *NodeEx; /* Will become a CFGStmt */
+    const Stmt *BoundEx;
     ExprEngine &Eng;
 
     CheckersTy::const_iterator checkers_begin() { return Checkers.begin(); }
     CheckersTy::const_iterator checkers_end() { return Checkers.end(); }
 
     CheckLocationContext(const CheckersTy &checkers,
-                         SVal loc, bool isLoad, const Stmt *s, ExprEngine &eng)
-      : Checkers(checkers), Loc(loc), IsLoad(isLoad), S(s), Eng(eng) { }
+                         SVal loc, bool isLoad, const Stmt *NodeEx,
+                         const Stmt *BoundEx,
+                         ExprEngine &eng)
+      : Checkers(checkers), Loc(loc), IsLoad(isLoad), NodeEx(NodeEx),
+        BoundEx(BoundEx), Eng(eng) {}
 
     void runChecker(CheckerManager::CheckLocationFunc checkFn,
                     NodeBuilder &Bldr, ExplodedNode *Pred) {
       ProgramPoint::Kind K =  IsLoad ? ProgramPoint::PreLoadKind :
                                        ProgramPoint::PreStoreKind;
-      const ProgramPoint &L = ProgramPoint::getProgramPoint(S, K,
-                                Pred->getLocationContext(), checkFn.Checker);
+      const ProgramPoint &L =
+        ProgramPoint::getProgramPoint(NodeEx, K,
+                                      Pred->getLocationContext(),
+                                      checkFn.Checker);
       CheckerContext C(Bldr, Eng, Pred, L);
-
-      checkFn(Loc, IsLoad, S, C);
+      checkFn(Loc, IsLoad, BoundEx, C);
     }
   };
 }
@@ -246,8 +255,11 @@ namespace {
 void CheckerManager::runCheckersForLocation(ExplodedNodeSet &Dst,
                                             const ExplodedNodeSet &Src,
                                             SVal location, bool isLoad,
-                                            const Stmt *S, ExprEngine &Eng) {
-  CheckLocationContext C(LocationCheckers, location, isLoad, S, Eng);
+                                            const Stmt *NodeEx,
+                                            const Stmt *BoundEx,
+                                            ExprEngine &Eng) {
+  CheckLocationContext C(LocationCheckers, location, isLoad, NodeEx,
+                         BoundEx, Eng);
   expandGraphWithCheckers(C, Dst, Src);
 }
 
@@ -356,7 +368,7 @@ void CheckerManager::runCheckersForBranchCondition(const Stmt *Condition,
 }
 
 /// \brief Run checkers for live symbols.
-void CheckerManager::runCheckersForLiveSymbols(const ProgramState *state,
+void CheckerManager::runCheckersForLiveSymbols(ProgramStateRef state,
                                                SymbolReaper &SymReaper) {
   for (unsigned i = 0, e = LiveSymbolsCheckers.size(); i != e; ++i)
     LiveSymbolsCheckers[i](state, SymReaper);
@@ -369,21 +381,25 @@ namespace {
     SymbolReaper &SR;
     const Stmt *S;
     ExprEngine &Eng;
+    ProgramPoint::Kind ProgarmPointKind;
 
     CheckersTy::const_iterator checkers_begin() { return Checkers.begin(); }
     CheckersTy::const_iterator checkers_end() { return Checkers.end(); }
 
     CheckDeadSymbolsContext(const CheckersTy &checkers, SymbolReaper &sr,
-                            const Stmt *s, ExprEngine &eng)
-      : Checkers(checkers), SR(sr), S(s), Eng(eng) { }
+                            const Stmt *s, ExprEngine &eng,
+                            ProgramPoint::Kind K)
+      : Checkers(checkers), SR(sr), S(s), Eng(eng), ProgarmPointKind(K) { }
 
     void runChecker(CheckerManager::CheckDeadSymbolsFunc checkFn,
                     NodeBuilder &Bldr, ExplodedNode *Pred) {
-      ProgramPoint::Kind K = ProgramPoint::PostPurgeDeadSymbolsKind;
-      const ProgramPoint &L = ProgramPoint::getProgramPoint(S, K,
+      const ProgramPoint &L = ProgramPoint::getProgramPoint(S, ProgarmPointKind,
                                 Pred->getLocationContext(), checkFn.Checker);
       CheckerContext C(Bldr, Eng, Pred, L);
 
+      // Note, do not pass the statement to the checkers without letting them
+      // differentiate if we ran remove dead bindings before or after the
+      // statement.
       checkFn(SR, C);
     }
   };
@@ -394,13 +410,14 @@ void CheckerManager::runCheckersForDeadSymbols(ExplodedNodeSet &Dst,
                                                const ExplodedNodeSet &Src,
                                                SymbolReaper &SymReaper,
                                                const Stmt *S,
-                                               ExprEngine &Eng) {
-  CheckDeadSymbolsContext C(DeadSymbolsCheckers, SymReaper, S, Eng);
+                                               ExprEngine &Eng,
+                                               ProgramPoint::Kind K) {
+  CheckDeadSymbolsContext C(DeadSymbolsCheckers, SymReaper, S, Eng, K);
   expandGraphWithCheckers(C, Dst, Src);
 }
 
 /// \brief True if at least one checker wants to check region changes.
-bool CheckerManager::wantsRegionChangeUpdate(const ProgramState *state) {
+bool CheckerManager::wantsRegionChangeUpdate(ProgramStateRef state) {
   for (unsigned i = 0, e = RegionChangesCheckers.size(); i != e; ++i)
     if (RegionChangesCheckers[i].WantUpdateFn(state))
       return true;
@@ -409,25 +426,26 @@ bool CheckerManager::wantsRegionChangeUpdate(const ProgramState *state) {
 }
 
 /// \brief Run checkers for region changes.
-const ProgramState *
-CheckerManager::runCheckersForRegionChanges(const ProgramState *state,
+ProgramStateRef 
+CheckerManager::runCheckersForRegionChanges(ProgramStateRef state,
                             const StoreManager::InvalidatedSymbols *invalidated,
                                     ArrayRef<const MemRegion *> ExplicitRegions,
-                                          ArrayRef<const MemRegion *> Regions) {
+                                          ArrayRef<const MemRegion *> Regions,
+                                          const CallOrObjCMessage *Call) {
   for (unsigned i = 0, e = RegionChangesCheckers.size(); i != e; ++i) {
     // If any checker declares the state infeasible (or if it starts that way),
     // bail out.
     if (!state)
       return NULL;
     state = RegionChangesCheckers[i].CheckFn(state, invalidated, 
-                                             ExplicitRegions, Regions);
+                                             ExplicitRegions, Regions, Call);
   }
   return state;
 }
 
 /// \brief Run checkers for handling assumptions on symbolic values.
-const ProgramState *
-CheckerManager::runCheckersForEvalAssume(const ProgramState *state,
+ProgramStateRef 
+CheckerManager::runCheckersForEvalAssume(ProgramStateRef state,
                                          SVal Cond, bool Assumption) {
   for (unsigned i = 0, e = EvalAssumeCheckers.size(); i != e; ++i) {
     // If any checker declares the state infeasible (or if it starts that way),
@@ -534,7 +552,7 @@ void CheckerManager::runCheckersOnEndOfTranslationUnit(
 }
 
 void CheckerManager::runCheckersForPrintState(raw_ostream &Out,
-                                              const ProgramState *State,
+                                              ProgramStateRef State,
                                               const char *NL, const char *Sep) {
   for (llvm::DenseMap<CheckerTag, CheckerRef>::iterator
         I = CheckerTags.begin(), E = CheckerTags.end(); I != E; ++I)

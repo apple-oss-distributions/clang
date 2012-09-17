@@ -38,7 +38,6 @@ CXDiagnosticSeverity CXStoredDiagnostic::getSeverity() const {
   }
   
   llvm_unreachable("Invalid diagnostic level");
-  return CXDiagnostic_Ignored;
 }
 
 CXSourceLocation CXStoredDiagnostic::getLocation() const {
@@ -78,6 +77,11 @@ CXString CXStoredDiagnostic::getDiagnosticOption(CXString *Disable) const {
 
 unsigned CXStoredDiagnostic::getCategory() const {
   return DiagnosticIDs::getCategoryNumberForDiag(Diag.getID());
+}
+
+CXString CXStoredDiagnostic::getCategoryText() const {
+  unsigned catID = DiagnosticIDs::getCategoryNumberForDiag(Diag.getID());
+  return createCXString(DiagnosticIDs::getCategoryNameFromID(catID));
 }
 
 unsigned CXStoredDiagnostic::getNumRanges() const {

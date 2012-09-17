@@ -60,7 +60,6 @@ BasicBlock *llvm::CloneBasicBlock(const BasicBlock *BB,
   
   if (CodeInfo) {
     CodeInfo->ContainsCalls          |= hasCalls;
-    CodeInfo->ContainsUnwinds        |= isa<UnwindInst>(BB->getTerminator());
     CodeInfo->ContainsDynamicAllocas |= hasDynamicAllocas;
     CodeInfo->ContainsDynamicAllocas |= hasStaticAllocas && 
                                         BB != &BB->getParent()->getEntryBlock();
@@ -75,7 +74,8 @@ void llvm::CloneFunctionInto(Function *NewFunc, const Function *OldFunc,
                              ValueToValueMapTy &VMap,
                              bool ModuleLevelChanges,
                              SmallVectorImpl<ReturnInst*> &Returns,
-                             const char *NameSuffix, ClonedCodeInfo *CodeInfo) {
+                             const char *NameSuffix, ClonedCodeInfo *CodeInfo,
+                             ValueMapTypeRemapper *TypeMapper) {
   assert(NameSuffix && "NameSuffix cannot be null!");
 
 #ifndef NDEBUG
@@ -141,7 +141,8 @@ void llvm::CloneFunctionInto(Function *NewFunc, const Function *OldFunc,
     // Loop over all instructions, fixing each one as we find it...
     for (BasicBlock::iterator II = BB->begin(); II != BB->end(); ++II)
       RemapInstruction(II, VMap,
-                       ModuleLevelChanges ? RF_None : RF_NoModuleLevelChanges);
+                       ModuleLevelChanges ? RF_None : RF_NoModuleLevelChanges,
+                       TypeMapper);
 }
 
 /// CloneFunction - Return a copy of the specified function, but without
@@ -312,7 +313,8 @@ void PruningFunctionCloner::CloneBlock(const BasicBlock *BB,
       Cond = dyn_cast_or_null<ConstantInt>(V);
     }
     if (Cond) {     // Constant fold to uncond branch!
-      BasicBlock *Dest = SI->getSuccessor(SI->findCaseValue(Cond));
+      unsigned CaseIndex = SI->findCaseValue(Cond);
+      BasicBlock *Dest = SI->getSuccessor(SI->resolveSuccessorIndex(CaseIndex));
       VMap[OldTI] = BranchInst::Create(Dest, NewBB);
       ToClone.push_back(Dest);
       TerminatorDone = true;
@@ -334,7 +336,6 @@ void PruningFunctionCloner::CloneBlock(const BasicBlock *BB,
   
   if (CodeInfo) {
     CodeInfo->ContainsCalls          |= hasCalls;
-    CodeInfo->ContainsUnwinds        |= isa<UnwindInst>(OldTI);
     CodeInfo->ContainsDynamicAllocas |= hasDynamicAllocas;
     CodeInfo->ContainsDynamicAllocas |= hasStaticAllocas && 
       BB != &BB->getParent()->front();

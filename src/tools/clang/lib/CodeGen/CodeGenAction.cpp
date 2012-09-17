@@ -33,6 +33,7 @@ using namespace llvm;
 
 namespace clang {
   class BackendConsumer : public ASTConsumer {
+    virtual void anchor();
     DiagnosticsEngine &Diags;
     BackendAction Action;
     const CodeGenOptions &CodeGenOpts;
@@ -43,9 +44,9 @@ namespace clang {
 
     Timer LLVMIRGeneration;
 
-    llvm::OwningPtr<CodeGenerator> Gen;
+    OwningPtr<CodeGenerator> Gen;
 
-    llvm::OwningPtr<llvm::Module> TheModule, LinkModule;
+    OwningPtr<llvm::Module> TheModule, LinkModule;
 
   public:
     BackendConsumer(BackendAction action, DiagnosticsEngine &_Diags,
@@ -71,6 +72,10 @@ namespace clang {
 
     llvm::Module *takeModule() { return TheModule.take(); }
     llvm::Module *takeLinkModule() { return LinkModule.take(); }
+
+    virtual void MarkVarRequired(VarDecl *VD) {
+      Gen->MarkVarRequired(VD);
+    }
 
     virtual void Initialize(ASTContext &Ctx) {
       Context = &Ctx;
@@ -120,7 +125,7 @@ namespace clang {
 
       // Make sure IR generation is happy with the module. This is released by
       // the module provider.
-      Module *M = Gen->ReleaseModule();
+      llvm::Module *M = Gen->ReleaseModule();
       if (!M) {
         // The module has been released by IR gen on failures, do not double
         // free.
@@ -180,6 +185,8 @@ namespace clang {
     void InlineAsmDiagHandler2(const llvm::SMDiagnostic &,
                                SourceLocation LocCookie);
   };
+  
+  void BackendConsumer::anchor() {}
 }
 
 /// ConvertBackendLocation - Convert a location in a temporary llvm::SourceMgr
@@ -315,7 +322,7 @@ static raw_ostream *GetOutputStream(CompilerInstance &CI,
 ASTConsumer *CodeGenAction::CreateASTConsumer(CompilerInstance &CI,
                                               StringRef InFile) {
   BackendAction BA = static_cast<BackendAction>(Act);
-  llvm::OwningPtr<raw_ostream> OS(GetOutputStream(CI, InFile, BA));
+  OwningPtr<raw_ostream> OS(GetOutputStream(CI, InFile, BA));
   if (BA != Backend_EmitNothing && !OS)
     return 0;
 
@@ -406,20 +413,26 @@ void CodeGenAction::ExecuteAction() {
 
 //
 
+void EmitAssemblyAction::anchor() { }
 EmitAssemblyAction::EmitAssemblyAction(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitAssembly, _VMContext) {}
 
+void EmitBCAction::anchor() { }
 EmitBCAction::EmitBCAction(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitBC, _VMContext) {}
 
+void EmitLLVMAction::anchor() { }
 EmitLLVMAction::EmitLLVMAction(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitLL, _VMContext) {}
 
+void EmitLLVMOnlyAction::anchor() { }
 EmitLLVMOnlyAction::EmitLLVMOnlyAction(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitNothing, _VMContext) {}
 
+void EmitCodeGenOnlyAction::anchor() { }
 EmitCodeGenOnlyAction::EmitCodeGenOnlyAction(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitMCNull, _VMContext) {}
 
+void EmitObjAction::anchor() { }
 EmitObjAction::EmitObjAction(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitObj, _VMContext) {}

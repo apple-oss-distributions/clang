@@ -195,7 +195,8 @@ void SparseSolver::getFeasibleSuccessors(TerminatorInst &TI,
     return;
   }
   
-  Succs[SI.findCaseValue(cast<ConstantInt>(C))] = true;
+  unsigned CCase = SI.findCaseValue(cast<ConstantInt>(C));
+  Succs[SI.resolveSuccessorIndex(CCase)] = true;
 }
 
 
@@ -327,13 +328,13 @@ void SparseSolver::Solve(Function &F) {
 }
 
 void SparseSolver::Print(Function &F, raw_ostream &OS) const {
-  OS << "\nFUNCTION: " << F.getNameStr() << "\n";
+  OS << "\nFUNCTION: " << F.getName() << "\n";
   for (Function::iterator BB = F.begin(), E = F.end(); BB != E; ++BB) {
     if (!BBExecutable.count(BB))
       OS << "INFEASIBLE: ";
     OS << "\t";
     if (BB->hasName())
-      OS << BB->getNameStr() << ":\n";
+      OS << BB->getName() << ":\n";
     else
       OS << "; anon bb\n";
     for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I) {

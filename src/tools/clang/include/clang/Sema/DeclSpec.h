@@ -25,9 +25,11 @@
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/Lex/Token.h"
 #include "clang/Basic/ExceptionSpecificationType.h"
+#include "clang/Basic/Lambda.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 
 namespace clang {
@@ -445,7 +447,10 @@ public:
   CXXScopeSpec &getTypeSpecScope() { return TypeScope; }
   const CXXScopeSpec &getTypeSpecScope() const { return TypeScope; }
 
-  const SourceRange &getSourceRange() const { return Range; }
+  const SourceRange &getSourceRange() const LLVM_READONLY { return Range; }
+  SourceLocation getLocStart() const LLVM_READONLY { return Range.getBegin(); }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Range.getEnd(); }
+
   SourceLocation getTypeSpecWidthLoc() const { return TSWLoc; }
   SourceLocation getTypeSpecComplexLoc() const { return TSCLoc; }
   SourceLocation getTypeSpecSignLoc() const { return TSSLoc; }
@@ -962,9 +967,11 @@ public:
   void setTemplateId(TemplateIdAnnotation *TemplateId);
 
   /// \brief Return the source range that covers this unqualified-id.
-  SourceRange getSourceRange() const { 
+  SourceRange getSourceRange() const LLVM_READONLY { 
     return SourceRange(StartLocation, EndLocation); 
   }
+  SourceLocation getLocStart() const LLVM_READONLY { return StartLocation; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return EndLocation; }
 };
   
 /// CachedTokens - A set of tokens that has been cached for later
@@ -1250,7 +1257,6 @@ struct DeclaratorChunk {
 
   void destroy() {
     switch (Kind) {
-    default: llvm_unreachable("Unknown decl type!");
     case DeclaratorChunk::Function:      return Fun.destroy();
     case DeclaratorChunk::Pointer:       return Ptr.destroy();
     case DeclaratorChunk::BlockPointer:  return Cls.destroy();
@@ -1416,6 +1422,7 @@ public:
     CXXCatchContext,     // C++ catch exception-declaration
     ObjCCatchContext,    // Objective-C catch exception-declaration
     BlockLiteralContext,  // Block literal declarator.
+    LambdaExprContext,   // Lambda-expression declarator.
     TemplateTypeArgContext, // Template type argument.
     AliasDeclContext,    // C++0x alias-declaration.
     AliasTemplateContext // C++0x alias-declaration template.
@@ -1466,6 +1473,10 @@ private:
 
   /// Extension - true if the declaration is preceded by __extension__.
   bool Extension : 1;
+
+  /// \brief If this is the second or subsequent declarator in this declaration,
+  /// the location of the comma before this declarator.
+  SourceLocation CommaLoc;
 
   /// \brief If provided, the source location of the ellipsis used to describe
   /// this declarator as a parameter pack.
@@ -1519,7 +1530,9 @@ public:
   }
 
   /// getSourceRange - Get the source range that spans this declarator.
-  const SourceRange &getSourceRange() const { return Range; }
+  const SourceRange &getSourceRange() const LLVM_READONLY { return Range; }
+  SourceLocation getLocStart() const LLVM_READONLY { return Range.getBegin(); }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Range.getEnd(); }
 
   void SetSourceRange(SourceRange R) { Range = R; }
   /// SetRangeBegin - Set the start of the source range to Loc, unless it's
@@ -1556,6 +1569,8 @@ public:
     Attrs.clear();
     AsmLabel = 0;
     InlineParamsUsed = false;
+    CommaLoc = SourceLocation();
+    EllipsisLoc = SourceLocation();
   }
 
   /// mayOmitIdentifier - Return true if the identifier is either optional or
@@ -1582,6 +1597,7 @@ public:
     case CXXCatchContext:
     case ObjCCatchContext:
     case BlockLiteralContext:
+    case LambdaExprContext:
     case TemplateTypeArgContext:
       return true;
     }
@@ -1612,6 +1628,7 @@ public:
     case ObjCParameterContext:
     case ObjCResultContext:
     case BlockLiteralContext:
+    case LambdaExprContext:
     case TemplateTypeArgContext:
       return false;
     }
@@ -1623,15 +1640,27 @@ public:
   bool mayBeFollowedByCXXDirectInit() const {
     if (hasGroupingParens()) return false;
 
+    if (getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_typedef)
+      return false;
+
+    if (getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_extern &&
+        Context != FileContext)
+      return false;
+
     switch (Context) {
     case FileContext:
     case BlockContext:
     case ForContext:
       return true;
 
+    case ConditionContext:
+      // This may not be followed by a direct initializer, but it can't be a
+      // function declaration either, and we'd prefer to perform a tentative
+      // parse in order to produce the right diagnostic.
+      return true;
+
     case KNRTypeListContext:
     case MemberContext:
-    case ConditionContext:
     case PrototypeContext:
     case ObjCParameterContext:
     case ObjCResultContext:
@@ -1643,6 +1672,7 @@ public:
     case AliasDeclContext:
     case AliasTemplateContext:
     case BlockLiteralContext:
+    case LambdaExprContext:
     case TemplateTypeArgContext:
       return false;
     }
@@ -1731,7 +1761,6 @@ public:
         return !DeclTypeInfo[i].Arr.NumElts;
       }
       llvm_unreachable("Invalid type chunk");
-      return false;
     }
     return false;
   }
@@ -1756,7 +1785,6 @@ public:
         return false;
       }
       llvm_unreachable("Invalid type chunk");
-      return false;
     }
     return false;
   }
@@ -1835,7 +1863,11 @@ public:
 
   void setGroupingParens(bool flag) { GroupingParens = flag; }
   bool hasGroupingParens() const { return GroupingParens; }
-  
+
+  bool isFirstDeclarator() const { return !CommaLoc.isValid(); }
+  SourceLocation getCommaLoc() const { return CommaLoc; }
+  void setCommaLoc(SourceLocation CL) { CommaLoc = CL; }
+
   bool hasEllipsis() const { return EllipsisLoc.isValid(); }
   SourceLocation getEllipsisLoc() const { return EllipsisLoc; }
   void setEllipsisLoc(SourceLocation EL) { EllipsisLoc = EL; }
@@ -1899,38 +1931,24 @@ private:
   SourceLocation LastLocation;
 };
 
-/// LambdaCaptureDefault - The default, if any, capture method for a
-/// lambda expression.
-enum LambdaCaptureDefault {
-  LCD_None,
-  LCD_ByCopy,
-  LCD_ByRef
-};
-
-/// LambdaCaptureKind - The different capture forms in a lambda
-/// introducer: 'this' or a copied or referenced variable.
-enum LambdaCaptureKind {
-  LCK_This,
-  LCK_ByCopy,
-  LCK_ByRef
-};
-
 /// LambdaCapture - An individual capture in a lambda introducer.
 struct LambdaCapture {
   LambdaCaptureKind Kind;
   SourceLocation Loc;
   IdentifierInfo* Id;
-
-  LambdaCapture(LambdaCaptureKind Kind,
-                     SourceLocation Loc,
-                     IdentifierInfo* Id = 0)
-    : Kind(Kind), Loc(Loc), Id(Id)
+  SourceLocation EllipsisLoc;
+  
+  LambdaCapture(LambdaCaptureKind Kind, SourceLocation Loc,
+                IdentifierInfo* Id = 0,
+                SourceLocation EllipsisLoc = SourceLocation())
+    : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc)
   {}
 };
 
 /// LambdaIntroducer - Represents a complete lambda introducer.
 struct LambdaIntroducer {
   SourceRange Range;
+  SourceLocation DefaultLoc;
   LambdaCaptureDefault Default;
   llvm::SmallVector<LambdaCapture, 4> Captures;
 
@@ -1940,8 +1958,9 @@ struct LambdaIntroducer {
   /// addCapture - Append a capture in a lambda introducer.
   void addCapture(LambdaCaptureKind Kind,
                   SourceLocation Loc,
-                  IdentifierInfo* Id = 0) {
-    Captures.push_back(LambdaCapture(Kind, Loc, Id));
+                  IdentifierInfo* Id = 0, 
+                  SourceLocation EllipsisLoc = SourceLocation()) {
+    Captures.push_back(LambdaCapture(Kind, Loc, Id, EllipsisLoc));
   }
 
 };

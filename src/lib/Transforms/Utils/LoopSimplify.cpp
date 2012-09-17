@@ -266,7 +266,7 @@ ReprocessLoop:
   PHINode *PN;
   for (BasicBlock::iterator I = L->getHeader()->begin();
        (PN = dyn_cast<PHINode>(I++)); )
-    if (Value *V = SimplifyInstruction(PN, 0, DT)) {
+    if (Value *V = SimplifyInstruction(PN, 0, 0, DT)) {
       if (AA) AA->deleteValue(PN);
       if (SE) SE->forgetValue(PN);
       PN->replaceAllUsesWith(V);
@@ -382,8 +382,7 @@ BasicBlock *LoopSimplify::InsertPreheaderForLoop(Loop *L) {
   // Split out the loop pre-header.
   BasicBlock *PreheaderBB;
   if (!Header->isLandingPad()) {
-    PreheaderBB = SplitBlockPredecessors(Header, &OutsideBlocks[0], 
-                                         OutsideBlocks.size(), ".preheader",
+    PreheaderBB = SplitBlockPredecessors(Header, OutsideBlocks, ".preheader",
                                          this);
   } else {
     SmallVector<BasicBlock*, 2> NewBBs;
@@ -430,9 +429,7 @@ BasicBlock *LoopSimplify::RewriteLoopExitBlock(Loop *L, BasicBlock *Exit) {
                                 this, NewBBs);
     NewExitBB = NewBBs[0];
   } else {
-    NewExitBB = SplitBlockPredecessors(Exit, &LoopBlocks[0],
-                                       LoopBlocks.size(), ".loopexit",
-                                       this);
+    NewExitBB = SplitBlockPredecessors(Exit, LoopBlocks, ".loopexit", this);
   }
 
   DEBUG(dbgs() << "LoopSimplify: Creating dedicated exit block "
@@ -466,7 +463,7 @@ static PHINode *FindPHIToPartitionLoops(Loop *L, DominatorTree *DT,
   for (BasicBlock::iterator I = L->getHeader()->begin(); isa<PHINode>(I); ) {
     PHINode *PN = cast<PHINode>(I);
     ++I;
-    if (Value *V = SimplifyInstruction(PN, 0, DT)) {
+    if (Value *V = SimplifyInstruction(PN, 0, 0, DT)) {
       // This is a degenerate PHI already, don't modify it!
       PN->replaceAllUsesWith(V);
       if (AA) AA->deleteValue(PN);
@@ -571,9 +568,8 @@ Loop *LoopSimplify::SeparateNestedLoop(Loop *L, LPPassManager &LPM,
     SE->forgetLoop(L);
 
   BasicBlock *Header = L->getHeader();
-  BasicBlock *NewBB = SplitBlockPredecessors(Header, &OuterLoopPreds[0],
-                                             OuterLoopPreds.size(),
-                                             ".outer", this);
+  BasicBlock *NewBB =
+    SplitBlockPredecessors(Header, OuterLoopPreds,  ".outer", this);
 
   // Make sure that NewBB is put someplace intelligent, which doesn't mess up
   // code layout too horribly.

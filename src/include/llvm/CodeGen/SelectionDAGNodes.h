@@ -1114,11 +1114,9 @@ protected:
   }
 public:
 
-  void getMask(SmallVectorImpl<int> &M) const {
+  ArrayRef<int> getMask() const {
     EVT VT = getValueType(0);
-    M.clear();
-    for (unsigned i = 0, e = VT.getVectorNumElements(); i != e; ++i)
-      M.push_back(Mask[i]);
+    return makeArrayRef(Mask, VT.getVectorNumElements());
   }
   int getMaskElt(unsigned Idx) const {
     assert(Idx < getValueType(0).getVectorNumElements() && "Idx out of range!");
@@ -1435,6 +1433,23 @@ public:
   }
 };
 
+class RegisterMaskSDNode : public SDNode {
+  // The memory for RegMask is not owned by the node.
+  const uint32_t *RegMask;
+  friend class SelectionDAG;
+  RegisterMaskSDNode(const uint32_t *mask)
+    : SDNode(ISD::RegisterMask, DebugLoc(), getSDVTList(MVT::Untyped)),
+      RegMask(mask) {}
+public:
+
+  const uint32_t *getRegMask() const { return RegMask; }
+
+  static bool classof(const RegisterMaskSDNode *) { return true; }
+  static bool classof(const SDNode *N) {
+    return N->getOpcode() == ISD::RegisterMask;
+  }
+};
+
 class BlockAddressSDNode : public SDNode {
   const BlockAddress *BA;
   unsigned char TargetFlags;
@@ -1685,6 +1700,8 @@ public:
   /// setMemRefs - Assign this MachineSDNodes's memory reference descriptor
   /// list. This does not transfer ownership.
   void setMemRefs(mmo_iterator NewMemRefs, mmo_iterator NewMemRefsEnd) {
+    for (mmo_iterator MMI = NewMemRefs, MME = NewMemRefsEnd; MMI != MME; ++MMI)
+      assert(*MMI && "Null mem ref detected!");
     MemRefs = NewMemRefs;
     MemRefsEnd = NewMemRefsEnd;
   }

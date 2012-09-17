@@ -50,7 +50,7 @@ class PropertiesRewriter {
   
   enum PropActionKind {
     PropAction_None,
-    PropAction_RetainRemoved,
+    PropAction_RetainReplacedWithStrong,
     PropAction_AssignRemoved,
     PropAction_AssignRewritten,
     PropAction_MaybeAddWeakOrUnsafe
@@ -73,13 +73,18 @@ public:
   explicit PropertiesRewriter(MigrationContext &MigrateCtx)
     : MigrateCtx(MigrateCtx), Pass(MigrateCtx.Pass) { }
 
-  static void collectProperties(ObjCContainerDecl *D, AtPropDeclsTy &AtProps) {
+  static void collectProperties(ObjCContainerDecl *D, AtPropDeclsTy &AtProps,
+                                AtPropDeclsTy *PrevAtProps = 0) {
     for (ObjCInterfaceDecl::prop_iterator
            propI = D->prop_begin(),
            propE = D->prop_end(); propI != propE; ++propI) {
       if (propI->getAtLoc().isInvalid())
         continue;
-      PropsTy &props = AtProps[propI->getAtLoc().getRawEncoding()];
+      unsigned RawLoc = propI->getAtLoc().getRawEncoding();
+      if (PrevAtProps)
+        if (PrevAtProps->find(RawLoc) != PrevAtProps->end())
+          continue;
+      PropsTy &props = AtProps[RawLoc];
       props.push_back(*propI);
     }
   }
@@ -139,7 +144,7 @@ public:
     for (ObjCCategoryDecl *Cat = iface->getCategoryList();
            Cat; Cat = Cat->getNextClassCategory())
       if (Cat->IsClassExtension())
-        collectProperties(Cat, AtExtProps);
+        collectProperties(Cat, AtExtProps, &AtProps);
 
     for (AtPropDeclsTy::iterator
            I = AtExtProps.begin(), E = AtExtProps.end(); I != E; ++I) {
@@ -161,9 +166,11 @@ private:
     switch (kind) {
     case PropAction_None:
       return;
-    case PropAction_RetainRemoved:
-      removeAttribute("retain", atLoc);
+    case PropAction_RetainReplacedWithStrong: {
+      StringRef toAttr = "strong";
+      MigrateCtx.rewritePropertyAttribute("retain", toAttr, atLoc);
       return;
+    }
     case PropAction_AssignRemoved:
       return removeAssignForDefaultStrong(props, atLoc);
     case PropAction_AssignRewritten:
@@ -193,16 +200,14 @@ private:
 
     if (propAttrs & ObjCPropertyDecl::OBJC_PR_retain) {
       // strong is the default.
-      return doPropAction(PropAction_RetainRemoved, props, atLoc);
+      return doPropAction(PropAction_RetainReplacedWithStrong, props, atLoc);
     }
 
     bool HasIvarAssignedAPlusOneObject = hasIvarAssignedAPlusOneObject(props);
 
     if (propAttrs & ObjCPropertyDecl::OBJC_PR_assign) {
-      if (HasIvarAssignedAPlusOneObject ||
-          (Pass.isGCMigration() && !hasGCWeak(props, atLoc))) {
+      if (HasIvarAssignedAPlusOneObject)
         return doPropAction(PropAction_AssignRemoved, props, atLoc);
-      }
       return doPropAction(PropAction_AssignRewritten, props, atLoc);
     }
 
@@ -229,19 +234,23 @@ private:
   void rewriteAssign(PropsTy &props, SourceLocation atLoc) const {
     bool canUseWeak = canApplyWeak(Pass.Ctx, getPropertyType(props),
                                   /*AllowOnUnknownClass=*/Pass.isGCMigration());
+    const char *toWhich = 
+      (Pass.isGCMigration() && !hasGCWeak(props, atLoc)) ? "strong" :
+      (canUseWeak ? "weak" : "unsafe_unretained");
 
-    bool rewroteAttr = rewriteAttribute("assign",
-                                     canUseWeak ? "weak" : "unsafe_unretained",
-                                         atLoc);
+    bool rewroteAttr = rewriteAttribute("assign", toWhich, atLoc);
     if (!rewroteAttr)
       canUseWeak = false;
 
     for (PropsTy::iterator I = props.begin(), E = props.end(); I != E; ++I) {
       if (isUserDeclared(I->IvarD)) {
         if (I->IvarD &&
-            I->IvarD->getType().getObjCLifetime() != Qualifiers::OCL_Weak)
-          Pass.TA.insert(I->IvarD->getLocation(),
-                         canUseWeak ? "__weak " : "__unsafe_unretained ");
+            I->IvarD->getType().getObjCLifetime() != Qualifiers::OCL_Weak) {
+          const char *toWhich = 
+            (Pass.isGCMigration() && !hasGCWeak(props, atLoc)) ? "__strong " :
+              (canUseWeak ? "__weak " : "__unsafe_unretained ");
+          Pass.TA.insert(I->IvarD->getLocation(), toWhich);
+        }
       }
       if (I->ImplD)
         Pass.TA.clearDiagnostic(diag::err_arc_assign_property_ownership,
@@ -300,17 +309,8 @@ private:
         if (RE->getDecl() != Ivar)
           return true;
 
-      if (ObjCMessageExpr *
-            ME = dyn_cast<ObjCMessageExpr>(E->getRHS()->IgnoreParenCasts()))
-        if (ME->getMethodFamily() == OMF_retain)
+        if (isPlusOneAssign(E))
           return false;
-
-      ImplicitCastExpr *implCE = dyn_cast<ImplicitCastExpr>(E->getRHS());
-      while (implCE && implCE->getCastKind() ==  CK_BitCast)
-        implCE = dyn_cast<ImplicitCastExpr>(implCE->getSubExpr());
-
-      if (implCE && implCE->getCastKind() == CK_ARCConsumeObject)
-        return false;
       }
 
       return true;

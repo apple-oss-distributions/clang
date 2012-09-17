@@ -119,6 +119,11 @@ typedef enum {
     LLVMReturnsTwice = 1 << 29,
     LLVMUWTable = 1 << 30,
     LLVMNonLazyBind = 1 << 31
+
+    // FIXME: This attribute is currently not included in the C API as
+    // a temporary measure until the API/ABI impact to the C API is understood
+    // and the path forward agreed upon.
+    //LLVMAddressSafety = 1ULL << 32
 } LLVMAttribute;
 
 typedef enum {
@@ -195,14 +200,13 @@ typedef enum {
 
   /* Exception Handling Operators */
   LLVMResume         = 58,
-  LLVMLandingPad     = 59,
-  LLVMUnwind         = 60
-
+  LLVMLandingPad     = 59
 
 } LLVMOpcode;
 
 typedef enum {
   LLVMVoidTypeKind,        /**< type with no size */
+  LLVMHalfTypeKind,        /**< 16 bit floating point type */
   LLVMFloatTypeKind,       /**< 32 bit floating point type */
   LLVMDoubleTypeKind,      /**< 64 bit floating point type */
   LLVMX86_FP80TypeKind,    /**< 80 bit floating point type (X87) */
@@ -382,12 +386,14 @@ LLVMTypeRef LLVMIntType(unsigned NumBits);
 unsigned LLVMGetIntTypeWidth(LLVMTypeRef IntegerTy);
 
 /* Operations on real types */
+LLVMTypeRef LLVMHalfTypeInContext(LLVMContextRef C);
 LLVMTypeRef LLVMFloatTypeInContext(LLVMContextRef C);
 LLVMTypeRef LLVMDoubleTypeInContext(LLVMContextRef C);
 LLVMTypeRef LLVMX86FP80TypeInContext(LLVMContextRef C);
 LLVMTypeRef LLVMFP128TypeInContext(LLVMContextRef C);
 LLVMTypeRef LLVMPPCFP128TypeInContext(LLVMContextRef C);
 
+LLVMTypeRef LLVMHalfType(void);
 LLVMTypeRef LLVMFloatType(void);
 LLVMTypeRef LLVMDoubleType(void);
 LLVMTypeRef LLVMX86FP80Type(void);
@@ -473,8 +479,6 @@ LLVMTypeRef LLVMX86MMXType(void);
         macro(IntrinsicInst)                \
           macro(DbgInfoIntrinsic)           \
             macro(DbgDeclareInst)           \
-          macro(EHExceptionInst)            \
-          macro(EHSelectorInst)             \
           macro(MemIntrinsic)               \
             macro(MemCpyInst)               \
             macro(MemMoveInst)              \
@@ -564,6 +568,8 @@ LLVMValueRef LLVMMDNode(LLVMValueRef *Vals, unsigned Count);
 const char  *LLVMGetMDString(LLVMValueRef V, unsigned* Len);
 unsigned LLVMGetNamedMetadataNumOperands(LLVMModuleRef M, const char* name);
 void LLVMGetNamedMetadataOperands(LLVMModuleRef M, const char* name, LLVMValueRef *Dest);
+void LLVMAddNamedMetadataOperand(LLVMModuleRef M, const char* name,
+                                 LLVMValueRef Val);
 
 /* Operations on scalar constants */
 LLVMValueRef LLVMConstInt(LLVMTypeRef IntTy, unsigned long long N,

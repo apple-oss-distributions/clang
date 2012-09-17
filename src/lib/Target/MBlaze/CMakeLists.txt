@@ -18,6 +18,7 @@ add_llvm_target(MBlazeCodeGen
   MBlazeISelDAGToDAG.cpp
   MBlazeISelLowering.cpp
   MBlazeFrameLowering.cpp
+  MBlazeMachineFunction.cpp
   MBlazeRegisterInfo.cpp
   MBlazeSubtarget.cpp
   MBlazeTargetMachine.cpp
@@ -27,19 +28,6 @@ add_llvm_target(MBlazeCodeGen
   MBlazeAsmPrinter.cpp
   MBlazeMCInstLower.cpp
   MBlazeELFWriterInfo.cpp
-  )
-
-add_llvm_library_dependencies(LLVMMBlazeCodeGen
-  LLVMAsmPrinter
-  LLVMCodeGen
-  LLVMCore
-  LLVMMBlazeAsmPrinter
-  LLVMMBlazeDesc
-  LLVMMBlazeInfo
-  LLVMMC
-  LLVMSelectionDAG
-  LLVMSupport
-  LLVMTarget
   )
 
 add_subdirectory(AsmParser)

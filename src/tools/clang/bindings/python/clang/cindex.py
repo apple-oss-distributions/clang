@@ -63,6 +63,7 @@ call is efficient.
 # o implement additional SourceLocation, SourceRange, and File methods.
 
 from ctypes import *
+import collections
 
 def get_cindex_library():
     # FIXME: It's probably not the case that the library is actually found in
@@ -146,6 +147,12 @@ class SourceLocation(Structure):
         """Get the file offset represented by this source location."""
         return self._get_instantiation()[3]
 
+    def __eq__(self, other):
+        return SourceLocation_equalLocations(self, other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
     def __repr__(self):
         if self.file:
             filename = self.file.name
@@ -185,6 +192,12 @@ class SourceRange(Structure):
         source range.
         """
         return SourceRange_end(self)
+
+    def __eq__(self, other):
+        return SourceRange_equalRanges(self, other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def __repr__(self):
         return "<SourceRange start %r, end %r>" % (self.start, self.end)
@@ -254,6 +267,29 @@ class Diagnostic(object):
                 return FixIt(range, value)
 
         return FixItIterator(self)
+
+    @property
+    def category_number(self):
+        """The category number for this diagnostic."""
+        return _clang_getDiagnosticCategory(self)
+
+    @property
+    def category_name(self):
+        """The string name of the category for this diagnostic."""
+        return _clang_getDiagnosticCategoryName(self.category_number)
+
+    @property
+    def option(self):
+        """The command-line option that enables this diagnostic."""
+        return _clang_getDiagnosticOption(self, None)
+
+    @property
+    def disable_option(self):
+        """The command-line option that disables this diagnostic."""
+        disable = _CXString()
+        _clang_getDiagnosticOption(self, byref(disable))
+
+        return _CXString_getCString(disable)
 
     def __repr__(self):
         return "<Diagnostic severity %r, location %r, spelling %r>" % (
@@ -343,6 +379,18 @@ class CursorKind(object):
     def is_invalid(self):
         """Test if this is an invalid kind."""
         return CursorKind_is_inv(self)
+
+    def is_translation_unit(self):
+        """Test if this is a translation unit kind."""
+        return CursorKind_is_translation_unit(self)
+
+    def is_preprocessing(self):
+        """Test if this is a preprocessing kind."""
+        return CursorKind_is_preprocessing(self)
+
+    def is_unexposed(self):
+        """Test if this is an unexposed kind."""
+        return CursorKind_is_unexposed(self)
 
     def __repr__(self):
         return 'CursorKind.%s' % (self.name,)
@@ -607,7 +655,7 @@ CursorKind.ADDR_LABEL_EXPR = CursorKind(120)
 # This is the GNU Statement Expression extension: ({int X=4; X;})
 CursorKind.StmtExpr = CursorKind(121)
 
-# Represents a C1X generic selection.
+# Represents a C11 generic selection.
 CursorKind.GENERIC_SELECTION_EXPR = CursorKind(122)
 
 # Implements the GNU __null extension, which is a name for a null
@@ -816,6 +864,11 @@ CursorKind.IB_ACTION_ATTR = CursorKind(401)
 CursorKind.IB_OUTLET_ATTR = CursorKind(402)
 CursorKind.IB_OUTLET_COLLECTION_ATTR = CursorKind(403)
 
+CursorKind.CXX_FINAL_ATTR = CursorKind(404)
+CursorKind.CXX_OVERRIDE_ATTR = CursorKind(405)
+CursorKind.ANNOTATE_ATTR = CursorKind(406)
+CursorKind.ASM_LABEL_ATTR = CursorKind(407)
+
 ###
 # Preprocessing
 CursorKind.PREPROCESSING_DIRECTIVE = CursorKind(500)
@@ -922,12 +975,45 @@ class Cursor(Structure):
     @property
     def type(self):
         """
-        Retrieve the type (if any) of of the entity pointed at by the
-        cursor.
+        Retrieve the Type (if any) of the entity pointed at by the cursor.
         """
         if not hasattr(self, '_type'):
             self._type = Cursor_type(self)
         return self._type
+
+    @property
+    def underlying_typedef_type(self):
+        """Return the underlying type of a typedef declaration.
+
+        Returns a Type for the typedef this cursor is a declaration for. If
+        the current cursor is not a typedef, this raises.
+        """
+        if not hasattr(self, '_underlying_type'):
+            assert self.kind.is_declaration()
+            self._underlying_type = Cursor_underlying_type(self)
+
+        return self._underlying_type
+
+    @property
+    def enum_type(self):
+        """Return the integer type of an enum declaration.
+
+        Returns a Type corresponding to an integer. If the cursor is not for an
+        enum, this raises.
+        """
+        if not hasattr(self, '_enum_type'):
+            assert self.kind == CursorKind.ENUM_DECL
+            self._enum_type = Cursor_enum_type(self)
+
+        return self._enum_type
+
+    @property
+    def hash(self):
+        """Returns a hash of the cursor as an int."""
+        if not hasattr(self, '_hash'):
+            self._hash = Cursor_hash(self)
+
+        return self._hash
 
     def get_children(self):
         """Return an iterator for accessing the children of this cursor."""
@@ -1039,6 +1125,7 @@ TypeKind.OBJCOBJECTPOINTER = TypeKind(109)
 TypeKind.FUNCTIONNOPROTO = TypeKind(110)
 TypeKind.FUNCTIONPROTO = TypeKind(111)
 TypeKind.CONSTANTARRAY = TypeKind(112)
+TypeKind.VECTOR = TypeKind(113)
 
 class Type(Structure):
     """
@@ -1050,6 +1137,71 @@ class Type(Structure):
     def kind(self):
         """Return the kind of this type."""
         return TypeKind.from_id(self._kind_id)
+
+    def argument_types(self):
+        """Retrieve a container for the non-variadic arguments for this type.
+
+        The returned object is iterable and indexable. Each item in the
+        container is a Type instance.
+        """
+        class ArgumentsIterator(collections.Sequence):
+            def __init__(self, parent):
+                self.parent = parent
+                self.length = None
+
+            def __len__(self):
+                if self.length is None:
+                    self.length = Type_get_num_arg_types(self.parent)
+
+                return self.length
+
+            def __getitem__(self, key):
+                # FIXME Support slice objects.
+                if not isinstance(key, int):
+                    raise TypeError("Must supply a non-negative int.")
+
+                if key < 0:
+                    raise IndexError("Only non-negative indexes are accepted.")
+
+                if key >= len(self):
+                    raise IndexError("Index greater than container length: "
+                                     "%d > %d" % ( key, len(self) ))
+
+                result = Type_get_arg_type(self.parent, key)
+                if result.kind == TypeKind.INVALID:
+                    raise IndexError("Argument could not be retrieved.")
+
+                return result
+
+        assert self.kind == TypeKind.FUNCTIONPROTO
+        return ArgumentsIterator(self)
+
+    @property
+    def element_type(self):
+        """Retrieve the Type of elements within this Type.
+
+        If accessed on a type that is not an array, complex, or vector type, an
+        exception will be raised.
+        """
+        result = Type_get_element_type(self)
+        if result.kind == TypeKind.INVALID:
+            raise Exception('Element type not available on this type.')
+
+        return result
+
+    @property
+    def element_count(self):
+        """Retrieve the number of elements in this type.
+
+        Returns an int.
+
+        If the Type is not an array or vector, this raises.
+        """
+        result = Type_get_num_elements(self)
+        if result < 0:
+            raise Exception('Type does not have elements.')
+
+        return result
 
     @staticmethod
     def from_result(res, fn, args):
@@ -1069,28 +1221,38 @@ class Type(Structure):
         return Type_get_canonical(self)
 
     def is_const_qualified(self):
-        """
-        Determine whether a Type has the "const" qualifier set,
-        without looking through typedefs that may have added "const"
+        """Determine whether a Type has the "const" qualifier set.
+
+        This does not look through typedefs that may have added "const"
         at a different level.
         """
         return Type_is_const_qualified(self)
 
     def is_volatile_qualified(self):
-        """
-        Determine whether a Type has the "volatile" qualifier set,
-        without looking through typedefs that may have added
-        "volatile" at a different level.
+        """Determine whether a Type has the "volatile" qualifier set.
+
+        This does not look through typedefs that may have added "volatile"
+        at a different level.
         """
         return Type_is_volatile_qualified(self)
 
     def is_restrict_qualified(self):
-        """
-        Determine whether a Type has the "restrict" qualifier set,
-        without looking through typedefs that may have added
-        "restrict" at a different level.
+        """Determine whether a Type has the "restrict" qualifier set.
+
+        This does not look through typedefs that may have added "restrict" at
+        a different level.
         """
         return Type_is_restrict_qualified(self)
+
+    def is_function_variadic(self):
+        """Determine whether this function Type is a variadic function type."""
+        assert self.kind == TypeKind.FUNCTIONPROTO
+
+        return Type_is_variadic(self)
+
+    def is_pod(self):
+        """Determine whether this Type represents plain old data (POD)."""
+        return Type_is_pod(self)
 
     def get_pointee(self):
         """
@@ -1121,6 +1283,15 @@ class Type(Structure):
         Retrieve the size of the constant array.
         """
         return Type_get_array_size(self)
+
+    def __eq__(self, other):
+        if type(other) != type(self):
+            return False
+
+        return Type_equal(self, other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
 ## CIndex Objects ##
 
@@ -1187,6 +1358,20 @@ _clang_getDiagnosticFixIt = lib.clang_getDiagnosticFixIt
 _clang_getDiagnosticFixIt.argtypes = [Diagnostic, c_uint, POINTER(SourceRange)]
 _clang_getDiagnosticFixIt.restype = _CXString
 _clang_getDiagnosticFixIt.errcheck = _CXString.from_result
+
+_clang_getDiagnosticCategory = lib.clang_getDiagnosticCategory
+_clang_getDiagnosticCategory.argtypes = [Diagnostic]
+_clang_getDiagnosticCategory.restype = c_uint
+
+_clang_getDiagnosticCategoryName = lib.clang_getDiagnosticCategoryName
+_clang_getDiagnosticCategoryName.argtypes = [c_uint]
+_clang_getDiagnosticCategoryName.restype = _CXString
+_clang_getDiagnosticCategoryName.errcheck = _CXString.from_result
+
+_clang_getDiagnosticOption = lib.clang_getDiagnosticOption
+_clang_getDiagnosticOption.argtypes = [Diagnostic, POINTER(_CXString)]
+_clang_getDiagnosticOption.restype = _CXString
+_clang_getDiagnosticOption.errcheck = _CXString.from_result
 
 ###
 
@@ -1608,6 +1793,10 @@ SourceLocation_getLocation = lib.clang_getLocation
 SourceLocation_getLocation.argtypes = [TranslationUnit, File, c_uint, c_uint]
 SourceLocation_getLocation.restype = SourceLocation
 
+SourceLocation_equalLocations = lib.clang_equalLocations
+SourceLocation_equalLocations.argtypes = [SourceLocation, SourceLocation]
+SourceLocation_equalLocations.restype = bool
+
 # Source Range Functions
 SourceRange_getRange = lib.clang_getRange
 SourceRange_getRange.argtypes = [SourceLocation, SourceLocation]
@@ -1620,6 +1809,10 @@ SourceRange_start.restype = SourceLocation
 SourceRange_end = lib.clang_getRangeEnd
 SourceRange_end.argtypes = [SourceRange]
 SourceRange_end.restype = SourceLocation
+
+SourceRange_equalRanges = lib.clang_equalRanges
+SourceRange_equalRanges.argtypes = [SourceRange, SourceRange]
+SourceRange_equalRanges.restype = bool
 
 # CursorKind Functions
 CursorKind_is_decl = lib.clang_isDeclaration
@@ -1645,6 +1838,18 @@ CursorKind_is_attribute.restype = bool
 CursorKind_is_inv = lib.clang_isInvalid
 CursorKind_is_inv.argtypes = [CursorKind]
 CursorKind_is_inv.restype = bool
+
+CursorKind_is_translation_unit = lib.clang_isTranslationUnit
+CursorKind_is_translation_unit.argtypes = [CursorKind]
+CursorKind_is_translation_unit.restype = bool
+
+CursorKind_is_preprocessing = lib.clang_isPreprocessing
+CursorKind_is_preprocessing.argtypes = [CursorKind]
+CursorKind_is_preprocessing.restype = bool
+
+CursorKind_is_unexposed = lib.clang_isUnexposed
+CursorKind_is_unexposed.argtypes = [CursorKind]
+CursorKind_is_unexposed.restype = bool
 
 # Cursor Functions
 # TODO: Implement this function
@@ -1672,6 +1877,10 @@ Cursor_def.errcheck = Cursor.from_result
 Cursor_eq = lib.clang_equalCursors
 Cursor_eq.argtypes = [Cursor, Cursor]
 Cursor_eq.restype = c_uint
+
+Cursor_hash = lib.clang_hashCursor
+Cursor_hash.argtypes = [Cursor]
+Cursor_hash.restype = c_uint
 
 Cursor_spelling = lib.clang_getCursorSpelling
 Cursor_spelling.argtypes = [Cursor]
@@ -1701,6 +1910,16 @@ Cursor_type.argtypes = [Cursor]
 Cursor_type.restype = Type
 Cursor_type.errcheck = Type.from_result
 
+Cursor_underlying_type = lib.clang_getTypedefDeclUnderlyingType
+Cursor_underlying_type.argtypes = [Cursor]
+Cursor_underlying_type.restype = Type
+Cursor_underlying_type.errcheck = Type.from_result
+
+Cursor_enum_type = lib.clang_getEnumDeclIntegerType
+Cursor_enum_type.argtypes = [Cursor]
+Cursor_enum_type.restype = Type
+Cursor_enum_type.errcheck = Type.from_result
+
 Cursor_visit_callback = CFUNCTYPE(c_int, Cursor, Cursor, py_object)
 Cursor_visit = lib.clang_visitChildren
 Cursor_visit.argtypes = [Cursor, Cursor_visit_callback, py_object]
@@ -1724,6 +1943,14 @@ Type_is_restrict_qualified = lib.clang_isRestrictQualifiedType
 Type_is_restrict_qualified.argtypes = [Type]
 Type_is_restrict_qualified.restype = bool
 
+Type_is_pod = lib.clang_isPODType
+Type_is_pod.argtypes = [Type]
+Type_is_pod.restype = bool
+
+Type_is_variadic = lib.clang_isFunctionTypeVariadic
+Type_is_variadic.argtypes = [Type]
+Type_is_variadic.restype = bool
+
 Type_get_pointee = lib.clang_getPointeeType
 Type_get_pointee.argtypes = [Type]
 Type_get_pointee.restype = Type
@@ -1739,6 +1966,24 @@ Type_get_result.argtypes = [Type]
 Type_get_result.restype = Type
 Type_get_result.errcheck = Type.from_result
 
+Type_get_num_arg_types = lib.clang_getNumArgTypes
+Type_get_num_arg_types.argtypes = [Type]
+Type_get_num_arg_types.restype = c_uint
+
+Type_get_arg_type = lib.clang_getArgType
+Type_get_arg_type.argtypes = [Type, c_uint]
+Type_get_arg_type.restype = Type
+Type_get_arg_type.errcheck = Type.from_result
+Type_get_element_type = lib.clang_getElementType
+
+Type_get_element_type.argtypes = [Type]
+Type_get_element_type.restype = Type
+Type_get_element_type.errcheck = Type.from_result
+
+Type_get_num_elements = lib.clang_getNumElements
+Type_get_num_elements.argtypes = [Type]
+Type_get_num_elements.restype = c_longlong
+
 Type_get_array_element = lib.clang_getArrayElementType
 Type_get_array_element.argtypes = [Type]
 Type_get_array_element.restype = Type
@@ -1747,6 +1992,10 @@ Type_get_array_element.errcheck = Type.from_result
 Type_get_array_size = lib.clang_getArraySize
 Type_get_array_size.argtype = [Type]
 Type_get_array_size.restype = c_longlong
+
+Type_equal = lib.clang_equalTypes
+Type_equal.argtypes = [Type, Type]
+Type_equal.restype = bool
 
 # Index Functions
 Index_create = lib.clang_createIndex

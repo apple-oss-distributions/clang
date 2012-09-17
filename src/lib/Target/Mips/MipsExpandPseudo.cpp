@@ -1,4 +1,4 @@
-//===--  MipsExpandPseudo.cpp - Expand pseudo instructions ----------------===//
+//===--  MipsExpandPseudo.cpp - Expand Pseudo Instructions ----------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -64,16 +64,22 @@ bool MipsExpandPseudo::runOnMachineBasicBlock(MachineBasicBlock& MBB) {
     const MCInstrDesc& MCid = I->getDesc();
 
     switch(MCid.getOpcode()) {
-    default: 
+    default:
       ++I;
       continue;
+    case Mips::SETGP2:
+      // Convert "setgp2 $globalreg, $t9" to "addu $globalreg, $v0, $t9"
+      BuildMI(MBB, I, I->getDebugLoc(), TII->get(Mips::ADDu),
+              I->getOperand(0).getReg())
+        .addReg(Mips::V0).addReg(I->getOperand(1).getReg());
+      break;
     case Mips::BuildPairF64:
       ExpandBuildPairF64(MBB, I);
       break;
     case Mips::ExtractElementF64:
       ExpandExtractElementF64(MBB, I);
       break;
-    } 
+    }
 
     // delete original instr
     MBB.erase(I++);
@@ -84,7 +90,7 @@ bool MipsExpandPseudo::runOnMachineBasicBlock(MachineBasicBlock& MBB) {
 }
 
 void MipsExpandPseudo::ExpandBuildPairF64(MachineBasicBlock& MBB,
-                                            MachineBasicBlock::iterator I) {  
+                                            MachineBasicBlock::iterator I) {
   unsigned DstReg = I->getOperand(0).getReg();
   unsigned LoReg = I->getOperand(1).getReg(), HiReg = I->getOperand(2).getReg();
   const MCInstrDesc& Mtc1Tdd = TII->get(Mips::MTC1);
@@ -110,7 +116,7 @@ void MipsExpandPseudo::ExpandExtractElementF64(MachineBasicBlock& MBB,
   BuildMI(MBB, I, dl, Mfc1Tdd, DstReg).addReg(*(SubReg + N));
 }
 
-/// createMipsMipsExpandPseudoPass - Returns a pass that expands pseudo 
+/// createMipsMipsExpandPseudoPass - Returns a pass that expands pseudo
 /// instrs into real instrs
 FunctionPass *llvm::createMipsExpandPseudoPass(MipsTargetMachine &tm) {
   return new MipsExpandPseudo(tm);

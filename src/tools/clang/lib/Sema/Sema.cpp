@@ -33,6 +33,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/StmtCXX.h"
+#include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/PartialDiagnostic.h"
@@ -54,10 +55,12 @@ void FunctionScopeInfo::Clear() {
 }
 
 BlockScopeInfo::~BlockScopeInfo() { }
+LambdaScopeInfo::~LambdaScopeInfo() { }
 
-PrintingPolicy Sema::getPrintingPolicy() const {
+PrintingPolicy Sema::getPrintingPolicy(const ASTContext &Context,
+                                       const Preprocessor &PP) {
   PrintingPolicy Policy = Context.getPrintingPolicy();
-  Policy.Bool = getLangOptions().Bool;
+  Policy.Bool = Context.getLangOpts().Bool;
   if (!Policy.Bool) {
     if (MacroInfo *BoolMacro = PP.getMacroInfo(&Context.Idents.get("bool"))) {
       Policy.Bool = BoolMacro->isObjectLike() && 
@@ -74,36 +77,28 @@ void Sema::ActOnTranslationUnitScope(Scope *S) {
   PushDeclContext(S, Context.getTranslationUnitDecl());
 
   VAListTagName = PP.getIdentifierInfo("__va_list_tag");
-
-  if (PP.getLangOptions().ObjC1) {
-    // Synthesize "@class Protocol;
-    if (Context.getObjCProtoType().isNull()) {
-      ObjCInterfaceDecl *ProtocolDecl =
-        ObjCInterfaceDecl::Create(Context, CurContext, SourceLocation(),
-                                  &Context.Idents.get("Protocol"),
-                                  SourceLocation(), true);
-      Context.setObjCProtoType(Context.getObjCInterfaceType(ProtocolDecl));
-      PushOnScopeChains(ProtocolDecl, TUScope, false);
-    }  
-  }
 }
 
 Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
            TranslationUnitKind TUKind,
            CodeCompleteConsumer *CodeCompleter)
-  : TheTargetAttributesSema(0), FPFeatures(pp.getLangOptions()),
-    LangOpts(pp.getLangOptions()), PP(pp), Context(ctxt), Consumer(consumer),
+  : TheTargetAttributesSema(0), FPFeatures(pp.getLangOpts()),
+    LangOpts(pp.getLangOpts()), PP(pp), Context(ctxt), Consumer(consumer),
     Diags(PP.getDiagnostics()), SourceMgr(PP.getSourceManager()),
     CollectStats(false), ExternalSource(0), CodeCompleter(CodeCompleter),
     CurContext(0), OriginalLexicalContext(0),
     PackContext(0), MSStructPragmaOn(false), VisContext(0),
     ExprNeedsCleanups(false), LateTemplateParser(0), OpaqueParser(0),
-    IdResolver(pp), CXXTypeInfoDecl(0), MSVCGuidDecl(0),
+    IdResolver(pp), StdInitializerList(0), CXXTypeInfoDecl(0), MSVCGuidDecl(0),
+    NSNumberDecl(0),
+    NSStringDecl(0), StringWithUTF8StringMethod(0),
+    NSArrayDecl(0), ArrayWithObjectsMethod(0),
+    NSDictionaryDecl(0), DictionaryWithObjectsMethod(0),
     GlobalNewDeleteDeclared(false), 
     ObjCShouldCallSuperDealloc(false),
     ObjCShouldCallSuperFinalize(false),
     TUKind(TUKind),
-    NumSFINAEErrors(0), SuppressAccessChecking(false), 
+    NumSFINAEErrors(0), InFunctionDeclarator(0), SuppressAccessChecking(false), 
     AccessCheckingSFINAE(false), InNonInstantiationSFINAEContext(false),
     NonInstantiationEntries(0), ArgumentPackSubstitutionIndex(-1),
     CurrentInstantiationScope(0), TyposCorrected(0),
@@ -111,8 +106,13 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
 {
   TUScope = 0;
   LoadedExternalKnownNamespaces = false;
-  
-  if (getLangOptions().CPlusPlus)
+  for (unsigned I = 0; I != NSAPI::NumNSNumberLiteralMethods; ++I)
+    NSNumberLiteralMethods[I] = 0;
+
+  if (getLangOpts().ObjC1)
+    NSAPIObj.reset(new NSAPI(Context));
+
+  if (getLangOpts().CPlusPlus)
     FieldCollector.reset(new CXXFieldCollector());
 
   // Tell diagnostics how to render things from the AST library.
@@ -120,7 +120,8 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
                                        &Context);
 
   ExprEvalContexts.push_back(
-        ExpressionEvaluationContextRecord(PotentiallyEvaluated, 0, false));
+        ExpressionEvaluationContextRecord(PotentiallyEvaluated, 0,
+                                          false, 0, false));
 
   FunctionScopes.push_back(new FunctionScopeInfo(Diags));
 }
@@ -153,7 +154,7 @@ void Sema::Initialize() {
   
 
   // Initialize predefined Objective-C types:
-  if (PP.getLangOptions().ObjC1) {
+  if (PP.getLangOpts().ObjC1) {
     // If 'SEL' does not yet refer to any declarations, make it refer to the
     // predefined 'SEL'.
     DeclarationName SEL = &Context.Idents.get("SEL");
@@ -170,6 +171,11 @@ void Sema::Initialize() {
     DeclarationName Class = &Context.Idents.get("Class");
     if (IdResolver.begin(Class) == IdResolver.end())
       PushOnScopeChains(Context.getObjCClassDecl(), TUScope);
+
+    // Create the built-in forward declaratino for 'Protocol'.
+    DeclarationName Protocol = &Context.Idents.get("Protocol");
+    if (IdResolver.begin(Protocol) == IdResolver.end())
+      PushOnScopeChains(Context.getObjCProtocolDecl(), TUScope);
   }
 }
 
@@ -252,6 +258,7 @@ ExprResult Sema::ImpCastExprToType(Expr *E, QualType Ty,
       break;
     }
   }
+  assert((VK == VK_RValue || !E->isRValue()) && "can't cast rvalue to lvalue");
 #endif
 
   QualType ExprTy = Context.getCanonicalType(E->getType());
@@ -260,7 +267,7 @@ ExprResult Sema::ImpCastExprToType(Expr *E, QualType Ty,
   if (ExprTy == TypeTy)
     return Owned(E);
 
-  if (getLangOptions().ObjCAutoRefCount)
+  if (getLangOpts().ObjCAutoRefCount)
     CheckObjCARCConversion(SourceRange(), Ty, E, CCK);
 
   // If this is a derived-to-base cast to a through a virtual base, we
@@ -317,7 +324,7 @@ static bool ShouldRemoveFromUnused(Sema *SemaRef, const DeclaratorDecl *D) {
 
     // Later redecls may add new information resulting in not having to warn,
     // so check again.
-    DeclToCheck = FD->getMostRecentDeclaration();
+    DeclToCheck = FD->getMostRecentDecl();
     if (DeclToCheck != FD)
       return !SemaRef->ShouldWarnIfUnusedFileScopedDecl(DeclToCheck);
   }
@@ -331,7 +338,7 @@ static bool ShouldRemoveFromUnused(Sema *SemaRef, const DeclaratorDecl *D) {
 
     // Later redecls may add new information resulting in not having to warn,
     // so check again.
-    DeclToCheck = VD->getMostRecentDeclaration();
+    DeclToCheck = VD->getMostRecentDecl();
     if (DeclToCheck != VD)
       return !SemaRef->ShouldWarnIfUnusedFileScopedDecl(DeclToCheck);
   }
@@ -421,6 +428,8 @@ void Sema::ActOnEndOfTranslationUnit() {
   // Only complete translation units define vtables and perform implicit
   // instantiations.
   if (TUKind == TU_Complete) {
+    DiagnoseUseOfUnimplementedSelectors();
+
     // If any dynamic classes have their key function defined within
     // this translation unit, then those vtables are considered "used" and must
     // be emitted.
@@ -482,6 +491,32 @@ void Sema::ActOnEndOfTranslationUnit() {
   }
 
   if (TUKind == TU_Module) {
+    // If we are building a module, resolve all of the exported declarations
+    // now.
+    if (Module *CurrentModule = PP.getCurrentModule()) {
+      ModuleMap &ModMap = PP.getHeaderSearchInfo().getModuleMap();
+      
+      llvm::SmallVector<Module *, 2> Stack;
+      Stack.push_back(CurrentModule);
+      while (!Stack.empty()) {
+        Module *Mod = Stack.back();
+        Stack.pop_back();
+        
+        // Resolve the exported declarations.
+        // FIXME: Actually complain, once we figure out how to teach the
+        // diagnostic client to deal with complains in the module map at this
+        // point.
+        ModMap.resolveExports(Mod, /*Complain=*/false);
+        
+        // Queue the submodules, so their exports will also be resolved.
+        for (Module::submodule_iterator Sub = Mod->submodule_begin(),
+                                     SubEnd = Mod->submodule_end();
+             Sub != SubEnd; ++Sub) {
+          Stack.push_back(*Sub);
+        }
+      }
+    }
+    
     // Modules don't need any of the checking below.
     TUScope = 0;
     return;
@@ -606,8 +641,16 @@ void Sema::ActOnEndOfTranslationUnit() {
 DeclContext *Sema::getFunctionLevelDeclContext() {
   DeclContext *DC = CurContext;
 
-  while (isa<BlockDecl>(DC) || isa<EnumDecl>(DC))
-    DC = DC->getParent();
+  while (true) {
+    if (isa<BlockDecl>(DC) || isa<EnumDecl>(DC)) {
+      DC = DC->getParent();
+    } else if (isa<CXXMethodDecl>(DC) &&
+               cast<CXXMethodDecl>(DC)->getOverloadedOperator() == OO_Call &&
+               cast<CXXRecordDecl>(DC->getParent())->isLambda()) {
+      DC = DC->getParent()->getParent();
+    }
+    else break;
+  }
 
   return DC;
 }
@@ -632,12 +675,17 @@ NamedDecl *Sema::getCurFunctionOrMethodDecl() {
   return 0;
 }
 
-Sema::SemaDiagnosticBuilder::~SemaDiagnosticBuilder() {
-  if (!isActive())
-    return;
-  
-  if (llvm::Optional<TemplateDeductionInfo*> Info = SemaRef.isSFINAEContext()) {
-    switch (DiagnosticIDs::getDiagnosticSFINAEResponse(getDiagID())) {
+void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
+  // FIXME: It doesn't make sense to me that DiagID is an incoming argument here
+  // and yet we also use the current diag ID on the DiagnosticsEngine. This has
+  // been made more painfully obvious by the refactor that introduced this
+  // function, but it is possible that the incoming argument can be
+  // eliminnated. If it truly cannot be (for example, there is some reentrancy
+  // issue I am not seeing yet), then there should at least be a clarifying
+  // comment somewhere.
+  if (llvm::Optional<TemplateDeductionInfo*> Info = isSFINAEContext()) {
+    switch (DiagnosticIDs::getDiagnosticSFINAEResponse(
+              Diags.getCurrentDiagID())) {
     case DiagnosticIDs::SFINAE_Report:
       // We'll report the diagnostic below.
       break;
@@ -645,10 +693,9 @@ Sema::SemaDiagnosticBuilder::~SemaDiagnosticBuilder() {
     case DiagnosticIDs::SFINAE_SubstitutionFailure:
       // Count this failure so that we know that template argument deduction
       // has failed.
-      ++SemaRef.NumSFINAEErrors;
-      SemaRef.Diags.setLastDiagnosticIgnored();
-      SemaRef.Diags.Clear();
-      Clear();
+      ++NumSFINAEErrors;
+      Diags.setLastDiagnosticIgnored();
+      Diags.Clear();
       return;
       
     case DiagnosticIDs::SFINAE_AccessControl: {
@@ -656,52 +703,47 @@ Sema::SemaDiagnosticBuilder::~SemaDiagnosticBuilder() {
       // Additionally, the AccessCheckingSFINAE flag can be used to temporary
       // make access control a part of SFINAE for the purposes of checking
       // type traits.
-      if (!SemaRef.AccessCheckingSFINAE &&
-          !SemaRef.getLangOptions().CPlusPlus0x)
+      if (!AccessCheckingSFINAE && !getLangOpts().CPlusPlus0x)
         break;
 
-      SourceLocation Loc = getLocation();
+      SourceLocation Loc = Diags.getCurrentDiagLoc();
 
       // Suppress this diagnostic.
-      ++SemaRef.NumSFINAEErrors;
-      SemaRef.Diags.setLastDiagnosticIgnored();
-      SemaRef.Diags.Clear();
-      Clear();
+      ++NumSFINAEErrors;
+      Diags.setLastDiagnosticIgnored();
+      Diags.Clear();
 
       // Now the diagnostic state is clear, produce a C++98 compatibility
       // warning.
-      SemaRef.Diag(Loc, diag::warn_cxx98_compat_sfinae_access_control);
+      Diag(Loc, diag::warn_cxx98_compat_sfinae_access_control);
 
       // The last diagnostic which Sema produced was ignored. Suppress any
       // notes attached to it.
-      SemaRef.Diags.setLastDiagnosticIgnored();
+      Diags.setLastDiagnosticIgnored();
       return;
     }
 
     case DiagnosticIDs::SFINAE_Suppress:
       // Make a copy of this suppressed diagnostic and store it with the
       // template-deduction information;
-      FlushCounts();
-      Diagnostic DiagInfo(&SemaRef.Diags);
+      Diagnostic DiagInfo(&Diags);
         
       if (*Info)
         (*Info)->addSuppressedDiagnostic(DiagInfo.getLocation(),
-                        PartialDiagnostic(DiagInfo,
-                                          SemaRef.Context.getDiagAllocator()));
+                        PartialDiagnostic(DiagInfo,Context.getDiagAllocator()));
         
       // Suppress this diagnostic.        
-      SemaRef.Diags.setLastDiagnosticIgnored();
-      SemaRef.Diags.Clear();
-      Clear();
+      Diags.setLastDiagnosticIgnored();
+      Diags.Clear();
       return;
     }
   }
   
   // Set up the context's printing policy based on our current state.
-  SemaRef.Context.setPrintingPolicy(SemaRef.getPrintingPolicy());
+  Context.setPrintingPolicy(getPrintingPolicy());
   
   // Emit the diagnostic.
-  if (!this->Emit())
+  if (!Diags.EmitCurrentDiagnostic())
     return;
 
   // If this is not a note, and we're in a template instantiation
@@ -709,18 +751,12 @@ Sema::SemaDiagnosticBuilder::~SemaDiagnosticBuilder() {
   // we emitted an error, print a template instantiation
   // backtrace.
   if (!DiagnosticIDs::isBuiltinNote(DiagID) &&
-      !SemaRef.ActiveTemplateInstantiations.empty() &&
-      SemaRef.ActiveTemplateInstantiations.back()
-        != SemaRef.LastTemplateInstantiationErrorContext) {
-    SemaRef.PrintInstantiationStack();
-    SemaRef.LastTemplateInstantiationErrorContext
-      = SemaRef.ActiveTemplateInstantiations.back();
+      !ActiveTemplateInstantiations.empty() &&
+      ActiveTemplateInstantiations.back()
+        != LastTemplateInstantiationErrorContext) {
+    PrintInstantiationStack();
+    LastTemplateInstantiationErrorContext = ActiveTemplateInstantiations.back();
   }
-}
-
-Sema::SemaDiagnosticBuilder Sema::Diag(SourceLocation Loc, unsigned DiagID) {
-  DiagnosticBuilder DB = Diags.Report(Loc, DiagID);
-  return SemaDiagnosticBuilder(DB, *this, DiagID);
 }
 
 Sema::SemaDiagnosticBuilder
@@ -799,8 +835,14 @@ void Sema::PushBlockScope(Scope *BlockScope, BlockDecl *Block) {
                                               BlockScope, Block));
 }
 
-void Sema::PopFunctionOrBlockScope(const AnalysisBasedWarnings::Policy *WP,
-                                   const Decl *D, const BlockExpr *blkExpr) {
+void Sema::PushLambdaScope(CXXRecordDecl *Lambda, 
+                           CXXMethodDecl *CallOperator) {
+  FunctionScopes.push_back(new LambdaScopeInfo(getDiagnostics(), Lambda,
+                                               CallOperator));
+}
+
+void Sema::PopFunctionScopeInfo(const AnalysisBasedWarnings::Policy *WP,
+                                const Decl *D, const BlockExpr *blkExpr) {
   FunctionScopeInfo *Scope = FunctionScopes.pop_back_val();  
   assert(!FunctionScopes.empty() && "mismatched push/pop!");
   
@@ -822,6 +864,17 @@ void Sema::PopFunctionOrBlockScope(const AnalysisBasedWarnings::Policy *WP,
   }
 }
 
+void Sema::PushCompoundScope() {
+  getCurFunction()->CompoundScopes.push_back(CompoundScopeInfo());
+}
+
+void Sema::PopCompoundScope() {
+  FunctionScopeInfo *CurFunction = getCurFunction();
+  assert(!CurFunction->CompoundScopes.empty() && "mismatched push/pop");
+
+  CurFunction->CompoundScopes.pop_back();
+}
+
 /// \brief Determine whether any errors occurred within this function/method/
 /// block.
 bool Sema::hasAnyUnrecoverableErrorsInThisFunction() const {
@@ -835,13 +888,17 @@ BlockScopeInfo *Sema::getCurBlock() {
   return dyn_cast<BlockScopeInfo>(FunctionScopes.back());  
 }
 
+LambdaScopeInfo *Sema::getCurLambda() {
+  if (FunctionScopes.empty())
+    return 0;
+  
+  return dyn_cast<LambdaScopeInfo>(FunctionScopes.back());  
+}
+
 // Pin this vtable to this file.
 ExternalSemaSource::~ExternalSemaSource() {}
 
-std::pair<ObjCMethodList, ObjCMethodList>
-ExternalSemaSource::ReadMethodPool(Selector Sel) {
-  return std::pair<ObjCMethodList, ObjCMethodList>();
-}
+void ExternalSemaSource::ReadMethodPool(Selector Sel) { }
 
 void ExternalSemaSource::ReadKnownNamespaces(
                            SmallVectorImpl<NamespaceDecl *> &Namespaces) {  
@@ -967,7 +1024,7 @@ static void noteOverloads(Sema &S, const UnresolvedSetImpl &Overloads,
     }
 
     NamedDecl *Fn = (*It)->getUnderlyingDecl();
-    S.Diag(Fn->getLocStart(), diag::note_possible_target_of_call);
+    S.Diag(Fn->getLocation(), diag::note_possible_target_of_call);
     ++ShownOverloads;
   }
 

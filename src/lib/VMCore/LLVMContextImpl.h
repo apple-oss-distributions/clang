@@ -29,6 +29,7 @@
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/Hashing.h"
 #include <vector>
 
 namespace llvm {
@@ -89,6 +90,105 @@ struct DenseMapAPFloatKeyInfo {
   }
 };
 
+struct AnonStructTypeKeyInfo {
+  struct KeyTy {
+    ArrayRef<Type*> ETypes;
+    bool isPacked;
+    KeyTy(const ArrayRef<Type*>& E, bool P) :
+      ETypes(E), isPacked(P) {}
+    KeyTy(const KeyTy& that) :
+      ETypes(that.ETypes), isPacked(that.isPacked) {}
+    KeyTy(const StructType* ST) :
+      ETypes(ArrayRef<Type*>(ST->element_begin(), ST->element_end())),
+      isPacked(ST->isPacked()) {}
+    bool operator==(const KeyTy& that) const {
+      if (isPacked != that.isPacked)
+        return false;
+      if (ETypes != that.ETypes)
+        return false;
+      return true;
+    }
+    bool operator!=(const KeyTy& that) const {
+      return !this->operator==(that);
+    }
+  };
+  static inline StructType* getEmptyKey() {
+    return DenseMapInfo<StructType*>::getEmptyKey();
+  }
+  static inline StructType* getTombstoneKey() {
+    return DenseMapInfo<StructType*>::getTombstoneKey();
+  }
+  static unsigned getHashValue(const KeyTy& Key) {
+    return hash_combine(hash_combine_range(Key.ETypes.begin(),
+                                           Key.ETypes.end()),
+                        Key.isPacked);
+  }
+  static unsigned getHashValue(const StructType *ST) {
+    return getHashValue(KeyTy(ST));
+  }
+  static bool isEqual(const KeyTy& LHS, const StructType *RHS) {
+    if (RHS == getEmptyKey() || RHS == getTombstoneKey())
+      return false;
+    return LHS == KeyTy(RHS);
+  }
+  static bool isEqual(const StructType *LHS, const StructType *RHS) {
+    return LHS == RHS;
+  }
+};
+
+struct FunctionTypeKeyInfo {
+  struct KeyTy {
+    const Type *ReturnType;
+    ArrayRef<Type*> Params;
+    bool isVarArg;
+    KeyTy(const Type* R, const ArrayRef<Type*>& P, bool V) :
+      ReturnType(R), Params(P), isVarArg(V) {}
+    KeyTy(const KeyTy& that) :
+      ReturnType(that.ReturnType),
+      Params(that.Params),
+      isVarArg(that.isVarArg) {}
+    KeyTy(const FunctionType* FT) :
+      ReturnType(FT->getReturnType()),
+      Params(ArrayRef<Type*>(FT->param_begin(), FT->param_end())),
+      isVarArg(FT->isVarArg()) {}
+    bool operator==(const KeyTy& that) const {
+      if (ReturnType != that.ReturnType)
+        return false;
+      if (isVarArg != that.isVarArg)
+        return false;
+      if (Params != that.Params)
+        return false;
+      return true;
+    }
+    bool operator!=(const KeyTy& that) const {
+      return !this->operator==(that);
+    }
+  };
+  static inline FunctionType* getEmptyKey() {
+    return DenseMapInfo<FunctionType*>::getEmptyKey();
+  }
+  static inline FunctionType* getTombstoneKey() {
+    return DenseMapInfo<FunctionType*>::getTombstoneKey();
+  }
+  static unsigned getHashValue(const KeyTy& Key) {
+    return hash_combine(Key.ReturnType,
+                        hash_combine_range(Key.Params.begin(),
+                                           Key.Params.end()),
+                        Key.isVarArg);
+  }
+  static unsigned getHashValue(const FunctionType *FT) {
+    return getHashValue(KeyTy(FT));
+  }
+  static bool isEqual(const KeyTy& LHS, const FunctionType *RHS) {
+    if (RHS == getEmptyKey() || RHS == getTombstoneKey())
+      return false;
+    return LHS == KeyTy(RHS);
+  }
+  static bool isEqual(const FunctionType *LHS, const FunctionType *RHS) {
+    return LHS == RHS;
+  }
+};
+
 /// DebugRecVH - This is a CallbackVH used to keep the Scope -> index maps
 /// up to date as MDNodes mutate.  This class is implemented in DebugLoc.cpp.
 class DebugRecVH : public CallbackVH {
@@ -138,23 +238,23 @@ public:
   // on Context destruction.
   SmallPtrSet<MDNode*, 1> NonUniquedMDNodes;
   
-  ConstantUniqueMap<char, char, Type, ConstantAggregateZero> AggZeroConstants;
+  DenseMap<Type*, ConstantAggregateZero*> CAZConstants;
 
-  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayRef<Constant*>,
-    ArrayType, ConstantArray, true /*largekey*/> ArrayConstantsTy;
+  typedef ConstantAggrUniqueMap<ArrayType, ConstantArray> ArrayConstantsTy;
   ArrayConstantsTy ArrayConstants;
   
-  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayRef<Constant*>,
-    StructType, ConstantStruct, true /*largekey*/> StructConstantsTy;
+  typedef ConstantAggrUniqueMap<StructType, ConstantStruct> StructConstantsTy;
   StructConstantsTy StructConstants;
   
-  typedef ConstantUniqueMap<std::vector<Constant*>, ArrayRef<Constant*>,
-                            VectorType, ConstantVector> VectorConstantsTy;
+  typedef ConstantAggrUniqueMap<VectorType, ConstantVector> VectorConstantsTy;
   VectorConstantsTy VectorConstants;
   
-  ConstantUniqueMap<char, char, PointerType, ConstantPointerNull>
-    NullPtrConstants;
-  ConstantUniqueMap<char, char, Type, UndefValue> UndefValueConstants;
+  DenseMap<PointerType*, ConstantPointerNull*> CPNConstants;
+
+  DenseMap<Type*, UndefValue*> UVConstants;
+  
+  StringMap<ConstantDataSequential*> CDSConstants;
+
   
   DenseMap<std::pair<Function*, BasicBlock*> , BlockAddress*> BlockAddresses;
   ConstantUniqueMap<ExprMapKeyType, const ExprMapKeyType&, Type, ConstantExpr>
@@ -169,7 +269,7 @@ public:
   LeakDetectorImpl<Value> LLVMObjects;
   
   // Basic type instances.
-  Type VoidTy, LabelTy, FloatTy, DoubleTy, MetadataTy;
+  Type VoidTy, LabelTy, HalfTy, FloatTy, DoubleTy, MetadataTy;
   Type X86_FP80Ty, FP128Ty, PPC_FP128Ty, X86_MMXTy;
   IntegerType Int1Ty, Int8Ty, Int16Ty, Int32Ty, Int64Ty;
 
@@ -180,9 +280,10 @@ public:
   
   DenseMap<unsigned, IntegerType*> IntegerTypes;
   
-  // TODO: Optimize FunctionTypes/AnonStructTypes!
-  std::map<std::vector<Type*>, FunctionType*> FunctionTypes;
-  std::map<std::vector<Type*>, StructType*> AnonStructTypes;
+  typedef DenseMap<FunctionType*, bool, FunctionTypeKeyInfo> FunctionTypeMap;
+  FunctionTypeMap FunctionTypes;
+  typedef DenseMap<StructType*, bool, AnonStructTypeKeyInfo> StructTypeMap;
+  StructTypeMap AnonStructTypes;
   StringMap<StructType*> NamedStructTypes;
   unsigned NamedStructTypesUniqueID;
     

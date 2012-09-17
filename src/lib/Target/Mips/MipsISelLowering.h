@@ -40,13 +40,6 @@ namespace llvm {
       // Handle gp_rel (small data/bss sections) relocation.
       GPRel,
 
-      // General Dynamic TLS
-      TlsGd,
-
-      // Local Exec TLS
-      TprelHi,
-      TprelLo,
-
       // Thread Pointer
       ThreadPointer,
 
@@ -79,7 +72,7 @@ namespace llvm {
       BuildPairF64,
       ExtractElementF64,
 
-      WrapperPIC,
+      Wrapper,
 
       DynAlloc,
 
@@ -116,7 +109,7 @@ namespace llvm {
   private:
     // Subtarget Info
     const MipsSubtarget *Subtarget;
-    
+
     bool HasMips64, IsN64, IsO32;
 
     // Lower Operand helpers
@@ -151,7 +144,7 @@ namespace llvm {
     virtual SDValue
       LowerCall(SDValue Chain, SDValue Callee,
                 CallingConv::ID CallConv, bool isVarArg,
-                bool &isTailCall,
+                bool doesNotRet, bool &isTailCall,
                 const SmallVectorImpl<ISD::OutputArg> &Outs,
                 const SmallVectorImpl<SDValue> &OutVals,
                 const SmallVectorImpl<ISD::InputArg> &Ins,
@@ -187,6 +180,8 @@ namespace llvm {
     /// specified FP immediate natively. If false, the legalizer will
     /// materialize the FP immediate as a load from a constant pool.
     virtual bool isFPImmLegal(const APFloat &Imm, EVT VT) const;
+
+    virtual unsigned getJumpTableEncoding() const;
 
     MachineBasicBlock *EmitAtomicBinary(MachineInstr *MI, MachineBasicBlock *BB,
                     unsigned Size, unsigned BinOpcode, bool Nand = false) const;

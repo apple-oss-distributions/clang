@@ -94,7 +94,6 @@ void PPCInstPrinter::printPredicateOperand(const MCInst *MI, unsigned OpNo,
   unsigned Code = MI->getOperand(OpNo).getImm();
   if (StringRef(Modifier) == "cc") {
     switch ((PPC::Predicate)Code) {
-    default: assert(0 && "Invalid predicate");
     case PPC::PRED_ALWAYS: return; // Don't print anything for always.
     case PPC::PRED_LT: O << "lt"; return;
     case PPC::PRED_LE: O << "le"; return;
@@ -175,7 +174,7 @@ void PPCInstPrinter::printcrbitm(const MCInst *MI, unsigned OpNo,
   unsigned CCReg = MI->getOperand(OpNo).getReg();
   unsigned RegNo;
   switch (CCReg) {
-  default: assert(0 && "Unknown CR register");
+  default: llvm_unreachable("Unknown CR register");
   case PPC::CR0: RegNo = 0; break;
   case PPC::CR1: RegNo = 1; break;
   case PPC::CR2: RegNo = 2; break;

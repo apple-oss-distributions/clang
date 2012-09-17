@@ -19,6 +19,7 @@
 #include "llvm/Constants.h"
 #include "llvm/Module.h"
 #include "llvm/Instructions.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -137,7 +138,7 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
   // Turn on accelerator tables for Darwin.
   if (Triple(M->getTargetTriple()).isOSDarwin())
     DwarfAccelTables = true;
-
+  
   {
     NamedRegionTimer T(DbgTimerName, DWARFGroupName, TimePassesIsEnabled);
     beginModule(M);
@@ -394,8 +395,7 @@ DIE *DwarfDebug::constructInlinedScopeDIE(CompileUnit *TheCU,
   const MCSymbol *EndLabel = getLabelAfterInsn(RI->second);
 
   if (StartLabel == 0 || EndLabel == 0) {
-    assert(0 && "Unexpected Start and End labels for a inlined scope!");
-    return 0;
+    llvm_unreachable("Unexpected Start and End labels for a inlined scope!");
   }
   assert(StartLabel->isDefined() &&
          "Invalid starting label for an inlined scope!");
@@ -444,7 +444,8 @@ DIE *DwarfDebug::constructInlinedScopeDIE(CompileUnit *TheCU,
     I->second.push_back(std::make_pair(StartLabel, ScopeDIE));
 
   DILocation DL(Scope->getInlinedAt());
-  TheCU->addUInt(ScopeDIE, dwarf::DW_AT_call_file, 0, TheCU->getID());
+  TheCU->addUInt(ScopeDIE, dwarf::DW_AT_call_file, 0,
+                 GetOrCreateSourceID(DL.getFilename(), DL.getDirectory()));
   TheCU->addUInt(ScopeDIE, dwarf::DW_AT_call_line, 0, DL.getLineNumber());
 
   // Add name to the name table, we do this here because we're guaranteed
@@ -453,8 +454,6 @@ DIE *DwarfDebug::constructInlinedScopeDIE(CompileUnit *TheCU,
   
   return ScopeDIE;
 }
-
-
 
 /// constructScopeDIE - Construct a DIE for this scope.
 DIE *DwarfDebug::constructScopeDIE(CompileUnit *TheCU, LexicalScope *Scope) {
@@ -558,7 +557,7 @@ CompileUnit *DwarfDebug::constructCompileUnit(const MDNode *N) {
   unsigned ID = GetOrCreateSourceID(FN, CompilationDir);
 
   DIE *Die = new DIE(dwarf::DW_TAG_compile_unit);
-  CompileUnit *NewCU = new CompileUnit(ID, Die, Asm, this);
+  CompileUnit *NewCU = new CompileUnit(ID, DIUnit.getLanguage(), Die, Asm, this);
   NewCU->addString(Die, dwarf::DW_AT_producer, DIUnit.getProducer());
   NewCU->addUInt(Die, dwarf::DW_AT_language, dwarf::DW_FORM_data2,
                  DIUnit.getLanguage());
@@ -607,19 +606,7 @@ void DwarfDebug::constructSubprogramDIE(CompileUnit *TheCU,
     // class type.
     return;
 
-  DISubprogram SPDecl = SP.getFunctionDeclaration();
-  DIE *DeclDie = NULL;
-  if (SPDecl.isSubprogram()) {
-    DeclDie = TheCU->getOrCreateSubprogramDIE(SPDecl);
-  }
-
   DIE *SubprogramDie = TheCU->getOrCreateSubprogramDIE(SP);
-
-  if (DeclDie) {
-    // Refer function declaration directly.
-    TheCU->addDIEEntry(SubprogramDie, dwarf::DW_AT_specification,
-                       dwarf::DW_FORM_ref4, DeclDie);
-  }
 
   // Add to map.
   TheCU->insertDIE(N, SubprogramDie);
@@ -791,6 +778,13 @@ void DwarfDebug::endModule() {
   for (SmallPtrSet<DIE *, 4>::iterator AI = InlinedSubprogramDIEs.begin(),
          AE = InlinedSubprogramDIEs.end(); AI != AE; ++AI) {
     DIE *ISP = *AI;
+    FirstCU->addUInt(ISP, dwarf::DW_AT_inline, 0, dwarf::DW_INL_inlined);
+  }
+  for (DenseMap<const MDNode *, DIE *>::iterator AI = AbstractSPDies.begin(),
+         AE = AbstractSPDies.end(); AI != AE; ++AI) {
+    DIE *ISP = AI->second;
+    if (InlinedSubprogramDIEs.count(ISP))
+      continue;
     FirstCU->addUInt(ISP, dwarf::DW_AT_inline, 0, dwarf::DW_INL_inlined);
   }
 
@@ -968,8 +962,7 @@ static DotDebugLocEntry getDebugLocEntry(AsmPrinter *Asm,
   if (MI->getOperand(0).isCImm())
     return DotDebugLocEntry(FLabel, SLabel, MI->getOperand(0).getCImm());
 
-  assert(0 && "Unexpected 3 operand DBG_VALUE instruction!");
-  return DotDebugLocEntry();
+  llvm_unreachable("Unexpected 3 operand DBG_VALUE instruction!");
 }
 
 /// collectVariableInfo - Find variables for each lexical scope.
@@ -1065,7 +1058,8 @@ DwarfDebug::collectVariableInfo(const MachineFunction *MF,
       }
 
       // The value is valid until the next DBG_VALUE or clobber.
-      DotDebugLocEntries.push_back(getDebugLocEntry(Asm, FLabel, SLabel, Begin));
+      DotDebugLocEntries.push_back(getDebugLocEntry(Asm, FLabel, SLabel,
+                                                    Begin));
     }
     DotDebugLocEntries.push_back(DotDebugLocEntry());
   }
@@ -1100,12 +1094,15 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   if (!MI->isDebugValue()) {
     DebugLoc DL = MI->getDebugLoc();
     if (DL != PrevInstLoc && (!DL.isUnknown() || UnknownLocations)) {
-      unsigned Flags = DWARF2_FLAG_IS_STMT;
+      unsigned Flags = 0;
       PrevInstLoc = DL;
       if (DL == PrologEndLoc) {
         Flags |= DWARF2_FLAG_PROLOGUE_END;
         PrologEndLoc = DebugLoc();
       }
+      if (PrologEndLoc.isUnknown())
+        Flags |= DWARF2_FLAG_IS_STMT;
+
       if (!DL.isUnknown()) {
         const MDNode *Scope = DL.getScope(Asm->MF->getFunction()->getContext());
         recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
@@ -1200,12 +1197,19 @@ static MDNode *getScopeNode(DebugLoc DL, const LLVMContext &Ctx) {
 }
 
 /// getFnDebugLoc - Walk up the scope chain of given debug loc and find
-/// line number  info for the function.
+/// line number info for the function.
 static DebugLoc getFnDebugLoc(DebugLoc DL, const LLVMContext &Ctx) {
   const MDNode *Scope = getScopeNode(DL, Ctx);
   DISubprogram SP = getDISubprogram(Scope);
-  if (SP.Verify()) 
-    return DebugLoc::get(SP.getLineNumber(), 0, SP);
+  if (SP.Verify()) {
+    // Check for number of operands since the compatibility is
+    // cheap here.
+    if (SP->getNumOperands() > 19)
+      return DebugLoc::get(SP.getScopeLineNumber(), 0, SP);
+    else
+      return DebugLoc::get(SP.getLineNumber(), 0, SP);
+  }
+
   return DebugLoc();
 }
 
@@ -1378,7 +1382,7 @@ void DwarfDebug::beginFunction(const MachineFunction *MF) {
                                        MF->getFunction()->getContext());
     recordSourceLine(FnStartDL.getLine(), FnStartDL.getCol(),
                      FnStartDL.getScope(MF->getFunction()->getContext()),
-                     DWARF2_FLAG_IS_STMT);
+                     0);
   }
 }
 
@@ -1428,7 +1432,7 @@ void DwarfDebug::endFunction(const MachineFunction *MF) {
   
   DIE *CurFnDIE = constructScopeDIE(TheCU, FnScope);
   
-  if (!DisableFramePointerElim(*MF))
+  if (!MF->getTarget().Options.DisableFramePointerElim(*MF))
     TheCU->addUInt(CurFnDIE, dwarf::DW_AT_APPLE_omit_frame_ptr,
                    dwarf::DW_FORM_flag, 1);
 
@@ -1481,7 +1485,7 @@ void DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, const MDNode *S,
       Fn = DB.getFilename();
       Dir = DB.getDirectory();
     } else
-      assert(0 && "Unexpected scope info");
+      llvm_unreachable("Unexpected scope info");
 
     Src = GetOrCreateSourceID(Fn, Dir);
   }
@@ -1498,10 +1502,6 @@ unsigned
 DwarfDebug::computeSizeAndOffset(DIE *Die, unsigned Offset, bool Last) {
   // Get the children.
   const std::vector<DIE *> &Children = Die->getChildren();
-
-  // If not last sibling and has children then add sibling offset attribute.
-  if (!Last && !Children.empty())
-    Die->addSiblingOffset(DIEValueAllocator);
 
   // Record the abbreviation.
   assignAbbrevNumber(Die->getAbbrev());
@@ -1613,9 +1613,6 @@ void DwarfDebug::emitDIE(DIE *Die) {
       Asm->OutStreamer.AddComment(dwarf::AttributeString(Attr));
 
     switch (Attr) {
-    case dwarf::DW_AT_sibling:
-      Asm->EmitInt32(Die->getSiblingOffset());
-      break;
     case dwarf::DW_AT_abstract_origin: {
       DIEEntry *E = cast<DIEEntry>(Values[i]);
       DIE *Origin = E->getEntry();
@@ -1925,6 +1922,7 @@ void DwarfDebug::emitDebugPubTypes() {
       Asm->EmitInt32(Entity->getOffset());
 
       if (Asm->isVerbose()) Asm->OutStreamer.AddComment("External Name");
+      // Emit the name with a terminating null byte.
       Asm->OutStreamer.EmitBytes(StringRef(Name, GI->getKeyLength()+1), 0);
     }
 
@@ -1960,9 +1958,10 @@ void DwarfDebug::emitDebugStr() {
     // Emit a label for reference from debug information entries.
     Asm->OutStreamer.EmitLabel(Entries[i].second->getValue().first);
 
-    // Emit the string itself.
-    Asm->OutStreamer.EmitBytes(Entries[i].second->getKey(), 0/*addrspace*/);
-    Asm->OutStreamer.EmitZeros(1, 0);
+    // Emit the string itself with a terminating null byte.
+    Asm->OutStreamer.EmitBytes(StringRef(Entries[i].second->getKeyData(),
+                                         Entries[i].second->getKeyLength()+1),
+                               0/*addrspace*/);
   }
 }
 
@@ -2051,9 +2050,11 @@ void DwarfDebug::emitDebugLoc() {
             if (Element == DIBuilder::OpPlus) {
               Asm->EmitInt8(dwarf::DW_OP_plus_uconst);
               Asm->EmitULEB128(DV.getAddrElement(++i));
-            } else if (Element == DIBuilder::OpDeref)
-              Asm->EmitInt8(dwarf::DW_OP_deref);
-            else llvm_unreachable("unknown Opcode found in complex address");
+            } else if (Element == DIBuilder::OpDeref) {
+              if (!Entry.Loc.isReg())
+                Asm->EmitInt8(dwarf::DW_OP_deref);
+            } else
+              llvm_unreachable("unknown Opcode found in complex address");
           }
         }
       }
@@ -2150,10 +2151,9 @@ void DwarfDebug::emitDebugInlineInfo() {
     StringRef Name = SP.getName();
 
     Asm->OutStreamer.AddComment("MIPS linkage name");
-    if (LName.empty()) {
-      Asm->OutStreamer.EmitBytes(Name, 0);
-      Asm->OutStreamer.EmitIntValue(0, 1, 0); // nul terminator.
-    } else
+    if (LName.empty())
+      Asm->EmitSectionOffset(getStringPoolEntry(Name), DwarfStrSectionSym);
+    else
       Asm->EmitSectionOffset(getStringPoolEntry(getRealLinkageName(LName)),
                              DwarfStrSectionSym);
 

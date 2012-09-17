@@ -1,4 +1,4 @@
-//===-- RuntimeDyld.cpp - Run-time dynamic linker for MC-JIT ------*- C++ -*-===//
+//===-- RuntimeDyld.cpp - Run-time dynamic linker for MC-JIT ----*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,6 +13,10 @@
 
 #define DEBUG_TYPE "dyld"
 #include "RuntimeDyldImpl.h"
+#include "RuntimeDyldELF.h"
+#include "RuntimeDyldMachO.h"
+#include "llvm/Support/Path.h"
+
 using namespace llvm;
 using namespace llvm::object;
 
@@ -24,6 +28,7 @@ namespace llvm {
 
 void RuntimeDyldImpl::extractFunction(StringRef Name, uint8_t *StartAddress,
                                       uint8_t *EndAddress) {
+  // FIXME: DEPRECATED in favor of by-section allocation.
   // Allocate memory for the function via the memory manager.
   uintptr_t Size = EndAddress - StartAddress + 1;
   uintptr_t AllocSize = Size;
@@ -34,21 +39,30 @@ void RuntimeDyldImpl::extractFunction(StringRef Name, uint8_t *StartAddress,
   memcpy(Mem, StartAddress, Size);
   MemMgr->endFunctionBody(Name.data(), Mem, Mem + Size);
   // Remember where we put it.
-  Functions[Name] = sys::MemoryBlock(Mem, Size);
+  unsigned SectionID = Sections.size();
+  Sections.push_back(sys::MemoryBlock(Mem, Size));
+
   // Default the assigned address for this symbol to wherever this
   // allocated it.
-  SymbolTable[Name] = Mem;
+  SymbolTable[Name] = SymbolLoc(SectionID, 0);
   DEBUG(dbgs() << "    allocated to [" << Mem << ", " << Mem + Size << "]\n");
 }
 
 // Resolve the relocations for all symbols we currently know about.
 void RuntimeDyldImpl::resolveRelocations() {
-  // Just iterate over the symbols in our symbol table and assign their
-  // addresses.
-  StringMap<uint8_t*>::iterator i = SymbolTable.begin();
-  StringMap<uint8_t*>::iterator e = SymbolTable.end();
-  for (;i != e; ++i)
-    reassignSymbolAddress(i->getKey(), i->getValue());
+  // Just iterate over the sections we have and resolve all the relocations
+  // in them. Gross overkill, but it gets the job done.
+  for (int i = 0, e = Sections.size(); i != e; ++i) {
+    reassignSectionAddress(i, SectionLoadAddress[i]);
+  }
+}
+
+void RuntimeDyldImpl::mapSectionAddress(void *LocalAddress,
+                                        uint64_t TargetAddress) {
+  assert(SectionLocalMemToID.count(LocalAddress) &&
+         "Attempting to remap address of unknown section!");
+  unsigned SectionID = SectionLocalMemToID[LocalAddress];
+  reassignSectionAddress(SectionID, TargetAddress);
 }
 
 //===----------------------------------------------------------------------===//
@@ -64,12 +78,36 @@ RuntimeDyld::~RuntimeDyld() {
 
 bool RuntimeDyld::loadObject(MemoryBuffer *InputBuffer) {
   if (!Dyld) {
-    if (RuntimeDyldMachO::isKnownFormat(InputBuffer))
-      Dyld = new RuntimeDyldMachO(MM);
-    else
-      report_fatal_error("Unknown object format!");
+    sys::LLVMFileType type = sys::IdentifyFileType(
+            InputBuffer->getBufferStart(),
+            static_cast<unsigned>(InputBuffer->getBufferSize()));
+    switch (type) {
+      case sys::ELF_Relocatable_FileType:
+      case sys::ELF_Executable_FileType:
+      case sys::ELF_SharedObject_FileType:
+      case sys::ELF_Core_FileType:
+        Dyld = new RuntimeDyldELF(MM);
+        break;
+      case sys::Mach_O_Object_FileType:
+      case sys::Mach_O_Executable_FileType:
+      case sys::Mach_O_FixedVirtualMemorySharedLib_FileType:
+      case sys::Mach_O_Core_FileType:
+      case sys::Mach_O_PreloadExecutable_FileType:
+      case sys::Mach_O_DynamicallyLinkedSharedLib_FileType:
+      case sys::Mach_O_DynamicLinker_FileType:
+      case sys::Mach_O_Bundle_FileType:
+      case sys::Mach_O_DynamicallyLinkedSharedLibStub_FileType:
+      case sys::Mach_O_DSYMCompanion_FileType:
+        Dyld = new RuntimeDyldMachO(MM);
+        break;
+      case sys::Unknown_FileType:
+      case sys::Bitcode_FileType:
+      case sys::Archive_FileType:
+      case sys::COFF_FileType:
+        report_fatal_error("Incompatible object format!");
+    }
   } else {
-    if(!Dyld->isCompatibleFormat(InputBuffer))
+    if (!Dyld->isCompatibleFormat(InputBuffer))
       report_fatal_error("Incompatible object format!");
   }
 
@@ -84,8 +122,14 @@ void RuntimeDyld::resolveRelocations() {
   Dyld->resolveRelocations();
 }
 
-void RuntimeDyld::reassignSymbolAddress(StringRef Name, uint8_t *Addr) {
-  Dyld->reassignSymbolAddress(Name, Addr);
+void RuntimeDyld::reassignSectionAddress(unsigned SectionID,
+                                         uint64_t Addr) {
+  Dyld->reassignSectionAddress(SectionID, Addr);
+}
+
+void RuntimeDyld::mapSectionAddress(void *LocalAddress,
+                                    uint64_t TargetAddress) {
+  Dyld->mapSectionAddress(LocalAddress, TargetAddress);
 }
 
 StringRef RuntimeDyld::getErrorString() {

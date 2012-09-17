@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines AnalysisDeclContext, a class that manages the analysis context
-// data for path sensitive analysis.
+// This file defines AnalysisDeclContext, a class that manages the analysis
+// context data for path sensitive analysis.
 //
 //===----------------------------------------------------------------------===//
 
@@ -39,7 +39,7 @@ class ImplicitParamDecl;
 class LocationContextManager;
 class StackFrameContext;
 class AnalysisDeclContextManager;
-class LocationContext;  
+class LocationContext;
 
 namespace idx { class TranslationUnit; }
 
@@ -50,7 +50,7 @@ protected:
   ManagedAnalysis() {}
 public:
   virtual ~ManagedAnalysis();
-  
+
   // Subclasses need to implement:
   //
   //  static const void *getTag();
@@ -62,37 +62,36 @@ public:
   //
   // which creates the analysis object given an AnalysisDeclContext.
 };
-  
-  
-/// AnalysisDeclContext contains the context data for the function or method under
-/// analysis.
+
+
+/// AnalysisDeclContext contains the context data for the function or method
+/// under analysis.
 class AnalysisDeclContext {
-  /// Backpoint to the AnalysisManager object that created this AnalysisDeclContext.
-  /// This may be null.
+  /// Backpoint to the AnalysisManager object that created this
+  /// AnalysisDeclContext. This may be null.
   AnalysisDeclContextManager *Manager;
-  
+
   const Decl *D;
 
   // TranslationUnit is NULL if we don't have multiple translation units.
   idx::TranslationUnit *TU;
 
-  llvm::OwningPtr<CFG> cfg, completeCFG;
-  llvm::OwningPtr<CFGStmtMap> cfgStmtMap;
+  OwningPtr<CFG> cfg, completeCFG;
+  OwningPtr<CFGStmtMap> cfgStmtMap;
 
   CFG::BuildOptions cfgBuildOptions;
   CFG::BuildOptions::ForcedBlkExprs *forcedBlkExprs;
-  
+
   bool builtCFG, builtCompleteCFG;
 
-  llvm::OwningPtr<LiveVariables> liveness;
-  llvm::OwningPtr<LiveVariables> relaxedLiveness;
-  llvm::OwningPtr<ParentMap> PM;
-  llvm::OwningPtr<PseudoConstantAnalysis> PCA;
-  llvm::OwningPtr<CFGReverseBlockReachabilityAnalysis> CFA;
+  OwningPtr<LiveVariables> liveness;
+  OwningPtr<LiveVariables> relaxedLiveness;
+  OwningPtr<ParentMap> PM;
+  OwningPtr<PseudoConstantAnalysis> PCA;
+  OwningPtr<CFGReverseBlockReachabilityAnalysis> CFA;
 
   llvm::BumpPtrAllocator A;
 
-  // FIXME: remove.
   llvm::DenseMap<const BlockDecl*,void*> *ReferencedBlockVars;
 
   void *ManagedAnalyses;
@@ -122,12 +121,12 @@ public:
   const CFG::BuildOptions &getCFGBuildOptions() const {
     return cfgBuildOptions;
   }
-  
+
   /// getAddEHEdges - Return true iff we are adding exceptional edges from
   /// callExprs.  If this is false, then try/catch statements and blocks
   /// reachable from them can appear to be dead in the CFG, analysis passes must
   /// cope with that.
-  bool getAddEHEdges() const { return cfgBuildOptions.AddEHEdges; }  
+  bool getAddEHEdges() const { return cfgBuildOptions.AddEHEdges; }
   bool getUseUnoptimizedCFG() const {
       return !cfgBuildOptions.PruneTriviallyFalseEdges;
   }
@@ -136,18 +135,18 @@ public:
 
   void registerForcedBlockExpression(const Stmt *stmt);
   const CFGBlock *getBlockForRegisteredExpression(const Stmt *stmt);
-  
+
   Stmt *getBody() const;
   CFG *getCFG();
-  
+
   CFGStmtMap *getCFGStmtMap();
 
   CFGReverseBlockReachabilityAnalysis *getCFGReachablityAnalysis();
-  
+
   /// Return a version of the CFG without any edges pruned.
   CFG *getUnoptimizedCFG();
 
-  void dumpCFG();
+  void dumpCFG(bool ShowColors);
 
   /// \brief Returns true if we have built a CFG for this analysis context.
   /// Note that this doesn't correspond to whether or not a valid CFG exists, it
@@ -165,12 +164,12 @@ public:
   /// Return the ImplicitParamDecl* associated with 'self' if this
   /// AnalysisDeclContext wraps an ObjCMethodDecl.  Returns NULL otherwise.
   const ImplicitParamDecl *getSelfDecl() const;
-  
+
   const StackFrameContext *getStackFrame(LocationContext const *Parent,
                                          const Stmt *S,
                                          const CFGBlock *Blk,
-                                         unsigned Idx);  
-  
+                                         unsigned Idx);
+
   /// Return the specified analysis object, lazily running the analysis if
   /// necessary.  Return NULL if the analysis could not run.
   template <typename T>
@@ -184,7 +183,7 @@ public:
   }
 private:
   ManagedAnalysis *&getAnalysisImpl(const void* tag);
-  
+
   LocationContextManager &getLocationContextManager();
 };
 
@@ -195,7 +194,8 @@ public:
 private:
   ContextKind Kind;
 
-  // AnalysisDeclContext can't be const since some methods may modify its member.
+  // AnalysisDeclContext can't be const since some methods may modify its
+  // member.
   AnalysisDeclContext *Ctx;
 
   const LocationContext *Parent;
@@ -212,8 +212,8 @@ public:
 
   AnalysisDeclContext *getAnalysisDeclContext() const { return Ctx; }
 
-  idx::TranslationUnit *getTranslationUnit() const { 
-    return Ctx->getTranslationUnit(); 
+  idx::TranslationUnit *getTranslationUnit() const {
+    return Ctx->getTranslationUnit();
   }
 
   const LocationContext *getParent() const { return Parent; }
@@ -265,7 +265,7 @@ class StackFrameContext : public LocationContext {
 
   friend class LocationContextManager;
   StackFrameContext(AnalysisDeclContext *ctx, const LocationContext *parent,
-                    const Stmt *s, const CFGBlock *blk, 
+                    const Stmt *s, const CFGBlock *blk,
                     unsigned idx)
     : LocationContext(StackFrame, ctx, parent), CallSite(s),
       Block(blk), Index(idx) {}
@@ -324,7 +324,8 @@ class BlockInvocationContext : public LocationContext {
 
   friend class LocationContextManager;
 
-  BlockInvocationContext(AnalysisDeclContext *ctx, const LocationContext *parent,
+  BlockInvocationContext(AnalysisDeclContext *ctx,
+                         const LocationContext *parent,
                          const BlockDecl *bd)
     : LocationContext(Block, ctx, parent), BD(bd) {}
 
@@ -370,28 +371,28 @@ private:
 
 class AnalysisDeclContextManager {
   typedef llvm::DenseMap<const Decl*, AnalysisDeclContext*> ContextMap;
-  
+
   ContextMap Contexts;
   LocationContextManager LocContexts;
   CFG::BuildOptions cfgBuildOptions;
-  
+
 public:
   AnalysisDeclContextManager(bool useUnoptimizedCFG = false,
                          bool addImplicitDtors = false,
                          bool addInitializers = false);
-  
+
   ~AnalysisDeclContextManager();
-  
+
   AnalysisDeclContext *getContext(const Decl *D, idx::TranslationUnit *TU = 0);
-  
+
   bool getUseUnoptimizedCFG() const {
     return !cfgBuildOptions.PruneTriviallyFalseEdges;
   }
-  
+
   CFG::BuildOptions &getCFGBuildOptions() {
     return cfgBuildOptions;
   }
-  
+
   const StackFrameContext *getStackFrame(AnalysisDeclContext *Ctx,
                                          LocationContext const *Parent,
                                          const Stmt *S,
@@ -399,15 +400,15 @@ public:
                                          unsigned Idx) {
     return LocContexts.getStackFrame(Ctx, Parent, S, Blk, Idx);
   }
-  
+
   // Get the top level stack frame.
-  const StackFrameContext *getStackFrame(Decl const *D, 
+  const StackFrameContext *getStackFrame(Decl const *D,
                                          idx::TranslationUnit *TU) {
     return LocContexts.getStackFrame(getContext(D, TU), 0, 0, 0, 0);
   }
-  
+
   // Get a stack frame with parent.
-  StackFrameContext const *getStackFrame(const Decl *D, 
+  StackFrameContext const *getStackFrame(const Decl *D,
                                          LocationContext const *Parent,
                                          const Stmt *S,
                                          const CFGBlock *Blk,
@@ -415,7 +416,7 @@ public:
     return LocContexts.getStackFrame(getContext(D), Parent, S, Blk, Idx);
   }
 
-  
+
   /// Discard all previously created AnalysisDeclContexts.
   void clear();
 

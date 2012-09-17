@@ -1,0 +1,228 @@
+#!/usr/bin/env python
+
+import os
+import shlex
+import subprocess
+import sys
+import time
+from optparse import OptionParser, OptionGroup
+
+import commands
+
+###
+
+def get_test_cases(opts):
+    yield (
+        'pch-gen-Cocoa', 'Cocoa_Prefix_Precompiled.h.gch', True,
+        ('-x', 'objective-c-header', 'Cocoa_Prefix.h'))
+    yield (
+        'trivial-c', None, True,
+        ('-c', 'trivial-input.c', '-O0', '-g'))
+    yield (
+        'trivial-obj-c', None, True,
+        ('-c', 'trivial-input.m', '-O0', '-g',
+         '-include', '%T/Cocoa_Prefix_Precompiled.h'))
+
+    # Check the trivial inputs in a few different combinations.
+    yield (
+        'trivial-cxx', None, False,
+        ('-c', 'trivial-input.cpp', '-O0', '-g'))
+    yield (
+        'trivial-c-armv7', None, False,
+        ('-c', 'trivial-input.c', '-O0', '-g', '-arch', 'armv7',
+         '-integrated-as'))
+    yield (
+        'trivial-c-Os', None, False,
+        ('-c', 'trivial-input.c', '-Os'))
+    yield (
+        'trivial-c-O3-g', None, False,
+        ('-c', 'trivial-input.c', '-O3', '-g'))
+    yield (
+        'trivial-c-i386', None, False,
+        ('-c', 'trivial-input.c', '-O0', '-g', '-arch', 'i386'))
+
+    # Check actual project inputs in important combinations.
+    #
+    # These are preprocessed inputs for x86_64.
+    for input in ('403.gcc__combine.c', 'JavaScriptCore__Interpreter.cpp',
+                  'OmniGroupFrameworks__NSBezierPath-OAExtensions.m'):
+        arch = 'x86_64'
+        for flags in (('-O0', '-g'), ('-Os', '-g'), ('-O2',), ('-O3',)):
+            test_name = '%s__%s__%s' % (input, arch, ''.join(flags))
+            yield (
+                test_name, None, False,
+                ('-c', input, '-arch', arch, '-w') + flags)
+    
+
+def get_cc1_command_for_args(cmd, cwd, env):
+    # Find the cc1 command used by the compiler. To do this we execute the
+    # compiler with '-###' to figure out what it wants to do.
+    cc_output = commands.capture(cmd + ['-###'],
+                                 include_stderr=True, cwd=cwd, env=env).strip()
+    cc_commands = []
+    for ln in cc_output.split('\n'):
+        # Filter out known garbage.
+        if (ln == 'Using built-in specs.' or
+            ln.startswith('Configured with:') or
+            ln.startswith('Target:') or
+            ln.startswith('Thread model:') or
+            ' version ' in ln):
+            continue
+        cc_commands.append(ln)
+
+    if len(cc_commands) != 1:
+        commands.fatal('unable to determine cc1 command: %r' % cc_output)
+
+    cc1_cmd = shlex.split(cc_commands[0])
+    if not cc1_cmd:
+        commands.fatal('unable to determine cc1 command: %r' % cc_output)
+
+    return cc1_cmd
+
+def execute_dtrace_test(args, data_name, opts, env,
+                        suppress_stderr=False):
+    # Form the dtrace script to run.
+    if opts.use_multishot:
+        target = "pid$target:::entry"
+    else:
+        target = "oneshot$target:::entry"
+    predicate = '%s/probemod=="%s"/' % (target, os.path.basename(args[0]))
+    log_timestamp = 'printf("TS: %d\\n", timestamp)'
+    if opts.use_ustack:
+        action = 'ustack(1);'
+    else:
+        action = 'printf("%s\\n", probefunc);'
+    dtrace_script = "%s { %s; %s }" % (predicate, log_timestamp, action)
+
+    # Execute the script.
+    dtrace_args = []
+    if opts.use_sudo:
+        dtrace_args.append("sudo")
+    dtrace_args.extend((
+        'dtrace', '-xevaltime=exec', '-xmangled',
+        '-xbufsize=%dm' % (opts.buffer_size),
+        '-q', '-n', dtrace_script, 
+        '-c', ' '.join(args)))
+    commands.note("generating dtrace data for test %r: %r" % (
+            data_name, ' '.join('"%s"' % arg
+                                for arg in dtrace_args)))
+    with open("%s.test-%s-data.log" % (opts.outputs_prefix,
+                                       data_name), "w") as f:
+        if suppress_stderr:
+            stderr = subprocess.PIPE
+        else:
+            stderr = None
+        start_time = time.time()
+        try:
+            subprocess.check_call(dtrace_args, stdout=f, stderr=stderr,
+                                  cwd=opts.inputs_path, env=env)
+        except subprocess.CalledProcessError,e:
+            # For some reason, dtrace sometimes fails for reasons we haven't
+            # been able to track down yet. We allow such failures for the time
+            # being.
+            if e.returncode != -11:
+                raise
+            commands.note("warning: dtrace data collection failed (ignoring)")
+        elapsed = time.time() - start_time
+        commands.note("... data collection took %.4fs" % (elapsed,))
+
+def execute_test_case(test_case, opts):
+    cwd = opts.inputs_path
+
+    test_name,output_name,test_driver,test_args = test_case
+    if output_name is None:
+        output_name = "%s.o" % (test_name,)
+
+    # Rewrite '%T' in any arguments to be the temps path.
+    actual_args = [a.replace('%T', opts.temps_path)
+                   for a in test_args]
+    full_args = [opts.cc] + list(actual_args) + [
+        '-o', os.path.join(opts.temps_path, output_name)]
+
+    # Create a scrubbed environment to execute the tests in.
+    test_env = {
+        'PATH' : os.environ['PATH'] }
+
+    # Gather data on the driver invocation.
+    if opts.sample_driver and test_driver:
+        execute_dtrace_test(full_args + ['-###'], "%s.driver" % (test_name),
+                            opts, test_env, suppress_stderr=True)
+
+    # Extract the cc1 level command.
+    cc1_cmd = get_cc1_command_for_args(full_args, opts.inputs_path, test_env)
+
+    # We can't use dtrace's -c option if there are space in options.
+    for arg in cc1_cmd:
+        if ' ' in arg:
+            commands.fatal("unable to use dtrace on cc1 command: %r" % (
+                    cc1_cmd,))
+
+    # Gather data on the cc1 invocation.
+    execute_dtrace_test(cc1_cmd, test_name, opts, test_env)
+
+def main():
+    parser = OptionParser("%prog  [options]")
+    parser.add_option("", "--cc", dest="cc", type='str',
+                      help="Path to the compiler under test",
+                      action="store", default=None)
+    parser.add_option("", "--inputs", dest="inputs_path", type='str',
+                      help="Path to the inputs directory",
+                      action="store", metavar="PATH",
+                      default=os.path.join(os.path.dirname(__file__), 'inputs'))
+    parser.add_option("", "--temps", dest="temps_path", type='str',
+                      help="Path to a directory for temporary outputs",
+                      action="store", default="temps", metavar="PATH")
+    parser.add_option("", "--outputs", dest="outputs_prefix", type='str',
+                      help="Path (and prefix) to use for outputs",
+                      action="store", default=None, metavar="PATH")
+    parser.add_option("", "--use-multishot", dest="use_multishot",
+                      help="Record multiple function entry samples",
+                      action="store_true", default=False)
+    parser.add_option("", "--no-sudo", dest="use_sudo",
+                      help="Don't automatically use sudo with dtrace",
+                      action="store_false", default=True)
+    parser.add_option("", "--use-probefunc", dest="use_ustack",
+                      help="Record probefunc instead of ustack(1)",
+                      action="store_false", default=True)
+    parser.add_option("", "--buffer-size", dest="buffer_size",
+                      help="DTrace buffer size to use (in MB)",
+                      type=int, default=1)
+    parser.add_option("", "--without-driver", dest="sample_driver",
+                      help="Do not record driver samples",
+                      action="store_false", default=True)
+    parser.add_option("", "--max-tests", dest="max_tests",
+                      help="maximum number of tests to run",
+                      type=int, default=None)
+    (opts, args) = parser.parse_args()
+
+    if opts.cc is None:
+        parser.error("--cc argument is required")
+    if opts.outputs_prefix is None:
+        parser.error("--outputs argument is required")
+    if len(args) != 0:
+        parser.error("invalid number of arguments")
+
+    # Make all paths absolute.
+    opts.cc = os.path.abspath(commands.which(opts.cc))
+    opts.inputs_path = os.path.abspath(opts.inputs_path)
+    opts.temps_path = os.path.abspath(opts.temps_path)
+    opts.outputs_prefix = os.path.abspath(opts.outputs_prefix)
+
+    # Create the temps directory if it doesn't exist.
+    commands.mkdir_p(opts.temps_path)
+
+    # Create the parent of the output directory if it doesn't exist.
+    commands.mkdir_p(os.path.dirname(opts.outputs_prefix))
+
+    # Get the test cases.
+    test_cases = list(get_test_cases(opts))
+
+    # Honor --max-tests, if provided.
+    if opts.max_tests is not None:
+        test_cases = test_cases[:opts.max_tests]
+
+    for test_case in test_cases:
+        execute_test_case(test_case, opts)
+
+if __name__ == '__main__':
+    main()

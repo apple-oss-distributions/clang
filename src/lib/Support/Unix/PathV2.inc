@@ -17,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Unix.h"
+#include "llvm/Support/Process.h"
 #if HAVE_SYS_STAT_H
 #include <sys/stat.h>
 #endif
@@ -87,7 +88,7 @@ namespace {
     result.clear();
     StringRef d(dir);
     result.append(d.begin(), d.end());
-    return success;
+    return error_code::success();
   }
 }
 
@@ -110,7 +111,7 @@ error_code current_path(SmallVectorImpl<char> &result) {
   }
 
   result.set_size(strlen(result.data()));
-  return success;
+  return error_code::success();
 }
 
 error_code copy_file(const Twine &from, const Twine &to, copy_option copt) {
@@ -169,7 +170,7 @@ error_code copy_file(const Twine &from, const Twine &to, copy_option copt) {
   if (sz_read < 0)
     return error_code(errno, system_category());
 
-  return success;
+  return error_code::success();
 }
 
 error_code create_directory(const Twine &path, bool &existed) {
@@ -183,7 +184,7 @@ error_code create_directory(const Twine &path, bool &existed) {
   } else
     existed = false;
 
-  return success;
+  return error_code::success();
 }
 
 error_code create_hard_link(const Twine &to, const Twine &from) {
@@ -196,7 +197,7 @@ error_code create_hard_link(const Twine &to, const Twine &from) {
   if (::link(t.begin(), f.begin()) == -1)
     return error_code(errno, system_category());
 
-  return success;
+  return error_code::success();
 }
 
 error_code create_symlink(const Twine &to, const Twine &from) {
@@ -209,7 +210,7 @@ error_code create_symlink(const Twine &to, const Twine &from) {
   if (::symlink(t.begin(), f.begin()) == -1)
     return error_code(errno, system_category());
 
-  return success;
+  return error_code::success();
 }
 
 error_code remove(const Twine &path, bool &existed) {
@@ -223,7 +224,7 @@ error_code remove(const Twine &path, bool &existed) {
   } else
     existed = true;
 
-  return success;
+  return error_code::success();
 }
 
 error_code rename(const Twine &from, const Twine &to) {
@@ -245,7 +246,7 @@ error_code rename(const Twine &from, const Twine &to) {
       return error_code(errno, system_category());
   }
 
-  return success;
+  return error_code::success();
 }
 
 error_code resize_file(const Twine &path, uint64_t size) {
@@ -255,7 +256,7 @@ error_code resize_file(const Twine &path, uint64_t size) {
   if (::truncate(p.begin(), size) == -1)
     return error_code(errno, system_category());
 
-  return success;
+  return error_code::success();
 }
 
 error_code exists(const Twine &path, bool &result) {
@@ -270,32 +271,21 @@ error_code exists(const Twine &path, bool &result) {
   } else
     result = true;
 
-  return success;
+  return error_code::success();
+}
+
+bool equivalent(file_status A, file_status B) {
+  assert(status_known(A) && status_known(B));
+  return A.st_dev == B.st_dev &&
+         A.st_ino == B.st_ino;
 }
 
 error_code equivalent(const Twine &A, const Twine &B, bool &result) {
-  // Get arguments.
-  SmallString<128> a_storage;
-  SmallString<128> b_storage;
-  StringRef a = A.toNullTerminatedStringRef(a_storage);
-  StringRef b = B.toNullTerminatedStringRef(b_storage);
-
-  struct stat stat_a, stat_b;
-  int error_b = ::stat(b.begin(), &stat_b);
-  int error_a = ::stat(a.begin(), &stat_a);
-
-  // If both are invalid, it's an error. If only one is, the result is false.
-  if (error_a != 0 || error_b != 0) {
-    if (error_a == error_b)
-      return error_code(errno, system_category());
-    result = false;
-  } else {
-    result =
-      stat_a.st_dev == stat_b.st_dev &&
-      stat_a.st_ino == stat_b.st_ino;
-  }
-
-  return success;
+  file_status fsA, fsB;
+  if (error_code ec = status(A, fsA)) return ec;
+  if (error_code ec = status(B, fsB)) return ec;
+  result = equivalent(fsA, fsB);
+  return error_code::success();
 }
 
 error_code file_size(const Twine &path, uint64_t &result) {
@@ -309,7 +299,7 @@ error_code file_size(const Twine &path, uint64_t &result) {
     return make_error_code(errc::operation_not_permitted);
 
   result = status.st_size;
-  return success;
+  return error_code::success();
 }
 
 error_code status(const Twine &path, file_status &result) {
@@ -341,12 +331,16 @@ error_code status(const Twine &path, file_status &result) {
   else
     result = file_status(file_type::type_unknown);
 
-  return success;
+  result.st_dev = status.st_dev;
+  result.st_ino = status.st_ino;
+
+  return error_code::success();
 }
 
+// Since this is most often used for temporary files, mode defaults to 0600.
 error_code unique_file(const Twine &model, int &result_fd,
-                             SmallVectorImpl<char> &result_path,
-                             bool makeAbsolute) {
+                       SmallVectorImpl<char> &result_path,
+                       bool makeAbsolute, unsigned mode) {
   SmallString<128> Model;
   model.toVector(Model);
   // Null terminate.
@@ -363,37 +357,20 @@ error_code unique_file(const Twine &model, int &result_fd,
     }
   }
 
-  // Replace '%' with random chars. From here on, DO NOT modify model. It may be
-  // needed if the randomly chosen path already exists.
-  SmallString<128> RandomPath;
-  RandomPath.reserve(Model.size() + 1);
-  ::srand(::time(NULL));
+  // From here on, DO NOT modify model. It may be needed if the randomly chosen
+  // path already exists.
+  SmallString<128> RandomPath = Model;
 
 retry_random_path:
-  // This is opened here instead of above to make it easier to track when to
-  // close it. Collisions should be rare enough for the possible extra syscalls
-  // not to matter.
-  FILE *RandomSource = ::fopen("/dev/urandom", "r");
-  RandomPath.set_size(0);
-  for (SmallVectorImpl<char>::const_iterator i = Model.begin(),
-                                             e = Model.end(); i != e; ++i) {
-    if (*i == '%') {
-      char val = 0;
-      if (RandomSource)
-        val = fgetc(RandomSource);
-      else
-        val = ::rand();
-      RandomPath.push_back("0123456789abcdef"[val & 15]);
-    } else
-      RandomPath.push_back(*i);
+  // Replace '%' with random chars.
+  for (unsigned i = 0, e = Model.size(); i != e; ++i) {
+    if (Model[i] == '%')
+      RandomPath[i] = "0123456789abcdef"[sys::Process::GetRandomNumber() & 15];
   }
-
-  if (RandomSource)
-    ::fclose(RandomSource);
 
   // Try to open + create the file.
 rety_open_create:
-  int RandomFD = ::open(RandomPath.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  int RandomFD = ::open(RandomPath.c_str(), O_RDWR | O_CREAT | O_EXCL, mode);
   if (RandomFD == -1) {
     // If the file existed, try again, otherwise, error.
     if (errno == errc::file_exists)
@@ -436,10 +413,11 @@ rety_open_create:
   result_path.append(d.begin(), d.end());
 
   result_fd = RandomFD;
-  return success;
+  return error_code::success();
 }
 
-error_code directory_iterator_construct(directory_iterator &it, StringRef path){
+error_code detail::directory_iterator_construct(detail::DirIterState &it,
+                                                StringRef path){
   SmallString<128> path_null(path);
   DIR *directory = ::opendir(path_null.c_str());
   if (directory == 0)
@@ -452,15 +430,15 @@ error_code directory_iterator_construct(directory_iterator &it, StringRef path){
   return directory_iterator_increment(it);
 }
 
-error_code directory_iterator_destruct(directory_iterator& it) {
+error_code detail::directory_iterator_destruct(detail::DirIterState &it) {
   if (it.IterationHandle)
     ::closedir(reinterpret_cast<DIR *>(it.IterationHandle));
   it.IterationHandle = 0;
   it.CurrentEntry = directory_entry();
-  return success;
+  return error_code::success();
 }
 
-error_code directory_iterator_increment(directory_iterator& it) {
+error_code detail::directory_iterator_increment(detail::DirIterState &it) {
   errno = 0;
   dirent *cur_dir = ::readdir(reinterpret_cast<DIR *>(it.IterationHandle));
   if (cur_dir == 0 && errno != 0) {
@@ -474,7 +452,7 @@ error_code directory_iterator_increment(directory_iterator& it) {
   } else
     return directory_iterator_destruct(it);
 
-  return success;
+  return error_code::success();
 }
 
 error_code get_magic(const Twine &path, uint32_t len,
@@ -505,7 +483,7 @@ error_code get_magic(const Twine &path, uint32_t len,
   }
   std::fclose(file);
   result.set_size(len);
-  return success;
+  return error_code::success();
 }
 
 } // end namespace fs

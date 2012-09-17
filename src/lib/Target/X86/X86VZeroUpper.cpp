@@ -145,7 +145,7 @@ bool VZeroUpperInserter::runOnMachineFunction(MachineFunction &MF) {
   // to insert any VZEROUPPER instructions.  This is constant-time, so it is
   // cheap in the common case of no ymm use.
   bool YMMUsed = false;
-  TargetRegisterClass *RC = X86::VR256RegisterClass;
+  const TargetRegisterClass *RC = X86::VR256RegisterClass;
   for (TargetRegisterClass::iterator i = RC->begin(), e = RC->end();
        i != e; i++) {
     if (MRI.isPhysRegUsed(*i)) {
@@ -220,7 +220,7 @@ bool VZeroUpperInserter::processBasicBlock(MachineFunction &MF,
   for (MachineBasicBlock::iterator I = BB.begin(); I != BB.end(); ++I) {
     MachineInstr *MI = I;
     DebugLoc dl = I->getDebugLoc();
-    bool isControlFlow = MI->getDesc().isCall() || MI->getDesc().isReturn();
+    bool isControlFlow = MI->isCall() || MI->isReturn();
 
     // Shortcut: don't need to check regular instructions in dirty state. 
     if (!isControlFlow && CurState == ST_DIRTY)

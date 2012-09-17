@@ -28,7 +28,7 @@ By default B<lit> will use a succinct progress display and will only print
 summary information for test failures. See L<"OUTPUT OPTIONS"> for options
 controlling the B<lit> progress display and output.
 
-B<lit> also includes a number of options for controlling how tests are exected
+B<lit> also includes a number of options for controlling how tests are executed
 (specific features may depend on the particular test format). See L<"EXECUTION
 OPTIONS"> for more information.
 
@@ -37,7 +37,7 @@ the options specified on the command line, see L<"SELECTION OPTIONS"> for
 more information.
 
 Users interested in the B<lit> architecture or designing a B<lit> testing
-implementation should see L<"LIT ARCHITECTURE">
+implementation should see L<"LIT INFRASTRUCTURE">
 
 =head1 GENERAL OPTIONS
 
@@ -208,7 +208,7 @@ suite.
 
 The test succeeded, but it was expected to fail. This is used for tests which
 were specified as expected to fail, but are now succeeding (generally because
-the feautre they test was broken and has been fixed).
+the feature they test was broken and has been fixed).
 
 =item B<FAIL>
 
@@ -227,7 +227,7 @@ which can report unsupported tests.
 =back
 
 Depending on the test format tests may produce additional information about
-their status (generally only for failures). See the L<Output|"LIT OUTPUT">
+their status (generally only for failures). See the L<Output|"OUTPUT OPTIONS">
 section for more information.
 
 =head1 LIT INFRASTRUCTURE
@@ -247,7 +247,7 @@ suite>. Test suites serve to define the format of the tests they contain, the
 logic for finding those tests, and any additional information to run the tests.
 
 B<lit> identifies test suites as directories containing I<lit.cfg> or
-I<lit.site.cfg> files (see also B<--config-prefix>. Test suites are initially
+I<lit.site.cfg> files (see also B<--config-prefix>). Test suites are initially
 discovered by recursively searching up the directory hierarchy for all the input
 files passed on the command line. You can use B<--show-suites> to display the
 discovered test suites at startup.

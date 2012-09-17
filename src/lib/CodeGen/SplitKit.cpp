@@ -62,13 +62,14 @@ SlotIndex SplitAnalysis::computeLastSplitPoint(unsigned Num) {
   const MachineBasicBlock *MBB = MF.getBlockNumbered(Num);
   const MachineBasicBlock *LPad = MBB->getLandingPadSuccessor();
   std::pair<SlotIndex, SlotIndex> &LSP = LastSplitPoint[Num];
+  SlotIndex MBBEnd = LIS.getMBBEndIdx(MBB);
 
   // Compute split points on the first call. The pair is independent of the
   // current live interval.
   if (!LSP.first.isValid()) {
     MachineBasicBlock::const_iterator FirstTerm = MBB->getFirstTerminator();
     if (FirstTerm == MBB->end())
-      LSP.first = LIS.getMBBEndIdx(MBB);
+      LSP.first = MBBEnd;
     else
       LSP.first = LIS.getInstructionIndex(FirstTerm);
 
@@ -80,7 +81,7 @@ SlotIndex SplitAnalysis::computeLastSplitPoint(unsigned Num) {
     for (MachineBasicBlock::const_iterator I = MBB->end(), E = MBB->begin();
          I != E;) {
       --I;
-      if (I->getDesc().isCall()) {
+      if (I->isCall()) {
         LSP.second = LIS.getInstructionIndex(I);
         break;
       }
@@ -89,10 +90,32 @@ SlotIndex SplitAnalysis::computeLastSplitPoint(unsigned Num) {
 
   // If CurLI is live into a landing pad successor, move the last split point
   // back to the call that may throw.
-  if (LPad && LSP.second.isValid() && LIS.isLiveInToMBB(*CurLI, LPad))
-    return LSP.second;
-  else
+  if (!LPad || !LSP.second || !LIS.isLiveInToMBB(*CurLI, LPad))
     return LSP.first;
+
+  // Find the value leaving MBB.
+  const VNInfo *VNI = CurLI->getVNInfoBefore(MBBEnd);
+  if (!VNI)
+    return LSP.first;
+
+  // If the value leaving MBB was defined after the call in MBB, it can't
+  // really be live-in to the landing pad.  This can happen if the landing pad
+  // has a PHI, and this register is undef on the exceptional edge.
+  // <rdar://problem/10664933>
+  if (!SlotIndex::isEarlierInstr(VNI->def, LSP.second) && VNI->def < MBBEnd)
+    return LSP.first;
+
+  // Value is properly live-in to the landing pad.
+  // Only allow splits before the call.
+  return LSP.second;
+}
+
+MachineBasicBlock::iterator
+SplitAnalysis::getLastSplitPointIter(MachineBasicBlock *MBB) {
+  SlotIndex LSP = getLastSplitPoint(MBB->getNumber());
+  if (LSP == LIS.getMBBEndIdx(MBB))
+    return MBB->end();
+  return LIS.getInstructionFromIndex(LSP);
 }
 
 /// analyzeUses - Count instructions, basic blocks, and loops using CurLI.
@@ -112,7 +135,7 @@ void SplitAnalysis::analyzeUses() {
        I = MRI.use_nodbg_begin(CurLI->reg), E = MRI.use_nodbg_end(); I != E;
        ++I)
     if (!I.getOperand().isUndef())
-      UseSlots.push_back(LIS.getInstructionIndex(&*I).getDefIndex());
+      UseSlots.push_back(LIS.getInstructionIndex(&*I).getRegSlot());
 
   array_pod_sort(UseSlots.begin(), UseSlots.end());
 
@@ -351,7 +374,7 @@ VNInfo *SplitEditor::defValue(unsigned RegIdx,
   LiveInterval *LI = Edit->get(RegIdx);
 
   // Create a new value.
-  VNInfo *VNI = LI->getNextValue(Idx, 0, LIS.getVNInfoAllocator());
+  VNInfo *VNI = LI->getNextValue(Idx, LIS.getVNInfoAllocator());
 
   // Use insert for lookup, so we can add missing values with a second lookup.
   std::pair<ValueMap::iterator, bool> InsP =
@@ -366,14 +389,14 @@ VNInfo *SplitEditor::defValue(unsigned RegIdx,
   // If the previous value was a simple mapping, add liveness for it now.
   if (VNInfo *OldVNI = InsP.first->second.getPointer()) {
     SlotIndex Def = OldVNI->def;
-    LI->addRange(LiveRange(Def, Def.getNextSlot(), OldVNI));
+    LI->addRange(LiveRange(Def, Def.getDeadSlot(), OldVNI));
     // No longer a simple mapping.  Switch to a complex, non-forced mapping.
     InsP.first->second = ValueForcePair();
   }
 
   // This is a complex mapping, add liveness for VNI
   SlotIndex Def = VNI->def;
-  LI->addRange(LiveRange(Def, Def.getNextSlot(), VNI));
+  LI->addRange(LiveRange(Def, Def.getDeadSlot(), VNI));
 
   return VNI;
 }
@@ -393,7 +416,7 @@ void SplitEditor::forceRecompute(unsigned RegIdx, const VNInfo *ParentVNI) {
   // This was previously a single mapping. Make sure the old def is represented
   // by a trivial live range.
   SlotIndex Def = VNI->def;
-  Edit->get(RegIdx)->addRange(LiveRange(Def, Def.getNextSlot(), VNI));
+  Edit->get(RegIdx)->addRange(LiveRange(Def, Def.getDeadSlot(), VNI));
   // Mark as complex mapped, forced.
   VFP = ValueForcePair(0, true);
 }
@@ -421,14 +444,12 @@ VNInfo *SplitEditor::defFromParent(unsigned RegIdx,
     CopyMI = BuildMI(MBB, I, DebugLoc(), TII.get(TargetOpcode::COPY), LI->reg)
                .addReg(Edit->getReg());
     Def = LIS.getSlotIndexes()->insertMachineInstrInMaps(CopyMI, Late)
-            .getDefIndex();
+            .getRegSlot();
     ++NumCopies;
   }
 
   // Define the value in Reg.
-  VNInfo *VNI = defValue(RegIdx, ParentVNI, Def);
-  VNI->setCopy(CopyMI);
-  return VNI;
+  return defValue(RegIdx, ParentVNI, Def);
 }
 
 /// Create a new virtual register and live interval.
@@ -497,7 +518,7 @@ SlotIndex SplitEditor::enterIntvAtEnd(MachineBasicBlock &MBB) {
   }
   DEBUG(dbgs() << ": valno " << ParentVNI->id);
   VNInfo *VNI = defFromParent(OpenIdx, ParentVNI, Last, MBB,
-                              LIS.getLastSplitPoint(Edit->getParent(), &MBB));
+                              SA.getLastSplitPointIter(&MBB));
   RegAssign.insert(VNI->def, End, OpenIdx);
   DEBUG(dump());
   return VNI->def;
@@ -586,7 +607,7 @@ SlotIndex SplitEditor::leaveIntvAtTop(MachineBasicBlock &MBB) {
 void SplitEditor::overlapIntv(SlotIndex Start, SlotIndex End) {
   assert(OpenIdx && "openIntv not called before overlapIntv");
   const VNInfo *ParentVNI = Edit->getParent().getVNInfoAt(Start);
-  assert(ParentVNI == Edit->getParent().getVNInfoAt(End.getPrevSlot()) &&
+  assert(ParentVNI == Edit->getParent().getVNInfoBefore(End) &&
          "Parent changes value in extended range");
   assert(LIS.getMBBFromIndex(Start) == LIS.getMBBFromIndex(End) &&
          "Range cannot span basic blocks");
@@ -640,7 +661,7 @@ void SplitEditor::removeBackCopies(SmallVectorImpl<VNInfo*> &Copies) {
       DEBUG(dbgs() << "  cannot find simple kill of RegIdx " << RegIdx << '\n');
       forceRecompute(RegIdx, Edit->getParent().getVNInfoAt(Def));
     } else {
-      SlotIndex Kill = LIS.getInstructionIndex(MBBI).getDefIndex();
+      SlotIndex Kill = LIS.getInstructionIndex(MBBI).getRegSlot();
       DEBUG(dbgs() << "  move kill to " << Kill << '\t' << *MBBI);
       AssignI.setStop(Kill);
     }
@@ -780,7 +801,7 @@ void SplitEditor::hoistCopiesForSize() {
     SlotIndex Last = LIS.getMBBEndIdx(Dom.first).getPrevSlot();
     Dom.second =
       defFromParent(0, ParentVNI, Last, *Dom.first,
-                    LIS.getLastSplitPoint(Edit->getParent(), Dom.first))->def;
+                    SA.getLastSplitPointIter(Dom.first))->def;
   }
 
   // Remove redundant back-copies that are now known to be dominated by another
@@ -958,7 +979,7 @@ void SplitEditor::rewriteAssigned(bool ExtendRanges) {
     // use the same register as the def, so just do that always.
     SlotIndex Idx = LIS.getInstructionIndex(MI);
     if (MO.isDef() || MO.isUndef())
-      Idx = MO.isEarlyClobber() ? Idx.getUseIndex() : Idx.getDefIndex();
+      Idx = Idx.getRegSlot(MO.isEarlyClobber());
 
     // Rewrite to the mapped register at Idx.
     unsigned RegIdx = RegAssign.lookup(Idx);
@@ -981,7 +1002,7 @@ void SplitEditor::rewriteAssigned(bool ExtendRanges) {
       if (!Edit->getParent().liveAt(Idx))
         continue;
     } else
-      Idx = Idx.getUseIndex();
+      Idx = Idx.getRegSlot(true);
 
     getLRCalc(RegIdx).extend(LI, Idx.getNextSlot(), LIS.getSlotIndexes(),
                              &MDT, &LIS.getVNInfoAllocator());
@@ -994,8 +1015,8 @@ void SplitEditor::deleteRematVictims() {
     LiveInterval *LI = *I;
     for (LiveInterval::const_iterator LII = LI->begin(), LIE = LI->end();
            LII != LIE; ++LII) {
-      // Dead defs end at the store slot.
-      if (LII->end != LII->valno->def.getNextSlot())
+      // Dead defs end at the dead slot.
+      if (LII->end != LII->valno->def.getDeadSlot())
         continue;
       MachineInstr *MI = LIS.getInstructionFromIndex(LII->valno->def);
       assert(MI && "Missing instruction for dead def");
@@ -1030,7 +1051,6 @@ void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
     unsigned RegIdx = RegAssign.lookup(ParentVNI->def);
     VNInfo *VNI = defValue(RegIdx, ParentVNI, ParentVNI->def);
     VNI->setIsPHIDef(ParentVNI->isPHIDef());
-    VNI->setCopy(ParentVNI->getCopy());
 
     // Force rematted values to be recomputed everywhere.
     // The new live ranges may be truncated.
@@ -1049,7 +1069,6 @@ void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
     break;
   case SM_Speed:
     llvm_unreachable("Spill mode 'speed' not implemented yet");
-    break;
   }
 
   // Transfer the simply mapped values, check if any are skipped.

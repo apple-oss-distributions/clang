@@ -13,7 +13,7 @@
 #===------------------------------------------------------------------------===#
 
 # Define LLVM specific info and directories based on the autoconf variables
-LLVMPackageName   := @PACKAGE_NAME@
+LLVMPackageName   := @PACKAGE_TARNAME@
 LLVMVersion       := @PACKAGE_VERSION@
 LLVM_CONFIGTIME   := @LLVM_CONFIGTIME@
 
@@ -48,7 +48,7 @@ PROJ_OBJ_ROOT := $(call realpath, $(PROJ_OBJ_DIR)/$(LEVEL))
 
 CLANG_SRC_ROOT  := @CLANG_SRC_ROOT@
 
-ifeq ($(PROJECT_NAME),llvm)
+ifeq ($(PROJECT_NAME),$(LLVMPackageName))
 LLVM_SRC_ROOT   := $(call realpath, @abs_top_srcdir@)
 LLVM_OBJ_ROOT   := $(call realpath, @abs_top_builddir@)
 PROJ_SRC_ROOT   := $(LLVM_SRC_ROOT)
@@ -114,6 +114,7 @@ TARGET_OS=@TARGET_OS@
 
 # Target hardware architecture
 ARCH=@ARCH@
+TARGET_NATIVE_ARCH := $(ARCH)
 
 # Indicates, whether we're cross-compiling LLVM or not
 LLVM_CROSS_COMPILING=@LLVM_CROSS_COMPILING@
@@ -214,6 +215,10 @@ RDYNAMIC := @RDYNAMIC@
 
 # These are options that can either be enabled here, or can be enabled on the
 # make command line (ie, make ENABLE_PROFILING=1):
+
+# When ENABLE_LIBCPP is enabled, LLVM uses libc++ by default to build.
+#ENABLE_LIBCPP = 0
+ENABLE_LIBCPP = @ENABLE_LIBCPP@
 
 # When ENABLE_OPTIMIZED is enabled, LLVM code is optimized and output is put
 # into the "Release" directories. Otherwise, LLVM code is not optimized and
@@ -332,6 +337,8 @@ BINUTILS_INCDIR := @BINUTILS_INCDIR@
 NO_MISSING_FIELD_INITIALIZERS = @NO_MISSING_FIELD_INITIALIZERS@
 # -Wno-variadic-macros
 NO_VARIADIC_MACROS = @NO_VARIADIC_MACROS@
+# -Wcovered-switch-default
+COVERED_SWITCH_DEFAULT = @COVERED_SWITCH_DEFAULT@
 
 # Was polly found in tools/polly?
 LLVM_HAS_POLLY = @LLVM_HAS_POLLY@

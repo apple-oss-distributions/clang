@@ -101,7 +101,7 @@ error_code COFFObjectFile::getSymbolNext(DataRefImpl Symb,
   return getSymbolName(symb, Result);
 }
 
-error_code COFFObjectFile::getSymbolOffset(DataRefImpl Symb,
+error_code COFFObjectFile::getSymbolFileOffset(DataRefImpl Symb,
                                             uint64_t &Result) const {
   const coff_symbol *symb = toSymb(Symb);
   const coff_section *Section = NULL;
@@ -113,7 +113,7 @@ error_code COFFObjectFile::getSymbolOffset(DataRefImpl Symb,
   if (Type == 'U' || Type == 'w')
     Result = UnknownAddressOrSize;
   else if (Section)
-    Result = Section->VirtualAddress + symb->Value;
+    Result = Section->PointerToRawData + symb->Value;
   else
     Result = symb->Value;
   return object_error::success;
@@ -131,11 +131,9 @@ error_code COFFObjectFile::getSymbolAddress(DataRefImpl Symb,
   if (Type == 'U' || Type == 'w')
     Result = UnknownAddressOrSize;
   else if (Section)
-    Result = reinterpret_cast<uintptr_t>(base() +
-                                         Section->PointerToRawData +
-                                         symb->Value);
+    Result = Section->VirtualAddress + symb->Value;
   else
-    Result = reinterpret_cast<uintptr_t>(base() + symb->Value);
+    Result = symb->Value;
   return object_error::success;
 }
 
@@ -145,7 +143,7 @@ error_code COFFObjectFile::getSymbolType(DataRefImpl Symb,
   Result = SymbolRef::ST_Other;
   if (symb->StorageClass == COFF::IMAGE_SYM_CLASS_EXTERNAL &&
       symb->SectionNumber == COFF::IMAGE_SYM_UNDEFINED) {
-    Result = SymbolRef::ST_External;
+    Result = SymbolRef::ST_Unknown;
   } else {
     if (symb->getComplexType() == COFF::IMAGE_SYM_DTYPE_FUNCTION) {
       Result = SymbolRef::ST_Function;
@@ -161,17 +159,27 @@ error_code COFFObjectFile::getSymbolType(DataRefImpl Symb,
   return object_error::success;
 }
 
-error_code COFFObjectFile::isSymbolGlobal(DataRefImpl Symb,
-                                          bool &Result) const {
+error_code COFFObjectFile::getSymbolFlags(DataRefImpl Symb,
+                                          uint32_t &Result) const {
   const coff_symbol *symb = toSymb(Symb);
-  Result = (symb->StorageClass == COFF::IMAGE_SYM_CLASS_EXTERNAL);
-  return object_error::success;
-}
+  Result = SymbolRef::SF_None;
 
-error_code COFFObjectFile::isSymbolWeak(DataRefImpl Symb,
-                                          bool &Result) const {
-  const coff_symbol *symb = toSymb(Symb);
-  Result = (symb->StorageClass == COFF::IMAGE_SYM_CLASS_WEAK_EXTERNAL);
+  // TODO: Correctly set SF_FormatSpecific, SF_ThreadLocal, SF_Common
+
+  if (symb->StorageClass == COFF::IMAGE_SYM_CLASS_EXTERNAL &&
+      symb->SectionNumber == COFF::IMAGE_SYM_UNDEFINED)
+    Result |= SymbolRef::SF_Undefined;
+
+  // TODO: This are certainly too restrictive.
+  if (symb->StorageClass == COFF::IMAGE_SYM_CLASS_EXTERNAL)
+    Result |= SymbolRef::SF_Global;
+
+  if (symb->StorageClass == COFF::IMAGE_SYM_CLASS_WEAK_EXTERNAL)
+    Result |= SymbolRef::SF_Weak;
+
+  if (symb->SectionNumber == COFF::IMAGE_SYM_ABSOLUTE)
+    Result |= SymbolRef::SF_Absolute;
+
   return object_error::success;
 }
 
@@ -226,7 +234,9 @@ error_code COFFObjectFile::getSymbolNMTypeChar(DataRefImpl Symb,
     if (symb->StorageClass == COFF::IMAGE_SYM_CLASS_WEAK_EXTERNAL) {
       Result = 'w';
       return object_error::success; // Don't do ::toupper.
-    } else
+    } else if (symb->Value != 0) // Check for common symbols.
+      ret = 'c';
+    else
       ret = 'u';
     break;
   case COFF::IMAGE_SYM_ABSOLUTE:
@@ -262,26 +272,13 @@ error_code COFFObjectFile::getSymbolNMTypeChar(DataRefImpl Symb,
   return object_error::success;
 }
 
-error_code COFFObjectFile::isSymbolInternal(DataRefImpl Symb,
-                                            bool &Result) const {
-  Result = false;
-  return object_error::success;
-}
-
-error_code COFFObjectFile::isSymbolAbsolute(DataRefImpl Symb,
-                                            bool &Result) const {
-  const coff_symbol *symb = toSymb(Symb);
-  Result = symb->SectionNumber == COFF::IMAGE_SYM_ABSOLUTE;
-  return object_error::success;
-}
-
 error_code COFFObjectFile::getSymbolSection(DataRefImpl Symb,
                                             section_iterator &Result) const {
   const coff_symbol *symb = toSymb(Symb);
   if (symb->SectionNumber <= COFF::IMAGE_SYM_UNDEFINED)
     Result = end_sections();
   else {
-    const coff_section *sec;
+    const coff_section *sec = 0;
     if (error_code ec = getSection(symb->SectionNumber, sec)) return ec;
     DataRefImpl Sec;
     std::memset(&Sec, 0, sizeof(Sec));
@@ -314,7 +311,8 @@ error_code COFFObjectFile::getSectionName(DataRefImpl Sec,
   // Check for string table entry. First byte is '/'.
   if (name[0] == '/') {
     uint32_t Offset;
-    name.substr(1).getAsInteger(10, Offset);
+    if (name.substr(1).getAsInteger(10, Offset))
+      return object_error::parse_failed;
     if (error_code ec = getString(Offset, name))
       return ec;
   }
@@ -387,7 +385,7 @@ error_code COFFObjectFile::sectionContainsSymbol(DataRefImpl Sec,
                                                  bool &Result) const {
   const coff_section *sec = toSec(Sec);
   const coff_symbol *symb = toSymb(Symb);
-  const coff_section *symb_sec;
+  const coff_section *symb_sec = 0;
   if (error_code ec = getSection(symb->SectionNumber, symb_sec)) return ec;
   if (symb_sec == sec)
     Result = true;
@@ -508,6 +506,26 @@ symbol_iterator COFFObjectFile::end_symbols() const {
   return symbol_iterator(SymbolRef(ret, this));
 }
 
+symbol_iterator COFFObjectFile::begin_dynamic_symbols() const {
+  // TODO: implement
+  report_fatal_error("Dynamic symbols unimplemented in COFFObjectFile");
+}
+
+symbol_iterator COFFObjectFile::end_dynamic_symbols() const {
+  // TODO: implement
+  report_fatal_error("Dynamic symbols unimplemented in COFFObjectFile");
+}
+
+library_iterator COFFObjectFile::begin_libraries_needed() const {
+  // TODO: implement
+  report_fatal_error("Libraries needed unimplemented in COFFObjectFile");
+}
+
+library_iterator COFFObjectFile::end_libraries_needed() const {
+  // TODO: implement
+  report_fatal_error("Libraries needed unimplemented in COFFObjectFile");
+}
+
 section_iterator COFFObjectFile::begin_sections() const {
   DataRefImpl ret;
   std::memset(&ret, 0, sizeof(DataRefImpl));
@@ -622,6 +640,11 @@ error_code COFFObjectFile::getRelocationAddress(DataRefImpl Rel,
   Res = toRel(Rel)->VirtualAddress;
   return object_error::success;
 }
+error_code COFFObjectFile::getRelocationOffset(DataRefImpl Rel,
+                                               uint64_t &Res) const {
+  Res = toRel(Rel)->VirtualAddress;
+  return object_error::success;
+}
 error_code COFFObjectFile::getRelocationSymbol(DataRefImpl Rel,
                                                SymbolRef &Res) const {
   const coff_relocation* R = toRel(Rel);
@@ -712,6 +735,16 @@ error_code COFFObjectFile::getRelocationValueString(DataRefImpl Rel,
   if (error_code ec = getSymbolName(sym, symname)) return ec;
   Result.append(symname.begin(), symname.end());
   return object_error::success;
+}
+
+error_code COFFObjectFile::getLibraryNext(DataRefImpl LibData,
+                                          LibraryRef &Result) const {
+  report_fatal_error("getLibraryNext not implemented in COFFObjectFile");
+}
+
+error_code COFFObjectFile::getLibraryPath(DataRefImpl LibData,
+                                          StringRef &Result) const {
+  report_fatal_error("getLibraryPath not implemented in COFFObjectFile");
 }
 
 namespace llvm {

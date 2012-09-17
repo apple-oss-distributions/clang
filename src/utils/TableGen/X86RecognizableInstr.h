@@ -50,6 +50,8 @@ private:
   uint8_t SegOvr;
   /// The hasOpSizePrefix field from the record
   bool HasOpSizePrefix;
+  /// The hasAdSizePrefix field from the record
+  bool HasAdSizePrefix;
   /// The hasREX_WPrefix field from the record
   bool HasREX_WPrefix;
   /// The hasVEXPrefix field from the record
@@ -62,7 +64,9 @@ private:
   bool HasVEX_WPrefix;
   /// Inferred from the operands; indicates whether the L bit in the VEX prefix is set
   bool HasVEX_LPrefix;
-  // The ignoreVEX_L field from the record
+  /// The hasMemOp4Prefix field from the record
+  bool HasMemOp4Prefix;
+  /// The ignoreVEX_L field from the record
   bool IgnoresVEX_L;
   /// The hasLockPrefix field from the record
   bool HasLockPrefix;

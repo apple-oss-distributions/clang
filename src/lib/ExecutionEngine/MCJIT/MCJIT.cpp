@@ -36,7 +36,6 @@ extern "C" void LLVMLinkInMCJIT() {
 ExecutionEngine *MCJIT::createJIT(Module *M,
                                   std::string *ErrorStr,
                                   JITMemoryManager *JMM,
-                                  CodeGenOpt::Level OptLevel,
                                   bool GVsWithCode,
                                   TargetMachine *TM) {
   // Try to register the program as a source of symbols to resolve against.
@@ -46,8 +45,7 @@ ExecutionEngine *MCJIT::createJIT(Module *M,
 
   // If the target supports JIT code generation, create the JIT.
   if (TargetJITInfo *TJ = TM->getJITInfo())
-    return new MCJIT(M, TM, *TJ, new MCJITMemoryManager(JMM, M), OptLevel,
-                     GVsWithCode);
+    return new MCJIT(M, TM, *TJ, new MCJITMemoryManager(JMM, M), GVsWithCode);
 
   if (ErrorStr)
     *ErrorStr = "target does not support JIT code generation";
@@ -55,8 +53,7 @@ ExecutionEngine *MCJIT::createJIT(Module *M,
 }
 
 MCJIT::MCJIT(Module *m, TargetMachine *tm, TargetJITInfo &tji,
-             RTDyldMemoryManager *MM, CodeGenOpt::Level OptLevel,
-             bool AllocateGVsWithCode)
+             RTDyldMemoryManager *MM, bool AllocateGVsWithCode)
   : ExecutionEngine(m), TM(tm), MemMgr(MM), M(m), OS(Buffer), Dyld(MM) {
 
   setTargetData(TM->getTargetData());
@@ -64,7 +61,7 @@ MCJIT::MCJIT(Module *m, TargetMachine *tm, TargetJITInfo &tji,
 
   // Turn the machine code intermediate representation into bytes in memory
   // that may be executed.
-  if (TM->addPassesToEmitMC(PM, Ctx, OS, CodeGenOpt::Default, false)) {
+  if (TM->addPassesToEmitMC(PM, Ctx, OS, false)) {
     report_fatal_error("Target does not support MC emission!");
   }
 
@@ -88,11 +85,11 @@ MCJIT::MCJIT(Module *m, TargetMachine *tm, TargetJITInfo &tji,
 
 MCJIT::~MCJIT() {
   delete MemMgr;
+  delete TM;
 }
 
 void *MCJIT::getPointerToBasicBlock(BasicBlock *BB) {
   report_fatal_error("not yet implemented");
-  return 0;
 }
 
 void *MCJIT::getPointerToFunction(Function *F) {
@@ -211,12 +208,10 @@ GenericValue MCJIT::runFunction(Function *F,
     case Type::FP128TyID:
     case Type::PPC_FP128TyID:
       llvm_unreachable("long double not supported yet");
-      return rv;
     case Type::PointerTyID:
       return PTOGV(((void*(*)())(intptr_t)FPtr)());
     }
   }
 
-  assert(0 && "Full-featured argument passing not supported yet!");
-  return GenericValue();
+  llvm_unreachable("Full-featured argument passing not supported yet!");
 }

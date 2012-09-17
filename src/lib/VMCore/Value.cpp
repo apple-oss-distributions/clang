@@ -66,7 +66,7 @@ Value::~Value() {
   // a <badref>
   //
   if (!use_empty()) {
-    dbgs() << "While deleting: " << *VTy << " %" << getNameStr() << "\n";
+    dbgs() << "While deleting: " << *VTy << " %" << getName() << "\n";
     for (use_iterator I = use_begin(), E = use_end(); I != E; ++I)
       dbgs() << "Use still stuck around after Def is destroyed:"
            << **I << "\n";
@@ -108,6 +108,19 @@ bool Value::hasNUsesOrMore(unsigned N) const {
 /// isUsedInBasicBlock - Return true if this value is used in the specified
 /// basic block.
 bool Value::isUsedInBasicBlock(const BasicBlock *BB) const {
+  // Start by scanning over the instructions looking for a use before we start
+  // the expensive use iteration.
+  unsigned MaxBlockSize = 3;
+  for (BasicBlock::const_iterator I = BB->begin(), E = BB->end(); I != E; ++I) {
+    if (std::find(I->op_begin(), I->op_end(), this) != I->op_end())
+      return true;
+    if (MaxBlockSize-- == 0) // If the block is larger fall back to use_iterator
+      break;
+  }
+
+  if (MaxBlockSize != 0) // We scanned the entire block and found no use.
+    return false;
+
   for (const_use_iterator I = use_begin(), E = use_end(); I != E; ++I) {
     const Instruction *User = dyn_cast<Instruction>(*I);
     if (User && User->getParent() == BB)
@@ -154,10 +167,6 @@ StringRef Value::getName() const {
   // terminated.
   if (!Name) return StringRef("", 0);
   return Name->getKey();
-}
-
-std::string Value::getNameStr() const {
-  return getName().str();
 }
 
 void Value::setName(const Twine &NewName) {
@@ -340,7 +349,8 @@ Value *Value::stripPointerCasts() {
 
 /// isDereferenceablePointer - Test if this value is always a pointer to
 /// allocated and suitably aligned memory for a simple load or store.
-bool Value::isDereferenceablePointer() const {
+static bool isDereferenceablePointer(const Value *V,
+                                     SmallPtrSet<const Value *, 32> &Visited) {
   // Note that it is not safe to speculate into a malloc'd region because
   // malloc may return null.
   // It's also not always safe to follow a bitcast, for example:
@@ -349,20 +359,22 @@ bool Value::isDereferenceablePointer() const {
   // be handled using TargetData to check sizes and alignments though.
 
   // These are obviously ok.
-  if (isa<AllocaInst>(this)) return true;
+  if (isa<AllocaInst>(V)) return true;
 
   // Global variables which can't collapse to null are ok.
-  if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(this))
+  if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(V))
     return !GV->hasExternalWeakLinkage();
 
   // byval arguments are ok.
-  if (const Argument *A = dyn_cast<Argument>(this))
+  if (const Argument *A = dyn_cast<Argument>(V))
     return A->hasByValAttr();
-  
+
   // For GEPs, determine if the indexing lands within the allocated object.
-  if (const GEPOperator *GEP = dyn_cast<GEPOperator>(this)) {
+  if (const GEPOperator *GEP = dyn_cast<GEPOperator>(V)) {
     // Conservatively require that the base pointer be fully dereferenceable.
-    if (!GEP->getOperand(0)->isDereferenceablePointer())
+    if (!Visited.insert(GEP->getOperand(0)))
+      return false;
+    if (!isDereferenceablePointer(GEP->getOperand(0), Visited))
       return false;
     // Check the indices.
     gep_type_iterator GTI = gep_type_begin(GEP);
@@ -394,6 +406,13 @@ bool Value::isDereferenceablePointer() const {
 
   // If we don't know, assume the worst.
   return false;
+}
+
+/// isDereferenceablePointer - Test if this value is always a pointer to
+/// allocated and suitably aligned memory for a simple load or store.
+bool Value::isDereferenceablePointer() const {
+  SmallPtrSet<const Value *, 32> Visited;
+  return ::isDereferenceablePointer(this, Visited);
 }
 
 /// DoPHITranslation - If this value is a PHI node with CurBB as its parent,
@@ -554,7 +573,7 @@ void ValueHandleBase::ValueIsDeleted(Value *V) {
   // All callbacks, weak references, and assertingVHs should be dropped by now.
   if (V->HasValueHandle) {
 #ifndef NDEBUG      // Only in +Asserts mode...
-    dbgs() << "While deleting: " << *V->getType() << " %" << V->getNameStr()
+    dbgs() << "While deleting: " << *V->getType() << " %" << V->getName()
            << "\n";
     if (pImpl->ValueHandles[V]->getKind() == Assert)
       llvm_unreachable("An asserting value handle still pointed to this"
@@ -617,8 +636,8 @@ void ValueHandleBase::ValueIsRAUWd(Value *Old, Value *New) {
       case Tracking:
       case Weak:
         dbgs() << "After RAUW from " << *Old->getType() << " %"
-          << Old->getNameStr() << " to " << *New->getType() << " %"
-          << New->getNameStr() << "\n";
+               << Old->getName() << " to " << *New->getType() << " %"
+               << New->getName() << "\n";
         llvm_unreachable("A tracking or weak value handle still pointed to the"
                          " old value!\n");
       default:

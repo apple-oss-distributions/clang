@@ -145,8 +145,8 @@ EmitTargetCodeForMemset(SelectionDAG &DAG, DebugLoc dl,
                         SDValue Src, SDValue Size,
                         unsigned Align, bool isVolatile,
                         MachinePointerInfo DstPtrInfo) const {
-  // Use default for non AAPCS subtargets
-  if (!Subtarget->isAAPCS_ABI())
+  // Use default for non AAPCS (or Darwin) subtargets
+  if (!Subtarget->isAAPCS_ABI() || Subtarget->isTargetDarwin())
     return SDValue();
 
   const ARMTargetLowering &TLI =
@@ -189,6 +189,7 @@ EmitTargetCodeForMemset(SelectionDAG &DAG, DebugLoc dl,
                     0,     // number of fixed arguments
                     TLI.getLibcallCallingConv(RTLIB::MEMSET), // call conv
                     false, // is tail call
+                    false, // does not return
                     false, // is return val used
                     DAG.getExternalSymbol(TLI.getLibcallName(RTLIB::MEMSET),
                                           TLI.getPointerTy()), // callee

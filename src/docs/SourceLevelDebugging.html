@@ -53,6 +53,19 @@
     <li><a href="#ccxx_composite_types">C/C++ struct/union types</a></li>
     <li><a href="#ccxx_enumeration_types">C/C++ enumeration types</a></li>
   </ol></li>
+  <li><a href="#llvmdwarfextension">LLVM Dwarf Extensions</a>
+    <ol>
+      <li><a href="#objcproperty">Debugging Information Extension 
+	  for Objective C Properties</a></li>
+      <ul>
+	<li><a href="#objcpropertyintroduction">Introduction</a></li>
+	<li><a href="#objcpropertyproposal">Proposal</a></li>
+	<li><a href="#objcpropertynewattributes">New DWARF Attributes</a></li>
+	<li><a href="#objcpropertynewconstants">New DWARF Constants</a></li>
+      </ul>
+
+    </ol>
+  </li>
 </ul>
 </td>
 <td class="right">
@@ -429,11 +442,12 @@ global variables are collected by named metadata <tt>!llvm.dbg.gv</tt>.</p>
   metadata, ;; Reference to type descriptor
   i1,       ;; True if the global is local to compile unit (static)
   i1,       ;; True if the global is defined in the compile unit (not extern)
+  i32,      ;; Line number where the scope of the subprogram begins
   i32,      ;; Virtuality, e.g. dwarf::DW_VIRTUALITY__virtual
   i32,      ;; Index into a virtual function
   metadata, ;; indicates which base type contains the vtable pointer for the 
             ;; derived class
-  i1,       ;; isArtificial
+  i32,      ;; Flags - Artifical, Private, Protected, Explicit, Prototyped.
   i1,       ;; isOptimized
   Function *,;; Pointer to LLVM function
   metadata, ;; Lists function template parameters
@@ -446,8 +460,6 @@ global variables are collected by named metadata <tt>!llvm.dbg.gv</tt>.</p>
 <p>These descriptors provide debug information about functions, methods and
    subprograms.  They provide details such as name, return types and the source
    location where the subprogram is defined.
-   All subprogram descriptors are collected by a named metadata 
-   <tt>!llvm.dbg.sp</tt>.
 </p>
 
 </div>
@@ -561,8 +573,9 @@ DW_ATE_unsigned_char = 8
   i64,      ;; Size in bits
   i64,      ;; Alignment in bits
   i64,      ;; Offset in bits
+  i32,      ;; Flags to encode attributes, e.g. private
   metadata, ;; Reference to type derived from
-  metadata, ;; (optional) Name of the Objective C property assoicated with 
+  metadata, ;; (optional) Name of the Objective C property associated with 
             ;; Objective-C an ivar 
   metadata, ;; (optional) Name of the Objective C property getter selector.
   metadata, ;; (optional) Name of the Objective C property setter selector.
@@ -597,9 +610,9 @@ DW_TAG_restrict_type    = 55
 
 <p><tt>DW_TAG_typedef</tt> is used to provide a name for the derived type.</p>
 
-<p><tt>DW_TAG_pointer_type</tt>,<tt>DW_TAG_reference_type</tt>,
-   <tt>DW_TAG_const_type</tt>, <tt>DW_TAG_volatile_type</tt>
-   and <tt>DW_TAG_restrict_type</tt> are used to qualify
+<p><tt>DW_TAG_pointer_type</tt>, <tt>DW_TAG_reference_type</tt>, 
+   <tt>DW_TAG_const_type</tt>, <tt>DW_TAG_volatile_type</tt> and 
+   <tt>DW_TAG_restrict_type</tt> are used to qualify
    the <a href="#format_derived_type">derived type</a>. </p>
 
 <p><a href="#format_derived_type">Derived type</a> location can be determined
@@ -820,9 +833,9 @@ DW_TAG_return_variable = 258
   void %<a href="#format_common_declare">llvm.dbg.declare</a>(metadata, metadata)
 </pre>
 
-<p>This intrinsic provides information about a local element (ex. variable.) The
-   first argument is metadata holding alloca for the variable. The
-   second argument is metadata containing description of the variable. </p>
+<p>This intrinsic provides information about a local element (e.g., variable). The
+   first argument is metadata holding the alloca for the variable. The
+   second argument is metadata containing a description of the variable.</p>
 </div>
 
 <!-- ======================================================================= -->
@@ -838,8 +851,8 @@ DW_TAG_return_variable = 258
 <p>This intrinsic provides information when a user source variable is set to a
    new value.  The first argument is the new value (wrapped as metadata).  The
    second argument is the offset in the user source variable where the new value
-   is written.  The third argument is metadata containing description of the
-   user source variable. </p>
+   is written.  The third argument is metadata containing a description of the
+   user source variable.</p>
 </div>
 
 </div>
@@ -1801,6 +1814,307 @@ enum Trees {
 
 </div>
 
+</div>
+
+
+<!-- *********************************************************************** -->
+<h2>
+  <a name="llvmdwarfextension">Debugging information format</a>
+</h2>
+<!-- *********************************************************************** -->
+<div>
+<!-- ======================================================================= -->
+<h3>
+  <a name="objcproperty">Debugging Information Extension for Objective C
+Properties</a></li>
+</h3>
+<div>
+<!-- *********************************************************************** -->
+<h4>
+  <a name="objcpropertyintroduction">Introduction</a>
+</h4>
+<!-- *********************************************************************** -->
+
+<div>
+<p>Objective C provides a simpler way to declare and define accessor methods 
+using declared properties. The language provides features to declare a 
+property and to let compiler synthesize accessor methods.
+</p>
+
+<p>The debugger lets developer inspect Objective C interfaces and their 
+instance variables and class variables. However, the debugger does not know 
+anything about the properties defined in Objective C interfaces. The debugger
+consumes information generated by compiler in DWARF format. The format does 
+not support encoding of Objective C properties. This proposal describes DWARF
+extensions to encode Objective C properties, which the debugger can use to let
+developers inspect Objective C properties.
+</p>
+
+</div>
+
+
+<!-- *********************************************************************** -->
+<h4>
+  <a name="objcpropertyproposal">Proposal</a>
+</h4>
+<!-- *********************************************************************** -->
+
+<div>
+<p>Objective C properties exist separately from class members. A property
+can be defined only by &quot;setter&quot; and &quot;getter&quot; selectors, and 
+be calculated anew on each access.  Or a property can just be a direct access 
+to some declared ivar.  Finally it can have an ivar &quot;automatically 
+synthesized&quot; for it by the compiler, in which case the property can be 
+referred to in user code directly using the standard C dereference syntax as 
+well as through the property &quot;dot&quot; syntax, but there is no entry in 
+the @interface declaration corresponding to this ivar.
+</p>
+<p>
+To facilitate debugging, these properties we will add a new DWARF TAG into the 
+DW_TAG_structure_type definition for the class to hold the description of a 
+given property, and a set of DWARF attributes that provide said description.
+The property tag will also contain the name and declared type of the property.  
+</p>
+<p>
+If there is a related ivar, there will also be a DWARF property attribute placed 
+in the DW_TAG_member DIE for that ivar referring back to the property TAG for 
+that property. And in the case where the compiler synthesizes the ivar directly, 
+the compiler is expected to generate a DW_TAG_member for that ivar (with the 
+DW_AT_artificial set to 1), whose name will be the name used to access this 
+ivar directly in code, and with the property attribute pointing back to the 
+property it is backing.
+</p>
+<p>
+The following examples will serve as illustration for our discussion:
+</p>
+
+<div class="doc_code">
+<pre>
+@interface I1 { 
+  int n2;
+} 
+
+@property int p1; 
+@property int p2; 
+@end
+
+@implementation I1 
+@synthesize p1; 
+@synthesize p2 = n2; 
+@end
+</pre>
+</div>
+
+<p>
+This produces the following DWARF (this is a &quot;pseudo dwarfdump&quot; output):
+</p>
+<div class="doc_code">
+<pre>
+0x00000100:  TAG_structure_type [7] * 
+               AT_APPLE_runtime_class( 0x10 )
+               AT_name( "I1" )
+               AT_decl_file( "Objc_Property.m" ) 
+               AT_decl_line( 3 )
+
+0x00000110    TAG_APPLE_property
+                AT_name ( "p1" )
+                AT_type ( {0x00000150} ( int ) )
+
+0x00000120:   TAG_APPLE_property
+                AT_name ( "p2" )
+                AT_type ( {0x00000150} ( int ) )
+
+0x00000130:   TAG_member [8] 
+                AT_name( "_p1" )
+                AT_APPLE_property ( {0x00000110} "p1" )
+                AT_type( {0x00000150} ( int ) )
+                AT_artificial ( 0x1 )
+
+0x00000140:    TAG_member [8] 
+                 AT_name( "n2" )
+                 AT_APPLE_property ( {0x00000120} "p2" )
+                 AT_type( {0x00000150} ( int ) )
+
+0x00000150:  AT_type( ( int ) )
+</pre>
+</div>
+
+<p> Note, the current convention is that the name of the ivar for an 
+auto-synthesized property is the name of the property from which it derives with
+an underscore prepended, as is shown in the example.
+But we actually don't need to know this convention, since we are given the name
+of the ivar directly.
+</p>
+
+<p>
+Also, it is common practice in ObjC to have different property declarations in 
+the @interface and @implementation - e.g. to provide a read-only property in 
+the interface,and a read-write interface in the implementation.  In that case, 
+the compiler should emit whichever property declaration will be in force in the 
+current translation unit.
+</p>
+
+<p> Developers can decorate a property with attributes which are encoded using 
+DW_AT_APPLE_property_attribute.
+</p>
+
+<div class="doc_code">
+<pre>
+@property (readonly, nonatomic) int pr;
+</pre>
+</div>
+<p>
+Which produces a property tag:
+<p>
+<div class="doc_code">
+<pre>
+TAG_APPLE_property [8] 
+  AT_name( "pr" ) 
+  AT_type ( {0x00000147} (int) ) 
+  AT_APPLE_property_attribute (DW_APPLE_PROPERTY_readonly, DW_APPLE_PROPERTY_nonatomic)
+</pre>
+</div>
+
+<p> The setter and getter method names are attached to the property using 
+DW_AT_APPLE_property_setter and DW_AT_APPLE_property_getter attributes.
+</p>
+<div class="doc_code">
+<pre>
+@interface I1 
+@property (setter=myOwnP3Setter:) int p3; 
+-(void)myOwnP3Setter:(int)a; 
+@end
+
+@implementation I1 
+@synthesize p3;
+-(void)myOwnP3Setter:(int)a{ } 
+@end
+</pre>
+</div>
+
+<p>
+The DWARF for this would be:
+</p>
+<div class="doc_code">
+<pre>
+0x000003bd: TAG_structure_type [7] * 
+              AT_APPLE_runtime_class( 0x10 )
+              AT_name( "I1" )
+              AT_decl_file( "Objc_Property.m" ) 
+              AT_decl_line( 3 )
+
+0x000003cd      TAG_APPLE_property
+                  AT_name ( "p3" )
+                  AT_APPLE_property_setter ( "myOwnP3Setter:" )
+                  AT_type( {0x00000147} ( int ) )
+              
+0x000003f3:     TAG_member [8] 
+                  AT_name( "_p3" ) 
+                  AT_type ( {0x00000147} ( int ) )
+                  AT_APPLE_property ( {0x000003cd} )
+                  AT_artificial ( 0x1 )
+</pre>
+</div>
+
+</div>
+
+<!-- *********************************************************************** -->
+<h4>
+  <a name="objcpropertynewtags">New DWARF Tags</a>
+</h4>
+<!-- *********************************************************************** -->
+
+<div>
+<table border="1" cellspacing="0">
+  <tr>
+    <th width=200 >TAG</th>
+    <th width=200 >Value</th>
+  </tr>
+  <tr>
+    <td width=200 >DW_TAG_APPLE_property</td>
+    <td width=200 >0x4200</td>
+  </tr>
+</table>
+
+</div>
+
+<!-- *********************************************************************** -->
+<h4>
+  <a name="objcpropertynewattributes">New DWARF Attributes</a>
+</h4>
+<!-- *********************************************************************** -->
+
+<div>
+<table border="1" cellspacing="0">
+  <tr>
+    <th width=200 >Attribute</th>
+    <th width=200 >Value</th>
+    <th width=200 >Classes</th>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_property</td>
+    <td width=200 >0x3fed</td>
+    <td width=200 >Reference</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_property_getter</td>
+    <td width=200 >0x3fe9</td>
+    <td width=200 >String</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_property_setter</td>
+    <td width=200 >0x3fea</td>
+    <td width=200 >String</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_property_attribute</td>
+    <td width=200 >0x3feb</td>
+    <td width=200 >Constant</td>
+  </tr>
+</table>
+
+</div>
+
+<!-- *********************************************************************** -->
+<h4>
+  <a name="objcpropertynewconstants">New DWARF Constants</a>
+</h4>
+<!-- *********************************************************************** -->
+
+<div>
+<table border="1" cellspacing="0">
+  <tr>
+    <th width=200 >Name</th>
+    <th width=200 >Value</th>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_PROPERTY_readonly</td>
+    <td width=200 >0x1</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_PROPERTY_readwrite</td>
+    <td width=200 >0x2</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_PROPERTY_assign</td>
+    <td width=200 >0x4</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_PROPERTY_retain</td>
+    <td width=200 >0x8</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_PROPERTY_copy</td>
+    <td width=200 >0x10</td>
+  </tr>
+  <tr>
+    <td width=200 >DW_AT_APPLE_PROPERTY_nonatomic</td>
+    <td width=200 >0x20</td>
+  </tr>
+</table>
+
+</div>
+</div>
 </div>
 
 <!-- *********************************************************************** -->

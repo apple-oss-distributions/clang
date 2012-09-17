@@ -1,10 +1,10 @@
-//===- PPCInstrInfo.td - The PowerPC Instruction Set -------*- tablegen -*-===//
-// 
+//===-- PPCInstrInfo.td - The PowerPC Instruction Set ------*- tablegen -*-===//
+//
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
-// 
+//
 //===----------------------------------------------------------------------===//
 //
 // This file describes the subset of the 32-bit PowerPC instruction set, as used
@@ -349,7 +349,7 @@ def iaddroff : ComplexPattern<iPTR, 1, "SelectAddrImmOffs", [], []>;
 
 //===----------------------------------------------------------------------===//
 // PowerPC Instruction Predicate Definitions.
-def FPContractions : Predicate<"!NoExcessFPPrecision">;
+def FPContractions : Predicate<"!TM.Options.NoExcessFPPrecision">;
 def In32BitMode  : Predicate<"!PPCSubTarget.isPPC64()">;
 def In64BitMode  : Predicate<"PPCSubTarget.isPPC64()">;
 def IsBookE  : Predicate<"PPCSubTarget.isBookE()">;
@@ -399,7 +399,14 @@ let usesCustomInserter = 1,    // Expanded after instruction selection.
 
 // SPILL_CR - Indicate that we're dumping the CR register, so we'll need to
 // scavenge a register for it.
-def SPILL_CR : Pseudo<(outs), (ins GPRC:$cond, memri:$F),
+let mayStore = 1 in
+def SPILL_CR : Pseudo<(outs), (ins CRRC:$cond, memri:$F),
+                     "", []>;
+
+// RESTORE_CR - Indicate that we're restoring the CR register (previously
+// spilled), so we'll need to scavenge a register for it.
+let mayLoad = 1 in
+def RESTORE_CR : Pseudo<(outs CRRC:$cond), (ins memri:$F),
                      "", []>;
 
 let isTerminator = 1, isBarrier = 1, PPC970_Unit = 7 in {
@@ -1091,7 +1098,7 @@ def MFVRSAVE : XFXForm_1_ext<31, 339, 256, (outs GPRC:$rT), (ins),
                              "mfspr $rT, 256", IntGeneral>,
                PPC970_DGroup_First, PPC970_Unit_FXU;
 
-def MTCRF : XFXForm_5<31, 144, (outs), (ins crbitm:$FXM, GPRC:$rS),
+def MTCRF : XFXForm_5<31, 144, (outs crbitm:$FXM), (ins GPRC:$rS),
                       "mtcrf $FXM, $rS", BrMCRX>,
             PPC970_MicroCode, PPC970_Unit_CRU;
 

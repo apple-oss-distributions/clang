@@ -24,7 +24,7 @@
 #include "clang/Analysis/CFG.h"
 #include "clang/Analysis/CFGStmtMap.h"
 #include "clang/Analysis/Support/BumpVector.h"
-#include "clang/Analysis/Support/SaveAndRestore.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -179,8 +179,8 @@ CFGReverseBlockReachabilityAnalysis *AnalysisDeclContext::getCFGReachablityAnaly
   return 0;
 }
 
-void AnalysisDeclContext::dumpCFG() {
-    getCFG()->dump(getASTContext().getLangOptions());
+void AnalysisDeclContext::dumpCFG(bool ShowColors) {
+    getCFG()->dump(getASTContext().getLangOpts(), ShowColors);
 }
 
 ParentMap &AnalysisDeclContext::getParentMap() {
@@ -353,7 +353,7 @@ public:
         Visit(child);
   }
 
-  void VisitDeclRefExpr(const DeclRefExpr *DR) {
+  void VisitDeclRefExpr(DeclRefExpr *DR) {
     // Non-local variables are also directly modified.
     if (const VarDecl *VD = dyn_cast<VarDecl>(DR->getDecl()))
       if (!VD->hasLocalStorage()) {
@@ -362,24 +362,30 @@ public:
           flag = 1;
           BEVals.push_back(VD, BC);
         }
+      } else if (DR->refersToEnclosingLocal()) {
+        unsigned &flag = Visited[VD];
+        if (!flag) {
+          flag = 1;
+          if (IsTrackedDecl(VD))
+            BEVals.push_back(VD, BC);
+        }
       }
-  }
-
-  void VisitBlockDeclRefExpr(BlockDeclRefExpr *DR) {
-    if (const VarDecl *VD = dyn_cast<VarDecl>(DR->getDecl())) {
-      unsigned &flag = Visited[VD];
-      if (!flag) {
-        flag = 1;
-        if (IsTrackedDecl(VD))
-          BEVals.push_back(VD, BC);
-      }
-    }
   }
 
   void VisitBlockExpr(BlockExpr *BR) {
     // Blocks containing blocks can transitively capture more variables.
     IgnoredContexts.insert(BR->getBlockDecl());
     Visit(BR->getBlockDecl()->getBody());
+  }
+  
+  void VisitPseudoObjectExpr(PseudoObjectExpr *PE) {
+    for (PseudoObjectExpr::semantics_iterator it = PE->semantics_begin(), 
+         et = PE->semantics_end(); it != et; ++it) {
+      Expr *Semantic = *it;
+      if (OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(Semantic))
+        Semantic = OVE->getSourceExpr();
+      Visit(Semantic);
+    }
   }
 };
 } // end anonymous namespace

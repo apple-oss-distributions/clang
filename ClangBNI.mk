@@ -24,18 +24,36 @@
 #   Clang_Linker_Options := ...
 #     The linker flags to use.
 
-# This makefile currently supports the following build targets:
-#
-#   install-clang	 - Build the Clang compiler.
-#   install-cross	 - Build the Clang compiler, for ARM.
-#   install-clang-links	 - Install links from a platforms subdirectory to the
-#                          root clang.
-#
-# The default build target is 'install-clang'.
-#
 # Particular build targets (which correspond to project configurations) may
 # override various defaults based on what makes sense to build/install for that
 # particular target.
+
+##
+# Default target.
+
+all: help
+
+help:
+	@echo "usage: make [{VARIABLE=VALUE}*] <target>"
+	@echo
+	@echo "The Apple Clang makefile is primarily intended for use with XBS."
+	@echo
+	@echo "Supported B&I related targets are:"
+	@echo "  installsrc    -- Copy source files from the current" \
+	      "directory to the SRCROOT."
+	@echo "  clean         -- Does nothing, just for XBS support."
+	@echo "  installhdrs   -- Does nothing, just for XBS support."
+	@echo "  install       -- Alias for install-clang."
+	@echo "  install-clang -- Build the Apple Clang compiler."
+	@echo "  install-cross -- Build the Apple Clang compiler, for ARM."
+	@echo "  install-clang-links"
+	@echo "                -- Install links from a platforms subdirectory" \
+	      "to the root clang."
+	@echo
+	@echo "The Makefile also supports the following utility targets:"
+	@echo "  commit-buildbot-order-file -- order file update utility"
+	@echo "    This command is for use with buildbot, it copies back a"
+	@echo "    generated order file to the "
 
 ##
 # Variable defaults.
@@ -94,34 +112,19 @@ endif
 # B&I Build Logic
 ##
 
-# Require Train_Name to be set.
-ifeq ($(Train_Name),)
-$(error "invalid setting for train name: '$(Train_Name)'")
-endif
-
-# Require Source_To_Draw_From to be set to a known value.
-ifeq ($(Source_To_Draw_From),trunk)
-Draw_LLVM_From_Trunk := 1
-Draw_Clang_From_Trunk := 1
-else ifeq ($(Source_To_Draw_From),branch)
-Draw_LLVM_From_Trunk := 0
-Draw_Clang_From_Trunk := 0
-else ifeq ($(Source_To_Draw_From),branch-llvm-only)
-Draw_LLVM_From_Trunk := 0
-Draw_Clang_From_Trunk := 1
-else
-$(error "invalid setting for source to draw from: '$(Source_To_Draw_From)'")
-endif
-
 # Require Clang_Version to be set.
 ifeq ($(Clang_Version),)
 $(error "invalid setting for clang version: '$(Clang_Version)'")
 endif
 
-# Set RC_ProjectSourceVersion, if unspecified, and a real target.
+# Set RC_ProjectSourceVersion, if unspecified, and a real target (i.e. not one
+# of installsrc, clean, help, the default target, or any utility target).
 ifeq ($(RC_ProjectSourceVersion),)
 ifeq ($(MAKECMDGOALS),installsrc)
 else ifeq ($(MAKECMDGOALS),clean)
+else ifeq ($(MAKECMDGOALS),help)
+else ifeq ($(MAKECMDGOALS),)
+else ifeq ($(MAKECMDGOALS),commit-buildbot-order-file)
 else
 $(error "B&I build variable RC_ProjectSourceVersion must be set")
 endif
@@ -133,22 +136,34 @@ RC_ProjectNameAndSourceVersion := "clang-$(RC_ProjectSourceVersion)"
 endif
 Clang_Tag := "tags/Apple/$(RC_ProjectNameAndSourceVersion)"
 
+# Select optimized mode.
+ifeq ($(Clang_Use_Optimized), 1)
+Optimized_Configure_Flag :=  --enable-optimized
+Build_Mode := Release
+else ifeq ($(Clang_Use_Optimized), 0)
+Optimized_Configure_Flag :=  --disable-optimized
+Build_Mode := Debug
+else
+$(error "invalid setting for clang optimized: '$(Clang_Use_Optimized)'")
+endif
+
 # Select assertions mode.
 ifeq ($(Clang_Use_Assertions), 1)
 Assertions_Configure_Flag :=  --enable-assertions
+Build_Mode := $(Build_Mode)+Asserts
 else ifeq ($(Clang_Use_Assertions), 0)
 Assertions_Configure_Flag :=  --disable-assertions
 else
 $(error "invalid setting for clang assertions: '$(Clang_Use_Assertions)'")
 endif
 
-# Select optimized mode.
-ifeq ($(Clang_Use_Optimized), 1)
-Optimized_Configure_Flag :=  --enable-optimized
-else ifeq ($(Clang_Use_Optimized), 0)
-Optimized_Configure_Flag :=  --disable-optimized
+# Select final build target based on automatic order file generation.
+ifeq ($(Clang_Autogenerate_Order_File), 1)
+Final_Build_Target := build-clang_final_ordered
+else ifeq ($(Clang_Autogenerate_Order_File), 0)
+Final_Build_Target := build-clang_final
 else
-$(error "invalid setting for clang optimized: '$(Clang_Use_Optimized)'")
+$(error "invalid setting for clang autogenerate order file: '$(Clang_Autogenerate_Order_File)'")
 endif
 
 # Select whether to build everything (for testing purposes).
@@ -165,8 +180,20 @@ Clang_Make_Variables := $(Extra_Make_Variables) KEEP_SYMBOLS=1 \
                         CLANG_VENDOR=Apple \
                         CLANG_VENDOR_UTI=com.apple.compilers.llvm.clang
 Clang_Make_Variables += CLANG_VERSION=$(Clang_Version)
+
+# If CLANG_REPOSITORY_STRING has been set via an argument to buildit, use that
+# (and expect an SVN_REVISION to have been provided), otherwise we use the tag
+# name.
+ifdef CLANG_REPOSITORY_STRING
+ifndef SVN_REVISION
+$(error "not setting for SVN_REVISION (required with CLANG_REPOSITORY_STRING)")
+endif
+Clang_Make_Variables += CLANG_REPOSITORY_STRING=$(CLANG_REPOSITORY_STRING)
+Clang_Make_Variables += SVN_REVISION=$(SVN_REVISION)
+else
 Clang_Make_Variables += CLANG_REPOSITORY_STRING=$(Clang_Tag)
-Clang_Make_Variables += CLANG_ORDER_FILE=$(SRCROOT)/clang.order
+endif
+
 ifeq ($(Clang_Driver_Mode), Production)
 Clang_Make_Variables += CLANG_IS_PRODUCTION=1
 
@@ -191,11 +218,8 @@ else
 $(error "invalid setting for default install root: '$(Default_Install_Root)'")
 endif
 
-# Set Install_Prefix and validate it exists.
+# Set Install_Prefix.
 Install_Prefix := $(Install_Root)
-ifneq (OK, $(shell test -d $(Install_Prefix) && echo "OK"))
-  $(error "invalid install prefix: '$(Install_Prefix)'")
-endif
 
 ifneq ($(Install_Path_Suffix),)
 Install_Prefix := $(Install_Prefix)/$(Install_Path_Suffix)
@@ -229,7 +253,7 @@ Common_Configure_Flags = \
 		  $(Assertions_Configure_Flag) \
 		  $(Optimized_Configure_Flag) \
                   --with-optimize-option="$(Clang_Optimize_Option)" \
-                  --with-extra-ld-option="$(Clang_Linker_Options)" \
+                  --with-extra-ld-options="$(Clang_Linker_Options)" \
 		  --without-llvmgcc --without-llvmgxx \
 		  --disable-bindings \
 		  --disable-doxygen \
@@ -286,142 +310,6 @@ Build_Target = $(Clang_Make_Variables) $(Clang_Build_Target)
 Install_Target_Stage1 = $(Clang_Make_Variables) install-clang
 Build_Target_Stage1 = $(Clang_Make_Variables) clang-only
 
-# Set default target.
-
-all: install
-
-###
-# Utility targets for managing the integration branch.
-
-# Determine if we are running an SVN utility target.
-SVN_UTILITY_TARGETS := \
-	test-svn update-sources update-sources-from-tag \
-	rebranch-llvm-from-tag rebranch-clang-from-tag \
-	rebranch-clang-from-revision \
-	tag-clang retag-clang
-ifneq ($(strip $(foreach i,$(SVN_UTILITY_TARGETS), $(filter $(i),$(MAKECMDGOALS)))),)
-SVN_UTILITY_MODE := 1
-$(warning NOTE: Running SVN utility target. Be careful!)
-$(warning )
-endif
-
-ifeq ($(SVN_UTILITY_MODE),1)
-SVN_BASE := $(shell svn info | sed -n 's/^URL: //; s,/llvm-project/.*$$,/llvm-project,p')
-SVN_CLANG := $(shell svn info | sed -n 's/^URL: //p')
-SVN_TAGS := $(SVN_BASE)/cfe/tags/Apple
-
-$(warning Using SVN base     : $(SVN_BASE))
-$(warning Using Clang SVN    : $(SVN_CLANG))
-$(warning Using SVN tag dir  : $(SVN_TAGS))
-$(warning )
-
-# Validate that we match the expected branch name, as a safety/sanity check.
-ifneq ($(SVN_CLANG),$(SVN_BASE)/cfe/branches/Apple/$(Train_Name)-IB)
-$(error Unable to recognize SVN layout, conservatively refusing to do anything.)
-endif
-
-# Define the upstream paths.
-LLVM_Branch_Path := $(SVN_BASE)/llvm/branches/Apple/$(Train_Name)
-Clang_Branch_Path := $(SVN_BASE)/cfe/branches/Apple/$(Train_Name)
-
-ifeq ($(Draw_LLVM_From_Trunk),1)
-LLVM_Upstream := $(SVN_BASE)/llvm/trunk
-else
-LLVM_Upstream := $(LLVM_Branch_Path)
-endif
-
-ifeq ($(Draw_Clang_From_Trunk),1)
-Clang_Upstream := $(SVN_BASE)/cfe/trunk
-else
-Clang_Upstream := $(Clang_Branch_Path)
-endif
-
-CompilerRT_Upstream := $(SVN_BASE)/compiler-rt/trunk
-
-# Print information on the upstream sources.
-$(warning LLVM Upstream      : $(LLVM_Upstream))
-$(warning Clang Upstream     : $(Clang_Upstream))
-$(warning CompilerRT Upstream: $(CompilerRT_Upstream))
-$(warning )
-
-# Only actually do anything when EXECUTE=1
-ifeq ($(EXECUTE), 1)
-SVN_COMMAND := svn
-else
-$(warning Not in commit mode, only echoing commands (use EXECUTE=1 to execute).)
-$(warning )
-SVN_COMMAND := @echo svn
-endif
-
-else
-SVN_COMMAND := @echo "NOT IN SVN COMMAND MODE!!!"
-endif
-
-test-svn:
-	@echo "*** TESTING SVN UTILITY MODE ***"
-	$(SVN_COMMAND) info $(SVN_BASE)
-
-update-sources:
-	@if ! [ -n "$(REVISION)" ]; then \
-	  echo Usage: make $@ REVISION=102052; \
-	  false; \
-	fi
-	$(SVN_COMMAND) rm -m 'Update.' $(SVN_CLANG)/src
-	$(SVN_COMMAND) cp -m 'Update.' $(LLVM_Upstream)@$(REVISION) $(SVN_CLANG)/src
-	$(SVN_COMMAND) cp -m 'Update.' $(Clang_Upstream)@$(REVISION) $(SVN_CLANG)/src/tools/clang
-	$(SVN_COMMAND) cp -m 'Update.' $(CompilerRT_Upstream)@$(REVISION) $(SVN_CLANG)/src/projects/compiler-rt
-	$(SVN_COMMAND) up
-
-update-sources-from-tag:
-	@if ! [ -n "$(VERSION)" ]; then \
-	  echo Usage: make $@ VERSION=122; \
-	  false; \
-	fi
-	$(SVN_COMMAND) rm -m 'Update.' $(SVN_CLANG)/src
-	$(SVN_COMMAND) cp -m 'Update from clang-$(VERSION).' $(SVN_TAGS)/clang-$(VERSION)/src $(SVN_CLANG)/src
-	$(SVN_COMMAND) up
-
-rebranch-llvm-from-tag:
-	@if ! [ -n "$(VERSION)" ]; then \
-	  echo Usage: make $@ VERSION=65; \
-	  false; \
-	fi
-	$(SVN_COMMAND) rm -m 'Remove for branch of LLVM.' $(LLVM_Branch_Path)
-	$(SVN_COMMAND) cp -m 'Rebranch LLVM from clang-$(VERSION).' $(SVN_TAGS)/clang-$(VERSION)/src $(LLVM_Branch_Path)
-	$(SVN_COMMAND) rm -m 'Rebranch LLVM from clang-$(VERSION) (cleanup 1/2)' $(LLVM_Branch_Path)/tools/clang
-	$(SVN_COMMAND) rm -m 'Rebranch LLVM from clang-$(VERSION) (cleanup 2/2)' $(LLVM_Branch_Path)/projects/compiler-rt
-
-rebranch-clang-from-tag:
-	@if ! [ -n "$(VERSION)" ]; then \
-	  echo Usage: make $@ VERSION=65; \
-	  false; \
-	fi
-	$(SVN_COMMAND) rm -m 'Remove for branch of Clang.' $(Clang_Branch_Path)
-	$(SVN_COMMAND) cp -m 'Rebranch Clang from clang-$(VERSION).' $(SVN_TAGS)/clang-$(VERSION)/src/tools/clang $(Clang_Branch_Path)
-
-rebranch-clang-from-revision:
-	@if ! [ -n "$(REVISION)" ]; then \
-	  echo Usage: make $@ REVISION=100000; \
-	  false; \
-	fi
-	$(SVN_COMMAND) rm -m 'Remove for branch of Clang.' $(Clang_Branch_Path)
-	$(SVN_COMMAND) cp -m 'Rebranch Clang from clang trunk at r$(REVISION).' $(SVN_BASE)/cfe/trunk@$(REVISION) $(Clang_Branch_Path)
-
-tag-clang:
-	@if ! [ -n "$(VERSION)" ]; then \
-	  echo Usage: make $@ VERSION=25; \
-	  false; \
-	fi
-	$(SVN_COMMAND) cp -m 'Tag.' $(SVN_CLANG) $(SVN_TAGS)/clang-$(VERSION)
-
-retag-clang:
-	@if ! [ -n "$(VERSION)" ]; then \
-	  echo Usage: make $@ VERSION=25; \
-	  false; \
-	fi
-	$(SVN_COMMAND) rm -m 'Retag.' $(SVN_TAGS)/clang-$(VERSION)
-	$(SVN_COMMAND) cp -m 'Retag.' $(SVN_CLANG) $(SVN_TAGS)/clang-$(VERSION)
-
 ##
 # Additional Tool Paths
 
@@ -439,12 +327,6 @@ XARGS		:= /usr/bin/xargs
 # happens to use make for a sub-task. For that reason, we redefine MAKE to not
 # propagate overrides.
 MAKE            := env MAKEFLAGS= $(MAKE_COMMAND)
-
-## 
-# Tool Variables
-
-Cruft      = CVS RCS SCCS *~ .*~ .nfs\* .*.wmd .svn .DS_Store
-Find_Cruft = '(' $(Cruft:%=-name '%' -or) -name '' ')' -print
 
 ##
 # Assorted variables
@@ -465,41 +347,50 @@ PATH := ${OBJROOT}/bin:${PATH}
 ##
 # Build Logic
 
-.PHONY: all install installsrc installhdrs clean
+.PHONY: all help install installsrc installhdrs clean
 
 SYSCTL := $(shell if [ `sysctl -n hw.activecpu` -ge 8 -a `sysctl -n hw.memsize` -le 2147483648 ]; then echo 4; else sysctl -n hw.activecpu; fi)
 
 # Default is to build Clang.
 install: install-clang
 
-clean:
-
+# We install the source using rsync. We take particular care to:
+#
+#   1. Exclude any source control files.
+#
+#   2. Exclude any editor or OS cruft.
+#
+#   3. Exclude any build products that might be expected to be in a users local
+#      tree (e.g., docs/_build) but not in the build directory. We don't try and
+#      support users silly enough to do in-tree builds, though.
+#
+#   4. Exclude all tests.
+#
+#      This is unfortunate -- we would ideally like to have the exact versions
+#      of the tests present at a submission archived -- but XBS does not deal
+#      well with projects with many small files and the copy to the submission
+#      server takes a very long time without this.
+#
+#   5. Copy "unsafe" links (links to outside the input directory). This allows
+#      developers to link to a properly set up LLVM source directory from
+#      Clang-IB and still be able to run buildit or submitproject directly.
 installsrc:
 	@echo "Installing source..."
 	$(_v) $(MKDIR) "$(SRCROOT)"
-	$(_v) $(PAX) -rw . "$(SRCROOT)"
-	$(_v) if [ ! -z "$(LLVM_SEPARATE_SOURCES)" ]; then \
-		$(MKDIR) "$(SRCROOT)/src"; \
-		rsync -ar "$(LLVM_SEPARATE_SOURCES)/" "$(SRCROOT)/src/"; \
-	fi
-	$(_v) if [ ! -z "$(CLANG_SEPARATE_SOURCES)" ]; then \
-		$(MKDIR) "$(SRCROOT)/src/tools/clang"; \
-		rsync -ar "$(CLANG_SEPARATE_SOURCES)/" "$(SRCROOT)/src/tools/clang/"; \
-	fi
-	$(_v) if [ ! -z "$(COMPILERRT_SEPARATE_SOURCES)" ]; then \
-		$(MKDIR) "$(SRCROOT)/src/projects/compiler-rt"; \
-		rsync -ar "$(COMPILERRT_SEPARATE_SOURCES)/" "$(SRCROOT)/src/projects/compiler-rt/"; \
-	fi
-	$(_v) if [ ! -z "$(LIBCXX_SEPARATE_SOURCES)" ]; then \
-		$(MKDIR) "$(SRCROOT)/src/projects/libcxx"; \
-		rsync -ar "$(LIBCXX_SEPARATE_SOURCES)/" "$(SRCROOT)/src/projects/libcxx/"; \
-	fi
-	$(_v) $(PAX) -rw . "$(SRCROOT)"
-	$(_v) $(FIND) "$(SRCROOT)" $(Find_Cruft) -depth -exec $(RMDIR) "{}" \;
-	$(_v) rm -rf "$(SRCROOT)"/src/test/*/
-	$(_v) rm -rf "$(SRCROOT)"/src/tools/clang/test/*/
-	$(_v) rm -rf "$(SRCROOT)"/src/projects/libcxx/test/*/
+	$(_v) time rsync -ar . "$(SRCROOT)" \
+	  --exclude .git --exclude .svn \
+	  --exclude .DS_Store --exclude '*~' --exclude '.*~' \
+	  --exclude src/docs/_build \
+	  --exclude src/test/ --exclude src/tools/clang/test/ \
+	    --exclude 'src/projects/*/test/' \
+	  --copy-unsafe-links
 
+# The clean target is run after installing sources, but we do nothing because
+# the expectation is that we will just avoid copying in cruft during the installsrc
+# phase.
+clean:
+
+# We do not need to do anything for the install headers phase.
 installhdrs:
 
 ##
@@ -507,6 +398,7 @@ installhdrs:
 
 .PHONY: install-clang
 .PHONY: install-clang_final build-clang build-clang_final build-clang_stage1
+.PHONY: build-clang_final_ordered
 .PHONY: configure-clang_final configure-clang_singlestage configure-clang_stage2
 .PHONY: configure-clang_stage1
 .PHONY: install-clang-rootlinks install-clang-opensourcelicense
@@ -529,32 +421,79 @@ install-clang_final: build-clang
 	./merge-lipo `for arch in $(RC_ARCHS) ; do echo $(OBJROOT)/install-$$arch ; done` $(DSTROOT)
 	$(_v) ln -sf clang $(DSTROOT)/$(Install_Prefix)/bin/cc
 	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/cc.1
-	$(_v) if [ -f $(DSTROOT)/$(Install_Prefix)/bin/clang++ ]; then \
-	  ln -sf clang++ $(DSTROOT)/$(Install_Prefix)/bin/c++; \
-	  ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1; \
-	  ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1;\
-	fi
-	$(_v) $(FIND) $(DSTROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
-	$(_v) $(FIND) $(SYMROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
+	$(_v) ln -sf clang++ $(DSTROOT)/$(Install_Prefix)/bin/c++
+	$(_v) ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1
+	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
-	$(_v) $(FIND) $(DSTROOT) -perm -0111 -type f -print | $(XARGS) -n 1 -P $(SYSCTL) dsymutil
-	$(_v) cd $(DSTROOT) && find . -path \*.dSYM/\* -print | cpio -pdml $(SYMROOT)
-	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -P $(SYSCTL) strip -S
-	$(_v) find $(DSTROOT) -name \*.dSYM -print | xargs rm -r
+	@echo "Copying executables into SYMROOT..."
+	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
+	@echo "Running 'dsymutil' on executables (in SYMROOT)..."
+	$(_v) cd $(SYMROOT) && find . -perm -0111 -type f -print | \
+	  xargs -n 1 -P $(SYSCTL) dsymutil
+	@echo "Stripping executables in DSTROOT..."
+	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -Sx
+	@echo "Setting permissions for executables in DSTROOT..."
 	$(_v)- $(CHOWN) -R root:wheel $(DSTROOT) $(SYMROOT)
 
-build-clang: build-clang_final
+build-clang: $(Final_Build_Target)
 
 build-clang_final: configure-clang_final
+	$(_v) set -ex; \
+	for arch in $(RC_ARCHS) ; do \
+	  echo "Building (Final) for $$arch..."; \
+	  if [ -f $(SRCROOT)/buildbot-order-files/$$arch/clang.order ]; then \
+	    order_file=$(SRCROOT)/buildbot-order-files/$$arch/clang.order; \
+	  else  \
+	    order_file=$(SRCROOT)/static-order-files/$$arch/clang.order; \
+	  fi; \
+	  time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch \
+	    $(Build_Target) CLANG_ORDER_FILE=$${order_file}; \
+	done
+
+# This is a special target which uses the build compiler to generate order file
+# information, and then rebuilds the compiler with the constructed order file.
+build-clang_final_ordered: build-clang_final
+	set -ex && \
 	$(_v) for arch in $(RC_ARCHS) ; do \
-		echo "Building (Final) for $$arch..." && \
-		time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch $(Build_Target) || exit 1; \
+		echo "Building (Final) (Ordered) for $$arch..." && \
+	        echo "Generating Order File Data for $$arch " && \
+	        $(SRCROOT)/order-files/gen-clang-order-data \
+		  --no-sudo \
+	          --cc "$(OBJROOT)/$$arch/$(Build_Mode)/bin/clang" \
+		  --inputs "$(SRCROOT)/order-files/inputs" \
+		  --temps "$(OBJROOT)/order-data/$$arch/temps" \
+		  --outputs "$(OBJROOT)/order-data/$$arch/data"; \
+	        echo "Generating Order File for $$arch" && \
+	        $(SRCROOT)/order-files/gen-order-file \
+	          --binary "$(OBJROOT)/$$arch/$(Build_Mode)/bin/clang" \
+	          --output "$(OBJROOT)/order-data/$$arch/clang.order" \
+	          --output-unordered-symbols \
+		    "$(OBJROOT)/order-data/$$arch/unordered_symbols.txt" \
+	          --method "call_order" \
+		  "$(OBJROOT)/order-data/$$arch/"data*.log && \
+	        echo "Rebuilding With Order File" && \
+		mv "$(OBJROOT)/$$arch/$(Build_Mode)/bin/clang" \
+		  "$(OBJROOT)/$$arch/$(Build_Mode)/bin/clang.preorder" && \
+		$(MAKE) -j$(SYSCTL) \
+		  -C "$(OBJROOT)/$$arch/tools/clang/tools/driver" \
+		  $(Clang_Make_Variables) \
+		  "CLANG_ORDER_FILE=$(OBJROOT)/order-data/$$arch/clang.order"; \
 	done
 
 build-clang_stage1: configure-clang_stage1
-	$(_v) echo "Building (Stage 1) for $(Stage1_Compiler_Arch)..."
-	$(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) $(Build_Target_Stage1)
-	$(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) $(Install_Target_Stage1)
+	$(_v) set -ex; \
+	$(_v) for arch in $(Stage1_Compiler_Arch) ; do \
+	  $(_v) echo "Building (Stage 1) for $$arch..."; \
+	  if [ -f $(SRCROOT)/buildbot-order-files/$$arch/clang.order ]; then \
+	    order_file=$(SRCROOT)/buildbot-order-files/$$arch/clang.order; \
+	  else  \
+	    order_file=$(SRCROOT)/static-order-files/$$arch/clang.order; \
+	  fi; \
+	  $(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) \
+	    $(Build_Target_Stage1) CLANG_ORDER_FILE=$${order_file}; \
+	  $(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) \
+	    $(Install_Target_Stage1); \
+	done
 
 configure-clang_final: $(Final_Configure_Target)
 
@@ -640,15 +579,18 @@ install-cross: build-cross
 	$(_v) mkdir -p $(DSTROOT)
 	$(_v) for arch in $(filter-out $(firstword $(RC_ARCHS)),$(RC_ARCHS)); do \
 		rm -rf $(OBJROOT)/install-$$arch$(Install_Prefix)/lib/clang/*/lib; \
+		rm -f $(OBJROOT)/install-$$arch$(Install_Prefix)/bin/llvm-config-host; \
 	done
 	./merge-lipo `for arch in $(RC_ARCHS) ; do echo $(OBJROOT)/install-$$arch ; done` $(DSTROOT)
-	$(_v) $(FIND) $(DSTROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
-	$(_v) $(FIND) $(SYMROOT) $(Find_Cruft) | $(XARGS) $(RMDIR)
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
-	$(_v) $(FIND) $(DSTROOT) -perm -0111 -type f -print | $(XARGS) -n 1 -P $(SYSCTL) dsymutil
-	$(_v) cd $(DSTROOT) && find . -path \*.dSYM/\* -print | cpio -pdml $(SYMROOT)
-	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -P $(SYSCTL) strip -S
-	$(_v) find $(DSTROOT) -name \*.dSYM -print | xargs rm -r
+	@echo "Copying executables into SYMROOT..."
+	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
+	@echo "Running 'dsymutil' on executables (in SYMROOT)..."
+	$(_v) cd $(SYMROOT) && find . -perm -0111 -type f -print | \
+	  xargs -n 1 -P $(SYSCTL) dsymutil
+	@echo "Stripping executables in DSTROOT..."
+	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -Sx
+	@echo "Setting permissions for executables in DSTROOT..."
 	$(_v)- $(CHOWN) -R root:wheel $(DSTROOT) $(SYMROOT)
 
 build-cross: configure-cross
@@ -689,6 +631,43 @@ setup-tools-cross:
 	    >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
 	  chmod a+x $(OBJROOT)/bin/arm-apple-darwin10-$$prog || exit 1 ; \
 	done
+
+###
+# Utility targets
+
+commit-buildbot-order-file:
+	@if ([ ! -d .svn ] || [ ! -f ClangBNI.mk ] || \
+	     [ ! -d buildbot-order-files ]); then \
+	  echo "error: this does not look like a valid Apple Clang checkout"; \
+	  exit 1; \
+	fi
+	@if ([ -z "$(OBJROOT)" ] || [ ! -d "$(OBJROOT)" ]); then \
+	  echo "error: OBJROOT must point to a valid directory"; \
+	  exit 1; \
+	fi
+	@echo "Updating current order files to HEAD (to avoid conflicts)."
+	@(cd buildbot-order-files && svn up)
+	@echo "Copying order files from OBJROOT to the current checkout."
+	@for path in "$(OBJROOT)"/order-data/*; do \
+	  arch=$$(basename $$path); \
+	  if [ ! -f $$path/clang.order ]; then \
+	    echo "warning: missing order file for arch $$arch"; \
+	  fi; \
+	  mkdir -p buildbot-order-files/$$arch; \
+	  cp $$path/clang.order buildbot-order-files/$$arch/; \
+	done
+	@echo "Committing result."
+	(set -ex; \
+	 cd buildbot-order-files && \
+	 svn add -N */ && \
+	 svn add */clang.order && \
+	 if (! svn commit -m "[autoupdate] Update buildbot order files."); then \
+	   echo "warning: svn commit failed, restoring contents!"; \
+	   svn revert */ || true; \
+	   rm -rf */; \
+	   svn up; \
+	 fi)
+.PHONY: commit-buildbot-order-file
 
 ###
 # Debugging

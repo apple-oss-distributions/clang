@@ -13,6 +13,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/ParentMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/SaveAndRestore.h"
 
 namespace clang {
   class Decl;
@@ -37,7 +38,6 @@ void rewriteUnbridgedCasts(MigrationPass &pass);
 void makeAssignARCSafe(MigrationPass &pass);
 void removeRetainReleaseDeallocFinalize(MigrationPass &pass);
 void removeZeroOutPropsInDeallocFinalize(MigrationPass &pass);
-void rewriteBlockObjCVariable(MigrationPass &pass);
 void rewriteUnusedInitDelegate(MigrationPass &pass);
 void checkAPIUses(MigrationPass &pass);
 
@@ -130,6 +130,11 @@ public:
   virtual void traverseObjCImplementation(ObjCImplementationContext &ImplCtx);
 };
 
+class BlockObjCVariableTraverser : public ASTTraverser {
+public:
+  virtual void traverseBody(BodyContext &BodyCtx);
+};
+
 // GC transformations
 
 class GCAttrsTraverser : public ASTTraverser {
@@ -149,6 +154,8 @@ public:
 /// \brief Determine whether we can add weak to the given type.
 bool canApplyWeak(ASTContext &Ctx, QualType type,
                   bool AllowOnUnknownClass = false);
+
+bool isPlusOneAssign(const BinaryOperator *E);
 
 /// \brief 'Loc' is the end of a statement range. This returns the location
 /// immediately after the semicolon following the statement.
@@ -170,14 +177,21 @@ StringRef getNilString(ASTContext &Ctx);
 template <typename BODY_TRANS>
 class BodyTransform : public RecursiveASTVisitor<BodyTransform<BODY_TRANS> > {
   MigrationPass &Pass;
+  Decl *ParentD;
 
+  typedef RecursiveASTVisitor<BodyTransform<BODY_TRANS> > base;
 public:
-  BodyTransform(MigrationPass &pass) : Pass(pass) { }
+  BodyTransform(MigrationPass &pass) : Pass(pass), ParentD(0) { }
 
   bool TraverseStmt(Stmt *rootS) {
     if (rootS)
-      BODY_TRANS(Pass).transformBody(rootS);
+      BODY_TRANS(Pass).transformBody(rootS, ParentD);
     return true;
+  }
+
+  bool TraverseObjCMethodDecl(ObjCMethodDecl *D) {
+    SaveAndRestore<Decl *> SetParent(ParentD, D);
+    return base::TraverseObjCMethodDecl(D);
   }
 };
 

@@ -126,6 +126,8 @@ static const Target *GetTarget(const ObjectFile *Obj = NULL) {
   return 0;
 }
 
+void llvm::StringRefMemoryObject::anchor() { }
+
 void llvm::DumpBytes(StringRef bytes) {
   static const char hex_rep[] = "0123456789abcdef";
   // FIXME: The real way to do this is to figure out the longest instruction
@@ -186,7 +188,9 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
       bool contains;
       if (!error(i->containsSymbol(*si, contains)) && contains) {
         uint64_t Address;
-        if (error(si->getOffset(Address))) break;
+        if (error(si->getAddress(Address))) break;
+        Address -= SectionAddr;
+
         StringRef Name;
         if (error(si->getName(Name))) break;
         Symbols.push_back(std::make_pair(Address, Name));
@@ -477,26 +481,28 @@ static void PrintSymbolTable(const ObjectFile *o) {
                          se = o->end_symbols(); si != se; si.increment(ec)) {
       if (error(ec)) return;
       StringRef Name;
-      uint64_t Offset;
-      bool Global;
+      uint64_t Address;
       SymbolRef::Type Type;
-      bool Weak;
-      bool Absolute;
       uint64_t Size;
+      uint32_t Flags;
       section_iterator Section = o->end_sections();
       if (error(si->getName(Name))) continue;
-      if (error(si->getOffset(Offset))) continue;
-      if (error(si->isGlobal(Global))) continue;
+      if (error(si->getAddress(Address))) continue;
+      if (error(si->getFlags(Flags))) continue;
       if (error(si->getType(Type))) continue;
-      if (error(si->isWeak(Weak))) continue;
-      if (error(si->isAbsolute(Absolute))) continue;
       if (error(si->getSize(Size))) continue;
       if (error(si->getSection(Section))) continue;
 
-      if (Offset == UnknownAddressOrSize)
-        Offset = 0;
+      bool Global = Flags & SymbolRef::SF_Global;
+      bool Weak = Flags & SymbolRef::SF_Weak;
+      bool Absolute = Flags & SymbolRef::SF_Absolute;
+
+      if (Address == UnknownAddressOrSize)
+        Address = 0;
+      if (Size == UnknownAddressOrSize)
+        Size = 0;
       char GlobLoc = ' ';
-      if (Type != SymbolRef::ST_External)
+      if (Type != SymbolRef::ST_Unknown)
         GlobLoc = Global ? 'g' : 'l';
       char Debug = (Type == SymbolRef::ST_Debug || Type == SymbolRef::ST_File)
                    ? 'd' : ' ';
@@ -506,7 +512,7 @@ static void PrintSymbolTable(const ObjectFile *o) {
       else if (Type == SymbolRef::ST_Function)
         FileFunc = 'F';
 
-      outs() << format("%08"PRIx64, Offset) << " "
+      outs() << format("%08"PRIx64, Address) << " "
              << GlobLoc // Local -> 'l', Global -> 'g', Neither -> ' '
              << (Weak ? 'w' : ' ') // Weak?
              << ' ' // Constructor. Not supported yet.
@@ -556,8 +562,10 @@ static void DumpArchive(const Archive *a) {
                                e = a->end_children(); i != e; ++i) {
     OwningPtr<Binary> child;
     if (error_code ec = i->getAsBinary(child)) {
-      errs() << ToolName << ": '" << a->getFileName() << "': " << ec.message()
-             << ".\n";
+      // Ignore non-object files.
+      if (ec != object_error::invalid_file_type)
+        errs() << ToolName << ": '" << a->getFileName() << "': " << ec.message()
+               << ".\n";
       continue;
     }
     if (ObjectFile *o = dyn_cast<ObjectFile>(child.get()))

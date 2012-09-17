@@ -21,6 +21,8 @@ using namespace cxcursor;
 static void getTopOverriddenMethods(CXTranslationUnit TU,
                                     Decl *D,
                                     SmallVectorImpl<Decl *> &Methods) {
+  if (!D)
+    return;
   if (!isa<ObjCMethodDecl>(D) && !isa<CXXMethodDecl>(D))
     return;
 
@@ -147,6 +149,9 @@ static enum CXChildVisitResult findFileIdRefVisit(CXCursor cursor,
     return CXChildVisit_Recurse;
 
   Decl *D = cxcursor::getCursorDecl(declCursor);
+  if (!D)
+    return CXChildVisit_Continue;
+
   FindFileIdRefVisitData *data = (FindFileIdRefVisitData *)client_data;
   if (data->isHit(D)) {
     cursor = cxcursor::getSelectorIdentifierCursor(data->SelectorIdIdx, cursor);
@@ -344,6 +349,11 @@ void clang_findReferencesInFile(CXCursor cursor, CXFile file,
       llvm::errs() << "clang_findReferencesInFile: Null cursor\n";
     return;
   }
+  if (cursor.kind == CXCursor_NoDeclFound) {
+    if (Logging)
+      llvm::errs() << "clang_findReferencesInFile: Got CXCursor_NoDeclFound\n";
+    return;
+  }
   if (!file) {
     if (Logging)
       llvm::errs() << "clang_findReferencesInFile: Null file\n";
@@ -354,6 +364,12 @@ void clang_findReferencesInFile(CXCursor cursor, CXFile file,
       llvm::errs() << "clang_findReferencesInFile: Null visitor\n";
     return;
   }
+
+  ASTUnit *CXXUnit = cxcursor::getCursorASTUnit(cursor);
+  if (!CXXUnit)
+    return;
+
+  ASTUnit::ConcurrencyCheck Check(*CXXUnit);
 
   if (cursor.kind == CXCursor_MacroDefinition ||
       cursor.kind == CXCursor_MacroExpansion) {
@@ -381,9 +397,6 @@ void clang_findReferencesInFile(CXCursor cursor, CXFile file,
                       "declaration\n";
     return;
   }
-
-  ASTUnit *CXXUnit = cxcursor::getCursorASTUnit(cursor);
-  ASTUnit::ConcurrencyCheck Check(*CXXUnit);
 
   findIdRefsInFile(cxcursor::getCursorTU(cursor),
                    refCursor,

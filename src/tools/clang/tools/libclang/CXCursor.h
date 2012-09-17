@@ -41,6 +41,7 @@ class Stmt;
 class TemplateDecl;
 class TemplateName;
 class TypeDecl;
+class VarDecl;
   
 namespace cxcursor {
 
@@ -54,7 +55,7 @@ CXCursor MakeCXCursor(clang::Decl *D, CXTranslationUnit TU,
 CXCursor MakeCXCursor(clang::Stmt *S, clang::Decl *Parent,
                       CXTranslationUnit TU,
                       SourceRange RegionOfInterest = SourceRange());
-CXCursor MakeCXCursorInvalid(CXCursorKind K);
+CXCursor MakeCXCursorInvalid(CXCursorKind K, CXTranslationUnit TU = 0);
 
 /// \brief Create an Objective-C superclass reference at the given location.
 CXCursor MakeCursorObjCSuperClassRef(ObjCInterfaceDecl *Super, 
@@ -110,6 +111,14 @@ CXCursor MakeCursorNamespaceRef(const NamedDecl *NS, SourceLocation Loc,
 /// \brief Unpack a NamespaceRef cursor into the namespace or namespace alias
 /// it references and the location where the reference occurred.
 std::pair<NamedDecl *, SourceLocation> getCursorNamespaceRef(CXCursor C);
+
+/// \brief Create a reference to a variable at the given location.
+CXCursor MakeCursorVariableRef(const VarDecl *Var, SourceLocation Loc, 
+                               CXTranslationUnit TU);
+
+/// \brief Unpack a VariableRef cursor into the variable it references and the
+/// location where the where the reference occurred.
+std::pair<VarDecl *, SourceLocation> getCursorVariableRef(CXCursor C); 
 
 /// \brief Create a reference to a field at the given location.
 CXCursor MakeCursorMemberRef(const FieldDecl *Field, SourceLocation Loc, 
@@ -197,8 +206,15 @@ ASTUnit *getCursorASTUnit(CXCursor Cursor);
 CXTranslationUnit getCursorTU(CXCursor Cursor);
 
 void getOverriddenCursors(CXCursor cursor,
-                          SmallVectorImpl<CXCursor> &overridden); 
+                          SmallVectorImpl<CXCursor> &overridden);
+  
+/// \brief Create an opaque  pool used for fast generation of overriden
+/// CXCursor arrays.
+void *createOverridenCXCursorsPool();
 
+/// \brief Dispose of the overriden CXCursors pool.
+void disposeOverridenCXCursorsPool(void *pool);
+  
 /// \brief Returns a index/location pair for a selector identifier if the cursor
 /// points to one.
 std::pair<int, SourceLocation> getSelectorIdentifierIndexAndLoc(CXCursor);

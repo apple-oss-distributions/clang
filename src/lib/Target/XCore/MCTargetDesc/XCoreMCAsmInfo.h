@@ -1,4 +1,4 @@
-//=====-- XCoreMCAsmInfo.h - XCore asm properties -------------*- C++ -*--====//
+//===-- XCoreMCAsmInfo.h - XCore asm properties ----------------*- C++ -*--===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -21,6 +21,7 @@ namespace llvm {
   class Target;
 
   class XCoreMCAsmInfo : public MCAsmInfo {
+    virtual void anchor();
   public:
     explicit XCoreMCAsmInfo(const Target &T, StringRef TT);
   };

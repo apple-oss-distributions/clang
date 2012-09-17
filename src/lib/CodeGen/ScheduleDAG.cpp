@@ -31,6 +31,8 @@ static cl::opt<bool> StressSchedOpt(
   cl::desc("Stress test instruction scheduling"));
 #endif
 
+void SchedulingPriorityQueue::anchor() { }
+
 ScheduleDAG::ScheduleDAG(MachineFunction &mf)
   : TM(mf.getTarget()),
     TII(TM.getInstrInfo()),
@@ -313,13 +315,12 @@ void SUnit::dumpAll(const ScheduleDAG *G) const {
       case SDep::Output:      dbgs() << "out "; break;
       case SDep::Order:       dbgs() << "ch  "; break;
       }
-      dbgs() << "#";
-      dbgs() << I->getSUnit() << " - SU(" << I->getSUnit()->NodeNum << ")";
+      dbgs() << "SU(" << I->getSUnit()->NodeNum << ")";
       if (I->isArtificial())
         dbgs() << " *";
       dbgs() << ": Latency=" << I->getLatency();
       if (I->isAssignedRegDep())
-        dbgs() << " Reg=" << G->TRI->getName(I->getReg());
+        dbgs() << " Reg=" << PrintReg(I->getReg(), G->TRI);
       dbgs() << "\n";
     }
   }
@@ -334,8 +335,7 @@ void SUnit::dumpAll(const ScheduleDAG *G) const {
       case SDep::Output:      dbgs() << "out "; break;
       case SDep::Order:       dbgs() << "ch  "; break;
       }
-      dbgs() << "#";
-      dbgs() << I->getSUnit() << " - SU(" << I->getSUnit()->NodeNum << ")";
+      dbgs() << "SU(" << I->getSUnit()->NodeNum << ")";
       if (I->isArtificial())
         dbgs() << " *";
       dbgs() << ": Latency=" << I->getLatency();

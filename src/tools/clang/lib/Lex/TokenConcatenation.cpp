@@ -45,7 +45,7 @@ static bool IsStringPrefix(StringRef Str, bool CPlusPlus0x) {
 /// IsIdentifierStringPrefix - Return true if the spelling of the token
 /// is literally 'L', 'u', 'U', or 'u8'. Including raw versions.
 bool TokenConcatenation::IsIdentifierStringPrefix(const Token &Tok) const {
-  const LangOptions &LangOpts = PP.getLangOptions();
+  const LangOptions &LangOpts = PP.getLangOpts();
 
   if (!Tok.needsCleaning()) {
     if (Tok.getLength() < 1 || Tok.getLength() > 3)
@@ -179,11 +179,9 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
   switch (PrevKind) {
   default:
     llvm_unreachable("InitAvoidConcatTokenInfo built wrong");
-    return true;
 
   case tok::raw_identifier:
     llvm_unreachable("tok::raw_identifier in non-raw lexing mode!");
-    return true;
 
   case tok::identifier:   // id+id or id+number or id+L"foo".
     // id+'.'... will not append.
@@ -209,7 +207,7 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
   case tok::period:          // ..., .*, .1234
     return (FirstChar == '.' && PrevPrevTok.is(tok::period)) ||
     isdigit(FirstChar) ||
-    (PP.getLangOptions().CPlusPlus && FirstChar == '*');
+    (PP.getLangOpts().CPlusPlus && FirstChar == '*');
   case tok::amp:             // &&
     return FirstChar == '&';
   case tok::plus:            // ++
@@ -228,10 +226,10 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
     return FirstChar == '>' || FirstChar == ':';
   case tok::colon:           // ::, :>
     return FirstChar == '>' ||
-    (PP.getLangOptions().CPlusPlus && FirstChar == ':');
+    (PP.getLangOpts().CPlusPlus && FirstChar == ':');
   case tok::hash:            // ##, #@, %:%:
     return FirstChar == '#' || FirstChar == '@' || FirstChar == '%';
   case tok::arrow:           // ->*
-    return PP.getLangOptions().CPlusPlus && FirstChar == '*';
+    return PP.getLangOpts().CPlusPlus && FirstChar == '*';
   }
 }

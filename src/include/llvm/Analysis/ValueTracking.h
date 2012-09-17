@@ -17,14 +17,13 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/DataTypes.h"
-#include <string>
 
 namespace llvm {
-  template <typename T> class SmallVectorImpl;
   class Value;
   class Instruction;
   class APInt;
   class TargetData;
+  class StringRef;
   
   /// ComputeMaskedBits - Determine which of the bits specified in Mask are
   /// known to be either zero or one and return them in the KnownZero/KnownOne
@@ -125,16 +124,15 @@ namespace llvm {
     return GetPointerBaseWithConstantOffset(const_cast<Value*>(Ptr), Offset,TD);
   }
   
-  /// GetConstantStringInfo - This function computes the length of a
+  /// getConstantStringInfo - This function computes the length of a
   /// null-terminated C string pointed to by V.  If successful, it returns true
-  /// and returns the string in Str.  If unsuccessful, it returns false.  If
-  /// StopAtNul is set to true (the default), the returned string is truncated
-  /// by a nul character in the global.  If StopAtNul is false, the nul
-  /// character is included in the result string.
-  bool GetConstantStringInfo(const Value *V, std::string &Str,
-                             uint64_t Offset = 0,
-                             bool StopAtNul = true);
-                        
+  /// and returns the string in Str.  If unsuccessful, it returns false.  This
+  /// does not include the trailing nul character by default.  If TrimAtNul is
+  /// set to false, then this returns any trailing nul characters as well as any
+  /// other characters that come after it.
+  bool getConstantStringInfo(const Value *V, StringRef &Str,
+                             uint64_t Offset = 0, bool TrimAtNul = true);
+
   /// GetStringLength - If we can compute the length of the string pointed to by
   /// the specified pointer, return 'len+1'.  If we can't, return 0.
   uint64_t GetStringLength(Value *V);
@@ -155,6 +153,27 @@ namespace llvm {
   /// onlyUsedByLifetimeMarkers - Return true if the only users of this pointer
   /// are lifetime markers.
   bool onlyUsedByLifetimeMarkers(const Value *V);
+
+  /// isSafeToSpeculativelyExecute - Return true if the instruction does not
+  /// have any effects besides calculating the result and does not have
+  /// undefined behavior.
+  ///
+  /// This method never returns true for an instruction that returns true for
+  /// mayHaveSideEffects; however, this method also does some other checks in
+  /// addition. It checks for undefined behavior, like dividing by zero or
+  /// loading from an invalid pointer (but not for undefined results, like a
+  /// shift with a shift amount larger than the width of the result). It checks
+  /// for malloc and alloca because speculatively executing them might cause a
+  /// memory leak. It also returns false for instructions related to control
+  /// flow, specifically terminators and PHI nodes.
+  ///
+  /// This method only looks at the instruction itself and its operands, so if
+  /// this method returns true, it is safe to move the instruction as long as
+  /// the correct dominance relationships for the operands and users hold.
+  /// However, this method can return true for instructions that read memory;
+  /// for such instructions, moving them may change the resulting value.
+  bool isSafeToSpeculativelyExecute(const Value *V,
+                                    const TargetData *TD = 0);
 
 } // end namespace llvm
 

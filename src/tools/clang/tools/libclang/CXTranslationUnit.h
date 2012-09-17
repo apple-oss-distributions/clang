@@ -16,18 +16,21 @@
 
 extern "C" {
 struct CXTranslationUnitImpl {
+  void *CIdx;
   void *TUData;
   void *StringPool;
   void *Diagnostics;
+  void *OverridenCursorsPool;
 };
 }
 
 namespace clang {
   class ASTUnit;
+  class CIndexer;
 
 namespace cxtu {
 
-CXTranslationUnitImpl *MakeCXTranslationUnit(ASTUnit *TU);
+CXTranslationUnitImpl *MakeCXTranslationUnit(CIndexer *CIdx, ASTUnit *TU);
   
 class CXTUOwner {
   CXTranslationUnitImpl *TU;

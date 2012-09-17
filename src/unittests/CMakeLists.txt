@@ -60,19 +60,23 @@ add_llvm_unittest(ADT
   ADT/DenseMapTest.cpp
   ADT/DenseSetTest.cpp
   ADT/FoldingSet.cpp
+  ADT/HashingTest.cpp
   ADT/ilistTest.cpp
   ADT/ImmutableSetTest.cpp
   ADT/IntEqClassesTest.cpp
   ADT/IntervalMapTest.cpp
+  ADT/IntrusiveRefCntPtrTest.cpp
   ADT/PackedVectorTest.cpp
   ADT/SmallBitVectorTest.cpp
   ADT/SmallStringTest.cpp
   ADT/SmallVectorTest.cpp
   ADT/SparseBitVectorTest.cpp
+  ADT/SparseSetTest.cpp
   ADT/StringMapTest.cpp
   ADT/StringRefTest.cpp
   ADT/TripleTest.cpp
   ADT/TwineTest.cpp
+  ADT/VariadicFunctionTest.cpp
  )
 
 add_llvm_unittest(Analysis
@@ -96,7 +100,7 @@ endif()
 
 add_llvm_unittest(ExecutionEngine/JIT ${JITTestsSources})
 
-if(MINGW)
+if(MINGW OR CYGWIN)
   set_property(TARGET JITTests PROPERTY LINK_FLAGS -Wl,--export-all-symbols)
 endif()
 
@@ -121,6 +125,10 @@ endif()
 
 add_llvm_unittest(VMCore ${VMCoreSources})
 
+add_llvm_unittest(Bitcode
+  Bitcode/BitReaderTest.cpp
+  )
+
 set(LLVM_LINK_COMPONENTS
   Support
   Core
@@ -132,6 +140,7 @@ add_llvm_unittest(Support
   Support/CommandLineTest.cpp
   Support/ConstantRangeTest.cpp
   Support/EndianTest.cpp
+  Support/JSONParserTest.cpp
   Support/LeakDetectorTest.cpp
   Support/MathExtrasTest.cpp
   Support/Path.cpp

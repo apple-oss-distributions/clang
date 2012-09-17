@@ -1,7 +1,13 @@
 clang_CXCursorSet_contains
 clang_CXCursorSet_insert
+clang_CXIndex_getGlobalOptions
+clang_CXIndex_setGlobalOptions
 clang_CXXMethod_isStatic
 clang_CXXMethod_isVirtual
+clang_Cursor_getArgument
+clang_Cursor_getNumArguments
+clang_Cursor_getObjCSelectorIndex
+clang_Cursor_getSpellingNameRange
 clang_Cursor_getTranslationUnit
 clang_Cursor_isNull
 clang_IndexAction_create
@@ -37,6 +43,7 @@ clang_disposeDiagnostic
 clang_disposeDiagnosticSet
 clang_disposeIndex
 clang_disposeOverriddenCursors
+clang_disposeCXPlatformAvailability
 clang_disposeString
 clang_disposeTokens
 clang_disposeTranslationUnit
@@ -49,6 +56,7 @@ clang_executeOnThread
 clang_findReferencesInFile
 clang_findReferencesInFileWithBlock
 clang_formatDiagnostic
+clang_getArgType
 clang_getArrayElementType
 clang_getArraySize
 clang_getCString
@@ -64,6 +72,7 @@ clang_getCompletionChunkCompletionString
 clang_getCompletionChunkKind
 clang_getCompletionChunkText
 clang_getCompletionNumAnnotations
+clang_getCompletionParent
 clang_getCompletionPriority
 clang_getCursor
 clang_getCursorAvailability
@@ -77,6 +86,7 @@ clang_getCursorLanguage
 clang_getCursorLexicalParent
 clang_getCursorLinkage
 clang_getCursorLocation
+clang_getCursorPlatformAvailability
 clang_getCursorReferenceNameRange
 clang_getCursorReferenced
 clang_getCursorResultType
@@ -89,6 +99,7 @@ clang_getDefinitionSpellingAndExtent
 clang_getDiagnostic
 clang_getDiagnosticCategory
 clang_getDiagnosticCategoryName
+clang_getDiagnosticCategoryText
 clang_getDiagnosticFixIt
 clang_getDiagnosticInSet
 clang_getDiagnosticLocation
@@ -99,10 +110,15 @@ clang_getDiagnosticRange
 clang_getDiagnosticSetFromTU
 clang_getDiagnosticSeverity
 clang_getDiagnosticSpelling
+clang_getElementType
+clang_getEnumConstantDeclUnsignedValue
+clang_getEnumConstantDeclValue
+clang_getEnumDeclIntegerType
 clang_getExpansionLocation
 clang_getFile
 clang_getFileName
 clang_getFileTime
+clang_getFunctionTypeCallingConv
 clang_getIBOutletCollectionType
 clang_getIncludedFile
 clang_getInclusions
@@ -112,9 +128,11 @@ clang_getLocationForOffset
 clang_getNullCursor
 clang_getNullLocation
 clang_getNullRange
+clang_getNumArgTypes
 clang_getNumCompletionChunks
 clang_getNumDiagnostics
 clang_getNumDiagnosticsInSet
+clang_getNumElements
 clang_getNumOverloadedDecls
 clang_getOverloadedDecl
 clang_getOverriddenCursors
@@ -124,6 +142,7 @@ clang_getRange
 clang_getRangeEnd
 clang_getRangeStart
 clang_getRemappings
+clang_getRemappingsFromFileList
 clang_getResultType
 clang_getSpecializedCursorTemplate
 clang_getSpellingLocation
@@ -137,6 +156,7 @@ clang_getTranslationUnitCursor
 clang_getTranslationUnitSpelling
 clang_getTypeDeclaration
 clang_getTypeKindSpelling
+clang_getTypedefDeclUnderlyingType
 clang_hashCursor
 clang_indexLoc_getCXSourceLocation
 clang_indexLoc_getFileLocation
@@ -149,6 +169,7 @@ clang_index_getIBOutletCollectionAttrInfo
 clang_index_getObjCCategoryDeclInfo
 clang_index_getObjCContainerDeclInfo
 clang_index_getObjCInterfaceDeclInfo
+clang_index_getObjCPropertyDeclInfo
 clang_index_getObjCProtocolRefListInfo
 clang_index_isEntityObjCContainerKind
 clang_index_setClientContainer
@@ -159,6 +180,7 @@ clang_isCursorDefinition
 clang_isDeclaration
 clang_isExpression
 clang_isFileMultipleIncludeGuarded
+clang_isFunctionTypeVariadic
 clang_isInvalid
 clang_isPODType
 clang_isPreprocessing

@@ -10,11 +10,13 @@
 #include "Transforms.h"
 #include "Internals.h"
 #include "clang/Sema/SemaDiagnostic.h"
+#include "clang/Sema/Sema.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Analysis/DomainSpecific/CocoaConventions.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/DenseSet.h"
 #include <map>
@@ -25,54 +27,29 @@ using namespace trans;
 
 ASTTraverser::~ASTTraverser() { }
 
+bool MigrationPass::CFBridgingFunctionsDefined() {
+  if (!EnableCFBridgeFns.hasValue())
+    EnableCFBridgeFns = SemaRef.isKnownName("CFBridgingRetain") &&
+                        SemaRef.isKnownName("CFBridgingRelease");
+  return *EnableCFBridgeFns;
+}
+
 //===----------------------------------------------------------------------===//
 // Helpers.
 //===----------------------------------------------------------------------===//
 
-/// \brief True if the class is one that does not support weak.
-static bool isClassInWeakBlacklist(ObjCInterfaceDecl *cls) {
-  if (!cls)
-    return false;
-
-  bool inList = llvm::StringSwitch<bool>(cls->getName())
-                 .Case("NSColorSpace", true)
-                 .Case("NSFont", true)
-                 .Case("NSFontPanel", true)
-                 .Case("NSImage", true)
-                 .Case("NSLazyBrowserCell", true)
-                 .Case("NSWindow", true)
-                 .Case("NSWindowController", true)
-                 .Case("NSViewController", true)
-                 .Case("NSMenuView", true)
-                 .Case("NSPersistentUIWindowInfo", true)
-                 .Case("NSTableCellView", true)
-                 .Case("NSATSTypeSetter", true)
-                 .Case("NSATSGlyphStorage", true)
-                 .Case("NSLineFragmentRenderingContext", true)
-                 .Case("NSAttributeDictionary", true)
-                 .Case("NSParagraphStyle", true)
-                 .Case("NSTextTab", true)
-                 .Case("NSSimpleHorizontalTypesetter", true)
-                 .Case("_NSCachedAttributedString", true)
-                 .Case("NSStringDrawingTextStorage", true)
-                 .Case("NSTextView", true)
-                 .Case("NSSubTextStorage", true)
-                 .Default(false);
-
-  if (inList)
-    return true;
-
-  return isClassInWeakBlacklist(cls->getSuperClass());
-}
-
 bool trans::canApplyWeak(ASTContext &Ctx, QualType type,
                          bool AllowOnUnknownClass) {
-  if (!Ctx.getLangOptions().ObjCRuntimeHasWeak)
+  if (!Ctx.getLangOpts().ObjCRuntimeHasWeak)
     return false;
 
   QualType T = type;
   if (T.isNull())
     return false;
+
+  // iOS is always safe to use 'weak'.
+  if (Ctx.getTargetInfo().getTriple().getOS() == llvm::Triple::IOS)
+    AllowOnUnknownClass = true;
 
   while (const PointerType *ptr = T->getAs<PointerType>())
     T = ptr->getPointeeType();
@@ -80,15 +57,54 @@ bool trans::canApplyWeak(ASTContext &Ctx, QualType type,
     ObjCInterfaceDecl *Class = ObjT->getInterfaceDecl();
     if (!AllowOnUnknownClass && (!Class || Class->getName() == "NSObject"))
       return false; // id/NSObject is not safe for weak.
-    if (!AllowOnUnknownClass && Class->isForwardDecl())
+    if (!AllowOnUnknownClass && !Class->hasDefinition())
       return false; // forward classes are not verifiable, therefore not safe.
     if (Class->isArcWeakrefUnavailable())
-      return false;
-    if (isClassInWeakBlacklist(Class))
       return false;
   }
 
   return true;
+}
+
+bool trans::isPlusOneAssign(const BinaryOperator *E) {
+  if (E->getOpcode() != BO_Assign)
+    return false;
+
+  if (const ObjCMessageExpr *
+        ME = dyn_cast<ObjCMessageExpr>(E->getRHS()->IgnoreParenCasts()))
+    if (ME->getMethodFamily() == OMF_retain)
+      return true;
+
+  if (const CallExpr *
+        callE = dyn_cast<CallExpr>(E->getRHS()->IgnoreParenCasts())) {
+    if (const FunctionDecl *FD = callE->getDirectCallee()) {
+      if (FD->getAttr<CFReturnsRetainedAttr>())
+        return true;
+
+      if (FD->isGlobal() &&
+          FD->getIdentifier() &&
+          FD->getParent()->isTranslationUnit() &&
+          FD->getLinkage() == ExternalLinkage &&
+          ento::cocoa::isRefType(callE->getType(), "CF",
+                                 FD->getIdentifier()->getName())) {
+        StringRef fname = FD->getIdentifier()->getName();
+        if (fname.endswith("Retain") ||
+            fname.find("Create") != StringRef::npos ||
+            fname.find("Copy") != StringRef::npos) {
+          return true;
+        }
+      }
+    }
+  }
+
+  const ImplicitCastExpr *implCE = dyn_cast<ImplicitCastExpr>(E->getRHS());
+  while (implCE && implCE->getCastKind() ==  CK_BitCast)
+    implCE = dyn_cast<ImplicitCastExpr>(implCE->getSubExpr());
+
+  if (implCE && implCE->getCastKind() == CK_ARCConsumeObject)
+    return true;
+
+  return false;
 }
 
 /// \brief 'Loc' is the end of a statement range. This returns the location
@@ -111,11 +127,10 @@ SourceLocation trans::findSemiAfterLocation(SourceLocation loc,
                                             ASTContext &Ctx) {
   SourceManager &SM = Ctx.getSourceManager();
   if (loc.isMacroID()) {
-    if (!Lexer::isAtEndOfMacroExpansion(loc, SM, Ctx.getLangOptions()))
+    if (!Lexer::isAtEndOfMacroExpansion(loc, SM, Ctx.getLangOpts(), &loc))
       return SourceLocation();
-    loc = SM.getExpansionRange(loc).second;
   }
-  loc = Lexer::getLocForEndOfToken(loc, /*Offset=*/0, SM, Ctx.getLangOptions());
+  loc = Lexer::getLocForEndOfToken(loc, /*Offset=*/0, SM, Ctx.getLangOpts());
 
   // Break down the source location.
   std::pair<FileID, unsigned> locInfo = SM.getDecomposedLoc(loc);
@@ -130,7 +145,7 @@ SourceLocation trans::findSemiAfterLocation(SourceLocation loc,
 
   // Lex from the start of the given location.
   Lexer lexer(SM.getLocForStartOfFile(locInfo.first),
-              Ctx.getLangOptions(),
+              Ctx.getLangOpts(),
               file.begin(), tokenBegin, file.end());
   Token tok;
   lexer.LexFromRawLexer(tok);
@@ -195,7 +210,6 @@ class ReferenceClear : public RecursiveASTVisitor<ReferenceClear> {
 public:
   ReferenceClear(ExprSet &refs) : Refs(refs) { }
   bool VisitDeclRefExpr(DeclRefExpr *E) { Refs.erase(E); return true; }
-  bool VisitBlockDeclRefExpr(BlockDeclRefExpr *E) { Refs.erase(E); return true; }
 };
 
 class ReferenceCollector : public RecursiveASTVisitor<ReferenceCollector> {
@@ -207,12 +221,6 @@ public:
     : Dcl(D), Refs(refs) { }
 
   bool VisitDeclRefExpr(DeclRefExpr *E) {
-    if (E->getDecl() == Dcl)
-      Refs.insert(E);
-    return true;
-  }
-
-  bool VisitBlockDeclRefExpr(BlockDeclRefExpr *E) {
     if (E->getDecl() == Dcl)
       Refs.insert(E);
     return true;
@@ -383,7 +391,7 @@ bool MigrationContext::rewritePropertyAttribute(StringRef fromAttr,
 
   // Lex from the start of the given location.
   Lexer lexer(SM.getLocForStartOfFile(locInfo.first),
-              Pass.Ctx.getLangOptions(),
+              Pass.Ctx.getLangOpts(),
               file.begin(), tokenBegin, file.end());
   Token tok;
   lexer.LexFromRawLexer(tok);
@@ -466,7 +474,7 @@ bool MigrationContext::addPropertyAttribute(StringRef attr,
 
   // Lex from the start of the given location.
   Lexer lexer(SM.getLocForStartOfFile(locInfo.first),
-              Pass.Ctx.getLangOptions(),
+              Pass.Ctx.getLangOpts(),
               file.begin(), tokenBegin, file.end());
   Token tok;
   lexer.LexFromRawLexer(tok);
@@ -503,6 +511,45 @@ void MigrationContext::traverse(TranslationUnitDecl *TU) {
   ASTTransform(*this).TraverseDecl(TU);
 }
 
+static void GCRewriteFinalize(MigrationPass &pass) {
+  ASTContext &Ctx = pass.Ctx;
+  TransformActions &TA = pass.TA;
+  DeclContext *DC = Ctx.getTranslationUnitDecl();
+  Selector FinalizeSel =
+   Ctx.Selectors.getNullarySelector(&pass.Ctx.Idents.get("finalize"));
+  
+  typedef DeclContext::specific_decl_iterator<ObjCImplementationDecl>
+  impl_iterator;
+  for (impl_iterator I = impl_iterator(DC->decls_begin()),
+       E = impl_iterator(DC->decls_end()); I != E; ++I) {
+    for (ObjCImplementationDecl::instmeth_iterator
+         MI = (*I)->instmeth_begin(),
+         ME = (*I)->instmeth_end(); MI != ME; ++MI) {
+      ObjCMethodDecl *MD = *MI;
+      if (!MD->hasBody())
+        continue;
+      
+      if (MD->isInstanceMethod() && MD->getSelector() == FinalizeSel) {
+        ObjCMethodDecl *FinalizeM = MD;
+        Transaction Trans(TA);
+        TA.insert(FinalizeM->getSourceRange().getBegin(), 
+                  "#if !__has_feature(objc_arc)\n");
+        CharSourceRange::getTokenRange(FinalizeM->getSourceRange());
+        const SourceManager &SM = pass.Ctx.getSourceManager();
+        const LangOptions &LangOpts = pass.Ctx.getLangOpts();
+        bool Invalid;
+        std::string str = "\n#endif\n";
+        str += Lexer::getSourceText(
+                  CharSourceRange::getTokenRange(FinalizeM->getSourceRange()), 
+                                    SM, LangOpts, &Invalid);
+        TA.insertAfterToken(FinalizeM->getSourceRange().getEnd(), str);
+        
+        break;
+      }
+    }
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // getAllTransformations.
 //===----------------------------------------------------------------------===//
@@ -515,6 +562,7 @@ static void traverseAST(MigrationPass &pass) {
     MigrateCtx.addTraverser(new GCAttrsTraverser());
   }
   MigrateCtx.addTraverser(new PropertyRewriteTraverser());
+  MigrateCtx.addTraverser(new BlockObjCVariableTraverser());
 
   MigrateCtx.traverse(pass.Ctx.getTranslationUnitDecl());
 }
@@ -526,15 +574,17 @@ static void independentTransforms(MigrationPass &pass) {
   removeZeroOutPropsInDeallocFinalize(pass);
   makeAssignARCSafe(pass);
   rewriteUnbridgedCasts(pass);
-  rewriteBlockObjCVariable(pass);
   checkAPIUses(pass);
   traverseAST(pass);
 }
 
 std::vector<TransformFn> arcmt::getAllTransformations(
-                                               LangOptions::GCMode OrigGCMode) {
+                                               LangOptions::GCMode OrigGCMode,
+                                               bool NoFinalizeRemoval) {
   std::vector<TransformFn> transforms;
 
+  if (OrigGCMode ==  LangOptions::GCOnly && NoFinalizeRemoval)
+    transforms.push_back(GCRewriteFinalize);
   transforms.push_back(independentTransforms);
   // This depends on previous transformations removing various expressions.
   transforms.push_back(removeEmptyStatementsAndDeallocFinalize);

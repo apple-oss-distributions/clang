@@ -21,7 +21,6 @@
 
 #include "LegalizeTypes.h"
 #include "llvm/Target/TargetData.h"
-#include "llvm/CodeGen/PseudoSourceValue.h"
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -46,8 +45,6 @@ void DAGTypeLegalizer::ExpandRes_BITCAST(SDNode *N, SDValue &Lo, SDValue &Hi) {
 
   // Handle some special cases efficiently.
   switch (getTypeAction(InVT)) {
-    default:
-      assert(false && "Unknown type action!");
     case TargetLowering::TypeLegal:
     case TargetLowering::TypePromoteInteger:
       break;

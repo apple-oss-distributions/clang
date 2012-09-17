@@ -24,7 +24,7 @@ class BackendConsumer;
 class CodeGenAction : public ASTFrontendAction {
 private:
   unsigned Act;
-  llvm::OwningPtr<llvm::Module> TheModule;
+  OwningPtr<llvm::Module> TheModule;
   llvm::Module *LinkModule;
   llvm::LLVMContext *VMContext;
   bool OwnsVMContext;
@@ -63,31 +63,37 @@ public:
 };
 
 class EmitAssemblyAction : public CodeGenAction {
+  virtual void anchor();
 public:
   EmitAssemblyAction(llvm::LLVMContext *_VMContext = 0);
 };
 
 class EmitBCAction : public CodeGenAction {
+  virtual void anchor();
 public:
   EmitBCAction(llvm::LLVMContext *_VMContext = 0);
 };
 
 class EmitLLVMAction : public CodeGenAction {
+  virtual void anchor();
 public:
   EmitLLVMAction(llvm::LLVMContext *_VMContext = 0);
 };
 
 class EmitLLVMOnlyAction : public CodeGenAction {
+  virtual void anchor();
 public:
   EmitLLVMOnlyAction(llvm::LLVMContext *_VMContext = 0);
 };
 
 class EmitCodeGenOnlyAction : public CodeGenAction {
+  virtual void anchor();
 public:
   EmitCodeGenOnlyAction(llvm::LLVMContext *_VMContext = 0);
 };
 
 class EmitObjAction : public CodeGenAction {
+  virtual void anchor();
 public:
   EmitObjAction(llvm::LLVMContext *_VMContext = 0);
 };

@@ -38,10 +38,13 @@ InclusionDirective::InclusionDirective(PreprocessingRecord &PPRec,
 }
 
 PreprocessingRecord::PreprocessingRecord(SourceManager &SM,
-                                         bool IncludeNestedMacroExpansions)
-  : SourceMgr(SM), IncludeNestedMacroExpansions(IncludeNestedMacroExpansions),
+                                         bool RecordConditionalDirectives)
+  : SourceMgr(SM),
+    RecordCondDirectives(RecordConditionalDirectives), CondDirectiveNextIdx(0),
     ExternalSource(0)
 {
+  if (RecordCondDirectives)
+    CondDirectiveStack.push_back(CondDirectiveNextIdx++);
 }
 
 /// \brief Returns a pair of [Begin, End) iterators of preprocessed entities
@@ -241,33 +244,58 @@ unsigned PreprocessingRecord::findEndLocalPreprocessedEntity(
   return I - PreprocessedEntities.begin();
 }
 
-void PreprocessingRecord::addPreprocessedEntity(PreprocessedEntity *Entity) {
+PreprocessingRecord::PPEntityID
+PreprocessingRecord::addPreprocessedEntity(PreprocessedEntity *Entity) {
   assert(Entity);
   SourceLocation BeginLoc = Entity->getSourceRange().getBegin();
-  
+
+  if (!isa<class InclusionDirective>(Entity)) {
+    assert((PreprocessedEntities.empty() ||
+            !SourceMgr.isBeforeInTranslationUnit(BeginLoc,
+                   PreprocessedEntities.back()->getSourceRange().getBegin())) &&
+           "a macro directive was encountered out-of-order");
+    PreprocessedEntities.push_back(Entity);
+    return getPPEntityID(PreprocessedEntities.size()-1, /*isLoaded=*/false);
+  }
+
   // Check normal case, this entity begin location is after the previous one.
   if (PreprocessedEntities.empty() ||
       !SourceMgr.isBeforeInTranslationUnit(BeginLoc,
                    PreprocessedEntities.back()->getSourceRange().getBegin())) {
     PreprocessedEntities.push_back(Entity);
-    return;
+    return getPPEntityID(PreprocessedEntities.size()-1, /*isLoaded=*/false);
   }
 
-  // The entity's location is not after the previous one; this can happen rarely
-  // e.g. with "#include MACRO".
-  // Iterate the entities vector in reverse until we find the right place to
-  // insert the new entity.
-  for (std::vector<PreprocessedEntity *>::iterator
-         RI = PreprocessedEntities.end(), Begin = PreprocessedEntities.begin();
-       RI != Begin; --RI) {
-    std::vector<PreprocessedEntity *>::iterator I = RI;
+  // The entity's location is not after the previous one; this can happen with
+  // include directives that form the filename using macros, e.g:
+  // "#include MACRO(STUFF)".
+
+  typedef std::vector<PreprocessedEntity *>::iterator pp_iter;
+
+  // Usually there are few macro expansions when defining the filename, do a
+  // linear search for a few entities.
+  unsigned count = 0;
+  for (pp_iter RI    = PreprocessedEntities.end(),
+               Begin = PreprocessedEntities.begin();
+       RI != Begin && count < 4; --RI, ++count) {
+    pp_iter I = RI;
     --I;
     if (!SourceMgr.isBeforeInTranslationUnit(BeginLoc,
                                            (*I)->getSourceRange().getBegin())) {
-      PreprocessedEntities.insert(RI, Entity);
-      return;
+      pp_iter insertI = PreprocessedEntities.insert(RI, Entity);
+      return getPPEntityID(insertI - PreprocessedEntities.begin(),
+                           /*isLoaded=*/false);
     }
   }
+
+  // Linear search unsuccessful. Do a binary search.
+  pp_iter I = std::upper_bound(PreprocessedEntities.begin(),
+                               PreprocessedEntities.end(),
+                               BeginLoc,
+                               PPEntityComp<&SourceRange::getBegin>(SourceMgr));
+  pp_iter insertI = PreprocessedEntities.insert(I, Entity);
+  return getPPEntityID(insertI - PreprocessedEntities.begin(),
+                       /*isLoaded=*/false);
 }
 
 void PreprocessingRecord::SetExternalSource(
@@ -331,7 +359,8 @@ MacroDefinition *PreprocessingRecord::findMacroDefinition(const MacroInfo *MI) {
 
 void PreprocessingRecord::MacroExpands(const Token &Id, const MacroInfo* MI,
                                        SourceRange Range) {
-  if (!IncludeNestedMacroExpansions && Id.getLocation().isMacroID())
+  // We don't record nested macro expansions.
+  if (Id.getLocation().isMacroID())
     return;
 
   if (MI->isBuiltinMacro())
@@ -347,9 +376,7 @@ void PreprocessingRecord::MacroDefined(const Token &Id,
   SourceRange R(MI->getDefinitionLoc(), MI->getDefinitionEndLoc());
   MacroDefinition *Def
       = new (*this) MacroDefinition(Id.getIdentifierInfo(), R);
-  addPreprocessedEntity(Def);
-  MacroDefinitions[MI] = getPPEntityID(PreprocessedEntities.size()-1,
-                                       /*isLoaded=*/false);
+  MacroDefinitions[MI] = addPreprocessedEntity(Def);
 }
 
 void PreprocessingRecord::MacroUndefined(const Token &Id,
@@ -390,13 +417,101 @@ void PreprocessingRecord::InclusionDirective(
     
   default:
     llvm_unreachable("Unknown include directive kind");
-    return;
   }
   
   clang::InclusionDirective *ID
     = new (*this) clang::InclusionDirective(*this, Kind, FileName, !IsAngled, 
                                             File, SourceRange(HashLoc, EndLoc));
   addPreprocessedEntity(ID);
+}
+
+bool PreprocessingRecord::rangeIntersectsConditionalDirective(
+                                                      SourceRange Range) const {
+  if (Range.isInvalid())
+    return false;
+
+  CondDirectiveLocsTy::const_iterator
+    low = std::lower_bound(CondDirectiveLocs.begin(), CondDirectiveLocs.end(),
+                           Range.getBegin(), CondDirectiveLoc::Comp(SourceMgr));
+  if (low == CondDirectiveLocs.end())
+    return false;
+
+  if (SourceMgr.isBeforeInTranslationUnit(Range.getEnd(), low->getLoc()))
+    return false;
+
+  CondDirectiveLocsTy::const_iterator
+    upp = std::upper_bound(low, CondDirectiveLocs.end(),
+                           Range.getEnd(), CondDirectiveLoc::Comp(SourceMgr));
+  unsigned uppIdx;
+  if (upp != CondDirectiveLocs.end())
+    uppIdx = upp->getIdx();
+  else
+    uppIdx = 0;
+
+  return low->getIdx() != uppIdx;
+}
+
+unsigned PreprocessingRecord::findCondDirectiveIdx(SourceLocation Loc) const {
+  if (Loc.isInvalid())
+    return 0;
+
+  CondDirectiveLocsTy::const_iterator
+    low = std::lower_bound(CondDirectiveLocs.begin(), CondDirectiveLocs.end(),
+                           Loc, CondDirectiveLoc::Comp(SourceMgr));
+  if (low == CondDirectiveLocs.end())
+    return 0;
+  return low->getIdx();
+}
+
+void PreprocessingRecord::addCondDirectiveLoc(CondDirectiveLoc DirLoc) {
+  // Ignore directives in system headers.
+  if (SourceMgr.isInSystemHeader(DirLoc.getLoc()))
+    return;
+
+  assert(CondDirectiveLocs.empty() ||
+         SourceMgr.isBeforeInTranslationUnit(CondDirectiveLocs.back().getLoc(),
+                                             DirLoc.getLoc()));
+  CondDirectiveLocs.push_back(DirLoc);
+}
+
+void PreprocessingRecord::If(SourceLocation Loc, SourceRange ConditionRange) {
+  if (RecordCondDirectives) {
+    addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
+    CondDirectiveStack.push_back(CondDirectiveNextIdx++);
+  }
+}
+
+void PreprocessingRecord::Ifdef(SourceLocation Loc, const Token &MacroNameTok) {
+  if (RecordCondDirectives) {
+    addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
+    CondDirectiveStack.push_back(CondDirectiveNextIdx++);
+  }
+}
+
+void PreprocessingRecord::Ifndef(SourceLocation Loc,const Token &MacroNameTok) {
+  if (RecordCondDirectives) {
+    addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
+    CondDirectiveStack.push_back(CondDirectiveNextIdx++);
+  }
+}
+
+void PreprocessingRecord::Elif(SourceLocation Loc, SourceRange ConditionRange,
+                               SourceLocation IfLoc) {
+  if (RecordCondDirectives)
+    addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
+}
+
+void PreprocessingRecord::Else(SourceLocation Loc, SourceLocation IfLoc) {
+  if (RecordCondDirectives)
+    addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
+}
+
+void PreprocessingRecord::Endif(SourceLocation Loc, SourceLocation IfLoc) {
+  if (RecordCondDirectives) {
+    addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
+    assert(!CondDirectiveStack.empty());
+    CondDirectiveStack.pop_back();
+  }
 }
 
 size_t PreprocessingRecord::getTotalMemory() const {

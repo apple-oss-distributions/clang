@@ -88,6 +88,12 @@ MCObjectWriter *createX86MachObjectWriter(raw_ostream &OS,
                                           uint32_t CPUType,
                                           uint32_t CPUSubtype);
 
+/// createX86ELFObjectWriter - Construct an X86 ELF object writer.
+MCObjectWriter *createX86ELFObjectWriter(raw_ostream &OS,
+                                         bool Is64Bit,
+                                         uint8_t OSABI);
+/// createX86WinCOFFObjectWriter - Construct an X86 Win COFF object writer.
+MCObjectWriter *createX86WinCOFFObjectWriter(raw_ostream &OS, bool Is64Bit);
 } // End llvm namespace
 
 

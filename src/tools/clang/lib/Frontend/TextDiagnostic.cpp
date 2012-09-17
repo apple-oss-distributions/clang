@@ -233,7 +233,7 @@ static unsigned findEndOfWord(unsigned Start, StringRef Str,
 
   // We have the start of a balanced punctuation sequence (quotes,
   // parentheses, etc.). Determine the full sequence is.
-  llvm::SmallString<16> PunctuationEndStack;
+  SmallString<16> PunctuationEndStack;
   PunctuationEndStack.push_back(EndPunct);
   while (End < Length && !PunctuationEndStack.empty()) {
     if (Str[End] == PunctuationEndStack.back())
@@ -284,7 +284,7 @@ static bool printWordWrapped(raw_ostream &OS, StringRef Str,
   const unsigned Length = std::min(Str.find('\n'), Str.size());
 
   // The string used to indent each line.
-  llvm::SmallString<16> IndentStr;
+  SmallString<16> IndentStr;
   IndentStr.assign(Indentation, ' ');
   bool Wrapped = false;
   for (unsigned WordStart = 0, WordEnd; WordStart < Length;
@@ -326,10 +326,9 @@ static bool printWordWrapped(raw_ostream &OS, StringRef Str,
 }
 
 TextDiagnostic::TextDiagnostic(raw_ostream &OS,
-                               const SourceManager &SM,
                                const LangOptions &LangOpts,
                                const DiagnosticOptions &DiagOpts)
-  : DiagnosticRenderer(SM, LangOpts, DiagOpts), OS(OS) {}
+  : DiagnosticRenderer(LangOpts, DiagOpts), OS(OS) {}
 
 TextDiagnostic::~TextDiagnostic() {}
 
@@ -339,11 +338,13 @@ TextDiagnostic::emitDiagnosticMessage(SourceLocation Loc,
                                       DiagnosticsEngine::Level Level,
                                       StringRef Message,
                                       ArrayRef<clang::CharSourceRange> Ranges,
-                                      const Diagnostic *Info) {
+                                      const SourceManager *SM,
+                                      DiagOrStoredDiag D) {
   uint64_t StartOfLocationInfo = OS.tell();
 
   // Emit the location of this particular diagnostic.
-  emitDiagnosticLoc(Loc, PLoc, Level, Ranges);
+  if (Loc.isValid())
+    emitDiagnosticLoc(Loc, PLoc, Level, Ranges, *SM);
   
   if (DiagOpts.ShowColors)
     OS.resetColor();
@@ -417,7 +418,8 @@ TextDiagnostic::printDiagnosticMessage(raw_ostream &OS,
 /// ranges necessary.
 void TextDiagnostic::emitDiagnosticLoc(SourceLocation Loc, PresumedLoc PLoc,
                                        DiagnosticsEngine::Level Level,
-                                       ArrayRef<CharSourceRange> Ranges) {
+                                       ArrayRef<CharSourceRange> Ranges,
+                                       const SourceManager &SM) {
   if (PLoc.isInvalid()) {
     // At least print the file name if available:
     FileID FID = SM.getFileID(Loc);
@@ -523,7 +525,8 @@ void TextDiagnostic::emitBasicNote(StringRef Message) {
 }
 
 void TextDiagnostic::emitIncludeLocation(SourceLocation Loc,
-                                         PresumedLoc PLoc) {
+                                         PresumedLoc PLoc,
+                                         const SourceManager &SM) {
   if (DiagOpts.ShowLocation)
     OS << "In file included from " << PLoc.getFilename() << ':'
        << PLoc.getLine() << ":\n";
@@ -541,7 +544,8 @@ void TextDiagnostic::emitIncludeLocation(SourceLocation Loc,
 void TextDiagnostic::emitSnippetAndCaret(
     SourceLocation Loc, DiagnosticsEngine::Level Level,
     SmallVectorImpl<CharSourceRange>& Ranges,
-    ArrayRef<FixItHint> Hints) {
+    ArrayRef<FixItHint> Hints,
+    const SourceManager &SM) {
   assert(!Loc.isInvalid() && "must have a valid source location here");
   assert(Loc.isFileID() && "must have a file location here");
 
@@ -600,7 +604,7 @@ void TextDiagnostic::emitSnippetAndCaret(
   for (SmallVectorImpl<CharSourceRange>::iterator I = Ranges.begin(),
                                                   E = Ranges.end();
        I != E; ++I)
-    highlightRange(*I, LineNo, FID, SourceLine, CaretLine);
+    highlightRange(*I, LineNo, FID, SourceLine, CaretLine, SM);
 
   // Next, insert the caret itself.
   if (ColNo-1 < CaretLine.size())
@@ -621,7 +625,7 @@ void TextDiagnostic::emitSnippetAndCaret(
 
   std::string FixItInsertionLine = buildFixItInsertionLine(LineNo,
                                                            LineStart, LineEnd,
-                                                           Hints);
+                                                           Hints, SM);
 
   // If the source line is too long for our terminal, select only the
   // "interesting" source region within that line.
@@ -655,14 +659,15 @@ void TextDiagnostic::emitSnippetAndCaret(
   }
 
   // Print out any parseable fixit information requested by the options.
-  emitParseableFixits(Hints);
+  emitParseableFixits(Hints, SM);
 }
 
 /// \brief Highlight a SourceRange (with ~'s) for any characters on LineNo.
 void TextDiagnostic::highlightRange(const CharSourceRange &R,
                                     unsigned LineNo, FileID FID,
                                     const std::string &SourceLine,
-                                    std::string &CaretLine) {
+                                    std::string &CaretLine,
+                                    const SourceManager &SM) {
   assert(CaretLine.size() == SourceLine.size() &&
          "Expect a correspondence between source and caret line!");
   if (!R.isValid()) return;
@@ -739,7 +744,8 @@ void TextDiagnostic::highlightRange(const CharSourceRange &R,
 std::string TextDiagnostic::buildFixItInsertionLine(unsigned LineNo,
                                                     const char *LineStart,
                                                     const char *LineEnd,
-                                                    ArrayRef<FixItHint> Hints) {
+                                                    ArrayRef<FixItHint> Hints,
+                                                    const SourceManager &SM) {
   std::string FixItInsertionLine;
   if (Hints.empty() || !DiagOpts.ShowFixits)
     return FixItInsertionLine;
@@ -835,7 +841,8 @@ void TextDiagnostic::expandTabs(std::string &SourceLine,
   }
 }
 
-void TextDiagnostic::emitParseableFixits(ArrayRef<FixItHint> Hints) {
+void TextDiagnostic::emitParseableFixits(ArrayRef<FixItHint> Hints,
+                                         const SourceManager &SM) {
   if (!DiagOpts.ShowParseableFixits)
     return;
 

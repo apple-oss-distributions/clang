@@ -21,7 +21,9 @@
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <map>
 #include <vector>
@@ -102,7 +104,39 @@ namespace SrcMgr {
 
     /// NumLines - The number of lines in this ContentCache.  This is only valid
     /// if SourceLineCache is non-null.
-    unsigned NumLines;
+    unsigned NumLines : 31;
+
+    /// \brief Indicates whether the buffer itself was provided to override
+    /// the actual file contents.
+    ///
+    /// When true, the original entry may be a virtual file that does not
+    /// exist.
+    unsigned BufferOverridden : 1;
+    
+    ContentCache(const FileEntry *Ent = 0)
+      : Buffer(0, false), OrigEntry(Ent), ContentsEntry(Ent),
+        SourceLineCache(0), NumLines(0), BufferOverridden(false) {}
+    
+    ContentCache(const FileEntry *Ent, const FileEntry *contentEnt)
+      : Buffer(0, false), OrigEntry(Ent), ContentsEntry(contentEnt),
+        SourceLineCache(0), NumLines(0), BufferOverridden(false) {}
+    
+    ~ContentCache();
+    
+    /// The copy ctor does not allow copies where source object has either
+    ///  a non-NULL Buffer or SourceLineCache.  Ownership of allocated memory
+    ///  is not transferred, so this is a logical error.
+    ContentCache(const ContentCache &RHS)
+      : Buffer(0, false), SourceLineCache(0), BufferOverridden(false)
+    {
+      OrigEntry = RHS.OrigEntry;
+      ContentsEntry = RHS.ContentsEntry;
+      
+      assert (RHS.Buffer.getPointer() == 0 && RHS.SourceLineCache == 0 &&
+              "Passed ContentCache object cannot own a buffer.");
+      
+      NumLines = RHS.NumLines;
+    }
 
     /// getBuffer - Returns the memory buffer for the associated content.
     ///
@@ -157,31 +191,6 @@ namespace SrcMgr {
     /// \brief Determine whether the buffer should be freed.
     bool shouldFreeBuffer() const {
       return (Buffer.getInt() & DoNotFreeFlag) == 0;
-    }
-
-    ContentCache(const FileEntry *Ent = 0)
-      : Buffer(0, false), OrigEntry(Ent), ContentsEntry(Ent),
-        SourceLineCache(0), NumLines(0) {}
-
-    ContentCache(const FileEntry *Ent, const FileEntry *contentEnt)
-      : Buffer(0, false), OrigEntry(Ent), ContentsEntry(contentEnt),
-        SourceLineCache(0), NumLines(0) {}
-
-    ~ContentCache();
-
-    /// The copy ctor does not allow copies where source object has either
-    ///  a non-NULL Buffer or SourceLineCache.  Ownership of allocated memory
-    ///  is not transferred, so this is a logical error.
-    ContentCache(const ContentCache &RHS)
-      : Buffer(0, false), SourceLineCache(0)
-    {
-      OrigEntry = RHS.OrigEntry;
-      ContentsEntry = RHS.ContentsEntry;
-
-      assert (RHS.Buffer.getPointer() == 0 && RHS.SourceLineCache == 0 &&
-              "Passed ContentCache object cannot own a buffer.");
-
-      NumLines = RHS.NumLines;
     }
 
   private:
@@ -476,7 +485,7 @@ public:
 /// the case of a macro expansion, for example, the spelling location indicates
 /// where the expanded token came from and the expansion location specifies
 /// where it was expanded.
-class SourceManager : public llvm::RefCountedBase<SourceManager> {
+class SourceManager : public RefCountedBase<SourceManager> {
   /// \brief DiagnosticsEngine object.
   DiagnosticsEngine &Diag;
 
@@ -494,9 +503,24 @@ class SourceManager : public llvm::RefCountedBase<SourceManager> {
   /// files, should report the original file name. Defaults to true.
   bool OverridenFilesKeepOriginalName;
 
-  /// \brief Files that have been overriden with the contents from another file.
-  llvm::DenseMap<const FileEntry *, const FileEntry *> OverriddenFiles;
+  struct OverriddenFilesInfoTy {
+    /// \brief Files that have been overriden with the contents from another
+    /// file.
+    llvm::DenseMap<const FileEntry *, const FileEntry *> OverriddenFiles;
+    /// \brief Files that were overridden with a memory buffer.
+    llvm::DenseSet<const FileEntry *> OverriddenFilesWithBuffer;
+  };
 
+  /// \brief Lazily create the object keeping overridden files info, since
+  /// it is uncommonly used.
+  OwningPtr<OverriddenFilesInfoTy> OverriddenFilesInfo;
+
+  OverriddenFilesInfoTy &getOverriddenFilesInfo() {
+    if (!OverriddenFilesInfo)
+      OverriddenFilesInfo.reset(new OverriddenFilesInfoTy);
+    return *OverriddenFilesInfo;
+  }
+  
   /// MemBufferInfos - Information about various memory buffers that we have
   /// read in.  All FileEntry* within the stored ContentCache objects are NULL,
   /// as they do not refer to a file.
@@ -512,7 +536,7 @@ class SourceManager : public llvm::RefCountedBase<SourceManager> {
   ///
   /// Negative FileIDs are indexes into this table. To get from ID to an index,
   /// use (-ID - 2).
-  std::vector<SrcMgr::SLocEntry> LoadedSLocEntryTable;
+  mutable std::vector<SrcMgr::SLocEntry> LoadedSLocEntryTable;
 
   /// \brief The starting offset of the next local SLocEntry.
   ///
@@ -569,6 +593,8 @@ class SourceManager : public llvm::RefCountedBase<SourceManager> {
   // Cache for the "fake" buffer used for error-recovery purposes.
   mutable llvm::MemoryBuffer *FakeBufferForRecovery;
 
+  mutable SrcMgr::ContentCache *FakeContentCacheForRecovery;
+
   /// \brief Lazily computed map of macro argument chunks to their expanded
   /// source location.
   typedef std::map<unsigned, SourceLocation> MacroArgsMap;
@@ -611,10 +637,17 @@ public:
   FileID getMainFileID() const { return MainFileID; }
 
   /// createMainFileID - Create the FileID for the main source file.
-  FileID createMainFileID(const FileEntry *SourceFile) {
+  FileID createMainFileID(const FileEntry *SourceFile, 
+                          SrcMgr::CharacteristicKind Kind = SrcMgr::C_User) {
     assert(MainFileID.isInvalid() && "MainFileID already set!");
-    MainFileID = createFileID(SourceFile, SourceLocation(), SrcMgr::C_User);
+    MainFileID = createFileID(SourceFile, SourceLocation(), Kind);
     return MainFileID;
+  }
+
+  /// \brief Set the file ID for the main source file.
+  void setMainFileID(FileID FID) {
+    assert(MainFileID.isInvalid() && "MainFileID already set!");
+    MainFileID = FID;
   }
 
   /// \brief Set the file ID for the precompiled preamble.
@@ -699,6 +732,23 @@ public:
   void overrideFileContents(const FileEntry *SourceFile,
                             const FileEntry *NewFile);
 
+  /// \brief Returns true if the file contents have been overridden.
+  bool isFileOverridden(const FileEntry *File) {
+    if (OverriddenFilesInfo) {
+      if (OverriddenFilesInfo->OverriddenFilesWithBuffer.count(File))
+        return true;
+      if (OverriddenFilesInfo->OverriddenFiles.find(File) !=
+          OverriddenFilesInfo->OverriddenFiles.end())
+        return true;
+    }
+    return false;
+  }
+
+  /// \brief Disable overridding the contents of a file, previously enabled
+  /// with \see overrideFileContents.
+  /// This should be called before parsing has begun.
+  void disableFileContentsOverride(const FileEntry *File);
+
   //===--------------------------------------------------------------------===//
   // FileID manipulation methods.
   //===--------------------------------------------------------------------===//
@@ -743,13 +793,19 @@ public:
     if (MyInvalid || !Entry.isFile())
       return 0;
 
-    return Entry.getFile().getContentCache()->OrigEntry;
+    const SrcMgr::ContentCache *Content = Entry.getFile().getContentCache();
+    if (!Content)
+      return 0;
+    return Content->OrigEntry;
   }
 
   /// Returns the FileEntry record for the provided SLocEntry.
   const FileEntry *getFileEntryForSLocEntry(const SrcMgr::SLocEntry &sloc) const
   {
-    return sloc.getFile().getContentCache()->OrigEntry;
+    const SrcMgr::ContentCache *Content = sloc.getFile().getContentCache();
+    if (!Content)
+      return 0;
+    return Content->OrigEntry;
   }
 
   /// getBufferData - Return a StringRef to the source buffer data for the
@@ -760,7 +816,7 @@ public:
   StringRef getBufferData(FileID FID, bool *Invalid = 0) const;
 
   /// \brief Get the number of FileIDs (files and macros) that were created
-  /// during preprocessing of \arg FID, including it.
+  /// during preprocessing of \p FID, including it.
   unsigned getNumCreatedFIDsForFileID(FileID FID) const {
     bool Invalid = false;
     const SrcMgr::SLocEntry &Entry = getSLocEntry(FID, &Invalid);
@@ -771,7 +827,7 @@ public:
   }
 
   /// \brief Set the number of FileIDs (files and macros) that were created
-  /// during preprocessing of \arg FID, including it.
+  /// during preprocessing of \p FID, including it.
   void setNumCreatedFIDsForFileID(FileID FID, unsigned NumFIDs) const {
     bool Invalid = false;
     const SrcMgr::SLocEntry &Entry = getSLocEntry(FID, &Invalid);
@@ -825,7 +881,7 @@ public:
     return SourceLocation::getFileLoc(FileOffset + getFileIDSize(FID) - 1);
   }
 
-  /// \brief Returns the include location if \arg FID is a #include'd file
+  /// \brief Returns the include location if \p FID is a #include'd file
   /// otherwise it returns an invalid location.
   SourceLocation getIncludeLoc(FileID FID) const {
     bool Invalid = false;
@@ -845,7 +901,7 @@ public:
     return getExpansionLocSlowCase(Loc);
   }
 
-  /// \brief Given \arg Loc, if it is a macro location return the expansion
+  /// \brief Given \p Loc, if it is a macro location return the expansion
   /// location or the spelling location, depending on if it comes from a
   /// macro argument or not.
   SourceLocation getFileLoc(SourceLocation Loc) const {
@@ -941,10 +997,10 @@ public:
   /// expanded.
   bool isMacroArgExpansion(SourceLocation Loc) const;
 
-  /// \brief Returns true if \arg Loc is inside the [\arg Start, +\arg Length)
+  /// \brief Returns true if \p Loc is inside the [\p Start, +\p Length)
   /// chunk of the source location address space.
-  /// If it's true and \arg RelativeOffset is non-null, it will be set to the
-  /// relative offset of \arg Loc inside the chunk.
+  /// If it's true and \p RelativeOffset is non-null, it will be set to the
+  /// relative offset of \p Loc inside the chunk.
   bool isInSLocAddrSpace(SourceLocation Loc,
                          SourceLocation Start, unsigned Length,
                          unsigned *RelativeOffset = 0) const {
@@ -965,10 +1021,10 @@ public:
     return false;
   }
 
-  /// \brief Return true if both \arg LHS and \arg RHS are in the local source
-  /// location address space or the loaded one. If it's true and
-  /// \arg RelativeOffset is non-null, it will be set to the offset of \arg RHS
-  /// relative to \arg LHS.
+  /// \brief Return true if both \p LHS and \p RHS are in the local source
+  /// location address space or the loaded one. If it's true and \p
+  /// RelativeOffset is non-null, it will be set to the offset of \p RHS
+  /// relative to \p LHS.
   bool isInSameSLocAddrSpace(SourceLocation LHS, SourceLocation RHS,
                              int *RelativeOffset) const {
     unsigned LHSOffs = LHS.getOffset(), RHSOffs = RHS.getOffset();
@@ -1068,12 +1124,17 @@ public:
     return getFileCharacteristic(Loc) == SrcMgr::C_ExternCSystem;
   }
 
-  /// \brief The size of the SLocEnty that \arg FID represents.
+  /// \brief Returns whether \p Loc is expanded from a macro in a system header.
+  bool isInSystemMacro(SourceLocation loc) {
+    return loc.isMacroID() && isInSystemHeader(getSpellingLoc(loc));
+  }
+
+  /// \brief The size of the SLocEnty that \p FID represents.
   unsigned getFileIDSize(FileID FID) const;
 
-  /// \brief Given a specific FileID, returns true if \arg Loc is inside that
-  /// FileID chunk and sets relative offset (offset of \arg Loc from beginning
-  /// of FileID) to \arg relativeOffset.
+  /// \brief Given a specific FileID, returns true if \p Loc is inside that
+  /// FileID chunk and sets relative offset (offset of \p Loc from beginning
+  /// of FileID) to \p relativeOffset.
   bool isInFileID(SourceLocation Loc, FileID FID,
                   unsigned *RelativeOffset = 0) const {
     unsigned Offs = Loc.getOffset();
@@ -1151,12 +1212,12 @@ public:
   /// first inclusion.
   FileID translateFile(const FileEntry *SourceFile) const;
 
-  /// \brief Get the source location in \arg FID for the given line:col.
-  /// Returns null location if \arg FID is not a file SLocEntry.
+  /// \brief Get the source location in \p FID for the given line:col.
+  /// Returns null location if \p FID is not a file SLocEntry.
   SourceLocation translateLineCol(FileID FID,
                                   unsigned Line, unsigned Col) const;
 
-  /// \brief If \arg Loc points inside a function macro argument, the returned
+  /// \brief If \p Loc points inside a function macro argument, the returned
   /// location will be the macro location in which the argument was expanded.
   /// If a macro argument is used multiple times, the expanded location will
   /// be at the first expansion of the argument.
@@ -1235,9 +1296,9 @@ public:
   const SrcMgr::SLocEntry &getLoadedSLocEntry(unsigned Index,
                                               bool *Invalid = 0) const {
     assert(Index < LoadedSLocEntryTable.size() && "Invalid index");
-    if (!SLocEntryLoaded[Index])
-      ExternalSLocEntries->ReadSLocEntry(-(static_cast<int>(Index) + 2));
-    return LoadedSLocEntryTable[Index];
+    if (SLocEntryLoaded[Index])
+      return LoadedSLocEntryTable[Index];
+    return loadSLocEntry(Index, Invalid);
   }
 
   const SrcMgr::SLocEntry &getSLocEntry(FileID FID, bool *Invalid = 0) const {
@@ -1265,29 +1326,32 @@ public:
   std::pair<int, unsigned>
   AllocateLoadedSLocEntries(unsigned NumSLocEntries, unsigned TotalSize);
 
-  /// \brief Returns true if \arg Loc came from a PCH/Module.
+  /// \brief Returns true if \p Loc came from a PCH/Module.
   bool isLoadedSourceLocation(SourceLocation Loc) const {
     return Loc.getOffset() >= CurrentLoadedOffset;
   }
 
-  /// \brief Returns true if \arg Loc did not come from a PCH/Module.
+  /// \brief Returns true if \p Loc did not come from a PCH/Module.
   bool isLocalSourceLocation(SourceLocation Loc) const {
     return Loc.getOffset() < NextLocalOffset;
   }
 
-  /// \brief Returns true if \arg FID came from a PCH/Module.
+  /// \brief Returns true if \p FID came from a PCH/Module.
   bool isLoadedFileID(FileID FID) const {
     assert(FID.ID != -1 && "Using FileID sentinel value");
     return FID.ID < 0;
   }
 
-  /// \brief Returns true if \arg FID did not come from a PCH/Module.
+  /// \brief Returns true if \p FID did not come from a PCH/Module.
   bool isLocalFileID(FileID FID) const {
     return !isLoadedFileID(FID);
   }
 
 private:
   const llvm::MemoryBuffer *getFakeBufferForRecovery() const;
+  const SrcMgr::ContentCache *getFakeContentCacheForRecovery() const;
+
+  const SrcMgr::SLocEntry &loadSLocEntry(unsigned Index, bool *Invalid) const;
 
   /// \brief Get the entry with the given unwrapped FileID.
   const SrcMgr::SLocEntry &getSLocEntryByID(int ID) const {
@@ -1297,8 +1361,9 @@ private:
     return getLocalSLocEntry(static_cast<unsigned>(ID));
   }
 
-  const SrcMgr::SLocEntry &getLoadedSLocEntryByID(int ID) const {
-    return getLoadedSLocEntry(static_cast<unsigned>(-ID - 2));
+  const SrcMgr::SLocEntry &getLoadedSLocEntryByID(int ID,
+                                                  bool *Invalid = 0) const {
+    return getLoadedSLocEntry(static_cast<unsigned>(-ID - 2), Invalid);
   }
 
   /// createExpansionLoc - Implements the common elements of storing an

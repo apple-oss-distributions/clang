@@ -63,8 +63,22 @@ void CodeMetrics::analyzeBasicBlock(const BasicBlock *BB,
 
     // Special handling for calls.
     if (isa<CallInst>(II) || isa<InvokeInst>(II)) {
-      if (isa<DbgInfoIntrinsic>(II))
-        continue;  // Debug intrinsics don't count as size.
+      if (const IntrinsicInst *IntrinsicI = dyn_cast<IntrinsicInst>(II)) {
+        switch (IntrinsicI->getIntrinsicID()) {
+        default: break;
+        case Intrinsic::dbg_declare:
+        case Intrinsic::dbg_value:
+        case Intrinsic::invariant_start:
+        case Intrinsic::invariant_end:
+        case Intrinsic::lifetime_start:
+        case Intrinsic::lifetime_end:
+        case Intrinsic::objectsize:
+        case Intrinsic::ptr_annotation:
+        case Intrinsic::var_annotation:
+          // These intrinsics don't count as size.
+          continue;
+        }
+      }
 
       ImmutableCallSite CS(cast<Instruction>(II));
 
@@ -72,7 +86,7 @@ void CodeMetrics::analyzeBasicBlock(const BasicBlock *BB,
         // If a function is both internal and has a single use, then it is
         // extremely likely to get inlined in the future (it was probably
         // exposed by an interleaved devirtualization pass).
-        if (F->hasInternalLinkage() && F->hasOneUse())
+        if (!CS.isNoInline() && F->hasInternalLinkage() && F->hasOneUse())
           ++NumInlineCandidates;
 
         // If this call is to function itself, then the function is recursive.
@@ -138,7 +152,7 @@ void CodeMetrics::analyzeBasicBlock(const BasicBlock *BB,
   // FIXME: This logic isn't really right; we can safely inline functions
   // with indirectbr's as long as no other function or global references the
   // blockaddress of a block within the current function.  And as a QOI issue,
-  // if someone is using a blockaddress wihtout an indirectbr, and that
+  // if someone is using a blockaddress without an indirectbr, and that
   // reference somehow ends up in another function or global, we probably
   // don't want to inline this function.
   if (isa<IndirectBrInst>(BB->getTerminator()))
@@ -207,22 +221,120 @@ unsigned CodeMetrics::CountCodeReductionForConstant(Value *V) {
 unsigned CodeMetrics::CountCodeReductionForAlloca(Value *V) {
   if (!V->getType()->isPointerTy()) return 0;  // Not a pointer
   unsigned Reduction = 0;
-  for (Value::use_iterator UI = V->use_begin(), E = V->use_end(); UI != E;++UI){
-    Instruction *I = cast<Instruction>(*UI);
-    if (isa<LoadInst>(I) || isa<StoreInst>(I))
-      Reduction += InlineConstants::InstrCost;
-    else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-      // If the GEP has variable indices, we won't be able to do much with it.
-      if (GEP->hasAllConstantIndices())
-        Reduction += CountCodeReductionForAlloca(GEP);
-    } else if (BitCastInst *BCI = dyn_cast<BitCastInst>(I)) {
-      // Track pointer through bitcasts.
-      Reduction += CountCodeReductionForAlloca(BCI);
-    } else {
-      // If there is some other strange instruction, we're not going to be able
-      // to do much if we inline this.
-      return 0;
+
+  // Looking at ICmpInsts will never abort the analysis and return zero, and
+  // analyzing them is expensive, so save them for last so that we don't do
+  // extra work that we end up throwing out.
+  SmallVector<ICmpInst *, 4> ICmpInsts;
+
+  SmallVector<Value *, 4> Worklist;
+  Worklist.push_back(V);
+  do {
+    Value *V = Worklist.pop_back_val();
+    for (Value::use_iterator UI = V->use_begin(), E = V->use_end();
+         UI != E; ++UI){
+      Instruction *I = cast<Instruction>(*UI);
+      if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+        if (!LI->isSimple())
+          return 0;
+        Reduction += InlineConstants::InstrCost;
+      } else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
+        if (!SI->isSimple())
+          return 0;
+        Reduction += InlineConstants::InstrCost;
+      } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
+        // If the GEP has variable indices, we won't be able to do much with it.
+        if (!GEP->hasAllConstantIndices())
+          return 0;
+        // A non-zero GEP will likely become a mask operation after SROA.
+        if (GEP->hasAllZeroIndices())
+          Reduction += InlineConstants::InstrCost;
+        Worklist.push_back(GEP);
+      } else if (BitCastInst *BCI = dyn_cast<BitCastInst>(I)) {
+        // Track pointer through bitcasts.
+        Worklist.push_back(BCI);
+        Reduction += InlineConstants::InstrCost;
+      } else if (SelectInst *SI = dyn_cast<SelectInst>(I)) {
+        // SROA can handle a select of alloca iff all uses of the alloca are
+        // loads, and dereferenceable. We assume it's dereferenceable since
+        // we're told the input is an alloca.
+        for (Value::use_iterator UI = SI->use_begin(), UE = SI->use_end();
+             UI != UE; ++UI) {
+          LoadInst *LI = dyn_cast<LoadInst>(*UI);
+          if (LI == 0 || !LI->isSimple()) return 0;
+        }
+        // We don't know whether we'll be deleting the rest of the chain of
+        // instructions from the SelectInst on, because we don't know whether
+        // the other side of the select is also an alloca or not.
+        continue;
+      } else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
+        switch (II->getIntrinsicID()) {
+        default:
+          return 0;
+        case Intrinsic::memset:
+        case Intrinsic::memcpy:
+        case Intrinsic::memmove:
+        case Intrinsic::lifetime_start:
+        case Intrinsic::lifetime_end:
+          // SROA can usually chew through these intrinsics.
+          Reduction += InlineConstants::InstrCost;
+          break;
+        }
+      } else if (ICmpInst *ICI = dyn_cast<ICmpInst>(I)) {
+        if (!isa<Constant>(ICI->getOperand(1)))
+          return 0;
+        ICmpInsts.push_back(ICI);
+      } else {
+        // If there is some other strange instruction, we're not going to be
+        // able to do much if we inline this.
+        return 0;
+      }
     }
+  } while (!Worklist.empty());
+
+  while (!ICmpInsts.empty()) {
+    ICmpInst *ICI = ICmpInsts.pop_back_val();
+
+    // An icmp pred (alloca, C) becomes true if the predicate is true when
+    // equal and false otherwise.
+    bool Result = ICI->isTrueWhenEqual();
+
+    SmallVector<Instruction *, 4> Worklist;
+    Worklist.push_back(ICI);
+    do {
+      Instruction *U = Worklist.pop_back_val();
+      Reduction += InlineConstants::InstrCost;
+      for (Value::use_iterator UI = U->use_begin(), UE = U->use_end();
+           UI != UE; ++UI) {
+        Instruction *I = dyn_cast<Instruction>(*UI);
+        if (!I || I->mayHaveSideEffects()) continue;
+        if (I->getNumOperands() == 1)
+          Worklist.push_back(I);
+        if (BinaryOperator *BO = dyn_cast<BinaryOperator>(I)) {
+          // If BO produces the same value as U, then the other operand is
+          // irrelevant and we can put it into the Worklist to continue
+          // deleting dead instructions. If BO produces the same value as the
+          // other operand, we can delete BO but that's it.
+          if (Result == true) {
+            if (BO->getOpcode() == Instruction::Or)
+              Worklist.push_back(I);
+            if (BO->getOpcode() == Instruction::And)
+              Reduction += InlineConstants::InstrCost;
+          } else {
+            if (BO->getOpcode() == Instruction::Or ||
+                BO->getOpcode() == Instruction::Xor)
+              Reduction += InlineConstants::InstrCost;
+            if (BO->getOpcode() == Instruction::And)
+              Worklist.push_back(I);
+          }
+        }
+        if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
+          BasicBlock *BB = BI->getSuccessor(Result ? 0 : 1);
+          if (BB->getSinglePredecessor())
+            Reduction += InlineConstants::InstrCost * NumBBInsts[BB];
+        }
+      }
+    } while (!Worklist.empty());
   }
 
   return Reduction;
@@ -232,10 +344,12 @@ unsigned CodeMetrics::CountCodeReductionForAlloca(Value *V) {
 /// from the specified function.
 void CodeMetrics::analyzeFunction(Function *F, const TargetData *TD) {
   // If this function contains a call that "returns twice" (e.g., setjmp or
-  // _setjmp), never inline it. This is a hack because we depend on the user
-  // marking their local variables as volatile if they are live across a setjmp
-  // call, and they probably won't do this in callers.
-  callsSetJmp = F->callsFunctionThatReturnsTwice();
+  // _setjmp) and it isn't marked with "returns twice" itself, never inline it.
+  // This is a hack because we depend on the user marking their local variables
+  // as volatile if they are live across a setjmp call, and they probably
+  // won't do this in callers.
+  exposesReturnsTwice = F->callsFunctionThatReturnsTwice() &&
+    !F->hasFnAttr(Attribute::ReturnsTwice);
 
   // Look at the size of the callee.
   for (Function::const_iterator BB = F->begin(), E = F->end(); BB != E; ++BB)
@@ -265,7 +379,7 @@ void InlineCostAnalyzer::FunctionInfo::analyzeFunction(Function *F,
 /// NeverInline - returns true if the function should never be inlined into
 /// any caller
 bool InlineCostAnalyzer::FunctionInfo::NeverInline() {
-  return (Metrics.callsSetJmp || Metrics.isRecursive ||
+  return (Metrics.exposesReturnsTwice || Metrics.isRecursive ||
           Metrics.containsIndirectBr);
 }
 // getSpecializationBonus - The heuristic used to determine the per-call
@@ -420,7 +534,7 @@ int InlineCostAnalyzer::getInlineSize(CallSite CS, Function *Callee) {
   InlineCost += CalleeFI->Metrics.NumCalls * InlineConstants::CallPenalty;
 
   // Look at the size of the callee. Each instruction counts as 5.
-  InlineCost += CalleeFI->Metrics.NumInsts*InlineConstants::InstrCost;
+  InlineCost += CalleeFI->Metrics.NumInsts * InlineConstants::InstrCost;
 
   return InlineCost;
 }
@@ -634,7 +748,7 @@ InlineCostAnalyzer::growCachedCostInfo(Function *Caller, Function *Callee) {
 
   // FIXME: If any of these three are true for the callee, the callee was
   // not inlined into the caller, so I think they're redundant here.
-  CallerMetrics.callsSetJmp |= CalleeMetrics.callsSetJmp;
+  CallerMetrics.exposesReturnsTwice |= CalleeMetrics.exposesReturnsTwice;
   CallerMetrics.isRecursive |= CalleeMetrics.isRecursive;
   CallerMetrics.containsIndirectBr |= CalleeMetrics.containsIndirectBr;
 

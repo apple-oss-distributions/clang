@@ -40,7 +40,7 @@ public:
   UnusedInitRewriter(MigrationPass &pass)
     : Body(0), Pass(pass) { }
 
-  void transformBody(Stmt *body) {
+  void transformBody(Stmt *body, Decl *ParentD) {
     Body = body;
     collectRemovables(body, Removables);
     TraverseStmt(body);
@@ -54,7 +54,11 @@ public:
       Transaction Trans(Pass.TA);
       Pass.TA.clearDiagnostic(diag::err_arc_unused_init_message,
                               ME->getExprLoc());
-      Pass.TA.insert(ME->getExprLoc(), "self = ");
+      SourceRange ExprRange = ME->getSourceRange();
+      Pass.TA.insert(ExprRange.getBegin(), "if (!(self = ");
+      std::string retStr = ")) return ";
+      retStr += getNilString(Pass.Ctx);
+      Pass.TA.insertAfterToken(ExprRange.getEnd(), retStr);
     }
     return true;
   }

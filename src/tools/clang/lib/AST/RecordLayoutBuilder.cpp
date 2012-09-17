@@ -558,6 +558,14 @@ protected:
 
   SmallVector<uint64_t, 16> FieldOffsets;
 
+  /// \brief Whether the external AST source has provided a layout for this
+  /// record.
+  unsigned ExternalLayout : 1;
+
+  /// \brief Whether we need to infer alignment, even when we have an 
+  /// externally-provided layout.
+  unsigned InferAlignment : 1;
+  
   /// Packed - Whether the record is packed or not.
   unsigned Packed : 1;
 
@@ -618,12 +626,27 @@ protected:
   /// avoid visiting virtual bases more than once.
   llvm::SmallPtrSet<const CXXRecordDecl *, 4> VisitedVirtualBases;
 
+  /// \brief Externally-provided size.
+  uint64_t ExternalSize;
+  
+  /// \brief Externally-provided alignment.
+  uint64_t ExternalAlign;
+  
+  /// \brief Externally-provided field offsets.
+  llvm::DenseMap<const FieldDecl *, uint64_t> ExternalFieldOffsets;
+
+  /// \brief Externally-provided direct, non-virtual base offsets.
+  llvm::DenseMap<const CXXRecordDecl *, CharUnits> ExternalBaseOffsets;
+
+  /// \brief Externally-provided virtual base offsets.
+  llvm::DenseMap<const CXXRecordDecl *, CharUnits> ExternalVirtualBaseOffsets;
+
   RecordLayoutBuilder(const ASTContext &Context,
                       EmptySubobjectMap *EmptySubobjects)
     : Context(Context), EmptySubobjects(EmptySubobjects), Size(0), 
       Alignment(CharUnits::One()), UnpackedAlignment(CharUnits::One()),
-      Packed(false), IsUnion(false), 
-      IsMac68kAlign(false), IsMsStruct(false),
+      ExternalLayout(false), InferAlignment(false), 
+      Packed(false), IsUnion(false), IsMac68kAlign(false), IsMsStruct(false),
       UnfilledBitsInLastByte(0), MaxFieldAlignment(CharUnits::Zero()), 
       DataSize(0), NonVirtualSize(CharUnits::Zero()), 
       NonVirtualAlignment(CharUnits::One()), 
@@ -728,6 +751,14 @@ protected:
     UpdateAlignment(NewAlignment, NewAlignment);
   }
 
+  /// \brief Retrieve the externally-supplied field offset for the given
+  /// field.
+  ///
+  /// \param Field The field whose offset is being queried.
+  /// \param ComputedOffset The offset that we've computed for this field.
+  uint64_t updateExternalFieldOffset(const FieldDecl *Field, 
+                                     uint64_t ComputedOffset);
+  
   void CheckFieldPadding(uint64_t Offset, uint64_t UnpaddedOffset,
                           uint64_t UnpackedOffset, unsigned UnpackedAlign,
                           bool isPacked, const FieldDecl *D);
@@ -1289,8 +1320,31 @@ void RecordLayoutBuilder::LayoutVirtualBase(const BaseSubobjectInfo *Base) {
 CharUnits RecordLayoutBuilder::LayoutBase(const BaseSubobjectInfo *Base) {
   const ASTRecordLayout &Layout = Context.getASTRecordLayout(Base->Class);
 
+  
+  CharUnits Offset;
+  
+  // Query the external layout to see if it provides an offset.
+  bool HasExternalLayout = false;
+  if (ExternalLayout) {
+    llvm::DenseMap<const CXXRecordDecl *, CharUnits>::iterator Known;
+    if (Base->IsVirtual) {
+      Known = ExternalVirtualBaseOffsets.find(Base->Class);
+      if (Known != ExternalVirtualBaseOffsets.end()) {
+        Offset = Known->second;
+        HasExternalLayout = true;
+      }
+    } else {
+      Known = ExternalBaseOffsets.find(Base->Class);
+      if (Known != ExternalBaseOffsets.end()) {
+        Offset = Known->second;
+        HasExternalLayout = true;
+      }
+    }
+  }
+  
   // If we have an empty base class, try to place it at offset 0.
   if (Base->Class->isEmpty() &&
+      (!HasExternalLayout || Offset == CharUnits::Zero()) &&
       EmptySubobjects->CanPlaceBaseAtOffset(Base, CharUnits::Zero())) {
     setSize(std::max(getSize(), Layout.getSize()));
 
@@ -1306,13 +1360,19 @@ CharUnits RecordLayoutBuilder::LayoutBase(const BaseSubobjectInfo *Base) {
     UnpackedBaseAlign = std::min(UnpackedBaseAlign, MaxFieldAlignment);
   }
 
-  // Round up the current record size to the base's alignment boundary.
-  CharUnits Offset = getDataSize().RoundUpToAlignment(BaseAlign);
+  if (!HasExternalLayout) {
+    // Round up the current record size to the base's alignment boundary.
+    Offset = getDataSize().RoundUpToAlignment(BaseAlign);
 
-  // Try to place the base.
-  while (!EmptySubobjects->CanPlaceBaseAtOffset(Base, Offset))
-    Offset += BaseAlign;
-
+    // Try to place the base.
+    while (!EmptySubobjects->CanPlaceBaseAtOffset(Base, Offset))
+      Offset += BaseAlign;
+  } else {
+    bool Allowed = EmptySubobjects->CanPlaceBaseAtOffset(Base, Offset);
+    (void)Allowed;
+    assert(Allowed && "Base subobject externally placed at overlapping offset");
+  }
+  
   if (!Base->Class->isEmpty()) {
     // Update the data size.
     setDataSize(Offset + Layout.getNonVirtualSize());
@@ -1336,7 +1396,7 @@ void RecordLayoutBuilder::InitializeLayout(const Decl *D) {
   IsMsStruct = D->hasAttr<MsStructAttr>();
 
   // Honor the default struct packing maximum alignment flag.
-  if (unsigned DefaultMaxFieldAlignment = Context.getLangOptions().PackStruct) {
+  if (unsigned DefaultMaxFieldAlignment = Context.getLangOpts().PackStruct) {
     MaxFieldAlignment = CharUnits::fromQuantity(DefaultMaxFieldAlignment);
   }
 
@@ -1355,6 +1415,28 @@ void RecordLayoutBuilder::InitializeLayout(const Decl *D) {
     if (unsigned MaxAlign = D->getMaxAlignment())
       UpdateAlignment(Context.toCharUnitsFromBits(MaxAlign));
   }
+  
+  // If there is an external AST source, ask it for the various offsets.
+  if (const RecordDecl *RD = dyn_cast<RecordDecl>(D))
+    if (ExternalASTSource *External = Context.getExternalSource()) {
+      ExternalLayout = External->layoutRecordType(RD, 
+                                                  ExternalSize,
+                                                  ExternalAlign,
+                                                  ExternalFieldOffsets,
+                                                  ExternalBaseOffsets,
+                                                  ExternalVirtualBaseOffsets);
+      
+      // Update based on external alignment.
+      if (ExternalLayout) {
+        if (ExternalAlign > 0) {
+          Alignment = Context.toCharUnitsFromBits(ExternalAlign);
+          UnpackedAlignment = Alignment;
+        } else {
+          // The external source didn't have alignment information; infer it.
+          InferAlignment = true;
+        }
+      }
+    }
 }
 
 void RecordLayoutBuilder::Layout(const RecordDecl *D) {
@@ -1399,10 +1481,8 @@ void RecordLayoutBuilder::Layout(const CXXRecordDecl *RD) {
   }
 
   // Finally, round the size of the total struct up to the alignment
-  // of the struct itself.  Amazingly, this does not occur in the MS
-  // ABI after virtual base layout.
-  if (!isMicrosoftCXXABI() || RD->getNumVBases())
-    FinishLayout(RD);
+  // of the struct itself.
+  FinishLayout(RD);
 
 #ifndef NDEBUG
   // Check that we have base offsets for all bases.
@@ -1578,7 +1658,7 @@ void RecordLayoutBuilder::LayoutWideBitField(uint64_t FieldSize,
                                              uint64_t TypeSize,
                                              bool FieldPacked,
                                              const FieldDecl *D) {
-  assert(Context.getLangOptions().CPlusPlus &&
+  assert(Context.getLangOpts().CPlusPlus &&
          "Can only have wide bit-fields in C++!");
 
   // Itanium C++ ABI 2.4:
@@ -1710,8 +1790,9 @@ void RecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
   }
 
   // Check if we need to add padding to give the field the correct alignment.
-  if (FieldSize == 0 || (MaxFieldAlignment.isZero() &&
-                         (FieldOffset & (FieldAlign-1)) + FieldSize > TypeSize))
+  if (FieldSize == 0 || 
+      (MaxFieldAlignment.isZero() &&
+       (FieldOffset & (FieldAlign-1)) + FieldSize > TypeSize))
     FieldOffset = llvm::RoundUpToAlignment(FieldOffset, FieldAlign);
 
   if (FieldSize == 0 ||
@@ -1728,11 +1809,15 @@ void RecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
   if (!IsMsStruct)
     ZeroLengthBitfield = 0;
 
+  if (ExternalLayout)
+    FieldOffset = updateExternalFieldOffset(D, FieldOffset);
+
   // Place this field at the current location.
   FieldOffsets.push_back(FieldOffset);
 
-  CheckFieldPadding(FieldOffset, UnpaddedFieldOffset, UnpackedFieldOffset,
-                    UnpackedFieldAlign, FieldPacked, D);
+  if (!ExternalLayout)
+    CheckFieldPadding(FieldOffset, UnpaddedFieldOffset, UnpackedFieldOffset,
+                      UnpackedFieldAlign, FieldPacked, D);
 
   // Update DataSize to include the last byte containing (part of) the bitfield.
   if (IsUnion) {
@@ -1754,7 +1839,7 @@ void RecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
                   Context.toCharUnitsFromBits(UnpackedFieldAlign));
 }
 
-void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {
+void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {  
   if (D->isBitField()) {
     LayoutBitField(D);
     return;
@@ -1815,7 +1900,7 @@ void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {
       ZeroLengthBitfield = 0;
     }
 
-    if (Context.getLangOptions().MSBitfields || IsMsStruct) {
+    if (Context.getLangOpts().MSBitfields || IsMsStruct) {
       // If MS bitfield layout is required, figure out what type is being
       // laid out and align the field to the width of that type.
       
@@ -1853,38 +1938,56 @@ void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {
   UnpackedFieldOffset = 
     UnpackedFieldOffset.RoundUpToAlignment(UnpackedFieldAlign);
 
-  if (!IsUnion && EmptySubobjects) {
-    // Check if we can place the field at this offset.
-    while (!EmptySubobjects->CanPlaceFieldAtOffset(D, FieldOffset)) {
-      // We couldn't place the field at the offset. Try again at a new offset.
-      FieldOffset += FieldAlign;
+  if (ExternalLayout) {
+    FieldOffset = Context.toCharUnitsFromBits(
+                    updateExternalFieldOffset(D, Context.toBits(FieldOffset)));
+    
+    if (!IsUnion && EmptySubobjects) {
+      // Record the fact that we're placing a field at this offset.
+      bool Allowed = EmptySubobjects->CanPlaceFieldAtOffset(D, FieldOffset);
+      (void)Allowed;
+      assert(Allowed && "Externally-placed field cannot be placed here");      
+    }
+  } else {
+    if (!IsUnion && EmptySubobjects) {
+      // Check if we can place the field at this offset.
+      while (!EmptySubobjects->CanPlaceFieldAtOffset(D, FieldOffset)) {
+        // We couldn't place the field at the offset. Try again at a new offset.
+        FieldOffset += FieldAlign;
+      }
     }
   }
-
+  
   // Place this field at the current location.
   FieldOffsets.push_back(Context.toBits(FieldOffset));
 
-  CheckFieldPadding(Context.toBits(FieldOffset), UnpaddedFieldOffset, 
-                    Context.toBits(UnpackedFieldOffset),
-                    Context.toBits(UnpackedFieldAlign), FieldPacked, D);
+  if (!ExternalLayout)
+    CheckFieldPadding(Context.toBits(FieldOffset), UnpaddedFieldOffset, 
+                      Context.toBits(UnpackedFieldOffset),
+                      Context.toBits(UnpackedFieldAlign), FieldPacked, D);
 
   // Reserve space for this field.
   uint64_t FieldSizeInBits = Context.toBits(FieldSize);
   if (IsUnion)
-    setSize(std::max(getSizeInBits(), FieldSizeInBits));
+    setDataSize(std::max(getDataSizeInBits(), FieldSizeInBits));
   else
-    setSize(FieldOffset + FieldSize);
+    setDataSize(FieldOffset + FieldSize);
 
-  // Update the data size.
-  setDataSize(getSizeInBits());
+  // Update the size.
+  setSize(std::max(getSizeInBits(), getDataSizeInBits()));
 
   // Remember max struct/class alignment.
   UpdateAlignment(FieldAlign, UnpackedFieldAlign);
 }
 
 void RecordLayoutBuilder::FinishLayout(const NamedDecl *D) {
+  if (ExternalLayout) {
+    setSize(ExternalSize);
+    return;
+  }
+  
   // In C++, records cannot be of size 0.
-  if (Context.getLangOptions().CPlusPlus && getSizeInBits() == 0) {
+  if (Context.getLangOpts().CPlusPlus && getSizeInBits() == 0) {
     if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D)) {
       // Compatibility with gcc requires a class (pod or non-pod)
       // which is not empty but of size 0; such as having fields of
@@ -1895,6 +1998,13 @@ void RecordLayoutBuilder::FinishLayout(const NamedDecl *D) {
     else
       setSize(CharUnits::One());
   }
+
+  // MSVC doesn't round up to the alignment of the record with virtual bases.
+  if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D)) {
+    if (isMicrosoftCXXABI() && RD->getNumVBases())
+      return;
+  }
+
   // Finally, round the size of the record up to the alignment of the
   // record itself.
   uint64_t UnpaddedSize = getSizeInBits() - UnfilledBitsInLastByte;
@@ -1931,8 +2041,9 @@ void RecordLayoutBuilder::FinishLayout(const NamedDecl *D) {
 
 void RecordLayoutBuilder::UpdateAlignment(CharUnits NewAlignment,
                                           CharUnits UnpackedNewAlignment) {
-  // The alignment is not modified when using 'mac68k' alignment.
-  if (IsMac68kAlign)
+  // The alignment is not modified when using 'mac68k' alignment or when
+  // we have an externally-supplied layout that also provides overall alignment.
+  if (IsMac68kAlign || (ExternalLayout && !InferAlignment))
     return;
 
   if (NewAlignment > Alignment) {
@@ -1946,6 +2057,25 @@ void RecordLayoutBuilder::UpdateAlignment(CharUnits NewAlignment,
            "Alignment not a power of 2"));
     UnpackedAlignment = UnpackedNewAlignment;
   }
+}
+
+uint64_t
+RecordLayoutBuilder::updateExternalFieldOffset(const FieldDecl *Field, 
+                                               uint64_t ComputedOffset) {
+  assert(ExternalFieldOffsets.find(Field) != ExternalFieldOffsets.end() &&
+         "Field does not have an external offset");
+  
+  uint64_t ExternalFieldOffset = ExternalFieldOffsets[Field];
+  
+  if (InferAlignment && ExternalFieldOffset < ComputedOffset) {
+    // The externally-supplied field offset is before the field offset we
+    // computed. Assume that the structure is packed.
+    Alignment = CharUnits::fromQuantity(1);
+    InferAlignment = false;
+  }
+  
+  // Use the externally-supplied field offset.
+  return ExternalFieldOffset;
 }
 
 void RecordLayoutBuilder::CheckFieldPadding(uint64_t Offset,
@@ -2057,6 +2187,10 @@ ASTContext::getASTRecordLayout(const RecordDecl *D) const {
   // as soon as we begin to parse the definition.  That definition is
   // not a complete definition (which is what isDefinition() tests)
   // until we *finish* parsing the definition.
+
+  if (D->hasExternalLexicalStorage() && !D->getDefinition())
+    getExternalSource()->CompleteType(const_cast<RecordDecl*>(D));
+    
   D = D->getDefinition();
   assert(D && "Cannot get layout of forward declarations!");
   assert(D->isCompleteDefinition() && "Cannot layout type before complete!");
@@ -2129,9 +2263,9 @@ ASTContext::getASTRecordLayout(const RecordDecl *D) const {
 
   ASTRecordLayouts[D] = NewEntry;
 
-  if (getLangOptions().DumpRecordLayouts) {
+  if (getLangOpts().DumpRecordLayouts) {
     llvm::errs() << "\n*** Dumping AST Record Layout\n";
-    DumpRecordLayout(D, llvm::errs());
+    DumpRecordLayout(D, llvm::errs(), getLangOpts().DumpRecordLayoutsSimple);
   }
 
   return *NewEntry;
@@ -2148,6 +2282,28 @@ const CXXMethodDecl *ASTContext::getKeyFunction(const CXXRecordDecl *RD) {
   return Entry;
 }
 
+static uint64_t getFieldOffset(const ASTContext &C, const FieldDecl *FD) {
+  const ASTRecordLayout &Layout = C.getASTRecordLayout(FD->getParent());
+  return Layout.getFieldOffset(FD->getFieldIndex());
+}
+
+uint64_t ASTContext::getFieldOffset(const ValueDecl *VD) const {
+  uint64_t OffsetInBits;
+  if (const FieldDecl *FD = dyn_cast<FieldDecl>(VD)) {
+    OffsetInBits = ::getFieldOffset(*this, FD);
+  } else {
+    const IndirectFieldDecl *IFD = cast<IndirectFieldDecl>(VD);
+
+    OffsetInBits = 0;
+    for (IndirectFieldDecl::chain_iterator CI = IFD->chain_begin(),
+                                           CE = IFD->chain_end();
+         CI != CE; ++CI)
+      OffsetInBits += ::getFieldOffset(*this, cast<FieldDecl>(*CI));
+  }
+
+  return OffsetInBits;
+}
+
 /// getObjCLayout - Get or compute information about the layout of the
 /// given interface.
 ///
@@ -2156,7 +2312,9 @@ const CXXMethodDecl *ASTContext::getKeyFunction(const CXXRecordDecl *RD) {
 const ASTRecordLayout &
 ASTContext::getObjCLayout(const ObjCInterfaceDecl *D,
                           const ObjCImplementationDecl *Impl) const {
-  assert(!D->isForwardDecl() && "Invalid interface decl!");
+  // Retrieve the definition
+  D = D->getDefinition();
+  assert(D && D->isThisDeclarationADefinition() && "Invalid interface decl!");
 
   // Look up this layout, if already laid out, return what we have.
   ObjCContainerDecl *Key =
@@ -2300,16 +2458,20 @@ static void DumpCXXRecordLayout(raw_ostream &OS,
 }
 
 void ASTContext::DumpRecordLayout(const RecordDecl *RD,
-                                  raw_ostream &OS) const {
+                                  raw_ostream &OS,
+                                  bool Simple) const {
   const ASTRecordLayout &Info = getASTRecordLayout(RD);
 
   if (const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(RD))
-    return DumpCXXRecordLayout(OS, CXXRD, *this, CharUnits(), 0, 0,
-                               /*IncludeVirtualBases=*/true);
+    if (!Simple)
+      return DumpCXXRecordLayout(OS, CXXRD, *this, CharUnits(), 0, 0,
+                                 /*IncludeVirtualBases=*/true);
 
   OS << "Type: " << getTypeDeclType(RD).getAsString() << "\n";
-  OS << "Record: ";
-  RD->dump();
+  if (!Simple) {
+    OS << "Record: ";
+    RD->dump();
+  }
   OS << "\nLayout: ";
   OS << "<ASTRecordLayout\n";
   OS << "  Size:" << toBits(Info.getSize()) << "\n";

@@ -102,14 +102,13 @@ static const char *GetBlockName(unsigned BlockID,
   default:                           return 0;
   case bitc::MODULE_BLOCK_ID:        return "MODULE_BLOCK";
   case bitc::PARAMATTR_BLOCK_ID:     return "PARAMATTR_BLOCK";
-  case bitc::TYPE_BLOCK_ID_OLD:      return "TYPE_BLOCK_ID_OLD";
   case bitc::TYPE_BLOCK_ID_NEW:      return "TYPE_BLOCK_ID";
   case bitc::CONSTANTS_BLOCK_ID:     return "CONSTANTS_BLOCK";
   case bitc::FUNCTION_BLOCK_ID:      return "FUNCTION_BLOCK";
-  case bitc::TYPE_SYMTAB_BLOCK_ID_OLD: return "TYPE_SYMTAB_OLD";
   case bitc::VALUE_SYMTAB_BLOCK_ID:  return "VALUE_SYMTAB";
   case bitc::METADATA_BLOCK_ID:      return "METADATA_BLOCK";
   case bitc::METADATA_ATTACHMENT_ID: return "METADATA_ATTACHMENT_BLOCK";
+  case bitc::USELIST_BLOCK_ID:       return "USELIST_BLOCK_ID";
   }
 }
 
@@ -163,7 +162,6 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     default: return 0;
     case bitc::PARAMATTR_CODE_ENTRY: return "ENTRY";
     }
-  case bitc::TYPE_BLOCK_ID_OLD:
   case bitc::TYPE_BLOCK_ID_NEW:
     switch (CodeID) {
     default: return 0;
@@ -175,8 +173,6 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     case bitc::TYPE_CODE_OPAQUE:       return "OPAQUE";
     case bitc::TYPE_CODE_INTEGER:      return "INTEGER";
     case bitc::TYPE_CODE_POINTER:      return "POINTER";
-    case bitc::TYPE_CODE_FUNCTION_OLD: return "FUNCTION_OLD";
-    case bitc::TYPE_CODE_STRUCT_OLD:   return "STRUCT_OLD";
     case bitc::TYPE_CODE_ARRAY:        return "ARRAY";
     case bitc::TYPE_CODE_VECTOR:       return "VECTOR";
     case bitc::TYPE_CODE_X86_FP80:     return "X86_FP80";
@@ -212,6 +208,8 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     case bitc::CST_CODE_CE_CMP:          return "CE_CMP";
     case bitc::CST_CODE_INLINEASM:       return "INLINEASM";
     case bitc::CST_CODE_CE_SHUFVEC_EX:   return "CE_SHUFVEC_EX";
+    case bitc::CST_CODE_BLOCKADDRESS:    return "CST_CODE_BLOCKADDRESS";
+    case bitc::CST_CODE_DATA:            return "DATA";
     }
   case bitc::FUNCTION_BLOCK_ID:
     switch (CodeID) {
@@ -232,7 +230,6 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     case bitc::FUNC_CODE_INST_BR:           return "INST_BR";
     case bitc::FUNC_CODE_INST_SWITCH:       return "INST_SWITCH";
     case bitc::FUNC_CODE_INST_INVOKE:       return "INST_INVOKE";
-    case bitc::FUNC_CODE_INST_UNWIND:       return "INST_UNWIND";
     case bitc::FUNC_CODE_INST_UNREACHABLE:  return "INST_UNREACHABLE";
 
     case bitc::FUNC_CODE_INST_PHI:          return "INST_PHI";
@@ -247,11 +244,6 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     case bitc::FUNC_CODE_DEBUG_LOC_AGAIN:   return "DEBUG_LOC_AGAIN";
     case bitc::FUNC_CODE_INST_CALL:         return "INST_CALL";
     case bitc::FUNC_CODE_DEBUG_LOC:         return "DEBUG_LOC";
-    }
-  case bitc::TYPE_SYMTAB_BLOCK_ID_OLD:
-    switch (CodeID) {
-    default: return 0;
-    case bitc::TST_CODE_ENTRY: return "ENTRY";
     }
   case bitc::VALUE_SYMTAB_BLOCK_ID:
     switch (CodeID) {
@@ -273,6 +265,11 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     case bitc::METADATA_NODE:        return "METADATA_NODE";
     case bitc::METADATA_FN_NODE:     return "METADATA_FN_NODE";
     case bitc::METADATA_NAMED_NODE:  return "METADATA_NAMED_NODE";
+    }
+  case bitc::USELIST_BLOCK_ID:
+    switch(CodeID) {
+    default:return 0;
+    case bitc::USELIST_CODE_ENTRY:   return "USELIST_CODE_ENTRY";
     }
   }
 }
@@ -486,13 +483,13 @@ static int AnalyzeBitcode() {
   if (MemBuf->getBufferSize() & 3)
     return Error("Bitcode stream should be a multiple of 4 bytes in length");
 
-  unsigned char *BufPtr = (unsigned char *)MemBuf->getBufferStart();
-  unsigned char *EndBufPtr = BufPtr+MemBuf->getBufferSize();
+  const unsigned char *BufPtr = (unsigned char *)MemBuf->getBufferStart();
+  const unsigned char *EndBufPtr = BufPtr+MemBuf->getBufferSize();
 
   // If we have a wrapper header, parse it and ignore the non-bc file contents.
   // The magic number is 0x0B17C0DE stored in little endian.
   if (isBitcodeWrapper(BufPtr, EndBufPtr))
-    if (SkipBitcodeWrapperHeader(BufPtr, EndBufPtr))
+    if (SkipBitcodeWrapperHeader(BufPtr, EndBufPtr, true))
       return Error("Invalid bitcode wrapper header");
 
   BitstreamReader StreamFile(BufPtr, EndBufPtr);
@@ -538,7 +535,6 @@ static int AnalyzeBitcode() {
   errs() << "\n";
   errs() << "        Stream type: ";
   switch (CurStreamType) {
-  default: assert(0 && "Unknown bitstream type");
   case UnknownBitstream: errs() << "unknown\n"; break;
   case LLVMIRBitstream:  errs() << "LLVM IR\n"; break;
   }

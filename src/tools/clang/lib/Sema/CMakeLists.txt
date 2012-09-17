@@ -8,7 +8,6 @@ add_clang_library(clangSema
   DelayedDiagnostic.cpp
   IdentifierResolver.cpp
   JumpDiagnostics.cpp
-  MultiInitializer.cpp
   Scope.cpp
   Sema.cpp
   SemaAccess.cpp
@@ -17,6 +16,7 @@ add_clang_library(clangSema
   SemaCast.cpp
   SemaChecking.cpp
   SemaCodeComplete.cpp
+  SemaConsumer.cpp
   SemaDecl.cpp
   SemaDeclAttr.cpp
   SemaDeclCXX.cpp
@@ -28,6 +28,7 @@ add_clang_library(clangSema
   SemaExprObjC.cpp
   SemaFixItUtils.cpp
   SemaInit.cpp
+  SemaLambda.cpp
   SemaLookup.cpp
   SemaObjCProperty.cpp
   SemaOverload.cpp
@@ -43,4 +44,8 @@ add_clang_library(clangSema
   )
 
 add_dependencies(clangSema ClangARMNeon ClangAttrClasses ClangAttrList 
-                 ClangDiagnosticSema ClangDeclNodes ClangStmtNodes)
+                 ClangDiagnosticSema ClangDeclNodes ClangStmtNodes 
+                 ClangAttrTemplateInstantiate ClangAttrParsedAttrList 
+				 ClangAttrParsedAttrKinds)
+
+

@@ -18,42 +18,196 @@ namespace llvm {
 
   namespace LibFunc {
     enum Func {
-      /// void *memset(void *b, int c, size_t len);
-      memset,
-      
-      // void *memcpy(void *s1, const void *s2, size_t n);
-      memcpy,
-      
-      // void *memmove(void *s1, const void *s2, size_t n);
-      memmove,
-      
-      /// void memset_pattern16(void *b, const void *pattern16, size_t len);
-      memset_pattern16,
-      
-      /// int iprintf(const char *format, ...);
-      iprintf,
-      
-      /// int siprintf(char *str, const char *format, ...);
-      siprintf,
-
-      /// double sqrt(double x);
-      sqrt,
-
-      /// long double sqrtl(long double x);
-      sqrtl,
-
-      /// float sqrtf(float x);
-      sqrtf,
-      
+      /// double acos(double x);
+      acos,
+      /// long double acosl(long double x);
+      acosl,
+      /// float acosf(float x);
+      acosf,
+      /// double asin(double x);
+      asin,
+      /// long double asinl(long double x);
+      asinl,
+      /// float asinf(float x);
+      asinf,
+      /// double atan(double x);
+      atan,
+      /// long double atanl(long double x);
+      atanl,
+      /// float atanf(float x);
+      atanf,
+      /// double atan2(double y, double x);
+      atan2,
+      /// long double atan2l(long double y, long double x);
+      atan2l,
+      /// float atan2f(float y, float x);
+      atan2f,
+      /// double ceil(double x);
+      ceil,
+      /// long double ceill(long double x);
+      ceill,
+      /// float ceilf(float x);
+      ceilf,
+      /// double copysign(double x, double y);
+      copysign,
+      /// float copysignf(float x, float y);
+      copysignf,
+      /// long double copysignl(long double x, long double y);
+      copysignl,
+      /// double cos(double x);
+      cos,
+      /// long double cosl(long double x);
+      cosl,
+      /// float cosf(float x);
+      cosf,
+      /// double cosh(double x);
+      cosh,
+      /// long double coshl(long double x);
+      coshl,
+      /// float coshf(float x);
+      coshf,
+      /// double exp(double x);
+      exp,
+      /// long double expl(long double x);
+      expl,
+      /// float expf(float x);
+      expf,
+      /// double exp2(double x);
+      exp2,
+      /// long double exp2l(long double x);
+      exp2l,
+      /// float exp2f(float x);
+      exp2f,
+      /// double expm1(double x);
+      expm1,
+      /// long double expm1l(long double x);
+      expm1l,
+      /// float expm1f(float x);
+      expl1f,
+      /// double fabs(double x);
+      fabs,
+      /// long double fabsl(long double x);
+      fabsl,
+      /// float fabsf(float x);
+      fabsf,
+      /// double floor(double x);
+      floor,
+      /// long double floorl(long double x);
+      floorl,
+      /// float floorf(float x);
+      floorf,
       /// int fiprintf(FILE *stream, const char *format, ...);
       fiprintf,
-
-      // size_t fwrite(const void *ptr, size_t size, size_t nitems,
-      //               FILE *stream);
-      fwrite,
-
-      // int fputs(const char *s, FILE *stream);
+      /// double fmod(double x, double y);
+      fmod,
+      /// long double fmodl(long double x, long double y);
+      fmodl,
+      /// float fmodf(float x, float y);
+      fmodf,
+      /// int fputs(const char *s, FILE *stream);
       fputs,
+      /// size_t fwrite(const void *ptr, size_t size, size_t nitems,
+      /// FILE *stream);
+      fwrite,
+      /// int iprintf(const char *format, ...);
+      iprintf,
+      /// double log(double x);
+      log,
+      /// long double logl(long double x);
+      logl,
+      /// float logf(float x);
+      logf,
+      /// double log2(double x);
+      log2,
+      /// double long double log2l(long double x);
+      log2l,
+      /// float log2f(float x);
+      log2f,
+      /// double log10(double x);
+      log10,
+      /// long double log10l(long double x);
+      log10l,
+      /// float log10f(float x);
+      log10f,
+      /// double log1p(double x);
+      log1p,
+      /// long double log1pl(long double x);
+      log1pl,
+      /// float log1pf(float x);
+      log1pf,
+      /// void *memcpy(void *s1, const void *s2, size_t n);
+      memcpy,
+      /// void *memmove(void *s1, const void *s2, size_t n);
+      memmove,
+      /// void *memset(void *b, int c, size_t len);
+      memset,
+      /// void memset_pattern16(void *b, const void *pattern16, size_t len);
+      memset_pattern16,
+      /// double nearbyint(double x);
+      nearbyint,
+      /// float nearbyintf(float x);
+      nearbyintf,
+      /// long double nearbyintl(long double x);
+      nearbyintl,
+      /// double pow(double x, double y);
+      pow,
+      /// float powf(float x, float y);
+      powf,
+      /// long double powl(long double x, long double y);
+      powl,
+      /// double rint(double x);
+      rint,
+      /// float rintf(float x);
+      rintf,
+      /// long dobule rintl(long double x);
+      rintl,
+      /// double sin(double x);
+      sin,
+      /// long double sinl(long double x);
+      sinl,
+      /// float sinf(float x);
+      sinf,
+      /// double sinh(double x);
+      sinh,
+      /// long double sinhl(long double x);
+      sinhl,
+      /// float sinhf(float x);
+      sinhf,
+      /// int siprintf(char *str, const char *format, ...);
+      siprintf,
+      /// double sqrt(double x);
+      sqrt,
+      /// long double sqrtl(long double x);
+      sqrtl,
+      /// float sqrtf(float x);
+      sqrtf,
+      /// double tan(double x);
+      tan,
+      /// long double tanl(long double x);
+      tanl,
+      /// float tanf(float x);
+      tanf,
+      /// double tanh(double x);
+      tanh,
+      /// long double tanhl(long double x);
+      tanhl,
+      /// float tanhf(float x);
+      tanhf,
+      /// double trunc(double x);
+      trunc,
+      /// float truncf(float x);
+      truncf,
+      /// long double truncl(long double x);
+      truncl,
+      /// int __cxa_atexit(void (*f)(void *), void *p, void *d);
+      cxa_atexit,
+      /// void __cxa_guard_abort(guard_t *guard);
+      /// guard_t is int64_t in Itanium ABI or int32_t on ARM eabi.
+      cxa_guard_abort,      
+      /// int __cxa_guard_acquire(guard_t *guard);
+      cxa_guard_acquire,
+      /// void __cxa_guard_release(guard_t *guard);
+      cxa_guard_release,
 
       NumLibFuncs
     };
@@ -63,6 +217,7 @@ namespace llvm {
 /// library functions are available for the current target, and allows a
 /// frontend to disable optimizations through -fno-builtin etc.
 class TargetLibraryInfo : public ImmutablePass {
+  virtual void anchor();
   unsigned char AvailableArray[(LibFunc::NumLibFuncs+3)/4];
   llvm::DenseMap<unsigned, std::string> CustomNames;
   static const char* StandardNames[LibFunc::NumLibFuncs];

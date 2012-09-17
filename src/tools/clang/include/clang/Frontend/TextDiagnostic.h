@@ -37,7 +37,6 @@ class TextDiagnostic : public DiagnosticRenderer {
 
 public:
   TextDiagnostic(raw_ostream &OS,
-                 const SourceManager &SM,
                  const LangOptions &LangOpts,
                  const DiagnosticOptions &DiagOpts);
 
@@ -81,38 +80,45 @@ protected:
                                      DiagnosticsEngine::Level Level,
                                      StringRef Message,
                                      ArrayRef<CharSourceRange> Ranges,
-                                     const Diagnostic *Info);
+                                     const SourceManager *SM,
+                                     DiagOrStoredDiag D);
 
   virtual void emitDiagnosticLoc(SourceLocation Loc, PresumedLoc PLoc,
                                  DiagnosticsEngine::Level Level,
-                                 ArrayRef<CharSourceRange> Ranges);
+                                 ArrayRef<CharSourceRange> Ranges,
+                                 const SourceManager &SM);
   
   virtual void emitCodeContext(SourceLocation Loc,
                                DiagnosticsEngine::Level Level,
                                SmallVectorImpl<CharSourceRange>& Ranges,
-                               ArrayRef<FixItHint> Hints) {
-    emitSnippetAndCaret(Loc, Level, Ranges, Hints);
+                               ArrayRef<FixItHint> Hints,
+                               const SourceManager &SM) {
+    emitSnippetAndCaret(Loc, Level, Ranges, Hints, SM);
   }
   
   virtual void emitBasicNote(StringRef Message);
   
-  virtual void emitIncludeLocation(SourceLocation Loc, PresumedLoc PLoc);
+  virtual void emitIncludeLocation(SourceLocation Loc, PresumedLoc PLoc,
+                                   const SourceManager &SM);
 
 private:
   void emitSnippetAndCaret(SourceLocation Loc, DiagnosticsEngine::Level Level,
                            SmallVectorImpl<CharSourceRange>& Ranges,
-                           ArrayRef<FixItHint> Hints);
+                           ArrayRef<FixItHint> Hints,
+                           const SourceManager &SM);
 
   void highlightRange(const CharSourceRange &R,
                       unsigned LineNo, FileID FID,
                       const std::string &SourceLine,
-                      std::string &CaretLine);
+                      std::string &CaretLine,
+                      const SourceManager &SM);
   std::string buildFixItInsertionLine(unsigned LineNo,
                                       const char *LineStart,
                                       const char *LineEnd,
-                                      ArrayRef<FixItHint> Hints);
+                                      ArrayRef<FixItHint> Hints,
+                                      const SourceManager &SM);
   void expandTabs(std::string &SourceLine, std::string &CaretLine);
-  void emitParseableFixits(ArrayRef<FixItHint> Hints);
+  void emitParseableFixits(ArrayRef<FixItHint> Hints, const SourceManager &SM);
 };
 
 } // end namespace clang

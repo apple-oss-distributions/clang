@@ -90,11 +90,11 @@ int main(int argc, char **argv) {
     return 0;
 
   DiagnosticOptions DiagOpts;
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags
+  IntrusiveRefCntPtr<Diagnostic> Diags
     = CompilerInstance::createDiagnostics(DiagOpts, argc, argv);
   for (unsigned i = 0, e = InputFilenames.size(); i != e; ++i) {
     const std::string &InFile = InputFilenames[i];
-    llvm::OwningPtr<ASTUnit> AST(ASTUnit::LoadFromASTFile(InFile, Diags,
+    OwningPtr<ASTUnit> AST(ASTUnit::LoadFromASTFile(InFile, Diags,
                                                           FileSystemOptions(),
                                                           false, 0, 0, true));
     if (!AST)
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
   }
 
   if (ViewCallGraph) {
-    llvm::OwningPtr<CallGraph> CG;
+    OwningPtr<CallGraph> CG;
     CG.reset(new CallGraph(Prog));
 
     for (unsigned i = 0, e = ASTUnits.size(); i != e; ++i)
@@ -151,16 +151,16 @@ int main(int argc, char **argv) {
     Opts.CheckersControlList.push_back(std::make_pair("macosx", true));
 
   // Checks to perform for Objective-C/Objective-C++.
-  if (PP.getLangOptions().ObjC1)
+  if (PP.getLangOpts().ObjC1)
     Opts.CheckersControlList.push_back(std::make_pair("cocoa", true));
 
-  llvm::OwningPtr<ento::CheckerManager> checkerMgr;
-  checkerMgr.reset(ento::registerCheckers(Opts, PP.getLangOptions(),
+  OwningPtr<ento::CheckerManager> checkerMgr;
+  checkerMgr.reset(ento::registerCheckers(Opts, PP.getLangOpts(),
                                           PP.getDiagnostics()));
 
   using namespace clang::ento;
   AnalysisManager AMgr(TU->getASTContext(), PP.getDiagnostics(),
-                       PP.getLangOptions(), /* PathDiagnostic */ 0,
+                       PP.getLangOpts(), /* PathDiagnostic */ 0,
                        CreateRegionStoreManager,
                        CreateRangeConstraintManager, checkerMgr.get(), &Idxer,
                        Opts.MaxNodes, Opts.MaxLoop,
@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
                        Opts.EagerlyTrimEGraph);
 
   TransferFuncs* TF = MakeCFRefCountTF(AMgr.getASTContext(), /*GC*/false,
-                                         AMgr.getLangOptions());
+                                         AMgr.getLangOpts());
   ExprEngine Eng(AMgr, TF);
 
   Eng.ExecuteWorkList(AMgr.getStackFrame(FD, TU), AMgr.getMaxNodes());

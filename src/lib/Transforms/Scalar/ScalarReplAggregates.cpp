@@ -453,6 +453,8 @@ bool ConvertToScalarInfo::CanConvertToScalar(Value *V, uint64_t Offset) {
 
       // Compute the offset that this GEP adds to the pointer.
       SmallVector<Value*, 8> Indices(GEP->op_begin()+1, GEP->op_end());
+      if (!GEP->getPointerOperandType()->isPointerTy())
+        return false;
       uint64_t GEPOffset = TD.getIndexedOffset(GEP->getPointerOperandType(),
                                                Indices);
       // See if all uses can be converted.
@@ -572,8 +574,9 @@ void ConvertToScalarInfo::ConvertUsesToScalar(Value *Ptr, AllocaInst *NewAI,
     // transform it into a store of the expanded constant value.
     if (MemSetInst *MSI = dyn_cast<MemSetInst>(User)) {
       assert(MSI->getRawDest() == Ptr && "Consistency error!");
-      unsigned NumBytes = cast<ConstantInt>(MSI->getLength())->getZExtValue();
-      if (NumBytes != 0) {
+      signed SNumBytes = cast<ConstantInt>(MSI->getLength())->getSExtValue();
+      if (SNumBytes > 0) {
+        unsigned NumBytes = static_cast<unsigned>(SNumBytes);
         unsigned Val = cast<ConstantInt>(MSI->getValue())->getZExtValue();
 
         // Compute the value replicated the right number of times.
@@ -936,13 +939,14 @@ public:
   void run(AllocaInst *AI, const SmallVectorImpl<Instruction*> &Insts) {
     // Remember which alloca we're promoting (for isInstInList).
     this->AI = AI;
-    if (MDNode *DebugNode = MDNode::getIfExists(AI->getContext(), AI))
+    if (MDNode *DebugNode = MDNode::getIfExists(AI->getContext(), AI)) {
       for (Value::use_iterator UI = DebugNode->use_begin(),
              E = DebugNode->use_end(); UI != E; ++UI)
         if (DbgDeclareInst *DDI = dyn_cast<DbgDeclareInst>(*UI))
           DDIs.push_back(DDI);
         else if (DbgValueInst *DVI = dyn_cast<DbgValueInst>(*UI))
           DVIs.push_back(DVI);
+    }
 
     LoadAndStorePromoter::run(Insts);
     AI->eraseFromParent();
@@ -977,30 +981,25 @@ public:
     for (SmallVector<DbgValueInst *, 4>::const_iterator I = DVIs.begin(), 
            E = DVIs.end(); I != E; ++I) {
       DbgValueInst *DVI = *I;
+      Value *Arg = NULL;
       if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
-        Instruction *DbgVal = NULL;
         // If an argument is zero extended then use argument directly. The ZExt
         // may be zapped by an optimization pass in future.
-        Argument *ExtendedArg = NULL;
         if (ZExtInst *ZExt = dyn_cast<ZExtInst>(SI->getOperand(0)))
-          ExtendedArg = dyn_cast<Argument>(ZExt->getOperand(0));
+          Arg = dyn_cast<Argument>(ZExt->getOperand(0));
         if (SExtInst *SExt = dyn_cast<SExtInst>(SI->getOperand(0)))
-          ExtendedArg = dyn_cast<Argument>(SExt->getOperand(0));
-        if (ExtendedArg)
-          DbgVal = DIB->insertDbgValueIntrinsic(ExtendedArg, 0, 
-                                                DIVariable(DVI->getVariable()),
-                                                SI);
-        else
-          DbgVal = DIB->insertDbgValueIntrinsic(SI->getOperand(0), 0, 
-                                                DIVariable(DVI->getVariable()),
-                                                SI);
-        DbgVal->setDebugLoc(DVI->getDebugLoc());
+          Arg = dyn_cast<Argument>(SExt->getOperand(0));
+        if (!Arg)
+          Arg = SI->getOperand(0);
       } else if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
-        Instruction *DbgVal = 
-          DIB->insertDbgValueIntrinsic(LI->getOperand(0), 0, 
-                                       DIVariable(DVI->getVariable()), LI);
-        DbgVal->setDebugLoc(DVI->getDebugLoc());
+        Arg = LI->getOperand(0);
+      } else {
+        continue;
       }
+      Instruction *DbgVal =
+        DIB->insertDbgValueIntrinsic(Arg, 0, DIVariable(DVI->getVariable()),
+                                     Inst);
+      DbgVal->setDebugLoc(DVI->getDebugLoc());
     }
   }
 };
@@ -1519,6 +1518,9 @@ void SROA::isSafeForScalarRepl(Instruction *I, uint64_t Offset,
       ConstantInt *Length = dyn_cast<ConstantInt>(MI->getLength());
       if (Length == 0)
         return MarkUnsafe(Info, User);
+      if (Length->isNegative())
+        return MarkUnsafe(Info, User);
+
       isSafeMemAccess(Offset, Length->getZExtValue(), 0,
                       UI.getOperandNo() == 0, Info, MI,
                       true /*AllowWholeAccess*/);
@@ -1875,8 +1877,14 @@ void SROA::RewriteBitCast(BitCastInst *BC, AllocaInst *AI, uint64_t Offset,
     return;
 
   // The bitcast references the original alloca.  Replace its uses with
-  // references to the first new element alloca.
-  Instruction *Val = NewElts[0];
+  // references to the alloca containing offset zero (which is normally at
+  // index zero, but might not be in cases involving structs with elements
+  // of size zero).
+  Type *T = AI->getAllocatedType();
+  uint64_t EltOffset = 0;
+  Type *IdxTy;
+  uint64_t Idx = FindElementAndOffset(T, EltOffset, IdxTy);
+  Instruction *Val = NewElts[Idx];
   if (Val->getType() != BC->getDestTy()) {
     Val = new BitCastInst(Val, BC->getDestTy(), "", BC);
     Val->takeName(BC);
@@ -2148,8 +2156,7 @@ void SROA::RewriteMemIntrinUserOfAlloca(MemIntrinsic *MI, Instruction *Inst,
           // If the requested value was a vector constant, create it.
           if (EltTy->isVectorTy()) {
             unsigned NumElts = cast<VectorType>(EltTy)->getNumElements();
-            SmallVector<Constant*, 16> Elts(NumElts, StoreVal);
-            StoreVal = ConstantVector::get(Elts);
+            StoreVal = ConstantVector::getSplat(NumElts, StoreVal);
           }
         }
         new StoreInst(StoreVal, EltPtr, MI);
@@ -2160,6 +2167,8 @@ void SROA::RewriteMemIntrinUserOfAlloca(MemIntrinsic *MI, Instruction *Inst,
     }
 
     unsigned EltSize = TD->getTypeAllocSize(EltTy);
+    if (!EltSize)
+      continue;
 
     IRBuilder<> Builder(MI);
 
@@ -2526,13 +2535,12 @@ isOnlyCopiedFromConstantGlobal(Value *V, MemTransferInst *&TheCopy,
       // ignore it if we know that the value isn't captured.
       unsigned ArgNo = CS.getArgumentNo(UI);
       if (CS.onlyReadsMemory() &&
-          (CS.getInstruction()->use_empty() ||
-           CS.paramHasAttr(ArgNo+1, Attribute::NoCapture)))
+          (CS.getInstruction()->use_empty() || CS.doesNotCapture(ArgNo)))
         continue;
 
       // If this is being passed as a byval argument, the caller is making a
       // copy, so it is only a read of the alloca.
-      if (CS.paramHasAttr(ArgNo+1, Attribute::ByVal))
+      if (CS.isByValArgument(ArgNo))
         continue;
     }
 

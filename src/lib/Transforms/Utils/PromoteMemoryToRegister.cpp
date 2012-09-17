@@ -423,7 +423,8 @@ void PromoteMem2Reg::run() {
 
       // Finally, after the scan, check to see if the store is all that is left.
       if (Info.UsingBlocks.empty()) {
-        // Record debuginfo for the store and remove the declaration's debuginfo.
+        // Record debuginfo for the store and remove the declaration's 
+        // debuginfo.
         if (DbgDeclareInst *DDI = Info.DbgDeclare) {
           if (!DIB)
             DIB = new DIBuilder(*DDI->getParent()->getParent()->getParent());
@@ -590,7 +591,7 @@ void PromoteMem2Reg::run() {
       PHINode *PN = I->second;
 
       // If this PHI node merges one value and/or undefs, get the value.
-      if (Value *V = SimplifyInstruction(PN, 0, &DT)) {
+      if (Value *V = SimplifyInstruction(PN, 0, 0, &DT)) {
         if (AST && PN->getType()->isPointerTy())
           AST->deleteValue(PN);
         PN->replaceAllUsesWith(V);

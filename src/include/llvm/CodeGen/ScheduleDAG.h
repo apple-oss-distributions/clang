@@ -16,7 +16,7 @@
 #define LLVM_CODEGEN_SCHEDULEDAG_H
 
 #include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetLowering.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/GraphTraits.h"
@@ -129,8 +129,7 @@ namespace llvm {
                Contents.Order.isMustAlias == Other.Contents.Order.isMustAlias &&
                Contents.Order.isArtificial == Other.Contents.Order.isArtificial;
       }
-      assert(0 && "Invalid dependency kind!");
-      return false;
+      llvm_unreachable("Invalid dependency kind!");
     }
 
     bool operator!=(const SDep &Other) const {
@@ -232,6 +231,7 @@ namespace llvm {
   public:
     SUnit *OrigNode;                    // If not this, the node from which
                                         // this node was cloned.
+                                        // (SD scheduling only)
 
     // Preds/Succs - The SUnits before/after us in the graph.
     SmallVector<SDep, 4> Preds;  // All sunit predecessors.
@@ -427,6 +427,7 @@ namespace llvm {
   /// implementation to decide.
   ///
   class SchedulingPriorityQueue {
+    virtual void anchor();
     unsigned CurCycle;
     bool HasReadyFilter;
   public:

@@ -163,22 +163,15 @@ struct __two {char _[2];};
 template <class _Tp, _Tp __v>
 struct _LIBCPP_VISIBLE integral_constant
 {
-    static constexpr _Tp      value = __v;
+    static _LIBCPP_CONSTEXPR const _Tp      value = __v;
     typedef _Tp               value_type;
     typedef integral_constant type;
     _LIBCPP_INLINE_VISIBILITY
-#ifndef _LIBCPP_HAS_NO_CONSTEXPR
-    constexpr
-#endif
-         operator value_type()
-#ifdef _LIBCPP_HAS_NO_CONSTEXPR
-                               const
-#endif
-                                     {return value;}
+        _LIBCPP_CONSTEXPR operator value_type() const {return value;}
 };
 
 template <class _Tp, _Tp __v>
-constexpr _Tp integral_constant<_Tp, __v>::value;
+_LIBCPP_CONSTEXPR const _Tp integral_constant<_Tp, __v>::value;
 
 typedef integral_constant<bool, true>  true_type;
 typedef integral_constant<bool, false> false_type;
@@ -772,6 +765,14 @@ template <class _Tp> struct _LIBCPP_VISIBLE is_empty : public __libcpp_empty<_Tp
 
 // is_polymorphic
 
+#if __has_feature(is_polymorphic)
+
+template <class _Tp>
+struct _LIBCPP_VISIBLE is_polymorphic
+    : public integral_constant<bool, __is_polymorphic(_Tp)> {};
+
+#else
+
 template <class _Tp> struct __is_polymorphic1 : public _Tp {};
 template <class _Tp> struct __is_polymorphic2 : public _Tp {virtual ~__is_polymorphic2() throw();};
 
@@ -783,6 +784,8 @@ template <class _Tp> struct __libcpp_polymorphic<_Tp, false> : public false_type
 
 template <class _Tp> struct _LIBCPP_VISIBLE is_polymorphic
     : public __libcpp_polymorphic<_Tp> {};
+
+#endif // __has_feature(is_polymorphic)
 
 // has_virtual_destructor
 
@@ -1144,7 +1147,7 @@ private:
     static _Up __u();
 #endif  // _LIBCPP_HAS_NO_RVALUE_REFERENCES
 public:
-    typedef decltype(true ? __t() : __u()) type;
+    typedef typename remove_reference<decltype(true ? __t() : __u())>::type type;
 };
 
 #else  // _LIBCPP_HAS_NO_VARIADICS
@@ -1165,7 +1168,7 @@ private:
     static _Up&& __u();
     static bool __f();
 public:
-    typedef decltype(__f() ? __t() : __u()) type;
+    typedef typename remove_reference<decltype(__f() ? __t() : __u())>::type type;
 };
 
 template <class _Tp, class _Up, class ..._Vp>
@@ -1314,6 +1317,18 @@ typename enable_if
     _Tp&
 >::type
 move(_Tp& __t)
+{
+    return __t;
+}
+
+template <class _Tp>
+inline _LIBCPP_INLINE_VISIBILITY
+typename enable_if
+<
+    !is_convertible<_Tp, __rv<_Tp> >::value,
+    const _Tp&
+>::type
+move(const _Tp& __t)
 {
     return __t;
 }
@@ -2197,6 +2212,16 @@ struct _LIBCPP_VISIBLE is_move_constructible
 
 #ifndef _LIBCPP_HAS_NO_VARIADICS
 
+#if __has_feature(is_trivially_constructible)
+
+template <class _Tp, class... _Args>
+struct _LIBCPP_VISIBLE is_trivially_constructible
+    : integral_constant<bool, __is_trivially_constructible(_Tp, _Args...)>
+{
+};
+
+#else  // !__has_feature(is_trivially_constructible)
+
 template <class _Tp, class... _Args>
 struct _LIBCPP_VISIBLE is_trivially_constructible
     : false_type
@@ -2219,33 +2244,23 @@ struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp&&>
 #else
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp>
 #endif
-#if __has_feature(has_trivial_copy) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_copy(_Tp)>
-#else
     : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
 {
 };
 
 template <class _Tp>
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, const _Tp&>
-#if __has_feature(has_trivial_copy) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_copy(_Tp)>
-#else
     : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
 {
 };
 
 template <class _Tp>
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp&>
-#if __has_feature(has_trivial_copy) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_copy(_Tp)>
-#else
     : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
 {
 };
+
+#endif  // !__has_feature(is_trivially_constructible)
 
 #else  // _LIBCPP_HAS_NO_VARIADICS
 
@@ -2256,49 +2271,67 @@ struct _LIBCPP_VISIBLE is_trivially_constructible
 {
 };
 
+#if __has_feature(is_trivially_constructible)
+
 template <class _Tp>
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, __is_construct::__nat,
                                                        __is_construct::__nat>
-#if __has_feature(has_trivial_constructor) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_constructor(_Tp)>
-#else
-    : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
+    : integral_constant<bool, __is_trivially_constructible(_Tp)>
 {
 };
 
 template <class _Tp>
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp,
                                                        __is_construct::__nat>
-#if __has_feature(has_trivial_copy) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_copy(_Tp)>
-#else
-    : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
+    : integral_constant<bool, __is_trivially_constructible(_Tp, _Tp)>
 {
 };
 
 template <class _Tp>
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, const _Tp&,
                                                        __is_construct::__nat>
-#if __has_feature(has_trivial_copy) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_copy(_Tp)>
-#else
-    : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
+    : integral_constant<bool, __is_trivially_constructible(_Tp, const _Tp&)>
 {
 };
 
 template <class _Tp>
 struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp&,
                                                        __is_construct::__nat>
-#if __has_feature(has_trivial_copy) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_copy(_Tp)>
-#else
-    : integral_constant<bool, is_scalar<_Tp>::value>
-#endif
+    : integral_constant<bool, __is_trivially_constructible(_Tp, _Tp&)>
 {
 };
+
+#else  // !__has_feature(is_trivially_constructible)
+
+template <class _Tp>
+struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, __is_construct::__nat,
+                                                       __is_construct::__nat>
+    : integral_constant<bool, is_scalar<_Tp>::value>
+{
+};
+
+template <class _Tp>
+struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp,
+                                                       __is_construct::__nat>
+    : integral_constant<bool, is_scalar<_Tp>::value>
+{
+};
+
+template <class _Tp>
+struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, const _Tp&,
+                                                       __is_construct::__nat>
+    : integral_constant<bool, is_scalar<_Tp>::value>
+{
+};
+
+template <class _Tp>
+struct _LIBCPP_VISIBLE is_trivially_constructible<_Tp, _Tp&,
+                                                       __is_construct::__nat>
+    : integral_constant<bool, is_scalar<_Tp>::value>
+{
+};
+
+#endif  // !__has_feature(is_trivially_constructible)
 
 #endif  // _LIBCPP_HAS_NO_VARIADICS
 
@@ -2326,45 +2359,41 @@ template <class _Tp> struct _LIBCPP_VISIBLE is_trivially_move_constructible
 
 // is_trivially_assignable
 
+#if __has_feature(is_trivially_constructible)
+
+template <class _Tp, class _Arg>
+struct is_trivially_assignable
+    : integral_constant<bool, __is_trivially_assignable(_Tp, _Arg)>
+{
+};
+
+#else  // !__has_feature(is_trivially_constructible)
+
 template <class _Tp, class _Arg>
 struct is_trivially_assignable
     : public false_type {};
 
 template <class _Tp>
 struct is_trivially_assignable<_Tp&, _Tp>
-#if __has_feature(has_trivial_assign) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_assign(_Tp)> {};
-#else
     : integral_constant<bool, is_scalar<_Tp>::value> {};
-#endif
 
 template <class _Tp>
 struct is_trivially_assignable<_Tp&, _Tp&>
-#if __has_feature(has_trivial_assign) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_assign(_Tp)> {};
-#else
     : integral_constant<bool, is_scalar<_Tp>::value> {};
-#endif
 
 template <class _Tp>
 struct is_trivially_assignable<_Tp&, const _Tp&>
-#if __has_feature(has_trivial_assign) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_assign(_Tp)> {};
-#else
     : integral_constant<bool, is_scalar<_Tp>::value> {};
-#endif
 
 #ifndef _LIBCPP_HAS_NO_RVALUE_REFERENCES
 
 template <class _Tp>
 struct is_trivially_assignable<_Tp&, _Tp&&>
-#if __has_feature(has_trivial_assign) || (__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3)
-    : integral_constant<bool, __has_trivial_assign(_Tp)> {};
-#else
     : integral_constant<bool, is_scalar<_Tp>::value> {};
-#endif
 
 #endif  // _LIBCPP_HAS_NO_RVALUE_REFERENCES
+
+#endif  // !__has_feature(is_trivially_constructible)
 
 // is_trivially_copy_assignable
 

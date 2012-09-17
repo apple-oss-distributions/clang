@@ -14,6 +14,7 @@
 #include "clang/Basic/TargetOptions.h"
 #include "clang/Basic/FileSystemOptions.h"
 #include "clang/Frontend/AnalyzerOptions.h"
+#include "clang/Frontend/MigratorOptions.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "clang/Frontend/DependencyOutputOptions.h"
 #include "clang/Frontend/DiagnosticOptions.h"
@@ -32,11 +33,22 @@ namespace clang {
 
 class CompilerInvocation;
 class DiagnosticsEngine;
+
+namespace driver {
+class ArgList;
+}
+
+/// CompilerInvocation - Fill out Opts based on the options given in Args.
+/// Args must have been created from the OptTable returned by
+/// createCC1OptTable(). When errors are encountered, return false and,
+/// if Diags is non-null, report the error(s).
+bool ParseDiagnosticArgs(DiagnosticOptions &Opts, driver::ArgList &Args,
+                         DiagnosticsEngine *Diags = 0);
   
-class CompilerInvocationBase : public llvm::RefCountedBase<CompilerInvocation> { 
+class CompilerInvocationBase : public RefCountedBase<CompilerInvocation> {
 protected:
   /// Options controlling the language variant.
-  llvm::IntrusiveRefCntPtr<LangOptions> LangOpts;
+  IntrusiveRefCntPtr<LangOptions> LangOpts;
 public:
   CompilerInvocationBase();
 
@@ -56,6 +68,8 @@ class CompilerInvocation : public CompilerInvocationBase {
   /// Options controlling the static analyzer.
   AnalyzerOptions AnalyzerOpts;
 
+  MigratorOptions MigratorOpts;
+  
   /// Options controlling IRgen and the backend.
   CodeGenOptions CodeGenOpts;
 
@@ -90,13 +104,13 @@ public:
   /// @{
 
   /// CreateFromArgs - Create a compiler invocation from a list of input
-  /// options.
+  /// options. Returns true on success.
   ///
   /// \param Res [out] - The resulting invocation.
   /// \param ArgBegin - The first element in the argument vector.
   /// \param ArgEnd - The last element in the argument vector.
   /// \param Diags - The diagnostic engine to use for errors.
-  static void CreateFromArgs(CompilerInvocation &Res,
+  static bool CreateFromArgs(CompilerInvocation &Res,
                              const char* const *ArgBegin,
                              const char* const *ArgEnd,
                              DiagnosticsEngine &Diags);
@@ -147,6 +161,11 @@ public:
     return AnalyzerOpts;
   }
 
+  MigratorOptions &getMigratorOpts() { return MigratorOpts; }
+  const MigratorOptions &getMigratorOpts() const {
+    return MigratorOpts;
+  }
+  
   CodeGenOptions &getCodeGenOpts() { return CodeGenOpts; }
   const CodeGenOptions &getCodeGenOpts() const {
     return CodeGenOpts;

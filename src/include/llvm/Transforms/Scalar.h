@@ -309,12 +309,6 @@ extern char &InstructionNamerID;
   
 //===----------------------------------------------------------------------===//
 //
-// GEPSplitter - Split complex GEPs into simple ones
-//
-FunctionPass *createGEPSplitterPass();
-
-//===----------------------------------------------------------------------===//
-//
 // Sink - Code Sinking
 //
 FunctionPass *createSinkingPass();
@@ -330,6 +324,12 @@ Pass *createLowerAtomicPass();
 // ValuePropagation - Propagate CFG-derived value information
 //
 Pass *createCorrelatedValuePropagationPass();
+
+//===----------------------------------------------------------------------===//
+//
+// ObjCARCAPElim - ObjC ARC autorelease pool elimination.
+//
+Pass *createObjCARCAPElimPass();
 
 //===----------------------------------------------------------------------===//
 //

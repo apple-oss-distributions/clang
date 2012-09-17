@@ -182,7 +182,7 @@ bool GlobalMerge::doInitialization(Module &M) {
       continue;
 
     // Ignore fancy-aligned globals for now.
-    unsigned Alignment = I->getAlignment();
+    unsigned Alignment = TD->getPreferredAlignment(I);
     Type *Ty = I->getType()->getElementType();
     if (Alignment > TD->getABITypeAlignment(Ty))
       continue;
@@ -193,8 +193,8 @@ bool GlobalMerge::doInitialization(Module &M) {
       continue;
 
     if (TD->getTypeAllocSize(Ty) < MaxOffset) {
-      const TargetLoweringObjectFile &TLOF = TLI->getObjFileLowering();
-      if (TLOF.getKindForGlobal(I, TLI->getTargetMachine()).isBSSLocal())
+      if (TargetLoweringObjectFile::getKindForGlobal(I, TLI->getTargetMachine())
+          .isBSSLocal())
         BSSGlobals.push_back(I);
       else if (I->isConstant())
         ConstGlobals.push_back(I);

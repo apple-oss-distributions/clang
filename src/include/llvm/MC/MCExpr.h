@@ -162,6 +162,7 @@ public:
     VK_TPOFF,
     VK_DTPOFF,
     VK_TLVP,      // Mach-O thread local variable relocation
+    VK_SECREL,
     // FIXME: We'd really like to use the generic Kinds listed above for these.
     VK_ARM_PLT,   // ARM-style PLT references. i.e., (PLT) instead of @PLT
     VK_ARM_TLSGD, //   ditto for TLSGD, GOT, GOTOFF, TPOFF and GOTTPOFF
@@ -169,6 +170,7 @@ public:
     VK_ARM_GOTOFF,
     VK_ARM_TPOFF,
     VK_ARM_GOTTPOFF,
+    VK_ARM_TARGET1,
 
     VK_PPC_TOC,
     VK_PPC_DARWIN_HA16,  // ha16(symbol)
@@ -176,13 +178,16 @@ public:
     VK_PPC_GAS_HA16,     // symbol@ha
     VK_PPC_GAS_LO16,      // symbol@l
 
-    VK_Mips_None,
     VK_Mips_GPREL,
     VK_Mips_GOT_CALL,
+    VK_Mips_GOT16,
     VK_Mips_GOT,
     VK_Mips_ABS_HI,
     VK_Mips_ABS_LO,
     VK_Mips_TLSGD,
+    VK_Mips_TLSLDM,
+    VK_Mips_DTPREL_HI,
+    VK_Mips_DTPREL_LO,
     VK_Mips_GOTTPREL,
     VK_Mips_TPREL_HI,
     VK_Mips_TPREL_LO,
@@ -201,7 +206,9 @@ private:
   const VariantKind Kind;
 
   explicit MCSymbolRefExpr(const MCSymbol *_Symbol, VariantKind _Kind)
-    : MCExpr(MCExpr::SymbolRef), Symbol(_Symbol), Kind(_Kind) {}
+    : MCExpr(MCExpr::SymbolRef), Symbol(_Symbol), Kind(_Kind) {
+    assert(Symbol);
+  }
 
 public:
   /// @name Construction

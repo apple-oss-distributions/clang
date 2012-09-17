@@ -1,4 +1,4 @@
-//===- Thumb2InstrInfo.h - Thumb-2 Instruction Information ------*- C++ -*-===//
+//===-- Thumb2InstrInfo.h - Thumb-2 Instruction Information -----*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -27,6 +27,9 @@ class Thumb2InstrInfo : public ARMBaseInstrInfo {
   Thumb2RegisterInfo RI;
 public:
   explicit Thumb2InstrInfo(const ARMSubtarget &STI);
+
+  /// getNoopForMachoTarget - Return the noop instruction to use for a noop.
+  void getNoopForMachoTarget(MCInst &NopInst) const;
 
   // Return the non-pre/post incrementing version of 'Opc'. Return 0
   // if there is not such an opcode.

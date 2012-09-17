@@ -78,8 +78,7 @@ class JIT : public ExecutionEngine {
 
 
   JIT(Module *M, TargetMachine &tm, TargetJITInfo &tji,
-      JITMemoryManager *JMM, CodeGenOpt::Level OptLevel,
-      bool AllocateGVsWithCode);
+      JITMemoryManager *JMM, bool AllocateGVsWithCode);
 public:
   ~JIT();
 
@@ -125,8 +124,8 @@ public:
   /// found, this function silently returns a null pointer. Otherwise,
   /// it prints a message to stderr and aborts.
   ///
-  void *getPointerToNamedFunction(const std::string &Name,
-                                  bool AbortOnFailure = true);
+  virtual void *getPointerToNamedFunction(const std::string &Name,
+                                          bool AbortOnFailure = true);
 
   // CompilationCallback - Invoked the first time that a call site is found,
   // which causes lazy compilation of the target function.
@@ -185,7 +184,6 @@ public:
   static ExecutionEngine *createJIT(Module *M,
                                     std::string *ErrorStr,
                                     JITMemoryManager *JMM,
-                                    CodeGenOpt::Level OptLevel,
                                     bool GVsWithCode,
                                     TargetMachine *TM);
 

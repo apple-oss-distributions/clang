@@ -245,7 +245,6 @@ bool Declarator::isDeclarationOfFunction() const {
       return false;
     }
     llvm_unreachable("Invalid type chunk");
-    return false;
   }
   
   switch (DS.getTypeSpecType()) {
@@ -295,8 +294,8 @@ bool Declarator::isDeclarationOfFunction() const {
       return QT->isFunctionType();
     }
   }
-  
-  return false;
+
+  llvm_unreachable("Invalid TypeSpecType!");
 }
 
 /// getParsedSpecifiers - Return a bitmask of which flavors of specifiers this
@@ -422,7 +421,7 @@ bool DeclSpec::SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
   // It seems sensible to prohibit private_extern too
   // The cl_clang_storage_class_specifiers extension enables support for
   // these storage-class specifiers.
-  if (S.getLangOptions().OpenCL &&
+  if (S.getLangOpts().OpenCL &&
       !S.getOpenCLOptions().cl_clang_storage_class_specifiers) {
     switch (SC) {
     case SCS_extern:
@@ -441,7 +440,7 @@ bool DeclSpec::SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
   if (StorageClassSpec != SCS_unspecified) {
     // Maybe this is an attempt to use C++0x 'auto' outside of C++0x mode.
     bool isInvalid = true;
-    if (TypeSpecType == TST_unspecified && S.getLangOptions().CPlusPlus) {
+    if (TypeSpecType == TST_unspecified && S.getLangOpts().CPlusPlus) {
       if (SC == SCS_auto)
         return SetTypeSpecType(TST_auto, Loc, PrevSpec, DiagID);
       if (StorageClassSpec == SCS_auto) {
@@ -867,7 +866,8 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
       TypeSpecType = TST_double;   // _Complex -> _Complex double.
     } else if (TypeSpecType == TST_int || TypeSpecType == TST_char) {
       // Note that this intentionally doesn't include _Complex _Bool.
-      Diag(D, TSTLoc, diag::ext_integer_complex);
+      if (!PP.getLangOpts().CPlusPlus)
+        Diag(D, TSTLoc, diag::ext_integer_complex);
     } else if (TypeSpecType != TST_float && TypeSpecType != TST_double) {
       Diag(D, TSCLoc, diag::err_invalid_complex_spec)
         << getSpecifierName((TST)TypeSpecType);
@@ -880,7 +880,7 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   // class specifier, then assume this is an attempt to use C++0x's 'auto'
   // type specifier.
   // FIXME: Does Microsoft really support implicit int in C++?
-  if (PP.getLangOptions().CPlusPlus && !PP.getLangOptions().MicrosoftExt &&
+  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().MicrosoftExt &&
       TypeSpecType == TST_unspecified && StorageClassSpec == SCS_auto) {
     TypeSpecType = TST_auto;
     StorageClassSpec = StorageClassSpecAsWritten = SCS_unspecified;
@@ -889,17 +889,15 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   }
   // Diagnose if we've recovered from an ill-formed 'auto' storage class
   // specifier in a pre-C++0x dialect of C++.
-  if (!PP.getLangOptions().CPlusPlus0x && TypeSpecType == TST_auto)
+  if (!PP.getLangOpts().CPlusPlus0x && TypeSpecType == TST_auto)
     Diag(D, TSTLoc, diag::ext_auto_type_specifier);
-  if (PP.getLangOptions().CPlusPlus && !PP.getLangOptions().CPlusPlus0x &&
+  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().CPlusPlus0x &&
       StorageClassSpec == SCS_auto)
     Diag(D, StorageClassSpecLoc, diag::warn_auto_storage_class)
       << FixItHint::CreateRemoval(StorageClassSpecLoc);
   if (TypeSpecType == TST_char16 || TypeSpecType == TST_char32)
     Diag(D, TSTLoc, diag::warn_cxx98_compat_unicode_type)
       << (TypeSpecType == TST_char16 ? "char16_t" : "char32_t");
-  if (TypeSpecType == TST_decltype)
-    Diag(D, TSTLoc, diag::warn_cxx98_compat_decltype);
   if (Constexpr_specified)
     Diag(D, ConstexprLoc, diag::warn_cxx98_compat_constexpr);
 

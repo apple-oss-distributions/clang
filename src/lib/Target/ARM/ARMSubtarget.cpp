@@ -1,4 +1,4 @@
-//===-- ARMSubtarget.cpp - ARM Subtarget Information ------------*- C++ -*-===//
+//===-- ARMSubtarget.cpp - ARM Subtarget Information ----------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -48,6 +48,7 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   , HasV7Ops(false)
   , HasVFPv2(false)
   , HasVFPv3(false)
+  , HasVFPv4(false)
   , HasNEON(false)
   , UseNEONForSinglePrecisionFP(false)
   , SlowFPVMLx(false)
@@ -83,7 +84,7 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   // Insert the architecture feature derived from the target triple into the
   // feature string. This is important for setting features that are implied
   // based on the architecture version.
-  std::string ArchFS = ARM_MC::ParseARMTriple(TT);
+  std::string ArchFS = ARM_MC::ParseARMTriple(TT, CPUString);
   if (!FS.empty()) {
     if (!ArchFS.empty())
       ArchFS = ArchFS + "," + FS;
@@ -103,19 +104,20 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   // After parsing Itineraries, set ItinData.IssueWidth.
   computeIssueWidth();
 
-  if (TT.find("eabi") != std::string::npos)
+  if ((TT.find("eabi") != std::string::npos) || (isTargetIOS() && isMClass()))
+    // FIXME: We might want to separate AAPCS and EABI. Some systems, e.g.
+    // Darwin-EABI conforms to AACPS but not the rest of EABI.
     TargetABI = ARM_ABI_AAPCS;
 
   if (isAAPCS_ABI())
     stackAlignment = 8;
 
-  if (!isTargetDarwin())
+  if (!isTargetIOS())
     UseMovt = hasV6T2Ops();
   else {
     IsR9Reserved = ReserveR9 | !HasV6Ops;
     UseMovt = DarwinUseMOVT && hasV6T2Ops();
-    const Triple &T = getTargetTriple();
-    SupportsTailCall = T.getOS() == Triple::IOS && !T.isOSVersionLT(5, 0);
+    SupportsTailCall = !getTargetTriple().isOSVersionLT(5, 0);
   }
 
   if (!isThumb() || hasThumb2())

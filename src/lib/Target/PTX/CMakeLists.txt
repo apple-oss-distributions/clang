@@ -17,25 +17,13 @@ add_llvm_target(PTXCodeGen
   PTXMCAsmStreamer.cpp
   PTXMCInstLower.cpp
   PTXMFInfoExtract.cpp
+  PTXMachineFunctionInfo.cpp
   PTXParamManager.cpp
   PTXRegAlloc.cpp
   PTXRegisterInfo.cpp
   PTXSelectionDAGInfo.cpp
   PTXSubtarget.cpp
   PTXTargetMachine.cpp
-  )
-
-add_llvm_library_dependencies(LLVMPTXCodeGen
-  LLVMAnalysis
-  LLVMAsmPrinter
-  LLVMCodeGen
-  LLVMCore
-  LLVMMC
-  LLVMPTXDesc
-  LLVMPTXInfo
-  LLVMSelectionDAG
-  LLVMSupport
-  LLVMTarget
   )
 
 add_subdirectory(TargetInfo)

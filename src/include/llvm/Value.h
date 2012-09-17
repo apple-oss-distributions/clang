@@ -17,7 +17,6 @@
 #include "llvm/Use.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
-#include <string>
 
 namespace llvm {
 
@@ -117,18 +116,7 @@ public:
   /// getName() - Return a constant reference to the value's name. This is cheap
   /// and guaranteed to return the same reference as long as the value is not
   /// modified.
-  ///
-  /// This is currently guaranteed to return a StringRef for which data() points
-  /// to a valid null terminated string. The use of StringRef.data() is 
-  /// deprecated here, however, and clients should not rely on it. If such 
-  /// behavior is needed, clients should use expensive getNameStr(), or switch 
-  /// to an interface that does not depend on null termination.
   StringRef getName() const;
-
-  /// getNameStr() - Return the name of the specified value, *constructing a
-  /// string* to hold it.  This is guaranteed to construct a string and is very
-  /// expensive, clients should use getName() unless necessary.
-  std::string getNameStr() const;
 
   /// setName() - Change the name of the value, choosing a new unique name if
   /// the provided name is taken.
@@ -205,6 +193,8 @@ public:
     BlockAddressVal,          // This is an instance of BlockAddress
     ConstantExprVal,          // This is an instance of ConstantExpr
     ConstantAggregateZeroVal, // This is an instance of ConstantAggregateZero
+    ConstantDataArrayVal,     // This is an instance of ConstantDataArray
+    ConstantDataVectorVal,    // This is an instance of ConstantDataVector
     ConstantIntVal,           // This is an instance of ConstantInt
     ConstantFPVal,            // This is an instance of ConstantFP
     ConstantArrayVal,         // This is an instance of ConstantArray

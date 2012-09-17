@@ -249,7 +249,6 @@ int Disassembler::disassembleEnhanced(const std::string &TS,
     break;
   }
 
-  EDDisassembler::initialize();
   OwningPtr<EDDisassembler>
     disassembler(EDDisassembler::getDisassembler(TS.c_str(), AS));
 
@@ -296,7 +295,6 @@ int Disassembler::disassembleEnhanced(const std::string &TS,
         Out << operandIndex << "-";
 
       switch (token->type()) {
-      default: Out << "?"; break;
       case EDToken::kTokenWhitespace: Out << "w"; break;
       case EDToken::kTokenPunctuation: Out << "p"; break;
       case EDToken::kTokenOpcode: Out << "o"; break;
@@ -367,4 +365,3 @@ int Disassembler::disassembleEnhanced(const std::string &TS,
 
   return 0;
 }
-

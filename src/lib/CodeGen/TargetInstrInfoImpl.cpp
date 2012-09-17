@@ -24,6 +24,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/ScoreboardHazardRecognizer.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
+#include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -121,6 +122,9 @@ MachineInstr *TargetInstrInfoImpl::commuteInstruction(MachineInstr *MI,
 bool TargetInstrInfoImpl::findCommutedOpIndices(MachineInstr *MI,
                                                 unsigned &SrcOpIdx1,
                                                 unsigned &SrcOpIdx2) const {
+  assert(!MI->isBundle() &&
+         "TargetInstrInfoImpl::findCommutedOpIndices() can't handle bundles");
+
   const MCInstrDesc &MCID = MI->getDesc();
   if (!MCID.isCommutable())
     return false;
@@ -136,11 +140,28 @@ bool TargetInstrInfoImpl::findCommutedOpIndices(MachineInstr *MI,
 }
 
 
+bool
+TargetInstrInfoImpl::isUnpredicatedTerminator(const MachineInstr *MI) const {
+  if (!MI->isTerminator()) return false;
+
+  // Conditional branch is a special case.
+  if (MI->isBranch() && !MI->isBarrier())
+    return true;
+  if (!MI->isPredicable())
+    return true;
+  return !isPredicated(MI);
+}
+
+
 bool TargetInstrInfoImpl::PredicateInstruction(MachineInstr *MI,
                             const SmallVectorImpl<MachineOperand> &Pred) const {
   bool MadeChange = false;
+
+  assert(!MI->isBundle() &&
+         "TargetInstrInfoImpl::PredicateInstruction() can't handle bundles");
+
   const MCInstrDesc &MCID = MI->getDesc();
-  if (!MCID.isPredicable())
+  if (!MI->isPredicable())
     return false;
 
   for (unsigned j = 0, i = 0, e = MI->getNumOperands(); i != e; ++i) {
@@ -218,7 +239,7 @@ TargetInstrInfoImpl::produceSameValue(const MachineInstr *MI0,
 
 MachineInstr *TargetInstrInfoImpl::duplicate(MachineInstr *Orig,
                                              MachineFunction &MF) const {
-  assert(!Orig->getDesc().isNotDuplicable() &&
+  assert(!Orig->isNotDuplicable() &&
          "Instruction cannot be duplicated");
   return MF.CloneMachineInstr(Orig);
 }
@@ -288,16 +309,15 @@ TargetInstrInfo::foldMemoryOperand(MachineBasicBlock::iterator MI,
   if (MachineInstr *NewMI = foldMemoryOperandImpl(MF, MI, Ops, FI)) {
     // Add a memory operand, foldMemoryOperandImpl doesn't do that.
     assert((!(Flags & MachineMemOperand::MOStore) ||
-            NewMI->getDesc().mayStore()) &&
+            NewMI->mayStore()) &&
            "Folded a def to a non-store!");
     assert((!(Flags & MachineMemOperand::MOLoad) ||
-            NewMI->getDesc().mayLoad()) &&
+            NewMI->mayLoad()) &&
            "Folded a use to a non-load!");
     const MachineFrameInfo &MFI = *MF.getFrameInfo();
     assert(MFI.getObjectOffset(FI) != -1);
     MachineMemOperand *MMO =
-      MF.getMachineMemOperand(
-                    MachinePointerInfo(PseudoSourceValue::getFixedStack(FI)),
+      MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FI),
                               Flags, MFI.getObjectSize(FI),
                               MFI.getObjectAlignment(FI));
     NewMI->addMemOperand(MF, MMO);
@@ -332,7 +352,7 @@ MachineInstr*
 TargetInstrInfo::foldMemoryOperand(MachineBasicBlock::iterator MI,
                                    const SmallVectorImpl<unsigned> &Ops,
                                    MachineInstr* LoadMI) const {
-  assert(LoadMI->getDesc().canFoldAsLoad() && "LoadMI isn't foldable!");
+  assert(LoadMI->canFoldAsLoad() && "LoadMI isn't foldable!");
 #ifndef NDEBUG
   for (unsigned i = 0, e = Ops.size(); i != e; ++i)
     assert(MI->getOperand(Ops[i]).isUse() && "Folding load into def!");
@@ -360,7 +380,6 @@ isReallyTriviallyReMaterializableGeneric(const MachineInstr *MI,
   const MachineRegisterInfo &MRI = MF.getRegInfo();
   const TargetMachine &TM = MF.getTarget();
   const TargetInstrInfo &TII = *TM.getInstrInfo();
-  const TargetRegisterInfo &TRI = *TM.getRegisterInfo();
 
   // Remat clients assume operand 0 is the defined register.
   if (!MI->getNumOperands() || !MI->getOperand(0).isReg())
@@ -383,10 +402,8 @@ isReallyTriviallyReMaterializableGeneric(const MachineInstr *MI,
       MF.getFrameInfo()->isImmutableObjectIndex(FrameIdx))
     return true;
 
-  const MCInstrDesc &MCID = MI->getDesc();
-
   // Avoid instructions obviously unsafe for remat.
-  if (MCID.isNotDuplicable() || MCID.mayStore() ||
+  if (MI->isNotDuplicable() || MI->mayStore() ||
       MI->hasUnmodeledSideEffects())
     return false;
 
@@ -396,7 +413,7 @@ isReallyTriviallyReMaterializableGeneric(const MachineInstr *MI,
     return false;
 
   // Avoid instructions which load from potentially varying memory.
-  if (MCID.mayLoad() && !MI->isInvariantLoad(AA))
+  if (MI->mayLoad() && !MI->isInvariantLoad(AA))
     return false;
 
   // If any of the registers accessed are non-constant, conservatively assume
@@ -414,19 +431,8 @@ isReallyTriviallyReMaterializableGeneric(const MachineInstr *MI,
         // If the physreg has no defs anywhere, it's just an ambient register
         // and we can freely move its uses. Alternatively, if it's allocatable,
         // it could get allocated to something with a def during allocation.
-        if (!MRI.def_empty(Reg))
+        if (!MRI.isConstantPhysReg(Reg, MF))
           return false;
-        BitVector AllocatableRegs = TRI.getAllocatableSet(MF, 0);
-        if (AllocatableRegs.test(Reg))
-          return false;
-        // Check for a def among the register's aliases too.
-        for (const unsigned *Alias = TRI.getAliasSet(Reg); *Alias; ++Alias) {
-          unsigned AliasReg = *Alias;
-          if (!MRI.def_empty(AliasReg))
-            return false;
-          if (AllocatableRegs.test(AliasReg))
-            return false;
-        }
       } else {
         // A physreg def. We can't remat it.
         return false;
@@ -457,7 +463,7 @@ bool TargetInstrInfoImpl::isSchedulingBoundary(const MachineInstr *MI,
                                                const MachineBasicBlock *MBB,
                                                const MachineFunction &MF) const{
   // Terminators and labels can't be scheduled around.
-  if (MI->getDesc().isTerminator() || MI->isLabel())
+  if (MI->isTerminator() || MI->isLabel())
     return true;
 
   // Don't attempt to schedule around any instruction that defines
@@ -493,3 +499,32 @@ CreateTargetPostRAHazardRecognizer(const InstrItineraryData *II,
   return (ScheduleHazardRecognizer *)
     new ScoreboardHazardRecognizer(II, DAG, "post-RA-sched");
 }
+
+int
+TargetInstrInfoImpl::getOperandLatency(const InstrItineraryData *ItinData,
+                                       SDNode *DefNode, unsigned DefIdx,
+                                       SDNode *UseNode, unsigned UseIdx) const {
+  if (!ItinData || ItinData->isEmpty())
+    return -1;
+
+  if (!DefNode->isMachineOpcode())
+    return -1;
+
+  unsigned DefClass = get(DefNode->getMachineOpcode()).getSchedClass();
+  if (!UseNode->isMachineOpcode())
+    return ItinData->getOperandCycle(DefClass, DefIdx);
+  unsigned UseClass = get(UseNode->getMachineOpcode()).getSchedClass();
+  return ItinData->getOperandLatency(DefClass, DefIdx, UseClass, UseIdx);
+}
+
+int TargetInstrInfoImpl::getInstrLatency(const InstrItineraryData *ItinData,
+                                         SDNode *N) const {
+  if (!ItinData || ItinData->isEmpty())
+    return 1;
+
+  if (!N->isMachineOpcode())
+    return 1;
+
+  return ItinData->getStageLatency(get(N->getMachineOpcode()).getSchedClass());
+}
+

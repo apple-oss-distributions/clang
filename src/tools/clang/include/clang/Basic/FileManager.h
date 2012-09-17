@@ -110,7 +110,7 @@ public:
 /// properties, such as uniquing files based on "inode", so that a file with two
 /// names (e.g. symlinked) will be treated as a single file.
 ///
-class FileManager : public llvm::RefCountedBase<FileManager> {
+class FileManager : public RefCountedBase<FileManager> {
   FileSystemOptions FileSystemOpts;
 
   class UniqueDirContainer;
@@ -148,7 +148,7 @@ class FileManager : public llvm::RefCountedBase<FileManager> {
   unsigned NumDirCacheMisses, NumFileCacheMisses;
 
   // Caching.
-  llvm::OwningPtr<FileSystemStatCache> StatCache;
+  OwningPtr<FileSystemStatCache> StatCache;
 
   bool getStatValue(const char *Path, struct stat &StatBuf,
                     int *FileDescriptor);
@@ -225,6 +225,11 @@ public:
   /// file to the corresponding FileEntry pointer.
   void GetUniqueIDMapping(
                     SmallVectorImpl<const FileEntry *> &UIDToFiles) const;
+
+  /// \brief Modifies the size and modification time of a previously created
+  /// FileEntry. Use with caution.
+  static void modifyFileEntry(FileEntry *File, off_t Size,
+                              time_t ModificationTime);
 
   void PrintStats() const;
 };

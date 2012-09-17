@@ -816,9 +816,8 @@ bool MemCpyOpt::processMemCpy(MemCpyInst *M) {
       }
     }
   }
-  
-  AliasAnalysis &AA = getAnalysis<AliasAnalysis>();
-  AliasAnalysis::Location SrcLoc = AA.getLocationForSource(M);
+
+  AliasAnalysis::Location SrcLoc = AliasAnalysis::getLocationForSource(M);
   MemDepResult SrcDepInfo = MD->getPointerDependencyFrom(SrcLoc, true,
                                                          M, M->getParent());
   if (SrcDepInfo.isClobber()) {
@@ -950,7 +949,7 @@ bool MemCpyOpt::iterateOnFunction(Function &F) {
         RepeatInstruction = processMemMove(M);
       else if (CallSite CS = (Value*)I) {
         for (unsigned i = 0, e = CS.arg_size(); i != e; ++i)
-          if (CS.paramHasAttr(i+1, Attribute::ByVal))
+          if (CS.isByValArgument(i))
             MadeChange |= processByValArgument(CS, i);
       }
 

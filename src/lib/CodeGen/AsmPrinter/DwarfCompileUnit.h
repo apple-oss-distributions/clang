@@ -36,6 +36,10 @@ class CompileUnit {
   ///
   unsigned ID;
 
+  /// Language - The DW_AT_language of the compile unit
+  ///
+  unsigned Language;
+
   /// Die - Compile unit debug information entry.
   ///
   const OwningPtr<DIE> CUDie;
@@ -76,11 +80,12 @@ class CompileUnit {
   DenseMap<DIE *, const MDNode *> ContainingTypeMap;
 
 public:
-  CompileUnit(unsigned I, DIE *D, AsmPrinter *A, DwarfDebug *DW);
+  CompileUnit(unsigned I, unsigned L, DIE *D, AsmPrinter *A, DwarfDebug *DW);
   ~CompileUnit();
 
   // Accessors.
   unsigned getID()                  const { return ID; }
+  unsigned getLanguage()            const { return Language; }
   DIE* getCUDie()                   const { return CUDie.get(); }
   const StringMap<DIE*> &getGlobalTypes() const { return GlobalTypes; }
 
@@ -208,6 +213,7 @@ public:
   void addSourceLine(DIE *Die, DISubprogram SP);
   void addSourceLine(DIE *Die, DIType Ty);
   void addSourceLine(DIE *Die, DINameSpace NS);
+  void addSourceLine(DIE *Die, DIObjCProperty Ty);
 
   /// addAddress - Add an address attribute to a die based on the location
   /// provided.

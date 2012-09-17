@@ -67,7 +67,7 @@ addDagOperandMapping(Record *Rec, DagInit *Dag, CodeGenInstruction &Insn,
       // Since we added more than one, we also need to adjust the base.
       BaseIdx += NewOps - 1;
     } else
-      assert(0 && "Unhandled pseudo-expansion argument type!");
+      llvm_unreachable("Unhandled pseudo-expansion argument type!");
   }
   return OpsAdded;
 }
@@ -176,8 +176,6 @@ void PseudoLoweringEmitter::emitLoweringEmitter(raw_ostream &o) {
       for (unsigned i = 0, e = Dest.Operands[OpNo].MINumOperands;
            i != e; ++i) {
         switch (Expansion.OperandMap[MIOpNo + i].Kind) {
-        default:
-          llvm_unreachable("Unknown operand type?!");
         case OpData::Operand:
           o << "      lowerOperand(MI->getOperand("
             << Source.Operands[Expansion.OperandMap[MIOpNo].Data

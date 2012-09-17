@@ -1,4 +1,4 @@
-//===- lib/Target/PTX/PTXMCAsmStreamer.cpp - PTX Text Assembly Output -----===//
+//===-- PTXMCAsmStreamer.cpp - PTX Text Assembly Output -------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -162,7 +162,7 @@ public:
   virtual void EmitCodeAlignment(unsigned ByteAlignment,
                                  unsigned MaxBytesToEmit = 0);
 
-  virtual void EmitValueToOffset(const MCExpr *Offset,
+  virtual bool EmitValueToOffset(const MCExpr *Offset,
                                  unsigned char Value = 0);
 
   virtual void EmitFileDirective(StringRef Filename);
@@ -176,7 +176,7 @@ public:
   /// indicated by the hasRawTextSupport() predicate.
   virtual void EmitRawText(StringRef String);
 
-  virtual void Finish();
+  virtual void FinishImpl();
 
   /// @}
 
@@ -478,8 +478,8 @@ void PTXMCAsmStreamer::EmitValueToAlignment(unsigned ByteAlignment,
 void PTXMCAsmStreamer::EmitCodeAlignment(unsigned ByteAlignment,
                                          unsigned MaxBytesToEmit) {}
 
-void PTXMCAsmStreamer::EmitValueToOffset(const MCExpr *Offset,
-                                         unsigned char Value) {}
+bool PTXMCAsmStreamer::EmitValueToOffset(const MCExpr *Offset,
+                                         unsigned char Value) {return false;}
 
 
 void PTXMCAsmStreamer::EmitFileDirective(StringRef Filename) {
@@ -540,7 +540,7 @@ void PTXMCAsmStreamer::EmitRawText(StringRef String) {
   EmitEOL();
 }
 
-void PTXMCAsmStreamer::Finish() {}
+void PTXMCAsmStreamer::FinishImpl() {}
 
 namespace llvm {
   MCStreamer *createPTXAsmStreamer(MCContext &Context,

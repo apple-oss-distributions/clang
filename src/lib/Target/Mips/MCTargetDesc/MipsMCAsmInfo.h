@@ -1,4 +1,4 @@
-//=====-- MipsMCAsmInfo.h - Mips asm properties ---------------*- C++ -*--====//
+//===-- MipsMCAsmInfo.h - Mips Asm Info ------------------------*- C++ -*--===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -21,6 +21,7 @@ namespace llvm {
   class Target;
 
   class MipsMCAsmInfo : public MCAsmInfo {
+    virtual void anchor();
   public:
     explicit MipsMCAsmInfo(const Target &T, StringRef TT);
   };

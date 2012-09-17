@@ -1,4 +1,4 @@
-//=====-- MSP430MCAsmInfo.h - MSP430 asm properties -----------*- C++ -*--====//
+//===-- MSP430MCAsmInfo.h - MSP430 asm properties --------------*- C++ -*--===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -20,7 +20,9 @@
 namespace llvm {
   class Target;
 
-  struct MSP430MCAsmInfo : public MCAsmInfo {
+  class MSP430MCAsmInfo : public MCAsmInfo {
+    virtual void anchor();
+  public:
     explicit MSP430MCAsmInfo(const Target &T, StringRef TT);
   };
 

@@ -159,7 +159,9 @@ LTOModule *LTOModule::makeLTOModule(MemoryBuffer *buffer,
   Features.getDefaultSubtargetFeatures(llvm::Triple(Triple));
   std::string FeatureStr = Features.getString();
   std::string CPU;
-  TargetMachine *target = march->createTargetMachine(Triple, CPU, FeatureStr);
+  TargetOptions Options;
+  TargetMachine *target = march->createTargetMachine(Triple, CPU, FeatureStr,
+                                                     Options);
   LTOModule *Ret = new LTOModule(m.take(), target);
   if (Ret->ParseSymbols(errMsg)) {
     delete Ret;
@@ -188,9 +190,9 @@ bool LTOModule::objcClassNameFromExpression(Constant *c, std::string &name) {
     Constant *op = ce->getOperand(0);
     if (GlobalVariable *gvn = dyn_cast<GlobalVariable>(op)) {
       Constant *cn = gvn->getInitializer();
-      if (ConstantArray *ca = dyn_cast<ConstantArray>(cn)) {
+      if (ConstantDataArray *ca = dyn_cast<ConstantDataArray>(cn)) {
         if (ca->isCString()) {
-          name = ".objc_class_name_" + ca->getAsCString();
+          name = ".objc_class_name_" + ca->getAsCString().str();
           return true;
         }
       }
@@ -587,8 +589,8 @@ namespace {
                                       unsigned MaxBytesToEmit) {}
     virtual void EmitCodeAlignment(unsigned ByteAlignment,
                                    unsigned MaxBytesToEmit) {}
-    virtual void EmitValueToOffset(const MCExpr *Offset,
-                                   unsigned char Value ) {}
+    virtual bool EmitValueToOffset(const MCExpr *Offset,
+                                   unsigned char Value ) { return false; }
     virtual void EmitFileDirective(StringRef Filename) {}
     virtual void EmitDwarfAdvanceLineAddr(int64_t LineDelta,
                                           const MCSymbol *LastLabel,
@@ -601,7 +603,7 @@ namespace {
         if (Inst.getOperand(i).isExpr())
           AddValueSymbols(Inst.getOperand(i).getExpr());
     }
-    virtual void Finish() {}
+    virtual void FinishImpl() {}
   };
 }
 

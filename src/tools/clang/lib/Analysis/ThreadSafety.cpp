@@ -32,7 +32,9 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 using namespace clang;
@@ -60,11 +62,11 @@ namespace {
 ///
 /// Clang introduces an additional wrinkle, which is that it is difficult to
 /// derive canonical expressions, or compare expressions directly for equality.
-/// Thus, we identify a mutex not by an Expr, but by the set of named
+/// Thus, we identify a mutex not by an Expr, but by the list of named
 /// declarations that are referenced by the Expr.  In other words,
 /// x->foo->bar.mu will be a four element vector with the Decls for
 /// mu, bar, and foo, and x.  The vector will uniquely identify the expression
-/// for all practical purposes.
+/// for all practical purposes.  Null is used to denote 'this'.
 ///
 /// Note we will need to perform substitution on "this" and function parameter
 /// names when constructing a lock expression.
@@ -86,38 +88,48 @@ class MutexID {
   /// Recursive function that terminates on DeclRefExpr.
   /// Note: this function merely creates a MutexID; it does not check to
   /// ensure that the original expression is a valid mutex expression.
-  void buildMutexID(Expr *Exp, Expr *Parent, int NumArgs,
-                    const NamedDecl **FunArgDecls, Expr **FunArgs) {
+  void buildMutexID(Expr *Exp, const NamedDecl *D, Expr *Parent,
+                    unsigned NumArgs, Expr **FunArgs) {
     if (!Exp) {
       DeclSeq.clear();
       return;
     }
 
     if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Exp)) {
-      if (FunArgDecls) {
-        // Substitute call arguments for references to function parameters
-        for (int i = 0; i < NumArgs; ++i) {
-          if (DRE->getDecl() == FunArgDecls[i]) {
-            buildMutexID(FunArgs[i], 0, 0, 0, 0);
-            return;
-          }
-        }
-      }
       NamedDecl *ND = cast<NamedDecl>(DRE->getDecl()->getCanonicalDecl());
+      ParmVarDecl *PV = dyn_cast_or_null<ParmVarDecl>(ND);
+      if (PV) {
+        FunctionDecl *FD =
+          cast<FunctionDecl>(PV->getDeclContext())->getCanonicalDecl();
+        unsigned i = PV->getFunctionScopeIndex();
+
+        if (FunArgs && FD == D->getCanonicalDecl()) {
+          // Substitute call arguments for references to function parameters
+          assert(i < NumArgs);
+          buildMutexID(FunArgs[i], D, 0, 0, 0);
+          return;
+        }
+        // Map the param back to the param of the original function declaration.
+        DeclSeq.push_back(FD->getParamDecl(i));
+        return;
+      }
+      // Not a function parameter -- just store the reference.
       DeclSeq.push_back(ND);
     } else if (MemberExpr *ME = dyn_cast<MemberExpr>(Exp)) {
       NamedDecl *ND = ME->getMemberDecl();
       DeclSeq.push_back(ND);
-      buildMutexID(ME->getBase(), Parent, NumArgs, FunArgDecls, FunArgs);
+      buildMutexID(ME->getBase(), D, Parent, NumArgs, FunArgs);
     } else if (isa<CXXThisExpr>(Exp)) {
       if (Parent)
-        buildMutexID(Parent, 0, 0, 0, 0);
-      else
+        buildMutexID(Parent, D, 0, 0, 0);
+      else {
+        DeclSeq.push_back(0);  // Use 0 to represent 'this'.
         return;  // mutexID is still valid in this case
+      }
     } else if (UnaryOperator *UOE = dyn_cast<UnaryOperator>(Exp))
-      buildMutexID(UOE->getSubExpr(), Parent, NumArgs, FunArgDecls, FunArgs);
+      buildMutexID(UOE->getSubExpr(), D, Parent, NumArgs, FunArgs);
     else if (CastExpr *CE = dyn_cast<CastExpr>(Exp))
-      buildMutexID(CE->getSubExpr(), Parent, NumArgs, FunArgDecls, FunArgs);
+      buildMutexID(CE->getSubExpr(), D, Parent, NumArgs, FunArgs);
     else
       DeclSeq.clear(); // Mark as invalid lock expression.
   }
@@ -131,11 +143,10 @@ class MutexID {
     Expr *Parent = 0;
     unsigned NumArgs = 0;
     Expr **FunArgs = 0;
-    SmallVector<const NamedDecl*, 8> FunArgDecls;
 
     // If we are processing a raw attribute expression, with no substitutions.
     if (DeclExp == 0) {
-      buildMutexID(MutexExp, 0, 0, 0, 0);
+      buildMutexID(MutexExp, D, 0, 0, 0);
       return;
     }
 
@@ -145,6 +156,9 @@ class MutexID {
       Parent = ME->getBase();
     } else if (CXXMemberCallExpr *CE = dyn_cast<CXXMemberCallExpr>(DeclExp)) {
       Parent = CE->getImplicitObjectArgument();
+      NumArgs = CE->getNumArgs();
+      FunArgs = CE->getArgs();
+    } else if (CallExpr *CE = dyn_cast<CallExpr>(DeclExp)) {
       NumArgs = CE->getNumArgs();
       FunArgs = CE->getArgs();
     } else if (CXXConstructExpr *CE = dyn_cast<CXXConstructExpr>(DeclExp)) {
@@ -158,20 +172,18 @@ class MutexID {
 
     // If the attribute has no arguments, then assume the argument is "this".
     if (MutexExp == 0) {
-      buildMutexID(Parent, 0, 0, 0, 0);
+      buildMutexID(Parent, D, 0, 0, 0);
       return;
     }
 
-    // FIXME: handle default arguments
-    if (const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D)) {
-      for (unsigned i = 0, ni = FD->getNumParams(); i < ni && i < NumArgs; ++i) {
-        FunArgDecls.push_back(FD->getParamDecl(i));
-      }
-    }
-    buildMutexID(MutexExp, Parent, NumArgs, &FunArgDecls.front(), FunArgs);
+    buildMutexID(MutexExp, D, Parent, NumArgs, FunArgs);
   }
 
 public:
+  explicit MutexID(clang::Decl::EmptyShell e) {
+    DeclSeq.clear();
+  }
+
   /// \param MutexExp The original mutex expression within an attribute
   /// \param DeclExp An expression involving the Decl on which the attribute
   ///        occurs.
@@ -223,6 +235,8 @@ public:
   /// We do not want to output the entire expression text for security reasons.
   StringRef getName() const {
     assert(isValid());
+    if (!DeclSeq.front())
+      return "this";  // Use 0 to represent 'this'.
     return DeclSeq.front()->getName();
   }
 
@@ -249,9 +263,14 @@ struct LockData {
   ///
   /// FIXME: add support for re-entrant locking and lock up/downgrading
   LockKind LKind;
+  MutexID UnderlyingMutex;  // for ScopedLockable objects
 
   LockData(SourceLocation AcquireLoc, LockKind LKind)
-    : AcquireLoc(AcquireLoc), LKind(LKind) {}
+    : AcquireLoc(AcquireLoc), LKind(LKind), UnderlyingMutex(Decl::EmptyShell())
+  {}
+
+  LockData(SourceLocation AcquireLoc, LockKind LKind, const MutexID &Mu)
+    : AcquireLoc(AcquireLoc), LKind(LKind), UnderlyingMutex(Mu) {}
 
   bool operator==(const LockData &other) const {
     return AcquireLoc == other.AcquireLoc && LKind == other.LKind;
@@ -271,6 +290,558 @@ struct LockData {
 /// A Lockset maps each MutexID (defined above) to information about how it has
 /// been locked.
 typedef llvm::ImmutableMap<MutexID, LockData> Lockset;
+typedef llvm::ImmutableMap<NamedDecl*, unsigned> LocalVarContext;
+
+class LocalVariableMap;
+
+/// A side (entry or exit) of a CFG node.
+enum CFGBlockSide { CBS_Entry, CBS_Exit };
+
+/// CFGBlockInfo is a struct which contains all the information that is
+/// maintained for each block in the CFG.  See LocalVariableMap for more
+/// information about the contexts.
+struct CFGBlockInfo {
+  Lockset EntrySet;             // Lockset held at entry to block
+  Lockset ExitSet;              // Lockset held at exit from block
+  LocalVarContext EntryContext; // Context held at entry to block
+  LocalVarContext ExitContext;  // Context held at exit from block
+  SourceLocation EntryLoc;      // Location of first statement in block
+  SourceLocation ExitLoc;       // Location of last statement in block.
+  unsigned EntryIndex;          // Used to replay contexts later
+
+  const Lockset &getSet(CFGBlockSide Side) const {
+    return Side == CBS_Entry ? EntrySet : ExitSet;
+  }
+  SourceLocation getLocation(CFGBlockSide Side) const {
+    return Side == CBS_Entry ? EntryLoc : ExitLoc;
+  }
+
+private:
+  CFGBlockInfo(Lockset EmptySet, LocalVarContext EmptyCtx)
+    : EntrySet(EmptySet), ExitSet(EmptySet),
+      EntryContext(EmptyCtx), ExitContext(EmptyCtx)
+  { }
+
+public:
+  static CFGBlockInfo getEmptyBlockInfo(Lockset::Factory &F,
+                                        LocalVariableMap &M);
+};
+
+
+
+// A LocalVariableMap maintains a map from local variables to their currently
+// valid definitions.  It provides SSA-like functionality when traversing the
+// CFG.  Like SSA, each definition or assignment to a variable is assigned a
+// unique name (an integer), which acts as the SSA name for that definition.
+// The total set of names is shared among all CFG basic blocks.
+// Unlike SSA, we do not rewrite expressions to replace local variables declrefs
+// with their SSA-names.  Instead, we compute a Context for each point in the
+// code, which maps local variables to the appropriate SSA-name.  This map
+// changes with each assignment.
+//
+// The map is computed in a single pass over the CFG.  Subsequent analyses can
+// then query the map to find the appropriate Context for a statement, and use
+// that Context to look up the definitions of variables.
+class LocalVariableMap {
+public:
+  typedef LocalVarContext Context;
+
+  /// A VarDefinition consists of an expression, representing the value of the
+  /// variable, along with the context in which that expression should be
+  /// interpreted.  A reference VarDefinition does not itself contain this
+  /// information, but instead contains a pointer to a previous VarDefinition.
+  struct VarDefinition {
+  public:
+    friend class LocalVariableMap;
+
+    NamedDecl *Dec;       // The original declaration for this variable.
+    Expr *Exp;            // The expression for this variable, OR
+    unsigned Ref;         // Reference to another VarDefinition
+    Context Ctx;          // The map with which Exp should be interpreted.
+
+    bool isReference() { return !Exp; }
+
+  private:
+    // Create ordinary variable definition
+    VarDefinition(NamedDecl *D, Expr *E, Context C)
+      : Dec(D), Exp(E), Ref(0), Ctx(C)
+    { }
+
+    // Create reference to previous definition
+    VarDefinition(NamedDecl *D, unsigned R, Context C)
+      : Dec(D), Exp(0), Ref(R), Ctx(C)
+    { }
+  };
+
+private:
+  Context::Factory ContextFactory;
+  std::vector<VarDefinition> VarDefinitions;
+  std::vector<unsigned> CtxIndices;
+  std::vector<std::pair<Stmt*, Context> > SavedContexts;
+
+public:
+  LocalVariableMap() {
+    // index 0 is a placeholder for undefined variables (aka phi-nodes).
+    VarDefinitions.push_back(VarDefinition(0, 0u, getEmptyContext()));
+  }
+
+  /// Look up a definition, within the given context.
+  const VarDefinition* lookup(NamedDecl *D, Context Ctx) {
+    const unsigned *i = Ctx.lookup(D);
+    if (!i)
+      return 0;
+    assert(*i < VarDefinitions.size());
+    return &VarDefinitions[*i];
+  }
+
+  /// Look up the definition for D within the given context.  Returns
+  /// NULL if the expression is not statically known.  If successful, also
+  /// modifies Ctx to hold the context of the return Expr.
+  Expr* lookupExpr(NamedDecl *D, Context &Ctx) {
+    const unsigned *P = Ctx.lookup(D);
+    if (!P)
+      return 0;
+
+    unsigned i = *P;
+    while (i > 0) {
+      if (VarDefinitions[i].Exp) {
+        Ctx = VarDefinitions[i].Ctx;
+        return VarDefinitions[i].Exp;
+      }
+      i = VarDefinitions[i].Ref;
+    }
+    return 0;
+  }
+
+  Context getEmptyContext() { return ContextFactory.getEmptyMap(); }
+
+  /// Return the next context after processing S.  This function is used by
+  /// clients of the class to get the appropriate context when traversing the
+  /// CFG.  It must be called for every assignment or DeclStmt.
+  Context getNextContext(unsigned &CtxIndex, Stmt *S, Context C) {
+    if (SavedContexts[CtxIndex+1].first == S) {
+      CtxIndex++;
+      Context Result = SavedContexts[CtxIndex].second;
+      return Result;
+    }
+    return C;
+  }
+
+  void dumpVarDefinitionName(unsigned i) {
+    if (i == 0) {
+      llvm::errs() << "Undefined";
+      return;
+    }
+    NamedDecl *Dec = VarDefinitions[i].Dec;
+    if (!Dec) {
+      llvm::errs() << "<<NULL>>";
+      return;
+    }
+    Dec->printName(llvm::errs());
+    llvm::errs() << "." << i << " " << ((void*) Dec);
+  }
+
+  /// Dumps an ASCII representation of the variable map to llvm::errs()
+  void dump() {
+    for (unsigned i = 1, e = VarDefinitions.size(); i < e; ++i) {
+      Expr *Exp = VarDefinitions[i].Exp;
+      unsigned Ref = VarDefinitions[i].Ref;
+
+      dumpVarDefinitionName(i);
+      llvm::errs() << " = ";
+      if (Exp) Exp->dump();
+      else {
+        dumpVarDefinitionName(Ref);
+        llvm::errs() << "\n";
+      }
+    }
+  }
+
+  /// Dumps an ASCII representation of a Context to llvm::errs()
+  void dumpContext(Context C) {
+    for (Context::iterator I = C.begin(), E = C.end(); I != E; ++I) {
+      NamedDecl *D = I.getKey();
+      D->printName(llvm::errs());
+      const unsigned *i = C.lookup(D);
+      llvm::errs() << " -> ";
+      dumpVarDefinitionName(*i);
+      llvm::errs() << "\n";
+    }
+  }
+
+  /// Builds the variable map.
+  void traverseCFG(CFG *CFGraph, PostOrderCFGView *SortedGraph,
+                     std::vector<CFGBlockInfo> &BlockInfo);
+
+protected:
+  // Get the current context index
+  unsigned getContextIndex() { return SavedContexts.size()-1; }
+
+  // Save the current context for later replay
+  void saveContext(Stmt *S, Context C) {
+    SavedContexts.push_back(std::make_pair(S,C));
+  }
+
+  // Adds a new definition to the given context, and returns a new context.
+  // This method should be called when declaring a new variable.
+  Context addDefinition(NamedDecl *D, Expr *Exp, Context Ctx) {
+    assert(!Ctx.contains(D));
+    unsigned newID = VarDefinitions.size();
+    Context NewCtx = ContextFactory.add(Ctx, D, newID);
+    VarDefinitions.push_back(VarDefinition(D, Exp, Ctx));
+    return NewCtx;
+  }
+
+  // Add a new reference to an existing definition.
+  Context addReference(NamedDecl *D, unsigned i, Context Ctx) {
+    unsigned newID = VarDefinitions.size();
+    Context NewCtx = ContextFactory.add(Ctx, D, newID);
+    VarDefinitions.push_back(VarDefinition(D, i, Ctx));
+    return NewCtx;
+  }
+
+  // Updates a definition only if that definition is already in the map.
+  // This method should be called when assigning to an existing variable.
+  Context updateDefinition(NamedDecl *D, Expr *Exp, Context Ctx) {
+    if (Ctx.contains(D)) {
+      unsigned newID = VarDefinitions.size();
+      Context NewCtx = ContextFactory.remove(Ctx, D);
+      NewCtx = ContextFactory.add(NewCtx, D, newID);
+      VarDefinitions.push_back(VarDefinition(D, Exp, Ctx));
+      return NewCtx;
+    }
+    return Ctx;
+  }
+
+  // Removes a definition from the context, but keeps the variable name
+  // as a valid variable.  The index 0 is a placeholder for cleared definitions.
+  Context clearDefinition(NamedDecl *D, Context Ctx) {
+    Context NewCtx = Ctx;
+    if (NewCtx.contains(D)) {
+      NewCtx = ContextFactory.remove(NewCtx, D);
+      NewCtx = ContextFactory.add(NewCtx, D, 0);
+    }
+    return NewCtx;
+  }
+
+  // Remove a definition entirely frmo the context.
+  Context removeDefinition(NamedDecl *D, Context Ctx) {
+    Context NewCtx = Ctx;
+    if (NewCtx.contains(D)) {
+      NewCtx = ContextFactory.remove(NewCtx, D);
+    }
+    return NewCtx;
+  }
+
+  Context intersectContexts(Context C1, Context C2);
+  Context createReferenceContext(Context C);
+  void intersectBackEdge(Context C1, Context C2);
+
+  friend class VarMapBuilder;
+};
+
+
+// This has to be defined after LocalVariableMap.
+CFGBlockInfo CFGBlockInfo::getEmptyBlockInfo(Lockset::Factory &F,
+                                             LocalVariableMap &M) {
+  return CFGBlockInfo(F.getEmptyMap(), M.getEmptyContext());
+}
+
+
+/// Visitor which builds a LocalVariableMap
+class VarMapBuilder : public StmtVisitor<VarMapBuilder> {
+public:
+  LocalVariableMap* VMap;
+  LocalVariableMap::Context Ctx;
+
+  VarMapBuilder(LocalVariableMap *VM, LocalVariableMap::Context C)
+    : VMap(VM), Ctx(C) {}
+
+  void VisitDeclStmt(DeclStmt *S);
+  void VisitBinaryOperator(BinaryOperator *BO);
+};
+
+
+// Add new local variables to the variable map
+void VarMapBuilder::VisitDeclStmt(DeclStmt *S) {
+  bool modifiedCtx = false;
+  DeclGroupRef DGrp = S->getDeclGroup();
+  for (DeclGroupRef::iterator I = DGrp.begin(), E = DGrp.end(); I != E; ++I) {
+    if (VarDecl *VD = dyn_cast_or_null<VarDecl>(*I)) {
+      Expr *E = VD->getInit();
+
+      // Add local variables with trivial type to the variable map
+      QualType T = VD->getType();
+      if (T.isTrivialType(VD->getASTContext())) {
+        Ctx = VMap->addDefinition(VD, E, Ctx);
+        modifiedCtx = true;
+      }
+    }
+  }
+  if (modifiedCtx)
+    VMap->saveContext(S, Ctx);
+}
+
+// Update local variable definitions in variable map
+void VarMapBuilder::VisitBinaryOperator(BinaryOperator *BO) {
+  if (!BO->isAssignmentOp())
+    return;
+
+  Expr *LHSExp = BO->getLHS()->IgnoreParenCasts();
+
+  // Update the variable map and current context.
+  if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(LHSExp)) {
+    ValueDecl *VDec = DRE->getDecl();
+    if (Ctx.lookup(VDec)) {
+      if (BO->getOpcode() == BO_Assign)
+        Ctx = VMap->updateDefinition(VDec, BO->getRHS(), Ctx);
+      else
+        // FIXME -- handle compound assignment operators
+        Ctx = VMap->clearDefinition(VDec, Ctx);
+      VMap->saveContext(BO, Ctx);
+    }
+  }
+}
+
+
+// Computes the intersection of two contexts.  The intersection is the
+// set of variables which have the same definition in both contexts;
+// variables with different definitions are discarded.
+LocalVariableMap::Context
+LocalVariableMap::intersectContexts(Context C1, Context C2) {
+  Context Result = C1;
+  for (Context::iterator I = C1.begin(), E = C1.end(); I != E; ++I) {
+    NamedDecl *Dec = I.getKey();
+    unsigned i1 = I.getData();
+    const unsigned *i2 = C2.lookup(Dec);
+    if (!i2)             // variable doesn't exist on second path
+      Result = removeDefinition(Dec, Result);
+    else if (*i2 != i1)  // variable exists, but has different definition
+      Result = clearDefinition(Dec, Result);
+  }
+  return Result;
+}
+
+// For every variable in C, create a new variable that refers to the
+// definition in C.  Return a new context that contains these new variables.
+// (We use this for a naive implementation of SSA on loop back-edges.)
+LocalVariableMap::Context LocalVariableMap::createReferenceContext(Context C) {
+  Context Result = getEmptyContext();
+  for (Context::iterator I = C.begin(), E = C.end(); I != E; ++I) {
+    NamedDecl *Dec = I.getKey();
+    unsigned i = I.getData();
+    Result = addReference(Dec, i, Result);
+  }
+  return Result;
+}
+
+// This routine also takes the intersection of C1 and C2, but it does so by
+// altering the VarDefinitions.  C1 must be the result of an earlier call to
+// createReferenceContext.
+void LocalVariableMap::intersectBackEdge(Context C1, Context C2) {
+  for (Context::iterator I = C1.begin(), E = C1.end(); I != E; ++I) {
+    NamedDecl *Dec = I.getKey();
+    unsigned i1 = I.getData();
+    VarDefinition *VDef = &VarDefinitions[i1];
+    assert(VDef->isReference());
+
+    const unsigned *i2 = C2.lookup(Dec);
+    if (!i2 || (*i2 != i1))
+      VDef->Ref = 0;    // Mark this variable as undefined
+  }
+}
+
+
+// Traverse the CFG in topological order, so all predecessors of a block
+// (excluding back-edges) are visited before the block itself.  At
+// each point in the code, we calculate a Context, which holds the set of
+// variable definitions which are visible at that point in execution.
+// Visible variables are mapped to their definitions using an array that
+// contains all definitions.
+//
+// At join points in the CFG, the set is computed as the intersection of
+// the incoming sets along each edge, E.g.
+//
+//                       { Context                 | VarDefinitions }
+//   int x = 0;          { x -> x1                 | x1 = 0 }
+//   int y = 0;          { x -> x1, y -> y1        | y1 = 0, x1 = 0 }
+//   if (b) x = 1;       { x -> x2, y -> y1        | x2 = 1, y1 = 0, ... }
+//   else   x = 2;       { x -> x3, y -> y1        | x3 = 2, x2 = 1, ... }
+//   ...                 { y -> y1  (x is unknown) | x3 = 2, x2 = 1, ... }
+//
+// This is essentially a simpler and more naive version of the standard SSA
+// algorithm.  Those definitions that remain in the intersection are from blocks
+// that strictly dominate the current block.  We do not bother to insert proper
+// phi nodes, because they are not used in our analysis; instead, wherever
+// a phi node would be required, we simply remove that definition from the
+// context (E.g. x above).
+//
+// The initial traversal does not capture back-edges, so those need to be
+// handled on a separate pass.  Whenever the first pass encounters an
+// incoming back edge, it duplicates the context, creating new definitions
+// that refer back to the originals.  (These correspond to places where SSA
+// might have to insert a phi node.)  On the second pass, these definitions are
+// set to NULL if the the variable has changed on the back-edge (i.e. a phi
+// node was actually required.)  E.g.
+//
+//                       { Context           | VarDefinitions }
+//   int x = 0, y = 0;   { x -> x1, y -> y1  | y1 = 0, x1 = 0 }
+//   while (b)           { x -> x2, y -> y1  | [1st:] x2=x1; [2nd:] x2=NULL; }
+//     x = x+1;          { x -> x3, y -> y1  | x3 = x2 + 1, ... }
+//   ...                 { y -> y1           | x3 = 2, x2 = 1, ... }
+//
+void LocalVariableMap::traverseCFG(CFG *CFGraph,
+                                   PostOrderCFGView *SortedGraph,
+                                   std::vector<CFGBlockInfo> &BlockInfo) {
+  PostOrderCFGView::CFGBlockSet VisitedBlocks(CFGraph);
+
+  CtxIndices.resize(CFGraph->getNumBlockIDs());
+
+  for (PostOrderCFGView::iterator I = SortedGraph->begin(),
+       E = SortedGraph->end(); I!= E; ++I) {
+    const CFGBlock *CurrBlock = *I;
+    int CurrBlockID = CurrBlock->getBlockID();
+    CFGBlockInfo *CurrBlockInfo = &BlockInfo[CurrBlockID];
+
+    VisitedBlocks.insert(CurrBlock);
+
+    // Calculate the entry context for the current block
+    bool HasBackEdges = false;
+    bool CtxInit = true;
+    for (CFGBlock::const_pred_iterator PI = CurrBlock->pred_begin(),
+         PE  = CurrBlock->pred_end(); PI != PE; ++PI) {
+      // if *PI -> CurrBlock is a back edge, so skip it
+      if (*PI == 0 || !VisitedBlocks.alreadySet(*PI)) {
+        HasBackEdges = true;
+        continue;
+      }
+
+      int PrevBlockID = (*PI)->getBlockID();
+      CFGBlockInfo *PrevBlockInfo = &BlockInfo[PrevBlockID];
+
+      if (CtxInit) {
+        CurrBlockInfo->EntryContext = PrevBlockInfo->ExitContext;
+        CtxInit = false;
+      }
+      else {
+        CurrBlockInfo->EntryContext =
+          intersectContexts(CurrBlockInfo->EntryContext,
+                            PrevBlockInfo->ExitContext);
+      }
+    }
+
+    // Duplicate the context if we have back-edges, so we can call
+    // intersectBackEdges later.
+    if (HasBackEdges)
+      CurrBlockInfo->EntryContext =
+        createReferenceContext(CurrBlockInfo->EntryContext);
+
+    // Create a starting context index for the current block
+    saveContext(0, CurrBlockInfo->EntryContext);
+    CurrBlockInfo->EntryIndex = getContextIndex();
+
+    // Visit all the statements in the basic block.
+    VarMapBuilder VMapBuilder(this, CurrBlockInfo->EntryContext);
+    for (CFGBlock::const_iterator BI = CurrBlock->begin(),
+         BE = CurrBlock->end(); BI != BE; ++BI) {
+      switch (BI->getKind()) {
+        case CFGElement::Statement: {
+          const CFGStmt *CS = cast<CFGStmt>(&*BI);
+          VMapBuilder.Visit(const_cast<Stmt*>(CS->getStmt()));
+          break;
+        }
+        default:
+          break;
+      }
+    }
+    CurrBlockInfo->ExitContext = VMapBuilder.Ctx;
+
+    // Mark variables on back edges as "unknown" if they've been changed.
+    for (CFGBlock::const_succ_iterator SI = CurrBlock->succ_begin(),
+         SE  = CurrBlock->succ_end(); SI != SE; ++SI) {
+      // if CurrBlock -> *SI is *not* a back edge
+      if (*SI == 0 || !VisitedBlocks.alreadySet(*SI))
+        continue;
+
+      CFGBlock *FirstLoopBlock = *SI;
+      Context LoopBegin = BlockInfo[FirstLoopBlock->getBlockID()].EntryContext;
+      Context LoopEnd   = CurrBlockInfo->ExitContext;
+      intersectBackEdge(LoopBegin, LoopEnd);
+    }
+  }
+
+  // Put an extra entry at the end of the indexed context array
+  unsigned exitID = CFGraph->getExit().getBlockID();
+  saveContext(0, BlockInfo[exitID].ExitContext);
+}
+
+/// Find the appropriate source locations to use when producing diagnostics for
+/// each block in the CFG.
+static void findBlockLocations(CFG *CFGraph,
+                               PostOrderCFGView *SortedGraph,
+                               std::vector<CFGBlockInfo> &BlockInfo) {
+  for (PostOrderCFGView::iterator I = SortedGraph->begin(),
+       E = SortedGraph->end(); I!= E; ++I) {
+    const CFGBlock *CurrBlock = *I;
+    CFGBlockInfo *CurrBlockInfo = &BlockInfo[CurrBlock->getBlockID()];
+
+    // Find the source location of the last statement in the block, if the
+    // block is not empty.
+    if (const Stmt *S = CurrBlock->getTerminator()) {
+      CurrBlockInfo->EntryLoc = CurrBlockInfo->ExitLoc = S->getLocStart();
+    } else {
+      for (CFGBlock::const_reverse_iterator BI = CurrBlock->rbegin(),
+           BE = CurrBlock->rend(); BI != BE; ++BI) {
+        // FIXME: Handle other CFGElement kinds.
+        if (const CFGStmt *CS = dyn_cast<CFGStmt>(&*BI)) {
+          CurrBlockInfo->ExitLoc = CS->getStmt()->getLocStart();
+          break;
+        }
+      }
+    }
+
+    if (!CurrBlockInfo->ExitLoc.isInvalid()) {
+      // This block contains at least one statement. Find the source location
+      // of the first statement in the block.
+      for (CFGBlock::const_iterator BI = CurrBlock->begin(),
+           BE = CurrBlock->end(); BI != BE; ++BI) {
+        // FIXME: Handle other CFGElement kinds.
+        if (const CFGStmt *CS = dyn_cast<CFGStmt>(&*BI)) {
+          CurrBlockInfo->EntryLoc = CS->getStmt()->getLocStart();
+          break;
+        }
+      }
+    } else if (CurrBlock->pred_size() == 1 && *CurrBlock->pred_begin() &&
+               CurrBlock != &CFGraph->getExit()) {
+      // The block is empty, and has a single predecessor. Use its exit
+      // location.
+      CurrBlockInfo->EntryLoc = CurrBlockInfo->ExitLoc =
+          BlockInfo[(*CurrBlock->pred_begin())->getBlockID()].ExitLoc;
+    }
+  }
+}
+
+/// \brief Class which implements the core thread safety analysis routines.
+class ThreadSafetyAnalyzer {
+  friend class BuildLockset;
+
+  ThreadSafetyHandler &Handler;
+  Lockset::Factory    LocksetFactory;
+  LocalVariableMap    LocalVarMap;
+
+public:
+  ThreadSafetyAnalyzer(ThreadSafetyHandler &H) : Handler(H) {}
+
+  Lockset intersectAndWarn(const CFGBlockInfo &Block1, CFGBlockSide Side1,
+                           const CFGBlockInfo &Block2, CFGBlockSide Side2,
+                           LockErrorKind LEK);
+
+  Lockset addLock(Lockset &LSet, Expr *MutexExp, const NamedDecl *D,
+                  LockKind LK, SourceLocation Loc);
+
+  void runAnalysis(AnalysisDeclContext &AC);
+};
+
 
 /// \brief We use this class to visit different types of expressions in
 /// CFGBlocks, and build up the lockset.
@@ -281,15 +852,20 @@ class BuildLockset : public StmtVisitor<BuildLockset> {
   friend class ThreadSafetyAnalyzer;
 
   ThreadSafetyHandler &Handler;
-  Lockset LSet;
   Lockset::Factory &LocksetFactory;
+  LocalVariableMap &LocalVarMap;
+
+  Lockset LSet;
+  LocalVariableMap::Context LVarCtx;
+  unsigned CtxIndex;
 
   // Helper functions
-  void removeLock(SourceLocation UnlockLoc, MutexID &Mutex);
-  void addLock(SourceLocation LockLoc, MutexID &Mutex, LockKind LK);
+  void addLock(const MutexID &Mutex, const LockData &LDat);
+  void removeLock(const MutexID &Mutex, SourceLocation UnlockLoc);
 
   template <class AttrType>
-  void addLocksToSet(LockKind LK, AttrType *Attr, Expr *Exp, NamedDecl *D);
+  void addLocksToSet(LockKind LK, AttrType *Attr,
+                     Expr *Exp, NamedDecl *D, VarDecl *VD = 0);
   void removeLocksFromSet(UnlockFunctionAttr *Attr,
                           Expr *Exp, NamedDecl* FunDecl);
 
@@ -298,7 +874,16 @@ class BuildLockset : public StmtVisitor<BuildLockset> {
                            Expr *MutexExp, ProtectedOperationKind POK);
   void checkAccess(Expr *Exp, AccessKind AK);
   void checkDereference(Expr *Exp, AccessKind AK);
-  void handleCall(Expr *Exp, NamedDecl *D);
+  void handleCall(Expr *Exp, NamedDecl *D, VarDecl *VD = 0);
+
+  template <class AttrType>
+  void addTrylock(LockKind LK, AttrType *Attr, Expr *Exp, NamedDecl *FunDecl,
+                  const CFGBlock* PredBlock, const CFGBlock *CurrBlock,
+                  Expr *BrE, bool Neg);
+  CallExpr* getTrylockCallExpr(Stmt *Cond, LocalVariableMap::Context C,
+                               bool &Negate);
+  void handleTrylock(Stmt *Cond, const CFGBlock* PredBlock,
+                     const CFGBlock *CurrBlock);
 
   /// \brief Returns true if the lockset contains a lock, regardless of whether
   /// the lock is held exclusively or shared.
@@ -329,56 +914,69 @@ class BuildLockset : public StmtVisitor<BuildLockset> {
   }
 
 public:
-  BuildLockset(ThreadSafetyHandler &Handler, Lockset LS, Lockset::Factory &F)
-    : StmtVisitor<BuildLockset>(), Handler(Handler), LSet(LS),
-      LocksetFactory(F) {}
-
-  Lockset getLockset() {
-    return LSet;
-  }
+  BuildLockset(ThreadSafetyAnalyzer *analyzer, CFGBlockInfo &Info)
+    : StmtVisitor<BuildLockset>(),
+      Handler(analyzer->Handler),
+      LocksetFactory(analyzer->LocksetFactory),
+      LocalVarMap(analyzer->LocalVarMap),
+      LSet(Info.EntrySet),
+      LVarCtx(Info.EntryContext),
+      CtxIndex(Info.EntryIndex)
+  {}
 
   void VisitUnaryOperator(UnaryOperator *UO);
   void VisitBinaryOperator(BinaryOperator *BO);
   void VisitCastExpr(CastExpr *CE);
-  void VisitCXXMemberCallExpr(CXXMemberCallExpr *Exp);
+  void VisitCallExpr(CallExpr *Exp);
   void VisitCXXConstructExpr(CXXConstructExpr *Exp);
+  void VisitDeclStmt(DeclStmt *S);
 };
 
 /// \brief Add a new lock to the lockset, warning if the lock is already there.
-/// \param LockLoc The source location of the acquire
-/// \param LockExp The lock expression corresponding to the lock to be added
-void BuildLockset::addLock(SourceLocation LockLoc, MutexID &Mutex,
-                           LockKind LK) {
-  // FIXME: deal with acquired before/after annotations. We can write a first
-  // pass that does the transitive lookup lazily, and refine afterwards.
-  LockData NewLock(LockLoc, LK);
-
+/// \param Mutex -- the Mutex expression for the lock
+/// \param LDat  -- the LockData for the lock
+void BuildLockset::addLock(const MutexID &Mutex, const LockData& LDat) {
+  // FIXME: deal with acquired before/after annotations.
   // FIXME: Don't always warn when we have support for reentrant locks.
   if (locksetContains(Mutex))
-    Handler.handleDoubleLock(Mutex.getName(), LockLoc);
+    Handler.handleDoubleLock(Mutex.getName(), LDat.AcquireLoc);
   else
-    LSet = LocksetFactory.add(LSet, Mutex, NewLock);
+    LSet = LocksetFactory.add(LSet, Mutex, LDat);
 }
 
 /// \brief Remove a lock from the lockset, warning if the lock is not there.
 /// \param LockExp The lock expression corresponding to the lock to be removed
 /// \param UnlockLoc The source location of the unlock (only used in error msg)
-void BuildLockset::removeLock(SourceLocation UnlockLoc, MutexID &Mutex) {
-  Lockset NewLSet = LocksetFactory.remove(LSet, Mutex);
-  if(NewLSet == LSet)
+void BuildLockset::removeLock(const MutexID &Mutex, SourceLocation UnlockLoc) {
+  const LockData *LDat = LSet.lookup(Mutex);
+  if (!LDat)
     Handler.handleUnmatchedUnlock(Mutex.getName(), UnlockLoc);
-  else
-    LSet = NewLSet;
+  else {
+    // For scoped-lockable vars, remove the mutex associated with this var.
+    if (LDat->UnderlyingMutex.isValid())
+      removeLock(LDat->UnderlyingMutex, UnlockLoc);
+    LSet = LocksetFactory.remove(LSet, Mutex);
+  }
 }
 
 /// \brief This function, parameterized by an attribute type, is used to add a
 /// set of locks specified as attribute arguments to the lockset.
 template <typename AttrType>
 void BuildLockset::addLocksToSet(LockKind LK, AttrType *Attr,
-                                 Expr *Exp, NamedDecl* FunDecl) {
+                                 Expr *Exp, NamedDecl* FunDecl, VarDecl *VD) {
   typedef typename AttrType::args_iterator iterator_type;
 
   SourceLocation ExpLocation = Exp->getExprLoc();
+
+  // Figure out if we're calling the constructor of scoped lockable class
+  bool isScopedVar = false;
+  if (VD) {
+    if (CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(FunDecl)) {
+      CXXRecordDecl* PD = CD->getParent();
+      if (PD && PD->getAttr<ScopedLockableAttr>())
+        isScopedVar = true;
+    }
+  }
 
   if (Attr->args_size() == 0) {
     // The mutex held is the "this" object.
@@ -386,7 +984,7 @@ void BuildLockset::addLocksToSet(LockKind LK, AttrType *Attr,
     if (!Mutex.isValid())
       MutexID::warnInvalidLock(Handler, 0, Exp, FunDecl);
     else
-      addLock(ExpLocation, Mutex, LK);
+      addLock(Mutex, LockData(ExpLocation, LK));
     return;
   }
 
@@ -394,8 +992,15 @@ void BuildLockset::addLocksToSet(LockKind LK, AttrType *Attr,
     MutexID Mutex(*I, Exp, FunDecl);
     if (!Mutex.isValid())
       MutexID::warnInvalidLock(Handler, *I, Exp, FunDecl);
-    else
-      addLock(ExpLocation, Mutex, LK);
+    else {
+      addLock(Mutex, LockData(ExpLocation, LK));
+      if (isScopedVar) {
+        // For scoped lockable vars, map this var to its underlying mutex.
+        DeclRefExpr DRE(VD, false, VD->getType(), VK_LValue, VD->getLocation());
+        MutexID SMutex(&DRE, 0, 0);
+        addLock(SMutex, LockData(VD->getLocation(), LK, Mutex));
+      }
+    }
   }
 }
 
@@ -412,7 +1017,7 @@ void BuildLockset::removeLocksFromSet(UnlockFunctionAttr *Attr,
     if (!Mu.isValid())
       MutexID::warnInvalidLock(Handler, 0, Exp, FunDecl);
     else
-      removeLock(ExpLocation, Mu);
+      removeLock(Mu, ExpLocation);
     return;
   }
 
@@ -422,7 +1027,7 @@ void BuildLockset::removeLocksFromSet(UnlockFunctionAttr *Attr,
     if (!Mutex.isValid())
       MutexID::warnInvalidLock(Handler, *I, Exp, FunDecl);
     else
-      removeLock(ExpLocation, Mutex);
+      removeLock(Mutex, ExpLocation);
   }
 }
 
@@ -508,7 +1113,7 @@ void BuildLockset::checkAccess(Expr *Exp, AccessKind AK) {
 ///
 /// FIXME: Do not flag an error for member variables accessed in constructors/
 /// destructors
-void BuildLockset::handleCall(Expr *Exp, NamedDecl *D) {
+void BuildLockset::handleCall(Expr *Exp, NamedDecl *D, VarDecl *VD) {
   AttrVec &ArgAttrs = D->getAttrs();
   for(unsigned i = 0; i < ArgAttrs.size(); ++i) {
     Attr *Attr = ArgAttrs[i];
@@ -517,7 +1122,7 @@ void BuildLockset::handleCall(Expr *Exp, NamedDecl *D) {
       // to our lockset with kind exclusive.
       case attr::ExclusiveLockFunction: {
         ExclusiveLockFunctionAttr *A = cast<ExclusiveLockFunctionAttr>(Attr);
-        addLocksToSet(LK_Exclusive, A, Exp, D);
+        addLocksToSet(LK_Exclusive, A, Exp, D, VD);
         break;
       }
 
@@ -525,7 +1130,7 @@ void BuildLockset::handleCall(Expr *Exp, NamedDecl *D) {
       // to our lockset with kind shared.
       case attr::SharedLockFunction: {
         SharedLockFunctionAttr *A = cast<SharedLockFunctionAttr>(Attr);
-        addLocksToSet(LK_Shared, A, Exp, D);
+        addLocksToSet(LK_Shared, A, Exp, D, VD);
         break;
       }
 
@@ -577,6 +1182,104 @@ void BuildLockset::handleCall(Expr *Exp, NamedDecl *D) {
   }
 }
 
+
+/// \brief Add lock to set, if the current block is in the taken branch of a
+/// trylock.
+template <class AttrType>
+void BuildLockset::addTrylock(LockKind LK, AttrType *Attr, Expr *Exp,
+                              NamedDecl *FunDecl, const CFGBlock *PredBlock,
+                              const CFGBlock *CurrBlock, Expr *BrE, bool Neg) {
+  // Find out which branch has the lock
+  bool branch = 0;
+  if (CXXBoolLiteralExpr *BLE = dyn_cast_or_null<CXXBoolLiteralExpr>(BrE)) {
+    branch = BLE->getValue();
+  }
+  else if (IntegerLiteral *ILE = dyn_cast_or_null<IntegerLiteral>(BrE)) {
+    branch = ILE->getValue().getBoolValue();
+  }
+  int branchnum = branch ? 0 : 1;
+  if (Neg) branchnum = !branchnum;
+
+  // If we've taken the trylock branch, then add the lock
+  int i = 0;
+  for (CFGBlock::const_succ_iterator SI = PredBlock->succ_begin(),
+       SE = PredBlock->succ_end(); SI != SE && i < 2; ++SI, ++i) {
+    if (*SI == CurrBlock && i == branchnum) {
+      addLocksToSet(LK, Attr, Exp, FunDecl, 0);
+    }
+  }
+}
+
+
+// If Cond can be traced back to a function call, return the call expression.
+// The negate variable should be called with false, and will be set to true
+// if the function call is negated, e.g. if (!mu.tryLock(...))
+CallExpr* BuildLockset::getTrylockCallExpr(Stmt *Cond,
+                               LocalVariableMap::Context C,
+                               bool &Negate) {
+  if (!Cond)
+    return 0;
+
+  if (CallExpr *CallExp = dyn_cast<CallExpr>(Cond)) {
+    return CallExp;
+  }
+  else if (ImplicitCastExpr *CE = dyn_cast<ImplicitCastExpr>(Cond)) {
+    return getTrylockCallExpr(CE->getSubExpr(), C, Negate);
+  }
+  else if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Cond)) {
+    Expr *E = LocalVarMap.lookupExpr(DRE->getDecl(), C);
+    return getTrylockCallExpr(E, C, Negate);
+  }
+  else if (UnaryOperator *UOP = dyn_cast<UnaryOperator>(Cond)) {
+    if (UOP->getOpcode() == UO_LNot) {
+      Negate = !Negate;
+      return getTrylockCallExpr(UOP->getSubExpr(), C, Negate);
+    }
+  }
+  // FIXME -- handle && and || as well.
+  return NULL;
+}
+
+
+/// \brief Process a conditional branch from a previous block to the current
+/// block, looking for trylock calls.
+void BuildLockset::handleTrylock(Stmt *Cond, const CFGBlock *PredBlock,
+                                 const CFGBlock *CurrBlock) {
+  bool Negate = false;
+  CallExpr *Exp = getTrylockCallExpr(Cond, LVarCtx, Negate);
+  if (!Exp)
+    return;
+
+  NamedDecl *FunDecl = dyn_cast_or_null<NamedDecl>(Exp->getCalleeDecl());
+  if(!FunDecl || !FunDecl->hasAttrs())
+    return;
+
+  // If the condition is a call to a Trylock function, then grab the attributes
+  AttrVec &ArgAttrs = FunDecl->getAttrs();
+  for (unsigned i = 0; i < ArgAttrs.size(); ++i) {
+    Attr *Attr = ArgAttrs[i];
+    switch (Attr->getKind()) {
+      case attr::ExclusiveTrylockFunction: {
+        ExclusiveTrylockFunctionAttr *A =
+          cast<ExclusiveTrylockFunctionAttr>(Attr);
+        addTrylock(LK_Exclusive, A, Exp, FunDecl, PredBlock, CurrBlock,
+                   A->getSuccessValue(), Negate);
+        break;
+      }
+      case attr::SharedTrylockFunction: {
+        SharedTrylockFunctionAttr *A =
+          cast<SharedTrylockFunctionAttr>(Attr);
+        addTrylock(LK_Shared, A, Exp, FunDecl, PredBlock, CurrBlock,
+                   A->getSuccessValue(), Negate);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+
 /// \brief For unary operations which read and write a variable, we need to
 /// check whether we hold any required mutexes. Reads are checked in
 /// VisitCastExpr.
@@ -602,6 +1305,10 @@ void BuildLockset::VisitUnaryOperator(UnaryOperator *UO) {
 void BuildLockset::VisitBinaryOperator(BinaryOperator *BO) {
   if (!BO->isAssignmentOp())
     return;
+
+  // adjust the context
+  LVarCtx = LocalVarMap.getNextContext(CtxIndex, BO, LVarCtx);
+
   Expr *LHSExp = BO->getLHS()->IgnoreParenCasts();
   checkAccess(LHSExp, AK_Written);
   checkDereference(LHSExp, AK_Written);
@@ -619,7 +1326,7 @@ void BuildLockset::VisitCastExpr(CastExpr *CE) {
 }
 
 
-void BuildLockset::VisitCXXMemberCallExpr(CXXMemberCallExpr *Exp) {
+void BuildLockset::VisitCallExpr(CallExpr *Exp) {
   NamedDecl *D = dyn_cast_or_null<NamedDecl>(Exp->getCalleeDecl());
   if(!D || !D->hasAttrs())
     return;
@@ -627,29 +1334,28 @@ void BuildLockset::VisitCXXMemberCallExpr(CXXMemberCallExpr *Exp) {
 }
 
 void BuildLockset::VisitCXXConstructExpr(CXXConstructExpr *Exp) {
-  NamedDecl *D = cast<NamedDecl>(Exp->getConstructor());
-  if(!D || !D->hasAttrs())
-    return;
-  handleCall(Exp, D);
+  // FIXME -- only handles constructors in DeclStmt below.
 }
 
+void BuildLockset::VisitDeclStmt(DeclStmt *S) {
+  // adjust the context
+  LVarCtx = LocalVarMap.getNextContext(CtxIndex, S, LVarCtx);
 
-/// \brief Class which implements the core thread safety analysis routines.
-class ThreadSafetyAnalyzer {
-  ThreadSafetyHandler &Handler;
-  Lockset::Factory    LocksetFactory;
+  DeclGroupRef DGrp = S->getDeclGroup();
+  for (DeclGroupRef::iterator I = DGrp.begin(), E = DGrp.end(); I != E; ++I) {
+    Decl *D = *I;
+    if (VarDecl *VD = dyn_cast_or_null<VarDecl>(D)) {
+      Expr *E = VD->getInit();
+      if (CXXConstructExpr *CE = dyn_cast_or_null<CXXConstructExpr>(E)) {
+        NamedDecl *CtorD = dyn_cast_or_null<NamedDecl>(CE->getConstructor());
+        if (!CtorD || !CtorD->hasAttrs())
+          return;
+        handleCall(CE, CtorD, VD);
+      }
+    }
+  }
+}
 
-public:
-  ThreadSafetyAnalyzer(ThreadSafetyHandler &H) : Handler(H) {}
-
-  Lockset intersectAndWarn(const Lockset LSet1, const Lockset LSet2,
-                           LockErrorKind LEK);
-
-  Lockset addLock(Lockset &LSet, Expr *MutexExp, const NamedDecl *D,
-                  LockKind LK, SourceLocation Loc);
-
-  void runAnalysis(AnalysisDeclContext &AC);
-};
 
 /// \brief Compute the intersection of two locksets and issue warnings for any
 /// locks in the symmetric difference.
@@ -659,9 +1365,14 @@ public:
 /// A; if () then B; else C; D; we need to check that the lockset after B and C
 /// are the same. In the event of a difference, we use the intersection of these
 /// two locksets at the start of D.
-Lockset ThreadSafetyAnalyzer::intersectAndWarn(const Lockset LSet1,
-                                               const Lockset LSet2,
+Lockset ThreadSafetyAnalyzer::intersectAndWarn(const CFGBlockInfo &Block1,
+                                               CFGBlockSide Side1,
+                                               const CFGBlockInfo &Block2,
+                                               CFGBlockSide Side2,
                                                LockErrorKind LEK) {
+  Lockset LSet1 = Block1.getSet(Side1);
+  Lockset LSet2 = Block2.getSet(Side2);
+
   Lockset Intersection = LSet1;
   for (Lockset::iterator I = LSet2.begin(), E = LSet2.end(); I != E; ++I) {
     const MutexID &LSet2Mutex = I.getKey();
@@ -677,7 +1388,8 @@ Lockset ThreadSafetyAnalyzer::intersectAndWarn(const Lockset LSet1,
       }
     } else {
       Handler.handleMutexHeldEndOfScope(LSet2Mutex.getName(),
-                                        LSet2LockData.AcquireLoc, LEK);
+                                        LSet2LockData.AcquireLoc,
+                                        Block1.getLocation(Side1), LEK);
     }
   }
 
@@ -686,7 +1398,8 @@ Lockset ThreadSafetyAnalyzer::intersectAndWarn(const Lockset LSet1,
       const MutexID &Mutex = I.getKey();
       const LockData &MissingLock = I.getData();
       Handler.handleMutexHeldEndOfScope(Mutex.getName(),
-                                        MissingLock.AcquireLoc, LEK);
+                                        MissingLock.AcquireLoc,
+                                        Block2.getLocation(Side2), LEK);
       Intersection = LocksetFactory.remove(Intersection, Mutex);
     }
   }
@@ -719,12 +1432,17 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
     return;  // Ignore anonymous functions for now.
   if (D->getAttr<NoThreadSafetyAnalysisAttr>())
     return;
+  // FIXME: Do something a bit more intelligent inside constructor and
+  // destructor code.  Constructors and destructors must assume unique access
+  // to 'this', so checks on member variable access is disabled, but we should
+  // still enable checks on other objects.
+  if (isa<CXXConstructorDecl>(D))
+    return;  // Don't check inside constructors.
+  if (isa<CXXDestructorDecl>(D))
+    return;  // Don't check inside destructors.
 
-  // FIXME: Switch to SmallVector? Otherwise improve performance impact?
-  std::vector<Lockset> EntryLocksets(CFGraph->getNumBlockIDs(),
-                                     LocksetFactory.getEmptyMap());
-  std::vector<Lockset> ExitLocksets(CFGraph->getNumBlockIDs(),
-                                    LocksetFactory.getEmptyMap());
+  std::vector<CFGBlockInfo> BlockInfo(CFGraph->getNumBlockIDs(),
+    CFGBlockInfo::getEmptyBlockInfo(LocksetFactory, LocalVarMap));
 
   // We need to explore the CFG via a "topological" ordering.
   // That way, we will be guaranteed to have information about required
@@ -732,31 +1450,47 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
   PostOrderCFGView *SortedGraph = AC.getAnalysis<PostOrderCFGView>();
   PostOrderCFGView::CFGBlockSet VisitedBlocks(CFGraph);
 
+  // Compute SSA names for local variables
+  LocalVarMap.traverseCFG(CFGraph, SortedGraph, BlockInfo);
+
+  // Fill in source locations for all CFGBlocks.
+  findBlockLocations(CFGraph, SortedGraph, BlockInfo);
+
   // Add locks from exclusive_locks_required and shared_locks_required
-  // to initial lockset.
+  // to initial lockset. Also turn off checking for lock and unlock functions.
+  // FIXME: is there a more intelligent way to check lock/unlock functions?
   if (!SortedGraph->empty() && D->hasAttrs()) {
     const CFGBlock *FirstBlock = *SortedGraph->begin();
-    Lockset &InitialLockset = EntryLocksets[FirstBlock->getBlockID()];
+    Lockset &InitialLockset = BlockInfo[FirstBlock->getBlockID()].EntrySet;
     const AttrVec &ArgAttrs = D->getAttrs();
-    for(unsigned i = 0; i < ArgAttrs.size(); ++i) {
+    for (unsigned i = 0; i < ArgAttrs.size(); ++i) {
       Attr *Attr = ArgAttrs[i];
       SourceLocation AttrLoc = Attr->getLocation();
       if (SharedLocksRequiredAttr *SLRAttr
             = dyn_cast<SharedLocksRequiredAttr>(Attr)) {
         for (SharedLocksRequiredAttr::args_iterator
-            SLRIter = SLRAttr->args_begin(),
-            SLREnd = SLRAttr->args_end(); SLRIter != SLREnd; ++SLRIter)
+             SLRIter = SLRAttr->args_begin(),
+             SLREnd = SLRAttr->args_end(); SLRIter != SLREnd; ++SLRIter)
           InitialLockset = addLock(InitialLockset,
                                    *SLRIter, D, LK_Shared,
                                    AttrLoc);
       } else if (ExclusiveLocksRequiredAttr *ELRAttr
                    = dyn_cast<ExclusiveLocksRequiredAttr>(Attr)) {
         for (ExclusiveLocksRequiredAttr::args_iterator
-            ELRIter = ELRAttr->args_begin(),
-            ELREnd = ELRAttr->args_end(); ELRIter != ELREnd; ++ELRIter)
+             ELRIter = ELRAttr->args_begin(),
+             ELREnd = ELRAttr->args_end(); ELRIter != ELREnd; ++ELRIter)
           InitialLockset = addLock(InitialLockset,
                                    *ELRIter, D, LK_Exclusive,
                                    AttrLoc);
+      } else if (isa<UnlockFunctionAttr>(Attr)) {
+        // Don't try to check unlock functions for now
+        return;
+      } else if (isa<ExclusiveLockFunctionAttr>(Attr)) {
+        // Don't try to check lock functions for now
+        return;
+      } else if (isa<SharedLockFunctionAttr>(Attr)) {
+        // Don't try to check lock functions for now
+        return;
       }
     }
   }
@@ -765,12 +1499,10 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
        E = SortedGraph->end(); I!= E; ++I) {
     const CFGBlock *CurrBlock = *I;
     int CurrBlockID = CurrBlock->getBlockID();
-
-    VisitedBlocks.insert(CurrBlock);
+    CFGBlockInfo *CurrBlockInfo = &BlockInfo[CurrBlockID];
 
     // Use the default initial lockset in case there are no predecessors.
-    Lockset &Entryset = EntryLocksets[CurrBlockID];
-    Lockset &Exitset = ExitLocksets[CurrBlockID];
+    VisitedBlocks.insert(CurrBlock);
 
     // Iterate through the predecessor blocks and warn if the lockset for all
     // predecessors is not the same. We take the entry lockset of the current
@@ -786,6 +1518,7 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
     // union because the real error is probably that we forgot to unlock M on
     // all code paths.
     bool LocksetInitialized = false;
+    llvm::SmallVector<CFGBlock*, 8> SpecialBlocks;
     for (CFGBlock::const_pred_iterator PI = CurrBlock->pred_begin(),
          PE  = CurrBlock->pred_end(); PI != PE; ++PI) {
 
@@ -793,17 +1526,70 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
       if (*PI == 0 || !VisitedBlocks.alreadySet(*PI))
         continue;
 
+      // If the previous block ended in a 'continue' or 'break' statement, then
+      // a difference in locksets is probably due to a bug in that block, rather
+      // than in some other predecessor. In that case, keep the other
+      // predecessor's lockset.
+      if (const Stmt *Terminator = (*PI)->getTerminator()) {
+        if (isa<ContinueStmt>(Terminator) || isa<BreakStmt>(Terminator)) {
+          SpecialBlocks.push_back(*PI);
+          continue;
+        }
+      }
+
       int PrevBlockID = (*PI)->getBlockID();
+      CFGBlockInfo *PrevBlockInfo = &BlockInfo[PrevBlockID];
+
       if (!LocksetInitialized) {
-        Entryset = ExitLocksets[PrevBlockID];
+        CurrBlockInfo->EntrySet = PrevBlockInfo->ExitSet;
         LocksetInitialized = true;
       } else {
-        Entryset = intersectAndWarn(Entryset, ExitLocksets[PrevBlockID],
-                                    LEK_LockedSomePredecessors);
+        CurrBlockInfo->EntrySet =
+          intersectAndWarn(*CurrBlockInfo, CBS_Entry,
+                           *PrevBlockInfo, CBS_Exit,
+                           LEK_LockedSomePredecessors);
       }
     }
 
-    BuildLockset LocksetBuilder(Handler, Entryset, LocksetFactory);
+    // Process continue and break blocks. Assume that the lockset for the
+    // resulting block is unaffected by any discrepancies in them.
+    for (unsigned SpecialI = 0, SpecialN = SpecialBlocks.size();
+         SpecialI < SpecialN; ++SpecialI) {
+      CFGBlock *PrevBlock = SpecialBlocks[SpecialI];
+      int PrevBlockID = PrevBlock->getBlockID();
+      CFGBlockInfo *PrevBlockInfo = &BlockInfo[PrevBlockID];
+
+      if (!LocksetInitialized) {
+        CurrBlockInfo->EntrySet = PrevBlockInfo->ExitSet;
+        LocksetInitialized = true;
+      } else {
+        // Determine whether this edge is a loop terminator for diagnostic
+        // purposes. FIXME: A 'break' statement might be a loop terminator, but
+        // it might also be part of a switch. Also, a subsequent destructor
+        // might add to the lockset, in which case the real issue might be a
+        // double lock on the other path.
+        const Stmt *Terminator = PrevBlock->getTerminator();
+        bool IsLoop = Terminator && isa<ContinueStmt>(Terminator);
+
+        // Do not update EntrySet.
+        intersectAndWarn(*CurrBlockInfo, CBS_Entry, *PrevBlockInfo, CBS_Exit,
+                         IsLoop ? LEK_LockedSomeLoopIterations
+                                : LEK_LockedSomePredecessors);
+      }
+    }
+
+    BuildLockset LocksetBuilder(this, *CurrBlockInfo);
+    CFGBlock::const_pred_iterator PI = CurrBlock->pred_begin(),
+                                  PE = CurrBlock->pred_end();
+    if (PI != PE) {
+      // If the predecessor ended in a branch, then process any trylocks.
+      // FIXME -- check to make sure there's only one predecessor.
+      if (Stmt *TCE = (*PI)->getTerminatorCondition()) {
+        LocksetBuilder.handleTrylock(TCE, *PI, CurrBlock);
+      }
+    }
+
+    // Visit all the statements in the basic block.
     for (CFGBlock::const_iterator BI = CurrBlock->begin(),
          BE = CurrBlock->end(); BI != BE; ++BI) {
       switch (BI->getKind()) {
@@ -822,7 +1608,7 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
 
           // Create a dummy expression,
           VarDecl *VD = const_cast<VarDecl*>(AD->getVarDecl());
-          DeclRefExpr DRE(VD, VD->getType(), VK_LValue,
+          DeclRefExpr DRE(VD, false, VD->getType(), VK_LValue,
                           AD->getTriggerStmt()->getLocEnd());
           LocksetBuilder.handleCall(&DRE, DD);
           break;
@@ -831,7 +1617,7 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
           break;
       }
     }
-    Exitset = LocksetBuilder.getLockset();
+    CurrBlockInfo->ExitSet = LocksetBuilder.LSet;
 
     // For every back edge from CurrBlock (the end of the loop) to another block
     // (FirstLoopBlock) we need to check that the Lockset of Block is equal to
@@ -845,17 +1631,19 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
         continue;
 
       CFGBlock *FirstLoopBlock = *SI;
-      Lockset PreLoop = EntryLocksets[FirstLoopBlock->getBlockID()];
-      Lockset LoopEnd = ExitLocksets[CurrBlockID];
-      intersectAndWarn(LoopEnd, PreLoop, LEK_LockedSomeLoopIterations);
+      CFGBlockInfo &PreLoop = BlockInfo[FirstLoopBlock->getBlockID()];
+      CFGBlockInfo &LoopEnd = BlockInfo[CurrBlockID];
+      intersectAndWarn(LoopEnd, CBS_Exit, PreLoop, CBS_Entry,
+                       LEK_LockedSomeLoopIterations);
     }
   }
 
-  Lockset InitialLockset = EntryLocksets[CFGraph->getEntry().getBlockID()];
-  Lockset FinalLockset = ExitLocksets[CFGraph->getExit().getBlockID()];
+  CFGBlockInfo &Initial = BlockInfo[CFGraph->getEntry().getBlockID()];
+  CFGBlockInfo &Final = BlockInfo[CFGraph->getExit().getBlockID()];
 
   // FIXME: Should we call this function for all blocks which exit the function?
-  intersectAndWarn(InitialLockset, FinalLockset, LEK_LockedAtEndOfFunction);
+  intersectAndWarn(Initial, CBS_Entry, Final, CBS_Exit,
+                   LEK_LockedAtEndOfFunction);
 }
 
 } // end anonymous namespace

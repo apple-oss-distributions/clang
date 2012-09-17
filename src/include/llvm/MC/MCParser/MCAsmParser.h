@@ -64,6 +64,9 @@ public:
   MCTargetAsmParser &getTargetParser() const { return *TargetParser; }
   void setTargetParser(MCTargetAsmParser &P);
 
+  virtual unsigned getAssemblerDialect() { return 0;}
+  virtual void setAssemblerDialect(unsigned i) { }
+
   bool getShowParsedOperands() const { return ShowParsedOperands; }
   void setShowParsedOperands(bool Value) { ShowParsedOperands = Value; }
 

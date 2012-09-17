@@ -10,7 +10,10 @@ set(CMAKE_MODULE_PATH
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules"
   )
 
-set(PACKAGE_VERSION "3.1svn")
+set(LLVM_VERSION_MAJOR 3)
+set(LLVM_VERSION_MINOR 1)
+
+set(PACKAGE_VERSION "${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}svn")
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -23,9 +26,9 @@ if( LLVM_APPEND_VC_REV )
   add_version_info_from_vcs(PACKAGE_VERSION)
 endif()
 
-set(PACKAGE_NAME llvm)
+set(PACKAGE_NAME LLVM)
 set(PACKAGE_STRING "${PACKAGE_NAME} ${PACKAGE_VERSION}")
-set(PACKAGE_BUGREPORT "llvmbugs@cs.uiuc.edu")
+set(PACKAGE_BUGREPORT "http://llvm.org/bugs/")
 
 # Sanity check our source directory to make sure that we are not trying to
 # generate an in-tree build (unless on MSVC_IDE, where it is ok), and to make
@@ -72,6 +75,7 @@ set(LLVM_ALL_TARGETS
   CBackend
   CellSPU
   CppBackend
+  Hexagon
   Mips
   MBlaze
   MSP430
@@ -89,9 +93,12 @@ if( MSVC )
   set(LLVM_TARGETS_TO_BUILD X86
     CACHE STRING "Semicolon-separated list of targets to build, or \"all\".")
 else( MSVC )
-  set(LLVM_TARGETS_TO_BUILD ${LLVM_ALL_TARGETS}
+  set(LLVM_TARGETS_TO_BUILD "all"
     CACHE STRING "Semicolon-separated list of targets to build, or \"all\".")
 endif( MSVC )
+
+option(BUILD_SHARED_LIBS
+  "Build all libraries as shared libraries instead of static" OFF)
 
 option(LLVM_ENABLE_CBE_PRINTF_A "Set to ON if CBE is enabled for printf %a output" ON)
 if(LLVM_ENABLE_CBE_PRINTF_A)
@@ -164,8 +171,8 @@ if (MSVC OR XCODE)
 endif()
 set(LLVM_LIT_ARGS "${LIT_ARGS_DEFAULT}" CACHE STRING "Default options for lit")
 
-# On Win32/Cygwin, provide an option to specify the path to the GnuWin32 tools.
-if( WIN32 AND CYGWIN )
+# On Win32 hosts, provide an option to specify the path to the GnuWin32 tools.
+if( WIN32 AND NOT CYGWIN )
   set(LLVM_LIT_TOOLS_DIR "" CACHE PATH "Path to GnuWin32 tools")
 endif()
 
@@ -230,7 +237,7 @@ endif()
 
 set(LLVMBUILDTOOL "${LLVM_MAIN_SRC_DIR}/utils/llvm-build/llvm-build")
 set(LLVMCONFIGLIBRARYDEPENDENCIESINC
-  "${LLVM_BINARY_DIR}/tools/llvm-config-2/LibraryDependencies.inc")
+  "${LLVM_BINARY_DIR}/tools/llvm-config/LibraryDependencies.inc")
 set(LLVMBUILDCMAKEFRAG
   "${LLVM_BINARY_DIR}/LLVMBuild.cmake")
 message(STATUS "Constructing LLVMBuild project information")
@@ -352,6 +359,7 @@ add_subdirectory(utils/FileUpdate)
 add_subdirectory(utils/count)
 add_subdirectory(utils/not)
 add_subdirectory(utils/llvm-lit)
+add_subdirectory(utils/json-bench)
 
 add_subdirectory(projects)
 
@@ -406,8 +414,8 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include/
 # TODO: make and install documentation.
 
 set(CPACK_PACKAGE_VENDOR "LLVM")
-set(CPACK_PACKAGE_VERSION_MAJOR 2)
-set(CPACK_PACKAGE_VERSION_MINOR 9)
+set(CPACK_PACKAGE_VERSION_MAJOR ${LLVM_VERSION_MAJOR})
+set(CPACK_PACKAGE_VERSION_MINOR ${LLVM_VERSION_MINOR})
 add_version_info_from_vcs(CPACK_PACKAGE_VERSION_PATCH)
 include(CPack)
 

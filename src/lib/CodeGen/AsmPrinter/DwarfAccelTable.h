@@ -97,7 +97,7 @@ class DwarfAccelTable {
     TableHeader (uint32_t data_len) :
       magic (MagicHash), version (1), hash_function (eHashFunctionDJB),
       bucket_count (0), hashes_count (0), header_data_len (data_len)
-    {};
+    {}
 
 #ifndef NDEBUG
     void print(raw_ostream &O) {
@@ -149,7 +149,7 @@ public:
     AtomType type; // enum AtomType
     uint16_t form; // DWARF DW_FORM_ defines
 
-    Atom(AtomType type, uint16_t form) : type(type), form(form) {};
+    Atom(AtomType type, uint16_t form) : type(type), form(form) {}
     static const char * AtomTypeString(enum AtomType);
 #ifndef NDEBUG
     void print(raw_ostream &O) {
@@ -207,7 +207,7 @@ public:
 
     HashDataContents(DIE *D, char Flags) :
       Die(D),
-      Flags(Flags) { };
+      Flags(Flags) { }
     #ifndef NDEBUG
     void print(raw_ostream &O) const {
       O << "  Offset: " << Die->getOffset() << "\n";

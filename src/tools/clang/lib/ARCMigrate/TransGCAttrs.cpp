@@ -11,8 +11,9 @@
 #include "Internals.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/Analysis/Support/SaveAndRestore.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "clang/Sema/SemaDiagnostic.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TinyPtrVector.h"
 
 using namespace clang;
@@ -92,11 +93,11 @@ public:
     SourceManager &SM = Ctx.getSourceManager();
     if (Loc.isMacroID())
       Loc = SM.getImmediateExpansionRange(Loc).first;
-    llvm::SmallString<32> Buf;
+    SmallString<32> Buf;
     bool Invalid = false;
     StringRef Spell = Lexer::getSpelling(
                                   SM.getSpellingLoc(TL.getAttrEnumOperandLoc()),
-                                  Buf, SM, Ctx.getLangOptions(), &Invalid);
+                                  Buf, SM, Ctx.getLangOpts(), &Invalid);
     if (Invalid)
       return false;
     MigrationContext::GCAttrOccurrence::AttrKind Kind;
@@ -181,30 +182,6 @@ public:
 };
 
 } // anonymous namespace
-
-static void clearRedundantStrongs(MigrationContext &MigrateCtx) {
-  TransformActions &TA = MigrateCtx.Pass.TA;
-
-  for (unsigned i = 0, e = MigrateCtx.GCAttrs.size(); i != e; ++i) {
-    MigrationContext::GCAttrOccurrence &Attr = MigrateCtx.GCAttrs[i];
-    if (Attr.Kind == MigrationContext::GCAttrOccurrence::Strong &&
-        Attr.FullyMigratable && Attr.Dcl) {
-      TypeSourceInfo *TInfo = 0;
-      if (DeclaratorDecl *DD = dyn_cast<DeclaratorDecl>(Attr.Dcl))
-        TInfo = DD->getTypeSourceInfo();
-      else if (ObjCPropertyDecl *PD = dyn_cast<ObjCPropertyDecl>(Attr.Dcl))
-        TInfo = PD->getTypeSourceInfo();
-      if (!TInfo)
-        continue;
-
-      if (TInfo->getType().getObjCLifetime() == Qualifiers::OCL_Strong) {
-        Transaction Trans(TA);
-        TA.remove(Attr.Loc);
-        MigrateCtx.RemovedAttrSet.insert(Attr.Loc.getRawEncoding());
-      }
-    }
-  }
-}
 
 static void errorForGCAttrsOnNonObjC(MigrationContext &MigrateCtx) {
   TransformActions &TA = MigrateCtx.Pass.TA;
@@ -353,7 +330,6 @@ void GCAttrsTraverser::traverseTU(MigrationContext &MigrateCtx) {
   GCAttrsCollector(MigrateCtx, AllProps).TraverseDecl(
                                   MigrateCtx.Pass.Ctx.getTranslationUnitDecl());
 
-  clearRedundantStrongs(MigrateCtx);
   errorForGCAttrsOnNonObjC(MigrateCtx);
   checkAllProps(MigrateCtx, AllProps);
   checkWeakGCAttrs(MigrateCtx);

@@ -19,7 +19,7 @@
 using namespace llvm;
 using namespace object;
 
-static const StringRef Magic = "!<arch>\n";
+static const char *Magic = "!<arch>\n";
 
 namespace {
 struct ArchiveMemberHeader {
@@ -73,6 +73,8 @@ static bool isInternalMember(const ArchiveMemberHeader &amh) {
   }
   return false;
 }
+
+void Archive::anchor() { }
 
 Archive::Child Archive::Child::getNext() const {
   size_t SpaceToSkip = sizeof(ArchiveMemberHeader) +
@@ -198,7 +200,7 @@ Archive::Archive(MemoryBuffer *source, error_code &ec)
 }
 
 Archive::child_iterator Archive::begin_children(bool skip_internal) const {
-  const char *Loc = Data->getBufferStart() + Magic.size();
+  const char *Loc = Data->getBufferStart() + strlen(Magic);
   size_t Size = sizeof(ArchiveMemberHeader) +
     ToHeader(Loc)->getSize();
   Child c(this, StringRef(Loc, Size));

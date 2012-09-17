@@ -544,7 +544,7 @@ void AsmWriterEmitter::EmitGetRegisterName(raw_ostream &O) {
     O << "  const unsigned *RegAsmOffset;\n"
       << "  const char *AsmStrs;\n"
       << "  switch(AltIdx) {\n"
-      << "  default: assert(0 && \"Invalid register alt name index!\");\n";
+      << "  default: llvm_unreachable(\"Invalid register alt name index!\");\n";
     for (unsigned i = 0, e = AltNameIndices.size(); i < e; ++i) {
       StringRef Namespace = AltNameIndices[1]->getValueAsString("Namespace");
       StringRef AltName(AltNameIndices[i]->getName());
@@ -858,7 +858,6 @@ void AsmWriterEmitter::EmitPrintAliasInstruction(raw_ostream &O) {
         const CodeGenInstAlias::ResultOperand &RO = CGA->ResultOperands[i];
 
         switch (RO.Kind) {
-        default: assert(0 && "unexpected InstAlias operand kind");
         case CodeGenInstAlias::ResultOperand::K_Record: {
           const Record *Rec = RO.getRecord();
           StringRef ROName = RO.getName();
@@ -900,6 +899,13 @@ void AsmWriterEmitter::EmitPrintAliasInstruction(raw_ostream &O) {
           IAP->addCond(Cond);
           break;
         case CodeGenInstAlias::ResultOperand::K_Reg:
+          // If this is zero_reg, something's playing tricks we're not
+          // equipped to handle.
+          if (!CGA->ResultOperands[i].getRegister()) {
+            CantHandle = true;
+            break;
+          }
+
           Cond = std::string("MI->getOperand(") +
             llvm::utostr(i) + ").getReg() == " + Target.getName() +
             "::" + CGA->ResultOperands[i].getRegister()->getName();

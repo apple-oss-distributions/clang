@@ -25,13 +25,59 @@ public:
 
   void handleDeclarator(DeclaratorDecl *D, const NamedDecl *Parent = 0) {
     if (!Parent) Parent = D;
-    IndexCtx.indexTypeSourceInfo(D->getTypeSourceInfo(), Parent);
-    IndexCtx.indexNestedNameSpecifierLoc(D->getQualifierLoc(), Parent);
+
+    if (!IndexCtx.shouldIndexFunctionLocalSymbols()) {
+      IndexCtx.indexTypeSourceInfo(D->getTypeSourceInfo(), Parent);
+      IndexCtx.indexNestedNameSpecifierLoc(D->getQualifierLoc(), Parent);
+    } else {
+      if (ParmVarDecl *Parm = dyn_cast<ParmVarDecl>(D)) {
+        IndexCtx.handleVar(Parm);
+      } else if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+        for (FunctionDecl::param_iterator
+               PI = FD->param_begin(), PE = FD->param_end(); PI != PE; ++PI) {
+          IndexCtx.handleVar(*PI);
+        }
+      }
+    }
+  }
+
+  void handleObjCMethod(ObjCMethodDecl *D) {
+    IndexCtx.handleObjCMethod(D);
+    if (D->isImplicit())
+      return;
+
+    IndexCtx.indexTypeSourceInfo(D->getResultTypeSourceInfo(), D);
+    for (ObjCMethodDecl::param_iterator
+           I = D->param_begin(), E = D->param_end(); I != E; ++I)
+      handleDeclarator(*I, D);
+
+    if (D->isThisDeclarationADefinition()) {
+      const Stmt *Body = D->getBody();
+      if (Body) {
+        IndexCtx.indexBody(Body, D, D);
+      }
+    }
   }
 
   bool VisitFunctionDecl(FunctionDecl *D) {
     IndexCtx.handleFunction(D);
     handleDeclarator(D);
+
+    if (CXXConstructorDecl *Ctor = dyn_cast<CXXConstructorDecl>(D)) {
+      // Constructor initializers.
+      for (CXXConstructorDecl::init_iterator I = Ctor->init_begin(),
+                                             E = Ctor->init_end();
+           I != E; ++I) {
+        CXXCtorInitializer *Init = *I;
+        if (Init->isWritten()) {
+          IndexCtx.indexTypeSourceInfo(Init->getTypeSourceInfo(), D);
+          if (const FieldDecl *Member = Init->getAnyMember())
+            IndexCtx.handleReference(Member, Init->getMemberLocation(), D, D);
+          IndexCtx.indexBody(Init->getInit(), D, D);
+        }
+      }
+    }
+
     if (D->isThisDeclarationADefinition()) {
       const Stmt *Body = D->getBody();
       if (Body) {
@@ -77,45 +123,23 @@ public:
     return true;
   }
 
-  bool VisitObjCClassDecl(ObjCClassDecl *D) {
-    IndexCtx.handleObjCClass(D);
-    return true;
-  }
+  bool VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
+    IndexCtx.handleObjCInterface(D);
 
-  bool VisitObjCForwardProtocolDecl(ObjCForwardProtocolDecl *D) {
-    ObjCForwardProtocolDecl::protocol_loc_iterator LI = D->protocol_loc_begin();
-    for (ObjCForwardProtocolDecl::protocol_iterator
-           I = D->protocol_begin(), E = D->protocol_end(); I != E; ++I, ++LI) {
-      SourceLocation Loc = *LI;
-      ObjCProtocolDecl *PD = *I;
-
-      bool isRedeclaration = PD->getLocation() != Loc;
-      IndexCtx.handleObjCForwardProtocol(PD, Loc, isRedeclaration);
+    if (D->isThisDeclarationADefinition()) {
+      IndexCtx.indexTUDeclsInObjCContainer();
+      IndexCtx.indexDeclContext(D);
     }
     return true;
   }
 
-  bool VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
-    // Forward decls are handled at VisitObjCClassDecl.
-    if (D->isForwardDecl())
-      return true;
-
-    IndexCtx.handleObjCInterface(D);
-
-    IndexCtx.indexTUDeclsInObjCContainer();
-    IndexCtx.indexDeclContext(D);
-    return true;
-  }
-
   bool VisitObjCProtocolDecl(ObjCProtocolDecl *D) {
-    // Forward decls are handled at VisitObjCForwardProtocolDecl.
-    if (D->isForwardDecl())
-      return true;
-
     IndexCtx.handleObjCProtocol(D);
 
-    IndexCtx.indexTUDeclsInObjCContainer();
-    IndexCtx.indexDeclContext(D);
+    if (D->isThisDeclarationADefinition()) {
+      IndexCtx.indexTUDeclsInObjCContainer();
+      IndexCtx.indexDeclContext(D);
+    }
     return true;
   }
 
@@ -130,7 +154,20 @@ public:
     IndexCtx.handleObjCImplementation(D);
 
     IndexCtx.indexTUDeclsInObjCContainer();
-    IndexCtx.indexDeclContext(D);
+
+    // Index the ivars first to make sure the synthesized ivars are indexed
+    // before indexing the methods that can reference them.
+    for (ObjCImplementationDecl::ivar_iterator
+           IvarI = D->ivar_begin(),
+           IvarE = D->ivar_end(); IvarI != IvarE; ++IvarI) {
+      IndexCtx.indexDecl(*IvarI);
+    }
+    for (DeclContext::decl_iterator
+           I = D->decls_begin(), E = D->decls_end(); I != E; ++I) {
+      if (!isa<ObjCIvarDecl>(*I))
+        IndexCtx.indexDecl(*I);
+    }
+
     return true;
   }
 
@@ -155,22 +192,22 @@ public:
   }
 
   bool VisitObjCMethodDecl(ObjCMethodDecl *D) {
-    IndexCtx.handleObjCMethod(D);
-    IndexCtx.indexTypeSourceInfo(D->getResultTypeSourceInfo(), D);
-    for (ObjCMethodDecl::param_iterator
-           I = D->param_begin(), E = D->param_end(); I != E; ++I)
-      handleDeclarator(*I, D);
+    // Methods associated with a property, even user-declared ones, are
+    // handled when we handle the property.
+    if (D->isSynthesized())
+      return true;
 
-    if (D->isThisDeclarationADefinition()) {
-      const Stmt *Body = D->getBody();
-      if (Body) {
-        IndexCtx.indexBody(Body, D, D);
-      }
-    }
+    handleObjCMethod(D);
     return true;
   }
 
   bool VisitObjCPropertyDecl(ObjCPropertyDecl *D) {
+    if (ObjCMethodDecl *MD = D->getGetterMethodDecl())
+      if (MD->getLexicalDeclContext() == D->getLexicalDeclContext())
+        handleObjCMethod(MD);
+    if (ObjCMethodDecl *MD = D->getSetterMethodDecl())
+      if (MD->getLexicalDeclContext() == D->getLexicalDeclContext())
+        handleObjCMethod(MD);
     IndexCtx.handleObjCProperty(D);
     IndexCtx.indexTypeSourceInfo(D->getTypeSourceInfo(), D);
     return true;
@@ -192,11 +229,13 @@ public:
 
     if (ObjCMethodDecl *MD = PD->getGetterMethodDecl()) {
       if (MD->isSynthesized())
-        IndexCtx.handleSynthesizedObjCMethod(MD, D->getLocation());
+        IndexCtx.handleSynthesizedObjCMethod(MD, D->getLocation(),
+                                             D->getLexicalDeclContext());
     }
     if (ObjCMethodDecl *MD = PD->getSetterMethodDecl()) {
       if (MD->isSynthesized())
-        IndexCtx.handleSynthesizedObjCMethod(MD, D->getLocation());
+        IndexCtx.handleSynthesizedObjCMethod(MD, D->getLocation(),
+                                             D->getLexicalDeclContext());
     }
     return true;
   }
@@ -207,10 +246,44 @@ public:
     return true;
   }
 
+  bool VisitUsingDecl(UsingDecl *D) {
+    // FIXME: Parent for the following is CXIdxEntity_Unexposed with no USR,
+    // we should do better.
+
+    IndexCtx.indexNestedNameSpecifierLoc(D->getQualifierLoc(), D);
+    for (UsingDecl::shadow_iterator
+           I = D->shadow_begin(), E = D->shadow_end(); I != E; ++I) {
+      IndexCtx.handleReference((*I)->getUnderlyingDecl(), D->getLocation(),
+                               D, D->getLexicalDeclContext());
+    }
+    return true;
+  }
+
+  bool VisitUsingDirectiveDecl(UsingDirectiveDecl *D) {
+    // FIXME: Parent for the following is CXIdxEntity_Unexposed with no USR,
+    // we should do better.
+
+    IndexCtx.indexNestedNameSpecifierLoc(D->getQualifierLoc(), D);
+    IndexCtx.handleReference(D->getNominatedNamespaceAsWritten(),
+                             D->getLocation(), D, D->getLexicalDeclContext());
+    return true;
+  }
+
   bool VisitClassTemplateDecl(ClassTemplateDecl *D) {
     IndexCtx.handleClassTemplate(D);
     if (D->isThisDeclarationADefinition())
       IndexCtx.indexDeclContext(D->getTemplatedDecl());
+    return true;
+  }
+
+  bool VisitClassTemplateSpecializationDecl(
+                                           ClassTemplateSpecializationDecl *D) {
+    // FIXME: Notify subsequent callbacks if info comes from implicit
+    // instantiation.
+    if (D->isThisDeclarationADefinition() &&
+        (IndexCtx.shouldIndexImplicitTemplateInsts() ||
+         !IndexCtx.isTemplateImplicitInstantiation(D)))
+      IndexCtx.indexTagDecl(D);
     return true;
   }
 
@@ -237,6 +310,9 @@ public:
 } // anonymous namespace
 
 void IndexingContext::indexDecl(const Decl *D) {
+  if (D->isImplicit() && shouldIgnoreIfImplicit(D))
+    return;
+
   bool Handled = IndexingDeclVisitor(*this).Visit(const_cast<Decl*>(D));
   if (!Handled && isa<DeclContext>(D))
     indexDeclContext(cast<DeclContext>(D));
@@ -265,7 +341,9 @@ void IndexingContext::indexDeclGroupRef(DeclGroupRef DG) {
 }
 
 void IndexingContext::indexTUDeclsInObjCContainer() {
-  for (unsigned i = 0, e = TUDeclsInObjCContainer.size(); i != e; ++i)
-    indexDeclGroupRef(TUDeclsInObjCContainer[i]);
-  TUDeclsInObjCContainer.clear();
+  while (!TUDeclsInObjCContainer.empty()) {
+    DeclGroupRef DG = TUDeclsInObjCContainer.front();
+    TUDeclsInObjCContainer.pop_front();
+    indexDeclGroupRef(DG);
+  }
 }

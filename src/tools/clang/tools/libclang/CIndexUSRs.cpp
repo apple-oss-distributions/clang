@@ -30,7 +30,7 @@ using namespace clang::cxstring;
 
 namespace {
 class USRGenerator : public DeclVisitor<USRGenerator> {
-  llvm::OwningPtr<llvm::SmallString<128> > OwnedBuf;
+  OwningPtr<SmallString<128> > OwnedBuf;
   SmallVectorImpl<char> &Buf;
   llvm::raw_svector_ostream Out;
   bool IgnoreResults;
@@ -41,7 +41,7 @@ class USRGenerator : public DeclVisitor<USRGenerator> {
   
 public:
   explicit USRGenerator(ASTContext *Ctx = 0, SmallVectorImpl<char> *extBuf = 0)
-  : OwnedBuf(extBuf ? 0 : new llvm::SmallString<128>()),
+  : OwnedBuf(extBuf ? 0 : new SmallString<128>()),
     Buf(extBuf ? *extBuf : *OwnedBuf.get()),
     Out(Buf),
     IgnoreResults(false),
@@ -75,9 +75,7 @@ public:
   void VisitNamespaceAliasDecl(NamespaceAliasDecl *D);
   void VisitFunctionTemplateDecl(FunctionTemplateDecl *D);
   void VisitClassTemplateDecl(ClassTemplateDecl *D);
-  void VisitObjCClassDecl(ObjCClassDecl *CD);
   void VisitObjCContainerDecl(ObjCContainerDecl *CD);
-  void VisitObjCForwardProtocolDecl(ObjCForwardProtocolDecl *P);
   void VisitObjCMethodDecl(ObjCMethodDecl *MD);
   void VisitObjCPropertyDecl(ObjCPropertyDecl *D);
   void VisitObjCPropertyImplDecl(ObjCPropertyImplDecl *D);
@@ -196,8 +194,18 @@ void USRGenerator::VisitFunctionDecl(FunctionDecl *D) {
   D->printName(Out);
 
   ASTContext &Ctx = *Context;
-  if (!Ctx.getLangOptions().CPlusPlus || D->isExternC())
+  if (!Ctx.getLangOpts().CPlusPlus || D->isExternC())
     return;
+
+  if (const TemplateArgumentList *
+        SpecArgs = D->getTemplateSpecializationArgs()) {
+    Out << '<';
+    for (unsigned I = 0, N = SpecArgs->size(); I != N; ++I) {
+      Out << '#';
+      VisitTemplateArgument(SpecArgs->get(I));
+    }
+    Out << '>';
+  }
 
   // Mangle in type information for the arguments.
   for (FunctionDecl::param_iterator I = D->param_begin(), E = D->param_end();
@@ -310,18 +318,6 @@ void USRGenerator::VisitObjCMethodDecl(ObjCMethodDecl *D) {
   N.printName(Out);
 }
 
-void USRGenerator::VisitObjCClassDecl(ObjCClassDecl *D) {
-  // FIXME: @class declarations can refer to multiple classes.  We need
-  //  to be able to traverse these.
-  IgnoreResults = true;
-}
-
-void USRGenerator::VisitObjCForwardProtocolDecl(ObjCForwardProtocolDecl *D) {
-  // FIXME: @protocol declarations can refer to multiple protocols.  We need
-  //  to be able to traverse these.
-  IgnoreResults = true;
-}
-
 void USRGenerator::VisitObjCContainerDecl(ObjCContainerDecl *D) {
   switch (D->getKind()) {
     default:
@@ -409,7 +405,7 @@ void USRGenerator::VisitTagDecl(TagDecl *D) {
       case TTK_Struct: Out << "@ST"; break;
       case TTK_Class:  Out << "@CT"; break;
       case TTK_Union:  Out << "@UT"; break;
-      case TTK_Enum: llvm_unreachable("enum template"); break;
+      case TTK_Enum: llvm_unreachable("enum template");
       }
       VisitTemplateParameterList(ClassTmpl->getTemplateParameters());
     } else if (ClassTemplatePartialSpecializationDecl *PartialSpec
@@ -420,7 +416,7 @@ void USRGenerator::VisitTagDecl(TagDecl *D) {
       case TTK_Struct: Out << "@SP"; break;
       case TTK_Class:  Out << "@CP"; break;
       case TTK_Union:  Out << "@UP"; break;
-      case TTK_Enum: llvm_unreachable("enum partial specialization"); break;
+      case TTK_Enum: llvm_unreachable("enum partial specialization");
       }      
       VisitTemplateParameterList(PartialSpec->getTemplateParameters());
     }
@@ -845,6 +841,9 @@ CXString clang_getCursorUSR(CXCursor C) {
 
   if (clang_isDeclaration(K)) {
     Decl *D = cxcursor::getCursorDecl(C);
+    if (!D)
+      return createCXString("");
+
     CXTranslationUnit TU = cxcursor::getCursorTU(C);
     if (!TU)
       return createCXString("");

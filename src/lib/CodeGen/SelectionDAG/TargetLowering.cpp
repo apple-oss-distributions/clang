@@ -572,21 +572,42 @@ TargetLowering::TargetLowering(const TargetMachine &tm,
   // ConstantFP nodes default to expand.  Targets can either change this to
   // Legal, in which case all fp constants are legal, or use isFPImmLegal()
   // to optimize expansions for certain constants.
+  setOperationAction(ISD::ConstantFP, MVT::f16, Expand);
   setOperationAction(ISD::ConstantFP, MVT::f32, Expand);
   setOperationAction(ISD::ConstantFP, MVT::f64, Expand);
   setOperationAction(ISD::ConstantFP, MVT::f80, Expand);
 
   // These library functions default to expand.
-  setOperationAction(ISD::FLOG , MVT::f64, Expand);
-  setOperationAction(ISD::FLOG2, MVT::f64, Expand);
-  setOperationAction(ISD::FLOG10,MVT::f64, Expand);
-  setOperationAction(ISD::FEXP , MVT::f64, Expand);
-  setOperationAction(ISD::FEXP2, MVT::f64, Expand);
-  setOperationAction(ISD::FLOG , MVT::f32, Expand);
-  setOperationAction(ISD::FLOG2, MVT::f32, Expand);
-  setOperationAction(ISD::FLOG10,MVT::f32, Expand);
-  setOperationAction(ISD::FEXP , MVT::f32, Expand);
-  setOperationAction(ISD::FEXP2, MVT::f32, Expand);
+  setOperationAction(ISD::FLOG ,  MVT::f16, Expand);
+  setOperationAction(ISD::FLOG2,  MVT::f16, Expand);
+  setOperationAction(ISD::FLOG10, MVT::f16, Expand);
+  setOperationAction(ISD::FEXP ,  MVT::f16, Expand);
+  setOperationAction(ISD::FEXP2,  MVT::f16, Expand);
+  setOperationAction(ISD::FFLOOR, MVT::f16, Expand);
+  setOperationAction(ISD::FNEARBYINT, MVT::f16, Expand);
+  setOperationAction(ISD::FCEIL,  MVT::f16, Expand);
+  setOperationAction(ISD::FRINT,  MVT::f16, Expand);
+  setOperationAction(ISD::FTRUNC, MVT::f16, Expand);
+  setOperationAction(ISD::FLOG ,  MVT::f32, Expand);
+  setOperationAction(ISD::FLOG2,  MVT::f32, Expand);
+  setOperationAction(ISD::FLOG10, MVT::f32, Expand);
+  setOperationAction(ISD::FEXP ,  MVT::f32, Expand);
+  setOperationAction(ISD::FEXP2,  MVT::f32, Expand);
+  setOperationAction(ISD::FFLOOR, MVT::f32, Expand);
+  setOperationAction(ISD::FNEARBYINT, MVT::f32, Expand);
+  setOperationAction(ISD::FCEIL,  MVT::f32, Expand);
+  setOperationAction(ISD::FRINT,  MVT::f32, Expand);
+  setOperationAction(ISD::FTRUNC, MVT::f32, Expand);
+  setOperationAction(ISD::FLOG ,  MVT::f64, Expand);
+  setOperationAction(ISD::FLOG2,  MVT::f64, Expand);
+  setOperationAction(ISD::FLOG10, MVT::f64, Expand);
+  setOperationAction(ISD::FEXP ,  MVT::f64, Expand);
+  setOperationAction(ISD::FEXP2,  MVT::f64, Expand);
+  setOperationAction(ISD::FFLOOR, MVT::f64, Expand);
+  setOperationAction(ISD::FNEARBYINT, MVT::f64, Expand);
+  setOperationAction(ISD::FCEIL,  MVT::f64, Expand);
+  setOperationAction(ISD::FRINT,  MVT::f64, Expand);
+  setOperationAction(ISD::FTRUNC, MVT::f64, Expand);
 
   // Default ISD::TRAP to expand (which turns it into abort).
   setOperationAction(ISD::TRAP, MVT::Other, Expand);
@@ -1365,8 +1386,9 @@ bool TargetLowering::SimplifyDemandedBits(SDValue Op,
     // bits on that side are also known to be set on the other side, turn this
     // into an AND, as we know the bits will be cleared.
     //    e.g. (X | C1) ^ C2 --> (X | C1) & ~C2 iff (C1&C2) == C2
-    if ((NewMask & (KnownZero|KnownOne)) == NewMask) { // all known
-      if ((KnownOne & KnownOne2) == KnownOne) {
+    // NB: it is okay if more bits are known than are requested
+    if ((NewMask & (KnownZero|KnownOne)) == NewMask) { // all known on one side 
+      if (KnownOne == KnownOne2) { // set bits are the same on both sides
         EVT VT = Op.getValueType();
         SDValue ANDC = TLO.DAG.getConstant(~KnownOne & NewMask, VT);
         return TLO.CombineTo(Op, TLO.DAG.getNode(ISD::AND, dl, VT,
@@ -1473,9 +1495,8 @@ bool TargetLowering::SimplifyDemandedBits(SDValue Op,
       if (InOp.getNode()->getOpcode() == ISD::ANY_EXTEND) {
         SDValue InnerOp = InOp.getNode()->getOperand(0);
         EVT InnerVT = InnerOp.getValueType();
-        if ((APInt::getHighBitsSet(BitWidth,
-                                   BitWidth - InnerVT.getSizeInBits()) &
-               DemandedMask) == 0 &&
+        unsigned InnerBits = InnerVT.getSizeInBits();
+        if (ShAmt < InnerBits && NewMask.lshr(InnerBits) == 0 &&
             isTypeDesirableForOp(ISD::SHL, InnerVT)) {
           EVT ShTy = getShiftAmountTy(InnerVT);
           if (!APInt(BitWidth, ShAmt).isIntN(ShTy.getSizeInBits()))
@@ -1545,7 +1566,7 @@ bool TargetLowering::SimplifyDemandedBits(SDValue Op,
     // always convert this into a logical shr, even if the shift amount is
     // variable.  The low bit of the shift cannot be an input sign bit unless
     // the shift amount is >= the size of the datatype, which is undefined.
-    if (DemandedMask == 1)
+    if (NewMask == 1)
       return TLO.CombineTo(Op,
                            TLO.DAG.getNode(ISD::SRL, dl, Op.getValueType(),
                                            Op.getOperand(0), Op.getOperand(1)));
@@ -1588,23 +1609,40 @@ bool TargetLowering::SimplifyDemandedBits(SDValue Op,
     }
     break;
   case ISD::SIGN_EXTEND_INREG: {
-    EVT EVT = cast<VTSDNode>(Op.getOperand(1))->getVT();
+    EVT ExVT = cast<VTSDNode>(Op.getOperand(1))->getVT();
+
+    APInt MsbMask = APInt::getHighBitsSet(BitWidth, 1);
+    // If we only care about the highest bit, don't bother shifting right.
+    if (MsbMask == DemandedMask) {
+      unsigned ShAmt = ExVT.getScalarType().getSizeInBits();
+      SDValue InOp = Op.getOperand(0);
+
+      // Compute the correct shift amount type, which must be getShiftAmountTy
+      // for scalar types after legalization.
+      EVT ShiftAmtTy = Op.getValueType();
+      if (TLO.LegalTypes() && !ShiftAmtTy.isVector())
+        ShiftAmtTy = getShiftAmountTy(ShiftAmtTy);
+
+      SDValue ShiftAmt = TLO.DAG.getConstant(BitWidth - ShAmt, ShiftAmtTy);
+      return TLO.CombineTo(Op, TLO.DAG.getNode(ISD::SHL, dl,
+                                            Op.getValueType(), InOp, ShiftAmt));
+    }
 
     // Sign extension.  Compute the demanded bits in the result that are not
     // present in the input.
     APInt NewBits =
       APInt::getHighBitsSet(BitWidth,
-                            BitWidth - EVT.getScalarType().getSizeInBits());
+                            BitWidth - ExVT.getScalarType().getSizeInBits());
 
     // If none of the extended bits are demanded, eliminate the sextinreg.
     if ((NewBits & NewMask) == 0)
       return TLO.CombineTo(Op, Op.getOperand(0));
 
     APInt InSignBit =
-      APInt::getSignBit(EVT.getScalarType().getSizeInBits()).zext(BitWidth);
+      APInt::getSignBit(ExVT.getScalarType().getSizeInBits()).zext(BitWidth);
     APInt InputDemandedBits =
       APInt::getLowBitsSet(BitWidth,
-                           EVT.getScalarType().getSizeInBits()) &
+                           ExVT.getScalarType().getSizeInBits()) &
       NewMask;
 
     // Since the sign extended bits are demanded, we know that the sign
@@ -1622,7 +1660,7 @@ bool TargetLowering::SimplifyDemandedBits(SDValue Op,
     // If the input sign bit is known zero, convert this into a zero extension.
     if (KnownZero.intersects(InSignBit))
       return TLO.CombineTo(Op,
-                           TLO.DAG.getZeroExtendInReg(Op.getOperand(0),dl,EVT));
+                          TLO.DAG.getZeroExtendInReg(Op.getOperand(0),dl,ExVT));
 
     if (KnownOne.intersects(InSignBit)) {    // Input sign bit known set
       KnownOne |= NewBits;
@@ -2395,8 +2433,16 @@ TargetLowering::SimplifySetCC(EVT VT, SDValue N0, SDValue N1,
 
   if (N0 == N1) {
     // We can always fold X == X for integer setcc's.
-    if (N0.getValueType().isInteger())
-      return DAG.getConstant(ISD::isTrueWhenEqual(Cond), VT);
+    if (N0.getValueType().isInteger()) {
+      switch (getBooleanContents(N0.getValueType().isVector())) {
+      default: llvm_unreachable ("Unknown boolean content.");
+      case UndefinedBooleanContent: 
+      case ZeroOrOneBooleanContent: 
+        return DAG.getConstant(ISD::isTrueWhenEqual(Cond), VT);
+      case ZeroOrNegativeOneBooleanContent:
+        return DAG.getConstant(ISD::isTrueWhenEqual(Cond) ? -1 : 0, VT);
+      }
+    }
     unsigned UOF = ISD::getUnorderedFlavor(Cond);
     if (UOF == 2)   // FP operators that are undefined on NaNs.
       return DAG.getConstant(ISD::isTrueWhenEqual(Cond), VT);
@@ -2429,6 +2475,10 @@ TargetLowering::SimplifySetCC(EVT VT, SDValue N0, SDValue N1,
                                 Cond);
         }
       }
+
+      // If RHS is a legal immediate value for a compare instruction, we need
+      // to be careful about increasing register pressure needlessly.
+      bool LegalRHSImm = false;
 
       if (ConstantSDNode *RHSC = dyn_cast<ConstantSDNode>(N1)) {
         if (ConstantSDNode *LHSR = dyn_cast<ConstantSDNode>(N0.getOperand(1))) {
@@ -2464,25 +2514,33 @@ TargetLowering::SimplifySetCC(EVT VT, SDValue N0, SDValue N1,
                            Cond);
           }
         }
+
+        // Could RHSC fold directly into a compare?
+        if (RHSC->getValueType(0).getSizeInBits() <= 64)
+          LegalRHSImm = isLegalICmpImmediate(RHSC->getSExtValue());
       }
 
       // Simplify (X+Z) == X -->  Z == 0
-      if (N0.getOperand(0) == N1)
-        return DAG.getSetCC(dl, VT, N0.getOperand(1),
-                        DAG.getConstant(0, N0.getValueType()), Cond);
-      if (N0.getOperand(1) == N1) {
-        if (DAG.isCommutativeBinOp(N0.getOpcode()))
-          return DAG.getSetCC(dl, VT, N0.getOperand(0),
-                          DAG.getConstant(0, N0.getValueType()), Cond);
-        else if (N0.getNode()->hasOneUse()) {
-          assert(N0.getOpcode() == ISD::SUB && "Unexpected operation!");
-          // (Z-X) == X  --> Z == X<<1
-          SDValue SH = DAG.getNode(ISD::SHL, dl, N1.getValueType(),
-                                     N1,
+      // Don't do this if X is an immediate that can fold into a cmp
+      // instruction and X+Z has other uses. It could be an induction variable
+      // chain, and the transform would increase register pressure.
+      if (!LegalRHSImm || N0.getNode()->hasOneUse()) {
+        if (N0.getOperand(0) == N1)
+          return DAG.getSetCC(dl, VT, N0.getOperand(1),
+                              DAG.getConstant(0, N0.getValueType()), Cond);
+        if (N0.getOperand(1) == N1) {
+          if (DAG.isCommutativeBinOp(N0.getOpcode()))
+            return DAG.getSetCC(dl, VT, N0.getOperand(0),
+                                DAG.getConstant(0, N0.getValueType()), Cond);
+          else if (N0.getNode()->hasOneUse()) {
+            assert(N0.getOpcode() == ISD::SUB && "Unexpected operation!");
+            // (Z-X) == X  --> Z == X<<1
+            SDValue SH = DAG.getNode(ISD::SHL, dl, N1.getValueType(), N1,
                        DAG.getConstant(1, getShiftAmountTy(N1.getValueType())));
-          if (!DCI.isCalledByLegalizer())
-            DCI.AddToWorklist(SH.getNode());
-          return DAG.getSetCC(dl, VT, N0.getOperand(0), SH, Cond);
+            if (!DCI.isCalledByLegalizer())
+              DCI.AddToWorklist(SH.getNode());
+            return DAG.getSetCC(dl, VT, N0.getOperand(0), SH, Cond);
+          }
         }
       }
     }
@@ -2986,7 +3044,6 @@ TargetLowering::AsmOperandInfoVector TargetLowering::ParseConstraints(
 /// is.
 static unsigned getConstraintGenerality(TargetLowering::ConstraintType CT) {
   switch (CT) {
-  default: llvm_unreachable("Unknown constraint type!");
   case TargetLowering::C_Other:
   case TargetLowering::C_Unknown:
     return 0;
@@ -2997,6 +3054,7 @@ static unsigned getConstraintGenerality(TargetLowering::ConstraintType CT) {
   case TargetLowering::C_Memory:
     return 3;
   }
+  llvm_unreachable("Invalid constraint type");
 }
 
 /// Examine constraint type and operand type and determine a weight value.

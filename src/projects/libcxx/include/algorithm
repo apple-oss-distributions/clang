@@ -2712,8 +2712,8 @@ public:
 
     result_type operator()();
 
-    static constexpr result_type min() {return _Min;}
-    static constexpr result_type max() {return _Max;}
+    static _LIBCPP_CONSTEXPR result_type min() {return _Min;}
+    static _LIBCPP_CONSTEXPR result_type max() {return _Max;}
 
     friend __rs_default __rs_get();
 };
@@ -4751,6 +4751,8 @@ __nth_element(_RandomAccessIterator __first, _RandomAccessIterator __nth, _Rando
     while (true)
     {
     __restart:
+        if (__nth == __last)
+            return;
         difference_type __len = __last - __first;
         switch (__len)
         {

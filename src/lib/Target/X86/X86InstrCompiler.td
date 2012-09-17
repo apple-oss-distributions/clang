@@ -125,10 +125,26 @@ def SEG_ALLOCA_64 : I<0, Pseudo, (outs GR64:$dst), (ins GR64:$size),
                       [(set GR64:$dst,
                          (X86SegAlloca GR64:$size))]>,
                     Requires<[In64BitMode]>;
-
 }
 
+// The MSVC runtime contains an _ftol2 routine for converting floating-point
+// to integer values. It has a strange calling convention: the input is
+// popped from the x87 stack, and the return value is given in EDX:EAX. No
+// other registers (aside from flags) are touched.
+// Microsoft toolchains do not support 80-bit precision, so a WIN_FTOL_80
+// variant is unnecessary.
 
+let Defs = [EAX, EDX, EFLAGS], FPForm = SpecialFP in {
+  def WIN_FTOL_32 : I<0, Pseudo, (outs), (ins RFP32:$src),
+                      "# win32 fptoui",
+                      [(X86WinFTOL RFP32:$src)]>,
+                    Requires<[In32BitMode]>;
+
+  def WIN_FTOL_64 : I<0, Pseudo, (outs), (ins RFP64:$src),
+                      "# win32 fptoui",
+                      [(X86WinFTOL RFP64:$src)]>,
+                    Requires<[In32BitMode]>;
+}
 
 //===----------------------------------------------------------------------===//
 // EH Pseudo Instructions
@@ -551,7 +567,7 @@ def ATOMSWAP6432 : I<0, Pseudo, (outs GR32:$dst1, GR32:$dst2),
 // Memory barriers
 
 // TODO: Get this to fold the constant into the instruction.
-let isCodeGenOnly = 1 in
+let isCodeGenOnly = 1, Defs = [EFLAGS] in
 def OR32mrLocked  : I<0x09, MRMDestMem, (outs), (ins i32mem:$dst, GR32:$zero),
                       "lock\n\t"
                       "or{l}\t{$zero, $dst|$dst, $zero}",
@@ -561,15 +577,6 @@ let hasSideEffects = 1 in
 def Int_MemBarrier : I<0, Pseudo, (outs), (ins),
                      "#MEMBARRIER",
                      [(X86MemBarrier)]>;
-
-// TODO: Get this to fold the constant into the instruction.
-let hasSideEffects = 1, Defs = [ESP], isCodeGenOnly = 1 in
-def Int_MemBarrierNoSSE64  : RI<0x09, MRM1r, (outs), (ins GR64:$zero),
-                           "lock\n\t"
-                           "or{q}\t{$zero, (%rsp)|(%rsp), $zero}",
-                           [(X86MemBarrierNoSSE GR64:$zero)]>,
-                           Requires<[In64BitMode]>, LOCK;
-
 
 // RegOpc corresponds to the mr version of the instruction
 // ImmOpc corresponds to the mi version of the instruction
@@ -954,14 +961,9 @@ def : Pat<(load (i64 (X86Wrapper tglobaltlsaddr :$dst))),
 // Direct PC relative function call for small code model. 32-bit displacement
 // sign extended to 64-bit.
 def : Pat<(X86call (i64 tglobaladdr:$dst)),
-          (CALL64pcrel32 tglobaladdr:$dst)>, Requires<[NotWin64]>;
+          (CALL64pcrel32 tglobaladdr:$dst)>;
 def : Pat<(X86call (i64 texternalsym:$dst)),
-          (CALL64pcrel32 texternalsym:$dst)>, Requires<[NotWin64]>;
-
-def : Pat<(X86call (i64 tglobaladdr:$dst)),
-          (WINCALL64pcrel32 tglobaladdr:$dst)>, Requires<[IsWin64]>;
-def : Pat<(X86call (i64 texternalsym:$dst)),
-          (WINCALL64pcrel32 texternalsym:$dst)>, Requires<[IsWin64]>;
+          (CALL64pcrel32 texternalsym:$dst)>;
 
 // tailcall stuff
 def : Pat<(X86tcret GR32_TC:$dst, imm:$off),
@@ -1458,58 +1460,62 @@ def : Pat<(shl GR16:$src1, (i8 1)), (ADD16rr GR16:$src1, GR16:$src1)>;
 def : Pat<(shl GR32:$src1, (i8 1)), (ADD32rr GR32:$src1, GR32:$src1)>;
 def : Pat<(shl GR64:$src1, (i8 1)), (ADD64rr GR64:$src1, GR64:$src1)>;
 
+// Helper imms that check if a mask doesn't change significant shift bits.
+def immShift32 : ImmLeaf<i8, [{ return CountTrailingOnes_32(Imm) >= 5; }]>;
+def immShift64 : ImmLeaf<i8, [{ return CountTrailingOnes_32(Imm) >= 6; }]>;
+
 // (shl x (and y, 31)) ==> (shl x, y)
-def : Pat<(shl GR8:$src1, (and CL, 31)),
+def : Pat<(shl GR8:$src1, (and CL, immShift32)),
           (SHL8rCL GR8:$src1)>;
-def : Pat<(shl GR16:$src1, (and CL, 31)),
+def : Pat<(shl GR16:$src1, (and CL, immShift32)),
           (SHL16rCL GR16:$src1)>;
-def : Pat<(shl GR32:$src1, (and CL, 31)),
+def : Pat<(shl GR32:$src1, (and CL, immShift32)),
           (SHL32rCL GR32:$src1)>;
-def : Pat<(store (shl (loadi8 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (shl (loadi8 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SHL8mCL addr:$dst)>;
-def : Pat<(store (shl (loadi16 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (shl (loadi16 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SHL16mCL addr:$dst)>;
-def : Pat<(store (shl (loadi32 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (shl (loadi32 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SHL32mCL addr:$dst)>;
 
-def : Pat<(srl GR8:$src1, (and CL, 31)),
+def : Pat<(srl GR8:$src1, (and CL, immShift32)),
           (SHR8rCL GR8:$src1)>;
-def : Pat<(srl GR16:$src1, (and CL, 31)),
+def : Pat<(srl GR16:$src1, (and CL, immShift32)),
           (SHR16rCL GR16:$src1)>;
-def : Pat<(srl GR32:$src1, (and CL, 31)),
+def : Pat<(srl GR32:$src1, (and CL, immShift32)),
           (SHR32rCL GR32:$src1)>;
-def : Pat<(store (srl (loadi8 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (srl (loadi8 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SHR8mCL addr:$dst)>;
-def : Pat<(store (srl (loadi16 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (srl (loadi16 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SHR16mCL addr:$dst)>;
-def : Pat<(store (srl (loadi32 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (srl (loadi32 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SHR32mCL addr:$dst)>;
 
-def : Pat<(sra GR8:$src1, (and CL, 31)),
+def : Pat<(sra GR8:$src1, (and CL, immShift32)),
           (SAR8rCL GR8:$src1)>;
-def : Pat<(sra GR16:$src1, (and CL, 31)),
+def : Pat<(sra GR16:$src1, (and CL, immShift32)),
           (SAR16rCL GR16:$src1)>;
-def : Pat<(sra GR32:$src1, (and CL, 31)),
+def : Pat<(sra GR32:$src1, (and CL, immShift32)),
           (SAR32rCL GR32:$src1)>;
-def : Pat<(store (sra (loadi8 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (sra (loadi8 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SAR8mCL addr:$dst)>;
-def : Pat<(store (sra (loadi16 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (sra (loadi16 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SAR16mCL addr:$dst)>;
-def : Pat<(store (sra (loadi32 addr:$dst), (and CL, 31)), addr:$dst),
+def : Pat<(store (sra (loadi32 addr:$dst), (and CL, immShift32)), addr:$dst),
           (SAR32mCL addr:$dst)>;
 
 // (shl x (and y, 63)) ==> (shl x, y)
-def : Pat<(shl GR64:$src1, (and CL, 63)),
+def : Pat<(shl GR64:$src1, (and CL, immShift64)),
           (SHL64rCL GR64:$src1)>;
 def : Pat<(store (shl (loadi64 addr:$dst), (and CL, 63)), addr:$dst),
           (SHL64mCL addr:$dst)>;
 
-def : Pat<(srl GR64:$src1, (and CL, 63)),
+def : Pat<(srl GR64:$src1, (and CL, immShift64)),
           (SHR64rCL GR64:$src1)>;
 def : Pat<(store (srl (loadi64 addr:$dst), (and CL, 63)), addr:$dst),
           (SHR64mCL addr:$dst)>;
 
-def : Pat<(sra GR64:$src1, (and CL, 63)),
+def : Pat<(sra GR64:$src1, (and CL, immShift64)),
           (SAR64rCL GR64:$src1)>;
 def : Pat<(store (sra (loadi64 addr:$dst), (and CL, 63)), addr:$dst),
           (SAR64mCL addr:$dst)>;
@@ -1753,3 +1759,11 @@ def : Pat<(and GR64:$src1, i64immSExt8:$src2),
           (AND64ri8 GR64:$src1, i64immSExt8:$src2)>;
 def : Pat<(and GR64:$src1, i64immSExt32:$src2),
           (AND64ri32 GR64:$src1, i64immSExt32:$src2)>;
+
+// Bit scan instruction patterns to match explicit zero-undef behavior.
+def : Pat<(cttz_zero_undef GR16:$src), (BSF16rr GR16:$src)>;
+def : Pat<(cttz_zero_undef GR32:$src), (BSF32rr GR32:$src)>;
+def : Pat<(cttz_zero_undef GR64:$src), (BSF64rr GR64:$src)>;
+def : Pat<(cttz_zero_undef (loadi16 addr:$src)), (BSF16rm addr:$src)>;
+def : Pat<(cttz_zero_undef (loadi32 addr:$src)), (BSF32rm addr:$src)>;
+def : Pat<(cttz_zero_undef (loadi64 addr:$src)), (BSF64rm addr:$src)>;

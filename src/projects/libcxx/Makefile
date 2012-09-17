@@ -16,7 +16,7 @@ else
 endif
 INSTALL_DIR=$(DSTROOT)/$(INSTALL_PREFIX)
 
-.PHONY: help installsrc clean installhdrs do-installhdrs install
+.PHONY: help installsrc clean installheaders do-installhdrs install
 
 help::
 	echo Use make install DSTROOT=<destination>
@@ -30,13 +30,7 @@ installsrc:: $(SRCROOT)
 
 clean::
 
-installhdrs::
-
-	$(MAKE) HEADER_DIR=$(INSTALL_DIR)/usr/include do-installhdrs
-	$(MAKE) HEADER_DIR=$(INSTALL_DIR)/usr/lib do-installhdrs
-	$(MAKE) HEADER_DIR=$(INSTALL_DIR)/usr/clang-ide/lib do-installhdrs
-	$(MAKE) HEADER_DIR=$(INSTALL_DIR)/Developer/usr/lib do-installhdrs
-	$(MAKE) HEADER_DIR=$(INSTALL_DIR)/Developer/Platforms/iPhoneOS.platform/usr/lib do-installhdrs
+installheaders:: do-installhdrs
 
 # The do-installhdrs target is also used by clang's runtime/libcxx makefile.
 do-installhdrs:
@@ -49,7 +43,7 @@ do-installhdrs:
 	chmod 755 $(HEADER_DIR)/c++/v1/ext
 	chmod 644 $(HEADER_DIR)/c++/v1/ext/*
 
-install:: installhdrs $(DESTDIR)
+install::
 
 	cd lib && ./buildit
 	ditto lib/libc++.1.dylib $(SYMROOT)/usr/lib/libc++.1.dylib

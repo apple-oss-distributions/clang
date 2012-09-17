@@ -1,4 +1,4 @@
-//===-- X86/X86CodeEmitter.cpp - Convert X86 code to machine code ---------===//
+//===-- X86CodeEmitter.cpp - Convert X86 code to machine code -------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -806,8 +806,7 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
     }
     
     assert(MO.isImm() && "Unknown RawFrm operand!");
-    if (Opcode == X86::CALLpcrel32 || Opcode == X86::CALL64pcrel32 ||
-        Opcode == X86::WINCALL64pcrel32) {
+    if (Opcode == X86::CALLpcrel32 || Opcode == X86::CALL64pcrel32) {
       // Fix up immediate operand for pc relative calls.
       intptr_t Imm = (intptr_t)MO.getImm();
       Imm = Imm - MCE.getCurrentPCValue() - 4;
@@ -1004,7 +1003,7 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
     break;
   }
 
-  if (!Desc->isVariadic() && CurOp != NumOps) {
+  if (!MI.isVariadic() && CurOp != NumOps) {
 #ifndef NDEBUG
     dbgs() << "Cannot encode all operands of: " << MI << "\n";
 #endif

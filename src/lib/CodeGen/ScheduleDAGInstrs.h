@@ -21,11 +21,13 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SparseSet.h"
 #include <map>
 
 namespace llvm {
   class MachineLoopInfo;
   class MachineDominatorTree;
+  class LiveIntervals;
 
   /// LoopDependencies - This class analyzes loop-oriented register
   /// dependencies, which are used to guide scheduling decisions.
@@ -104,12 +106,88 @@ namespace llvm {
     const MachineFrameInfo *MFI;
     const InstrItineraryData *InstrItins;
 
-    /// Defs, Uses - Remember where defs and uses of each physical register
-    /// are as we iterate upward through the instructions. This is allocated
-    /// here instead of inside BuildSchedGraph to avoid the need for it to be
-    /// initialized and destructed for each block.
-    std::vector<std::vector<SUnit *> > Defs;
-    std::vector<std::vector<SUnit *> > Uses;
+    /// isPostRA flag indicates vregs cannot be present.
+    bool IsPostRA;
+
+    /// Live Intervals provides reaching defs in preRA scheduling.
+    LiveIntervals *LIS;
+
+    DenseMap<MachineInstr*, SUnit*> MISUnitMap;
+
+    /// UnitLatencies (misnamed) flag avoids computing def-use latencies, using
+    /// the def-side latency only.
+    bool UnitLatencies;
+
+    /// Combine a SparseSet with a 1x1 vector to track physical registers.
+    /// The SparseSet allows iterating over the (few) live registers for quickly
+    /// comparing against a regmask or clearing the set.
+    ///
+    /// Storage for the map is allocated once for the pass. The map can be
+    /// cleared between scheduling regions without freeing unused entries.
+    class Reg2SUnitsMap {
+      SparseSet<unsigned> PhysRegSet;
+      std::vector<std::vector<SUnit*> > SUnits;
+    public:
+      typedef SparseSet<unsigned>::const_iterator const_iterator;
+
+      // Allow iteration over register numbers (keys) in the map. If needed, we
+      // can provide an iterator over SUnits (values) as well.
+      const_iterator reg_begin() const { return PhysRegSet.begin(); }
+      const_iterator reg_end() const { return PhysRegSet.end(); }
+
+      /// Initialize the map with the number of registers.
+      /// If the map is already large enough, no allocation occurs.
+      /// For simplicity we expect the map to be empty().
+      void setRegLimit(unsigned Limit);
+
+      /// Returns true if the map is empty.
+      bool empty() const { return PhysRegSet.empty(); }
+
+      /// Clear the map without deallocating storage.
+      void clear();
+
+      bool contains(unsigned Reg) const { return PhysRegSet.count(Reg); }
+
+      /// If this register is mapped, return its existing SUnits vector.
+      /// Otherwise map the register and return an empty SUnits vector.
+      std::vector<SUnit *> &operator[](unsigned Reg) {
+        bool New = PhysRegSet.insert(Reg).second;
+        assert((!New || SUnits[Reg].empty()) && "stale SUnits vector");
+        (void)New;
+        return SUnits[Reg];
+      }
+
+      /// Erase an existing element without freeing memory.
+      void erase(unsigned Reg) {
+        PhysRegSet.erase(Reg);
+        SUnits[Reg].clear();
+      }
+    };
+    /// Defs, Uses - Remember where defs and uses of each register are as we
+    /// iterate upward through the instructions. This is allocated here instead
+    /// of inside BuildSchedGraph to avoid the need for it to be initialized and
+    /// destructed for each block.
+    Reg2SUnitsMap Defs;
+    Reg2SUnitsMap Uses;
+
+    /// An individual mapping from virtual register number to SUnit.
+    struct VReg2SUnit {
+      unsigned VirtReg;
+      SUnit *SU;
+
+      VReg2SUnit(unsigned reg, SUnit *su): VirtReg(reg), SU(su) {}
+
+      unsigned getSparseSetKey() const {
+        return TargetRegisterInfo::virtReg2Index(VirtReg);
+      }
+    };
+    /// Use SparseSet as a SparseMap by relying on the fact that it never
+    /// compares ValueT's, only unsigned keys. This allows the set to be cleared
+    /// between scheduling regions in constant time as long as ValueT does not
+    /// require a destructor.
+    typedef SparseSet<VReg2SUnit> VReg2SUnitMap;
+    /// Track the last instructon in this region defining each virtual register.
+    VReg2SUnitMap VRegDefs;
 
     /// PendingLoads - Remember where unknown loads are after the most recent
     /// unknown store, as we iterate. As with Defs and Uses, this is here
@@ -119,11 +197,6 @@ namespace llvm {
     /// LoopRegs - Track which registers are used for loop-carried dependencies.
     ///
     LoopDependencies LoopRegs;
-
-    /// LoopLiveInRegs - Track which regs are live into a loop, to help guide
-    /// back-edge-aware scheduling.
-    ///
-    SmallSet<unsigned, 8> LoopLiveInRegs;
 
   protected:
 
@@ -141,7 +214,9 @@ namespace llvm {
 
     explicit ScheduleDAGInstrs(MachineFunction &mf,
                                const MachineLoopInfo &mli,
-                               const MachineDominatorTree &mdt);
+                               const MachineDominatorTree &mdt,
+                               bool IsPostRAFlag,
+                               LiveIntervals *LIS = 0);
 
     virtual ~ScheduleDAGInstrs() {}
 
@@ -157,6 +232,7 @@ namespace llvm {
       SUnits.back().OrigNode = &SUnits.back();
       return &SUnits.back();
     }
+
 
     /// Run - perform scheduling.
     ///
@@ -206,6 +282,24 @@ namespace llvm {
     virtual void dumpNode(const SUnit *SU) const;
 
     virtual std::string getGraphNodeLabel(const SUnit *SU) const;
+
+  protected:
+    SUnit *getSUnit(MachineInstr *MI) const {
+      DenseMap<MachineInstr*, SUnit*>::const_iterator I = MISUnitMap.find(MI);
+      if (I == MISUnitMap.end())
+        return 0;
+      return I->second;
+    }
+
+    void initSUnits();
+    void addPhysRegDataDeps(SUnit *SU, const MachineOperand &MO);
+    void addPhysRegDeps(SUnit *SU, unsigned OperIdx);
+    void addVRegDefDeps(SUnit *SU, unsigned OperIdx);
+    void addVRegUseDeps(SUnit *SU, unsigned OperIdx);
+
+    VReg2SUnitMap::iterator findVRegDef(unsigned VirtReg) {
+      return VRegDefs.find(TargetRegisterInfo::virtReg2Index(VirtReg));
+    }
   };
 }
 

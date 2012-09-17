@@ -69,40 +69,50 @@ protected:
   class GCCInstallationDetector {
 
     bool IsValid;
-    std::string GccTriple;
+    llvm::Triple GCCTriple;
 
     // FIXME: These might be better as path objects.
-    std::string GccInstallPath;
-    std::string GccParentLibPath;
+    std::string GCCInstallPath;
+    std::string GCCMultiarchSuffix;
+    std::string GCCParentLibPath;
 
     GCCVersion Version;
 
   public:
-    GCCInstallationDetector(const Driver &D);
+    GCCInstallationDetector(const Driver &D, const llvm::Triple &TargetTriple,
+                            const ArgList &Args);
 
     /// \brief Check whether we detected a valid GCC install.
     bool isValid() const { return IsValid; }
 
     /// \brief Get the GCC triple for the detected install.
-    StringRef getTriple() const { return GccTriple; }
+    const llvm::Triple &getTriple() const { return GCCTriple; }
 
     /// \brief Get the detected GCC installation path.
-    StringRef getInstallPath() const { return GccInstallPath; }
+    StringRef getInstallPath() const { return GCCInstallPath; }
+
+    /// \brief Get the detected GCC installation path suffix for multiarch GCCs.
+    StringRef getMultiarchSuffix() const { return GCCMultiarchSuffix; }
 
     /// \brief Get the detected GCC parent lib path.
-    StringRef getParentLibPath() const { return GccParentLibPath; }
+    StringRef getParentLibPath() const { return GCCParentLibPath; }
 
     /// \brief Get the detected GCC version string.
     StringRef getVersion() const { return Version.Text; }
 
   private:
-    static void CollectLibDirsAndTriples(llvm::Triple::ArchType HostArch,
-                                         SmallVectorImpl<StringRef> &LibDirs,
-                                         SmallVectorImpl<StringRef> &Triples);
+    static void CollectLibDirsAndTriples(
+      const llvm::Triple &TargetTriple,
+      const llvm::Triple &MultiarchTriple,
+      SmallVectorImpl<StringRef> &LibDirs,
+      SmallVectorImpl<StringRef> &TripleAliases,
+      SmallVectorImpl<StringRef> &MultiarchLibDirs,
+      SmallVectorImpl<StringRef> &MultiarchTripleAliases);
 
-    void ScanLibDirForGCCTriple(llvm::Triple::ArchType HostArch,
+    void ScanLibDirForGCCTriple(llvm::Triple::ArchType TargetArch,
                                 const std::string &LibDir,
-                                StringRef CandidateTriple);
+                                StringRef CandidateTriple,
+                                bool NeedsMultiarchSuffix = false);
   };
 
   GCCInstallationDetector GCCInstallation;
@@ -110,7 +120,7 @@ protected:
   mutable llvm::DenseMap<unsigned, Tool*> Tools;
 
 public:
-  Generic_GCC(const HostInfo &Host, const llvm::Triple& Triple);
+  Generic_GCC(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
   ~Generic_GCC();
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
@@ -125,18 +135,31 @@ protected:
   /// @{
 
   /// \brief Check whether the target triple's architecture is 64-bits.
-  bool isTarget64Bit() const {
-    return (getTriple().getArch() == llvm::Triple::x86_64 ||
-            getTriple().getArch() == llvm::Triple::ppc64);
-  }
+  bool isTarget64Bit() const { return getTriple().isArch64Bit(); }
+
   /// \brief Check whether the target triple's architecture is 32-bits.
-  /// FIXME: This should likely do more than just negate the 64-bit query.
-  bool isTarget32Bit() const { return !isTarget64Bit(); }
+  bool isTarget32Bit() const { return getTriple().isArch32Bit(); }
 
   /// @}
 };
 
-/// Darwin - The base Darwin tool chain.
+class LLVM_LIBRARY_VISIBILITY Hexagon_TC : public ToolChain {
+protected:
+  mutable llvm::DenseMap<unsigned, Tool*> Tools;
+
+public:
+  Hexagon_TC(const Driver &D, const llvm::Triple& Triple);
+  ~Hexagon_TC();
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
+                           const ActionList &Inputs) const;
+
+  virtual bool IsUnwindTablesDefault() const;
+  virtual const char *GetDefaultRelocationModel() const;
+  virtual const char *GetForcedPicModel() const;
+};
+
+  /// Darwin - The base Darwin tool chain.
 class LLVM_LIBRARY_VISIBILITY Darwin : public ToolChain {
 public:
   /// The host version.
@@ -182,12 +205,13 @@ private:
   std::string MacosxVersionMin;
 
   bool hasARCRuntime() const;
+  bool hasSubscriptingRuntime() const;
 
 private:
   void AddDeploymentTarget(DerivedArgList &Args) const;
 
 public:
-  Darwin(const HostInfo &Host, const llvm::Triple& Triple);
+  Darwin(const Driver &D, const llvm::Triple& Triple);
   ~Darwin();
 
   std::string ComputeEffectiveClangTriple(const ArgList &Args,
@@ -227,6 +251,12 @@ public:
   bool isTargetIOSSimulator() const {
     assert(TargetInitialized && "Target not initialized!");
     return TargetIsIPhoneOSSimulator;
+  }
+
+  bool isTargetMacOS() const {
+    return !isTargetIOSSimulator() &&
+           !isTargetIPhoneOS() &&
+           ARCRuntimeForSimulator == ARCSimulator_None;
   }
 
   bool isTargetInitialized() const { return TargetInitialized; }
@@ -306,9 +336,8 @@ public:
 #ifdef DISABLE_DEFAULT_INTEGRATED_ASSEMBLER
     return false;
 #else
-    // Default integrated assembler to on for x86.
-    return (getTriple().getArch() == llvm::Triple::x86 ||
-            getTriple().getArch() == llvm::Triple::x86_64);
+    // Default integrated assembler to on for Darwin.
+    return true;
 #endif
   }
   virtual bool IsStrictAliasingDefault() const {
@@ -320,7 +349,7 @@ public:
   }
   
   virtual bool IsObjCDefaultSynthPropertiesDefault() const {
-    return false;
+    return true;
   }
 
   virtual bool IsObjCNonFragileABIDefault() const {
@@ -347,12 +376,17 @@ public:
       (!isMacosxVersionLT(10, 6) ||
          (!isMacosxVersionLT(10, 5) && !KernelOrKext));
   }
+  virtual RuntimeLibType GetDefaultRuntimeLibType() const {
+    return ToolChain::RLT_CompilerRT;
+  }
   virtual const char *GetDefaultRelocationModel() const;
   virtual const char *GetForcedPicModel() const;
 
   virtual bool SupportsProfiling() const;
 
   virtual bool SupportsObjCGC() const;
+
+  virtual bool SupportsObjCARC() const;
 
   virtual bool UseDwarfDebugFlags() const;
 
@@ -367,7 +401,7 @@ private:
   void AddGCCLibexecPath(unsigned darwinVersion);
 
 public:
-  DarwinClang(const HostInfo &Host, const llvm::Triple& Triple);
+  DarwinClang(const Driver &D, const llvm::Triple& Triple);
 
   /// @name Darwin ToolChain Implementation
   /// {
@@ -394,8 +428,8 @@ public:
 /// Darwin_Generic_GCC - Generic Darwin tool chain using gcc.
 class LLVM_LIBRARY_VISIBILITY Darwin_Generic_GCC : public Generic_GCC {
 public:
-  Darwin_Generic_GCC(const HostInfo &Host, const llvm::Triple& Triple)
-    : Generic_GCC(Host, Triple) {}
+  Darwin_Generic_GCC(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+    : Generic_GCC(D, Triple, Args) {}
 
   std::string ComputeEffectiveClangTriple(const ArgList &Args,
                                           types::ID InputType) const;
@@ -404,9 +438,10 @@ public:
 };
 
 class LLVM_LIBRARY_VISIBILITY Generic_ELF : public Generic_GCC {
- public:
-  Generic_ELF(const HostInfo &Host, const llvm::Triple& Triple)
-    : Generic_GCC(Host, Triple) {}
+  virtual void anchor();
+public:
+  Generic_ELF(const Driver &D, const llvm::Triple& Triple, const ArgList &Args)
+    : Generic_GCC(D, Triple, Args) {}
 
   virtual bool IsIntegratedAssemblerDefault() const {
     // Default integrated assembler to on for x86.
@@ -417,15 +452,26 @@ class LLVM_LIBRARY_VISIBILITY Generic_ELF : public Generic_GCC {
 
 class LLVM_LIBRARY_VISIBILITY AuroraUX : public Generic_GCC {
 public:
-  AuroraUX(const HostInfo &Host, const llvm::Triple& Triple);
+  AuroraUX(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
 };
 
+class LLVM_LIBRARY_VISIBILITY Solaris : public Generic_GCC {
+public:
+  Solaris(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
+                           const ActionList &Inputs) const;
+
+  virtual bool IsIntegratedAssemblerDefault() const { return true; }
+};
+
+
 class LLVM_LIBRARY_VISIBILITY OpenBSD : public Generic_ELF {
 public:
-  OpenBSD(const HostInfo &Host, const llvm::Triple& Triple);
+  OpenBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
@@ -433,26 +479,23 @@ public:
 
 class LLVM_LIBRARY_VISIBILITY FreeBSD : public Generic_ELF {
 public:
-  FreeBSD(const HostInfo &Host, const llvm::Triple& Triple);
+  FreeBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
 };
 
 class LLVM_LIBRARY_VISIBILITY NetBSD : public Generic_ELF {
-  const llvm::Triple ToolTriple;
-
 public:
-  NetBSD(const HostInfo &Host, const llvm::Triple& Triple,
-         const llvm::Triple& ToolTriple);
+  NetBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
 };
 
-class LLVM_LIBRARY_VISIBILITY Minix : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY Minix : public Generic_ELF {
 public:
-  Minix(const HostInfo &Host, const llvm::Triple& Triple);
+  Minix(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
@@ -460,7 +503,7 @@ public:
 
 class LLVM_LIBRARY_VISIBILITY DragonFly : public Generic_ELF {
 public:
-  DragonFly(const HostInfo &Host, const llvm::Triple& Triple);
+  DragonFly(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
@@ -468,7 +511,7 @@ public:
 
 class LLVM_LIBRARY_VISIBILITY Linux : public Generic_ELF {
 public:
-  Linux(const HostInfo &Host, const llvm::Triple& Triple);
+  Linux(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
   virtual bool HasNativeLLVMSupport() const;
 
@@ -482,6 +525,11 @@ public:
 
   std::string Linker;
   std::vector<std::string> ExtraOpts;
+
+private:
+  static bool addLibStdCXXIncludePaths(Twine Base, Twine TargetArchDir,
+                                       const ArgList &DriverArgs,
+                                       ArgStringList &CC1Args);
 };
 
 
@@ -489,7 +537,7 @@ public:
 /// all subcommands. See http://tce.cs.tut.fi for our peculiar target.
 class LLVM_LIBRARY_VISIBILITY TCEToolChain : public ToolChain {
 public:
-  TCEToolChain(const HostInfo &Host, const llvm::Triple& Triple);
+  TCEToolChain(const Driver &D, const llvm::Triple& Triple);
   ~TCEToolChain();
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
@@ -508,7 +556,7 @@ class LLVM_LIBRARY_VISIBILITY Windows : public ToolChain {
   mutable llvm::DenseMap<unsigned, Tool*> Tools;
 
 public:
-  Windows(const HostInfo &Host, const llvm::Triple& Triple);
+  Windows(const Driver &D, const llvm::Triple& Triple);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;

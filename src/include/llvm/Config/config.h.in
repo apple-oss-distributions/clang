@@ -9,18 +9,6 @@
 /* Relative directory for resource files */
 #undef CLANG_RESOURCE_DIR
 
-/* 32 bit multilib directory. */
-#undef CXX_INCLUDE_32BIT_DIR
-
-/* 64 bit multilib directory. */
-#undef CXX_INCLUDE_64BIT_DIR
-
-/* Arch the libstdc++ headers. */
-#undef CXX_INCLUDE_ARCH
-
-/* Directory with the libstdc++ headers. */
-#undef CXX_INCLUDE_ROOT
-
 /* Directories clang will search for headers */
 #undef C_INCLUDE_DIRS
 
@@ -30,11 +18,14 @@
 /* Define if position independent code is enabled */
 #undef ENABLE_PIC
 
-/* Define if threads enabled */
-#undef ENABLE_THREADS
-
 /* Define if timestamp information (e.g., __DATE___) is allowed */
 #undef ENABLE_TIMESTAMPS
+
+/* Directory where gcc is installed. */
+#undef GCC_INSTALL_PREFIX
+
+/* Define to 1 if you have the `arc4random' function. */
+#undef HAVE_ARC4RANDOM
 
 /* Define to 1 if you have the `argz_append' function. */
 #undef HAVE_ARGZ_APPEND
@@ -295,6 +286,9 @@
 /* Define to 1 if you have the `powf' function. */
 #undef HAVE_POWF
 
+/* Define to 1 if you have the `pread' function. */
+#undef HAVE_PREAD
+
 /* Define if libtool can extract symbol lists from object files. */
 #undef HAVE_PRELOADED_SYMBOLS
 
@@ -549,6 +543,9 @@
 /* Installation directory for documentation */
 #undef LLVM_DOCSDIR
 
+/* Define if threads enabled */
+#undef LLVM_ENABLE_THREADS
+
 /* Installation directory for config files */
 #undef LLVM_ETCDIR
 
@@ -620,6 +617,12 @@
 
 /* Installation prefix directory */
 #undef LLVM_PREFIX
+
+/* Major version of the LLVM API */
+#undef LLVM_VERSION_MAJOR
+
+/* Minor version of the LLVM API */
+#undef LLVM_VERSION_MINOR
 
 /* Define if the OS needs help to load dependent libraries for dlopen(). */
 #undef LTDL_DLOPEN_DEPLIBS

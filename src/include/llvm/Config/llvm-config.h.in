@@ -25,17 +25,20 @@
 /* Installation directory for data files */
 #undef LLVM_DATADIR
 
+/* Target triple LLVM will generate code for by default */
+#undef LLVM_DEFAULT_TARGET_TRIPLE
+
 /* Installation directory for documentation */
 #undef LLVM_DOCSDIR
+
+/* Define if threads enabled */
+#undef LLVM_ENABLE_THREADS
 
 /* Installation directory for config files */
 #undef LLVM_ETCDIR
 
 /* Has gcc/MSVC atomic intrinsics */
 #undef LLVM_HAS_ATOMICS
-
-/* Host triple we were built on */
-#undef LLVM_DEFAULT_TARGET_TRIPLE
 
 /* Installation directory for include files */
 #undef LLVM_INCLUDEDIR
@@ -102,5 +105,11 @@
 
 /* Installation prefix directory */
 #undef LLVM_PREFIX
+
+/* Major version of the LLVM API */
+#undef LLVM_VERSION_MAJOR
+
+/* Minor version of the LLVM API */
+#undef LLVM_VERSION_MINOR
 
 #endif

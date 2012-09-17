@@ -27,7 +27,7 @@ using namespace clang;
 TextDiagnosticPrinter::TextDiagnosticPrinter(raw_ostream &os,
                                              const DiagnosticOptions &diags,
                                              bool _OwnsOutputStream)
-  : OS(os), LangOpts(0), DiagOpts(&diags), SM(0),
+  : OS(os), DiagOpts(&diags),
     OwnsOutputStream(_OwnsOutputStream) {
 }
 
@@ -38,22 +38,12 @@ TextDiagnosticPrinter::~TextDiagnosticPrinter() {
 
 void TextDiagnosticPrinter::BeginSourceFile(const LangOptions &LO,
                                             const Preprocessor *PP) {
-  LangOpts = &LO;
+  // Build the TextDiagnostic utility.
+  TextDiag.reset(new TextDiagnostic(OS, LO, *DiagOpts));
 }
 
 void TextDiagnosticPrinter::EndSourceFile() {
-  LangOpts = 0;
   TextDiag.reset(0);
-}
-
-/// \brief Print the diagnostic name to a raw_ostream.
-///
-/// This prints the diagnostic name to a raw_ostream if it has one. It formats
-/// the name according to the expected diagnostic message formatting:
-///   " [diagnostic_name_here]"
-static void printDiagnosticName(raw_ostream &OS, const Diagnostic &Info) {
-  if (!DiagnosticIDs::isBuiltinNote(Info.getID()))
-    OS << " [" << DiagnosticIDs::getName(Info.getID()) << "]";
 }
 
 /// \brief Print any diagnostic option information to a raw_ostream.
@@ -132,12 +122,10 @@ void TextDiagnosticPrinter::HandleDiagnostic(DiagnosticsEngine::Level Level,
 
   // Render the diagnostic message into a temporary buffer eagerly. We'll use
   // this later as we print out the diagnostic to the terminal.
-  llvm::SmallString<100> OutStr;
+  SmallString<100> OutStr;
   Info.FormatDiagnostic(OutStr);
 
   llvm::raw_svector_ostream DiagMessageStream(OutStr);
-  if (DiagOpts->ShowNames)
-    printDiagnosticName(DiagMessageStream, Info);
   printDiagnosticOptions(DiagMessageStream, Level, Info, *DiagOpts);
 
   // Keeps track of the the starting position of the location
@@ -164,22 +152,16 @@ void TextDiagnosticPrinter::HandleDiagnostic(DiagnosticsEngine::Level Level,
   }
 
   // Assert that the rest of our infrastructure is setup properly.
-  assert(LangOpts && "Unexpected diagnostic outside source file processing");
   assert(DiagOpts && "Unexpected diagnostic without options set");
   assert(Info.hasSourceManager() &&
          "Unexpected diagnostic with no source manager");
-
-  // Rebuild the TextDiagnostic utility if missing or the source manager has
-  // changed.
-  if (!TextDiag || SM != &Info.getSourceManager()) {
-    SM = &Info.getSourceManager();
-    TextDiag.reset(new TextDiagnostic(OS, *SM, *LangOpts, *DiagOpts));
-  }
+  assert(TextDiag && "Unexpected diagnostic outside source file processing");
 
   TextDiag->emitDiagnostic(Info.getLocation(), Level, DiagMessageStream.str(),
                            Info.getRanges(),
                            llvm::makeArrayRef(Info.getFixItHints(),
-                                              Info.getNumFixItHints()));
+                                              Info.getNumFixItHints()),
+                           &Info.getSourceManager());
 
   OS.flush();
 }

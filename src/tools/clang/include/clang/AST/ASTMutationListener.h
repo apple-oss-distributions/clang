@@ -63,9 +63,6 @@ public:
   virtual void AddedObjCCategoryToInterface(const ObjCCategoryDecl *CatD,
                                             const ObjCInterfaceDecl *IFD) {}
 
-  /// \brief A objc interface or protocol forward reference was completed.
-  virtual void CompletedObjCForwardRef(const ObjCContainerDecl *D) {}
-
   /// \brief A objc class extension redeclared or introduced a property.
   ///
   /// \param Prop the property in the class extension
@@ -78,8 +75,8 @@ public:
                                             const ObjCPropertyDecl *OrigProp,
                                             const ObjCCategoryDecl *ClassExt) {}
 
-  /// \brief The attributes list of a declaration was updated.
-  virtual void UpdatedAttributeList(const Decl *D) {}
+  // NOTE: If new methods are added they should also be added to
+  // MultiplexASTMutationListener.
 };
 
 } // end namespace clang

@@ -36,6 +36,7 @@ template<typename ValueSubClass, typename ItemParentClass>
 /// These are used to efficiently contain a byte sequence for metadata.
 /// MDString is always unnamed.
 class MDString : public Value {
+  virtual void anchor();
   MDString(const MDString &);            // DO NOT IMPLEMENT
 
   StringRef Str;
@@ -134,6 +135,9 @@ public:
   /// deleteTemporary - Deallocate a node created by getTemporary. The
   /// node must not have any users.
   static void deleteTemporary(MDNode *N);
+
+  /// replaceOperandWith - Replace a specific operand.
+  void replaceOperandWith(unsigned i, Value *NewVal);
   
   /// getOperand - Return specified operand.
   Value *getOperand(unsigned i) const;
@@ -225,6 +229,9 @@ public:
 
   /// print - Implement operator<< on NamedMDNode.
   void print(raw_ostream &ROS, AssemblyAnnotationWriter *AAW = 0) const;
+
+  /// dump() - Allow printing of NamedMDNodes from the debugger.
+  void dump() const;
 };
 
 } // end llvm namespace

@@ -215,6 +215,8 @@ namespace {
     bool printConstExprCast(const ConstantExpr *CE, bool Static);
     void printConstantArray(ConstantArray *CPA, bool Static);
     void printConstantVector(ConstantVector *CV, bool Static);
+    void printConstantDataSequential(ConstantDataSequential *CDS, bool Static);
+
 
     /// isAddressExposed - Return true if the specified value's name needs to
     /// have its address taken in order to get a C value of the correct type.
@@ -286,9 +288,6 @@ namespace {
     void visitSwitchInst(SwitchInst &I);
     void visitIndirectBrInst(IndirectBrInst &I);
     void visitInvokeInst(InvokeInst &I) {
-      llvm_unreachable("Lowerinvoke pass didn't work!");
-    }
-    void visitUnwindInst(UnwindInst &I) {
       llvm_unreachable("Lowerinvoke pass didn't work!");
     }
     void visitResumeInst(ResumeInst &I) {
@@ -553,33 +552,44 @@ raw_ostream &CWriter::printType(raw_ostream &Out, Type *Ty,
   default:
     llvm_unreachable("Unhandled case in getTypeProps!");
   }
-
-  return Out;
 }
 
 void CWriter::printConstantArray(ConstantArray *CPA, bool Static) {
+  Out << "{ ";
+  printConstant(cast<Constant>(CPA->getOperand(0)), Static);
+  for (unsigned i = 1, e = CPA->getNumOperands(); i != e; ++i) {
+    Out << ", ";
+    printConstant(cast<Constant>(CPA->getOperand(i)), Static);
+  }
+  Out << " }";
+}
 
+void CWriter::printConstantVector(ConstantVector *CP, bool Static) {
+  Out << "{ ";
+  printConstant(cast<Constant>(CP->getOperand(0)), Static);
+  for (unsigned i = 1, e = CP->getNumOperands(); i != e; ++i) {
+    Out << ", ";
+    printConstant(cast<Constant>(CP->getOperand(i)), Static);
+  }
+  Out << " }";
+}
+
+void CWriter::printConstantDataSequential(ConstantDataSequential *CDS,
+                                          bool Static) {
   // As a special case, print the array as a string if it is an array of
   // ubytes or an array of sbytes with positive values.
   //
-  Type *ETy = CPA->getType()->getElementType();
-  bool isString = (ETy == Type::getInt8Ty(CPA->getContext()) ||
-                   ETy == Type::getInt8Ty(CPA->getContext()));
-
-  // Make sure the last character is a null char, as automatically added by C
-  if (isString && (CPA->getNumOperands() == 0 ||
-                   !cast<Constant>(*(CPA->op_end()-1))->isNullValue()))
-    isString = false;
-
-  if (isString) {
+  if (CDS->isCString()) {
     Out << '\"';
     // Keep track of whether the last number was a hexadecimal escape.
     bool LastWasHex = false;
-
+    
+    StringRef Bytes = CDS->getAsCString();
+    
     // Do not include the last character, which we know is null
-    for (unsigned i = 0, e = CPA->getNumOperands()-1; i != e; ++i) {
-      unsigned char C = cast<ConstantInt>(CPA->getOperand(i))->getZExtValue();
-
+    for (unsigned i = 0, e = Bytes.size(); i != e; ++i) {
+      unsigned char C = Bytes[i];
+      
       // Print it out literally if it is a printable character.  The only thing
       // to be careful about is when the last letter output was a hex escape
       // code, in which case we have to be careful not to print out hex digits
@@ -595,49 +605,34 @@ void CWriter::printConstantArray(ConstantArray *CPA, bool Static) {
       } else {
         LastWasHex = false;
         switch (C) {
-        case '\n': Out << "\\n"; break;
-        case '\t': Out << "\\t"; break;
-        case '\r': Out << "\\r"; break;
-        case '\v': Out << "\\v"; break;
-        case '\a': Out << "\\a"; break;
-        case '\"': Out << "\\\""; break;
-        case '\'': Out << "\\\'"; break;
-        default:
-          Out << "\\x";
-          Out << (char)(( C/16  < 10) ? ( C/16 +'0') : ( C/16 -10+'A'));
-          Out << (char)(((C&15) < 10) ? ((C&15)+'0') : ((C&15)-10+'A'));
-          LastWasHex = true;
-          break;
+          case '\n': Out << "\\n"; break;
+          case '\t': Out << "\\t"; break;
+          case '\r': Out << "\\r"; break;
+          case '\v': Out << "\\v"; break;
+          case '\a': Out << "\\a"; break;
+          case '\"': Out << "\\\""; break;
+          case '\'': Out << "\\\'"; break;
+          default:
+            Out << "\\x";
+            Out << (char)(( C/16  < 10) ? ( C/16 +'0') : ( C/16 -10+'A'));
+            Out << (char)(((C&15) < 10) ? ((C&15)+'0') : ((C&15)-10+'A'));
+            LastWasHex = true;
+            break;
         }
       }
     }
     Out << '\"';
   } else {
-    Out << '{';
-    if (CPA->getNumOperands()) {
-      Out << ' ';
-      printConstant(cast<Constant>(CPA->getOperand(0)), Static);
-      for (unsigned i = 1, e = CPA->getNumOperands(); i != e; ++i) {
-        Out << ", ";
-        printConstant(cast<Constant>(CPA->getOperand(i)), Static);
-      }
+    Out << "{ ";
+    printConstant(CDS->getElementAsConstant(0), Static);
+    for (unsigned i = 1, e = CDS->getNumElements(); i != e; ++i) {
+      Out << ", ";
+      printConstant(CDS->getElementAsConstant(i), Static);
     }
     Out << " }";
   }
 }
 
-void CWriter::printConstantVector(ConstantVector *CP, bool Static) {
-  Out << '{';
-  if (CP->getNumOperands()) {
-    Out << ' ';
-    printConstant(cast<Constant>(CP->getOperand(0)), Static);
-    for (unsigned i = 1, e = CP->getNumOperands(); i != e; ++i) {
-      Out << ", ";
-      printConstant(cast<Constant>(CP->getOperand(i)), Static);
-    }
-  }
-  Out << " }";
-}
 
 // isFPCSafeToPrint - Returns true if we may assume that CFP may be written out
 // textually as a double (rather than as a reference to a stack-allocated
@@ -743,7 +738,6 @@ void CWriter::printCast(unsigned opc, Type *SrcTy, Type *DstTy) {
       break; // These don't need a source cast.
     default:
       llvm_unreachable("Invalid cast opcode");
-      break;
   }
 }
 
@@ -1027,6 +1021,9 @@ void CWriter::printConstant(Constant *CPV, bool Static) {
     Out << "{ "; // Arrays are wrapped in struct types.
     if (ConstantArray *CA = dyn_cast<ConstantArray>(CPV)) {
       printConstantArray(CA, Static);
+    } else if (ConstantDataSequential *CDS = 
+                 dyn_cast<ConstantDataSequential>(CPV)) {
+      printConstantDataSequential(CDS, Static);
     } else {
       assert(isa<ConstantAggregateZero>(CPV) || isa<UndefValue>(CPV));
       ArrayType *AT = cast<ArrayType>(CPV->getType());
@@ -1054,6 +1051,9 @@ void CWriter::printConstant(Constant *CPV, bool Static) {
     }
     if (ConstantVector *CV = dyn_cast<ConstantVector>(CPV)) {
       printConstantVector(CV, Static);
+    } else if (ConstantDataSequential *CDS = 
+               dyn_cast<ConstantDataSequential>(CPV)) {
+      printConstantDataSequential(CDS, Static);
     } else {
       assert(isa<ConstantAggregateZero>(CPV) || isa<UndefValue>(CPV));
       VectorType *VT = cast<VectorType>(CPV->getType());
@@ -2394,9 +2394,9 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
 
   unsigned NumCases = SI.getNumCases();
   // Skip the first item since that's the default case.
-  for (unsigned i = 1; i < NumCases; ++i) {
+  for (unsigned i = 0; i < NumCases; ++i) {
     ConstantInt* CaseVal = SI.getCaseValue(i);
-    BasicBlock* Succ = SI.getSuccessor(i);
+    BasicBlock* Succ = SI.getCaseSuccessor(i);
     Out << "  case ";
     writeOperand(CaseVal);
     Out << ":\n";
@@ -3604,7 +3604,6 @@ void CWriter::visitExtractValueInst(ExtractValueInst &EVI) {
 bool CTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
                                          formatted_raw_ostream &o,
                                          CodeGenFileType FileType,
-                                         CodeGenOpt::Level OptLevel,
                                          bool DisableVerify) {
   if (FileType != TargetMachine::CGFT_AssemblyFile) return true;
 

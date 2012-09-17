@@ -75,7 +75,10 @@ void LLVMInitializeInstCombine(LLVMPassRegistryRef R) {
 }
 
 char InstCombiner::ID = 0;
-INITIALIZE_PASS(InstCombiner, "instcombine",
+INITIALIZE_PASS_BEGIN(InstCombiner, "instcombine",
+                "Combine redundant instructions", false, false)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
+INITIALIZE_PASS_END(InstCombiner, "instcombine",
                 "Combine redundant instructions", false, false)
 
 void InstCombiner::getAnalysisUsage(AnalysisUsage &AU) const {
@@ -492,7 +495,7 @@ Value *InstCombiner::dyn_castNegVal(Value *V) const {
   if (ConstantInt *C = dyn_cast<ConstantInt>(V))
     return ConstantExpr::getNeg(C);
 
-  if (ConstantVector *C = dyn_cast<ConstantVector>(V))
+  if (ConstantDataVector *C = dyn_cast<ConstantDataVector>(V))
     if (C->getType()->getElementType()->isIntegerTy())
       return ConstantExpr::getNeg(C);
 
@@ -511,7 +514,7 @@ Value *InstCombiner::dyn_castFNegVal(Value *V) const {
   if (ConstantFP *C = dyn_cast<ConstantFP>(V))
     return ConstantExpr::getFNeg(C);
 
-  if (ConstantVector *C = dyn_cast<ConstantVector>(V))
+  if (ConstantDataVector *C = dyn_cast<ConstantDataVector>(V))
     if (C->getType()->getElementType()->isFloatingPointTy())
       return ConstantExpr::getFNeg(C);
 
@@ -828,7 +831,8 @@ Instruction *InstCombiner::visitGetElementPtrInst(GetElementPtrInst &GEP) {
           MadeChange = true;
         }
 
-      if ((*I)->getType() != IntPtrTy) {
+      Type *IndexTy = (*I)->getType();
+      if (IndexTy != IntPtrTy && !IndexTy->isVectorTy()) {
         // If we are using a wider index than needed for this platform, shrink
         // it to what we need.  If narrower, sign-extend it to what we need.
         // This explicit cast can make subsequent optimizations more obvious.
@@ -911,7 +915,11 @@ Instruction *InstCombiner::visitGetElementPtrInst(GetElementPtrInst &GEP) {
 
   // Handle gep(bitcast x) and gep(gep x, 0, 0, 0).
   Value *StrippedPtr = PtrOp->stripPointerCasts();
-  PointerType *StrippedPtrTy =cast<PointerType>(StrippedPtr->getType());
+  PointerType *StrippedPtrTy = dyn_cast<PointerType>(StrippedPtr->getType());
+  // We do not handle pointer-vector geps here
+  if (!StrippedPtr)
+    return 0;
+
   if (StrippedPtr != PtrOp &&
     StrippedPtrTy->getAddressSpace() == GEP.getPointerAddressSpace()) {
 
@@ -1239,13 +1247,13 @@ Instruction *InstCombiner::visitSwitchInst(SwitchInst &SI) {
         // change 'switch (X+4) case 1:' into 'switch (X) case -3'
         unsigned NumCases = SI.getNumCases();
         // Skip the first item since that's the default case.
-        for (unsigned i = 1; i < NumCases; ++i) {
+        for (unsigned i = 0; i < NumCases; ++i) {
           ConstantInt* CaseVal = SI.getCaseValue(i);
           Constant* NewCaseVal = ConstantExpr::getSub(cast<Constant>(CaseVal),
                                                       AddRHS);
           assert(isa<ConstantInt>(NewCaseVal) &&
                  "Result of expression should be constant");
-          SI.setSuccessorValue(i, cast<ConstantInt>(NewCaseVal));
+          SI.setCaseValue(i, cast<ConstantInt>(NewCaseVal));
         }
         SI.setCondition(I->getOperand(0));
         Worklist.Add(I);
@@ -1262,24 +1270,16 @@ Instruction *InstCombiner::visitExtractValueInst(ExtractValueInst &EV) {
     return ReplaceInstUsesWith(EV, Agg);
 
   if (Constant *C = dyn_cast<Constant>(Agg)) {
-    if (isa<UndefValue>(C))
-      return ReplaceInstUsesWith(EV, UndefValue::get(EV.getType()));
-      
-    if (isa<ConstantAggregateZero>(C))
-      return ReplaceInstUsesWith(EV, Constant::getNullValue(EV.getType()));
-
-    if (isa<ConstantArray>(C) || isa<ConstantStruct>(C)) {
-      // Extract the element indexed by the first index out of the constant
-      Value *V = C->getOperand(*EV.idx_begin());
-      if (EV.getNumIndices() > 1)
-        // Extract the remaining indices out of the constant indexed by the
-        // first index
-        return ExtractValueInst::Create(V, EV.getIndices().slice(1));
-      else
-        return ReplaceInstUsesWith(EV, V);
+    if (Constant *C2 = C->getAggregateElement(*EV.idx_begin())) {
+      if (EV.getNumIndices() == 0)
+        return ReplaceInstUsesWith(EV, C2);
+      // Extract the remaining indices out of the constant indexed by the
+      // first index
+      return ExtractValueInst::Create(C2, EV.getIndices().slice(1));
     }
     return 0; // Can't handle other constants
-  } 
+  }
+  
   if (InsertValueInst *IV = dyn_cast<InsertValueInst>(Agg)) {
     // We're extracting from an insertvalue instruction, compare the indices
     const unsigned *exti, *exte, *insi, *inse;
@@ -1800,7 +1800,8 @@ static bool TryToSinkInstruction(Instruction *I, BasicBlock *DestBlock) {
 static bool AddReachableCodeToWorklist(BasicBlock *BB, 
                                        SmallPtrSet<BasicBlock*, 64> &Visited,
                                        InstCombiner &IC,
-                                       const TargetData *TD) {
+                                       const TargetData *TD,
+                                       const TargetLibraryInfo *TLI) {
   bool MadeIRChange = false;
   SmallVector<BasicBlock*, 256> Worklist;
   Worklist.push_back(BB);
@@ -1827,7 +1828,7 @@ static bool AddReachableCodeToWorklist(BasicBlock *BB,
       
       // ConstantProp instruction if trivially constant.
       if (!Inst->use_empty() && isa<Constant>(Inst->getOperand(0)))
-        if (Constant *C = ConstantFoldInstruction(Inst, TD)) {
+        if (Constant *C = ConstantFoldInstruction(Inst, TD, TLI)) {
           DEBUG(errs() << "IC: ConstFold to: " << *C << " from: "
                        << *Inst << '\n');
           Inst->replaceAllUsesWith(C);
@@ -1845,7 +1846,7 @@ static bool AddReachableCodeToWorklist(BasicBlock *BB,
 
           Constant*& FoldRes = FoldedConstants[CE];
           if (!FoldRes)
-            FoldRes = ConstantFoldConstantExpression(CE, TD);
+            FoldRes = ConstantFoldConstantExpression(CE, TD, TLI);
           if (!FoldRes)
             FoldRes = CE;
 
@@ -1872,15 +1873,15 @@ static bool AddReachableCodeToWorklist(BasicBlock *BB,
     } else if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
       if (ConstantInt *Cond = dyn_cast<ConstantInt>(SI->getCondition())) {
         // See if this is an explicit destination.
-        for (unsigned i = 1, e = SI->getNumSuccessors(); i != e; ++i)
+        for (unsigned i = 0, e = SI->getNumCases(); i != e; ++i)
           if (SI->getCaseValue(i) == Cond) {
-            BasicBlock *ReachableBB = SI->getSuccessor(i);
+            BasicBlock *ReachableBB = SI->getCaseSuccessor(i);
             Worklist.push_back(ReachableBB);
             continue;
           }
         
         // Otherwise it is the default destination.
-        Worklist.push_back(SI->getSuccessor(0));
+        Worklist.push_back(SI->getDefaultDest());
         continue;
       }
     }
@@ -1904,14 +1905,15 @@ bool InstCombiner::DoOneIteration(Function &F, unsigned Iteration) {
   MadeIRChange = false;
   
   DEBUG(errs() << "\n\nINSTCOMBINE ITERATION #" << Iteration << " on "
-        << F.getNameStr() << "\n");
+               << F.getName() << "\n");
 
   {
     // Do a depth-first traversal of the function, populate the worklist with
     // the reachable instructions.  Ignore blocks that are not reachable.  Keep
     // track of which blocks we visit.
     SmallPtrSet<BasicBlock*, 64> Visited;
-    MadeIRChange |= AddReachableCodeToWorklist(F.begin(), Visited, *this, TD);
+    MadeIRChange |= AddReachableCodeToWorklist(F.begin(), Visited, *this, TD,
+                                               TLI);
 
     // Do a quick scan over the function.  If we find any blocks that are
     // unreachable, remove any instructions inside of them.  This prevents
@@ -1956,7 +1958,7 @@ bool InstCombiner::DoOneIteration(Function &F, unsigned Iteration) {
 
     // Instruction isn't dead, see if we can constant propagate it.
     if (!I->use_empty() && isa<Constant>(I->getOperand(0)))
-      if (Constant *C = ConstantFoldInstruction(I, TD)) {
+      if (Constant *C = ConstantFoldInstruction(I, TD, TLI)) {
         DEBUG(errs() << "IC: ConstFold to: " << *C << " from: " << *I << '\n');
 
         // Add operands to the worklist.
@@ -2064,7 +2066,7 @@ bool InstCombiner::DoOneIteration(Function &F, unsigned Iteration) {
 
 bool InstCombiner::runOnFunction(Function &F) {
   TD = getAnalysisIfAvailable<TargetData>();
-
+  TLI = &getAnalysis<TargetLibraryInfo>();
   
   /// Builder - This is an IRBuilder that automatically inserts new
   /// instructions into the worklist when they are created.

@@ -28,6 +28,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/Host.h"
+#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetMachine.h"
 #include <cmath>
@@ -41,14 +42,12 @@ ExecutionEngine *(*ExecutionEngine::JITCtor)(
   Module *M,
   std::string *ErrorStr,
   JITMemoryManager *JMM,
-  CodeGenOpt::Level OptLevel,
   bool GVsWithCode,
   TargetMachine *TM) = 0;
 ExecutionEngine *(*ExecutionEngine::MCJITCtor)(
   Module *M,
   std::string *ErrorStr,
   JITMemoryManager *JMM,
-  CodeGenOpt::Level OptLevel,
   bool GVsWithCode,
   TargetMachine *TM) = 0;
 ExecutionEngine *(*ExecutionEngine::InterpCtor)(Module *M,
@@ -308,13 +307,12 @@ void ExecutionEngine::runStaticConstructorsDestructors(Module *module,
 
   // Should be an array of '{ i32, void ()* }' structs.  The first value is
   // the init priority, which we ignore.
-  if (isa<ConstantAggregateZero>(GV->getInitializer()))
+  ConstantArray *InitList = dyn_cast<ConstantArray>(GV->getInitializer());
+  if (InitList == 0)
     return;
-  ConstantArray *InitList = cast<ConstantArray>(GV->getInitializer());
   for (unsigned i = 0, e = InitList->getNumOperands(); i != e; ++i) {
-    if (isa<ConstantAggregateZero>(InitList->getOperand(i)))
-      continue;
-    ConstantStruct *CS = cast<ConstantStruct>(InitList->getOperand(i));
+    ConstantStruct *CS = dyn_cast<ConstantStruct>(InitList->getOperand(i));
+    if (CS == 0) continue;
 
     Constant *FP = CS->getOperand(1);
     if (FP->isNullValue())
@@ -420,7 +418,7 @@ ExecutionEngine *ExecutionEngine::create(Module *M,
 ExecutionEngine *ExecutionEngine::createJIT(Module *M,
                                             std::string *ErrorStr,
                                             JITMemoryManager *JMM,
-                                            CodeGenOpt::Level OptLevel,
+                                            CodeGenOpt::Level OL,
                                             bool GVsWithCode,
                                             Reloc::Model RM,
                                             CodeModel::Model CMM) {
@@ -436,11 +434,14 @@ ExecutionEngine *ExecutionEngine::createJIT(Module *M,
   StringRef MCPU = "";
   SmallVector<std::string, 1> MAttrs;
 
+  Triple TT(M->getTargetTriple());
+  // TODO: permit custom TargetOptions here
   TargetMachine *TM =
-    EngineBuilder::selectTarget(M, MArch, MCPU, MAttrs, RM, CMM, ErrorStr);
+    EngineBuilder::selectTarget(TT, MArch, MCPU, MAttrs, TargetOptions(), RM,
+                                CMM, OL, ErrorStr);
   if (!TM || (ErrorStr && ErrorStr->length() > 0)) return 0;
 
-  return ExecutionEngine::JITCtor(M, ErrorStr, JMM, OptLevel, GVsWithCode, TM);
+  return ExecutionEngine::JITCtor(M, ErrorStr, JMM, GVsWithCode, TM);
 }
 
 ExecutionEngine *EngineBuilder::create() {
@@ -465,17 +466,25 @@ ExecutionEngine *EngineBuilder::create() {
   // Unless the interpreter was explicitly selected or the JIT is not linked,
   // try making a JIT.
   if (WhichEngine & EngineKind::JIT) {
-    if (TargetMachine *TM = EngineBuilder::selectTarget(M, MArch, MCPU, MAttrs,
+    Triple TT(M->getTargetTriple());
+    if (TargetMachine *TM = EngineBuilder::selectTarget(TT, MArch, MCPU, MAttrs,
+                                                        Options,
                                                         RelocModel, CMModel,
-                                                        ErrorStr)) {
+                                                        OptLevel, ErrorStr)) {
+      if (!TM->getTarget().hasJIT()) {
+        errs() << "WARNING: This target JIT is not designed for the host"
+               << " you are running.  If bad things happen, please choose"
+               << " a different -march switch.\n";
+      }
+
       if (UseMCJIT && ExecutionEngine::MCJITCtor) {
         ExecutionEngine *EE =
-          ExecutionEngine::MCJITCtor(M, ErrorStr, JMM, OptLevel,
+          ExecutionEngine::MCJITCtor(M, ErrorStr, JMM,
                                      AllocateGVsWithCode, TM);
         if (EE) return EE;
       } else if (ExecutionEngine::JITCtor) {
         ExecutionEngine *EE =
-          ExecutionEngine::JITCtor(M, ErrorStr, JMM, OptLevel,
+          ExecutionEngine::JITCtor(M, ErrorStr, JMM,
                                    AllocateGVsWithCode, TM);
         if (EE) return EE;
       }
@@ -944,30 +953,47 @@ void ExecutionEngine::LoadValueFromMemory(GenericValue &Result,
 void ExecutionEngine::InitializeMemory(const Constant *Init, void *Addr) {
   DEBUG(dbgs() << "JIT: Initializing " << Addr << " ");
   DEBUG(Init->dump());
-  if (isa<UndefValue>(Init)) {
+  if (isa<UndefValue>(Init))
     return;
-  } else if (const ConstantVector *CP = dyn_cast<ConstantVector>(Init)) {
+  
+  if (const ConstantVector *CP = dyn_cast<ConstantVector>(Init)) {
     unsigned ElementSize =
       getTargetData()->getTypeAllocSize(CP->getType()->getElementType());
     for (unsigned i = 0, e = CP->getNumOperands(); i != e; ++i)
       InitializeMemory(CP->getOperand(i), (char*)Addr+i*ElementSize);
     return;
-  } else if (isa<ConstantAggregateZero>(Init)) {
+  }
+  
+  if (isa<ConstantAggregateZero>(Init)) {
     memset(Addr, 0, (size_t)getTargetData()->getTypeAllocSize(Init->getType()));
     return;
-  } else if (const ConstantArray *CPA = dyn_cast<ConstantArray>(Init)) {
+  }
+  
+  if (const ConstantArray *CPA = dyn_cast<ConstantArray>(Init)) {
     unsigned ElementSize =
       getTargetData()->getTypeAllocSize(CPA->getType()->getElementType());
     for (unsigned i = 0, e = CPA->getNumOperands(); i != e; ++i)
       InitializeMemory(CPA->getOperand(i), (char*)Addr+i*ElementSize);
     return;
-  } else if (const ConstantStruct *CPS = dyn_cast<ConstantStruct>(Init)) {
+  }
+  
+  if (const ConstantStruct *CPS = dyn_cast<ConstantStruct>(Init)) {
     const StructLayout *SL =
       getTargetData()->getStructLayout(cast<StructType>(CPS->getType()));
     for (unsigned i = 0, e = CPS->getNumOperands(); i != e; ++i)
       InitializeMemory(CPS->getOperand(i), (char*)Addr+SL->getElementOffset(i));
     return;
-  } else if (Init->getType()->isFirstClassType()) {
+  }
+
+  if (const ConstantDataSequential *CDS =
+               dyn_cast<ConstantDataSequential>(Init)) {
+    // CDS is already laid out in host memory order.
+    StringRef Data = CDS->getRawDataValues();
+    memcpy(Addr, Data.data(), Data.size());
+    return;
+  }
+
+  if (Init->getType()->isFirstClassType()) {
     GenericValue Val = getConstantValue(Init);
     StoreValueToMemory(Val, (GenericValue*)Addr, Init->getType());
     return;
@@ -1123,6 +1149,6 @@ void ExecutionEngineState::AddressMapConfig::onDelete(ExecutionEngineState *EES,
 void ExecutionEngineState::AddressMapConfig::onRAUW(ExecutionEngineState *,
                                                     const GlobalValue *,
                                                     const GlobalValue *) {
-  assert(false && "The ExecutionEngine doesn't know how to handle a"
-         " RAUW on a value it has a global mapping for.");
+  llvm_unreachable("The ExecutionEngine doesn't know how to handle a"
+                   " RAUW on a value it has a global mapping for.");
 }

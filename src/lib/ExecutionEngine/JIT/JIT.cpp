@@ -206,7 +206,6 @@ void DarwinRegisterFrame(void* FrameBegin) {
 ExecutionEngine *JIT::createJIT(Module *M,
                                 std::string *ErrorStr,
                                 JITMemoryManager *JMM,
-                                CodeGenOpt::Level OptLevel,
                                 bool GVsWithCode,
                                 TargetMachine *TM) {
   // Try to register the program as a source of symbols to resolve against.
@@ -216,7 +215,7 @@ ExecutionEngine *JIT::createJIT(Module *M,
 
   // If the target supports JIT code generation, create the JIT.
   if (TargetJITInfo *TJ = TM->getJITInfo()) {
-    return new JIT(M, *TM, *TJ, JMM, OptLevel, GVsWithCode);
+    return new JIT(M, *TM, *TJ, JMM, GVsWithCode);
   } else {
     if (ErrorStr)
       *ErrorStr = "target does not support JIT code generation";
@@ -268,7 +267,7 @@ extern "C" {
 }
 
 JIT::JIT(Module *M, TargetMachine &tm, TargetJITInfo &tji,
-         JITMemoryManager *JMM, CodeGenOpt::Level OptLevel, bool GVsWithCode)
+         JITMemoryManager *JMM, bool GVsWithCode)
   : ExecutionEngine(M), TM(tm), TJI(tji), AllocateGVsWithCode(GVsWithCode),
     isAlreadyCodeGenerating(false) {
   setTargetData(TM.getTargetData());
@@ -288,7 +287,7 @@ JIT::JIT(Module *M, TargetMachine &tm, TargetJITInfo &tji,
 
   // Turn the machine code intermediate representation into bytes in memory that
   // may be executed.
-  if (TM.addPassesToEmitMachineCode(PM, *JCE, OptLevel)) {
+  if (TM.addPassesToEmitMachineCode(PM, *JCE)) {
     report_fatal_error("Target does not support machine code emission!");
   }
 
@@ -341,7 +340,7 @@ void JIT::addModule(Module *M) {
 
     // Turn the machine code intermediate representation into bytes in memory
     // that may be executed.
-    if (TM.addPassesToEmitMachineCode(PM, *JCE, CodeGenOpt::Default)) {
+    if (TM.addPassesToEmitMachineCode(PM, *JCE)) {
       report_fatal_error("Target does not support machine code emission!");
     }
 
@@ -372,7 +371,7 @@ bool JIT::removeModule(Module *M) {
 
     // Turn the machine code intermediate representation into bytes in memory
     // that may be executed.
-    if (TM.addPassesToEmitMachineCode(PM, *JCE, CodeGenOpt::Default)) {
+    if (TM.addPassesToEmitMachineCode(PM, *JCE)) {
       report_fatal_error("Target does not support machine code emission!");
     }
 
@@ -476,7 +475,6 @@ GenericValue JIT::runFunction(Function *F,
     case Type::FP128TyID:
     case Type::PPC_FP128TyID:
       llvm_unreachable("long double not supported yet");
-      return rv;
     case Type::PointerTyID:
       return PTOGV(((void*(*)())(intptr_t)FPtr)());
     }
@@ -708,9 +706,8 @@ void *JIT::getPointerToBasicBlock(BasicBlock *BB) {
   if (I != getBasicBlockAddressMap(locked).end()) {
     return I->second;
   } else {
-    assert(0 && "JIT does not have BB address for address-of-label, was"
-           " it eliminated by optimizer?");
-    return 0;
+    llvm_unreachable("JIT does not have BB address for address-of-label, was"
+                     " it eliminated by optimizer?");
   }
 }
 

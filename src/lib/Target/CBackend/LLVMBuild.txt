@@ -15,6 +15,9 @@
 ;
 ;===------------------------------------------------------------------------===;
 
+[common]
+subdirectories = TargetInfo
+
 [component_0]
 type = TargetGroup
 name = CBackend
@@ -26,4 +29,3 @@ name = CBackendCodeGen
 parent = CBackend
 required_libraries = Analysis CBackendInfo CodeGen Core MC Scalar Support Target TransformUtils
 add_to_library_groups = CBackend
-

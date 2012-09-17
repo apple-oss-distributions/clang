@@ -1,4 +1,4 @@
-//===- Thumb2InstrInfo.cpp - Thumb-2 Instruction Information ----*- C++ -*-===//
+//===-- Thumb2InstrInfo.cpp - Thumb-2 Instruction Information -------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -20,8 +20,8 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
-#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/MC/MCInst.h"
 #include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
@@ -33,6 +33,13 @@ OldT2IfCvt("old-thumb2-ifcvt", cl::Hidden,
 
 Thumb2InstrInfo::Thumb2InstrInfo(const ARMSubtarget &STI)
   : ARMBaseInstrInfo(STI), RI(*this, STI) {
+}
+
+/// getNoopForMachoTarget - Return the noop instruction to use for a noop.
+void Thumb2InstrInfo::getNoopForMachoTarget(MCInst &NopInst) const {
+  NopInst.setOpcode(ARM::tNOP);
+  NopInst.addOperand(MCOperand::CreateImm(ARMCC::AL));
+  NopInst.addOperand(MCOperand::CreateReg(0));
 }
 
 unsigned Thumb2InstrInfo::getUnindexedOpcode(unsigned Opc) const {
@@ -130,8 +137,7 @@ storeRegToStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
     MachineFunction &MF = *MBB.getParent();
     MachineFrameInfo &MFI = *MF.getFrameInfo();
     MachineMemOperand *MMO =
-      MF.getMachineMemOperand(
-                      MachinePointerInfo(PseudoSourceValue::getFixedStack(FI)),
+      MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FI),
                               MachineMemOperand::MOStore,
                               MFI.getObjectSize(FI),
                               MFI.getObjectAlignment(FI));
@@ -158,8 +164,7 @@ loadRegFromStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
     MachineFunction &MF = *MBB.getParent();
     MachineFrameInfo &MFI = *MF.getFrameInfo();
     MachineMemOperand *MMO =
-      MF.getMachineMemOperand(
-                      MachinePointerInfo(PseudoSourceValue::getFixedStack(FI)),
+      MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FI),
                               MachineMemOperand::MOLoad,
                               MFI.getObjectSize(FI),
                               MFI.getObjectAlignment(FI));
@@ -589,7 +594,7 @@ Thumb2InstrInfo::scheduleTwoAddrSource(MachineInstr *SrcMI,
     ARMCC::CondCodes NCC = llvm::getInstrPredicate(NMI, PredReg);
     if (!(NCC == CC || NCC == OCC) ||
         NMI->modifiesRegister(SrcReg, &TRI) ||
-        NMI->definesRegister(ARM::CPSR))
+        NMI->modifiesRegister(ARM::CPSR, &TRI))
       break;
     if (++NumInsts == 4)
       // Too many in a row!

@@ -10,23 +10,15 @@ add_llvm_library(LLVMSelectionDAG
   LegalizeTypesGeneric.cpp
   LegalizeVectorOps.cpp
   LegalizeVectorTypes.cpp
+  ResourcePriorityQueue.cpp
   ScheduleDAGFast.cpp
- ScheduleDAGRRList.cpp
+  ScheduleDAGRRList.cpp
   ScheduleDAGSDNodes.cpp
   SelectionDAG.cpp
   SelectionDAGBuilder.cpp
   SelectionDAGISel.cpp
   SelectionDAGPrinter.cpp
+  ScheduleDAGVLIW.cpp
   TargetLowering.cpp
   TargetSelectionDAGInfo.cpp
-  )
-
-add_llvm_library_dependencies(LLVMSelectionDAG
-  LLVMAnalysis
-  LLVMCodeGen
-  LLVMCore
-  LLVMMC
-  LLVMSupport
-  LLVMTarget
-  LLVMTransformUtils
   )

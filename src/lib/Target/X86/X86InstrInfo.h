@@ -1,4 +1,4 @@
-//===- X86InstrInfo.h - X86 Instruction Information ------------*- C++ -*- ===//
+//===-- X86InstrInfo.h - X86 Instruction Information ------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -344,6 +344,11 @@ public:
   getExecutionDomain(const MachineInstr *MI) const;
 
   void setExecutionDomain(MachineInstr *MI, unsigned Domain) const;
+
+  unsigned getPartialRegUpdateClearance(const MachineInstr *MI, unsigned OpNum,
+                                        const TargetRegisterInfo *TRI) const;
+  void breakPartialRegDependency(MachineBasicBlock::iterator MI, unsigned OpNum,
+                                 const TargetRegisterInfo *TRI) const;
 
   MachineInstr* foldMemoryOperandImpl(MachineFunction &MF,
                                       MachineInstr* MI,

@@ -56,8 +56,8 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
 
   TLSThreadInitSection
     = Ctx->getMachOSection("__DATA", "__thread_init",
-                           MCSectionMachO::S_THREAD_LOCAL_INIT_FUNCTION_POINTERS,
-                           SectionKind::getDataRel());
+                          MCSectionMachO::S_THREAD_LOCAL_INIT_FUNCTION_POINTERS,
+                          SectionKind::getDataRel());
 
   CStringSection // .cstring
     = Ctx->getMachOSection("__TEXT", "__cstring",
@@ -221,8 +221,8 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
 void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
   if (T.getArch() == Triple::x86) {
     PersonalityEncoding = (RelocM == Reloc::PIC_)
-      ? dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
-      : dwarf::DW_EH_PE_absptr;
+     ? dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
+     : dwarf::DW_EH_PE_absptr;
     LSDAEncoding = (RelocM == Reloc::PIC_)
       ? dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
       : dwarf::DW_EH_PE_absptr;
@@ -230,8 +230,8 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
       ? dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
       : dwarf::DW_EH_PE_absptr;
     TTypeEncoding = (RelocM == Reloc::PIC_)
-      ? dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
-      : dwarf::DW_EH_PE_absptr;
+     ? dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
+     : dwarf::DW_EH_PE_absptr;
   } else if (T.getArch() == Triple::x86_64) {
     FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
 
@@ -258,10 +258,17 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
     }
   }
 
+  // Solaris requires different flags for .eh_frame to seemingly every other
+  // platform.
+  EHSectionFlags = ELF::SHF_ALLOC;
+  if (T.getOS() == Triple::Solaris)
+    EHSectionFlags |= ELF::SHF_WRITE;
+
+
   // ELF
   BSSSection =
     Ctx->getELFSection(".bss", ELF::SHT_NOBITS,
-                       ELF::SHF_WRITE |ELF::SHF_ALLOC,
+                       ELF::SHF_WRITE | ELF::SHF_ALLOC,
                        SectionKind::getBSS());
 
   TextSection =
@@ -402,12 +409,22 @@ void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
                         COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
                         COFF::IMAGE_SCN_MEM_READ,
                         SectionKind::getReadOnly());
-  StaticCtorSection =
-    Ctx->getCOFFSection(".ctors",
-                        COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
-                        COFF::IMAGE_SCN_MEM_READ |
-                        COFF::IMAGE_SCN_MEM_WRITE,
-                        SectionKind::getDataRel());
+  if (T.getOS() == Triple::Win32) {
+    StaticCtorSection =
+      Ctx->getCOFFSection(".CRT$XCU",
+                          COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getReadOnly());
+  } else {
+    StaticCtorSection =
+      Ctx->getCOFFSection(".ctors",
+                          COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          COFF::IMAGE_SCN_MEM_READ |
+                          COFF::IMAGE_SCN_MEM_WRITE,
+                          SectionKind::getDataRel());
+  }
+
+
   StaticDtorSection =
     Ctx->getCOFFSection(".dtors",
                         COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
@@ -495,6 +512,12 @@ void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
                         COFF::IMAGE_SCN_MEM_READ |
                         COFF::IMAGE_SCN_MEM_WRITE,
                         SectionKind::getDataRel());
+  TLSDataSection =
+    Ctx->getCOFFSection(".tls$",
+                        COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                        COFF::IMAGE_SCN_MEM_READ |
+                        COFF::IMAGE_SCN_MEM_WRITE,
+                        SectionKind::getDataRel());
 }
 
 void MCObjectFileInfo::InitMCObjectFileInfo(StringRef TT, Reloc::Model relocm,
@@ -553,7 +576,7 @@ void MCObjectFileInfo::InitEHFrameSection() {
   else if (Env == IsELF)
     EHFrameSection =
       Ctx->getELFSection(".eh_frame", ELF::SHT_PROGBITS,
-                         ELF::SHF_ALLOC,
+                         EHSectionFlags,
                          SectionKind::getDataRel());
   else
     EHFrameSection =

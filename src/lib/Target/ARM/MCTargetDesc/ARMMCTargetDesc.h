@@ -31,7 +31,7 @@ class raw_ostream;
 extern Target TheARMTarget, TheThumbTarget;
 
 namespace ARM_MC {
-  std::string ParseARMTriple(StringRef TT);
+  std::string ParseARMTriple(StringRef TT, StringRef CPU);
 
   /// createARMMCSubtargetInfo - Create a ARM MCSubtargetInfo instance.
   /// This is exposed so Asm parser, etc. do not need to go through
@@ -45,6 +45,10 @@ MCCodeEmitter *createARMMCCodeEmitter(const MCInstrInfo &MCII,
                                       MCContext &Ctx);
 
 MCAsmBackend *createARMAsmBackend(const Target &T, StringRef TT);
+
+/// createARMELFObjectWriter - Construct an ELF Mach-O object writer.
+MCObjectWriter *createARMELFObjectWriter(raw_ostream &OS,
+                                         uint8_t OSABI);
 
 /// createARMMachObjectWriter - Construct an ARM Mach-O object writer.
 MCObjectWriter *createARMMachObjectWriter(raw_ostream &OS,

@@ -1,4 +1,4 @@
-//===- MBlazeRegisterInfo.cpp - MBlaze Register Information -== -*- C++ -*-===//
+//===-- MBlazeRegisterInfo.cpp - MBlaze Register Information --------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -184,10 +184,8 @@ unsigned MBlazeRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
 
 unsigned MBlazeRegisterInfo::getEHExceptionRegister() const {
   llvm_unreachable("What is the exception register");
-  return 0;
 }
 
 unsigned MBlazeRegisterInfo::getEHHandlerRegister() const {
   llvm_unreachable("What is the exception handler register");
-  return 0;
 }

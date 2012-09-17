@@ -17,6 +17,7 @@
 #include "FixedLenDecoderEmitter.h"
 #include "CodeGenTarget.h"
 #include "llvm/TableGen/Record.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -71,7 +72,7 @@ static void dumpBits(raw_ostream &o, BitsInit &bits) {
       o << "_";
       break;
     default:
-      assert(0 && "unexpected return value from bitFromBits");
+      llvm_unreachable("unexpected return value from bitFromBits");
     }
   }
 }
@@ -285,8 +286,20 @@ protected:
   void insnWithID(insn_t &Insn, unsigned Opcode) const {
     BitsInit &Bits = getBitsField(*AllInstructions[Opcode]->TheDef, "Inst");
 
-    for (unsigned i = 0; i < BitWidth; ++i)
-      Insn.push_back(bitFromBits(Bits, i));
+    // We may have a SoftFail bitmask, which specifies a mask where an encoding
+    // may differ from the value in "Inst" and yet still be valid, but the
+    // disassembler should return SoftFail instead of Success.
+    //
+    // This is used for marking UNPREDICTABLE instructions in the ARM world.
+    BitsInit *SFBits =
+      AllInstructions[Opcode]->TheDef->getValueAsBitsInit("SoftFail");
+
+    for (unsigned i = 0; i < BitWidth; ++i) {
+      if (SFBits && bitFromBits(*SFBits, i) == BIT_TRUE)
+        Insn.push_back(BIT_UNSET);
+      else
+        Insn.push_back(bitFromBits(Bits, i));
+    }
   }
 
   // Returns the record name.
@@ -333,6 +346,8 @@ protected:
   // Emits code to check the Predicates member of an instruction are true.
   // Returns true if predicate matches were emitted, false otherwise.
   bool emitPredicateMatch(raw_ostream &o, unsigned &Indentation,unsigned Opc);
+
+  void emitSoftFailCheck(raw_ostream &o, unsigned Indentation, unsigned Opc);
 
   // Emits code to decode the singleton.  Return true if we have matched all the
   // well-known bits.
@@ -573,8 +588,9 @@ unsigned Filter::usefulness() const {
 void FilterChooser::emitTop(raw_ostream &o, unsigned Indentation,
                             std::string Namespace) {
   o.indent(Indentation) <<
-    "static MCDisassembler::DecodeStatus decode" << Namespace << "Instruction" << BitWidth
-    << "(MCInst &MI, uint" << BitWidth << "_t insn, uint64_t Address, "
+    "static MCDisassembler::DecodeStatus decode" << Namespace << "Instruction"
+    << BitWidth << "(MCInst &MI, uint" << BitWidth
+    << "_t insn, uint64_t Address, "
     << "const void *Decoder, const MCSubtargetInfo &STI) {\n";
   o.indent(Indentation) << "  unsigned tmp = 0;\n";
   o.indent(Indentation) << "  (void)tmp;\n";
@@ -698,9 +714,7 @@ unsigned FilterChooser::getIslands(std::vector<unsigned> &StartBits,
     Val = Value(Insn[i]);
     bool Filtered = PositionFiltered(i);
     switch (State) {
-    default:
-      assert(0 && "Unreachable code!");
-      break;
+    default: llvm_unreachable("Unreachable code!");
     case 0:
     case 1:
       if (Filtered || Val == -1)
@@ -759,7 +773,8 @@ void FilterChooser::emitBinaryParser(raw_ostream &o, unsigned &Indentation,
 
   if (Decoder != "")
     o.indent(Indentation) << "  " << Emitter->GuardPrefix << Decoder
-                          << "(MI, tmp, Address, Decoder)" << Emitter->GuardPostfix << "\n";
+                          << "(MI, tmp, Address, Decoder)"
+                          << Emitter->GuardPostfix << "\n";
   else
     o.indent(Indentation) << "  MI.addOperand(MCOperand::CreateImm(tmp));\n";
 
@@ -776,7 +791,8 @@ static void emitSinglePredicateMatch(raw_ostream &o, StringRef str,
 
 bool FilterChooser::emitPredicateMatch(raw_ostream &o, unsigned &Indentation,
                                            unsigned Opc) {
-  ListInit *Predicates = AllInstructions[Opc]->TheDef->getValueAsListInit("Predicates");
+  ListInit *Predicates =
+    AllInstructions[Opc]->TheDef->getValueAsListInit("Predicates");
   for (unsigned i = 0; i < Predicates->getSize(); ++i) {
     Record *Pred = Predicates->getElementAsRecord(i);
     if (!Pred->getValue("AssemblerMatcherPredicate"))
@@ -802,6 +818,66 @@ bool FilterChooser::emitPredicateMatch(raw_ostream &o, unsigned &Indentation,
   return Predicates->getSize() > 0;
 }
 
+void FilterChooser::emitSoftFailCheck(raw_ostream &o, unsigned Indentation,
+                                      unsigned Opc) {
+  BitsInit *SFBits =
+    AllInstructions[Opc]->TheDef->getValueAsBitsInit("SoftFail");
+  if (!SFBits) return;
+  BitsInit *InstBits = AllInstructions[Opc]->TheDef->getValueAsBitsInit("Inst");
+
+  APInt PositiveMask(BitWidth, 0ULL);
+  APInt NegativeMask(BitWidth, 0ULL);
+  for (unsigned i = 0; i < BitWidth; ++i) {
+    bit_value_t B = bitFromBits(*SFBits, i);
+    bit_value_t IB = bitFromBits(*InstBits, i);
+
+    if (B != BIT_TRUE) continue;
+
+    switch (IB) {
+    case BIT_FALSE:
+      // The bit is meant to be false, so emit a check to see if it is true.
+      PositiveMask.setBit(i);
+      break;
+    case BIT_TRUE:
+      // The bit is meant to be true, so emit a check to see if it is false.
+      NegativeMask.setBit(i);
+      break;
+    default:
+      // The bit is not set; this must be an error!
+      StringRef Name = AllInstructions[Opc]->TheDef->getName();
+      errs() << "SoftFail Conflict: bit SoftFail{" << i << "} in "
+             << Name
+             << " is set but Inst{" << i <<"} is unset!\n"
+             << "  - You can only mark a bit as SoftFail if it is fully defined"
+             << " (1/0 - not '?') in Inst\n";
+      o << "#error SoftFail Conflict, " << Name << "::SoftFail{" << i 
+        << "} set but Inst{" << i << "} undefined!\n";
+    }
+  }
+
+  bool NeedPositiveMask = PositiveMask.getBoolValue();
+  bool NeedNegativeMask = NegativeMask.getBoolValue();
+
+  if (!NeedPositiveMask && !NeedNegativeMask)
+    return;
+
+  std::string PositiveMaskStr = PositiveMask.toString(16, /*signed=*/false);
+  std::string NegativeMaskStr = NegativeMask.toString(16, /*signed=*/false);
+  StringRef BitExt = "";
+  if (BitWidth > 32)
+    BitExt = "ULL";
+
+  o.indent(Indentation) << "if (";
+  if (NeedPositiveMask)
+    o << "insn & 0x" << PositiveMaskStr << BitExt;
+  if (NeedPositiveMask && NeedNegativeMask)
+    o << " || ";
+  if (NeedNegativeMask)
+    o << "~insn & 0x" << NegativeMaskStr << BitExt;
+  o << ")\n";
+  o.indent(Indentation+2) << "S = MCDisassembler::SoftFail;\n";
+}
+
 // Emits code to decode the singleton.  Return true if we have matched all the
 // well-known bits.
 bool FilterChooser::emitSingletonDecoder(raw_ostream &o, unsigned &Indentation,
@@ -824,6 +900,7 @@ bool FilterChooser::emitSingletonDecoder(raw_ostream &o, unsigned &Indentation,
     if (!emitPredicateMatch(o, Indentation, Opc))
       o << "1";
     o << ") {\n";
+    emitSoftFailCheck(o, Indentation+2, Opc);
     o.indent(Indentation) << "  MI.setOpcode(" << Opc << ");\n";
     std::vector<OperandInfo>& InsnOperands = Operands[Opc];
     for (std::vector<OperandInfo>::iterator
@@ -831,15 +908,16 @@ bool FilterChooser::emitSingletonDecoder(raw_ostream &o, unsigned &Indentation,
       // If a custom instruction decoder was specified, use that.
       if (I->numFields() == 0 && I->Decoder.size()) {
         o.indent(Indentation) << "  " << Emitter->GuardPrefix << I->Decoder
-                              << "(MI, insn, Address, Decoder)" << Emitter->GuardPostfix << "\n";
+                              << "(MI, insn, Address, Decoder)"
+                              << Emitter->GuardPostfix << "\n";
         break;
       }
 
       emitBinaryParser(o, Indentation, *I);
     }
 
-    o.indent(Indentation) << "  return " << Emitter->ReturnOK << "; // " << nameWithID(Opc)
-                          << '\n';
+    o.indent(Indentation) << "  return " << Emitter->ReturnOK << "; // "
+                          << nameWithID(Opc) << '\n';
     o.indent(Indentation) << "}\n"; // Closing predicate block.
     return true;
   }
@@ -873,6 +951,7 @@ bool FilterChooser::emitSingletonDecoder(raw_ostream &o, unsigned &Indentation,
     else
       o << ") {\n";
   }
+  emitSoftFailCheck(o, Indentation+2, Opc);
   o.indent(Indentation) << "  MI.setOpcode(" << Opc << ");\n";
   std::vector<OperandInfo>& InsnOperands = Operands[Opc];
   for (std::vector<OperandInfo>::iterator
@@ -880,14 +959,15 @@ bool FilterChooser::emitSingletonDecoder(raw_ostream &o, unsigned &Indentation,
     // If a custom instruction decoder was specified, use that.
     if (I->numFields() == 0 && I->Decoder.size()) {
       o.indent(Indentation) << "  " << Emitter->GuardPrefix << I->Decoder
-                            << "(MI, insn, Address, Decoder)" << Emitter->GuardPostfix << "\n";
+                            << "(MI, insn, Address, Decoder)"
+                            << Emitter->GuardPostfix << "\n";
       break;
     }
 
     emitBinaryParser(o, Indentation, *I);
   }
-  o.indent(Indentation) << "  return " << Emitter->ReturnOK << "; // " << nameWithID(Opc)
-                        << '\n';
+  o.indent(Indentation) << "  return " << Emitter->ReturnOK << "; // "
+                        << nameWithID(Opc) << '\n';
   o.indent(Indentation) << "}\n";
 
   return false;
@@ -1069,7 +1149,7 @@ bool FilterChooser::filterProcessor(bool AllowMixed, bool Greedy) {
         RA = ATTR_MIXED;
         break;
       default:
-        assert(0 && "Unexpected bitAttr!");
+        llvm_unreachable("Unexpected bitAttr!");
       }
       break;
     case ATTR_ALL_SET:
@@ -1090,7 +1170,7 @@ bool FilterChooser::filterProcessor(bool AllowMixed, bool Greedy) {
         RA = ATTR_MIXED;
         break;
       default:
-        assert(0 && "Unexpected bitAttr!");
+        llvm_unreachable("Unexpected bitAttr!");
       }
       break;
     case ATTR_MIXED:
@@ -1112,13 +1192,13 @@ bool FilterChooser::filterProcessor(bool AllowMixed, bool Greedy) {
       case ATTR_MIXED:
         break;
       default:
-        assert(0 && "Unexpected bitAttr!");
+        llvm_unreachable("Unexpected bitAttr!");
       }
       break;
     case ATTR_ALL_UNSET:
-      assert(0 && "regionAttr state machine has no ATTR_UNSET state");
+      llvm_unreachable("regionAttr state machine has no ATTR_UNSET state");
     case ATTR_FILTERED:
-      assert(0 && "regionAttr state machine has no ATTR_FILTERED state");
+      llvm_unreachable("regionAttr state machine has no ATTR_FILTERED state");
     }
   }
 
