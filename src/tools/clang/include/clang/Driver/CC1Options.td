@@ -546,6 +546,8 @@ def ffast_math : Flag<"-ffast-math">,
   HelpText<"Enable the *frontend*'s 'fast-math' mode. This has no effect on "
            "optimizations, but provides a preprocessor macro __FAST_MATH__ the "
            "same as GCC's -ffast-math flag.">;
+def ffinite_math_only : Flag<"-ffinite-math-only">,
+  HelpText<"Optimize assuming that floating-point values are finite">;
 def ffreestanding : Flag<"-ffreestanding">,
   HelpText<"Assert that the compilation takes place in a freestanding environment">;
 def fgnu_runtime : Flag<"-fgnu-runtime">,

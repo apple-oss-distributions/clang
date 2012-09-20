@@ -185,6 +185,12 @@ private:
   } ARCRuntimeForSimulator;
 
   mutable enum {
+    SubscriptSimulator_None,
+    SubscriptSimulator_NotAvailable,
+    SubscriptSimulator_Available
+  } SubscriptRuntimeForSimulator;
+
+  mutable enum {
     LibCXXSimulator_None,
     LibCXXSimulator_NotAvailable,
     LibCXXSimulator_Available
@@ -372,7 +378,7 @@ public:
   virtual unsigned GetDefaultStackProtectorLevel(bool KernelOrKext) const {
     // Stack protectors default to on for user code on 10.5,
     // and for everything in 10.6 and beyond
-    return !isTargetIPhoneOS() &&
+    return isTargetIPhoneOS() ||
       (!isMacosxVersionLT(10, 6) ||
          (!isMacosxVersionLT(10, 5) && !KernelOrKext));
   }

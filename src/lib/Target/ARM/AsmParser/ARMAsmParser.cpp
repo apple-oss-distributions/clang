@@ -3284,26 +3284,51 @@ parseMSRMaskOperand(SmallVectorImpl<MCParsedAsmOperand*> &Operands) {
     // See ARMv6-M 10.1.1
     std::string Name = Mask.lower();
     unsigned FlagsVal = StringSwitch<unsigned>(Name)
-      .Case("apsr", 0)
-      .Case("iapsr", 1)
-      .Case("eapsr", 2)
-      .Case("xpsr", 3)
-      .Case("ipsr", 5)
-      .Case("epsr", 6)
-      .Case("iepsr", 7)
-      .Case("msp", 8)
-      .Case("psp", 9)
-      .Case("primask", 16)
-      .Case("basepri", 17)
-      .Case("basepri_max", 18)
-      .Case("faultmask", 19)
-      .Case("control", 20)
+      // Note: in the documentation:
+      //  ARM deprecates using MSR APSR without a _<bits> qualifier as an alias
+      //  for MSR APSR_nzcvq.
+      // but we do make it an alias here.  This is so to get the "mask encoding"
+      // bits correct on MSR APSR writes.
+      //
+      // FIXME: Note the 0xc00 "mask encoding" bits version of the registers
+      // should really only be allowed when writing a special register.  Note
+      // they get dropped in the MRS instruction reading a special register as
+      // the SYSm field is only 8 bits.
+      //
+      // FIXME: the _g and _nzcvqg versions are only allowed if the processor
+      // includes the DSP extension but that is not checked.
+      .Case("apsr", 0x800)
+      .Case("apsr_nzcvq", 0x800)
+      .Case("apsr_g", 0x400)
+      .Case("apsr_nzcvqg", 0xc00)
+      .Case("iapsr", 0x801)
+      .Case("iapsr_nzcvq", 0x801)
+      .Case("iapsr_g", 0x401)
+      .Case("iapsr_nzcvqg", 0xc01)
+      .Case("eapsr", 0x802)
+      .Case("eapsr_nzcvq", 0x802)
+      .Case("eapsr_g", 0x402)
+      .Case("eapsr_nzcvqg", 0xc02)
+      .Case("xpsr", 0x803)
+      .Case("xpsr_nzcvq", 0x803)
+      .Case("xpsr_g", 0x403)
+      .Case("xpsr_nzcvqg", 0xc03)
+      .Case("ipsr", 0x805)
+      .Case("epsr", 0x806)
+      .Case("iepsr", 0x807)
+      .Case("msp", 0x808)
+      .Case("psp", 0x809)
+      .Case("primask", 0x810)
+      .Case("basepri", 0x811)
+      .Case("basepri_max", 0x812)
+      .Case("faultmask", 0x813)
+      .Case("control", 0x814)
       .Default(~0U);
 
     if (FlagsVal == ~0U)
       return MatchOperand_NoMatch;
 
-    if (!hasV7Ops() && FlagsVal >= 17 && FlagsVal <= 19)
+    if (!hasV7Ops() && FlagsVal >= 0x811 && FlagsVal <= 0x813)
       // basepri, basepri_max and faultmask only valid for V7m.
       return MatchOperand_NoMatch;
 

@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Analysis/Analyses/LiveVariables.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ObjCMessage.h"
@@ -216,6 +217,11 @@ bool ExprEngine::shouldInlineDecl(const FunctionDecl *FD, ExplodedNode *Pred) {
     return false;
 
   if (CalleeCFG->getNumBlockIDs() > AMgr.InlineMaxFunctionSize)
+    return false;
+
+  // It is possible that the live variables analysis cannot be
+  // run.  If so, bail out.
+  if (!CalleeADC->getAnalysis<RelaxedLiveVariables>())
     return false;
 
   return true;

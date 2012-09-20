@@ -30,7 +30,7 @@ class StringRef;
 class ARMSubtarget : public ARMGenSubtargetInfo {
 protected:
   enum ARMProcFamilyEnum {
-    Others, CortexA8, CortexA9
+    Others, CortexA8, CortexA9, Swift
   };
 
   /// ARMProcFamily - ARM processor family: Cortex-A8, Cortex-A9, and others.
@@ -56,6 +56,20 @@ protected:
   /// specified. Use the method useNEONForSinglePrecisionFP() to
   /// determine if NEON should actually be used.
   bool UseNEONForSinglePrecisionFP;
+
+  /// UseMulOps - True if non-microcoded fused integer multiply-add and
+  /// multiply-subtract instructions should be used.
+  bool UseMulOps;
+
+  /// UseVLD1 - True if the target prefers to use vld1 instructions instead of
+  /// vldm to load vectors.  The vld1 instructions will be given alignment
+  /// hints.
+  bool UseVLD1;
+
+  /// UseVST1 - True if the target prefers to use vst1 instructions insteac of
+  /// vstm to store vectors.  The vst1 instructions will be given alignment
+  /// hints.
+  bool UseVST1;
 
   /// SlowFPVMLx - If the VFP2 / NEON instructions are available, indicates
   /// whether the FP VML[AS] instructions are slow (if so, don't use them).
@@ -107,6 +121,9 @@ protected:
 
   /// HasHardwareDivide - True if subtarget supports [su]div
   bool HasHardwareDivide;
+
+  /// HasHardwareDivideInARM - True if subtarget supports [su]div in ARM mode
+  bool HasHardwareDivideInARM;
 
   /// HasT2ExtractPack - True if subtarget supports thumb2 extract/pack
   /// instructions.
@@ -195,8 +212,10 @@ protected:
   bool hasV6T2Ops() const { return HasV6T2Ops; }
   bool hasV7Ops()   const { return HasV7Ops;  }
 
+  bool isCortexA7() const { return CPUString == "cortex-a7"; }
   bool isCortexA8() const { return ARMProcFamily == CortexA8; }
   bool isCortexA9() const { return ARMProcFamily == CortexA9; }
+  bool isSwift()    const { return ARMProcFamily == Swift; }
   bool isCortexM3() const { return CPUString == "cortex-m3"; }
 
   bool hasARMOps() const { return !NoARM; }
@@ -209,8 +228,12 @@ protected:
     return hasNEON() && UseNEONForSinglePrecisionFP; }
 
   bool hasDivide() const { return HasHardwareDivide; }
+  bool hasDivideInARMMode() const { return HasHardwareDivideInARM; }
   bool hasT2ExtractPack() const { return HasT2ExtractPack; }
   bool hasDataBarrier() const { return HasDataBarrier; }
+  bool useMulOps() const { return UseMulOps; }
+  bool useVLD1() const { return UseVLD1; }
+  bool useVST1() const { return UseVST1; }
   bool useFPVMLx() const { return !SlowFPVMLx; }
   bool hasVMLxForwarding() const { return HasVMLxForwarding; }
   bool isFPBrccSlow() const { return SlowFPBrcc; }

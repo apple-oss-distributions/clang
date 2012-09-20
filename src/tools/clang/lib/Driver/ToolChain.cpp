@@ -119,6 +119,8 @@ static const char *getARMTargetCPU(const ArgList &Args,
     return "cortex-a8";
   if (MArch == "armv7f" || MArch == "armv7-f")
     return "cortex-a9-mp";
+  if (MArch == "armv7s" || MArch == "armv7-s")
+    return "swift";
   if (MArch == "armv7r" || MArch == "armv7-r")
     return "cortex-r4";
   if (MArch == "armv7m" || MArch == "armv7-m")
@@ -164,7 +166,7 @@ static const char *getLLVMArchSuffixForARM(StringRef CPU) {
   if (CPU == "arm1156t2-s" || CPU == "arm1156t2f-s")
     return "v6t2";
 
-  if (CPU == "cortex-a8" || CPU == "cortex-a9")
+  if (CPU == "cortex-a7" || CPU == "cortex-a8" || CPU == "cortex-a9")
     return "v7";
 
   if (CPU == "cortex-a9-mp")
@@ -179,6 +181,9 @@ static const char *getLLVMArchSuffixForARM(StringRef CPU) {
   if (CPU == "cortex-m0")
     return "v6m";
 
+
+  if (CPU == "swift")
+    return "v7s";
 
   return "";
 }

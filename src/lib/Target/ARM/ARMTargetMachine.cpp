@@ -150,7 +150,8 @@ bool ARMPassConfig::addPreRegAlloc() {
   // FIXME: temporarily disabling load / store optimization pass for Thumb1.
   if (getOptLevel() != CodeGenOpt::None && !getARMSubtarget().isThumb1Only())
     PM.add(createARMLoadStoreOptimizationPass(true));
-  if (getOptLevel() != CodeGenOpt::None && getARMSubtarget().isCortexA9())
+  if (getOptLevel() != CodeGenOpt::None &&
+      (getARMSubtarget().isCortexA9()))
     PM.add(createMLxExpansionPass());
   return true;
 }

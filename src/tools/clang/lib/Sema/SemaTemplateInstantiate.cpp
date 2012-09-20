@@ -1714,8 +1714,6 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
                        const MultiLevelTemplateArgumentList &TemplateArgs,
                        TemplateSpecializationKind TSK,
                        bool Complain) {
-  bool Invalid = false;
-
   CXXRecordDecl *PatternDef
     = cast_or_null<CXXRecordDecl>(Pattern->getDefinition());
   if (!PatternDef || PatternDef->isBeingDefined()) {
@@ -1789,7 +1787,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
 
   // Do substitution on the base class specifiers.
   if (SubstBaseSpecifiers(Instantiation, Pattern, TemplateArgs))
-    Invalid = true;
+    Instantiation->setInvalidDecl();
 
   TemplateDeclInstantiator Instantiator(*this, Instantiation, TemplateArgs);
   SmallVector<Decl*, 4> Fields;
@@ -1815,7 +1813,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
       continue;
 
     if ((*Member)->isInvalidDecl()) {
-      Invalid = true; 
+      Instantiation->setInvalidDecl(); 
       continue;
     }
 
@@ -1828,11 +1826,12 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
           FieldsWithMemberInitializers.push_back(std::make_pair(OldField,
                                                                 Field));
       } else if (NewMember->isInvalidDecl())
-        Invalid = true;
+        Instantiation->setInvalidDecl();
     } else {
       // FIXME: Eventually, a NULL return will mean that one of the
-      // instantiations was a semantic disaster, and we'll want to set Invalid =
-      // true. For now, we expect to skip some members that we can't yet handle.
+      // instantiations was a semantic disaster, and we'll want to mark the
+      // declaration invalid.
+      // For now, we expect to skip some members that we can't yet handle.
     }
   }
 
@@ -1884,9 +1883,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
     Instantiation->setRBraceLoc(Pattern->getRBraceLoc());
   }
 
-  if (Instantiation->isInvalidDecl())
-    Invalid = true;
-  else {
+  if (!Instantiation->isInvalidDecl()) {
     // Instantiate any out-of-line class template partial
     // specializations now.
     for (TemplateDeclInstantiator::delayed_partial_spec_iterator 
@@ -1896,7 +1893,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
       if (!Instantiator.InstantiateClassTemplatePartialSpecialization(
                                                                 P->first,
                                                                 P->second)) {
-        Invalid = true;
+        Instantiation->setInvalidDecl();
         break;
       }
     }
@@ -1905,7 +1902,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
   // Exit the scope of this instantiation.
   SavedContext.pop();
 
-  if (!Invalid) {
+  if (!Instantiation->isInvalidDecl()) {
     Consumer.HandleTagDeclDefinition(Instantiation);
 
     // Always emit the vtable for an explicit instantiation definition
@@ -1914,7 +1911,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
       MarkVTableUsed(PointOfInstantiation, Instantiation, true);
   }
 
-  return Invalid;
+  return Instantiation->isInvalidDecl();
 }
 
 namespace {

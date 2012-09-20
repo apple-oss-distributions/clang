@@ -49,6 +49,11 @@ static cl::opt<bool>
 WidenVMOVS("widen-vmovs", cl::Hidden, cl::init(true),
            cl::desc("Widen ARM vmovs to vmovd when possible"));
 
+static cl::opt<unsigned>
+SwiftPartialUpdateClearance("swift-partial-update-clearance",
+     cl::Hidden, cl::init(12),
+     cl::desc("Clearance before partial register updates"));
+
 /// ARM_MLxEntry - Record information about MLA / MLS instructions.
 struct ARM_MLxEntry {
   unsigned MLxOpc;     // MLA / MLS opcode
@@ -1312,7 +1317,6 @@ bool ARMBaseInstrInfo::areLoadsFromSameBasePtr(SDNode *Load1, SDNode *Load2,
   case ARM::VLDRD:
   case ARM::VLDRS:
   case ARM::t2LDRi8:
-  case ARM::t2LDRDi8:
   case ARM::t2LDRSHi8:
   case ARM::t2LDRi12:
   case ARM::t2LDRSHi12:
@@ -1424,7 +1428,10 @@ isProfitableToIfCvt(MachineBasicBlock &MBB,
   UnpredCost += 1; // The branch itself
   UnpredCost += Subtarget.getMispredictionPenalty() / 10;
 
-  return (NumCycles + ExtraPredCycles) <= UnpredCost;
+  if ((NumCycles + ExtraPredCycles) > UnpredCost)
+    return false;
+
+  return true;
 }
 
 bool ARMBaseInstrInfo::
@@ -1448,7 +1455,18 @@ isProfitableToIfCvt(MachineBasicBlock &TMBB,
   UnpredCost += 1; // The branch itself
   UnpredCost += Subtarget.getMispredictionPenalty() / 10;
 
-  return (TCycles + FCycles + TExtra + FExtra) <= UnpredCost;
+  if ((TCycles + FCycles + TExtra + FExtra) > UnpredCost)
+    return false;
+
+  return true;
+}
+
+bool
+ARMBaseInstrInfo::isProfitableToUnpredicate(MachineBasicBlock &TMBB,
+                                            MachineBasicBlock &FMBB) const {
+  // Reduce false anti-dependencies to let Swift's out-of-order execution
+  // engine do its thing.
+  return Subtarget.isSwift();
 }
 
 /// getInstrPredicate - If instruction is predicated, returns its predicate
@@ -2041,6 +2059,228 @@ bool ARMBaseInstrInfo::FoldImmediate(MachineInstr *UseMI,
   return true;
 }
 
+static unsigned getNumMicroOpsSwiftLdSt(const InstrItineraryData *ItinData,
+                                        const MachineInstr *MI) {
+  switch (MI->getOpcode()) {
+  default: {
+    const MCInstrDesc &Desc = MI->getDesc();
+    unsigned Class = Desc.getSchedClass();
+    return ItinData->Itineraries[Class].NumMicroOps;
+  }
+
+  case ARM::LDRrs:
+  case ARM::LDRBrs:
+  case ARM::STRrs:
+  case ARM::STRBrs: {
+    unsigned ShOpVal = MI->getOperand(3).getImm();
+    bool isSub = ARM_AM::getAM2Op(ShOpVal) == ARM_AM::sub;
+    unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+    if (!isSub &&
+        (ShImm == 0 ||
+         ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+          ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl)))
+      return 1;
+    return 2;
+  }
+
+  case ARM::LDRH:
+  case ARM::STRH: {
+    if (!MI->getOperand(2).getReg())
+      return 1;
+
+    unsigned ShOpVal = MI->getOperand(3).getImm();
+    bool isSub = ARM_AM::getAM2Op(ShOpVal) == ARM_AM::sub;
+    unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+    if (!isSub &&
+        (ShImm == 0 ||
+         ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+          ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl)))
+      return 1;
+    return 2;
+  }
+
+  case ARM::LDRSB:
+  case ARM::LDRSH:
+    return (ARM_AM::getAM3Op(MI->getOperand(3).getImm()) == ARM_AM::sub) ? 3:2;
+
+  case ARM::LDRSB_POST:
+  case ARM::LDRSH_POST: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rm = MI->getOperand(3).getReg();
+    return (Rt == Rm) ? 4 : 3;
+  }
+
+  case ARM::LDR_PRE_REG:
+  case ARM::LDRB_PRE_REG: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rm = MI->getOperand(3).getReg();
+    if (Rt == Rm)
+      return 3;
+    unsigned ShOpVal = MI->getOperand(4).getImm();
+    bool isSub = ARM_AM::getAM2Op(ShOpVal) == ARM_AM::sub;
+    unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+    if (!isSub &&
+        (ShImm == 0 ||
+         ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+          ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl)))
+      return 2;
+    return 3;
+  }
+
+  case ARM::STR_PRE_REG:
+  case ARM::STRB_PRE_REG: {
+    unsigned ShOpVal = MI->getOperand(4).getImm();
+    bool isSub = ARM_AM::getAM2Op(ShOpVal) == ARM_AM::sub;
+    unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+    if (!isSub &&
+        (ShImm == 0 ||
+         ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+          ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl)))
+      return 2;
+    return 3;
+  }
+
+  case ARM::LDRH_PRE:
+  case ARM::STRH_PRE: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rm = MI->getOperand(3).getReg();
+    if (!Rm)
+      return 2;
+    if (Rt == Rm)
+      return 3;
+    return (ARM_AM::getAM3Op(MI->getOperand(4).getImm()) == ARM_AM::sub)
+      ? 3 : 2;
+  }
+
+  case ARM::LDR_POST_REG:
+  case ARM::LDRB_POST_REG:
+  case ARM::LDRH_POST: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rm = MI->getOperand(3).getReg();
+    return (Rt == Rm) ? 3 : 2;
+  }
+
+  case ARM::LDR_PRE_IMM:
+  case ARM::LDRB_PRE_IMM:
+  case ARM::LDR_POST_IMM:
+  case ARM::LDRB_POST_IMM:
+  case ARM::STRB_POST_IMM:
+  case ARM::STRB_POST_REG:
+  case ARM::STRB_PRE_IMM:
+  case ARM::STRH_POST:
+  case ARM::STR_POST_IMM:
+  case ARM::STR_POST_REG:
+  case ARM::STR_PRE_IMM:
+    return 2;
+
+  case ARM::LDRSB_PRE:
+  case ARM::LDRSH_PRE: {
+    unsigned Rm = MI->getOperand(3).getReg();
+    if (Rm == 0)
+      return 3;
+    unsigned Rt = MI->getOperand(0).getReg();
+    if (Rt == Rm)
+      return 4;
+    unsigned ShOpVal = MI->getOperand(4).getImm();
+    bool isSub = ARM_AM::getAM2Op(ShOpVal) == ARM_AM::sub;
+    unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+    if (!isSub &&
+        (ShImm == 0 ||
+         ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+          ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl)))
+      return 3;
+    return 4;
+  }
+
+  case ARM::LDRD: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rn = MI->getOperand(2).getReg();
+    unsigned Rm = MI->getOperand(3).getReg();
+    if (Rm)
+      return (ARM_AM::getAM3Op(MI->getOperand(4).getImm()) == ARM_AM::sub) ?4:3;
+    return (Rt == Rn) ? 3 : 2;
+  }
+
+  case ARM::STRD: {
+    unsigned Rm = MI->getOperand(3).getReg();
+    if (Rm)
+      return (ARM_AM::getAM3Op(MI->getOperand(4).getImm()) == ARM_AM::sub) ?4:3;
+    return 2;
+  }
+
+  case ARM::LDRD_POST:
+  case ARM::t2LDRD_POST:
+    return 3;
+
+  case ARM::STRD_POST:
+  case ARM::t2STRD_POST:
+    return 4;
+
+  case ARM::LDRD_PRE: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rn = MI->getOperand(3).getReg();
+    unsigned Rm = MI->getOperand(4).getReg();
+    if (Rm)
+      return (ARM_AM::getAM3Op(MI->getOperand(5).getImm()) == ARM_AM::sub) ?5:4;
+    return (Rt == Rn) ? 4 : 3;
+  }
+
+  case ARM::t2LDRD_PRE: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rn = MI->getOperand(3).getReg();
+    return (Rt == Rn) ? 4 : 3;
+  }
+
+  case ARM::STRD_PRE: {
+    unsigned Rm = MI->getOperand(4).getReg();
+    if (Rm)
+      return (ARM_AM::getAM3Op(MI->getOperand(5).getImm()) == ARM_AM::sub) ?5:4;
+    return 3;
+  }
+
+  case ARM::t2STRD_PRE:
+    return 3;
+
+  case ARM::t2LDR_POST:
+  case ARM::t2LDRB_POST:
+  case ARM::t2LDRB_PRE:
+  case ARM::t2LDRSBi12:
+  case ARM::t2LDRSBi8:
+  case ARM::t2LDRSBpci:
+  case ARM::t2LDRSBs:
+  case ARM::t2LDRH_POST:
+  case ARM::t2LDRH_PRE:
+  case ARM::t2LDRSBT:
+  case ARM::t2LDRSB_POST:
+  case ARM::t2LDRSB_PRE:
+  case ARM::t2LDRSH_POST:
+  case ARM::t2LDRSH_PRE:
+  case ARM::t2LDRSHi12:
+  case ARM::t2LDRSHi8:
+  case ARM::t2LDRSHpci:
+  case ARM::t2LDRSHs:
+    return 2;
+
+  case ARM::t2LDRDi8: {
+    unsigned Rt = MI->getOperand(0).getReg();
+    unsigned Rn = MI->getOperand(2).getReg();
+    return (Rt == Rn) ? 3 : 2;
+  }
+
+  case ARM::t2STRB_POST:
+  case ARM::t2STRB_PRE:
+  case ARM::t2STRBs:
+  case ARM::t2STRDi8:
+  case ARM::t2STRH_POST:
+  case ARM::t2STRH_PRE:
+  case ARM::t2STRHs:
+  case ARM::t2STR_POST:
+  case ARM::t2STR_PRE:
+  case ARM::t2STRs:
+    return 2;
+  }
+}
+
 unsigned
 ARMBaseInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
                                  const MachineInstr *MI) const {
@@ -2050,8 +2290,12 @@ ARMBaseInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
   const MCInstrDesc &Desc = MI->getDesc();
   unsigned Class = Desc.getSchedClass();
   unsigned UOps = ItinData->Itineraries[Class].NumMicroOps;
-  if (UOps)
+  if (UOps) {
+    if (Subtarget.isSwift() && (Desc.mayLoad() || Desc.mayStore()))
+      return getNumMicroOpsSwiftLdSt(ItinData, MI);
+
     return UOps;
+  }
 
   unsigned Opc = MI->getOpcode();
   switch (Opc) {
@@ -2120,7 +2364,43 @@ ARMBaseInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
   case ARM::t2STMIA_UPD:
   case ARM::t2STMDB_UPD: {
     unsigned NumRegs = MI->getNumOperands() - Desc.getNumOperands() + 1;
-    if (Subtarget.isCortexA8()) {
+    if (Subtarget.isSwift()) {
+      // rdar://8402126
+      UOps = 1 + NumRegs;  // One for address computation, one for each ld / st.
+      switch (Opc) {
+      default: break;
+      case ARM::VLDMDIA_UPD:
+      case ARM::VLDMDDB_UPD:
+      case ARM::VLDMSIA_UPD:
+      case ARM::VLDMSDB_UPD:
+      case ARM::VSTMDIA_UPD:
+      case ARM::VSTMDDB_UPD:
+      case ARM::VSTMSIA_UPD:
+      case ARM::VSTMSDB_UPD:
+      case ARM::LDMIA_UPD:
+      case ARM::LDMDA_UPD:
+      case ARM::LDMDB_UPD:
+      case ARM::LDMIB_UPD:
+      case ARM::STMIA_UPD:
+      case ARM::STMDA_UPD:
+      case ARM::STMDB_UPD:
+      case ARM::STMIB_UPD:
+      case ARM::tLDMIA_UPD:
+      case ARM::tSTMIA_UPD:
+      case ARM::t2LDMIA_UPD:
+      case ARM::t2LDMDB_UPD:
+      case ARM::t2STMIA_UPD:
+      case ARM::t2STMDB_UPD:
+        ++UOps; // One for base register writeback.
+        break;
+      case ARM::LDMIA_RET:
+      case ARM::tPOP_RET:
+      case ARM::t2LDMIA_RET:
+        UOps += 2; // One for base reg wb, one for write to pc.
+        break;
+      }
+      return UOps;
+    } else if (Subtarget.isCortexA8() || Subtarget.isCortexA7()) {
       if (NumRegs < 4)
         return 2;
       // 4 registers would be issued: 2, 2.
@@ -2129,7 +2409,7 @@ ARMBaseInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
       if (NumRegs % 2)
         ++UOps;
       return UOps;
-    } else if (Subtarget.isCortexA9()) {
+    } else if (Subtarget.isCortexA9() || Subtarget.isSwift()) {
       UOps = (NumRegs / 2);
       // If there are odd number of registers or if it's not 64-bit aligned,
       // then it takes an extra AGU (Address Generation Unit) cycle.
@@ -2157,12 +2437,12 @@ ARMBaseInstrInfo::getVLDMDefCycle(const InstrItineraryData *ItinData,
     return ItinData->getOperandCycle(DefClass, DefIdx);
 
   int DefCycle;
-  if (Subtarget.isCortexA8()) {
+  if (Subtarget.isCortexA8() || Subtarget.isCortexA7()) {
     // (regno / 2) + (regno % 2) + 1
     DefCycle = RegNo / 2 + 1;
     if (RegNo % 2)
       ++DefCycle;
-  } else if (Subtarget.isCortexA9()) {
+  } else if (Subtarget.isCortexA9() || Subtarget.isSwift()) {
     DefCycle = RegNo;
     bool isSLoad = false;
 
@@ -2198,7 +2478,7 @@ ARMBaseInstrInfo::getLDMDefCycle(const InstrItineraryData *ItinData,
     return ItinData->getOperandCycle(DefClass, DefIdx);
 
   int DefCycle;
-  if (Subtarget.isCortexA8()) {
+  if (Subtarget.isCortexA8() || Subtarget.isCortexA7()) {
     // 4 registers would be issued: 1, 2, 1.
     // 5 registers would be issued: 1, 2, 2.
     DefCycle = RegNo / 2;
@@ -2206,7 +2486,7 @@ ARMBaseInstrInfo::getLDMDefCycle(const InstrItineraryData *ItinData,
       DefCycle = 1;
     // Result latency is issue cycle + 2: E2.
     DefCycle += 2;
-  } else if (Subtarget.isCortexA9()) {
+  } else if (Subtarget.isCortexA9() || Subtarget.isSwift()) {
     DefCycle = (RegNo / 2);
     // If there are odd number of registers or if it's not 64-bit aligned,
     // then it takes an extra AGU (Address Generation Unit) cycle.
@@ -2232,12 +2512,12 @@ ARMBaseInstrInfo::getVSTMUseCycle(const InstrItineraryData *ItinData,
     return ItinData->getOperandCycle(UseClass, UseIdx);
 
   int UseCycle;
-  if (Subtarget.isCortexA8()) {
+  if (Subtarget.isCortexA8() || Subtarget.isCortexA7()) {
     // (regno / 2) + (regno % 2) + 1
     UseCycle = RegNo / 2 + 1;
     if (RegNo % 2)
       ++UseCycle;
-  } else if (Subtarget.isCortexA9()) {
+  } else if (Subtarget.isCortexA9() || Subtarget.isSwift()) {
     UseCycle = RegNo;
     bool isSStore = false;
 
@@ -2272,13 +2552,13 @@ ARMBaseInstrInfo::getSTMUseCycle(const InstrItineraryData *ItinData,
     return ItinData->getOperandCycle(UseClass, UseIdx);
 
   int UseCycle;
-  if (Subtarget.isCortexA8()) {
+  if (Subtarget.isCortexA8() || Subtarget.isCortexA7()) {
     UseCycle = RegNo / 2;
     if (UseCycle < 2)
       UseCycle = 2;
     // Read in E3.
     UseCycle += 2;
-  } else if (Subtarget.isCortexA9()) {
+  } else if (Subtarget.isCortexA9() || Subtarget.isSwift()) {
     UseCycle = (RegNo / 2);
     // If there are odd number of registers or if it's not 64-bit aligned,
     // then it takes an extra AGU (Address Generation Unit) cycle.
@@ -2474,7 +2754,8 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
   if (Reg == ARM::CPSR) {
     if (DefMI->getOpcode() == ARM::FMSTAT) {
       // fpscr -> cpsr stalls over 20 cycles on A8 (and earlier?)
-      return Subtarget.isCortexA9() ? 1 : 20;
+      return (Subtarget.isCortexA9() || Subtarget.isSwift() ||
+              Subtarget.isCortexA7()) ? 1 : 20;
     }
 
     // CPSR set and branch can be paired in the same cycle.
@@ -2531,7 +2812,8 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
   }
 
   if (Latency > 1 &&
-      (Subtarget.isCortexA8() || Subtarget.isCortexA9())) {
+      (Subtarget.isCortexA8() || Subtarget.isCortexA9() ||
+       Subtarget.isCortexA7())) {
     // FIXME: Shifter op hack: no shift (i.e. [r +/- r]) or [r + r << 2]
     // variants are one cycle cheaper.
     switch (DefMCID->getOpcode()) {
@@ -2553,6 +2835,37 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
       unsigned ShAmt = DefMI->getOperand(3).getImm();
       if (ShAmt == 0 || ShAmt == 2)
         --Latency;
+      break;
+    }
+    }
+  } else if (DefIdx == 0 && Latency > 2 && Subtarget.isSwift()) {
+    // FIXME: Properly handle all of the latency adjustments for address
+    // writeback.
+    switch (DefMCID->getOpcode()) {
+    default: break;
+    case ARM::LDRrs:
+    case ARM::LDRBrs: {
+      unsigned ShOpVal = DefMI->getOperand(3).getImm();
+      bool isSub = ARM_AM::getAM2Op(ShOpVal) == ARM_AM::sub;
+      unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+      if (!isSub &&
+          (ShImm == 0 ||
+           ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+            ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl)))
+        Latency -= 2;
+      else if (!isSub &&
+               ShImm == 1 && ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsr)
+        --Latency;
+      break;
+    }
+    case ARM::t2LDRs:
+    case ARM::t2LDRBs:
+    case ARM::t2LDRHs:
+    case ARM::t2LDRSHs: {
+      // Thumb2 mode: lsl only.
+      unsigned ShAmt = DefMI->getOperand(3).getImm();
+      if (ShAmt == 0 || ShAmt == 1 || ShAmt == 2 || ShAmt == 3)
+        Latency -= 2;
       break;
     }
     }
@@ -2691,7 +3004,7 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
 
   if (!UseNode->isMachineOpcode()) {
     int Latency = ItinData->getOperandCycle(DefMCID.getSchedClass(), DefIdx);
-    if (Subtarget.isCortexA9())
+    if (Subtarget.isCortexA9() || Subtarget.isSwift())
       return Latency <= 2 ? 1 : Latency - 1;
     else
       return Latency <= 3 ? 1 : Latency - 2;
@@ -2708,7 +3021,8 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
                                   UseMCID, UseIdx, UseAlign);
 
   if (Latency > 1 &&
-      (Subtarget.isCortexA8() || Subtarget.isCortexA9())) {
+      (Subtarget.isCortexA8() || Subtarget.isCortexA9() ||
+       Subtarget.isCortexA7())) {
     // FIXME: Shifter op hack: no shift (i.e. [r +/- r]) or [r + r << 2]
     // variants are one cycle cheaper.
     switch (DefMCID.getOpcode()) {
@@ -2732,6 +3046,33 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
         cast<ConstantSDNode>(DefNode->getOperand(2))->getZExtValue();
       if (ShAmt == 0 || ShAmt == 2)
         --Latency;
+      break;
+    }
+    }
+  } else if (DefIdx == 0 && Latency > 2 && Subtarget.isSwift()) {
+    // FIXME: Properly handle all of the latency adjustments for address
+    // writeback.
+    switch (DefMCID.getOpcode()) {
+    default: break;
+    case ARM::LDRrs:
+    case ARM::LDRBrs: {
+      unsigned ShOpVal =
+        cast<ConstantSDNode>(DefNode->getOperand(2))->getZExtValue();
+      unsigned ShImm = ARM_AM::getAM2Offset(ShOpVal);
+      if (ShImm == 0 ||
+          ((ShImm == 1 || ShImm == 2 || ShImm == 3) &&
+           ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsl))
+        Latency -= 2;
+      else if (ShImm == 1 && ARM_AM::getAM2ShiftOpc(ShOpVal) == ARM_AM::lsr)
+        --Latency;
+      break;
+    }
+    case ARM::t2LDRs:
+    case ARM::t2LDRBs:
+    case ARM::t2LDRHs:
+    case ARM::t2LDRSHs: {
+      // Thumb2 mode: lsl 0-3 only.
+      Latency -= 2;
       break;
     }
     }
@@ -2902,9 +3243,19 @@ int ARMBaseInstrInfo::getInstrLatency(const InstrItineraryData *ItinData,
     // When predicated, CPSR is an additional source operand for CPSR updating
     // instructions, this apparently increases their latencies.
     *PredCost = 1;
-  if (UOps)
-    return ItinData->getStageLatency(Class);
-  return getNumMicroOps(ItinData, MI);
+
+  if (!UOps)
+    return getNumMicroOps(ItinData, MI);
+
+  if (Subtarget.isSwift() && (MI->mayLoad() || MI->mayStore())) {
+    // For Swift, look at load / store instructions to determine if they are
+    // micro-coded.
+    unsigned NumUOps = getNumMicroOps(ItinData, MI);
+    if (NumUOps > 1)
+      return NumUOps;
+  }
+
+  return ItinData->getStageLatency(Class);
 }
 
 int ARMBaseInstrInfo::getInstrLatency(const InstrItineraryData *ItinData,
@@ -3046,6 +3397,122 @@ ARMBaseInstrInfo::setExecutionDomain(MachineInstr *MI, unsigned Domain) const {
   // Add the extra source operand and new predicates.
   // This will go before any implicit ops.
   AddDefaultPred(MachineInstrBuilder(MI).addOperand(MI->getOperand(1)));
+}
+
+//===----------------------------------------------------------------------===//
+// Partial register updates
+//===----------------------------------------------------------------------===//
+//
+// Swift renames NEON registers with 64-bit granularity.  That means any
+// instruction writing an S-reg implicitly reads the containing D-reg.  The
+// problem is mostly avoided by translating f32 operations to v2f32 operations
+// on D-registers, but f32 loads are still a problem.
+//
+// These instructions can load an f32 into a NEON register:
+//
+// VLDRS - Only writes S, partial D update.
+// VLD1LNd32 - Writes all D-regs, explicit partial D update, 2 uops.
+// VLD1DUPd32 - Writes all D-regs, no partial reg update, 2 uops.
+//
+// FCONSTD can be used as a dependency-breaking instruction.
+
+
+unsigned ARMBaseInstrInfo::
+getPartialRegUpdateClearance(const MachineInstr *MI,
+                             unsigned OpNum,
+                             const TargetRegisterInfo *TRI) const {
+  // Only Swift has partial register update problems.
+  if (!SwiftPartialUpdateClearance || !Subtarget.isSwift())
+    return 0;
+
+  assert(TRI && "Need TRI instance");
+
+  const MachineOperand &MO = MI->getOperand(OpNum);
+  if (MO.readsReg())
+    return 0;
+  unsigned Reg = MO.getReg();
+  int UseOp = -1;
+
+  switch(MI->getOpcode()) {
+    // Normal instructions writing only an S-register.
+  case ARM::VLDRS:
+  case ARM::FCONSTS:
+  case ARM::VMOVSR:
+    // rdar://problem/8791586
+  case ARM::VMOVv8i8:
+  case ARM::VMOVv4i16:
+  case ARM::VMOVv2i32:
+  case ARM::VMOVv2f32:
+  case ARM::VMOVv1i64:
+    UseOp = MI->findRegisterUseOperandIdx(Reg, false, TRI);
+    break;
+
+    // Explicitly reads the dependency.
+  case ARM::VLD1LNd32:
+    UseOp = 1;
+    break;
+  default:
+    return 0;
+  }
+
+  // If this instruction actually reads a value from Reg, there is no unwanted
+  // dependency.
+  if (UseOp != -1 && MI->getOperand(UseOp).readsReg())
+    return 0;
+
+  // We must be able to clobber the whole D-reg.
+  if (TargetRegisterInfo::isVirtualRegister(Reg)) {
+    // Virtual register must be a foo:ssub_0<def,undef> operand.
+    if (!MO.getSubReg() || MI->readsVirtualRegister(Reg))
+      return 0;
+  } else if (ARM::SPRRegClass.contains(Reg)) {
+    // Physical register: MI must define the full D-reg.
+    unsigned DReg = TRI->getMatchingSuperReg(Reg, ARM::ssub_0,
+                                             ARM::DPRRegisterClass);
+    if (!DReg || !MI->definesRegister(DReg, TRI))
+      return 0;
+  }
+
+  // MI has an unwanted D-register dependency.
+  // Avoid defs in the previous N instructrions.
+  return SwiftPartialUpdateClearance;
+}
+
+// Break a partial register dependency after getPartialRegUpdateClearance
+// returned non-zero.
+void ARMBaseInstrInfo::
+breakPartialRegDependency(MachineBasicBlock::iterator MI,
+                          unsigned OpNum,
+                          const TargetRegisterInfo *TRI) const {
+  assert(MI && OpNum < MI->getDesc().getNumDefs() && "OpNum is not a def");
+  assert(TRI && "Need TRI instance");
+
+  const MachineOperand &MO = MI->getOperand(OpNum);
+  unsigned Reg = MO.getReg();
+  assert(TargetRegisterInfo::isPhysicalRegister(Reg) &&
+         "Can't break virtual register dependencies.");
+  unsigned DReg = Reg;
+
+  // If MI defines an S-reg, find the corresponding D super-register.
+  if (ARM::SPRRegClass.contains(Reg)) {
+    DReg = ARM::D0 + (Reg - ARM::S0) / 2;
+    assert(TRI->isSuperRegister(Reg, DReg) && "Register enums broken");
+  }
+
+  assert(ARM::DPRRegClass.contains(DReg) && "Can only break D-reg deps");
+  assert(MI->definesRegister(DReg, TRI) && "MI doesn't clobber full D-reg");
+
+  // FIXME: In some cases, VLDRS can be changed to a VLD1DUPd32 which defines
+  // the full D-register by loading the same value to both lanes.  The
+  // instruction is micro-coded with 2 uops, so don't do this until we can
+  // properly schedule micro-coded instuctions.  The dispatcher stalls cause
+  // too big regressions.
+
+  // Insert the dependency-breaking FCONSTD before MI.
+  // 96 is the encoding of 0.5, but the actual value doesn't matter here.
+  AddDefaultPred(BuildMI(*MI->getParent(), MI, MI->getDebugLoc(),
+                         get(ARM::FCONSTD), DReg).addImm(96));
+  MI->addRegisterKilled(DReg, TRI, true);
 }
 
 bool ARMBaseInstrInfo::hasNOP() const {

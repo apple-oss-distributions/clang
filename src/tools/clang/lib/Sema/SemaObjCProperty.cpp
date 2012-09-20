@@ -144,7 +144,7 @@ Decl *Sema::ActOnProperty(Scope *S, SourceLocation AtLoc,
                                            isOverridingProperty, TSI,
                                            MethodImplKind);
       if (Res) {
-        CheckObjCPropertyAttributes(Res, AtLoc, Attributes);
+        CheckObjCPropertyAttributes(Res, AtLoc, Attributes, false);
         if (getLangOpts().ObjCAutoRefCount)
           checkARCPropertyDecl(*this, cast<ObjCPropertyDecl>(Res));
       }
@@ -161,7 +161,9 @@ Decl *Sema::ActOnProperty(Scope *S, SourceLocation AtLoc,
     Res->setLexicalDeclContext(lexicalDC);
 
   // Validate the attributes on the @property.
-  CheckObjCPropertyAttributes(Res, AtLoc, Attributes);
+  CheckObjCPropertyAttributes(Res, AtLoc, Attributes,
+                              (isa<ObjCInterfaceDecl>(ClassDecl) ||
+                               isa<ObjCProtocolDecl>(ClassDecl)));
 
   if (getLangOpts().ObjCAutoRefCount)
     checkARCPropertyDecl(*this, Res);
@@ -568,6 +570,67 @@ static void setImpliedPropertyAttributeForReadOnlyProperty(
   return;
 }
 
+/// DiagnoseClassAndClassExtPropertyMismatch - diagnose inconsistant property
+/// attribute declared in primary class and attributes overridden in any of its
+/// class extensions.
+static void
+DiagnoseClassAndClassExtPropertyMismatch(Sema &S, ObjCInterfaceDecl *ClassDecl,
+                                         ObjCPropertyDecl *property) {
+  unsigned Attributes = property->getPropertyAttributesAsWritten();
+  bool warn = (Attributes & ObjCDeclSpec::DQ_PR_readonly);
+  for (const ObjCCategoryDecl *CDecl = ClassDecl->getFirstClassExtension();
+       CDecl; CDecl = CDecl->getNextClassExtension()) {
+    ObjCPropertyDecl *ClassExtProperty = 0;
+    for (ObjCContainerDecl::prop_iterator P = CDecl->prop_begin(),
+         E = CDecl->prop_end(); P != E; ++P) {
+      if ((*P)->getIdentifier() == property->getIdentifier()) {
+        ClassExtProperty = *P;
+        break;
+      }
+    }
+    if (ClassExtProperty) {
+      warn = false;
+      unsigned classExtPropertyAttr =
+        ClassExtProperty->getPropertyAttributesAsWritten();
+      // We are issuing the warning that we postponed because class extensions
+      // can override readonly->readwrite and 'setter' attributes originally
+      // placed on class's property declaration now make sense in the overridden
+      // property.
+      if (Attributes & ObjCDeclSpec::DQ_PR_readonly) {
+        if (!classExtPropertyAttr ||
+            (classExtPropertyAttr & ObjCDeclSpec::DQ_PR_readwrite))
+          continue;
+        warn = true;
+        break;
+      }
+    }
+  }
+  if (warn) {
+    unsigned setterAttrs = (ObjCDeclSpec::DQ_PR_assign |
+                            ObjCDeclSpec::DQ_PR_unsafe_unretained |
+                            ObjCDeclSpec::DQ_PR_copy |
+                            ObjCDeclSpec::DQ_PR_retain |
+                            ObjCDeclSpec::DQ_PR_strong);
+    if (Attributes & setterAttrs) {
+      const char * which =
+      (Attributes & ObjCDeclSpec::DQ_PR_assign) ?
+      "assign" :
+      (Attributes & ObjCDeclSpec::DQ_PR_unsafe_unretained) ?
+      "unsafe_unretained" :
+      (Attributes & ObjCDeclSpec::DQ_PR_copy) ?
+      "copy" :
+      (Attributes & ObjCDeclSpec::DQ_PR_retain) ?
+      "retain" : "strong";
+
+      S.Diag(property->getLocation(),
+             diag::warn_objc_property_attr_mutually_exclusive)
+      << "readonly" << which;
+    }
+  }
+
+
+}
+
 /// ActOnPropertyImplDecl - This routine performs semantic checks and
 /// builds the AST node for a property implementation declaration; declared
 /// as @synthesize or @dynamic.
@@ -628,6 +691,8 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
         return 0;
       }
     }
+    DiagnoseClassAndClassExtPropertyMismatch(*this, IDecl, property);
+
   } else if ((CatImplClass = dyn_cast<ObjCCategoryImplDecl>(ClassImpDecl))) {
     if (Synthesize) {
       Diag(AtLoc, diag::error_synthesize_category_decl);
@@ -696,6 +761,24 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
       } else {
         PropertyIvarType =
           Context.getObjCGCQualType(PropertyIvarType, Qualifiers::Weak);
+      }
+    }
+    if (AtLoc.isInvalid()) {
+      // Check when default synthesizing a property that there is
+      // an ivar matching property name and issue warning; since this
+      // is the most common case of not using an ivar used for backing
+      // property in non-default synthesis case.
+      ObjCInterfaceDecl *ClassDeclared=0;
+      ObjCIvarDecl *originalIvar =
+      IDecl->lookupInstanceVariable(property->getIdentifier(),
+                                    ClassDeclared);
+      if (originalIvar) {
+        Diag(PropertyDiagLoc,
+             diag::warn_autosynthesis_property_ivar_match)
+        << property->getName() << (Ivar == 0) << PropertyIvar->getName()
+        << originalIvar->getName();
+        Diag(property->getLocation(), diag::note_property_declare);
+        Diag(originalIvar->getLocation(), diag::note_ivar_decl);
       }
     }
 
@@ -1792,7 +1875,8 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
 
 void Sema::CheckObjCPropertyAttributes(Decl *PDecl,
                                        SourceLocation Loc,
-                                       unsigned &Attributes) {
+                                       unsigned &Attributes,
+                                       bool propertyInPrimaryClass) {
   // FIXME: Improve the reported location.
   if (!PDecl || PDecl->isInvalidDecl())
     return;
@@ -1814,9 +1898,18 @@ void Sema::CheckObjCPropertyAttributes(Decl *PDecl,
     if ((Attributes & rel) == 0)
       return;
   }
-  
+
+  if (propertyInPrimaryClass) {
+    // we postpone most property diagnosis until class's implementation
+    // because, its readonly attribute may be overridden in its class
+    // extensions making other attributes, which make no sense, to make sense.
+    if ((Attributes & ObjCDeclSpec::DQ_PR_readonly) &&
+        (Attributes & ObjCDeclSpec::DQ_PR_readwrite))
+      Diag(Loc, diag::err_objc_property_attr_mutually_exclusive)
+        << "readonly" << "readwrite";
+  }
   // readonly and readwrite/assign/retain/copy conflict.
-  if ((Attributes & ObjCDeclSpec::DQ_PR_readonly) &&
+  else if ((Attributes & ObjCDeclSpec::DQ_PR_readonly) &&
       (Attributes & (ObjCDeclSpec::DQ_PR_readwrite |
                      ObjCDeclSpec::DQ_PR_assign |
                      ObjCDeclSpec::DQ_PR_unsafe_unretained |

@@ -1822,6 +1822,8 @@ void CheckFormatHandler::HandleNullChar(const char *nullCharacter) {
   }
 }
 
+// Note that this may return NULL if there was an error parsing or building
+// one of the argument expressions.
 const Expr *CheckFormatHandler::getDataArg(unsigned i) const {
   return Args[FirstDataArg + i];
 }
@@ -1835,11 +1837,13 @@ void CheckFormatHandler::DoneProcessing() {
     signed notCoveredArg = CoveredArgs.find_first();
     if (notCoveredArg >= 0) {
       assert((unsigned)notCoveredArg < NumDataArgs);
-      SourceLocation Loc = getDataArg((unsigned) notCoveredArg)->getLocStart();
-      if (!S.getSourceManager().isInSystemMacro(Loc)) {
-        EmitFormatDiagnostic(S.PDiag(diag::warn_printf_data_arg_not_used),
-                             Loc,
-                             /*IsStringLocation*/false, getFormatStringRange());
+      if (const Expr *E = getDataArg((unsigned) notCoveredArg)) {
+        SourceLocation Loc = E->getLocStart();
+        if (!S.getSourceManager().isInSystemMacro(Loc)) {
+          EmitFormatDiagnostic(S.PDiag(diag::warn_printf_data_arg_not_used),
+                               Loc, /*IsStringLocation*/false,
+                               getFormatStringRange());
+        }
       }
     }
   }
@@ -2039,6 +2043,9 @@ bool CheckPrintfHandler::HandleAmount(
       // doesn't emit a warning for that case.
       CoveredArgs.set(argIndex);
       const Expr *Arg = getDataArg(argIndex);
+      if (!Arg)
+        return false;
+
       QualType T = Arg->getType();
 
       const analyze_printf::ArgTypeResult &ATR = Amt.getArgType(S.Context);
@@ -2245,6 +2252,9 @@ CheckPrintfHandler::HandlePrintfSpecifier(const analyze_printf::PrintfSpecifier
   // Now type check the data expression that matches the
   // format specifier.
   const Expr *Ex = getDataArg(argIndex);
+  if (!Ex)
+    return true;
+
   const analyze_printf::ArgTypeResult &ATR = FS.getArgType(S.Context,
                                                            IsObjCLiteral);
   if (ATR.isValid() && !ATR.matchesType(S.Context, Ex->getType())) {
@@ -2426,6 +2436,9 @@ bool CheckScanfHandler::HandleScanfSpecifier(
   
   // Check that the argument type matches the format specifier.
   const Expr *Ex = getDataArg(argIndex);
+  if (!Ex)
+    return true;
+
   const analyze_scanf::ScanfArgTypeResult &ATR = FS.getArgType(S.Context);
   if (ATR.isValid() && !ATR.matchesType(S.Context, Ex->getType())) {
     ScanfSpecifier fixedFS = FS;
@@ -2606,19 +2619,43 @@ void Sema::CheckMemaccessArguments(const CallExpr *Call,
           // TODO: For strncpy() and friends, this could suggest sizeof(dst)
           //       over sizeof(src) as well.
           unsigned ActionIdx = 0; // Default is to suggest dereferencing.
+          StringRef ReadableName = FnName->getName();
+
           if (const UnaryOperator *UnaryOp = dyn_cast<UnaryOperator>(Dest))
             if (UnaryOp->getOpcode() == UO_AddrOf)
               ActionIdx = 1; // If its an address-of operator, just remove it.
           if (Context.getTypeSize(PointeeTy) == Context.getCharWidth())
             ActionIdx = 2; // If the pointee's size is sizeof(char),
                            // suggest an explicit length.
-          unsigned DestSrcSelect =
-            (BId == Builtin::BIstrndup ? 1 : ArgIdx);
-          DiagRuntimeBehavior(SizeOfArg->getExprLoc(), Dest,
+
+          // If the function is defined as a builtin macro, do not show macro
+          // expansion.
+          SourceLocation SL = SizeOfArg->getExprLoc();
+          SourceRange DSR = Dest->getSourceRange();
+          SourceRange SSR = SizeOfArg->getSourceRange();
+          SourceManager &SM  = PP.getSourceManager();
+
+          if (SM.isMacroArgExpansion(SL)) {
+            ReadableName = Lexer::getImmediateMacroName(SL, SM, LangOpts);
+            SL = SM.getSpellingLoc(SL);
+            DSR = SourceRange(SM.getSpellingLoc(DSR.getBegin()),
+                             SM.getSpellingLoc(DSR.getEnd()));
+            SSR = SourceRange(SM.getSpellingLoc(SSR.getBegin()),
+                             SM.getSpellingLoc(SSR.getEnd()));
+          }
+
+          DiagRuntimeBehavior(SL, SizeOfArg,
                               PDiag(diag::warn_sizeof_pointer_expr_memaccess)
-                                << FnName << DestSrcSelect << ActionIdx
-                                << Dest->getSourceRange()
-                                << SizeOfArg->getSourceRange());
+                                << ReadableName
+                                << PointeeTy
+                                << DestTy
+                                << DSR
+                                << SSR);
+          DiagRuntimeBehavior(SL, SizeOfArg,
+                         PDiag(diag::warn_sizeof_pointer_expr_memaccess_note)
+                                << ActionIdx
+                                << SSR);
+
           break;
         }
       }

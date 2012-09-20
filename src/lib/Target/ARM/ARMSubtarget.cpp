@@ -32,6 +32,10 @@ static cl::opt<bool>
 DarwinUseMOVT("arm-darwin-use-movt", cl::init(true), cl::Hidden);
 
 static cl::opt<bool>
+UseFusedMulOps("arm-use-mulops",
+               cl::init(true), cl::Hidden);
+
+static cl::opt<bool>
 StrictAlign("arm-strict-align", cl::Hidden,
             cl::desc("Disallow all unaligned memory accesses"));
 
@@ -51,6 +55,9 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   , HasVFPv4(false)
   , HasNEON(false)
   , UseNEONForSinglePrecisionFP(false)
+  , UseMulOps(UseFusedMulOps)
+  , UseVLD1(false)
+  , UseVST1(false)
   , SlowFPVMLx(false)
   , HasVMLxForwarding(false)
   , SlowFPBrcc(false)
@@ -65,6 +72,7 @@ ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
   , HasFP16(false)
   , HasD16(false)
   , HasHardwareDivide(false)
+  , HasHardwareDivideInARM(false)
   , HasT2ExtractPack(false)
   , HasDataBarrier(false)
   , Pref32BitThumb(false)
@@ -188,7 +196,7 @@ unsigned ARMSubtarget::getMispredictionPenalty() const {
   // estimate the penalty of a misprediction based on that.
   if (isCortexA8())
     return 13;
-  else if (isCortexA9())
+  else if (isCortexA7() || isCortexA9())
     return 8;
 
   // Otherwise, just return a sensible default.
@@ -208,7 +216,7 @@ void ARMSubtarget::computeIssueWidth() {
     // clear the lowest bit
     allStage1Units ^= allStage1Units & ~(allStage1Units - 1);
   }
-  assert(InstrItins.IssueWidth <= 2 && "itinerary bug, too many stage 1 units");
+  assert(InstrItins.IssueWidth <= 3 && "itinerary bug, too many stage 1 units");
 }
 
 bool ARMSubtarget::enablePostRAScheduler(

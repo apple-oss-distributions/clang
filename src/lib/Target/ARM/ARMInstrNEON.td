@@ -2312,6 +2312,14 @@ def VST4LNq32Pseudo_UPD : VSTQQQQLNWBPseudo<IIC_VST4lnu>;
 
 } // mayStore = 1, neverHasSideEffects = 1, hasExtraSrcRegAllocReq = 1
 
+// Use vld1/vst1 for Q and QQ on Swift.
+let Predicates = [UseVLD1] in
+def : Pat<(v2f64 (load addrmode6:$addr)),
+          (VLD1q64Pseudo addrmode6:$addr)>;
+
+let Predicates = [UseVST1] in
+def : Pat<(store (v2f64 QPR:$value), addrmode6:$addr),
+          (VST1q64Pseudo addrmode6:$addr, QPR:$value)>;
 
 //===----------------------------------------------------------------------===//
 // NEON pattern fragments
@@ -5018,7 +5026,8 @@ def VGETLNi32 : NVGetLane<{1,1,1,0,0,0,?,1}, 0b1011, 0b00,
                           (outs GPR:$R), (ins DPR:$V, VectorIndex32:$lane),
                           IIC_VMOVSI, "vmov", "32", "$R, $V$lane",
                           [(set GPR:$R, (extractelt (v2i32 DPR:$V),
-                                           imm:$lane))]> {
+                                           imm:$lane))]>,
+                Requires<[HasNEON, HasFastVGETLNi32]> {
   let Inst{21} = lane{0};
 }
 // def VGETLNf32: see FMRDH and FMRDL in ARMInstrVFP.td
@@ -5041,7 +5050,16 @@ def : Pat<(NEONvgetlaneu (v8i16 QPR:$src), imm:$lane),
 def : Pat<(extractelt (v4i32 QPR:$src), imm:$lane),
           (VGETLNi32 (v2i32 (EXTRACT_SUBREG QPR:$src,
                              (DSubReg_i32_reg imm:$lane))),
-                     (SubReg_i32_lane imm:$lane))>;
+                     (SubReg_i32_lane imm:$lane))>,
+      Requires<[HasNEON, HasFastVGETLNi32]>;
+def : Pat<(extractelt (v2i32 DPR:$src), imm:$lane),
+          (COPY_TO_REGCLASS
+            (i32 (EXTRACT_SUBREG DPR:$src, (SSubReg_f32_reg imm:$lane))), GPR)>,
+      Requires<[HasNEON, HasSlowVGETLNi32]>;
+def : Pat<(extractelt (v4i32 QPR:$src), imm:$lane),
+          (COPY_TO_REGCLASS
+            (i32 (EXTRACT_SUBREG QPR:$src, (SSubReg_f32_reg imm:$lane))), GPR)>,
+      Requires<[HasNEON, HasSlowVGETLNi32]>;
 def : Pat<(extractelt (v2f32 DPR:$src1), imm:$src2),
           (EXTRACT_SUBREG (v2f32 (COPY_TO_REGCLASS (v2f32 DPR:$src1),DPR_VFP2)),
                           (SSubReg_f32_reg imm:$src2))>;
@@ -5596,6 +5614,10 @@ def : N2VSPat<arm_ftosi, VCVTf2sd>;
 def : N2VSPat<arm_ftoui, VCVTf2ud>;
 def : N2VSPat<arm_sitof, VCVTs2fd>;
 def : N2VSPat<arm_uitof, VCVTu2fd>;
+
+// Prefer VMOVDRR for i32 -> f32 bitcasts, it can write all DPR registers.
+def : NEONFPPat<(f32 (bitconvert GPR:$a)),
+                (EXTRACT_SUBREG (VMOVDRR GPR:$a, GPR:$a), ssub_0)>;
 
 
 //===----------------------------------------------------------------------===//

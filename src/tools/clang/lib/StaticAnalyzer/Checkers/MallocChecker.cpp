@@ -441,19 +441,27 @@ ProgramStateRef MallocChecker::MallocMemAux(CheckerContext &C,
                                            const CallExpr *CE,
                                            SVal Size, SVal Init,
                                            ProgramStateRef state) {
-  // Get the return value.
-  SVal retVal = state->getSVal(CE, C.getLocationContext());
+
+  // Bind the return value to the symbolic value from the heap region.
+  // TODO: We could rewrite post visit to eval call; 'malloc' does not have
+  // side effects other than what we model here.
+  unsigned Count = C.getCurrentBlockCount();
+  SValBuilder &svalBuilder = C.getSValBuilder();
+  const LocationContext *LCtx = C.getPredecessor()->getLocationContext();
+  DefinedSVal RetVal =
+    cast<DefinedSVal>(svalBuilder.getConjuredHeapSymbolVal(CE, LCtx, Count));
+  state = state->BindExpr(CE, C.getLocationContext(), RetVal);
 
   // We expect the malloc functions to return a pointer.
-  if (!isa<Loc>(retVal))
+  if (!isa<Loc>(RetVal))
     return 0;
 
   // Fill the region with the initialization value.
-  state = state->bindDefault(retVal, Init);
+  state = state->bindDefault(RetVal, Init);
 
   // Set the region's extent equal to the Size parameter.
   const SymbolicRegion *R =
-      dyn_cast_or_null<SymbolicRegion>(retVal.getAsRegion());
+      dyn_cast_or_null<SymbolicRegion>(RetVal.getAsRegion());
   if (!R)
     return 0;
   if (isa<DefinedOrUnknownSVal>(Size)) {
@@ -1226,8 +1234,7 @@ bool MallocChecker::doesNotFreeMemory(const CallOrObjCMessage *Call,
   }
 
   // If it's not a system call, assume it frees memory.
-  SourceManager &SM = ASTC.getSourceManager();
-  if (!SM.isInSystemHeader(D->getLocation()))
+  if (!Call->isInSystemHeader())
     return false;
 
   // Process C/ObjC functions.
@@ -1240,6 +1247,12 @@ bool MallocChecker::doesNotFreeMemory(const CallOrObjCMessage *Call,
 
     // White list thread local storage.
     if (FName.equals("pthread_setspecific"))
+      return false;
+
+    // White list xpc connection context.
+    // TODO: Ensure that the deallocation actually happens, need to reason
+    // about "xpc_connection_set_finalizer_f".
+    if (FName.equals("xpc_connection_set_context"))
       return false;
 
     // White list the 'XXXNoCopy' ObjC functions.
@@ -1330,6 +1343,16 @@ bool MallocChecker::doesNotFreeMemory(const CallOrObjCMessage *Call,
     // transfered as well.
     // Ex:  [NSData dataWithBytesNoCopy:bytes length:10];
     if (S.getNameForSlot(0).endswith("NoCopy")) {
+      return false;
+    }
+
+    // If the first selector starts with addPointer, insertPointer,
+    // or replacePointer, assume we are dealing with NSPointerArray or similar.
+    // This is similar to C++ containers (vector); we still might want to check
+    // that the pointers get freed, by following the container itself.
+    if (S.getNameForSlot(0).startswith("addPointer") ||
+        S.getNameForSlot(0).startswith("insertPointer") ||
+        S.getNameForSlot(0).startswith("replacePointer")) {
       return false;
     }
 

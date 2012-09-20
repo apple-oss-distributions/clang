@@ -1103,6 +1103,8 @@ Sema::ActOnBaseSpecifier(Decl *classdecl, SourceRange SpecifierRange,
                                                       Virtual, Access, TInfo,
                                                       EllipsisLoc))
     return BaseSpec;
+  else
+    Class->setInvalidDecl();
 
   return true;
 }
@@ -2680,7 +2682,7 @@ BuildImplicitMemberInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
       FieldBaseElementType->isObjCRetainableType() &&
       FieldBaseElementType.getObjCLifetime() != Qualifiers::OCL_None &&
       FieldBaseElementType.getObjCLifetime() != Qualifiers::OCL_ExplicitNone) {
-    // Instant objects:
+    // ARC:
     //   Default-initialize Objective-C pointers to NULL.
     CXXMemberInit
       = new (SemaRef.Context) CXXCtorInitializer(SemaRef.Context, Field, 
@@ -7481,7 +7483,7 @@ std::pair<Sema::ImplicitExceptionSpecification, bool>
 Sema::ComputeDefaultedCopyAssignmentExceptionSpecAndConst(
                                                    CXXRecordDecl *ClassDecl) {
   if (ClassDecl->isInvalidDecl())
-    return std::make_pair(ImplicitExceptionSpecification(Context), false);
+    return std::make_pair(ImplicitExceptionSpecification(Context), true);
 
   // C++ [class.copy]p10:
   //   If the class definition does not explicitly declare a copy
@@ -8408,7 +8410,7 @@ void Sema::DefineImplicitMoveAssignment(SourceLocation CurrentLocation,
 std::pair<Sema::ImplicitExceptionSpecification, bool>
 Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
   if (ClassDecl->isInvalidDecl())
-    return std::make_pair(ImplicitExceptionSpecification(Context), false);
+    return std::make_pair(ImplicitExceptionSpecification(Context), true);
 
   // C++ [class.copy]p5:
   //   The implicitly-declared copy constructor for a class X will

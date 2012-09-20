@@ -381,9 +381,12 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
   if (FailingCommand->getCreator().isLinkJob())
     return;
 
+  // Print the version of the compiler.
+  PrintVersion(C, llvm::errs());
+
   Diag(clang::diag::note_drv_command_failed_diag_msg)
-    << "Please submit a bug report to " BUG_REPORT_URL " and include command"
-    " line arguments and all diagnostic information.";
+    << "PLEASE submit a bug report to " BUG_REPORT_URL " and include the "
+    "crash backtrace, preprocessed source, and associated run script.";
 
   // Suppress driver output and emit preprocessor output to temp file.
   CCCIsCPP = true;
@@ -472,7 +475,9 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
   // If the command succeeded, we are done.
   if (Res == 0) {
     Diag(clang::diag::note_drv_command_failed_diag_msg)
-      << "Preprocessed source(s) and associated run script(s) are located at:";
+      << "\n********************\n\n"
+      "PLEASE ATTACH THE FOLLOWING FILES TO THE BUG REPORT:\n"
+      "Preprocessed source(s) and associated run script(s) are located at:";
     ArgStringList Files = C.getTempFiles();
     for (ArgStringList::const_iterator it = Files.begin(), ie = Files.end();
          it != ie; ++it) {
@@ -492,6 +497,8 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
         Diag(clang::diag::note_drv_command_failed_diag_msg) << Script;
       }
     }
+    Diag(clang::diag::note_drv_command_failed_diag_msg)
+      << "\n\n********************";
   } else {
     // Failure, remove preprocessed files.
     if (!C.getArgs().hasArg(options::OPT_save_temps))

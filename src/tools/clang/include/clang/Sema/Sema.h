@@ -5761,7 +5761,8 @@ public:
   /// be modified to be consistent with \arg PropertyTy.
   void CheckObjCPropertyAttributes(Decl *PropertyPtrTy,
                                    SourceLocation Loc,
-                                   unsigned &Attributes);
+                                   unsigned &Attributes,
+                                   bool propertyInPrimaryClass);
 
   /// Process the specified property declaration and create decls for the
   /// setters and getters as needed.

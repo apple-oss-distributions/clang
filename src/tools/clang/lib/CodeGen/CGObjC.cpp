@@ -30,7 +30,7 @@ typedef llvm::PointerIntPair<llvm::Value*,1,bool> TryEmitResult;
 static TryEmitResult
 tryEmitARCRetainScalarExpr(CodeGenFunction &CGF, const Expr *e);
 static RValue AdjustRelatedResultType(CodeGenFunction &CGF,
-                                      const Expr *E,
+                                      QualType ET,
                                       const ObjCMethodDecl *Method,
                                       RValue Result);
 
@@ -201,20 +201,20 @@ llvm::Value *CodeGenFunction::EmitObjCProtocolExpr(const ObjCProtocolExpr *E) {
 /// \brief Adjust the type of the result of an Objective-C message send 
 /// expression when the method has a related result type.
 static RValue AdjustRelatedResultType(CodeGenFunction &CGF,
-                                      const Expr *E,
+                                      QualType ET,
                                       const ObjCMethodDecl *Method,
                                       RValue Result) {
   if (!Method)
     return Result;
 
   if (!Method->hasRelatedResultType() ||
-      CGF.getContext().hasSameType(E->getType(), Method->getResultType()) ||
+      CGF.getContext().hasSameType(ET, Method->getResultType()) ||
       !Result.isScalar())
     return Result;
   
   // We have applied a related result type. Cast the rvalue appropriately.
   return RValue::get(CGF.Builder.CreateBitCast(Result.getScalarVal(),
-                                               CGF.ConvertType(E->getType())));
+                                               CGF.ConvertType(ET)));
 }
 
 /// Decide whether to extend the lifetime of the receiver of a
@@ -400,7 +400,7 @@ RValue CodeGenFunction::EmitObjCMessageExpr(const ObjCMessageExpr *E,
     Builder.CreateStore(newSelf, selfAddr);
   }
 
-  return AdjustRelatedResultType(*this, E, method, result);
+  return AdjustRelatedResultType(*this, E->getType(), method, result);
 }
 
 namespace {
@@ -709,7 +709,7 @@ void CodeGenFunction::GenerateObjCGetter(ObjCImplementationDecl *IMP,
   assert(OMD && "Invalid call to generate getter (empty method)");
   StartObjCMethod(OMD, IMP->getClassInterface(), OMD->getLocStart());
 
-  generateObjCGetterBody(IMP, PID, AtomicHelperFn);
+  generateObjCGetterBody(IMP, PID, OMD, AtomicHelperFn);
 
   FinishFunction();
 }
@@ -771,6 +771,7 @@ static void emitCPPObjectAtomicGetterCall(CodeGenFunction &CGF,
 void
 CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
                                         const ObjCPropertyImplDecl *propImpl,
+                                         const ObjCMethodDecl *GetterMethodDecl,
                                         llvm::Constant *AtomicHelperFn) {
   // If there's a non-trivial 'get' expression, we just have to emit that.
   if (!hasTrivialGetExpr(propImpl)) {
@@ -904,6 +905,8 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
         }
 
         value = Builder.CreateBitCast(value, ConvertType(propType));
+        value = Builder.CreateBitCast(value,
+                   ConvertType(GetterMethodDecl->getResultType()));
       }
       
       EmitReturnOfRValue(RValue::get(value), propType);
@@ -1030,6 +1033,9 @@ bool UseOptimizedSetter(CodeGenModule &CGM) {
     return false;
   VersionTuple TargetMinVersion = Target.getPlatformMinVersion();
   
+  if (!TargetPlatform.compare("ios") &&
+      TargetMinVersion.getMajor() >= 6)
+    return true;
   if (TargetPlatform.compare("macosx") ||
       TargetMinVersion.getMajor() <= 9)
     return false;
@@ -1098,7 +1104,7 @@ CodeGenFunction::generateObjCSetterBody(const ObjCImplementationDecl *classImpl,
     llvm::Value *setOptimizedPropertyFn = 0;
     llvm::Value *setPropertyFn = 0;
     if (UseOptimizedSetter(CGM)) {
-      // 10.8 code and GC is off
+      // 10.8 and iOS 6.0 code and GC is off
       setOptimizedPropertyFn = 
         CGM.getObjCRuntime().GetOptimizedPropertySetFunction(strategy.isAtomic(),
                                                              strategy.isCopy());

@@ -74,7 +74,7 @@ RuntimeDirs :=
 ifeq ($(OS),Darwin)
 RuntimeDirs += darwin
 RuntimeLibrary.darwin.Configs := \
-	eprintf 10.4 osx ios cc_kext \
+	eprintf 10.4 osx ios cc_kext cc_kext_ios5 \
 	asan_osx profile_osx profile_ios
 endif
 

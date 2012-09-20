@@ -458,6 +458,7 @@ static const char *getARMTargetCPU(const ArgList &Args,
     .Case("armv6t2", "arm1156t2-s")
     .Cases("armv7", "armv7a", "armv7-a", "cortex-a8")
     .Cases("armv7f", "armv7-f", "cortex-a9-mp")
+    .Cases("armv7s", "armv7-s", "swift")
     .Cases("armv7r", "armv7-r", "cortex-r4")
     .Cases("armv7m", "armv7-m", "cortex-m3")
     .Case("ep9312", "ep9312")
@@ -486,11 +487,12 @@ static const char *getLLVMArchSuffixForARM(StringRef CPU) {
     .Cases("arm1136j-s",  "arm1136jf-s",  "arm1176jz-s", "v6")
     .Cases("arm1176jzf-s",  "mpcorenovfp",  "mpcore", "v6")
     .Cases("arm1156t2-s",  "arm1156t2f-s", "v6t2")
-    .Cases("cortex-a8", "cortex-a9", "v7")
+    .Cases("cortex-a7", "cortex-a8", "cortex-a9", "v7")
     .Case("cortex-m3", "v7m")
     .Case("cortex-m4", "v7m")
     .Case("cortex-m0", "v6m")
     .Case("cortex-a9-mp", "v7f")
+    .Case("swift", "v7s")
     .Default("");
 }
 
@@ -519,7 +521,8 @@ static void addFPMathArgs(const Driver &D, const Arg *A, const ArgList &Args,
     CmdArgs.push_back("-target-feature");
     CmdArgs.push_back("+neonfp");
     
-    if (CPU != "cortex-a8" && CPU != "cortex-a9" && CPU != "cortex-a9-mp")    
+    if (CPU != "cortex-a7" && CPU != "cortex-a8" &&
+        CPU != "cortex-a9" && CPU != "cortex-a9-mp")
       D.Diag(diag::err_drv_invalid_feature) << "-mfpmath=neon" << CPU;
     
   } else if (FPMath == "vfp" || FPMath == "vfp2" || FPMath == "vfp3" ||
@@ -536,7 +539,9 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
                              ArgStringList &CmdArgs,
                              bool KernelOrKext) const {
   const Driver &D = getToolChain().getDriver();
-  llvm::Triple Triple = getToolChain().getTriple();
+  // Get the effective triple, which takes into account the deployment target.
+  std::string TripleStr = getToolChain().ComputeEffectiveClangTriple(Args);
+  llvm::Triple Triple(TripleStr);
 
   // Select the ABI to use.
   //
@@ -727,8 +732,10 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
 
   // Kernel code has more strict alignment requirements.
   if (KernelOrKext) {
-    CmdArgs.push_back("-backend-option");
-    CmdArgs.push_back("-arm-long-calls");
+    if (Triple.getOS() != llvm::Triple::IOS || Triple.isOSVersionLT(6)) {
+      CmdArgs.push_back("-backend-option");
+      CmdArgs.push_back("-arm-long-calls");
+    }
 
     CmdArgs.push_back("-backend-option");
     CmdArgs.push_back("-arm-strict-align");
@@ -1446,8 +1453,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                      Args.hasArg(options::OPT_fpic) ||
                      Args.hasArg(options::OPT_fPIE) ||
                      Args.hasArg(options::OPT_fpie));
-  bool PICDisabled = (Args.hasArg(options::OPT_mkernel) ||
-                      Args.hasArg(options::OPT_static));
+  llvm::Triple Triple(TripleStr);
+  bool PICDisabled = (Args.hasArg(options::OPT_static) ||
+                      ((Args.hasArg(options::OPT_mkernel) ||
+                        Args.hasArg(options::OPT_fapple_kext)) &&
+                       (Triple.getOS() != llvm::Triple::IOS ||
+                        Triple.isOSVersionLT(6))));
   const char *Model = getToolChain().GetForcedPicModel();
   if (!Model) {
     if (Args.hasArg(options::OPT_mdynamic_no_pic))
@@ -1576,12 +1587,15 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       !TrappingMath)
     CmdArgs.push_back("-menable-unsafe-fp-math");
 
-  // We separately look for the '-ffast-math' flag, and if we find it, tell the
-  // frontend to provide the appropriate preprocessor macros. This is distinct
-  // from enabling any optimizations as it induces a language change which must
-  // survive serialization and deserialization, etc.
+  // We separately look for the '-ffast-math' and '-ffinite-math-only' flags,
+  // and if we find them, tell the frontend to provide the appropriate
+  // preprocessor macros. This is distinct from enabling any optimizations as
+  // these options induce language changes which must survive serialization
+  // and deserialization, etc.
   if (Args.hasArg(options::OPT_ffast_math))
     CmdArgs.push_back("-ffast-math");
+  if (Args.hasArg(options::OPT_ffinite_math_only))
+    CmdArgs.push_back("-ffinite-math-only");
 
   // Decide whether to use verbose asm. Verbose assembly is the default on
   // toolchains which have the integrated assembler on by default.
@@ -1832,7 +1846,8 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   Args.AddAllArgs(CmdArgs, options::OPT_W_Group);
-  Args.AddLastArg(CmdArgs, options::OPT_pedantic);
+  if (Args.hasFlag(options::OPT_pedantic, options::OPT_no_pedantic, false))
+    CmdArgs.push_back("-pedantic");
   Args.AddLastArg(CmdArgs, options::OPT_pedantic_errors);
   Args.AddLastArg(CmdArgs, options::OPT_w);
 
@@ -3300,7 +3315,10 @@ void darwin::CC1::AddCC1Args(const ArgList &Args,
   CheckCodeGenerationOptions(D, Args);
 
   // Derived from cc1 spec.
-  if (!Args.hasArg(options::OPT_mkernel) && !Args.hasArg(options::OPT_static) &&
+  if ((!Args.hasArg(options::OPT_mkernel) ||
+       (getDarwinToolChain().isTargetIPhoneOS() &&
+        !getDarwinToolChain().isIPhoneOSVersionLT(6, 0))) &&
+      !Args.hasArg(options::OPT_static) &&
       !Args.hasArg(options::OPT_mdynamic_no_pic))
     CmdArgs.push_back("-fPIC");
 
@@ -3755,9 +3773,11 @@ void darwin::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-force_cpusubtype_ALL");
 
   if (getToolChain().getTriple().getArch() != llvm::Triple::x86_64 &&
-      (Args.hasArg(options::OPT_mkernel) ||
-       Args.hasArg(options::OPT_static) ||
-       Args.hasArg(options::OPT_fapple_kext)))
+      (((Args.hasArg(options::OPT_mkernel) ||
+         Args.hasArg(options::OPT_fapple_kext)) &&
+        (!getDarwinToolChain().isTargetIPhoneOS() ||
+         getDarwinToolChain().isIPhoneOSVersionLT(6, 0))) ||
+       Args.hasArg(options::OPT_static)))
     CmdArgs.push_back("-static");
 
   Args.AddAllArgValues(CmdArgs, options::OPT_Wa_COMMA,
@@ -4091,6 +4111,9 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
 
             // darwin_crt2 spec is empty.
           }
+          if (getDarwinToolChain().isTargetMacOS() &&
+              !getDarwinToolChain().isMacosxVersionLT(10, 8))
+            CmdArgs.push_back("-no_new_main");
         } else {
           if (Args.hasArg(options::OPT_static) ||
               Args.hasArg(options::OPT_object) ||
@@ -4104,7 +4127,7 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
             } else if (getDarwinToolChain().isTargetIPhoneOS()) {
               if (getDarwinToolChain().isIPhoneOSVersionLT(3, 1))
                 CmdArgs.push_back("-lcrt1.o");
-              else
+              else if (getDarwinToolChain().isIPhoneOSVersionLT(6, 0))
                 CmdArgs.push_back("-lcrt1.3.1.o");
             } else {
               if (getDarwinToolChain().isMacosxVersionLT(10, 5))

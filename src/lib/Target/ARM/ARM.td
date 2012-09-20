@@ -32,9 +32,6 @@ def FeatureVFP2 : SubtargetFeature<"vfp2", "HasVFPv2", "true",
 def FeatureVFP3 : SubtargetFeature<"vfp3", "HasVFPv3", "true",
                                    "Enable VFP3 instructions",
                                    [FeatureVFP2]>;
-def FeatureVFP4 : SubtargetFeature<"vfp4", "HasVFPv4", "true",
-                                   "Enable VFP4 instructions",
-                                   [FeatureVFP3]>;
 def FeatureNEON : SubtargetFeature<"neon", "HasNEON", "true",
                                    "Enable NEON instructions",
                                    [FeatureVFP3]>;
@@ -44,10 +41,16 @@ def FeatureNoARM  : SubtargetFeature<"noarm", "NoARM", "true",
                                      "Does not support ARM mode execution">;
 def FeatureFP16   : SubtargetFeature<"fp16", "HasFP16", "true",
                                      "Enable half-precision floating point">;
+def FeatureVFP4   : SubtargetFeature<"vfp4", "HasVFPv4", "true",
+                                     "Enable VFP4 instructions",
+                                     [FeatureVFP3, FeatureFP16]>;
 def FeatureD16    : SubtargetFeature<"d16", "HasD16", "true",
                                      "Restrict VFP3 to 16 double registers">;
 def FeatureHWDiv  : SubtargetFeature<"hwdiv", "HasHardwareDivide", "true",
                                      "Enable divide instructions">;
+def FeatureHWDivARM  : SubtargetFeature<"hwdiv-arm",
+                                        "HasHardwareDivideInARM", "true",
+                                      "Enable divide instructions in ARM mode">;
 def FeatureT2XtPk : SubtargetFeature<"t2xtpk", "HasT2ExtractPack", "true",
                                  "Enable Thumb2 extract and pack instructions">;
 def FeatureDB     : SubtargetFeature<"db", "HasDataBarrier", "true",
@@ -86,6 +89,13 @@ def FeaturePref32BitThumb : SubtargetFeature<"32bit", "Pref32BitThumb", "true",
 def FeatureAvoidPartialCPSR : SubtargetFeature<"avoid-partial-cpsr",
                                                "AvoidCPSRPartialUpdate", "true",
                                  "Avoid CPSR partial update for OOO execution">;
+
+/// Some micro-architectures prefer to use vld1/vst1 for vector loads and
+/// stores instead of vldm/vstm because they have explicit alignment hints.
+def FeatureUseVLD1 : SubtargetFeature<"usevld1", "UseVLD1", "true",
+                                      "Prefer vld1 for vector loads">;
+def FeatureUseVST1 : SubtargetFeature<"usevst1", "UseVST1", "true",
+                                      "Prefer vst1 for vector stores">;
 
 // Some processors perform return stack prediction. CodeGen should avoid issue
 // "normal" call instructions to callees which do not return.
@@ -141,6 +151,13 @@ def ProcA9      : SubtargetFeature<"a9", "ARMProcFamily", "CortexA9",
                                     FeatureT2XtPk, FeatureFP16,
                                     FeatureAvoidPartialCPSR
                                     ]>;
+def ProcSwift   : SubtargetFeature<"swift", "ARMProcFamily", "Swift",
+                                   "Swift ARM processors",
+                                   [FeatureNEONForFP, FeatureT2XtPk,
+                                    FeatureVFP4, FeatureMP, FeatureHWDiv,
+                                    FeatureUseVLD1, FeatureUseVST1,
+                                    FeatureHWDivARM, FeatureAvoidPartialCPSR,
+                                    FeatureHasSlowFPVMLx]>;
 
 class ProcNoItin<string Name, list<SubtargetFeature> Features>
  : Processor<Name, GenericItineraries, Features>;
@@ -206,6 +223,16 @@ def : Processor<"arm1156t2f-s",     ARMV6Itineraries, [HasV6T2Ops, FeatureVFP2,
                                                        FeatureDSPThumb2]>;
 
 // V7a Processors.
+// FIXME: Cortex-A7 definition is similar to A8, but it has VFP4 and div
+// instructions.
+def : Processor<"cortex-a7",        CortexA8Itineraries,
+                                    [HasV7Ops, FeatureNEON, FeatureDB,
+                                     FeatureDSPThumb2, FeatureHasRAS,
+                                     FeatureNEONForFP,
+                                     FeatureHasSlowFPVMLx,FeatureVMLxForwarding,
+                                     FeatureT2XtPk,
+                                     FeatureVFP4,
+                                     FeatureHWDiv, FeatureHWDivARM]>;
 def : Processor<"cortex-a8",        CortexA8Itineraries,
                                     [ProcA8, HasV7Ops, FeatureNEON, FeatureDB,
                                      FeatureDSPThumb2, FeatureHasRAS]>;
@@ -228,6 +255,12 @@ def : ProcNoItin<"cortex-m4",       [HasV7Ops,
                                      FeatureHWDiv, FeatureDSPThumb2,
                                      FeatureT2XtPk, FeatureVFP2,
                                      FeatureVFPOnlySP, FeatureMClass]>;
+
+// Swift uArch Processors.
+def : Processor<"swift",            SwiftItineraries,
+                                    [ProcSwift, HasV7Ops, FeatureNEON,
+                                     FeatureDB, FeatureDSPThumb2,
+                                     FeatureHasRAS]>;
 
 //===----------------------------------------------------------------------===//
 // Register File Description

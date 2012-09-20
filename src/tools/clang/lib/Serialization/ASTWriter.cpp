@@ -3119,7 +3119,8 @@ void ASTWriter::SetSelectorOffset(Selector Sel, uint32_t Offset) {
 
 ASTWriter::ASTWriter(llvm::BitstreamWriter &Stream)
   : Stream(Stream), Context(0), PP(0), Chain(0), WritingModule(0),
-    WritingAST(false), ASTHasCompilerErrors(false),
+    WritingAST(false), DoneWritingDeclsAndTypes(false),
+    ASTHasCompilerErrors(false),
     FirstDeclID(NUM_PREDEF_DECL_IDS), NextDeclID(FirstDeclID),
     FirstTypeID(NUM_PREDEF_TYPE_IDS), NextTypeID(FirstTypeID),
     FirstIdentID(NUM_PREDEF_IDENT_IDS), NextIdentID(FirstIdentID), 
@@ -3377,7 +3378,15 @@ void ASTWriter::WriteASTCore(Sema &SemaRef, MemorizeStatCalls *StatCalls,
       Record.push_back(reinterpret_cast<uint64_t>(NS));
     }
   }
-  
+
+  // Make sure visible decls, added to DeclContexts previously loaded from
+  // an AST file, are registered for serialization.
+  for (SmallVector<const Decl *, 16>::iterator
+         I = UpdatingVisibleDecls.begin(),
+         E = UpdatingVisibleDecls.end(); I != E; ++I) {
+    GetDeclRef(*I);
+  }
+
   // Resolve any declaration pointers within the declaration updates block.
   ResolveDeclUpdatesBlocks();
   
@@ -3410,6 +3419,8 @@ void ASTWriter::WriteASTCore(Sema &SemaRef, MemorizeStatCalls *StatCalls,
       WriteDecl(Context, DOT.getDecl());
   }
   Stream.ExitBlock();
+
+  DoneWritingDeclsAndTypes = true;
 
   WriteFileDeclIDsMap();
   WriteSourceManagerBlock(Context.getSourceManager(), PP, isysroot);
@@ -3796,6 +3807,11 @@ TypeIdx ASTWriter::GetOrCreateTypeIdx(QualType T) {
 
   TypeIdx &Idx = TypeIdxs[T];
   if (Idx.getIndex() == 0) {
+    if (DoneWritingDeclsAndTypes) {
+      assert(0 && "New type seen after serializing all the types to emit!");
+      return TypeIdx();
+    }
+
     // We haven't seen this type before. Assign it a new ID and put it
     // into the queue of types to emit.
     Idx = TypeIdx(NextTypeID++);
@@ -3833,6 +3849,11 @@ DeclID ASTWriter::GetDeclRef(const Decl *D) {
   assert(!(reinterpret_cast<uintptr_t>(D) & 0x01) && "Invalid decl pointer");
   DeclID &ID = DeclIDs[D];
   if (ID == 0) {
+    if (DoneWritingDeclsAndTypes) {
+      assert(0 && "New decl seen after serializing all the decls to emit!");
+      return 0;
+    }
+
     // We haven't seen this declaration before. Give it a new ID and
     // enqueue it in the list of declarations to emit.
     ID = NextDeclID++;
@@ -4457,6 +4478,7 @@ void ASTWriter::AddedVisibleDecl(const DeclContext *DC, const Decl *D) {
     return; // Not a source decl added to a DeclContext from PCH.
 
   AddUpdatedDeclContext(DC);
+  UpdatingVisibleDecls.push_back(D);
 }
 
 void ASTWriter::AddedCXXImplicitMember(const CXXRecordDecl *RD, const Decl *D) {

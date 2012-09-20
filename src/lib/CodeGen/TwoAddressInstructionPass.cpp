@@ -998,6 +998,9 @@ TwoAddressInstructionPass::RescheduleMIBelowKill(MachineBasicBlock *MBB,
             ((MO.isKill() && Uses.count(MOReg)) || Kills.count(MOReg)))
           // Don't want to extend other live ranges and update kills.
           return false;
+        if (MOReg == Reg && !MO.isKill())
+          // We can't schedule across a use of the register in question.
+          return false;
       }
     }
   }
@@ -1133,6 +1136,9 @@ TwoAddressInstructionPass::RescheduleKillAboveMI(MachineBasicBlock *MBB,
           return false;
         if (Kills.count(MOReg))
           // Don't want to extend other live ranges and update kills.
+          return false;
+        if (OtherMI != MI && MOReg == Reg && !MO.isKill())
+          // We can't schedule across a use of the register in question.
           return false;
       } else {
         OtherDefs.push_back(MOReg);

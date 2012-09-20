@@ -393,3 +393,7 @@ def VREINTERPRET
   : Inst<"vreinterpret", "dd",
          "csilUcUsUiUlhfPcPsQcQsQiQlQUcQUsQUiQUlQhQfQPcQPs", OP_REINT>;
 
+////////////////////////////////////////////////////////////////////////////////
+// Vector fused multiply-add operations
+
+def VFMA : SInst<"vfma", "dddd", "fQf">;

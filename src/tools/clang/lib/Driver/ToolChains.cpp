@@ -44,6 +44,7 @@ using namespace clang;
 Darwin::Darwin(const Driver &D, const llvm::Triple& Triple)
   : ToolChain(D, Triple), TargetInitialized(false),
     ARCRuntimeForSimulator(ARCSimulator_None),
+    SubscriptRuntimeForSimulator(SubscriptSimulator_None),
     LibCXXForSimulator(LibCXXSimulator_None)
 {
   // Compute the initial Darwin version from the triple
@@ -94,7 +95,21 @@ bool Darwin::hasARCRuntime() const {
 }
 
 bool Darwin::hasSubscriptingRuntime() const {
-    return !isTargetIPhoneOS() && !isMacosxVersionLT(10, 8);
+  // FIXME: Remove this once we move to -mios-simulator-version-min completely
+  // and stop using __IPHONE_OS_VERSION_MIN_REQUIRED.
+  switch (SubscriptRuntimeForSimulator) {
+  case SubscriptSimulator_None:
+    break;
+  case SubscriptSimulator_Available:
+    return true;
+  case SubscriptSimulator_NotAvailable:
+    return false;
+  }
+
+  if (isTargetIPhoneOS())
+    return !isIPhoneOSVersionLT(6);
+  else
+    return !isMacosxVersionLT(10, 8);
 }
 
 /// Darwin provides an ARC runtime starting in MacOS X 10.7 and iOS 5.0.
@@ -133,6 +148,7 @@ static const char *GetArmArchForMArch(StringRef Value) {
     .Cases("armv7m", "armv7-m", "armv7")
     .Cases("armv7f", "armv7-f", "armv7f")
     .Cases("armv7k", "armv7-k", "armv7k")
+    .Cases("armv7s", "armv7-s", "armv7s")
     .Default(0);
 }
 
@@ -146,6 +162,7 @@ static const char *GetArmArchForMCpu(StringRef Value) {
            "arm1176jzf-s", "cortex-m0", "armv6")
     .Cases("cortex-a8", "cortex-r4", "cortex-m3", "cortex-a9", "armv7")
     .Case("cortex-a9-mp", "armv7f")
+    .Case("swift", "armv7s")
     .Default(0);
 }
 
@@ -188,11 +205,18 @@ std::string Darwin::ComputeEffectiveClangTriple(const ArgList &Args,
   unsigned Version[3];
   getTargetVersion(Version);
 
-  SmallString<16> Str;
-  llvm::raw_svector_ostream(Str)
-    << (isTargetIPhoneOS() ? "ios" : "macosx")
-    << Version[0] << "." << Version[1] << "." << Version[2];
-  Triple.setOSName(Str.str());
+  if (Triple.getArchName() == "thumbv6m" ||
+      Triple.getArchName() == "thumbv7m") {
+    // OS is ios or macosx unless it's the v6m or v7m.
+    Triple.setOS(llvm::Triple::Darwin);
+    Triple.setEnvironment(llvm::Triple::EABI);
+  } else {
+    SmallString<16> Str;
+    llvm::raw_svector_ostream(Str)
+      << (isTargetIPhoneOS() ? "ios" : "macosx")
+      << Version[0] << "." << Version[1] << "." << Version[2];
+    Triple.setOSName(Str.str());
+  }
 
   return Triple.getTriple();
 }
@@ -347,6 +371,8 @@ void DarwinClang::AddLinkSearchPathArgs(const ArgList &Args,
       ArchSpecificDir = "v7f";
     else if (TripleStr.startswith("armv7k") || TripleStr.startswith("thumbv7k"))
       ArchSpecificDir = "v7k";
+    else if (TripleStr.startswith("armv7s") || TripleStr.startswith("thumbv7s"))
+      ArchSpecificDir = "v7s";
     else if (TripleStr.startswith("armv7") || TripleStr.startswith("thumbv7"))
       ArchSpecificDir = "v7";
     break;
@@ -427,7 +453,9 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
 
   // Darwin doesn't support real static executables, don't link any runtime
   // libraries with -static.
-  if (Args.hasArg(options::OPT_static))
+  if (Args.hasArg(options::OPT_static) ||
+      Args.hasArg(options::OPT_fapple_kext) ||
+      Args.hasArg(options::OPT_mkernel))
     return;
 
   // Reject -static-libgcc for now, we can deal with this when and if someone
@@ -564,6 +592,9 @@ void Darwin::AddDeploymentTarget(DerivedArgList &Args) const {
                                              : ARCSimulator_HasARCRuntime;
           LibCXXForSimulator = Major < 5 ? LibCXXSimulator_NotAvailable
                                          : LibCXXSimulator_Available;
+          SubscriptRuntimeForSimulator =
+              Major < 6 ? SubscriptSimulator_NotAvailable
+                        : SubscriptSimulator_Available;
         }
         // When using the define to indicate the simulator, we force
         // 10.6 macosx target.
@@ -759,7 +790,14 @@ void DarwinClang::AddCCKextLibArgs(const ArgList &Args,
   llvm::sys::Path P(getDriver().ResourceDir);
   P.appendComponent("lib");
   P.appendComponent("darwin");
-  P.appendComponent("libclang_rt.cc_kext.a");
+
+  // Use the newer cc_kext for iOS ARM after 6.0.
+  if (!isTargetIPhoneOS() || isTargetIOSSimulator() ||
+      !isIPhoneOSVersionLT(6, 0)) {
+    P.appendComponent("libclang_rt.cc_kext.a");
+  } else {
+    P.appendComponent("libclang_rt.cc_kext_ios5.a");
+  }
 
   // For now, allow missing resource libraries to support developers who may
   // not have compiler-rt checked out or integrated into their build.
@@ -972,6 +1010,8 @@ DerivedArgList *Darwin::TranslateArgs(const DerivedArgList &Args,
       DAL->AddJoinedArg(0, MArch, "armv7f");
     else if (Name == "armv7k")
       DAL->AddJoinedArg(0, MArch, "armv7k");
+    else if (Name == "armv7s")
+      DAL->AddJoinedArg(0, MArch, "armv7s");
 
     else
       llvm_unreachable("invalid Darwin arch");
@@ -981,6 +1021,25 @@ DerivedArgList *Darwin::TranslateArgs(const DerivedArgList &Args,
   // after argument translation because -Xarch_ arguments may add a version min
   // argument.
   AddDeploymentTarget(*DAL);
+
+  // For iOS 6, undo the translation to add -static for -mkernel/-fapple-kext.
+  // FIXME: It would be far better to avoid inserting those -static arguments,
+  // but we can't check the deployment target in the translation code until
+  // it is set here.
+  if (isTargetIPhoneOS() && !isIPhoneOSVersionLT(6, 0)) {
+    for (ArgList::iterator it = DAL->begin(), ie = DAL->end(); it != ie; ) {
+      Arg *A = *it;
+      ++it;
+      if (A->getOption().getID() != options::OPT_mkernel &&
+          A->getOption().getID() != options::OPT_fapple_kext)
+        continue;
+      assert(it != ie && "unexpected argument translation");
+      A = *it;
+      assert(A->getOption().getID() == options::OPT_static &&
+             "missing expected -static argument");
+      it = DAL->getArgs().erase(it);
+    }
+  }
 
   // Validate the C++ standard library choice.
   CXXStdlibType Type = GetCXXStdlibType(*DAL);

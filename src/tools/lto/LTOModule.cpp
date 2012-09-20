@@ -565,7 +565,7 @@ namespace {
     virtual void BeginCOFFSymbolDef(const MCSymbol *Symbol) {}
     virtual void EmitCOFFSymbolStorageClass(int StorageClass) {}
     virtual void EmitZerofill(const MCSection *Section, MCSymbol *Symbol,
-                              unsigned Size , unsigned ByteAlignment) {
+                              uint64_t Size , unsigned ByteAlignment) {
       markDefined(*Symbol);
     }
     virtual void EmitCOFFSymbolType(int Type) {}

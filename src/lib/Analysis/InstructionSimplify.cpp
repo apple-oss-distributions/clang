@@ -1635,23 +1635,39 @@ static Value *SimplifyICmpInst(unsigned Predicate, Value *LHS, Value *RHS,
     if (llvm::isKnownNonNull(LHSPtr) || llvm::isKnownNonNull(RHSPtr)) {
       // If both sides are different identified objects, they aren't equal
       // unless they're null.
-      if (LHSPtr != RHSPtr && llvm::isIdentifiedObject(RHSPtr))
-        return ConstantInt::get(ITy, CmpInst::isFalseWhenEqual(Pred));
+      if (LHSPtr != RHSPtr && llvm::isIdentifiedObject(RHSPtr) &&
+          Pred == CmpInst::ICMP_EQ)
+        return ConstantInt::get(ITy, false);
 
       // A local identified object (alloca or noalias call) can't equal any
-      // incoming argument, unless they're both null.
-      if (isa<Instruction>(LHSPtr) && isa<Argument>(RHSPtr))
-        return ConstantInt::get(ITy, CmpInst::isFalseWhenEqual(Pred));
+      // incoming argument, unless they're both null or they belong to
+      // different functions. The latter happens during inlining.
+      if (Instruction *LHSInst = dyn_cast<Instruction>(LHSPtr))
+        if (Argument *RHSArg = dyn_cast<Argument>(RHSPtr))
+          if (LHSInst->getParent()->getParent() == RHSArg->getParent() &&
+              Pred == CmpInst::ICMP_EQ)
+            return ConstantInt::get(ITy, false);
     }
 
     // Assume that the constant null is on the right.
-    if (llvm::isKnownNonNull(LHSPtr) && isa<ConstantPointerNull>(RHSPtr))
-      return ConstantInt::get(ITy, CmpInst::isFalseWhenEqual(Pred));
-  } else if (isa<Argument>(LHSPtr)) {
+    if (llvm::isKnownNonNull(LHSPtr) && isa<ConstantPointerNull>(RHSPtr)) {
+      if (Pred == CmpInst::ICMP_EQ)
+        return ConstantInt::get(ITy, false);
+      else if (Pred == CmpInst::ICMP_NE)
+        return ConstantInt::get(ITy, true);
+    }
+  } else if (Argument *LHSArg = dyn_cast<Argument>(LHSPtr)) {
     RHSPtr = stripPointerAdjustments(RHSPtr);
-    // An alloca can't be equal to an argument.
-    if (isa<AllocaInst>(RHSPtr))
-      return ConstantInt::get(ITy, CmpInst::isFalseWhenEqual(Pred));
+    // An alloca can't be equal to an argument unless they come from separate
+    // functions via inlining.
+    if (AllocaInst *RHSInst = dyn_cast<AllocaInst>(RHSPtr)) {
+      if (LHSArg->getParent() == RHSInst->getParent()->getParent()) {
+        if (Pred == CmpInst::ICMP_EQ)
+          return ConstantInt::get(ITy, false);
+        else if (Pred == CmpInst::ICMP_NE)
+          return ConstantInt::get(ITy, true);
+      }
+    }
   }
 
   // If we are comparing with zero then try hard since this is a common case.

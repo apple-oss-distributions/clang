@@ -2357,7 +2357,8 @@ def t2MUL: T2ThreeReg<(outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm), IIC_iMUL32,
 def t2MLA: T2FourReg<
                 (outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm, rGPR:$Ra), IIC_iMAC32,
                 "mla", "\t$Rd, $Rn, $Rm, $Ra",
-                [(set rGPR:$Rd, (add (mul rGPR:$Rn, rGPR:$Rm), rGPR:$Ra))]> {
+                [(set rGPR:$Rd, (add (mul rGPR:$Rn, rGPR:$Rm), rGPR:$Ra))]>,
+           Requires<[IsThumb2, UseMulOps]> {
   let Inst{31-27} = 0b11111;
   let Inst{26-23} = 0b0110;
   let Inst{22-20} = 0b000;
@@ -2367,7 +2368,8 @@ def t2MLA: T2FourReg<
 def t2MLS: T2FourReg<
                 (outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm, rGPR:$Ra), IIC_iMAC32,
                 "mls", "\t$Rd, $Rn, $Rm, $Ra",
-                [(set rGPR:$Rd, (sub rGPR:$Ra, (mul rGPR:$Rn, rGPR:$Rm)))]> {
+                [(set rGPR:$Rd, (sub rGPR:$Ra, (mul rGPR:$Rn, rGPR:$Rm)))]>,
+           Requires<[IsThumb2, UseMulOps]> {
   let Inst{31-27} = 0b11111;
   let Inst{26-23} = 0b0110;
   let Inst{22-20} = 0b000;
@@ -2434,7 +2436,7 @@ def t2SMMLA : T2FourReg<
         (outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm, rGPR:$Ra), IIC_iMAC32,
                 "smmla", "\t$Rd, $Rn, $Rm, $Ra",
                 [(set rGPR:$Rd, (add (mulhs rGPR:$Rm, rGPR:$Rn), rGPR:$Ra))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+              Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
   let Inst{31-27} = 0b11111;
   let Inst{26-23} = 0b0110;
   let Inst{22-20} = 0b101;
@@ -2455,7 +2457,7 @@ def t2SMMLS: T2FourReg<
         (outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm, rGPR:$Ra), IIC_iMAC32,
                 "smmls", "\t$Rd, $Rn, $Rm, $Ra",
                 [(set rGPR:$Rd, (sub rGPR:$Ra, (mulhs rGPR:$Rn, rGPR:$Rm)))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+             Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
   let Inst{31-27} = 0b11111;
   let Inst{26-23} = 0b0110;
   let Inst{22-20} = 0b110;
@@ -2560,7 +2562,7 @@ multiclass T2I_smla<string opc, PatFrag opnode> {
               [(set rGPR:$Rd, (add rGPR:$Ra,
                                (opnode (sext_inreg rGPR:$Rn, i16),
                                        (sext_inreg rGPR:$Rm, i16))))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+           Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
     let Inst{31-27} = 0b11111;
     let Inst{26-23} = 0b0110;
     let Inst{22-20} = 0b001;
@@ -2573,7 +2575,7 @@ multiclass T2I_smla<string opc, PatFrag opnode> {
              !strconcat(opc, "bt"), "\t$Rd, $Rn, $Rm, $Ra",
              [(set rGPR:$Rd, (add rGPR:$Ra, (opnode (sext_inreg rGPR:$Rn, i16),
                                                  (sra rGPR:$Rm, (i32 16)))))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+           Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
     let Inst{31-27} = 0b11111;
     let Inst{26-23} = 0b0110;
     let Inst{22-20} = 0b001;
@@ -2586,7 +2588,7 @@ multiclass T2I_smla<string opc, PatFrag opnode> {
               !strconcat(opc, "tb"), "\t$Rd, $Rn, $Rm, $Ra",
               [(set rGPR:$Rd, (add rGPR:$Ra, (opnode (sra rGPR:$Rn, (i32 16)),
                                                (sext_inreg rGPR:$Rm, i16))))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+           Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
     let Inst{31-27} = 0b11111;
     let Inst{26-23} = 0b0110;
     let Inst{22-20} = 0b001;
@@ -2599,7 +2601,7 @@ multiclass T2I_smla<string opc, PatFrag opnode> {
               !strconcat(opc, "tt"), "\t$Rd, $Rn, $Rm, $Ra",
              [(set rGPR:$Rd, (add rGPR:$Ra, (opnode (sra rGPR:$Rn, (i32 16)),
                                                  (sra rGPR:$Rm, (i32 16)))))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+           Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
     let Inst{31-27} = 0b11111;
     let Inst{26-23} = 0b0110;
     let Inst{22-20} = 0b001;
@@ -2612,7 +2614,7 @@ multiclass T2I_smla<string opc, PatFrag opnode> {
               !strconcat(opc, "wb"), "\t$Rd, $Rn, $Rm, $Ra",
               [(set rGPR:$Rd, (add rGPR:$Ra, (sra (opnode rGPR:$Rn,
                                     (sext_inreg rGPR:$Rm, i16)), (i32 16))))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+           Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
     let Inst{31-27} = 0b11111;
     let Inst{26-23} = 0b0110;
     let Inst{22-20} = 0b011;
@@ -2625,7 +2627,7 @@ multiclass T2I_smla<string opc, PatFrag opnode> {
               !strconcat(opc, "wt"), "\t$Rd, $Rn, $Rm, $Ra",
               [(set rGPR:$Rd, (add rGPR:$Ra, (sra (opnode rGPR:$Rn,
                                       (sra rGPR:$Rm, (i32 16))), (i32 16))))]>,
-          Requires<[IsThumb2, HasThumb2DSP]> {
+           Requires<[IsThumb2, HasThumb2DSP, UseMulOps]> {
     let Inst{31-27} = 0b11111;
     let Inst{26-23} = 0b0110;
     let Inst{22-20} = 0b011;
@@ -2719,7 +2721,7 @@ def t2SMLSLDX : T2FourReg_mac<1, 0b101, 0b1101, (outs rGPR:$Ra,rGPR:$Rd),
 //  Division Instructions.
 //  Signed and unsigned division on v7-M
 //
-def t2SDIV : T2ThreeReg<(outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm), IIC_iALUi,
+def t2SDIV : T2ThreeReg<(outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm), IIC_iDIV,
                  "sdiv", "\t$Rd, $Rn, $Rm",
                  [(set rGPR:$Rd, (sdiv rGPR:$Rn, rGPR:$Rm))]>,
                  Requires<[HasDivide, IsThumb2]> {
@@ -2730,7 +2732,7 @@ def t2SDIV : T2ThreeReg<(outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm), IIC_iALUi,
   let Inst{7-4} = 0b1111;
 }
 
-def t2UDIV : T2ThreeReg<(outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm), IIC_iALUi,
+def t2UDIV : T2ThreeReg<(outs rGPR:$Rd), (ins rGPR:$Rn, rGPR:$Rm), IIC_iDIV,
                  "udiv", "\t$Rd, $Rn, $Rm",
                  [(set rGPR:$Rd, (udiv rGPR:$Rn, rGPR:$Rm))]>,
                  Requires<[HasDivide, IsThumb2]> {
@@ -3206,6 +3208,7 @@ def t2B   : T2I<(outs), (ins uncondbrtarget:$target), IIC_Br,
   let Inst{13} = target{17};
   let Inst{21-16} = target{16-11};
   let Inst{10-0} = target{10-0};
+  let DecoderMethod = "DecodeT2BInstruction";
 }
 
 let isNotDuplicable = 1, isIndirectBranch = 1 in {
@@ -3408,21 +3411,18 @@ let imod = 0, iflags = 0, M = 1 in
 
 // A6.3.4 Branches and miscellaneous control
 // Table A6-14 Change Processor State, and hint instructions
-class T2I_hint<bits<8> op7_0, string opc, string asm>
-  : T2I<(outs), (ins), NoItinerary, opc, asm, []> {
-  let Inst{31-20} = 0xf3a;
-  let Inst{19-16} = 0b1111;
-  let Inst{15-14} = 0b10;
-  let Inst{12} = 0;
-  let Inst{10-8} = 0b000;
-  let Inst{7-0} = op7_0;
+def t2HINT : T2I<(outs), (ins imm0_255:$imm), NoItinerary, "hint", "\t$imm",[]>{
+  bits<8> imm;
+  let Inst{31-8} = 0b111100111010111110000000;
+  let Inst{7-0} = imm;
 }
 
-def t2NOP   : T2I_hint<0b00000000, "nop",   ".w">;
-def t2YIELD : T2I_hint<0b00000001, "yield", ".w">;
-def t2WFE   : T2I_hint<0b00000010, "wfe",   ".w">;
-def t2WFI   : T2I_hint<0b00000011, "wfi",   ".w">;
-def t2SEV   : T2I_hint<0b00000100, "sev",   ".w">;
+def : t2InstAlias<"hint$p.w $imm", (t2HINT imm0_255:$imm, pred:$p)>;
+def : t2InstAlias<"nop$p.w", (t2HINT 0, pred:$p)>;
+def : t2InstAlias<"yield$p.w", (t2HINT 1, pred:$p)>;
+def : t2InstAlias<"wfe$p.w", (t2HINT 2, pred:$p)>;
+def : t2InstAlias<"wfi$p.w", (t2HINT 3, pred:$p)>;
+def : t2InstAlias<"sev$p.w", (t2HINT 4, pred:$p)>;
 
 def t2DBG : T2I<(outs), (ins imm0_15:$opt), NoItinerary, "dbg", "\t$opt", []> {
   bits<4> opt;
@@ -3709,13 +3709,13 @@ def t2MSR_AR : T2I<(outs), (ins msr_mask:$mask, rGPR:$Rn),
 def t2MSR_M : T2I<(outs), (ins msr_mask:$SYSm, rGPR:$Rn),
                   NoItinerary, "msr", "\t$SYSm, $Rn", []>,
               Requires<[IsThumb,IsMClass]> {
-  bits<8> SYSm;
+  bits<12> SYSm;
   bits<4> Rn;
   let Inst{31-21} = 0b11110011100;
   let Inst{20}    = 0b0;
   let Inst{19-16} = Rn;
   let Inst{15-12} = 0b1000;
-  let Inst{7-0}  = SYSm;
+  let Inst{11-0}  = SYSm;
 }
 
 

@@ -2134,10 +2134,11 @@ void Sema::mergeObjCMethodDecls(ObjCMethodDecl *newMethod,
   mergeDeclAttributes(newMethod, oldMethod, mergeDeprecation);
 
   // Merge attributes from the parameters.
-  ObjCMethodDecl::param_const_iterator oi = oldMethod->param_begin();
+  ObjCMethodDecl::param_const_iterator oi = oldMethod->param_begin(),
+                                       oe = oldMethod->param_end();
   for (ObjCMethodDecl::param_iterator
          ni = newMethod->param_begin(), ne = newMethod->param_end();
-       ni != ne; ++ni, ++oi)
+       ni != ne && oi != oe; ++ni, ++oi)
     mergeParamDeclAttributes(*ni, *oi, Context);
 
   CheckObjCMethodOverride(newMethod, oldMethod, true);
@@ -9390,6 +9391,23 @@ void Sema::ActOnFields(Scope* S,
   if (EnclosingDecl->isInvalidDecl())
     return;
 
+  // If this is an Objective-C @implementation or category and we have
+  // new fields here we should reset the layout of the interface since
+  // it will now change.
+  if (!Fields.empty() && isa<ObjCContainerDecl>(EnclosingDecl)) {
+    ObjCContainerDecl *DC = cast<ObjCContainerDecl>(EnclosingDecl);
+    switch (DC->getKind()) {
+    default: break;
+    case Decl::ObjCCategory:
+      Context.ResetObjCLayout(cast<ObjCCategoryDecl>(DC)->getClassInterface());
+      break;
+    case Decl::ObjCImplementation:
+      Context.
+        ResetObjCLayout(cast<ObjCImplementationDecl>(DC)->getClassInterface());
+      break;
+    }
+  }
+  
   RecordDecl *Record = dyn_cast<RecordDecl>(EnclosingDecl);
 
   // Start counting up the number of named members; make sure to include
@@ -9590,7 +9608,7 @@ void Sema::ActOnFields(Scope* S,
           // However, here we check whether this particular class is only 
           // non-POD because of the presence of an Objective-C pointer member. 
           // If so, objects of this type cannot be shared between code compiled 
-          // with instant objects and code compiled with manual retain/release.
+          // with ARC and code compiled with manual retain/release.
           if (getLangOpts().ObjCAutoRefCount &&
               CXXRecord->hasObjectMember() && 
               CXXRecord->getLinkage() == ExternalLinkage) {

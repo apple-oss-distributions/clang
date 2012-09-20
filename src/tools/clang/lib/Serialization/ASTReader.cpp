@@ -1161,8 +1161,9 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(int ID) {
       // This is the module's main file.
       IncludeLoc = getImportLocation(F);
     }
-    FileID FID = SourceMgr.createFileID(File, IncludeLoc,
-                                        (SrcMgr::CharacteristicKind)Record[2],
+    SrcMgr::CharacteristicKind
+      FileCharacter = (SrcMgr::CharacteristicKind)Record[2];
+    FileID FID = SourceMgr.createFileID(File, IncludeLoc, FileCharacter,
                                         ID, BaseOffset + Record[0]);
     SrcMgr::FileInfo &FileInfo =
           const_cast<SrcMgr::FileInfo&>(SourceMgr.getSLocEntry(FID).getFile());
@@ -1179,7 +1180,8 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(int ID) {
     }
     
     const SrcMgr::ContentCache *ContentCache
-      = SourceMgr.getOrCreateContentCache(File);
+      = SourceMgr.getOrCreateContentCache(File,
+                              /*isSystemFile=*/FileCharacter != SrcMgr::C_User);
     if (OverriddenBuffer && !ContentCache->BufferOverridden &&
         ContentCache->ContentsEntry == ContentCache->OrigEntry) {
       unsigned Code = SLocEntryCursor.ReadCode();
@@ -4690,7 +4692,9 @@ Decl *ASTReader::GetDecl(DeclID ID) {
   unsigned Index = ID - NUM_PREDEF_DECL_IDS;
 
   if (Index >= DeclsLoaded.size()) {
+    assert(0 && "declaration ID out-of-range for AST file");
     Error("declaration ID out-of-range for AST file");
+    return 0;
   }
   
   if (!DeclsLoaded[Index]) {

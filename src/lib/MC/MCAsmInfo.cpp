@@ -49,6 +49,7 @@ MCAsmInfo::MCAsmInfo() {
   AllowQuotesInName = false;
   AllowNameToStartWithDigit = false;
   AllowPeriodsInName = true;
+  UseDataRegionDirectives = false;
   ZeroDirective = "\t.zero\t";
   AsciiDirective = "\t.ascii\t";
   AscizDirective = "\t.asciz\t";
@@ -56,12 +57,6 @@ MCAsmInfo::MCAsmInfo() {
   Data16bitsDirective = "\t.short\t";
   Data32bitsDirective = "\t.long\t";
   Data64bitsDirective = "\t.quad\t";
-  DataBegin = "$d.";
-  CodeBegin = "$a.";
-  JT8Begin = "$d.";
-  JT16Begin = "$d.";
-  JT32Begin = "$d.";
-  SupportsDataRegions = false;
   SunStyleELFSectionSwitchSyntax = false;
   UsesELFSectionDirectiveForBSS = false;
   AlignDirective = "\t.align\t";
