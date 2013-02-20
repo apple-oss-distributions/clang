@@ -1,8 +1,11 @@
-from clang.cindex import Cursor
+import gc
+
 from clang.cindex import CursorKind
-from clang.cindex import Index
+from clang.cindex import TranslationUnit
 from clang.cindex import TypeKind
 from nose.tools import raises
+from .util import get_cursor
+from .util import get_tu
 
 kInput = """\
 
@@ -21,35 +24,6 @@ struct teststruct {
 
 """
 
-def get_tu(source=kInput, lang='c'):
-    name = 't.c'
-    if lang == 'cpp':
-        name = 't.cpp'
-
-    index = Index.create()
-    tu = index.parse(name, unsaved_files=[(name, source)])
-    assert tu is not None
-    return tu
-
-def get_cursor(source, spelling):
-    children = []
-    if isinstance(source, Cursor):
-        children = source.get_children()
-    else:
-        # Assume TU
-        children = source.cursor.get_children()
-
-    for cursor in children:
-        if cursor.spelling == spelling:
-            return cursor
-
-        # Recurse into children.
-        result = get_cursor(cursor, spelling)
-        if result is not None:
-            return result
-
-    return None
-
 def test_a_struct():
     tu = get_tu(kInput)
 
@@ -57,6 +31,7 @@ def test_a_struct():
     assert teststruct is not None, "Could not find teststruct."
     fields = list(teststruct.get_children())
     assert all(x.kind == CursorKind.FIELD_DECL for x in fields)
+    assert all(x.translation_unit is not None for x in fields)
 
     assert fields[0].spelling == 'a'
     assert not fields[0].type.is_const_qualified()
@@ -101,6 +76,26 @@ def test_a_struct():
     assert fields[7].type.get_pointee().get_pointee().kind == TypeKind.POINTER
     assert fields[7].type.get_pointee().get_pointee().get_pointee().kind == TypeKind.INT
 
+def test_references():
+    """Ensure that a Type maintains a reference to a TranslationUnit."""
+
+    tu = get_tu('int x;')
+    children = list(tu.cursor.get_children())
+    assert len(children) > 0
+
+    cursor = children[0]
+    t = cursor.type
+
+    assert isinstance(t.translation_unit, TranslationUnit)
+
+    # Delete main TranslationUnit reference and force a GC.
+    del tu
+    gc.collect()
+    assert isinstance(t.translation_unit, TranslationUnit)
+
+    # If the TU was destroyed, this should cause a segfault.
+    decl = t.get_declaration()
+
 constarrayInput="""
 struct teststruct {
   void *A[2];
@@ -136,6 +131,14 @@ def test_equal():
 
     assert a.type != None
     assert a.type != 'foo'
+
+def test_typekind_spelling():
+    """Ensure TypeKind.spelling works."""
+    tu = get_tu('int a;')
+    a = get_cursor(tu, 'a')
+
+    assert a is not None
+    assert a.type.kind.spelling == 'Int'
 
 def test_function_argument_types():
     """Ensure that Type.argument_types() works as expected."""
@@ -284,7 +287,7 @@ def test_is_volatile_qualified():
 def test_is_restrict_qualified():
     """Ensure Type.is_restrict_qualified works."""
 
-    tu = get_tu('struct s { void * restrict i; void * j };')
+    tu = get_tu('struct s { void * restrict i; void * j; };')
 
     i = get_cursor(tu, 'i')
     j = get_cursor(tu, 'j')

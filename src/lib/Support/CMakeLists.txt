@@ -23,6 +23,7 @@ add_llvm_library(LLVMSupport
   Dwarf.cpp
   ErrorHandling.cpp
   FileUtilities.cpp
+  FileOutputBuffer.cpp
   FoldingSet.cpp
   FormattedStream.cpp
   GraphWriter.cpp
@@ -32,7 +33,7 @@ add_llvm_library(LLVMSupport
   IntrusiveRefCntPtr.cpp
   IsInf.cpp
   IsNAN.cpp
-  JSONParser.cpp
+  Locale.cpp
   LockFileManager.cpp
   ManagedStatic.cpp
   MemoryBuffer.cpp
@@ -54,6 +55,7 @@ add_llvm_library(LLVMSupport
   ToolOutputFile.cpp
   Triple.cpp
   Twine.cpp
+  YAMLParser.cpp
   raw_os_ostream.cpp
   raw_ostream.cpp
   regcomp.c

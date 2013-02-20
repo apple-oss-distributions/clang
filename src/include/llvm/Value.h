@@ -15,8 +15,8 @@
 #define LLVM_VALUE_H
 
 #include "llvm/Use.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Compiler.h"
 
 namespace llvm {
 
@@ -31,8 +31,6 @@ class GlobalAlias;
 class InlineAsm;
 class ValueSymbolTable;
 template<typename ValueTy> class StringMapEntry;
-template <typename ValueTy = Value>
-class AssertingVH;
 typedef StringMapEntry<Value*> ValueName;
 class raw_ostream;
 class AssemblyAnnotationWriter;
@@ -41,6 +39,7 @@ class LLVMContext;
 class Twine;
 class MDNode;
 class Type;
+class StringRef;
 
 //===----------------------------------------------------------------------===//
 //                                 Value Class
@@ -82,8 +81,8 @@ private:
   friend class ValueHandleBase;
   ValueName *Name;
 
-  void operator=(const Value &);     // Do not implement
-  Value(const Value &);              // Do not implement
+  void operator=(const Value &) LLVM_DELETED_FUNCTION;
+  Value(const Value &) LLVM_DELETED_FUNCTION;
 
 protected:
   /// printCustom - Value subclasses can override this to implement custom
@@ -109,9 +108,10 @@ public:
   /// All values hold a context through their type.
   LLVMContext &getContext() const;
 
-  // All values can potentially be named...
-  bool hasName() const { return Name != 0; }
+  // All values can potentially be named.
+  bool hasName() const { return Name != 0 && SubclassID != MDStringVal; }
   ValueName *getValueName() const { return Name; }
+  void setValueName(ValueName *VN) { Name = VN; }
   
   /// getName() - Return a constant reference to the value's name. This is cheap
   /// and guaranteed to return the same reference as long as the value is not
@@ -121,7 +121,7 @@ public:
   /// setName() - Change the name of the value, choosing a new unique name if
   /// the provided name is taken.
   ///
-  /// \arg Name - The new name; or "" if the value's name should be removed.
+  /// \param Name The new name; or "" if the value's name should be removed.
   void setName(const Twine &Name);
 
   
@@ -263,12 +263,30 @@ public:
     return true; // Values are always values.
   }
 
-  /// stripPointerCasts - This method strips off any unneeded pointer
-  /// casts from the specified value, returning the original uncasted value.
-  /// Note that the returned value has pointer type if the specified value does.
+  /// stripPointerCasts - This method strips off any unneeded pointer casts and
+  /// all-zero GEPs from the specified value, returning the original uncasted
+  /// value. If this is called on a non-pointer value, it returns 'this'.
   Value *stripPointerCasts();
   const Value *stripPointerCasts() const {
     return const_cast<Value*>(this)->stripPointerCasts();
+  }
+
+  /// stripInBoundsConstantOffsets - This method strips off unneeded pointer casts and
+  /// all-constant GEPs from the specified value, returning the original
+  /// pointer value. If this is called on a non-pointer value, it returns
+  /// 'this'.
+  Value *stripInBoundsConstantOffsets();
+  const Value *stripInBoundsConstantOffsets() const {
+    return const_cast<Value*>(this)->stripInBoundsConstantOffsets();
+  }
+
+  /// stripInBoundsOffsets - This method strips off unneeded pointer casts and
+  /// any in-bounds Offsets from the specified value, returning the original
+  /// pointer value. If this is called on a non-pointer value, it returns
+  /// 'this'.
+  Value *stripInBoundsOffsets();
+  const Value *stripInBoundsOffsets() const {
+    return const_cast<Value*>(this)->stripInBoundsOffsets();
   }
 
   /// isDereferenceablePointer - Test if this value is always a pointer to

@@ -36,7 +36,7 @@
   <!--*********************************************************************-->
 
   <p>libc++ is a new implementation of the C++ standard library, targeting
-     C++0X.</p>
+     C++11.</p>
 
   <p>All of the code in libc++ is <a
      href="http://llvm.org/docs/DeveloperPolicy.html#license">dual licensed</a>
@@ -47,7 +47,7 @@
   <!--=====================================================================-->
 
     <ul>
-        <li>Correctness as defined by the (currently draft) C++0X standard.</li>
+        <li>Correctness as defined by the C++11 standard.</li>
         <li>Fast execution.</li>
         <li>Minimal memory use.</li>
         <li>Fast compile times.</li>
@@ -88,7 +88,7 @@
 
   <li><p>STLport and the Apache libstdcxx library are two other popular
       candidates, but both lack C++'0x support.  Our experience (and the
-      experience of libstdc++ developers) is that adding support for C++0x (in
+      experience of libstdc++ developers) is that adding support for C++11 (in
       particular rvalue references and move-only types) requires changes to
       almost every class and function, essentially amounting to a rewrite.
       Faced with a rewrite, we decided to start from scratch and evaluate every
@@ -104,7 +104,7 @@
   <!--=====================================================================-->
 
    <p>libc++ is known to work on the following platforms, using g++-4.2 and
-      clang (lack of C++0X language support disables some functionality).</p>
+      clang (lack of C++11 language support disables some functionality).</p>
 
     <ul>
      <li>Mac OS X i386</li>
@@ -115,19 +115,14 @@
   <h2 id="dir-structure">Current Status</h2>
   <!--=====================================================================-->
 
-   <p>libc++ is still under development.  It has about 98% of
-      <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3126.pdf">N3126</a>
-      implemented/tested.  C++'98 support is fully featured, and most of C++'0x
-      support is as well.  The only major missing piece of C++'0x support is
-      <code>&lt;atomic&gt;</code>.</p>
-
    <p><a href="libcxx_by_chapter.pdf">Here</a> is a by-chapter breakdown of what
    is passing tests and what isn't. This chart is currently based on testing
-   against g++-4.4.0 with -std=c++0x. </p>
+   against clang++ with -std=c++11 on Apple's OS X. </p>
 
    <p>
-   A Windows port is underway.  <a href="results.Windows.html">Here</a> are
-   recent test results.
+   Ports to other platforms are underway. Here are recent test
+   results for <a href="results.Windows.html">Windows</a>
+   and <a href="results.Linux.html">Linux</a>.
    </p>
 
   <!--=====================================================================-->
@@ -146,7 +141,9 @@
   <p>
      On Mac OS 10.7 (Lion), the easiest way to get this library is to install
      Xcode 4.2 or later.  However if you want to install tip-of-trunk from here
-     (getting the bleeding edge), read on.
+     (getting the bleeding edge), read on.  However, be warned that Mac OS
+     10.7 will not boot without a valid copy of <code>libc++.1.dylib</code> in
+     <code>/usr/lib</code>.
   </p>
 
   <p>To build on Mac OS X 10.6 (Snow Leopard), you need a helper library and header 
@@ -186,10 +183,10 @@
 
   <ul>
     <li><code>clang++ -stdlib=libc++ test.cpp</code></li>
-    <li><code>clang++ -std=c++0x -stdlib=libc++ test.cpp</code></li>
+    <li><code>clang++ -std=c++11 -stdlib=libc++ test.cpp</code></li>
   </ul>
 
-  <p>To run the libc++ test suit (recommended):</p>
+  <p>To run the libc++ test suite (recommended):</p>
 
   <ul>
   <li><code>cd libcxx/test</code></li>
@@ -199,12 +196,21 @@
            math.h and inttypes.h, add "-U__STRICT_ANSI__" and
            "-D__STDC_FORMAT_MACROS" to the command line with:
            <blockquote>
-             <pre>export OPTIONS="-std=c++0x -stdlib=libc++ -U__STRICT_ANSI__ -D__STDC_FORMAT_MACROS"</pre>
+             <pre>export OPTIONS="-std=c++11 -stdlib=libc++ -U__STRICT_ANSI__ -D__STDC_FORMAT_MACROS"</pre>
            </blockquote></li>
        <li>People porting libc++ to other OSes will likely have to
            define similar macros.</li>
      </ul>
   </ul>
+
+  <!--=====================================================================-->
+  <h3>Notes</h3>
+  <!--=====================================================================-->
+
+<p>
+Building libc++ with <code>-fno-rtti</code> is not supported.  However linking
+against it with <code>-fno-rtti</code> is supported.
+</p>
 
   <p>Send discussions to the
   (<a href="http://lists.cs.uiuc.edu/mailman/listinfo/cfe-dev">clang mailing list</a>).</p>
@@ -216,6 +222,7 @@
 <ul>
 <li><a href="atomic_design.html"><tt>&lt;atomic&gt;</tt></a></li>
 <li><a href="type_traits_design.html"><tt>&lt;type_traits&gt;</tt></a></li>
+<li><a href="http://marshall.calepin.co/llvmclang-and-standard-libraries-on-mac-os-x.html">Excellent notes by Marshall Clow</a></li>
 </ul>
 
 </div>

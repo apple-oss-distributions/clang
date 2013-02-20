@@ -211,6 +211,11 @@ ExprResult Parser::ParseInitializerWithPotentialDesignator() {
     //   [foo ... bar]     -> array designator
     //   [4][foo bar]      -> obsolete GNU designation with objc message send.
     //
+    // We do not need to check for an expression starting with [[ here. If it
+    // contains an Objective-C message send, then it is not an ill-formed
+    // attribute. If it is a lambda-expression within an array-designator, then
+    // it will be rejected because a constant-expression cannot begin with a
+    // lambda-expression.
     InMessageExpressionRAIIObject InMessage(*this, true);
     
     BalancedDelimiterTracker T(*this, tok::l_square);
@@ -308,7 +313,7 @@ ExprResult Parser::ParseInitializerWithPotentialDesignator() {
       Idx = ParseAssignmentExpression();
       if (Idx.isInvalid()) {
         SkipUntil(tok::r_square);
-        return move(Idx);
+        return Idx;
       }
     }
 
@@ -336,7 +341,7 @@ ExprResult Parser::ParseInitializerWithPotentialDesignator() {
       ExprResult RHS(ParseConstantExpression());
       if (RHS.isInvalid()) {
         SkipUntil(tok::r_square);
-        return move(RHS);
+        return RHS;
       }
       Desig.AddDesignator(Designator::getArrayRange(Idx.release(),
                                                     RHS.release(),
@@ -400,15 +405,14 @@ ExprResult Parser::ParseBraceInitializer() {
 
   /// InitExprs - This is the actual list of expressions contained in the
   /// initializer.
-  ExprVector InitExprs(Actions);
+  ExprVector InitExprs;
 
   if (Tok.is(tok::r_brace)) {
     // Empty initializers are a C++ feature and a GNU extension to C.
     if (!getLangOpts().CPlusPlus)
       Diag(LBraceLoc, diag::ext_gnu_empty_initializer);
     // Match the '}'.
-    return Actions.ActOnInitList(LBraceLoc, MultiExprArg(Actions),
-                                 ConsumeBrace());
+    return Actions.ActOnInitList(LBraceLoc, MultiExprArg(), ConsumeBrace());
   }
 
   bool InitExprsOk = true;
@@ -471,7 +475,7 @@ ExprResult Parser::ParseBraceInitializer() {
   bool closed = !T.consumeClose();
 
   if (InitExprsOk && closed)
-    return Actions.ActOnInitList(LBraceLoc, move_arg(InitExprs),
+    return Actions.ActOnInitList(LBraceLoc, InitExprs,
                                  T.getCloseLocation());
 
   return ExprError(); // an error occurred.

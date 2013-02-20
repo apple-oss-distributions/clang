@@ -16,10 +16,10 @@ else
 endif
 INSTALL_DIR=$(DSTROOT)/$(INSTALL_PREFIX)
 
-.PHONY: help installsrc clean installheaders do-installhdrs install
+.PHONY: help installsrc clean installheaders install
 
 help::
-	echo Use make install DSTROOT=<destination>
+	@echo "Use make install DSTROOT=<destination>"
 
 installsrc:: $(SRCROOT)
 
@@ -30,10 +30,8 @@ installsrc:: $(SRCROOT)
 
 clean::
 
-installheaders:: do-installhdrs
-
-# The do-installhdrs target is also used by clang's runtime/libcxx makefile.
-do-installhdrs:
+# The installheaders target is used by clang's runtime/libcxx makefile.
+installheaders::
 	mkdir -p $(HEADER_DIR)/c++/v1/ext
 	rsync -r --exclude=".*" --exclude="support" $(SRCDIRS)/include/* \
 	  $(HEADER_DIR)/c++/v1/

@@ -1,4 +1,4 @@
-//===-- asan_benchmarks_test.cc ------------*- C++ -*-===//
+//===-- asan_benchmarks_test.cc ----------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,7 +12,6 @@
 // Some benchmarks for the instrumented code.
 //===----------------------------------------------------------------------===//
 
-#include "asan_test_config.h"
 #include "asan_test_utils.h"
 
 template<class T>

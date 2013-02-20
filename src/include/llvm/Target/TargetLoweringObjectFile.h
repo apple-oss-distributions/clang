@@ -19,28 +19,25 @@
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/SectionKind.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace llvm {
   class MachineModuleInfo;
   class Mangler;
-  class MCAsmInfo;
   class MCContext;
   class MCExpr;
   class MCSection;
-  class MCSectionMachO;
   class MCSymbol;
   class MCStreamer;
-  class NamedMDNode;
   class GlobalValue;
   class TargetMachine;
   
 class TargetLoweringObjectFile : public MCObjectFileInfo {
   MCContext *Ctx;
-  
-  TargetLoweringObjectFile(const TargetLoweringObjectFile&); // DO NOT IMPLEMENT
-  void operator=(const TargetLoweringObjectFile&);           // DO NOT IMPLEMENT
-  
+
+  TargetLoweringObjectFile(
+    const TargetLoweringObjectFile&) LLVM_DELETED_FUNCTION;
+  void operator=(const TargetLoweringObjectFile&) LLVM_DELETED_FUNCTION;
+
 public:
   MCContext &getContext() const { return *Ctx; }
 

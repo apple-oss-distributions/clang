@@ -33,7 +33,8 @@ namespace ento {
   class AnalysisManager;
   class BugReporter;
   class CheckerContext;
-  class ObjCMessage;
+  class SimpleCall;
+  class ObjCMethodCall;
   class SVal;
   class ExplodedNode;
   class ExplodedNodeSet;
@@ -43,12 +44,6 @@ namespace ento {
   struct NodeBuilderContext;
   class MemRegion;
   class SymbolReaper;
-
-class GraphExpander {
-public:
-  virtual ~GraphExpander();
-  virtual void expandGraph(ExplodedNodeSet &Dst, ExplodedNode *Pred) = 0;
-};
 
 template <typename T> class CheckerFn;
 
@@ -207,7 +202,7 @@ public:
   /// \brief Run checkers for pre-visiting obj-c messages.
   void runCheckersForPreObjCMessage(ExplodedNodeSet &Dst,
                                     const ExplodedNodeSet &Src,
-                                    const ObjCMessage &msg,
+                                    const ObjCMethodCall &msg,
                                     ExprEngine &Eng) {
     runCheckersForObjCMessage(/*isPreVisit=*/true, Dst, Src, msg, Eng);
   }
@@ -215,16 +210,39 @@ public:
   /// \brief Run checkers for post-visiting obj-c messages.
   void runCheckersForPostObjCMessage(ExplodedNodeSet &Dst,
                                      const ExplodedNodeSet &Src,
-                                     const ObjCMessage &msg,
-                                     ExprEngine &Eng) {
-    runCheckersForObjCMessage(/*isPreVisit=*/false, Dst, Src, msg, Eng);
+                                     const ObjCMethodCall &msg,
+                                     ExprEngine &Eng,
+                                     bool wasInlined = false) {
+    runCheckersForObjCMessage(/*isPreVisit=*/false, Dst, Src, msg, Eng,
+                              wasInlined);
   }
 
   /// \brief Run checkers for visiting obj-c messages.
   void runCheckersForObjCMessage(bool isPreVisit,
                                  ExplodedNodeSet &Dst,
                                  const ExplodedNodeSet &Src,
-                                 const ObjCMessage &msg, ExprEngine &Eng);
+                                 const ObjCMethodCall &msg, ExprEngine &Eng,
+                                 bool wasInlined = false);
+
+  /// \brief Run checkers for pre-visiting obj-c messages.
+  void runCheckersForPreCall(ExplodedNodeSet &Dst, const ExplodedNodeSet &Src,
+                             const CallEvent &Call, ExprEngine &Eng) {
+    runCheckersForCallEvent(/*isPreVisit=*/true, Dst, Src, Call, Eng);
+  }
+
+  /// \brief Run checkers for post-visiting obj-c messages.
+  void runCheckersForPostCall(ExplodedNodeSet &Dst, const ExplodedNodeSet &Src,
+                              const CallEvent &Call, ExprEngine &Eng,
+                              bool wasInlined = false) {
+    runCheckersForCallEvent(/*isPreVisit=*/false, Dst, Src, Call, Eng,
+                            wasInlined);
+  }
+
+  /// \brief Run checkers for visiting obj-c messages.
+  void runCheckersForCallEvent(bool isPreVisit, ExplodedNodeSet &Dst,
+                               const ExplodedNodeSet &Src,
+                               const CallEvent &Call, ExprEngine &Eng,
+                               bool wasInlined = false);
 
   /// \brief Run checkers for load/store of a location.
   void runCheckersForLocation(ExplodedNodeSet &Dst,
@@ -240,7 +258,7 @@ public:
                           const ExplodedNodeSet &Src,
                           SVal location, SVal val,
                           const Stmt *S, ExprEngine &Eng,
-                          ProgramPoint::Kind PointKind);
+                          const ProgramPoint &PP);
 
   /// \brief Run checkers for end of analysis.
   void runCheckersForEndAnalysis(ExplodedGraph &G, BugReporter &BR,
@@ -287,24 +305,25 @@ public:
   ///   For example, in the case of a function call, these would be arguments.
   /// \param Regions The transitive closure of accessible regions,
   ///   i.e. all regions that may have been touched by this change.
-  /// \param The call expression wrapper if the regions are invalidated by a
-  ///   call.
-  ProgramStateRef 
+  /// \param Call The call expression wrapper if the regions are invalidated
+  ///   by a call.
+  ProgramStateRef
   runCheckersForRegionChanges(ProgramStateRef state,
                             const StoreManager::InvalidatedSymbols *invalidated,
                               ArrayRef<const MemRegion *> ExplicitRegions,
                               ArrayRef<const MemRegion *> Regions,
-                              const CallOrObjCMessage *Call);
+                              const CallEvent *Call);
 
   /// \brief Run checkers for handling assumptions on symbolic values.
   ProgramStateRef runCheckersForEvalAssume(ProgramStateRef state,
                                                SVal Cond, bool Assumption);
 
   /// \brief Run checkers for evaluating a call.
+  ///
+  /// Warning: Currently, the CallEvent MUST come from a CallExpr!
   void runCheckersForEvalCall(ExplodedNodeSet &Dst,
                               const ExplodedNodeSet &Src,
-                              const CallExpr *CE, ExprEngine &Eng,
-                              GraphExpander *defaultEval = 0);
+                              const CallEvent &CE, ExprEngine &Eng);
   
   /// \brief Run checkers for the entire Translation Unit.
   void runCheckersOnEndOfTranslationUnit(const TranslationUnitDecl *TU,
@@ -343,8 +362,11 @@ public:
 
   typedef CheckerFn<void (const Stmt *, CheckerContext &)> CheckStmtFunc;
   
-  typedef CheckerFn<void (const ObjCMessage &, CheckerContext &)>
+  typedef CheckerFn<void (const ObjCMethodCall &, CheckerContext &)>
       CheckObjCMessageFunc;
+
+  typedef CheckerFn<void (const CallEvent &, CheckerContext &)>
+      CheckCallFunc;
   
   typedef CheckerFn<void (const SVal &location, bool isLoad,
                           const Stmt *S,
@@ -373,7 +395,7 @@ public:
                                 const StoreManager::InvalidatedSymbols *symbols,
                                 ArrayRef<const MemRegion *> ExplicitRegions,
                                 ArrayRef<const MemRegion *> Regions,
-                                const CallOrObjCMessage *Call)>
+                                const CallEvent *Call)>
       CheckRegionChangesFunc;
   
   typedef CheckerFn<bool (ProgramStateRef)> WantsRegionChangeUpdateFunc;
@@ -384,11 +406,6 @@ public:
   
   typedef CheckerFn<bool (const CallExpr *, CheckerContext &)>
       EvalCallFunc;
-
-  typedef CheckerFn<bool (const CallExpr *, ExprEngine &Eng,
-                                            ExplodedNode *Pred,
-                                            ExplodedNodeSet &Dst)>
-      InlineCallFunc;
 
   typedef CheckerFn<void (const TranslationUnitDecl *,
                           AnalysisManager&, BugReporter &)>
@@ -402,6 +419,9 @@ public:
 
   void _registerForPreObjCMessage(CheckObjCMessageFunc checkfn);
   void _registerForPostObjCMessage(CheckObjCMessageFunc checkfn);
+
+  void _registerForPreCall(CheckCallFunc checkfn);
+  void _registerForPostCall(CheckCallFunc checkfn);
 
   void _registerForLocation(CheckLocationFunc checkfn);
 
@@ -423,8 +443,6 @@ public:
   void _registerForEvalAssume(EvalAssumeFunc checkfn);
 
   void _registerForEvalCall(EvalCallFunc checkfn);
-
-  void _registerForInlineCall(InlineCallFunc checkfn);
 
   void _registerForEndOfTranslationUnit(CheckEndOfTranslationUnit checkfn);
 
@@ -524,6 +542,9 @@ private:
   std::vector<CheckObjCMessageFunc> PreObjCMessageCheckers;
   std::vector<CheckObjCMessageFunc> PostObjCMessageCheckers;
 
+  std::vector<CheckCallFunc> PreCallCheckers;
+  std::vector<CheckCallFunc> PostCallCheckers;
+
   std::vector<CheckLocationFunc> LocationCheckers;
 
   std::vector<CheckBindFunc> BindCheckers;
@@ -547,8 +568,6 @@ private:
   std::vector<EvalAssumeFunc> EvalAssumeCheckers;
 
   std::vector<EvalCallFunc> EvalCallCheckers;
-
-  std::vector<InlineCallFunc> InlineCallCheckers;
 
   std::vector<CheckEndOfTranslationUnit> EndOfTranslationUnitCheckers;
 

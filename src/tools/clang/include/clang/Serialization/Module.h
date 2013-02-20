@@ -25,10 +25,16 @@
 
 namespace clang {
 
+class FileEntry;
 class DeclContext;
 class Module;
-  
+template<typename Info> class OnDiskChainedHashTable;
+
 namespace serialization {
+
+namespace reader {
+  class ASTDeclContextNameLookupTrait;
+}
 
 /// \brief Specifies the kind of module that has been loaded.
 enum ModuleKind {
@@ -43,7 +49,8 @@ struct DeclContextInfo {
   DeclContextInfo()
     : NameLookupTableData(), LexicalDecls(), NumLexicalDecls() {}
 
-  void *NameLookupTableData; // an ASTDeclContextNameLookupTable.
+  OnDiskChainedHashTable<reader::ASTDeclContextNameLookupTrait>
+    *NameLookupTableData; // an ASTDeclContextNameLookupTable.
   const KindDeclIDPair *LexicalDecls;
   unsigned NumLexicalDecls;
 };
@@ -67,6 +74,9 @@ public:
 
   /// \brief The file name of the module file.
   std::string FileName;
+
+  /// \brief The file entry for the module file.
+  const FileEntry *File;
 
   /// \brief Whether this module has been directly imported by the
   /// user.
@@ -92,6 +102,7 @@ public:
   llvm::BitstreamCursor Stream;
 
   /// \brief The source location where this module was first imported.
+  /// FIXME: This is not properly initialized yet.
   SourceLocation ImportLoc;
 
   /// \brief The first source location in this module.
@@ -288,6 +299,7 @@ public:
 
   /// \brief Array of file-level DeclIDs sorted by file.
   const serialization::DeclID *FileSortedDecls;
+  unsigned NumFileSortedDecls;
 
   /// \brief Array of redeclaration chain location information within this 
   /// module file, sorted by the first declaration ID.

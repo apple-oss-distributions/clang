@@ -220,8 +220,6 @@ Type *Type::getStructElementType(unsigned N) const {
   return cast<StructType>(this)->getElementType(N);
 }
 
-
-
 Type *Type::getSequentialElementType() const {
   return cast<SequentialType>(this)->getElementType();
 }
@@ -237,8 +235,6 @@ unsigned Type::getVectorNumElements() const {
 unsigned Type::getPointerAddressSpace() const {
   return cast<PointerType>(this)->getAddressSpace();
 }
-
-
 
 
 //===----------------------------------------------------------------------===//
@@ -400,11 +396,9 @@ FunctionType *FunctionType::get(Type *ReturnType,
   return FT;
 }
 
-
 FunctionType *FunctionType::get(Type *Result, bool isVarArg) {
   return get(Result, ArrayRef<Type *>(), isVarArg);
 }
-
 
 /// isValidReturnType - Return true if the specified type is valid as a return
 /// type.
@@ -464,19 +458,26 @@ void StructType::setBody(ArrayRef<Type*> Elements, bool isPacked) {
 void StructType::setName(StringRef Name) {
   if (Name == getName()) return;
 
-  // If this struct already had a name, remove its symbol table entry.
-  if (SymbolTableEntry) {
-    getContext().pImpl->NamedStructTypes.erase(getName());
-    SymbolTableEntry = 0;
+  StringMap<StructType *> &SymbolTable = getContext().pImpl->NamedStructTypes;
+  typedef StringMap<StructType *>::MapEntryTy EntryTy;
+
+  // If this struct already had a name, remove its symbol table entry. Don't
+  // delete the data yet because it may be part of the new name.
+  if (SymbolTableEntry)
+    SymbolTable.remove((EntryTy *)SymbolTableEntry);
+
+  // If this is just removing the name, we're done.
+  if (Name.empty()) {
+    if (SymbolTableEntry) {
+      // Delete the old string data.
+      ((EntryTy *)SymbolTableEntry)->Destroy(SymbolTable.getAllocator());
+      SymbolTableEntry = 0;
+    }
+    return;
   }
   
-  // If this is just removing the name, we're done.
-  if (Name.empty())
-    return;
-  
   // Look up the entry for the name.
-  StringMapEntry<StructType*> *Entry =
-    &getContext().pImpl->NamedStructTypes.GetOrCreateValue(Name);
+  EntryTy *Entry = &getContext().pImpl->NamedStructTypes.GetOrCreateValue(Name);
   
   // While we have a name collision, try a random rename.
   if (Entry->getValue()) {
@@ -497,7 +498,10 @@ void StructType::setName(StringRef Name) {
 
   // Okay, we found an entry that isn't used.  It's us!
   Entry->setValue(this);
-    
+
+  // Delete the old string data.
+  if (SymbolTableEntry)
+    ((EntryTy *)SymbolTableEntry)->Destroy(SymbolTable.getAllocator());
   SymbolTableEntry = Entry;
 }
 
@@ -542,7 +546,6 @@ StructType *StructType::create(LLVMContext &Context, ArrayRef<Type*> Elements) {
 StructType *StructType::create(LLVMContext &Context) {
   return create(Context, StringRef());
 }
-
 
 StructType *StructType::create(ArrayRef<Type*> Elements, StringRef Name,
                                bool isPacked) {
@@ -627,7 +630,6 @@ bool StructType::isLayoutIdentical(StructType *Other) const {
   return std::equal(element_begin(), element_end(), Other->element_begin());
 }
 
-
 /// getTypeByName - Return the type with the specified name, or null if there
 /// is none by that name.
 StructType *Module::getTypeByName(StringRef Name) const {
@@ -689,7 +691,6 @@ ArrayType::ArrayType(Type *ElType, uint64_t NumEl)
   : SequentialType(ArrayTyID, ElType) {
   NumElements = NumEl;
 }
-
 
 ArrayType *ArrayType::get(Type *elementType, uint64_t NumElements) {
   Type *ElementType = const_cast<Type*>(elementType);

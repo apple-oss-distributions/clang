@@ -105,14 +105,15 @@ if( CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT WIN32 )
   if( LLVM_BUILD_32_BITS )
     message(STATUS "Building 32 bits executables and libraries.")
     add_llvm_definitions( -m32 )
-    list(APPEND CMAKE_EXE_LINKER_FLAGS -m32)
-    list(APPEND CMAKE_SHARED_LINKER_FLAGS -m32)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m32")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -m32")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -m32")
   endif( LLVM_BUILD_32_BITS )
 endif( CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT WIN32 )
 
-if( MSVC_IDE AND ( MSVC90 OR MSVC10 ) )
-  # Only Visual Studio 2008 and 2010 officially supports /MP.
-  # Visual Studio 2005 do support it but it's experimental there.
+# On Win32 using MS tools, provide an option to set the number of parallel jobs
+# to use.
+if( MSVC_IDE )
   set(LLVM_COMPILER_JOBS "0" CACHE STRING
     "Number of parallel compiler jobs. 0 means use all processors. Default is 0.")
   if( NOT LLVM_COMPILER_JOBS STREQUAL "1" )
@@ -136,6 +137,10 @@ endif()
 if( MSVC )
   include(ChooseMSVCCRT)
 
+  if( MSVC11 )
+    add_llvm_definitions(-D_VARIADIC_MAX=10)
+  endif()
+
   # Add definitions that make MSVC much less annoying.
   add_llvm_definitions(
     # For some reason MS wants to deprecate a bunch of standard functions...
@@ -146,8 +151,11 @@ if( MSVC )
     -D_SCL_SECURE_NO_DEPRECATE
     -D_SCL_SECURE_NO_WARNINGS
 
+    # Disabled warnings.
+    -wd4065 # Suppress 'switch statement contains 'default' but no 'case' labels'
     -wd4146 # Suppress 'unary minus operator applied to unsigned type, result still unsigned'
     -wd4180 # Suppress 'qualifier applied to function type has no meaning; ignored'
+    -wd4181 # Suppress 'qualifier applied to reference type; ignored'
     -wd4224 # Suppress 'nonstandard extension used : formal parameter 'identifier' was previously defined as a type'
     -wd4244 # Suppress ''argument' : conversion from 'type1' to 'type2', possible loss of data'
     -wd4267 # Suppress ''var' : conversion from 'size_t' to 'type', possible loss of data'
@@ -161,14 +169,18 @@ if( MSVC )
     -wd4624 # Suppress ''derived class' : destructor could not be generated because a base class destructor is inaccessible'
     -wd4715 # Suppress ''function' : not all control paths return a value'
     -wd4800 # Suppress ''type' : forcing value to bool 'true' or 'false' (performance warning)'
-    -wd4065 # Suppress 'switch statement contains 'default' but no 'case' labels'
-    -wd4181 # Suppress 'qualifier applied to reference type; ignored'
-    -w14062 # Promote "enumerator in switch of enum is not handled" to level 1 warning.
+
+    # Promoted warnings.
+    -w14062 # Promote 'enumerator in switch of enum is not handled' to level 1 warning.
+
+    # Promoted warnings to errors.
+    -we4238 # Promote 'nonstandard extension used : class rvalue used as lvalue' to error.
+    -we4239 # Promote 'nonstandard extension used : 'token' : conversion from 'type' to 'type'' to error.
     )
 
   # Enable warnings
   if (LLVM_ENABLE_WARNINGS)
-    add_llvm_definitions( /W4 /Wall )
+    add_llvm_definitions( /W4 )
     if (LLVM_ENABLE_PEDANTIC)
       # No MSVC equivalent available
     endif (LLVM_ENABLE_PEDANTIC)

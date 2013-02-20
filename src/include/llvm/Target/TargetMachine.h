@@ -14,8 +14,9 @@
 #ifndef LLVM_TARGET_TARGETMACHINE_H
 #define LLVM_TARGET_TARGETMACHINE_H
 
+#include "llvm/Pass.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Target/TargetOptions.h"
-#include "llvm/MC/MCCodeGenInfo.h"
 #include "llvm/ADT/StringRef.h"
 #include <cassert>
 #include <string>
@@ -24,11 +25,10 @@ namespace llvm {
 
 class InstrItineraryData;
 class JITCodeEmitter;
+class GlobalValue;
 class MCAsmInfo;
 class MCCodeGenInfo;
 class MCContext;
-class Pass;
-class PassManager;
 class PassManagerBase;
 class Target;
 class TargetData;
@@ -52,8 +52,8 @@ class raw_ostream;
 /// through this interface.
 ///
 class TargetMachine {
-  TargetMachine(const TargetMachine &);   // DO NOT IMPLEMENT
-  void operator=(const TargetMachine &);  // DO NOT IMPLEMENT
+  TargetMachine(const TargetMachine &) LLVM_DELETED_FUNCTION;
+  void operator=(const TargetMachine &) LLVM_DELETED_FUNCTION;
 protected: // Can only create subclasses.
   TargetMachine(const Target &T, StringRef TargetTriple,
                 StringRef CPU, StringRef FS, const TargetOptions &Options);
@@ -197,6 +197,10 @@ public:
   /// medium, large, and target default.
   CodeModel::Model getCodeModel() const;
 
+  /// getTLSModel - Returns the TLS model which should be used for the given
+  /// global variable.
+  TLSModel::Model getTLSModel(const GlobalValue *GV) const;
+
   /// getOptLevel - Returns the optimization level: None, Less,
   /// Default, or Aggressive.
   CodeGenOpt::Level getOptLevel() const;
@@ -244,7 +248,9 @@ public:
   virtual bool addPassesToEmitFile(PassManagerBase &,
                                    formatted_raw_ostream &,
                                    CodeGenFileType,
-                                   bool /*DisableVerify*/ = true) {
+                                   bool /*DisableVerify*/ = true,
+                                   AnalysisID StartAfter = 0,
+                                   AnalysisID StopAfter = 0) {
     return true;
   }
 
@@ -294,7 +300,9 @@ public:
   virtual bool addPassesToEmitFile(PassManagerBase &PM,
                                    formatted_raw_ostream &Out,
                                    CodeGenFileType FileType,
-                                   bool DisableVerify = true);
+                                   bool DisableVerify = true,
+                                   AnalysisID StartAfter = 0,
+                                   AnalysisID StopAfter = 0);
 
   /// addPassesToEmitMachineCode - Add passes to the specified pass manager to
   /// get machine code emitted.  This uses a JITCodeEmitter object to handle

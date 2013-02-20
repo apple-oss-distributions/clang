@@ -14,13 +14,13 @@
 #ifndef HexagonTARGETMACHINE_H
 #define HexagonTARGETMACHINE_H
 
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetData.h"
 #include "HexagonInstrInfo.h"
 #include "HexagonSubtarget.h"
 #include "HexagonISelLowering.h"
 #include "HexagonSelectionDAGInfo.h"
 #include "HexagonFrameLowering.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetData.h"
 
 namespace llvm {
 
@@ -37,8 +37,9 @@ class HexagonTargetMachine : public LLVMTargetMachine {
 
 public:
   HexagonTargetMachine(const Target &T, StringRef TT,StringRef CPU,
-                       StringRef FS, TargetOptions Options, Reloc::Model RM,
-                       CodeModel::Model CM, CodeGenOpt::Level OL);
+                       StringRef FS, const TargetOptions &Options,
+                       Reloc::Model RM, CodeModel::Model CM,
+                       CodeGenOpt::Level OL);
 
   virtual const HexagonInstrInfo *getInstrInfo() const {
     return &InstrInfo;

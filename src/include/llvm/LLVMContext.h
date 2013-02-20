@@ -15,6 +15,8 @@
 #ifndef LLVM_LLVMCONTEXT_H
 #define LLVM_LLVMCONTEXT_H
 
+#include "llvm/Support/Compiler.h"
+
 namespace llvm {
 
 class LLVMContextImpl;
@@ -42,7 +44,9 @@ public:
     MD_dbg = 0,  // "dbg"
     MD_tbaa = 1, // "tbaa"
     MD_prof = 2,  // "prof"
-    MD_fpaccuracy = 3  // "fpaccuracy"
+    MD_fpmath = 3,  // "fpmath"
+    MD_range = 4, // "range"
+    MD_tbaa_struct = 5 // "tbaa.struct"
   };
   
   /// getMDKindID - Return a unique non-zero ID for the specified metadata kind.
@@ -86,9 +90,8 @@ public:
   void emitError(const Twine &ErrorStr);
 
 private:
-  // DO NOT IMPLEMENT
-  LLVMContext(LLVMContext&);
-  void operator=(LLVMContext&);
+  LLVMContext(LLVMContext&) LLVM_DELETED_FUNCTION;
+  void operator=(LLVMContext&) LLVM_DELETED_FUNCTION;
 
   /// addModule - Register a module as being instantiated in this context.  If
   /// the context is deleted, the module will be deleted as well.

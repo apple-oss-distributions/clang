@@ -126,8 +126,9 @@ class LValue {
   // 'const' is unused here
   Qualifiers Quals;
 
-  /// The alignment to use when accessing this lvalue.
-  unsigned short Alignment;
+  // The alignment to use when accessing this lvalue.  (For vector elements,
+  // this is the alignment of the whole vector.)
+  int64_t Alignment;
 
   // objective-c's ivar
   bool Ivar:1;
@@ -152,7 +153,7 @@ class LValue {
 
 private:
   void Initialize(QualType Type, Qualifiers Quals,
-                  CharUnits Alignment = CharUnits(),
+                  CharUnits Alignment,
                   llvm::MDNode *TBAAInfo = 0) {
     this->Type = Type;
     this->Quals = Quals;
@@ -267,22 +268,22 @@ public:
   }
 
   static LValue MakeVectorElt(llvm::Value *Vec, llvm::Value *Idx,
-                              QualType type) {
+                              QualType type, CharUnits Alignment) {
     LValue R;
     R.LVType = VectorElt;
     R.V = Vec;
     R.VectorIdx = Idx;
-    R.Initialize(type, type.getQualifiers());
+    R.Initialize(type, type.getQualifiers(), Alignment);
     return R;
   }
 
   static LValue MakeExtVectorElt(llvm::Value *Vec, llvm::Constant *Elts,
-                                 QualType type) {
+                                 QualType type, CharUnits Alignment) {
     LValue R;
     R.LVType = ExtVectorElt;
     R.V = Vec;
     R.VectorElts = Elts;
-    R.Initialize(type, type.getQualifiers());
+    R.Initialize(type, type.getQualifiers(), Alignment);
     return R;
   }
 
@@ -294,12 +295,12 @@ public:
   /// access.
   static LValue MakeBitfield(llvm::Value *BaseValue,
                              const CGBitFieldInfo &Info,
-                             QualType type) {
+                             QualType type, CharUnits Alignment) {
     LValue R;
     R.LVType = BitField;
     R.V = BaseValue;
     R.BitFieldInfo = &Info;
-    R.Initialize(type, type.getQualifiers());
+    R.Initialize(type, type.getQualifiers(), Alignment);
     return R;
   }
 
@@ -388,7 +389,8 @@ public:
     return AV;
   }
 
-  static AggValueSlot forLValue(LValue LV, IsDestructed_t isDestructed,
+  static AggValueSlot forLValue(const LValue &LV,
+                                IsDestructed_t isDestructed,
                                 NeedsGCBarriers_t needsGC,
                                 IsAliased_t isAliased,
                                 IsZeroed_t isZeroed = IsNotZeroed) {

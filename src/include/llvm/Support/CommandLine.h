@@ -217,11 +217,11 @@ public:
   void setMiscFlag(enum MiscFlags M) { Misc |= M; }
   void setPosition(unsigned pos) { Position = pos; }
 protected:
-  explicit Option(enum NumOccurrencesFlag Occurrences, 
+  explicit Option(enum NumOccurrencesFlag OccurrencesFlag,
                   enum OptionHidden Hidden)
-    : NumOccurrences(0), Occurrences(Occurrences), HiddenFlag(Hidden), 
-      Formatting(NormalFormatting), Position(0),
-      AdditionalVals(0), NextRegistered(0),
+    : NumOccurrences(0), Occurrences(OccurrencesFlag), Value(0),
+      HiddenFlag(Hidden), Formatting(NormalFormatting), Misc(0),
+      Position(0), AdditionalVals(0), NextRegistered(0),
       ArgStr(""), HelpStr(""), ValueStr("") {
   }
 
@@ -1608,15 +1608,16 @@ public:
 class alias : public Option {
   Option *AliasFor;
   virtual bool handleOccurrence(unsigned pos, StringRef /*ArgName*/,
-                                StringRef Arg) {
+                                StringRef Arg) LLVM_OVERRIDE {
     return AliasFor->handleOccurrence(pos, AliasFor->ArgStr, Arg);
   }
   // Handle printing stuff...
-  virtual size_t getOptionWidth() const;
-  virtual void printOptionInfo(size_t GlobalWidth) const;
+  virtual size_t getOptionWidth() const LLVM_OVERRIDE;
+  virtual void printOptionInfo(size_t GlobalWidth) const LLVM_OVERRIDE;
 
   // Aliases do not need to print their values.
-  virtual void printOptionValue(size_t /*GlobalWidth*/, bool /*Force*/) const {}
+  virtual void printOptionValue(size_t /*GlobalWidth*/,
+                                bool /*Force*/) const LLVM_OVERRIDE {}
 
   void done() {
     if (!hasArgStr())

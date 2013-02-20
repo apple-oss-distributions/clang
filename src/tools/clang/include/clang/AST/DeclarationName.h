@@ -109,8 +109,8 @@ private:
   /// CXXSpecialName, returns a pointer to it. Otherwise, returns
   /// a NULL pointer.
   CXXSpecialName *getAsCXXSpecialName() const {
-    if (getNameKind() >= CXXConstructorName &&
-        getNameKind() <= CXXConversionFunctionName)
+    NameKind Kind = getNameKind();
+    if (Kind >= CXXConstructorName && Kind <= CXXConversionFunctionName)
       return reinterpret_cast<CXXSpecialName *>(Ptr & ~PtrMask);
     return 0;
   }
@@ -156,14 +156,8 @@ private:
   friend class DeclarationNameTable;
   friend class NamedDecl;
 
-  /// getFETokenInfoAsVoid - Retrieves the front end-specified pointer
-  /// for this name as a void pointer.
-  void *getFETokenInfoAsVoid() const {
-    if (getNameKind() == Identifier)
-      return getAsIdentifierInfo()->getFETokenInfo<void>();
-    return getFETokenInfoAsVoidSlow();
-  }
-
+  /// getFETokenInfoAsVoidSlow - Retrieves the front end-specified pointer
+  /// for this name as a void pointer if it's not an identifier.
   void *getFETokenInfoAsVoidSlow() const;
 
 public:
@@ -273,7 +267,11 @@ public:
   /// declaration names, including normal identifiers and C++
   /// constructors, destructors, and conversion functions.
   template<typename T>
-  T *getFETokenInfo() const { return static_cast<T*>(getFETokenInfoAsVoid()); }
+  T *getFETokenInfo() const {
+    if (const IdentifierInfo *Info = getAsIdentifierInfo())
+      return Info->getFETokenInfo<T>();
+    return static_cast<T*>(getFETokenInfoAsVoidSlow());
+  }
 
   void setFETokenInfo(void *T);
 
@@ -336,8 +334,8 @@ class DeclarationNameTable {
   CXXOperatorIdName *CXXOperatorNames; // Operator names
   void *CXXLiteralOperatorNames; // Actually a CXXOperatorIdName*
 
-  DeclarationNameTable(const DeclarationNameTable&);            // NONCOPYABLE
-  DeclarationNameTable& operator=(const DeclarationNameTable&); // NONCOPYABLE
+  DeclarationNameTable(const DeclarationNameTable&) LLVM_DELETED_FUNCTION;
+  void operator=(const DeclarationNameTable&) LLVM_DELETED_FUNCTION;
 
 public:
   DeclarationNameTable(const ASTContext &C);

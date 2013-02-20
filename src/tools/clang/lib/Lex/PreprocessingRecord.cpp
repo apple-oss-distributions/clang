@@ -25,10 +25,11 @@ ExternalPreprocessingRecordSource::~ExternalPreprocessingRecordSource() { }
 InclusionDirective::InclusionDirective(PreprocessingRecord &PPRec,
                                        InclusionKind Kind, 
                                        StringRef FileName, 
-                                       bool InQuotes, const FileEntry *File, 
+                                       bool InQuotes, bool ImportedModule,
+                                       const FileEntry *File,
                                        SourceRange Range)
   : PreprocessingDirective(InclusionDirectiveKind, Range), 
-    InQuotes(InQuotes), Kind(Kind), File(File) 
+    InQuotes(InQuotes), Kind(Kind), ImportedModule(ImportedModule), File(File)
 { 
   char *Memory 
     = (char*)PPRec.Allocate(FileName.size() + 1, llvm::alignOf<char>());
@@ -48,7 +49,7 @@ PreprocessingRecord::PreprocessingRecord(SourceManager &SM,
 }
 
 /// \brief Returns a pair of [Begin, End) iterators of preprocessed entities
-/// that source range \arg R encompasses.
+/// that source range \p Range encompasses.
 std::pair<PreprocessingRecord::iterator, PreprocessingRecord::iterator>
 PreprocessingRecord::getPreprocessedEntitiesInRange(SourceRange Range) {
   if (Range.isInvalid())
@@ -89,7 +90,7 @@ static bool isPreprocessedEntityIfInFileID(PreprocessedEntity *PPE, FileID FID,
 ///
 /// Can be used to avoid implicit deserializations of preallocated
 /// preprocessed entities if we only care about entities of a specific file
-/// and not from files #included in the range given at
+/// and not from files \#included in the range given at
 /// \see getPreprocessedEntitiesInRange.
 bool PreprocessingRecord::isEntityInFileID(iterator PPEI, FileID FID) {
   if (FID.isInvalid())
@@ -381,10 +382,7 @@ void PreprocessingRecord::MacroDefined(const Token &Id,
 
 void PreprocessingRecord::MacroUndefined(const Token &Id,
                                          const MacroInfo *MI) {
-  llvm::DenseMap<const MacroInfo *, PPEntityID>::iterator Pos
-    = MacroDefinitions.find(MI);
-  if (Pos != MacroDefinitions.end())
-    MacroDefinitions.erase(Pos);
+  MacroDefinitions.erase(MI);
 }
 
 void PreprocessingRecord::InclusionDirective(
@@ -392,10 +390,11 @@ void PreprocessingRecord::InclusionDirective(
     const clang::Token &IncludeTok,
     StringRef FileName,
     bool IsAngled,
+    CharSourceRange FilenameRange,
     const FileEntry *File,
-    clang::SourceLocation EndLoc,
     StringRef SearchPath,
-    StringRef RelativePath) {
+    StringRef RelativePath,
+    const Module *Imported) {
   InclusionDirective::InclusionKind Kind = InclusionDirective::Include;
   
   switch (IncludeTok.getIdentifierInfo()->getPPKeywordID()) {
@@ -418,9 +417,19 @@ void PreprocessingRecord::InclusionDirective(
   default:
     llvm_unreachable("Unknown include directive kind");
   }
-  
+
+  SourceLocation EndLoc;
+  if (!IsAngled) {
+    EndLoc = FilenameRange.getBegin();
+  } else {
+    EndLoc = FilenameRange.getEnd();
+    if (FilenameRange.isCharRange())
+      EndLoc = EndLoc.getLocWithOffset(-1); // the InclusionDirective expects
+                                            // a token range.
+  }
   clang::InclusionDirective *ID
-    = new (*this) clang::InclusionDirective(*this, Kind, FileName, !IsAngled, 
+    = new (*this) clang::InclusionDirective(*this, Kind, FileName, !IsAngled,
+                                            (bool)Imported,
                                             File, SourceRange(HashLoc, EndLoc));
   addPreprocessedEntity(ID);
 }

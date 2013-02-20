@@ -25,12 +25,13 @@ namespace clang {
 /// non-const iterator.
 class UnresolvedSetIterator {
 private:
-  typedef SmallVectorImpl<DeclAccessPair> DeclsTy;
+  typedef llvm::MutableArrayRef<DeclAccessPair> DeclsTy;
   typedef DeclsTy::iterator IteratorTy;
 
   IteratorTy ir;
 
   friend class UnresolvedSetImpl;
+  friend class ASTUnresolvedSet;
   friend class OverloadExpr;
   explicit UnresolvedSetIterator(DeclsTy::iterator ir) : ir(ir) {}
   explicit UnresolvedSetIterator(DeclsTy::const_iterator ir) :
@@ -87,14 +88,14 @@ public:
 
 /// UnresolvedSet - A set of unresolved declarations.
 class UnresolvedSetImpl {
-  typedef UnresolvedSetIterator::DeclsTy DeclsTy;
+  typedef SmallVectorImpl<DeclAccessPair> DeclsTy;
 
   // Don't allow direct construction, and only permit subclassing by
   // UnresolvedSet.
 private:
   template <unsigned N> friend class UnresolvedSet;
   UnresolvedSetImpl() {}
-  UnresolvedSetImpl(const UnresolvedSetImpl &) {}
+  UnresolvedSetImpl(const UnresolvedSetImpl &) LLVM_DELETED_FUNCTION;
 
 public:
   // We don't currently support assignment through this iterator, so we might

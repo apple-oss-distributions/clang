@@ -12,13 +12,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Sema/AttributeList.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/Expr.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/SmallString.h"
 using namespace clang;
 
 size_t AttributeList::allocated_size() const {
   if (IsAvailability) return AttributeFactory::AvailabilityAllocSize;
+  else if (IsTypeTagForDatatype)
+    return AttributeFactory::TypeTagForDatatypeAllocSize;
   return (sizeof(AttributeList) + NumArgs * sizeof(Expr*));
 }
 
@@ -94,12 +98,15 @@ AttributePool::createIntegerAttribute(ASTContext &C, IdentifierInfo *Name,
                                       SourceLocation TokLoc, int Arg) {
   Expr *IArg = IntegerLiteral::Create(C, llvm::APInt(32, (uint64_t) Arg),
                                       C.IntTy, TokLoc);
-  return create(Name, TokLoc, 0, TokLoc, 0, TokLoc, &IArg, 1, 0);
+  return create(Name, TokLoc, 0, TokLoc, 0, TokLoc, &IArg, 1,
+                AttributeList::AS_GNU);
 }
 
 #include "clang/Sema/AttrParsedAttrKinds.inc"
 
-AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
+AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name,
+                                           const IdentifierInfo *ScopeName,
+                                           Syntax SyntaxUsed) {
   StringRef AttrName = Name->getName();
 
   // Normalize the attribute name, __foo__ becomes foo.
@@ -107,5 +114,14 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
       AttrName.size() >= 4)
     AttrName = AttrName.substr(2, AttrName.size() - 4);
 
-  return ::getAttrKind(AttrName);
+  SmallString<64> Buf;
+  if (ScopeName)
+    Buf += ScopeName->getName();
+  // Ensure that in the case of C++11 attributes, we look for '::foo' if it is
+  // unscoped.
+  if (ScopeName || SyntaxUsed == AS_CXX11)
+    Buf += "::";
+  Buf += AttrName;
+
+  return ::getAttrKind(Buf);
 }

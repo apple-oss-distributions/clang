@@ -80,6 +80,9 @@ public:
   virtual void EmitDwarfAdvanceFrameAddr(const MCSymbol *LastLabel,
                                          const MCSymbol *Label);
   virtual void EmitGPRel32Value(const MCExpr *Value);
+  virtual void EmitGPRel64Value(const MCExpr *Value);
+  virtual void EmitFill(uint64_t NumBytes, uint8_t FillValue,
+                        unsigned AddrSpace);
   virtual void FinishImpl();
 
   /// @}

@@ -11,6 +11,10 @@
 
 #include "new"
 
+#ifndef __has_include
+#define __has_include(inc) 0
+#endif
+
 #if __APPLE__
     #include <cxxabi.h>
 
@@ -21,10 +25,13 @@
         #define __new_handler __cxxabiapple::__cxa_new_handler
     #endif
 #else  // __APPLE__
-    static std::new_handler __new_handler;
+    #if defined(LIBCXXRT) || __has_include(<cxxabi.h>)
+        #include <cxxabi.h>
+    #endif  // __has_include(<cxxabi.h>)
+    #ifndef _LIBCPPABI_VERSION
+        static std::new_handler __new_handler;
+    #endif  // _LIBCPPABI_VERSION
 #endif
-
-//#ifndef _LIBCPPABI_VERSION
 
 // Implement all new and delete operators as weak definitions
 // in this shared library, so that they can be overriden by programs
@@ -134,8 +141,6 @@ operator delete[] (void* ptr, const std::nothrow_t&) _NOEXCEPT
     ::operator delete[](ptr);
 }
 
-//#endif  // _LIBCPPABI_VERSION
-
 namespace std
 {
 
@@ -155,6 +160,8 @@ get_new_handler() _NOEXCEPT
     return __sync_fetch_and_add(&__new_handler, (new_handler)0);
 }
 
+#ifndef LIBCXXRT
+
 bad_alloc::bad_alloc() _NOEXCEPT
 {
 }
@@ -168,6 +175,8 @@ bad_alloc::what() const _NOEXCEPT
 {
     return "std::bad_alloc";
 }
+
+#endif //LIBCXXRT
 
 bad_array_new_length::bad_array_new_length() _NOEXCEPT
 {

@@ -17,9 +17,9 @@
 #include "JITDwarfEmitter.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/Constants.h"
-#include "llvm/Module.h"
+#include "llvm/DebugInfo.h"
 #include "llvm/DerivedTypes.h"
-#include "llvm/Analysis/DebugInfo.h"
+#include "llvm/Module.h"
 #include "llvm/CodeGen/JITCodeEmitter.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineCodeInfo.h"
@@ -108,13 +108,18 @@ namespace {
     /// particular GlobalVariable so that we can reuse them if necessary.
     GlobalToIndirectSymMapTy GlobalToIndirectSymMap;
 
+#ifndef NDEBUG
     /// Instance of the JIT this ResolverState serves.
     JIT *TheJIT;
+#endif
 
   public:
     JITResolverState(JIT *jit) : FunctionToLazyStubMap(this),
-                                 FunctionToCallSitesMap(this),
-                                 TheJIT(jit) {}
+                                 FunctionToCallSitesMap(this) {
+#ifndef NDEBUG
+      TheJIT = jit;
+#endif
+    }
 
     FunctionToLazyStubMapTy& getFunctionToLazyStubMap(
       const MutexGuard& locked) {
@@ -775,7 +780,7 @@ static unsigned GetConstantPoolSizeInBytes(MachineConstantPool *MCP,
 
 void JITEmitter::startFunction(MachineFunction &F) {
   DEBUG(dbgs() << "JIT: Starting CodeGen of Function "
-        << F.getFunction()->getName() << "\n");
+        << F.getName() << "\n");
 
   uintptr_t ActualSize = 0;
   // Set the memory writable, if it's not already
@@ -924,7 +929,7 @@ bool JITEmitter::finishFunction(MachineFunction &F) {
   PrevDL = DebugLoc();
 
   DEBUG(dbgs() << "JIT: Finished CodeGen of [" << (void*)FnStart
-        << "] Function: " << F.getFunction()->getName()
+        << "] Function: " << F.getName()
         << ": " << (FnEnd-FnStart) << " bytes of text, "
         << Relocations.size() << " relocations\n");
 

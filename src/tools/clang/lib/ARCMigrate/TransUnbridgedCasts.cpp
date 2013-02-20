@@ -35,9 +35,11 @@
 #include "Transforms.h"
 #include "Internals.h"
 #include "clang/Analysis/DomainSpecific/CocoaConventions.h"
-#include "clang/Sema/SemaDiagnostic.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/ParentMap.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Lex/Lexer.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "llvm/ADT/SmallString.h"
 
 using namespace clang;
@@ -229,20 +231,26 @@ private:
       }
     } else {
       assert(Kind == OBC_BridgeTransfer || Kind == OBC_BridgeRetained);
-      StringRef cfBridging;
-      if (Kind == OBC_BridgeTransfer)
-        cfBridging = "CFBridgingRelease";
-      else
-        cfBridging = "CFBridgingRetain";
+      SmallString<32> BridgeCall;
 
       Expr *WrapE = E->getSubExpr();
-      SourceLocation insertLoc = WrapE->getLocStart();
+      SourceLocation InsertLoc = WrapE->getLocStart();
+
+      SourceManager &SM = Pass.Ctx.getSourceManager();
+      char PrevChar = *SM.getCharacterData(InsertLoc.getLocWithOffset(-1));
+      if (Lexer::isIdentifierBodyChar(PrevChar, Pass.Ctx.getLangOpts()))
+        BridgeCall += ' ';
+
+      if (Kind == OBC_BridgeTransfer)
+        BridgeCall += "CFBridgingRelease";
+      else
+        BridgeCall += "CFBridgingRetain";
+
       if (isa<ParenExpr>(WrapE)) {
-        TA.insert(insertLoc, cfBridging);
+        TA.insert(InsertLoc, BridgeCall);
       } else {
-        std::string withParens = cfBridging;
-        withParens += '(';
-        TA.insert(insertLoc, withParens);
+        BridgeCall += '(';
+        TA.insert(InsertLoc, BridgeCall);
         TA.insertAfterToken(WrapE->getLocEnd(), ")");
       }
     }

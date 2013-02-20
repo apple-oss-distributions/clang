@@ -88,6 +88,7 @@ void CompilerInstance::setASTConsumer(ASTConsumer *Value) {
 
 void CompilerInstance::setCodeCompletionConsumer(CodeCompleteConsumer *Value) {
   CompletionConsumer.reset(Value);
+  getFrontendOpts().SkipFunctionBodies = Value != 0;
 }
 
 // Diagnostics
@@ -383,25 +384,23 @@ static bool EnableCodeCompletion(Preprocessor &PP,
 void CompilerInstance::createCodeCompletionConsumer() {
   const ParsedSourceLocation &Loc = getFrontendOpts().CodeCompletionAt;
   if (!CompletionConsumer) {
-    CompletionConsumer.reset(
+    setCodeCompletionConsumer(
       createCodeCompletionConsumer(getPreprocessor(),
                                    Loc.FileName, Loc.Line, Loc.Column,
-                                   getFrontendOpts().ShowMacrosInCodeCompletion,
-                             getFrontendOpts().ShowCodePatternsInCodeCompletion,
-                           getFrontendOpts().ShowGlobalSymbolsInCodeCompletion,
+                                   getFrontendOpts().CodeCompleteOpts,
                                    llvm::outs()));
     if (!CompletionConsumer)
       return;
   } else if (EnableCodeCompletion(getPreprocessor(), Loc.FileName,
                                   Loc.Line, Loc.Column)) {
-    CompletionConsumer.reset();
+    setCodeCompletionConsumer(0);
     return;
   }
 
   if (CompletionConsumer->isOutputBinary() &&
       llvm::sys::Program::ChangeStdoutToBinary()) {
     getPreprocessor().getDiagnostics().Report(diag::err_fe_stdout_binary);
-    CompletionConsumer.reset();
+    setCodeCompletionConsumer(0);
   }
 }
 
@@ -414,16 +413,13 @@ CompilerInstance::createCodeCompletionConsumer(Preprocessor &PP,
                                                const std::string &Filename,
                                                unsigned Line,
                                                unsigned Column,
-                                               bool ShowMacros,
-                                               bool ShowCodePatterns,
-                                               bool ShowGlobals,
+                                               const CodeCompleteOptions &Opts,
                                                raw_ostream &OS) {
   if (EnableCodeCompletion(PP, Filename, Line, Column))
     return 0;
 
   // Set up the creation routine for code-completion.
-  return new PrintingCodeCompleteConsumer(ShowMacros, ShowCodePatterns,
-                                          ShowGlobals, OS);
+  return new PrintingCodeCompleteConsumer(Opts, OS);
 }
 
 void CompilerInstance::createSema(TranslationUnitKind TUKind,
@@ -455,7 +451,7 @@ void CompilerInstance::clearOutputFiles(bool EraseFiles) {
         FileMgr->FixupRelativePath(NewOutFile);
         if (llvm::error_code ec = llvm::sys::fs::rename(it->TempFilename,
                                                         NewOutFile.str())) {
-          getDiagnostics().Report(diag::err_fe_unable_to_rename_temp)
+          getDiagnostics().Report(diag::err_unable_to_rename_temp)
             << it->TempFilename << it->Filename << ec.message();
 
           bool existed;
@@ -611,6 +607,19 @@ bool CompilerInstance::InitializeSourceManager(StringRef InputFile,
       return false;
     }
     SourceMgr.createMainFileID(File, Kind);
+
+    // The natural SourceManager infrastructure can't currently handle named
+    // pipes, but we would at least like to accept them for the main
+    // file. Detect them here, read them with the more generic MemoryBuffer
+    // function, and simply override their contents as we do for STDIN.
+    if (File->isNamedPipe()) {
+      OwningPtr<llvm::MemoryBuffer> MB;
+      if (llvm::error_code ec = llvm::MemoryBuffer::getFile(InputFile, MB)) {
+        Diags.Report(diag::err_cannot_open_file) << InputFile << ec.message();
+        return false;
+      }
+      SourceMgr.overrideFileContents(File, MB.take());
+    }
   } else {
     OwningPtr<llvm::MemoryBuffer> SB;
     if (llvm::MemoryBuffer::getSTDIN(SB)) {
@@ -650,6 +659,10 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
   // FIXME: We shouldn't need to do this, the target should be immutable once
   // created. This complexity should be lifted elsewhere.
   getTarget().setForcedLangOptions(getLangOpts());
+
+  // rewriter project will change target built-in bool type from its default. 
+  if (getFrontendOpts().ProgramAction == frontend::RewriteObjC)
+    getTarget().noSignedCharForObjCBool();
 
   // Validate/process some options.
   if (getHeaderSearchOpts().Verbose)
@@ -855,13 +868,6 @@ Module *CompilerInstance::loadModule(SourceLocation ImportLoc,
   }
   
   // Determine what file we're searching from.
-  SourceManager &SourceMgr = getSourceManager();
-  SourceLocation ExpandedImportLoc = SourceMgr.getExpansionLoc(ImportLoc);
-  const FileEntry *CurFile
-    = SourceMgr.getFileEntryForID(SourceMgr.getFileID(ExpandedImportLoc));
-  if (!CurFile)
-    CurFile = SourceMgr.getFileEntryForID(SourceMgr.getMainFileID());
-
   StringRef ModuleName = Path[0].first->getName();
   SourceLocation ModuleNameLoc = Path[0].second;
 
@@ -987,6 +993,9 @@ Module *CompilerInstance::loadModule(SourceLocation ImportLoc,
       Module = PP->getHeaderSearchInfo().getModuleMap()
                  .findModule((Path[0].first->getName()));
     }
+
+    if (Module)
+      Module->setASTFile(ModuleFile);
     
     // Cache the result of this top-level module lookup for later.
     Known = KnownModules.insert(std::make_pair(Path[0].first, Module)).first;
@@ -1086,9 +1095,12 @@ Module *CompilerInstance::loadModule(SourceLocation ImportLoc,
   // implicit import declaration to capture it in the AST.
   if (IsInclusionDirective && hasASTContext()) {
     TranslationUnitDecl *TU = getASTContext().getTranslationUnitDecl();
-    TU->addDecl(ImportDecl::CreateImplicit(getASTContext(), TU,
-                                           ImportLoc, Module, 
-                                           Path.back().second));
+    ImportDecl *ImportD = ImportDecl::CreateImplicit(getASTContext(), TU,
+                                                     ImportLoc, Module,
+                                                     Path.back().second);
+    TU->addDecl(ImportD);
+    if (Consumer)
+      Consumer->HandleImplicitImportDecl(ImportD);
   }
   
   LastModuleImportLoc = ImportLoc;

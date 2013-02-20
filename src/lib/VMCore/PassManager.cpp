@@ -14,7 +14,6 @@
 
 #include "llvm/PassManagers.h"
 #include "llvm/PassManager.h"
-#include "llvm/DebugInfoProbe.h"
 #include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/Assembly/Writer.h"
 #include "llvm/Support/CommandLine.h"
@@ -26,7 +25,6 @@
 #include "llvm/Support/PassNameParser.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Mutex.h"
-#include "llvm/ADT/StringMap.h"
 #include <algorithm>
 #include <map>
 using namespace llvm;
@@ -422,20 +420,6 @@ char PassManagerImpl::ID = 0;
 namespace {
 
 //===----------------------------------------------------------------------===//
-// DebugInfoProbe
-
-static DebugInfoProbeInfo *TheDebugProbe;
-static void createDebugInfoProbe() {
-  if (TheDebugProbe) return;
-
-  // Constructed the first time this is called. This guarantees that the
-  // object will be constructed, if -enable-debug-info-probe is set,
-  // before static globals, thus it will be destroyed before them.
-  static ManagedStatic<DebugInfoProbeInfo> DIP;
-  TheDebugProbe = &*DIP;
-}
-
-//===----------------------------------------------------------------------===//
 /// TimingInfo Class - This class is used to calculate information about the
 /// amount of time each pass takes to execute.  This only happens when
 /// -time-passes is enabled on the command line.
@@ -494,8 +478,7 @@ PMTopLevelManager::PMTopLevelManager(PMDataManager *PMDM) {
 
 /// Set pass P as the last user of the given analysis passes.
 void
-PMTopLevelManager::setLastUser(const SmallVectorImpl<Pass *> &AnalysisPasses,
-                               Pass *P) {
+PMTopLevelManager::setLastUser(ArrayRef<Pass*> AnalysisPasses, Pass *P) {
   unsigned PDepth = 0;
   if (P->getResolver())
     PDepth = P->getResolver()->getPMDataManager().getDepth();
@@ -610,6 +593,26 @@ void PMTopLevelManager::schedulePass(Pass *P) {
       Pass *AnalysisPass = findAnalysisPass(*I);
       if (!AnalysisPass) {
         const PassInfo *PI = PassRegistry::getPassRegistry()->getPassInfo(*I);
+
+        if (PI == NULL) {
+          // Pass P is not in the global PassRegistry
+          dbgs() << "Pass '"  << P->getPassName() << "' is not initialized." << "\n";
+          dbgs() << "Verify if there is a pass dependency cycle." << "\n";
+          dbgs() << "Required Passes:" << "\n";
+          for (AnalysisUsage::VectorType::const_iterator I2 = RequiredSet.begin(),
+                 E = RequiredSet.end(); I2 != E && I2 != I; ++I2) {
+            Pass *AnalysisPass2 = findAnalysisPass(*I2);
+            if (AnalysisPass2) {
+              dbgs() << "\t" << AnalysisPass2->getPassName() << "\n";
+            }
+            else {
+              dbgs() << "\t"   << "Error: Required pass not found! Possible causes:"  << "\n";
+              dbgs() << "\t\t" << "- Pass misconfiguration (e.g.: missing macros)"    << "\n";
+              dbgs() << "\t\t" << "- Corruption of the global PassRegistry"           << "\n";
+            }
+          }
+        }
+
         assert(PI && "Expected required passes to be initialized");
         AnalysisPass = PI->createPass();
         if (P->getPotentialPassManagerType () ==
@@ -1186,7 +1189,7 @@ void PMDataManager::dumpAnalysisUsage(StringRef Msg, const Pass *P,
   assert(PassDebugging >= Details);
   if (Set.empty())
     return;
-  dbgs() << (void*)P << std::string(getDepth()*2+3, ' ') << Msg << " Analyses:";
+  dbgs() << (const void*)P << std::string(getDepth()*2+3, ' ') << Msg << " Analyses:";
   for (unsigned i = 0; i != Set.size(); ++i) {
     if (i) dbgs() << ',';
     const PassInfo *PInf = PassRegistry::getPassRegistry()->getPassInfo(Set[i]);
@@ -1440,7 +1443,6 @@ void FunctionPassManagerImpl::releaseMemoryOnTheFly() {
 bool FunctionPassManagerImpl::run(Function &F) {
   bool Changed = false;
   TimingInfo::createTheTimeInfo();
-  createDebugInfoProbe();
 
   initializeAllAnalysisInfo();
   for (unsigned Index = 0; Index < getNumContainedManagers(); ++Index)
@@ -1488,16 +1490,13 @@ bool FPPassManager::runOnFunction(Function &F) {
     dumpRequiredSet(FP);
 
     initializeAnalysisImpl(FP);
-    if (TheDebugProbe)
-      TheDebugProbe->initialize(FP, F);
+
     {
       PassManagerPrettyStackEntry X(FP, F);
       TimeRegion PassTimer(getPassTimer(FP));
 
       LocalChanged |= FP->runOnFunction(F);
     }
-    if (TheDebugProbe)
-      TheDebugProbe->finalize(FP, F);
 
     Changed |= LocalChanged;
     if (LocalChanged)
@@ -1647,7 +1646,6 @@ Pass* MPPassManager::getOnTheFlyPass(Pass *MP, AnalysisID PI, Function &F){
 bool PassManagerImpl::run(Module &M) {
   bool Changed = false;
   TimingInfo::createTheTimeInfo();
-  createDebugInfoProbe();
 
   dumpArguments();
   dumpPasses();

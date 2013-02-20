@@ -60,12 +60,32 @@ class Random {
 public:
   /// C'tor
   Random(unsigned _seed):Seed(_seed) {}
-  /// Return the next random value.
-  unsigned Rand() {
-    unsigned Val = Seed + 0x000b07a1;
+
+  /// Return a random integer, up to a
+  /// maximum of 2**19 - 1.
+  uint32_t Rand() {
+    uint32_t Val = Seed + 0x000b07a1;
     Seed = (Val * 0x3c7c0ac1);
     // Only lowest 19 bits are random-ish.
     return Seed & 0x7ffff;
+  }
+
+  /// Return a random 32 bit integer.
+  uint32_t Rand32() {
+    uint32_t Val = Rand();
+    Val &= 0xffff;
+    return Val | (Rand() << 16);
+  }
+
+  /// Return a random 64 bit integer.
+  uint64_t Rand64() {
+    uint64_t Val = Rand32();
+    return Val | (uint64_t(Rand32()) << 32);
+  }
+
+  /// Rand operator for STL algorithms.
+  ptrdiff_t operator()(ptrdiff_t y) {
+    return  Rand64() % y;
   }
 
 private:
@@ -106,6 +126,10 @@ public:
   /// C'tor
   Modifier(BasicBlock *Block, PieceTable *PT, Random *R):
     BB(Block),PT(PT),Ran(R),Context(BB->getContext()) {}
+
+  /// virtual D'tor to silence warnings.
+  virtual ~Modifier() {}
+
   /// Add a new instruction.
   virtual void Act() = 0;
   /// Add N new instructions,
@@ -202,11 +226,17 @@ protected:
 
   /// Pick a random vector type.
   Type *pickVectorType(unsigned len = (unsigned)-1) {
-    Type *Ty = pickScalarType();
     // Pick a random vector width in the range 2**0 to 2**4.
     // by adding two randoms we are generating a normal-like distribution
     // around 2**3.
     unsigned width = 1<<((Ran->Rand() % 3) + (Ran->Rand() % 3));
+    Type *Ty;
+
+    // Vectors of x86mmx are illegal; keep trying till we get something else.
+    do {
+      Ty = pickScalarType();
+    } while (Ty->isX86_MMXTy());
+
     if (len != (unsigned)-1)
       width = len;
     return VectorType::get(Ty, width);
@@ -342,10 +372,20 @@ struct ConstModifier: public Modifier {
     }
 
     if (Ty->isFloatingPointTy()) {
+      // Generate 128 random bits, the size of the (currently)
+      // largest floating-point types.
+      uint64_t RandomBits[2];
+      for (unsigned i = 0; i < 2; ++i)
+        RandomBits[i] = Ran->Rand64();
+
+      APInt RandomInt(Ty->getPrimitiveSizeInBits(), makeArrayRef(RandomBits));
+
+      bool isIEEE = !Ty->isX86_FP80Ty() && !Ty->isPPC_FP128Ty();
+      APFloat RandomFloat(RandomInt, isIEEE);
+
       if (Ran->Rand() & 1)
         return PT->push_back(ConstantFP::getNullValue(Ty));
-      return PT->push_back(ConstantFP::get(Ty,
-                                           static_cast<double>(1)/Ran->Rand()));
+      return PT->push_back(ConstantFP::get(Ty->getContext(), RandomFloat));
     }
 
     if (Ty->isIntegerTy()) {
@@ -382,7 +422,7 @@ struct ExtractElementModifier: public Modifier {
     Value *Val0 = getRandomVectorValue();
     Value *V = ExtractElementInst::Create(Val0,
              ConstantInt::get(Type::getInt32Ty(BB->getContext()),
-             Ran->Rand() % cast<VectorType>(Val0->getType())->getNumElements()), 
+             Ran->Rand() % cast<VectorType>(Val0->getType())->getNumElements()),
              "E", BB->getTerminator());
     return PT->push_back(V);
   }
@@ -446,7 +486,7 @@ struct CastModifier: public Modifier {
       DestTy = pickVectorType(VecTy->getNumElements());
     }
 
-    // no need to casr.
+    // no need to cast.
     if (VTy == DestTy) return;
 
     // Pointers:
@@ -457,9 +497,11 @@ struct CastModifier: public Modifier {
         new BitCastInst(V, DestTy, "PC", BB->getTerminator()));
     }
 
+    unsigned VSize = VTy->getScalarType()->getPrimitiveSizeInBits();
+    unsigned DestSize = DestTy->getScalarType()->getPrimitiveSizeInBits();
+
     // Generate lots of bitcasts.
-    if ((Ran->Rand() & 1) &&
-        VTy->getPrimitiveSizeInBits() == DestTy->getPrimitiveSizeInBits()) {
+    if ((Ran->Rand() & 1) && VSize == DestSize) {
       return PT->push_back(
         new BitCastInst(V, DestTy, "BC", BB->getTerminator()));
     }
@@ -467,11 +509,11 @@ struct CastModifier: public Modifier {
     // Both types are integers:
     if (VTy->getScalarType()->isIntegerTy() &&
         DestTy->getScalarType()->isIntegerTy()) {
-      if (VTy->getScalarType()->getPrimitiveSizeInBits() >
-          DestTy->getScalarType()->getPrimitiveSizeInBits()) {
+      if (VSize > DestSize) {
         return PT->push_back(
           new TruncInst(V, DestTy, "Tr", BB->getTerminator()));
       } else {
+        assert(VSize < DestSize && "Different int types with the same size?");
         if (Ran->Rand() & 1)
           return PT->push_back(
             new ZExtInst(V, DestTy, "ZE", BB->getTerminator()));
@@ -501,14 +543,15 @@ struct CastModifier: public Modifier {
     // Both floats.
     if (VTy->getScalarType()->isFloatingPointTy() &&
         DestTy->getScalarType()->isFloatingPointTy()) {
-      if (VTy->getScalarType()->getPrimitiveSizeInBits() >
-          DestTy->getScalarType()->getPrimitiveSizeInBits()) {
+      if (VSize > DestSize) {
         return PT->push_back(
           new FPTruncInst(V, DestTy, "Tr", BB->getTerminator()));
-      } else {
+      } else if (VSize < DestSize) {
         return PT->push_back(
           new FPExtInst(V, DestTy, "ZE", BB->getTerminator()));
       }
+      // If VSize == DestSize, then the two types must be fp128 and ppc_fp128,
+      // for which there is no defined conversion. So do nothing.
     }
   }
 
@@ -566,15 +609,13 @@ struct CmpModifier: public Modifier {
   }
 };
 
-void FillFunction(Function *F) {
+void FillFunction(Function *F, Random &R) {
   // Create a legal entry block.
   BasicBlock *BB = BasicBlock::Create(F->getContext(), "BB", F);
   ReturnInst::Create(F->getContext(), BB);
 
   // Create the value table.
   Modifier::PieceTable PT;
-  // Pick an initial seed value
-  Random R(SeedCL);
 
   // Consider arguments as legal values.
   for (Function::arg_iterator it = F->arg_begin(), e = F->arg_end();
@@ -615,15 +656,17 @@ void FillFunction(Function *F) {
   SM->ActN(5); // Throw in a few stores.
 }
 
-void IntroduceControlFlow(Function *F) {
-  std::set<Instruction*> BoolInst;
+void IntroduceControlFlow(Function *F, Random &R) {
+  std::vector<Instruction*> BoolInst;
   for (BasicBlock::iterator it = F->begin()->begin(),
        e = F->begin()->end(); it != e; ++it) {
     if (it->getType() == IntegerType::getInt1Ty(F->getContext()))
-      BoolInst.insert(it);
+      BoolInst.push_back(it);
   }
 
-  for (std::set<Instruction*>::iterator it = BoolInst.begin(),
+  std::random_shuffle(BoolInst.begin(), BoolInst.end(), R);
+
+  for (std::vector<Instruction*>::iterator it = BoolInst.begin(),
        e = BoolInst.end(); it != e; ++it) {
     Instruction *Instr = *it;
     BasicBlock *Curr = Instr->getParent();
@@ -645,8 +688,13 @@ int main(int argc, char **argv) {
 
   std::auto_ptr<Module> M(new Module("/tmp/autogen.bc", getGlobalContext()));
   Function *F = GenEmptyFunction(M.get());
-  FillFunction(F);
-  IntroduceControlFlow(F);
+
+  // Pick an initial seed value
+  Random R(SeedCL);
+  // Generate lots of random instructions inside a single basic block.
+  FillFunction(F, R);
+  // Break the basic block into many loops.
+  IntroduceControlFlow(F, R);
 
   // Figure out what stream we are supposed to write to...
   OwningPtr<tool_output_file> Out;

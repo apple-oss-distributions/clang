@@ -42,11 +42,12 @@ public:
   virtual uint8_t getBytesInAddress() const;
   virtual StringRef getFileFormatName() const;
   virtual unsigned getArch() const;
+  virtual StringRef getLoadName() const;
 
-  MachOObject *getObject() { return MachOObj; }
+  MachOObject *getObject() { return MachOObj.get(); }
 
   static inline bool classof(const Binary *v) {
-    return v->getType() == isMachO;
+    return v->isMachO();
   }
   static inline bool classof(const MachOObjectFile *v) { return true; }
 
@@ -71,6 +72,10 @@ protected:
   virtual error_code isSectionText(DataRefImpl Sec, bool &Res) const;
   virtual error_code isSectionData(DataRefImpl Sec, bool &Res) const;
   virtual error_code isSectionBSS(DataRefImpl Sec, bool &Res) const;
+  virtual error_code isSectionRequiredForExecution(DataRefImpl Sec,
+                                                   bool &Res) const;
+  virtual error_code isSectionVirtual(DataRefImpl Sec, bool &Res) const;
+  virtual error_code isSectionZeroInit(DataRefImpl Sec, bool &Res) const;
   virtual error_code sectionContainsSymbol(DataRefImpl DRI, DataRefImpl S,
                                            bool &Result) const;
   virtual relocation_iterator getSectionRelBegin(DataRefImpl Sec) const;
@@ -98,7 +103,7 @@ protected:
   virtual error_code getLibraryPath(DataRefImpl LibData, StringRef &Res) const;
 
 private:
-  MachOObject *MachOObj;
+  OwningPtr<MachOObject> MachOObj;
   mutable uint32_t RegisteredStringTable;
   typedef SmallVector<DataRefImpl, 1> SectionList;
   SectionList Sections;

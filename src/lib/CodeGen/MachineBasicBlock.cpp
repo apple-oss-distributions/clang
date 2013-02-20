@@ -109,7 +109,8 @@ void ilist_traits<MachineInstr>::removeNodeFromList(MachineInstr *N) {
   assert(N->getParent() != 0 && "machine instruction not in a basic block");
 
   // Remove from the use/def lists.
-  N->RemoveRegOperandsFromUseLists();
+  if (MachineFunction *MF = N->getParent()->getParent())
+    N->RemoveRegOperandsFromUseLists(MF->getRegInfo());
 
   N->setParent(0);
 
@@ -227,15 +228,29 @@ const MachineBasicBlock *MachineBasicBlock::getLandingPadSuccessor() const {
   return 0;
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 void MachineBasicBlock::dump() const {
   print(dbgs());
 }
+#endif
 
 StringRef MachineBasicBlock::getName() const {
   if (const BasicBlock *LBB = getBasicBlock())
     return LBB->getName();
   else
     return "(null)";
+}
+
+/// Return a hopefully unique identifier for this block.
+std::string MachineBasicBlock::getFullName() const {
+  std::string Name;
+  if (getParent())
+    Name = (getParent()->getName() + ":").str();
+  if (getBasicBlock())
+    Name += getBasicBlock()->getName();
+  else
+    Name += (Twine("BB") + Twine(getNumber())).str();
+  return Name;
 }
 
 void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
@@ -259,11 +274,9 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
   }
   if (isLandingPad()) { OS << Comma << "EH LANDING PAD"; Comma = ", "; }
   if (hasAddressTaken()) { OS << Comma << "ADDRESS TAKEN"; Comma = ", "; }
-  if (Alignment) {
+  if (Alignment)
     OS << Comma << "Align " << Alignment << " (" << (1u << Alignment)
        << " bytes)";
-    Comma = ", ";
-  }
 
   OS << '\n';
 
@@ -300,8 +313,11 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
   if (!succ_empty()) {
     if (Indexes) OS << '\t';
     OS << "    Successors according to CFG:";
-    for (const_succ_iterator SI = succ_begin(), E = succ_end(); SI != E; ++SI)
+    for (const_succ_iterator SI = succ_begin(), E = succ_end(); SI != E; ++SI) {
       OS << " BB#" << (*SI)->getNumber();
+      if (!Weights.empty())
+        OS << '(' << *getWeightIterator(SI) << ')';
+    }
     OS << '\n';
   }
 }
@@ -309,8 +325,8 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
 void MachineBasicBlock::removeLiveIn(unsigned Reg) {
   std::vector<unsigned>::iterator I =
     std::find(LiveIns.begin(), LiveIns.end(), Reg);
-  assert(I != LiveIns.end() && "Not a live in!");
-  LiveIns.erase(I);
+  if (I != LiveIns.end())
+    LiveIns.erase(I);
 }
 
 bool MachineBasicBlock::isLiveIn(unsigned Reg) const {
@@ -380,22 +396,44 @@ void MachineBasicBlock::updateTerminator() {
         TII->InsertBranch(*this, TBB, 0, Cond, dl);
       }
     } else {
+      // Walk through the successors and find the successor which is not
+      // a landing pad and is not the conditional branch destination (in TBB)
+      // as the fallthrough successor.
+      MachineBasicBlock *FallthroughBB = 0;
+      for (succ_iterator SI = succ_begin(), SE = succ_end(); SI != SE; ++SI) {
+        if ((*SI)->isLandingPad() || *SI == TBB)
+          continue;
+        assert(!FallthroughBB && "Found more than one fallthrough successor.");
+        FallthroughBB = *SI;
+      }
+      if (!FallthroughBB && canFallThrough()) {
+        // We fallthrough to the same basic block as the conditional jump
+        // targets. Remove the conditional jump, leaving unconditional
+        // fallthrough.
+        // FIXME: This does not seem like a reasonable pattern to support, but it
+        // has been seen in the wild coming out of degenerate ARM test cases.
+        TII->RemoveBranch(*this);
+
+        // Finally update the unconditional successor to be reached via a branch
+        // if it would not be reached by fallthrough.
+        if (!isLayoutSuccessor(TBB))
+          TII->InsertBranch(*this, TBB, 0, Cond, dl);
+        return;
+      }
+
       // The block has a fallthrough conditional branch.
-      MachineBasicBlock *MBBA = *succ_begin();
-      MachineBasicBlock *MBBB = *llvm::next(succ_begin());
-      if (MBBA == TBB) std::swap(MBBB, MBBA);
       if (isLayoutSuccessor(TBB)) {
         if (TII->ReverseBranchCondition(Cond)) {
           // We can't reverse the condition, add an unconditional branch.
           Cond.clear();
-          TII->InsertBranch(*this, MBBA, 0, Cond, dl);
+          TII->InsertBranch(*this, FallthroughBB, 0, Cond, dl);
           return;
         }
         TII->RemoveBranch(*this);
-        TII->InsertBranch(*this, MBBA, 0, Cond, dl);
-      } else if (!isLayoutSuccessor(MBBA)) {
+        TII->InsertBranch(*this, FallthroughBB, 0, Cond, dl);
+      } else if (!isLayoutSuccessor(FallthroughBB)) {
         TII->RemoveBranch(*this);
-        TII->InsertBranch(*this, TBB, MBBA, Cond, dl);
+        TII->InsertBranch(*this, TBB, FallthroughBB, Cond, dl);
       }
     }
   }
@@ -445,18 +483,42 @@ MachineBasicBlock::removeSuccessor(succ_iterator I) {
 
 void MachineBasicBlock::replaceSuccessor(MachineBasicBlock *Old,
                                          MachineBasicBlock *New) {
-  uint32_t weight = 0;
-  succ_iterator SI = std::find(Successors.begin(), Successors.end(), Old);
+  if (Old == New)
+    return;
 
-  // If Weight list is empty it means we don't use it (disabled optimization).
-  if (!Weights.empty()) {
-    weight_iterator WI = getWeightIterator(SI);
-    weight = *WI;
+  succ_iterator E = succ_end();
+  succ_iterator NewI = E;
+  succ_iterator OldI = E;
+  for (succ_iterator I = succ_begin(); I != E; ++I) {
+    if (*I == Old) {
+      OldI = I;
+      if (NewI != E)
+        break;
+    }
+    if (*I == New) {
+      NewI = I;
+      if (OldI != E)
+        break;
+    }
+  }
+  assert(OldI != E && "Old is not a successor of this block");
+  Old->removePredecessor(this);
+
+  // If New isn't already a successor, let it take Old's place.
+  if (NewI == E) {
+    New->addPredecessor(this);
+    *OldI = New;
+    return;
   }
 
-  // Update the successor information.
-  removeSuccessor(SI);
-  addSuccessor(New, weight);
+  // New is already a successor.
+  // Update its weight instead of adding a duplicate edge.
+  if (!Weights.empty()) {
+    weight_iterator OldWI = getWeightIterator(OldI);
+    *getWeightIterator(NewI) += *OldWI;
+    Weights.erase(OldWI);
+  }
+  Successors.erase(OldI);
 }
 
 void MachineBasicBlock::addPredecessor(MachineBasicBlock *pred) {
@@ -475,14 +537,13 @@ void MachineBasicBlock::transferSuccessors(MachineBasicBlock *fromMBB) {
 
   while (!fromMBB->succ_empty()) {
     MachineBasicBlock *Succ = *fromMBB->succ_begin();
-    uint32_t weight = 0;
-
+    uint32_t Weight = 0;
 
     // If Weight list is empty it means we don't use it (disabled optimization).
     if (!fromMBB->Weights.empty())
-      weight = *fromMBB->Weights.begin();
+      Weight = *fromMBB->Weights.begin();
 
-    addSuccessor(Succ, weight);
+    addSuccessor(Succ, Weight);
     fromMBB->removeSuccessor(Succ);
   }
 }
@@ -494,7 +555,10 @@ MachineBasicBlock::transferSuccessorsAndUpdatePHIs(MachineBasicBlock *fromMBB) {
 
   while (!fromMBB->succ_empty()) {
     MachineBasicBlock *Succ = *fromMBB->succ_begin();
-    addSuccessor(Succ);
+    uint32_t Weight = 0;
+    if (!fromMBB->Weights.empty())
+      Weight = *fromMBB->Weights.begin();
+    addSuccessor(Succ, Weight);
     fromMBB->removeSuccessor(Succ);
 
     // Fix up any PHI nodes in the successor.
@@ -508,9 +572,12 @@ MachineBasicBlock::transferSuccessorsAndUpdatePHIs(MachineBasicBlock *fromMBB) {
   }
 }
 
+bool MachineBasicBlock::isPredecessor(const MachineBasicBlock *MBB) const {
+  return std::find(pred_begin(), pred_end(), MBB) != pred_end();
+}
+
 bool MachineBasicBlock::isSuccessor(const MachineBasicBlock *MBB) const {
-  const_succ_iterator I = std::find(Successors.begin(), Successors.end(), MBB);
-  return I != Successors.end();
+  return std::find(succ_begin(), succ_end(), MBB) != succ_end();
 }
 
 bool MachineBasicBlock::isLayoutSuccessor(const MachineBasicBlock *MBB) const {
@@ -641,7 +708,7 @@ MachineBasicBlock::SplitCriticalEdge(MachineBasicBlock *Succ, Pass *P) {
 
   // Inherit live-ins from the successor
   for (MachineBasicBlock::livein_iterator I = Succ->livein_begin(),
-	 E = Succ->livein_end(); I != E; ++I)
+         E = Succ->livein_end(); I != E; ++I)
     NMBB->addLiveIn(*I);
 
   // Update LiveVariables.
@@ -877,12 +944,11 @@ MachineBasicBlock::findDebugLoc(instr_iterator MBBI) {
 
 /// getSuccWeight - Return weight of the edge from this block to MBB.
 ///
-uint32_t MachineBasicBlock::getSuccWeight(const MachineBasicBlock *succ) const {
+uint32_t MachineBasicBlock::getSuccWeight(const_succ_iterator Succ) const {
   if (Weights.empty())
     return 0;
 
-  const_succ_iterator I = std::find(Successors.begin(), Successors.end(), succ);
-  return *getWeightIterator(I);
+  return *getWeightIterator(Succ);
 }
 
 /// getWeightIterator - Return wight iterator corresonding to the I successor
@@ -903,6 +969,80 @@ getWeightIterator(MachineBasicBlock::const_succ_iterator I) const {
   const size_t index = std::distance(Successors.begin(), I);
   assert(index < Weights.size() && "Not a current successor!");
   return Weights.begin() + index;
+}
+
+/// Return whether (physical) register "Reg" has been <def>ined and not <kill>ed
+/// as of just before "MI".
+/// 
+/// Search is localised to a neighborhood of
+/// Neighborhood instructions before (searching for defs or kills) and N
+/// instructions after (searching just for defs) MI.
+MachineBasicBlock::LivenessQueryResult
+MachineBasicBlock::computeRegisterLiveness(const TargetRegisterInfo *TRI,
+                                           unsigned Reg, MachineInstr *MI,
+                                           unsigned Neighborhood) {
+  
+  unsigned N = Neighborhood;
+  MachineBasicBlock *MBB = MI->getParent();
+
+  // Start by searching backwards from MI, looking for kills, reads or defs.
+
+  MachineBasicBlock::iterator I(MI);
+  // If this is the first insn in the block, don't search backwards.
+  if (I != MBB->begin()) {
+    do {
+      --I;
+
+      MachineOperandIteratorBase::PhysRegInfo Analysis =
+        MIOperands(I).analyzePhysReg(Reg, TRI);
+
+      if (Analysis.Kills)
+        // Register killed, so isn't live.
+        return LQR_Dead;
+
+      else if (Analysis.DefinesOverlap || Analysis.ReadsOverlap)
+        // Defined or read without a previous kill - live.
+        return (Analysis.Defines || Analysis.Reads) ? 
+          LQR_Live : LQR_OverlappingLive;
+
+    } while (I != MBB->begin() && --N > 0);
+  }
+
+  // Did we get to the start of the block?
+  if (I == MBB->begin()) {
+    // If so, the register's state is definitely defined by the live-in state.
+    for (MCRegAliasIterator RAI(Reg, TRI, /*IncludeSelf=*/true);
+         RAI.isValid(); ++RAI) {
+      if (MBB->isLiveIn(*RAI))
+        return (*RAI == Reg) ? LQR_Live : LQR_OverlappingLive;
+    }
+
+    return LQR_Dead;
+  }
+
+  N = Neighborhood;
+
+  // Try searching forwards from MI, looking for reads or defs.
+  I = MachineBasicBlock::iterator(MI);
+  // If this is the last insn in the block, don't search forwards.
+  if (I != MBB->end()) {
+    for (++I; I != MBB->end() && N > 0; ++I, --N) {
+      MachineOperandIteratorBase::PhysRegInfo Analysis =
+        MIOperands(I).analyzePhysReg(Reg, TRI);
+
+      if (Analysis.ReadsOverlap)
+        // Used, therefore must have been live.
+        return (Analysis.Reads) ?
+          LQR_Live : LQR_OverlappingLive;
+
+      else if (Analysis.DefinesOverlap)
+        // Defined (but not read) therefore cannot have been live.
+        return LQR_Dead;
+    }
+  }
+
+  // At this point we have no idea of the liveness of the register.
+  return LQR_Unknown;
 }
 
 void llvm::WriteAsOperand(raw_ostream &OS, const MachineBasicBlock *MBB,

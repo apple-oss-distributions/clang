@@ -101,7 +101,7 @@ CGIOperandList::CGIOperandList(Record *R) : TheDef(R) {
     } else if (Rec->isSubClassOf("RegisterClass")) {
       OperandType = "OPERAND_REGISTER";
     } else if (!Rec->isSubClassOf("PointerLikeRegClass") &&
-               Rec->getName() != "unknown")
+               !Rec->isSubClassOf("unknown_class"))
       throw "Unknown operand class '" + Rec->getName() +
       "' in '" + R->getName() + "' instruction!";
 
@@ -287,7 +287,8 @@ void CGIOperandList::ProcessDisableEncoding(std::string DisableEncoding) {
 // CodeGenInstruction Implementation
 //===----------------------------------------------------------------------===//
 
-CodeGenInstruction::CodeGenInstruction(Record *R) : TheDef(R), Operands(R) {
+CodeGenInstruction::CodeGenInstruction(Record *R)
+  : TheDef(R), Operands(R), InferredFrom(0) {
   Namespace = R->getValueAsString("Namespace");
   AsmString = R->getValueAsString("AsmString");
 
@@ -297,11 +298,10 @@ CodeGenInstruction::CodeGenInstruction(Record *R) : TheDef(R), Operands(R) {
   isCompare    = R->getValueAsBit("isCompare");
   isMoveImm    = R->getValueAsBit("isMoveImm");
   isBitcast    = R->getValueAsBit("isBitcast");
+  isSelect     = R->getValueAsBit("isSelect");
   isBarrier    = R->getValueAsBit("isBarrier");
   isCall       = R->getValueAsBit("isCall");
   canFoldAsLoad = R->getValueAsBit("canFoldAsLoad");
-  mayLoad      = R->getValueAsBit("mayLoad");
-  mayStore     = R->getValueAsBit("mayStore");
   isPredicable = Operands.isPredicable || R->getValueAsBit("isPredicable");
   isConvertibleToThreeAddress = R->getValueAsBit("isConvertibleToThreeAddress");
   isCommutable = R->getValueAsBit("isCommutable");
@@ -312,8 +312,13 @@ CodeGenInstruction::CodeGenInstruction(Record *R) : TheDef(R), Operands(R) {
   hasPostISelHook = R->getValueAsBit("hasPostISelHook");
   hasCtrlDep   = R->getValueAsBit("hasCtrlDep");
   isNotDuplicable = R->getValueAsBit("isNotDuplicable");
-  hasSideEffects = R->getValueAsBit("hasSideEffects");
+
+  mayLoad      = R->getValueAsBitOrUnset("mayLoad", mayLoad_Unset);
+  mayStore     = R->getValueAsBitOrUnset("mayStore", mayStore_Unset);
+  hasSideEffects = R->getValueAsBitOrUnset("hasSideEffects",
+                                           hasSideEffects_Unset);
   neverHasSideEffects = R->getValueAsBit("neverHasSideEffects");
+
   isAsCheapAsAMove = R->getValueAsBit("isAsCheapAsAMove");
   hasExtraSrcRegAllocReq = R->getValueAsBit("hasExtraSrcRegAllocReq");
   hasExtraDefRegAllocReq = R->getValueAsBit("hasExtraDefRegAllocReq");
@@ -408,7 +413,7 @@ FlattenAsmStringVariants(StringRef Cur, unsigned Variant) {
 /// successful match, with ResOp set to the result operand to be used.
 bool CodeGenInstAlias::tryAliasOpMatch(DagInit *Result, unsigned AliasOpNo,
                                        Record *InstOpRec, bool hasSubOps,
-                                       SMLoc Loc, CodeGenTarget &T,
+                                       ArrayRef<SMLoc> Loc, CodeGenTarget &T,
                                        ResultOperand &ResOp) {
   Init *Arg = Result->getArg(AliasOpNo);
   DefInit *ADI = dynamic_cast<DefInit*>(Arg);
@@ -556,9 +561,31 @@ CodeGenInstAlias::CodeGenInstAlias(Record *R, CodeGenTarget &T) : TheDef(R) {
     ResultOperand ResOp(static_cast<int64_t>(0));
     if (tryAliasOpMatch(Result, AliasOpNo, InstOpRec, (NumSubOps > 1),
                         R->getLoc(), T, ResOp)) {
-      ResultOperands.push_back(ResOp);
-      ResultInstOperandIndex.push_back(std::make_pair(i, -1));
-      ++AliasOpNo;
+      // If this is a simple operand, or a complex operand with a custom match
+      // class, then we can match is verbatim.
+      if (NumSubOps == 1 ||
+          (InstOpRec->getValue("ParserMatchClass") &&
+           InstOpRec->getValueAsDef("ParserMatchClass")
+             ->getValueAsString("Name") != "Imm")) {
+        ResultOperands.push_back(ResOp);
+        ResultInstOperandIndex.push_back(std::make_pair(i, -1));
+        ++AliasOpNo;
+
+      // Otherwise, we need to match each of the suboperands individually.
+      } else {
+         DagInit *MIOI = ResultInst->Operands[i].MIOperandInfo;
+         for (unsigned SubOp = 0; SubOp != NumSubOps; ++SubOp) {
+          Record *SubRec = dynamic_cast<DefInit*>(MIOI->getArg(SubOp))->getDef();
+
+          // Take care to instantiate each of the suboperands with the correct
+          // nomenclature: $foo.bar
+          ResultOperands.push_back(
+              ResultOperand(Result->getArgName(AliasOpNo) + "." +
+                            MIOI->getArgName(SubOp), SubRec));
+          ResultInstOperandIndex.push_back(std::make_pair(i, SubOp));
+         }
+         ++AliasOpNo;
+      }
       continue;
     }
 

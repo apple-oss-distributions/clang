@@ -456,9 +456,10 @@ def main(builtinParameters = {}):    # Bump the GIL check interval, its more imp
         parser.error('No inputs specified')
 
     if opts.configPrefix is not None:
-        global gConfigName, gSiteConfigName
+        global gConfigName, gSiteConfigName, kLocalConfigName
         gConfigName = '%s.cfg' % opts.configPrefix
         gSiteConfigName = '%s.site.cfg' % opts.configPrefix
+        kLocalConfigName = '%s.local.cfg' % opts.configPrefix
 
     if opts.numThreads is None:
 # Python <2.5 has a race condition causing lit to always fail with numThreads>1
@@ -565,6 +566,9 @@ def main(builtinParameters = {}):    # Bump the GIL check interval, its more imp
     if opts.maxTests is not None:
         tests = tests[:opts.maxTests]
 
+    # Don't create more threads than tests.
+    opts.numThreads = min(len(tests), opts.numThreads)
+
     extra = ''
     if len(tests) != numTotalTests:
         extra = ' of %d' % numTotalTests
@@ -587,9 +591,6 @@ def main(builtinParameters = {}):    # Bump the GIL check interval, its more imp
                 progressBar = ProgressBar.SimpleProgressBar('Testing: ')
         else:
             print header
-
-    # Don't create more threads than tests.
-    opts.numThreads = min(len(tests), opts.numThreads)
 
     startTime = time.time()
     display = TestingProgressDisplay(opts, len(tests), progressBar)

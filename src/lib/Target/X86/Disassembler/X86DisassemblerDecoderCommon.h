@@ -119,7 +119,7 @@ enum attributeBits {
   ENUM_ENTRY(IC_VEX_L_W_OPSIZE,     5,  "requires VEX, L, W and OpSize")
 
 
-#define ENUM_ENTRY(n, r, d) n,    
+#define ENUM_ENTRY(n, r, d) n,
 typedef enum {
   INSTRUCTION_CONTEXTS
   IC_max
@@ -148,11 +148,11 @@ typedef enum {
  * If a ModR/M byte is not required, "required" is left unset, and the values
  * for each instructionID are identical.
  */
- 
+
 typedef uint16_t InstrUID;
 
 /*
- * ModRMDecisionType - describes the type of ModR/M decision, allowing the 
+ * ModRMDecisionType - describes the type of ModR/M decision, allowing the
  * consumer to determine the number of entries in it.
  *
  * MODRM_ONEENTRY - No matter what the value of the ModR/M byte is, the decoded
@@ -160,6 +160,10 @@ typedef uint16_t InstrUID;
  * MODRM_SPLITRM  - If the ModR/M byte is between 0x00 and 0xbf, the opcode
  *                  corresponds to one instruction; otherwise, it corresponds to
  *                  a different instruction.
+ * MODRM_SPLITMISC- If the ModR/M byte is between 0x00 and 0xbf, ModR/M byte
+ *                  divided by 8 is used to select instruction; otherwise, each
+ *                  value of the ModR/M byte could correspond to a different
+ *                  instruction.
  * MODRM_SPLITREG - ModR/M byte divided by 8 is used to select instruction. This
                     corresponds to instructions that use reg field as opcode
  * MODRM_FULL     - Potentially, each value of the ModR/M byte could correspond
@@ -169,10 +173,11 @@ typedef uint16_t InstrUID;
 #define MODRMTYPES            \
   ENUM_ENTRY(MODRM_ONEENTRY)  \
   ENUM_ENTRY(MODRM_SPLITRM)   \
+  ENUM_ENTRY(MODRM_SPLITMISC)  \
   ENUM_ENTRY(MODRM_SPLITREG)  \
   ENUM_ENTRY(MODRM_FULL)
 
-#define ENUM_ENTRY(n) n,    
+#define ENUM_ENTRY(n) n,
 typedef enum {
   MODRMTYPES
   MODRM_max
@@ -180,13 +185,13 @@ typedef enum {
 #undef ENUM_ENTRY
 
 /*
- * ModRMDecision - Specifies whether a ModR/M byte is needed and (if so) which 
+ * ModRMDecision - Specifies whether a ModR/M byte is needed and (if so) which
  *  instruction each possible value of the ModR/M byte corresponds to.  Once
  *  this information is known, we have narrowed down to a single instruction.
  */
 struct ModRMDecision {
   uint8_t     modrm_type;
-  
+
   /* The macro below must be defined wherever this file is included. */
   INSTRUCTION_IDS
 };
@@ -210,7 +215,7 @@ struct ContextDecision {
   struct OpcodeDecision opcodeDecisions[IC_max];
 };
 
-/* 
+/*
  * Physical encodings of instruction operands.
  */
 
@@ -244,14 +249,14 @@ struct ContextDecision {
   ENUM_ENTRY(ENCODING_DUP,    "Duplicate of another operand; ID is encoded "   \
                               "in type")
 
-#define ENUM_ENTRY(n, d) n,    
+#define ENUM_ENTRY(n, d) n,
   typedef enum {
     ENCODINGS
     ENCODING_max
   } OperandEncoding;
 #undef ENUM_ENTRY
 
-/* 
+/*
  * Semantic interpretations of instruction operands.
  */
 
@@ -273,6 +278,7 @@ struct ContextDecision {
   ENUM_ENTRY(TYPE_IMM32,      "4-byte")                                        \
   ENUM_ENTRY(TYPE_IMM64,      "8-byte")                                        \
   ENUM_ENTRY(TYPE_IMM3,       "1-byte immediate operand between 0 and 7")      \
+  ENUM_ENTRY(TYPE_IMM5,       "1-byte immediate operand between 0 and 31")     \
   ENUM_ENTRY(TYPE_RM8,        "1-byte register or memory operand")             \
   ENUM_ENTRY(TYPE_RM16,       "2-byte")                                        \
   ENUM_ENTRY(TYPE_RM32,       "4-byte")                                        \
@@ -331,20 +337,20 @@ struct ContextDecision {
   ENUM_ENTRY(TYPE_DUP4,       "operand 4")                                     \
   ENUM_ENTRY(TYPE_M512,       "512-bit FPU/MMX/XMM/MXCSR state")
 
-#define ENUM_ENTRY(n, d) n,    
+#define ENUM_ENTRY(n, d) n,
 typedef enum {
   TYPES
   TYPE_max
 } OperandType;
 #undef ENUM_ENTRY
 
-/* 
+/*
  * OperandSpecifier - The specification for how to extract and interpret one
  *   operand.
  */
 struct OperandSpecifier {
-  OperandEncoding  encoding;
-  OperandType      type;
+  uint8_t encoding;
+  uint8_t type;
 };
 
 /*
@@ -371,10 +377,9 @@ typedef enum {
  * its operands.
  */
 struct InstructionSpecifier {
-  ModifierType modifierType;
+  uint8_t modifierType;
   uint8_t modifierBase;
-  struct OperandSpecifier operands[X86_MAX_OPERANDS];
-  
+
   /* The macro below must be defined wherever this file is included. */
   INSTRUCTION_SPECIFIER_FIELDS
 };

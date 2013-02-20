@@ -44,13 +44,15 @@
 #include <stdexcept>
 #include <streambuf>
 #include <string>
-#include <strstream> 
+#if __has_include(<strstream>)
+#include <strstream>
+#endif
 #include <typeinfo>
 #include <utility>
 #include <valarray>
 #include <vector>
 
-#if __cplusplus >= 201103
+#if __cplusplus >= 201103 || defined(__GXX_EXPERIMENTAL_CXX0X__)
 #include <array>
 #if __has_include(<atomic>)
 #include <atomic>

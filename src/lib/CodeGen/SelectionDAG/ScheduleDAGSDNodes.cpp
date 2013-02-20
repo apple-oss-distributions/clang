@@ -17,6 +17,8 @@
 #include "ScheduleDAGSDNodes.h"
 #include "InstrEmitter.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetInstrInfo.h"
@@ -44,20 +46,26 @@ static cl::opt<int> HighLatencyCycles(
            "instructions take for targets with no itinerary"));
 
 ScheduleDAGSDNodes::ScheduleDAGSDNodes(MachineFunction &mf)
-  : ScheduleDAG(mf),
+  : ScheduleDAG(mf), BB(0), DAG(0),
     InstrItins(mf.getTarget().getInstrItineraryData()) {}
 
 /// Run - perform scheduling.
 ///
-void ScheduleDAGSDNodes::Run(SelectionDAG *dag, MachineBasicBlock *bb,
-                             MachineBasicBlock::iterator insertPos) {
+void ScheduleDAGSDNodes::Run(SelectionDAG *dag, MachineBasicBlock *bb) {
+  BB = bb;
   DAG = dag;
-  ScheduleDAG::Run(bb, insertPos);
+
+  // Clear the scheduler's SUnit DAG.
+  ScheduleDAG::clearDAG();
+  Sequence.clear();
+
+  // Invoke the target's selection of scheduler.
+  Schedule();
 }
 
 /// NewSUnit - Creates a new SUnit and return a ptr to it.
 ///
-SUnit *ScheduleDAGSDNodes::NewSUnit(SDNode *N) {
+SUnit *ScheduleDAGSDNodes::newSUnit(SDNode *N) {
 #ifndef NDEBUG
   const SUnit *Addr = 0;
   if (!SUnits.empty())
@@ -79,7 +87,7 @@ SUnit *ScheduleDAGSDNodes::NewSUnit(SDNode *N) {
 }
 
 SUnit *ScheduleDAGSDNodes::Clone(SUnit *Old) {
-  SUnit *SU = NewSUnit(Old->getNode());
+  SUnit *SU = newSUnit(Old->getNode());
   SU->OrigNode = Old->OrigNode;
   SU->Latency = Old->Latency;
   SU->isVRegCycle = Old->isVRegCycle;
@@ -334,7 +342,7 @@ void ScheduleDAGSDNodes::BuildSchedUnits() {
     // If this node has already been processed, stop now.
     if (NI->getNodeId() != -1) continue;
 
-    SUnit *NodeSUnit = NewSUnit(NI);
+    SUnit *NodeSUnit = newSUnit(NI);
 
     // See if anything is glued to this node, if so, add them to glued
     // nodes.  Nodes can have at most one glue input and one glue output.  Glue
@@ -392,7 +400,7 @@ void ScheduleDAGSDNodes::BuildSchedUnits() {
     InitNumRegDefsLeft(NodeSUnit);
 
     // Assign the Latency field of NodeSUnit using target-provided information.
-    ComputeLatency(NodeSUnit);
+    computeLatency(NodeSUnit);
   }
 
   // Find all call operands.
@@ -414,7 +422,7 @@ void ScheduleDAGSDNodes::AddSchedEdges() {
   const TargetSubtargetInfo &ST = TM.getSubtarget<TargetSubtargetInfo>();
 
   // Check to see if the scheduler cares about latencies.
-  bool UnitLatencies = ForceUnitLatencies();
+  bool UnitLatencies = forceUnitLatencies();
 
   // Pass 2: add the preds, succs, etc.
   for (unsigned su = 0, e = SUnits.size(); su != e; ++su) {
@@ -480,7 +488,7 @@ void ScheduleDAGSDNodes::AddSchedEdges() {
         const SDep &dep = SDep(OpSU, isChain ? SDep::Order : SDep::Data,
                                OpLatency, PhysReg);
         if (!isChain && !UnitLatencies) {
-          ComputeOperandLatency(OpN, N, i, const_cast<SDep &>(dep));
+          computeOperandLatency(OpN, N, i, const_cast<SDep &>(dep));
           ST.adjustSchedDependency(OpSU, SU, const_cast<SDep &>(dep));
         }
 
@@ -573,7 +581,7 @@ void ScheduleDAGSDNodes::InitNumRegDefsLeft(SUnit *SU) {
   }
 }
 
-void ScheduleDAGSDNodes::ComputeLatency(SUnit *SU) {
+void ScheduleDAGSDNodes::computeLatency(SUnit *SU) {
   SDNode *N = SU->getNode();
 
   // TokenFactor operands are considered zero latency, and some schedulers
@@ -585,7 +593,7 @@ void ScheduleDAGSDNodes::ComputeLatency(SUnit *SU) {
   }
 
   // Check to see if the scheduler cares about latencies.
-  if (ForceUnitLatencies()) {
+  if (forceUnitLatencies()) {
     SU->Latency = 1;
     return;
   }
@@ -607,10 +615,10 @@ void ScheduleDAGSDNodes::ComputeLatency(SUnit *SU) {
       SU->Latency += TII->getInstrLatency(InstrItins, N);
 }
 
-void ScheduleDAGSDNodes::ComputeOperandLatency(SDNode *Def, SDNode *Use,
+void ScheduleDAGSDNodes::computeOperandLatency(SDNode *Def, SDNode *Use,
                                                unsigned OpIdx, SDep& dep) const{
   // Check to see if the scheduler cares about latencies.
-  if (ForceUnitLatencies())
+  if (forceUnitLatencies())
     return;
 
   if (dep.getKind() != SDep::Data)
@@ -635,6 +643,7 @@ void ScheduleDAGSDNodes::ComputeOperandLatency(SDNode *Def, SDNode *Use,
 }
 
 void ScheduleDAGSDNodes::dumpNode(const SUnit *SU) const {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   if (!SU->getNode()) {
     dbgs() << "PHYS REG COPY\n";
     return;
@@ -651,7 +660,34 @@ void ScheduleDAGSDNodes::dumpNode(const SUnit *SU) const {
     dbgs() << "\n";
     GluedNodes.pop_back();
   }
+#endif
 }
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void ScheduleDAGSDNodes::dumpSchedule() const {
+  for (unsigned i = 0, e = Sequence.size(); i != e; i++) {
+    if (SUnit *SU = Sequence[i])
+      SU->dump(this);
+    else
+      dbgs() << "**** NOOP ****\n";
+  }
+}
+#endif
+
+#ifndef NDEBUG
+/// VerifyScheduledSequence - Verify that all SUnits were scheduled and that
+/// their state is consistent with the nodes listed in Sequence.
+///
+void ScheduleDAGSDNodes::VerifyScheduledSequence(bool isBottomUp) {
+  unsigned ScheduledNodes = ScheduleDAG::VerifyScheduledDAG(isBottomUp);
+  unsigned Noops = 0;
+  for (unsigned i = 0, e = Sequence.size(); i != e; ++i)
+    if (!Sequence[i])
+      ++Noops;
+  assert(Sequence.size() - Noops == ScheduledNodes &&
+         "The number of nodes scheduled doesn't match the expected number!");
+}
+#endif // NDEBUG
 
 namespace {
   struct OrderSorter {
@@ -718,9 +754,48 @@ static void ProcessSourceNode(SDNode *N, SelectionDAG *DAG,
   ProcessSDDbgValues(N, DAG, Emitter, Orders, VRBaseMap, Order);
 }
 
+void ScheduleDAGSDNodes::
+EmitPhysRegCopy(SUnit *SU, DenseMap<SUnit*, unsigned> &VRBaseMap,
+                MachineBasicBlock::iterator InsertPos) {
+  for (SUnit::const_pred_iterator I = SU->Preds.begin(), E = SU->Preds.end();
+       I != E; ++I) {
+    if (I->isCtrl()) continue;  // ignore chain preds
+    if (I->getSUnit()->CopyDstRC) {
+      // Copy to physical register.
+      DenseMap<SUnit*, unsigned>::iterator VRI = VRBaseMap.find(I->getSUnit());
+      assert(VRI != VRBaseMap.end() && "Node emitted out of order - late");
+      // Find the destination physical register.
+      unsigned Reg = 0;
+      for (SUnit::const_succ_iterator II = SU->Succs.begin(),
+             EE = SU->Succs.end(); II != EE; ++II) {
+        if (II->isCtrl()) continue;  // ignore chain preds
+        if (II->getReg()) {
+          Reg = II->getReg();
+          break;
+        }
+      }
+      BuildMI(*BB, InsertPos, DebugLoc(), TII->get(TargetOpcode::COPY), Reg)
+        .addReg(VRI->second);
+    } else {
+      // Copy from physical register.
+      assert(I->getReg() && "Unknown physical register!");
+      unsigned VRBase = MRI.createVirtualRegister(SU->CopyDstRC);
+      bool isNew = VRBaseMap.insert(std::make_pair(SU, VRBase)).second;
+      (void)isNew; // Silence compiler warning.
+      assert(isNew && "Node emitted out of order - early");
+      BuildMI(*BB, InsertPos, DebugLoc(), TII->get(TargetOpcode::COPY), VRBase)
+        .addReg(I->getReg());
+    }
+    break;
+  }
+}
 
-/// EmitSchedule - Emit the machine code in scheduled order.
-MachineBasicBlock *ScheduleDAGSDNodes::EmitSchedule() {
+/// EmitSchedule - Emit the machine code in scheduled order. Return the new
+/// InsertPos and MachineBasicBlock that contains this insertion
+/// point. ScheduleDAGSDNodes holds a BB pointer for convenience, but this does
+/// not necessarily refer to returned BB. The emitter may split blocks.
+MachineBasicBlock *ScheduleDAGSDNodes::
+EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
   InstrEmitter Emitter(BB, InsertPos);
   DenseMap<SDValue, unsigned> VRBaseMap;
   DenseMap<SUnit*, unsigned> CopyVRBaseMap;
@@ -743,7 +818,7 @@ MachineBasicBlock *ScheduleDAGSDNodes::EmitSchedule() {
     SUnit *SU = Sequence[i];
     if (!SU) {
       // Null SUnit* is a noop.
-      EmitNoop();
+      TII->insertNoop(*Emitter.getBlock(), InsertPos);
       continue;
     }
 
@@ -751,7 +826,7 @@ MachineBasicBlock *ScheduleDAGSDNodes::EmitSchedule() {
     // SDNode and any glued SDNodes and append them to the block.
     if (!SU->getNode()) {
       // Emit a copy.
-      EmitPhysRegCopy(SU, CopyVRBaseMap);
+      EmitPhysRegCopy(SU, CopyVRBaseMap, InsertPos);
       continue;
     }
 
@@ -829,7 +904,11 @@ MachineBasicBlock *ScheduleDAGSDNodes::EmitSchedule() {
     InsertBB->insert(Pos, DbgMIs.begin(), DbgMIs.end());
   }
 
-  BB = Emitter.getBlock();
   InsertPos = Emitter.getInsertPos();
-  return BB;
+  return Emitter.getBlock();
+}
+
+/// Return the basic block label.
+std::string ScheduleDAGSDNodes::getDAGName() const {
+  return "sunit-dag." + BB->getFullName();
 }

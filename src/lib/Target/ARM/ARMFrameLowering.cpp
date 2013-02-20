@@ -15,6 +15,8 @@
 #include "ARMBaseInstrInfo.h"
 #include "ARMBaseRegisterInfo.h"
 #include "ARMMachineFunctionInfo.h"
+#include "llvm/CallingConv.h"
+#include "llvm/Function.h"
 #include "MCTargetDesc/ARMAddressingModes.h"
 #include "llvm/Function.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -81,7 +83,7 @@ ARMFrameLowering::canSimplifyCallFramePseudos(const MachineFunction &MF) const {
   return hasReservedCallFrame(MF) || MF.getFrameInfo()->hasVarSizedObjects();
 }
 
-static bool isCalleeSavedRegister(unsigned Reg, const unsigned *CSRegs) {
+static bool isCalleeSavedRegister(unsigned Reg, const uint16_t *CSRegs) {
   for (unsigned i = 0; CSRegs[i]; ++i)
     if (Reg == CSRegs[i])
       return true;
@@ -90,7 +92,7 @@ static bool isCalleeSavedRegister(unsigned Reg, const unsigned *CSRegs) {
 
 static bool isCSRestore(MachineInstr *MI,
                         const ARMBaseInstrInfo &TII,
-                        const unsigned *CSRegs) {
+                        const uint16_t *CSRegs) {
   // Integer spill area is handled with "pop".
   if (MI->getOpcode() == ARM::LDMIA_RET ||
       MI->getOpcode() == ARM::t2LDMIA_RET ||
@@ -150,6 +152,10 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF) const {
   unsigned GPRCS1Size = 0, GPRCS2Size = 0, DPRCSSize = 0;
   int FramePtrSpillFI = 0;
   int D8SpillFI = 0;
+
+  // All calls are tail calls in GHC calling conv, and functions have no prologue/epilogue.
+  if (MF.getFunction()->getCallingConv() == CallingConv::GHC)
+    return;
 
   // Allocate the vararg register save area. This is not counted in NumBytes.
   if (VARegSaveSize)
@@ -354,12 +360,16 @@ void ARMFrameLowering::emitEpilogue(MachineFunction &MF,
   int NumBytes = (int)MFI->getStackSize();
   unsigned FramePtr = RegInfo->getFrameRegister(MF);
 
+  // All calls are tail calls in GHC calling conv, and functions have no prologue/epilogue.
+  if (MF.getFunction()->getCallingConv() == CallingConv::GHC)
+    return;
+
   if (!AFI->hasStackFrame()) {
     if (NumBytes != 0)
       emitSPUpdate(isARM, MBB, MBBI, dl, TII, NumBytes);
   } else {
     // Unwind MBBI to point to first LDR / VLDRD.
-    const unsigned *CSRegs = RegInfo->getCalleeSavedRegs();
+    const uint16_t *CSRegs = RegInfo->getCalleeSavedRegs();
     if (MBBI != MBB.begin()) {
       do
         --MBBI;
@@ -422,17 +432,16 @@ void ARMFrameLowering::emitEpilogue(MachineFunction &MF,
     if (AFI->getGPRCalleeSavedArea1Size()) MBBI++;
   }
 
-  if (RetOpcode == ARM::TCRETURNdi || RetOpcode == ARM::TCRETURNdiND ||
-      RetOpcode == ARM::TCRETURNri || RetOpcode == ARM::TCRETURNriND) {
+  if (RetOpcode == ARM::TCRETURNdi || RetOpcode == ARM::TCRETURNri) {
     // Tail call return: adjust the stack pointer and jump to callee.
     MBBI = MBB.getLastNonDebugInstr();
     MachineOperand &JumpTarget = MBBI->getOperand(0);
 
     // Jump to label or value in register.
-    if (RetOpcode == ARM::TCRETURNdi || RetOpcode == ARM::TCRETURNdiND) {
-      unsigned TCOpcode = (RetOpcode == ARM::TCRETURNdi)
-        ? (STI.isThumb() ? ARM::tTAILJMPd : ARM::TAILJMPd)
-        : (STI.isThumb() ? ARM::tTAILJMPdND : ARM::TAILJMPdND);
+    if (RetOpcode == ARM::TCRETURNdi) {
+      unsigned TCOpcode = STI.isThumb() ?
+               (STI.isTargetIOS() ? ARM::tTAILJMPd : ARM::tTAILJMPdND) :
+               ARM::TAILJMPd;
       MachineInstrBuilder MIB = BuildMI(MBB, MBBI, dl, TII.get(TCOpcode));
       if (JumpTarget.isGlobal())
         MIB.addGlobalAddress(JumpTarget.getGlobal(), JumpTarget.getOffset(),
@@ -448,10 +457,6 @@ void ARMFrameLowering::emitEpilogue(MachineFunction &MF,
     } else if (RetOpcode == ARM::TCRETURNri) {
       BuildMI(MBB, MBBI, dl,
               TII.get(STI.isThumb() ? ARM::tTAILJMPr : ARM::TAILJMPr)).
-        addReg(JumpTarget.getReg(), RegState::Kill);
-    } else if (RetOpcode == ARM::TCRETURNriND) {
-      BuildMI(MBB, MBBI, dl,
-              TII.get(STI.isThumb() ? ARM::tTAILJMPrND : ARM::TAILJMPrND)).
         addReg(JumpTarget.getReg(), RegState::Kill);
     }
 
@@ -501,7 +506,7 @@ ARMFrameLowering::ResolveFrameIndexReference(const MachineFunction &MF,
 
   // SP can move around if there are allocas.  We may also lose track of SP
   // when emergency spilling inside a non-reserved call frame setup.
-  bool hasMovingSP = MFI->hasVarSizedObjects() || !hasReservedCallFrame(MF);
+  bool hasMovingSP = !hasReservedCallFrame(MF);
 
   // When dynamically realigning the stack, use the frame pointer for
   // parameters, and the stack/base pointer for locals.
@@ -648,9 +653,7 @@ void ARMFrameLowering::emitPopInst(MachineBasicBlock &MBB,
   DebugLoc DL = MI->getDebugLoc();
   unsigned RetOpcode = MI->getOpcode();
   bool isTailCall = (RetOpcode == ARM::TCRETURNdi ||
-                     RetOpcode == ARM::TCRETURNdiND ||
-                     RetOpcode == ARM::TCRETURNri ||
-                     RetOpcode == ARM::TCRETURNriND);
+                     RetOpcode == ARM::TCRETURNri);
 
   SmallVector<unsigned, 4> Regs;
   unsigned i = CSI.size();
@@ -797,7 +800,7 @@ static void emitAlignedDPRCS2Spills(MachineBasicBlock &MBB,
   // The writeback is only needed when emitting two vst1.64 instructions.
   if (NumAlignedDPRCS2Regs >= 6) {
     unsigned SupReg = TRI->getMatchingSuperReg(NextReg, ARM::dsub_0,
-                                               ARM::QQPRRegisterClass);
+                                               &ARM::QQPRRegClass);
     MBB.addLiveIn(SupReg);
     AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VST1d64Qwb_fixed),
                            ARM::R4)
@@ -815,7 +818,7 @@ static void emitAlignedDPRCS2Spills(MachineBasicBlock &MBB,
   // 16-byte aligned vst1.64 with 4 d-regs, no writeback.
   if (NumAlignedDPRCS2Regs >= 4) {
     unsigned SupReg = TRI->getMatchingSuperReg(NextReg, ARM::dsub_0,
-                                               ARM::QQPRRegisterClass);
+                                               &ARM::QQPRRegClass);
     MBB.addLiveIn(SupReg);
     AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VST1d64Q))
                    .addReg(ARM::R4).addImm(16).addReg(NextReg)
@@ -827,11 +830,10 @@ static void emitAlignedDPRCS2Spills(MachineBasicBlock &MBB,
   // 16-byte aligned vst1.64 with 2 d-regs.
   if (NumAlignedDPRCS2Regs >= 2) {
     unsigned SupReg = TRI->getMatchingSuperReg(NextReg, ARM::dsub_0,
-                                               ARM::QPRRegisterClass);
+                                               &ARM::QPRRegClass);
     MBB.addLiveIn(SupReg);
     AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VST1q64))
-                   .addReg(ARM::R4).addImm(16).addReg(NextReg)
-                   .addReg(SupReg, RegState::ImplicitKill));
+                   .addReg(ARM::R4).addImm(16).addReg(SupReg));
     NextReg += 2;
     NumAlignedDPRCS2Regs -= 2;
   }
@@ -916,7 +918,7 @@ static void emitAlignedDPRCS2Restores(MachineBasicBlock &MBB,
   // 16-byte aligned vld1.64 with 4 d-regs and writeback.
   if (NumAlignedDPRCS2Regs >= 6) {
     unsigned SupReg = TRI->getMatchingSuperReg(NextReg, ARM::dsub_0,
-                                               ARM::QQPRRegisterClass);
+                                               &ARM::QQPRRegClass);
     AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VLD1d64Qwb_fixed), NextReg)
                    .addReg(ARM::R4, RegState::Define)
                    .addReg(ARM::R4, RegState::Kill).addImm(16)
@@ -932,7 +934,7 @@ static void emitAlignedDPRCS2Restores(MachineBasicBlock &MBB,
   // 16-byte aligned vld1.64 with 4 d-regs, no writeback.
   if (NumAlignedDPRCS2Regs >= 4) {
     unsigned SupReg = TRI->getMatchingSuperReg(NextReg, ARM::dsub_0,
-                                               ARM::QQPRRegisterClass);
+                                               &ARM::QQPRRegClass);
     AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VLD1d64Q), NextReg)
                    .addReg(ARM::R4).addImm(16)
                    .addReg(SupReg, RegState::ImplicitDefine));
@@ -943,10 +945,9 @@ static void emitAlignedDPRCS2Restores(MachineBasicBlock &MBB,
   // 16-byte aligned vld1.64 with 2 d-regs.
   if (NumAlignedDPRCS2Regs >= 2) {
     unsigned SupReg = TRI->getMatchingSuperReg(NextReg, ARM::dsub_0,
-                                               ARM::QPRRegisterClass);
-    AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VLD1q64), NextReg)
-                   .addReg(ARM::R4).addImm(16)
-                   .addReg(SupReg, RegState::ImplicitDefine));
+                                               &ARM::QPRRegClass);
+    AddDefaultPred(BuildMI(MBB, MI, DL, TII.get(ARM::VLD1q64), SupReg)
+                   .addReg(ARM::R4).addImm(16));
     NextReg += 2;
     NumAlignedDPRCS2Regs -= 2;
   }
@@ -1150,7 +1151,7 @@ static void checkNumAlignedDPRCS2Regs(MachineFunction &MF) {
     return;
 
   // Naked functions don't spill callee-saved registers.
-  if (MF.getFunction()->hasFnAttr(Attribute::Naked))
+  if (MF.getFunction()->getFnAttributes().hasNakedAttr())
     return;
 
   // We are planning to use NEON instructions vst1 / vld1.
@@ -1244,7 +1245,7 @@ ARMFrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
 
   // Don't spill FP if the frame can be eliminated. This is determined
   // by scanning the callee-save registers to see if any is used.
-  const unsigned *CSRegs = RegInfo->getCalleeSavedRegs();
+  const uint16_t *CSRegs = RegInfo->getCalleeSavedRegs();
   for (unsigned i = 0; CSRegs[i]; ++i) {
     unsigned Reg = CSRegs[i];
     bool Spilled = false;
@@ -1253,7 +1254,7 @@ ARMFrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
       CanEliminateFrame = false;
     }
 
-    if (!ARM::GPRRegisterClass->contains(Reg))
+    if (!ARM::GPRRegClass.contains(Reg))
       continue;
 
     if (Spilled) {
@@ -1413,7 +1414,7 @@ ARMFrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
       } else if (!AFI->isThumb1OnlyFunction()) {
         // note: Thumb1 functions spill to R12, not the stack.  Reserve a slot
         // closest to SP or frame pointer.
-        const TargetRegisterClass *RC = ARM::GPRRegisterClass;
+        const TargetRegisterClass *RC = &ARM::GPRRegClass;
         RS->setScavengingFrameIndex(MFI->CreateStackObject(RC->getSize(),
                                                            RC->getAlignment(),
                                                            false));

@@ -48,9 +48,14 @@ def ext_bcpl_comment : Extension<
   InGroup<Comment>;
 def ext_no_newline_eof : Extension<"no newline at end of file">, 
   InGroup<DiagGroup<"newline-eof">>;
+
+def warn_cxx98_compat_no_newline_eof : Warning<
+  "C++98 requires newline at end of file">,
+  InGroup<CXX98CompatPedantic>, DefaultIgnore;
+
 def ext_dollar_in_identifier : Extension<"'$' in identifier">,
   InGroup<DiagGroup<"dollar-in-identifier-extension">>;
-def ext_charize_microsoft : Extension<"@# is a microsoft extension">,
+def ext_charize_microsoft : Extension<"charizing operator #@ is a Microsoft extension">,
   InGroup<Microsoft>;
 
 def ext_token_used : Extension<"extension used">,
@@ -59,9 +64,12 @@ def ext_token_used : Extension<"extension used">,
 def warn_cxx11_keyword : Warning<"'%0' is a keyword in C++11">,
   InGroup<CXX11Compat>, DefaultIgnore;
 
-def warn_unterminated_string : ExtWarn<"missing terminating '\"' character">;
-def warn_unterminated_char : ExtWarn<"missing terminating ' character">;
-def err_empty_character : Error<"empty character constant">;
+def ext_unterminated_string : ExtWarn<"missing terminating '\"' character">,
+  InGroup<InvalidPPToken>;
+def ext_unterminated_char : ExtWarn<"missing terminating ' character">,
+  InGroup<InvalidPPToken>;
+def ext_empty_character : ExtWarn<"empty character constant">,
+  InGroup<InvalidPPToken>;
 def err_unterminated_block_comment : Error<"unterminated /* comment">;
 def err_invalid_character_to_charify : Error<
   "invalid argument to convert to character">;
@@ -95,6 +103,16 @@ def err_hex_escape_no_digits : Error<"\\x used with no following hex digits">;
 def err_ucn_escape_no_digits : Error<"\\u used with no following hex digits">;
 def err_ucn_escape_invalid : Error<"invalid universal character">;
 def err_ucn_escape_incomplete : Error<"incomplete universal character name">;
+def err_ucn_escape_basic_scs : Error<
+  "character '%0' cannot be specified by a universal character name">;
+def err_ucn_control_character : Error<
+  "universal character name refers to a control character">;
+def warn_cxx98_compat_literal_ucn_escape_basic_scs : Warning<
+  "specifying character '%0' with a universal character name "
+  "is incompatible with C++98">, InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx98_compat_literal_ucn_control_character : Warning<
+  "universal character name referring to a control character "
+  "is incompatible with C++98">, InGroup<CXX98Compat>, DefaultIgnore;
 def err_invalid_decimal_digit : Error<"invalid digit '%0' in decimal constant">;
 def err_invalid_binary_digit : Error<"invalid digit '%0' in binary constant">;
 def err_invalid_octal_digit : Error<"invalid digit '%0' in octal constant">;
@@ -131,8 +149,27 @@ def warn_ucn_not_valid_in_c89 : ExtWarn<
 def warn_cxx98_compat_unicode_literal : Warning<
   "unicode literals are incompatible with C++98">,
   InGroup<CXX98Compat>, DefaultIgnore;
+def warn_cxx11_compat_user_defined_literal : Warning<
+  "identifier after literal will be treated as a user-defined literal suffix "
+  "in C++11">, InGroup<CXX11Compat>, DefaultIgnore;
+def warn_cxx11_compat_reserved_user_defined_literal : Warning<
+  "identifier after literal will be treated as a reserved user-defined literal "
+  "suffix in C++11">,
+  InGroup<CXX11CompatReservedUserDefinedLiteral>, DefaultIgnore;
+def ext_reserved_user_defined_literal : ExtWarn<
+  "invalid suffix on literal; C++11 requires a space between literal and "
+  "identifier">, InGroup<ReservedUserDefinedLiteral>, DefaultError;
+def ext_ms_reserved_user_defined_literal : ExtWarn<
+  "invalid suffix on literal; C++11 requires a space between literal and "
+  "identifier">, InGroup<ReservedUserDefinedLiteral>;
 def err_unsupported_string_concat : Error<
   "unsupported non-standard concatenation of string literals">;
+def err_string_concat_mixed_suffix : Error<
+  "differing user-defined suffixes ('%0' and '%1') in string literal "
+  "concatenation">;
+def err_pp_invalid_udl : Error<
+  "%select{character|integer}0 literal with user-defined suffix "
+  "cannot be used in preprocessor constant expression">;
 def err_bad_string_encoding : Error<
   "illegal character encoding in string literal">;
 def warn_bad_string_encoding : ExtWarn<
@@ -203,6 +240,9 @@ def warn_pp_convert_rhs_to_positive : Warning<
 
 def ext_pp_import_directive : Extension<"#import is a language extension">,
   InGroup<DiagGroup<"import-preprocessor-directive-pedantic">>;
+def err_pp_import_directive_ms : Error<
+  "#import of type library is an unsupported Microsoft feature">;
+
 def ext_pp_ident_directive : Extension<"#ident is a language extension">;
 def ext_pp_include_next_directive : Extension<
   "#include_next is a language extension">;
@@ -215,7 +255,7 @@ def ext_pp_comma_expr : Extension<"comma operator in operand of #if">;
 def ext_pp_bad_vaargs_use : Extension<
   "__VA_ARGS__ can only appear in the expansion of a C99 variadic macro">;
 def ext_pp_macro_redef : ExtWarn<"%0 macro redefined">;
-def ext_variadic_macro : Extension<"variadic macros were introduced in C99">,
+def ext_variadic_macro : Extension<"variadic macros are a C99 feature">,
   InGroup<VariadicMacros>;
 def warn_cxx98_compat_variadic_macro : Warning<
   "variadic macros are incompatible with C++98">,
@@ -228,15 +268,19 @@ def ext_embedded_directive : Extension<
   "embedding a directive within macro arguments has undefined behavior">,
   InGroup<DiagGroup<"embedded-directive">>;
 def ext_missing_varargs_arg : Extension<
-  "varargs argument missing, but tolerated as an extension">;
+  "must specify at least one argument for '...' parameter of variadic macro">,
+  InGroup<GNU>;
 def ext_empty_fnmacro_arg : Extension<
-  "empty macro arguments were standardized in C99">;
+  "empty macro arguments are a C99 feature">, InGroup<C99>;
 def warn_cxx98_compat_empty_fnmacro_arg : Warning<
-  "empty macro argument list is incompatible with C++98">,
+  "empty macro arguments are incompatible with C++98">,
   InGroup<CXX98CompatPedantic>, DefaultIgnore;
+def note_macro_here : Note<"macro %0 defined here">;
 
 def err_pp_invalid_directive : Error<"invalid preprocessing directive">;
 def err_pp_file_not_found : Error<"'%0' file not found">, DefaultFatal;
+def err_pp_file_not_found_not_fatal : Error<
+  "'%0' file not found with <angled> include; use \"quotes\" instead">;
 def err_pp_error_opening_file : Error<
   "error opening file '%0': %1">, DefaultFatal;
 def err_pp_empty_filename : Error<"empty filename">;
@@ -288,11 +332,23 @@ def err_feature_check_malformed : Error<
   "builtin feature check macro requires a parenthesized identifier">;
 
 def err_warning_check_malformed : Error<
-  "builtin warning check macro requires a parenthesized string">,
-  InGroup<MalformedWarningCheck>;
+  "builtin warning check macro requires a parenthesized string">;
 def warn_has_warning_invalid_option :
    ExtWarn<"__has_warning expected option name (e.g. \"-Wundef\")">,
    InGroup<MalformedWarningCheck>;
+
+def warn_pragma_include_alias_mismatch_angle :
+   ExtWarn<"angle-bracketed include <%0> cannot be aliased to double-quoted "
+   "include \"%1\"">, InGroup<UnknownPragmas>;
+def warn_pragma_include_alias_mismatch_quote :
+   ExtWarn<"double-quoted include \"%0\" cannot be aliased to angle-bracketed "
+   "include <%1>">, InGroup<UnknownPragmas>;
+def warn_pragma_include_alias_expected :
+   ExtWarn<"pragma include_alias expected '%0'">,
+   InGroup<UnknownPragmas>;
+def warn_pragma_include_alias_expected_filename :
+   ExtWarn<"pragma include_alias expected include filename">,
+   InGroup<UnknownPragmas>;
 
 def err__Pragma_malformed : Error<
   "_Pragma takes a parenthesized string literal">;
@@ -345,7 +401,7 @@ def err_paste_at_start : Error<
   "'##' cannot appear at start of macro expansion">;
 def err_paste_at_end : Error<"'##' cannot appear at end of macro expansion">;
 def ext_paste_comma : Extension<
-  "Use of comma pasting extension is non-portable">;
+  "token pasting of ',' and __VA_ARGS__ is a GNU extension">, InGroup<GNU>;
 def err_unterm_macro_invoc : Error<
   "unterminated function-like macro invocation">;
 def err_too_many_args_in_macro_invoc : Error<
@@ -363,6 +419,9 @@ def err_pp_illegal_floating_literal : Error<
   "floating point literal in preprocessor expression">;
 def err_pp_line_requires_integer : Error<
   "#line directive requires a positive integer argument">;
+def ext_pp_line_zero : Extension<
+  "#line directive with zero argument is a GNU extension">, 
+  InGroup<GNU>;
 def err_pp_line_invalid_filename : Error<
   "invalid filename for #line directive">;
 def warn_pp_line_decimal : Warning<
@@ -450,5 +509,7 @@ def warn_auto_module_import : Warning<
   "import of module '%1'">, InGroup<AutoImport>, DefaultIgnore;
 def warn_uncovered_module_header : Warning<
   "umbrella header does not include header '%0'">, InGroup<IncompleteUmbrella>;
-
+def err_expected_id_building_module : Error<
+  "expected a module name in '__building_module' expression">;
+  
 }

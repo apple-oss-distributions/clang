@@ -30,6 +30,15 @@ void PrintTo(const hash_code &code, std::ostream *os) {
 // objects.
 struct LargeTestInteger { uint64_t arr[8]; };
 
+struct NonPOD {
+  uint64_t x, y;
+  NonPOD(uint64_t x, uint64_t y) : x(x), y(y) {}
+  ~NonPOD() {}
+  friend hash_code hash_value(const NonPOD &obj) {
+    return hash_combine(obj.x, obj.y);
+  }
+};
+
 namespace hashing {
 namespace detail {
 template <> struct is_hashable_data<LargeTestInteger> : true_type {};
@@ -42,6 +51,11 @@ using namespace llvm;
 
 namespace {
 
+enum TestEnumeration {
+  TE_Foo = 42,
+  TE_Bar = 43
+};
+
 TEST(HashingTest, HashValueBasicTest) {
   int x = 42, y = 43, c = 'x';
   void *p = 0;
@@ -51,9 +65,10 @@ TEST(HashingTest, HashValueBasicTest) {
   const volatile int cvi = 71;
   uintptr_t addr = reinterpret_cast<uintptr_t>(&y);
   EXPECT_EQ(hash_value(42), hash_value(x));
+  EXPECT_EQ(hash_value(42), hash_value(TE_Foo));
   EXPECT_NE(hash_value(42), hash_value(y));
+  EXPECT_NE(hash_value(42), hash_value(TE_Bar));
   EXPECT_NE(hash_value(42), hash_value(p));
-  EXPECT_NE(hash_code::get_null_code(), hash_value(p));
   EXPECT_EQ(hash_value(71), hash_value(i));
   EXPECT_EQ(hash_value(71), hash_value(ci));
   EXPECT_EQ(hash_value(71), hash_value(vi));
@@ -61,6 +76,48 @@ TEST(HashingTest, HashValueBasicTest) {
   EXPECT_EQ(hash_value(c), hash_value('x'));
   EXPECT_EQ(hash_value('4'), hash_value('0' + 4));
   EXPECT_EQ(hash_value(addr), hash_value(&y));
+}
+
+TEST(HashingTest, HashValueStdPair) {
+  EXPECT_EQ(hash_combine(42, 43), hash_value(std::make_pair(42, 43)));
+  EXPECT_NE(hash_combine(43, 42), hash_value(std::make_pair(42, 43)));
+  EXPECT_NE(hash_combine(42, 43), hash_value(std::make_pair(42ull, 43ull)));
+  EXPECT_NE(hash_combine(42, 43), hash_value(std::make_pair(42, 43ull)));
+  EXPECT_NE(hash_combine(42, 43), hash_value(std::make_pair(42ull, 43)));
+
+  // Note that pairs are implicitly flattened to a direct sequence of data and
+  // hashed efficiently as a consequence.
+  EXPECT_EQ(hash_combine(42, 43, 44),
+            hash_value(std::make_pair(42, std::make_pair(43, 44))));
+  EXPECT_EQ(hash_value(std::make_pair(42, std::make_pair(43, 44))),
+            hash_value(std::make_pair(std::make_pair(42, 43), 44)));
+
+  // Ensure that pairs which have padding bytes *inside* them don't get treated
+  // this way.
+  EXPECT_EQ(hash_combine('0', hash_combine(1ull, '2')),
+            hash_value(std::make_pair('0', std::make_pair(1ull, '2'))));
+
+  // Ensure that non-POD pairs don't explode the traits used.
+  NonPOD obj1(1, 2), obj2(3, 4), obj3(5, 6);
+  EXPECT_EQ(hash_combine(obj1, hash_combine(obj2, obj3)),
+            hash_value(std::make_pair(obj1, std::make_pair(obj2, obj3))));
+}
+
+TEST(HashingTest, HashValueStdString) {
+  std::string s = "Hello World!";
+  EXPECT_EQ(hash_combine_range(s.c_str(), s.c_str() + s.size()), hash_value(s));
+  EXPECT_EQ(hash_combine_range(s.c_str(), s.c_str() + s.size() - 1),
+            hash_value(s.substr(0, s.size() - 1)));
+  EXPECT_EQ(hash_combine_range(s.c_str() + 1, s.c_str() + s.size() - 1),
+            hash_value(s.substr(1, s.size() - 2)));
+
+  std::wstring ws = L"Hello Wide World!";
+  EXPECT_EQ(hash_combine_range(ws.c_str(), ws.c_str() + ws.size()),
+            hash_value(ws));
+  EXPECT_EQ(hash_combine_range(ws.c_str(), ws.c_str() + ws.size() - 1),
+            hash_value(ws.substr(0, ws.size() - 1)));
+  EXPECT_EQ(hash_combine_range(ws.c_str() + 1, ws.c_str() + ws.size() - 1),
+            hash_value(ws.substr(1, ws.size() - 2)));
 }
 
 template <typename T, size_t N> T *begin(T (&arr)[N]) { return arr; }
@@ -75,13 +132,10 @@ TEST(HashingTest, HashCombineRangeBasicTest) {
   // Leave this uninitialized in the hope that valgrind will catch bad reads.
   int dummy;
   hash_code dummy_hash = hash_combine_range(&dummy, &dummy);
-  EXPECT_NE(hash_code::get_null_code(), dummy_hash);
-  EXPECT_NE(hash_code::get_invalid_code(), dummy_hash);
+  EXPECT_NE(hash_code(0), dummy_hash);
 
   const int arr1[] = { 1, 2, 3 };
   hash_code arr1_hash = hash_combine_range(begin(arr1), end(arr1));
-  EXPECT_NE(hash_code::get_null_code(), arr1_hash);
-  EXPECT_NE(hash_code::get_invalid_code(), arr1_hash);
   EXPECT_NE(dummy_hash, arr1_hash);
   EXPECT_EQ(arr1_hash, hash_combine_range(begin(arr1), end(arr1)));
 
@@ -96,22 +150,16 @@ TEST(HashingTest, HashCombineRangeBasicTest) {
 
   const int arr2[] = { 3, 2, 1 };
   hash_code arr2_hash = hash_combine_range(begin(arr2), end(arr2));
-  EXPECT_NE(hash_code::get_null_code(), arr2_hash);
-  EXPECT_NE(hash_code::get_invalid_code(), arr2_hash);
   EXPECT_NE(dummy_hash, arr2_hash);
   EXPECT_NE(arr1_hash, arr2_hash);
 
   const int arr3[] = { 1, 1, 2, 3 };
   hash_code arr3_hash = hash_combine_range(begin(arr3), end(arr3));
-  EXPECT_NE(hash_code::get_null_code(), arr3_hash);
-  EXPECT_NE(hash_code::get_invalid_code(), arr3_hash);
   EXPECT_NE(dummy_hash, arr3_hash);
   EXPECT_NE(arr1_hash, arr3_hash);
 
   const int arr4[] = { 1, 2, 3, 3 };
   hash_code arr4_hash = hash_combine_range(begin(arr4), end(arr4));
-  EXPECT_NE(hash_code::get_null_code(), arr4_hash);
-  EXPECT_NE(hash_code::get_invalid_code(), arr4_hash);
   EXPECT_NE(dummy_hash, arr4_hash);
   EXPECT_NE(arr1_hash, arr4_hash);
 
@@ -161,6 +209,7 @@ TEST(HashingTest, HashCombineRangeLengthDiff) {
 
 TEST(HashingTest, HashCombineRangeGoldenTest) {
   struct { const char *s; uint64_t hash; } golden_data[] = {
+#if SIZE_MAX == UINT64_MAX
     { "a",                                0xaeb6f9d5517c61f8ULL },
     { "ab",                               0x7ab1edb96be496b4ULL },
     { "abc",                              0xe38e60bf19c71a3fULL },
@@ -207,19 +256,76 @@ TEST(HashingTest, HashCombineRangeGoldenTest) {
     { "abababab",                         0xee14a29ddf0ce54cULL },
     { "ababababababa",                    0x38b3ddaada2d52b4ULL },
     { "ababababababababababa",            0xd3665364219f2b85ULL },
+    { "abababababababababababababababab", 0xa75cd6afbf1bc972ULL },
     { "abababababababababababababababab"
       "abababababababababababababababab"
       "abababababababababababababababab"
       "abababababababababababababababab"
       "abababababababababababababababab", 0x840192d129f7a22bULL }
+#elif SIZE_MAX == UINT32_MAX
+    { "a",                                0x000000004605f745ULL },
+    { "ab",                               0x00000000d5f06301ULL },
+    { "abc",                              0x00000000559fe1eeULL },
+    { "abcde",                            0x00000000424028d7ULL },
+    { "abcdefgh",                         0x000000007bb119f8ULL },
+    { "abcdefghijklm",                    0x00000000edbca513ULL },
+    { "abcdefghijklmnopqrstu",            0x000000007c15712eULL },
+    { "abcdefghijklmnopqrstuvwxyzabcdef", 0x000000000b3aad66ULL },
+    { "abcdefghijklmnopqrstuvwxyzabcdef"
+      "abcdefghijklmnopqrstuvwxyzghijkl"
+      "abcdefghijklmnopqrstuvwxyzmnopqr"
+      "abcdefghijklmnopqrstuvwxyzstuvwx"
+      "abcdefghijklmnopqrstuvwxyzyzabcd", 0x000000008c758c8bULL },
+    { "a",                                0x000000004605f745ULL },
+    { "aa",                               0x00000000dc0a52daULL },
+    { "aaa",                              0x00000000b309274fULL },
+    { "aaaaa",                            0x00000000203b5ef6ULL },
+    { "aaaaaaaa",                         0x00000000a429e18fULL },
+    { "aaaaaaaaaaaaa",                    0x000000008662070bULL },
+    { "aaaaaaaaaaaaaaaaaaaaa",            0x000000003f11151cULL },
+    { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0x000000008600fe20ULL },
+    { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0x000000004e0e0804ULL },
+    { "z",                                0x00000000c5e405e9ULL },
+    { "zz",                               0x00000000a8d8a2c6ULL },
+    { "zzz",                              0x00000000fc2af672ULL },
+    { "zzzzz",                            0x0000000047d9efe6ULL },
+    { "zzzzzzzz",                         0x0000000080d77794ULL },
+    { "zzzzzzzzzzzzz",                    0x00000000405f93adULL },
+    { "zzzzzzzzzzzzzzzzzzzzz",            0x00000000fc72838dULL },
+    { "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", 0x000000007ce160f1ULL },
+    { "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", 0x00000000aed9ed1bULL },
+    { "a",                                0x000000004605f745ULL },
+    { "ab",                               0x00000000d5f06301ULL },
+    { "aba",                              0x00000000a85cd91bULL },
+    { "ababa",                            0x000000009e3bb52eULL },
+    { "abababab",                         0x000000002709b3b9ULL },
+    { "ababababababa",                    0x000000003a234174ULL },
+    { "ababababababababababa",            0x000000005c63e5ceULL },
+    { "abababababababababababababababab", 0x0000000013f74334ULL },
+    { "abababababababababababababababab"
+      "abababababababababababababababab"
+      "abababababababababababababababab"
+      "abababababababababababababababab"
+      "abababababababababababababababab", 0x00000000c1a6f135ULL },
+#else
+#error This test only supports 64-bit and 32-bit systems.
+#endif
   };
   for (unsigned i = 0; i < sizeof(golden_data)/sizeof(*golden_data); ++i) {
     StringRef str = golden_data[i].s;
     hash_code hash = hash_combine_range(str.begin(), str.end());
 #if 0 // Enable this to generate paste-able text for the above structure.
     std::string member_str = "\"" + str.str() + "\",";
-    fprintf(stderr, " { %-35s 0x%016lxULL },\n",
-            member_str.c_str(), (size_t)hash);
+    fprintf(stderr, " { %-35s 0x%016llxULL },\n",
+            member_str.c_str(), static_cast<uint64_t>(hash));
 #endif
     EXPECT_EQ(static_cast<size_t>(golden_data[i].hash),
               static_cast<size_t>(hash));
@@ -239,7 +345,7 @@ TEST(HashingTest, HashCombineBasicTest) {
   EXPECT_EQ(hash_combine_range(arr1, arr1 + 6),
             hash_combine(i1, i2, i3, i4, i5, i6));
 
-  // Hashing a sequence of heterogenous types which *happen* to all produce the
+  // Hashing a sequence of heterogeneous types which *happen* to all produce the
   // same data for hashing produces the same as a range-based hash of the
   // fundamental values.
   const size_t s1 = 1024, s2 = 8888, s3 = 9000000;

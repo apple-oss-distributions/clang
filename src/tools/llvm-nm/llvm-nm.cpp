@@ -7,12 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This program is a utility that works like traditional Unix "nm",
-// that is, it prints out the names of symbols in a bitcode file,
-// along with some information about each symbol.
+// This program is a utility that works like traditional Unix "nm", that is, it
+// prints out the names of symbols in a bitcode or object file, along with some
+// information about each symbol.
 //
-// This "nm" does not print symbols' addresses. It supports many of
-// the features of GNU "nm", including its different output formats.
+// This "nm" supports many of the features of GNU "nm", including its different
+// output formats.
 //
 //===----------------------------------------------------------------------===//
 
@@ -110,6 +110,9 @@ namespace {
 
   cl::opt<bool> SizeSort("size-sort", cl::desc("Sort symbols by size"));
 
+  cl::opt<bool> WithoutAliases("without-aliases", cl::Hidden,
+                               cl::desc("Exclude aliases from output"));
+
   bool PrintAddress = true;
 
   bool MultipleFiles = false;
@@ -204,9 +207,10 @@ static void SortAndPrintSymbolList() {
       strcpy(SymbolSizeStr, "        ");
 
     if (i->Address != object::UnknownAddressOrSize)
-      format("%08"PRIx64, i->Address).print(SymbolAddrStr, sizeof(SymbolAddrStr));
+      format("%08" PRIx64, i->Address).print(SymbolAddrStr,
+                                             sizeof(SymbolAddrStr));
     if (i->Size != object::UnknownAddressOrSize)
-      format("%08"PRIx64, i->Size).print(SymbolSizeStr, sizeof(SymbolSizeStr));
+      format("%08" PRIx64, i->Size).print(SymbolSizeStr, sizeof(SymbolSizeStr));
 
     if (OutputFormat == posix) {
       outs() << i->Name << " " << i->TypeChar << " "
@@ -255,7 +259,6 @@ static void DumpSymbolNameForGlobalValue(GlobalValue &GV) {
   if (GV.hasPrivateLinkage() ||
       GV.hasLinkerPrivateLinkage() ||
       GV.hasLinkerPrivateWeakLinkage() ||
-      GV.hasLinkerPrivateWeakDefAutoLinkage() ||
       GV.hasAvailableExternallyLinkage())
     return;
   char TypeChar = TypeCharForSymbol(GV);
@@ -275,8 +278,9 @@ static void DumpSymbolNamesFromModule(Module *M) {
   std::for_each (M->begin(), M->end(), DumpSymbolNameForGlobalValue);
   std::for_each (M->global_begin(), M->global_end(),
                  DumpSymbolNameForGlobalValue);
-  std::for_each (M->alias_begin(), M->alias_end(),
-                 DumpSymbolNameForGlobalValue);
+  if (!WithoutAliases)
+    std::for_each (M->alias_begin(), M->alias_end(),
+		   DumpSymbolNameForGlobalValue);
 
   SortAndPrintSymbolList();
 }

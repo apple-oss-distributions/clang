@@ -7,11 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This class defines the interface that one who 'use's a Value must implement.
+// This class defines the interface that one who uses a Value must implement.
 // Each instance of the Value class keeps track of what User's have handles
 // to it.
 //
-//  * Instructions are the largest class of User's.
+//  * Instructions are the largest class of Users.
 //  * Constants may be users of other constants (think arrays and stuff)
 //
 //===----------------------------------------------------------------------===//
@@ -31,8 +31,8 @@ template <class>
 struct OperandTraits;
 
 class User : public Value {
-  User(const User &);             // Do not implement
-  void *operator new(size_t);     // Do not implement
+  User(const User &) LLVM_DELETED_FUNCTION;
+  void *operator new(size_t) LLVM_DELETED_FUNCTION;
   template <unsigned>
   friend struct HungoffOperandTraits;
   virtual void anchor();

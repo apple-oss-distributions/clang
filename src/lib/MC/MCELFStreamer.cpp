@@ -13,6 +13,8 @@
 
 #include "MCELF.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
@@ -89,7 +91,7 @@ public:
                                      unsigned ByteAlignment);
 
   virtual void EmitZerofill(const MCSection *Section, MCSymbol *Symbol = 0,
-                            unsigned Size = 0, unsigned ByteAlignment = 0) {
+                            uint64_t Size = 0, unsigned ByteAlignment = 0) {
     llvm_unreachable("ELF doesn't support this directive");
   }
   virtual void EmitTBSSSymbol(const MCSection *Section, MCSymbol *Symbol,
@@ -245,7 +247,6 @@ void MCELFStreamer::EmitSymbolAttribute(MCSymbol *Symbol,
   switch (Attribute) {
   case MCSA_LazyReference:
   case MCSA_Reference:
-  case MCSA_NoDeadStrip:
   case MCSA_SymbolResolver:
   case MCSA_PrivateExtern:
   case MCSA_WeakDefinition:
@@ -254,6 +255,7 @@ void MCELFStreamer::EmitSymbolAttribute(MCSymbol *Symbol,
   case MCSA_IndirectSymbol:
     llvm_unreachable("Invalid symbol attribute for ELF!");
 
+  case MCSA_NoDeadStrip:
   case MCSA_ELF_TypeGnuUniqueObject:
     // Ignore for now.
     break;

@@ -134,7 +134,7 @@ endif
 ifeq ($(RC_ProjectNameAndSourceVersion),)
 RC_ProjectNameAndSourceVersion := "clang-$(RC_ProjectSourceVersion)"
 endif
-Clang_Tag := "tags/Apple/$(RC_ProjectNameAndSourceVersion)"
+Clang_Tag := $(RC_ProjectNameAndSourceVersion)
 
 # Select optimized mode.
 ifeq ($(Clang_Use_Optimized), 1)
@@ -176,9 +176,10 @@ $(error "invalid setting for clang build all mode: '$(Clang_Build_All)'")
 endif
 
 # Set makefile variables to pass during build and install.
-Clang_Make_Variables := $(Extra_Make_Variables) KEEP_SYMBOLS=1 \
+Clang_Make_Variables := $(Extra_Make_Variables) KEEP_SYMBOLS=1 VERBOSE=1 \
                         CLANG_VENDOR=Apple \
-                        CLANG_VENDOR_UTI=com.apple.compilers.llvm.clang
+                        CLANG_VENDOR_UTI=com.apple.compilers.llvm.clang \
+                        BUILD_CLANG_ONLY=$(Clang_Build_No_Tools)
 Clang_Make_Variables += CLANG_VERSION=$(Clang_Version)
 
 # If CLANG_REPOSITORY_STRING has been set via an argument to buildit, use that
@@ -257,6 +258,8 @@ Common_Configure_Flags = \
 		  --without-llvmgcc --without-llvmgxx \
 		  --disable-bindings \
 		  --disable-doxygen \
+		  --enable-backtraces=no \
+		  --enable-libcpp \
 		  --with-bug-report-url="http://developer.apple.com/bugreporter/"
 Stage1_Configure_Flags = $(Common_Configure_Flags) \
                   --with-extra-options="$(Extra_Options)"
@@ -270,6 +273,10 @@ CXX := $(shell xcrun -find clang++)
 # Set stage1 compiler.
 Stage1_CC := $(CC)
 Stage1_CXX := $(CXX)
+
+# Set stage1 GCC_EXEC_PATH path and proper dsymutil tool
+Exec_Path := $(shell dirname `xcrun -find ld`)
+DSYMUTIL := $(shell xcrun -find dsymutil)
 
 # Set up any additional Clang install targets.
 Extra_Clang_Install_Targets := install-lto-h install-clang-diagnostic
@@ -314,7 +321,6 @@ Build_Target_Stage1 = $(Clang_Make_Variables) clang-only
 # Additional Tool Paths
 
 CHOWN		:= /usr/sbin/chown
-CXX             := /usr/bin/g++
 FIND		:= /usr/bin/find
 INSTALL		:= /usr/bin/install
 INSTALL_FILE	:= $(INSTALL) -m 0444
@@ -429,7 +435,7 @@ install-clang_final: build-clang
 	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
 	@echo "Running 'dsymutil' on executables (in SYMROOT)..."
 	$(_v) cd $(SYMROOT) && find . -perm -0111 -type f -print | \
-	  xargs -n 1 -P $(SYSCTL) dsymutil
+	  xargs -n 1 -P $(SYSCTL) $(DSYMUTIL)
 	@echo "Stripping executables in DSTROOT..."
 	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -Sx
 	@echo "Setting permissions for executables in DSTROOT..."
@@ -447,7 +453,8 @@ build-clang_final: configure-clang_final
 	    order_file=$(SRCROOT)/static-order-files/$$arch/clang.order; \
 	  fi; \
 	  time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch \
-	    $(Build_Target) CLANG_ORDER_FILE=$${order_file}; \
+	    $(Build_Target) CLANG_ORDER_FILE=$${order_file} \
+	    DYLD_LIBRARY_PATH="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/lib" ; \
 	done
 
 # This is a special target which uses the build compiler to generate order file
@@ -477,7 +484,8 @@ build-clang_final_ordered: build-clang_final
 		$(MAKE) -j$(SYSCTL) \
 		  -C "$(OBJROOT)/$$arch/tools/clang/tools/driver" \
 		  $(Clang_Make_Variables) \
-		  "CLANG_ORDER_FILE=$(OBJROOT)/order-data/$$arch/clang.order"; \
+		  "CLANG_ORDER_FILE=$(OBJROOT)/order-data/$$arch/clang.order" \
+	          DYLD_LIBRARY_PATH="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/lib" ; \
 	done
 
 build-clang_stage1: configure-clang_stage1
@@ -504,8 +512,8 @@ configure-clang_stage2: build-clang_stage1
 		$(MKDIR) $(OBJROOT)/$$arch && \
 		cd $(OBJROOT)/$$arch && \
 		time $(Configure) --prefix="$(Install_Prefix)" $(Configure_Flags) \
-		  CC="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/bin/clang -arch $$arch" \
-		  CXX="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/bin/clang++ -arch $$arch" || exit 1 ; \
+		  CC="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/bin/clang -B$(Exec_Path) -arch $$arch" \
+		  CXX="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/bin/clang++ -B$(Exec_Path) -arch $$arch" || exit 1 ; \
 	done
 
 configure-clang_singlestage:
@@ -587,7 +595,7 @@ install-cross: build-cross
 	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
 	@echo "Running 'dsymutil' on executables (in SYMROOT)..."
 	$(_v) cd $(SYMROOT) && find . -perm -0111 -type f -print | \
-	  xargs -n 1 -P $(SYSCTL) dsymutil
+	  xargs -n 1 -P $(SYSCTL) $(DSYMUTIL)
 	@echo "Stripping executables in DSTROOT..."
 	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -Sx
 	@echo "Setting permissions for executables in DSTROOT..."
@@ -596,7 +604,7 @@ install-cross: build-cross
 build-cross: configure-cross
 	$(_v) for arch in $(RC_ARCHS) ; do \
 		echo "Building (Cross) for $$arch..." && \
-		$(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch $(Build_Target) CFLAGS="-arch $$arch $(CFLAGS)" CXXFLAGS="-arch $$arch $(CXXFLAGS)" || exit 1; \
+		$(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch $(Build_Target) CFLAGS="-arch $$arch $(CFLAGS)" CXXFLAGS="-arch $$arch $(CXXFLAGS)" SDKROOT= || exit 1; \
 	done
 
 configure-cross: setup-tools-cross
@@ -604,32 +612,40 @@ configure-cross: setup-tools-cross
 		echo "Configuring (Cross) for $$arch..." && \
 		$(MKDIR) $(OBJROOT)/$$arch && \
 		cd $(OBJROOT)/$$arch && \
+		unset SDKROOT && \
 		$(Configure) --prefix="$(Install_Prefix)" $(Configure_Flags) \
 			--host=arm-apple-darwin10 \
 			--target=arm-apple-darwin10 \
 			--build=i686-apple-darwin10 \
+			--program-prefix="" \
 		  || exit 1 ; \
 	done
 
 # A cross-compiler configure will expect to find tools under names like
-# arm-apple-darwin10-gcc, so make sure we have them.
+# arm-apple-darwin10-gcc, so make sure we have them.  Also add sym links
+# for the host tools so we are sure to use the right versions of them.
 setup-tools-cross:
 	$(_v) $(MKDIR) $(OBJROOT)/bin
 	$(_v) for prog in ar nm ranlib strip lipo ld as ; do \
+	  ln -s `xcrun -find $$prog` $(OBJROOT)/bin/$$prog && \
 	  echo '#!/bin/sh' > $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
 	  echo 'exec '`xcrun -sdk $(SDKROOT) -find $$prog` '"$$@"' \
 	    >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
 	  chmod a+x $(OBJROOT)/bin/arm-apple-darwin10-$$prog || exit 1; \
 	done
-	$(_v) for prog in gcc g++ ; do \
-	  ccprog=`echo $$prog | sed -e 's/gcc/cc/' -e 's/g/c/'` && \
-	  echo '#!/bin/sh' > $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
-	  echo "ARCH='-arch armv7'" >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
-	  echo 'for i in $$@ ; do if [ "$$i" == "-arch" ] ; then ARCH= ; fi ; done' >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
-	  echo 'exec '`xcrun -sdk $(SDKROOT) -find $$ccprog` \
-	    ' $$ARCH -isysroot '$(SDKROOT)' "$$@"' \
-	    >> $(OBJROOT)/bin/arm-apple-darwin10-$$prog && \
-	  chmod a+x $(OBJROOT)/bin/arm-apple-darwin10-$$prog || exit 1 ; \
+	$(_v) for gcc in gcc g++ ; do \
+	  cc=`echo $$gcc | sed -e 's/gcc/cc/' -e 's/g/c/'` && \
+	  clang=`echo $$gcc | sed -e 's/gcc/clang/' -e 's/^g/clang/'` && \
+	  prog=`xcrun -find $$cc` && \
+	  ln -s $$prog $(OBJROOT)/bin/$$gcc && \
+	  ln -s $$prog $(OBJROOT)/bin/$$clang && \
+	  script=$(OBJROOT)/bin/arm-apple-darwin10-$$gcc && \
+	  echo '#!/bin/sh' > $$script && \
+	  echo "ARCH='-arch armv7'" >> $$script && \
+	  echo 'for i in $$@ ; do if [ "$$i" == "-arch" ] ; then' \
+	    ' ARCH= ; fi ; done' >> $$script && \
+	  echo exec $$prog '$$ARCH -isysroot '$(SDKROOT)' "$$@"' >> $$script &&\
+	  chmod a+x $$script || exit 1 ; \
 	done
 
 ###

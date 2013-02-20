@@ -11,10 +11,9 @@
 // MCInst records.
 //
 //===----------------------------------------------------------------------===//
-
+#include "MipsMCInstLower.h"
 #include "MipsAsmPrinter.h"
 #include "MipsInstrInfo.h"
-#include "MipsMCInstLower.h"
 #include "MCTargetDesc/MipsBaseInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -26,9 +25,13 @@
 
 using namespace llvm;
 
-MipsMCInstLower::MipsMCInstLower(Mangler *mang, const MachineFunction &mf,
-                                 MipsAsmPrinter &asmprinter)
-  : Ctx(mf.getContext()), Mang(mang), AsmPrinter(asmprinter) {}
+MipsMCInstLower::MipsMCInstLower(MipsAsmPrinter &asmprinter)
+  : AsmPrinter(asmprinter) {}
+
+void MipsMCInstLower::Initialize(Mangler *M, MCContext *C) {
+  Mang = M;
+  Ctx = C;
+}
 
 MCOperand MipsMCInstLower::LowerSymbolOperand(const MachineOperand &MO,
                                               MachineOperandType MOTy,
@@ -57,6 +60,8 @@ MCOperand MipsMCInstLower::LowerSymbolOperand(const MachineOperand &MO,
   case MipsII::MO_GOT_DISP:  Kind = MCSymbolRefExpr::VK_Mips_GOT_DISP; break;
   case MipsII::MO_GOT_PAGE:  Kind = MCSymbolRefExpr::VK_Mips_GOT_PAGE; break;
   case MipsII::MO_GOT_OFST:  Kind = MCSymbolRefExpr::VK_Mips_GOT_OFST; break;
+  case MipsII::MO_HIGHER:    Kind = MCSymbolRefExpr::VK_Mips_HIGHER; break;
+  case MipsII::MO_HIGHEST:   Kind = MCSymbolRefExpr::VK_Mips_HIGHEST; break;
   }
 
   switch (MOTy) {
@@ -66,14 +71,17 @@ MCOperand MipsMCInstLower::LowerSymbolOperand(const MachineOperand &MO,
 
   case MachineOperand::MO_GlobalAddress:
     Symbol = Mang->getSymbol(MO.getGlobal());
+    Offset += MO.getOffset();
     break;
 
   case MachineOperand::MO_BlockAddress:
     Symbol = AsmPrinter.GetBlockAddressSymbol(MO.getBlockAddress());
+    Offset += MO.getOffset();
     break;
 
   case MachineOperand::MO_ExternalSymbol:
     Symbol = AsmPrinter.GetExternalSymbolSymbol(MO.getSymbolName());
+    Offset += MO.getOffset();
     break;
 
   case MachineOperand::MO_JumpTableIndex:
@@ -82,15 +90,14 @@ MCOperand MipsMCInstLower::LowerSymbolOperand(const MachineOperand &MO,
 
   case MachineOperand::MO_ConstantPoolIndex:
     Symbol = AsmPrinter.GetCPISymbol(MO.getIndex());
-    if (MO.getOffset())
-      Offset += MO.getOffset();
+    Offset += MO.getOffset();
     break;
 
   default:
     llvm_unreachable("<unknown operand type>");
   }
 
-  const MCSymbolRefExpr *MCSym = MCSymbolRefExpr::Create(Symbol, Kind, Ctx);
+  const MCSymbolRefExpr *MCSym = MCSymbolRefExpr::Create(Symbol, Kind, *Ctx);
 
   if (!Offset)
     return MCOperand::CreateExpr(MCSym);
@@ -98,80 +105,24 @@ MCOperand MipsMCInstLower::LowerSymbolOperand(const MachineOperand &MO,
   // Assume offset is never negative.
   assert(Offset > 0);
 
-  const MCConstantExpr *OffsetExpr =  MCConstantExpr::Create(Offset, Ctx);
-  const MCBinaryExpr *AddExpr = MCBinaryExpr::CreateAdd(MCSym, OffsetExpr, Ctx);
-  return MCOperand::CreateExpr(AddExpr);
+  const MCConstantExpr *OffsetExpr =  MCConstantExpr::Create(Offset, *Ctx);
+  const MCBinaryExpr *Add = MCBinaryExpr::CreateAdd(MCSym, OffsetExpr, *Ctx);
+  return MCOperand::CreateExpr(Add);
 }
 
-// Lower ".cpload $reg" to
-//  "lui   $gp, %hi(_gp_disp)"
-//  "addiu $gp, $gp, %lo(_gp_disp)"
-//  "addu  $gp. $gp, $reg"
-void MipsMCInstLower::LowerCPLOAD(const MachineInstr *MI,
-                                  SmallVector<MCInst, 4>& MCInsts) {
-  MCInst Lui, Addiu, Addu;
-  StringRef SymName("_gp_disp");
-  const MCSymbol *Symbol = Ctx.GetOrCreateSymbol(SymName);
-  const MCSymbolRefExpr *MCSym;
-
-  // lui   $gp, %hi(_gp_disp)
-  Lui.setOpcode(Mips::LUi);
-  Lui.addOperand(MCOperand::CreateReg(Mips::GP));
-  MCSym = MCSymbolRefExpr::Create(Symbol, MCSymbolRefExpr::VK_Mips_ABS_HI, Ctx);
-  Lui.addOperand(MCOperand::CreateExpr(MCSym));
-  MCInsts.push_back(Lui);
-
-  // addiu $gp, $gp, %lo(_gp_disp)
-  Addiu.setOpcode(Mips::ADDiu);
-  Addiu.addOperand(MCOperand::CreateReg(Mips::GP));
-  Addiu.addOperand(MCOperand::CreateReg(Mips::GP));
-  MCSym = MCSymbolRefExpr::Create(Symbol, MCSymbolRefExpr::VK_Mips_ABS_LO, Ctx);
-  Addiu.addOperand(MCOperand::CreateExpr(MCSym));
-  MCInsts.push_back(Addiu);
-
-  // addu  $gp. $gp, $reg
-  Addu.setOpcode(Mips::ADDu);
-  Addu.addOperand(MCOperand::CreateReg(Mips::GP));
-  Addu.addOperand(MCOperand::CreateReg(Mips::GP));
-  const MachineOperand &MO = MI->getOperand(0);
-  assert(MO.isReg() && "CPLOAD's operand must be a register.");
-  Addu.addOperand(MCOperand::CreateReg(MO.getReg()));
-  MCInsts.push_back(Addu);
+/*
+static void CreateMCInst(MCInst& Inst, unsigned Opc, const MCOperand &Opnd0,
+                         const MCOperand &Opnd1,
+                         const MCOperand &Opnd2 = MCOperand()) {
+  Inst.setOpcode(Opc);
+  Inst.addOperand(Opnd0);
+  Inst.addOperand(Opnd1);
+  if (Opnd2.isValid())
+    Inst.addOperand(Opnd2);
 }
+*/
 
-// Lower ".cprestore offset" to "sw $gp, offset($sp)".
-void MipsMCInstLower::LowerCPRESTORE(const MachineInstr *MI,
-                                     SmallVector<MCInst, 4>& MCInsts) {
-  const MachineOperand &MO = MI->getOperand(0);
-  assert(MO.isImm() && "CPRESTORE's operand must be an immediate.");
-  unsigned Offset = MO.getImm(), Reg = Mips::SP;
-  MCInst Sw;
-
-  if (Offset >= 0x8000) {
-    unsigned Hi = (Offset >> 16) + ((Offset & 0x8000) != 0);
-    Offset &= 0xffff;
-    Reg = Mips::AT;
-
-    // lui   at,hi
-    // addu  at,at,sp
-    MCInsts.resize(2);
-    MCInsts[0].setOpcode(Mips::LUi);
-    MCInsts[0].addOperand(MCOperand::CreateReg(Mips::AT));
-    MCInsts[0].addOperand(MCOperand::CreateImm(Hi));
-    MCInsts[1].setOpcode(Mips::ADDu);
-    MCInsts[1].addOperand(MCOperand::CreateReg(Mips::AT));
-    MCInsts[1].addOperand(MCOperand::CreateReg(Mips::AT));
-    MCInsts[1].addOperand(MCOperand::CreateReg(Mips::SP));
-  }
-
-  Sw.setOpcode(Mips::SW);
-  Sw.addOperand(MCOperand::CreateReg(Mips::GP));
-  Sw.addOperand(MCOperand::CreateReg(Reg));
-  Sw.addOperand(MCOperand::CreateImm(Offset));
-  MCInsts.push_back(Sw);
-}
-
-MCOperand MipsMCInstLower::LowerOperand(const MachineOperand& MO,
+MCOperand MipsMCInstLower::LowerOperand(const MachineOperand &MO,
                                         unsigned offset) const {
   MachineOperandType MOTy = MO.getType();
 
@@ -209,141 +160,3 @@ void MipsMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   }
 }
 
-void MipsMCInstLower::LowerUnalignedLoadStore(const MachineInstr *MI,
-                                              SmallVector<MCInst,
-                                              4>& MCInsts) {
-  unsigned Opc = MI->getOpcode();
-  MCInst Instr1, Instr2, Instr3, Move;
-
-  bool TwoInstructions = false;
-
-  assert(MI->getNumOperands() == 3);
-  assert(MI->getOperand(0).isReg());
-  assert(MI->getOperand(1).isReg());
-
-  MCOperand Target = LowerOperand(MI->getOperand(0));
-  MCOperand Base = LowerOperand(MI->getOperand(1));
-  MCOperand ATReg = MCOperand::CreateReg(Mips::AT);
-  MCOperand ZeroReg = MCOperand::CreateReg(Mips::ZERO);
-
-  MachineOperand UnLoweredName = MI->getOperand(2);
-  MCOperand Name = LowerOperand(UnLoweredName);
-
-  Move.setOpcode(Mips::ADDu);
-  Move.addOperand(Target);
-  Move.addOperand(ATReg);
-  Move.addOperand(ZeroReg);
-
-  switch (Opc) {
-  case Mips::ULW: {
-    // FIXME: only works for little endian right now
-    MCOperand AdjName = LowerOperand(UnLoweredName, 3);
-    if (Base.getReg() == (Target.getReg())) {
-      Instr1.setOpcode(Mips::LWL);
-      Instr1.addOperand(ATReg);
-      Instr1.addOperand(Base);
-      Instr1.addOperand(AdjName);
-      Instr2.setOpcode(Mips::LWR);
-      Instr2.addOperand(ATReg);
-      Instr2.addOperand(Base);
-      Instr2.addOperand(Name);
-      Instr3 = Move;
-    } else {
-      TwoInstructions = true;
-      Instr1.setOpcode(Mips::LWL);
-      Instr1.addOperand(Target);
-      Instr1.addOperand(Base);
-      Instr1.addOperand(AdjName);
-      Instr2.setOpcode(Mips::LWR);
-      Instr2.addOperand(Target);
-      Instr2.addOperand(Base);
-      Instr2.addOperand(Name);
-    }
-    break;
-  }
-  case Mips::ULHu: {
-    // FIXME: only works for little endian right now
-    MCOperand AdjName = LowerOperand(UnLoweredName, 1);
-    Instr1.setOpcode(Mips::LBu);
-    Instr1.addOperand(ATReg);
-    Instr1.addOperand(Base);
-    Instr1.addOperand(AdjName);
-    Instr2.setOpcode(Mips::LBu);
-    Instr2.addOperand(Target);
-    Instr2.addOperand(Base);
-    Instr2.addOperand(Name);
-    Instr3.setOpcode(Mips::INS);
-    Instr3.addOperand(Target);
-    Instr3.addOperand(ATReg);
-    Instr3.addOperand(MCOperand::CreateImm(0x8));
-    Instr3.addOperand(MCOperand::CreateImm(0x18));
-    break;
-  }
-
-  case Mips::USW: {
-    // FIXME: only works for little endian right now
-    assert (Base.getReg() != Target.getReg());
-    TwoInstructions = true;
-    MCOperand AdjName = LowerOperand(UnLoweredName, 3);
-    Instr1.setOpcode(Mips::SWL);
-    Instr1.addOperand(Target);
-    Instr1.addOperand(Base);
-    Instr1.addOperand(AdjName);
-    Instr2.setOpcode(Mips::SWR);
-    Instr2.addOperand(Target);
-    Instr2.addOperand(Base);
-    Instr2.addOperand(Name);
-    break;
-  }
-  case Mips::USH: {
-    MCOperand AdjName = LowerOperand(UnLoweredName, 1);
-    Instr1.setOpcode(Mips::SB);
-    Instr1.addOperand(Target);
-    Instr1.addOperand(Base);
-    Instr1.addOperand(Name);
-    Instr2.setOpcode(Mips::SRL);
-    Instr2.addOperand(ATReg);
-    Instr2.addOperand(Target);
-    Instr2.addOperand(MCOperand::CreateImm(8));
-    Instr3.setOpcode(Mips::SB);
-    Instr3.addOperand(ATReg);
-    Instr3.addOperand(Base);
-    Instr3.addOperand(AdjName);
-    break;
-  }
-  default:
-    // FIXME: need to add others
-    llvm_unreachable("unaligned instruction not processed");
-  }
-
-  MCInsts.push_back(Instr1);
-  MCInsts.push_back(Instr2);
-  if (!TwoInstructions) MCInsts.push_back(Instr3);
-}
-
-// Convert
-//  "setgp01 $reg"
-// to
-//  "lui   $reg, %hi(_gp_disp)"
-//  "addiu $reg, $reg, %lo(_gp_disp)"
-void MipsMCInstLower::LowerSETGP01(const MachineInstr *MI,
-                                   SmallVector<MCInst, 4>& MCInsts) {
-  const MachineOperand &MO = MI->getOperand(0);
-  assert(MO.isReg());
-  MCOperand RegOpnd = MCOperand::CreateReg(MO.getReg());
-  StringRef SymName("_gp_disp");
-  const MCSymbol *Sym = Ctx.GetOrCreateSymbol(SymName);
-  const MCSymbolRefExpr *MCSym;
-
-  MCInsts.resize(2);
-
-  MCSym = MCSymbolRefExpr::Create(Sym, MCSymbolRefExpr::VK_Mips_ABS_HI, Ctx);
-  MCInsts[0].setOpcode(Mips::LUi);
-  MCInsts[0].addOperand(RegOpnd);
-  MCInsts[0].addOperand(MCOperand::CreateExpr(MCSym));
-  MCSym = MCSymbolRefExpr::Create(Sym, MCSymbolRefExpr::VK_Mips_ABS_LO, Ctx);
-  MCInsts[1].setOpcode(Mips::ADDiu);
-  MCInsts[1].addOperand(RegOpnd);
-  MCInsts[1].addOperand(RegOpnd);
-  MCInsts[1].addOperand(MCOperand::CreateExpr(MCSym));
-}

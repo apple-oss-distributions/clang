@@ -26,6 +26,7 @@
 #include "llvm/MC/MCInstrAnalysis.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -43,7 +44,7 @@ using namespace object;
 
 static cl::opt<bool>
   CFG("cfg", cl::desc("Create a CFG for every symbol in the object file and"
-                      "write it to a graphviz file (MachO-only)"));
+                      " write it to a graphviz file (MachO-only)"));
 
 static cl::opt<bool>
   UseDbg("g", cl::desc("Print line information from debug info if available"));
@@ -257,9 +258,11 @@ void llvm::DisassembleInputMachO(StringRef Filename) {
   OwningPtr<const MCSubtargetInfo>
     STI(TheTarget->createMCSubtargetInfo(TripleName, "", ""));
   OwningPtr<const MCDisassembler> DisAsm(TheTarget->createMCDisassembler(*STI));
+  OwningPtr<const MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TripleName));
   int AsmPrinterVariant = AsmInfo->getAssemblerDialect();
-  OwningPtr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(
-                              AsmPrinterVariant, *AsmInfo, *STI));
+  OwningPtr<MCInstPrinter>
+    IP(TheTarget->createMCInstPrinter(AsmPrinterVariant, *AsmInfo, *InstrInfo,
+                                      *MRI, *STI));
 
   if (!InstrAnalysis || !AsmInfo || !STI || !DisAsm || !IP) {
     errs() << "error: couldn't initialize disassembler for target "
@@ -283,8 +286,10 @@ void llvm::DisassembleInputMachO(StringRef Filename) {
 
   // Read and register the symbol table data.
   InMemoryStruct<macho::SymtabLoadCommand> SymtabLC;
-  MachOObj->ReadSymtabLoadCommand(*SymtabLCI, SymtabLC);
-  MachOObj->RegisterStringTable(*SymtabLC);
+  if (SymtabLCI) {
+    MachOObj->ReadSymtabLoadCommand(*SymtabLCI, SymtabLC);
+    MachOObj->RegisterStringTable(*SymtabLC);
+  }
 
   std::vector<SectionRef> Sections;
   std::vector<SymbolRef> Symbols;
@@ -427,7 +432,7 @@ void llvm::DisassembleInputMachO(StringRef Filename) {
 
       // Stop disassembling either at the beginning of the next symbol or at
       // the end of the section.
-      bool containsNextSym = true;
+      bool containsNextSym = false;
       uint64_t NextSym = 0;
       uint64_t NextSymIdx = SymIdx+1;
       while (Symbols.size() > NextSymIdx) {
@@ -493,6 +498,29 @@ void llvm::DisassembleInputMachO(StringRef Filename) {
         createMCFunctionAndSaveCalls(
             SymName, DisAsm.get(), memoryObject, Start, End,
             InstrAnalysis.get(), Start, DebugOut, FunctionMap, Functions);
+      }
+    }
+    if (!CFG && !symbolTableWorked) {
+      // Reading the symbol table didn't work, disassemble the whole section. 
+      uint64_t SectAddress;
+      Sections[SectIdx].getAddress(SectAddress);
+      uint64_t SectSize;
+      Sections[SectIdx].getSize(SectSize);
+      uint64_t InstSize;
+      for (uint64_t Index = 0; Index < SectSize; Index += InstSize) {
+        MCInst Inst;
+
+        if (DisAsm->getInstruction(Inst, InstSize, memoryObject, Index,
+                                   DebugOut, nulls())) {
+          outs() << format("%8" PRIx64 ":\t", SectAddress + Index);
+          DumpBytes(StringRef(Bytes.data() + Index, InstSize));
+          IP->printInst(&Inst, outs(), "");
+          outs() << "\n";
+        } else {
+          errs() << "llvm-objdump: warning: invalid instruction encoding\n";
+          if (InstSize == 0)
+            InstSize = 1; // skip illegible bytes
+        }
       }
     }
 

@@ -42,10 +42,107 @@ import os
 import csv
 import sys
 import glob
+import math
 import shutil
 import time
 import plistlib
 from subprocess import check_call, CalledProcessError
+
+#------------------------------------------------------------------------------
+# Helper functions.
+#------------------------------------------------------------------------------
+
+def detectCPUs():
+    """
+    Detects the number of CPUs on a system. Cribbed from pp.
+    """
+    # Linux, Unix and MacOS:
+    if hasattr(os, "sysconf"):
+        if os.sysconf_names.has_key("SC_NPROCESSORS_ONLN"):
+            # Linux & Unix:
+            ncpus = os.sysconf("SC_NPROCESSORS_ONLN")
+            if isinstance(ncpus, int) and ncpus > 0:
+                return ncpus
+        else: # OSX:
+            return int(capture(['sysctl', '-n', 'hw.ncpu']))
+    # Windows:
+    if os.environ.has_key("NUMBER_OF_PROCESSORS"):
+        ncpus = int(os.environ["NUMBER_OF_PROCESSORS"])
+        if ncpus > 0:
+            return ncpus
+    return 1 # Default
+
+def which(command, paths = None):
+   """which(command, [paths]) - Look up the given command in the paths string
+   (or the PATH environment variable, if unspecified)."""
+
+   if paths is None:
+       paths = os.environ.get('PATH','')
+
+   # Check for absolute match first.
+   if os.path.exists(command):
+       return command
+
+   # Would be nice if Python had a lib function for this.
+   if not paths:
+       paths = os.defpath
+
+   # Get suffixes to search.
+   # On Cygwin, 'PATHEXT' may exist but it should not be used.
+   if os.pathsep == ';':
+       pathext = os.environ.get('PATHEXT', '').split(';')
+   else:
+       pathext = ['']
+
+   # Search the paths...
+   for path in paths.split(os.pathsep):
+       for ext in pathext:
+           p = os.path.join(path, command + ext)
+           if os.path.exists(p):
+               return p
+
+   return None
+
+# Make sure we flush the output after every print statement.
+class flushfile(object):
+    def __init__(self, f):
+        self.f = f
+    def write(self, x):
+        self.f.write(x)
+        self.f.flush()
+
+sys.stdout = flushfile(sys.stdout)
+
+def getProjectMapPath():
+    ProjectMapPath = os.path.join(os.path.abspath(os.curdir), 
+                                  ProjectMapFile)
+    if not os.path.exists(ProjectMapPath):
+        print "Error: Cannot find the Project Map file " + ProjectMapPath +\
+                "\nRunning script for the wrong directory?"
+        sys.exit(-1)  
+    return ProjectMapPath         
+
+def getProjectDir(ID):
+    return os.path.join(os.path.abspath(os.curdir), ID)        
+
+def getSBOutputDirName(IsReferenceBuild) :
+    if IsReferenceBuild == True :
+        return SBOutputDirReferencePrefix + SBOutputDirName
+    else :
+        return SBOutputDirName
+
+#------------------------------------------------------------------------------
+# Configuration setup.
+#------------------------------------------------------------------------------
+
+# Find Clang for static analysis.
+Clang = which("clang", os.environ['PATH'])
+if not Clang:
+    print "Error: cannot find 'clang' in PATH"
+    sys.exit(-1)
+
+# Number of jobs.
+Jobs = math.ceil(detectCPUs() * 0.75)
 
 # Project map stores info about all the "registered" projects.
 ProjectMapFile = "projectMap.csv"
@@ -72,39 +169,13 @@ SBOutputDirReferencePrefix = "Ref"
 
 # The list of checkers used during analyzes.
 # Currently, consists of all the non experimental checkers.
-Checkers="experimental.security.taint,core,deadcode,cplusplus,security,unix,osx,cocoa"
+Checkers="alpha.security.taint,core,deadcode,security,unix,osx"
 
 Verbose = 1
 
-IsReferenceBuild = False
-
-# Make sure we flush the output after every print statement.
-class flushfile(object):
-    def __init__(self, f):
-        self.f = f
-    def write(self, x):
-        self.f.write(x)
-        self.f.flush()
-
-sys.stdout = flushfile(sys.stdout)
-
-def getProjectMapPath():
-    ProjectMapPath = os.path.join(os.path.abspath(os.curdir), 
-                                  ProjectMapFile)
-    if not os.path.exists(ProjectMapPath):
-        print "Error: Cannot find the Project Map file " + ProjectMapPath +\
-                "\nRunning script for the wrong directory?"
-        sys.exit(-1)  
-    return ProjectMapPath         
-
-def getProjectDir(ID):
-    return os.path.join(os.path.abspath(os.curdir), ID)        
-
-def getSBOutputDirName() :
-    if IsReferenceBuild == True :
-        return SBOutputDirReferencePrefix + SBOutputDirName
-    else :
-        return SBOutputDirName
+#------------------------------------------------------------------------------
+# Test harness logic.
+#------------------------------------------------------------------------------
 
 # Run pre-processing script if any.
 def runCleanupScript(Dir, PBuildLogFile):
@@ -131,13 +202,19 @@ def runScanBuild(Dir, SBOutputDir, PBuildLogFile):
     BuildScriptPath = os.path.join(Dir, BuildScript)
     if not os.path.exists(BuildScriptPath):
         print "Error: build script is not defined: %s" % BuildScriptPath
-        sys.exit(-1)       
-    SBOptions = "-plist-html -o " + SBOutputDir + " "
+        sys.exit(-1)
+    SBOptions = "--use-analyzer " + Clang + " "
+    SBOptions += "-plist-html -o " + SBOutputDir + " "
     SBOptions += "-enable-checker " + Checkers + " "  
     try:
         SBCommandFile = open(BuildScriptPath, "r")
         SBPrefix = "scan-build " + SBOptions + " "
         for Command in SBCommandFile:
+            # If using 'make', auto imply a -jX argument
+            # to speed up analysis.  xcodebuild will
+            # automatically use the maximum number of cores.
+            if Command.startswith("make "):
+                Command += "-j" + Jobs
             SBCommand = SBPrefix + Command
             if Verbose == 1:        
                 print "  Executing: %s" % (SBCommand,)
@@ -162,16 +239,19 @@ def isValidSingleInputFile(FileName):
         (Ext == ".m") | (Ext == "")) :
         return True
     return False
-
+   
 # Run analysis on a set of preprocessed files.
-def runAnalyzePreprocessed(Dir, SBOutputDir):
+def runAnalyzePreprocessed(Dir, SBOutputDir, Mode):
     if os.path.exists(os.path.join(Dir, BuildScript)):
         print "Error: The preprocessed files project should not contain %s" % \
                BuildScript
         raise Exception()       
 
-    CmdPrefix = "clang -cc1 -analyze -analyzer-output=plist -w "
+    CmdPrefix = Clang + " -cc1 -analyze -analyzer-output=plist -w "
     CmdPrefix += "-analyzer-checker=" + Checkers +" -fcxx-exceptions -fblocks "   
+    
+    if (Mode == 2) :
+        CmdPrefix += "-std=c++11 " 
     
     PlistPath = os.path.join(Dir, SBOutputDir, "date")
     FailPath = os.path.join(PlistPath, "failures");
@@ -210,7 +290,7 @@ def runAnalyzePreprocessed(Dir, SBOutputDir):
         if Failed == False:
             os.remove(LogFile.name);
 
-def buildProject(Dir, SBOutputDir, IsScanBuild):
+def buildProject(Dir, SBOutputDir, ProjectBuildMode, IsReferenceBuild):
     TBegin = time.time() 
 
     BuildLogPath = os.path.join(SBOutputDir, LogFolderName, BuildLogName)
@@ -240,10 +320,10 @@ def buildProject(Dir, SBOutputDir, IsScanBuild):
     try:
         runCleanupScript(Dir, PBuildLogFile)
         
-        if IsScanBuild:
+        if (ProjectBuildMode == 1):
             runScanBuild(Dir, SBOutputDir, PBuildLogFile)
         else:
-            runAnalyzePreprocessed(Dir, SBOutputDir)
+            runAnalyzePreprocessed(Dir, SBOutputDir, ProjectBuildMode)
         
         if IsReferenceBuild :
             runCleanupScript(Dir, PBuildLogFile)
@@ -295,7 +375,7 @@ def checkBuild(SBOutputDir):
     
         FailuresCopied = NumOfFailuresInSummary
         Idx = 0
-        for FailLogPathI in glob.glob(SBOutputDir + "/*/failures/*.stderr.txt"):
+        for FailLogPathI in Failures:
             if Idx >= NumOfFailuresInSummary:
                 break;
             Idx += 1 
@@ -359,7 +439,7 @@ def runCmpResults(Dir):
         OLD_STDOUT = sys.stdout
         sys.stdout = Discarder()
         # Scan the results, delete empty plist files.
-        NumDiffs = CmpRuns.cmpScanBuildResults(RefDir, NewDir, Opts, False)
+        NumDiffs = CmpRuns.dumpScanBuildResultsDiff(RefDir, NewDir, Opts, False)
         sys.stdout = OLD_STDOUT
         if (NumDiffs > 0) :
             print "Warning: %r differences in diagnostics. See %s" % \
@@ -373,7 +453,7 @@ def updateSVN(Mode, ProjectsMap):
         ProjectsMap.seek(0)    
         for I in csv.reader(ProjectsMap):
             ProjName = I[0] 
-            Path = os.path.join(ProjName, getSBOutputDirName())
+            Path = os.path.join(ProjName, getSBOutputDirName(True))
     
             if Mode == "delete":
                 Command = "svn delete %s" % (Path,)
@@ -382,7 +462,7 @@ def updateSVN(Mode, ProjectsMap):
 
             if Verbose == 1:        
                 print "  Executing: %s" % (Command,)
-                check_call(Command, shell=True)    
+            check_call(Command, shell=True)    
     
         if Mode == "delete":
             CommitCommand = "svn commit -m \"[analyzer tests] Remove " \
@@ -392,12 +472,12 @@ def updateSVN(Mode, ProjectsMap):
                             "reference results.\""
         if Verbose == 1:        
             print "  Executing: %s" % (CommitCommand,)
-            check_call(CommitCommand, shell=True)    
+        check_call(CommitCommand, shell=True)    
     except:
         print "Error: SVN update failed."
         sys.exit(-1)
         
-def testProject(ID, IsScanBuild, Dir=None):
+def testProject(ID, ProjectBuildMode, IsReferenceBuild=False, Dir=None):
     print " \n\n--- Building project %s" % (ID,)
 
     TBegin = time.time() 
@@ -408,10 +488,10 @@ def testProject(ID, IsScanBuild, Dir=None):
         print "  Build directory: %s." % (Dir,)
     
     # Set the build results directory.
-    RelOutputDir = getSBOutputDirName()
+    RelOutputDir = getSBOutputDirName(IsReferenceBuild)
     SBOutputDir = os.path.join(Dir, RelOutputDir)
                 
-    buildProject(Dir, SBOutputDir, IsScanBuild)    
+    buildProject(Dir, SBOutputDir, ProjectBuildMode, IsReferenceBuild)
 
     checkBuild(SBOutputDir)
     
@@ -421,10 +501,7 @@ def testProject(ID, IsScanBuild, Dir=None):
     print "Completed tests for project %s (time: %.2f)." % \
           (ID, (time.time()-TBegin))
     
-def testAll(InIsReferenceBuild = False, UpdateSVN = False):
-    global IsReferenceBuild
-    IsReferenceBuild = InIsReferenceBuild
-
+def testAll(IsReferenceBuild = False, UpdateSVN = False):
     PMapFile = open(getProjectMapPath(), "rb")
     try:        
         # Validate the input.
@@ -432,20 +509,21 @@ def testAll(InIsReferenceBuild = False, UpdateSVN = False):
             if (len(I) != 2) :
                 print "Error: Rows in the ProjectMapFile should have 3 entries."
                 raise Exception()
-            if (not ((I[1] == "1") | (I[1] == "0"))):
-                print "Error: Second entry in the ProjectMapFile should be 0 or 1."
+            if (not ((I[1] == "0") | (I[1] == "1") | (I[1] == "2"))):
+                print "Error: Second entry in the ProjectMapFile should be 0" \
+                      " (single file), 1 (project), or 2(single file c++11)."
                 raise Exception()              
 
         # When we are regenerating the reference results, we might need to 
         # update svn. Remove reference results from SVN.
         if UpdateSVN == True:
-            assert(InIsReferenceBuild == True);
+            assert(IsReferenceBuild == True);
             updateSVN("delete",  PMapFile);
             
         # Test the projects.
         PMapFile.seek(0)    
         for I in csv.reader(PMapFile):
-            testProject(I[0], int(I[1]))
+            testProject(I[0], int(I[1]), IsReferenceBuild)
 
         # Add reference results to SVN.
         if UpdateSVN == True:

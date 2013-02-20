@@ -1,4 +1,4 @@
-//===-- SPUMCTargetDesc.h - Hexagon Target Descriptions ---------*- C++ -*-===//
+//===-- HexagonMCTargetDesc.h - Hexagon Target Descriptions -----*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -11,13 +11,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef SPUMCTARGETDESC_H
-#define SPUMCTARGETDESC_H
+#ifndef HEXAGONMCTARGETDESC_H
+#define HEXAGONMCTARGETDESC_H
 
 namespace llvm {
 class MCSubtargetInfo;
 class Target;
-class StringRef;
 
 extern Target TheHexagonTarget;
 

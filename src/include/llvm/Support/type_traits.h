@@ -18,7 +18,13 @@
 #define LLVM_SUPPORT_TYPE_TRAITS_H
 
 #include "llvm/Support/DataTypes.h"
+#include <cstddef>
 #include <utility>
+
+#ifndef __has_feature
+#define LLVM_DEFINED_HAS_FEATURE
+#define __has_feature(x) 0
+#endif
 
 // This is actually the conforming implementation which works with abstract
 // classes.  However, enough compilers have trouble with it that most will use
@@ -48,8 +54,9 @@ struct is_class
   // is_class<> metafunction due to Paul Mensonides (leavings@attbi.com). For
   // more details:
   // http://groups.google.com/groups?hl=en&selm=000001c1cc83%24e154d5e0%247772e50c%40c161550a&rnum=1
- public:
-    enum { value = sizeof(char) == sizeof(dont_use::is_class_helper<T>(0)) };
+public:
+  static const bool value =
+      sizeof(char) == sizeof(dont_use::is_class_helper<T>(0));
 };
   
   
@@ -57,15 +64,21 @@ struct is_class
 /// type can be copied around with memcpy instead of running ctors etc.
 template <typename T>
 struct isPodLike {
+#if __has_feature(is_trivially_copyable)
+  // If the compiler supports the is_trivially_copyable trait use it, as it
+  // matches the definition of isPodLike closely.
+  static const bool value = __is_trivially_copyable(T);
+#else
   // If we don't know anything else, we can (at least) assume that all non-class
   // types are PODs.
   static const bool value = !is_class<T>::value;
+#endif
 };
 
 // std::pair's are pod-like if their elements are.
 template<typename T, typename U>
 struct isPodLike<std::pair<T, U> > {
-  static const bool value = isPodLike<T>::value & isPodLike<U>::value;
+  static const bool value = isPodLike<T>::value && isPodLike<U>::value;
 };
   
 
@@ -120,12 +133,43 @@ template <> struct is_integral_impl<unsigned long long> : true_type {};
 template <typename T>
 struct is_integral : is_integral_impl<T> {};
 
+/// \brief Metafunction to remove reference from a type.
+template <typename T> struct remove_reference { typedef T type; };
+template <typename T> struct remove_reference<T&> { typedef T type; };
+
 /// \brief Metafunction that determines whether the given type is a pointer
 /// type.
 template <typename T> struct is_pointer : false_type {};
 template <typename T> struct is_pointer<T*> : true_type {};
+template <typename T> struct is_pointer<T* const> : true_type {};
+template <typename T> struct is_pointer<T* volatile> : true_type {};
+template <typename T> struct is_pointer<T* const volatile> : true_type {};
 
-  
+/// \brief Metafunction that determines whether the given type is either an
+/// integral type or an enumeration type.
+///
+/// Note that this accepts potentially more integral types than we whitelist
+/// above for is_integral because it is based on merely being convertible
+/// implicitly to an integral type.
+template <typename T> class is_integral_or_enum {
+  // Provide an overload which can be called with anything implicitly
+  // convertible to an unsigned long long. This should catch integer types and
+  // enumeration types at least. We blacklist classes with conversion operators
+  // below.
+  static double check_int_convertible(unsigned long long);
+  static char check_int_convertible(...);
+
+  typedef typename remove_reference<T>::type UnderlyingT;
+  static UnderlyingT &nonce_instance;
+
+public:
+  static const bool
+    value = (!is_class<UnderlyingT>::value && !is_pointer<UnderlyingT>::value &&
+             !is_same<UnderlyingT, float>::value &&
+             !is_same<UnderlyingT, double>::value &&
+             sizeof(char) != sizeof(check_int_convertible(nonce_instance)));
+};
+
 // enable_if_c - Enable/disable a template based on a metafunction
 template<bool Cond, typename T = void>
 struct enable_if_c {
@@ -168,5 +212,9 @@ template <typename T, typename F>
 struct conditional<false, T, F> { typedef F type; };
 
 }
+
+#ifdef LLVM_DEFINED_HAS_FEATURE
+#undef __has_feature
+#endif
 
 #endif

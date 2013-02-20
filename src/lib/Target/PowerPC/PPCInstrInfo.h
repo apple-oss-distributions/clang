@@ -15,8 +15,8 @@
 #define POWERPC_INSTRUCTIONINFO_H
 
 #include "PPC.h"
-#include "llvm/Target/TargetInstrInfo.h"
 #include "PPCRegisterInfo.h"
+#include "llvm/Target/TargetInstrInfo.h"
 
 #define GET_INSTRINFO_HEADER
 #include "PPCGenInstrInfo.inc"
@@ -92,6 +92,9 @@ public:
   CreateTargetPostRAHazardRecognizer(const InstrItineraryData *II,
                                      const ScheduleDAG *DAG) const;
 
+  bool isCoalescableExtInstr(const MachineInstr &MI,
+                             unsigned &SrcReg, unsigned &DstReg,
+                             unsigned &SubIdx) const;
   unsigned isLoadFromStackSlot(const MachineInstr *MI,
                                int &FrameIndex) const;
   unsigned isStoreToStackSlot(const MachineInstr *MI,

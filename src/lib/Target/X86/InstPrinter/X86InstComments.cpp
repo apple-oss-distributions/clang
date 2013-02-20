@@ -29,7 +29,7 @@ using namespace llvm;
 void llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
                                   const char *(*getRegName)(unsigned)) {
   // If this is a shuffle operation, the switch should fill in this state.
-  SmallVector<unsigned, 8> ShuffleMask;
+  SmallVector<int, 8> ShuffleMask;
   const char *DestName = 0, *Src1Name = 0, *Src2Name = 0;
 
   switch (MI->getOpcode()) {
@@ -96,7 +96,17 @@ void llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
   case X86::PSHUFHWmi:
   case X86::VPSHUFHWmi:
     DestName = getRegName(MI->getOperand(0).getReg());
-    DecodePSHUFHWMask(MI->getOperand(MI->getNumOperands()-1).getImm(),
+    DecodePSHUFHWMask(MVT::v8i16,
+                      MI->getOperand(MI->getNumOperands()-1).getImm(),
+                      ShuffleMask);
+    break;
+  case X86::VPSHUFHWYri:
+    Src1Name = getRegName(MI->getOperand(1).getReg());
+    // FALL THROUGH.
+  case X86::VPSHUFHWYmi:
+    DestName = getRegName(MI->getOperand(0).getReg());
+    DecodePSHUFHWMask(MVT::v16i16,
+                      MI->getOperand(MI->getNumOperands()-1).getImm(),
                       ShuffleMask);
     break;
   case X86::PSHUFLWri:
@@ -106,7 +116,17 @@ void llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
   case X86::PSHUFLWmi:
   case X86::VPSHUFLWmi:
     DestName = getRegName(MI->getOperand(0).getReg());
-    DecodePSHUFLWMask(MI->getOperand(MI->getNumOperands()-1).getImm(),
+    DecodePSHUFLWMask(MVT::v8i16,
+                      MI->getOperand(MI->getNumOperands()-1).getImm(),
+                      ShuffleMask);
+    break;
+  case X86::VPSHUFLWYri:
+    Src1Name = getRegName(MI->getOperand(1).getReg());
+    // FALL THROUGH.
+  case X86::VPSHUFLWYmi:
+    DestName = getRegName(MI->getOperand(0).getReg());
+    DecodePSHUFLWMask(MVT::v16i16,
+                      MI->getOperand(MI->getNumOperands()-1).getImm(),
                       ShuffleMask);
     break;
 
@@ -487,6 +507,16 @@ void llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
     Src1Name = getRegName(MI->getOperand(1).getReg());
     DestName = getRegName(MI->getOperand(0).getReg());
     break;
+  case X86::VPERMQYri:
+  case X86::VPERMPDYri:
+    Src1Name = getRegName(MI->getOperand(1).getReg());
+    // FALL THROUGH.
+  case X86::VPERMQYmi:
+  case X86::VPERMPDYmi:
+    DecodeVPERMMask(MI->getOperand(MI->getNumOperands()-1).getImm(),
+                    ShuffleMask);
+    DestName = getRegName(MI->getOperand(0).getReg());
+    break;
   }
 
 
@@ -500,7 +530,7 @@ void llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
     if (Src1Name == Src2Name) {
       for (unsigned i = 0, e = ShuffleMask.size(); i != e; ++i) {
         if ((int)ShuffleMask[i] >= 0 && // Not sentinel.
-            ShuffleMask[i] >= e)        // From second mask.
+            ShuffleMask[i] >= (int)e)        // From second mask.
           ShuffleMask[i] -= e;
       }
     }
@@ -518,13 +548,13 @@ void llvm::EmitAnyX86InstComments(const MCInst *MI, raw_ostream &OS,
 
       // Otherwise, it must come from src1 or src2.  Print the span of elements
       // that comes from this src.
-      bool isSrc1 = ShuffleMask[i] < ShuffleMask.size();
+      bool isSrc1 = ShuffleMask[i] < (int)ShuffleMask.size();
       const char *SrcName = isSrc1 ? Src1Name : Src2Name;
       OS << (SrcName ? SrcName : "mem") << '[';
       bool IsFirst = true;
       while (i != e &&
              (int)ShuffleMask[i] >= 0 &&
-             (ShuffleMask[i] < ShuffleMask.size()) == isSrc1) {
+             (ShuffleMask[i] < (int)ShuffleMask.size()) == isSrc1) {
         if (!IsFirst)
           OS << ',';
         else

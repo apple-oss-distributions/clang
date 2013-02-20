@@ -14,9 +14,9 @@
 #ifndef X86SUBTARGET_H
 #define X86SUBTARGET_H
 
+#include "llvm/CallingConv.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
-#include "llvm/CallingConv.h"
 #include <string>
 
 #define GET_SUBTARGETINFO_HEADER
@@ -55,7 +55,7 @@ protected:
 
   /// X86ProcFamily - X86 processor family: Intel Atom, and others
   X86ProcFamilyEnum X86ProcFamily;
-  
+
   /// PICStyle - Which PIC style to use
   ///
   PICStyles::Style PICStyle;
@@ -85,11 +85,11 @@ protected:
   /// HasAES - Target has AES instructions
   bool HasAES;
 
-  /// HasCLMUL - Target has carry-less multiplication
-  bool HasCLMUL;
+  /// HasPCLMUL - Target has carry-less multiplication
+  bool HasPCLMUL;
 
-  /// HasFMA3 - Target has 3-operand fused multiply-add
-  bool HasFMA3;
+  /// HasFMA - Target has 3-operand fused multiply-add
+  bool HasFMA;
 
   /// HasFMA4 - Target has 4-operand fused multiply-add
   bool HasFMA4;
@@ -136,6 +136,10 @@ protected:
   /// the stack pointer. This is an optimization for Intel Atom processors.
   bool UseLeaForSP;
 
+  /// HasSlowDivide - True if smaller divides are significantly faster than
+  /// full divides and should be used when possible.
+  bool HasSlowDivide;
+
   /// PostRAScheduler - True if using post-register-allocation scheduler.
   bool PostRAScheduler;
 
@@ -149,7 +153,7 @@ protected:
 
   /// TargetTriple - What processor and OS we're targeting.
   Triple TargetTriple;
-  
+
   /// Instruction itineraries for scheduling
   InstrItineraryData InstrItins;
 
@@ -203,9 +207,10 @@ public:
   bool has3DNowA() const { return X863DNowLevel >= ThreeDNowA; }
   bool hasPOPCNT() const { return HasPOPCNT; }
   bool hasAES() const { return HasAES; }
-  bool hasCLMUL() const { return HasCLMUL; }
-  bool hasFMA3() const { return HasFMA3; }
-  bool hasFMA4() const { return HasFMA4; }
+  bool hasPCLMUL() const { return HasPCLMUL; }
+  bool hasFMA() const { return HasFMA; }
+  // FIXME: Favor FMA when both are enabled. Is this the right thing to do?
+  bool hasFMA4() const { return HasFMA4 && !HasFMA; }
   bool hasXOP() const { return HasXOP; }
   bool hasMOVBE() const { return HasMOVBE; }
   bool hasRDRAND() const { return HasRDRAND; }
@@ -219,6 +224,7 @@ public:
   bool hasVectorUAMem() const { return HasVectorUAMem; }
   bool hasCmpxchg16b() const { return HasCmpxchg16b; }
   bool useLeaForSP() const { return UseLeaForSP; }
+  bool hasSlowDivide() const { return HasSlowDivide; }
 
   bool isAtom() const { return X86ProcFamily == IntelAtom; }
 
@@ -296,16 +302,12 @@ public:
   /// returns null.
   const char *getBZeroEntry() const;
 
-  /// getSpecialAddressLatency - For targets where it is beneficial to
-  /// backschedule instructions that compute addresses, return a value
-  /// indicating the number of scheduling cycles of backscheduling that
-  /// should be attempted.
-  unsigned getSpecialAddressLatency() const;
-
   /// enablePostRAScheduler - run for Atom optimization.
   bool enablePostRAScheduler(CodeGenOpt::Level OptLevel,
                              TargetSubtargetInfo::AntiDepBreakMode& Mode,
                              RegClassVector& CriticalPathRCs) const;
+
+  bool postRAScheduler() const { return PostRAScheduler; }
 
   /// getInstrItins = Return the instruction itineraries based on the
   /// subtarget selection.

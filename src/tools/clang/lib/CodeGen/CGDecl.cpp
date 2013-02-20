@@ -184,15 +184,21 @@ CodeGenFunction::CreateStaticVarDecl(const VarDecl &D,
     Name = GetStaticDeclName(*this, D, Separator);
 
   llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(Ty);
+  unsigned AddrSpace =
+   CGM.GetGlobalVarAddressSpace(&D, CGM.getContext().getTargetAddressSpace(Ty));
   llvm::GlobalVariable *GV =
     new llvm::GlobalVariable(CGM.getModule(), LTy,
                              Ty.isConstant(getContext()), Linkage,
                              CGM.EmitNullConstant(D.getType()), Name, 0,
-                             D.isThreadSpecified(),
-                             CGM.getContext().getTargetAddressSpace(Ty));
+                             llvm::GlobalVariable::NotThreadLocal,
+                             AddrSpace);
   GV->setAlignment(getContext().getDeclAlign(&D).getQuantity());
   if (Linkage != llvm::GlobalValue::InternalLinkage)
     GV->setVisibility(CurFn->getVisibility());
+
+  if (D.isThreadSpecified())
+    CGM.setTLSMode(GV, D);
+
   return GV;
 }
 
@@ -239,7 +245,7 @@ CodeGenFunction::AddInitializerToStaticVarDecl(const VarDecl &D,
                                   OldGV->isConstant(),
                                   OldGV->getLinkage(), Init, "",
                                   /*InsertBefore*/ OldGV,
-                                  D.isThreadSpecified(),
+                                  OldGV->getThreadLocalMode(),
                            CGM.getContext().getTargetAddressSpace(D.getType()));
     GV->setVisibility(OldGV->getVisibility());
 
@@ -326,7 +332,8 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
 
   // Emit global variable debug descriptor for static vars.
   CGDebugInfo *DI = getDebugInfo();
-  if (DI) {
+  if (DI &&
+      CGM.getCodeGenOpts().DebugInfo >= CodeGenOptions::LimitedDebugInfo) {
     DI->setLocation(D.getLocation());
     DI->EmitGlobalVariable(var, &D);
   }
@@ -489,6 +496,14 @@ static bool isAccessedBy(const VarDecl &var, const Stmt *s) {
 
     if (const DeclRefExpr *ref = dyn_cast<DeclRefExpr>(e))
       return (ref->getDecl() == &var);
+    if (const BlockExpr *be = dyn_cast<BlockExpr>(e)) {
+      const BlockDecl *block = be->getBlockDecl();
+      for (BlockDecl::capture_const_iterator i = block->capture_begin(),
+           e = block->capture_end(); i != e; ++i) {
+        if (i->getVariable() == &var)
+          return true;
+      }
+    }
   }
 
   for (Stmt::const_child_range children = s->children(); children; ++children)
@@ -691,9 +706,8 @@ static bool canEmitInitWithFewStoresAfterMemset(llvm::Constant *Init,
 /// stores that would be required.
 static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
                                          bool isVolatile, CGBuilderTy &Builder) {
-  // Zero doesn't require a store.
-  if (Init->isNullValue() || isa<llvm::UndefValue>(Init))
-    return;
+  assert(!Init->isNullValue() && !isa<llvm::UndefValue>(Init) &&
+         "called emitStoresForInitAfterMemset for zero or undef value.");
 
   if (isa<llvm::ConstantInt>(Init) || isa<llvm::ConstantFP>(Init) ||
       isa<llvm::ConstantVector>(Init) || isa<llvm::BlockAddress>(Init) ||
@@ -706,10 +720,11 @@ static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
         dyn_cast<llvm::ConstantDataSequential>(Init)) {
     for (unsigned i = 0, e = CDS->getNumElements(); i != e; ++i) {
       llvm::Constant *Elt = CDS->getElementAsConstant(i);
-      
-      // Get a pointer to the element and emit it.
-      emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
-                                   isVolatile, Builder);
+
+      // If necessary, get a pointer to the element and emit it.
+      if (!Elt->isNullValue() && !isa<llvm::UndefValue>(Elt))
+        emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
+                                     isVolatile, Builder);
     }
     return;
   }
@@ -719,9 +734,11 @@ static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
 
   for (unsigned i = 0, e = Init->getNumOperands(); i != e; ++i) {
     llvm::Constant *Elt = cast<llvm::Constant>(Init->getOperand(i));
-    // Get a pointer to the element and emit it.
-    emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
-                                 isVolatile, Builder);
+
+    // If necessary, get a pointer to the element and emit it.
+    if (!Elt->isNullValue() && !isa<llvm::UndefValue>(Elt))
+      emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
+                                   isVolatile, Builder);
   }
 }
 
@@ -897,11 +914,14 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
   // Emit debug info for local var declaration.
   if (HaveInsertPoint())
     if (CGDebugInfo *DI = getDebugInfo()) {
-      DI->setLocation(D.getLocation());
-      if (Target.useGlobalsForAutomaticVariables()) {
-        DI->EmitGlobalVariable(static_cast<llvm::GlobalVariable *>(DeclPtr), &D);
-      } else
-        DI->EmitDeclareOfAutoVariable(&D, DeclPtr, Builder);
+      if (CGM.getCodeGenOpts().DebugInfo >= CodeGenOptions::LimitedDebugInfo) {
+        DI->setLocation(D.getLocation());
+        if (Target.useGlobalsForAutomaticVariables()) {
+          DI->EmitGlobalVariable(static_cast<llvm::GlobalVariable *>(DeclPtr),
+                                 &D);
+        } else
+          DI->EmitDeclareOfAutoVariable(&D, DeclPtr, Builder);
+      }
     }
 
   if (D.hasAttr<AnnotateAttr>())
@@ -1043,7 +1063,8 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
                 CGM.getTargetData().getTypeAllocSize(constant->getType()))) {
     Builder.CreateMemSet(Loc, llvm::ConstantInt::get(Int8Ty, 0), SizeVal,
                          alignment.getQuantity(), isVolatile);
-    if (!constant->isNullValue()) {
+    // Zero and undef don't require a stores.
+    if (!constant->isNullValue() && !isa<llvm::UndefValue>(constant)) {
       Loc = Builder.CreateBitCast(Loc, constant->getType()->getPointerTo());
       emitStoresForInitAfterMemset(constant, Loc, isVolatile, Builder);
     }
@@ -1054,7 +1075,7 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
     llvm::GlobalVariable *GV =
       new llvm::GlobalVariable(CGM.getModule(), constant->getType(), true,
                                llvm::GlobalValue::PrivateLinkage,
-                               constant, Name, 0, false, 0);
+                               constant, Name);
     GV->setAlignment(alignment.getQuantity());
     GV->setUnnamedAddr(true);
 
@@ -1477,8 +1498,11 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
       LocalDeclMap[&D] = Arg;
 
       if (CGDebugInfo *DI = getDebugInfo()) {
-        DI->setLocation(D.getLocation());
-        DI->EmitDeclareOfBlockLiteralArgVariable(*BlockInfo, Arg, Builder);
+        if (CGM.getCodeGenOpts().DebugInfo >=
+            CodeGenOptions::LimitedDebugInfo) {
+          DI->setLocation(D.getLocation());
+          DI->EmitDeclareOfBlockLiteralArgVariable(*BlockInfo, Arg, Builder);
+        }
       }
 
       return;
@@ -1556,8 +1580,11 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
   DMEntry = DeclPtr;
 
   // Emit debug info for param declaration.
-  if (CGDebugInfo *DI = getDebugInfo())
-    DI->EmitDeclareOfArgVariable(&D, DeclPtr, ArgNo, Builder);
+  if (CGDebugInfo *DI = getDebugInfo()) {
+    if (CGM.getCodeGenOpts().DebugInfo >= CodeGenOptions::LimitedDebugInfo) {
+      DI->EmitDeclareOfArgVariable(&D, DeclPtr, ArgNo, Builder);
+    }
+  }
 
   if (D.hasAttr<AnnotateAttr>())
       EmitVarAnnotations(&D, DeclPtr);

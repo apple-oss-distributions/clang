@@ -31,7 +31,7 @@ PPCallbacks::~PPCallbacks() {}
 //===----------------------------------------------------------------------===//
 
 /// isInPrimaryFile - Return true if we're in the top-level file, not in a
-/// #include.  This looks through macro expansions and active _Pragma lexers.
+/// \#include.  This looks through macro expansions and active _Pragma lexers.
 bool Preprocessor::isInPrimaryFile() const {
   if (IsFileLexer())
     return IncludeMacroStack.empty();
@@ -157,15 +157,15 @@ void Preprocessor::EnterSourceFileWithPTH(PTHLexer *PL,
 /// EnterMacro - Add a Macro to the top of the include stack and start lexing
 /// tokens from it instead of the current buffer.
 void Preprocessor::EnterMacro(Token &Tok, SourceLocation ILEnd,
-                              MacroArgs *Args) {
+                              MacroInfo *Macro, MacroArgs *Args) {
   PushIncludeMacroStack();
   CurDirLookup = 0;
 
   if (NumCachedTokenLexers == 0) {
-    CurTokenLexer.reset(new TokenLexer(Tok, ILEnd, Args, *this));
+    CurTokenLexer.reset(new TokenLexer(Tok, ILEnd, Macro, Args, *this));
   } else {
     CurTokenLexer.reset(TokenLexerCache[--NumCachedTokenLexers]);
-    CurTokenLexer->Init(Tok, ILEnd, Args);
+    CurTokenLexer->Init(Tok, ILEnd, Macro, Args);
   }
   if (CurLexerKind != CLK_LexAfterModuleImport)
     CurLexerKind = CLK_TokenLexer;
@@ -328,15 +328,17 @@ bool Preprocessor::HandleEndOfFile(Token &Result, bool isEndOfMacro) {
     CurLexer->BufferPtr = EndPos;
     CurLexer->FormTokenWithChars(Result, EndPos, tok::eof);
 
-    // We're done with the #included file.
-    CurLexer.reset();
+    if (!isIncrementalProcessingEnabled())
+      // We're done with lexing.
+      CurLexer.reset();
   } else {
     assert(CurPTHLexer && "Got EOF but no current lexer set!");
     CurPTHLexer->getEOF(Result);
     CurPTHLexer.reset();
   }
-
-  CurPPLexer = 0;
+  
+  if (!isIncrementalProcessingEnabled())
+    CurPPLexer = 0;
 
   // This is the end of the top-level file. 'WarnUnusedMacroLocs' has collected
   // all macro locations that we need to warn because they are not used.

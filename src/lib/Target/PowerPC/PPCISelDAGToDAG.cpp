@@ -111,6 +111,23 @@ namespace {
     /// immediate field.  Because preinc imms have already been validated, just
     /// accept it.
     bool SelectAddrImmOffs(SDValue N, SDValue &Out) const {
+      if (isa<ConstantSDNode>(N) || N.getOpcode() == PPCISD::Lo ||
+          N.getOpcode() == ISD::TargetGlobalAddress) {
+        Out = N;
+        return true;
+      }
+
+      return false;
+    }
+
+    /// SelectAddrIdxOffs - Return true if the operand is valid for a preinc
+    /// index field.  Because preinc imms have already been validated, just
+    /// accept it.
+    bool SelectAddrIdxOffs(SDValue N, SDValue &Out) const {
+      if (isa<ConstantSDNode>(N) || N.getOpcode() == PPCISD::Lo ||
+          N.getOpcode() == ISD::TargetGlobalAddress)
+        return false;
+
       Out = N;
       return true;
     }
@@ -238,11 +255,11 @@ SDNode *PPCDAGToDAGISel::getGlobalBaseReg() {
     DebugLoc dl;
 
     if (PPCLowering.getPointerTy() == MVT::i32) {
-      GlobalBaseReg = RegInfo->createVirtualRegister(PPC::GPRCRegisterClass);
+      GlobalBaseReg = RegInfo->createVirtualRegister(&PPC::GPRCRegClass);
       BuildMI(FirstMBB, MBBI, dl, TII.get(PPC::MovePCtoLR));
       BuildMI(FirstMBB, MBBI, dl, TII.get(PPC::MFLR), GlobalBaseReg);
     } else {
-      GlobalBaseReg = RegInfo->createVirtualRegister(PPC::G8RCRegisterClass);
+      GlobalBaseReg = RegInfo->createVirtualRegister(&PPC::G8RCRegClass);
       BuildMI(FirstMBB, MBBI, dl, TII.get(PPC::MovePCtoLR8));
       BuildMI(FirstMBB, MBBI, dl, TII.get(PPC::MFLR8), GlobalBaseReg);
     }
@@ -377,8 +394,8 @@ SDNode *PPCDAGToDAGISel::SelectBitfieldInsert(SDNode *N) {
   DebugLoc dl = N->getDebugLoc();
 
   APInt LKZ, LKO, RKZ, RKO;
-  CurDAG->ComputeMaskedBits(Op0, APInt::getAllOnesValue(32), LKZ, LKO);
-  CurDAG->ComputeMaskedBits(Op1, APInt::getAllOnesValue(32), RKZ, RKO);
+  CurDAG->ComputeMaskedBits(Op0, LKZ, LKO);
+  CurDAG->ComputeMaskedBits(Op1, RKZ, RKO);
 
   unsigned TargetMask = LKZ.getZExtValue();
   unsigned InsertMask = RKZ.getZExtValue();
@@ -697,7 +714,7 @@ SDNode *PPCDAGToDAGISel::SelectSETCC(SDNode *N) {
   CCReg = CurDAG->getCopyToReg(CurDAG->getEntryNode(), dl, CR7Reg, CCReg,
                                InFlag).getValue(1);
 
-  if (PPCSubTarget.isGigaProcessor() && OtherCondIdx == -1)
+  if (PPCSubTarget.hasMFOCRF() && OtherCondIdx == -1)
     IntCR = SDValue(CurDAG->getMachineNode(PPC::MFOCRF, dl, MVT::i32, CR7Reg,
                                            CCReg), 0);
  else
@@ -833,7 +850,7 @@ SDNode *PPCDAGToDAGISel::Select(SDNode *N) {
   case PPCISD::MFCR: {
     SDValue InFlag = N->getOperand(1);
     // Use MFOCRF if supported.
-    if (PPCSubTarget.isGigaProcessor())
+    if (PPCSubTarget.hasMFOCRF())
       return CurDAG->getMachineNode(PPC::MFOCRF, dl, MVT::i32,
                                     N->getOperand(0), InFlag);
     else
@@ -915,17 +932,50 @@ SDNode *PPCDAGToDAGISel::Select(SDNode *N) {
       SDValue Chain = LD->getChain();
       SDValue Base = LD->getBasePtr();
       SDValue Ops[] = { Offset, Base, Chain };
-      // FIXME: PPC64
       return CurDAG->getMachineNode(Opcode, dl, LD->getValueType(0),
                                     PPCLowering.getPointerTy(),
                                     MVT::Other, Ops, 3);
     } else {
-      llvm_unreachable("R+R preindex loads not supported yet!");
+      unsigned Opcode;
+      bool isSExt = LD->getExtensionType() == ISD::SEXTLOAD;
+      if (LD->getValueType(0) != MVT::i64) {
+        // Handle PPC32 integer and normal FP loads.
+        assert((!isSExt || LoadedVT == MVT::i16) && "Invalid sext update load");
+        switch (LoadedVT.getSimpleVT().SimpleTy) {
+          default: llvm_unreachable("Invalid PPC load type!");
+          case MVT::f64: Opcode = PPC::LFDUX; break;
+          case MVT::f32: Opcode = PPC::LFSUX; break;
+          case MVT::i32: Opcode = PPC::LWZUX; break;
+          case MVT::i16: Opcode = isSExt ? PPC::LHAUX : PPC::LHZUX; break;
+          case MVT::i1:
+          case MVT::i8:  Opcode = PPC::LBZUX; break;
+        }
+      } else {
+        assert(LD->getValueType(0) == MVT::i64 && "Unknown load result type!");
+        assert((!isSExt || LoadedVT == MVT::i16 || LoadedVT == MVT::i32) &&
+               "Invalid sext update load");
+        switch (LoadedVT.getSimpleVT().SimpleTy) {
+          default: llvm_unreachable("Invalid PPC load type!");
+          case MVT::i64: Opcode = PPC::LDUX; break;
+          case MVT::i32: Opcode = isSExt ? PPC::LWAUX  : PPC::LWZUX8; break;
+          case MVT::i16: Opcode = isSExt ? PPC::LHAUX8 : PPC::LHZUX8; break;
+          case MVT::i1:
+          case MVT::i8:  Opcode = PPC::LBZUX8; break;
+        }
+      }
+
+      SDValue Chain = LD->getChain();
+      SDValue Base = LD->getBasePtr();
+      SDValue Ops[] = { Offset, Base, Chain };
+      return CurDAG->getMachineNode(Opcode, dl, LD->getValueType(0),
+                                    PPCLowering.getPointerTy(),
+                                    MVT::Other, Ops, 3);
     }
   }
 
   case ISD::AND: {
     unsigned Imm, Imm2, SH, MB, ME;
+    uint64_t Imm64;
 
     // If this is an and of a value rotated between 0 and 31 bits and then and'd
     // with a mask, emit rlwinm
@@ -943,6 +993,14 @@ SDNode *PPCDAGToDAGISel::Select(SDNode *N) {
       SDValue Val = N->getOperand(0);
       SDValue Ops[] = { Val, getI32Imm(0), getI32Imm(MB), getI32Imm(ME) };
       return CurDAG->SelectNodeTo(N, PPC::RLWINM, MVT::i32, Ops, 4);
+    }
+    // If this is a 64-bit zero-extension mask, emit rldicl.
+    if (isInt64Immediate(N->getOperand(1).getNode(), Imm64) &&
+        isMask_64(Imm64)) {
+      SDValue Val = N->getOperand(0);
+      MB = 64 - CountTrailingOnes_64(Imm64);
+      SDValue Ops[] = { Val, getI32Imm(0), getI32Imm(MB) };
+      return CurDAG->SelectNodeTo(N, PPC::RLDICL, MVT::i64, Ops, 3);
     }
     // AND X, 0 -> 0, not "rlwinm 32".
     if (isInt32Immediate(N->getOperand(1), Imm) && (Imm == 0)) {

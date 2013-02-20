@@ -290,7 +290,11 @@ void MacOSKeychainAPIChecker::checkPreStmt(const CallExpr *CE,
   unsigned idx = InvalidIdx;
   ProgramStateRef State = C.getState();
 
-  StringRef funName = C.getCalleeName(CE);
+  const FunctionDecl *FD = C.getCalleeDecl(CE);
+  if (!FD || FD->getKind() != Decl::Function)
+    return;
+  
+  StringRef funName = C.getCalleeName(FD);
   if (funName.empty())
     return;
 
@@ -446,7 +450,11 @@ void MacOSKeychainAPIChecker::checkPreStmt(const CallExpr *CE,
 void MacOSKeychainAPIChecker::checkPostStmt(const CallExpr *CE,
                                             CheckerContext &C) const {
   ProgramStateRef State = C.getState();
-  StringRef funName = C.getCalleeName(CE);
+  const FunctionDecl *FD = C.getCalleeDecl(CE);
+  if (!FD || FD->getKind() != Decl::Function)
+    return;
+
+  StringRef funName = C.getCalleeName(FD);
 
   // If a value has been allocated, add it to the set for tracking.
   unsigned idx = getTrackedFunctionIndex(funName, true);
@@ -528,9 +536,11 @@ MacOSKeychainAPIChecker::getAllocationSite(const ExplodedNode *N,
   }
 
   ProgramPoint P = AllocNode->getLocation();
-  if (!isa<StmtPoint>(P))
-    return 0;
-  return cast<clang::PostStmt>(P).getStmt();
+  if (CallExitEnd *Exit = dyn_cast<CallExitEnd>(&P))
+    return Exit->getCalleeContext()->getCallSite();
+  if (clang::PostStmt *PS = dyn_cast<clang::PostStmt>(&P))
+    return PS->getStmt();
+  return 0;
 }
 
 BugReport *MacOSKeychainAPIChecker::
@@ -575,7 +585,9 @@ void MacOSKeychainAPIChecker::checkDeadSymbols(SymbolReaper &SR,
     State = State->remove<AllocatedData>(I->first);
     // If the allocated symbol is null or if the allocation call might have
     // returned an error, do not report.
-    if (State->getSymVal(I->first) ||
+    ConstraintManager &CMgr = State->getConstraintManager();
+    ConditionTruthVal AllocFailed = CMgr.isNull(State, I.getKey());
+    if (AllocFailed.isConstrainedTrue() ||
         definitelyReturnedError(I->second.Region, State, C.getSValBuilder()))
       continue;
     Errors.push_back(std::make_pair(I->first, &I->second));
@@ -620,7 +632,9 @@ void MacOSKeychainAPIChecker::checkEndPath(CheckerContext &C) const {
     state = state->remove<AllocatedData>(I->first);
     // If the allocated symbol is null or if error code was returned at
     // allocation, do not report.
-    if (state->getSymVal(I.getKey()) ||
+    ConstraintManager &CMgr = state->getConstraintManager();
+    ConditionTruthVal AllocFailed = CMgr.isNull(state, I.getKey());
+    if (AllocFailed.isConstrainedTrue() ||
         definitelyReturnedError(I->second.Region, state,
                                 C.getSValBuilder())) {
       continue;

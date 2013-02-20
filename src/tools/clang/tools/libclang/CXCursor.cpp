@@ -145,8 +145,12 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
     K = CXCursor_ReturnStmt;
     break;
   
-  case Stmt::AsmStmtClass:
-    K = CXCursor_AsmStmt;
+  case Stmt::GCCAsmStmtClass:
+    K = CXCursor_GCCAsmStmt;
+    break;
+
+  case Stmt::MSAsmStmtClass:
+    K = CXCursor_MSAsmStmt;
     break;
   
   case Stmt::ObjCAtTryStmtClass:
@@ -247,19 +251,23 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
   case Stmt::CompoundStmtClass:
     K = CXCursor_CompoundStmt;
     break;
-      
+
   case Stmt::NullStmtClass:
     K = CXCursor_NullStmt;
     break;
-      
+
   case Stmt::LabelStmtClass:
     K = CXCursor_LabelStmt;
     break;
-  
+
+  case Stmt::AttributedStmtClass:
+    K = CXCursor_UnexposedStmt;
+    break;
+
   case Stmt::DeclStmtClass:
     K = CXCursor_DeclStmt;
     break;
- 
+
   case Stmt::IntegerLiteralClass:
     K = CXCursor_IntegerLiteral;
     break;
@@ -287,7 +295,7 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
   case Stmt::UnaryOperatorClass:
     K = CXCursor_UnaryOperator;
     break;
-  
+
   case Stmt::CXXNoexceptExprClass:
     K = CXCursor_UnaryExpr;
     break;
@@ -424,6 +432,7 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
   case Stmt::DependentScopeDeclRefExprClass:
   case Stmt::SubstNonTypeTemplateParmExprClass:
   case Stmt::SubstNonTypeTemplateParmPackExprClass:
+  case Stmt::FunctionParmPackExprClass:
   case Stmt::UnresolvedLookupExprClass:
     K = CXCursor_DeclRefExpr;
     break;
@@ -445,6 +454,7 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
   case Stmt::CXXConstructExprClass:  
   case Stmt::CXXTemporaryObjectExprClass:
   case Stmt::CXXUnresolvedConstructExprClass:
+  case Stmt::UserDefinedLiteralClass:
     K = CXCursor_CallExpr;
     break;
       
@@ -785,194 +795,20 @@ CXTranslationUnit cxcursor::getCursorTU(CXCursor Cursor) {
   return static_cast<CXTranslationUnit>(Cursor.data[2]);
 }
 
-static void CollectOverriddenMethodsRecurse(CXTranslationUnit TU,
-                                     ObjCContainerDecl *Container, 
-                                     ObjCMethodDecl *Method,
-                                     SmallVectorImpl<CXCursor> &Methods,
-                                     bool MovedToSuper) {
-  if (!Container)
-    return;
-
-  // In categories look for overriden methods from protocols. A method from
-  // category is not "overriden" since it is considered as the "same" method
-  // (same USR) as the one from the interface.
-  if (ObjCCategoryDecl *Category = dyn_cast<ObjCCategoryDecl>(Container)) {
-    // Check whether we have a matching method at this category but only if we
-    // are at the super class level.
-    if (MovedToSuper)
-      if (ObjCMethodDecl *
-            Overridden = Container->getMethod(Method->getSelector(),
-                                              Method->isInstanceMethod()))
-        if (Method != Overridden) {
-          // We found an override at this category; there is no need to look
-          // into its protocols.
-          Methods.push_back(MakeCXCursor(Overridden, TU));
-          return;
-        }
-
-    for (ObjCCategoryDecl::protocol_iterator P = Category->protocol_begin(),
-                                          PEnd = Category->protocol_end();
-         P != PEnd; ++P)
-      CollectOverriddenMethodsRecurse(TU, *P, Method, Methods, MovedToSuper);
-    return;
-  }
-
-  // Check whether we have a matching method at this level.
-  if (ObjCMethodDecl *Overridden = Container->getMethod(Method->getSelector(),
-                                                    Method->isInstanceMethod()))
-    if (Method != Overridden) {
-      // We found an override at this level; there is no need to look
-      // into other protocols or categories.
-      Methods.push_back(MakeCXCursor(Overridden, TU));
-      return;
-    }
-
-  if (ObjCProtocolDecl *Protocol = dyn_cast<ObjCProtocolDecl>(Container)) {
-    for (ObjCProtocolDecl::protocol_iterator P = Protocol->protocol_begin(),
-                                          PEnd = Protocol->protocol_end();
-         P != PEnd; ++P)
-      CollectOverriddenMethodsRecurse(TU, *P, Method, Methods, MovedToSuper);
-  }
-
-  if (ObjCInterfaceDecl *Interface = dyn_cast<ObjCInterfaceDecl>(Container)) {
-    for (ObjCInterfaceDecl::protocol_iterator P = Interface->protocol_begin(),
-                                           PEnd = Interface->protocol_end();
-         P != PEnd; ++P)
-      CollectOverriddenMethodsRecurse(TU, *P, Method, Methods, MovedToSuper);
-
-    for (ObjCCategoryDecl *Category = Interface->getCategoryList();
-         Category; Category = Category->getNextClassCategory())
-      CollectOverriddenMethodsRecurse(TU, Category, Method, Methods,
-                                      MovedToSuper);
-
-    if (ObjCInterfaceDecl *Super = Interface->getSuperClass())
-      return CollectOverriddenMethodsRecurse(TU, Super, Method, Methods,
-                                             /*MovedToSuper=*/true);
-  }
-}
-
-static inline void CollectOverriddenMethods(CXTranslationUnit TU,
-                                           ObjCContainerDecl *Container, 
-                                           ObjCMethodDecl *Method,
-                                           SmallVectorImpl<CXCursor> &Methods) {
-  CollectOverriddenMethodsRecurse(TU, Container, Method, Methods,
-                                  /*MovedToSuper=*/false);
-}
-
-static void collectOverriddenMethodsSlow(CXTranslationUnit TU,
-                                         ObjCMethodDecl *Method,
-                                        SmallVectorImpl<CXCursor> &overridden) {
-  assert(Method->isOverriding());
-
-  if (ObjCProtocolDecl *
-        ProtD = dyn_cast<ObjCProtocolDecl>(Method->getDeclContext())) {
-    CollectOverriddenMethods(TU, ProtD, Method, overridden);
-
-  } else if (ObjCImplDecl *
-               IMD = dyn_cast<ObjCImplDecl>(Method->getDeclContext())) {
-    ObjCInterfaceDecl *ID = IMD->getClassInterface();
-    if (!ID)
-      return;
-    // Start searching for overridden methods using the method from the
-    // interface as starting point.
-    if (ObjCMethodDecl *IFaceMeth = ID->getMethod(Method->getSelector(),
-                                                  Method->isInstanceMethod()))
-      Method = IFaceMeth;
-    CollectOverriddenMethods(TU, ID, Method, overridden);
-
-  } else if (ObjCCategoryDecl *
-               CatD = dyn_cast<ObjCCategoryDecl>(Method->getDeclContext())) {
-    ObjCInterfaceDecl *ID = CatD->getClassInterface();
-    if (!ID)
-      return;
-    // Start searching for overridden methods using the method from the
-    // interface as starting point.
-    if (ObjCMethodDecl *IFaceMeth = ID->getMethod(Method->getSelector(),
-                                                  Method->isInstanceMethod()))
-      Method = IFaceMeth;
-    CollectOverriddenMethods(TU, ID, Method, overridden);
-
-  } else {
-    CollectOverriddenMethods(TU,
-                  dyn_cast_or_null<ObjCContainerDecl>(Method->getDeclContext()),
-                  Method, overridden);
-  }
-}
-
-static void collectOnCategoriesAfterLocation(SourceLocation Loc,
-                                             ObjCInterfaceDecl *Class,
-                                             CXTranslationUnit TU,
-                                             ObjCMethodDecl *Method,
-                                           SmallVectorImpl<CXCursor> &Methods) {
-  if (!Class)
-    return;
-
-  SourceManager &SM = static_cast<ASTUnit *>(TU->TUData)->getSourceManager();
-  for (ObjCCategoryDecl *Category = Class->getCategoryList();
-       Category; Category = Category->getNextClassCategory())
-    if (SM.isBeforeInTranslationUnit(Loc, Category->getLocation()))
-      CollectOverriddenMethodsRecurse(TU, Category, Method, Methods, true);
-
-  collectOnCategoriesAfterLocation(Loc, Class->getSuperClass(), TU,
-                                   Method, Methods);
-}
-
-/// \brief Faster collection that is enabled when ObjCMethodDecl::isOverriding()
-/// returns false.
-/// You'd think that in that case there are no overrides but categories can
-/// "introduce" new overridden methods that are missed by Sema because the
-/// overrides lookup that it does for methods, inside implementations, will
-/// stop at the interface level (if there is a method there) and not look
-/// further in super classes.
-static void collectOverriddenMethodsFast(CXTranslationUnit TU,
-                                         ObjCMethodDecl *Method,
-                                         SmallVectorImpl<CXCursor> &Methods) {
-  assert(!Method->isOverriding());
-
-  ObjCContainerDecl *ContD = cast<ObjCContainerDecl>(Method->getDeclContext());
-  if (isa<ObjCInterfaceDecl>(ContD) || isa<ObjCProtocolDecl>(ContD))
-    return;
-  ObjCInterfaceDecl *Class = Method->getClassInterface();
-  if (!Class)
-    return;
-
-  collectOnCategoriesAfterLocation(Class->getLocation(), Class->getSuperClass(),
-                                   TU, Method, Methods);
-}
-
 void cxcursor::getOverriddenCursors(CXCursor cursor,
                                     SmallVectorImpl<CXCursor> &overridden) { 
   assert(clang_isDeclaration(cursor.kind));
-  Decl *D = getCursorDecl(cursor);
+  const NamedDecl *D = dyn_cast_or_null<NamedDecl>(getCursorDecl(cursor));
   if (!D)
     return;
 
-  // Handle C++ member functions.
   CXTranslationUnit TU = getCursorTU(cursor);
-  if (CXXMethodDecl *CXXMethod = dyn_cast<CXXMethodDecl>(D)) {
-    for (CXXMethodDecl::method_iterator
-              M = CXXMethod->begin_overridden_methods(),
-           MEnd = CXXMethod->end_overridden_methods();
-         M != MEnd; ++M)
-      overridden.push_back(MakeCXCursor(const_cast<CXXMethodDecl*>(*M), TU));
-    return;
-  }
+  SmallVector<const NamedDecl *, 8> OverDecls;
+  D->getASTContext().getOverriddenMethods(D, OverDecls);
 
-  ObjCMethodDecl *Method = dyn_cast<ObjCMethodDecl>(D);
-  if (!Method)
-    return;
-
-  if (Method->isRedeclaration()) {
-    Method = cast<ObjCContainerDecl>(Method->getDeclContext())->
-                   getMethod(Method->getSelector(), Method->isInstanceMethod());
-  }
-
-  if (!Method->isOverriding()) {
-    collectOverriddenMethodsFast(TU, Method, overridden);
-  } else {
-    collectOverriddenMethodsSlow(TU, Method, overridden);
-    assert(!overridden.empty() &&
-           "ObjCMethodDecl's overriding bit is not as expected");
+  for (SmallVector<const NamedDecl *, 8>::iterator
+         I = OverDecls.begin(), E = OverDecls.end(); I != E; ++I) {
+    overridden.push_back(MakeCXCursor(const_cast<NamedDecl*>(*I), TU));
   }
 }
 
@@ -1189,7 +1025,8 @@ CXCompletionString clang_getCursorCompletionString(CXCursor cursor) {
         = Result.CreateCodeCompletionString(unit->getASTContext(),
                                             unit->getPreprocessor(),
                                  unit->getCodeCompletionTUInfo().getAllocator(),
-                                 unit->getCodeCompletionTUInfo());
+                                 unit->getCodeCompletionTUInfo(),
+                                 true);
       return String;
     }
   }
@@ -1202,7 +1039,8 @@ CXCompletionString clang_getCursorCompletionString(CXCursor cursor) {
       = Result.CreateCodeCompletionString(unit->getASTContext(),
                                           unit->getPreprocessor(),
                                  unit->getCodeCompletionTUInfo().getAllocator(),
-                                 unit->getCodeCompletionTUInfo());
+                                 unit->getCodeCompletionTUInfo(),
+                                 false);
     return String;
   }
   return NULL;
@@ -1308,5 +1146,30 @@ void clang_disposeOverriddenCursors(CXCursor *overridden) {
   
   pool.AvailableCursors.push_back(Vec);
 }
-  
+
+int clang_Cursor_isDynamicCall(CXCursor C) {
+  const Expr *E = 0;
+  if (clang_isExpression(C.kind))
+    E = getCursorExpr(C);
+  if (!E)
+    return 0;
+
+  if (const ObjCMessageExpr *MsgE = dyn_cast<ObjCMessageExpr>(E))
+    return MsgE->getReceiverKind() == ObjCMessageExpr::Instance;
+
+  const MemberExpr *ME = 0;
+  if (isa<MemberExpr>(E))
+    ME = cast<MemberExpr>(E);
+  else if (const CallExpr *CE = dyn_cast<CallExpr>(E))
+    ME = dyn_cast_or_null<MemberExpr>(CE->getCallee());
+
+  if (ME) {
+    if (const CXXMethodDecl *
+          MD = dyn_cast_or_null<CXXMethodDecl>(ME->getMemberDecl()))
+      return MD->isVirtual() && !ME->hasQualifier();
+  }
+
+  return 0;
+}
+
 } // end: extern "C"

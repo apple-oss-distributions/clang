@@ -37,16 +37,13 @@ using namespace llvm;
 void RegScavenger::setUsed(unsigned Reg) {
   RegsAvailable.reset(Reg);
 
-  for (const unsigned *SubRegs = TRI->getSubRegisters(Reg);
-       unsigned SubReg = *SubRegs; ++SubRegs)
-    RegsAvailable.reset(SubReg);
+  for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs)
+    RegsAvailable.reset(*SubRegs);
 }
 
 bool RegScavenger::isAliasUsed(unsigned Reg) const {
-  if (isUsed(Reg))
-    return true;
-  for (const unsigned *R = TRI->getAliasSet(Reg); *R; ++R)
-    if (isUsed(*R))
+  for (MCRegAliasIterator AI(Reg, TRI, true); AI.isValid(); ++AI)
+    if (isUsed(*AI))
       return true;
   return false;
 }
@@ -83,6 +80,11 @@ void RegScavenger::enterBasicBlock(MachineBasicBlock *mbb) {
   assert((NumPhysRegs == 0 || NumPhysRegs == TRI->getNumRegs()) &&
          "Target changed?");
 
+  // It is not possible to use the register scavenger after late optimization
+  // passes that don't preserve accurate liveness information.
+  assert(MRI->tracksLiveness() &&
+         "Cannot use register scavenger with inaccurate liveness");
+
   // Self-initialize.
   if (!MBB) {
     NumPhysRegs = TRI->getNumRegs();
@@ -90,12 +92,9 @@ void RegScavenger::enterBasicBlock(MachineBasicBlock *mbb) {
     KillRegs.resize(NumPhysRegs);
     DefRegs.resize(NumPhysRegs);
 
-    // Create reserved registers bitvector.
-    ReservedRegs = TRI->getReservedRegs(MF);
-
     // Create callee-saved registers bitvector.
     CalleeSavedRegs.resize(NumPhysRegs);
-    const unsigned *CSRegs = TRI->getCalleeSavedRegs(&MF);
+    const uint16_t *CSRegs = TRI->getCalleeSavedRegs(&MF);
     if (CSRegs != NULL)
       for (unsigned i = 0; CSRegs[i]; ++i)
         CalleeSavedRegs.set(CSRegs[i]);
@@ -109,8 +108,8 @@ void RegScavenger::enterBasicBlock(MachineBasicBlock *mbb) {
 
 void RegScavenger::addRegWithSubRegs(BitVector &BV, unsigned Reg) {
   BV.set(Reg);
-  for (const unsigned *R = TRI->getSubRegisters(Reg); *R; R++)
-    BV.set(*R);
+  for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs)
+    BV.set(*SubRegs);
 }
 
 void RegScavenger::forward() {
@@ -190,9 +189,8 @@ void RegScavenger::forward() {
         // Ideally we would like a way to model this, but leaving the
         // insert_subreg around causes both correctness and performance issues.
         bool SubUsed = false;
-        for (const unsigned *SubRegs = TRI->getSubRegisters(Reg);
-             unsigned SubReg = *SubRegs; ++SubRegs)
-          if (isUsed(SubReg)) {
+        for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs)
+          if (isUsed(*SubRegs)) {
             SubUsed = true;
             break;
           }
@@ -224,9 +222,9 @@ void RegScavenger::getRegsUsed(BitVector &used, bool includeReserved) {
   used = RegsAvailable;
   used.flip();
   if (includeReserved)
-    used |= ReservedRegs;
+    used |= MRI->getReservedRegs();
   else
-    used.reset(ReservedRegs);
+    used.reset(MRI->getReservedRegs());
 }
 
 unsigned RegScavenger::FindUnusedReg(const TargetRegisterClass *RC) const {
@@ -291,9 +289,8 @@ unsigned RegScavenger::findSurvivorReg(MachineBasicBlock::iterator StartMI,
           isVirtKillInsn = true;
         continue;
       }
-      Candidates.reset(MO.getReg());
-      for (const unsigned *R = TRI->getAliasSet(MO.getReg()); *R; R++)
-        Candidates.reset(*R);
+      for (MCRegAliasIterator AI(MO.getReg(), TRI, true); AI.isValid(); ++AI)
+        Candidates.reset(*AI);
     }
     // If we're not in a virtual reg's live range, this is a valid
     // restore point.

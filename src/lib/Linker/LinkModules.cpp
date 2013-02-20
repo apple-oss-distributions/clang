@@ -16,14 +16,18 @@
 #include "llvm/DerivedTypes.h"
 #include "llvm/Instructions.h"
 #include "llvm/Module.h"
+#include "llvm/TypeFinder.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm-c/Linker.h"
+#include <cctype>
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -49,8 +53,8 @@ class TypeMapTy : public ValueMapTypeRemapper {
   /// DstResolvedOpaqueTypes - This is the set of opaque types in the
   /// destination modules who are getting a body from the source module.
   SmallPtrSet<StructType*, 16> DstResolvedOpaqueTypes;
+
 public:
-  
   /// addTypeMapping - Indicate that the specified type in the destination
   /// module is conceptually equivalent to the specified type in the source
   /// module.
@@ -65,6 +69,18 @@ public:
   Type *get(Type *SrcTy);
 
   FunctionType *get(FunctionType *T) {return cast<FunctionType>(get((Type*)T));}
+
+  /// dump - Dump out the type map for debugging purposes.
+  void dump() const {
+    for (DenseMap<Type*, Type*>::const_iterator
+           I = MappedTypes.begin(), E = MappedTypes.end(); I != E; ++I) {
+      dbgs() << "TypeMap: ";
+      I->first->dump();
+      dbgs() << " => ";
+      I->second->dump();
+      dbgs() << '\n';
+    }
+  }
 
 private:
   Type *getImpl(Type *T);
@@ -223,7 +239,6 @@ void TypeMapTy::linkDefinedTypeBodies() {
   DstResolvedOpaqueTypes.clear();
 }
 
-
 /// get - Return the mapped type to use for the specified input type from the
 /// source module.
 Type *TypeMapTy::get(Type *Ty) {
@@ -327,8 +342,6 @@ Type *TypeMapTy::getImpl(Type *Ty) {
   return *Entry = DTy;
 }
 
-
-
 //===----------------------------------------------------------------------===//
 // ModuleLinker implementation.
 //===----------------------------------------------------------------------===//
@@ -430,8 +443,6 @@ namespace {
   };
 }
 
-
-
 /// forceRenaming - The LLVM SymbolTable class autorenames globals that conflict
 /// in the symbol table.  This is good for all clients except for us.  Go
 /// through the trouble to force this back.
@@ -453,9 +464,9 @@ static void forceRenaming(GlobalValue *GV, StringRef Name) {
   }
 }
 
-/// CopyGVAttributes - copy additional attributes (those not needed to construct
+/// copyGVAttributes - copy additional attributes (those not needed to construct
 /// a GlobalValue) from the SrcGV to the DestGV.
-static void CopyGVAttributes(GlobalValue *DestGV, const GlobalValue *SrcGV) {
+static void copyGVAttributes(GlobalValue *DestGV, const GlobalValue *SrcGV) {
   // Use the maximum alignment, rather than just copying the alignment of SrcGV.
   unsigned Alignment = std::max(DestGV->getAlignment(), SrcGV->getAlignment());
   DestGV->copyAttributesFrom(SrcGV);
@@ -585,14 +596,16 @@ void ModuleLinker::computeTypeMapping() {
   // At this point, the destination module may have a type "%foo = { i32 }" for
   // example.  When the source module got loaded into the same LLVMContext, if
   // it had the same type, it would have been renamed to "%foo.42 = { i32 }".
-  // Though it isn't required for correctness, attempt to link these up to clean
-  // up the IR.
-  std::vector<StructType*> SrcStructTypes;
-  SrcM->findUsedStructTypes(SrcStructTypes);
-  
+  TypeFinder SrcStructTypes;
+  SrcStructTypes.run(*SrcM, true);
   SmallPtrSet<StructType*, 32> SrcStructTypesSet(SrcStructTypes.begin(),
                                                  SrcStructTypes.end());
-  
+
+  TypeFinder DstStructTypes;
+  DstStructTypes.run(*DstM, true);
+  SmallPtrSet<StructType*, 32> DstStructTypesSet(DstStructTypes.begin(),
+                                                 DstStructTypes.end());
+
   for (unsigned i = 0, e = SrcStructTypes.size(); i != e; ++i) {
     StructType *ST = SrcStructTypes[i];
     if (!ST->hasName()) continue;
@@ -605,9 +618,24 @@ void ModuleLinker::computeTypeMapping() {
     
     // Check to see if the destination module has a struct with the prefix name.
     if (StructType *DST = DstM->getTypeByName(ST->getName().substr(0, DotPos)))
-      // Don't use it if this actually came from the source module.  They're in
-      // the same LLVMContext after all.
-      if (!SrcStructTypesSet.count(DST))
+      // Don't use it if this actually came from the source module. They're in
+      // the same LLVMContext after all. Also don't use it unless the type is
+      // actually used in the destination module. This can happen in situations
+      // like this:
+      //
+      //      Module A                         Module B
+      //      --------                         --------
+      //   %Z = type { %A }                %B = type { %C.1 }
+      //   %A = type { %B.1, [7 x i8] }    %C.1 = type { i8* }
+      //   %B.1 = type { %C }              %A.2 = type { %B.3, [5 x i8] }
+      //   %C = type { i8* }               %B.3 = type { %C.1 }
+      //
+      // When we link Module B with Module A, the '%B' in Module B is
+      // used. However, that would then use '%C.1'. But when we process '%C.1',
+      // we prefer to take the '%C' version. So we are then left with both
+      // '%C.1' and '%C' being used for the same types. This leads to some
+      // variables using one type and some using the other.
+      if (!SrcStructTypesSet.count(DST) && DstStructTypesSet.count(DST))
         TypeMap.addTypeMapping(DST, ST);
   }
 
@@ -657,11 +685,11 @@ bool ModuleLinker::linkAppendingVarProto(GlobalVariable *DstGV,
   GlobalVariable *NG =
     new GlobalVariable(*DstGV->getParent(), NewType, SrcGV->isConstant(),
                        DstGV->getLinkage(), /*init*/0, /*name*/"", DstGV,
-                       DstGV->isThreadLocal(),
+                       DstGV->getThreadLocalMode(),
                        DstGV->getType()->getAddressSpace());
   
   // Propagate alignment, visibility and section info.
-  CopyGVAttributes(NG, DstGV);
+  copyGVAttributes(NG, DstGV);
   
   AppendingVarInfo AVI;
   AVI.NewGV = NG;
@@ -732,10 +760,10 @@ bool ModuleLinker::linkGlobalProto(GlobalVariable *SGV) {
     new GlobalVariable(*DstM, TypeMap.get(SGV->getType()->getElementType()),
                        SGV->isConstant(), SGV->getLinkage(), /*init*/0,
                        SGV->getName(), /*insertbefore*/0,
-                       SGV->isThreadLocal(),
+                       SGV->getThreadLocalMode(),
                        SGV->getType()->getAddressSpace());
   // Propagate alignment, visibility and section info.
-  CopyGVAttributes(NewDGV, SGV);
+  copyGVAttributes(NewDGV, SGV);
   if (NewVisibility)
     NewDGV->setVisibility(*NewVisibility);
 
@@ -783,7 +811,7 @@ bool ModuleLinker::linkFunctionProto(Function *SF) {
   // bring SF over.
   Function *NewDF = Function::Create(TypeMap.get(SF->getFunctionType()),
                                      SF->getLinkage(), SF->getName(), DstM);
-  CopyGVAttributes(NewDF, SF);
+  copyGVAttributes(NewDF, SF);
   if (NewVisibility)
     NewDF->setVisibility(*NewVisibility);
 
@@ -838,7 +866,7 @@ bool ModuleLinker::linkAliasProto(GlobalAlias *SGA) {
   GlobalAlias *NewDA = new GlobalAlias(TypeMap.get(SGA->getType()),
                                        SGA->getLinkage(), SGA->getName(),
                                        /*aliasee*/0, DstM);
-  CopyGVAttributes(NewDA, SGA);
+  copyGVAttributes(NewDA, SGA);
   if (NewVisibility)
     NewDA->setVisibility(*NewVisibility);
 
@@ -871,9 +899,8 @@ void ModuleLinker::linkAppendingVarInit(const AppendingVarInfo &AVI) {
   AVI.NewGV->setInitializer(ConstantArray::get(NewType, Elements));
 }
 
-
-// linkGlobalInits - Update the initializers in the Dest module now that all
-// globals that may be referenced are in Dest.
+/// linkGlobalInits - Update the initializers in the Dest module now that all
+/// globals that may be referenced are in Dest.
 void ModuleLinker::linkGlobalInits() {
   // Loop over all of the globals in the src module, mapping them over as we go
   for (Module::const_global_iterator I = SrcM->global_begin(),
@@ -890,9 +917,9 @@ void ModuleLinker::linkGlobalInits() {
   }
 }
 
-// linkFunctionBody - Copy the source function over into the dest function and
-// fix up references to values.  At this point we know that Dest is an external
-// function, and that Src is not.
+/// linkFunctionBody - Copy the source function over into the dest function and
+/// fix up references to values.  At this point we know that Dest is an external
+/// function, and that Src is not.
 void ModuleLinker::linkFunctionBody(Function *Dst, Function *Src) {
   assert(Src && Dst && Dst->isDeclaration() && !Src->isDeclaration());
 
@@ -931,7 +958,7 @@ void ModuleLinker::linkFunctionBody(Function *Dst, Function *Src) {
   
 }
 
-
+/// linkAliasBodies - Insert all of the aliases in Src into the Dest module.
 void ModuleLinker::linkAliasBodies() {
   for (Module::alias_iterator I = SrcM->alias_begin(), E = SrcM->alias_end();
        I != E; ++I) {
@@ -944,7 +971,7 @@ void ModuleLinker::linkAliasBodies() {
   }
 }
 
-/// linkNamedMDNodes - Insert all of the named mdnodes in Src into the Dest
+/// linkNamedMDNodes - Insert all of the named MDNodes in Src into the Dest
 /// module.
 void ModuleLinker::linkNamedMDNodes() {
   const NamedMDNode *SrcModFlags = SrcM->getModuleFlagsMetadata();
@@ -960,7 +987,8 @@ void ModuleLinker::linkNamedMDNodes() {
   }
 }
 
-/// categorizeModuleFlagNodes -
+/// categorizeModuleFlagNodes - Categorize the module flags according to their
+/// type: Error, Warning, Override, and Require.
 bool ModuleLinker::
 categorizeModuleFlagNodes(const NamedMDNode *ModFlags,
                           DenseMap<MDString*, MDNode*> &ErrorNode,
@@ -1219,6 +1247,7 @@ bool ModuleLinker::run() {
     }
     
     linkFunctionBody(cast<Function>(ValueMap[SF]), SF);
+    SF->Dematerialize();
   }
 
   // Resolve all uses of aliases with aliasees.
@@ -1258,7 +1287,8 @@ bool ModuleLinker::run() {
         
         // Link in function body.
         linkFunctionBody(DF, SF);
-        
+        SF->Dematerialize();
+
         // "Remove" from vector by setting the element to 0.
         *I = 0;
         
@@ -1292,11 +1322,11 @@ bool ModuleLinker::run() {
 // LinkModules entrypoint.
 //===----------------------------------------------------------------------===//
 
-// LinkModules - This function links two modules together, with the resulting
-// left module modified to be the composite of the two input modules.  If an
-// error occurs, true is returned and ErrorMsg (if not null) is set to indicate
-// the problem.  Upon failure, the Dest module could be in a modified state, and
-// shouldn't be relied on to be consistent.
+/// LinkModules - This function links two modules together, with the resulting
+/// left module modified to be the composite of the two input modules.  If an
+/// error occurs, true is returned and ErrorMsg (if not null) is set to indicate
+/// the problem.  Upon failure, the Dest module could be in a modified state,
+/// and shouldn't be relied on to be consistent.
 bool Linker::LinkModules(Module *Dest, Module *Src, unsigned Mode, 
                          std::string *ErrorMsg) {
   ModuleLinker TheLinker(Dest, Src, Mode);
@@ -1304,6 +1334,20 @@ bool Linker::LinkModules(Module *Dest, Module *Src, unsigned Mode,
     if (ErrorMsg) *ErrorMsg = TheLinker.ErrorMsg;
     return true;
   }
-  
+
   return false;
+}
+
+//===----------------------------------------------------------------------===//
+// C API.
+//===----------------------------------------------------------------------===//
+
+LLVMBool LLVMLinkModules(LLVMModuleRef Dest, LLVMModuleRef Src,
+                         LLVMLinkerMode Mode, char **OutMessages) {
+  std::string Messages;
+  LLVMBool Result = Linker::LinkModules(unwrap(Dest), unwrap(Src),
+                                        Mode, OutMessages? &Messages : 0);
+  if (OutMessages)
+    *OutMessages = strdup(Messages.c_str());
+  return Result;
 }

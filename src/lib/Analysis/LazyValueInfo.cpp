@@ -24,6 +24,7 @@
 #include "llvm/Support/CFG.h"
 #include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/PatternMatch.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/ADT/DenseSet.h"
@@ -31,6 +32,7 @@
 #include <map>
 #include <stack>
 using namespace llvm;
+using namespace PatternMatch;
 
 char LazyValueInfo::ID = 0;
 INITIALIZE_PASS_BEGIN(LazyValueInfo, "lazy-value-info",
@@ -170,7 +172,7 @@ public:
       if (NewR.isEmptySet())
         return markOverdefined();
       
-      bool changed = Range == NewR;
+      bool changed = Range != NewR;
       Range = NewR;
       return changed;
     }
@@ -455,8 +457,10 @@ void LazyValueInfoCache::eraseBlock(BasicBlock *BB) {
 void LazyValueInfoCache::solve() {
   while (!BlockValueStack.empty()) {
     std::pair<BasicBlock*, Value*> &e = BlockValueStack.top();
-    if (solveBlockValue(e.second, e.first))
+    if (solveBlockValue(e.second, e.first)) {
+      assert(BlockValueStack.top() == e);
       BlockValueStack.pop();
+    }
   }
 }
 
@@ -466,8 +470,10 @@ bool LazyValueInfoCache::hasBlockValue(Value *Val, BasicBlock *BB) {
     return true;
 
   LVIValueHandle ValHandle(Val, this);
-  if (!ValueCache.count(ValHandle)) return false;
-  return ValueCache[ValHandle].count(BB);
+  std::map<LVIValueHandle, ValueCacheEntryTy>::iterator I =
+    ValueCache.find(ValHandle);
+  if (I == ValueCache.end()) return false;
+  return I->second.count(BB);
 }
 
 LVILatticeVal LazyValueInfoCache::getBlockValue(Value *Val, BasicBlock *BB) {
@@ -764,15 +770,10 @@ bool LazyValueInfoCache::solveBlockValueConstantRange(LVILatticeVal &BBLV,
   return true;
 }
 
-/// getEdgeValue - This method attempts to infer more complex 
-bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
-                                      BasicBlock *BBTo, LVILatticeVal &Result) {
-  // If already a constant, there is nothing to compute.
-  if (Constant *VC = dyn_cast<Constant>(Val)) {
-    Result = LVILatticeVal::get(VC);
-    return true;
-  }
-  
+/// \brief Compute the value of Val on the edge BBFrom -> BBTo. Returns false if
+/// Val is not constrained on the edge.
+static bool getEdgeValueLocal(Value *Val, BasicBlock *BBFrom,
+                              BasicBlock *BBTo, LVILatticeVal &Result) {
   // TODO: Handle more complex conditionals.  If (v == 0 || v2 < 1) is false, we
   // know that v != 0.
   if (BranchInst *BI = dyn_cast<BranchInst>(BBFrom->getTerminator())) {
@@ -795,9 +796,8 @@ bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
       // If the condition of the branch is an equality comparison, we may be
       // able to infer the value.
       ICmpInst *ICI = dyn_cast<ICmpInst>(BI->getCondition());
-      if (ICI && ICI->getOperand(0) == Val &&
-          isa<Constant>(ICI->getOperand(1))) {
-        if (ICI->isEquality()) {
+      if (ICI && isa<Constant>(ICI->getOperand(1))) {
+        if (ICI->isEquality() && ICI->getOperand(0) == Val) {
           // We know that V has the RHS constant if this is a true SETEQ or
           // false SETNE. 
           if (isTrueDest == (ICI->getPredicate() == ICmpInst::ICMP_EQ))
@@ -807,33 +807,27 @@ bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
           return true;
         }
 
-        if (ConstantInt *CI = dyn_cast<ConstantInt>(ICI->getOperand(1))) {
+        // Recognize the range checking idiom that InstCombine produces.
+        // (X-C1) u< C2 --> [C1, C1+C2)
+        ConstantInt *NegOffset = 0;
+        if (ICI->getPredicate() == ICmpInst::ICMP_ULT)
+          match(ICI->getOperand(0), m_Add(m_Specific(Val),
+                                          m_ConstantInt(NegOffset)));
+
+        ConstantInt *CI = dyn_cast<ConstantInt>(ICI->getOperand(1));
+        if (CI && (ICI->getOperand(0) == Val || NegOffset)) {
           // Calculate the range of values that would satisfy the comparison.
-          ConstantRange CmpRange(CI->getValue(), CI->getValue()+1);
+          ConstantRange CmpRange(CI->getValue());
           ConstantRange TrueValues =
             ConstantRange::makeICmpRegion(ICI->getPredicate(), CmpRange);
 
+          if (NegOffset) // Apply the offset from above.
+            TrueValues = TrueValues.subtract(NegOffset->getValue());
+
           // If we're interested in the false dest, invert the condition.
           if (!isTrueDest) TrueValues = TrueValues.inverse();
-          
-          // Figure out the possible values of the query BEFORE this branch.  
-          if (!hasBlockValue(Val, BBFrom)) {
-            BlockValueStack.push(std::make_pair(BBFrom, Val));
-            return false;
-          }
-          
-          LVILatticeVal InBlock = getBlockValue(Val, BBFrom);
-          if (!InBlock.isConstantRange()) {
-            Result = LVILatticeVal::getRange(TrueValues);
-            return true;
-          }
 
-          // Find all potential values that satisfy both the input and output
-          // conditions.
-          ConstantRange PossibleValues =
-            TrueValues.intersectWith(InBlock.getConstantRange());
-
-          Result = LVILatticeVal::getRange(PossibleValues);
+          Result = LVILatticeVal::getRange(TrueValues);
           return true;
         }
       }
@@ -843,37 +837,72 @@ bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
   // If the edge was formed by a switch on the value, then we may know exactly
   // what it is.
   if (SwitchInst *SI = dyn_cast<SwitchInst>(BBFrom->getTerminator())) {
-    if (SI->getCondition() == Val) {
-      // We don't know anything in the default case.
-      if (SI->getDefaultDest() == BBTo) {
-        Result.markOverdefined();
-        return true;
-      }
-      
-      // We only know something if there is exactly one value that goes from
-      // BBFrom to BBTo.
-      unsigned NumEdges = 0;
-      ConstantInt *EdgeVal = 0;
-      for (unsigned i = 0, e = SI->getNumCases(); i != e; ++i) {
-        if (SI->getCaseSuccessor(i) != BBTo) continue;
-        if (NumEdges++) break;
-        EdgeVal = SI->getCaseValue(i);
-      }
-      assert(EdgeVal && "Missing successor?");
-      if (NumEdges == 1) {
-        Result = LVILatticeVal::get(EdgeVal);
-        return true;
-      }
+    if (SI->getCondition() != Val)
+      return false;
+
+    bool DefaultCase = SI->getDefaultDest() == BBTo;
+    unsigned BitWidth = Val->getType()->getIntegerBitWidth();
+    ConstantRange EdgesVals(BitWidth, DefaultCase/*isFullSet*/);
+
+    for (SwitchInst::CaseIt i = SI->case_begin(), e = SI->case_end();
+         i != e; ++i) {
+      ConstantRange EdgeVal(i.getCaseValue()->getValue());
+      if (DefaultCase) {
+        // It is possible that the default destination is the destination of
+        // some cases. There is no need to perform difference for those cases.
+        if (i.getCaseSuccessor() != BBTo)
+          EdgesVals = EdgesVals.difference(EdgeVal);
+      } else if (i.getCaseSuccessor() == BBTo)
+        EdgesVals = EdgesVals.unionWith(EdgeVal);
     }
-  }
-  
-  // Otherwise see if the value is known in the block.
-  if (hasBlockValue(Val, BBFrom)) {
-    Result = getBlockValue(Val, BBFrom);
+    Result = LVILatticeVal::getRange(EdgesVals);
     return true;
   }
-  BlockValueStack.push(std::make_pair(BBFrom, Val));
   return false;
+}
+
+/// \brief Compute the value of Val on the edge BBFrom -> BBTo, or the value at
+/// the basic block if the edge does not constraint Val.
+bool LazyValueInfoCache::getEdgeValue(Value *Val, BasicBlock *BBFrom,
+                                      BasicBlock *BBTo, LVILatticeVal &Result) {
+  // If already a constant, there is nothing to compute.
+  if (Constant *VC = dyn_cast<Constant>(Val)) {
+    Result = LVILatticeVal::get(VC);
+    return true;
+  }
+
+  if (getEdgeValueLocal(Val, BBFrom, BBTo, Result)) {
+    if (!Result.isConstantRange() ||
+      Result.getConstantRange().getSingleElement())
+      return true;
+
+    // FIXME: this check should be moved to the beginning of the function when
+    // LVI better supports recursive values. Even for the single value case, we
+    // can intersect to detect dead code (an empty range).
+    if (!hasBlockValue(Val, BBFrom)) {
+      BlockValueStack.push(std::make_pair(BBFrom, Val));
+      return false;
+    }
+
+    // Try to intersect ranges of the BB and the constraint on the edge.
+    LVILatticeVal InBlock = getBlockValue(Val, BBFrom);
+    if (!InBlock.isConstantRange())
+      return true;
+
+    ConstantRange Range =
+      Result.getConstantRange().intersectWith(InBlock.getConstantRange());
+    Result = LVILatticeVal::getRange(Range);
+    return true;
+  }
+
+  if (!hasBlockValue(Val, BBFrom)) {
+    BlockValueStack.push(std::make_pair(BBFrom, Val));
+    return false;
+  }
+
+  // if we couldn't compute the value on the edge, use the value from the BB
+  Result = getBlockValue(Val, BBFrom);
+  return true;
 }
 
 LVILatticeVal LazyValueInfoCache::getValueInBlock(Value *V, BasicBlock *BB) {

@@ -18,6 +18,7 @@
 #include "llvm/Constants.h"
 #include "llvm/Instructions.h"
 #include "llvm/Analysis/Dominators.h"
+#include "llvm/Analysis/LoopInfoImpl.h"
 #include "llvm/Analysis/LoopIterator.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Assembly/Writer.h"
@@ -28,6 +29,10 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include <algorithm>
 using namespace llvm;
+
+// Explicitly instantiate methods in LoopInfoImpl.h for IR-level Loops.
+template class llvm::LoopBase<BasicBlock, Loop>;
+template class llvm::LoopInfoBase<BasicBlock, Loop>;
 
 // Always verify loopinfo if expensive checking is enabled.
 #ifdef XDEBUG
@@ -205,6 +210,17 @@ bool Loop::isLoopSimplifyForm() const {
   return getLoopPreheader() && getLoopLatch() && hasDedicatedExits();
 }
 
+/// isSafeToClone - Return true if the loop body is safe to clone in practice.
+/// Routines that reform the loop CFG and split edges often fail on indirectbr.
+bool Loop::isSafeToClone() const {
+  // Return false if any loop blocks contain indirectbrs.
+  for (Loop::block_iterator I = block_begin(), E = block_end(); I != E; ++I) {
+    if (isa<IndirectBrInst>((*I)->getTerminator()))
+      return false;
+  }
+  return true;
+}
+
 /// hasDedicatedExits - Return true if no exit block for the loop
 /// has a predecessor that is outside the loop.
 bool Loop::hasDedicatedExits() const {
@@ -290,9 +306,11 @@ BasicBlock *Loop::getUniqueExitBlock() const {
   return 0;
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 void Loop::dump() const {
   print(dbgs());
 }
+#endif
 
 //===----------------------------------------------------------------------===//
 // UnloopUpdater implementation
@@ -413,8 +431,8 @@ void UnloopUpdater::updateSubloopParents() {
     Unloop->removeChildLoop(llvm::prior(Unloop->end()));
 
     assert(SubloopParents.count(Subloop) && "DFS failed to visit subloop");
-    if (SubloopParents[Subloop])
-      SubloopParents[Subloop]->addChildLoop(Subloop);
+    if (Loop *Parent = SubloopParents[Subloop])
+      Parent->addChildLoop(Subloop);
     else
       LI->addTopLevelLoop(Subloop);
   }
@@ -440,9 +458,8 @@ Loop *UnloopUpdater::getNearestLoop(BasicBlock *BB, Loop *BBLoop) {
       assert(Subloop && "subloop is not an ancestor of the original loop");
     }
     // Get the current nearest parent of the Subloop exits, initially Unloop.
-    if (!SubloopParents.count(Subloop))
-      SubloopParents[Subloop] = Unloop;
-    NearLoop = SubloopParents[Subloop];
+    NearLoop =
+      SubloopParents.insert(std::make_pair(Subloop, Unloop)).first->second;
   }
 
   succ_iterator I = succ_begin(BB), E = succ_end(BB);
@@ -496,7 +513,7 @@ Loop *UnloopUpdater::getNearestLoop(BasicBlock *BB, Loop *BBLoop) {
 //
 bool LoopInfo::runOnFunction(Function &) {
   releaseMemory();
-  LI.Calculate(getAnalysis<DominatorTree>().getBase());    // Update
+  LI.Analyze(getAnalysis<DominatorTree>().getBase());
   return false;
 }
 
@@ -578,9 +595,6 @@ void LoopInfo::verifyAnalysis() const {
   }
 
   // Verify that blocks are mapped to valid loops.
-  //
-  // FIXME: With an up-to-date DFS (see LoopIterator.h) and DominatorTree, we
-  // could also verify that the blocks are still in the correct loops.
   for (DenseMap<BasicBlock*, Loop*>::const_iterator I = LI.BBMap.begin(),
          E = LI.BBMap.end(); I != E; ++I) {
     assert(Loops.count(I->second) && "orphaned loop");

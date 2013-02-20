@@ -18,6 +18,8 @@
 
 #include "clang/Frontend/DiagnosticRenderer.h"
 
+struct SourceColumnMap;
+
 namespace clang {
 
 /// \brief Class to encapsulate the logic for formatting and printing a textual
@@ -57,7 +59,7 @@ public:
   ///
   /// This is a static helper to handle the line wrapping, colorizing, and
   /// rendering of a diagnostic message to a particular ostream. It is
-  /// publically visible so that clients which do not have sufficient state to
+  /// publicly visible so that clients which do not have sufficient state to
   /// build a complete TextDiagnostic object can still get consistent
   /// formatting of their diagnostic messages.
   ///
@@ -107,17 +109,18 @@ private:
                            ArrayRef<FixItHint> Hints,
                            const SourceManager &SM);
 
+  void emitSnippet(StringRef SourceLine);
+
   void highlightRange(const CharSourceRange &R,
                       unsigned LineNo, FileID FID,
-                      const std::string &SourceLine,
+                      const SourceColumnMap &map,
                       std::string &CaretLine,
                       const SourceManager &SM);
+
   std::string buildFixItInsertionLine(unsigned LineNo,
-                                      const char *LineStart,
-                                      const char *LineEnd,
+                                      const SourceColumnMap &map,
                                       ArrayRef<FixItHint> Hints,
                                       const SourceManager &SM);
-  void expandTabs(std::string &SourceLine, std::string &CaretLine);
   void emitParseableFixits(ArrayRef<FixItHint> Hints, const SourceManager &SM);
 };
 

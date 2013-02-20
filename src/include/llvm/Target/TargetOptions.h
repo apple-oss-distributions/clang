@@ -24,9 +24,17 @@ namespace llvm {
   // Possible float ABI settings. Used with FloatABIType in TargetOptions.h.
   namespace FloatABI {
     enum ABIType {
-      Default, // Target-specific (either soft of hard depending on triple, etc).
+      Default, // Target-specific (either soft or hard depending on triple, etc).
       Soft, // Soft float.
       Hard  // Hard float.
+    };
+  }
+
+  namespace FPOpFusion {
+    enum FPOpFusionMode {
+      Fast,     // Enable fusion of FP ops wherever it's profitable.
+      Standard, // Only allow fusion of 'blessed' ops (currently just fmuladd).
+      Strict    // Never fuse FP-ops.
     };
   }
 
@@ -35,15 +43,15 @@ namespace llvm {
     TargetOptions()
         : PrintMachineCode(false), NoFramePointerElim(false),
           NoFramePointerElimNonLeaf(false), LessPreciseFPMADOption(false),
-          NoExcessFPPrecision(false), UnsafeFPMath(false), NoInfsFPMath(false),
+          UnsafeFPMath(false), NoInfsFPMath(false),
           NoNaNsFPMath(false), HonorSignDependentRoundingFPMathOption(false),
           UseSoftFloat(false), NoZerosInBSS(false), JITExceptionHandling(false),
           JITEmitDebugInfo(false), JITEmitDebugInfoToDisk(false),
           GuaranteedTailCallOpt(false), DisableTailCalls(false),
-          StackAlignmentOverride(0), RealignStack(true),
-          DisableJumpTables(false), EnableFastISel(false),
-          EnableSegmentedStacks(false), TrapFuncName(""),
-          FloatABIType(FloatABI::Default)
+          StackAlignmentOverride(0), RealignStack(true), EnableFastISel(false),
+          PositionIndependentExecutable(false), EnableSegmentedStacks(false),
+          UseInitArray(false), TrapFuncName(""), FloatABIType(FloatABI::Default),
+          AllowFPOpFusion(FPOpFusion::Standard)
     {}
 
     /// PrintMachineCode - This flag is enabled when the -print-machineinstrs
@@ -73,14 +81,6 @@ namespace llvm {
     /// operations individually.
     unsigned LessPreciseFPMADOption : 1;
     bool LessPreciseFPMAD() const;
-
-    /// NoExcessFPPrecision - This flag is enabled when the
-    /// -disable-excess-fp-precision flag is specified on the command line.
-    /// When this flag is off (the default), the code generator is allowed to
-    /// produce results that are "more precise" than IEEE allows.  This includes
-    /// use of FMA-like operations and use of the X86 FP registers without
-    /// rounding all over the place.
-    unsigned NoExcessFPPrecision : 1;
 
     /// UnsafeFPMath - This flag is enabled when the
     /// -enable-unsafe-fp-math flag is specified on the command line.  When
@@ -155,16 +155,26 @@ namespace llvm {
     /// automatically realigned, if needed.
     unsigned RealignStack : 1;
 
-    /// DisableJumpTables - This flag indicates jump tables should not be
-    /// generated.
-    unsigned DisableJumpTables : 1;
+    /// SSPBufferSize - The minimum size of buffers that will receive stack
+    /// smashing protection when -fstack-protection is used.
+    unsigned SSPBufferSize;
 
     /// EnableFastISel - This flag enables fast-path instruction selection
     /// which trades away generated code quality in favor of reducing
     /// compile time.
     unsigned EnableFastISel : 1;
 
+    /// PositionIndependentExecutable - This flag indicates whether the code
+    /// will eventually be linked into a single executable, despite the PIC
+    /// relocation model being in use. It's value is undefined (and irrelevant)
+    /// if the relocation model is anything other than PIC.
+    unsigned PositionIndependentExecutable : 1;
+
     unsigned EnableSegmentedStacks : 1;
+
+    /// UseInitArray - Use .init_array instead of .ctors for static
+    /// constructors.
+    unsigned UseInitArray : 1;
 
     /// getTrapFunctionName - If this returns a non-empty string, this means
     /// isel should lower Intrinsic::trap to a call to the specified function
@@ -179,6 +189,25 @@ namespace llvm {
     /// Such a combination is unfortunately popular (e.g. arm-apple-darwin).
     /// Hard presumes that the normal FP ABI is used.
     FloatABI::ABIType FloatABIType;
+
+    /// AllowFPOpFusion - This flag is set by the -fuse-fp-ops=xxx option.
+    /// This controls the creation of fused FP ops that store intermediate
+    /// results in higher precision than IEEE allows (E.g. FMAs).
+    ///
+    /// Fast mode - allows formation of fused FP ops whenever they're
+    /// profitable.
+    /// Standard mode - allow fusion only for 'blessed' FP ops. At present the
+    /// only blessed op is the fmuladd intrinsic. In the future more blessed ops
+    /// may be added.
+    /// Strict mode - allow fusion only if/when it can be proven that the excess
+    /// precision won't effect the result.
+    ///
+    /// Note: This option only controls formation of fused ops by the optimizers.
+    /// Fused operations that are explicitly specified (e.g. FMA via the
+    /// llvm.fma.* intrinsic) will always be honored, regardless of the value of
+    /// this option.
+    FPOpFusion::FPOpFusionMode AllowFPOpFusion;
+
   };
 } // End llvm namespace
 

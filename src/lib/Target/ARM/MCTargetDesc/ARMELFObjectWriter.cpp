@@ -11,6 +11,7 @@
 #include "MCTargetDesc/ARMMCTargetDesc.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/MC/MCELFObjectWriter.h"
@@ -177,9 +178,8 @@ unsigned ARMELFObjectWriter::GetRelocTypeInner(const MCValue &Target,
         break;
       }
       break;
-    case ARM::fixup_arm_bl:
     case ARM::fixup_arm_blx:
-    case ARM::fixup_arm_uncondbranch:
+    case ARM::fixup_arm_uncondbl:
       switch (Modifier) {
       case MCSymbolRefExpr::VK_ARM_PLT:
         Type = ELF::R_ARM_PLT32;
@@ -189,8 +189,14 @@ unsigned ARMELFObjectWriter::GetRelocTypeInner(const MCValue &Target,
         break;
       }
       break;
+    case ARM::fixup_arm_condbl:
     case ARM::fixup_arm_condbranch:
+    case ARM::fixup_arm_uncondbranch:
       Type = ELF::R_ARM_JUMP24;
+      break;
+    case ARM::fixup_t2_condbranch:
+    case ARM::fixup_t2_uncondbranch:
+      Type = ELF::R_ARM_THM_JUMP24;
       break;
     case ARM::fixup_arm_movt_hi16:
     case ARM::fixup_arm_movt_hi16_pcrel:
@@ -250,10 +256,8 @@ unsigned ARMELFObjectWriter::GetRelocTypeInner(const MCValue &Target,
     case ARM::fixup_arm_thumb_cp:
     case ARM::fixup_arm_thumb_br:
       llvm_unreachable("Unimplemented");
-    case ARM::fixup_arm_uncondbranch:
-      Type = ELF::R_ARM_CALL;
-      break;
     case ARM::fixup_arm_condbranch:
+    case ARM::fixup_arm_uncondbranch:
       Type = ELF::R_ARM_JUMP24;
       break;
     case ARM::fixup_arm_movt_hi16:

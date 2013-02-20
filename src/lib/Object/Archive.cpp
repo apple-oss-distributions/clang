@@ -28,7 +28,7 @@ struct ArchiveMemberHeader {
   char UID[6];
   char GID[6];
   char AccessMode[8];
-  char Size[10]; //< Size of data, not including header or padding.
+  char Size[10]; ///< Size of data, not including header or padding.
   char Terminator[2];
 
   ///! Get the name without looking up long names.
@@ -60,11 +60,11 @@ static const ArchiveMemberHeader *ToHeader(const char *base) {
 
 
 static bool isInternalMember(const ArchiveMemberHeader &amh) {
-  const char *internals[] = {
+  static const char *const internals[] = {
     "/",
     "//",
     "#_LLVM_SYM_TAB_#"
-    };
+  };
 
   StringRef name = amh.getName();
   for (std::size_t i = 0; i < sizeof(internals) / sizeof(*internals); ++i) {
@@ -174,7 +174,7 @@ error_code Archive::Child::getAsBinary(OwningPtr<Binary> &Result) const {
 }
 
 Archive::Archive(MemoryBuffer *source, error_code &ec)
-  : Binary(Binary::isArchive, source) {
+  : Binary(Binary::ID_Archive, source) {
   // Check for sufficient magic.
   if (!source || source->getBufferSize()
                  < (8 + sizeof(ArchiveMemberHeader) + 2) // Smallest archive.

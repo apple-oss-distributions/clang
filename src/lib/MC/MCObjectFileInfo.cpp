@@ -169,7 +169,7 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
     Ctx->getMachOSection("__DWARF", "__apple_types",
                          MCSectionMachO::S_ATTR_DEBUG,
                          SectionKind::getMetadata());
-    
+
   DwarfAbbrevSection =
     Ctx->getMachOSection("__DWARF", "__debug_abbrev",
                          MCSectionMachO::S_ATTR_DEBUG,
@@ -260,9 +260,14 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
 
   // Solaris requires different flags for .eh_frame to seemingly every other
   // platform.
+  EHSectionType = ELF::SHT_PROGBITS;
   EHSectionFlags = ELF::SHF_ALLOC;
-  if (T.getOS() == Triple::Solaris)
-    EHSectionFlags |= ELF::SHF_WRITE;
+  if (T.getOS() == Triple::Solaris) {
+    if (T.getArch() == Triple::x86_64)
+      EHSectionType = ELF::SHT_X86_64_UNWIND;
+    else
+      EHSectionFlags |= ELF::SHF_WRITE;
+  }
 
 
   // ELF
@@ -425,12 +430,20 @@ void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
   }
 
 
-  StaticDtorSection =
-    Ctx->getCOFFSection(".dtors",
-                        COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
-                        COFF::IMAGE_SCN_MEM_READ |
-                        COFF::IMAGE_SCN_MEM_WRITE,
-                        SectionKind::getDataRel());
+  if (T.getOS() == Triple::Win32) {
+    StaticDtorSection =
+      Ctx->getCOFFSection(".CRT$XTX",
+                          COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getReadOnly());
+  } else {
+    StaticDtorSection =
+      Ctx->getCOFFSection(".dtors",
+                          COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          COFF::IMAGE_SCN_MEM_READ |
+                          COFF::IMAGE_SCN_MEM_WRITE,
+                          SectionKind::getDataRel());
+  }
 
   // FIXME: We're emitting LSDA info into a readonly section on COFF, even
   // though it contains relocatable pointers.  In PIC mode, this is probably a
@@ -502,15 +515,13 @@ void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
   PDataSection =
     Ctx->getCOFFSection(".pdata",
                         COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
-                        COFF::IMAGE_SCN_MEM_READ |
-                        COFF::IMAGE_SCN_MEM_WRITE,
+                        COFF::IMAGE_SCN_MEM_READ,
                         SectionKind::getDataRel());
 
   XDataSection =
     Ctx->getCOFFSection(".xdata",
                         COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
-                        COFF::IMAGE_SCN_MEM_READ |
-                        COFF::IMAGE_SCN_MEM_WRITE,
+                        COFF::IMAGE_SCN_MEM_READ,
                         SectionKind::getDataRel());
   TLSDataSection =
     Ctx->getCOFFSection(".tls$",
@@ -575,7 +586,7 @@ void MCObjectFileInfo::InitEHFrameSection() {
                            SectionKind::getReadOnly());
   else if (Env == IsELF)
     EHFrameSection =
-      Ctx->getELFSection(".eh_frame", ELF::SHT_PROGBITS,
+      Ctx->getELFSection(".eh_frame", EHSectionType,
                          EHSectionFlags,
                          SectionKind::getDataRel());
   else

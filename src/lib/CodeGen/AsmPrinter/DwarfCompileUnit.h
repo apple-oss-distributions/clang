@@ -15,7 +15,7 @@
 #define CODEGEN_ASMPRINTER_DWARFCOMPILEUNIT_H
 
 #include "DIE.h"
-#include "llvm/Analysis/DebugInfo.h"
+#include "llvm/DebugInfo.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/OwningPtr.h"
@@ -176,6 +176,9 @@ public:
   }
 public:
 
+  /// addFlag - Add a flag that is true to the DIE.
+  void addFlag(DIE *Die, unsigned Attribute);
+  
   /// addUInt - Add an unsigned integer attribute data and value.
   ///
   void addUInt(DIE *Die, unsigned Attribute, unsigned Form, uint64_t Integer);
@@ -261,8 +264,10 @@ public:
   /// addToContextOwner - Add Die into the list of its context owner's children.
   void addToContextOwner(DIE *Die, DIDescriptor Context);
 
-  /// addType - Add a new type attribute to the specified entity.
-  void addType(DIE *Entity, DIType Ty);
+  /// addType - Add a new type attribute to the specified entity. This takes
+  /// and attribute parameter because DW_AT_friend attributes are also
+  /// type references.
+  void addType(DIE *Entity, DIType Ty, unsigned Attribute = dwarf::DW_AT_type);
 
   /// getOrCreateNameSpace - Create a DIE for DINameSpace.
   DIE *getOrCreateNameSpace(DINameSpace NS);
@@ -278,8 +283,8 @@ public:
   /// for the given DITemplateTypeParameter.
   DIE *getOrCreateTemplateTypeParameterDIE(DITemplateTypeParameter TP);
 
-  /// getOrCreateTemplateValueParameterDIE - Find existing DIE or create new DIE 
-  /// for the given DITemplateValueParameter.
+  /// getOrCreateTemplateValueParameterDIE - Find existing DIE or create
+  /// new DIE for the given DITemplateValueParameter.
   DIE *getOrCreateTemplateValueParameterDIE(DITemplateValueParameter TVP);
 
   /// createDIEEntry - Creates a new DIEEntry to be a proxy for a debug

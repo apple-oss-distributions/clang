@@ -31,7 +31,19 @@
 #  define _SHOULD_UNDEFINE_GNU_SOURCE
 #  define _GNU_SOURCE
 # endif
-# include_next <unwind.h>
+// libunwind's unwind.h reflects the current visibility.  However, Mozilla
+// builds with -fvisibility=hidden and relies on gcc's unwind.h to reset the
+// visibility to default and export its contents.  gcc also allows users to
+// override its override by #defining HIDE_EXPORTS (but note, this only obeys
+// the user's -fvisibility setting; it doesn't hide any exports on its own).  We
+// imitate gcc's header here:
+# ifdef HIDE_EXPORTS
+#  include_next <unwind.h>
+# else
+#  pragma GCC visibility push(default)
+#  include_next <unwind.h>
+#  pragma GCC visibility pop
+# endif
 # ifdef _SHOULD_UNDEFINE_GNU_SOURCE
 #  undef _GNU_SOURCE
 #  undef _SHOULD_UNDEFINE_GNU_SOURCE
@@ -88,7 +100,7 @@ typedef enum {
   _UVRSR_FAILED = 2  
 } _Unwind_VRS_Result; 
 
-_Unwind_VRS_Result _Unwind_VRS_Get(_Unwind_Context *context,
+_Unwind_VRS_Result _Unwind_VRS_Get(struct _Unwind_Context *context,
   _Unwind_VRS_RegClass regclass,
   uint32_t regno,
   _Unwind_VRS_DataRepresentation representation,

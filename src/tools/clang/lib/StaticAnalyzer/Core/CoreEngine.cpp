@@ -17,7 +17,6 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/AnalysisManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CoreEngine.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
-#include "clang/Index/TranslationUnit.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/StmtCXX.h"
 #include "llvm/Support/Casting.h"
@@ -27,6 +26,8 @@
 using namespace clang;
 using namespace ento;
 
+STATISTIC(NumSteps,
+            "The # of steps executed.");
 STATISTIC(NumReachedMaxSteps,
             "The # of times we reached the max number of steps.");
 STATISTIC(NumPathsExplored,
@@ -75,7 +76,7 @@ public:
   }
 
   virtual void enqueue(const WorkListUnit& U) {
-    Queue.push_front(U);
+    Queue.push_back(U);
   }
 
   virtual WorkListUnit dequeue() {
@@ -208,6 +209,8 @@ bool CoreEngine::ExecuteWorkList(const LocationContext *L, unsigned Steps,
       --Steps;
     }
 
+    NumSteps++;
+
     const WorkListUnit& WU = WList->dequeue();
 
     // Set the current block counter.
@@ -240,11 +243,6 @@ void CoreEngine::dispatchWorkItem(ExplodedNode* Pred, ProgramPoint Loc,
 
     case ProgramPoint::CallEnterKind: {
       CallEnter CEnter = cast<CallEnter>(Loc);
-      if (AnalyzedCallees)
-        if (const CallExpr* CE =
-            dyn_cast_or_null<CallExpr>(CEnter.getCallExpr()))
-          if (const Decl *CD = CE->getCalleeDecl())
-            AnalyzedCallees->insert(CD);
       SubEng.processCallEnter(CEnter, Pred);
       break;
     }
@@ -262,7 +260,9 @@ void CoreEngine::dispatchWorkItem(ExplodedNode* Pred, ProgramPoint Loc,
     }
     default:
       assert(isa<PostStmt>(Loc) ||
-             isa<PostInitializer>(Loc));
+             isa<PostInitializer>(Loc) ||
+             isa<PostImplicitCall>(Loc) ||
+             isa<CallExitEnd>(Loc));
       HandlePostStmt(WU.getBlock(), WU.getIndex(), Pred);
       break;
   }
@@ -503,7 +503,8 @@ void CoreEngine::enqueueStmtNode(ExplodedNode *N,
   }
 
   // Do not create extra nodes. Move to the next CFG element.
-  if (isa<PostInitializer>(N->getLocation())) {
+  if (isa<PostInitializer>(N->getLocation()) ||
+      isa<PostImplicitCall>(N->getLocation())) {
     WList->enqueue(N, Block, Idx+1);
     return;
   }
@@ -513,9 +514,9 @@ void CoreEngine::enqueueStmtNode(ExplodedNode *N,
     return;
   }
 
-  const CFGStmt *CS = (*Block)[Idx].getAs<CFGStmt>();
-  const Stmt *St = CS ? CS->getStmt() : 0;
-  PostStmt Loc(St, N->getLocationContext());
+  // At this point, we know we're processing a normal statement.
+  CFGStmt CS = cast<CFGStmt>((*Block)[Idx]);
+  PostStmt Loc(CS.getStmt(), N->getLocationContext());
 
   if (Loc == N->getLocation()) {
     // Note: 'N' should be a fresh node because otherwise it shouldn't be
@@ -536,10 +537,9 @@ ExplodedNode *CoreEngine::generateCallExitBeginNode(ExplodedNode *N) {
   // Create a CallExitBegin node and enqueue it.
   const StackFrameContext *LocCtx
                          = cast<StackFrameContext>(N->getLocationContext());
-  const Stmt *CE = LocCtx->getCallSite();
 
-  // Use the the callee location context.
-  CallExitBegin Loc(CE, LocCtx);
+  // Use the callee location context.
+  CallExitBegin Loc(LocCtx);
 
   bool isNew;
   ExplodedNode *Node = G->getNode(Loc, N->getState(), false, &isNew);

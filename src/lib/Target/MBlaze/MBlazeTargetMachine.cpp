@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "MBlaze.h"
 #include "MBlazeTargetMachine.h"
+#include "MBlaze.h"
 #include "llvm/PassManager.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/Support/FormattedStream.h"
@@ -68,7 +68,7 @@ TargetPassConfig *MBlazeTargetMachine::createPassConfig(PassManagerBase &PM) {
 // Install an instruction selector pass using
 // the ISelDag to gen MBlaze code.
 bool MBlazePassConfig::addInstSelector() {
-  PM.add(createMBlazeISelDag(getMBlazeTargetMachine()));
+  addPass(createMBlazeISelDag(getMBlazeTargetMachine()));
   return false;
 }
 
@@ -76,6 +76,6 @@ bool MBlazePassConfig::addInstSelector() {
 // machine code is emitted. return true if -print-machineinstrs should
 // print out the code after the passes.
 bool MBlazePassConfig::addPreEmitPass() {
-  PM.add(createMBlazeDelaySlotFillerPass(getMBlazeTargetMachine()));
+  addPass(createMBlazeDelaySlotFillerPass(getMBlazeTargetMachine()));
   return true;
 }

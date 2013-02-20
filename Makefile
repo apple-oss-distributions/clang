@@ -13,16 +13,19 @@ Clang_Driver_Mode      := Production
 # Select optimization flags to use.
 Clang_Optimize_Option  := -O2 -fno-stack-protector
 # Select linker options to use.
-Clang_Linker_Options  := -fno-pie
+Clang_Linker_Options   := -fno-pie
 # Additional arbitrary compiler options.
-Clang_Extra_Options    := \
-	-DDISABLE_DEFAULT_STRICT_ALIASING
+Clang_Extra_Options    :=
 # Additional arbitrary compiler options, only passed to final configure stage.
+ifeq ($(RC_ProjectName),clang)
+Clang_Final_Extra_Options := -flto -gline-tables-only
+else
 Clang_Final_Extra_Options := -g
+endif
 # Build all LLVM tools; not just clang?
 Clang_Build_All        := 0
 # Set the Clang version.
-Clang_Version          := 4.0
+Clang_Version          := 4.2
 # Enable bootstrap.
 Clang_Enable_Bootstrap := 1
 # Enable automatic order file generation, when using buildit.
@@ -31,6 +34,8 @@ Clang_Autogenerate_Order_File := 1
 else
 Clang_Autogenerate_Order_File := 0
 endif
+# Enable building clang tools.
+Clang_Build_No_Tools   := YES
 
 ##
 # Include build logic.

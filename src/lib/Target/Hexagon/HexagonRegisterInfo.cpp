@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Hexagon.h"
 #include "HexagonRegisterInfo.h"
+#include "Hexagon.h"
 #include "HexagonSubtarget.h"
 #include "HexagonTargetMachine.h"
 #include "HexagonMachineFunctionInfo.h"
@@ -44,13 +44,13 @@ HexagonRegisterInfo::HexagonRegisterInfo(HexagonSubtarget &st,
    TII(tii) {
 }
 
-const unsigned* HexagonRegisterInfo::getCalleeSavedRegs(const MachineFunction
+const uint16_t* HexagonRegisterInfo::getCalleeSavedRegs(const MachineFunction
                                                         *MF)
   const {
-  static const unsigned CalleeSavedRegsV2[] = {
-  Hexagon::R24,   Hexagon::R25,   Hexagon::R26,   Hexagon::R27, 0
+  static const uint16_t CalleeSavedRegsV2[] = {
+    Hexagon::R24,   Hexagon::R25,   Hexagon::R26,   Hexagon::R27, 0
   };
-  static const unsigned CalleeSavedRegsV3[] = {
+  static const uint16_t CalleeSavedRegsV3[] = {
     Hexagon::R16,   Hexagon::R17,   Hexagon::R18,   Hexagon::R19,
     Hexagon::R20,   Hexagon::R21,   Hexagon::R22,   Hexagon::R23,
     Hexagon::R24,   Hexagon::R25,   Hexagon::R26,   Hexagon::R27, 0
@@ -63,6 +63,7 @@ const unsigned* HexagonRegisterInfo::getCalleeSavedRegs(const MachineFunction
     return CalleeSavedRegsV2;
   case HexagonSubtarget::V3:
   case HexagonSubtarget::V4:
+  case HexagonSubtarget::V5:
     return CalleeSavedRegsV3;
   }
   llvm_unreachable("Callee saved registers requested for unknown architecture "
@@ -109,6 +110,7 @@ HexagonRegisterInfo::getCalleeSavedRegClasses(const MachineFunction *MF) const {
     return CalleeSavedRegClassesV2;
   case HexagonSubtarget::V3:
   case HexagonSubtarget::V4:
+  case HexagonSubtarget::V5:
     return CalleeSavedRegClassesV3;
   }
   llvm_unreachable("Callee saved register classes requested for unknown "
@@ -179,13 +181,15 @@ void HexagonRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
       // r0 = add(r30, #10000)
       // r0 = memw(r0)
       if ( (MI.getOpcode() == Hexagon::LDriw)  ||
-           (MI.getOpcode() == Hexagon::LDrid) ||
-           (MI.getOpcode() == Hexagon::LDrih) ||
-           (MI.getOpcode() == Hexagon::LDriuh) ||
-           (MI.getOpcode() == Hexagon::LDrib) ||
-           (MI.getOpcode() == Hexagon::LDriub) ) {
+           (MI.getOpcode() == Hexagon::LDrid)   ||
+           (MI.getOpcode() == Hexagon::LDrih)   ||
+           (MI.getOpcode() == Hexagon::LDriuh)  ||
+           (MI.getOpcode() == Hexagon::LDrib)   ||
+           (MI.getOpcode() == Hexagon::LDriub)  ||
+           (MI.getOpcode() == Hexagon::LDriw_f) ||
+           (MI.getOpcode() == Hexagon::LDrid_f)) {
         unsigned dstReg = (MI.getOpcode() == Hexagon::LDrid) ?
-          *getSubRegisters(MI.getOperand(0).getReg()) :
+          getSubReg(MI.getOperand(0).getReg(), Hexagon::subreg_loreg) :
           MI.getOperand(0).getReg();
 
         // Check if offset can fit in addi.
@@ -203,10 +207,13 @@ void HexagonRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
 
         MI.getOperand(i).ChangeToRegister(dstReg, false, false, true);
         MI.getOperand(i+1).ChangeToImmediate(0);
-      } else if ((MI.getOpcode() == Hexagon::STriw) ||
+      } else if ((MI.getOpcode() == Hexagon::STriw_indexed) ||
+                 (MI.getOpcode() == Hexagon::STriw) ||
                  (MI.getOpcode() == Hexagon::STrid) ||
                  (MI.getOpcode() == Hexagon::STrih) ||
-                 (MI.getOpcode() == Hexagon::STrib)) {
+                 (MI.getOpcode() == Hexagon::STrib) ||
+                 (MI.getOpcode() == Hexagon::STrid_f) ||
+                 (MI.getOpcode() == Hexagon::STriw_f)) {
         // For stores, we need a reserved register. Change
         // memw(r30 + #10000) = r0 to:
         //
@@ -303,6 +310,58 @@ void HexagonRegisterInfo::getInitialFrameState(std::vector<MachineMove>
   Moves.push_back(MachineMove(0, Dst, Src));
 }
 
+// Get the weight in units of pressure for this register class.
+const RegClassWeight &
+HexagonRegisterInfo::getRegClassWeight(const TargetRegisterClass *RC) const {
+  // Each TargetRegisterClass has a per register weight, and weight
+  // limit which must be less than the limits of its pressure sets.
+  static const RegClassWeight RCWeightTable[] = {
+    {1, 32}, // IntRegs
+    {1, 8},  // CRRegs
+    {1, 4},  // PredRegs
+    {2, 16}, // DoubleRegs
+    {0, 0} };
+  return RCWeightTable[RC->getID()];
+}
+
+/// Get the number of dimensions of register pressure.
+unsigned HexagonRegisterInfo::getNumRegPressureSets() const {
+  return 4;
+}
+
+/// Get the name of this register unit pressure set.
+const char *HexagonRegisterInfo::getRegPressureSetName(unsigned Idx) const {
+  static const char *const RegPressureSetName[] = {
+    "IntRegsRegSet",
+    "CRRegsRegSet",
+    "PredRegsRegSet",
+    "DoubleRegsRegSet"
+  };
+  assert((Idx < 4) && "Index out of bounds");
+  return RegPressureSetName[Idx];
+}
+
+/// Get the register unit pressure limit for this dimension.
+/// This limit must be adjusted dynamically for reserved registers.
+unsigned HexagonRegisterInfo::getRegPressureSetLimit(unsigned Idx) const {
+  static const int RegPressureLimit [] = { 16, 4, 2, 8 };
+  assert((Idx < 4) && "Index out of bounds");
+  return RegPressureLimit[Idx];
+}
+
+const int*
+HexagonRegisterInfo::getRegClassPressureSets(const TargetRegisterClass *RC)
+  const {
+  static const int RCSetsTable[] = {
+    0,  -1,  // IntRegs
+    1,  -1,  // CRRegs
+    2,  -1,  // PredRegs
+    0,  -1,  // DoubleRegs
+    -1 };
+  static const unsigned RCSetStartTable[] = { 0, 2, 4, 6, 0 };
+  unsigned SetListStart = RCSetStartTable[RC->getID()];
+  return &RCSetsTable[SetListStart];
+}
 unsigned HexagonRegisterInfo::getEHExceptionRegister() const {
   llvm_unreachable("What is the exception register");
 }

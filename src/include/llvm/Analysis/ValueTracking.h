@@ -24,7 +24,8 @@ namespace llvm {
   class APInt;
   class TargetData;
   class StringRef;
-  
+  class MDNode;
+
   /// ComputeMaskedBits - Determine which of the bits specified in Mask are
   /// known to be either zero or one and return them in the KnownZero/KnownOne
   /// bit sets.  This code only analyzes bits in Mask, in order to short-circuit
@@ -35,10 +36,10 @@ namespace llvm {
   /// where V is a vector, the mask, known zero, and known one values are the
   /// same width as the vector element, and the bit is set only if it is true
   /// for all of the elements in the vector.
-  void ComputeMaskedBits(Value *V, const APInt &Mask, APInt &KnownZero,
-                         APInt &KnownOne, const TargetData *TD = 0,
-                         unsigned Depth = 0);
-  
+  void ComputeMaskedBits(Value *V,  APInt &KnownZero, APInt &KnownOne,
+                         const TargetData *TD = 0, unsigned Depth = 0);
+  void computeMaskedBitsLoad(const MDNode &Ranges, APInt &KnownZero);
+
   /// ComputeSignBit - Determine whether the sign bit is known to be zero or
   /// one.  Convenience wrapper around ComputeMaskedBits.
   void ComputeSignBit(Value *V, bool &KnownZero, bool &KnownOne,
@@ -149,6 +150,14 @@ namespace llvm {
                       unsigned MaxLookup = 6) {
     return GetUnderlyingObject(const_cast<Value *>(V), TD, MaxLookup);
   }
+
+  /// GetUnderlyingObjects - This method is similar to GetUnderlyingObject
+  /// except that it can look through phi and select instructions and return
+  /// multiple objects.
+  void GetUnderlyingObjects(Value *V,
+                            SmallVectorImpl<Value *> &Objects,
+                            const TargetData *TD = 0,
+                            unsigned MaxLookup = 6);
 
   /// onlyUsedByLifetimeMarkers - Return true if the only users of this pointer
   /// are lifetime markers.

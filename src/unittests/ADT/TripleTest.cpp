@@ -87,6 +87,24 @@ TEST(TripleTest, ParsedIDs) {
   EXPECT_EQ(Triple::Linux, T.getOS());
   EXPECT_EQ(Triple::GNU, T.getEnvironment());
 
+  T = Triple("powerpc-bgp-linux");
+  EXPECT_EQ(Triple::ppc, T.getArch());
+  EXPECT_EQ(Triple::BGP, T.getVendor());
+  EXPECT_EQ(Triple::Linux, T.getOS());
+  EXPECT_EQ(Triple::UnknownEnvironment, T.getEnvironment());
+
+  T = Triple("powerpc-bgp-cnk");
+  EXPECT_EQ(Triple::ppc, T.getArch());
+  EXPECT_EQ(Triple::BGP, T.getVendor());
+  EXPECT_EQ(Triple::CNK, T.getOS());
+  EXPECT_EQ(Triple::UnknownEnvironment, T.getEnvironment());
+
+  T = Triple("powerpc64-bgq-linux");
+  EXPECT_EQ(Triple::ppc64, T.getArch());
+  EXPECT_EQ(Triple::BGQ, T.getVendor());
+  EXPECT_EQ(Triple::Linux, T.getOS());
+  EXPECT_EQ(Triple::UnknownEnvironment, T.getEnvironment());
+
   T = Triple("powerpc-dunno-notsure");
   EXPECT_EQ(Triple::ppc, T.getArch());
   EXPECT_EQ(Triple::UnknownVendor, T.getVendor());
@@ -335,9 +353,14 @@ TEST(TripleTest, BitWidthArchVariants) {
   EXPECT_EQ(Triple::ppc, T.get32BitArchVariant().getArch());
   EXPECT_EQ(Triple::ppc64, T.get64BitArchVariant().getArch());
 
-  T.setArch(Triple::ptx32);
-  EXPECT_EQ(Triple::ptx32, T.get32BitArchVariant().getArch());
-  EXPECT_EQ(Triple::ptx64, T.get64BitArchVariant().getArch());
+  T.setArch(Triple::nvptx);
+  EXPECT_EQ(Triple::nvptx, T.get32BitArchVariant().getArch());
+  EXPECT_EQ(Triple::nvptx64, T.get64BitArchVariant().getArch());
+
+
+  T.setArch(Triple::gpu_32);
+  EXPECT_EQ(Triple::gpu_32, T.get32BitArchVariant().getArch());
+  EXPECT_EQ(Triple::gpu_64, T.get64BitArchVariant().getArch());
 
   T.setArch(Triple::sparc);
   EXPECT_EQ(Triple::sparc, T.get32BitArchVariant().getArch());
@@ -359,9 +382,14 @@ TEST(TripleTest, BitWidthArchVariants) {
   EXPECT_EQ(Triple::ppc, T.get32BitArchVariant().getArch());
   EXPECT_EQ(Triple::ppc64, T.get64BitArchVariant().getArch());
 
-  T.setArch(Triple::ptx64);
-  EXPECT_EQ(Triple::ptx32, T.get32BitArchVariant().getArch());
-  EXPECT_EQ(Triple::ptx64, T.get64BitArchVariant().getArch());
+  T.setArch(Triple::nvptx64);
+  EXPECT_EQ(Triple::nvptx, T.get32BitArchVariant().getArch());
+  EXPECT_EQ(Triple::nvptx64, T.get64BitArchVariant().getArch());
+
+
+  T.setArch(Triple::gpu_64);
+  EXPECT_EQ(Triple::gpu_32, T.get32BitArchVariant().getArch());
+  EXPECT_EQ(Triple::gpu_64, T.get64BitArchVariant().getArch());
 
   T.setArch(Triple::sparcv9);
   EXPECT_EQ(Triple::sparc, T.get32BitArchVariant().getArch());
@@ -370,6 +398,71 @@ TEST(TripleTest, BitWidthArchVariants) {
   T.setArch(Triple::x86_64);
   EXPECT_EQ(Triple::x86, T.get32BitArchVariant().getArch());
   EXPECT_EQ(Triple::x86_64, T.get64BitArchVariant().getArch());
+}
+
+TEST(TripleTest, getOSVersion) {
+  Triple T;
+  unsigned Major, Minor, Micro;
+
+  T = Triple("i386-apple-darwin9");
+  T.getMacOSXVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)10, Major);
+  EXPECT_EQ((unsigned)5, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+  T.getiOSVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)3, Major);
+  EXPECT_EQ((unsigned)0, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+
+  T = Triple("x86_64-apple-darwin9");
+  T.getMacOSXVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)10, Major);
+  EXPECT_EQ((unsigned)5, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+  T.getiOSVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)3, Major);
+  EXPECT_EQ((unsigned)0, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+
+  T = Triple("x86_64-apple-macosx");
+  T.getMacOSXVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)10, Major);
+  EXPECT_EQ((unsigned)4, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+  T.getiOSVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)3, Major);
+  EXPECT_EQ((unsigned)0, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+
+  T = Triple("x86_64-apple-macosx10.7");
+  T.getMacOSXVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)10, Major);
+  EXPECT_EQ((unsigned)7, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+  T.getiOSVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)3, Major);
+  EXPECT_EQ((unsigned)0, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+
+  T = Triple("armv7-apple-ios");
+  T.getMacOSXVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)10, Major);
+  EXPECT_EQ((unsigned)4, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+  T.getiOSVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)3, Major);
+  EXPECT_EQ((unsigned)0, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+
+  T = Triple("armv7-apple-ios5.0");
+  T.getMacOSXVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)10, Major);
+  EXPECT_EQ((unsigned)4, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
+  T.getiOSVersion(Major, Minor, Micro);
+  EXPECT_EQ((unsigned)5, Major);
+  EXPECT_EQ((unsigned)0, Minor);
+  EXPECT_EQ((unsigned)0, Micro);
 }
 
 }

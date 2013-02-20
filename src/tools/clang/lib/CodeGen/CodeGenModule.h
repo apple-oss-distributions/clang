@@ -138,6 +138,7 @@ namespace CodeGen {
     union {
       unsigned char PointerAlignInBytes;
       unsigned char PointerSizeInBytes;
+      unsigned char SizeSizeInBytes;     // sizeof(size_t)
     };
   };
 
@@ -209,8 +210,8 @@ struct ARCEntrypoints {
 /// CodeGenModule - This class organizes the cross-function state that is used
 /// while generating LLVM code.
 class CodeGenModule : public CodeGenTypeCache {
-  CodeGenModule(const CodeGenModule&);  // DO NOT IMPLEMENT
-  void operator=(const CodeGenModule&); // DO NOT IMPLEMENT
+  CodeGenModule(const CodeGenModule &) LLVM_DELETED_FUNCTION;
+  void operator=(const CodeGenModule &) LLVM_DELETED_FUNCTION;
 
   typedef std::vector<std::pair<llvm::Constant*, int> > CtorList;
 
@@ -350,6 +351,8 @@ class CodeGenModule : public CodeGenTypeCache {
   struct {
     int GlobalUniqueCount;
   } Block;
+  
+  GlobalDecl initializedGlobalDecl;
 
   /// @}
 public:
@@ -457,6 +460,8 @@ public:
   bool shouldUseTBAA() const { return TBAA != 0; }
 
   llvm::MDNode *getTBAAInfo(QualType QTy);
+  llvm::MDNode *getTBAAInfoForVTablePtr();
+  llvm::MDNode *getTBAAStructInfo(QualType QTy);
 
   bool isTypeConstant(QualType QTy, bool ExcludeCtorDtor);
 
@@ -469,6 +474,10 @@ public:
   /// setGlobalVisibility - Set the visibility for the given LLVM
   /// GlobalValue.
   void setGlobalVisibility(llvm::GlobalValue *GV, const NamedDecl *D) const;
+
+  /// setTLSMode - Set the TLS mode for the given LLVM GlobalVariable
+  /// for the thread-local variable declaration D.
+  void setTLSMode(llvm::GlobalVariable *GV, const VarDecl &D) const;
 
   /// TypeVisibilityKind - The kind of global variable that is passed to 
   /// setTypeVisibility
@@ -514,6 +523,12 @@ public:
   llvm::GlobalVariable *
   CreateOrReplaceCXXRuntimeVariable(StringRef Name, llvm::Type *Ty,
                                     llvm::GlobalValue::LinkageTypes Linkage);
+
+  /// GetGlobalVarAddressSpace - Return the address space of the underlying
+  /// global variable for D, as determined by its declaration.  Normally this
+  /// is the same as the address space of D's type, but in CUDA, address spaces
+  /// are associated with declarations, not types.
+  unsigned GetGlobalVarAddressSpace(const VarDecl *D, unsigned AddrSpace);
 
   /// GetAddrOfGlobalVar - Return the llvm::Constant for the address of the
   /// given global variable.  If Ty is non-null and if the global doesn't exist,
@@ -579,7 +594,7 @@ public:
 
   /// getUniqueBlockCount - Fetches the global unique block count.
   int getUniqueBlockCount() { return ++Block.GlobalUniqueCount; }
-
+  
   /// getBlockDescriptorType - Fetches the type of a generic block
   /// descriptor.
   llvm::Type *getBlockDescriptorType();
@@ -667,10 +682,9 @@ public:
   /// EmitTopLevelDecl - Emit code for a single top level declaration.
   void EmitTopLevelDecl(Decl *D);
 
-  /// MarkVarRequired - Tell the consumer that this variable must be output.
-  /// This is needed when the definition is initially one that can be deferred,
-  /// but we then see an explicit template instantiation definition.
-  void MarkVarRequired(VarDecl *VD);
+  /// HandleCXXStaticMemberVarInstantiation - Tell the consumer that this
+  // variable has been instantiated.
+  void HandleCXXStaticMemberVarInstantiation(VarDecl *VD);
 
   /// AddUsedGlobal - Add a global which should be forced to be
   /// present in the object file; these are emitted to the llvm.used

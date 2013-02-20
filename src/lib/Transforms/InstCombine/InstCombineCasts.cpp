@@ -34,7 +34,7 @@ static Value *DecomposeSimpleLinearExpr(Value *Val, unsigned &Scale,
   if (BinaryOperator *I = dyn_cast<BinaryOperator>(Val)) {
     // Cannot look past anything that might overflow.
     OverflowingBinaryOperator *OBI = dyn_cast<OverflowingBinaryOperator>(Val);
-    if (OBI && !OBI->hasNoUnsignedWrap()) {
+    if (OBI && !OBI->hasNoUnsignedWrap() && !OBI->hasNoSignedWrap()) {
       Scale = 1;
       Offset = 0;
       return Val;
@@ -541,8 +541,7 @@ Instruction *InstCombiner::transformZExtICmp(ICmpInst *ICI, Instruction &CI,
       // If Op1C some other power of two, convert:
       uint32_t BitWidth = Op1C->getType()->getBitWidth();
       APInt KnownZero(BitWidth, 0), KnownOne(BitWidth, 0);
-      APInt TypeMask(APInt::getAllOnesValue(BitWidth));
-      ComputeMaskedBits(ICI->getOperand(0), TypeMask, KnownZero, KnownOne);
+      ComputeMaskedBits(ICI->getOperand(0), KnownZero, KnownOne);
         
       APInt KnownZeroMask(~KnownZero);
       if (KnownZeroMask.isPowerOf2()) { // Exactly 1 possible 1?
@@ -590,9 +589,8 @@ Instruction *InstCombiner::transformZExtICmp(ICmpInst *ICI, Instruction &CI,
 
       APInt KnownZeroLHS(BitWidth, 0), KnownOneLHS(BitWidth, 0);
       APInt KnownZeroRHS(BitWidth, 0), KnownOneRHS(BitWidth, 0);
-      APInt TypeMask(APInt::getAllOnesValue(BitWidth));
-      ComputeMaskedBits(LHS, TypeMask, KnownZeroLHS, KnownOneLHS);
-      ComputeMaskedBits(RHS, TypeMask, KnownZeroRHS, KnownOneRHS);
+      ComputeMaskedBits(LHS, KnownZeroLHS, KnownOneLHS);
+      ComputeMaskedBits(RHS, KnownZeroRHS, KnownOneRHS);
 
       if (KnownZeroLHS == KnownZeroRHS && KnownOneLHS == KnownOneRHS) {
         APInt KnownBits = KnownZeroLHS | KnownOneLHS;
@@ -650,10 +648,8 @@ static bool CanEvaluateZExtd(Value *V, Type *Ty, unsigned &BitsToClear) {
   if (!I) return false;
   
   // If the input is a truncate from the destination type, we can trivially
-  // eliminate it, even if it has multiple uses.
-  // FIXME: This is currently disabled until codegen can handle this without
-  // pessimizing code, PR5997.
-  if (0 && isa<TruncInst>(I) && I->getOperand(0)->getType() == Ty)
+  // eliminate it.
+  if (isa<TruncInst>(I) && I->getOperand(0)->getType() == Ty)
     return true;
   
   // We can't extend or shrink something that has multiple uses: doing so would
@@ -911,8 +907,7 @@ Instruction *InstCombiner::transformSExtICmp(ICmpInst *ICI, Instruction &CI) {
         ICI->isEquality() && (Op1C->isZero() || Op1C->getValue().isPowerOf2())){
       unsigned BitWidth = Op1C->getType()->getBitWidth();
       APInt KnownZero(BitWidth, 0), KnownOne(BitWidth, 0);
-      APInt TypeMask(APInt::getAllOnesValue(BitWidth));
-      ComputeMaskedBits(Op0, TypeMask, KnownZero, KnownOne);
+      ComputeMaskedBits(Op0, KnownZero, KnownOne);
 
       APInt KnownZeroMask(~KnownZero);
       if (KnownZeroMask.isPowerOf2()) {
@@ -995,11 +990,8 @@ static bool CanEvaluateSExtd(Value *V, Type *Ty) {
   Instruction *I = dyn_cast<Instruction>(V);
   if (!I) return false;
   
-  // If this is a truncate from the dest type, we can trivially eliminate it,
-  // even if it has multiple uses.
-  // FIXME: This is currently disabled until codegen can handle this without
-  // pessimizing code, PR5997.
-  if (0 && isa<TruncInst>(I) && I->getOperand(0)->getType() == Ty)
+  // If this is a truncate from the dest type, we can trivially eliminate it.
+  if (isa<TruncInst>(I) && I->getOperand(0)->getType() == Ty)
     return true;
   
   // We can't extend or shrink something that has multiple uses: doing so would
@@ -1344,10 +1336,9 @@ Instruction *InstCombiner::commonPointerCastTransforms(CastInst &CI) {
     // non-type-safe code.
     if (TD && GEP->hasOneUse() && isa<BitCastInst>(GEP->getOperand(0)) &&
         GEP->hasAllConstantIndices()) {
-      // We are guaranteed to get a constant from EmitGEPOffset.
-      ConstantInt *OffsetV = cast<ConstantInt>(EmitGEPOffset(GEP));
-      int64_t Offset = OffsetV->getSExtValue();
-      
+      SmallVector<Value*, 8> Ops(GEP->idx_begin(), GEP->idx_end());
+      int64_t Offset = TD->getIndexedOffset(GEP->getPointerOperandType(), Ops);
+
       // Get the base pointer input of the bitcast, and the type it points to.
       Value *OrigBase = cast<BitCastInst>(GEP->getOperand(0))->getOperand(0);
       Type *GEPIdxTy =

@@ -13,38 +13,40 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Attributes.h"
 #include "llvm/Constants.h"
+#include "llvm/DebugInfo.h"
 #include "llvm/DerivedTypes.h"
-#include "llvm/Module.h"
+#include "llvm/IRBuilder.h"
 #include "llvm/Instructions.h"
 #include "llvm/IntrinsicInst.h"
 #include "llvm/Intrinsics.h"
-#include "llvm/Attributes.h"
-#include "llvm/Analysis/CallGraph.h"
-#include "llvm/Analysis/DebugInfo.h"
-#include "llvm/Analysis/InstructionSimplify.h"
-#include "llvm/Target/TargetData.h"
-#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Module.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Analysis/CallGraph.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Support/CallSite.h"
-#include "llvm/Support/IRBuilder.h"
+#include "llvm/Target/TargetData.h"
+#include "llvm/Transforms/Utils/Local.h"
 using namespace llvm;
 
-bool llvm::InlineFunction(CallInst *CI, InlineFunctionInfo &IFI, bool InsertLifetime) {
+bool llvm::InlineFunction(CallInst *CI, InlineFunctionInfo &IFI,
+                          bool InsertLifetime) {
   return InlineFunction(CallSite(CI), IFI, InsertLifetime);
 }
-bool llvm::InlineFunction(InvokeInst *II, InlineFunctionInfo &IFI, bool InsertLifetime) {
+bool llvm::InlineFunction(InvokeInst *II, InlineFunctionInfo &IFI,
+                          bool InsertLifetime) {
   return InlineFunction(CallSite(II), IFI, InsertLifetime);
 }
 
 namespace {
   /// A class for recording information about inlining through an invoke.
   class InvokeInliningInfo {
-    BasicBlock *OuterResumeDest; //< Destination of the invoke's unwind.
-    BasicBlock *InnerResumeDest; //< Destination for the callee's resume.
-    LandingPadInst *CallerLPad;  //< LandingPadInst associated with the invoke.
-    PHINode *InnerEHValuesPHI;   //< PHI for EH values from landingpad insts.
+    BasicBlock *OuterResumeDest; ///< Destination of the invoke's unwind.
+    BasicBlock *InnerResumeDest; ///< Destination for the callee's resume.
+    LandingPadInst *CallerLPad;  ///< LandingPadInst associated with the invoke.
+    PHINode *InnerEHValuesPHI;   ///< PHI for EH values from landingpad insts.
     SmallVector<Value*, 8> UnwindDestPHIValues;
 
   public:
@@ -434,8 +436,8 @@ static bool hasLifetimeMarkers(AllocaInst *AI) {
   return false;
 }
 
-/// updateInlinedAtInfo - Helper function used by fixupLineNumbers to recursively
-/// update InlinedAtEntry of a DebugLoc.
+/// updateInlinedAtInfo - Helper function used by fixupLineNumbers to
+/// recursively update InlinedAtEntry of a DebugLoc.
 static DebugLoc updateInlinedAtInfo(const DebugLoc &DL, 
                                     const DebugLoc &InlinedAtDL,
                                     LLVMContext &Ctx) {
@@ -445,7 +447,7 @@ static DebugLoc updateInlinedAtInfo(const DebugLoc &DL,
     return DebugLoc::get(DL.getLine(), DL.getCol(), DL.getScope(Ctx),
                          NewInlinedAtDL.getAsMDNode(Ctx));
   }
-                                             
+
   return DebugLoc::get(DL.getLine(), DL.getCol(), DL.getScope(Ctx),
                        InlinedAtDL.getAsMDNode(Ctx));
 }
@@ -453,7 +455,7 @@ static DebugLoc updateInlinedAtInfo(const DebugLoc &DL,
 /// fixupLineNumbers - Update inlined instructions' line numbers to 
 /// to encode location where these instructions are inlined.
 static void fixupLineNumbers(Function *Fn, Function::iterator FI,
-                              Instruction *TheCall) {
+                             Instruction *TheCall) {
   DebugLoc TheCallDL = TheCall->getDebugLoc();
   if (TheCallDL.isUnknown())
     return;
@@ -484,7 +486,8 @@ static void fixupLineNumbers(Function *Fn, Function::iterator FI,
 /// instruction 'call B' is inlined, and 'B' calls 'C', then the call to 'C' now
 /// exists in the instruction stream.  Similarly this will inline a recursive
 /// function by one level.
-bool llvm::InlineFunction(CallSite CS, InlineFunctionInfo &IFI, bool InsertLifetime) {
+bool llvm::InlineFunction(CallSite CS, InlineFunctionInfo &IFI,
+                          bool InsertLifetime) {
   Instruction *TheCall = CS.getInstruction();
   assert(TheCall->getParent() && TheCall->getParent()->getParent() &&
          "Instruction not in function!");

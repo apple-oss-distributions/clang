@@ -22,6 +22,7 @@
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstPrinter.h"
+#include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -43,7 +44,7 @@ struct TripleMap {
   const char *String;
 };
 
-static struct TripleMap triplemap[] = {
+static const struct TripleMap triplemap[] = {
   { Triple::x86,          "i386-unknown-unknown"    },
   { Triple::x86_64,       "x86_64-unknown-unknown"  },
   { Triple::arm,          "arm-unknown-unknown"     },
@@ -165,10 +166,16 @@ EDDisassembler::EDDisassembler(CPUKey &key) :
     return;
     
   InstInfos = Disassembler->getEDInfo();
-  
+
+  MII.reset(Tgt->createMCInstrInfo());
+
+  if (!MII)
+    return;
+
   InstString.reset(new std::string);
   InstStream.reset(new raw_string_ostream(*InstString));
-  InstPrinter.reset(Tgt->createMCInstPrinter(LLVMSyntaxVariant, *AsmInfo, *STI));
+  InstPrinter.reset(Tgt->createMCInstPrinter(LLVMSyntaxVariant, *AsmInfo,
+                                             *MII, *MRI, *STI));
   
   if (!InstPrinter)
     return;
@@ -249,7 +256,7 @@ void EDDisassembler::initMaps(const MCRegisterInfo &registerInfo) {
   unsigned registerIndex;
   
   for (registerIndex = 0; registerIndex < numRegisters; ++registerIndex) {
-    const char* registerName = registerInfo.get(registerIndex).Name;
+    const char* registerName = registerInfo.getName(registerIndex);
     
     RegVec.push_back(registerName);
     RegRMap[registerName] = registerIndex;
@@ -359,8 +366,9 @@ int EDDisassembler::parseInst(SmallVectorImpl<MCParsedAsmOperand*> &operands,
     instName = OpcodeToken.getString();
     instLoc = OpcodeToken.getLoc();
     
+    ParseInstructionInfo Info;
     if (NextToken.isNot(AsmToken::Eof) &&
-        TargetParser->ParseInstruction(instName, instLoc, operands))
+        TargetParser->ParseInstruction(Info, instName, instLoc, operands))
       ret = -1;
   } else {
     ret = -1;

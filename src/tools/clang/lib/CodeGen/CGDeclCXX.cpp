@@ -98,7 +98,7 @@ static void EmitDeclDestroy(CodeGenFunction &CGF, const VarDecl &D,
     argument = llvm::Constant::getNullValue(CGF.Int8PtrTy);
   }
 
-  CGF.EmitCXXGlobalDtorRegistration(function, argument);
+  CGM.getCXXABI().registerGlobalDtor(CGF, function, argument);
 }
 
 /// Emit code to cause the variable at the given address to be considered as
@@ -145,37 +145,59 @@ void CodeGenFunction::EmitCXXGlobalVarDeclInit(const VarDecl &D,
   EmitStoreOfScalar(RV.getScalarVal(), DeclPtr, false, Alignment, T);
 }
 
-void
-CodeGenFunction::EmitCXXGlobalDtorRegistration(llvm::Constant *DtorFn,
-                                               llvm::Constant *DeclPtr) {
-  // Generate a global destructor entry if not using __cxa_atexit.
-  if (!CGM.getCodeGenOpts().CXAAtExit) {
-    CGM.AddCXXDtorEntry(DtorFn, DeclPtr);
-    return;
-  }
+static llvm::Function *
+CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
+                                   llvm::FunctionType *ty,
+                                   const Twine &name);
 
-  // Get the destructor function type
-  llvm::Type *DtorFnTy = llvm::FunctionType::get(VoidTy, Int8PtrTy, false);
-  DtorFnTy = llvm::PointerType::getUnqual(DtorFnTy);
+/// Create a stub function, suitable for being passed to atexit,
+/// which passes the given address to the given destructor function.
+static llvm::Constant *createAtExitStub(CodeGenModule &CGM,
+                                        llvm::Constant *dtor,
+                                        llvm::Constant *addr) {
+  // Get the destructor function type, void(*)(void).
+  llvm::FunctionType *ty = llvm::FunctionType::get(CGM.VoidTy, false);
+  llvm::Function *fn =
+    CreateGlobalInitOrDestructFunction(CGM, ty,
+                                       Twine("__dtor_", addr->getName()));
 
-  llvm::Type *Params[] = { DtorFnTy, Int8PtrTy, Int8PtrTy };
+  CodeGenFunction CGF(CGM);
 
-  // Get the __cxa_atexit function type
-  // extern "C" int __cxa_atexit ( void (*f)(void *), void *p, void *d );
-  llvm::FunctionType *AtExitFnTy =
-    llvm::FunctionType::get(ConvertType(getContext().IntTy), Params, false);
+  // Initialize debug info if needed.
+  CGF.maybeInitializeDebugInfo();
 
-  llvm::Constant *AtExitFn = CGM.CreateRuntimeFunction(AtExitFnTy,
-                                                       "__cxa_atexit");
-  if (llvm::Function *Fn = dyn_cast<llvm::Function>(AtExitFn))
-    Fn->setDoesNotThrow();
+  CGF.StartFunction(GlobalDecl(), CGM.getContext().VoidTy, fn,
+                    CGM.getTypes().arrangeNullaryFunction(),
+                    FunctionArgList(), SourceLocation());
 
-  llvm::Constant *Handle = CGM.CreateRuntimeVariable(Int8PtrTy,
-                                                     "__dso_handle");
-  llvm::Value *Args[3] = { llvm::ConstantExpr::getBitCast(DtorFn, DtorFnTy),
-                           llvm::ConstantExpr::getBitCast(DeclPtr, Int8PtrTy),
-                           llvm::ConstantExpr::getBitCast(Handle, Int8PtrTy) };
-  Builder.CreateCall(AtExitFn, Args);
+  llvm::CallInst *call = CGF.Builder.CreateCall(dtor, addr);
+ 
+ // Make sure the call and the callee agree on calling convention.
+  if (llvm::Function *dtorFn =
+        dyn_cast<llvm::Function>(dtor->stripPointerCasts()))
+    call->setCallingConv(dtorFn->getCallingConv());
+
+  CGF.FinishFunction();
+
+  return fn;
+}
+
+/// Register a global destructor using the C atexit runtime function.
+void CodeGenFunction::registerGlobalDtorWithAtExit(llvm::Constant *dtor,
+                                                   llvm::Constant *addr) {
+  // Create a function which calls the destructor.
+  llvm::Constant *dtorStub = createAtExitStub(CGM, dtor, addr);
+
+  // extern "C" int atexit(void (*f)(void));
+  llvm::FunctionType *atexitTy =
+    llvm::FunctionType::get(IntTy, dtorStub->getType(), false);
+
+  llvm::Constant *atexit =
+    CGM.CreateRuntimeFunction(atexitTy, "atexit");
+  if (llvm::Function *atexitFn = dyn_cast<llvm::Function>(atexit))
+    atexitFn->setDoesNotThrow();
+
+  Builder.CreateCall(atexit, dtorStub)->setDoesNotThrow();
 }
 
 void CodeGenFunction::EmitCXXGuardedInit(const VarDecl &D,
@@ -195,7 +217,7 @@ void CodeGenFunction::EmitCXXGuardedInit(const VarDecl &D,
 static llvm::Function *
 CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
                                    llvm::FunctionType *FTy,
-                                   StringRef Name) {
+                                   const Twine &Name) {
   llvm::Function *Fn =
     llvm::Function::Create(FTy, llvm::GlobalValue::InternalLinkage,
                            Name, &CGM.getModule());
@@ -208,6 +230,9 @@ CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
 
   if (!CGM.getLangOpts().Exceptions)
     Fn->setDoesNotThrow();
+
+  if (CGM.getLangOpts().AddressSanitizer)
+    Fn->addFnAttr(llvm::Attribute::AddressSafety);
 
   return Fn;
 }
@@ -290,7 +315,7 @@ void CodeGenModule::EmitCXXGlobalDtorFunc() {
   llvm::Function *Fn =
     CreateGlobalInitOrDestructFunction(*this, FTy, "_GLOBAL__D_a");
 
-  CodeGenFunction(*this).GenerateCXXGlobalDtorFunc(Fn, CXXGlobalDtors);
+  CodeGenFunction(*this).GenerateCXXGlobalDtorsFunc(Fn, CXXGlobalDtors);
   AddGlobalDtor(Fn);
 }
 
@@ -299,9 +324,13 @@ void CodeGenFunction::GenerateCXXGlobalVarDeclInitFunc(llvm::Function *Fn,
                                                        const VarDecl *D,
                                                  llvm::GlobalVariable *Addr,
                                                        bool PerformInit) {
-  StartFunction(GlobalDecl(), getContext().VoidTy, Fn,
+  // Check if we need to emit debug info for variable initializer.
+  if (!D->hasAttr<NoDebugAttr>())
+    maybeInitializeDebugInfo();
+
+  StartFunction(GlobalDecl(D), getContext().VoidTy, Fn,
                 getTypes().arrangeNullaryFunction(),
-                FunctionArgList(), SourceLocation());
+                FunctionArgList(), D->getInit()->getExprLoc());
 
   // Use guarded initialization if the global variable is weak. This
   // occurs for, e.g., instantiated static data members and
@@ -319,6 +348,9 @@ void CodeGenFunction::GenerateCXXGlobalVarDeclInitFunc(llvm::Function *Fn,
 void CodeGenFunction::GenerateCXXGlobalInitFunc(llvm::Function *Fn,
                                                 llvm::Constant **Decls,
                                                 unsigned NumDecls) {
+  // Initialize debug info if needed.
+  maybeInitializeDebugInfo();
+
   StartFunction(GlobalDecl(), getContext().VoidTy, Fn,
                 getTypes().arrangeNullaryFunction(),
                 FunctionArgList(), SourceLocation());
@@ -341,9 +373,12 @@ void CodeGenFunction::GenerateCXXGlobalInitFunc(llvm::Function *Fn,
   FinishFunction();
 }
 
-void CodeGenFunction::GenerateCXXGlobalDtorFunc(llvm::Function *Fn,
+void CodeGenFunction::GenerateCXXGlobalDtorsFunc(llvm::Function *Fn,
                   const std::vector<std::pair<llvm::WeakVH, llvm::Constant*> >
                                                 &DtorsAndObjects) {
+  // Initialize debug info if needed.
+  maybeInitializeDebugInfo();
+
   StartFunction(GlobalDecl(), getContext().VoidTy, Fn,
                 getTypes().arrangeNullaryFunction(),
                 FunctionArgList(), SourceLocation());
@@ -379,6 +414,9 @@ CodeGenFunction::generateDestroyHelper(llvm::Constant *addr,
   llvm::FunctionType *FTy = CGM.getTypes().GetFunctionType(FI);
   llvm::Function *fn = 
     CreateGlobalInitOrDestructFunction(CGM, FTy, "__cxx_global_array_dtor");
+
+  // Initialize debug info if needed.
+  maybeInitializeDebugInfo();
 
   StartFunction(GlobalDecl(), getContext().VoidTy, fn, FI, args,
                 SourceLocation());

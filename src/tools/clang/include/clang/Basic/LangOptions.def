@@ -45,13 +45,12 @@ LANGOPT(C99               , 1, 0, "C99")
 LANGOPT(C11               , 1, 0, "C11")
 LANGOPT(MicrosoftExt      , 1, 0, "Microsoft extensions")
 LANGOPT(MicrosoftMode     , 1, 0, "Microsoft compatibility mode")
+LANGOPT(AsmBlocks         , 1, 0, "Microsoft inline asm blocks")
 LANGOPT(Borland           , 1, 0, "Borland extensions")
 LANGOPT(CPlusPlus         , 1, 0, "C++")
 LANGOPT(CPlusPlus0x       , 1, 0, "C++0x")
 LANGOPT(ObjC1             , 1, 0, "Objective-C 1")
 LANGOPT(ObjC2             , 1, 0, "Objective-C 2")
-LANGOPT(ObjCNonFragileABI , 1, 0, "Objective-C modern abi")
-LANGOPT(ObjCNonFragileABI2 , 1, 0, "Objective-C enhanced modern abi")
 BENIGN_LANGOPT(ObjCDefaultSynthProperties , 1, 0, 
                "Objective-C auto-synthesized properties")
 BENIGN_LANGOPT(ObjCInferRelatedResultType , 1, 1, 
@@ -59,6 +58,7 @@ BENIGN_LANGOPT(ObjCInferRelatedResultType , 1, 1,
 LANGOPT(Trigraphs         , 1, 0,"trigraphs")
 LANGOPT(BCPLComment       , 1, 0, "BCPL-style '//' comments")
 LANGOPT(Bool              , 1, 0, "bool, true, and false keywords")
+LANGOPT(WChar             , 1, CPlusPlus, "wchar_t keyword")
 BENIGN_LANGOPT(DollarIdents   , 1, 1, "'$' in identifiers")
 BENIGN_LANGOPT(AsmPreprocessor, 1, 0, "preprocessor in asm mode")
 BENIGN_LANGOPT(GNUMode        , 1, 1, "GNU extensions")
@@ -80,7 +80,6 @@ LANGOPT(SjLjExceptions    , 1, 0, "setjmp-longjump exception handling")
 LANGOPT(TraditionalCPP    , 1, 0, "traditional CPP emulation")
 LANGOPT(RTTI              , 1, 1, "run-time type information")
 LANGOPT(MSBitfields       , 1, 0, "Microsoft-compatible structure layout")
-LANGOPT(NeXTRuntime       , 1, 1, "NeXT Objective-C runtime")
 LANGOPT(Freestanding, 1, 0, "freestanding implementation")
 LANGOPT(NoBuiltin         , 1, 0, "disable builtin functions")
 
@@ -96,11 +95,13 @@ LANGOPT(OptimizeSize      , 1, 0, "__OPTIMIZE_SIZE__ predefined macro")
 LANGOPT(Static            , 1, 0, "__STATIC__ predefined macro (as opposed to __DYNAMIC__)")
 VALUE_LANGOPT(PackStruct  , 32, 0, 
               "default struct packing maximum alignment")
-VALUE_LANGOPT(PICLevel          , 2, 0, "__PIC__ level")
+VALUE_LANGOPT(PICLevel    , 2, 0, "__PIC__ level")
+VALUE_LANGOPT(PIELevel    , 2, 0, "__PIE__ level")
 LANGOPT(GNUInline         , 1, 0, "GNU inline semantics")
 LANGOPT(NoInlineDefine    , 1, 0, "__NO_INLINE__ predefined macro")
 LANGOPT(Deprecated        , 1, 0, "__DEPRECATED predefined macro")
 LANGOPT(FastMath          , 1, 0, "__FAST_MATH__ predefined macro")
+LANGOPT(FiniteMathOnly    , 1, 0, "__FINITE_MATH_ONLY__ predefined macro")
 
 BENIGN_LANGOPT(ObjCGCBitmapPrint , 1, 0, "printing of GC's bitmap layout for __weak/__strong ivars")
 
@@ -111,6 +112,7 @@ LANGOPT(ShortWChar        , 1, 0, "unsigned short wchar_t")
 LANGOPT(ShortEnums        , 1, 0, "short enum types")
 
 LANGOPT(OpenCL            , 1, 0, "OpenCL")
+LANGOPT(OpenCLVersion     , 32, 0, "OpenCL version")
 LANGOPT(CUDA              , 1, 0, "CUDA")
 
 LANGOPT(AssumeSaneOperatorNew , 1, 1, "implicit __attribute__((malloc)) for C++'s new operators")
@@ -124,8 +126,9 @@ BENIGN_LANGOPT(InlineVisibilityHidden , 1, 0, "hidden default visibility for inl
 BENIGN_LANGOPT(ParseUnknownAnytype, 1, 0, "__unknown_anytype")
 BENIGN_LANGOPT(DebuggerSupport , 1, 0, "debugger support")
 BENIGN_LANGOPT(DebuggerCastResultToId, 1, 0, "for 'po' in the debugger, cast the result to id if it is of unknown type")
-BENIGN_LANGOPT(DebuggerObjCLiteral , 1, 0, "debugger objective-C literals and subscripting support")
+BENIGN_LANGOPT(DebuggerObjCLiteral , 1, 0, "debugger Objective-C literals and subscripting support")
 BENIGN_LANGOPT(AddressSanitizer , 1, 0, "AddressSanitizer enabled")
+BENIGN_LANGOPT(ThreadSanitizer , 1, 0, "ThreadSanitizer enabled")
 
 BENIGN_LANGOPT(SpellChecking , 1, 1, "spell-checking")
 LANGOPT(SinglePrecisionConstants , 1, 0, "treating double-precision floating point constants as single precision constants")
@@ -134,7 +137,7 @@ LANGOPT(DefaultFPContract , 1, 0, "FP_CONTRACT")
 LANGOPT(NoBitFieldTypeAlign , 1, 0, "bit-field type alignment")
 LANGOPT(HexagonQdsp6Compat , 1, 0, "hexagon-qdsp6 backward compatibility")
 LANGOPT(ObjCAutoRefCount , 1, 0, "Objective-C automated reference counting")
-LANGOPT(ObjCRuntimeHasWeak , 1, 0, "__weak support in the ARC runtime")
+LANGOPT(ObjCARCWeak         , 1, 0, "__weak support in the ARC runtime")
 LANGOPT(FakeAddressSpaceMap , 1, 0, "OpenCL fake address space map")
 
 LANGOPT(MRTD , 1, 0, "-mrtd calling convention")
@@ -148,6 +151,7 @@ ENUM_LANGOPT(StackProtector, StackProtectorMode, 2, SSPOff,
              "stack protector mode")
 ENUM_LANGOPT(SignedOverflowBehavior, SignedOverflowBehaviorTy, 2, SOB_Undefined,
              "signed integer overflow handling")
+ENUM_LANGOPT(FPContractMode, FPContractModeKind, 2, FPC_On, "FP_CONTRACT mode")
 
 BENIGN_LANGOPT(InstantiationDepth, 32, 512, 
                "maximum template instantiation depth")
@@ -159,6 +163,11 @@ VALUE_LANGOPT(MSCVersion, 32, 0,
               "version of Microsoft Visual C/C++")
 
 LANGOPT(ApplePragmaPack, 1, 0, "Apple gcc-compatible #pragma pack handling")
+
+BENIGN_LANGOPT(EmitMicrosoftInlineAsm , 1, 0, 
+               "Enable emission of MS-style inline assembly.")
+
+BENIGN_LANGOPT(RetainCommentsFromSystemHeaders, 1, 0, "retain documentation comments from system headers in the AST")
 
 #undef LANGOPT
 #undef VALUE_LANGOPT

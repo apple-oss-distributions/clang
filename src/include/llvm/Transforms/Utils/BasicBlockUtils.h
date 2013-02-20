@@ -27,6 +27,7 @@ class AliasAnalysis;
 class Instruction;
 class Pass;
 class ReturnInst;
+class TargetLibraryInfo;
 
 /// DeleteDeadBlock - Delete the specified block, which must have no
 /// predecessors.
@@ -44,7 +45,7 @@ void FoldSingleEntryPHINodes(BasicBlock *BB, Pass *P = 0);
 /// a result. This includes tracing the def-use list from the PHI to see if
 /// it is ultimately unused or if it reaches an unused cycle. Return true
 /// if any PHIs were deleted.
-bool DeleteDeadPHIs(BasicBlock *BB);
+bool DeleteDeadPHIs(BasicBlock *BB, const TargetLibraryInfo *TLI = 0);
 
 /// MergeBlockIntoPredecessor - Attempts to merge a block into its predecessor,
 /// if possible.  The return value indicates success or failure.
@@ -110,7 +111,8 @@ bool isCriticalEdge(const TerminatorInst *TI, unsigned SuccNum,
 ///
 BasicBlock *SplitCriticalEdge(TerminatorInst *TI, unsigned SuccNum,
                               Pass *P = 0, bool MergeIdenticalEdges = false,
-                              bool DontDeleteUselessPHIs = false);
+                              bool DontDeleteUselessPHIs = false,
+                              bool SplitLandingPads = false);
 
 inline BasicBlock *SplitCriticalEdge(BasicBlock *BB, succ_iterator SI,
                                      Pass *P = 0) {
@@ -200,10 +202,6 @@ void SplitLandingPadPredecessors(BasicBlock *OrigBB,ArrayRef<BasicBlock*> Preds,
 /// predecessor.
 ReturnInst *FoldReturnIntoUncondBranch(ReturnInst *RI, BasicBlock *BB,
                                        BasicBlock *Pred);
-
-/// GetFirstDebugLocInBasicBlock - Return first valid DebugLoc entry in a
-/// given basic block.
-DebugLoc GetFirstDebugLocInBasicBlock(const BasicBlock *BB);
 
 } // End llvm namespace
 

@@ -26,6 +26,8 @@
 #include "llvm/MC/MCDisassembler.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstPrinter.h"
+#include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
@@ -45,6 +47,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/system_error.h"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 using namespace llvm;
 using namespace object;
@@ -91,6 +94,12 @@ static cl::alias
 SectionHeadersShorter("h", cl::desc("Alias for --section-headers"),
                       cl::aliasopt(SectionHeaders));
 
+static cl::list<std::string>
+MAttrs("mattr",
+  cl::CommaSeparated,
+  cl::desc("Target specific attributes"),
+  cl::value_desc("a1,+a2,-a3,..."));
+
 static StringRef ToolName;
 
 static bool error(error_code ec) {
@@ -101,29 +110,27 @@ static bool error(error_code ec) {
   return true;
 }
 
-static const Target *GetTarget(const ObjectFile *Obj = NULL) {
+static const Target *getTarget(const ObjectFile *Obj = NULL) {
   // Figure out the target triple.
-  llvm::Triple TT("unknown-unknown-unknown");
+  llvm::Triple TheTriple("unknown-unknown-unknown");
   if (TripleName.empty()) {
     if (Obj)
-      TT.setArch(Triple::ArchType(Obj->getArch()));
+      TheTriple.setArch(Triple::ArchType(Obj->getArch()));
   } else
-    TT.setTriple(Triple::normalize(TripleName));
-
-  if (!ArchName.empty())
-    TT.setArchName(ArchName);
-
-  TripleName = TT.str();
+    TheTriple.setTriple(Triple::normalize(TripleName));
 
   // Get the target specific parser.
   std::string Error;
-  const Target *TheTarget = TargetRegistry::lookupTarget(TripleName, Error);
-  if (TheTarget)
-    return TheTarget;
+  const Target *TheTarget = TargetRegistry::lookupTarget(ArchName, TheTriple,
+                                                         Error);
+  if (!TheTarget) {
+    errs() << ToolName << ": " << Error;
+    return 0;
+  }
 
-  errs() << ToolName << ": error: unable to get target for '" << TripleName
-         << "', see --version and --triple.\n";
-  return 0;
+  // Update the triple name and return the found target.
+  TripleName = TheTriple.getTriple();
+  return TheTarget;
 }
 
 void llvm::StringRefMemoryObject::anchor() { }
@@ -162,10 +169,19 @@ static bool RelocAddressLess(RelocationRef a, RelocationRef b) {
 }
 
 static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
-  const Target *TheTarget = GetTarget(Obj);
-  if (!TheTarget) {
-    // GetTarget prints out stuff.
+  const Target *TheTarget = getTarget(Obj);
+  // getTarget() will have already issued a diagnostic if necessary, so
+  // just bail here if it failed.
+  if (!TheTarget)
     return;
+
+  // Package up features to be passed to target/subtarget
+  std::string FeaturesStr;
+  if (MAttrs.size()) {
+    SubtargetFeatures Features;
+    for (unsigned i = 0; i != MAttrs.size(); ++i)
+      Features.AddFeature(MAttrs[i]);
+    FeaturesStr = Features.getString();
   }
 
   error_code ec;
@@ -205,7 +221,7 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
     if (InlineRelocs) {
       for (relocation_iterator ri = i->begin_relocations(),
                                re = i->end_relocations();
-                              ri != re; ri.increment(ec)) {
+                               ri != re; ri.increment(ec)) {
         if (error(ec)) break;
         Rels.push_back(*ri);
       }
@@ -232,7 +248,7 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
     }
 
     OwningPtr<const MCSubtargetInfo> STI(
-      TheTarget->createMCSubtargetInfo(TripleName, "", ""));
+      TheTarget->createMCSubtargetInfo(TripleName, "", FeaturesStr));
 
     if (!STI) {
       errs() << "error: no subtarget info for target " << TripleName << "\n";
@@ -246,9 +262,21 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
       return;
     }
 
+    OwningPtr<const MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TripleName));
+    if (!MRI) {
+      errs() << "error: no register info for target " << TripleName << "\n";
+      return;
+    }
+
+    OwningPtr<const MCInstrInfo> MII(TheTarget->createMCInstrInfo());
+    if (!MII) {
+      errs() << "error: no instruction info for target " << TripleName << "\n";
+      return;
+    }
+
     int AsmPrinterVariant = AsmInfo->getAssemblerDialect();
     OwningPtr<MCInstPrinter> IP(TheTarget->createMCInstPrinter(
-                                AsmPrinterVariant, *AsmInfo, *STI));
+                                AsmPrinterVariant, *AsmInfo, *MII, *MRI, *STI));
     if (!IP) {
       errs() << "error: no instruction printer for target " << TripleName
              << '\n';
@@ -293,7 +321,7 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
 
         if (DisAsm->getInstruction(Inst, Size, memoryObject, Index,
                                    DebugOut, nulls())) {
-          outs() << format("%8"PRIx64":\t", SectionAddr + Index);
+          outs() << format("%8" PRIx64 ":\t", SectionAddr + Index);
           DumpBytes(StringRef(Bytes.data() + Index, Size));
           IP->printInst(&Inst, outs(), "");
           outs() << "\n";
@@ -320,8 +348,8 @@ static void DisassembleObject(const ObjectFile *Obj, bool InlineRelocs) {
           if (error(rel_cur->getTypeName(name))) goto skip_print_rel;
           if (error(rel_cur->getValueString(val))) goto skip_print_rel;
 
-          outs() << format("\t\t\t%8"PRIx64": ", SectionAddr + addr) << name << "\t"
-                 << val << "\n";
+          outs() << format("\t\t\t%8" PRIx64 ": ", SectionAddr + addr) << name
+                 << "\t" << val << "\n";
 
         skip_print_rel:
           ++rel_cur;
@@ -381,8 +409,8 @@ static void PrintSectionHeaders(const ObjectFile *o) {
     if (error(si->isBSS(BSS))) return;
     std::string Type = (std::string(Text ? "TEXT " : "") +
                         (Data ? "DATA " : "") + (BSS ? "BSS" : ""));
-    outs() << format("%3d %-13s %09"PRIx64" %017"PRIx64" %s\n", i, Name.str().c_str(), Size,
-                     Address, Type.c_str());
+    outs() << format("%3d %-13s %09" PRIx64 " %017" PRIx64 " %s\n",
+                     i, Name.str().c_str(), Size, Address, Type.c_str());
     ++i;
   }
 }
@@ -404,7 +432,7 @@ static void PrintSectionContents(const ObjectFile *o) {
 
     // Dump out the content as hex and printable ascii characters.
     for (std::size_t addr = 0, end = Contents.size(); addr < end; addr += 16) {
-      outs() << format(" %04"PRIx64" ", BaseAddr + addr);
+      outs() << format(" %04" PRIx64 " ", BaseAddr + addr);
       // Dump line of hex.
       for (std::size_t i = 0; i < 16; ++i) {
         if (i != 0 && i % 4 == 0)
@@ -450,9 +478,8 @@ static void PrintCOFFSymbolTable(const COFFObjectFile *coff) {
                << format("assoc %d comdat %d\n"
                          , unsigned(asd->Number)
                          , unsigned(asd->Selection));
-      } else {
+      } else
         outs() << "AUX Unknown\n";
-      }
     } else {
       StringRef name;
       if (error(coff->getSymbol(i, symbol))) return;
@@ -512,7 +539,7 @@ static void PrintSymbolTable(const ObjectFile *o) {
       else if (Type == SymbolRef::ST_Function)
         FileFunc = 'F';
 
-      outs() << format("%08"PRIx64, Address) << " "
+      outs() << format("%08" PRIx64, Address) << " "
              << GlobLoc // Local -> 'l', Global -> 'g', Neither -> ' '
              << (Weak ? 'w' : ' ') // Weak?
              << ' ' // Constructor. Not supported yet.
@@ -532,7 +559,7 @@ static void PrintSymbolTable(const ObjectFile *o) {
         outs() << SectionName;
       }
       outs() << '\t'
-             << format("%08"PRIx64" ", Size)
+             << format("%08" PRIx64 " ", Size)
              << Name
              << '\n';
     }
@@ -596,13 +623,12 @@ static void DumpInput(StringRef file) {
     return;
   }
 
-  if (Archive *a = dyn_cast<Archive>(binary.get())) {
+  if (Archive *a = dyn_cast<Archive>(binary.get()))
     DumpArchive(a);
-  } else if (ObjectFile *o = dyn_cast<ObjectFile>(binary.get())) {
+  else if (ObjectFile *o = dyn_cast<ObjectFile>(binary.get()))
     DumpObject(o);
-  } else {
+  else
     errs() << ToolName << ": '" << file << "': " << "Unrecognized file type.\n";
-  }
 }
 
 int main(int argc, char **argv) {
@@ -616,6 +642,9 @@ int main(int argc, char **argv) {
   llvm::InitializeAllTargetMCs();
   llvm::InitializeAllAsmParsers();
   llvm::InitializeAllDisassemblers();
+
+  // Register the target printer for --version.
+  cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
 
   cl::ParseCommandLineOptions(argc, argv, "llvm object file dumper\n");
   TripleName = Triple::normalize(TripleName);

@@ -18,6 +18,7 @@
 #include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/TypeLoc.h"
+#include "llvm/Support/AlignOf.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
 
@@ -33,7 +34,8 @@ NestedNameSpecifier::FindOrInsert(const ASTContext &Context,
   NestedNameSpecifier *NNS
     = Context.NestedNameSpecifiers.FindNodeOrInsertPos(ID, InsertPos);
   if (!NNS) {
-    NNS = new (Context, 4) NestedNameSpecifier(Mockup);
+    NNS = new (Context, llvm::alignOf<NestedNameSpecifier>())
+        NestedNameSpecifier(Mockup);
     Context.NestedNameSpecifiers.InsertNode(NNS, InsertPos);
   }
 
@@ -107,7 +109,9 @@ NestedNameSpecifier::Create(const ASTContext &Context, IdentifierInfo *II) {
 NestedNameSpecifier *
 NestedNameSpecifier::GlobalSpecifier(const ASTContext &Context) {
   if (!Context.GlobalNestedNameSpecifier)
-    Context.GlobalNestedNameSpecifier = new (Context, 4) NestedNameSpecifier();
+    Context.GlobalNestedNameSpecifier =
+        new (Context, llvm::alignOf<NestedNameSpecifier>())
+            NestedNameSpecifier();
   return Context.GlobalNestedNameSpecifier;
 }
 
@@ -434,9 +438,6 @@ namespace {
   }
 }
 
-NestedNameSpecifierLocBuilder::NestedNameSpecifierLocBuilder()
-  : Representation(0), Buffer(0), BufferSize(0), BufferCapacity(0) { }
-
 NestedNameSpecifierLocBuilder::
 NestedNameSpecifierLocBuilder(const NestedNameSpecifierLocBuilder &Other) 
   : Representation(Other.Representation), Buffer(0),
@@ -497,11 +498,6 @@ operator=(const NestedNameSpecifierLocBuilder &Other) {
   Buffer = static_cast<char *>(malloc(BufferSize));
   memcpy(Buffer, Other.Buffer, BufferSize);
   return *this;
-}
-
-NestedNameSpecifierLocBuilder::~NestedNameSpecifierLocBuilder() {
-  if (BufferCapacity)
-    free(Buffer);
 }
 
 void NestedNameSpecifierLocBuilder::Extend(ASTContext &Context, 
@@ -638,4 +634,3 @@ NestedNameSpecifierLocBuilder::getWithLocInContext(ASTContext &Context) const {
   memcpy(Mem, Buffer, BufferSize);
   return NestedNameSpecifierLoc(Representation, Mem);
 }
-

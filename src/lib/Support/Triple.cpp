@@ -29,6 +29,7 @@ const char *Triple::getArchTypeName(ArchType Kind) {
   case msp430:  return "msp430";
   case ppc64:   return "powerpc64";
   case ppc:     return "powerpc";
+  case r600:    return "r600";
   case sparc:   return "sparc";
   case sparcv9: return "sparcv9";
   case tce:     return "tce";
@@ -37,10 +38,13 @@ const char *Triple::getArchTypeName(ArchType Kind) {
   case x86_64:  return "x86_64";
   case xcore:   return "xcore";
   case mblaze:  return "mblaze";
-  case ptx32:   return "ptx32";
-  case ptx64:   return "ptx64";
+  case nvptx:   return "nvptx";
+  case nvptx64: return "nvptx64";
+  case gpu_32:  return "gpu_32";
+  case gpu_64:  return "gpu_64";
   case le32:    return "le32";
   case amdil:   return "amdil";
+  case spir:    return "spir";
   }
 
   llvm_unreachable("Invalid ArchType!");
@@ -61,7 +65,14 @@ const char *Triple::getArchTypePrefix(ArchType Kind) {
 
   case mblaze:  return "mblaze";
 
-  case hexagon:   return "hexagon";
+  case mips:
+  case mipsel:
+  case mips64:
+  case mips64el:return "mips";
+
+  case hexagon: return "hexagon";
+
+  case r600:    return "r600";
 
   case sparcv9:
   case sparc:   return "sparc";
@@ -71,10 +82,16 @@ const char *Triple::getArchTypePrefix(ArchType Kind) {
 
   case xcore:   return "xcore";
 
-  case ptx32:   return "ptx";
-  case ptx64:   return "ptx";
+  case nvptx:   return "nvptx";
+  case nvptx64: return "nvptx";
+
+
+  case gpu_32:
+  case gpu_64:  return "gpu";
+
   case le32:    return "le32";
   case amdil:   return "amdil";
+  case spir:    return "spir";
   }
 }
 
@@ -85,6 +102,9 @@ const char *Triple::getVendorTypeName(VendorType Kind) {
   case Apple: return "apple";
   case PC: return "pc";
   case SCEI: return "scei";
+  case BGP: return "bgp";
+  case BGQ: return "bgq";
+  case Freescale: return "fsl";
   }
 
   llvm_unreachable("Invalid VendorType!");
@@ -113,6 +133,8 @@ const char *Triple::getOSTypeName(OSType Kind) {
   case Minix: return "minix";
   case RTEMS: return "rtems";
   case NativeClient: return "nacl";
+  case CNK: return "cnk";
+  case Bitrig: return "bitrig";
   }
 
   llvm_unreachable("Invalid OSType");
@@ -126,7 +148,7 @@ const char *Triple::getEnvironmentTypeName(EnvironmentType Kind) {
   case GNUEABI: return "gnueabi";
   case EABI: return "eabi";
   case MachO: return "macho";
-  case ANDROIDEABI: return "androideabi";
+  case Android: return "android";
   }
 
   llvm_unreachable("Invalid EnvironmentType!");
@@ -145,6 +167,7 @@ Triple::ArchType Triple::getArchTypeForLLVMName(StringRef Name) {
     .Case("ppc32", ppc)
     .Case("ppc", ppc)
     .Case("mblaze", mblaze)
+    .Case("r600", r600)
     .Case("hexagon", hexagon)
     .Case("sparc", sparc)
     .Case("sparcv9", sparcv9)
@@ -153,10 +176,13 @@ Triple::ArchType Triple::getArchTypeForLLVMName(StringRef Name) {
     .Case("x86", x86)
     .Case("x86-64", x86_64)
     .Case("xcore", xcore)
-    .Case("ptx32", ptx32)
-    .Case("ptx64", ptx64)
+    .Case("nvptx", nvptx)
+    .Case("nvptx64", nvptx64)
+    .Case("gpu_32", gpu_32)
+    .Case("gpu_64", gpu_64)
     .Case("le32", le32)
     .Case("amdil", amdil)
+    .Case("spir", spir)
     .Default(UnknownArch);
 }
 
@@ -184,9 +210,13 @@ Triple::ArchType Triple::getArchTypeForDarwinArchName(StringRef Str) {
     // This is derived from the driver driver.
     .Cases("arm", "armv4t", "armv5", "armv6", Triple::arm)
     .Cases("armv7", "armv7f", "armv7k", "armv7s", "xscale", Triple::arm)
-    .Case("ptx32", Triple::ptx32)
-    .Case("ptx64", Triple::ptx64)
+    .Case("r600", Triple::r600)
+    .Case("nvptx", Triple::nvptx)
+    .Case("nvptx64", Triple::nvptx64)
+    .Case("gpu_32", Triple::gpu_32)
+    .Case("gpu_64", Triple::gpu_64)
     .Case("amdil", Triple::amdil)
+    .Case("spir", Triple::spir)
     .Default(Triple::UnknownArch);
 }
 
@@ -206,10 +236,12 @@ const char *Triple::getArchNameForAssembler() {
     .Cases("armv5", "armv5e", "thumbv5", "thumbv5e", "armv5")
     .Cases("armv6", "thumbv6", "armv6")
     .Cases("armv7", "thumbv7", "armv7")
-    .Case("ptx32", "ptx32")
-    .Case("ptx64", "ptx64")
+    .Case("r600", "r600")
+    .Case("nvptx", "nvptx")
+    .Case("nvptx64", "nvptx64")
     .Case("le32", "le32")
     .Case("amdil", "amdil")
+    .Case("spir", "spir")
     .Default(NULL);
 }
 
@@ -234,15 +266,19 @@ static Triple::ArchType parseArch(StringRef ArchName) {
     .Cases("mipsel", "mipsallegrexel", Triple::mipsel)
     .Cases("mips64", "mips64eb", Triple::mips64)
     .Case("mips64el", Triple::mips64el)
+    .Case("r600", Triple::r600)
     .Case("hexagon", Triple::hexagon)
     .Case("sparc", Triple::sparc)
     .Case("sparcv9", Triple::sparcv9)
     .Case("tce", Triple::tce)
     .Case("xcore", Triple::xcore)
-    .Case("ptx32", Triple::ptx32)
-    .Case("ptx64", Triple::ptx64)
+    .Case("nvptx", Triple::nvptx)
+    .Case("nvptx64", Triple::nvptx64)
+    .Case("gpu_32", Triple::gpu_32)
+    .Case("gpu_64", Triple::gpu_64)
     .Case("le32", Triple::le32)
     .Case("amdil", Triple::amdil)
+    .Case("spir", Triple::spir)
     .Default(Triple::UnknownArch);
 }
 
@@ -251,6 +287,9 @@ static Triple::VendorType parseVendor(StringRef VendorName) {
     .Case("apple", Triple::Apple)
     .Case("pc", Triple::PC)
     .Case("scei", Triple::SCEI)
+    .Case("bgp", Triple::BGP)
+    .Case("bgq", Triple::BGQ)
+    .Case("fsl", Triple::Freescale)
     .Default(Triple::UnknownVendor);
 }
 
@@ -275,6 +314,8 @@ static Triple::OSType parseOS(StringRef OSName) {
     .StartsWith("minix", Triple::Minix)
     .StartsWith("rtems", Triple::RTEMS)
     .StartsWith("nacl", Triple::NativeClient)
+    .StartsWith("cnk", Triple::CNK)
+    .StartsWith("bitrig", Triple::Bitrig)
     .Default(Triple::UnknownOS);
 }
 
@@ -285,7 +326,7 @@ static Triple::EnvironmentType parseEnvironment(StringRef EnvironmentName) {
     .StartsWith("gnueabi", Triple::GNUEABI)
     .StartsWith("gnu", Triple::GNU)
     .StartsWith("macho", Triple::MachO)
-    .StartsWith("androideabi", Triple::ANDROIDEABI)
+    .StartsWith("android", Triple::Android)
     .Default(Triple::UnknownEnvironment);
 }
 
@@ -571,6 +612,29 @@ bool Triple::getMacOSXVersion(unsigned &Major, unsigned &Minor,
   return true;
 }
 
+void Triple::getiOSVersion(unsigned &Major, unsigned &Minor,
+                           unsigned &Micro) const {
+  switch (getOS()) {
+  default: llvm_unreachable("unexpected OS for Darwin triple");
+  case Darwin:
+  case MacOSX:
+    // Ignore the version from the triple.  This is only handled because the
+    // the clang driver combines OS X and IOS support into a common Darwin
+    // toolchain that wants to know the iOS version number even when targeting
+    // OS X.
+    Major = 3;
+    Minor = 0;
+    Micro = 0;
+    break;
+  case IOS:
+    getOSVersion(Major, Minor, Micro);
+    // Default to 3.0.
+    if (Major == 0)
+      Major = 3;
+    break;
+  }
+}
+
 void Triple::setTriple(const Twine &Str) {
   *this = Triple(Str);
 }
@@ -625,6 +689,7 @@ void Triple::setOSAndEnvironmentName(StringRef Str) {
 
 static unsigned getArchPointerBitWidth(llvm::Triple::ArchType Arch) {
   switch (Arch) {
+  case llvm::Triple::spir:
   case llvm::Triple::UnknownArch:
     return 0;
 
@@ -639,21 +704,24 @@ static unsigned getArchPointerBitWidth(llvm::Triple::ArchType Arch) {
   case llvm::Triple::mblaze:
   case llvm::Triple::mips:
   case llvm::Triple::mipsel:
+  case llvm::Triple::nvptx:
   case llvm::Triple::ppc:
-  case llvm::Triple::ptx32:
+  case llvm::Triple::r600:
   case llvm::Triple::sparc:
   case llvm::Triple::tce:
   case llvm::Triple::thumb:
   case llvm::Triple::x86:
   case llvm::Triple::xcore:
+  case llvm::Triple::gpu_32:
     return 32;
 
   case llvm::Triple::mips64:
   case llvm::Triple::mips64el:
+  case llvm::Triple::nvptx64:
   case llvm::Triple::ppc64:
-  case llvm::Triple::ptx64:
   case llvm::Triple::sparcv9:
   case llvm::Triple::x86_64:
+  case llvm::Triple::gpu_64:
     return 64;
   }
   llvm_unreachable("Invalid architecture value");
@@ -680,6 +748,7 @@ Triple Triple::get32BitArchVariant() const {
     break;
 
   case Triple::amdil:
+  case Triple::spir:
   case Triple::arm:
   case Triple::cellspu:
   case Triple::hexagon:
@@ -687,22 +756,25 @@ Triple Triple::get32BitArchVariant() const {
   case Triple::mblaze:
   case Triple::mips:
   case Triple::mipsel:
+  case Triple::nvptx:
   case Triple::ppc:
-  case Triple::ptx32:
+  case Triple::r600:
   case Triple::sparc:
   case Triple::tce:
   case Triple::thumb:
   case Triple::x86:
   case Triple::xcore:
+  case Triple::gpu_32:
     // Already 32-bit.
     break;
 
   case Triple::mips64:    T.setArch(Triple::mips);    break;
   case Triple::mips64el:  T.setArch(Triple::mipsel);  break;
+  case Triple::nvptx64:   T.setArch(Triple::nvptx);   break;
   case Triple::ppc64:     T.setArch(Triple::ppc);   break;
-  case Triple::ptx64:     T.setArch(Triple::ptx32);   break;
   case Triple::sparcv9:   T.setArch(Triple::sparc);   break;
   case Triple::x86_64:    T.setArch(Triple::x86);     break;
+  case Triple::gpu_64:    T.setArch(Triple::gpu_32);  break;
   }
   return T;
 }
@@ -718,27 +790,31 @@ Triple Triple::get64BitArchVariant() const {
   case Triple::le32:
   case Triple::mblaze:
   case Triple::msp430:
+  case Triple::r600:
   case Triple::tce:
   case Triple::thumb:
   case Triple::xcore:
     T.setArch(UnknownArch);
     break;
 
+  case Triple::spir:
   case Triple::mips64:
   case Triple::mips64el:
+  case Triple::nvptx64:
   case Triple::ppc64:
-  case Triple::ptx64:
   case Triple::sparcv9:
   case Triple::x86_64:
+  case Triple::gpu_64:
     // Already 64-bit.
     break;
 
   case Triple::mips:    T.setArch(Triple::mips64);    break;
   case Triple::mipsel:  T.setArch(Triple::mips64el);  break;
+  case Triple::nvptx:   T.setArch(Triple::nvptx64);   break;
   case Triple::ppc:     T.setArch(Triple::ppc64);     break;
-  case Triple::ptx32:   T.setArch(Triple::ptx64);     break;
   case Triple::sparc:   T.setArch(Triple::sparcv9);   break;
   case Triple::x86:     T.setArch(Triple::x86_64);    break;
+  case Triple::gpu_32:  T.setArch(Triple::gpu_64);    break;
   }
   return T;
 }

@@ -14,13 +14,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "HexagonCallingConvLower.h"
+#include "Hexagon.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "Hexagon.h"
 using namespace llvm;
 
 Hexagon_CCState::Hexagon_CCState(CallingConv::ID CC, bool isVarArg,
@@ -56,11 +56,8 @@ void Hexagon_CCState::HandleByVal(unsigned ValNo, EVT ValVT,
 
 /// MarkAllocated - Mark a register and all of its aliases as allocated.
 void Hexagon_CCState::MarkAllocated(unsigned Reg) {
-  UsedRegs[Reg/32] |= 1 << (Reg&31);
-
-  if (const unsigned *RegAliases = TRI.getAliasSet(Reg))
-    for (; (Reg = *RegAliases); ++RegAliases)
-      UsedRegs[Reg/32] |= 1 << (Reg&31);
+  for (MCRegAliasIterator AI(Reg, &TRI, true); AI.isValid(); ++AI)
+    UsedRegs[*AI/32] |= 1 << (*AI&31);
 }
 
 /// AnalyzeFormalArguments - Analyze an ISD::FORMAL_ARGUMENTS node,

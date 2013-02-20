@@ -25,6 +25,7 @@ add_llvm_library(LLVMScalarOpts
   Reassociate.cpp
   Reg2Mem.cpp
   SCCP.cpp
+  SROA.cpp
   Scalar.cpp
   ScalarReplAggregates.cpp
   SimplifyCFGPass.cpp
@@ -32,3 +33,5 @@ add_llvm_library(LLVMScalarOpts
   Sink.cpp
   TailRecursionElimination.cpp
   )
+
+add_dependencies(LLVMScalarOpts intrinsics_gen)

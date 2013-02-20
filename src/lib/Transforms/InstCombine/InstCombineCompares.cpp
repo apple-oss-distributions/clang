@@ -17,6 +17,7 @@
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Target/TargetData.h"
+#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/Support/PatternMatch.h"
@@ -1028,15 +1029,14 @@ Instruction *InstCombiner::visitICmpInstWithInstAndIntCst(ICmpInst &ICI,
       // of the high bits truncated out of x are known.
       unsigned DstBits = LHSI->getType()->getPrimitiveSizeInBits(),
              SrcBits = LHSI->getOperand(0)->getType()->getPrimitiveSizeInBits();
-      APInt Mask(APInt::getHighBitsSet(SrcBits, SrcBits-DstBits));
       APInt KnownZero(SrcBits, 0), KnownOne(SrcBits, 0);
-      ComputeMaskedBits(LHSI->getOperand(0), Mask, KnownZero, KnownOne);
+      ComputeMaskedBits(LHSI->getOperand(0), KnownZero, KnownOne);
 
       // If all the high bits are known, we can do this xform.
       if ((KnownZero|KnownOne).countLeadingOnes() >= SrcBits-DstBits) {
         // Pull in the high bits from known-ones set.
         APInt NewRHS = RHS->getValue().zext(SrcBits);
-        NewRHS |= KnownOne;
+        NewRHS |= KnownOne & APInt::getHighBitsSet(SrcBits, SrcBits-DstBits);
         return new ICmpInst(ICI.getPredicate(), LHSI->getOperand(0),
                             ConstantInt::get(ICI.getContext(), NewRHS));
       }
@@ -2581,10 +2581,25 @@ Instruction *InstCombiner::visitICmpInst(ICmpInst &I) {
       }
     }
 
+    // Transform (zext A) == (B & (1<<X)-1) --> A == (trunc B)
+    // and       (B & (1<<X)-1) == (zext A) --> A == (trunc B)
+    ConstantInt *Cst1;
+    if ((Op0->hasOneUse() &&
+         match(Op0, m_ZExt(m_Value(A))) &&
+         match(Op1, m_And(m_Value(B), m_ConstantInt(Cst1)))) ||
+        (Op1->hasOneUse() &&
+         match(Op0, m_And(m_Value(B), m_ConstantInt(Cst1))) &&
+         match(Op1, m_ZExt(m_Value(A))))) {
+      APInt Pow2 = Cst1->getValue() + 1;
+      if (Pow2.isPowerOf2() && isa<IntegerType>(A->getType()) &&
+          Pow2.logBase2() == cast<IntegerType>(A->getType())->getBitWidth())
+        return new ICmpInst(I.getPredicate(), A,
+                            Builder->CreateTrunc(B, A->getType()));
+    }
+
     // Transform "icmp eq (trunc (lshr(X, cst1)), cst" to
     // "icmp (and X, mask), cst"
     uint64_t ShAmt = 0;
-    ConstantInt *Cst1;
     if (Op0->hasOneUse() &&
         match(Op0, m_Trunc(m_OneUse(m_LShr(m_Value(A),
                                            m_ConstantInt(ShAmt))))) &&
@@ -2810,7 +2825,7 @@ Instruction *InstCombiner::FoldFCmp_IntToFP_Cst(FCmpInst &I,
       case ICmpInst::ICMP_UGE:
         // (float)int >= -4.4   --> true
         // (float)int >= 4.4    --> int > 4
-        if (!RHS.isNegative())
+        if (RHS.isNegative())
           return ReplaceInstUsesWith(I, ConstantInt::getTrue(I.getContext()));
         Pred = ICmpInst::ICMP_UGT;
         break;
@@ -2971,6 +2986,44 @@ Instruction *InstCombiner::visitFCmpInst(FCmpInst &I) {
                 return Res;
         }
         break;
+      case Instruction::Call: {
+        CallInst *CI = cast<CallInst>(LHSI);
+        LibFunc::Func Func;
+        // Various optimization for fabs compared with zero.
+        if (RHSC->isNullValue() && CI->getCalledFunction() &&
+            TLI->getLibFunc(CI->getCalledFunction()->getName(), Func) &&
+            TLI->has(Func)) {
+          if (Func == LibFunc::fabs || Func == LibFunc::fabsf ||
+              Func == LibFunc::fabsl) {
+            switch (I.getPredicate()) {
+            default: break;
+            // fabs(x) < 0 --> false
+            case FCmpInst::FCMP_OLT:
+              return ReplaceInstUsesWith(I, Builder->getFalse());
+            // fabs(x) > 0 --> x != 0
+            case FCmpInst::FCMP_OGT:
+              return new FCmpInst(FCmpInst::FCMP_ONE, CI->getArgOperand(0),
+                                  RHSC);
+            // fabs(x) <= 0 --> x == 0
+            case FCmpInst::FCMP_OLE:
+              return new FCmpInst(FCmpInst::FCMP_OEQ, CI->getArgOperand(0),
+                                  RHSC);
+            // fabs(x) >= 0 --> !isnan(x)
+            case FCmpInst::FCMP_OGE:
+              return new FCmpInst(FCmpInst::FCMP_ORD, CI->getArgOperand(0),
+                                  RHSC);
+            // fabs(x) == 0 --> x == 0
+            // fabs(x) != 0 --> x != 0
+            case FCmpInst::FCMP_OEQ:
+            case FCmpInst::FCMP_UEQ:
+            case FCmpInst::FCMP_ONE:
+            case FCmpInst::FCMP_UNE:
+              return new FCmpInst(I.getPredicate(), CI->getArgOperand(0),
+                                  RHSC);
+            }
+          }
+        }
+      }
       }
   }
 

@@ -14,6 +14,7 @@
 #include "llvm/MC/MCAsmLayout.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Debug.h"
@@ -135,10 +136,12 @@ void MCExpr::print(raw_ostream &OS) const {
   llvm_unreachable("Invalid expression kind!");
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 void MCExpr::dump() const {
   print(dbgs());
   dbgs() << '\n';
 }
+#endif
 
 /* *** */
 
@@ -196,11 +199,14 @@ StringRef MCSymbolRefExpr::getVariantKindName(VariantKind Kind) {
   case VK_ARM_GOTTPOFF: return "(gottpoff)";
   case VK_ARM_TLSGD: return "(tlsgd)";
   case VK_ARM_TARGET1: return "(target1)";
-  case VK_PPC_TOC: return "toc";
+  case VK_PPC_TOC: return "tocbase";
+  case VK_PPC_TOC_ENTRY: return "toc";
   case VK_PPC_DARWIN_HA16: return "ha16";
   case VK_PPC_DARWIN_LO16: return "lo16";
   case VK_PPC_GAS_HA16: return "ha";
   case VK_PPC_GAS_LO16: return "l";
+  case VK_PPC_TPREL16_HA: return "tprel@ha";
+  case VK_PPC_TPREL16_LO: return "tprel@l";
   case VK_Mips_GPREL: return "GPREL";
   case VK_Mips_GOT_CALL: return "GOT_CALL";
   case VK_Mips_GOT16: return "GOT16";
@@ -219,6 +225,8 @@ StringRef MCSymbolRefExpr::getVariantKindName(VariantKind Kind) {
   case VK_Mips_GOT_DISP: return "GOT_DISP";
   case VK_Mips_GOT_PAGE: return "GOT_PAGE";
   case VK_Mips_GOT_OFST: return "GOT_OFST";
+  case VK_Mips_HIGHER:   return "HIGHER";
+  case VK_Mips_HIGHEST:  return "HIGHEST";
   }
   llvm_unreachable("Invalid variant kind");
 }
@@ -259,7 +267,7 @@ MCSymbolRefExpr::getVariantKindForName(StringRef Name) {
 
 /* *** */
 
-void MCTargetExpr::Anchor() {}
+void MCTargetExpr::anchor() {}
 
 /* *** */
 

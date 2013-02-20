@@ -77,7 +77,9 @@ bool FileRemapper::initFromFile(StringRef filePath, DiagnosticsEngine &Diag,
   for (unsigned idx = 0; idx+3 <= lines.size(); idx += 3) {
     StringRef fromFilename = lines[idx];
     unsigned long long timeModified;
-    lines[idx+1].getAsInteger(10, timeModified);
+    if (lines[idx+1].getAsInteger(10, timeModified))
+      return report("Invalid file data: '" + lines[idx+1] + "' not a number",
+                    Diag);
     StringRef toFilename = lines[idx+2];
     
     const FileEntry *origFE = FileMgr->getFile(fromFilename);
@@ -280,10 +282,7 @@ void FileRemapper::resetTarget(Target &targ) {
     delete oldmem;
   } else {
     const FileEntry *toFE = targ.get<const FileEntry *>();
-    llvm::DenseMap<const FileEntry *, const FileEntry *>::iterator
-      I = ToFromMappings.find(toFE);
-    if (I != ToFromMappings.end())
-      ToFromMappings.erase(I);
+    ToFromMappings.erase(toFE);
   }
 }
 

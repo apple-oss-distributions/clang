@@ -38,6 +38,9 @@ union DataRefImpl {
     uint32_t a, b;
   } d;
   uintptr_t p;
+  DataRefImpl() {
+    std::memset(this, 0, sizeof(DataRefImpl));
+  }
 };
 
 template<class content_type>
@@ -73,13 +76,13 @@ public:
   }
 };
 
-static bool operator ==(const DataRefImpl &a, const DataRefImpl &b) {
+inline bool operator ==(const DataRefImpl &a, const DataRefImpl &b) {
   // Check bitwise identical. This is the only legal way to compare a union w/o
   // knowing which member is in use.
   return std::memcmp(&a, &b, sizeof(DataRefImpl)) == 0;
 }
 
-static bool operator <(const DataRefImpl &a, const DataRefImpl &b) {
+inline bool operator <(const DataRefImpl &a, const DataRefImpl &b) {
   // Check bitwise identical. This is the only legal way to compare a union w/o
   // knowing which member is in use.
   return std::memcmp(&a, &b, sizeof(DataRefImpl)) < 0;
@@ -94,9 +97,7 @@ class RelocationRef {
   const ObjectFile *OwningObject;
 
 public:
-  RelocationRef() : OwningObject(NULL) {
-    std::memset(&RelocationPimpl, 0, sizeof(RelocationPimpl));
-  }
+  RelocationRef() : OwningObject(NULL) { }
 
   RelocationRef(DataRefImpl RelocationP, const ObjectFile *Owner);
 
@@ -125,6 +126,8 @@ public:
   ///
   /// This is for display purposes only.
   error_code getValueString(SmallVectorImpl<char> &Result) const;
+
+  DataRefImpl getRawDataRefImpl() const;
 };
 typedef content_iterator<RelocationRef> relocation_iterator;
 
@@ -136,9 +139,7 @@ class SectionRef {
   const ObjectFile *OwningObject;
 
 public:
-  SectionRef() : OwningObject(NULL) {
-    std::memset(&SectionPimpl, 0, sizeof(SectionPimpl));
-  }
+  SectionRef() : OwningObject(NULL) { }
 
   SectionRef(DataRefImpl SectionP, const ObjectFile *Owner);
 
@@ -159,11 +160,16 @@ public:
   error_code isText(bool &Result) const;
   error_code isData(bool &Result) const;
   error_code isBSS(bool &Result) const;
+  error_code isRequiredForExecution(bool &Result) const;
+  error_code isVirtual(bool &Result) const;
+  error_code isZeroInit(bool &Result) const;
 
   error_code containsSymbol(SymbolRef S, bool &Result) const;
 
   relocation_iterator begin_relocations() const;
   relocation_iterator end_relocations() const;
+
+  DataRefImpl getRawDataRefImpl() const;
 };
 typedef content_iterator<SectionRef> section_iterator;
 
@@ -175,9 +181,7 @@ class SymbolRef {
   const ObjectFile *OwningObject;
 
 public:
-  SymbolRef() : OwningObject(NULL) {
-    std::memset(&SymbolPimpl, 0, sizeof(SymbolPimpl));
-  }
+  SymbolRef() : OwningObject(NULL) { }
 
   enum Type {
     ST_Unknown, // Type not specified
@@ -208,6 +212,8 @@ public:
   error_code getNext(SymbolRef &Result) const;
 
   error_code getName(StringRef &Result) const;
+  /// Returns the symbol virtual address (i.e. address at which it will be
+  /// mapped).
   error_code getAddress(uint64_t &Result) const;
   error_code getFileOffset(uint64_t &Result) const;
   error_code getSize(uint64_t &Result) const;
@@ -219,6 +225,9 @@ public:
 
   /// Get symbol flags (bitwise OR of SymbolRef::Flags)
   error_code getFlags(uint32_t &Result) const;
+
+  /// @brief Return true for common symbols such as uninitialized globals
+  error_code isCommon(bool &Result) const;
 
   /// @brief Get section this symbol is defined in reference to. Result is
   /// end_sections() if it is undefined or is an absolute symbol.
@@ -236,9 +245,7 @@ class LibraryRef {
   const ObjectFile *OwningObject;
 
 public:
-  LibraryRef() : OwningObject(NULL) {
-    std::memset(&LibraryPimpl, 0, sizeof(LibraryPimpl));
-  }
+  LibraryRef() : OwningObject(NULL) { }
 
   LibraryRef(DataRefImpl LibraryP, const ObjectFile *Owner);
 
@@ -261,8 +268,8 @@ const uint64_t UnknownAddressOrSize = ~0ULL;
 /// figure out which type to create.
 class ObjectFile : public Binary {
   virtual void anchor();
-  ObjectFile(); // = delete
-  ObjectFile(const ObjectFile &other); // = delete
+  ObjectFile() LLVM_DELETED_FUNCTION;
+  ObjectFile(const ObjectFile &other) LLVM_DELETED_FUNCTION;
 
 protected:
   ObjectFile(unsigned int Type, MemoryBuffer *source, error_code &ec);
@@ -304,6 +311,11 @@ protected:
   virtual error_code isSectionText(DataRefImpl Sec, bool &Res) const = 0;
   virtual error_code isSectionData(DataRefImpl Sec, bool &Res) const = 0;
   virtual error_code isSectionBSS(DataRefImpl Sec, bool &Res) const = 0;
+  virtual error_code isSectionRequiredForExecution(DataRefImpl Sec,
+                                                   bool &Res) const = 0;
+  // A section is 'virtual' if its contents aren't present in the object image.
+  virtual error_code isSectionVirtual(DataRefImpl Sec, bool &Res) const = 0;
+  virtual error_code isSectionZeroInit(DataRefImpl Sec, bool &Res) const = 0;
   virtual error_code sectionContainsSymbol(DataRefImpl Sec, DataRefImpl Symb,
                                            bool &Result) const = 0;
   virtual relocation_iterator getSectionRelBegin(DataRefImpl Sec) const = 0;
@@ -359,6 +371,11 @@ public:
   virtual StringRef getFileFormatName() const = 0;
   virtual /* Triple::ArchType */ unsigned getArch() const = 0;
 
+  /// For shared objects, returns the name which this object should be
+  /// loaded from at runtime. This corresponds to DT_SONAME on ELF and
+  /// LC_ID_DYLIB (install name) on MachO.
+  virtual StringRef getLoadName() const = 0;
+
   /// @returns Pointer to ObjectFile subclass to handle this type of object.
   /// @param ObjectPath The path to the object file. ObjectPath.isObject must
   ///        return true.
@@ -367,8 +384,7 @@ public:
   static ObjectFile *createObjectFile(MemoryBuffer *Object);
 
   static inline bool classof(const Binary *v) {
-    return v->getType() >= isObject &&
-           v->getType() < lastObject;
+    return v->isObject();
   }
   static inline bool classof(const ObjectFile *v) { return true; }
 
@@ -482,6 +498,18 @@ inline error_code SectionRef::isBSS(bool &Result) const {
   return OwningObject->isSectionBSS(SectionPimpl, Result);
 }
 
+inline error_code SectionRef::isRequiredForExecution(bool &Result) const {
+  return OwningObject->isSectionRequiredForExecution(SectionPimpl, Result);
+}
+
+inline error_code SectionRef::isVirtual(bool &Result) const {
+  return OwningObject->isSectionVirtual(SectionPimpl, Result);
+}
+
+inline error_code SectionRef::isZeroInit(bool &Result) const {
+  return OwningObject->isSectionZeroInit(SectionPimpl, Result);
+}
+
 inline error_code SectionRef::containsSymbol(SymbolRef S, bool &Result) const {
   return OwningObject->sectionContainsSymbol(SectionPimpl, S.SymbolPimpl,
                                              Result);
@@ -495,6 +523,9 @@ inline relocation_iterator SectionRef::end_relocations() const {
   return OwningObject->getSectionRelEnd(SectionPimpl);
 }
 
+inline DataRefImpl SectionRef::getRawDataRefImpl() const {
+  return SectionPimpl;
+}
 
 /// RelocationRef
 inline RelocationRef::RelocationRef(DataRefImpl RelocationP,
@@ -543,6 +574,11 @@ inline error_code RelocationRef::getValueString(SmallVectorImpl<char> &Result)
 inline error_code RelocationRef::getHidden(bool &Result) const {
   return OwningObject->getRelocationHidden(RelocationPimpl, Result);
 }
+
+inline DataRefImpl RelocationRef::getRawDataRefImpl() const {
+  return RelocationPimpl;
+}
+
 // Inline function definitions.
 inline LibraryRef::LibraryRef(DataRefImpl LibraryP, const ObjectFile *Owner)
   : LibraryPimpl(LibraryP)

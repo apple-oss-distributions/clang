@@ -12,12 +12,11 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Thumb1RegisterInfo.h"
 #include "ARM.h"
 #include "ARMBaseInstrInfo.h"
 #include "ARMMachineFunctionInfo.h"
 #include "ARMSubtarget.h"
-#include "Thumb1InstrInfo.h"
-#include "Thumb1RegisterInfo.h"
 #include "MCTargetDesc/ARMAddressingModes.h"
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
@@ -50,13 +49,14 @@ const TargetRegisterClass*
 Thumb1RegisterInfo::getLargestLegalSuperClass(const TargetRegisterClass *RC)
                                                                          const {
   if (ARM::tGPRRegClass.hasSubClassEq(RC))
-    return ARM::tGPRRegisterClass;
+    return &ARM::tGPRRegClass;
   return ARMBaseRegisterInfo::getLargestLegalSuperClass(RC);
 }
 
 const TargetRegisterClass *
-Thumb1RegisterInfo::getPointerRegClass(unsigned Kind) const {
-  return ARM::tGPRRegisterClass;
+Thumb1RegisterInfo::getPointerRegClass(const MachineFunction &MF, unsigned Kind)
+                                                                         const {
+  return &ARM::tGPRRegClass;
 }
 
 /// emitLoadConstPool - Emits a load from constpool to materialize the
@@ -110,7 +110,7 @@ void emitThumbRegPlusImmInReg(MachineBasicBlock &MBB,
     unsigned LdReg = DestReg;
     if (DestReg == ARM::SP) {
       assert(BaseReg == ARM::SP && "Unexpected!");
-      LdReg = MF.getRegInfo().createVirtualRegister(ARM::tGPRRegisterClass);
+      LdReg = MF.getRegInfo().createVirtualRegister(&ARM::tGPRRegClass);
     }
 
     if (NumBytes <= 255 && NumBytes >= 0)
@@ -694,7 +694,7 @@ Thumb1RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
       // register. The offset is already handled in the vreg value.
       MI.getOperand(i+1).ChangeToRegister(FrameReg, false, false, false);
   } else if (MI.mayStore()) {
-      VReg = MF.getRegInfo().createVirtualRegister(ARM::tGPRRegisterClass);
+      VReg = MF.getRegInfo().createVirtualRegister(&ARM::tGPRRegClass);
       bool UseRR = false;
 
       if (Opcode == ARM::tSTRspi) {

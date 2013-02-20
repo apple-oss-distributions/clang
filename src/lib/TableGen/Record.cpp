@@ -18,6 +18,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
@@ -28,6 +29,8 @@ using namespace llvm;
 //===----------------------------------------------------------------------===//
 //    std::string wrapper for DenseMap purposes
 //===----------------------------------------------------------------------===//
+
+namespace llvm {
 
 /// TableGenStringKey - This is a wrapper for std::string suitable for
 /// using as a key to a DenseMap.  Because there isn't a particularly
@@ -43,14 +46,16 @@ public:
   TableGenStringKey(const char *str) : data(str) {}
 
   const std::string &str() const { return data; }
-  
+
+  friend hash_code hash_value(const TableGenStringKey &Value) {
+    using llvm::hash_value;
+    return hash_value(Value.str());
+  }
 private:
   std::string data;
 };
 
 /// Specialize DenseMapInfo for TableGenStringKey.
-namespace llvm {
-
 template<> struct DenseMapInfo<TableGenStringKey> {
   static inline TableGenStringKey getEmptyKey() {
     TableGenStringKey Empty("<<<EMPTY KEY>>>");
@@ -61,7 +66,8 @@ template<> struct DenseMapInfo<TableGenStringKey> {
     return Tombstone;
   }
   static unsigned getHashValue(const TableGenStringKey& Val) {
-    return HashString(Val.str());
+    using llvm::hash_value;
+    return hash_value(Val);
   }
   static bool isEqual(const TableGenStringKey& LHS,
                       const TableGenStringKey& RHS) {
@@ -69,7 +75,7 @@ template<> struct DenseMapInfo<TableGenStringKey> {
   }
 };
 
-}
+} // namespace llvm
 
 //===----------------------------------------------------------------------===//
 //    Type implementations
@@ -106,7 +112,10 @@ Init *BitRecTy::convertValue(IntInit *II) {
 }
 
 Init *BitRecTy::convertValue(TypedInit *VI) {
-  if (dynamic_cast<BitRecTy*>(VI->getType()))
+  RecTy *Ty = VI->getType();
+  if (dynamic_cast<BitRecTy*>(Ty) ||
+      dynamic_cast<BitsRecTy*>(Ty) ||
+      dynamic_cast<IntRecTy*>(Ty))
     return VI;  // Accept variable if it is already of bit type!
   return 0;
 }
@@ -172,60 +181,15 @@ Init *BitsRecTy::convertValue(BitsInit *BI) {
 }
 
 Init *BitsRecTy::convertValue(TypedInit *VI) {
-  if (BitsRecTy *BRT = dynamic_cast<BitsRecTy*>(VI->getType()))
-    if (BRT->Size == Size) {
-      SmallVector<Init *, 16> NewBits(Size);
- 
-      for (unsigned i = 0; i != Size; ++i)
-        NewBits[i] = VarBitInit::get(VI, i);
-      return BitsInit::get(NewBits);
-    }
-
   if (Size == 1 && dynamic_cast<BitRecTy*>(VI->getType()))
     return BitsInit::get(VI);
 
-  if (TernOpInit *Tern = dynamic_cast<TernOpInit*>(VI)) {
-    if (Tern->getOpcode() == TernOpInit::IF) {
-      Init *LHS = Tern->getLHS();
-      Init *MHS = Tern->getMHS();
-      Init *RHS = Tern->getRHS();
+  if (VI->getType()->typeIsConvertibleTo(this)) {
+    SmallVector<Init *, 16> NewBits(Size);
 
-      IntInit *MHSi = dynamic_cast<IntInit*>(MHS);
-      IntInit *RHSi = dynamic_cast<IntInit*>(RHS);
-
-      if (MHSi && RHSi) {
-        int64_t MHSVal = MHSi->getValue();
-        int64_t RHSVal = RHSi->getValue();
-
-        if (canFitInBitfield(MHSVal, Size) && canFitInBitfield(RHSVal, Size)) {
-          SmallVector<Init *, 16> NewBits(Size);
-
-          for (unsigned i = 0; i != Size; ++i)
-            NewBits[i] =
-              TernOpInit::get(TernOpInit::IF, LHS,
-                              IntInit::get((MHSVal & (1LL << i)) ? 1 : 0),
-                              IntInit::get((RHSVal & (1LL << i)) ? 1 : 0),
-                              VI->getType());
-
-          return BitsInit::get(NewBits);
-        }
-      } else {
-        BitsInit *MHSbs = dynamic_cast<BitsInit*>(MHS);
-        BitsInit *RHSbs = dynamic_cast<BitsInit*>(RHS);
-
-        if (MHSbs && RHSbs) {
-          SmallVector<Init *, 16> NewBits(Size);
-
-          for (unsigned i = 0; i != Size; ++i)
-            NewBits[i] = TernOpInit::get(TernOpInit::IF, LHS,
-                                         MHSbs->getBit(i),
-                                         RHSbs->getBit(i),
-                                         VI->getType());
-
-          return BitsInit::get(NewBits);
-        }
-      }
-    }
+    for (unsigned i = 0; i != Size; ++i)
+      NewBits[i] = VarBitInit::get(VI, i);
+    return BitsInit::get(NewBits);
   }
 
   return 0;
@@ -380,57 +344,53 @@ bool RecordRecTy::baseClassOf(const RecordRecTy *RHS) const {
   return false;
 }
 
-
 /// resolveTypes - Find a common type that T1 and T2 convert to.
 /// Return 0 if no such type exists.
 ///
 RecTy *llvm::resolveTypes(RecTy *T1, RecTy *T2) {
-  if (!T1->typeIsConvertibleTo(T2)) {
-    if (!T2->typeIsConvertibleTo(T1)) {
-      // If one is a Record type, check superclasses
-      RecordRecTy *RecTy1 = dynamic_cast<RecordRecTy*>(T1);
-      if (RecTy1) {
-        // See if T2 inherits from a type T1 also inherits from
-        const std::vector<Record *> &T1SuperClasses =
-          RecTy1->getRecord()->getSuperClasses();
-        for(std::vector<Record *>::const_iterator i = T1SuperClasses.begin(),
-              iend = T1SuperClasses.end();
-            i != iend;
-            ++i) {
-          RecordRecTy *SuperRecTy1 = RecordRecTy::get(*i);
-          RecTy *NewType1 = resolveTypes(SuperRecTy1, T2);
-          if (NewType1 != 0) {
-            if (NewType1 != SuperRecTy1) {
-              delete SuperRecTy1;
-            }
-            return NewType1;
-          }
-        }
-      }
-      RecordRecTy *RecTy2 = dynamic_cast<RecordRecTy*>(T2);
-      if (RecTy2) {
-        // See if T1 inherits from a type T2 also inherits from
-        const std::vector<Record *> &T2SuperClasses =
-          RecTy2->getRecord()->getSuperClasses();
-        for (std::vector<Record *>::const_iterator i = T2SuperClasses.begin(),
-              iend = T2SuperClasses.end();
-            i != iend;
-            ++i) {
-          RecordRecTy *SuperRecTy2 = RecordRecTy::get(*i);
-          RecTy *NewType2 = resolveTypes(T1, SuperRecTy2);
-          if (NewType2 != 0) {
-            if (NewType2 != SuperRecTy2) {
-              delete SuperRecTy2;
-            }
-            return NewType2;
-          }
-        }
-      }
-      return 0;
-    }
+  if (T1->typeIsConvertibleTo(T2))
     return T2;
+  if (T2->typeIsConvertibleTo(T1))
+    return T1;
+
+  // If one is a Record type, check superclasses
+  if (RecordRecTy *RecTy1 = dynamic_cast<RecordRecTy*>(T1)) {
+    // See if T2 inherits from a type T1 also inherits from
+    const std::vector<Record *> &T1SuperClasses =
+      RecTy1->getRecord()->getSuperClasses();
+    for(std::vector<Record *>::const_iterator i = T1SuperClasses.begin(),
+          iend = T1SuperClasses.end();
+        i != iend;
+        ++i) {
+      RecordRecTy *SuperRecTy1 = RecordRecTy::get(*i);
+      RecTy *NewType1 = resolveTypes(SuperRecTy1, T2);
+      if (NewType1 != 0) {
+        if (NewType1 != SuperRecTy1) {
+          delete SuperRecTy1;
+        }
+        return NewType1;
+      }
+    }
   }
-  return T1;
+  if (RecordRecTy *RecTy2 = dynamic_cast<RecordRecTy*>(T2)) {
+    // See if T1 inherits from a type T2 also inherits from
+    const std::vector<Record *> &T2SuperClasses =
+      RecTy2->getRecord()->getSuperClasses();
+    for (std::vector<Record *>::const_iterator i = T2SuperClasses.begin(),
+          iend = T2SuperClasses.end();
+        i != iend;
+        ++i) {
+      RecordRecTy *SuperRecTy2 = RecordRecTy::get(*i);
+      RecTy *NewType2 = resolveTypes(T1, SuperRecTy2);
+      if (NewType2 != 0) {
+        if (NewType2 != SuperRecTy2) {
+          delete SuperRecTy2;
+        }
+        return NewType2;
+      }
+    }
+  }
+  return 0;
 }
 
 
@@ -513,6 +473,15 @@ std::string BitsInit::getAsString() const {
   return Result + " }";
 }
 
+// Fix bit initializer to preserve the behavior that bit reference from a unset
+// bits initializer will resolve into VarBitInit to keep the field name and bit
+// number used in targets with fixed insn length.
+static Init *fixBitInit(const RecordVal *RV, Init *Before, Init *After) {
+  if (RV || After != UnsetInit::get())
+    return After;
+  return Before;
+}
+
 // resolveReferences - If there are any field references that refer to fields
 // that have been filled in, we can propagate the values now.
 //
@@ -520,16 +489,39 @@ Init *BitsInit::resolveReferences(Record &R, const RecordVal *RV) const {
   bool Changed = false;
   SmallVector<Init *, 16> NewBits(getNumBits());
 
-  for (unsigned i = 0, e = Bits.size(); i != e; ++i) {
-    Init *B;
-    Init *CurBit = getBit(i);
+  Init *CachedInit = 0;
+  Init *CachedBitVar = 0;
+  bool CachedBitVarChanged = false;
 
-    do {
-      B = CurBit;
-      CurBit = CurBit->resolveReferences(R, RV);
-      Changed |= B != CurBit;
-    } while (B != CurBit);
+  for (unsigned i = 0, e = getNumBits(); i != e; ++i) {
+    Init *CurBit = Bits[i];
+    Init *CurBitVar = CurBit->getBitVar();
+
     NewBits[i] = CurBit;
+
+    if (CurBitVar == CachedBitVar) {
+      if (CachedBitVarChanged) {
+        Init *Bit = CachedInit->getBit(CurBit->getBitNum());
+        NewBits[i] = fixBitInit(RV, CurBit, Bit);
+      }
+      continue;
+    }
+    CachedBitVar = CurBitVar;
+    CachedBitVarChanged = false;
+
+    Init *B;
+    do {
+      B = CurBitVar;
+      CurBitVar = CurBitVar->resolveReferences(R, RV);
+      CachedBitVarChanged |= B != CurBitVar;
+      Changed |= B != CurBitVar;
+    } while (B != CurBitVar);
+    CachedInit = CurBitVar;
+
+    if (CachedBitVarChanged) {
+      Init *Bit = CurBitVar->getBit(CurBit->getBitNum());
+      NewBits[i] = fixBitInit(RV, CurBit, Bit);
+    }
   }
 
   if (Changed)
@@ -676,20 +668,6 @@ std::string ListInit::getAsString() const {
   return Result + "]";
 }
 
-Init *OpInit::resolveBitReference(Record &R, const RecordVal *IRV,
-                                  unsigned Bit) const {
-  Init *Folded = Fold(&R, 0);
-
-  if (Folded != this) {
-    TypedInit *Typed = dynamic_cast<TypedInit *>(Folded);
-    if (Typed) {
-      return Typed->resolveBitReference(R, IRV, Bit);
-    }
-  }
-
-  return 0;
-}
-
 Init *OpInit::resolveListElementReference(Record &R, const RecordVal *IRV,
                                           unsigned Elt) const {
   Init *Resolved = resolveReferences(R, IRV);
@@ -710,6 +688,12 @@ Init *OpInit::resolveListElementReference(Record &R, const RecordVal *IRV,
   }
 
   return 0;
+}
+
+Init *OpInit::getBit(unsigned Bit) const {
+  if (getType() == BitRecTy::get())
+    return const_cast<OpInit*>(this);
+  return VarBitInit::get(const_cast<OpInit*>(this), Bit);
 }
 
 UnOpInit *UnOpInit::get(UnaryOp opc, Init *lhs, RecTy *Type) {
@@ -916,9 +900,9 @@ Init *BinOpInit::Fold(Record *CurRec, MultiClass *CurMultiClass) const {
   case EQ: {
     // try to fold eq comparison for 'bit' and 'int', otherwise fallback
     // to string objects.
-    IntInit* L =
+    IntInit *L =
       dynamic_cast<IntInit*>(LHS->convertInitializerTo(IntRecTy::get()));
-    IntInit* R =
+    IntInit *R =
       dynamic_cast<IntInit*>(RHS->convertInitializerTo(IntRecTy::get()));
 
     if (L && R)
@@ -1318,25 +1302,10 @@ const std::string &VarInit::getName() const {
   return NameString->getValue();
 }
 
-Init *VarInit::resolveBitReference(Record &R, const RecordVal *IRV,
-                                   unsigned Bit) const {
-  if (R.isTemplateArg(getNameInit())) return 0;
-  if (IRV && IRV->getNameInit() != getNameInit()) return 0;
-
-  RecordVal *RV = R.getValue(getNameInit());
-  assert(RV && "Reference to a non-existent variable?");
-  assert(dynamic_cast<BitsInit*>(RV->getValue()));
-  BitsInit *BI = (BitsInit*)RV->getValue();
-
-  assert(Bit < BI->getNumBits() && "Bit reference out of range!");
-  Init *B = BI->getBit(Bit);
-
-  // If the bit is set to some value, or if we are resolving a reference to a
-  // specific variable and that variable is explicitly unset, then replace the
-  // VarBitInit with it.
-  if (IRV || !dynamic_cast<UnsetInit*>(B))
-    return B;
-  return 0;
+Init *VarInit::getBit(unsigned Bit) const {
+  if (getType() == BitRecTy::get())
+    return const_cast<VarInit*>(this);
+  return VarBitInit::get(const_cast<VarInit*>(this), Bit);
 }
 
 Init *VarInit::resolveListElementReference(Record &R,
@@ -1419,9 +1388,11 @@ std::string VarBitInit::getAsString() const {
 }
 
 Init *VarBitInit::resolveReferences(Record &R, const RecordVal *RV) const {
-  if (Init *I = getVariable()->resolveBitReference(R, RV, getBitNum()))
-    return I;
-  return const_cast<VarBitInit *>(this);
+  Init *I = TI->resolveReferences(R, RV);
+  if (TI != I)
+    return I->getBit(getBitNum());
+
+  return const_cast<VarBitInit*>(this);
 }
 
 VarListElementInit *VarListElementInit::get(TypedInit *T,
@@ -1450,11 +1421,10 @@ VarListElementInit::resolveReferences(Record &R, const RecordVal *RV) const {
   return const_cast<VarListElementInit *>(this);
 }
 
-Init *VarListElementInit::resolveBitReference(Record &R, const RecordVal *RV,
-                                              unsigned Bit) const {
-  // FIXME: This should be implemented, to support references like:
-  // bit B = AA[0]{1};
-  return 0;
+Init *VarListElementInit::getBit(unsigned Bit) const {
+  if (getType() == BitRecTy::get())
+    return const_cast<VarListElementInit*>(this);
+  return VarBitInit::get(const_cast<VarListElementInit*>(this), Bit);
 }
 
 Init *VarListElementInit:: resolveListElementReference(Record &R,
@@ -1507,17 +1477,10 @@ FieldInit *FieldInit::get(Init *R, const std::string &FN) {
   return I;
 }
 
-Init *FieldInit::resolveBitReference(Record &R, const RecordVal *RV,
-                                     unsigned Bit) const {
-  if (Init *BitsVal = Rec->getFieldInit(R, RV, FieldName))
-    if (BitsInit *BI = dynamic_cast<BitsInit*>(BitsVal)) {
-      assert(Bit < BI->getNumBits() && "Bit reference out of range!");
-      Init *B = BI->getBit(Bit);
-
-      if (dynamic_cast<BitInit*>(B))  // If the bit is set.
-        return B;                     // Replace the VarBitInit with it.
-    }
-  return 0;
+Init *FieldInit::getBit(unsigned Bit) const {
+  if (getType() == BitRecTy::get())
+    return const_cast<FieldInit*>(this);
+  return VarBitInit::get(const_cast<FieldInit*>(this), Bit);
 }
 
 Init *FieldInit::resolveListElementReference(Record &R, const RecordVal *RV,
@@ -1693,7 +1656,7 @@ void Record::checkName() {
   assert(TypedName && "Record name is not typed!");
   RecTy *Type = TypedName->getType();
   if (dynamic_cast<StringRecTy *>(Type) == 0) {
-    throw "Record name is not a string!";
+    throw TGError(getLoc(), "Record name is not a string!");
   }
 }
 
@@ -1720,12 +1683,6 @@ void Record::setName(Init *NewName) {
   }  // Otherwise this isn't yet registered.
   Name = NewName;
   checkName();
-  // Since the Init for the name was changed, see if we can resolve
-  // any of it using members of the Record.
-  Init *ComputedName = Name->resolveReferences(*this, 0);
-  if (ComputedName != Name) {
-    setName(ComputedName);
-  }
   // DO NOT resolve record values to the name at this point because
   // there might be default values for arguments of this def.  Those
   // arguments might not have been resolved yet so we don't want to
@@ -1748,8 +1705,18 @@ void Record::setName(const std::string &Name) {
 /// references.
 void Record::resolveReferencesTo(const RecordVal *RV) {
   for (unsigned i = 0, e = Values.size(); i != e; ++i) {
+    if (RV == &Values[i]) // Skip resolve the same field as the given one
+      continue;
     if (Init *V = Values[i].getValue())
-      Values[i].setValue(V->resolveReferences(*this, RV));
+      if (Values[i].setValue(V->resolveReferences(*this, RV)))
+        throw TGError(getLoc(), "Invalid value is found when setting '"
+                      + Values[i].getNameInitAsString()
+                      + "' after resolving references"
+                      + (RV ? " against '" + RV->getNameInitAsString()
+                              + "' of ("
+                              + RV->getValue()->getAsUnquotedString() + ")"
+                            : "")
+                      + "\n");
   }
   Init *OldName = getNameInit();
   Init *NewName = Name->resolveReferences(*this, RV);
@@ -1955,6 +1922,23 @@ bool Record::getValueAsBit(StringRef FieldName) const {
     throw "Record `" + getName() + "' does not have a field named `" +
       FieldName.str() + "'!\n";
 
+  if (BitInit *BI = dynamic_cast<BitInit*>(R->getValue()))
+    return BI->getValue();
+  throw "Record `" + getName() + "', field `" + FieldName.str() +
+        "' does not have a bit initializer!";
+}
+
+bool Record::getValueAsBitOrUnset(StringRef FieldName, bool &Unset) const {
+  const RecordVal *R = getValue(FieldName);
+  if (R == 0 || R->getValue() == 0)
+    throw "Record `" + getName() + "' does not have a field named `" +
+      FieldName.str() + "'!\n";
+
+  if (R->getValue() == UnsetInit::get()) {
+    Unset = true;
+    return false;
+  }
+  Unset = false;
   if (BitInit *BI = dynamic_cast<BitInit*>(R->getValue()))
     return BI->getValue();
   throw "Record `" + getName() + "', field `" + FieldName.str() +

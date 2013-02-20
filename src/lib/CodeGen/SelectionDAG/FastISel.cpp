@@ -40,6 +40,7 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "isel"
+#include "llvm/DebugInfo.h"
 #include "llvm/Function.h"
 #include "llvm/GlobalVariable.h"
 #include "llvm/Instructions.h"
@@ -51,10 +52,10 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/Analysis/DebugInfo.h"
 #include "llvm/Analysis/Loads.h"
 #include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetInstrInfo.h"
+#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -136,15 +137,8 @@ unsigned FastISel::getRegForValue(const Value *V) {
       return 0;
   }
 
-  // Look up the value to see if we already have a register for it. We
-  // cache values defined by Instructions across blocks, and other values
-  // only locally. This is because Instructions already have the SSA
-  // def-dominates-use requirement enforced.
-  DenseMap<const Value *, unsigned>::iterator I = FuncInfo.ValueMap.find(V);
-  if (I != FuncInfo.ValueMap.end())
-    return I->second;
-
-  unsigned Reg = LocalValueMap[V];
+  // Look up the value to see if we already have a register for it.
+  unsigned Reg = lookUpRegForValue(V);
   if (Reg != 0)
     return Reg;
 
@@ -199,7 +193,7 @@ unsigned FastISel::materializeRegForValue(const Value *V, MVT VT) {
       uint32_t IntBitWidth = IntVT.getSizeInBits();
       bool isExact;
       (void) Flt.convertToInteger(x, IntBitWidth, /*isSigned=*/true,
-                                APFloat::rmTowardZero, &isExact);
+                                  APFloat::rmTowardZero, &isExact);
       if (isExact) {
         APInt IntVal(IntBitWidth, x);
 
@@ -402,6 +396,13 @@ bool FastISel::SelectBinaryOp(const User *I, unsigned ISDOpcode) {
       ISDOpcode = ISD::SRA;
     }
 
+    // Transform "urem x, pow2" -> "and x, pow2-1".
+    if (ISDOpcode == ISD::UREM && isa<BinaryOperator>(I) &&
+        isPowerOf2_64(Imm)) {
+      --Imm;
+      ISDOpcode = ISD::AND;
+    }
+
     unsigned ResultReg = FastEmit_ri_(VT.getSimpleVT(), ISDOpcode, Op0,
                                       Op0IsKill, Imm, VT.getSimpleVT());
     if (ResultReg == 0) return false;
@@ -484,7 +485,7 @@ bool FastISel::SelectGetElementPtr(const User *I) {
       if (const ConstantInt *CI = dyn_cast<ConstantInt>(Idx)) {
         if (CI->isZero()) continue;
         // N = N + Offset
-        TotalOffs += 
+        TotalOffs +=
           TD.getTypeAllocSize(Ty)*cast<ConstantInt>(CI)->getSExtValue();
         if (TotalOffs >= MaxOffs) {
           N = FastEmit_ri_(VT, ISD::ADD, N, NIsKill, TotalOffs, VT);
@@ -573,7 +574,10 @@ bool FastISel::SelectCall(const User *I) {
     // At -O0 we don't care about the lifetime intrinsics.
   case Intrinsic::lifetime_start:
   case Intrinsic::lifetime_end:
+    // The donothing intrinsic does, well, nothing.
+  case Intrinsic::donothing:
     return true;
+
   case Intrinsic::dbg_declare: {
     const DbgDeclareInst *DI = cast<DbgDeclareInst>(Call);
     if (!DIVariable(DI->getVariable()).Verify() ||
@@ -594,12 +598,23 @@ bool FastISel::SelectCall(const User *I) {
       // Some arguments' frame index is recorded during argument lowering.
       Offset = FuncInfo.getArgumentFrameIndex(Arg);
       if (Offset)
-	Reg = TRI.getFrameRegister(*FuncInfo.MF);
+        Reg = TRI.getFrameRegister(*FuncInfo.MF);
     }
     if (!Reg)
       Reg = lookUpRegForValue(Address);
 
-    if (!Reg && isa<Instruction>(Address) &&
+    // If we have a VLA that has a "use" in a metadata node that's then used
+    // here but it has no other uses, then we have a problem. E.g.,
+    //
+    //   int foo (const int *x) {
+    //     char a[*x];
+    //     return 0;
+    //   }
+    //
+    // If we assign 'a' a vreg and fast isel later on has to use the selection
+    // DAG isel, it will want to copy the value to the vreg. However, there are
+    // no uses, which goes counter to what selection DAG isel expects.
+    if (!Reg && !Address->use_empty() && isa<Instruction>(Address) &&
         (!isa<AllocaInst>(Address) ||
          !FuncInfo.StaticAllocaMap.count(cast<AllocaInst>(Address))))
       Reg = FuncInfo.InitializeRegForValue(Address);
@@ -609,6 +624,10 @@ bool FastISel::SelectCall(const User *I) {
               TII.get(TargetOpcode::DBG_VALUE))
         .addReg(Reg, RegState::Debug).addImm(Offset)
         .addMetadata(DI->getVariable());
+    else
+      // We can't yet handle anything else here because it would require
+      // generating code, thus altering codegen because of debug info.
+      DEBUG(dbgs() << "Dropping debug info for " << DI);
     return true;
   }
   case Intrinsic::dbg_value: {
@@ -627,7 +646,7 @@ bool FastISel::SelectCall(const User *I) {
         BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, II)
           .addCImm(CI).addImm(DI->getOffset())
           .addMetadata(DI->getVariable());
-      else 
+      else
         BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, II)
           .addImm(CI->getZExtValue()).addImm(DI->getOffset())
           .addMetadata(DI->getVariable());
@@ -771,13 +790,24 @@ FastISel::SelectInstruction(const Instruction *I) {
 
   MachineBasicBlock::iterator SavedInsertPt = FuncInfo.InsertPt;
 
+  // As a special case, don't handle calls to builtin library functions that
+  // may be translated directly to target instructions.
+  if (const CallInst *Call = dyn_cast<CallInst>(I)) {
+    const Function *F = Call->getCalledFunction();
+    LibFunc::Func Func;
+    if (F && !F->hasLocalLinkage() && F->hasName() &&
+        LibInfo->getLibFunc(F->getName(), Func) &&
+        LibInfo->hasOptimizedCodeGen(Func))
+      return false;
+  }
+
   // First, try doing target-independent selection.
   if (SelectOperator(I, I->getOpcode())) {
     ++NumFastIselSuccessIndependent;
     DL = DebugLoc();
     return true;
   }
-  // Remove dead code.  However, ignore call instructions since we've flushed 
+  // Remove dead code.  However, ignore call instructions since we've flushed
   // the local value map and recomputed the insert point.
   if (!isa<CallInst>(I)) {
     recomputeInsertPt();
@@ -806,8 +836,11 @@ FastISel::SelectInstruction(const Instruction *I) {
 /// the CFG.
 void
 FastISel::FastEmitBranch(MachineBasicBlock *MSucc, DebugLoc DL) {
-  if (FuncInfo.MBB->isLayoutSuccessor(MSucc)) {
-    // The unconditional fall-through case, which needs no instructions.
+
+  if (FuncInfo.MBB->getBasicBlock()->size() > 1 && FuncInfo.MBB->isLayoutSuccessor(MSucc)) {
+    // For more accurate line information if this is the only instruction
+    // in the block then emit it, otherwise we have the unconditional
+    // fall-through case, which needs no instructions.
   } else {
     // The unconditional branch case.
     TII.InsertBranch(*FuncInfo.MBB, MSucc, NULL,
@@ -1019,7 +1052,8 @@ FastISel::SelectOperator(const User *I, unsigned Opcode) {
   }
 }
 
-FastISel::FastISel(FunctionLoweringInfo &funcInfo)
+FastISel::FastISel(FunctionLoweringInfo &funcInfo,
+                   const TargetLibraryInfo *libInfo)
   : FuncInfo(funcInfo),
     MRI(FuncInfo.MF->getRegInfo()),
     MFI(*FuncInfo.MF->getFrameInfo()),
@@ -1028,7 +1062,8 @@ FastISel::FastISel(FunctionLoweringInfo &funcInfo)
     TD(*TM.getTargetData()),
     TII(*TM.getInstrInfo()),
     TLI(*TM.getTargetLowering()),
-    TRI(*TM.getRegisterInfo()) {
+    TRI(*TM.getRegisterInfo()),
+    LibInfo(libInfo) {
 }
 
 FastISel::~FastISel() {}
@@ -1288,6 +1323,30 @@ unsigned FastISel::FastEmitInst_rri(unsigned MachineInstOpcode,
   return ResultReg;
 }
 
+unsigned FastISel::FastEmitInst_rrii(unsigned MachineInstOpcode,
+                                     const TargetRegisterClass *RC,
+                                     unsigned Op0, bool Op0IsKill,
+                                     unsigned Op1, bool Op1IsKill,
+                                     uint64_t Imm1, uint64_t Imm2) {
+  unsigned ResultReg = createResultReg(RC);
+  const MCInstrDesc &II = TII.get(MachineInstOpcode);
+
+  if (II.getNumDefs() >= 1)
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, II, ResultReg)
+      .addReg(Op0, Op0IsKill * RegState::Kill)
+      .addReg(Op1, Op1IsKill * RegState::Kill)
+      .addImm(Imm1).addImm(Imm2);
+  else {
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, II)
+      .addReg(Op0, Op0IsKill * RegState::Kill)
+      .addReg(Op1, Op1IsKill * RegState::Kill)
+      .addImm(Imm1).addImm(Imm2);
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(TargetOpcode::COPY),
+            ResultReg).addReg(II.ImplicitDefs[0]);
+  }
+  return ResultReg;
+}
+
 unsigned FastISel::FastEmitInst_i(unsigned MachineInstOpcode,
                                   const TargetRegisterClass *RC,
                                   uint64_t Imm) {
@@ -1327,6 +1386,8 @@ unsigned FastISel::FastEmitInst_extractsubreg(MVT RetVT,
   unsigned ResultReg = createResultReg(TLI.getRegClassFor(RetVT));
   assert(TargetRegisterInfo::isVirtualRegister(Op0) &&
          "Cannot yet extract from physregs");
+  const TargetRegisterClass *RC = MRI.getRegClass(Op0);
+  MRI.constrainRegClass(Op0, TRI.getSubClassWithSubReg(RC, Idx));
   BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt,
           DL, TII.get(TargetOpcode::COPY), ResultReg)
     .addReg(Op0, getKillRegState(Op0IsKill), Idx);

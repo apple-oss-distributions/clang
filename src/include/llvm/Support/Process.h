@@ -97,6 +97,10 @@ namespace sys {
       /// the user rather than being put on a pipe or stored in a file.
       static bool FileDescriptorIsDisplayed(int fd);
 
+      /// This function determines if the given file descriptor is displayd and
+      /// supports colors.
+      static bool FileDescriptorHasColors(int fd);
+
       /// This function determines the number of columns in the window
       /// if standard output is connected to a "tty" or "console"
       /// window. If standard output is not connected to a tty or
@@ -135,6 +139,10 @@ namespace sys {
 
       /// Same as OutputColor, but only enables the bold attribute.
       static const char *OutputBold(bool bg);
+
+      /// This function returns the escape sequence to reverse forground and
+      /// background colors.
+      static const char *OutputReverse();
 
       /// Resets the terminals colors, or returns an escape sequence to do so.
       static const char *ResetColor();

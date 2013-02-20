@@ -251,8 +251,8 @@ class AttrListInfo {
   SmallVector<CXIdxAttrInfo *, 2> CXAttrs;
   unsigned ref_cnt;
 
-  AttrListInfo(const AttrListInfo&); // DO NOT IMPLEMENT
-  void operator=(const AttrListInfo&); // DO NOT IMPLEMENT
+  AttrListInfo(const AttrListInfo &) LLVM_DELETED_FUNCTION;
+  void operator=(const AttrListInfo &) LLVM_DELETED_FUNCTION;
 public:
   AttrListInfo(const Decl *D, IndexingContext &IdxCtx);
 
@@ -370,6 +370,8 @@ public:
     return IndexOptions & CXIndexOpt_IndexImplicitTemplateInstantiations;
   }
 
+  static bool isFunctionLocalDecl(const Decl *D);
+
   bool shouldAbort();
 
   bool hasDiagnosticCallback() const { return CB.diagnostic; }
@@ -379,6 +381,9 @@ public:
   void ppIncludedFile(SourceLocation hashLoc,
                       StringRef filename, const FileEntry *File,
                       bool isImport, bool isAngled);
+
+  void importedModule(const ImportDecl *ImportD);
+  void importedPCH(const FileEntry *File);
 
   void startedTranslationUnit();
 
@@ -451,7 +456,7 @@ public:
 
   bool isNotFromSourceFile(SourceLocation Loc) const;
 
-  void indexTopLevelDecl(Decl *D);
+  void indexTopLevelDecl(const Decl *D);
   void indexTUDeclsInObjCContainer();
   void indexDeclGroupRef(DeclGroupRef DG);
 
@@ -542,10 +547,8 @@ namespace llvm {
     }
 
     static unsigned getHashValue(clang::cxindex::RefFileOccurence S) {
-      llvm::FoldingSetNodeID ID;
-      ID.AddPointer(S.File);
-      ID.AddPointer(S.Dcl);
-      return ID.ComputeHash();
+      typedef std::pair<const clang::FileEntry *, const clang::Decl *> PairTy;
+      return DenseMapInfo<PairTy>::getHashValue(PairTy(S.File, S.Dcl));
     }
 
     static bool isEqual(clang::cxindex::RefFileOccurence LHS,

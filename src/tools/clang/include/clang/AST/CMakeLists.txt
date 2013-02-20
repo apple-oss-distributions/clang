@@ -15,3 +15,20 @@ clang_tablegen(StmtNodes.inc -gen-clang-stmt-nodes
 clang_tablegen(DeclNodes.inc -gen-clang-decl-nodes
   SOURCE ../Basic/DeclNodes.td
   TARGET ClangDeclNodes)
+
+clang_tablegen(CommentNodes.inc -gen-clang-comment-nodes
+  SOURCE ../Basic/CommentNodes.td
+  TARGET ClangCommentNodes)
+
+clang_tablegen(CommentHTMLTags.inc -gen-clang-comment-html-tags
+  SOURCE CommentHTMLTags.td
+  TARGET ClangCommentHTMLTags)
+
+clang_tablegen(CommentHTMLTagsProperties.inc -gen-clang-comment-html-tags-properties
+  SOURCE CommentHTMLTags.td
+  TARGET ClangCommentHTMLTagsProperties)
+
+clang_tablegen(CommentCommandInfo.inc -gen-clang-comment-command-info
+  SOURCE CommentCommands.td
+  TARGET ClangCommentCommandInfo)
+

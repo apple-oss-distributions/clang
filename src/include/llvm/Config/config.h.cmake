@@ -11,20 +11,23 @@
 /* Relative directory for resource files */
 #define CLANG_RESOURCE_DIR "${CLANG_RESOURCE_DIR}"
 
-/* Directory wherelibstdc++ is installed. */
-#define GCC_INSTALL_PREFIX "${GCC_INSTALL_PREFIX}"
-
 /* Directories clang will search for headers */
 #define C_INCLUDE_DIRS "${C_INCLUDE_DIRS}"
 
-/* Define if CBE is enabled for printf %a output */
-#cmakedefine ENABLE_CBE_PRINTF_A ${ENABLE_CBE_PRINTF_A}
+/* Default <path> to all compiler invocations for --sysroot=<path>. */
+#undef DEFAULT_SYSROOT
+
+/* Define if you want backtraces on crash */
+#cmakedefine ENABLE_BACKTRACES
 
 /* Define if position independent code is enabled */
 #cmakedefine ENABLE_PIC
 
-/* Define if timestamp information (e.g., __DATE___) is allowed */
+/* Define if timestamp information (e.g., __DATE__) is allowed */
 #cmakedefine ENABLE_TIMESTAMPS ${ENABLE_TIMESTAMPS}
+
+/* Directory where gcc is installed. */
+#undef GCC_INSTALL_PREFIX
 
 /* Define to 1 if you have the `arc4random' function. */
 #cmakedefine HAVE_ARC4RANDOM
@@ -51,7 +54,7 @@
 #cmakedefine HAVE_ASSERT_H ${HAVE_ASSERT_H}
 
 /* Define to 1 if you have the `backtrace' function. */
-#undef HAVE_BACKTRACE
+#cmakedefine HAVE_BACKTRACE ${HAVE_BACKTRACE}
 
 /* Define to 1 if you have the `bcopy' function. */
 #undef HAVE_BCOPY
@@ -161,7 +164,7 @@
 #cmakedefine HAVE_GETTIMEOFDAY ${HAVE_GETTIMEOFDAY}
 
 /* Define if the Graphviz program is available */
-#undef HAVE_GRAPHVIZ
+#cmakedefine HAVE_GRAPHVIZ ${HAVE_GRAPHVIZ}
 
 /* Define if the gv program is available */
 #cmakedefine HAVE_GV ${HAVE_GV}
@@ -554,6 +557,9 @@
 /* Has gcc/MSVC atomic intrinsics */
 #cmakedefine01 LLVM_HAS_ATOMICS
 
+/* Host triple LLVM will be executed on */
+#cmakedefine LLVM_HOSTTRIPLE "${LLVM_HOSTTRIPLE}"
+
 /* Installation directory for include files */
 #cmakedefine LLVM_INCLUDEDIR "${LLVM_INCLUDEDIR}"
 
@@ -574,6 +580,9 @@
 
 /* LLVM name for the native AsmPrinter init function, if available */
 #cmakedefine LLVM_NATIVE_ASMPRINTER LLVMInitialize${LLVM_NATIVE_ARCH}AsmPrinter
+
+/* LLVM name for the native Disassembler init function, if available */
+#cmakedefine LLVM_NATIVE_DISASSEMBLER LLVMInitialize${LLVM_NATIVE_ARCH}Disassembler
 
 /* LLVM name for the native Target init function, if available */
 #cmakedefine LLVM_NATIVE_TARGET LLVMInitialize${LLVM_NATIVE_ARCH}Target
@@ -619,6 +628,12 @@
 
 /* Installation prefix directory */
 #cmakedefine LLVM_PREFIX "${LLVM_PREFIX}"
+
+/* Define if we have the Intel JIT API runtime support library */
+#cmakedefine LLVM_USE_INTEL_JITEVENTS 1
+
+/* Define if we have the oprofile JIT-support library */
+#cmakedefine LLVM_USE_OPROFILE 1
 
 /* Major version of the LLVM API */
 #cmakedefine LLVM_VERSION_MAJOR ${LLVM_VERSION_MAJOR}
@@ -679,9 +694,6 @@
 
 /* Define to 1 if your <sys/time.h> declares `struct tm'. */
 #undef TM_IN_SYS_TIME
-
-/* Define if we have the oprofile JIT-support library */
-#undef USE_OPROFILE
 
 /* Define if use udis86 library */
 #undef USE_UDIS86

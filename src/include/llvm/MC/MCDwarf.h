@@ -17,20 +17,17 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/MC/MachineLocation.h"
-#include "llvm/MC/MCObjectWriter.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Dwarf.h"
+#include "llvm/Support/Compiler.h"
 #include <vector>
 
 namespace llvm {
   class MCContext;
-  class MCExpr;
+  class MCObjectWriter;
   class MCSection;
-  class MCSectionData;
   class MCStreamer;
   class MCSymbol;
-  class MCObjectStreamer;
-  class raw_ostream;
   class SourceMgr;
   class SMLoc;
 
@@ -52,8 +49,8 @@ namespace llvm {
     MCDwarfFile(StringRef name, unsigned dirIndex)
       : Name(name), DirIndex(dirIndex) {}
 
-    MCDwarfFile(const MCDwarfFile&);       // DO NOT IMPLEMENT
-    void operator=(const MCDwarfFile&); // DO NOT IMPLEMENT
+    MCDwarfFile(const MCDwarfFile&) LLVM_DELETED_FUNCTION;
+    void operator=(const MCDwarfFile&) LLVM_DELETED_FUNCTION;
   public:
     /// getName - Get the base name of this MCDwarfFile.
     StringRef getName() const { return Name; }
@@ -62,7 +59,7 @@ namespace llvm {
     unsigned getDirIndex() const { return DirIndex; }
 
 
-    /// print - Print the value to the stream \arg OS.
+    /// print - Print the value to the stream \p OS.
     void print(raw_ostream &OS) const;
 
     /// dump - Print the value to stderr.
@@ -181,8 +178,8 @@ namespace llvm {
   class MCLineSection {
 
   private:
-    MCLineSection(const MCLineSection&);  // DO NOT IMPLEMENT
-    void operator=(const MCLineSection&); // DO NOT IMPLEMENT
+    MCLineSection(const MCLineSection&) LLVM_DELETED_FUNCTION;
+    void operator=(const MCLineSection&) LLVM_DELETED_FUNCTION;
 
   public:
     // Constructor to create an MCLineSection with an empty MCLineEntries

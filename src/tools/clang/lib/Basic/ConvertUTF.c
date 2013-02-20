@@ -111,7 +111,6 @@ static const UTF8 firstByteMark[7] = { 0x00, 0x00, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC 
  * into an inline function.
  */
 
-#ifdef CLANG_NEEDS_THESE_ONE_DAY
 
 /* --------------------------------------------------------------------- */
 
@@ -339,8 +338,6 @@ ConversionResult ConvertUTF32toUTF8 (
     return result;
 }
 
-#endif
-
 /* --------------------------------------------------------------------- */
 
 /*
@@ -387,10 +384,36 @@ static Boolean isLegalUTF8(const UTF8 *source, int length) {
  */
 Boolean isLegalUTF8Sequence(const UTF8 *source, const UTF8 *sourceEnd) {
     int length = trailingBytesForUTF8[*source]+1;
-    if (source+length > sourceEnd) {
+    if (length > sourceEnd - source) {
         return false;
     }
     return isLegalUTF8(source, length);
+}
+
+/* --------------------------------------------------------------------- */
+
+/*
+ * Exported function to return the total number of bytes in a codepoint
+ * represented in UTF-8, given the value of the first byte.
+ */
+unsigned getNumBytesForUTF8(UTF8 first) {
+  return trailingBytesForUTF8[first] + 1;
+}
+
+/* --------------------------------------------------------------------- */
+
+/*
+ * Exported function to return whether a UTF-8 string is legal or not.
+ * This is not used here; it's just exported.
+ */
+Boolean isLegalUTF8String(const UTF8 **source, const UTF8 *sourceEnd) {
+    while (*source != sourceEnd) {
+        int length = trailingBytesForUTF8[**source] + 1;
+        if (length > sourceEnd - *source || !isLegalUTF8(*source, length))
+            return false;
+        *source += length;
+    }
+    return true;
 }
 
 /* --------------------------------------------------------------------- */
@@ -404,7 +427,7 @@ ConversionResult ConvertUTF8toUTF16 (
     while (source < sourceEnd) {
         UTF32 ch = 0;
         unsigned short extraBytesToRead = trailingBytesForUTF8[*source];
-        if (source + extraBytesToRead >= sourceEnd) {
+        if (extraBytesToRead >= sourceEnd - source) {
             result = sourceExhausted; break;
         }
         /* Do this check whether lenient or strict */
@@ -477,7 +500,7 @@ ConversionResult ConvertUTF8toUTF32 (
     while (source < sourceEnd) {
         UTF32 ch = 0;
         unsigned short extraBytesToRead = trailingBytesForUTF8[*source];
-        if (source + extraBytesToRead >= sourceEnd) {
+        if (extraBytesToRead >= sourceEnd - source) {
             result = sourceExhausted; break;
         }
         /* Do this check whether lenient or strict */

@@ -12,6 +12,7 @@ class DStmt<Stmt base, bit abstract = 0> : Stmt<abstract> {
 def NullStmt : Stmt;
 def CompoundStmt : Stmt;
 def LabelStmt : Stmt;
+def AttributedStmt : Stmt;
 def IfStmt : Stmt;
 def SwitchStmt : Stmt;
 def WhileStmt : Stmt;
@@ -27,8 +28,10 @@ def SwitchCase : Stmt<1>;
 def CaseStmt : DStmt<SwitchCase>;
 def DefaultStmt : DStmt<SwitchCase>;
 
-// GNU Extensions
-def AsmStmt : Stmt;
+// Asm statements
+def AsmStmt : Stmt<1>;
+def GCCAsmStmt : DStmt<AsmStmt>;
+def MSAsmStmt : DStmt<AsmStmt>;
 
 // Obj-C statements
 def ObjCAtTryStmt : Stmt;
@@ -98,6 +101,7 @@ def CXXReinterpretCastExpr : DStmt<CXXNamedCastExpr>;
 def CXXConstCastExpr : DStmt<CXXNamedCastExpr>;
 def CXXFunctionalCastExpr : DStmt<ExplicitCastExpr>;
 def CXXTypeidExpr : DStmt<Expr>;
+def UserDefinedLiteral : DStmt<CallExpr>;
 def CXXBoolLiteralExpr : DStmt<Expr>;
 def CXXNullPtrLiteralExpr : DStmt<Expr>;
 def CXXThisExpr : DStmt<Expr>;
@@ -127,6 +131,7 @@ def PackExpansionExpr : DStmt<Expr>;
 def SizeOfPackExpr : DStmt<Expr>;
 def SubstNonTypeTemplateParmExpr : DStmt<Expr>;
 def SubstNonTypeTemplateParmPackExpr : DStmt<Expr>;
+def FunctionParmPackExpr : DStmt<Expr>;
 def MaterializeTemporaryExpr : DStmt<Expr>;
 def LambdaExpr : DStmt<Expr>;
 

@@ -14,10 +14,10 @@
 
 #define DEBUG_TYPE "regalloc"
 #include "SplitKit.h"
-#include "LiveRangeEdit.h"
 #include "VirtRegMap.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/LiveIntervalAnalysis.h"
+#include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
@@ -345,15 +345,18 @@ void SplitEditor::reset(LiveRangeEdit &LRE, ComplementSpillMode SM) {
   Values.clear();
 
   // Reset the LiveRangeCalc instances needed for this spill mode.
-  LRCalc[0].reset(&VRM.getMachineFunction());
+  LRCalc[0].reset(&VRM.getMachineFunction(), LIS.getSlotIndexes(), &MDT,
+                  &LIS.getVNInfoAllocator());
   if (SpillMode)
-    LRCalc[1].reset(&VRM.getMachineFunction());
+    LRCalc[1].reset(&VRM.getMachineFunction(), LIS.getSlotIndexes(), &MDT,
+                    &LIS.getVNInfoAllocator());
 
   // We don't need an AliasAnalysis since we will only be performing
   // cheap-as-a-copy remats anyway.
-  Edit->anyRematerializable(LIS, TII, 0);
+  Edit->anyRematerializable(0);
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 void SplitEditor::dump() const {
   if (RegAssign.empty()) {
     dbgs() << " empty\n";
@@ -364,6 +367,7 @@ void SplitEditor::dump() const {
     dbgs() << " [" << I.start() << ';' << I.stop() << "):" << I.value();
   dbgs() << '\n';
 }
+#endif
 
 VNInfo *SplitEditor::defValue(unsigned RegIdx,
                               const VNInfo *ParentVNI,
@@ -436,8 +440,8 @@ VNInfo *SplitEditor::defFromParent(unsigned RegIdx,
 
   // Attempt cheap-as-a-copy rematerialization.
   LiveRangeEdit::Remat RM(ParentVNI);
-  if (Edit->canRematerializeAt(RM, UseIdx, true, LIS)) {
-    Def = Edit->rematerializeAt(MBB, I, LI->reg, RM, LIS, TII, TRI, Late);
+  if (Edit->canRematerializeAt(RM, UseIdx, true)) {
+    Def = Edit->rematerializeAt(MBB, I, LI->reg, RM, TRI, Late);
     ++NumRemats;
   } else {
     // Can't remat, just insert a copy from parent.
@@ -456,11 +460,11 @@ VNInfo *SplitEditor::defFromParent(unsigned RegIdx,
 unsigned SplitEditor::openIntv() {
   // Create the complement as index 0.
   if (Edit->empty())
-    Edit->create(LIS, VRM);
+    Edit->create();
 
   // Create the open interval.
   OpenIdx = Edit->size();
-  Edit->create(LIS, VRM);
+  Edit->create();
   return OpenIdx;
 }
 
@@ -650,7 +654,7 @@ void SplitEditor::removeBackCopies(SmallVectorImpl<VNInfo*> &Copies) {
     // Adjust RegAssign if a register assignment is killed at VNI->def.  We
     // want to avoid calculating the live range of the source register if
     // possible.
-    AssignI.find(VNI->def.getPrevSlot());
+    AssignI.find(Def.getPrevSlot());
     if (!AssignI.valid() || AssignI.start() >= Def)
       continue;
     // If MI doesn't kill the assigned register, just leave it.
@@ -737,6 +741,8 @@ void SplitEditor::hoistCopiesForSize() {
   for (LiveInterval::vni_iterator VI = LI->vni_begin(), VE = LI->vni_end();
        VI != VE; ++VI) {
     VNInfo *VNI = *VI;
+    if (VNI->isUnused())
+      continue;
     VNInfo *ParentVNI = Edit->getParent().getVNInfoAt(VNI->def);
     assert(ParentVNI && "Parent not live at complement def");
 
@@ -810,6 +816,8 @@ void SplitEditor::hoistCopiesForSize() {
   for (LiveInterval::vni_iterator VI = LI->vni_begin(), VE = LI->vni_end();
        VI != VE; ++VI) {
     VNInfo *VNI = *VI;
+    if (VNI->isUnused())
+      continue;
     VNInfo *ParentVNI = Edit->getParent().getVNInfoAt(VNI->def);
     const DomPair &Dom = NearestDom[ParentVNI->id];
     if (!Dom.first || Dom.second == VNI->def)
@@ -924,11 +932,9 @@ bool SplitEditor::transferValues() {
     DEBUG(dbgs() << '\n');
   }
 
-  LRCalc[0].calculateValues(LIS.getSlotIndexes(), &MDT,
-                            &LIS.getVNInfoAllocator());
+  LRCalc[0].calculateValues();
   if (SpillMode)
-    LRCalc[1].calculateValues(LIS.getSlotIndexes(), &MDT,
-                              &LIS.getVNInfoAllocator());
+    LRCalc[1].calculateValues();
 
   return Skipped;
 }
@@ -953,8 +959,7 @@ void SplitEditor::extendPHIKillRanges() {
       if (Edit->getParent().liveAt(LastUse)) {
         assert(RegAssign.lookup(LastUse) == RegIdx &&
                "Different register assignment in phi predecessor");
-        LRC.extend(LI, End,
-                   LIS.getSlotIndexes(), &MDT, &LIS.getVNInfoAllocator());
+        LRC.extend(LI, End);
       }
     }
   }
@@ -1004,8 +1009,7 @@ void SplitEditor::rewriteAssigned(bool ExtendRanges) {
     } else
       Idx = Idx.getRegSlot(true);
 
-    getLRCalc(RegIdx).extend(LI, Idx.getNextSlot(), LIS.getSlotIndexes(),
-                             &MDT, &LIS.getVNInfoAllocator());
+    getLRCalc(RegIdx).extend(LI, Idx.getNextSlot());
   }
 }
 
@@ -1033,7 +1037,7 @@ void SplitEditor::deleteRematVictims() {
   if (Dead.empty())
     return;
 
-  Edit->eliminateDeadDefs(Dead, LIS, VRM, TII);
+  Edit->eliminateDeadDefs(Dead);
 }
 
 void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
@@ -1049,8 +1053,7 @@ void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
     if (ParentVNI->isUnused())
       continue;
     unsigned RegIdx = RegAssign.lookup(ParentVNI->def);
-    VNInfo *VNI = defValue(RegIdx, ParentVNI, ParentVNI->def);
-    VNI->setIsPHIDef(ParentVNI->isPHIDef());
+    defValue(RegIdx, ParentVNI, ParentVNI->def);
 
     // Force rematted values to be recomputed everywhere.
     // The new live ranges may be truncated.
@@ -1108,7 +1111,7 @@ void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
     SmallVector<LiveInterval*, 8> dups;
     dups.push_back(li);
     for (unsigned j = 1; j != NumComp; ++j)
-      dups.push_back(&Edit->create(LIS, VRM));
+      dups.push_back(&Edit->create());
     ConEQ.Distribute(&dups[0], MRI);
     // The new intervals all map back to i.
     if (LRMap)
@@ -1116,7 +1119,7 @@ void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
   }
 
   // Calculate spill weight and allocation hints for new intervals.
-  Edit->calculateRegClassAndHint(VRM.getMachineFunction(), LIS, SA.Loops);
+  Edit->calculateRegClassAndHint(VRM.getMachineFunction(), SA.Loops);
 
   assert(!LRMap || LRMap->size() == Edit->size());
 }

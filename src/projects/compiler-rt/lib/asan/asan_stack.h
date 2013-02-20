@@ -14,46 +14,12 @@
 #ifndef ASAN_STACK_H
 #define ASAN_STACK_H
 
-#include "asan_internal.h"
+#include "sanitizer_common/sanitizer_stacktrace.h"
 
 namespace __asan {
 
-static const size_t kStackTraceMax = 64;
-
-struct AsanStackTrace {
-  size_t size;
-  size_t max_size;
-  uintptr_t trace[kStackTraceMax];
-  static void PrintStack(uintptr_t *addr, size_t size);
-  void PrintStack() {
-    PrintStack(this->trace, this->size);
-  }
-  void CopyTo(uintptr_t *dst, size_t dst_size) {
-    for (size_t i = 0; i < size && i < dst_size; i++)
-      dst[i] = trace[i];
-    for (size_t i = size; i < dst_size; i++)
-      dst[i] = 0;
-  }
-
-  void CopyFrom(uintptr_t *src, size_t src_size) {
-    size = src_size;
-    if (size > kStackTraceMax) size = kStackTraceMax;
-    for (size_t i = 0; i < size; i++) {
-      trace[i] = src[i];
-    }
-  }
-
-  void GetStackTrace(size_t max_s, uintptr_t pc, uintptr_t bp);
-
-  void FastUnwindStack(uintptr_t pc, uintptr_t bp);
-
-  static uintptr_t GetCurrentPc();
-
-  static size_t CompressStack(AsanStackTrace *stack,
-                            uint32_t *compressed, size_t size);
-  static void UncompressStack(AsanStackTrace *stack,
-                              uint32_t *compressed, size_t size);
-};
+void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp);
+void PrintStack(StackTrace *stack);
 
 }  // namespace __asan
 
@@ -62,8 +28,8 @@ struct AsanStackTrace {
 // The bp may refer to the current frame or to the caller's frame.
 // fast_unwind is currently unused.
 #define GET_STACK_TRACE_WITH_PC_AND_BP(max_s, pc, bp)               \
-  AsanStackTrace stack;                                             \
-  stack.GetStackTrace(max_s, pc, bp);                               \
+  StackTrace stack;                                             \
+  GetStackTrace(&stack, max_s, pc, bp)
 
 // NOTE: A Rule of thumb is to retrieve stack trace in the interceptors
 // as early as possible (in functions exposed to the user), as we generally
@@ -71,18 +37,18 @@ struct AsanStackTrace {
 
 #define GET_STACK_TRACE_HERE(max_size)                        \
   GET_STACK_TRACE_WITH_PC_AND_BP(max_size,                    \
-      AsanStackTrace::GetCurrentPc(), GET_CURRENT_FRAME())    \
+      StackTrace::GetCurrentPc(), GET_CURRENT_FRAME())
 
 #define GET_STACK_TRACE_HERE_FOR_MALLOC                             \
-  GET_STACK_TRACE_HERE(FLAG_malloc_context_size)
+  GET_STACK_TRACE_HERE(flags()->malloc_context_size)
 
 #define GET_STACK_TRACE_HERE_FOR_FREE(ptr)                          \
-  GET_STACK_TRACE_HERE(FLAG_malloc_context_size)
+  GET_STACK_TRACE_HERE(flags()->malloc_context_size)
 
 #define PRINT_CURRENT_STACK()                    \
   {                                              \
     GET_STACK_TRACE_HERE(kStackTraceMax);        \
-    stack.PrintStack();                          \
-  }                                              \
+    PrintStack(&stack);                          \
+  }
 
 #endif  // ASAN_STACK_H

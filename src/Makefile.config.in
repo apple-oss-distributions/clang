@@ -61,6 +61,7 @@ endif
 
 prefix          := @prefix@
 PROJ_prefix     := $(prefix)
+program_prefix  := @program_prefix@
 PROJ_VERSION    := $(LLVMVersion)
 else
 ifndef PROJ_SRC_ROOT
@@ -112,6 +113,8 @@ HOST_OS=@HOST_OS@
 # Target operating system for which LLVM will compile for.
 TARGET_OS=@TARGET_OS@
 
+# Host hardware architecture
+HOST_ARCH=@HOST_ARCH@
 # Target hardware architecture
 ARCH=@ARCH@
 TARGET_NATIVE_ARCH := $(ARCH)
@@ -175,7 +178,6 @@ SED        := @SED@
 TAR        := @TAR@
 
 # Paths to miscellaneous programs we hope are present but might not be
-PERL       := @PERL@
 BZIP2      := @BZIP2@
 CAT        := @CAT@
 DOT        := @DOT@
@@ -190,11 +192,8 @@ GAS        := @GAS@
 POD2HTML   := @POD2HTML@
 POD2MAN    := @POD2MAN@
 PDFROFF    := @PDFROFF@
-RUNTEST    := @RUNTEST@
-TCLSH      := @TCLSH@
 ZIP        := @ZIP@
 
-HAVE_PERL    := @HAVE_PERL@
 HAVE_PTHREAD := @HAVE_PTHREAD@
 
 LIBS       := @LIBS@
@@ -219,6 +218,12 @@ RDYNAMIC := @RDYNAMIC@
 # When ENABLE_LIBCPP is enabled, LLVM uses libc++ by default to build.
 #ENABLE_LIBCPP = 0
 ENABLE_LIBCPP = @ENABLE_LIBCPP@
+
+# When ENABLE_CXX11 is enabled, LLVM uses c++11 mode by default to build.
+ENABLE_CXX11 = @ENABLE_CXX11@
+
+# When ENABLE_WERROR is enabled, we'll pass -Werror on the command line
+ENABLE_WERROR = @ENABLE_WERROR@
 
 # When ENABLE_OPTIMIZED is enabled, LLVM code is optimized and output is put
 # into the "Release" directories. Otherwise, LLVM code is not optimized and
@@ -253,6 +258,11 @@ ENABLE_LIBCPP = @ENABLE_LIBCPP@
 # symbols.
 #DEBUG_SYMBOLS = 1
 @DEBUG_SYMBOLS@
+
+# When KEEP_SYMBOLS is enabled, installed executables will never have their
+# symbols stripped.
+#KEEP_SYMBOLS = 1
+@KEEP_SYMBOLS@
 
 # The compiler flags to use for optimized builds.
 OPTIMIZE_OPTION := @OPTIMIZE_OPTION@
@@ -345,3 +355,22 @@ LLVM_HAS_POLLY = @LLVM_HAS_POLLY@
 # Flags supported by the linker.
 # bfd ld / gold --version-script=file
 HAVE_LINK_VERSION_SCRIPT = @HAVE_LINK_VERSION_SCRIPT@
+
+# Flags to control using libxml2
+LIBXML2_LIBS := @LIBXML2_LIBS@
+LIBXML2_INC  := @LIBXML2_INC@
+
+# Flags to control building support for Intel JIT Events API
+USE_INTEL_JITEVENTS := @USE_INTEL_JITEVENTS@
+INTEL_JITEVENTS_INCDIR := @INTEL_JITEVENTS_INCDIR@
+INTEL_JITEVENTS_LIBDIR := @INTEL_JITEVENTS_LIBDIR@
+
+# Flags to control building support for OProfile JIT API
+USE_OPROFILE := @USE_OPROFILE@
+
+ifeq ($(USE_INTEL_JITEVENTS), 1)
+  OPTIONAL_COMPONENTS += IntelJITEvents
+endif
+ifeq ($(USE_OPROFILE), 1)
+  OPTIONAL_COMPONENTS += OProfileJIT
+endif

@@ -409,7 +409,7 @@ private:
 
     if (Constant *C = dyn_cast<Constant>(V)) {
       Constant *Elt = C->getAggregateElement(i);
-      
+
       if (Elt == 0)
         LV.markOverdefined();      // Unknown sort of constant.
       else if (isa<UndefValue>(Elt))
@@ -564,7 +564,7 @@ void SCCPSolver::getFeasibleSuccessors(TerminatorInst &TI,
       return;
     }
 
-    Succs[SI->resolveSuccessorIndex(SI->findCaseValue(CI))] = true;
+    Succs[SI->findCaseValue(CI).getSuccessorIndex()] = true;
     return;
   }
 
@@ -623,14 +623,7 @@ bool SCCPSolver::isEdgeFeasible(BasicBlock *From, BasicBlock *To) {
     if (CI == 0)
       return !SCValue.isUndefined();
 
-    // Make sure to skip the "default value" which isn't a value
-    for (unsigned i = 0, E = SI->getNumCases(); i != E; ++i)
-      if (SI->getCaseValue(i) == CI) // Found the taken branch.
-        return SI->getCaseSuccessor(i) == To;
-
-    // If the constant value is not equal to any of the branches, we must
-    // execute default branch.
-    return SI->getDefaultDest() == To;
+    return SI->findCaseValue(CI).getCaseSuccessor() == To;
   }
 
   // Just mark all destinations executable!
@@ -1495,12 +1488,12 @@ bool SCCPSolver::ResolvedUndefsIn(Function &F) {
       // If the input to SCCP is actually switch on undef, fix the undef to
       // the first constant.
       if (isa<UndefValue>(SI->getCondition())) {
-        SI->setCondition(SI->getCaseValue(0));
-        markEdgeExecutable(BB, SI->getCaseSuccessor(0));
+        SI->setCondition(SI->case_begin().getCaseValue());
+        markEdgeExecutable(BB, SI->case_begin().getCaseSuccessor());
         return true;
       }
 
-      markForcedConstant(SI->getCondition(), SI->getCaseValue(0));
+      markForcedConstant(SI->getCondition(), SI->case_begin().getCaseValue());
       return true;
     }
   }
@@ -1932,8 +1925,8 @@ bool IPSCCP::runOnModule(Module &M) {
     ReturnsToZap[i]->setOperand(0, UndefValue::get(F->getReturnType()));
   }
 
-  // If we inferred constant or undef values for globals variables, we can delete
-  // the global and any stores that remain to it.
+  // If we inferred constant or undef values for globals variables, we can
+  // delete the global and any stores that remain to it.
   const DenseMap<GlobalVariable*, LatticeVal> &TG = Solver.getTrackedGlobals();
   for (DenseMap<GlobalVariable*, LatticeVal>::const_iterator I = TG.begin(),
          E = TG.end(); I != E; ++I) {

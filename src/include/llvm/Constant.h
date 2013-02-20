@@ -39,8 +39,8 @@ namespace llvm {
 /// don't have to worry about the lifetime of the objects.
 /// @brief LLVM Constant Representation
 class Constant : public User {
-  void operator=(const Constant &);     // Do not implement
-  Constant(const Constant &);           // Do not implement
+  void operator=(const Constant &) LLVM_DELETED_FUNCTION;
+  Constant(const Constant &) LLVM_DELETED_FUNCTION;
   virtual void anchor();
   
 protected:
@@ -137,8 +137,8 @@ public:
 
   static Constant *getNullValue(Type* Ty);
 
-  /// @returns the value for an integer constant of the given type that has all
-  /// its bits set to true.
+  /// @returns the value for an integer or vector of integer constant of the
+  /// given type that has all its bits set to true.
   /// @brief Get the all ones value
   static Constant *getAllOnesValue(Type* Ty);
 

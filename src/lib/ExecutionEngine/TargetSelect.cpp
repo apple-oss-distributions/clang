@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/Module.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Target/TargetMachine.h"
@@ -24,17 +25,17 @@
 
 using namespace llvm;
 
+TargetMachine *EngineBuilder::selectTarget() {
+  Triple TT(LLVM_HOSTTRIPLE);
+  return selectTarget(TT, MArch, MCPU, MAttrs);
+}
+
 /// selectTarget - Pick a target either via -march or by guessing the native
 /// arch.  Add any CPU features specified via -mcpu or -mattr.
 TargetMachine *EngineBuilder::selectTarget(const Triple &TargetTriple,
                               StringRef MArch,
                               StringRef MCPU,
-                              const SmallVectorImpl<std::string>& MAttrs,
-                              const TargetOptions &Options,
-                              Reloc::Model RM,
-                              CodeModel::Model CM,
-                              CodeGenOpt::Level OL,
-                              std::string *ErrorStr) {
+                              const SmallVectorImpl<std::string>& MAttrs) {
   Triple TheTriple(TargetTriple);
   if (TheTriple.getTriple().empty())
     TheTriple.setTriple(sys::getDefaultTargetTriple());
@@ -51,8 +52,9 @@ TargetMachine *EngineBuilder::selectTarget(const Triple &TargetTriple,
     }
 
     if (!TheTarget) {
-      *ErrorStr = "No available targets are compatible with this -march, "
-        "see -version for the available targets.\n";
+      if (ErrorStr)
+        *ErrorStr = "No available targets are compatible with this -march, "
+                    "see -version for the available targets.\n";
       return 0;
     }
 
@@ -84,7 +86,8 @@ TargetMachine *EngineBuilder::selectTarget(const Triple &TargetTriple,
   TargetMachine *Target = TheTarget->createTargetMachine(TheTriple.getTriple(),
                                                          MCPU, FeaturesStr,
                                                          Options,
-                                                         RM, CM, OL);
+                                                         RelocModel, CMModel,
+                                                         OptLevel);
   assert(Target && "Could not allocate target machine!");
   return Target;
 }

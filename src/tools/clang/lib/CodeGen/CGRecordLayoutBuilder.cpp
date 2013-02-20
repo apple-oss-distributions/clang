@@ -235,6 +235,8 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
                                uint64_t FieldSize,
                                uint64_t ContainingTypeSizeInBits,
                                unsigned ContainingTypeAlign) {
+  assert(ContainingTypeAlign && "Expected alignment to be specified");
+
   llvm::Type *Ty = Types.ConvertTypeForMem(FD->getType());
   CharUnits TypeSizeInBytes =
     CharUnits::fromQuantity(Types.getTargetData().getTypeAllocSize(Ty));
@@ -576,6 +578,7 @@ void CGRecordLayoutBuilder::LayoutUnion(const RecordDecl *D) {
     }
   }
   if (unionAlign.isZero()) {
+    (void)hasOnlyZeroSizedBitFields;
     assert(hasOnlyZeroSizedBitFields &&
            "0-align record did not have all zero-sized bit-fields!");
     unionAlign = CharUnits::One();
@@ -713,9 +716,7 @@ CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
     }
 
   // Otherwise, add a vtable / vf-table if the layout says to do so.
-  } else if (Types.getContext().getTargetInfo().getCXXABI() == CXXABI_Microsoft
-               ? Layout.getVFPtrOffset() != CharUnits::fromQuantity(-1)
-               : RD->isDynamicClass()) {
+  } else if (Layout.hasOwnVFPtr()) {
     llvm::Type *FunctionType =
       llvm::FunctionType::get(llvm::Type::getInt32Ty(Types.getLLVMContext()),
                               /*isVarArg=*/true);
@@ -819,7 +820,7 @@ bool CGRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
     if (IsMsStruct) {
       // Zero-length bitfields following non-bitfield members are
       // ignored:
-      const FieldDecl *FD =  (*Field);
+      const FieldDecl *FD = *Field;
       if (Types.getContext().ZeroBitfieldFollowsNonBitfield(FD, LastFD)) {
         --FieldNo;
         continue;

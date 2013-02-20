@@ -18,59 +18,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallString.h"
 #include <algorithm>
 using namespace clang;
-
-/// Look through spelling locations for a macro argument expansion, and
-/// if found skip to it so that we can trace the argument rather than the macros
-/// in which that argument is used. If no macro argument expansion is found,
-/// don't skip anything and return the starting location.
-static SourceLocation skipToMacroArgExpansion(const SourceManager &SM,
-                                              SourceLocation StartLoc) {
-  for (SourceLocation L = StartLoc; L.isMacroID();
-       L = SM.getImmediateSpellingLoc(L)) {
-    if (SM.isMacroArgExpansion(L))
-      return L;
-  }
-  
-  // Otherwise just return initial location, there's nothing to skip.
-  return StartLoc;
-}
-
-/// Gets the location of the immediate macro caller, one level up the stack
-/// toward the initial macro typed into the source.
-static SourceLocation getImmediateMacroCallerLoc(const SourceManager &SM,
-                                                 SourceLocation Loc) {
-  if (!Loc.isMacroID()) return Loc;
-  
-  // When we have the location of (part of) an expanded parameter, its spelling
-  // location points to the argument as typed into the macro call, and
-  // therefore is used to locate the macro caller.
-  if (SM.isMacroArgExpansion(Loc))
-    return SM.getImmediateSpellingLoc(Loc);
-  
-  // Otherwise, the caller of the macro is located where this macro is
-  // expanded (while the spelling is part of the macro definition).
-  return SM.getImmediateExpansionRange(Loc).first;
-}
-
-/// Gets the location of the immediate macro callee, one level down the stack
-/// toward the leaf macro.
-static SourceLocation getImmediateMacroCalleeLoc(const SourceManager &SM,
-                                                 SourceLocation Loc) {
-  if (!Loc.isMacroID()) return Loc;
-  
-  // When we have the location of (part of) an expanded parameter, its
-  // expansion location points to the unexpanded paramater reference within
-  // the macro definition (or callee).
-  if (SM.isMacroArgExpansion(Loc))
-    return SM.getImmediateExpansionRange(Loc).first;
-  
-  // Otherwise, the callee of the macro is located where this location was
-  // spelled inside the macro definition.
-  return SM.getImmediateSpellingLoc(Loc);
-}
 
 /// \brief Retrieve the name of the immediate macro expansion.
 ///
@@ -107,20 +58,6 @@ static StringRef getImmediateMacroName(SourceLocation Loc,
    unsigned MacroTokenLength = Lexer::MeasureTokenLength(Loc, SM, LangOpts);
    StringRef ExpansionBuffer = SM.getBufferData(ExpansionInfo.first);
    return ExpansionBuffer.substr(ExpansionInfo.second, MacroTokenLength);
-}
-
-/// Get the presumed location of a diagnostic message. This computes the
-/// presumed location for the top of any macro backtrace when present.
-static PresumedLoc getDiagnosticPresumedLoc(const SourceManager &SM,
-                                            SourceLocation Loc) {
-  // This is a condensed form of the algorithm used by emitCaretDiagnostic to
-  // walk to the top of the macro call stack.
-  while (Loc.isMacroID()) {
-    Loc = skipToMacroArgExpansion(SM, Loc);
-    Loc = getImmediateMacroCallerLoc(SM, Loc);
-  }
-  
-  return SM.getPresumedLoc(Loc);
 }
 
 DiagnosticRenderer::DiagnosticRenderer(const LangOptions &LangOpts,
@@ -191,7 +128,7 @@ void DiagnosticRenderer::emitDiagnostic(SourceLocation Loc,
   
   PresumedLoc PLoc;
   if (Loc.isValid()) {
-    PLoc = getDiagnosticPresumedLoc(*SM, Loc);
+    PLoc = SM->getPresumedLocForDisplay(Loc);
   
     // First, if this diagnostic is not in the main file, print out the
     // "included from" lines.
@@ -282,6 +219,53 @@ void DiagnosticRenderer::emitIncludeStackRecursively(SourceLocation Loc,
   emitIncludeLocation(Loc, PLoc, SM);
 }
 
+// Helper function to fix up source ranges.  It takes in an array of ranges,
+// and outputs an array of ranges where we want to draw the range highlighting
+// around the location specified by CaretLoc.
+//
+// To find locations which correspond to the caret, we crawl the macro caller
+// chain for the beginning and end of each range.  If the caret location
+// is in a macro expansion, we search each chain for a location
+// in the same expansion as the caret; otherwise, we crawl to the top of
+// each chain. Two locations are part of the same macro expansion
+// iff the FileID is the same.
+static void mapDiagnosticRanges(
+    SourceLocation CaretLoc,
+    const SmallVectorImpl<CharSourceRange>& Ranges,
+    SmallVectorImpl<CharSourceRange>& SpellingRanges,
+    const SourceManager *SM) {
+  FileID CaretLocFileID = SM->getFileID(CaretLoc);
+
+  for (SmallVectorImpl<CharSourceRange>::const_iterator I = Ranges.begin(),
+       E = Ranges.end();
+       I != E; ++I) {
+    SourceLocation Begin = I->getBegin(), End = I->getEnd();
+    bool IsTokenRange = I->isTokenRange();
+
+    // Search the macro caller chain for the beginning of the range.
+    while (Begin.isMacroID() && SM->getFileID(Begin) != CaretLocFileID)
+      Begin = SM->getImmediateMacroCallerLoc(Begin);
+
+    // Search the macro caller chain for the beginning of the range.
+    while (End.isMacroID() && SM->getFileID(End) != CaretLocFileID) {
+      // The computation of the next End is an inlined version of
+      // getImmediateMacroCallerLoc, except it chooses the end of an
+      // expansion range.
+      if (SM->isMacroArgExpansion(End)) {
+        End = SM->getImmediateSpellingLoc(End);
+      } else {
+        End = SM->getImmediateExpansionRange(End).second;
+      }
+    }
+
+    // Return the spelling location of the beginning and end of the range.
+    Begin = SM->getSpellingLoc(Begin);
+    End = SM->getSpellingLoc(End);
+    SpellingRanges.push_back(CharSourceRange(SourceRange(Begin, End),
+                                             IsTokenRange));
+  }
+}
+
 /// \brief Recursively emit notes for each macro expansion and caret
 /// diagnostics where appropriate.
 ///
@@ -309,20 +293,23 @@ void DiagnosticRenderer::emitMacroExpansionsAndCarets(
   // If this is a file source location, directly emit the source snippet and
   // caret line. Also record the macro depth reached.
   if (Loc.isFileID()) {
+    // Map the ranges.
+    SmallVector<CharSourceRange, 4> SpellingRanges;
+    mapDiagnosticRanges(Loc, Ranges, SpellingRanges, &SM);
+
     assert(MacroDepth == 0 && "We shouldn't hit a leaf node twice!");
     MacroDepth = OnMacroInst;
-    emitCodeContext(Loc, Level, Ranges, Hints, SM);
+    emitCodeContext(Loc, Level, SpellingRanges, Hints, SM);
     return;
   }
   // Otherwise recurse through each macro expansion layer.
   
   // When processing macros, skip over the expansions leading up to
   // a macro argument, and trace the argument's expansion stack instead.
-  Loc = skipToMacroArgExpansion(SM, Loc);
+  Loc = SM.skipToMacroArgExpansion(Loc);
   
-  SourceLocation OneLevelUp = getImmediateMacroCallerLoc(SM, Loc);
-  
-  // FIXME: Map ranges?
+  SourceLocation OneLevelUp = SM.getImmediateMacroCallerLoc(Loc);
+
   emitMacroExpansionsAndCarets(OneLevelUp, Level, Ranges, Hints, SM, MacroDepth,
                                OnMacroInst + 1);
   
@@ -330,7 +317,7 @@ void DiagnosticRenderer::emitMacroExpansionsAndCarets(
   SourceLocation MacroLoc = Loc;
   
   // Map the location.
-  Loc = getImmediateMacroCalleeLoc(SM, Loc);
+  Loc = SM.getImmediateMacroCalleeLoc(Loc);
   
   unsigned MacroSkipStart = 0, MacroSkipEnd = 0;
   if (MacroDepth > DiagOpts.MacroBacktraceLimit &&
@@ -344,17 +331,6 @@ void DiagnosticRenderer::emitMacroExpansionsAndCarets(
   bool Suppressed = (OnMacroInst >= MacroSkipStart &&
                      OnMacroInst < MacroSkipEnd);
   
-  // Map the ranges.
-  for (SmallVectorImpl<CharSourceRange>::iterator I = Ranges.begin(),
-       E = Ranges.end();
-       I != E; ++I) {
-    SourceLocation Start = I->getBegin(), End = I->getEnd();
-    if (Start.isMacroID())
-      I->setBegin(getImmediateMacroCalleeLoc(SM, Start));
-    if (End.isMacroID())
-      I->setEnd(getImmediateMacroCalleeLoc(SM, End));
-  }
-  
   if (Suppressed) {
     // Tell the user that we've skipped contexts.
     if (OnMacroInst == MacroSkipStart) {
@@ -367,14 +343,18 @@ void DiagnosticRenderer::emitMacroExpansionsAndCarets(
     }
     return;
   }
-  
+
+  // Map the ranges.
+  SmallVector<CharSourceRange, 4> SpellingRanges;
+  mapDiagnosticRanges(MacroLoc, Ranges, SpellingRanges, &SM);
+
   SmallString<100> MessageStorage;
   llvm::raw_svector_ostream Message(MessageStorage);
   Message << "expanded from macro '"
           << getImmediateMacroName(MacroLoc, SM, LangOpts) << "'";
   emitDiagnostic(SM.getSpellingLoc(Loc), DiagnosticsEngine::Note,
                  Message.str(),
-                 Ranges, ArrayRef<FixItHint>(), &SM);
+                 SpellingRanges, ArrayRef<FixItHint>(), &SM);
 }
 
 DiagnosticNoteRenderer::~DiagnosticNoteRenderer() {}
@@ -393,4 +373,3 @@ void DiagnosticNoteRenderer::emitIncludeLocation(SourceLocation Loc,
 void DiagnosticNoteRenderer::emitBasicNote(StringRef Message) {
   emitNote(SourceLocation(), Message, 0);  
 }
-

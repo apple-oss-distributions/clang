@@ -182,11 +182,6 @@ sub Analyze {
   }
   else {
     $Cmd = $Clang;
-    if ($Lang eq "objective-c" || $Lang eq "objective-c++") {
-      push @Args,'-DIBOutlet=__attribute__((iboutlet))';
-      push @Args,'-DIBOutletCollection(ClassName)=__attribute__((iboutletcollection)))';
-      push @Args,'-DIBAction=void)__attribute__((ibaction)';
-    }
 
     # Create arguments for doing regular parsing.
     my $SyntaxArgs = GetCCArgs("-fsyntax-only", \@Args);
@@ -351,11 +346,15 @@ my %LinkerOptionMap = (
 
 my %CompilerLinkerOptionMap = (
   '-fobjc-arc' => 0,
+  '-fno-objc-arc' => 0,
   '-fobjc-abi-version' => 0, # This is really a 1 argument, but always has '='
+  '-fobjc-legacy-dispatch' => 0,
+  '-mios-simulator-version-min' => 0, # This really has 1 argument, but always has '='
   '-isysroot' => 1,
   '-arch' => 1,
   '-m32' => 0,
   '-m64' => 0,
+  '-stdlib' => 0, # This is really a 1 argument, but always has '='
   '-v' => 0,
   '-fpascal-strings' => 0,
   '-mmacosx-version-min' => 0, # This is really a 1 argument, but always has '='
@@ -387,6 +386,8 @@ my %LangMap = (
   'c'   => 'c',
   'cp'  => 'c++',
   'cpp' => 'c++',
+  'cxx' => 'c++',
+  'txx' => 'c++',
   'cc'  => 'c++',
   'ii'  => 'c++',
   'i'   => 'c-cpp-output',
@@ -432,11 +433,17 @@ if ($Status) { exit($Status >> 8); }
 # Get the analysis options.
 my $Analyses = $ENV{'CCC_ANALYZER_ANALYSIS'};
 
+# Get the plugins to load.
+my $Plugins = $ENV{'CCC_ANALYZER_PLUGINS'};
+
 # Get the store model.
 my $StoreModel = $ENV{'CCC_ANALYZER_STORE_MODEL'};
 
 # Get the constraints engine.
 my $ConstraintsModel = $ENV{'CCC_ANALYZER_CONSTRAINTS_MODEL'};
+
+#Get the internal stats setting.
+my $InternalStats = $ENV{'CCC_ANALYZER_INTERNAL_STATS'};
 
 # Get the output format.
 my $OutputFormat = $ENV{'CCC_ANALYZER_OUTPUT_FORMAT'};
@@ -642,9 +649,17 @@ if ($Action eq 'compile' or $Action eq 'link') {
     if (defined $ConstraintsModel) {
       push @AnalyzeArgs, "-analyzer-constraints=$ConstraintsModel";
     }
+
+    if (defined $InternalStats) {
+      push @AnalyzeArgs, "-analyzer-stats";
+    }
     
     if (defined $Analyses) {
       push @AnalyzeArgs, split '\s+', $Analyses;
+    }
+
+    if (defined $Plugins) {
+      push @AnalyzeArgs, split '\s+', $Plugins;
     }
 
     if (defined $OutputFormat) {

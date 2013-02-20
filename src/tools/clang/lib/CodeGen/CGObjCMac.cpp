@@ -241,9 +241,9 @@ public:
     Params.push_back(Ctx.getPointerDiffType()->getCanonicalTypeUnqualified());
     Params.push_back(Ctx.BoolTy);
     llvm::FunctionType *FTy =
-      Types.GetFunctionType(Types.arrangeFunctionType(IdType, Params,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All));
+      Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(IdType, Params,
+                                                    FunctionType::ExtInfo(),
+                                                          RequiredArgs::All));
     return CGM.CreateRuntimeFunction(FTy, "objc_getProperty");
   }
 
@@ -261,9 +261,9 @@ public:
     Params.push_back(Ctx.BoolTy);
     Params.push_back(Ctx.BoolTy);
     llvm::FunctionType *FTy =
-      Types.GetFunctionType(Types.arrangeFunctionType(Ctx.VoidTy, Params,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All));
+      Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(Ctx.VoidTy, Params,
+                                                     FunctionType::ExtInfo(),
+                                                          RequiredArgs::All));
     return CGM.CreateRuntimeFunction(FTy, "objc_setProperty");
   }
 
@@ -287,9 +287,9 @@ public:
     Params.push_back(IdType);
     Params.push_back(Ctx.getPointerDiffType()->getCanonicalTypeUnqualified());
     llvm::FunctionType *FTy =
-    Types.GetFunctionType(Types.arrangeFunctionType(Ctx.VoidTy, Params,
-                                                    FunctionType::ExtInfo(),
-                                                    RequiredArgs::All));
+    Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(Ctx.VoidTy, Params,
+                                                        FunctionType::ExtInfo(),
+                                                        RequiredArgs::All));
     const char *name;
     if (atomic && copy)
       name = "objc_setProperty_atomic_copy";
@@ -314,9 +314,9 @@ public:
     Params.push_back(Ctx.BoolTy);
     Params.push_back(Ctx.BoolTy);
     llvm::FunctionType *FTy =
-      Types.GetFunctionType(Types.arrangeFunctionType(Ctx.VoidTy, Params,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All));
+      Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(Ctx.VoidTy, Params,
+                                                     FunctionType::ExtInfo(),
+                                                          RequiredArgs::All));
     return CGM.CreateRuntimeFunction(FTy, "objc_copyStruct");
   }
   
@@ -333,9 +333,9 @@ public:
     Params.push_back(Ctx.VoidPtrTy);
     Params.push_back(Ctx.VoidPtrTy);
     llvm::FunctionType *FTy =
-      Types.GetFunctionType(Types.arrangeFunctionType(Ctx.VoidTy, Params,
-                                                      FunctionType::ExtInfo(),
-                                                      RequiredArgs::All));
+      Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(Ctx.VoidTy, Params,
+                                                     FunctionType::ExtInfo(),
+                                                          RequiredArgs::All));
     return CGM.CreateRuntimeFunction(FTy, "objc_copyCppObjectAtomic");
   }
   
@@ -346,7 +346,7 @@ public:
     SmallVector<CanQualType,1> Params;
     Params.push_back(Ctx.getCanonicalParamType(Ctx.getObjCIdType()));
     llvm::FunctionType *FTy =
-      Types.GetFunctionType(Types.arrangeFunctionType(Ctx.VoidTy, Params,
+      Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(Ctx.VoidTy, Params,
                                                       FunctionType::ExtInfo(),
                                                       RequiredArgs::All));
     return CGM.CreateRuntimeFunction(FTy, "objc_enumerationMutation");
@@ -433,19 +433,19 @@ public:
   
   /// SyncEnterFn - LLVM object_sync_enter function.
   llvm::Constant *getSyncEnterFn() {
-    // void objc_sync_enter (id)
+    // int objc_sync_enter (id)
     llvm::Type *args[] = { ObjectPtrTy };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(CGM.VoidTy, args, false);
+      llvm::FunctionType::get(CGM.IntTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_sync_enter");
   }
 
   /// SyncExitFn - LLVM object_sync_exit function.
   llvm::Constant *getSyncExitFn() {
-    // void objc_sync_exit (id)
+    // int objc_sync_exit (id)
     llvm::Type *args[] = { ObjectPtrTy };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(CGM.VoidTy, args, false);
+      llvm::FunctionType::get(CGM.IntTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_sync_exit");
   }
 
@@ -1860,7 +1860,7 @@ llvm::Constant *CGObjCCommonMac::BuildGCBlockLayout(CodeGenModule &CGM,
   llvm::Constant *C = BuildIvarLayoutBitmap(BitMap);
   if (CGM.getLangOpts().ObjCGCBitmapPrint) {
     printf("\n block variable layout for block: ");
-    const unsigned char *s = (unsigned char*)BitMap.c_str();
+    const unsigned char *s = (const unsigned char*)BitMap.c_str();
     for (unsigned i = 0, e = BitMap.size(); i < e; i++)
       if (!(s[i] & 0xf0))
         printf("0x0%x%s", s[i], s[i] != 0 ? ", " : "");
@@ -2338,15 +2338,37 @@ void CGObjCMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   MethodDefinitions.clear();
 }
 
-// FIXME: Get from somewhere?
-enum ClassFlags {
-  eClassFlags_Factory              = 0x00001,
-  eClassFlags_Meta                 = 0x00002,
-  // <rdr://5142207>
-  eClassFlags_HasCXXStructors      = 0x02000,
-  eClassFlags_Hidden               = 0x20000,
-  eClassFlags_ABI2_Hidden          = 0x00010,
-  eClassFlags_ABI2_HasCXXStructors = 0x00004   // <rdr://4923634>
+enum FragileClassFlags {
+  FragileABI_Class_Factory                 = 0x00001,
+  FragileABI_Class_Meta                    = 0x00002,
+  FragileABI_Class_HasCXXStructors         = 0x02000,
+  FragileABI_Class_Hidden                  = 0x20000
+};
+
+enum NonFragileClassFlags {
+  /// Is a meta-class.
+  NonFragileABI_Class_Meta                 = 0x00001,
+
+  /// Is a root class.
+  NonFragileABI_Class_Root                 = 0x00002,
+
+  /// Has a C++ constructor and destructor.
+  NonFragileABI_Class_HasCXXStructors      = 0x00004,
+
+  /// Has hidden visibility.
+  NonFragileABI_Class_Hidden               = 0x00010,
+
+  /// Has the exception attribute.
+  NonFragileABI_Class_Exception            = 0x00020,
+
+  /// (Obsolete) ARC-specific: this class has a .release_ivars method
+  NonFragileABI_Class_HasIvarReleaser      = 0x00040,
+
+  /// Class implementation was compiled under ARC.
+  NonFragileABI_Class_CompiledByARC        = 0x00080,
+
+  /// Class has non-trivial destructors, but zero-initialization is okay.
+  NonFragileABI_Class_HasCXXDestructorOnly = 0x00100
 };
 
 /*
@@ -2379,15 +2401,15 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
     EmitProtocolList("\01L_OBJC_CLASS_PROTOCOLS_" + ID->getName(),
                      Interface->all_referenced_protocol_begin(),
                      Interface->all_referenced_protocol_end());
-  unsigned Flags = eClassFlags_Factory;
-  if (ID->hasCXXStructors())
-    Flags |= eClassFlags_HasCXXStructors;
+  unsigned Flags = FragileABI_Class_Factory;
+  if (ID->hasNonZeroConstructors() || ID->hasDestructors())
+    Flags |= FragileABI_Class_HasCXXStructors;
   unsigned Size =
     CGM.getContext().getASTObjCImplementationLayout(ID).getSize().getQuantity();
 
   // FIXME: Set CXX-structors flag.
   if (ID->getClassInterface()->getVisibility() == HiddenVisibility)
-    Flags |= eClassFlags_Hidden;
+    Flags |= FragileABI_Class_Hidden;
 
   llvm::SmallVector<llvm::Constant*, 16> InstanceMethods, ClassMethods;
   for (ObjCImplementationDecl::instmeth_iterator
@@ -2470,11 +2492,11 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
 llvm::Constant *CGObjCMac::EmitMetaClass(const ObjCImplementationDecl *ID,
                                          llvm::Constant *Protocols,
                                          ArrayRef<llvm::Constant*> Methods) {
-  unsigned Flags = eClassFlags_Meta;
+  unsigned Flags = FragileABI_Class_Meta;
   unsigned Size = CGM.getTargetData().getTypeAllocSize(ObjCTypes.ClassTy);
 
   if (ID->getClassInterface()->getVisibility() == HiddenVisibility)
-    Flags |= eClassFlags_Hidden;
+    Flags |= FragileABI_Class_Hidden;
 
   llvm::Constant *Values[12];
   // The isa for the metaclass is the root of the hierarchy.
@@ -2515,7 +2537,7 @@ llvm::Constant *CGObjCMac::EmitMetaClass(const ObjCImplementationDecl *ID,
                                                    Values);
 
   std::string Name("\01L_OBJC_METACLASS_");
-  Name += ID->getNameAsCString();
+  Name += ID->getName();
 
   // Check for a forward reference.
   llvm::GlobalVariable *GV = CGM.getModule().getGlobalVariable(Name);
@@ -3612,7 +3634,8 @@ enum ImageInfoFlags {
 
   // A flag indicating that the module has no instances of a @synthesize of a
   // superclass variable. <rdar://problem/6803242>
-  eImageInfo_CorrectedSynthesize = (1 << 4)
+  eImageInfo_CorrectedSynthesize = (1 << 4),
+  eImageInfo_ImageIsSimulated    = (1 << 5)
 };
 
 void CGObjCCommonMac::EmitImageInfo() {
@@ -3657,6 +3680,14 @@ void CGObjCCommonMac::EmitImageInfo() {
                         llvm::MDNode::get(VMContext, Ops));
     }
   }
+
+  // Indicate whether we're compiling this to run on a simulator.
+  const llvm::Triple &Triple = CGM.getTarget().getTriple();
+  if (Triple.getOS() == llvm::Triple::IOS &&
+      (Triple.getArch() == llvm::Triple::x86 ||
+       Triple.getArch() == llvm::Triple::x86_64))
+    Mod.addModuleFlag(llvm::Module::Error, "Objective-C Is Simulated",
+                      eImageInfo_ImageIsSimulated);
 }
 
 // struct objc_module {
@@ -3809,7 +3840,10 @@ void CGObjCCommonMac::BuildAggrIvarRecordLayout(const RecordType *RT,
                                                 bool &HasUnion) {
   const RecordDecl *RD = RT->getDecl();
   // FIXME - Use iterator.
-  SmallVector<const FieldDecl*, 16> Fields(RD->field_begin(), RD->field_end());
+  SmallVector<const FieldDecl*, 16> Fields;
+  for (RecordDecl::field_iterator i = RD->field_begin(),
+                                  e = RD->field_end(); i != e; ++i)
+    Fields.push_back(*i);
   llvm::Type *Ty = CGM.getTypes().ConvertType(QualType(RT, 0));
   const llvm::StructLayout *RecLayout =
     CGM.getTargetData().getStructLayout(cast<llvm::StructType>(Ty));
@@ -4175,7 +4209,7 @@ llvm::Constant *CGObjCCommonMac::BuildIvarLayout(
     printf("\n%s ivar layout for class '%s': ",
            ForStrongLayout ? "strong" : "weak",
            OMD->getClassInterface()->getName().data());
-    const unsigned char *s = (unsigned char*)BitMap.c_str();
+    const unsigned char *s = (const unsigned char*)BitMap.c_str();
     for (unsigned i = 0, e = BitMap.size(); i < e; i++)
       if (!(s[i] & 0xf0))
         printf("0x0%x%s", s[i], s[i] != 0 ? ", " : "");
@@ -4374,9 +4408,10 @@ ObjCCommonTypesHelper::ObjCCommonTypesHelper(CodeGen::CodeGenModule &cgm)
                                       SourceLocation(), SourceLocation(),
                                       &Ctx.Idents.get("_objc_super"));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.getObjCIdType(), 0, 0, false, false));
+                                Ctx.getObjCIdType(), 0, 0, false, ICIS_NoInit));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.getObjCClassType(), 0, 0, false, false));
+                                Ctx.getObjCClassType(), 0, 0, false,
+                                ICIS_NoInit));
   RD->completeDefinition();
 
   SuperCTy = Ctx.getTagDeclType(RD);
@@ -4755,9 +4790,10 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
                                       SourceLocation(), SourceLocation(),
                                       &Ctx.Idents.get("_message_ref_t"));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.VoidPtrTy, 0, 0, false, false));
+                                Ctx.VoidPtrTy, 0, 0, false, ICIS_NoInit));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.getObjCSelType(), 0, 0, false, false));
+                                Ctx.getObjCSelType(), 0, 0, false,
+                                ICIS_NoInit));
   RD->completeDefinition();
 
   MessageRefCTy = Ctx.getTagDeclType(RD);
@@ -4927,19 +4963,6 @@ bool CGObjCNonFragileABIMac::isVTableDispatchedSelector(Selector Sel) {
   return VTableDispatchMethods.count(Sel);
 }
 
-// Metadata flags
-enum MetaDataDlags {
-  CLS = 0x0,
-  CLS_META = 0x1,
-  CLS_ROOT = 0x2,
-  OBJC2_CLS_HIDDEN = 0x10,
-  CLS_EXCEPTION = 0x20,
-
-  /// (Obsolete) ARC-specific: this class has a .release_ivars method
-  CLS_HAS_IVAR_RELEASER = 0x40,
-  /// class was compiled with -fobjc-arr
-  CLS_COMPILED_BY_ARC = 0x80  // (1<<7)
-};
 /// BuildClassRoTInitializer - generate meta-data for:
 /// struct _class_ro_t {
 ///   uint32_t const flags;
@@ -4964,19 +4987,20 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassRoTInitializer(
   llvm::Constant *Values[10]; // 11 for 64bit targets!
 
   if (CGM.getLangOpts().ObjCAutoRefCount)
-    flags |= CLS_COMPILED_BY_ARC;
+    flags |= NonFragileABI_Class_CompiledByARC;
 
   Values[ 0] = llvm::ConstantInt::get(ObjCTypes.IntTy, flags);
   Values[ 1] = llvm::ConstantInt::get(ObjCTypes.IntTy, InstanceStart);
   Values[ 2] = llvm::ConstantInt::get(ObjCTypes.IntTy, InstanceSize);
   // FIXME. For 64bit targets add 0 here.
-  Values[ 3] = (flags & CLS_META) ? GetIvarLayoutName(0, ObjCTypes)
+  Values[ 3] = (flags & NonFragileABI_Class_Meta)
+    ? GetIvarLayoutName(0, ObjCTypes)
     : BuildIvarLayout(ID, true);
   Values[ 4] = GetClassName(ID->getIdentifier());
   // const struct _method_list_t * const baseMethods;
   std::vector<llvm::Constant*> Methods;
   std::string MethodListName("\01l_OBJC_$_");
-  if (flags & CLS_META) {
+  if (flags & NonFragileABI_Class_Meta) {
     MethodListName += "CLASS_METHODS_" + ID->getNameAsString();
     for (ObjCImplementationDecl::classmeth_iterator
            i = ID->classmeth_begin(), e = ID->classmeth_end(); i != e; ++i) {
@@ -5016,24 +5040,23 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassRoTInitializer(
                                 OID->all_referenced_protocol_begin(),
                                 OID->all_referenced_protocol_end());
 
-  if (flags & CLS_META)
+  if (flags & NonFragileABI_Class_Meta) {
     Values[ 7] = llvm::Constant::getNullValue(ObjCTypes.IvarListnfABIPtrTy);
-  else
-    Values[ 7] = EmitIvarList(ID);
-  Values[ 8] = (flags & CLS_META) ? GetIvarLayoutName(0, ObjCTypes)
-    : BuildIvarLayout(ID, false);
-  if (flags & CLS_META)
+    Values[ 8] = GetIvarLayoutName(0, ObjCTypes);
     Values[ 9] = llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
-  else
+  } else {
+    Values[ 7] = EmitIvarList(ID);
+    Values[ 8] = BuildIvarLayout(ID, false);
     Values[ 9] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + ID->getName(),
                                   ID, ID->getClassInterface(), ObjCTypes);
+  }
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.ClassRonfABITy,
                                                    Values);
   llvm::GlobalVariable *CLASS_RO_GV =
     new llvm::GlobalVariable(CGM.getModule(), ObjCTypes.ClassRonfABITy, false,
                              llvm::GlobalValue::InternalLinkage,
                              Init,
-                             (flags & CLS_META) ?
+                             (flags & NonFragileABI_Class_Meta) ?
                              std::string("\01l_OBJC_METACLASS_RO_$_")+ClassName :
                              std::string("\01l_OBJC_CLASS_RO_$_")+ClassName);
   CLASS_RO_GV->setAlignment(
@@ -5126,21 +5149,29 @@ void CGObjCNonFragileABIMac::GenerateClass(const ObjCImplementationDecl *ID) {
   uint32_t InstanceStart =
     CGM.getTargetData().getTypeAllocSize(ObjCTypes.ClassnfABITy);
   uint32_t InstanceSize = InstanceStart;
-  uint32_t flags = CLS_META;
+  uint32_t flags = NonFragileABI_Class_Meta;
   std::string ObjCMetaClassName(getMetaclassSymbolPrefix());
   std::string ObjCClassName(getClassSymbolPrefix());
 
   llvm::GlobalVariable *SuperClassGV, *IsAGV;
 
+  // Build the flags for the metaclass.
   bool classIsHidden =
     ID->getClassInterface()->getVisibility() == HiddenVisibility;
   if (classIsHidden)
-    flags |= OBJC2_CLS_HIDDEN;
-  if (ID->hasCXXStructors())
-    flags |= eClassFlags_ABI2_HasCXXStructors;
+    flags |= NonFragileABI_Class_Hidden;
+
+  // FIXME: why is this flag set on the metaclass?
+  // ObjC metaclasses have no fields and don't really get constructed.
+  if (ID->hasNonZeroConstructors() || ID->hasDestructors()) {
+    flags |= NonFragileABI_Class_HasCXXStructors;
+    if (!ID->hasNonZeroConstructors())
+      flags |= NonFragileABI_Class_HasCXXDestructorOnly;  
+  }
+
   if (!ID->getClassInterface()->getSuperClass()) {
     // class is root
-    flags |= CLS_ROOT;
+    flags |= NonFragileABI_Class_Root;
     SuperClassGV = GetClassGlobal(ObjCClassName + ClassName);
     IsAGV = GetClassGlobal(ObjCMetaClassName + ClassName);
   } else {
@@ -5169,17 +5200,28 @@ void CGObjCNonFragileABIMac::GenerateClass(const ObjCImplementationDecl *ID) {
   DefinedMetaClasses.push_back(MetaTClass);
 
   // Metadata for the class
-  flags = CLS;
+  flags = 0;
   if (classIsHidden)
-    flags |= OBJC2_CLS_HIDDEN;
-  if (ID->hasCXXStructors())
-    flags |= eClassFlags_ABI2_HasCXXStructors;
+    flags |= NonFragileABI_Class_Hidden;
+
+  if (ID->hasNonZeroConstructors() || ID->hasDestructors()) {
+    flags |= NonFragileABI_Class_HasCXXStructors;
+
+    // Set a flag to enable a runtime optimization when a class has
+    // fields that require destruction but which don't require
+    // anything except zero-initialization during construction.  This
+    // is most notably true of __strong and __weak types, but you can
+    // also imagine there being C++ types with non-trivial default
+    // constructors that merely set all fields to null.
+    if (!ID->hasNonZeroConstructors())
+      flags |= NonFragileABI_Class_HasCXXDestructorOnly;
+  }
 
   if (hasObjCExceptionAttribute(CGM.getContext(), ID->getClassInterface()))
-    flags |= CLS_EXCEPTION;
+    flags |= NonFragileABI_Class_Exception;
 
   if (!ID->getClassInterface()->getSuperClass()) {
-    flags |= CLS_ROOT;
+    flags |= NonFragileABI_Class_Root;
     SuperClassGV = 0;
   } else {
     // Has a root. Current class is not a root.
@@ -5206,7 +5248,7 @@ void CGObjCNonFragileABIMac::GenerateClass(const ObjCImplementationDecl *ID) {
     DefinedNonLazyClasses.push_back(ClassMD);
 
   // Force the definition of the EHType if necessary.
-  if (flags & CLS_EXCEPTION)
+  if (flags & NonFragileABI_Class_Exception)
     GetInterfaceEHType(ID->getClassInterface(), true);
   // Make sure method definition entries are all clear for next implementation.
   MethodDefinitions.clear();
@@ -6065,16 +6107,9 @@ CGObjCNonFragileABIMac::GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
 
   // If this is a class message the metaclass is passed as the target.
   llvm::Value *Target;
-  if (IsClassMessage) {
-    if (isCategoryImpl) {
-      // Message sent to "super' in a class method defined in
-      // a category implementation.
-      Target = EmitClassRef(CGF.Builder, Class);
-      Target = CGF.Builder.CreateStructGEP(Target, 0);
-      Target = CGF.Builder.CreateLoad(Target);
-    } else
+  if (IsClassMessage)
       Target = EmitMetaClassRef(CGF.Builder, Class);
-  } else
+  else
     Target = EmitSuperClassRef(CGF.Builder, Class);
 
   // FIXME: We shouldn't need to do this cast, rectify the ASTContext and
@@ -6367,7 +6402,18 @@ CGObjCNonFragileABIMac::GetInterfaceEHType(const ObjCInterfaceDecl *ID,
 
 CodeGen::CGObjCRuntime *
 CodeGen::CreateMacObjCRuntime(CodeGen::CodeGenModule &CGM) {
-  if (CGM.getLangOpts().ObjCNonFragileABI)
-    return new CGObjCNonFragileABIMac(CGM);
+  switch (CGM.getLangOpts().ObjCRuntime.getKind()) {
+  case ObjCRuntime::FragileMacOSX:
   return new CGObjCMac(CGM);
+
+  case ObjCRuntime::MacOSX:
+  case ObjCRuntime::iOS:
+    return new CGObjCNonFragileABIMac(CGM);
+
+  case ObjCRuntime::GNUstep:
+  case ObjCRuntime::GCC:
+  case ObjCRuntime::ObjFW:
+    llvm_unreachable("these runtimes are not Mac runtimes");
+  }
+  llvm_unreachable("bad runtime");
 }

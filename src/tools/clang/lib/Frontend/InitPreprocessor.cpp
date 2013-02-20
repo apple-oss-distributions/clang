@@ -49,7 +49,7 @@ static void DefineBuiltinMacro(MacroBuilder &Builder, StringRef Macro,
   }
 }
 
-/// AddImplicitInclude - Add an implicit #include of the specified file to the
+/// AddImplicitInclude - Add an implicit \#include of the specified file to the
 /// predefines buffer.
 static void AddImplicitInclude(MacroBuilder &Builder, StringRef File,
                                FileManager &FileMgr) {
@@ -66,8 +66,8 @@ static void AddImplicitIncludeMacros(MacroBuilder &Builder,
   Builder.append("##"); // ##?
 }
 
-/// AddImplicitIncludePTH - Add an implicit #include using the original file
-///  used to generate a PTH cache.
+/// AddImplicitIncludePTH - Add an implicit \#include using the original file
+/// used to generate a PTH cache.
 static void AddImplicitIncludePTH(MacroBuilder &Builder, Preprocessor &PP,
                                   StringRef ImplicitIncludePTH) {
   PTHManager *P = PP.getPTHManager();
@@ -202,6 +202,20 @@ static void DefineExactWidthIntType(TargetInfo::IntType Ty,
                         ConstSuffix);
 }
 
+/// Get the value the ATOMIC_*_LOCK_FREE macro should have for a type with
+/// the specified properties.
+static const char *getLockFreeValue(unsigned TypeWidth, unsigned TypeAlign,
+                                    unsigned InlineWidth) {
+  // Fully-aligned, power-of-2 sizes no larger than the inline
+  // width will be inlined as lock-free operations.
+  if (TypeWidth == TypeAlign && (TypeWidth & (TypeWidth - 1)) == 0 &&
+      TypeWidth <= InlineWidth)
+    return "2"; // "always lock free"
+  // We cannot be certain what operations the lib calls might be
+  // able to implement as lock-free on future processors.
+  return "1"; // "sometimes lock free"
+}
+
 /// \brief Add definitions required for a smooth interaction between
 /// Objective-C++ automated reference counting and libstdc++ (4.2).
 static void AddObjCXXARCLibstdcxxDefines(const LangOptions &LangOpts, 
@@ -233,7 +247,7 @@ static void AddObjCXXARCLibstdcxxDefines(const LangOptions &LangOpts,
         << "};\n"
         << "\n";
       
-    if (LangOpts.ObjCRuntimeHasWeak) {
+    if (LangOpts.ObjCARCWeak) {
       Out << "template<typename _Tp>\n"
           << "struct __is_scalar<__attribute__((objc_ownership(weak))) _Tp> {\n"
           << "  enum { __value = 0 };\n"
@@ -274,20 +288,16 @@ static void InitializeStandardPredefinedMacros(const TargetInfo &TI,
     else if (!LangOpts.GNUMode && LangOpts.Digraphs)
       Builder.defineMacro("__STDC_VERSION__", "199409L");
   } else {
-    if (LangOpts.GNUMode)
-      Builder.defineMacro("__cplusplus");
-    else {
-      // C++0x [cpp.predefined]p1:
-      //   The name_ _cplusplus is defined to the value 201103L when compiling a
-      //   C++ translation unit.
-      if (LangOpts.CPlusPlus0x)
-        Builder.defineMacro("__cplusplus", "201103L");
-      // C++03 [cpp.predefined]p1:
-      //   The name_ _cplusplus is defined to the value 199711L when compiling a
-      //   C++ translation unit.
-      else
-        Builder.defineMacro("__cplusplus", "199711L");
-    }
+    // C++11 [cpp.predefined]p1:
+    //   The name __cplusplus is defined to the value 201103L when compiling a
+    //   C++ translation unit.
+    if (LangOpts.CPlusPlus0x)
+      Builder.defineMacro("__cplusplus", "201103L");
+    // C++03 [cpp.predefined]p1:
+    //   The name __cplusplus is defined to the value 199711L when compiling a
+    //   C++ translation unit.
+    else
+      Builder.defineMacro("__cplusplus", "199711L");
   }
 
   if (LangOpts.ObjC1)
@@ -315,15 +325,18 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   Builder.defineMacro("__clang_patchlevel__", "0");
 #endif
   Builder.defineMacro("__clang_version__", 
-                      "\"" CLANG_VERSION_STRING " ("
-                      + getClangFullRepositoryVersion() + ")\"");
+                      "\"" CLANG_VERSION_STRING " "
+                      + getClangFullRepositoryVersion() + "\"");
 #undef TOSTR
 #undef TOSTR2
-  // Currently claim to be compatible with GCC 4.2.1-5621.
-  Builder.defineMacro("__GNUC_MINOR__", "2");
-  Builder.defineMacro("__GNUC_PATCHLEVEL__", "1");
-  Builder.defineMacro("__GNUC__", "4");
-  Builder.defineMacro("__GXX_ABI_VERSION", "1002");
+  if (!LangOpts.MicrosoftMode) {
+    // Currently claim to be compatible with GCC 4.2.1-5621, but only if we're
+    // not compiling for MSVC compatibility
+    Builder.defineMacro("__GNUC_MINOR__", "2");
+    Builder.defineMacro("__GNUC_PATCHLEVEL__", "1");
+    Builder.defineMacro("__GNUC__", "4");
+    Builder.defineMacro("__GXX_ABI_VERSION", "1002");
+  }
 
   // Define macros for the C11 / C++11 memory orderings
   Builder.defineMacro("__ATOMIC_RELAXED", "0");
@@ -352,7 +365,7 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     Builder.defineMacro("__GXX_EXPERIMENTAL_CXX0X__");
 
   if (LangOpts.ObjC1) {
-    if (LangOpts.ObjCNonFragileABI) {
+    if (LangOpts.ObjCRuntime.isNonFragile()) {
       Builder.defineMacro("__OBJC2__");
       
       if (LangOpts.ObjCExceptions)
@@ -362,8 +375,13 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     if (LangOpts.getGC() != LangOptions::NonGC)
       Builder.defineMacro("__OBJC_GC__");
 
-    if (LangOpts.NeXTRuntime)
+    if (LangOpts.ObjCRuntime.isNeXTFamily())
       Builder.defineMacro("__NEXT_RUNTIME__");
+
+    Builder.defineMacro("IBOutlet", "__attribute__((iboutlet))");
+    Builder.defineMacro("IBOutletCollection(ClassName)",
+                        "__attribute__((iboutletcollection(ClassName)))");
+    Builder.defineMacro("IBAction", "void)__attribute__((ibaction)");
   }
 
   // darwin_constant_cfstrings controls this. This is also dependent
@@ -402,18 +420,16 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     // Both __PRETTY_FUNCTION__ and __FUNCTION__ are GCC extensions, however
     // VC++ appears to only like __FUNCTION__.
     Builder.defineMacro("__PRETTY_FUNCTION__", "__FUNCTION__");
-    // Work around some issues with Visual C++ headerws.
-    if (LangOpts.CPlusPlus) {
-      // Since we define wchar_t in C++ mode.
+    // Work around some issues with Visual C++ headers.
+    if (LangOpts.WChar) {
+      // wchar_t supported as a keyword.
       Builder.defineMacro("_WCHAR_T_DEFINED");
       Builder.defineMacro("_NATIVE_WCHAR_T_DEFINED");
+    }
+    if (LangOpts.CPlusPlus) {
       // FIXME: Support Microsoft's __identifier extension in the lexer.
       Builder.append("#define __identifier(x) x");
       Builder.append("class type_info;");
-    }
-
-    if (LangOpts.CPlusPlus0x) {
-      Builder.defineMacro("_HAS_CHAR16_T_LANGUAGE_SUPPORT", "1");
     }
   }
 
@@ -426,6 +442,26 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     Builder.defineMacro("__FAST_MATH__");
 
   // Initialize target-specific preprocessor defines.
+
+  // __BYTE_ORDER__ was added in GCC 4.6. It's analogous
+  // to the macro __BYTE_ORDER (no trailing underscores)
+  // from glibc's <endian.h> header.
+  // We don't support the PDP-11 as a target, but include
+  // the define so it can still be compared against.
+  Builder.defineMacro("__ORDER_LITTLE_ENDIAN__", "1234");
+  Builder.defineMacro("__ORDER_BIG_ENDIAN__",    "4321");
+  Builder.defineMacro("__ORDER_PDP_ENDIAN__",    "3412");
+  if (TI.isBigEndian())
+    Builder.defineMacro("__BYTE_ORDER__", "__ORDER_BIG_ENDIAN__");
+  else
+    Builder.defineMacro("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+
+
+  if (TI.getPointerWidth(0) == 64 && TI.getLongWidth() == 64
+      && TI.getIntWidth() == 32) {
+    Builder.defineMacro("_LP64");
+    Builder.defineMacro("__LP64__");
+  }
 
   // Define type sizing macros based on the target properties.
   assert(TI.getCharWidth() == 8 && "Only support 8-bit char so far");
@@ -455,6 +491,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
                    TI.getTypeWidth(TI.getWCharType()), TI, Builder);
   DefineTypeSizeof("__SIZEOF_WINT_T__",
                    TI.getTypeWidth(TI.getWIntType()), TI, Builder);
+  if (TI.hasInt128Type())
+    DefineTypeSizeof("__SIZEOF_INT128__", 128, TI, Builder);
 
   DefineType("__INTMAX_TYPE__", TI.getIntMaxType(), Builder);
   DefineType("__UINTMAX_TYPE__", TI.getUIntMaxType(), Builder);
@@ -484,6 +522,9 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (!LangOpts.CharIsSigned)
     Builder.defineMacro("__CHAR_UNSIGNED__");
 
+  if (!TargetInfo::isTypeSigned(TI.getWCharType()))
+    Builder.defineMacro("__WCHAR_UNSIGNED__");
+
   if (!TargetInfo::isTypeSigned(TI.getWIntType()))
     Builder.defineMacro("__WINT_UNSIGNED__");
 
@@ -503,20 +544,44 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (TI.getLongLongWidth() > TI.getLongWidth())
     DefineExactWidthIntType(TargetInfo::SignedLongLong, TI, Builder);
 
-  // Add __builtin_va_list typedef.
-  Builder.append(TI.getVAListDeclaration());
-
   if (const char *Prefix = TI.getUserLabelPrefix())
     Builder.defineMacro("__USER_LABEL_PREFIX__", Prefix);
 
-  // Build configuration options.  FIXME: these should be controlled by
-  // command line options or something.
-  Builder.defineMacro("__FINITE_MATH_ONLY__", "0");
+  if (LangOpts.FastMath || LangOpts.FiniteMathOnly)
+    Builder.defineMacro("__FINITE_MATH_ONLY__", "1");
+  else
+    Builder.defineMacro("__FINITE_MATH_ONLY__", "0");
 
   if (LangOpts.GNUInline)
     Builder.defineMacro("__GNUC_GNU_INLINE__");
   else
     Builder.defineMacro("__GNUC_STDC_INLINE__");
+
+  // The value written by __atomic_test_and_set.
+  // FIXME: This is target-dependent.
+  Builder.defineMacro("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
+
+  // Used by libstdc++ to implement ATOMIC_<foo>_LOCK_FREE.
+  unsigned InlineWidthBits = TI.getMaxAtomicInlineWidth();
+#define DEFINE_LOCK_FREE_MACRO(TYPE, Type) \
+  Builder.defineMacro("__GCC_ATOMIC_" #TYPE "_LOCK_FREE", \
+                      getLockFreeValue(TI.get##Type##Width(), \
+                                       TI.get##Type##Align(), \
+                                       InlineWidthBits));
+  DEFINE_LOCK_FREE_MACRO(BOOL, Bool);
+  DEFINE_LOCK_FREE_MACRO(CHAR, Char);
+  DEFINE_LOCK_FREE_MACRO(CHAR16_T, Char16);
+  DEFINE_LOCK_FREE_MACRO(CHAR32_T, Char32);
+  DEFINE_LOCK_FREE_MACRO(WCHAR_T, WChar);
+  DEFINE_LOCK_FREE_MACRO(SHORT, Short);
+  DEFINE_LOCK_FREE_MACRO(INT, Int);
+  DEFINE_LOCK_FREE_MACRO(LONG, Long);
+  DEFINE_LOCK_FREE_MACRO(LLONG, LongLong);
+  Builder.defineMacro("__GCC_ATOMIC_POINTER_LOCK_FREE",
+                      getLockFreeValue(TI.getPointerWidth(0),
+                                       TI.getPointerAlign(0),
+                                       InlineWidthBits));
+#undef DEFINE_LOCK_FREE_MACRO
 
   if (LangOpts.NoInlineDefine)
     Builder.defineMacro("__NO_INLINE__");
@@ -524,6 +589,10 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (unsigned PICLevel = LangOpts.PICLevel) {
     Builder.defineMacro("__PIC__", Twine(PICLevel));
     Builder.defineMacro("__pic__", Twine(PICLevel));
+  }
+  if (unsigned PIELevel = LangOpts.PIELevel) {
+    Builder.defineMacro("__PIE__", Twine(PIELevel));
+    Builder.defineMacro("__pie__", Twine(PIELevel));
   }
 
   // Macros to control C99 numerics and <float.h>

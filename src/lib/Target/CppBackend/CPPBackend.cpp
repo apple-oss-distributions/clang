@@ -33,8 +33,9 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Config/config.h"
 #include <algorithm>
-#include <set>
+#include <cstdio>
 #include <map>
+#include <set>
 using namespace llvm;
 
 static cl::opt<std::string>
@@ -129,6 +130,7 @@ namespace {
   private:
     void printLinkageType(GlobalValue::LinkageTypes LT);
     void printVisibilityType(GlobalValue::VisibilityTypes VisTypes);
+    void printThreadLocalMode(GlobalVariable::ThreadLocalMode TLM);
     void printCallingConv(CallingConv::ID cc);
     void printEscapedString(const std::string& str);
     void printCFP(const ConstantFP* CFP);
@@ -193,6 +195,18 @@ static std::string getTypePrefix(Type *Ty) {
 
 void CppWriter::error(const std::string& msg) {
   report_fatal_error(msg);
+}
+
+static inline std::string ftostr(const APFloat& V) {
+  std::string Buf;
+  if (&V.getSemantics() == &APFloat::IEEEdouble) {
+    raw_string_ostream(Buf) << V.convertToDouble();
+    return Buf;
+  } else if (&V.getSemantics() == &APFloat::IEEEsingle) {
+    raw_string_ostream(Buf) << (double)V.convertToFloat();
+    return Buf;
+  }
+  return "<unknown format in ftostr>"; // error
 }
 
 // printCFP - Print a floating point constant .. very carefully :)
@@ -271,14 +285,14 @@ void CppWriter::printLinkageType(GlobalValue::LinkageTypes LT) {
     Out << "GlobalValue::LinkerPrivateLinkage"; break;
   case GlobalValue::LinkerPrivateWeakLinkage:
     Out << "GlobalValue::LinkerPrivateWeakLinkage"; break;
-  case GlobalValue::LinkerPrivateWeakDefAutoLinkage:
-    Out << "GlobalValue::LinkerPrivateWeakDefAutoLinkage"; break;
   case GlobalValue::AvailableExternallyLinkage:
     Out << "GlobalValue::AvailableExternallyLinkage "; break;
   case GlobalValue::LinkOnceAnyLinkage:
     Out << "GlobalValue::LinkOnceAnyLinkage "; break;
   case GlobalValue::LinkOnceODRLinkage:
     Out << "GlobalValue::LinkOnceODRLinkage "; break;
+  case GlobalValue::LinkOnceODRAutoHideLinkage:
+    Out << "GlobalValue::LinkOnceODRAutoHideLinkage"; break;
   case GlobalValue::WeakAnyLinkage:
     Out << "GlobalValue::WeakAnyLinkage"; break;
   case GlobalValue::WeakODRLinkage:
@@ -309,6 +323,26 @@ void CppWriter::printVisibilityType(GlobalValue::VisibilityTypes VisType) {
   case GlobalValue::ProtectedVisibility:
     Out << "GlobalValue::ProtectedVisibility";
     break;
+  }
+}
+
+void CppWriter::printThreadLocalMode(GlobalVariable::ThreadLocalMode TLM) {
+  switch (TLM) {
+    case GlobalVariable::NotThreadLocal:
+      Out << "GlobalVariable::NotThreadLocal";
+      break;
+    case GlobalVariable::GeneralDynamicTLSModel:
+      Out << "GlobalVariable::GeneralDynamicTLSModel";
+      break;
+    case GlobalVariable::LocalDynamicTLSModel:
+      Out << "GlobalVariable::LocalDynamicTLSModel";
+      break;
+    case GlobalVariable::InitialExecTLSModel:
+      Out << "GlobalVariable::InitialExecTLSModel";
+      break;
+    case GlobalVariable::LocalExecTLSModel:
+      Out << "GlobalVariable::LocalExecTLSModel";
+      break;
   }
 }
 
@@ -474,7 +508,7 @@ void CppWriter::printAttributes(const AttrListPtr &PAL,
 #undef HANDLE_ATTR
       if (attrs & Attribute::StackAlignment)
         Out << " | Attribute::constructStackAlignmentFromInt("
-            << Attribute::getStackAlignmentFromAttrs(attrs)
+            << attrs.getStackAlignment()
             << ")"; 
       attrs &= ~Attribute::StackAlignment;
       assert(attrs == 0 && "Unhandled attribute!");
@@ -483,7 +517,7 @@ void CppWriter::printAttributes(const AttrListPtr &PAL,
       Out << "Attrs.push_back(PAWI);";
       nl(Out);
     }
-    Out << name << "_PAL = AttrListPtr::get(Attrs.begin(), Attrs.end());";
+    Out << name << "_PAL = AttrListPtr::get(Attrs);";
     nl(Out);
     out(); nl(Out);
     Out << '}'; nl(Out);
@@ -983,7 +1017,9 @@ void CppWriter::printVariableHead(const GlobalVariable *GV) {
   }
   if (GV->isThreadLocal()) {
     printCppName(GV);
-    Out << "->setThreadLocal(true);";
+    Out << "->setThreadLocalMode(";
+    printThreadLocalMode(GV->getThreadLocalMode());
+    Out << ");";
     nl(Out);
   }
   if (is_inline) {
@@ -1090,10 +1126,10 @@ void CppWriter::printInstruction(const Instruction *I,
         << getOpName(SI->getDefaultDest()) << ", "
         << SI->getNumCases() << ", " << bbname << ");";
     nl(Out);
-    unsigned NumCases = SI->getNumCases();
-    for (unsigned i = 0; i < NumCases; ++i) {
-      const ConstantInt* CaseVal = SI->getCaseValue(i);
-      const BasicBlock *BB = SI->getCaseSuccessor(i);
+    for (SwitchInst::ConstCaseIt i = SI->case_begin(), e = SI->case_end();
+         i != e; ++i) {
+      const IntegersSubset CaseVal = i.getCaseValueEx();
+      const BasicBlock *BB = i.getCaseSuccessor();
       Out << iName << "->addCase("
           << getOpName(CaseVal) << ", "
           << getOpName(BB) << ");";
@@ -2065,7 +2101,9 @@ char CppWriter::ID = 0;
 bool CPPTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
                                            formatted_raw_ostream &o,
                                            CodeGenFileType FileType,
-                                           bool DisableVerify) {
+                                           bool DisableVerify,
+                                           AnalysisID StartAfter,
+                                           AnalysisID StopAfter) {
   if (FileType != TargetMachine::CGFT_AssemblyFile) return true;
   PM.add(new CppWriter(o));
   return false;

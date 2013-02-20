@@ -121,9 +121,20 @@ static void addObjCARCOptPass(const PassManagerBuilder &Builder, PassManagerBase
     PM.add(createObjCARCOptPass());
 }
 
+static unsigned BoundsChecking;
+static void addBoundsCheckingPass(const PassManagerBuilder &Builder,
+                                    PassManagerBase &PM) {
+  PM.add(createBoundsCheckingPass(BoundsChecking));
+}
+
 static void addAddressSanitizerPass(const PassManagerBuilder &Builder,
                                     PassManagerBase &PM) {
   PM.add(createAddressSanitizerPass());
+}
+
+static void addThreadSanitizerPass(const PassManagerBuilder &Builder,
+                                   PassManagerBase &PM) {
+  PM.add(createThreadSanitizerPass());
 }
 
 void EmitAssemblyHelper::CreatePasses() {
@@ -155,13 +166,28 @@ void EmitAssemblyHelper::CreatePasses() {
                            addObjCARCOptPass);
   }
 
+  if (CodeGenOpts.BoundsChecking > 0) {
+    BoundsChecking = CodeGenOpts.BoundsChecking;
+    PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
+                           addBoundsCheckingPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addBoundsCheckingPass);
+  }
+
   if (LangOpts.AddressSanitizer) {
     PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
                            addAddressSanitizerPass);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
                            addAddressSanitizerPass);
   }
-  
+
+  if (LangOpts.ThreadSanitizer) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addThreadSanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addThreadSanitizerPass);
+  }
+
   // Figure out TargetLibraryInfo.
   Triple TargetTriple(TheModule->getTargetTriple());
   PMBuilder.LibraryInfo = new TargetLibraryInfo(TargetTriple);
@@ -207,7 +233,7 @@ void EmitAssemblyHelper::CreatePasses() {
                                     CodeGenOpts.EmitGcovArcs,
                                     TargetTriple.isMacOSX()));
 
-    if (!CodeGenOpts.DebugInfo)
+    if (CodeGenOpts.DebugInfo == CodeGenOptions::NoDebugInfo)
       MPM->add(createStripSymbolsPass(true));
   }
   
@@ -312,6 +338,9 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
     Options.NoFramePointerElimNonLeaf = true;
   }
 
+  if (CodeGenOpts.UseInitArray)
+    Options.UseInitArray = true;
+
   // Set float ABI type.
   if (CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp")
     Options.FloatABIType = llvm::FloatABI::Soft;
@@ -320,6 +349,19 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   else {
     assert(CodeGenOpts.FloatABI.empty() && "Invalid float abi!");
     Options.FloatABIType = llvm::FloatABI::Default;
+  }
+
+  // Set FP fusion mode.
+  switch (LangOpts.getFPContractMode()) {
+  case LangOptions::FPC_Off:
+    Options.AllowFPOpFusion = llvm::FPOpFusion::Strict;
+    break;
+  case LangOptions::FPC_On:
+    Options.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+    break;
+  case LangOptions::FPC_Fast:
+    Options.AllowFPOpFusion = llvm::FPOpFusion::Fast;
+    break;              
   }
 
   Options.LessPreciseFPMADOption = CodeGenOpts.LessPreciseFPMAD;
@@ -332,6 +374,8 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   Options.RealignStack = CodeGenOpts.StackRealignment;
   Options.DisableTailCalls = CodeGenOpts.DisableTailCalls;
   Options.TrapFuncName = CodeGenOpts.TrapFuncName;
+  Options.PositionIndependentExecutable = LangOpts.PIELevel != 0;
+  Options.SSPBufferSize = CodeGenOpts.SSPBufferSize;
 
   TargetMachine *TM = TheTarget->createTargetMachine(Triple, TargetOpts.CPU,
                                                      FeaturesStr, Options,

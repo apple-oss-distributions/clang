@@ -14,8 +14,8 @@
 #ifndef LLVM_TARGET_MSP430INSTRINFO_H
 #define LLVM_TARGET_MSP430INSTRINFO_H
 
-#include "llvm/Target/TargetInstrInfo.h"
 #include "MSP430RegisterInfo.h"
+#include "llvm/Target/TargetInstrInfo.h"
 
 #define GET_INSTRINFO_HEADER
 #include "MSP430GenInstrInfo.inc"
@@ -42,7 +42,6 @@ namespace MSP430II {
 
 class MSP430InstrInfo : public MSP430GenInstrInfo {
   const MSP430RegisterInfo RI;
-  MSP430TargetMachine &TM;
 public:
   explicit MSP430InstrInfo(MSP430TargetMachine &TM);
 

@@ -20,13 +20,14 @@
 #define LLVM_ANALYSIS_INSTRUCTIONSIMPLIFY_H
 
 namespace llvm {
-  class DominatorTree;
-  class Instruction;
-  class Value;
-  class TargetData;
-  class TargetLibraryInfo;
   template<typename T>
   class ArrayRef;
+  class DominatorTree;
+  class Instruction;
+  class TargetData;
+  class TargetLibraryInfo;
+  class Type;
+  class Value;
 
   /// SimplifyAddInst - Given operands for an Add, see if we can
   /// fold the result.  If not, this returns null.
@@ -141,11 +142,13 @@ namespace llvm {
   /// the result.  If not, this returns null.
   Value *SimplifySelectInst(Value *Cond, Value *TrueVal, Value *FalseVal,
                             const TargetData *TD = 0,
+                            const TargetLibraryInfo *TLI = 0,
                             const DominatorTree *DT = 0);
 
   /// SimplifyGEPInst - Given operands for an GetElementPtrInst, see if we can
   /// fold the result.  If not, this returns null.
   Value *SimplifyGEPInst(ArrayRef<Value *> Ops, const TargetData *TD = 0,
+                         const TargetLibraryInfo *TLI = 0,
                          const DominatorTree *DT = 0);
 
   /// SimplifyInsertValueInst - Given operands for an InsertValueInst, see if we
@@ -153,7 +156,14 @@ namespace llvm {
   Value *SimplifyInsertValueInst(Value *Agg, Value *Val,
                                  ArrayRef<unsigned> Idxs,
                                  const TargetData *TD = 0,
+                                 const TargetLibraryInfo *TLI = 0,
                                  const DominatorTree *DT = 0);
+
+  /// SimplifyTruncInst - Given operands for an TruncInst, see if we can fold
+  /// the result.  If not, this returns null.
+  Value *SimplifyTruncInst(Value *Op, Type *Ty, const TargetData *TD = 0,
+                           const TargetLibraryInfo *TLI = 0,
+                           const DominatorTree *DT = 0);
 
   //=== Helper functions for higher up the class hierarchy.
 
@@ -179,16 +189,29 @@ namespace llvm {
                              const DominatorTree *DT = 0);
 
 
-  /// ReplaceAndSimplifyAllUses - Perform From->replaceAllUsesWith(To) and then
-  /// delete the From instruction.  In addition to a basic RAUW, this does a
-  /// recursive simplification of the updated instructions.  This catches
-  /// things where one simplification exposes other opportunities.  This only
-  /// simplifies and deletes scalar operations, it does not change the CFG.
+  /// \brief Replace all uses of 'I' with 'SimpleV' and simplify the uses
+  /// recursively.
   ///
-  void ReplaceAndSimplifyAllUses(Instruction *From, Value *To,
-                                 const TargetData *TD = 0,
-                                 const TargetLibraryInfo *TLI = 0,
-                                 const DominatorTree *DT = 0);
+  /// This first performs a normal RAUW of I with SimpleV. It then recursively
+  /// attempts to simplify those users updated by the operation. The 'I'
+  /// instruction must not be equal to the simplified value 'SimpleV'.
+  ///
+  /// The function returns true if any simplifications were performed.
+  bool replaceAndRecursivelySimplify(Instruction *I, Value *SimpleV,
+                                     const TargetData *TD = 0,
+                                     const TargetLibraryInfo *TLI = 0,
+                                     const DominatorTree *DT = 0);
+
+  /// \brief Recursively attempt to simplify an instruction.
+  ///
+  /// This routine uses SimplifyInstruction to simplify 'I', and if successful
+  /// replaces uses of 'I' with the simplified value. It then recurses on each
+  /// of the users impacted. It returns true if any simplifications were
+  /// performed.
+  bool recursivelySimplifyInstruction(Instruction *I,
+                                      const TargetData *TD = 0,
+                                      const TargetLibraryInfo *TLI = 0,
+                                      const DominatorTree *DT = 0);
 } // end namespace llvm
 
 #endif

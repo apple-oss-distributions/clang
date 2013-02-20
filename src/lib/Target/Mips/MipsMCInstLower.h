@@ -14,11 +14,9 @@
 #include "llvm/Support/Compiler.h"
 
 namespace llvm {
-  class MCAsmInfo;
   class MCContext;
   class MCInst;
   class MCOperand;
-  class MCSymbol;
   class MachineInstr;
   class MachineFunction;
   class Mangler;
@@ -28,22 +26,18 @@ namespace llvm {
 //                    MCInst.
 class LLVM_LIBRARY_VISIBILITY MipsMCInstLower {
   typedef MachineOperand::MachineOperandType MachineOperandType;
-  MCContext &Ctx;
+  MCContext *Ctx;
   Mangler *Mang;
   MipsAsmPrinter &AsmPrinter;
 public:
-  MipsMCInstLower(Mangler *mang, const MachineFunction &MF,
-                  MipsAsmPrinter &asmprinter);
+  MipsMCInstLower(MipsAsmPrinter &asmprinter);
+  void Initialize(Mangler *mang, MCContext *C);
   void Lower(const MachineInstr *MI, MCInst &OutMI) const;
-  void LowerCPLOAD(const MachineInstr *MI, SmallVector<MCInst, 4>& MCInsts);
-  void LowerCPRESTORE(const MachineInstr *MI, SmallVector<MCInst, 4>& MCInsts);
-  void LowerUnalignedLoadStore(const MachineInstr *MI,
-		                           SmallVector<MCInst, 4>& MCInsts);
-  void LowerSETGP01(const MachineInstr *MI, SmallVector<MCInst, 4>& MCInsts);
+  MCOperand LowerOperand(const MachineOperand& MO, unsigned offset = 0) const;
+
 private:
   MCOperand LowerSymbolOperand(const MachineOperand &MO,
                                MachineOperandType MOTy, unsigned Offset) const;
-  MCOperand LowerOperand(const MachineOperand& MO, unsigned offset = 0) const;
 };
 }
 

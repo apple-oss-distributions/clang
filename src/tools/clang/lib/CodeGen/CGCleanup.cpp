@@ -504,7 +504,7 @@ static void destroyOptimisticNormalEntry(CodeGenFunction &CGF,
     llvm::SwitchInst *si = cast<llvm::SwitchInst>(use.getUser());
     if (si->getNumCases() == 1 && si->getDefaultDest() == unreachableBB) {
       // Replace the switch with a branch.
-      llvm::BranchInst::Create(si->getCaseSuccessor(0), si);
+      llvm::BranchInst::Create(si->case_begin().getCaseSuccessor(), si);
 
       // The switch operand is a load from the cleanup-dest alloca.
       llvm::LoadInst *condition = cast<llvm::LoadInst>(si->getCondition());
@@ -831,8 +831,12 @@ void CodeGenFunction::PopCleanupBlock(bool FallthroughIsBranchThrough) {
 
     EmitBlock(EHEntry);
 
-    cleanupFlags.setIsForEHCleanup();
-    EmitCleanup(*this, Fn, cleanupFlags, EHActiveFlag);
+    // We only actually emit the cleanup code if the cleanup is either
+    // active or was used before it was deactivated.
+    if (EHActiveFlag || IsActive) {
+      cleanupFlags.setIsForEHCleanup();
+      EmitCleanup(*this, Fn, cleanupFlags, EHActiveFlag);
+    }
 
     Builder.CreateBr(getEHDispatchBlock(EHParent));
 

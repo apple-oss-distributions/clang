@@ -1,4 +1,4 @@
-/*===- pso-stub.c - Stub executable to run llvm bitcode files -------------===//
+//===- llvm-readobj.cpp - Dump contents of an Object File -----------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,13 +7,19 @@
 //
 //===----------------------------------------------------------------------===//
 //
-//===----------------------------------------------------------------------===*/
+// This program is a utility that works like traditional Unix "readelf",
+// except that it can handle any type of object file recognized by lib/Object.
+//
+// It makes use of the generic ObjectFile interface.
+//
+// Caution: This utility is new, experimental, unsupported, and incomplete.
+//
+//===----------------------------------------------------------------------===//
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Object/ELF.h"
 #include "llvm/Analysis/Verifier.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/PrettyStackTrace.h"
@@ -73,26 +79,39 @@ std::string GetFlagStr(uint32_t Flags) {
   return result;
 }
 
-void DumpSymbol(const SymbolRef &sym) {
+void DumpSymbol(const SymbolRef &Sym, const ObjectFile *obj, bool IsDynamic) {
     StringRef Name;
     SymbolRef::Type Type;
     uint32_t Flags;
     uint64_t Address;
     uint64_t Size;
     uint64_t FileOffset;
-    sym.getName(Name);
-    sym.getAddress(Address);
-    sym.getSize(Size);
-    sym.getFileOffset(FileOffset);
-    sym.getType(Type);
-    sym.getFlags(Flags);
+    Sym.getName(Name);
+    Sym.getAddress(Address);
+    Sym.getSize(Size);
+    Sym.getFileOffset(FileOffset);
+    Sym.getType(Type);
+    Sym.getFlags(Flags);
+    std::string FullName = Name;
+
+    // If this is a dynamic symbol from an ELF object, append
+    // the symbol's version to the name.
+    if (IsDynamic && obj->isELF()) {
+      StringRef Version;
+      bool IsDefault;
+      GetELFSymbolVersion(obj, Sym, Version, IsDefault);
+      if (!Version.empty()) {
+        FullName += (IsDefault ? "@@" : "@");
+        FullName += Version;
+      }
+    }
 
     // format() can't handle StringRefs
-    outs() << format("  %-32s", Name.str().c_str())
+    outs() << format("  %-32s", FullName.c_str())
            << format("  %-4s", GetTypeStr(Type))
-           << format("  %16"PRIx64, Address)
-           << format("  %16"PRIx64, Size)
-           << format("  %16"PRIx64, FileOffset)
+           << format("  %16" PRIx64, Address)
+           << format("  %16" PRIx64, Size)
+           << format("  %16" PRIx64, FileOffset)
            << "  " << GetFlagStr(Flags)
            << "\n";
 }
@@ -106,7 +125,7 @@ void DumpSymbols(const ObjectFile *obj) {
   symbol_iterator it = obj->begin_symbols();
   symbol_iterator ie = obj->end_symbols();
   while (it != ie) {
-    DumpSymbol(*it);
+    DumpSymbol(*it, obj, false);
     it.increment(ec);
     if (ec)
       report_fatal_error("Symbol iteration failed");
@@ -123,7 +142,7 @@ void DumpDynamicSymbols(const ObjectFile *obj) {
   symbol_iterator it = obj->begin_dynamic_symbols();
   symbol_iterator ie = obj->end_dynamic_symbols();
   while (it != ie) {
-    DumpSymbol(*it);
+    DumpSymbol(*it, obj, true);
     it.increment(ec);
     if (ec)
       report_fatal_error("Symbol iteration failed");
@@ -155,6 +174,16 @@ void DumpLibrariesNeeded(const ObjectFile *obj) {
   outs() << "  Total: " << count << "\n\n";
 }
 
+void DumpHeaders(const ObjectFile *obj) {
+  outs() << "File Format : " << obj->getFileFormatName() << "\n";
+  outs() << "Arch        : "
+         << Triple::getArchTypeName((llvm::Triple::ArchType)obj->getArch())
+         << "\n";
+  outs() << "Address Size: " << (8*obj->getBytesInAddress()) << " bits\n";
+  outs() << "Load Name   : " << obj->getLoadName() << "\n";
+  outs() << "\n";
+}
+
 int main(int argc, char** argv) {
   error_code ec;
   sys::PrintStackTraceOnErrorSignal();
@@ -180,6 +209,7 @@ int main(int argc, char** argv) {
     errs() << InputFilename << ": Object type not recognized\n";
   }
 
+  DumpHeaders(obj);
   DumpSymbols(obj);
   DumpDynamicSymbols(obj);
   DumpLibrariesNeeded(obj);

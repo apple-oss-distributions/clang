@@ -1,4 +1,4 @@
-//===-- HexagonMCTargetDesc.cpp - Cell Hexagon Target Descriptions --------===//
+//===-- HexagonMCTargetDesc.cpp - Hexagon Target Descriptions -------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file provides Cell Hexagon specific target descriptions.
+// This file provides Hexagon specific target descriptions.
 //
 //===----------------------------------------------------------------------===//
 

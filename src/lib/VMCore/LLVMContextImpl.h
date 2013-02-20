@@ -16,6 +16,7 @@
 #define LLVM_LLVMCONTEXT_IMPL_H
 
 #include "llvm/LLVMContext.h"
+#include "AttributesImpl.h"
 #include "ConstantsContext.h"
 #include "LeaksContext.h"
 #include "llvm/Constants.h"
@@ -52,12 +53,14 @@ struct DenseMapAPIntKeyInfo {
     bool operator!=(const KeyTy& that) const {
       return !this->operator==(that);
     }
+    friend hash_code hash_value(const KeyTy &Key) {
+      return hash_combine(Key.type, Key.val);
+    }
   };
   static inline KeyTy getEmptyKey() { return KeyTy(APInt(1,0), 0); }
   static inline KeyTy getTombstoneKey() { return KeyTy(APInt(1,1), 0); }
   static unsigned getHashValue(const KeyTy &Key) {
-    return DenseMapInfo<void*>::getHashValue(Key.type) ^ 
-      Key.val.getHashValue();
+    return static_cast<unsigned>(hash_value(Key));
   }
   static bool isEqual(const KeyTy &LHS, const KeyTy &RHS) {
     return LHS == RHS;
@@ -75,6 +78,9 @@ struct DenseMapAPFloatKeyInfo {
     bool operator!=(const KeyTy& that) const {
       return !this->operator==(that);
     }
+    friend hash_code hash_value(const KeyTy &Key) {
+      return hash_combine(Key.val);
+    }
   };
   static inline KeyTy getEmptyKey() { 
     return KeyTy(APFloat(APFloat::Bogus,1));
@@ -83,7 +89,7 @@ struct DenseMapAPFloatKeyInfo {
     return KeyTy(APFloat(APFloat::Bogus,2)); 
   }
   static unsigned getHashValue(const KeyTy &Key) {
-    return Key.val.getHashValue();
+    return static_cast<unsigned>(hash_value(Key));
   }
   static bool isEqual(const KeyTy &LHS, const KeyTy &RHS) {
     return LHS == RHS;
@@ -189,6 +195,26 @@ struct FunctionTypeKeyInfo {
   }
 };
 
+// Provide a FoldingSetTrait::Equals specialization for MDNode that can use a
+// shortcut to avoid comparing all operands.
+template<> struct FoldingSetTrait<MDNode> : DefaultFoldingSetTrait<MDNode> {
+  static bool Equals(const MDNode &X, const FoldingSetNodeID &ID,
+                     unsigned IDHash, FoldingSetNodeID &TempID) {
+    assert(!X.isNotUniqued() && "Non-uniqued MDNode in FoldingSet?");
+    // First, check if the cached hashes match.  If they don't we can skip the
+    // expensive operand walk.
+    if (X.Hash != IDHash)
+      return false;
+
+    // If they match we have to compare the operands.
+    X.Profile(TempID);
+    return TempID == ID;
+  }
+  static unsigned ComputeHash(const MDNode &X, FoldingSetNodeID &) {
+    return X.Hash; // Return cached hash.
+  }
+};
+
 /// DebugRecVH - This is a CallbackVH used to keep the Scope -> index maps
 /// up to date as MDNodes mutate.  This class is implemented in DebugLoc.cpp.
 class DebugRecVH : public CallbackVH {
@@ -228,10 +254,13 @@ public:
   typedef DenseMap<DenseMapAPFloatKeyInfo::KeyTy, ConstantFP*, 
                          DenseMapAPFloatKeyInfo> FPMapTy;
   FPMapTy FPConstants;
+
+  FoldingSet<AttributesImpl> AttrsSet;
   
-  StringMap<MDString*> MDStringCache;
-  
+  StringMap<Value*> MDStringCache;
+
   FoldingSet<MDNode> MDNodeSet;
+
   // MDNodes may be uniqued or not uniqued.  When they're not uniqued, they
   // aren't in the MDNodeSet, but they're still shared between objects, so no
   // one object can destroy them.  This set allows us to at least destroy them

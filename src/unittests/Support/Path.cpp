@@ -312,4 +312,79 @@ TEST_F(FileSystemTest, Magic) {
   }
 }
 
+#if !defined(_WIN32) // FIXME: Win32 has different permission schema.
+TEST_F(FileSystemTest, Permissions) {
+  // Create a temp file.
+  int FileDescriptor;
+  SmallString<64> TempPath;
+  ASSERT_NO_ERROR(
+    fs::unique_file("%%-%%-%%-%%.temp", FileDescriptor, TempPath));
+
+  // Mark file as read-only
+  const fs::perms AllWrite = fs::owner_write|fs::group_write|fs::others_write;
+  ASSERT_NO_ERROR(fs::permissions(Twine(TempPath), fs::remove_perms|AllWrite));
+ 
+  // Verify file is read-only
+  fs::file_status Status;
+  ASSERT_NO_ERROR(fs::status(Twine(TempPath), Status));
+  bool AnyWriteBits = (Status.permissions() & AllWrite);
+  EXPECT_FALSE(AnyWriteBits);
+  
+  // Mark file as read-write
+  ASSERT_NO_ERROR(fs::permissions(Twine(TempPath), fs::add_perms|AllWrite));
+  
+  // Verify file is read-write
+  ASSERT_NO_ERROR(fs::status(Twine(TempPath), Status));
+  AnyWriteBits = (Status.permissions() & AllWrite);
+  EXPECT_TRUE(AnyWriteBits);
+}
+#endif
+
+TEST_F(FileSystemTest, FileMapping) {
+  // Create a temp file.
+  int FileDescriptor;
+  SmallString<64> TempPath;
+  ASSERT_NO_ERROR(
+    fs::unique_file("%%-%%-%%-%%.temp", FileDescriptor, TempPath));
+  // Map in temp file and add some content
+  error_code EC;
+  StringRef Val("hello there");
+  {
+    fs::mapped_file_region mfr(FileDescriptor,
+                               fs::mapped_file_region::readwrite,
+                               4096,
+                               0,
+                               EC);
+    ASSERT_NO_ERROR(EC);
+    std::copy(Val.begin(), Val.end(), mfr.data());
+    // Explicitly add a 0.
+    mfr.data()[Val.size()] = 0;
+    // Unmap temp file
+  }
+  
+  // Map it back in read-only
+  fs::mapped_file_region mfr(Twine(TempPath),
+                             fs::mapped_file_region::readonly,
+                             0,
+                             0,
+                             EC);
+  ASSERT_NO_ERROR(EC);
+  
+  // Verify content
+  EXPECT_EQ(StringRef(mfr.const_data()), Val);
+  
+  // Unmap temp file
+
+#if LLVM_USE_RVALUE_REFERENCES
+  fs::mapped_file_region m(Twine(TempPath),
+                             fs::mapped_file_region::readonly,
+                             0,
+                             0,
+                             EC);
+  ASSERT_NO_ERROR(EC);
+  const char *Data = m.const_data();
+  fs::mapped_file_region mfrrv(llvm_move(m));
+  EXPECT_EQ(mfrrv.const_data(), Data);
+#endif
+}
 } // anonymous namespace

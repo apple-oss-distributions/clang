@@ -402,6 +402,7 @@ void USRGenerator::VisitTagDecl(TagDecl *D) {
       AlreadyStarted = true;
       
       switch (D->getTagKind()) {
+      case TTK_Interface:
       case TTK_Struct: Out << "@ST"; break;
       case TTK_Class:  Out << "@CT"; break;
       case TTK_Union:  Out << "@UT"; break;
@@ -413,6 +414,7 @@ void USRGenerator::VisitTagDecl(TagDecl *D) {
       AlreadyStarted = true;
       
       switch (D->getTagKind()) {
+      case TTK_Interface:
       case TTK_Struct: Out << "@SP"; break;
       case TTK_Class:  Out << "@CP"; break;
       case TTK_Union:  Out << "@UP"; break;
@@ -424,6 +426,7 @@ void USRGenerator::VisitTagDecl(TagDecl *D) {
   
   if (!AlreadyStarted) {
     switch (D->getTagKind()) {
+      case TTK_Interface:
       case TTK_Struct: Out << "@S"; break;
       case TTK_Class:  Out << "@C"; break;
       case TTK_Union:  Out << "@U"; break;
@@ -725,10 +728,12 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
     break;
 
   case TemplateArgument::Declaration:
-    if (Decl *D = Arg.getAsDecl())
-      Visit(D);
+    Visit(Arg.getAsDecl());
     break;
-      
+
+  case TemplateArgument::NullPtr:
+    break;
+
   case TemplateArgument::TemplateExpansion:
     Out << 'P'; // pack expansion of...
     // Fall through
@@ -754,7 +759,7 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
   case TemplateArgument::Integral:
     Out << 'V';
     VisitType(Arg.getIntegralType());
-    Out << *Arg.getAsIntegral();
+    Out << Arg.getAsIntegral();
     break;
   }
 }

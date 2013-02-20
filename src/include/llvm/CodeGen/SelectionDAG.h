@@ -73,8 +73,8 @@ class SDDbgInfo {
   SmallVector<SDDbgValue*, 32> ByvalParmDbgValues;
   DenseMap<const SDNode*, SmallVector<SDDbgValue*, 2> > DbgValMap;
 
-  void operator=(const SDDbgInfo&);   // Do not implement.
-  SDDbgInfo(const SDDbgInfo&);   // Do not implement.
+  void operator=(const SDDbgInfo&) LLVM_DELETED_FUNCTION;
+  SDDbgInfo(const SDDbgInfo&) LLVM_DELETED_FUNCTION;
 public:
   SDDbgInfo() {}
 
@@ -222,8 +222,8 @@ private:
                               DenseSet<SDNode *> &visited,
                               int level, bool &printed);
 
-  void operator=(const SelectionDAG&); // Do not implement.
-  SelectionDAG(const SelectionDAG&);   // Do not implement.
+  void operator=(const SelectionDAG&) LLVM_DELETED_FUNCTION;
+  SelectionDAG(const SelectionDAG&) LLVM_DELETED_FUNCTION;
 
 public:
   explicit SelectionDAG(const TargetMachine &TM, llvm::CodeGenOpt::Level);
@@ -422,6 +422,8 @@ public:
                                   int Offset = 0, unsigned char TargetFlags=0) {
     return getConstantPool(C, VT, Align, Offset, true, TargetFlags);
   }
+  SDValue getTargetIndex(int Index, EVT VT, int64_t Offset = 0,
+                         unsigned char TargetFlags = 0);
   // When generating a branch to a BB, we don't in general know enough
   // to provide debug info for the BB at that time, so keep this one around.
   SDValue getBasicBlock(MachineBasicBlock *MBB);
@@ -435,7 +437,13 @@ public:
   SDValue getRegisterMask(const uint32_t *RegMask);
   SDValue getEHLabel(DebugLoc dl, SDValue Root, MCSymbol *Label);
   SDValue getBlockAddress(const BlockAddress *BA, EVT VT,
-                          bool isTarget = false, unsigned char TargetFlags = 0);
+                          int64_t Offset = 0, bool isTarget = false,
+                          unsigned char TargetFlags = 0);
+  SDValue getTargetBlockAddress(const BlockAddress *BA, EVT VT,
+                                int64_t Offset = 0,
+                                unsigned char TargetFlags = 0) {
+    return getBlockAddress(BA, VT, Offset, true, TargetFlags);
+  }
 
   SDValue getCopyToReg(SDValue Chain, DebugLoc dl, unsigned Reg, SDValue N) {
     return getNode(ISD::CopyToReg, dl, MVT::Other, Chain,
@@ -692,7 +700,7 @@ public:
   SDValue getLoad(EVT VT, DebugLoc dl, SDValue Chain, SDValue Ptr,
                   MachinePointerInfo PtrInfo, bool isVolatile,
                   bool isNonTemporal, bool isInvariant, unsigned Alignment,
-                  const MDNode *TBAAInfo = 0);
+                  const MDNode *TBAAInfo = 0, const MDNode *Ranges = 0);
   SDValue getExtLoad(ISD::LoadExtType ExtType, DebugLoc dl, EVT VT,
                      SDValue Chain, SDValue Ptr, MachinePointerInfo PtrInfo,
                      EVT MemVT, bool isVolatile,
@@ -705,7 +713,8 @@ public:
                   SDValue Chain, SDValue Ptr, SDValue Offset,
                   MachinePointerInfo PtrInfo, EVT MemVT,
                   bool isVolatile, bool isNonTemporal, bool isInvariant,
-                  unsigned Alignment, const MDNode *TBAAInfo = 0);
+                  unsigned Alignment, const MDNode *TBAAInfo = 0,
+                  const MDNode *Ranges = 0);
   SDValue getLoad(ISD::MemIndexedMode AM, ISD::LoadExtType ExtType,
                   EVT VT, DebugLoc dl,
                   SDValue Chain, SDValue Ptr, SDValue Offset,
@@ -996,8 +1005,8 @@ public:
   /// bitsets.  This code only analyzes bits in Mask, in order to short-circuit
   /// processing.  Targets can implement the computeMaskedBitsForTargetNode
   /// method in the TargetLowering class to allow target nodes to be understood.
-  void ComputeMaskedBits(SDValue Op, const APInt &Mask, APInt &KnownZero,
-                         APInt &KnownOne, unsigned Depth = 0) const;
+  void ComputeMaskedBits(SDValue Op, APInt &KnownZero, APInt &KnownOne,
+                         unsigned Depth = 0) const;
 
   /// ComputeNumSignBits - Return the number of times the sign bit of the
   /// register is replicated into the other bits.  We know that at least 1 bit

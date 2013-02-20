@@ -18,6 +18,7 @@
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DataTypes.h"
 #include "clang/Basic/TokenKinds.h"
 #include <cctype>
@@ -45,11 +46,12 @@ class NumericLiteralParser {
 
   unsigned radix;
 
-  bool saw_exponent, saw_period;
+  bool saw_exponent, saw_period, saw_ud_suffix;
 
 public:
-  NumericLiteralParser(const char *begin, const char *end,
-                       SourceLocation Loc, Preprocessor &PP);
+  NumericLiteralParser(StringRef TokSpelling,
+                       SourceLocation TokLoc,
+                       Preprocessor &PP);
   bool hadError;
   bool isUnsigned;
   bool isLong;        // This is *not* set for long long.
@@ -64,8 +66,17 @@ public:
   bool isFloatingLiteral() const {
     return saw_period || saw_exponent;
   }
-  bool hasSuffix() const {
-    return SuffixBegin != ThisTokEnd;
+
+  bool hasUDSuffix() const {
+    return saw_ud_suffix;
+  }
+  StringRef getUDSuffix() const {
+    assert(saw_ud_suffix);
+    return StringRef(SuffixBegin, ThisTokEnd - SuffixBegin);
+  }
+  unsigned getUDSuffixOffset() const {
+    assert(saw_ud_suffix);
+    return SuffixBegin - ThisTokBegin;
   }
 
   unsigned getRadix() const { return radix; }
@@ -128,6 +139,8 @@ class CharLiteralParser {
   tok::TokenKind Kind;
   bool IsMultiChar;
   bool HadError;
+  SmallString<32> UDSuffixBuf;
+  unsigned UDSuffixOffset;
 public:
   CharLiteralParser(const char *begin, const char *end,
                     SourceLocation Loc, Preprocessor &PP,
@@ -140,6 +153,11 @@ public:
   bool isUTF32() const { return Kind == tok::utf32_char_constant; }
   bool isMultiChar() const { return IsMultiChar; }
   uint64_t getValue() const { return Value; }
+  StringRef getUDSuffix() const { return UDSuffixBuf; }
+  unsigned getUDSuffixOffset() const {
+    assert(!UDSuffixBuf.empty() && "no ud-suffix");
+    return UDSuffixOffset;
+  }
 };
 
 /// StringLiteralParser - This decodes string escape characters and performs
@@ -157,6 +175,9 @@ class StringLiteralParser {
   tok::TokenKind Kind;
   SmallString<512> ResultBuf;
   char *ResultPtr; // cursor
+  SmallString<32> UDSuffixBuf;
+  unsigned UDSuffixToken;
+  unsigned UDSuffixOffset;
 public:
   StringLiteralParser(const Token *StringToks, unsigned NumStringToks,
                       Preprocessor &PP, bool Complain = true);
@@ -196,10 +217,23 @@ public:
   bool isUTF32() const { return Kind == tok::utf32_string_literal; }
   bool isPascal() const { return Pascal; }
 
+  StringRef getUDSuffix() const { return UDSuffixBuf; }
+
+  /// Get the index of a token containing a ud-suffix.
+  unsigned getUDSuffixToken() const {
+    assert(!UDSuffixBuf.empty() && "no ud-suffix");
+    return UDSuffixToken;
+  }
+  /// Get the spelling offset of the first byte of the ud-suffix.
+  unsigned getUDSuffixOffset() const {
+    assert(!UDSuffixBuf.empty() && "no ud-suffix");
+    return UDSuffixOffset;
+  }
+
 private:
   void init(const Token *StringToks, unsigned NumStringToks);
-  bool CopyStringFragment(StringRef Fragment);
-  bool DiagnoseBadString(const Token& Tok);
+  bool CopyStringFragment(const Token &Tok, const char *TokBegin,
+                          StringRef Fragment);
   void DiagnoseLexingError(SourceLocation Loc);
 };
 

@@ -11,12 +11,83 @@ two perspectives:
 
   2. For use by end users who want to integrate regular static analyzer testing
      into a buildbot like environment.
+
+Usage:
+
+    # Load the results of both runs, to obtain lists of the corresponding
+    # AnalysisDiagnostic objects.
+    #
+    resultsA = loadResultsFromSingleRun(singleRunInfoA, deleteEmpty)
+    resultsB = loadResultsFromSingleRun(singleRunInfoB, deleteEmpty)
+    
+    # Generate a relation from diagnostics in run A to diagnostics in run B 
+    # to obtain a list of triples (a, b, confidence). 
+    diff = compareResults(resultsA, resultsB)
+           
 """
 
 import os
 import plistlib
+import CmpRuns
 
-#
+# Information about analysis run:
+# path - the analysis output directory
+# root - the name of the root directory, which will be disregarded when 
+# determining the source file name
+class SingleRunInfo:
+    def __init__(self, path, root="", verboseLog=None):
+        self.path = path
+        self.root = root
+        self.verboseLog = verboseLog
+
+class AnalysisDiagnostic:
+    def __init__(self, data, report, htmlReport):
+        self._data = data
+        self._loc = self._data['location']
+        self._report = report
+        self._htmlReport = htmlReport
+
+    def getFileName(self):
+        root = self._report.run.root
+        fileName = self._report.files[self._loc['file']]
+        if fileName.startswith(root) :
+            return fileName[len(root):]  
+        return fileName
+
+    def getLine(self):
+        return self._loc['line']
+        
+    def getColumn(self):
+        return self._loc['col']
+
+    def getCategory(self):
+        return self._data['category']
+
+    def getDescription(self):
+        return self._data['description']
+
+    def getIssueIdentifier(self) :
+        id = self.getFileName() + "+"
+        if 'issue_context' in self._data :
+          id += self._data['issue_context'] + "+"
+        if 'issue_hash' in self._data :
+          id += str(self._data['issue_hash'])
+        return id
+
+    def getReport(self):
+        if self._htmlReport is None:
+            return " "
+        return os.path.join(self._report.run.path, self._htmlReport)
+
+    def getReadableName(self):
+        return '%s:%d:%d, %s: %s' % (self.getFileName(), self.getLine(), 
+                                     self.getColumn(), self.getCategory(), 
+                                     self.getDescription())
+        
+    # Note, the data format is not an API and may change from one analyzer 
+    # version to another.        
+    def getRawData(self):
+        return self._data
 
 class multidict:
     def __init__(self, elts=()):
@@ -41,65 +112,44 @@ class multidict:
         return len(self.data)
     def get(self, key, default=None):
         return self.data.get(key, default)
-    
-#
 
 class CmpOptions:
-    def __init__(self, verboseLog=None, root=""):
-        self.root = root
+    def __init__(self, verboseLog=None, rootA="", rootB=""):
+        self.rootA = rootA
+        self.rootB = rootB
         self.verboseLog = verboseLog
 
 class AnalysisReport:
-    def __init__(self, run, files):
+    def __init__(self, run, files, clang_vers):
         self.run = run
+        self.clang_version = clang_vers
         self.files = files
-
-class AnalysisDiagnostic:
-    def __init__(self, data, report, htmlReport):
-        self.data = data
-        self.report = report
-        self.htmlReport = htmlReport
-
-    def getReadableName(self):
-        loc = self.data['location']
-        filename = self.report.run.getSourceName(self.report.files[loc['file']])
-        line = loc['line']
-        column = loc['col']
-        category = self.data['category']
-        description = self.data['description']
-
-        # FIXME: Get a report number based on this key, to 'distinguish'
-        # reports, or something.
-        
-        return '%s:%d:%d, %s: %s' % (filename, line, column, category, 
-                                   description)
-
-    def getReportData(self):
-        if self.htmlReport is None:
-            return " "
-        return os.path.join(self.report.run.path, self.htmlReport)
-        # We could also dump the report with:
-        # return open(os.path.join(self.report.run.path,
-        #                         self.htmlReport), "rb").read() 
+        self.diagnostics = []
 
 class AnalysisRun:
-    def __init__(self, path, opts):
-        self.path = path
+    def __init__(self, info):
+        self.path = info.path
+        self.root = info.root
+        self.info = info
         self.reports = []
+        # Cumulative list of all diagnostics from all the reports.
         self.diagnostics = []
-        self.opts = opts
 
-    def getSourceName(self, path):
-        if path.startswith(self.opts.root):
-            return path[len(self.opts.root):]
-        return path
 
-def loadResults(path, opts, deleteEmpty=True):
-    run = AnalysisRun(path, opts)
+# Backward compatibility API. 
+def loadResults(path, opts, root = "", deleteEmpty=True):
+    return loadResultsFromSingleRun(SingleRunInfo(path, root, opts.verboseLog),
+                                    deleteEmpty)
 
+# Load results of the analyzes from a given output folder.
+# - info is the SingleRunInfo object
+# - deleteEmpty specifies if the empty plist files should be deleted
+def loadResultsFromSingleRun(info, deleteEmpty=True):
+    path = info.path
+    run = AnalysisRun(info)
+    
     for f in os.listdir(path):
-        if (not f.startswith('report') or
-            not f.endswith('plist')):
+        if (not f.endswith('plist')):
             continue
 
         p = os.path.join(path, f)
@@ -121,18 +171,26 @@ def loadResults(path, opts, deleteEmpty=True):
                 htmlFiles.append(d.pop('HTMLDiagnostics_files')[0])
         else:
             htmlFiles = [None] * len(data['diagnostics'])
-            
-        report = AnalysisReport(run, data.pop('files'))
+        
+        clang_version = ''
+        if 'clang_version' in data:
+            clang_version = data.pop('clang_version')
+        
+        report = AnalysisReport(run, data.pop('files'), clang_version)
         diagnostics = [AnalysisDiagnostic(d, report, h) 
                        for d,h in zip(data.pop('diagnostics'),
                                       htmlFiles)]
 
         assert not data
-
+        
+        report.diagnostics.extend(diagnostics)
         run.reports.append(report)
         run.diagnostics.extend(diagnostics)
 
     return run
+
+def cmpAnalysisDiagnostic(d) :
+    return d.getIssueIdentifier()
 
 def compareResults(A, B):
     """
@@ -152,19 +210,19 @@ def compareResults(A, B):
     neqB = []
     eltsA = list(A.diagnostics)
     eltsB = list(B.diagnostics)
-    eltsA.sort(key = lambda d: d.data)
-    eltsB.sort(key = lambda d: d.data)
+    eltsA.sort(key = cmpAnalysisDiagnostic)
+    eltsB.sort(key = cmpAnalysisDiagnostic)
     while eltsA and eltsB:
         a = eltsA.pop()
         b = eltsB.pop()
-        if a.data['location'] == b.data['location']:
+        if (a.getIssueIdentifier() == b.getIssueIdentifier()) :
             res.append((a, b, 0))
-        elif a.data > b.data:
-            neqA.append(a)
+        elif a.getIssueIdentifier() > b.getIssueIdentifier():
             eltsB.append(b)
+            neqA.append(a)
         else:
-            neqB.append(b)
             eltsA.append(a)
+            neqB.append(b)
     neqA.extend(eltsA)
     neqB.extend(eltsB)
 
@@ -181,10 +239,10 @@ def compareResults(A, B):
 
     return res
 
-def cmpScanBuildResults(dirA, dirB, opts, deleteEmpty=True):
+def dumpScanBuildResultsDiff(dirA, dirB, opts, deleteEmpty=True):
     # Load the run results.
-    resultsA = loadResults(dirA, opts, deleteEmpty)
-    resultsB = loadResults(dirB, opts, deleteEmpty)
+    resultsA = loadResults(dirA, opts, opts.rootA, deleteEmpty)
+    resultsB = loadResults(dirB, opts, opts.rootB, deleteEmpty)
     
     # Open the verbose log, if given.
     if opts.verboseLog:
@@ -201,13 +259,13 @@ def cmpScanBuildResults(dirA, dirB, opts, deleteEmpty=True):
             foundDiffs += 1
             if auxLog:
                 print >>auxLog, ("('ADDED', %r, %r)" % (b.getReadableName(),
-                                                        b.getReportData()))
+                                                        b.getReport()))
         elif b is None:
             print "REMOVED: %r" % a.getReadableName()
             foundDiffs += 1
             if auxLog:
                 print >>auxLog, ("('REMOVED', %r, %r)" % (a.getReadableName(),
-                                                          a.getReportData()))
+                                                          a.getReport()))
         elif confidence:
             print "CHANGED: %r to %r" % (a.getReadableName(),
                                          b.getReadableName())
@@ -216,8 +274,8 @@ def cmpScanBuildResults(dirA, dirB, opts, deleteEmpty=True):
                 print >>auxLog, ("('CHANGED', %r, %r, %r, %r)" 
                                  % (a.getReadableName(),
                                     b.getReadableName(),
-                                    a.getReportData(),
-                                    b.getReportData()))
+                                    a.getReport(),
+                                    b.getReport()))
         else:
             pass
 
@@ -233,8 +291,11 @@ def cmpScanBuildResults(dirA, dirB, opts, deleteEmpty=True):
 def main():
     from optparse import OptionParser
     parser = OptionParser("usage: %prog [options] [dir A] [dir B]")
-    parser.add_option("", "--root", dest="root",
-                      help="Prefix to ignore on source files",
+    parser.add_option("", "--rootA", dest="rootA",
+                      help="Prefix to ignore on source files for directory A",
+                      action="store", type=str, default="")
+    parser.add_option("", "--rootB", dest="rootB",
+                      help="Prefix to ignore on source files for directory B",
                       action="store", type=str, default="")
     parser.add_option("", "--verbose-log", dest="verboseLog",
                       help="Write additional information to LOG [default=None]",
@@ -247,7 +308,7 @@ def main():
 
     dirA,dirB = args
 
-    cmpScanBuildResults(dirA, dirB, opts)    
+    dumpScanBuildResultsDiff(dirA, dirB, opts)    
 
 if __name__ == '__main__':
     main()

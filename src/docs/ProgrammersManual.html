@@ -4,7 +4,7 @@
 <head>
   <meta http-equiv="Content-type" content="text/html;charset=UTF-8">
   <title>LLVM Programmer's Manual</title>
-  <link rel="stylesheet" href="llvm.css" type="text/css">
+  <link rel="stylesheet" href="_static/llvm.css" type="text/css">
 </head>
 <body>
 
@@ -507,8 +507,9 @@ small and pervasive enough in LLVM that it should always be passed by value.</p>
 
 <div>
 
-<p>The <tt>Twine</tt> class is an efficient way for APIs to accept concatenated
-strings.  For example, a common LLVM paradigm is to name one instruction based on
+<p>The <tt><a href="/doxygen/classllvm_1_1Twine.html">Twine</a></tt> class is an
+efficient way for APIs to accept concatenated strings.  For example, a common
+LLVM paradigm is to name one instruction based on
 the name of another instruction with a suffix, for example:</p>
 
 <div class="doc_code">
@@ -517,17 +518,17 @@ the name of another instruction with a suffix, for example:</p>
 </pre>
 </div>
 
-<p>The <tt>Twine</tt> class is effectively a
-lightweight <a href="http://en.wikipedia.org/wiki/Rope_(computer_science)">rope</a>
+<p>The <tt>Twine</tt> class is effectively a lightweight
+<a href="http://en.wikipedia.org/wiki/Rope_(computer_science)">rope</a>
 which points to temporary (stack allocated) objects.  Twines can be implicitly
 constructed as the result of the plus operator applied to strings (i.e., a C
-strings, an <tt>std::string</tt>, or a <tt>StringRef</tt>).  The twine delays the
-actual concatenation of strings until it is actually required, at which point
-it can be efficiently rendered directly into a character array.  This avoids
-unnecessary heap allocation involved in constructing the temporary results of
-string concatenation. See
-"<tt><a href="/doxygen/classllvm_1_1Twine_8h-source.html">llvm/ADT/Twine.h</a></tt>"
-for more information.</p>
+strings, an <tt>std::string</tt>, or a <tt>StringRef</tt>).  The twine delays
+the actual concatenation of strings until it is actually required, at which
+point it can be efficiently rendered directly into a character array.  This
+avoids unnecessary heap allocation involved in constructing the temporary
+results of string concatenation. See
+"<tt><a href="/doxygen/Twine_8h_source.html">llvm/ADT/Twine.h</a></tt>"
+and <a href="#dss_twine">here</a> for more information.</p>
 
 <p>As with a <tt>StringRef</tt>, <tt>Twine</tt> objects point to external memory
 and should almost never be stored or mentioned directly.  They are intended
@@ -1734,6 +1735,9 @@ already in the table, and each pair in the map is store in a single allocation
 
 <p>StringMap also provides query methods that take byte ranges, so it only ever
 copies a string if a value is inserted into the table.</p>
+
+<p>StringMap iteratation order, however, is not guaranteed to be deterministic,
+so any uses which require that should instead use a std::map.</p>
 </div>
 
 <!-- _______________________________________________________________________ -->
@@ -2567,7 +2571,7 @@ block but not delete it, you can use the <tt>removeFromParent()</tt> method.</p>
 
 <div>
 
-<p><i>Replacing individual instructions</i></p>
+<h5><i>Replacing individual instructions</i></h5>
 
 <p>Including "<a href="/doxygen/BasicBlockUtils_8h-source.html">llvm/Transforms/Utils/BasicBlockUtils.h</a>"
 permits use of two very useful replace functions: <tt>ReplaceInstWithValue</tt>
@@ -2575,6 +2579,7 @@ and <tt>ReplaceInstWithInst</tt>.</p>
 
 <h5><a name="schanges_deleting">Deleting <tt>Instruction</tt>s</a></h5>
 
+<div>
 <ul>
   <li><tt>ReplaceInstWithValue</tt>
 
@@ -2611,7 +2616,9 @@ ReplaceInstWithInst(instToReplace-&gt;getParent()-&gt;getInstList(), ii,
 </pre></div></li>
 </ul>
 
-<p><i>Replacing multiple uses of <tt>User</tt>s and <tt>Value</tt>s</i></p>
+</div>
+
+<h5><i>Replacing multiple uses of <tt>User</tt>s and <tt>Value</tt>s</i></h5>
 
 <p>You can use <tt>Value::replaceAllUsesWith</tt> and
 <tt>User::replaceUsesOfWith</tt> to change more than one use at a time.  See the
@@ -3305,13 +3312,12 @@ helpful member functions that try to make common operations easy.</p>
 <div>
 
 <ul>
-  <li><tt>Module::Module(std::string name = "")</tt></li>
-</ul>
+  <li><tt>Module::Module(std::string name = "")</tt>
 
-<p>Constructing a <a href="#Module">Module</a> is easy. You can optionally
+  <p>Constructing a <a href="#Module">Module</a> is easy. You can optionally
 provide a name for it (probably based on the name of the translation unit).</p>
+  </li>
 
-<ul>
   <li><tt>Module::iterator</tt> - Typedef for function list iterator<br>
     <tt>Module::const_iterator</tt> - Typedef for const_iterator.<br>
 
@@ -3369,8 +3375,9 @@ provide a name for it (probably based on the name of the translation unit).</p>
 <hr>
 
 <ul>
-  <li><tt><a href="#Function">Function</a> *getFunction(const std::string
-  &amp;Name, const <a href="#FunctionType">FunctionType</a> *Ty)</tt>
+
+  <li><tt><a href="#Function">Function</a> *getFunction(StringRef Name) const
+    </tt>
 
     <p>Look up the specified function in the <tt>Module</tt> <a
     href="#SymbolTable"><tt>SymbolTable</tt></a>. If it does not exist, return
@@ -3858,7 +3865,7 @@ is its address (after linking) which is guaranteed to be constant.</p>
   *Ty, LinkageTypes Linkage, const std::string &amp;N = "", Module* Parent = 0)</tt>
 
     <p>Constructor used when you need to create new <tt>Function</tt>s to add
-    the the program.  The constructor must specify the type of the function to
+    the program.  The constructor must specify the type of the function to
     create and what type of linkage the function should have. The <a 
     href="#FunctionType"><tt>FunctionType</tt></a> argument
     specifies the formal arguments and return value for the function. The same

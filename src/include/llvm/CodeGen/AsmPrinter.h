@@ -17,6 +17,7 @@
 #define LLVM_CODEGEN_ASMPRINTER_H
 
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/InlineAsm.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -354,6 +355,13 @@ namespace llvm {
     void EmitLabelPlusOffset(const MCSymbol *Label, uint64_t Offset,
                                    unsigned Size) const;
 
+    /// EmitLabelReference - Emit something like ".long Label"
+    /// where the size in bytes of the directive is specified by Size and Label
+    /// specifies the label.
+    void EmitLabelReference(const MCSymbol *Label, unsigned Size) const {
+      EmitLabelPlusOffset(Label, 0, Size);
+    }
+
     //===------------------------------------------------------------------===//
     // Dwarf Emission Helper Routines
     //===------------------------------------------------------------------===//
@@ -453,7 +461,8 @@ namespace llvm {
     mutable unsigned SetCounter;
 
     /// EmitInlineAsm - Emit a blob of inline asm to the output streamer.
-    void EmitInlineAsm(StringRef Str, const MDNode *LocMDNode = 0) const;
+    void EmitInlineAsm(StringRef Str, const MDNode *LocMDNode = 0,
+                    InlineAsm::AsmDialect AsmDialect = InlineAsm::AD_ATT) const;
 
     /// EmitInlineAsm - This method formats and emits the specified machine
     /// instruction that is an inline asm.

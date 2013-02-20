@@ -88,7 +88,7 @@ public:
 
   /// \brief Erase an entry from the mapping table.
   ///
-  /// \returns The address that \arg ToUnmap was happed to.
+  /// \returns The address that \p ToUnmap was happed to.
   void *RemoveMapping(const MutexGuard &, const GlobalValue *ToUnmap);
 };
 
@@ -244,7 +244,7 @@ public:
   /// Map the address of a JIT section as returned from the memory manager
   /// to the address in the target process as the running code will see it.
   /// This is the address which will be used for relocation resolution.
-  virtual void mapSectionAddress(void *LocalAddress, uint64_t TargetAddress) {
+  virtual void mapSectionAddress(const void *LocalAddress, uint64_t TargetAddress) {
     llvm_unreachable("Re-mapping of section addresses not supported with this "
                      "EE!");
   }
@@ -354,7 +354,7 @@ public:
   /// variable, possibly emitting it to memory if needed.  This is used by the
   /// Emitter.
   virtual void *getOrEmitGlobalVariable(const GlobalVariable *GV) {
-    return getPointerToGlobal((GlobalValue*)GV);
+    return getPointerToGlobal((const GlobalValue *)GV);
   }
 
   /// Registers a listener to be called back on various events within
@@ -602,19 +602,20 @@ public:
     return *this;
   }
 
+  TargetMachine *selectTarget();
+
   /// selectTarget - Pick a target either via -march or by guessing the native
   /// arch.  Add any CPU features specified via -mcpu or -mattr.
-  static TargetMachine *selectTarget(const Triple &TargetTriple,
-                                     StringRef MArch,
-                                     StringRef MCPU,
-                                     const SmallVectorImpl<std::string>& MAttrs,
-                                     const TargetOptions &Options,
-                                     Reloc::Model RM,
-                                     CodeModel::Model CM,
-                                     CodeGenOpt::Level OL,
-                                     std::string *Err);
+  TargetMachine *selectTarget(const Triple &TargetTriple,
+                              StringRef MArch,
+                              StringRef MCPU,
+                              const SmallVectorImpl<std::string>& MAttrs);
 
-  ExecutionEngine *create();
+  ExecutionEngine *create() {
+    return create(selectTarget());
+  }
+
+  ExecutionEngine *create(TargetMachine *TM);
 };
 
 } // End llvm namespace

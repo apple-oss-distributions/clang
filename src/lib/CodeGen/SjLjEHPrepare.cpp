@@ -1,4 +1,4 @@
-//===- SjLjEHPass.cpp - Eliminate Invoke & Unwind instructions -----------===//
+//===- SjLjEHPrepare.cpp - Eliminate Invoke & Unwind instructions ---------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,28 +13,28 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sjljehprepare"
-#include "llvm/Transforms/Scalar.h"
 #include "llvm/Constants.h"
 #include "llvm/DerivedTypes.h"
+#include "llvm/IRBuilder.h"
 #include "llvm/Instructions.h"
 #include "llvm/Intrinsics.h"
 #include "llvm/LLVMContext.h"
 #include "llvm/Module.h"
 #include "llvm/Pass.h"
-#include "llvm/CodeGen/Passes.h"
-#include "llvm/Target/TargetData.h"
-#include "llvm/Target/TargetLowering.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/Local.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/IRBuilder.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/Passes.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetData.h"
+#include "llvm/Target/TargetLowering.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include <set>
 using namespace llvm;
 
@@ -42,7 +42,7 @@ STATISTIC(NumInvokes, "Number of invokes replaced");
 STATISTIC(NumSpilled, "Number of registers live across unwind edges");
 
 namespace {
-  class SjLjEHPass : public FunctionPass {
+  class SjLjEHPrepare : public FunctionPass {
     const TargetLowering *TLI;
     Type *FunctionContextTy;
     Constant *RegisterFn;
@@ -58,7 +58,7 @@ namespace {
     AllocaInst *FuncCtx;
   public:
     static char ID; // Pass identification, replacement for typeid
-    explicit SjLjEHPass(const TargetLowering *tli = NULL)
+    explicit SjLjEHPrepare(const TargetLowering *tli = NULL)
       : FunctionPass(ID), TLI(tli) { }
     bool doInitialization(Module &M);
     bool runOnFunction(Function &F);
@@ -79,15 +79,15 @@ namespace {
   };
 } // end anonymous namespace
 
-char SjLjEHPass::ID = 0;
+char SjLjEHPrepare::ID = 0;
 
-// Public Interface To the SjLjEHPass pass.
-FunctionPass *llvm::createSjLjEHPass(const TargetLowering *TLI) {
-  return new SjLjEHPass(TLI);
+// Public Interface To the SjLjEHPrepare pass.
+FunctionPass *llvm::createSjLjEHPreparePass(const TargetLowering *TLI) {
+  return new SjLjEHPrepare(TLI);
 }
 // doInitialization - Set up decalarations and types needed to process
 // exceptions.
-bool SjLjEHPass::doInitialization(Module &M) {
+bool SjLjEHPrepare::doInitialization(Module &M) {
   // Build the function context structure.
   // builtin_setjmp uses a five word jbuf
   Type *VoidPtrTy = Type::getInt8PtrTy(M.getContext());
@@ -123,7 +123,7 @@ bool SjLjEHPass::doInitialization(Module &M) {
 
 /// insertCallSiteStore - Insert a store of the call-site value to the
 /// function context
-void SjLjEHPass::insertCallSiteStore(Instruction *I, int Number) {
+void SjLjEHPrepare::insertCallSiteStore(Instruction *I, int Number) {
   IRBuilder<> Builder(I);
 
   // Get a reference to the call_site field.
@@ -151,8 +151,8 @@ static void MarkBlocksLiveIn(BasicBlock *BB,
 
 /// substituteLPadValues - Substitute the values returned by the landingpad
 /// instruction with those returned by the personality function.
-void SjLjEHPass::substituteLPadValues(LandingPadInst *LPI, Value *ExnVal,
-                                      Value *SelVal) {
+void SjLjEHPrepare::substituteLPadValues(LandingPadInst *LPI, Value *ExnVal,
+                                         Value *SelVal) {
   SmallVector<Value*, 8> UseWorkList(LPI->use_begin(), LPI->use_end());
   while (!UseWorkList.empty()) {
     Value *Val = UseWorkList.pop_back_val();
@@ -183,7 +183,7 @@ void SjLjEHPass::substituteLPadValues(LandingPadInst *LPI, Value *ExnVal,
 
 /// setupFunctionContext - Allocate the function context on the stack and fill
 /// it with all of the data that we know at this point.
-Value *SjLjEHPass::
+Value *SjLjEHPrepare::
 setupFunctionContext(Function &F, ArrayRef<LandingPadInst*> LPads) {
   BasicBlock *EntryBB = F.begin();
 
@@ -196,53 +196,38 @@ setupFunctionContext(Function &F, ArrayRef<LandingPadInst*> LPads) {
     new AllocaInst(FunctionContextTy, 0, Align, "fn_context", EntryBB->begin());
 
   // Fill in the function context structure.
-  Type *Int32Ty = Type::getInt32Ty(F.getContext());
-  Value *Zero = ConstantInt::get(Int32Ty, 0);
-  Value *One = ConstantInt::get(Int32Ty, 1);
-  Value *Two = ConstantInt::get(Int32Ty, 2);
-  Value *Three = ConstantInt::get(Int32Ty, 3);
-  Value *Four = ConstantInt::get(Int32Ty, 4);
-
-  Value *Idxs[2] = { Zero, 0 };
-
   for (unsigned I = 0, E = LPads.size(); I != E; ++I) {
     LandingPadInst *LPI = LPads[I];
     IRBuilder<> Builder(LPI->getParent()->getFirstInsertionPt());
 
     // Reference the __data field.
-    Idxs[1] = Two;
-    Value *FCData = Builder.CreateGEP(FuncCtx, Idxs, "__data");
+    Value *FCData = Builder.CreateConstGEP2_32(FuncCtx, 0, 2, "__data");
 
     // The exception values come back in context->__data[0].
-    Idxs[1] = Zero;
-    Value *ExceptionAddr = Builder.CreateGEP(FCData, Idxs, "exception_gep");
+    Value *ExceptionAddr = Builder.CreateConstGEP2_32(FCData, 0, 0,
+                                                      "exception_gep");
     Value *ExnVal = Builder.CreateLoad(ExceptionAddr, true, "exn_val");
-    ExnVal = Builder.CreateIntToPtr(ExnVal, Type::getInt8PtrTy(F.getContext()));
+    ExnVal = Builder.CreateIntToPtr(ExnVal, Builder.getInt8PtrTy());
 
-    Idxs[1] = One;
-    Value *SelectorAddr = Builder.CreateGEP(FCData, Idxs, "exn_selector_gep");
+    Value *SelectorAddr = Builder.CreateConstGEP2_32(FCData, 0, 1,
+                                                     "exn_selector_gep");
     Value *SelVal = Builder.CreateLoad(SelectorAddr, true, "exn_selector_val");
 
     substituteLPadValues(LPI, ExnVal, SelVal);
   }
 
   // Personality function
-  Idxs[1] = Three;
+  IRBuilder<> Builder(EntryBB->getTerminator());
   if (!PersonalityFn)
     PersonalityFn = LPads[0]->getPersonalityFn();
-  Value *PersonalityFieldPtr =
-    GetElementPtrInst::Create(FuncCtx, Idxs, "pers_fn_gep",
-                              EntryBB->getTerminator());
-  new StoreInst(PersonalityFn, PersonalityFieldPtr, true,
-                EntryBB->getTerminator());
+  Value *PersonalityFieldPtr = Builder.CreateConstGEP2_32(FuncCtx, 0, 3,
+                                                          "pers_fn_gep");
+  Builder.CreateStore(PersonalityFn, PersonalityFieldPtr, /*isVolatile=*/true);
 
   // LSDA address
-  Value *LSDA = CallInst::Create(LSDAAddrFn, "lsda_addr",
-                                 EntryBB->getTerminator());
-  Idxs[1] = Four;
-  Value *LSDAFieldPtr = GetElementPtrInst::Create(FuncCtx, Idxs, "lsda_gep",
-                                                  EntryBB->getTerminator());
-  new StoreInst(LSDA, LSDAFieldPtr, true, EntryBB->getTerminator());
+  Value *LSDA = Builder.CreateCall(LSDAAddrFn, "lsda_addr");
+  Value *LSDAFieldPtr = Builder.CreateConstGEP2_32(FuncCtx, 0, 4, "lsda_gep");
+  Builder.CreateStore(LSDA, LSDAFieldPtr, /*isVolatile=*/true);
 
   return FuncCtx;
 }
@@ -251,7 +236,7 @@ setupFunctionContext(Function &F, ArrayRef<LandingPadInst*> LPads) {
 /// specially, we lower each arg to a copy instruction in the entry block. This
 /// ensures that the argument value itself cannot be live out of the entry
 /// block.
-void SjLjEHPass::lowerIncomingArguments(Function &F) {
+void SjLjEHPrepare::lowerIncomingArguments(Function &F) {
   BasicBlock::iterator AfterAllocaInsPt = F.begin()->begin();
   while (isa<AllocaInst>(AfterAllocaInsPt) &&
          isa<ConstantInt>(cast<AllocaInst>(AfterAllocaInsPt)->getArraySize()))
@@ -295,8 +280,8 @@ void SjLjEHPass::lowerIncomingArguments(Function &F) {
 
 /// lowerAcrossUnwindEdges - Find all variables which are alive across an unwind
 /// edge and spill them.
-void SjLjEHPass::lowerAcrossUnwindEdges(Function &F,
-                                        ArrayRef<InvokeInst*> Invokes) {
+void SjLjEHPrepare::lowerAcrossUnwindEdges(Function &F,
+                                           ArrayRef<InvokeInst*> Invokes) {
   // Finally, scan the code looking for instructions with bad live ranges.
   for (Function::iterator
          BB = F.begin(), BBE = F.end(); BB != BBE; ++BB) {
@@ -393,7 +378,7 @@ void SjLjEHPass::lowerAcrossUnwindEdges(Function &F,
 /// setupEntryBlockAndCallSites - Setup the entry block by creating and filling
 /// the function context and marking the call sites with the appropriate
 /// values. These values are used by the DWARF EH emitter.
-bool SjLjEHPass::setupEntryBlockAndCallSites(Function &F) {
+bool SjLjEHPrepare::setupEntryBlockAndCallSites(Function &F) {
   SmallVector<ReturnInst*,     16> Returns;
   SmallVector<InvokeInst*,     16> Invokes;
   SmallSetVector<LandingPadInst*, 16> LPads;
@@ -417,48 +402,31 @@ bool SjLjEHPass::setupEntryBlockAndCallSites(Function &F) {
   Value *FuncCtx =
     setupFunctionContext(F, makeArrayRef(LPads.begin(), LPads.end()));
   BasicBlock *EntryBB = F.begin();
-  Type *Int32Ty = Type::getInt32Ty(F.getContext());
-
-  Value *Idxs[2] = {
-    ConstantInt::get(Int32Ty, 0), 0
-  };
+  IRBuilder<> Builder(EntryBB->getTerminator());
 
   // Get a reference to the jump buffer.
-  Idxs[1] = ConstantInt::get(Int32Ty, 5);
-  Value *JBufPtr = GetElementPtrInst::Create(FuncCtx, Idxs, "jbuf_gep",
-                                             EntryBB->getTerminator());
+  Value *JBufPtr = Builder.CreateConstGEP2_32(FuncCtx, 0, 5, "jbuf_gep");
 
   // Save the frame pointer.
-  Idxs[1] = ConstantInt::get(Int32Ty, 0);
-  Value *FramePtr = GetElementPtrInst::Create(JBufPtr, Idxs, "jbuf_fp_gep",
-                                              EntryBB->getTerminator());
+  Value *FramePtr = Builder.CreateConstGEP2_32(JBufPtr, 0, 0, "jbuf_fp_gep");
 
-  Value *Val = CallInst::Create(FrameAddrFn,
-                                ConstantInt::get(Int32Ty, 0),
-                                "fp",
-                                EntryBB->getTerminator());
-  new StoreInst(Val, FramePtr, true, EntryBB->getTerminator());
+  Value *Val = Builder.CreateCall(FrameAddrFn, Builder.getInt32(0), "fp");
+  Builder.CreateStore(Val, FramePtr, /*isVolatile=*/true);
 
   // Save the stack pointer.
-  Idxs[1] = ConstantInt::get(Int32Ty, 2);
-  Value *StackPtr = GetElementPtrInst::Create(JBufPtr, Idxs, "jbuf_sp_gep",
-                                              EntryBB->getTerminator());
+  Value *StackPtr = Builder.CreateConstGEP2_32(JBufPtr, 0, 2, "jbuf_sp_gep");
 
-  Val = CallInst::Create(StackAddrFn, "sp", EntryBB->getTerminator());
-  new StoreInst(Val, StackPtr, true, EntryBB->getTerminator());
+  Val = Builder.CreateCall(StackAddrFn, "sp");
+  Builder.CreateStore(Val, StackPtr, /*isVolatile=*/true);
 
   // Call the setjmp instrinsic. It fills in the rest of the jmpbuf.
-  Value *SetjmpArg = CastInst::Create(Instruction::BitCast, JBufPtr,
-                                      Type::getInt8PtrTy(F.getContext()), "",
-                                      EntryBB->getTerminator());
-  CallInst::Create(BuiltinSetjmpFn, SetjmpArg, "", EntryBB->getTerminator());
+  Value *SetjmpArg = Builder.CreateBitCast(JBufPtr, Builder.getInt8PtrTy());
+  Builder.CreateCall(BuiltinSetjmpFn, SetjmpArg);
 
   // Store a pointer to the function context so that the back-end will know
   // where to look for it.
-  Value *FuncCtxArg = CastInst::Create(Instruction::BitCast, FuncCtx,
-                                       Type::getInt8PtrTy(F.getContext()), "",
-                                       EntryBB->getTerminator());
-  CallInst::Create(FuncCtxFn, FuncCtxArg, "", EntryBB->getTerminator());
+  Value *FuncCtxArg = Builder.CreateBitCast(FuncCtx, Builder.getInt8PtrTy());
+  Builder.CreateCall(FuncCtxFn, FuncCtxArg);
 
   // At this point, we are all set up, update the invoke instructions to mark
   // their call_site values.
@@ -519,7 +487,7 @@ bool SjLjEHPass::setupEntryBlockAndCallSites(Function &F) {
   return true;
 }
 
-bool SjLjEHPass::runOnFunction(Function &F) {
+bool SjLjEHPrepare::runOnFunction(Function &F) {
   bool Res = setupEntryBlockAndCallSites(F);
   return Res;
 }

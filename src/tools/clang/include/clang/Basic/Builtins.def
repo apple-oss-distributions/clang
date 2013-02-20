@@ -33,7 +33,8 @@
 //  H -> SEL
 //  a -> __builtin_va_list
 //  A -> "reference" to __builtin_va_list
-//  V -> Vector, following num elements and a base type.
+//  V -> Vector, followed by the number of elements and the base type.
+//  E -> ext_vector, followed by the number of elements and the base type.
 //  X -> _Complex, followed by the base type.
 //  Y -> ptrdiff_t
 //  P -> FILE
@@ -375,9 +376,9 @@ BUILTIN(__builtin_ctz  , "iUi"  , "nc")
 BUILTIN(__builtin_ctzl , "iULi" , "nc")
 BUILTIN(__builtin_ctzll, "iULLi", "nc")
 // TODO: int ctzimax(uintmax_t)
-BUILTIN(__builtin_ffs  , "iUi"  , "nc")
-BUILTIN(__builtin_ffsl , "iULi" , "nc")
-BUILTIN(__builtin_ffsll, "iULLi", "nc")
+BUILTIN(__builtin_ffs  , "ii"  , "nc")
+BUILTIN(__builtin_ffsl , "iLi" , "nc")
+BUILTIN(__builtin_ffsll, "iLLi", "nc")
 BUILTIN(__builtin_parity  , "iUi"  , "nc")
 BUILTIN(__builtin_parityl , "iULi" , "nc")
 BUILTIN(__builtin_parityll, "iULLi", "nc")
@@ -452,12 +453,15 @@ BUILTIN(__builtin_extend_pointer, "ULLiv*", "n") // _Unwind_Word == uint64_t
 // GCC Object size checking builtins
 BUILTIN(__builtin_object_size, "zvC*i", "n")
 BUILTIN(__builtin___memcpy_chk, "v*v*vC*zz", "nF")
+BUILTIN(__builtin___memccpy_chk, "v*v*vC*iz", "nF")
 BUILTIN(__builtin___memmove_chk, "v*v*vC*zz", "nF")
 BUILTIN(__builtin___mempcpy_chk, "v*v*vC*zz", "nF")
 BUILTIN(__builtin___memset_chk, "v*v*izz", "nF")
 BUILTIN(__builtin___stpcpy_chk, "c*c*cC*z", "nF")
 BUILTIN(__builtin___strcat_chk, "c*c*cC*z", "nF")
 BUILTIN(__builtin___strcpy_chk, "c*c*cC*z", "nF")
+BUILTIN(__builtin___strlcat_chk, "c*c*cC*zz", "nF")
+BUILTIN(__builtin___strlcpy_chk, "c*c*cC*zz", "nF")
 BUILTIN(__builtin___strncat_chk, "c*c*cC*zz", "nF")
 BUILTIN(__builtin___strncpy_chk, "c*c*cC*zz", "nF")
 BUILTIN(__builtin___stpncpy_chk, "c*c*cC*zz", "nF")
@@ -472,7 +476,9 @@ BUILTIN(__builtin___vprintf_chk, "iicC*a", "FP:1:")
 
 BUILTIN(__builtin_expect, "LiLiLi"   , "nc")
 BUILTIN(__builtin_prefetch, "vvC*.", "nc")
+BUILTIN(__builtin_readcyclecounter, "ULLi", "n")
 BUILTIN(__builtin_trap, "v", "nr")
+BUILTIN(__builtin_debugtrap, "v", "n")
 BUILTIN(__builtin_unreachable, "v", "nr")
 BUILTIN(__builtin_shufflevector, "v."   , "nc")
 BUILTIN(__builtin_alloca, "v*z"   , "n")
@@ -591,37 +597,57 @@ BUILTIN(__sync_swap_4, "iiD*i.", "tn")
 BUILTIN(__sync_swap_8, "LLiLLiD*LLi.", "tn")
 BUILTIN(__sync_swap_16, "LLLiLLLiD*LLLi.", "tn")
 
+// Some of our atomics builtins are handled by AtomicExpr rather than
+// as normal builtin CallExprs. This macro is used for such builtins.
+#ifndef ATOMIC_BUILTIN
+#define ATOMIC_BUILTIN(ID, TYPE, ATTRS) BUILTIN(ID, TYPE, ATTRS)
+#endif
+
 // C11 _Atomic operations for <stdatomic.h>.
-BUILTIN(__c11_atomic_load, "v.", "t")
-BUILTIN(__c11_atomic_store, "v.", "t")
-BUILTIN(__c11_atomic_exchange, "v.", "t")
-BUILTIN(__c11_atomic_compare_exchange_strong, "v.", "t")
-BUILTIN(__c11_atomic_compare_exchange_weak, "v.", "t")
-BUILTIN(__c11_atomic_fetch_add, "v.", "t")
-BUILTIN(__c11_atomic_fetch_sub, "v.", "t")
-BUILTIN(__c11_atomic_fetch_and, "v.", "t")
-BUILTIN(__c11_atomic_fetch_or, "v.", "t")
-BUILTIN(__c11_atomic_fetch_xor, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_init, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_load, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_store, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_exchange, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_compare_exchange_strong, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_compare_exchange_weak, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_add, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_sub, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_and, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_or, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_xor, "v.", "t")
 BUILTIN(__c11_atomic_thread_fence, "vi", "n")
 BUILTIN(__c11_atomic_signal_fence, "vi", "n")
-BUILTIN(__c11_atomic_init, "v.", "t")
 BUILTIN(__c11_atomic_is_lock_free, "iz", "n")
 
-// FIXME: Convert these to implementing GNU atomic builtins.
-BUILTIN(__atomic_load, "v.", "t")
-BUILTIN(__atomic_store, "v.", "t")
-BUILTIN(__atomic_exchange, "v.", "t")
-BUILTIN(__atomic_compare_exchange_strong, "v.", "t")
-BUILTIN(__atomic_compare_exchange_weak, "v.", "t")
-BUILTIN(__atomic_fetch_add, "v.", "t")
-BUILTIN(__atomic_fetch_sub, "v.", "t")
-BUILTIN(__atomic_fetch_and, "v.", "t")
-BUILTIN(__atomic_fetch_or, "v.", "t")
-BUILTIN(__atomic_fetch_xor, "v.", "t")
+// GNU atomic builtins.
+ATOMIC_BUILTIN(__atomic_load, "v.", "t")
+ATOMIC_BUILTIN(__atomic_load_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_store, "v.", "t")
+ATOMIC_BUILTIN(__atomic_store_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_exchange, "v.", "t")
+ATOMIC_BUILTIN(__atomic_exchange_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_compare_exchange, "v.", "t")
+ATOMIC_BUILTIN(__atomic_compare_exchange_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_add, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_sub, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_and, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_or, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_xor, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_nand, "v.", "t")
+ATOMIC_BUILTIN(__atomic_add_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_sub_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_and_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_or_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_xor_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_nand_fetch, "v.", "t")
+BUILTIN(__atomic_test_and_set, "bvD*i", "n")
+BUILTIN(__atomic_clear, "vvD*i", "n")
 BUILTIN(__atomic_thread_fence, "vi", "n")
 BUILTIN(__atomic_signal_fence, "vi", "n")
-BUILTIN(__atomic_init, "v.", "t")
-BUILTIN(__atomic_is_lock_free, "iz", "n")
+BUILTIN(__atomic_always_lock_free, "izvCD*", "n")
+BUILTIN(__atomic_is_lock_free, "izvCD*", "n")
+
+#undef ATOMIC_BUILTIN
 
 // Non-overloaded atomic builtins.
 BUILTIN(__sync_synchronize, "v.", "n")
@@ -702,6 +728,10 @@ LIBBUILTIN(strndup, "c*cC*z",     "f",     "string.h", ALL_LANGUAGES)
 LIBBUILTIN(index, "c*cC*i",       "f",     "strings.h", ALL_LANGUAGES)
 LIBBUILTIN(rindex, "c*cC*i",      "f",     "strings.h", ALL_LANGUAGES)
 LIBBUILTIN(bzero, "vv*z",         "f",     "strings.h", ALL_LANGUAGES)
+// In some systems str[n]casejmp is a macro that expands to _str[n]icmp.
+// We undefine then here to avoid wrong name.
+#undef strcasecmp
+#undef strncasecmp
 LIBBUILTIN(strcasecmp, "icC*cC*", "f",     "strings.h", ALL_LANGUAGES)
 LIBBUILTIN(strncasecmp, "icC*cC*z", "f",   "strings.h", ALL_LANGUAGES)
 // POSIX unistd.h
@@ -797,9 +827,13 @@ LIBBUILTIN(atan2, "ddd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(atan2l, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(atan2f, "fff", "fe", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(ceil, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(ceill, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(ceilf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(ceil, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(ceill, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(ceilf, "ff", "fc", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(copysign, "ddd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(copysignl, "LdLdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(copysignf, "fff", "fc", "math.h", ALL_LANGUAGES)
 
 LIBBUILTIN(cos, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(cosl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
@@ -809,37 +843,53 @@ LIBBUILTIN(exp, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(expl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(expf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(fabs, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(fabsl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(fabsf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(exp2, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(exp2l, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(exp2f, "ff", "fe", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(floor, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(floorl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(floorf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fabs, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fabsl, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fabsf, "ff", "fc", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(floor, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(floorl, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(floorf, "ff", "fc", "math.h", ALL_LANGUAGES)
 
 LIBBUILTIN(fma, "dddd", "fc", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(fmal, "LdLdLdLd", "fc", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(fmaf, "ffff", "fc", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(fmax, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(fmaxl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(fmaxf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fmax, "ddd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fmaxl, "LdLdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fmaxf, "fff", "fc", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(fmin, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(fminl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(fminf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fmin, "ddd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fminl, "LdLdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fminf, "fff", "fc", "math.h", ALL_LANGUAGES)
 
 LIBBUILTIN(log, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(logl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(logf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
+LIBBUILTIN(log2, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(log2l, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(log2f, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(nearbyint, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(nearbyintl, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(nearbyintf, "ff", "fc", "math.h", ALL_LANGUAGES)
+
 LIBBUILTIN(pow, "ddd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(powl, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(powf, "fff", "fe", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(round, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(roundl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(roundf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(rint, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(rintl, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(rintf, "ff", "fc", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(round, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(roundl, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(roundf, "ff", "fc", "math.h", ALL_LANGUAGES)
 
 LIBBUILTIN(sin, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(sinl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
@@ -853,13 +903,17 @@ LIBBUILTIN(tan, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(tanl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(tanf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
+LIBBUILTIN(trunc, "dd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(truncl, "LdLd", "fc", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(truncf, "ff", "fc", "math.h", ALL_LANGUAGES)
+
 // Blocks runtime Builtin math library functions
 LIBBUILTIN(_Block_object_assign, "vv*vC*iC", "f", "Blocks.h", ALL_LANGUAGES)
 LIBBUILTIN(_Block_object_dispose, "vvC*iC", "f", "Blocks.h", ALL_LANGUAGES)
 // FIXME: Also declare NSConcreteGlobalBlock and NSConcreteStackBlock.
 
 // Annotation function
-BUILTIN(__builtin_annotation, "UiUicC*", "nc")
+BUILTIN(__builtin_annotation, "v.", "tn")
 
 #undef BUILTIN
 #undef LIBBUILTIN

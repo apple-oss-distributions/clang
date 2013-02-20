@@ -11,6 +11,7 @@ add_llvm_library(LLVMCodeGen
   DeadMachineInstructionElim.cpp
   DFAPacketizer.cpp
   DwarfEHPrepare.cpp
+  EarlyIfConversion.cpp
   EdgeBundles.cpp
   ExecutionDepsFix.cpp
   ExpandISelPseudos.cpp
@@ -30,6 +31,7 @@ add_llvm_library(LLVMCodeGen
   LiveInterval.cpp
   LiveIntervalAnalysis.cpp
   LiveIntervalUnion.cpp
+  LiveRegMatrix.cpp
   LiveStackAnalysis.cpp
   LiveVariables.cpp
   LiveRangeCalc.cpp
@@ -43,6 +45,7 @@ add_llvm_library(LLVMCodeGen
   MachineCopyPropagation.cpp
   MachineCSE.cpp
   MachineDominators.cpp
+  MachinePostDominators.cpp
   MachineFunction.cpp
   MachineFunctionAnalysis.cpp
   MachineFunctionPass.cpp
@@ -59,6 +62,7 @@ add_llvm_library(LLVMCodeGen
   MachineSSAUpdater.cpp
   MachineScheduler.cpp
   MachineSink.cpp
+  MachineTraceMetrics.cpp
   MachineVerifier.cpp
   OcamlGC.cpp
   OptimizePHIs.cpp
@@ -77,10 +81,9 @@ add_llvm_library(LLVMCodeGen
   RegAllocPBQP.cpp
   RegisterClassInfo.cpp
   RegisterCoalescer.cpp
+  RegisterPressure.cpp
   RegisterScavenging.cpp
-  RenderMachineFunction.cpp
   ScheduleDAG.cpp
-  ScheduleDAGEmit.cpp
   ScheduleDAGInstrs.cpp
   ScheduleDAGPrinter.cpp
   ScoreboardHazardRecognizer.cpp
@@ -93,16 +96,20 @@ add_llvm_library(LLVMCodeGen
   SplitKit.cpp
   StackProtector.cpp
   StackSlotColoring.cpp
+  StackColoring.cpp
   StrongPHIElimination.cpp
   TailDuplication.cpp
   TargetFrameLoweringImpl.cpp
   TargetInstrInfoImpl.cpp
   TargetLoweringObjectFileImpl.cpp
   TargetOptionsImpl.cpp
+  TargetSchedule.cpp
   TwoAddressInstructionPass.cpp
   UnreachableBlockElim.cpp
   VirtRegMap.cpp
   )
+
+add_dependencies(LLVMCodeGen intrinsics_gen)
 
 add_subdirectory(SelectionDAG)
 add_subdirectory(AsmPrinter)

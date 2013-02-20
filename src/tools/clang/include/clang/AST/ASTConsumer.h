@@ -25,6 +25,7 @@ namespace clang {
   class TagDecl;
   class VarDecl;
   class FunctionDecl;
+  class ImportDecl;
 
 /// ASTConsumer - This is an abstract interface that should be implemented by
 /// clients that read ASTs.  This abstraction layer allows the client to be
@@ -79,6 +80,11 @@ public:
   /// The default implementation ignored them.
   virtual void HandleTopLevelDeclInObjCContainer(DeclGroupRef D);
 
+  /// \brief Handle an ImportDecl that was implicitly created due to an
+  /// inclusion directive.
+  /// The default implementation passes it to HandleTopLevelDecl.
+  virtual void HandleImplicitImportDecl(ImportDecl *D);
+
   /// CompleteTentativeDefinition - Callback invoked at the end of a translation
   /// unit to notify the consumer that the given tentative definition should be
   /// completed.
@@ -90,10 +96,9 @@ public:
   /// modified by the introduction of an implicit zero initializer.
   virtual void CompleteTentativeDefinition(VarDecl *D) {}
 
-  /// MarkVarRequired - Tell the consumer that this variable must be output.
-  /// This is needed when the definition is initially one that can be deferred,
-  /// but we then see an explicit template instantiation definition.
-  virtual void MarkVarRequired(VarDecl *D) {}
+  /// HandleCXXStaticMemberVarInstantiation - Tell the consumer that this
+  // variable has been instantiated.
+  virtual void HandleCXXStaticMemberVarInstantiation(VarDecl *D) {}
 
   /// \brief Callback involved at the end of a translation unit to
   /// notify the consumer that a vtable for the given C++ class is

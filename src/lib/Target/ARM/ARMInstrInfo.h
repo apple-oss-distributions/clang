@@ -14,11 +14,10 @@
 #ifndef ARMINSTRUCTIONINFO_H
 #define ARMINSTRUCTIONINFO_H
 
-#include "llvm/Target/TargetInstrInfo.h"
+#include "ARM.h"
 #include "ARMBaseInstrInfo.h"
 #include "ARMRegisterInfo.h"
 #include "ARMSubtarget.h"
-#include "ARM.h"
 
 namespace llvm {
   class ARMSubtarget;

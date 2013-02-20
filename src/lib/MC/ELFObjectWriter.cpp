@@ -17,7 +17,6 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmLayout.h"
 #include "llvm/MC/MCAssembler.h"
@@ -25,13 +24,13 @@
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCELFSymbolFlags.h"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCFixupKindInfo.h"
+#include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ELF.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/ADT/StringSwitch.h"
 
 #include <vector>
 using namespace llvm;
@@ -81,32 +80,6 @@ class ELFObjectWriter : public MCObjectWriter {
           return false;
         return SymbolData->getSymbol().getName() <
                RHS.SymbolData->getSymbol().getName();
-      }
-    };
-
-    /// @name Relocation Data
-    /// @{
-
-    struct ELFRelocationEntry {
-      // Make these big enough for both 32-bit and 64-bit
-      uint64_t r_offset;
-      int Index;
-      unsigned Type;
-      const MCSymbol *Symbol;
-      uint64_t r_addend;
-
-      ELFRelocationEntry()
-        : r_offset(0), Index(0), Type(0), Symbol(0), r_addend(0) {}
-
-      ELFRelocationEntry(uint64_t RelocOffset, int Idx,
-                         unsigned RelType, const MCSymbol *Sym,
-                         uint64_t Addend)
-        : r_offset(RelocOffset), Index(Idx), Type(RelType),
-          Symbol(Sym), r_addend(Addend) {}
-
-      // Support lexicographic sorting.
-      bool operator<(const ELFRelocationEntry &RE) const {
-        return RE.r_offset < r_offset;
       }
     };
 
@@ -297,9 +270,10 @@ class ELFObjectWriter : public MCObjectWriter {
 
     /// ComputeSymbolTable - Compute the symbol table data
     ///
-    /// \param StringTable [out] - The string table data.
-    /// \param StringIndexMap [out] - Map from symbol names to offsets in the
-    /// string table.
+    /// \param Asm - The assembler.
+    /// \param SectionIndexMap - Maps a section to its index.
+    /// \param RevGroupMap - Maps a signature symbol to the group section.
+    /// \param NumRegularSections - Number of non-relocation sections.
     void ComputeSymbolTable(MCAssembler &Asm,
                             const SectionIndexMapTy &SectionIndexMap,
                             RevGroupMapTy RevGroupMap,
@@ -654,7 +628,7 @@ void ELFObjectWriter::WriteSymbolTable(MCDataFragment *SymtabF,
 
 const MCSymbol *ELFObjectWriter::SymbolToReloc(const MCAssembler &Asm,
                                                const MCValue &Target,
-                                               const MCFragment &F, 
+                                               const MCFragment &F,
                                                const MCFixup &Fixup,
                                                bool IsPCRel) const {
   const MCSymbol &Symbol = Target.getSymA()->getSymbol();
@@ -786,7 +760,7 @@ void ELFObjectWriter::RecordRelocation(const MCAssembler &Asm,
   else
     assert(isInt<32>(Addend));
 
-  ELFRelocationEntry ERE(RelocOffset, Index, Type, RelocSymbol, Addend);
+  ELFRelocationEntry ERE(RelocOffset, Index, Type, RelocSymbol, Addend, Fixup);
   Relocations[Fragment->getParent()].push_back(ERE);
 }
 
@@ -1072,8 +1046,10 @@ void ELFObjectWriter::WriteRelocationsFragment(const MCAssembler &Asm,
                                                MCDataFragment *F,
                                                const MCSectionData *SD) {
   std::vector<ELFRelocationEntry> &Relocs = Relocations[SD];
-  // sort by the r_offset just like gnu as does
-  array_pod_sort(Relocs.begin(), Relocs.end());
+
+  // Sort the relocation entries. Most targets just sort by r_offset, but some
+  // (e.g., MIPS) have additional constraints.
+  TargetObjectWriter->sortRelocs(Asm, Relocs);
 
   for (unsigned i = 0, e = Relocs.size(); i != e; ++i) {
     ELFRelocationEntry entry = Relocs[e - i - 1];
@@ -1086,11 +1062,19 @@ void ELFObjectWriter::WriteRelocationsFragment(const MCAssembler &Asm,
       entry.Index += LocalSymbolData.size();
     if (is64Bit()) {
       String64(*F, entry.r_offset);
+      if (TargetObjectWriter->isN64()) {
+        String32(*F, entry.Index);
 
-      struct ELF::Elf64_Rela ERE64;
-      ERE64.setSymbolAndType(entry.Index, entry.Type);
-      String64(*F, ERE64.r_info);
-
+        String8(*F, TargetObjectWriter->getRSsym(entry.Type));
+        String8(*F, TargetObjectWriter->getRType3(entry.Type));
+        String8(*F, TargetObjectWriter->getRType2(entry.Type));
+        String8(*F, TargetObjectWriter->getRType(entry.Type));
+      }
+      else {
+        struct ELF::Elf64_Rela ERE64;
+        ERE64.setSymbolAndType(entry.Index, entry.Type);
+        String64(*F, ERE64.r_info);
+      }
       if (hasRelocationAddend())
         String64(*F, entry.r_addend);
     } else {

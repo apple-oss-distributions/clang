@@ -232,7 +232,7 @@ private:
   /// Updates the topological ordering if required.
   SUnit *CreateNewSUnit(SDNode *N) {
     unsigned NumSUnits = SUnits.size();
-    SUnit *NewNode = NewSUnit(N);
+    SUnit *NewNode = newSUnit(N);
     // Update the topological ordering.
     if (NewNode->NodeNum >= NumSUnits)
       Topo.InitDAGTopologicalSorting();
@@ -250,9 +250,9 @@ private:
     return NewNode;
   }
 
-  /// ForceUnitLatencies - Register-pressure-reducing scheduling doesn't
+  /// forceUnitLatencies - Register-pressure-reducing scheduling doesn't
   /// need actual latency information but the hybrid scheduler does.
-  bool ForceUnitLatencies() const {
+  bool forceUnitLatencies() const {
     return !NeedLatency;
   }
 };
@@ -266,7 +266,8 @@ static void GetCostForDef(const ScheduleDAGSDNodes::RegDefIter &RegDefPos,
                           const TargetLowering *TLI,
                           const TargetInstrInfo *TII,
                           const TargetRegisterInfo *TRI,
-                          unsigned &RegClass, unsigned &Cost) {
+                          unsigned &RegClass, unsigned &Cost,
+                          const MachineFunction &MF) {
   EVT VT = RegDefPos.GetValue();
 
   // Special handling for untyped values.  These values can only come from
@@ -285,7 +286,7 @@ static void GetCostForDef(const ScheduleDAGSDNodes::RegDefIter &RegDefPos,
 
     unsigned Idx = RegDefPos.GetIdx();
     const MCInstrDesc Desc = TII->get(Opcode);
-    const TargetRegisterClass *RC = TII->getRegClass(Desc, Idx, TRI);
+    const TargetRegisterClass *RC = TII->getRegClass(Desc, Idx, TRI, MF);
     RegClass = RC->getID();
     // FIXME: Cost arbitrarily set to 1 because there doesn't seem to be a
     // better way to determine it.
@@ -327,6 +328,12 @@ void ScheduleDAGRRList::Schedule() {
   ListScheduleBottomUp();
 
   AvailableQueue->releaseState();
+
+  DEBUG({
+      dbgs() << "*** Final schedule ***\n";
+      dumpSchedule();
+      dbgs() << '\n';
+    });
 }
 
 //===----------------------------------------------------------------------===//
@@ -348,7 +355,7 @@ void ScheduleDAGRRList::ReleasePred(SUnit *SU, const SDep *PredEdge) {
 #endif
   --PredSU->NumSuccsLeft;
 
-  if (!ForceUnitLatencies()) {
+  if (!forceUnitLatencies()) {
     // Updating predecessor's height. This is now the cycle when the
     // predecessor can be scheduled without causing a pipeline stall.
     PredSU->setHeightToAtLeast(SU->getHeight() + PredEdge->getLatency());
@@ -649,6 +656,8 @@ void ScheduleDAGRRList::EmitNode(SUnit *SU) {
     break;
   case ISD::MERGE_VALUES:
   case ISD::TokenFactor:
+  case ISD::LIFETIME_START:
+  case ISD::LIFETIME_END:
   case ISD::CopyToReg:
   case ISD::CopyFromReg:
   case ISD::EH_LABEL:
@@ -695,7 +704,7 @@ void ScheduleDAGRRList::ScheduleNodeBottomUp(SUnit *SU) {
 
   Sequence.push_back(SU);
 
-  AvailableQueue->ScheduledNode(SU);
+  AvailableQueue->scheduledNode(SU);
 
   // If HazardRec is disabled, and each inst counts as one cycle, then
   // advance CurCycle before ReleasePredecessors to avoid useless pushes to
@@ -842,11 +851,11 @@ void ScheduleDAGRRList::UnscheduleNodeBottomUp(SUnit *SU) {
   else {
     AvailableQueue->push(SU);
   }
-  AvailableQueue->UnscheduledNode(SU);
+  AvailableQueue->unscheduledNode(SU);
 }
 
 /// After backtracking, the hazard checker needs to be restored to a state
-/// corresponding the the current cycle.
+/// corresponding the current cycle.
 void ScheduleDAGRRList::RestoreHazardCheckerBottomUp() {
   HazardRec->Reset();
 
@@ -963,7 +972,7 @@ SUnit *ScheduleDAGRRList::CopyAndMoveSuccessors(SUnit *SU) {
       LoadNode->setNodeId(LoadSU->NodeNum);
 
       InitNumRegDefsLeft(LoadSU);
-      ComputeLatency(LoadSU);
+      computeLatency(LoadSU);
     }
 
     SUnit *NewSU = CreateNewSUnit(N);
@@ -981,7 +990,7 @@ SUnit *ScheduleDAGRRList::CopyAndMoveSuccessors(SUnit *SU) {
       NewSU->isCommutable = true;
 
     InitNumRegDefsLeft(NewSU);
-    ComputeLatency(NewSU);
+    computeLatency(NewSU);
 
     // Record all the edges to and from the old SU, by category.
     SmallVector<SDep, 4> ChainPreds;
@@ -1160,7 +1169,7 @@ static EVT getPhysicalRegisterVT(SDNode *N, unsigned Reg,
   const MCInstrDesc &MCID = TII->get(N->getMachineOpcode());
   assert(MCID.ImplicitDefs && "Physical reg def must be in implicit def list!");
   unsigned NumRes = MCID.getNumDefs();
-  for (const unsigned *ImpDef = MCID.getImplicitDefs(); *ImpDef; ++ImpDef) {
+  for (const uint16_t *ImpDef = MCID.getImplicitDefs(); *ImpDef; ++ImpDef) {
     if (Reg == *ImpDef)
       break;
     ++NumRes;
@@ -1175,7 +1184,7 @@ static void CheckForLiveRegDef(SUnit *SU, unsigned Reg,
                                SmallSet<unsigned, 4> &RegAdded,
                                SmallVector<unsigned, 4> &LRegs,
                                const TargetRegisterInfo *TRI) {
-  for (const unsigned *AliasI = TRI->getOverlaps(Reg); *AliasI; ++AliasI) {
+  for (MCRegAliasIterator AliasI(Reg, TRI, true); AliasI.isValid(); ++AliasI) {
 
     // Check if Ref is live.
     if (!LiveRegDefs[*AliasI]) continue;
@@ -1286,7 +1295,7 @@ DelayForLiveRegsBottomUp(SUnit *SU, SmallVector<unsigned, 4> &LRegs) {
     const MCInstrDesc &MCID = TII->get(Node->getMachineOpcode());
     if (!MCID.ImplicitDefs)
       continue;
-    for (const unsigned *Reg = MCID.ImplicitDefs; *Reg; ++Reg)
+    for (const uint16_t *Reg = MCID.getImplicitDefs(); *Reg; ++Reg)
       CheckForLiveRegDef(SU, *Reg, LiveRegDefs, RegAdded, LRegs, TRI);
   }
 
@@ -1475,7 +1484,7 @@ void ScheduleDAGRRList::ListScheduleBottomUp() {
   std::reverse(Sequence.begin(), Sequence.end());
 
 #ifndef NDEBUG
-  VerifySchedule(/*isBottomUp=*/true);
+  VerifyScheduledSequence(/*isBottomUp=*/true);
 #endif
 }
 
@@ -1581,6 +1590,7 @@ protected:
   std::vector<SUnit*> Queue;
   unsigned CurQueueId;
   bool TracksRegPressure;
+  bool SrcOrder;
 
   // SUnits - The SUnits for the current graph.
   std::vector<SUnit> *SUnits;
@@ -1606,11 +1616,12 @@ public:
   RegReductionPQBase(MachineFunction &mf,
                      bool hasReadyFilter,
                      bool tracksrp,
+                     bool srcorder,
                      const TargetInstrInfo *tii,
                      const TargetRegisterInfo *tri,
                      const TargetLowering *tli)
     : SchedulingPriorityQueue(hasReadyFilter),
-      CurQueueId(0), TracksRegPressure(tracksrp),
+      CurQueueId(0), TracksRegPressure(tracksrp), SrcOrder(srcorder),
       MF(mf), TII(tii), TRI(tri), TLI(tli), scheduleDAG(NULL) {
     if (TracksRegPressure) {
       unsigned NumRC = TRI->getNumRegClasses();
@@ -1681,9 +1692,9 @@ public:
 
   int RegPressureDiff(SUnit *SU, unsigned &LiveUses) const;
 
-  void ScheduledNode(SUnit *SU);
+  void scheduledNode(SUnit *SU);
 
-  void UnscheduledNode(SUnit *SU);
+  void unscheduledNode(SUnit *SU);
 
 protected:
   bool canClobber(const SUnit *SU, const SUnit *Op);
@@ -1725,10 +1736,12 @@ class RegReductionPriorityQueue : public RegReductionPQBase {
 public:
   RegReductionPriorityQueue(MachineFunction &mf,
                             bool tracksrp,
+                            bool srcorder,
                             const TargetInstrInfo *tii,
                             const TargetRegisterInfo *tri,
                             const TargetLowering *tli)
-    : RegReductionPQBase(mf, SF::HasReadyFilter, tracksrp, tii, tri, tli),
+    : RegReductionPQBase(mf, SF::HasReadyFilter, tracksrp, srcorder,
+                         tii, tri, tli),
       Picker(this) {}
 
   bool isBottomUp() const { return SF::IsBottomUp; }
@@ -1745,6 +1758,7 @@ public:
     return V;
   }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   void dump(ScheduleDAG *DAG) const {
     // Emulate pop() without clobbering NodeQueueIds.
     std::vector<SUnit*> DumpQueue = Queue;
@@ -1755,6 +1769,7 @@ public:
       SU->dump(DAG);
     }
   }
+#endif
 };
 
 typedef RegReductionPriorityQueue<bu_ls_rr_sort>
@@ -1882,6 +1897,7 @@ unsigned RegReductionPQBase::getNodePriority(const SUnit *SU) const {
 //===----------------------------------------------------------------------===//
 
 void RegReductionPQBase::dumpRegPressure() const {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   for (TargetRegisterInfo::regclass_iterator I = TRI->regclass_begin(),
          E = TRI->regclass_end(); I != E; ++I) {
     const TargetRegisterClass *RC = *I;
@@ -1891,6 +1907,7 @@ void RegReductionPQBase::dumpRegPressure() const {
     DEBUG(dbgs() << RC->getName() << ": " << RP << " / " << RegLimit[Id]
           << '\n');
   }
+#endif
 }
 
 bool RegReductionPQBase::HighRegPressure(const SUnit *SU) const {
@@ -1910,7 +1927,7 @@ bool RegReductionPQBase::HighRegPressure(const SUnit *SU) const {
     for (ScheduleDAGSDNodes::RegDefIter RegDefPos(PredSU, scheduleDAG);
          RegDefPos.IsValid(); RegDefPos.Advance()) {
       unsigned RCId, Cost;
-      GetCostForDef(RegDefPos, TLI, TII, TRI, RCId, Cost);
+      GetCostForDef(RegDefPos, TLI, TII, TRI, RCId, Cost, MF);
 
       if ((RegPressure[RCId] + Cost) >= RegLimit[RCId])
         return true;
@@ -1984,7 +2001,7 @@ int RegReductionPQBase::RegPressureDiff(SUnit *SU, unsigned &LiveUses) const {
   return PDiff;
 }
 
-void RegReductionPQBase::ScheduledNode(SUnit *SU) {
+void RegReductionPQBase::scheduledNode(SUnit *SU) {
   if (!TracksRegPressure)
     return;
 
@@ -2024,7 +2041,7 @@ void RegReductionPQBase::ScheduledNode(SUnit *SU) {
         continue;
 
       unsigned RCId, Cost;
-      GetCostForDef(RegDefPos, TLI, TII, TRI, RCId, Cost);
+      GetCostForDef(RegDefPos, TLI, TII, TRI, RCId, Cost, MF);
       RegPressure[RCId] += Cost;
       break;
     }
@@ -2039,7 +2056,7 @@ void RegReductionPQBase::ScheduledNode(SUnit *SU) {
     if (SkipRegDefs > 0)
       continue;
     unsigned RCId, Cost;
-    GetCostForDef(RegDefPos, TLI, TII, TRI, RCId, Cost);
+    GetCostForDef(RegDefPos, TLI, TII, TRI, RCId, Cost, MF);
     if (RegPressure[RCId] < Cost) {
       // Register pressure tracking is imprecise. This can happen. But we try
       // hard not to let it happen because it likely results in poor scheduling.
@@ -2053,7 +2070,7 @@ void RegReductionPQBase::ScheduledNode(SUnit *SU) {
   dumpRegPressure();
 }
 
-void RegReductionPQBase::UnscheduledNode(SUnit *SU) {
+void RegReductionPQBase::unscheduledNode(SUnit *SU) {
   if (!TracksRegPressure)
     return;
 
@@ -2320,22 +2337,21 @@ static int BUCompareLatency(SUnit *left, SUnit *right, bool checkPref,
   // and latency.
   if (!checkPref || (left->SchedulingPref == Sched::ILP ||
                      right->SchedulingPref == Sched::ILP)) {
-    if (DisableSchedCycles) {
+    // If neither instruction stalls (!LStall && !RStall) and HazardRecognizer
+    // is enabled, grouping instructions by cycle, then its height is already
+    // covered so only its depth matters. We also reach this point if both stall
+    // but have the same height.
+    if (!SPQ->getHazardRec()->isEnabled()) {
       if (LHeight != RHeight)
         return LHeight > RHeight ? 1 : -1;
     }
-    else {
-      // If neither instruction stalls (!LStall && !RStall) then
-      // its height is already covered so only its depth matters. We also reach
-      // this if both stall but have the same height.
-      int LDepth = left->getDepth() - LPenalty;
-      int RDepth = right->getDepth() - RPenalty;
-      if (LDepth != RDepth) {
-        DEBUG(dbgs() << "  Comparing latency of SU (" << left->NodeNum
-              << ") depth " << LDepth << " vs SU (" << right->NodeNum
-              << ") depth " << RDepth << "\n");
-        return LDepth < RDepth ? 1 : -1;
-      }
+    int LDepth = left->getDepth() - LPenalty;
+    int RDepth = right->getDepth() - RPenalty;
+    if (LDepth != RDepth) {
+      DEBUG(dbgs() << "  Comparing latency of SU (" << left->NodeNum
+            << ") depth " << LDepth << " vs SU (" << right->NodeNum
+            << ") depth " << RDepth << "\n");
+      return LDepth < RDepth ? 1 : -1;
     }
     if (left->Latency != right->Latency)
       return left->Latency > right->Latency ? 1 : -1;
@@ -2353,7 +2369,7 @@ static bool BURRSort(SUnit *left, SUnit *right, RegReductionPQBase *SPQ) {
     bool RHasPhysReg = right->hasPhysRegDefs;
     if (LHasPhysReg != RHasPhysReg) {
       #ifndef NDEBUG
-      const char *PhysRegMsg[] = {" has no physreg", " defines a physreg"};
+      const char *const PhysRegMsg[] = {" has no physreg"," defines a physreg"};
       #endif
       DEBUG(dbgs() << "  SU (" << left->NodeNum << ") "
             << PhysRegMsg[LHasPhysReg] << " SU(" << right->NodeNum << ") "
@@ -2619,7 +2635,7 @@ void RegReductionPQBase::initNodes(std::vector<SUnit> &sunits) {
   if (!Disable2AddrHack)
     AddPseudoTwoAddrDeps();
   // Reroute edges to nodes with multiple uses.
-  if (!TracksRegPressure)
+  if (!TracksRegPressure && !SrcOrder)
     PrescheduleNodesWithMultipleUses();
   // Calculate node priorities.
   CalculateSethiUllmanNumbers();
@@ -2661,7 +2677,7 @@ static bool canClobberReachingPhysRegUse(const SUnit *DepSU, const SUnit *SU,
                                          ScheduleDAGRRList *scheduleDAG,
                                          const TargetInstrInfo *TII,
                                          const TargetRegisterInfo *TRI) {
-  const unsigned *ImpDefs
+  const uint16_t *ImpDefs
     = TII->get(SU->getNode()->getMachineOpcode()).getImplicitDefs();
   const uint32_t *RegMask = getNodeRegMask(SU->getNode());
   if(!ImpDefs && !RegMask)
@@ -2680,7 +2696,7 @@ static bool canClobberReachingPhysRegUse(const SUnit *DepSU, const SUnit *SU,
         return true;
 
       if (ImpDefs)
-        for (const unsigned *ImpDef = ImpDefs; *ImpDef; ++ImpDef)
+        for (const uint16_t *ImpDef = ImpDefs; *ImpDef; ++ImpDef)
           // Return true if SU clobbers this physical register use and the
           // definition of the register reaches from DepSU. IsReachable queries
           // a topological forward sort of the DAG (following the successors).
@@ -2699,13 +2715,13 @@ static bool canClobberPhysRegDefs(const SUnit *SuccSU, const SUnit *SU,
                                   const TargetRegisterInfo *TRI) {
   SDNode *N = SuccSU->getNode();
   unsigned NumDefs = TII->get(N->getMachineOpcode()).getNumDefs();
-  const unsigned *ImpDefs = TII->get(N->getMachineOpcode()).getImplicitDefs();
+  const uint16_t *ImpDefs = TII->get(N->getMachineOpcode()).getImplicitDefs();
   assert(ImpDefs && "Caller should check hasPhysRegDefs");
   for (const SDNode *SUNode = SU->getNode(); SUNode;
        SUNode = SUNode->getGluedNode()) {
     if (!SUNode->isMachineOpcode())
       continue;
-    const unsigned *SUImpDefs =
+    const uint16_t *SUImpDefs =
       TII->get(SUNode->getMachineOpcode()).getImplicitDefs();
     const uint32_t *SURegMask = getNodeRegMask(SUNode);
     if (!SUImpDefs && !SURegMask)
@@ -2942,7 +2958,7 @@ llvm::createBURRListDAGScheduler(SelectionDAGISel *IS,
   const TargetRegisterInfo *TRI = TM.getRegisterInfo();
 
   BURegReductionPriorityQueue *PQ =
-    new BURegReductionPriorityQueue(*IS->MF, false, TII, TRI, 0);
+    new BURegReductionPriorityQueue(*IS->MF, false, false, TII, TRI, 0);
   ScheduleDAGRRList *SD = new ScheduleDAGRRList(*IS->MF, false, PQ, OptLevel);
   PQ->setScheduleDAG(SD);
   return SD;
@@ -2956,7 +2972,7 @@ llvm::createSourceListDAGScheduler(SelectionDAGISel *IS,
   const TargetRegisterInfo *TRI = TM.getRegisterInfo();
 
   SrcRegReductionPriorityQueue *PQ =
-    new SrcRegReductionPriorityQueue(*IS->MF, false, TII, TRI, 0);
+    new SrcRegReductionPriorityQueue(*IS->MF, false, true, TII, TRI, 0);
   ScheduleDAGRRList *SD = new ScheduleDAGRRList(*IS->MF, false, PQ, OptLevel);
   PQ->setScheduleDAG(SD);
   return SD;
@@ -2971,7 +2987,7 @@ llvm::createHybridListDAGScheduler(SelectionDAGISel *IS,
   const TargetLowering *TLI = &IS->getTargetLowering();
 
   HybridBURRPriorityQueue *PQ =
-    new HybridBURRPriorityQueue(*IS->MF, true, TII, TRI, TLI);
+    new HybridBURRPriorityQueue(*IS->MF, true, false, TII, TRI, TLI);
 
   ScheduleDAGRRList *SD = new ScheduleDAGRRList(*IS->MF, true, PQ, OptLevel);
   PQ->setScheduleDAG(SD);
@@ -2987,7 +3003,7 @@ llvm::createILPListDAGScheduler(SelectionDAGISel *IS,
   const TargetLowering *TLI = &IS->getTargetLowering();
 
   ILPBURRPriorityQueue *PQ =
-    new ILPBURRPriorityQueue(*IS->MF, true, TII, TRI, TLI);
+    new ILPBURRPriorityQueue(*IS->MF, true, false, TII, TRI, TLI);
   ScheduleDAGRRList *SD = new ScheduleDAGRRList(*IS->MF, true, PQ, OptLevel);
   PQ->setScheduleDAG(SD);
   return SD;

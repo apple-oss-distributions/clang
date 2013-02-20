@@ -8,8 +8,9 @@ add_llvm_library(LLVMCore
   ConstantFold.cpp
   Constants.cpp
   Core.cpp
-  DebugInfoProbe.cpp
+  DebugInfo.cpp
   DebugLoc.cpp
+  DIBuilder.cpp
   Dominators.cpp
   Function.cpp
   GCOV.cpp
@@ -30,6 +31,7 @@ add_llvm_library(LLVMCore
   PassRegistry.cpp
   PrintModulePass.cpp
   Type.cpp
+  TypeFinder.cpp
   Use.cpp
   User.cpp
   Value.cpp
@@ -37,3 +39,14 @@ add_llvm_library(LLVMCore
   ValueTypes.cpp
   Verifier.cpp
   )
+
+# Workaround: It takes over 20 minutes to compile with msvc10.
+# FIXME: Suppressing optimizations to core libraries would not be good thing.
+if( MSVC_VERSION LESS 1700 )
+set_property(
+  SOURCE Function.cpp
+  PROPERTY COMPILE_FLAGS "/Og-"
+  )
+endif()
+
+add_dependencies(LLVMCore intrinsics_gen)

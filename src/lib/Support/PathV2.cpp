@@ -654,12 +654,13 @@ error_code create_directories(const Twine &path, bool &existed) {
   StringRef p = path.toStringRef(path_storage);
 
   StringRef parent = path::parent_path(p);
-  bool parent_exists;
+  if (!parent.empty()) {
+    bool parent_exists;
+    if (error_code ec = fs::exists(parent, parent_exists)) return ec;
 
-  if (error_code ec = fs::exists(parent, parent_exists)) return ec;
-
-  if (!parent_exists)
-    if (error_code ec = create_directories(parent, existed)) return ec;
+    if (!parent_exists)
+      if (error_code ec = create_directories(parent, existed)) return ec;
+  }
 
   return create_directory(p, existed);
 }
@@ -743,6 +744,8 @@ error_code has_magic(const Twine &path, const Twine &magic, bool &result) {
 
 /// @brief Identify the magic in magic.
 file_magic identify_magic(StringRef magic) {
+  if (magic.size() < 4)
+    return file_magic::unknown;
   switch ((unsigned char)magic[0]) {
     case 0xDE:  // 0x0B17C0DE = BC wraper
       if (magic[1] == (char)0xC0 && magic[2] == (char)0x17 &&

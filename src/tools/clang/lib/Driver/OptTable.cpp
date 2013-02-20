@@ -129,58 +129,16 @@ OptTable::~OptTable() {
   delete[] Options;
 }
 
+bool OptTable::isOptionHelpHidden(OptSpecifier id) const {
+  return getInfo(id).Flags & options::HelpHidden;
+}
+
 Option *OptTable::CreateOption(unsigned id) const {
   const Info &info = getInfo(id);
-  const OptionGroup *Group =
-    cast_or_null<OptionGroup>(getOption(info.GroupID));
+  const Option *Group = getOption(info.GroupID);
   const Option *Alias = getOption(info.AliasID);
 
-  Option *Opt = 0;
-  switch (info.Kind) {
-  case Option::InputClass:
-    Opt = new InputOption(id); break;
-  case Option::UnknownClass:
-    Opt = new UnknownOption(id); break;
-  case Option::GroupClass:
-    Opt = new OptionGroup(id, info.Name, Group); break;
-  case Option::FlagClass:
-    Opt = new FlagOption(id, info.Name, Group, Alias); break;
-  case Option::JoinedClass:
-    Opt = new JoinedOption(id, info.Name, Group, Alias); break;
-  case Option::SeparateClass:
-    Opt = new SeparateOption(id, info.Name, Group, Alias); break;
-  case Option::CommaJoinedClass:
-    Opt = new CommaJoinedOption(id, info.Name, Group, Alias); break;
-  case Option::MultiArgClass:
-    Opt = new MultiArgOption(id, info.Name, Group, Alias, info.Param); break;
-  case Option::JoinedOrSeparateClass:
-    Opt = new JoinedOrSeparateOption(id, info.Name, Group, Alias); break;
-  case Option::JoinedAndSeparateClass:
-    Opt = new JoinedAndSeparateOption(id, info.Name, Group, Alias); break;
-  }
-
-  if (info.Flags & DriverOption)
-    Opt->setDriverOption(true);
-  if (info.Flags & LinkerInput)
-    Opt->setLinkerInput(true);
-  if (info.Flags & NoArgumentUnused)
-    Opt->setNoArgumentUnused(true);
-  if (info.Flags & NoForward)
-    Opt->setNoForward(true);
-  if (info.Flags & RenderAsInput)
-    Opt->setNoOptAsInput(true);
-  if (info.Flags & RenderJoined) {
-    assert((info.Kind == Option::JoinedOrSeparateClass ||
-            info.Kind == Option::SeparateClass) && "Invalid option.");
-    Opt->setRenderStyle(Option::RenderJoinedStyle);
-  }
-  if (info.Flags & RenderSeparate) {
-    assert((info.Kind == Option::JoinedOrSeparateClass ||
-            info.Kind == Option::JoinedClass) && "Invalid option.");
-    Opt->setRenderStyle(Option::RenderSeparateStyle);
-  }
-  if (info.Flags & Unsupported)
-    Opt->setUnsupported(true);
+  Option *Opt = new Option(&info, Group, Alias);
 
   return Opt;
 }
@@ -207,10 +165,11 @@ Arg *OptTable::ParseOneArg(const ArgList &Args, unsigned &Index) const {
   // FIXME: This is searching much more than necessary, but I am
   // blanking on the simplest way to make it fast. We can solve this
   // problem when we move to TableGen.
+  StringRef StrRef(Str);
   for (; Start != End; ++Start) {
     // Scan for first option which is a proper prefix.
     for (; Start != End; ++Start)
-      if (memcmp(Str, Start->Name, strlen(Start->Name)) == 0)
+      if (StrRef.startswith(Start->Name))
         break;
     if (Start == End)
       break;

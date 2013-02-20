@@ -94,7 +94,7 @@ protected:
 
 public:
   /// Code Generation virtual methods...
-  const unsigned *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
+  const uint16_t *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
   const uint32_t *getCallPreservedMask(CallingConv::ID) const;
 
   BitVector getReservedRegs(const MachineFunction &MF) const;
@@ -109,7 +109,8 @@ public:
                                        SmallVectorImpl<unsigned> &SubIndices,
                                        unsigned &NewSubIdx) const;
 
-  const TargetRegisterClass *getPointerRegClass(unsigned Kind = 0) const;
+  const TargetRegisterClass*
+  getPointerRegClass(const MachineFunction &MF, unsigned Kind = 0) const;
   const TargetRegisterClass*
   getCrossCopyRegClass(const TargetRegisterClass *RC) const;
 
@@ -119,7 +120,7 @@ public:
   unsigned getRegPressureLimit(const TargetRegisterClass *RC,
                                MachineFunction &MF) const;
 
-  ArrayRef<unsigned> getRawAllocationOrder(const TargetRegisterClass *RC,
+  ArrayRef<uint16_t> getRawAllocationOrder(const TargetRegisterClass *RC,
                                            unsigned HintType, unsigned HintReg,
                                            const MachineFunction &MF) const;
 
@@ -172,6 +173,8 @@ public:
   virtual bool isReservedReg(const MachineFunction &MF, unsigned Reg) const;
 
   virtual bool requiresRegisterScavenging(const MachineFunction &MF) const;
+
+  virtual bool trackLivenessAfterRegAlloc(const MachineFunction &MF) const;
 
   virtual bool requiresFrameIndexScavenging(const MachineFunction &MF) const;
 

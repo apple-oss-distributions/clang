@@ -17,9 +17,9 @@
 #include "clang/AST/Type.h"
 #include "clang/AST/Expr.h"
 #include "clang/Basic/SourceLocation.h"
+#include "llvm/DebugInfo.h"
+#include "llvm/DIBuilder.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/Analysis/DebugInfo.h"
-#include "llvm/Analysis/DIBuilder.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/Allocator.h"
 
@@ -30,6 +30,7 @@ namespace llvm {
 }
 
 namespace clang {
+  class CXXMethodDecl;
   class VarDecl;
   class ObjCInterfaceDecl;
   class ClassTemplateSpecializationDecl;
@@ -49,6 +50,9 @@ class CGDebugInfo {
   llvm::DICompileUnit TheCU;
   SourceLocation CurLoc, PrevLoc;
   llvm::DIType VTablePtrType;
+  llvm::DIType ClassTy;
+  llvm::DIType ObjTy;
+  llvm::DIType SelTy;
   
   /// TypeCache - Cache of previously constructed Types.
   llvm::DenseMap<void *, llvm::WeakVH> TypeCache;
@@ -226,6 +230,12 @@ public:
 
   /// getOrCreateRecordType - Emit record type's standalone debug info. 
   llvm::DIType getOrCreateRecordType(QualType Ty, SourceLocation L);
+
+  /// getOrCreateInterfaceType - Emit an objective c interface type standalone
+  /// debug info.
+  llvm::DIType getOrCreateInterfaceType(QualType Ty,
+					SourceLocation Loc);
+
 private:
   /// EmitDeclare - Emit call to llvm.dbg.declare for a variable declaration.
   void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,

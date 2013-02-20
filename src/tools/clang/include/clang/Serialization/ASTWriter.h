@@ -60,6 +60,7 @@ class SourceManager;
 class SwitchCase;
 class TargetInfo;
 class VersionTuple;
+class ASTUnresolvedSet;
 
 namespace SrcMgr { class SLocEntry; }
 
@@ -76,6 +77,7 @@ public:
   typedef SmallVectorImpl<uint64_t> RecordDataImpl;
 
   friend class ASTDeclWriter;
+  friend class ASTStmtWriter;
 private:
   /// \brief Map that provides the ID numbers of each type within the
   /// output stream, plus those deserialized from a chained PCH.
@@ -108,6 +110,10 @@ private:
   /// \brief Indicates when the AST writing is actively performing
   /// serialization, rather than just queueing updates.
   bool WritingAST;
+
+  /// \brief Indicates that we are done serializing the collection of decls
+  /// and types to emit.
+  bool DoneWritingDeclsAndTypes;
 
   /// \brief Indicates that the AST contained compiler errors.
   bool ASTHasCompilerErrors;
@@ -166,8 +172,7 @@ private:
     /// indicates the index that this particular vector has in the global one.
     unsigned FirstDeclIndex;
   };
-  typedef llvm::DenseMap<const SrcMgr::SLocEntry *,
-                         DeclIDInFileInfo *> FileDeclIDsTy;
+  typedef llvm::DenseMap<FileID, DeclIDInFileInfo *> FileDeclIDsTy;
 
   /// \brief Map from file SLocEntries to info about the file-level declarations
   /// that it contains.
@@ -295,6 +300,10 @@ private:
   /// it.
   llvm::SmallPtrSet<const DeclContext *, 16> UpdatedDeclContexts;
 
+  /// \brief Keeps track of visible decls that were added in DeclContexts
+  /// coming from another AST file.
+  SmallVector<const Decl *, 16> UpdatingVisibleDecls;
+
   typedef llvm::SmallPtrSet<const Decl *, 16> DeclsToRewriteTy;
   /// \brief Decls that will be replaced in the current dependent AST file.
   DeclsToRewriteTy DeclsToRewrite;
@@ -413,11 +422,12 @@ private:
   uint64_t WriteDeclContextVisibleBlock(ASTContext &Context, DeclContext *DC);
   void WriteTypeDeclOffsets();
   void WriteFileDeclIDsMap();
+  void WriteComments();
   void WriteSelectors(Sema &SemaRef);
   void WriteReferencedSelectorsPool(Sema &SemaRef);
   void WriteIdentifierTable(Preprocessor &PP, IdentifierResolver &IdResolver,
                             bool IsModule);
-  void WriteAttributes(const AttrVec &Attrs, RecordDataImpl &Record);
+  void WriteAttributes(ArrayRef<const Attr*> Attrs, RecordDataImpl &Record);
   void ResolveDeclUpdatesBlocks();
   void WriteDeclUpdatesBlocks();
   void WriteDeclReplacementsBlock();
@@ -590,7 +600,7 @@ public:
                                 RecordDataImpl &Record);
 
   /// \brief Emit a UnresolvedSet structure.
-  void AddUnresolvedSet(const UnresolvedSetImpl &Set, RecordDataImpl &Record);
+  void AddUnresolvedSet(const ASTUnresolvedSet &Set, RecordDataImpl &Record);
 
   /// \brief Emit a C++ base specifier.
   void AddCXXBaseSpecifier(const CXXBaseSpecifier &Base,

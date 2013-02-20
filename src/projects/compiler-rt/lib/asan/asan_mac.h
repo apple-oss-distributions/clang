@@ -9,91 +9,48 @@
 //
 // This file is a part of AddressSanitizer, an address sanity checker.
 //
-// ASan-private header for asan_mac.cc
+// Mac-specific ASan definitions.
 //===----------------------------------------------------------------------===//
-#ifdef __APPLE__
-
 #ifndef ASAN_MAC_H
 #define ASAN_MAC_H
 
-#include "asan_interceptors.h"
+// CF_RC_BITS, the layout of CFRuntimeBase and __CFStrIsConstant are internal
+// and subject to change in further CoreFoundation versions. Apple does not
+// guarantee any binary compatibility from release to release.
 
-#include <setjmp.h>
-#include <CoreFoundation/CFString.h>
+// See http://opensource.apple.com/source/CF/CF-635.15/CFInternal.h
+#if defined(__BIG_ENDIAN__)
+#define CF_RC_BITS 0
+#endif
+
+#if defined(__LITTLE_ENDIAN__)
+#define CF_RC_BITS 3
+#endif
+
+// See http://opensource.apple.com/source/CF/CF-635.15/CFRuntime.h
+typedef struct __CFRuntimeBase {
+  uptr _cfisa;
+  u8 _cfinfo[4];
+#if __LP64__
+  u32 _rc;
+#endif
+} CFRuntimeBase;
 
 enum {
   MACOS_VERSION_UNKNOWN = 0,
   MACOS_VERSION_LEOPARD,
   MACOS_VERSION_SNOW_LEOPARD,
-  MACOS_VERSION_LION,
+  MACOS_VERSION_LION
 };
 
+// Used by asan_malloc_mac.cc and asan_mac.cc
+extern "C" void __CFInitialize();
+
 namespace __asan {
+
 int GetMacosVersion();
-}
+void ReplaceCFAllocator();
 
-typedef void* pthread_workqueue_t;
-typedef void* pthread_workitem_handle_t;
-
-typedef void* dispatch_group_t;
-typedef void* dispatch_queue_t;
-typedef uint64_t dispatch_time_t;
-typedef void (*dispatch_function_t)(void *block);
-typedef void* (*worker_t)(void *block);
-
-DECLARE_REAL_AND_INTERCEPTOR(void, dispatch_async_f, dispatch_queue_t dq,
-                                                     void *ctxt,
-                                                     dispatch_function_t func);
-DECLARE_REAL_AND_INTERCEPTOR(void, dispatch_sync_f, dispatch_queue_t dq,
-                                                    void *ctxt,
-                                                    dispatch_function_t func);
-DECLARE_REAL_AND_INTERCEPTOR(void, dispatch_after_f, dispatch_time_t when,
-                                                     dispatch_queue_t dq,
-                                                     void *ctxt,
-                                                     dispatch_function_t func);
-DECLARE_REAL_AND_INTERCEPTOR(void, dispatch_barrier_async_f,
-                                   dispatch_queue_t dq,
-                                   void *ctxt,
-                                   dispatch_function_t func);
-DECLARE_REAL_AND_INTERCEPTOR(void, dispatch_group_async_f,
-                                   dispatch_group_t group,
-                                   dispatch_queue_t dq,
-                                   void *ctxt,
-                                   dispatch_function_t func);
-DECLARE_REAL_AND_INTERCEPTOR(int, pthread_workqueue_additem_np,
-                                  pthread_workqueue_t workq,
-                                  void *(*workitem_func)(void *),
-                                  void * workitem_arg,
-                                  pthread_workitem_handle_t * itemhandlep,
-                                  unsigned int *gencountp);
-DECLARE_REAL_AND_INTERCEPTOR(CFStringRef, CFStringCreateCopy,
-                                          CFAllocatorRef alloc,
-                                          CFStringRef str);
-
-// A wrapper for the ObjC blocks used to support libdispatch.
-typedef struct {
-  void *block;
-  dispatch_function_t func;
-  int parent_tid;
-} asan_block_context_t;
-
-
-extern "C" {
-void dispatch_async_f(dispatch_queue_t dq, void *ctxt,
-                      dispatch_function_t func);
-void dispatch_sync_f(dispatch_queue_t dq, void *ctxt,
-                     dispatch_function_t func);
-void dispatch_after_f(dispatch_time_t when, dispatch_queue_t dq, void *ctxt,
-                      dispatch_function_t func);
-void dispatch_barrier_async_f(dispatch_queue_t dq, void *ctxt,
-                              dispatch_function_t func);
-void dispatch_group_async_f(dispatch_group_t group, dispatch_queue_t dq,
-                            void *ctxt, dispatch_function_t func);
-int pthread_workqueue_additem_np(pthread_workqueue_t workq,
-    void *(*workitem_func)(void *), void * workitem_arg,
-    pthread_workitem_handle_t * itemhandlep, unsigned int *gencountp);
-}
+}  // namespace __asan
 
 #endif  // ASAN_MAC_H
-
-#endif  // __APPLE__

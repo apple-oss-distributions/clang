@@ -83,31 +83,31 @@ public:
   }
 };
 
-  /// \brief Checks deserialized declarations and emits error if a name
-  /// matches one given in command-line using -error-on-deserialized-decl.
-  class DeserializedDeclsChecker : public DelegatingDeserializationListener {
-    ASTContext &Ctx;
-    std::set<std::string> NamesToCheck;
+/// \brief Checks deserialized declarations and emits error if a name
+/// matches one given in command-line using -error-on-deserialized-decl.
+class DeserializedDeclsChecker : public DelegatingDeserializationListener {
+  ASTContext &Ctx;
+  std::set<std::string> NamesToCheck;
 
-  public:
-    DeserializedDeclsChecker(ASTContext &Ctx,
-                             const std::set<std::string> &NamesToCheck, 
-                             ASTDeserializationListener *Previous)
-      : DelegatingDeserializationListener(Previous),
-        Ctx(Ctx), NamesToCheck(NamesToCheck) { }
+public:
+  DeserializedDeclsChecker(ASTContext &Ctx,
+                           const std::set<std::string> &NamesToCheck,
+                           ASTDeserializationListener *Previous)
+    : DelegatingDeserializationListener(Previous),
+      Ctx(Ctx), NamesToCheck(NamesToCheck) { }
 
-    virtual void DeclRead(serialization::DeclID ID, const Decl *D) {
-      if (const NamedDecl *ND = dyn_cast<NamedDecl>(D))
-        if (NamesToCheck.find(ND->getNameAsString()) != NamesToCheck.end()) {
-          unsigned DiagID
-            = Ctx.getDiagnostics().getCustomDiagID(DiagnosticsEngine::Error,
-                                                   "%0 was deserialized");
-          Ctx.getDiagnostics().Report(Ctx.getFullLoc(D->getLocation()), DiagID)
-              << ND->getNameAsString();
-        }
+  virtual void DeclRead(serialization::DeclID ID, const Decl *D) {
+    if (const NamedDecl *ND = dyn_cast<NamedDecl>(D))
+      if (NamesToCheck.find(ND->getNameAsString()) != NamesToCheck.end()) {
+        unsigned DiagID
+          = Ctx.getDiagnostics().getCustomDiagID(DiagnosticsEngine::Error,
+                                                 "%0 was deserialized");
+        Ctx.getDiagnostics().Report(Ctx.getFullLoc(D->getLocation()), DiagID)
+            << ND->getNameAsString();
+      }
 
-      DelegatingDeserializationListener::DeclRead(ID, D);
-    }
+    DelegatingDeserializationListener::DeclRead(ID, D);
+  }
 };
 
 } // end anonymous namespace
@@ -162,6 +162,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   setCurrentInput(Input);
   setCompilerInstance(&CI);
 
+  bool HasBegunSourceFile = false;
   if (!BeginInvocation(CI))
     goto failure;
 
@@ -214,6 +215,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 
     // Inform the diagnostic client we are processing a source file.
     CI.getDiagnosticClient().BeginSourceFile(CI.getLangOpts(), 0);
+    HasBegunSourceFile = true;
 
     // Initialize the action.
     if (!BeginSourceFileAction(CI, Input.File))
@@ -228,6 +230,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   // Inform the diagnostic client we are processing a source file.
   CI.getDiagnosticClient().BeginSourceFile(CI.getLangOpts(),
                                            &CI.getPreprocessor());
+  HasBegunSourceFile = true;
 
   // Initialize the action.
   if (!BeginSourceFileAction(CI, Input.File))
@@ -309,7 +312,8 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     CI.setFileManager(0);
   }
 
-  CI.getDiagnosticClient().EndSourceFile();
+  if (HasBegunSourceFile)
+    CI.getDiagnosticClient().EndSourceFile();
   setCurrentInput(FrontendInputFile());
   setCompilerInstance(0);
   return false;
@@ -414,7 +418,8 @@ void ASTFrontendAction::ExecuteAction() {
   if (!CI.hasSema())
     CI.createSema(getTranslationUnitKind(), CompletionConsumer);
 
-  ParseAST(CI.getSema(), CI.getFrontendOpts().ShowStats);
+  ParseAST(CI.getSema(), CI.getFrontendOpts().ShowStats,
+           CI.getFrontendOpts().SkipFunctionBodies);
 }
 
 void PluginASTAction::anchor() { }

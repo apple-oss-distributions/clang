@@ -1,9 +1,9 @@
 add_llvm_library(LLVMTransformUtils
   AddrModeMatcher.cpp
   BasicBlockUtils.cpp
-  BasicInliner.cpp
   BreakCriticalEdges.cpp
   BuildLibCalls.cpp
+  BypassSlowDivision.cpp
   CloneFunction.cpp
   CloneModule.cpp
   CmpInstAnalysis.cpp
@@ -11,6 +11,7 @@ add_llvm_library(LLVMTransformUtils
   DemoteRegToStack.cpp
   InlineFunction.cpp
   InstructionNamer.cpp
+  IntegerDivision.cpp
   LCSSA.cpp
   Local.cpp
   LoopSimplify.cpp
@@ -20,6 +21,7 @@ add_llvm_library(LLVMTransformUtils
   LowerInvoke.cpp
   LowerSwitch.cpp
   Mem2Reg.cpp
+  MetaRenamer.cpp
   ModuleUtils.cpp
   PromoteMemoryToRegister.cpp
   SSAUpdater.cpp
@@ -30,3 +32,5 @@ add_llvm_library(LLVMTransformUtils
   Utils.cpp
   ValueMapper.cpp
   )
+
+add_dependencies(LLVMTransformUtils intrinsics_gen)

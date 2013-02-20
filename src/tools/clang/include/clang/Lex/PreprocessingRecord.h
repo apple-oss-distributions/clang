@@ -59,8 +59,8 @@ namespace clang {
       /// \brief A macro definition.
       MacroDefinitionKind,
       
-      /// \brief An inclusion directive, such as \c #include, \c
-      /// #import, or \c #include_next.
+      /// \brief An inclusion directive, such as \c \#include, \c
+      /// \#import, or \c \#include_next.
       InclusionDirectiveKind,
 
       /// @}
@@ -197,19 +197,19 @@ namespace clang {
   };
 
   /// \brief Record the location of an inclusion directive, such as an
-  /// \c #include or \c #import statement.
+  /// \c \#include or \c \#import statement.
   class InclusionDirective : public PreprocessingDirective {
   public:
     /// \brief The kind of inclusion directives known to the
     /// preprocessor.
     enum InclusionKind {
-      /// \brief An \c #include directive.
+      /// \brief An \c \#include directive.
       Include,
-      /// \brief An Objective-C \c #import directive.
+      /// \brief An Objective-C \c \#import directive.
       Import,
-      /// \brief A GNU \c #include_next directive.
+      /// \brief A GNU \c \#include_next directive.
       IncludeNext,
-      /// \brief A Clang \c #__include_macros directive.
+      /// \brief A Clang \c \#__include_macros directive.
       IncludeMacros
     };
 
@@ -227,13 +227,18 @@ namespace clang {
     /// This is a value of type InclusionKind.
     unsigned Kind : 2;
 
+    /// \brief Whether the inclusion directive was automatically turned into
+    /// a module import.
+    unsigned ImportedModule : 1;
+
     /// \brief The file that was included.
     const FileEntry *File;
 
   public:
     InclusionDirective(PreprocessingRecord &PPRec,
                        InclusionKind Kind, StringRef FileName, 
-                       bool InQuotes, const FileEntry *File, SourceRange Range);
+                       bool InQuotes, bool ImportedModule,
+                       const FileEntry *File, SourceRange Range);
     
     /// \brief Determine what kind of inclusion directive this is.
     InclusionKind getKind() const { return static_cast<InclusionKind>(Kind); }
@@ -244,6 +249,10 @@ namespace clang {
     /// \brief Determine whether the included file name was written in quotes;
     /// otherwise, it was written in angle brackets.
     bool wasInQuotes() const { return InQuotes; }
+
+    /// \brief Determine whether the inclusion directive was automatically
+    /// turned into a module import.
+    bool importedModule() const { return ImportedModule; }
     
     /// \brief Retrieve the file entry for the actual file that was included
     /// by this directive.
@@ -269,12 +278,12 @@ namespace clang {
     virtual PreprocessedEntity *ReadPreprocessedEntity(unsigned Index) = 0;
 
     /// \brief Returns a pair of [Begin, End) indices of preallocated
-    /// preprocessed entities that \arg Range encompasses.
+    /// preprocessed entities that \p Range encompasses.
     virtual std::pair<unsigned, unsigned>
         findPreprocessedEntitiesInRange(SourceRange Range) = 0;
 
     /// \brief Optionally returns true or false if the preallocated preprocessed
-    /// entity with index \arg Index came from file \arg FID.
+    /// entity with index \p Index came from file \p FID.
     virtual llvm::Optional<bool> isPreprocessedEntityInFileID(unsigned Index,
                                                               FileID FID) {
       return llvm::Optional<bool>();
@@ -372,7 +381,7 @@ namespace clang {
     }
 
     /// \brief Returns a pair of [Begin, End) indices of local preprocessed
-    /// entities that \arg Range encompasses.
+    /// entities that \p Range encompasses.
     std::pair<unsigned, unsigned>
       findLocalPreprocessedEntitiesInRange(SourceRange Range) const;
     unsigned findBeginLocalPreprocessedEntity(SourceLocation Loc) const;
@@ -539,19 +548,30 @@ namespace clang {
       return iterator(this, PreprocessedEntities.size());
     }
 
+    /// \brief begin/end iterator pair for the given range of loaded
+    /// preprocessed entities.
+    std::pair<iterator, iterator>
+    getIteratorsForLoadedRange(unsigned start, unsigned count) {
+      unsigned end = start + count;
+      assert(end <= LoadedPreprocessedEntities.size());
+      return std::make_pair(
+                   iterator(this, int(start)-LoadedPreprocessedEntities.size()),
+                   iterator(this, int(end)-LoadedPreprocessedEntities.size()));
+    }
+
     /// \brief Returns a pair of [Begin, End) iterators of preprocessed entities
-    /// that source range \arg R encompasses.
+    /// that source range \p R encompasses.
     ///
     /// \param R the range to look for preprocessed entities.
     ///
     std::pair<iterator, iterator> getPreprocessedEntitiesInRange(SourceRange R);
 
-    /// \brief Returns true if the preprocessed entity that \arg PPEI iterator
-    /// points to is coming from the file \arg FID.
+    /// \brief Returns true if the preprocessed entity that \p PPEI iterator
+    /// points to is coming from the file \p FID.
     ///
     /// Can be used to avoid implicit deserializations of preallocated
     /// preprocessed entities if we only care about entities of a specific file
-    /// and not from files #included in the range given at
+    /// and not from files \#included in the range given at
     /// \see getPreprocessedEntitiesInRange.
     bool isEntityInFileID(iterator PPEI, FileID FID);
 
@@ -565,7 +585,7 @@ namespace clang {
     }
 
     /// \brief Returns true if the given range intersects with a conditional
-    /// directive. if a #if/#endif block is fully contained within the range,
+    /// directive. if a \#if/\#endif block is fully contained within the range,
     /// this function will return false.
     bool rangeIntersectsConditionalDirective(SourceRange Range) const;
 
@@ -597,10 +617,11 @@ namespace clang {
                                     const Token &IncludeTok,
                                     StringRef FileName,
                                     bool IsAngled,
+                                    CharSourceRange FilenameRange,
                                     const FileEntry *File,
-                                    SourceLocation EndLoc,
                                     StringRef SearchPath,
-                                    StringRef RelativePath);
+                                    StringRef RelativePath,
+                                    const Module *Imported);
     virtual void If(SourceLocation Loc, SourceRange ConditionRange);
     virtual void Elif(SourceLocation Loc, SourceRange ConditionRange,
                       SourceLocation IfLoc);

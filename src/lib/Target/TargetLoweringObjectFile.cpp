@@ -28,7 +28,6 @@
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/SmallString.h"
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -153,7 +152,7 @@ SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalValue *GV,
   // a mergable string section, or general .data if it contains relocations.
   if (GVar->isConstant()) {
     // If the initializer for the global contains something that requires a
-    // relocation, then we may have to drop this into a wriable data section
+    // relocation, then we may have to drop this into a writable data section
     // even though it is marked const.
     switch (C->getRelocationInfo()) {
     case Constant::NoRelocation:

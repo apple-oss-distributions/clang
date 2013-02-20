@@ -24,11 +24,7 @@
 
 namespace llvm {
 
-class MachineJumpTableInfo;
-class MCContext;
-class MCInst;
 class MCStreamer;
-class MCSymbol;
 
 class LLVM_LIBRARY_VISIBILITY X86AsmPrinter : public AsmPrinter {
   const X86Subtarget *Subtarget;
@@ -41,21 +37,21 @@ class LLVM_LIBRARY_VISIBILITY X86AsmPrinter : public AsmPrinter {
   virtual const char *getPassName() const {
     return "X86 AT&T-Style Assembly Printer";
   }
-  
+
   const X86Subtarget &getSubtarget() const { return *Subtarget; }
 
   virtual void EmitStartOfAsmFile(Module &M);
 
   virtual void EmitEndOfAsmFile(Module &M);
-  
+
   virtual void EmitInstruction(const MachineInstr *MI);
-  
+
   void printSymbolOperand(const MachineOperand &MO, raw_ostream &O);
 
   // These methods are used by the tablegen'erated instruction printer.
   void printOperand(const MachineInstr *MI, unsigned OpNo, raw_ostream &O,
-                    const char *Modifier = 0);
-  void print_pcrel_imm(const MachineInstr *MI, unsigned OpNo, raw_ostream &O);
+                    const char *Modifier = 0, unsigned AsmVariant = 0);
+  void printPCRelImm(const MachineInstr *MI, unsigned OpNo, raw_ostream &O);
 
   bool printAsmMRegister(const MachineOperand &MO, char Mode, raw_ostream &O);
   bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
@@ -74,8 +70,12 @@ class LLVM_LIBRARY_VISIBILITY X86AsmPrinter : public AsmPrinter {
 
   void printPICLabel(const MachineInstr *MI, unsigned Op, raw_ostream &O);
 
+  void printIntelMemReference(const MachineInstr *MI, unsigned Op,
+                              raw_ostream &O, const char *Modifier=NULL,
+                              unsigned AsmVariant = 1);                         
+
   bool runOnMachineFunction(MachineFunction &F);
-  
+
   void PrintDebugValueComment(const MachineInstr *MI, raw_ostream &OS);
 
   MachineLocation getDebugValueLocation(const MachineInstr *MI) const;

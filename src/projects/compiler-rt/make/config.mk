@@ -42,5 +42,5 @@ endif
 
 ###
 # Common compiler options
-COMMON_CXXFLAGS=-fno-exceptions -fPIC -funwind-tables
+COMMON_CXXFLAGS=-fno-exceptions -fPIC -funwind-tables -I${ProjSrcRoot}/lib -I${ProjSrcRoot}/include
 COMMON_CFLAGS=-fPIC

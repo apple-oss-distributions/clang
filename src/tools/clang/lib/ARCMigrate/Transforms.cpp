@@ -9,14 +9,14 @@
 
 #include "Transforms.h"
 #include "Internals.h"
-#include "clang/Sema/SemaDiagnostic.h"
-#include "clang/Sema/Sema.h"
+#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/StmtVisitor.h"
-#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
-#include "clang/Lex/Lexer.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
+#include "clang/Lex/Lexer.h"
+#include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/DenseSet.h"
 #include <map>
@@ -40,7 +40,7 @@ bool MigrationPass::CFBridgingFunctionsDefined() {
 
 bool trans::canApplyWeak(ASTContext &Ctx, QualType type,
                          bool AllowOnUnknownClass) {
-  if (!Ctx.getLangOpts().ObjCRuntimeHasWeak)
+  if (!Ctx.getLangOpts().ObjCARCWeak)
     return false;
 
   QualType T = type;
@@ -59,7 +59,7 @@ bool trans::canApplyWeak(ASTContext &Ctx, QualType type,
       return false; // id/NSObject is not safe for weak.
     if (!AllowOnUnknownClass && !Class->hasDefinition())
       return false; // forward classes are not verifiable, therefore not safe.
-    if (Class->isArcWeakrefUnavailable())
+    if (Class && Class->isArcWeakrefUnavailable())
       return false;
   }
 
@@ -523,8 +523,8 @@ static void GCRewriteFinalize(MigrationPass &pass) {
   for (impl_iterator I = impl_iterator(DC->decls_begin()),
        E = impl_iterator(DC->decls_end()); I != E; ++I) {
     for (ObjCImplementationDecl::instmeth_iterator
-         MI = (*I)->instmeth_begin(),
-         ME = (*I)->instmeth_end(); MI != ME; ++MI) {
+         MI = I->instmeth_begin(),
+         ME = I->instmeth_end(); MI != ME; ++MI) {
       ObjCMethodDecl *MD = *MI;
       if (!MD->hasBody())
         continue;

@@ -25,6 +25,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/InlineAsm.h"
 #include "llvm/Support/DebugLoc.h"
 #include <vector>
 
@@ -74,14 +75,15 @@ private:
                                         // anything other than to convey comment
                                         // information to AsmPrinter.
 
+  uint16_t NumMemRefs;                  // information on memory references
+  mmo_iterator MemRefs;
+
   std::vector<MachineOperand> Operands; // the operands
-  mmo_iterator MemRefs;                 // information on memory references
-  mmo_iterator MemRefsEnd;
   MachineBasicBlock *Parent;            // Pointer to the owning basic block.
   DebugLoc debugLoc;                    // Source line information.
 
-  MachineInstr(const MachineInstr&);   // DO NOT IMPLEMENT
-  void operator=(const MachineInstr&); // DO NOT IMPLEMENT
+  MachineInstr(const MachineInstr&) LLVM_DELETED_FUNCTION;
+  void operator=(const MachineInstr&) LLVM_DELETED_FUNCTION;
 
   // Intrusive list support
   friend struct ilist_traits<MachineInstr>;
@@ -284,13 +286,13 @@ public:
 
   /// Access to memory operands of the instruction
   mmo_iterator memoperands_begin() const { return MemRefs; }
-  mmo_iterator memoperands_end() const { return MemRefsEnd; }
-  bool memoperands_empty() const { return MemRefsEnd == MemRefs; }
+  mmo_iterator memoperands_end() const { return MemRefs + NumMemRefs; }
+  bool memoperands_empty() const { return NumMemRefs == 0; }
 
   /// hasOneMemOperand - Return true if this instruction has exactly one
   /// MachineMemOperand.
   bool hasOneMemOperand() const {
-    return MemRefsEnd - MemRefs == 1;
+    return NumMemRefs == 1;
   }
 
   /// API for querying MachineInstr properties. They are the same as MCInstrDesc
@@ -307,7 +309,14 @@ public:
   /// The first argument is the property being queried.
   /// The second argument indicates whether the query should look inside
   /// instruction bundles.
-  bool hasProperty(unsigned Flag, QueryType Type = AnyInBundle) const;
+  bool hasProperty(unsigned MCFlag, QueryType Type = AnyInBundle) const {
+    // Inline the fast path.
+    if (Type == IgnoreBundle || !isBundle())
+      return getDesc().getFlags() & (1 << MCFlag);
+
+    // If we have a bundle, take the slow path.
+    return hasPropertyInBundle(1 << MCFlag, Type);
+  }
 
   /// isVariadic - Return true if this instruction can have a variable number of
   /// operands.  In this case, the variable operands will be after the normal
@@ -412,6 +421,12 @@ public:
     return hasProperty(MCID::Bitcast, Type);
   }
 
+  /// isSelect - Return true if this instruction is a select instruction.
+  ///
+  bool isSelect(QueryType Type = IgnoreBundle) const {
+    return hasProperty(MCID::Select, Type);
+  }
+
   /// isNotDuplicable - Return true if this instruction cannot be safely
   /// duplicated.  For example, if the instruction has a unique labels attached
   /// to it, duplicating it would cause multiple definition errors.
@@ -445,6 +460,11 @@ public:
   /// Instructions with this flag set are not necessarily simple load
   /// instructions, they may load a value and modify it, for example.
   bool mayLoad(QueryType Type = AnyInBundle) const {
+    if (isInlineAsm()) {
+      unsigned ExtraInfo = getOperand(InlineAsm::MIOp_ExtraInfo).getImm();
+      if (ExtraInfo & InlineAsm::Extra_MayLoad)
+        return true;
+    }
     return hasProperty(MCID::MayLoad, Type);
   }
 
@@ -454,6 +474,11 @@ public:
   /// instructions, they may store a modified value based on their operands, or
   /// may not actually modify anything, for example.
   bool mayStore(QueryType Type = AnyInBundle) const {
+    if (isInlineAsm()) {
+      unsigned ExtraInfo = getOperand(InlineAsm::MIOp_ExtraInfo).getImm();
+      if (ExtraInfo & InlineAsm::Extra_MayStore)
+        return true;
+    }
     return hasProperty(MCID::MayStore, Type);
   }
 
@@ -596,6 +621,7 @@ public:
   bool isImplicitDef() const { return getOpcode()==TargetOpcode::IMPLICIT_DEF; }
   bool isInlineAsm() const { return getOpcode() == TargetOpcode::INLINEASM; }
   bool isStackAligningInlineAsm() const;
+  InlineAsm::AsmDialect getInlineAsmDialect() const;
   bool isInsertSubreg() const {
     return getOpcode() == TargetOpcode::INSERT_SUBREG;
   }
@@ -625,6 +651,30 @@ public:
   bool isIdentityCopy() const {
     return isCopy() && getOperand(0).getReg() == getOperand(1).getReg() &&
       getOperand(0).getSubReg() == getOperand(1).getSubReg();
+  }
+
+  /// isTransient - Return true if this is a transient instruction that is
+  /// either very likely to be eliminated during register allocation (such as
+  /// copy-like instructions), or if this instruction doesn't have an
+  /// execution-time cost.
+  bool isTransient() const {
+    switch(getOpcode()) {
+    default: return false;
+    // Copy-like instructions are usually eliminated during register allocation.
+    case TargetOpcode::PHI:
+    case TargetOpcode::COPY:
+    case TargetOpcode::INSERT_SUBREG:
+    case TargetOpcode::SUBREG_TO_REG:
+    case TargetOpcode::REG_SEQUENCE:
+    // Pseudo-instructions that don't produce any real output.
+    case TargetOpcode::IMPLICIT_DEF:
+    case TargetOpcode::KILL:
+    case TargetOpcode::PROLOG_LABEL:
+    case TargetOpcode::EH_LABEL:
+    case TargetOpcode::GC_LABEL:
+    case TargetOpcode::DBG_VALUE:
+      return true;
+    }
   }
 
   /// getBundleSize - Return the number of instructions inside the MI bundle.
@@ -744,16 +794,43 @@ public:
                         const TargetInstrInfo *TII,
                         const TargetRegisterInfo *TRI) const;
 
+  /// tieOperands - Add a tie between the register operands at DefIdx and
+  /// UseIdx. The tie will cause the register allocator to ensure that the two
+  /// operands are assigned the same physical register.
+  ///
+  /// Tied operands are managed automatically for explicit operands in the
+  /// MCInstrDesc. This method is for exceptional cases like inline asm.
+  void tieOperands(unsigned DefIdx, unsigned UseIdx);
+
+  /// findTiedOperandIdx - Given the index of a tied register operand, find the
+  /// operand it is tied to. Defs are tied to uses and vice versa. Returns the
+  /// index of the tied operand which must exist.
+  unsigned findTiedOperandIdx(unsigned OpIdx) const;
+
   /// isRegTiedToUseOperand - Given the index of a register def operand,
   /// check if the register def is tied to a source operand, due to either
   /// two-address elimination or inline assembly constraints. Returns the
   /// first tied use operand index by reference if UseOpIdx is not null.
-  bool isRegTiedToUseOperand(unsigned DefOpIdx, unsigned *UseOpIdx = 0) const;
+  bool isRegTiedToUseOperand(unsigned DefOpIdx, unsigned *UseOpIdx = 0) const {
+    const MachineOperand &MO = getOperand(DefOpIdx);
+    if (!MO.isReg() || !MO.isDef() || !MO.isTied())
+      return false;
+    if (UseOpIdx)
+      *UseOpIdx = findTiedOperandIdx(DefOpIdx);
+    return true;
+  }
 
   /// isRegTiedToDefOperand - Return true if the use operand of the specified
   /// index is tied to an def operand. It also returns the def operand index by
   /// reference if DefOpIdx is not null.
-  bool isRegTiedToDefOperand(unsigned UseOpIdx, unsigned *DefOpIdx = 0) const;
+  bool isRegTiedToDefOperand(unsigned UseOpIdx, unsigned *DefOpIdx = 0) const {
+    const MachineOperand &MO = getOperand(UseOpIdx);
+    if (!MO.isReg() || !MO.isUse() || !MO.isTied())
+      return false;
+    if (DefOpIdx)
+      *DefOpIdx = findTiedOperandIdx(UseOpIdx);
+    return true;
+  }
 
   /// clearKillInfo - Clears kill flags on all operands.
   ///
@@ -814,11 +891,11 @@ public:
   bool isSafeToReMat(const TargetInstrInfo *TII, AliasAnalysis *AA,
                      unsigned DstReg) const;
 
-  /// hasVolatileMemoryRef - Return true if this instruction may have a
-  /// volatile memory reference, or if the information describing the
-  /// memory reference is not available. Return false if it is known to
-  /// have no volatile memory references.
-  bool hasVolatileMemoryRef() const;
+  /// hasOrderedMemoryRef - Return true if this instruction may have an ordered
+  /// or volatile memory reference, or if the information describing the memory
+  /// reference is not available. Return false if it is known to have no
+  /// ordered or volatile memory references.
+  bool hasOrderedMemoryRef() const;
 
   /// isInvariantLoad - Return true if this instruction is loading from a
   /// location whose value is invariant across the function.  For example,
@@ -888,7 +965,7 @@ public:
   /// list. This does not transfer ownership.
   void setMemRefs(mmo_iterator NewMemRefs, mmo_iterator NewMemRefsEnd) {
     MemRefs = NewMemRefs;
-    MemRefsEnd = NewMemRefsEnd;
+    NumMemRefs = NewMemRefsEnd - NewMemRefs;
   }
 
 private:
@@ -897,6 +974,15 @@ private:
   /// return null.
   MachineRegisterInfo *getRegInfo();
 
+  /// untieRegOperand - Break any tie involving OpIdx.
+  void untieRegOperand(unsigned OpIdx) {
+    MachineOperand &MO = getOperand(OpIdx);
+    if (MO.isReg() && MO.isTied()) {
+      getOperand(findTiedOperandIdx(OpIdx)).TiedTo = 0;
+      MO.TiedTo = 0;
+    }
+  }
+
   /// addImplicitDefUseOperands - Add all implicit def and use operands to
   /// this instruction.
   void addImplicitDefUseOperands();
@@ -904,12 +990,16 @@ private:
   /// RemoveRegOperandsFromUseLists - Unlink all of the register operands in
   /// this instruction from their respective use lists.  This requires that the
   /// operands already be on their use lists.
-  void RemoveRegOperandsFromUseLists();
+  void RemoveRegOperandsFromUseLists(MachineRegisterInfo&);
 
   /// AddRegOperandsToUseLists - Add all of the register operands in
   /// this instruction from their respective use lists.  This requires that the
   /// operands not be on their use lists yet.
-  void AddRegOperandsToUseLists(MachineRegisterInfo &RegInfo);
+  void AddRegOperandsToUseLists(MachineRegisterInfo&);
+
+  /// hasPropertyInBundle - Slow path for hasProperty when we're dealing with a
+  /// bundle.
+  bool hasPropertyInBundle(unsigned Mask, QueryType Type) const;
 };
 
 /// MachineInstrExpressionTrait - Special DenseMapInfo traits to compare

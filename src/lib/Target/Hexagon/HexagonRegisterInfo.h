@@ -16,9 +16,10 @@
 #define HexagonREGISTERINFO_H
 
 #include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/MC/MachineLocation.h"
+
 #define GET_REGINFO_HEADER
 #include "HexagonGenRegisterInfo.inc"
-#include "llvm/MC/MachineLocation.h"
 
 //
 //  We try not to hard code the reserved registers in our code,
@@ -48,7 +49,7 @@ struct HexagonRegisterInfo : public HexagonGenRegisterInfo {
   HexagonRegisterInfo(HexagonSubtarget &st, const HexagonInstrInfo &tii);
 
   /// Code Generation virtual methods...
-  const unsigned *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
+  const uint16_t *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
 
   const TargetRegisterClass* const* getCalleeSavedRegClasses(
                                      const MachineFunction *MF = 0) const;
@@ -72,6 +73,10 @@ struct HexagonRegisterInfo : public HexagonGenRegisterInfo {
     return true;
   }
 
+  bool trackLivenessAfterRegAlloc(const MachineFunction &MF) const {
+    return true;
+  }
+
   // Debug information queries.
   unsigned getRARegister() const;
   unsigned getFrameRegister(const MachineFunction &MF) const;
@@ -82,6 +87,11 @@ struct HexagonRegisterInfo : public HexagonGenRegisterInfo {
   // Exception handling queries.
   unsigned getEHExceptionRegister() const;
   unsigned getEHHandlerRegister() const;
+  const RegClassWeight &getRegClassWeight(const TargetRegisterClass *RC) const;
+  unsigned getNumRegPressureSets() const;
+  const char *getRegPressureSetName(unsigned Idx) const;
+  unsigned getRegPressureSetLimit(unsigned Idx) const;
+  const int* getRegClassPressureSets(const TargetRegisterClass *RC) const;
 };
 
 } // end namespace llvm

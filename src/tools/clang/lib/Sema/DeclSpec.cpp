@@ -145,6 +145,7 @@ CXXScopeSpec::getWithLocInContext(ASTContext &Context) const {
 /// DeclaratorChunk::getFunction - Return a DeclaratorChunk for a function.
 /// "TheDeclarator" is the declarator that this will be added to.
 DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
+                                             bool isAmbiguous,
                                              SourceLocation EllipsisLoc,
                                              ParamInfo *ArgInfo,
                                              unsigned NumArgs,
@@ -165,7 +166,7 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
                                              SourceLocation LocalRangeBegin,
                                              SourceLocation LocalRangeEnd,
                                              Declarator &TheDeclarator,
-                                             ParsedType TrailingReturnType) {
+                                             TypeResult TrailingReturnType) {
   DeclaratorChunk I;
   I.Kind                        = Function;
   I.Loc                         = LocalRangeBegin;
@@ -173,6 +174,7 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
   I.Fun.AttrList                = 0;
   I.Fun.hasPrototype            = hasProto;
   I.Fun.isVariadic              = isVariadic;
+  I.Fun.isAmbiguous             = isAmbiguous;
   I.Fun.EllipsisLoc             = EllipsisLoc.getRawEncoding();
   I.Fun.DeleteArgInfo           = false;
   I.Fun.TypeQuals               = TypeQuals;
@@ -188,7 +190,9 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
   I.Fun.NumExceptions           = 0;
   I.Fun.Exceptions              = 0;
   I.Fun.NoexceptExpr            = 0;
-  I.Fun.TrailingReturnType   = TrailingReturnType.getAsOpaquePtr();
+  I.Fun.HasTrailingReturnType   = TrailingReturnType.isUsable() ||
+                                  TrailingReturnType.isInvalid();
+  I.Fun.TrailingReturnType      = TrailingReturnType.get();
 
   // new[] an argument array if needed.
   if (NumArgs) {
@@ -264,7 +268,9 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_float:
     case TST_half:
     case TST_int:
+    case TST_int128:
     case TST_struct:
+    case TST_interface:
     case TST_union:
     case TST_unknown_anytype:
     case TST_unspecified:
@@ -320,10 +326,14 @@ unsigned DeclSpec::getParsedSpecifiers() const {
 
 template <class T> static bool BadSpecifier(T TNew, T TPrev,
                                             const char *&PrevSpec,
-                                            unsigned &DiagID) {
+                                            unsigned &DiagID,
+                                            bool IsExtension = true) {
   PrevSpec = DeclSpec::getSpecifierName(TPrev);
-  DiagID = (TNew == TPrev ? diag::ext_duplicate_declspec
-            : diag::err_invalid_decl_spec_combination);
+  if (TNew != TPrev)
+    DiagID = diag::err_invalid_decl_spec_combination;
+  else
+    DiagID = IsExtension ? diag::ext_duplicate_declspec : 
+                           diag::warn_duplicate_declspec;    
   return true;
 }
 
@@ -379,6 +389,7 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T) {
   case DeclSpec::TST_char16:      return "char16_t";
   case DeclSpec::TST_char32:      return "char32_t";
   case DeclSpec::TST_int:         return "int";
+  case DeclSpec::TST_int128:      return "__int128";
   case DeclSpec::TST_half:        return "half";
   case DeclSpec::TST_float:       return "float";
   case DeclSpec::TST_double:      return "double";
@@ -390,6 +401,7 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T) {
   case DeclSpec::TST_class:       return "class";
   case DeclSpec::TST_union:       return "union";
   case DeclSpec::TST_struct:      return "struct";
+  case DeclSpec::TST_interface:   return "__interface";
   case DeclSpec::TST_typename:    return "type-name";
   case DeclSpec::TST_typeofType:
   case DeclSpec::TST_typeofExpr:  return "typeof";
@@ -416,19 +428,27 @@ const char *DeclSpec::getSpecifierName(TQ T) {
 bool DeclSpec::SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
                                    const char *&PrevSpec,
                                    unsigned &DiagID) {
-  // OpenCL 1.1 6.8g: "The extern, static, auto and register storage-class
-  // specifiers are not supported."
+  // OpenCL v1.1 s6.8g: "The extern, static, auto and register storage-class
+  // specifiers are not supported.
   // It seems sensible to prohibit private_extern too
   // The cl_clang_storage_class_specifiers extension enables support for
   // these storage-class specifiers.
+  // OpenCL v1.2 s6.8 changes this to "The auto and register storage-class
+  // specifiers are not supported."
   if (S.getLangOpts().OpenCL &&
       !S.getOpenCLOptions().cl_clang_storage_class_specifiers) {
     switch (SC) {
     case SCS_extern:
     case SCS_private_extern:
+    case SCS_static:
+        if (S.getLangOpts().OpenCLVersion < 120) {
+          DiagID   = diag::err_not_opencl_storage_class_specifier;
+          PrevSpec = getSpecifierName(SC);
+          return true;
+        }
+        break;
     case SCS_auto:
     case SCS_register:
-    case SCS_static:
       DiagID   = diag::err_not_opencl_storage_class_specifier;
       PrevSpec = getSpecifierName(SC);
       return true;
@@ -656,10 +676,18 @@ bool DeclSpec::SetTypeSpecError() {
 }
 
 bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
-                           unsigned &DiagID, const LangOptions &Lang) {
-  // Duplicates turn into warnings pre-C99.
-  if ((TypeQualifiers & T) && !Lang.C99)
-    return BadSpecifier(T, T, PrevSpec, DiagID);
+                           unsigned &DiagID, const LangOptions &Lang,
+                           bool IsTypeSpec) {
+  // Duplicates are permitted in C99, and are permitted in C++11 unless the
+  // cv-qualifier appears as a type-specifier.  However, since this is likely 
+  // not what the user intended, we will always warn.  We do not need to set the
+  // qualifier's location since we already have it.
+  if (TypeQualifiers & T) {
+    bool IsExtension = true;
+    if (Lang.C99 || (Lang.CPlusPlus0x && !IsTypeSpec))
+      IsExtension = false;
+    return BadSpecifier(T, T, PrevSpec, DiagID, IsExtension);
+  }
   TypeQualifiers |= T;
 
   switch (T) {
@@ -749,7 +777,7 @@ void DeclSpec::SaveWrittenBuiltinSpecs() {
   writtenBS.ModeAttr = false;
   AttributeList* attrs = getAttributes().getList();
   while (attrs) {
-    if (attrs->getKind() == AttributeList::AT_mode) {
+    if (attrs->getKind() == AttributeList::AT_Mode) {
       writtenBS.ModeAttr = true;
       break;
     }
@@ -818,7 +846,7 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   if (TypeSpecSign != TSS_unspecified) {
     if (TypeSpecType == TST_unspecified)
       TypeSpecType = TST_int; // unsigned -> unsigned int, signed -> signed int.
-    else if (TypeSpecType != TST_int  &&
+    else if (TypeSpecType != TST_int  && TypeSpecType != TST_int128 &&
              TypeSpecType != TST_char && TypeSpecType != TST_wchar) {
       Diag(D, TSSLoc, diag::err_invalid_sign_spec)
         << getSpecifierName((TST)TypeSpecType);
@@ -931,13 +959,6 @@ bool DeclSpec::isMissingDeclaratorOk() {
   TST tst = getTypeSpecType();
   return isDeclRep(tst) && getRepAsDecl() != 0 &&
     StorageClassSpec != DeclSpec::SCS_typedef;
-}
-
-void UnqualifiedId::clear() {
-  Kind = IK_Identifier;
-  Identifier = 0;
-  StartLocation = SourceLocation();
-  EndLocation = SourceLocation();
 }
 
 void UnqualifiedId::setOperatorFunctionId(SourceLocation OperatorLoc, 

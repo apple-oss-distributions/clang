@@ -13,8 +13,8 @@ E: hhinnant@apple.com
 D: Architect and primary author of libc++
 
 N: Marshall Clow
+E: mclow.lists@gmail.com
 E: marshall@idio.com
-E: mclow@qualcomm.com
 D: Minor patches and bug fixes.
 
 N: Bjorn Reese
@@ -23,7 +23,7 @@ D: Initial regex prototype
 
 N: David Chisnall
 E: theraven at theravensnest dot org
-D: FreeBSD port and libcxxrt support.
+D: FreeBSD and Solaris ports, libcxxrt support, some atomics work.
 
 N: Ruben Van Boxem
 E: vanboxem dot ruben at gmail dot com
@@ -44,3 +44,29 @@ N: Jeffrey Yasskin
 E: jyasskin@gmail.com
 E: jyasskin@google.com
 D: Linux fixes.
+
+N: Jonathan Sauer
+D: Minor patches, mostly related to constexpr
+
+N: Richard Smith
+D: Minor patches.
+
+N: Andrew Morrow
+E: andrew.c.morrow@gmail.com
+D: Minor patches and Linux fixes.
+
+N: Hyeon-bin Jeong
+E: tuhertz@gmail.com
+D: Minor patches and bug fixes.
+
+N: Michel Morin
+E: mimomorin@gmail.com
+D: Minor patches to is_convertible.
+
+N: Dimitry Andric
+E: dimitry@andric.com
+D: Visibility fixes, minor FreeBSD portability patches.
+
+N: Holger Arnold
+E: holgerar@gmail.com
+D: Minor fix.

@@ -108,8 +108,10 @@ static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
 static MCInstPrinter *createPPCMCInstPrinter(const Target &T,
                                              unsigned SyntaxVariant,
                                              const MCAsmInfo &MAI,
+                                             const MCInstrInfo &MII,
+                                             const MCRegisterInfo &MRI,
                                              const MCSubtargetInfo &STI) {
-  return new PPCInstPrinter(MAI, SyntaxVariant);
+  return new PPCInstPrinter(MAI, MII, MRI, SyntaxVariant);
 }
 
 extern "C" void LLVMInitializePowerPCTargetMC() {

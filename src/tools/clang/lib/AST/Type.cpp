@@ -288,18 +288,17 @@ QualType QualType::IgnoreParens(QualType T) {
   return T;
 }
 
-/// \brief This will check for a TypedefType by removing any existing sugar
-/// until it reaches a TypedefType or a non-sugared type.
-template <> const TypedefType *Type::getAs() const {
-  const Type *Cur = this;
-
+/// \brief This will check for a T (which should be a Type which can act as
+/// sugar, such as a TypedefType) by removing any existing sugar until it
+/// reaches a T or a non-sugared type.
+template<typename T> static const T *getAsSugar(const Type *Cur) {
   while (true) {
-    if (const TypedefType *TDT = dyn_cast<TypedefType>(Cur))
-      return TDT;
+    if (const T *Sugar = dyn_cast<T>(Cur))
+      return Sugar;
     switch (Cur->getTypeClass()) {
 #define ABSTRACT_TYPE(Class, Parent)
 #define TYPE(Class, Parent) \
-    case Class: { \
+    case Type::Class: { \
       const Class##Type *Ty = cast<Class##Type>(Cur); \
       if (!Ty->isSugared()) return 0; \
       Cur = Ty->desugar().getTypePtr(); \
@@ -308,6 +307,14 @@ template <> const TypedefType *Type::getAs() const {
 #include "clang/AST/TypeNodes.def"
     }
   }
+}
+
+template <> const TypedefType *Type::getAs() const {
+  return getAsSugar<TypedefType>(this);
+}
+
+template <> const TemplateSpecializationType *Type::getAs() const {
+  return getAsSugar<TemplateSpecializationType>(this);
 }
 
 /// getUnqualifiedDesugaredType - Pull any qualifiers and syntactic
@@ -357,9 +364,15 @@ bool Type::isStructureType() const {
     return RT->getDecl()->isStruct();
   return false;
 }
+bool Type::isInterfaceType() const {
+  if (const RecordType *RT = getAs<RecordType>())
+    return RT->getDecl()->isInterface();
+  return false;
+}
 bool Type::isStructureOrClassType() const {
   if (const RecordType *RT = getAs<RecordType>())
-    return RT->getDecl()->isStruct() || RT->getDecl()->isClass();
+    return RT->getDecl()->isStruct() || RT->getDecl()->isClass() ||
+      RT->getDecl()->isInterface();
   return false;
 }
 bool Type::isVoidPointerType() const {
@@ -499,10 +512,18 @@ const ObjCObjectPointerType *Type::getAsObjCInterfacePointerType() const {
   return 0;
 }
 
-const CXXRecordDecl *Type::getCXXRecordDeclForPointerType() const {
+const CXXRecordDecl *Type::getPointeeCXXRecordDecl() const {
+  QualType PointeeType;
   if (const PointerType *PT = getAs<PointerType>())
-    if (const RecordType *RT = PT->getPointeeType()->getAs<RecordType>())
-      return dyn_cast<CXXRecordDecl>(RT->getDecl());
+    PointeeType = PT->getPointeeType();
+  else if (const ReferenceType *RT = getAs<ReferenceType>())
+    PointeeType = RT->getPointeeType();
+  else
+    return 0;
+
+  if (const RecordType *RT = PointeeType->getAs<RecordType>())
+    return dyn_cast<CXXRecordDecl>(RT->getDecl());
+
   return 0;
 }
 
@@ -917,6 +938,14 @@ bool Type::isIncompleteType(NamedDecl **Def) const {
 }
 
 bool QualType::isPODType(ASTContext &Context) const {
+  // C++11 has a more relaxed definition of POD.
+  if (Context.getLangOpts().CPlusPlus0x)
+    return isCXX11PODType(Context);
+
+  return isCXX98PODType(Context);
+}
+
+bool QualType::isCXX98PODType(ASTContext &Context) const {
   // The compiler shouldn't query this for incomplete types, but the user might.
   // We return false for that case. Except for incomplete arrays of PODs, which
   // are PODs according to the standard.
@@ -924,7 +953,7 @@ bool QualType::isPODType(ASTContext &Context) const {
     return 0;
   
   if ((*this)->isIncompleteArrayType())
-    return Context.getBaseElementType(*this).isPODType(Context);
+    return Context.getBaseElementType(*this).isCXX98PODType(Context);
     
   if ((*this)->isIncompleteType())
     return false;
@@ -951,7 +980,7 @@ bool QualType::isPODType(ASTContext &Context) const {
   case Type::VariableArray:
   case Type::ConstantArray:
     // IncompleteArray is handled above.
-    return Context.getBaseElementType(*this).isPODType(Context);
+    return Context.getBaseElementType(*this).isCXX98PODType(Context);
         
   case Type::ObjCObjectPointer:
   case Type::BlockPointer:
@@ -1197,8 +1226,6 @@ bool QualType::isCXX11PODType(ASTContext &Context) const {
       return false;
 
     case Qualifiers::OCL_None:
-      if (ty->isObjCLifetimeType())
-        return false;
       break;
     }        
   }
@@ -1309,6 +1336,7 @@ TypeWithKeyword::getKeywordForTypeSpec(unsigned TypeSpec) {
   case TST_typename: return ETK_Typename;
   case TST_class: return ETK_Class;
   case TST_struct: return ETK_Struct;
+  case TST_interface: return ETK_Interface;
   case TST_union: return ETK_Union;
   case TST_enum: return ETK_Enum;
   }
@@ -1319,6 +1347,7 @@ TypeWithKeyword::getTagTypeKindForTypeSpec(unsigned TypeSpec) {
   switch(TypeSpec) {
   case TST_class: return TTK_Class;
   case TST_struct: return TTK_Struct;
+  case TST_interface: return TTK_Interface;
   case TST_union: return TTK_Union;
   case TST_enum: return TTK_Enum;
   }
@@ -1331,6 +1360,7 @@ TypeWithKeyword::getKeywordForTagTypeKind(TagTypeKind Kind) {
   switch (Kind) {
   case TTK_Class: return ETK_Class;
   case TTK_Struct: return ETK_Struct;
+  case TTK_Interface: return ETK_Interface;
   case TTK_Union: return ETK_Union;
   case TTK_Enum: return ETK_Enum;
   }
@@ -1342,6 +1372,7 @@ TypeWithKeyword::getTagTypeKindForKeyword(ElaboratedTypeKeyword Keyword) {
   switch (Keyword) {
   case ETK_Class: return TTK_Class;
   case ETK_Struct: return TTK_Struct;
+  case ETK_Interface: return TTK_Interface;
   case ETK_Union: return TTK_Union;
   case ETK_Enum: return TTK_Enum;
   case ETK_None: // Fall through.
@@ -1359,6 +1390,7 @@ TypeWithKeyword::KeywordIsTagTypeKind(ElaboratedTypeKeyword Keyword) {
     return false;
   case ETK_Class:
   case ETK_Struct:
+  case ETK_Interface:
   case ETK_Union:
   case ETK_Enum:
     return true;
@@ -1373,6 +1405,7 @@ TypeWithKeyword::getKeywordName(ElaboratedTypeKeyword Keyword) {
   case ETK_Typename: return "typename";
   case ETK_Class:  return "class";
   case ETK_Struct: return "struct";
+  case ETK_Interface: return "__interface";
   case ETK_Union:  return "union";
   case ETK_Enum:   return "enum";
   }
@@ -1450,13 +1483,13 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
   case Int:               return "int";
   case Long:              return "long";
   case LongLong:          return "long long";
-  case Int128:            return "__int128_t";
+  case Int128:            return "__int128";
   case UChar:             return "unsigned char";
   case UShort:            return "unsigned short";
   case UInt:              return "unsigned int";
   case ULong:             return "unsigned long";
   case ULongLong:         return "unsigned long long";
-  case UInt128:           return "__uint128_t";
+  case UInt128:           return "unsigned __int128";
   case Half:              return "half";
   case Float:             return "float";
   case Double:            return "double";
@@ -1472,6 +1505,7 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
   case Dependent:         return "<dependent type>";
   case UnknownAny:        return "<unknown type>";
   case ARCUnbridgedCast:  return "<ARC unbridged cast type>";
+  case BuiltinFn:         return "<builtin fn type>";
   case ObjCId:            return "id";
   case ObjCClass:         return "Class";
   case ObjCSel:           return "SEL";
@@ -1568,6 +1602,19 @@ FunctionProtoType::FunctionProtoType(QualType result, const QualType *args,
       else if (epi.NoexceptExpr->isInstantiationDependent())
         setInstantiationDependent();
     }
+  } else if (getExceptionSpecType() == EST_Uninstantiated) {
+    // Store the function decl from which we will resolve our
+    // exception specification.
+    FunctionDecl **slot = reinterpret_cast<FunctionDecl**>(argSlot + numArgs);
+    slot[0] = epi.ExceptionSpecDecl;
+    slot[1] = epi.ExceptionSpecTemplate;
+    // This exception specification doesn't make the type dependent, because
+    // it's not instantiated as part of instantiating the type.
+  } else if (getExceptionSpecType() == EST_Unevaluated) {
+    // Store the function decl from which we will resolve our
+    // exception specification.
+    FunctionDecl **slot = reinterpret_cast<FunctionDecl**>(argSlot + numArgs);
+    slot[0] = epi.ExceptionSpecDecl;
   }
 
   if (epi.ConsumedArguments) {
@@ -1651,6 +1698,9 @@ void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID, QualType Result,
       ID.AddPointer(epi.Exceptions[i].getAsOpaquePtr());
   } else if (epi.ExceptionSpecType == EST_ComputedNoexcept && epi.NoexceptExpr){
     epi.NoexceptExpr->Profile(ID, Context, false);
+  } else if (epi.ExceptionSpecType == EST_Uninstantiated ||
+             epi.ExceptionSpecType == EST_Unevaluated) {
+    ID.AddPointer(epi.ExceptionSpecDecl->getCanonicalDecl());
   }
   if (epi.ConsumedArguments) {
     for (unsigned i = 0; i != NumArgs; ++i)
@@ -1844,8 +1894,7 @@ TemplateSpecializationType(TemplateName T,
          Canon.isNull()? T.isDependent() 
                        : Canon->isInstantiationDependentType(),
          false,
-         Canon.isNull()? T.containsUnexpandedParameterPack()
-                       : Canon->containsUnexpandedParameterPack()),
+         T.containsUnexpandedParameterPack()),
     Template(T), NumArgs(NumArgs), TypeAlias(!AliasedType.isNull()) {
   assert(!T.getAsDependentTemplateName() && 
          "Use DependentTemplateSpecializationType for dependent template-name");
@@ -1870,6 +1919,8 @@ TemplateSpecializationType(TemplateName T,
     // arguments is. Given:
     //   template<typename T> using U = int;
     // U<T> is always non-dependent, irrespective of the type T.
+    // However, U<Ts> contains an unexpanded parameter pack, even though
+    // its expansion (and thus its desugared type) doesn't.
     if (Canon.isNull() && Args[Arg].isDependent())
       setDependent();
     else if (Args[Arg].isInstantiationDependent())
@@ -1878,7 +1929,7 @@ TemplateSpecializationType(TemplateName T,
     if (Args[Arg].getKind() == TemplateArgument::Type &&
         Args[Arg].getAsType()->isVariablyModifiedType())
       setVariablyModified();
-    if (Canon.isNull() && Args[Arg].containsUnexpandedParameterPack())
+    if (Args[Arg].containsUnexpandedParameterPack())
       setContainsUnexpandedParameterPack();
 
     new (&TemplateArgs[Arg]) TemplateArgument(Args[Arg]);

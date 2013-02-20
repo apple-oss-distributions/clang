@@ -11,8 +11,8 @@
 
 #include "Spiller.h"
 #include "VirtRegMap.h"
-#include "LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveIntervalAnalysis.h"
+#include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveStackAnalysis.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -116,7 +116,7 @@ protected:
       }
 
       // Create a new vreg & interval for this instr.
-      LiveInterval *newLI = &LRE.create(*lis, *vrm);
+      LiveInterval *newLI = &LRE.create();
       newLI->weight = HUGE_VALF;
 
       // Update the reg operands & kill flags.

@@ -68,15 +68,19 @@ endif
 
 ifeq ($(MAKECMDGOALS),install-clang)
   DIRS := tools/clang/tools/driver tools/clang/lib/Headers \
-          tools/clang/tools/libclang tools/clang/tools/c-index-test \
+          tools/clang/tools/libclang \
           tools/clang/include/clang-c \
           tools/clang/runtime tools/clang/docs \
           tools/lto runtime
+  ifneq ($(BUILD_CLANG_ONLY),YES)
+    DIRS += tools/clang/tools/c-index-test
+  endif
   OPTIONAL_DIRS :=
   NO_INSTALL = 1
 endif
 
 ifeq ($(MAKECMDGOALS),clang-only)
+  BUILD_CLANG_ONLY := YES
   DIRS := $(filter-out tools docs unittests, $(DIRS)) \
           tools/clang tools/lto
   OPTIONAL_DIRS :=
@@ -111,15 +115,18 @@ cross-compile-build-tools:
 	  cd BuildTools ; \
 	  unset CFLAGS ; \
 	  unset CXXFLAGS ; \
+	  unset SDKROOT ; \
+	  unset UNIVERSAL_SDK_PATH ; \
 	  $(PROJ_SRC_DIR)/configure --build=$(BUILD_TRIPLE) \
 		--host=$(BUILD_TRIPLE) --target=$(BUILD_TRIPLE) \
 	        --disable-polly ; \
 	  cd .. ; \
 	fi; \
-	(unset SDKROOT; \
-	 $(MAKE) -C BuildTools \
+	($(MAKE) -C BuildTools \
 	  BUILD_DIRS_ONLY=1 \
 	  UNIVERSAL= \
+	  UNIVERSAL_SDK_PATH= \
+	  SDKROOT= \
 	  TARGET_NATIVE_ARCH="$(TARGET_NATIVE_ARCH)" \
 	  TARGETS_TO_BUILD="$(TARGETS_TO_BUILD)" \
 	  ENABLE_OPTIMIZED=$(ENABLE_OPTIMIZED) \
@@ -244,13 +251,13 @@ build-for-llvm-top:
 SVN = svn
 SVN-UPDATE-OPTIONS =
 AWK = awk
-SUB-SVN-DIRS = $(AWK) '/\?\ \ \ \ \ \ / {print $$2}'   \
+SUB-SVN-DIRS = $(AWK) '/I|\?      / {print $$2}'   \
 		| LC_ALL=C xargs $(SVN) info 2>/dev/null \
 		| $(AWK) '/^Path:\ / {print $$2}'
 
 update:
 	$(SVN) $(SVN-UPDATE-OPTIONS) update $(LLVM_SRC_ROOT)
-	@ $(SVN) status $(LLVM_SRC_ROOT) | $(SUB-SVN-DIRS) | xargs $(SVN) $(SVN-UPDATE-OPTIONS) update
+	@ $(SVN) status --no-ignore $(LLVM_SRC_ROOT) | $(SUB-SVN-DIRS) | xargs $(SVN) $(SVN-UPDATE-OPTIONS) update
 
 happiness: update all check-all
 

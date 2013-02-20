@@ -11,11 +11,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ARMBaseRegisterInfo.h"
 #include "ARM.h"
 #include "ARMBaseInstrInfo.h"
-#include "ARMBaseRegisterInfo.h"
 #include "ARMFrameLowering.h"
-#include "ARMInstrInfo.h"
 #include "ARMMachineFunctionInfo.h"
 #include "ARMSubtarget.h"
 #include "MCTargetDesc/ARMAddressingModes.h"
@@ -61,10 +60,22 @@ ARMBaseRegisterInfo::ARMBaseRegisterInfo(const ARMBaseInstrInfo &tii,
     BasePtr(ARM::R6) {
 }
 
-const unsigned*
+const uint16_t*
 ARMBaseRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
+  bool ghcCall = false;
+ 
+  if (MF) {
+    const Function *F = MF->getFunction();
+    ghcCall = (F ? F->getCallingConv() == CallingConv::GHC : false);
+  }
+ 
+  if (ghcCall) {
+      return CSR_GHC_SaveList;
+  }
+  else {
   return (STI.isTargetIOS() && !STI.isAAPCS_ABI())
     ? CSR_iOS_SaveList : CSR_AAPCS_SaveList;
+  }
 }
 
 const uint32_t*
@@ -260,8 +271,9 @@ ARMBaseRegisterInfo::getLargestLegalSuperClass(const TargetRegisterClass *RC)
 }
 
 const TargetRegisterClass *
-ARMBaseRegisterInfo::getPointerRegClass(unsigned Kind) const {
-  return ARM::GPRRegisterClass;
+ARMBaseRegisterInfo::getPointerRegClass(const MachineFunction &MF, unsigned Kind)
+                                                                         const {
+  return &ARM::GPRRegClass;
 }
 
 const TargetRegisterClass *
@@ -293,7 +305,7 @@ ARMBaseRegisterInfo::getRegPressureLimit(const TargetRegisterClass *RC,
 
 /// getRawAllocationOrder - Returns the register allocation order for a
 /// specified register class with a target-dependent hint.
-ArrayRef<unsigned>
+ArrayRef<uint16_t>
 ARMBaseRegisterInfo::getRawAllocationOrder(const TargetRegisterClass *RC,
                                            unsigned HintType, unsigned HintReg,
                                            const MachineFunction &MF) const {
@@ -302,77 +314,77 @@ ARMBaseRegisterInfo::getRawAllocationOrder(const TargetRegisterClass *RC,
   // of register pairs.
 
   // No FP, R9 is available.
-  static const unsigned GPREven1[] = {
+  static const uint16_t GPREven1[] = {
     ARM::R0, ARM::R2, ARM::R4, ARM::R6, ARM::R8, ARM::R10,
     ARM::R1, ARM::R3, ARM::R12,ARM::LR, ARM::R5, ARM::R7,
     ARM::R9, ARM::R11
   };
-  static const unsigned GPROdd1[] = {
+  static const uint16_t GPROdd1[] = {
     ARM::R1, ARM::R3, ARM::R5, ARM::R7, ARM::R9, ARM::R11,
     ARM::R0, ARM::R2, ARM::R12,ARM::LR, ARM::R4, ARM::R6,
     ARM::R8, ARM::R10
   };
 
   // FP is R7, R9 is available.
-  static const unsigned GPREven2[] = {
+  static const uint16_t GPREven2[] = {
     ARM::R0, ARM::R2, ARM::R4,          ARM::R8, ARM::R10,
     ARM::R1, ARM::R3, ARM::R12,ARM::LR, ARM::R5, ARM::R6,
     ARM::R9, ARM::R11
   };
-  static const unsigned GPROdd2[] = {
+  static const uint16_t GPROdd2[] = {
     ARM::R1, ARM::R3, ARM::R5,          ARM::R9, ARM::R11,
     ARM::R0, ARM::R2, ARM::R12,ARM::LR, ARM::R4, ARM::R6,
     ARM::R8, ARM::R10
   };
 
   // FP is R11, R9 is available.
-  static const unsigned GPREven3[] = {
+  static const uint16_t GPREven3[] = {
     ARM::R0, ARM::R2, ARM::R4, ARM::R6, ARM::R8,
     ARM::R1, ARM::R3, ARM::R10,ARM::R12,ARM::LR, ARM::R5, ARM::R7,
     ARM::R9
   };
-  static const unsigned GPROdd3[] = {
+  static const uint16_t GPROdd3[] = {
     ARM::R1, ARM::R3, ARM::R5, ARM::R6, ARM::R9,
     ARM::R0, ARM::R2, ARM::R10,ARM::R12,ARM::LR, ARM::R4, ARM::R7,
     ARM::R8
   };
 
   // No FP, R9 is not available.
-  static const unsigned GPREven4[] = {
+  static const uint16_t GPREven4[] = {
     ARM::R0, ARM::R2, ARM::R4, ARM::R6,          ARM::R10,
     ARM::R1, ARM::R3, ARM::R12,ARM::LR, ARM::R5, ARM::R7, ARM::R8,
     ARM::R11
   };
-  static const unsigned GPROdd4[] = {
+  static const uint16_t GPROdd4[] = {
     ARM::R1, ARM::R3, ARM::R5, ARM::R7,          ARM::R11,
     ARM::R0, ARM::R2, ARM::R12,ARM::LR, ARM::R4, ARM::R6, ARM::R8,
     ARM::R10
   };
 
   // FP is R7, R9 is not available.
-  static const unsigned GPREven5[] = {
+  static const uint16_t GPREven5[] = {
     ARM::R0, ARM::R2, ARM::R4,                   ARM::R10,
     ARM::R1, ARM::R3, ARM::R12,ARM::LR, ARM::R5, ARM::R6, ARM::R8,
     ARM::R11
   };
-  static const unsigned GPROdd5[] = {
+  static const uint16_t GPROdd5[] = {
     ARM::R1, ARM::R3, ARM::R5,                   ARM::R11,
     ARM::R0, ARM::R2, ARM::R12,ARM::LR, ARM::R4, ARM::R6, ARM::R8,
     ARM::R10
   };
 
   // FP is R11, R9 is not available.
-  static const unsigned GPREven6[] = {
+  static const uint16_t GPREven6[] = {
     ARM::R0, ARM::R2, ARM::R4, ARM::R6,
     ARM::R1, ARM::R3, ARM::R10,ARM::R12,ARM::LR, ARM::R5, ARM::R7, ARM::R8
   };
-  static const unsigned GPROdd6[] = {
+  static const uint16_t GPROdd6[] = {
     ARM::R1, ARM::R3, ARM::R5, ARM::R7,
     ARM::R0, ARM::R2, ARM::R10,ARM::R12,ARM::LR, ARM::R4, ARM::R6, ARM::R8
   };
 
   // We only support even/odd hints for GPR and rGPR.
-  if (RC != ARM::GPRRegisterClass && RC != ARM::rGPRRegisterClass)
+  if (RC != &ARM::GPRRegClass && RC != &ARM::rGPRRegClass)
     return RC->getRawAllocationOrder(MF);
 
   if (HintType == ARMRI::RegPairEven) {
@@ -464,7 +476,7 @@ ARMBaseRegisterInfo::UpdateRegAllocHint(unsigned Reg, unsigned NewReg,
 bool
 ARMBaseRegisterInfo::avoidWriteAfterWrite(const TargetRegisterClass *RC) const {
   // CortexA9 has a Write-after-write hazard for NEON registers.
-  if (!STI.isCortexA9())
+  if (!STI.isLikeA9())
     return false;
 
   switch (RC->getID()) {
@@ -495,8 +507,7 @@ bool ARMBaseRegisterInfo::hasBasePointer(const MachineFunction &MF) const {
   // When outgoing call frames are so large that we adjust the stack pointer
   // around the call, we can no longer use the stack pointer to reach the
   // emergency spill slot.
-  if (needsStackRealignment(MF) && (MFI->hasVarSizedObjects() ||
-                                    !TFI->hasReservedCallFrame(MF)))
+  if (needsStackRealignment(MF) && !TFI->hasReservedCallFrame(MF))
     return true;
 
   // Thumb has trouble with negative offsets from the FP. Thumb2 has a limited
@@ -520,7 +531,6 @@ bool ARMBaseRegisterInfo::hasBasePointer(const MachineFunction &MF) const {
 }
 
 bool ARMBaseRegisterInfo::canRealignStack(const MachineFunction &MF) const {
-  const MachineFrameInfo *MFI = MF.getFrameInfo();
   const MachineRegisterInfo *MRI = &MF.getRegInfo();
   const ARMFunctionInfo *AFI = MF.getInfo<ARMFunctionInfo>();
   // We can't realign the stack if:
@@ -552,7 +562,7 @@ needsStackRealignment(const MachineFunction &MF) const {
   const Function *F = MF.getFunction();
   unsigned StackAlign = MF.getTarget().getFrameLowering()->getStackAlignment();
   bool requiresRealignment = ((MFI->getMaxAlignment() > StackAlign) ||
-                               F->hasFnAttr(Attribute::StackAlignment));
+                               F->getFnAttributes().hasStackAlignmentAttr());
 
   return requiresRealignment && canRealignStack(MF);
 }
@@ -713,6 +723,11 @@ emitLoadConstPool(MachineBasicBlock &MBB,
 
 bool ARMBaseRegisterInfo::
 requiresRegisterScavenging(const MachineFunction &MF) const {
+  return true;
+}
+
+bool ARMBaseRegisterInfo::
+trackLivenessAfterRegAlloc(const MachineFunction &MF) const {
   return true;
 }
 
@@ -937,7 +952,8 @@ materializeFrameBaseRegister(MachineBasicBlock *MBB,
 
   const MCInstrDesc &MCID = TII.get(ADDriOpc);
   MachineRegisterInfo &MRI = MBB->getParent()->getRegInfo();
-  MRI.constrainRegClass(BaseReg, TII.getRegClass(MCID, 0, this));
+  const MachineFunction &MF = *MBB->getParent();
+  MRI.constrainRegClass(BaseReg, TII.getRegClass(MCID, 0, this, MF));
 
   MachineInstrBuilder MIB = AddDefaultPred(BuildMI(*MBB, Ins, DL, MCID, BaseReg)
     .addFrameIndex(FrameIdx).addImm(Offset));
@@ -1115,7 +1131,7 @@ ARMBaseRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     // Must be addrmode4/6.
     MI.getOperand(i).ChangeToRegister(FrameReg, false, false, false);
   else {
-    ScratchReg = MF.getRegInfo().createVirtualRegister(ARM::GPRRegisterClass);
+    ScratchReg = MF.getRegInfo().createVirtualRegister(&ARM::GPRRegClass);
     if (!AFI->isThumbFunction())
       emitARMRegPlusImmediate(MBB, II, MI.getDebugLoc(), ScratchReg, FrameReg,
                               Offset, Pred, PredReg, TII);

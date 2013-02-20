@@ -24,8 +24,6 @@ STATISTIC(NumMovedInsts, "Number of predicated instructions moved");
 
 namespace {
   class Thumb2ITBlockPass : public MachineFunctionPass {
-    bool PreRegAlloc;
-
   public:
     static char ID;
     Thumb2ITBlockPass() : MachineFunctionPass(ID) {}
@@ -76,16 +74,14 @@ static void TrackDefUses(MachineInstr *MI,
   for (unsigned i = 0, e = LocalUses.size(); i != e; ++i) {
     unsigned Reg = LocalUses[i];
     Uses.insert(Reg);
-    for (const unsigned *Subreg = TRI->getSubRegisters(Reg);
-         *Subreg; ++Subreg)
+    for (MCSubRegIterator Subreg(Reg, TRI); Subreg.isValid(); ++Subreg)
       Uses.insert(*Subreg);
   }
 
   for (unsigned i = 0, e = LocalDefs.size(); i != e; ++i) {
     unsigned Reg = LocalDefs[i];
     Defs.insert(Reg);
-    for (const unsigned *Subreg = TRI->getSubRegisters(Reg);
-         *Subreg; ++Subreg)
+    for (MCSubRegIterator Subreg(Reg, TRI); Subreg.isValid(); ++Subreg)
       Defs.insert(*Subreg);
     if (Reg == ARM::CPSR)
       continue;
@@ -154,7 +150,7 @@ Thumb2ITBlockPass::MoveCopyOutOfITBlock(MachineInstr *MI,
     ++I;
   if (I != E) {
     unsigned NPredReg = 0;
-    ARMCC::CondCodes NCC = llvm::getITInstrPredicate(I, NPredReg);
+    ARMCC::CondCodes NCC = getITInstrPredicate(I, NPredReg);
     if (NCC == CC || NCC == OCC)
       return true;
   }
@@ -171,7 +167,7 @@ bool Thumb2ITBlockPass::InsertITInstructions(MachineBasicBlock &MBB) {
     MachineInstr *MI = &*MBBI;
     DebugLoc dl = MI->getDebugLoc();
     unsigned PredReg = 0;
-    ARMCC::CondCodes CC = llvm::getITInstrPredicate(MI, PredReg);
+    ARMCC::CondCodes CC = getITInstrPredicate(MI, PredReg);
     if (CC == ARMCC::AL) {
       ++MBBI;
       continue;
@@ -207,7 +203,7 @@ bool Thumb2ITBlockPass::InsertITInstructions(MachineBasicBlock &MBB) {
       MI = NMI;
 
       unsigned NPredReg = 0;
-      ARMCC::CondCodes NCC = llvm::getITInstrPredicate(NMI, NPredReg);
+      ARMCC::CondCodes NCC = getITInstrPredicate(NMI, NPredReg);
       if (NCC == CC || NCC == OCC) {
         Mask |= (NCC & 1) << Pos;
         // Add implicit use of ITSTATE.
