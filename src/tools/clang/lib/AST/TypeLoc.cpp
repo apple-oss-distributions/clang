@@ -11,11 +11,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Support/raw_ostream.h"
-#include "clang/AST/TypeLocVisitor.h"
+#include "clang/AST/TypeLoc.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/TypeLocVisitor.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 using namespace clang;
 
 //===----------------------------------------------------------------------===//
@@ -98,23 +99,38 @@ void TypeLoc::initializeImpl(ASTContext &Context, TypeLoc TL,
 
 SourceLocation TypeLoc::getBeginLoc() const {
   TypeLoc Cur = *this;
+  TypeLoc LeftMost = Cur;
   while (true) {
     switch (Cur.getTypeLocClass()) {
-    // FIXME: Currently QualifiedTypeLoc does not have a source range
-    // case Qualified:
     case Elaborated:
-    case DependentName:
-    case DependentTemplateSpecialization:
+      LeftMost = Cur;
       break;
-    default:
-      TypeLoc Next = Cur.getNextTypeLoc();
-      if (Next.isNull()) break;
-      Cur = Next;
+    case FunctionProto:
+      if (cast<FunctionProtoTypeLoc>(&Cur)->getTypePtr()->hasTrailingReturn()) {
+        LeftMost = Cur;
+        break;
+      }
+      /* Fall through */
+    case FunctionNoProto:
+    case ConstantArray:
+    case DependentSizedArray:
+    case IncompleteArray:
+    case VariableArray:
+      // FIXME: Currently QualifiedTypeLoc does not have a source range
+    case Qualified:
+      Cur = Cur.getNextTypeLoc();
       continue;
-    }
+    default:
+      if (!Cur.getLocalSourceRange().getBegin().isInvalid())
+        LeftMost = Cur;
+      Cur = Cur.getNextTypeLoc();
+      if (Cur.isNull())
+        break;
+      continue;
+    } // switch
     break;
-  }
-  return Cur.getLocalSourceRange().getBegin();
+  } // while
+  return LeftMost.getLocalSourceRange().getBegin();
 }
 
 SourceLocation TypeLoc::getEndLoc() const {
@@ -131,9 +147,14 @@ SourceLocation TypeLoc::getEndLoc() const {
     case DependentSizedArray:
     case IncompleteArray:
     case VariableArray:
-    case FunctionProto:
     case FunctionNoProto:
       Last = Cur;
+      break;
+    case FunctionProto:
+      if (cast<FunctionProtoTypeLoc>(&Cur)->getTypePtr()->hasTrailingReturn())
+        Last = TypeLoc();
+      else
+        Last = Cur;
       break;
     case Pointer:
     case BlockPointer:
@@ -241,6 +262,13 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   case BuiltinType::ObjCId:
   case BuiltinType::ObjCClass:
   case BuiltinType::ObjCSel:
+  case BuiltinType::OCLImage1d:
+  case BuiltinType::OCLImage1dArray:
+  case BuiltinType::OCLImage1dBuffer:
+  case BuiltinType::OCLImage2d:
+  case BuiltinType::OCLImage2dArray:
+  case BuiltinType::OCLImage3d:
+  case BuiltinType::OCLEvent:
   case BuiltinType::BuiltinFn:
     return TST_unspecified;
   }

@@ -14,20 +14,24 @@
 #ifndef CLANG_CODEGEN_CODEGENMODULE_H
 #define CLANG_CODEGEN_CODEGENMODULE_H
 
-#include "clang/Basic/ABI.h"
-#include "clang/Basic/LangOptions.h"
+#include "CGVTables.h"
+#include "CodeGenTypes.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/GlobalDecl.h"
 #include "clang/AST/Mangle.h"
-#include "CGVTables.h"
-#include "CodeGenTypes.h"
-#include "llvm/Module.h"
+#include "clang/Basic/ABI.h"
+#include "clang/Basic/LangOptions.h"
+#include "clang/Basic/Module.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/IR/CallingConv.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/ValueHandle.h"
+#include "llvm/Transforms/Utils/BlackList.h"
 
 namespace llvm {
   class Module;
@@ -35,7 +39,7 @@ namespace llvm {
   class ConstantInt;
   class Function;
   class GlobalValue;
-  class TargetData;
+  class DataLayout;
   class FunctionType;
   class LLVMContext;
 }
@@ -66,6 +70,7 @@ namespace clang {
   class AnnotateAttr;
   class CXXDestructorDecl;
   class MangleBuffer;
+  class Module;
 
 namespace CodeGen {
 
@@ -140,6 +145,11 @@ namespace CodeGen {
       unsigned char PointerSizeInBytes;
       unsigned char SizeSizeInBytes;     // sizeof(size_t)
     };
+
+    llvm::CallingConv::ID RuntimeCC;
+    llvm::CallingConv::ID getRuntimeCC() const {
+      return RuntimeCC;
+    }
   };
 
 struct RREntrypoints {
@@ -205,8 +215,11 @@ struct ARCEntrypoints {
   /// A void(void) inline asm to use to mark that the return value of
   /// a call will be immediately retain.
   llvm::InlineAsm *retainAutoreleasedReturnValueMarker;
+
+  /// void clang.arc.use(...);
+  llvm::Constant *clang_arc_use;
 };
-  
+
 /// CodeGenModule - This class organizes the cross-function state that is used
 /// while generating LLVM code.
 class CodeGenModule : public CodeGenTypeCache {
@@ -219,7 +232,7 @@ class CodeGenModule : public CodeGenTypeCache {
   const LangOptions &LangOpts;
   const CodeGenOptions &CodeGenOpts;
   llvm::Module &TheModule;
-  const llvm::TargetData &TheTargetData;
+  const llvm::DataLayout &TheDataLayout;
   mutable const TargetCodeGenInfo *TheTargetCodeGenInfo;
   DiagnosticsEngine &Diags;
   CGCXXABI &ABI;
@@ -254,6 +267,9 @@ class CodeGenModule : public CodeGenTypeCache {
   /// is done.
   std::vector<GlobalDecl> DeferredDeclsToEmit;
 
+  /// DeferredVTables - A queue of (optional) vtables to consider emitting.
+  std::vector<const CXXRecordDecl*> DeferredVTables;
+
   /// LLVMUsed - List of global values which are required to be
   /// present in the object file; bitcast to i8*. This is used for
   /// forcing visibility of symbols which may otherwise be optimized
@@ -286,6 +302,14 @@ class CodeGenModule : public CodeGenTypeCache {
   llvm::DenseMap<QualType, llvm::Constant *> AtomicSetterHelperFnMap;
   llvm::DenseMap<QualType, llvm::Constant *> AtomicGetterHelperFnMap;
 
+  /// \brief thread_local variables defined or used in this TU.
+  std::vector<std::pair<const VarDecl *, llvm::GlobalVariable *> >
+    CXXThreadLocals;
+
+  /// \brief thread_local variables with initializers that need to run
+  /// before any thread_local variable in this TU is odr-used.
+  std::vector<llvm::Constant*> CXXThreadLocalInits;
+
   /// CXXGlobalInits - Global variables with initializers that need to run
   /// before main.
   std::vector<llvm::Constant*> CXXGlobalInits;
@@ -296,26 +320,36 @@ class CodeGenModule : public CodeGenTypeCache {
   /// order.
   llvm::DenseMap<const Decl*, unsigned> DelayedCXXInitPosition;
   
+  typedef std::pair<OrderGlobalInits, llvm::Function*> GlobalInitData;
+
+  struct GlobalInitPriorityCmp {
+    bool operator()(const GlobalInitData &LHS,
+                    const GlobalInitData &RHS) const {
+      return LHS.first.priority < RHS.first.priority;
+    }
+  };
+
   /// - Global variables with initializers whose order of initialization
   /// is set by init_priority attribute.
-  
-  SmallVector<std::pair<OrderGlobalInits, llvm::Function*>, 8> 
-    PrioritizedCXXGlobalInits;
+  SmallVector<GlobalInitData, 8> PrioritizedCXXGlobalInits;
 
   /// CXXGlobalDtors - Global destructor functions and arguments that need to
   /// run on termination.
   std::vector<std::pair<llvm::WeakVH,llvm::Constant*> > CXXGlobalDtors;
+
+  /// \brief The complete set of modules that has been imported.
+  llvm::SetVector<clang::Module *> ImportedModules;
 
   /// @name Cache for Objective-C runtime types
   /// @{
 
   /// CFConstantStringClassRef - Cached reference to the class for constant
   /// strings. This value has type int * but is actually an Obj-C class pointer.
-  llvm::Constant *CFConstantStringClassRef;
+  llvm::WeakVH CFConstantStringClassRef;
 
   /// ConstantStringClassRef - Cached reference to the class for constant
   /// strings. This value has type int * but is actually an Obj-C class pointer.
-  llvm::Constant *ConstantStringClassRef;
+  llvm::WeakVH ConstantStringClassRef;
 
   /// \brief The LLVM type corresponding to NSConstantString.
   llvm::StructType *NSConstantStringType;
@@ -351,13 +385,23 @@ class CodeGenModule : public CodeGenTypeCache {
   struct {
     int GlobalUniqueCount;
   } Block;
-  
+
+  /// void @llvm.lifetime.start(i64 %size, i8* nocapture <ptr>)
+  llvm::Constant *LifetimeStartFn;
+
+  /// void @llvm.lifetime.end(i64 %size, i8* nocapture <ptr>)
+  llvm::Constant *LifetimeEndFn;
+
   GlobalDecl initializedGlobalDecl;
+
+  llvm::BlackList SanitizerBlacklist;
+
+  const SanitizerOptions &SanOpts;
 
   /// @}
 public:
   CodeGenModule(ASTContext &C, const CodeGenOptions &CodeGenOpts,
-                llvm::Module &M, const llvm::TargetData &TD,
+                llvm::Module &M, const llvm::DataLayout &TD,
                 DiagnosticsEngine &Diags);
 
   ~CodeGenModule();
@@ -451,7 +495,7 @@ public:
   CodeGenVTables &getVTables() { return VTables; }
   VTableContext &getVTableContext() { return VTables.getVTableContext(); }
   DiagnosticsEngine &getDiags() const { return Diags; }
-  const llvm::TargetData &getTargetData() const { return TheTargetData; }
+  const llvm::DataLayout &getDataLayout() const { return TheDataLayout; }
   const TargetInfo &getTarget() const { return Context.getTargetInfo(); }
   llvm::LLVMContext &getLLVMContext() { return VMContext; }
   const TargetCodeGenInfo &getTargetCodeGenInfo();
@@ -548,6 +592,9 @@ public:
   /// GetAddrOfRTTIDescriptor - Get the address of the RTTI descriptor 
   /// for the given type.
   llvm::Constant *GetAddrOfRTTIDescriptor(QualType Ty, bool ForEH = false);
+
+  /// GetAddrOfUuidDescriptor - Get the address of a uuid descriptor .
+  llvm::Constant *GetAddrOfUuidDescriptor(const CXXUuidofExpr* E);
 
   /// GetAddrOfThunk - Get the address of the thunk for the given global decl.
   llvm::Constant *GetAddrOfThunk(GlobalDecl GD, const ThunkInfo &Thunk);
@@ -701,8 +748,8 @@ public:
   /// type and name.
   llvm::Constant *CreateRuntimeFunction(llvm::FunctionType *Ty,
                                         StringRef Name,
-                                        llvm::Attributes ExtraAttrs =
-                                          llvm::Attribute::None);
+                                        llvm::AttributeSet ExtraAttrs =
+                                          llvm::AttributeSet());
   /// CreateRuntimeVariable - Create a new runtime global variable with the
   /// specified type and name.
   llvm::Constant *CreateRuntimeVariable(llvm::Type *Ty,
@@ -717,6 +764,9 @@ public:
   llvm::Constant *getBlockObjectDispose();
 
   ///@}
+
+  llvm::Constant *getLLVMLifetimeStartFn();
+  llvm::Constant *getLLVMLifetimeEndFn();
 
   // UpdateCompleteType - Make sure that this type is translated.
   void UpdateCompletedType(const TagDecl *TD);
@@ -793,6 +843,10 @@ public:
   /// as a return type.
   bool ReturnTypeUsesSRet(const CGFunctionInfo &FI);
 
+  /// ReturnSlotInterferesWithArgs - Return true iff the given type uses an
+  /// argument slot when 'sret' is used as a return type.
+  bool ReturnSlotInterferesWithArgs(const CGFunctionInfo &FI);
+
   /// ReturnTypeUsesFPRet - Return true iff the given type uses 'fpret' when
   /// used as a return type.
   bool ReturnTypeUsesFPRet(QualType ResultType);
@@ -844,13 +898,11 @@ public:
   GetLLVMLinkageVarDefinition(const VarDecl *D,
                               llvm::GlobalVariable *GV);
   
-  std::vector<const CXXRecordDecl*> DeferredVTables;
-
   /// Emit all the global annotations.
   void EmitGlobalAnnotations();
 
   /// Emit an annotation string.
-  llvm::Constant *EmitAnnotationString(llvm::StringRef Str);
+  llvm::Constant *EmitAnnotationString(StringRef Str);
 
   /// Emit the annotation's translation unit.
   llvm::Constant *EmitAnnotationUnit(SourceLocation Loc);
@@ -873,6 +925,16 @@ public:
   /// annotations are emitted during finalization of the LLVM code.
   void AddGlobalAnnotations(const ValueDecl *D, llvm::GlobalValue *GV);
 
+  const llvm::BlackList &getSanitizerBlacklist() const {
+    return SanitizerBlacklist;
+  }
+
+  const SanitizerOptions &getSanOpts() const { return SanOpts; }
+
+  void addDeferredVTable(const CXXRecordDecl *RD) {
+    DeferredVTables.push_back(RD);
+  }
+
 private:
   llvm::GlobalValue *GetGlobalValue(StringRef Ref);
 
@@ -880,8 +942,8 @@ private:
                                           llvm::Type *Ty,
                                           GlobalDecl D,
                                           bool ForVTable,
-                                          llvm::Attributes ExtraAttrs =
-                                            llvm::Attribute::None);
+                                          llvm::AttributeSet ExtraAttrs =
+                                            llvm::AttributeSet());
   llvm::Constant *GetOrCreateLLVMGlobal(StringRef MangledName,
                                         llvm::PointerType *PTy,
                                         const VarDecl *D,
@@ -925,6 +987,7 @@ private:
 
   void EmitNamespace(const NamespaceDecl *D);
   void EmitLinkageSpec(const LinkageSpecDecl *D);
+  void CompleteDIClassType(const CXXMethodDecl* D);
 
   /// EmitCXXConstructors - Emit constructors (base, complete) from a
   /// C++ constructor Decl.
@@ -941,6 +1004,9 @@ private:
   /// EmitCXXDestructor - Emit a single destructor with the given type from
   /// a C++ destructor Decl.
   void EmitCXXDestructor(const CXXDestructorDecl *D, CXXDtorType Type);
+
+  /// \brief Emit the function that initializes C++ thread_local variables.
+  void EmitCXXThreadLocalInitFunc();
 
   /// EmitCXXGlobalInitFunc - Emit the function that initializes C++ globals.
   void EmitCXXGlobalInitFunc();
@@ -973,17 +1039,27 @@ private:
 
   /// EmitDeferred - Emit any needed decls for which code generation
   /// was deferred.
-  void EmitDeferred(void);
+  void EmitDeferred();
+
+  /// EmitDeferredVTables - Emit any vtables which we deferred and
+  /// still have a use for.
+  void EmitDeferredVTables();
 
   /// EmitLLVMUsed - Emit the llvm.used metadata used to force
   /// references to global which may otherwise be optimized out.
-  void EmitLLVMUsed(void);
+  void EmitLLVMUsed();
+
+  /// \brief Emit the link options introduced by imported modules.
+  void EmitModuleLinkOptions();
 
   void EmitDeclMetadata();
 
   /// EmitCoverageFile - Emit the llvm.gcov metadata used to tell LLVM where
   /// to emit the .gcno and .gcda files in a way that persists in .bc files.
   void EmitCoverageFile();
+
+  /// Emits the initializer for a uuidof string.
+  llvm::Constant *EmitUuidofInitializer(StringRef uuidstr, QualType IIDType);
 
   /// MayDeferGeneration - Determine if the given decl can be emitted
   /// lazily; this is only relevant for definitions. The given decl

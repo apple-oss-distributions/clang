@@ -11,19 +11,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Parse/ParseDiagnostic.h" // FIXME: remove this back-dependency!
 #include "clang/Sema/DeclSpec.h"
-#include "clang/Sema/LocInfoType.h"
-#include "clang/Sema/ParsedTemplate.h"
-#include "clang/Sema/SemaDiagnostic.h"
-#include "clang/Sema/Sema.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/TypeLoc.h"
-#include "clang/Lex/Preprocessor.h"
 #include "clang/Basic/LangOptions.h"
+#include "clang/Lex/Preprocessor.h"
+#include "clang/Parse/ParseDiagnostic.h" // FIXME: remove this back-dependency!
+#include "clang/Sema/LocInfoType.h"
+#include "clang/Sema/ParsedTemplate.h"
+#include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cstring>
 using namespace clang;
@@ -144,11 +145,13 @@ CXXScopeSpec::getWithLocInContext(ASTContext &Context) const {
 
 /// DeclaratorChunk::getFunction - Return a DeclaratorChunk for a function.
 /// "TheDeclarator" is the declarator that this will be added to.
-DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
+DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
                                              bool isAmbiguous,
-                                             SourceLocation EllipsisLoc,
+                                             SourceLocation LParenLoc,
                                              ParamInfo *ArgInfo,
                                              unsigned NumArgs,
+                                             SourceLocation EllipsisLoc,
+                                             SourceLocation RParenLoc,
                                              unsigned TypeQuals,
                                              bool RefQualifierIsLvalueRef,
                                              SourceLocation RefQualifierLoc,
@@ -173,9 +176,11 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
   I.EndLoc                      = LocalRangeEnd;
   I.Fun.AttrList                = 0;
   I.Fun.hasPrototype            = hasProto;
-  I.Fun.isVariadic              = isVariadic;
+  I.Fun.isVariadic              = EllipsisLoc.isValid();
   I.Fun.isAmbiguous             = isAmbiguous;
+  I.Fun.LParenLoc               = LParenLoc.getRawEncoding();
   I.Fun.EllipsisLoc             = EllipsisLoc.getRawEncoding();
+  I.Fun.RParenLoc               = RParenLoc.getRawEncoding();
   I.Fun.DeleteArgInfo           = false;
   I.Fun.TypeQuals               = TypeQuals;
   I.Fun.NumArgs                 = NumArgs;
@@ -276,6 +281,13 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_unspecified:
     case TST_void:
     case TST_wchar:
+    case TST_image1d_t:
+    case TST_image1d_array_t:
+    case TST_image1d_buffer_t:
+    case TST_image2d_t:
+    case TST_image2d_array_t:
+    case TST_image3d_t:
+    case TST_event_t:
       return false;
 
     case TST_decltype:
@@ -310,7 +322,7 @@ bool Declarator::isDeclarationOfFunction() const {
 unsigned DeclSpec::getParsedSpecifiers() const {
   unsigned Res = 0;
   if (StorageClassSpec != SCS_unspecified ||
-      SCS_thread_specified)
+      ThreadStorageClassSpec != TSCS_unspecified)
     Res |= PQ_StorageClassSpecifier;
 
   if (TypeQualifiers != TQ_unspecified)
@@ -319,7 +331,8 @@ unsigned DeclSpec::getParsedSpecifiers() const {
   if (hasTypeSpecifier())
     Res |= PQ_TypeSpecifier;
 
-  if (FS_inline_specified || FS_virtual_specified || FS_explicit_specified)
+  if (FS_inline_specified || FS_virtual_specified || FS_explicit_specified ||
+      FS_noreturn_specified)
     Res |= PQ_FunctionSpecifier;
   return Res;
 }
@@ -347,6 +360,16 @@ const char *DeclSpec::getSpecifierName(DeclSpec::SCS S) {
   case DeclSpec::SCS_register:    return "register";
   case DeclSpec::SCS_private_extern: return "__private_extern__";
   case DeclSpec::SCS_mutable:     return "mutable";
+  }
+  llvm_unreachable("Unknown typespec!");
+}
+
+const char *DeclSpec::getSpecifierName(DeclSpec::TSCS S) {
+  switch (S) {
+  case DeclSpec::TSCS_unspecified:   return "unspecified";
+  case DeclSpec::TSCS___thread:      return "__thread";
+  case DeclSpec::TSCS_thread_local:  return "thread_local";
+  case DeclSpec::TSCS__Thread_local: return "_Thread_local";
   }
   llvm_unreachable("Unknown typespec!");
 }
@@ -410,6 +433,13 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T) {
   case DeclSpec::TST_underlyingType: return "__underlying_type";
   case DeclSpec::TST_unknown_anytype: return "__unknown_anytype";
   case DeclSpec::TST_atomic: return "_Atomic";
+  case DeclSpec::TST_image1d_t:   return "image1d_t";
+  case DeclSpec::TST_image1d_array_t: return "image1d_array_t";
+  case DeclSpec::TST_image1d_buffer_t: return "image1d_buffer_t";
+  case DeclSpec::TST_image2d_t:   return "image2d_t";
+  case DeclSpec::TST_image2d_array_t: return "image2d_array_t";
+  case DeclSpec::TST_image3d_t:   return "image3d_t";
+  case DeclSpec::TST_event_t:     return "event_t";
   case DeclSpec::TST_error:       return "(error)";
   }
   llvm_unreachable("Unknown typespec!");
@@ -485,16 +515,14 @@ bool DeclSpec::SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
   return false;
 }
 
-bool DeclSpec::SetStorageClassSpecThread(SourceLocation Loc,
+bool DeclSpec::SetStorageClassSpecThread(TSCS TSC, SourceLocation Loc,
                                          const char *&PrevSpec,
                                          unsigned &DiagID) {
-  if (SCS_thread_specified) {
-    PrevSpec = "__thread";
-    DiagID = diag::ext_duplicate_declspec;
-    return true;
-  }
-  SCS_thread_specified = true;
-  SCS_threadLoc = Loc;
+  if (ThreadStorageClassSpec != TSCS_unspecified)
+    return BadSpecifier(TSC, (TSCS)ThreadStorageClassSpec, PrevSpec, DiagID);
+
+  ThreadStorageClassSpec = TSC;
+  ThreadStorageClassSpecLoc = Loc;
   return false;
 }
 
@@ -611,7 +639,7 @@ bool DeclSpec::SetTypeSpecType(TST T, SourceLocation TagKwLoc,
   DeclRep = Rep;
   TSTLoc = TagKwLoc;
   TSTNameLoc = TagNameLoc;
-  TypeSpecOwned = Owned;
+  TypeSpecOwned = Owned && Rep != 0;
   return false;
 }
 
@@ -676,15 +704,13 @@ bool DeclSpec::SetTypeSpecError() {
 }
 
 bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
-                           unsigned &DiagID, const LangOptions &Lang,
-                           bool IsTypeSpec) {
-  // Duplicates are permitted in C99, and are permitted in C++11 unless the
-  // cv-qualifier appears as a type-specifier.  However, since this is likely 
-  // not what the user intended, we will always warn.  We do not need to set the
-  // qualifier's location since we already have it.
+                           unsigned &DiagID, const LangOptions &Lang) {
+  // Duplicates are permitted in C99, but are not permitted in C++. However,
+  // since this is likely not what the user intended, we will always warn.  We
+  // do not need to set the qualifier's location since we already have it.
   if (TypeQualifiers & T) {
     bool IsExtension = true;
-    if (Lang.C99 || (Lang.CPlusPlus0x && !IsTypeSpec))
+    if (Lang.C99)
       IsExtension = false;
     return BadSpecifier(T, T, PrevSpec, DiagID, IsExtension);
   }
@@ -699,27 +725,31 @@ bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
   return false;
 }
 
-bool DeclSpec::SetFunctionSpecInline(SourceLocation Loc, const char *&PrevSpec,
-                                     unsigned &DiagID) {
+bool DeclSpec::setFunctionSpecInline(SourceLocation Loc) {
   // 'inline inline' is ok.
   FS_inline_specified = true;
   FS_inlineLoc = Loc;
   return false;
 }
 
-bool DeclSpec::SetFunctionSpecVirtual(SourceLocation Loc, const char *&PrevSpec,
-                                      unsigned &DiagID) {
+bool DeclSpec::setFunctionSpecVirtual(SourceLocation Loc) {
   // 'virtual virtual' is ok.
   FS_virtual_specified = true;
   FS_virtualLoc = Loc;
   return false;
 }
 
-bool DeclSpec::SetFunctionSpecExplicit(SourceLocation Loc, const char *&PrevSpec,
-                                       unsigned &DiagID) {
+bool DeclSpec::setFunctionSpecExplicit(SourceLocation Loc) {
   // 'explicit explicit' is ok.
   FS_explicit_specified = true;
   FS_explicitLoc = Loc;
+  return false;
+}
+
+bool DeclSpec::setFunctionSpecNoreturn(SourceLocation Loc) {
+  // '_Noreturn _Noreturn' is ok.
+  FS_noreturn_specified = true;
+  FS_noreturnLoc = Loc;
   return false;
 }
 
@@ -761,9 +791,10 @@ void DeclSpec::setProtocolQualifiers(Decl * const *Protos,
                                      SourceLocation *ProtoLocs,
                                      SourceLocation LAngleLoc) {
   if (NP == 0) return;
-  ProtocolQualifiers = new Decl*[NP];
+  Decl **ProtoQuals = new Decl*[NP];
+  memcpy(ProtoQuals, Protos, sizeof(Decl*)*NP);
+  ProtocolQualifiers = ProtoQuals;
   ProtocolLocs = new SourceLocation[NP];
-  memcpy((void*)ProtocolQualifiers, Protos, sizeof(Decl*)*NP);
   memcpy(ProtocolLocs, ProtoLocs, sizeof(SourceLocation)*NP);
   NumProtocolQualifiers = NP;
   ProtocolLAngleLoc = LAngleLoc;
@@ -903,6 +934,34 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
     }
   }
 
+  // C11 6.7.1/3, C++11 [dcl.stc]p1, GNU TLS: __thread, thread_local and
+  // _Thread_local can only appear with the 'static' and 'extern' storage class
+  // specifiers. We also allow __private_extern__ as an extension.
+  if (ThreadStorageClassSpec != TSCS_unspecified) {
+    switch (StorageClassSpec) {
+    case SCS_unspecified:
+    case SCS_extern:
+    case SCS_private_extern:
+    case SCS_static:
+      break;
+    default:
+      if (PP.getSourceManager().isBeforeInTranslationUnit(
+            getThreadStorageClassSpecLoc(), getStorageClassSpecLoc()))
+        Diag(D, getStorageClassSpecLoc(),
+             diag::err_invalid_decl_spec_combination)
+          << DeclSpec::getSpecifierName(getThreadStorageClassSpec())
+          << SourceRange(getThreadStorageClassSpecLoc());
+      else
+        Diag(D, getThreadStorageClassSpecLoc(),
+             diag::err_invalid_decl_spec_combination)
+          << DeclSpec::getSpecifierName(getStorageClassSpec())
+          << SourceRange(getStorageClassSpecLoc());
+      // Discard the thread storage class specifier to recover.
+      ThreadStorageClassSpec = TSCS_unspecified;
+      ThreadStorageClassSpecLoc = SourceLocation();
+    }
+  }
+
   // If no type specifier was provided and we're parsing a language where
   // the type specifier is not optional, but we got 'auto' as a storage
   // class specifier, then assume this is an attempt to use C++0x's 'auto'
@@ -917,9 +976,9 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   }
   // Diagnose if we've recovered from an ill-formed 'auto' storage class
   // specifier in a pre-C++0x dialect of C++.
-  if (!PP.getLangOpts().CPlusPlus0x && TypeSpecType == TST_auto)
+  if (!PP.getLangOpts().CPlusPlus11 && TypeSpecType == TST_auto)
     Diag(D, TSTLoc, diag::ext_auto_type_specifier);
-  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().CPlusPlus0x &&
+  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().CPlusPlus11 &&
       StorageClassSpec == SCS_auto)
     Diag(D, StorageClassSpecLoc, diag::warn_auto_storage_class)
       << FixItHint::CreateRemoval(StorageClassSpecLoc);
@@ -932,16 +991,27 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   // C++ [class.friend]p6:
   //   No storage-class-specifier shall appear in the decl-specifier-seq
   //   of a friend declaration.
-  if (isFriendSpecified() && getStorageClassSpec()) {
-    DeclSpec::SCS SC = getStorageClassSpec();
-    const char *SpecName = getSpecifierName(SC);
+  if (isFriendSpecified() &&
+      (getStorageClassSpec() || getThreadStorageClassSpec())) {
+    SmallString<32> SpecName;
+    SourceLocation SCLoc;
+    FixItHint StorageHint, ThreadHint;
 
-    SourceLocation SCLoc = getStorageClassSpecLoc();
-    SourceLocation SCEndLoc = SCLoc.getLocWithOffset(strlen(SpecName));
+    if (DeclSpec::SCS SC = getStorageClassSpec()) {
+      SpecName = getSpecifierName(SC);
+      SCLoc = getStorageClassSpecLoc();
+      StorageHint = FixItHint::CreateRemoval(SCLoc);
+    }
+
+    if (DeclSpec::TSCS TSC = getThreadStorageClassSpec()) {
+      if (!SpecName.empty()) SpecName += " ";
+      SpecName += getSpecifierName(TSC);
+      SCLoc = getThreadStorageClassSpecLoc();
+      ThreadHint = FixItHint::CreateRemoval(SCLoc);
+    }
 
     Diag(D, SCLoc, diag::err_friend_storage_spec)
-      << SpecName
-      << FixItHint::CreateRemoval(SourceRange(SCLoc, SCEndLoc));
+      << SpecName << StorageHint << ThreadHint;
 
     ClearStorageClassSpecs();
   }

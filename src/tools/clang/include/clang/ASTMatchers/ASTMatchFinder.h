@@ -56,6 +56,10 @@ namespace ast_matchers {
 /// that will trigger the callbacks specified via addMatcher(...) when a match
 /// is found.
 ///
+/// The order of matches is guaranteed to be equivalent to doing a pre-order
+/// traversal on the AST, and applying the matchers in the order in which they
+/// were added to the MatchFinder.
+///
 /// See ASTMatchers.h for more information about how to create matchers.
 ///
 /// Not intended to be subclassed.
@@ -85,7 +89,14 @@ public:
   class MatchCallback {
   public:
     virtual ~MatchCallback();
+
+    /// \brief Called on every match by the \c MatchFinder.
     virtual void run(const MatchResult &Result) = 0;
+
+    /// \brief Called at the start of each translation unit.
+    ///
+    /// Optionally override to do per translation unit tasks.
+    virtual void onStartOfTranslationUnit() {}
   };
 
   /// \brief Called when parsing is finished. Intended for testing only.
@@ -116,10 +127,19 @@ public:
                   MatchCallback *Action);
   void addMatcher(const NestedNameSpecifierLocMatcher &NodeMatch,
                   MatchCallback *Action);
+  void addMatcher(const TypeLocMatcher &NodeMatch,
+                  MatchCallback *Action);
   /// @}
 
   /// \brief Creates a clang ASTConsumer that finds all matches.
   clang::ASTConsumer *newASTConsumer();
+
+  /// \brief Finds all matches on the given \c Node.
+  ///
+  /// @{
+  void findAll(const Decl &Node, ASTContext &Context);
+  void findAll(const Stmt &Node, ASTContext &Context);
+  /// @}
 
   /// \brief Registers a callback to notify the end of parsing.
   ///

@@ -24,8 +24,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_SUPPORT_FILE_SYSTEM_H
-#define LLVM_SUPPORT_FILE_SYSTEM_H
+#ifndef LLVM_SUPPORT_FILESYSTEM_H
+#define LLVM_SUPPORT_FILESYSTEM_H
 
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/OwningPtr.h"
@@ -607,7 +607,7 @@ private:
 public:
   typedef char char_type;
 
-#if LLVM_USE_RVALUE_REFERENCES
+#if LLVM_HAS_RVALUE_REFERENCES
   mapped_file_region(mapped_file_region&&);
   mapped_file_region &operator =(mapped_file_region&&);
 #endif

@@ -14,7 +14,7 @@
 
 #include "int_lib.h"
 
-#if __x86_64
+#if __LP64__
 
 /* Returns: convert a to a unsigned long long, rounding toward zero.
  *          Negative values all become zero.

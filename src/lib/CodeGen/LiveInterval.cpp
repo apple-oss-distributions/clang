@@ -19,15 +19,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/LiveInterval.h"
+#include "RegisterCoalescer.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/CodeGen/LiveIntervalAnalysis.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallSet.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetRegisterInfo.h"
-#include "RegisterCoalescer.h"
 #include <algorithm>
 using namespace llvm;
 
@@ -59,8 +59,16 @@ VNInfo *LiveInterval::createDeadDef(SlotIndex Def,
     return VNI;
   }
   if (SlotIndex::isSameInstr(Def, I->start)) {
-    assert(I->start == Def && "Cannot insert def, already live");
-    assert(I->valno->def == Def && "Inconsistent existing value def");
+    assert(I->valno->def == I->start && "Inconsistent existing value def");
+
+    // It is possible to have both normal and early-clobber defs of the same
+    // register on an instruction. It doesn't make a lot of sense, but it is
+    // possible to specify in inline assembly.
+    //
+    // Just convert everything to early-clobber.
+    Def = std::min(Def, I->start);
+    if (Def != I->start)
+      I->start = I->valno->def = Def;
     return I->valno;
   }
   assert(SlotIndex::isEarlierInstr(Def, I->start) && "Already live at def");
@@ -833,8 +841,16 @@ void ConnectedVNInfoEqClasses::Distribute(LiveInterval *LIV[],
     MachineOperand &MO = RI.getOperand();
     MachineInstr *MI = MO.getParent();
     ++RI;
-    // DBG_VALUE instructions should have been eliminated earlier.
-    LiveRangeQuery LRQ(LI, LIS.getInstructionIndex(MI));
+    // DBG_VALUE instructions don't have slot indexes, so get the index of the
+    // instruction before them.
+    // Normally, DBG_VALUE instructions are removed before this function is
+    // called, but it is not a requirement.
+    SlotIndex Idx;
+    if (MI->isDebugValue())
+      Idx = LIS.getSlotIndexes()->getIndexBefore(MI);
+    else
+      Idx = LIS.getInstructionIndex(MI);
+    LiveRangeQuery LRQ(LI, Idx);
     const VNInfo *VNI = MO.readsReg() ? LRQ.valueIn() : LRQ.valueDefined();
     // In the case of an <undef> use that isn't tied to any def, VNI will be
     // NULL. If the use is tied to a def, VNI will be the defined value.

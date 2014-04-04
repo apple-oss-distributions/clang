@@ -7,6 +7,7 @@ BUILT_SOURCES = \
 	DiagnosticParseKinds.inc DiagnosticSemaKinds.inc \
 	DiagnosticSerializationKinds.inc \
 	DiagnosticIndexName.inc DiagnosticGroups.inc AttrList.inc arm_neon.inc \
+	arm64_simd.inc \
 	Version.inc
 
 TABLEGEN_INC_FILES_COMMON = 1
@@ -50,7 +51,13 @@ $(ObjDir)/AttrList.inc.tmp : Attr.td $(CLANG_TBLGEN) $(ObjDir)/.dir
 
 $(ObjDir)/arm_neon.inc.tmp : arm_neon.td $(CLANG_TBLGEN) $(ObjDir)/.dir
 	$(Echo) "Building Clang arm_neon.inc with tblgen"
-	$(Verb) $(ClangTableGen) -gen-arm-neon-sema -o $(call SYSPATH, $@) $<
+	$(Verb) $(ClangTableGen) -gen-arm-neon-sema -o $(call SYSPATH, $@) \
+	  -I $(PROJ_SRC_DIR)/../.. $<
+
+$(ObjDir)/arm64_simd.inc.tmp : arm64_simd.td $(CLANG_TBLGEN) $(ObjDir)/.dir
+	$(Echo) "Building Clang arm64_simd.inc with tblgen"
+	$(Verb) $(ClangTableGen) -gen-arm64-simd-sema -o $(call SYSPATH, $@) \
+	  -I $(PROJ_SRC_DIR)/../.. $<
 
 $(ObjDir)/Version.inc.tmp : Version.inc.in Makefile $(LLVM_OBJ_ROOT)/Makefile.config $(ObjDir)/.dir
 	$(Echo) "Updating Clang version info."

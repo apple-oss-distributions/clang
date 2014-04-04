@@ -1,10 +1,10 @@
 // Test to make sure basic initialization order errors are caught.
 
 // RUN: %clangxx_asan -m64 -O0 %s %p/Helpers/initialization-bug-extra2.cc\
-// RUN:   -mllvm -asan-initialization-order -o %t && %t 2>&1 \
+// RUN:   -fsanitize=init-order -o %t && %t 2>&1 \
 // RUN:    | %symbolize | FileCheck %s
 // RUN: %clangxx_asan -m32 -O0 %s %p/Helpers/initialization-bug-extra2.cc\
-// RUN:   -mllvm -asan-initialization-order -o %t && %t 2>&1 \
+// RUN:   -fsanitize=init-order -o %t && %t 2>&1 \
 // RUN:     | %symbolize | FileCheck %s
 
 // Do not test with optimization -- the error may be optimized away.
@@ -30,7 +30,7 @@ int z = initZ();
 extern int y;
 int __attribute__((noinline)) initX() {
   return y + 1;
-  // CHECK: {{AddressSanitizer initialization-order-fiasco}}
+  // CHECK: {{AddressSanitizer: initialization-order-fiasco}}
   // CHECK: {{READ of size .* at 0x.* thread T0}}
   // CHECK: {{0x.* is located 0 bytes inside of global variable .*(y|z).*}}
 }

@@ -14,19 +14,18 @@
 #include "clang/Frontend/Utils.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/LangOptions.h"
-#include "clang/Frontend/HeaderSearchOptions.h"
+#include "clang/Config/config.h" // C_INCLUDE_DIRS
 #include "clang/Lex/HeaderSearch.h"
-#include "llvm/ADT/SmallString.h"
+#include "clang/Lex/HeaderSearchOptions.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Path.h"
-
-#include "clang/Config/config.h" // C_INCLUDE_DIRS
+#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace clang::frontend;
@@ -44,19 +43,32 @@ class InitHeaderSearch {
   HeaderSearch &Headers;
   bool Verbose;
   std::string IncludeSysroot;
-  bool IsNotEmptyOrRoot;
+  bool SysrootIsImplicit;
 
 public:
+  bool HasSysroot;
 
-  InitHeaderSearch(HeaderSearch &HS, bool verbose, StringRef sysroot)
-    : Headers(HS), Verbose(verbose), IncludeSysroot(sysroot),
-      IsNotEmptyOrRoot(!(sysroot.empty() || sysroot == "/")) {
+private:
+  /// AddPathInternal - Add the specified path to the specified group list,
+  /// without performing any additional processing.
+  void AddPathInternal(const Twine &Path, IncludeDirGroup Group,
+                       bool isFramework, bool WasImplicit);
+
+public:
+  InitHeaderSearch(HeaderSearch &HS, const HeaderSearchOptions &HSOpts)
+    : Headers(HS), Verbose(HSOpts.Verbose), IncludeSysroot(HSOpts.Sysroot),
+      SysrootIsImplicit(HSOpts.SysrootIsImplicit),
+      HasSysroot(!(IncludeSysroot.empty() || IncludeSysroot == "/")) {
   }
 
-  /// AddPath - Add the specified path to the specified group list.
-  void AddPath(const Twine &Path, IncludeDirGroup Group,
-               bool isCXXAware, bool isUserSupplied,
-               bool isFramework, bool IgnoreSysRoot = false);
+  /// AddPath - Add the specified path to the specified group list, prefixing
+  /// the sysroot if used.
+  void AddPath(const Twine &Path, IncludeDirGroup Group, bool isFramework);
+
+  /// AddUnmappedPath - Add the specified path to the specified group list,
+  /// without performing any sysroot remapping.
+  void AddUnmappedPath(const Twine &Path, IncludeDirGroup Group,
+                       bool isFramework);
 
   /// AddSystemHeaderPrefix - Add the specified prefix to the system header
   /// prefix list.
@@ -105,45 +117,76 @@ public:
 
 }  // end anonymous namespace.
 
-void InitHeaderSearch::AddPath(const Twine &Path,
-                               IncludeDirGroup Group, bool isCXXAware,
-                               bool isUserSupplied, bool isFramework,
-                               bool IgnoreSysRoot) {
-  assert(!Path.isTriviallyEmpty() && "can't handle empty path here");
-  FileManager &FM = Headers.getFileMgr();
+static bool CanPrefixSysroot(StringRef Path) {
+#if defined(_WIN32)
+  return !Path.empty() && llvm::sys::path::is_separator(Path[0]);
+#else
+  return llvm::sys::path::is_absolute(Path);
+#endif
+}
 
-  // Compute the actual path, taking into consideration -isysroot.
+void InitHeaderSearch::AddPath(const Twine &Path, IncludeDirGroup Group,
+                               bool isFramework) {
+  // Add the path with sysroot prepended, if desired and this is a system header
+  // group.
+  if (HasSysroot) {
+    SmallString<256> MappedPathStorage;
+    StringRef MappedPathStr = Path.toStringRef(MappedPathStorage);
+    if (CanPrefixSysroot(MappedPathStr)) {
+      AddPathInternal(IncludeSysroot + Path, Group, isFramework, false);
+
+      // If implicit sysroot behavior is enabled, also add the unmapped path.
+      if (SysrootIsImplicit)
+        AddPathInternal(Path, Group, isFramework, true);
+      return;
+    }
+  }
+
+  AddPathInternal(Path, Group, isFramework, false);
+}
+
+void InitHeaderSearch::AddUnmappedPath(const Twine &Path, IncludeDirGroup Group,
+                                       bool isFramework) {
+  // If implicit sysroot behavior is enabled, also add the path implicitly
+  // mapped into the sysroot. We make sure to put this ahead of the unmapped
+  // path, because we expect that when an explicitly mentioned path exists
+  // inside the SDK, it should take precedence. This is particularly important
+  // with frameworks, as the compiler only looks inside the first framework
+  // found for any specific framework name.
+  if (HasSysroot && SysrootIsImplicit) {
+    SmallString<256> MappedPathStorage;
+    StringRef MappedPathStr = Path.toStringRef(MappedPathStorage);
+    if (CanPrefixSysroot(MappedPathStr)) {
+      AddPathInternal(IncludeSysroot + Path, Group, isFramework, true);
+    }
+  }
+
+  // Add the unmapped path.
+  AddPathInternal(Path, Group, isFramework, false);
+}
+
+void InitHeaderSearch::AddPathInternal(const Twine &Path, IncludeDirGroup Group,
+                                       bool isFramework, bool WasImplicit) {
+  assert(!Path.isTriviallyEmpty() && "can't handle empty path here");
+
+  FileManager &FM = Headers.getFileMgr();
   SmallString<256> MappedPathStorage;
   StringRef MappedPathStr = Path.toStringRef(MappedPathStorage);
 
-  // Handle isysroot.
-  if ((Group == System || Group == CXXSystem) && !IgnoreSysRoot &&
-#if defined(_WIN32)
-      !MappedPathStr.empty() &&
-      llvm::sys::path::is_separator(MappedPathStr[0]) &&
-#else
-      llvm::sys::path::is_absolute(MappedPathStr) &&
-#endif
-      IsNotEmptyOrRoot) {
-    MappedPathStorage.clear();
-    MappedPathStr =
-      (IncludeSysroot + Path).toStringRef(MappedPathStorage);
-  }
-
   // Compute the DirectoryLookup type.
   SrcMgr::CharacteristicKind Type;
-  if (Group == Quoted || Group == Angled || Group == IndexHeaderMap)
+  if (Group == Quoted || Group == Angled || Group == IndexHeaderMap) {
     Type = SrcMgr::C_User;
-  else if (isCXXAware)
-    Type = SrcMgr::C_System;
-  else
+  } else if (Group == ExternCSystem) {
     Type = SrcMgr::C_ExternCSystem;
-
+  } else {
+    Type = SrcMgr::C_System;
+  }
 
   // If the directory exists, add it.
   if (const DirectoryEntry *DE = FM.getDirectory(MappedPathStr)) {
-    IncludePath.push_back(std::make_pair(Group, DirectoryLookup(DE, Type,
-                          isUserSupplied, isFramework)));
+    IncludePath.push_back(
+      std::make_pair(Group, DirectoryLookup(DE, Type, isFramework)));
     return;
   }
 
@@ -153,14 +196,15 @@ void InitHeaderSearch::AddPath(const Twine &Path,
     if (const FileEntry *FE = FM.getFile(MappedPathStr)) {
       if (const HeaderMap *HM = Headers.CreateHeaderMap(FE)) {
         // It is a headermap, add it to the search path.
-        IncludePath.push_back(std::make_pair(Group, DirectoryLookup(HM, Type,
-                              isUserSupplied, Group == IndexHeaderMap)));
+        IncludePath.push_back(
+          std::make_pair(Group,
+                         DirectoryLookup(HM, Type, Group == IndexHeaderMap)));
         return;
       }
     }
   }
 
-  if (Verbose)
+  if (Verbose && !WasImplicit)
     llvm::errs() << "ignoring nonexistent directory \""
                  << MappedPathStr << "\"\n";
 }
@@ -171,42 +215,42 @@ void InitHeaderSearch::AddGnuCPlusPlusIncludePaths(StringRef Base,
                                                    StringRef Dir64,
                                                    const llvm::Triple &triple) {
   // Add the base dir
-  AddPath(Base, CXXSystem, true, false, false);
+  AddPath(Base, CXXSystem, false);
 
   // Add the multilib dirs
   llvm::Triple::ArchType arch = triple.getArch();
   bool is64bit = arch == llvm::Triple::ppc64 || arch == llvm::Triple::x86_64;
   if (is64bit)
-    AddPath(Base + "/" + ArchDir + "/" + Dir64, CXXSystem, true, false, false);
+    AddPath(Base + "/" + ArchDir + "/" + Dir64, CXXSystem, false);
   else
-    AddPath(Base + "/" + ArchDir + "/" + Dir32, CXXSystem, true, false, false);
+    AddPath(Base + "/" + ArchDir + "/" + Dir32, CXXSystem, false);
 
   // Add the backward dir
-  AddPath(Base + "/backward", CXXSystem, true, false, false);
+  AddPath(Base + "/backward", CXXSystem, false);
 }
 
 void InitHeaderSearch::AddMinGWCPlusPlusIncludePaths(StringRef Base,
                                                      StringRef Arch,
                                                      StringRef Version) {
   AddPath(Base + "/" + Arch + "/" + Version + "/include/c++",
-          CXXSystem, true, false, false);
+          CXXSystem, false);
   AddPath(Base + "/" + Arch + "/" + Version + "/include/c++/" + Arch,
-          CXXSystem, true, false, false);
+          CXXSystem, false);
   AddPath(Base + "/" + Arch + "/" + Version + "/include/c++/backward",
-          CXXSystem, true, false, false);
+          CXXSystem, false);
 }
 
 void InitHeaderSearch::AddMinGW64CXXPaths(StringRef Base,
                                           StringRef Version) {
   // Assumes Base is HeaderSearchOpts' ResourceDir
   AddPath(Base + "/../../../include/c++/" + Version,
-          CXXSystem, true, false, false);
+          CXXSystem, false);
   AddPath(Base + "/../../../include/c++/" + Version + "/x86_64-w64-mingw32",
-          CXXSystem, true, false, false);
+          CXXSystem, false);
   AddPath(Base + "/../../../include/c++/" + Version + "/i686-w64-mingw32",
-          CXXSystem, true, false, false);
+          CXXSystem, false);
   AddPath(Base + "/../../../include/c++/" + Version + "/backward",
-          CXXSystem, true, false, false);
+          CXXSystem, false);
 }
 
 void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
@@ -222,7 +266,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
       break;
     default:
       // FIXME: temporary hack: hard-coded paths.
-      AddPath("/usr/local/include", System, true, false, false);
+      AddPath("/usr/local/include", System, false);
       break;
     }
   }
@@ -234,7 +278,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     // supplied path.
     llvm::sys::Path P(HSOpts.ResourceDir);
     P.appendComponent("include");
-    AddPath(P.str(), System, false, false, false, /*IgnoreSysRoot=*/ true);
+    AddUnmappedPath(P.str(), ExternCSystem, false);
   }
 
   // All remaining additions are for system include directories, early exit if
@@ -250,7 +294,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     for (SmallVectorImpl<StringRef>::iterator i = dirs.begin();
          i != dirs.end();
          ++i)
-      AddPath(*i, System, false, false, false);
+      AddPath(*i, ExternCSystem, false);
     return;
   }
 
@@ -260,68 +304,59 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     llvm_unreachable("Include management is handled in the driver.");
 
   case llvm::Triple::Haiku:
-    AddPath("/boot/common/include", System, true, false, false);
-    AddPath("/boot/develop/headers/os", System, true, false, false);
-    AddPath("/boot/develop/headers/os/app", System, true, false, false);
-    AddPath("/boot/develop/headers/os/arch", System, true, false, false);
-    AddPath("/boot/develop/headers/os/device", System, true, false, false);
-    AddPath("/boot/develop/headers/os/drivers", System, true, false, false);
-    AddPath("/boot/develop/headers/os/game", System, true, false, false);
-    AddPath("/boot/develop/headers/os/interface", System, true, false, false);
-    AddPath("/boot/develop/headers/os/kernel", System, true, false, false);
-    AddPath("/boot/develop/headers/os/locale", System, true, false, false);
-    AddPath("/boot/develop/headers/os/mail", System, true, false, false);
-    AddPath("/boot/develop/headers/os/media", System, true, false, false);
-    AddPath("/boot/develop/headers/os/midi", System, true, false, false);
-    AddPath("/boot/develop/headers/os/midi2", System, true, false, false);
-    AddPath("/boot/develop/headers/os/net", System, true, false, false);
-    AddPath("/boot/develop/headers/os/storage", System, true, false, false);
-    AddPath("/boot/develop/headers/os/support", System, true, false, false);
-    AddPath("/boot/develop/headers/os/translation",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/add-ons/graphics",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/add-ons/input_server",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/add-ons/screen_saver",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/add-ons/tracker",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/be_apps/Deskbar",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/be_apps/NetPositive",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/os/be_apps/Tracker",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/cpp", System, true, false, false);
-    AddPath("/boot/develop/headers/cpp/i586-pc-haiku",
-      System, true, false, false);
-    AddPath("/boot/develop/headers/3rdparty", System, true, false, false);
-    AddPath("/boot/develop/headers/bsd", System, true, false, false);
-    AddPath("/boot/develop/headers/glibc", System, true, false, false);
-    AddPath("/boot/develop/headers/posix", System, true, false, false);
-    AddPath("/boot/develop/headers",  System, true, false, false);
+    AddPath("/boot/common/include", System, false);
+    AddPath("/boot/develop/headers/os", System, false);
+    AddPath("/boot/develop/headers/os/app", System, false);
+    AddPath("/boot/develop/headers/os/arch", System, false);
+    AddPath("/boot/develop/headers/os/device", System, false);
+    AddPath("/boot/develop/headers/os/drivers", System, false);
+    AddPath("/boot/develop/headers/os/game", System, false);
+    AddPath("/boot/develop/headers/os/interface", System, false);
+    AddPath("/boot/develop/headers/os/kernel", System, false);
+    AddPath("/boot/develop/headers/os/locale", System, false);
+    AddPath("/boot/develop/headers/os/mail", System, false);
+    AddPath("/boot/develop/headers/os/media", System, false);
+    AddPath("/boot/develop/headers/os/midi", System, false);
+    AddPath("/boot/develop/headers/os/midi2", System, false);
+    AddPath("/boot/develop/headers/os/net", System, false);
+    AddPath("/boot/develop/headers/os/storage", System, false);
+    AddPath("/boot/develop/headers/os/support", System, false);
+    AddPath("/boot/develop/headers/os/translation", System, false);
+    AddPath("/boot/develop/headers/os/add-ons/graphics", System, false);
+    AddPath("/boot/develop/headers/os/add-ons/input_server", System, false);
+    AddPath("/boot/develop/headers/os/add-ons/screen_saver", System, false);
+    AddPath("/boot/develop/headers/os/add-ons/tracker", System, false);
+    AddPath("/boot/develop/headers/os/be_apps/Deskbar", System, false);
+    AddPath("/boot/develop/headers/os/be_apps/NetPositive", System, false);
+    AddPath("/boot/develop/headers/os/be_apps/Tracker", System, false);
+    AddPath("/boot/develop/headers/cpp", System, false);
+    AddPath("/boot/develop/headers/cpp/i586-pc-haiku", System, false);
+    AddPath("/boot/develop/headers/3rdparty", System, false);
+    AddPath("/boot/develop/headers/bsd", System, false);
+    AddPath("/boot/develop/headers/glibc", System, false);
+    AddPath("/boot/develop/headers/posix", System, false);
+    AddPath("/boot/develop/headers",  System, false);
     break;
   case llvm::Triple::RTEMS:
     break;
   case llvm::Triple::Cygwin:
-    AddPath("/usr/include/w32api", System, true, false, false);
+    AddPath("/usr/include/w32api", System, false);
     break;
   case llvm::Triple::MinGW32: { 
       // mingw-w64 crt include paths
       llvm::sys::Path P(HSOpts.ResourceDir);
       P.appendComponent("../../../i686-w64-mingw32/include"); // <sysroot>/i686-w64-mingw32/include
-      AddPath(P.str(), System, true, false, false);
+      AddPath(P.str(), System, false);
       P = llvm::sys::Path(HSOpts.ResourceDir);
       P.appendComponent("../../../x86_64-w64-mingw32/include"); // <sysroot>/x86_64-w64-mingw32/include
-      AddPath(P.str(), System, true, false, false);
+      AddPath(P.str(), System, false);
       // mingw.org crt include paths
       P = llvm::sys::Path(HSOpts.ResourceDir);
       P.appendComponent("../../../include"); // <sysroot>/include
-      AddPath(P.str(), System, true, false, false);
-      AddPath("/mingw/include", System, true, false, false);
+      AddPath(P.str(), System, false);
+      AddPath("/mingw/include", System, false);
 #if defined(_WIN32)
-      AddPath("c:/mingw/include", System, true, false, false); 
+      AddPath("c:/mingw/include", System, false); 
 #endif
     }
     break;
@@ -330,8 +365,45 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     break;
   }
 
-  if ( os != llvm::Triple::RTEMS )
-    AddPath("/usr/include", System, false, false, false);
+  if ( os != llvm::Triple::RTEMS ) {
+    // APPLE LOCAL: On Darwin, include the toolchain include directory in the
+    // default include search list. Since we have a split between the toolchains
+    // and the SDK, we need a place for tools to be able to drop headers
+    // (resources) that can be used with any SDK, for example in generated
+    // files.
+    //
+    // This functionality is currently only used to support flex's FlexLexer.h
+    // file. See:
+    //
+    //   <rdar://problem/13135439> Include toolchain include directory in
+    //   default header paths (for FlexLexer.h)
+    //
+    // for more information.
+    //
+    // We compute the toolchain include directory relative to the resource
+    // directory, so that it works with -ccc-install-dir properly. The resource
+    // directory follows the convention "../usr/lib/clang/<version>" so
+    // "<resource_dir>/../../../include" is the toolchain include directory.
+    StringRef P = HSOpts.ResourceDir;
+    P = llvm::sys::path::parent_path(P);
+    P = llvm::sys::path::parent_path(P);
+    P = llvm::sys::path::parent_path(P);
+
+    // If the last component is a '..' remove it, this is important because the
+    // driver sometimes forms the resource path with a '..' in it.
+    if (llvm::sys::path::filename(P) == "..") {
+      P = llvm::sys::path::parent_path(P);
+      P = llvm::sys::path::parent_path(P);
+    }
+
+    // Only add this directory if the compiler is actually installed in a
+    // toolchain or the command line tools directory.
+    if (P.endswith(".xctoolchain/usr") || P.endswith("/CommandLineTools/usr")) {
+      AddPathInternal(P + "/include", ExternCSystem, false, false);
+    }
+
+    AddPath("/usr/include", ExternCSystem, false);
+  }
 }
 
 void InitHeaderSearch::
@@ -367,6 +439,11 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple, const HeaderSearchOp
                                   "arm-apple-darwin10", "v7", "", triple);
       AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.2.1",
                                   "arm-apple-darwin10", "v6", "", triple);
+      break;
+
+    case llvm::Triple::arm64:
+      AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.2.1",
+                                  "arm64-apple-darwin10", "", "", triple);
       break;
     }
     return;
@@ -408,7 +485,7 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple, const HeaderSearchOp
 #endif
     break;
   case llvm::Triple::DragonFly:
-    AddPath("/usr/include/c++/4.1", CXXSystem, true, false, false);
+    AddPath("/usr/include/c++/4.1", CXXSystem, false);
     break;
   case llvm::Triple::FreeBSD:
     // FreeBSD 8.0
@@ -474,16 +551,15 @@ void InitHeaderSearch::AddDefaultIncludePaths(const LangOptions &Lang,
           // Get foo/lib/c++/v1
           P.appendComponent("c++");
           P.appendComponent("v1");
-          AddPath(P.str(), CXXSystem, true, false, false, true);
+          AddUnmappedPath(P.str(), CXXSystem, false);
         }
       }
       // On Solaris, include the support directory for things like xlocale and
       // fudged system headers.
       if (triple.getOS() == llvm::Triple::Solaris) 
-        AddPath("/usr/include/c++/v1/support/solaris", CXXSystem, true, false,
-            false);
+        AddPath("/usr/include/c++/v1/support/solaris", CXXSystem, false);
       
-      AddPath("/usr/include/c++/v1", CXXSystem, true, false, false);
+      AddPath("/usr/include/c++/v1", CXXSystem, false);
     } else {
       AddDefaultCPlusPlusIncludePaths(triple, HSOpts);
     }
@@ -494,8 +570,8 @@ void InitHeaderSearch::AddDefaultIncludePaths(const LangOptions &Lang,
   // Add the default framework include paths on Darwin.
   if (HSOpts.UseStandardSystemIncludes) {
     if (triple.isOSDarwin()) {
-      AddPath("/System/Library/Frameworks", System, true, false, true);
-      AddPath("/Library/Frameworks", System, true, false, true);
+      AddPath("/System/Library/Frameworks", System, true);
+      AddPath("/Library/Frameworks", System, true);
     }
   }
 }
@@ -613,7 +689,7 @@ void InitHeaderSearch::Realize(const LangOptions &Lang) {
 
   for (path_iterator it = IncludePath.begin(), ie = IncludePath.end();
        it != ie; ++it) {
-    if (it->first == System ||
+    if (it->first == System || it->first == ExternCSystem ||
         (!Lang.ObjC1 && !Lang.CPlusPlus && it->first == CSystem)    ||
         (/*FIXME !Lang.ObjC1 && */Lang.CPlusPlus  && it->first == CXXSystem)  ||
         (Lang.ObjC1  && !Lang.CPlusPlus && it->first == ObjCSystem) ||
@@ -664,13 +740,16 @@ void clang::ApplyHeaderSearchOptions(HeaderSearch &HS,
                                      const HeaderSearchOptions &HSOpts,
                                      const LangOptions &Lang,
                                      const llvm::Triple &Triple) {
-  InitHeaderSearch Init(HS, HSOpts.Verbose, HSOpts.Sysroot);
+  InitHeaderSearch Init(HS, HSOpts);
 
   // Add the user defined entries.
   for (unsigned i = 0, e = HSOpts.UserEntries.size(); i != e; ++i) {
     const HeaderSearchOptions::Entry &E = HSOpts.UserEntries[i];
-    Init.AddPath(E.Path, E.Group, !E.ImplicitExternC, E.IsUserSupplied,
-                 E.IsFramework, E.IgnoreSysRoot);
+    if (E.IgnoreSysRoot) {
+      Init.AddUnmappedPath(E.Path, E.Group, E.IsFramework);
+    } else {
+      Init.AddPath(E.Path, E.Group, E.IsFramework);
+    }
   }
 
   Init.AddDefaultIncludePaths(Lang, Triple, HSOpts);

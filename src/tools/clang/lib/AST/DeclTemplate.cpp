@@ -11,13 +11,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
-#include "clang/AST/ASTContext.h"
 #include "clang/AST/TypeLoc.h"
-#include "clang/AST/ASTMutationListener.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "llvm/ADT/STLExtras.h"
 #include <memory>
@@ -128,12 +128,12 @@ static void AdoptTemplateParameterList(TemplateParameterList *Params,
 // RedeclarableTemplateDecl Implementation
 //===----------------------------------------------------------------------===//
 
-RedeclarableTemplateDecl::CommonBase *RedeclarableTemplateDecl::getCommonPtr() {
+RedeclarableTemplateDecl::CommonBase *RedeclarableTemplateDecl::getCommonPtr() const {
   if (!Common) {
     // Walk the previous-declaration chain until we either find a declaration
     // with a common pointer or we run out of previous declarations.
-    llvm::SmallVector<RedeclarableTemplateDecl *, 2> PrevDecls;
-    for (RedeclarableTemplateDecl *Prev = getPreviousDecl(); Prev;
+    SmallVector<const RedeclarableTemplateDecl *, 2> PrevDecls;
+    for (const RedeclarableTemplateDecl *Prev = getPreviousDecl(); Prev;
          Prev = Prev->getPreviousDecl()) {
       if (Prev->Common) {
         Common = Prev->Common;
@@ -241,7 +241,7 @@ FunctionTemplateDecl *FunctionTemplateDecl::CreateDeserialized(ASTContext &C,
 }
 
 RedeclarableTemplateDecl::CommonBase *
-FunctionTemplateDecl::newCommon(ASTContext &C) {
+FunctionTemplateDecl::newCommon(ASTContext &C) const {
   Common *CommonPtr = new (C) Common;
   C.AddDeallocation(DeallocateCommon, CommonPtr);
   return CommonPtr;
@@ -328,7 +328,7 @@ ClassTemplateDecl::getPartialSpecializations() {
 }  
 
 RedeclarableTemplateDecl::CommonBase *
-ClassTemplateDecl::newCommon(ASTContext &C) {
+ClassTemplateDecl::newCommon(ASTContext &C) const {
   Common *CommonPtr = new (C) Common;
   C.AddDeallocation(DeallocateCommon, CommonPtr);
   return CommonPtr;
@@ -620,7 +620,7 @@ TemplateTemplateParmDecl::Create(const ASTContext &C, DeclContext *DC,
                                  SourceLocation L, unsigned D, unsigned P,
                                  IdentifierInfo *Id,
                                  TemplateParameterList *Params,
-                            llvm::ArrayRef<TemplateParameterList*> Expansions) {
+                                 ArrayRef<TemplateParameterList *> Expansions) {
   void *Mem = C.Allocate(sizeof(TemplateTemplateParmDecl) +
                          sizeof(TemplateParameterList*) * Expansions.size());
   return new (Mem) TemplateTemplateParmDecl(DC, L, D, P, Id, Params,
@@ -728,6 +728,8 @@ ClassTemplateSpecializationDecl::Create(ASTContext &Context, TagKind TK,
                                                    SpecializedTemplate,
                                                    Args, NumArgs,
                                                    PrevDecl);
+  Result->MayHaveOutOfDateDef = false;
+
   Context.getTypeDeclType(Result, PrevDecl);
   return Result;
 }
@@ -737,7 +739,10 @@ ClassTemplateSpecializationDecl::CreateDeserialized(ASTContext &C,
                                                     unsigned ID) {
   void *Mem = AllocateDeserializedDecl(C, ID, 
                                        sizeof(ClassTemplateSpecializationDecl));
-  return new (Mem) ClassTemplateSpecializationDecl(ClassTemplateSpecialization);
+  ClassTemplateSpecializationDecl *Result =
+    new (Mem) ClassTemplateSpecializationDecl(ClassTemplateSpecialization);
+  Result->MayHaveOutOfDateDef = false;
+  return Result;
 }
 
 void
@@ -764,13 +769,27 @@ ClassTemplateSpecializationDecl::getSpecializedTemplate() const {
 SourceRange
 ClassTemplateSpecializationDecl::getSourceRange() const {
   if (ExplicitInfo) {
-    SourceLocation Begin = getExternLoc();
-    if (Begin.isInvalid())
-      Begin = getTemplateKeywordLoc();
-    SourceLocation End = getRBraceLoc();
-    if (End.isInvalid())
-      End = getTypeAsWritten()->getTypeLoc().getEndLoc();
-    return SourceRange(Begin, End);
+    SourceLocation Begin = getTemplateKeywordLoc();
+    if (Begin.isValid()) {
+      // Here we have an explicit (partial) specialization or instantiation.
+      assert(getSpecializationKind() == TSK_ExplicitSpecialization ||
+             getSpecializationKind() == TSK_ExplicitInstantiationDeclaration ||
+             getSpecializationKind() == TSK_ExplicitInstantiationDefinition);
+      if (getExternLoc().isValid())
+        Begin = getExternLoc();
+      SourceLocation End = getRBraceLoc();
+      if (End.isInvalid())
+        End = getTypeAsWritten()->getTypeLoc().getEndLoc();
+      return SourceRange(Begin, End);
+    }
+    // An implicit instantiation of a class template partial specialization
+    // uses ExplicitInfo to record the TypeAsWritten, but the source
+    // locations should be retrieved from the instantiation pattern.
+    typedef ClassTemplatePartialSpecializationDecl CTPSDecl;
+    CTPSDecl *ctpsd = const_cast<CTPSDecl*>(cast<CTPSDecl>(this));
+    CTPSDecl *inst_from = ctpsd->getInstantiatedFromMember();
+    assert(inst_from != 0);
+    return inst_from->getSourceRange();
   }
   else {
     // No explicit info available.
@@ -843,6 +862,7 @@ Create(ASTContext &Context, TagKind TK,DeclContext *DC,
                                                           PrevDecl,
                                                           SequenceNumber);
   Result->setSpecializationKind(TSK_ExplicitSpecialization);
+  Result->MayHaveOutOfDateDef = false;
 
   Context.getInjectedClassNameType(Result, CanonInjectedType);
   return Result;
@@ -853,7 +873,10 @@ ClassTemplatePartialSpecializationDecl::CreateDeserialized(ASTContext &C,
                                                            unsigned ID) {
   void *Mem = AllocateDeserializedDecl(C, ID, 
                 sizeof(ClassTemplatePartialSpecializationDecl));
-  return new (Mem) ClassTemplatePartialSpecializationDecl();
+  ClassTemplatePartialSpecializationDecl *Result
+    = new (Mem) ClassTemplatePartialSpecializationDecl();
+  Result->MayHaveOutOfDateDef = false;
+  return Result;
 }
 
 //===----------------------------------------------------------------------===//
@@ -905,7 +928,7 @@ void TypeAliasTemplateDecl::DeallocateCommon(void *Ptr) {
   static_cast<Common *>(Ptr)->~Common();
 }
 RedeclarableTemplateDecl::CommonBase *
-TypeAliasTemplateDecl::newCommon(ASTContext &C) {
+TypeAliasTemplateDecl::newCommon(ASTContext &C) const {
   Common *CommonPtr = new (C) Common;
   C.AddDeallocation(DeallocateCommon, CommonPtr);
   return CommonPtr;

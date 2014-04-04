@@ -19,7 +19,7 @@ namespace __tsan {
 
 void InitializeSuppressions();
 void FinalizeSuppressions();
-bool IsSuppressed(ReportType typ, const ReportStack *stack);
+uptr IsSuppressed(ReportType typ, const ReportStack *stack);
 
 // Exposed for testing.
 enum SuppressionType {
@@ -35,7 +35,7 @@ struct Suppression {
   char *templ;
 };
 
-Suppression *SuppressionParse(const char* supp);
+Suppression *SuppressionParse(Suppression *head, const char* supp);
 bool SuppressionMatch(char *templ, const char *str);
 
 }  // namespace __tsan

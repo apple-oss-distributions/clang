@@ -12,17 +12,25 @@
 //
 //===----------------------------------------------------------------------===//
 
+/// CCIfSubtarget - Match if the current subtarget has a feature F.
+class CCIfSubtarget<string F, CCAction A>
+ : CCIf<!strconcat("State.getTarget().getSubtarget<PPCSubtarget>().", F), A>;
+
 //===----------------------------------------------------------------------===//
 // Return Value Calling Convention
 //===----------------------------------------------------------------------===//
 
 // Return-value convention for PowerPC
 def RetCC_PPC : CallingConv<[
+  // On PPC64, integer return values are always promoted to i64
+  CCIfType<[i32], CCIfSubtarget<"isPPC64()", CCPromoteToType<i64>>>,
+
   CCIfType<[i32], CCAssignToReg<[R3, R4, R5, R6, R7, R8, R9, R10]>>,
   CCIfType<[i64], CCAssignToReg<[X3, X4, X5, X6]>>,
+  CCIfType<[i128], CCAssignToReg<[X3, X4, X5, X6]>>,
   
-  CCIfType<[f32], CCAssignToReg<[F1]>>,
-  CCIfType<[f64], CCAssignToReg<[F1, F2]>>,
+  CCIfType<[f32], CCAssignToReg<[F1, F2]>>,
+  CCIfType<[f64], CCAssignToReg<[F1, F2, F3, F4]>>,
   
   // Vector types are always returned in V2.
   CCIfType<[v16i8, v8i16, v4i32, v4f32], CCAssignToReg<[V2]>>

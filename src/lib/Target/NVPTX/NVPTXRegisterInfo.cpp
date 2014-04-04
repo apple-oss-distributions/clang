@@ -13,13 +13,13 @@
 
 #define DEBUG_TYPE "nvptx-reg-info"
 
-#include "NVPTX.h"
 #include "NVPTXRegisterInfo.h"
+#include "NVPTX.h"
 #include "NVPTXSubtarget.h"
 #include "llvm/ADT/BitVector.h"
-#include "llvm/CodeGen/MachineInstrBuilder.h"
-#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/MC/MachineLocation.h"
 #include "llvm/Target/TargetInstrInfo.h"
 
@@ -277,29 +277,21 @@ BitVector NVPTXRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 
 void NVPTXRegisterInfo::
 eliminateFrameIndex(MachineBasicBlock::iterator II,
-                    int SPAdj,
+                    int SPAdj, unsigned FIOperandNum,
                     RegScavenger *RS) const {
   assert(SPAdj == 0 && "Unexpected");
 
-  unsigned i = 0;
   MachineInstr &MI = *II;
-  while (!MI.getOperand(i).isFI()) {
-    ++i;
-    assert(i < MI.getNumOperands() &&
-           "Instr doesn't have FrameIndex operand!");
-  }
-
-  int FrameIndex = MI.getOperand(i).getIndex();
+  int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
 
   MachineFunction &MF = *MI.getParent()->getParent();
   int Offset = MF.getFrameInfo()->getObjectOffset(FrameIndex) +
-      MI.getOperand(i+1).getImm();
+      MI.getOperand(FIOperandNum+1).getImm();
 
   // Using I0 as the frame pointer
-  MI.getOperand(i).ChangeToRegister(NVPTX::VRFrame, false);
-  MI.getOperand(i+1).ChangeToImmediate(Offset);
+  MI.getOperand(FIOperandNum).ChangeToRegister(NVPTX::VRFrame, false);
+  MI.getOperand(FIOperandNum+1).ChangeToImmediate(Offset);
 }
-
 
 int NVPTXRegisterInfo::
 getDwarfRegNum(unsigned RegNum, bool isEH) const {

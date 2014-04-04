@@ -15,21 +15,21 @@
 #ifndef LLVM_CLANG_AST_ASTCONTEXT_H
 #define LLVM_CLANG_AST_ASTCONTEXT_H
 
+#include "clang/AST/CanonicalType.h"
+#include "clang/AST/CommentCommandTraits.h"
+#include "clang/AST/Decl.h"
+#include "clang/AST/LambdaMangleContext.h"
+#include "clang/AST/NestedNameSpecifier.h"
+#include "clang/AST/PrettyPrinter.h"
+#include "clang/AST/RawCommentList.h"
+#include "clang/AST/TemplateName.h"
+#include "clang/AST/Type.h"
 #include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/VersionTuple.h"
-#include "clang/AST/Decl.h"
-#include "clang/AST/LambdaMangleContext.h"
-#include "clang/AST/NestedNameSpecifier.h"
-#include "clang/AST/PrettyPrinter.h"
-#include "clang/AST/TemplateName.h"
-#include "clang/AST/Type.h"
-#include "clang/AST/CanonicalType.h"
-#include "clang/AST/RawCommentList.h"
-#include "clang/AST/CommentCommandTraits.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
@@ -46,6 +46,7 @@ namespace llvm {
 namespace clang {
   class FileManager;
   class ASTRecordLayout;
+  class AtomicExpr;
   class BlockExpr;
   class CharUnits;
   class DiagnosticsEngine;
@@ -233,6 +234,8 @@ class ASTContext : public RefCountedBase<ASTContext> {
   QualType ObjCConstantStringType;
   mutable RecordDecl *CFConstantStringTypeDecl;
   
+  mutable QualType ObjCSuperType;
+  
   QualType ObjCNSStringType;
 
   /// \brief The typedef declaration for the Objective-C "instancetype" type.
@@ -343,7 +346,10 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// \brief Mapping from each declaration context to its corresponding lambda 
   /// mangling context.
   llvm::DenseMap<const DeclContext *, LambdaMangleContext> LambdaMangleContexts;
-  
+
+  llvm::DenseMap<const DeclContext *, unsigned> UnnamedMangleContexts;
+  llvm::DenseMap<const TagDecl *, unsigned> UnnamedMangleNumbers;
+
   /// \brief Mapping that stores parameterIndex values for ParmVarDecls when
   /// that value exceeds the bitfield size of ParmVarDeclBits.ParameterIndex.
   typedef llvm::DenseMap<const VarDecl *, unsigned> ParameterIndexTable;
@@ -426,6 +432,8 @@ public:
   }
 
   const TargetInfo &getTargetInfo() const { return *Target; }
+  
+  bool AtomicUsesUnsupportedLibcall(const AtomicExpr *E) const;
   
   const LangOptions& getLangOpts() const { return LangOpts; }
 
@@ -537,6 +545,9 @@ public:
   /// preprocessor is not available.
   comments::FullComment *getCommentForDecl(const Decl *D,
                                            const Preprocessor *PP) const;
+  
+  comments::FullComment *cloneFullComment(comments::FullComment *FC,
+                                         const Decl *D) const;
 
 private:
   mutable comments::CommandTraits CommentCommandTraits;
@@ -633,8 +644,9 @@ public:
   /// the same selector and is of the same kind (class or instance).
   /// A method in an implementation is not considered as overriding the same
   /// method in the interface or its categories.
-  void getOverriddenMethods(const NamedDecl *Method,
-                            SmallVectorImpl<const NamedDecl *> &Overridden);
+  void getOverriddenMethods(
+                        const NamedDecl *Method,
+                        SmallVectorImpl<const NamedDecl *> &Overridden) const;
   
   /// \brief Notify the AST context that a new import declaration has been
   /// parsed or implicitly created within this translation unit.
@@ -709,6 +721,10 @@ public:
   CanQualType PseudoObjectTy, ARCUnbridgedCastTy;
   CanQualType ObjCBuiltinIdTy, ObjCBuiltinClassTy, ObjCBuiltinSelTy;
   CanQualType ObjCBuiltinBoolTy;
+  CanQualType OCLImage1dTy, OCLImage1dArrayTy, OCLImage1dBufferTy;
+  CanQualType OCLImage2dTy, OCLImage2dArrayTy;
+  CanQualType OCLImage3dTy;
+  CanQualType OCLEventTy;
 
   // Types for deductions in C++0x [stmt.ranged]'s desugaring. Built on demand.
   mutable QualType AutoDeductTy;     // Deduction against 'auto'.
@@ -853,12 +869,17 @@ public:
     return cudaConfigureCallDecl;
   }
 
-  /// Builds the struct used for __block variables.
-  QualType BuildByRefType(StringRef DeclName, QualType Ty) const;
-
   /// Returns true iff we need copy/dispose helpers for the given type.
-  bool BlockRequiresCopying(QualType Ty) const;
-
+  bool BlockRequiresCopying(QualType Ty, const VarDecl *D);
+  
+  
+  /// Returns true, if given type has a known lifetime. HasByrefExtendedLayout is set
+  /// to false in this case. If HasByrefExtendedLayout returns true, byref variable
+  /// has extended lifetime. 
+  bool getByrefLifetime(QualType Ty,
+                        Qualifiers::ObjCLifetime &Lifetime,
+                        bool &HasByrefExtendedLayout) const;
+  
   /// \brief Return the uniqued reference to the type for an lvalue reference
   /// to the specified type.
   QualType getLValueReferenceType(QualType T, bool SpelledAsLValue = true)
@@ -937,8 +958,7 @@ public:
   }
 
   /// \brief Return a normal function type with a typed argument list.
-  QualType getFunctionType(QualType ResultTy,
-                           const QualType *Args, unsigned NumArgs,
+  QualType getFunctionType(QualType ResultTy, ArrayRef<QualType> Args,
                            const FunctionProtoType::ExtProtoInfo &EPI) const;
 
   /// \brief Return the unique reference to the type for the specified type
@@ -1090,13 +1110,29 @@ public:
   /// defined in <stddef.h> as defined by the target.
   QualType getWIntType() const { return WIntTy; }
 
+  /// \brief Return a type compatible with "intptr_t" (C99 7.18.1.4),
+  /// as defined by the target.
+  QualType getIntPtrType() const;
+
+  /// \brief Return a type compatible with "uintptr_t" (C99 7.18.1.4),
+  /// as defined by the target.
+  QualType getUIntPtrType() const;
+
   /// \brief Return the unique type for "ptrdiff_t" (C99 7.17) defined in
   /// <stddef.h>. Pointer - pointer requires this (C99 6.5.6p9).
   QualType getPointerDiffType() const;
 
+  /// \brief Return the unique type for "pid_t" defined in
+  /// <sys/types.h>. We need this to compute the correct type for vfork().
+  QualType getProcessIDType() const;
+
   /// \brief Return the C structure type used to represent constant CFStrings.
   QualType getCFConstantStringType() const;
-
+  
+  /// \brief Returns the C struct type for objc_super
+  QualType getObjCSuperType() const;
+  void setObjCSuperType(QualType ST) { ObjCSuperType = ST; }
+  
   /// Get the structure type used to representation CFStrings, or NULL
   /// if it hasn't yet been built.
   QualType getRawCFConstantStringType() const {
@@ -1380,7 +1416,18 @@ public:
     qs.addObjCLifetime(lifetime);
     return getQualifiedType(type, qs);
   }
-
+  
+  /// getUnqualifiedObjCPointerType - Returns version of
+  /// Objective-C pointer type with lifetime qualifier removed.
+  QualType getUnqualifiedObjCPointerType(QualType type) const {
+    if (!type.getTypePtr()->isObjCObjectPointerType() ||
+        !type.getQualifiers().hasObjCLifetime())
+      return type;
+    Qualifiers Qs = type.getQualifiers();
+    Qs.removeObjCLifetime();
+    return getQualifiedType(type.getUnqualifiedType(), Qs);
+  }
+  
   DeclarationNameInfo getNameForTemplate(TemplateName Name,
                                          SourceLocation NameLoc) const;
 
@@ -1537,14 +1584,27 @@ public:
   const ASTRecordLayout &
   getASTObjCImplementationLayout(const ObjCImplementationDecl *D) const;
 
-  /// \brief Get the key function for the given record decl, or NULL if there
-  /// isn't one.
+  /// \brief Get our current best idea for the key function of the
+  /// given record decl, or NULL if there isn't one.
   ///
   /// The key function is, according to the Itanium C++ ABI section 5.2.3:
+  ///   ...the first non-pure virtual function that is not inline at the
+  ///   point of class definition.
   ///
-  /// ...the first non-pure virtual function that is not inline at the point
-  /// of class definition.
-  const CXXMethodDecl *getKeyFunction(const CXXRecordDecl *RD);
+  /// Other ABIs use the same idea.  However, the ARM C++ ABI ignores
+  /// virtual functions that are defined 'inline', which means that
+  /// the result of this computation can change.
+  const CXXMethodDecl *getCurrentKeyFunction(const CXXRecordDecl *RD);
+
+  /// \brief Observe that the given method cannot be a key function.
+  /// Checks the key-function cache for the method's class and clears it
+  /// if matches the given declaration.
+  ///
+  /// This is used in ABIs where out-of-line definitions marked
+  /// inline are not considered to be key functions.
+  ///
+  /// \param method should be the declaration from the class definition
+  void setNonKeyFunction(const CXXMethodDecl *method);
 
   /// Get the offset of a FieldDecl or IndirectFieldDecl, in bits.
   uint64_t getFieldOffset(const ValueDecl *FD) const;
@@ -1935,7 +1995,7 @@ public:
   /// \brief Returns the Objective-C interface that \p ND belongs to if it is
   /// an Objective-C method/property/ivar etc. that is part of an interface,
   /// otherwise returns null.
-  ObjCInterfaceDecl *getObjContainingInterface(NamedDecl *ND) const;
+  const ObjCInterfaceDecl *getObjContainingInterface(const NamedDecl *ND) const;
   
   /// \brief Set the copy inialization expression of a block var decl.
   void setBlockVarCopyInits(VarDecl*VD, Expr* Init);
@@ -1984,6 +2044,9 @@ public:
   /// \returns true if the function/var must be CodeGen'ed/deserialized even if
   /// it is not used.
   bool DeclMustBeEmitted(const Decl *D);
+
+  void addUnnamedTag(const TagDecl *Tag);
+  int getUnnamedTagManglingNumber(const TagDecl *Tag) const;
 
   /// \brief Retrieve the lambda mangling number for a lambda expression.
   unsigned getLambdaManglingNumber(CXXMethodDecl *CallOperator);
@@ -2069,7 +2132,8 @@ private:
                                   bool EncodingProperty = false,
                                   bool StructField = false,
                                   bool EncodeBlockParameters = false,
-                                  bool EncodeClassNames = false) const;
+                                  bool EncodeClassNames = false,
+                                  bool EncodePointerToObjCTypedef = false) const;
 
   // Adds the encoding of the structure's members.
   void getObjCEncodingForStructureImpl(RecordDecl *RD, std::string &S,
@@ -2124,8 +2188,8 @@ static inline Selector GetUnarySelector(StringRef name, ASTContext& Ctx) {
 /// This placement form of operator new uses the ASTContext's allocator for
 /// obtaining memory.
 ///
-/// IMPORTANT: These are also declared in clang/AST/Attr.h! Any changes here
-/// need to also be made there.
+/// IMPORTANT: These are also declared in clang/AST/AttrIterator.h! Any changes
+/// here need to also be made there.
 ///
 /// We intentionally avoid using a nothrow specification here so that the calls
 /// to this operator will not perform a null check on the result -- the

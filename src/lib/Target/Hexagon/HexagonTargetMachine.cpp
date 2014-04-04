@@ -15,13 +15,13 @@
 #include "Hexagon.h"
 #include "HexagonISelLowering.h"
 #include "HexagonMachineScheduler.h"
-#include "llvm/Module.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/IR/Module.h"
 #include "llvm/PassManager.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
-#include "llvm/Transforms/Scalar.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TargetRegistry.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
 
@@ -68,7 +68,7 @@ HexagonTargetMachine::HexagonTargetMachine(const Target &T, StringRef TT,
                                            CodeModel::Model CM,
                                            CodeGenOpt::Level OL)
   : LLVMTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
-    DataLayout("e-p:32:32:32-"
+    DL("e-p:32:32:32-"
                 "i64:64:64-i32:32:32-i16:16:16-i1:32:32-"
                 "f64:64:64-f32:32:32-a0:0-n32") ,
     Subtarget(TT, CPU, FS), InstrInfo(Subtarget), TLInfo(*this),
@@ -87,7 +87,7 @@ bool HexagonTargetMachine::addPassesForOptimizations(PassManagerBase &PM) {
   PM.add(createDeadCodeEliminationPass());
   PM.add(createConstantPropagationPass());
   PM.add(createLoopUnrollPass());
-  PM.add(createLoopStrengthReducePass(getTargetLowering()));
+  PM.add(createLoopStrengthReducePass());
   return true;
 }
 

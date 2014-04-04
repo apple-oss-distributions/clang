@@ -12,20 +12,21 @@
 //
 //===----------------------------------------------------------------------===//
 #define DEBUG_TYPE "profile-loader"
-#include "llvm/BasicBlock.h"
-#include "llvm/InstrTypes.h"
-#include "llvm/Module.h"
-#include "llvm/Pass.h"
 #include "llvm/Analysis/Passes.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ProfileInfo.h"
 #include "llvm/Analysis/ProfileInfoLoader.h"
-#include "llvm/Support/CommandLine.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/CFG.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Format.h"
-#include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/SmallSet.h"
+#include "llvm/Support/raw_ostream.h"
 #include <set>
 using namespace llvm;
 
@@ -170,8 +171,8 @@ bool LoaderPass::runOnModule(Module &M) {
       }
     }
     if (ReadCount != Counters.size()) {
-      errs() << "WARNING: profile information is inconsistent with "
-             << "the current program!\n";
+      M.getContext().emitWarning("profile information is inconsistent "
+                                 "with the current program");
     }
     NumEdgesRead = ReadCount;
   }
@@ -218,8 +219,8 @@ bool LoaderPass::runOnModule(Module &M) {
       }
     }
     if (ReadCount != Counters.size()) {
-      errs() << "WARNING: profile information is inconsistent with "
-             << "the current program!\n";
+      M.getContext().emitWarning("profile information is inconsistent "
+                                 "with the current program");
     }
     NumEdgesRead = ReadCount;
   }
@@ -239,8 +240,8 @@ bool LoaderPass::runOnModule(Module &M) {
           BlockInformation[F][BB] = (double)Counters[ReadCount++];
     }
     if (ReadCount != Counters.size()) {
-      errs() << "WARNING: profile information is inconsistent with "
-             << "the current program!\n";
+      M.getContext().emitWarning("profile information is inconsistent "
+                                 "with the current program");
     }
   }
 
@@ -258,8 +259,8 @@ bool LoaderPass::runOnModule(Module &M) {
         FunctionInformation[F] = (double)Counters[ReadCount++];
     }
     if (ReadCount != Counters.size()) {
-      errs() << "WARNING: profile information is inconsistent with "
-             << "the current program!\n";
+      M.getContext().emitWarning("profile information is inconsistent "
+                                 "with the current program");
     }
   }
 

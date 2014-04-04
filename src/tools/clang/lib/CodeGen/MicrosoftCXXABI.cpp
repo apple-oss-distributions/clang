@@ -29,6 +29,9 @@ public:
   MicrosoftCXXABI(CodeGenModule &CGM) : CGCXXABI(CGM) {}
 
   StringRef GetPureVirtualCallName() { return "_purecall"; }
+  // No known support for deleted functions in MSVC yet, so this choice is
+  // arbitrary.
+  StringRef GetDeletedVirtualCallName() { return "_purecall"; }
 
   llvm::Value *adjustToCompleteObject(CodeGenFunction &CGF,
                                       llvm::Value *ptr,
@@ -56,9 +59,6 @@ public:
   void EmitGuardedInit(CodeGenFunction &CGF, const VarDecl &D,
                        llvm::GlobalVariable *DeclPtr,
                        bool PerformInit);
-
-  void EmitVTables(const CXXRecordDecl *Class);
-
 
   // ==== Notes on array cookies =========
   //
@@ -161,7 +161,7 @@ CharUnits MicrosoftCXXABI::getArrayCookieSizeImpl(QualType type) {
 llvm::Value *MicrosoftCXXABI::readArrayCookieImpl(CodeGenFunction &CGF,
                                                   llvm::Value *allocPtr,
                                                   CharUnits cookieSize) {
-  unsigned AS = cast<llvm::PointerType>(allocPtr->getType())->getAddressSpace();
+  unsigned AS = allocPtr->getType()->getPointerAddressSpace();
   llvm::Value *numElementsPtr =
     CGF.Builder.CreateBitCast(allocPtr, CGF.SizeTy->getPointerTo(AS));
   return CGF.Builder.CreateLoad(numElementsPtr);
@@ -181,7 +181,7 @@ llvm::Value* MicrosoftCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
   llvm::Value *cookiePtr = newPtr;
 
   // Write the number of elements into the appropriate slot.
-  unsigned AS = cast<llvm::PointerType>(newPtr->getType())->getAddressSpace();
+  unsigned AS = newPtr->getType()->getPointerAddressSpace();
   llvm::Value *numElementsPtr
     = CGF.Builder.CreateBitCast(cookiePtr, CGF.SizeTy->getPointerTo(AS));
   CGF.Builder.CreateStore(numElements, numElementsPtr);
@@ -199,12 +199,11 @@ void MicrosoftCXXABI::EmitGuardedInit(CodeGenFunction &CGF, const VarDecl &D,
   // Not sure whether we want thread-safe static local variables as VS
   // doesn't make them thread-safe.
 
+  if (D.getTLSKind())
+    CGM.ErrorUnsupported(&D, "dynamic TLS initialization");
+
   // Emit the initializer and add a global destructor if appropriate.
   CGF.EmitCXXGlobalVarDeclInit(D, DeclPtr, PerformInit);
-}
-
-void MicrosoftCXXABI::EmitVTables(const CXXRecordDecl *Class) {
-  // FIXME: implement
 }
 
 CGCXXABI *clang::CodeGen::CreateMicrosoftCXXABI(CodeGenModule &CGM) {

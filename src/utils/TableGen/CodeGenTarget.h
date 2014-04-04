@@ -9,18 +9,18 @@
 //
 // This file defines wrappers for the Target class and related global
 // functionality.  This makes it easier to access the data and provides a single
-// place that needs to check it for validity.  All of these classes throw
-// exceptions on error conditions.
+// place that needs to check it for validity.  All of these classes abort
+// on error conditions.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef CODEGEN_TARGET_H
 #define CODEGEN_TARGET_H
 
-#include "CodeGenRegisters.h"
 #include "CodeGenInstruction.h"
-#include "llvm/TableGen/Record.h"
+#include "CodeGenRegisters.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TableGen/Record.h"
 #include <algorithm>
 
 namespace llvm {

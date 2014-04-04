@@ -12,14 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "MipsSEInstrInfo.h"
-#include "MipsTargetMachine.h"
-#include "MipsMachineFunction.h"
 #include "InstPrinter/MipsInstPrinter.h"
+#include "MipsMachineFunction.h"
+#include "MipsTargetMachine.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/TargetRegistry.h"
-#include "llvm/ADT/STLExtras.h"
 
 using namespace llvm;
 
@@ -90,7 +90,7 @@ void MipsSEInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
 
   if (Mips::CPURegsRegClass.contains(DestReg)) { // Copy to CPU Reg.
     if (Mips::CPURegsRegClass.contains(SrcReg))
-      Opc = Mips::ADDu, ZeroReg = Mips::ZERO;
+      Opc = Mips::OR, ZeroReg = Mips::ZERO;
     else if (Mips::CCRRegClass.contains(SrcReg))
       Opc = Mips::CFC1;
     else if (Mips::FGR32RegClass.contains(SrcReg))
@@ -120,7 +120,7 @@ void MipsSEInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     Opc = Mips::MOVCCRToCCR;
   else if (Mips::CPU64RegsRegClass.contains(DestReg)) { // Copy to CPU64 Reg.
     if (Mips::CPU64RegsRegClass.contains(SrcReg))
-      Opc = Mips::DADDu, ZeroReg = Mips::ZERO_64;
+      Opc = Mips::OR64, ZeroReg = Mips::ZERO_64;
     else if (SrcReg == Mips::HI64)
       Opc = Mips::MFHI64, SrcReg = 0;
     else if (SrcReg == Mips::LO64)
@@ -144,11 +144,11 @@ void MipsSEInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   if (DestReg)
     MIB.addReg(DestReg, RegState::Define);
 
-  if (ZeroReg)
-    MIB.addReg(ZeroReg);
-
   if (SrcReg)
     MIB.addReg(SrcReg, getKillRegState(KillSrc));
+
+  if (ZeroReg)
+    MIB.addReg(ZeroReg);
 }
 
 void MipsSEInstrInfo::
@@ -260,9 +260,8 @@ void MipsSEInstrInfo::adjustStackPtr(unsigned SP, int64_t Amount,
   if (isInt<16>(Amount))// addi sp, sp, amount
     BuildMI(MBB, I, DL, get(ADDiu), SP).addReg(SP).addImm(Amount);
   else { // Expand immediate that doesn't fit in 16-bit.
-    MBB.getParent()->getInfo<MipsFunctionInfo>()->setEmitNOAT();
     unsigned Reg = loadImmediate(Amount, MBB, I, DL, 0);
-    BuildMI(MBB, I, DL, get(ADDu), SP).addReg(SP).addReg(Reg);
+    BuildMI(MBB, I, DL, get(ADDu), SP).addReg(SP).addReg(Reg, RegState::Kill);
   }
 }
 
@@ -274,10 +273,12 @@ MipsSEInstrInfo::loadImmediate(int64_t Imm, MachineBasicBlock &MBB,
                                unsigned *NewImm) const {
   MipsAnalyzeImmediate AnalyzeImm;
   const MipsSubtarget &STI = TM.getSubtarget<MipsSubtarget>();
+  MachineRegisterInfo &RegInfo = MBB.getParent()->getRegInfo();
   unsigned Size = STI.isABI_N64() ? 64 : 32;
   unsigned LUi = STI.isABI_N64() ? Mips::LUi64 : Mips::LUi;
   unsigned ZEROReg = STI.isABI_N64() ? Mips::ZERO_64 : Mips::ZERO;
-  unsigned ATReg = STI.isABI_N64() ? Mips::AT_64 : Mips::AT;
+  const TargetRegisterClass *RC = STI.isABI_N64() ?
+    &Mips::CPU64RegsRegClass : &Mips::CPURegsRegClass;
   bool LastInstrIsADDiu = NewImm;
 
   const MipsAnalyzeImmediate::InstSeq &Seq =
@@ -289,22 +290,23 @@ MipsSEInstrInfo::loadImmediate(int64_t Imm, MachineBasicBlock &MBB,
   // The first instruction can be a LUi, which is different from other
   // instructions (ADDiu, ORI and SLL) in that it does not have a register
   // operand.
+  unsigned Reg = RegInfo.createVirtualRegister(RC);
+
   if (Inst->Opc == LUi)
-    BuildMI(MBB, II, DL, get(LUi), ATReg)
-      .addImm(SignExtend64<16>(Inst->ImmOpnd));
+    BuildMI(MBB, II, DL, get(LUi), Reg).addImm(SignExtend64<16>(Inst->ImmOpnd));
   else
-    BuildMI(MBB, II, DL, get(Inst->Opc), ATReg).addReg(ZEROReg)
+    BuildMI(MBB, II, DL, get(Inst->Opc), Reg).addReg(ZEROReg)
       .addImm(SignExtend64<16>(Inst->ImmOpnd));
 
   // Build the remaining instructions in Seq.
   for (++Inst; Inst != Seq.end() - LastInstrIsADDiu; ++Inst)
-    BuildMI(MBB, II, DL, get(Inst->Opc), ATReg).addReg(ATReg)
+    BuildMI(MBB, II, DL, get(Inst->Opc), Reg).addReg(Reg, RegState::Kill)
       .addImm(SignExtend64<16>(Inst->ImmOpnd));
 
   if (LastInstrIsADDiu)
     *NewImm = Inst->ImmOpnd;
 
-  return ATReg;
+  return Reg;
 }
 
 unsigned MipsSEInstrInfo::GetAnalyzableBrOpc(unsigned Opc) const {

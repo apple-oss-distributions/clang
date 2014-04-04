@@ -13,34 +13,30 @@
 
 #define DEBUG_TYPE "WinCOFFObjectWriter"
 
-#include "llvm/MC/MCObjectWriter.h"
-#include "llvm/MC/MCSection.h"
-#include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCSymbol.h"
-#include "llvm/MC/MCExpr.h"
-#include "llvm/MC/MCValue.h"
-#include "llvm/MC/MCAssembler.h"
-#include "llvm/MC/MCAsmLayout.h"
-#include "llvm/MC/MCSectionCOFF.h"
 #include "llvm/MC/MCWinCOFFObjectWriter.h"
-
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
-
+#include "llvm/MC/MCAsmLayout.h"
+#include "llvm/MC/MCAssembler.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCObjectWriter.h"
+#include "llvm/MC/MCSection.h"
+#include "llvm/MC/MCSectionCOFF.h"
+#include "llvm/MC/MCSymbol.h"
+#include "llvm/MC/MCValue.h"
 #include "llvm/Support/COFF.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
-
 #include "llvm/Support/TimeValue.h"
-
 #include <cstdio>
 
 using namespace llvm;
 
 namespace {
-typedef llvm::SmallString<COFF::NameSize> name;
+typedef SmallString<COFF::NameSize> name;
 
 enum AuxiliaryType {
   ATFunctionDefinition,
@@ -62,7 +58,7 @@ class COFFSymbol {
 public:
   COFF::symbol Data;
 
-  typedef llvm::SmallVector<AuxSymbol, 1> AuxiliarySymbols;
+  typedef SmallVector<AuxSymbol, 1> AuxiliarySymbols;
 
   name             Name;
   int              Index;
@@ -73,7 +69,7 @@ public:
 
   MCSymbolData const *MCData;
 
-  COFFSymbol(llvm::StringRef name);
+  COFFSymbol(StringRef name);
   size_t size() const;
   void set_name_offset(uint32_t Offset);
 
@@ -101,13 +97,13 @@ public:
   COFFSymbol          *Symbol;
   relocations          Relocations;
 
-  COFFSection(llvm::StringRef name);
+  COFFSection(StringRef name);
   static size_t size();
 };
 
 // This class holds the COFF string table.
 class StringTable {
-  typedef llvm::StringMap<size_t> map;
+  typedef StringMap<size_t> map;
   map Map;
 
   void update_length();
@@ -116,7 +112,7 @@ public:
 
   StringTable();
   size_t size() const;
-  size_t insert(llvm::StringRef String);
+  size_t insert(StringRef String);
 };
 
 class WinCOFFObjectWriter : public MCObjectWriter {
@@ -148,7 +144,7 @@ public:
   COFFSection *createSection(StringRef Name);
 
   template <typename object_t, typename list_t>
-  object_t *createCOFFEntity(llvm::StringRef Name, list_t &List);
+  object_t *createCOFFEntity(StringRef Name, list_t &List);
 
   void DefineSection(MCSectionData const &SectionData);
   void DefineSymbol(MCSymbolData const &SymbolData, MCAssembler &Assembler);
@@ -206,7 +202,7 @@ static inline void write_uint8_le(void *Data, uint8_t const &Value) {
 //------------------------------------------------------------------------------
 // Symbol class implementation
 
-COFFSymbol::COFFSymbol(llvm::StringRef name)
+COFFSymbol::COFFSymbol(StringRef name)
   : Name(name.begin(), name.end())
   , Other(NULL)
   , Section(NULL)
@@ -258,7 +254,7 @@ bool COFFSymbol::should_keep() const {
 //------------------------------------------------------------------------------
 // Section class implementation
 
-COFFSection::COFFSection(llvm::StringRef name)
+COFFSection::COFFSection(StringRef name)
   : Name(name)
   , MCData(NULL)
   , Symbol(NULL) {
@@ -291,7 +287,7 @@ size_t StringTable::size() const {
 
 /// Add String to the table iff it is not already there.
 /// @returns the index into the string table where the string is now located.
-size_t StringTable::insert(llvm::StringRef String) {
+size_t StringTable::insert(StringRef String) {
   map::iterator i = Map.find(String);
 
   if (i != Map.end())
@@ -345,14 +341,14 @@ COFFSymbol *WinCOFFObjectWriter::GetOrCreateCOFFSymbol(const MCSymbol * Symbol){
   return RetSymbol;
 }
 
-COFFSection *WinCOFFObjectWriter::createSection(llvm::StringRef Name) {
+COFFSection *WinCOFFObjectWriter::createSection(StringRef Name) {
   return createCOFFEntity<COFFSection>(Name, Sections);
 }
 
 /// A template used to lookup or create a symbol/section, and initialize it if
 /// needed.
 template <typename object_t, typename list_t>
-object_t *WinCOFFObjectWriter::createCOFFEntity(llvm::StringRef Name,
+object_t *WinCOFFObjectWriter::createCOFFEntity(StringRef Name,
                                                 list_t &List) {
   object_t *Object = new object_t(Name);
 

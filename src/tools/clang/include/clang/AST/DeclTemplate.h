@@ -84,6 +84,13 @@ public:
 
   unsigned size() const { return NumParams; }
 
+  llvm::ArrayRef<NamedDecl*> asArray() {
+    return llvm::ArrayRef<NamedDecl*>(begin(), size());
+  }
+  llvm::ArrayRef<const NamedDecl*> asArray() const {
+    return llvm::ArrayRef<const NamedDecl*>(begin(), size());
+  }
+
   NamedDecl* getParam(unsigned Idx) {
     assert(Idx < size() && "Template parameter index out-of-range");
     return begin()[Idx];
@@ -193,6 +200,11 @@ public:
   /// \brief Retrieve the template argument at a given index.
   const TemplateArgument &operator[](unsigned Idx) const { return get(Idx); }
 
+  /// \brief Produce this as an array ref.
+  llvm::ArrayRef<TemplateArgument> asArray() const {
+    return llvm::ArrayRef<TemplateArgument>(data(), size());
+  }
+
   /// \brief Retrieve the number of template arguments in this
   /// template argument list.
   unsigned size() const { return NumArguments; }
@@ -243,12 +255,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TemplateDecl *D) { return true; }
-  static bool classof(const RedeclarableTemplateDecl *D) { return true; }
-  static bool classof(const FunctionTemplateDecl *D) { return true; }
-  static bool classof(const ClassTemplateDecl *D) { return true; }
-  static bool classof(const TemplateTemplateParmDecl *D) { return true; }
-  static bool classof(const TypeAliasTemplateDecl *D) { return true; }
   static bool classofKind(Kind K) {
     return K >= firstTemplate && K <= lastTemplate;
   }
@@ -330,6 +336,23 @@ public:
     return getTemplateSpecializationKind() == TSK_ExplicitSpecialization;
   }
 
+  /// \brief True if this declaration is an explicit specialization,
+  /// explicit instantiation declaration, or explicit instantiation
+  /// definition.
+  bool isExplicitInstantiationOrSpecialization() const {
+    switch (getTemplateSpecializationKind()) {
+    case TSK_ExplicitSpecialization:
+    case TSK_ExplicitInstantiationDeclaration:
+    case TSK_ExplicitInstantiationDefinition:
+      return true;
+
+    case TSK_Undeclared:
+    case TSK_ImplicitInstantiation:
+      return false;
+    }
+    llvm_unreachable("bad template specialization kind");
+  }
+
   /// \brief Set the template specialization kind.
   void setTemplateSpecializationKind(TemplateSpecializationKind TSK) {
     assert(TSK != TSK_Undeclared &&
@@ -394,6 +417,10 @@ public:
   /// \brief Determine what kind of template specialization this is.
   TemplateSpecializationKind getTemplateSpecializationKind() const {
     return (TemplateSpecializationKind)(MemberAndTSK.getInt() + 1);
+  }
+
+  bool isExplicitSpecialization() const {
+    return getTemplateSpecializationKind() == TSK_ExplicitSpecialization;
   }
 
   /// \brief Set the template specialization kind.
@@ -582,14 +609,14 @@ protected:
 
   /// \brief Pointer to the common data shared by all declarations of this
   /// template.
-  CommonBase *Common;
+  mutable CommonBase *Common;
   
   /// \brief Retrieves the "common" pointer shared by all (re-)declarations of
   /// the same template. Calling this routine may implicitly allocate memory
   /// for the common pointer.
-  CommonBase *getCommonPtr();
+  CommonBase *getCommonPtr() const;
 
-  virtual CommonBase *newCommon(ASTContext &C) = 0;
+  virtual CommonBase *newCommon(ASTContext &C) const = 0;
 
   // Construct a template decl with name, parameters, and templated element.
   RedeclarableTemplateDecl(Kind DK, DeclContext *DC, SourceLocation L,
@@ -624,7 +651,7 @@ public:
   /// template<> template<typename T>
   /// struct X<int>::Inner { /* ... */ };
   /// \endcode
-  bool isMemberSpecialization() {
+  bool isMemberSpecialization() const {
     return getCommonPtr()->InstantiatedFromMember.getInt();
   }
 
@@ -671,7 +698,7 @@ public:
   /// template<typename U>
   /// void X<T>::f(T, U);
   /// \endcode
-  RedeclarableTemplateDecl *getInstantiatedFromMemberTemplate() {
+  RedeclarableTemplateDecl *getInstantiatedFromMemberTemplate() const {
     return getCommonPtr()->InstantiatedFromMember.getPointer();
   }
 
@@ -688,10 +715,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const RedeclarableTemplateDecl *D) { return true; }
-  static bool classof(const FunctionTemplateDecl *D) { return true; }
-  static bool classof(const ClassTemplateDecl *D) { return true; }
-  static bool classof(const TypeAliasTemplateDecl *D) { return true; }
   static bool classofKind(Kind K) {
     return K >= firstRedeclarableTemplate && K <= lastRedeclarableTemplate;
   }
@@ -739,7 +762,7 @@ protected:
                        TemplateParameterList *Params, NamedDecl *Decl)
     : RedeclarableTemplateDecl(FunctionTemplate, DC, L, Name, Params, Decl) { }
 
-  CommonBase *newCommon(ASTContext &C);
+  CommonBase *newCommon(ASTContext &C) const;
 
   Common *getCommonPtr() {
     return static_cast<Common *>(RedeclarableTemplateDecl::getCommonPtr());
@@ -837,7 +860,6 @@ public:
 
   // Implement isa/cast/dyncast support
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const FunctionTemplateDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == FunctionTemplate; }
 
   friend class ASTDeclReader;
@@ -979,7 +1001,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TemplateTypeParmDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == TemplateTypeParm; }
 };
 
@@ -1160,7 +1181,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const NonTypeTemplateParmDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == NonTypeTemplateParm; }
 };
 
@@ -1218,7 +1238,7 @@ public:
                                           unsigned P,
                                           IdentifierInfo *Id,
                                           TemplateParameterList *Params,
-                             llvm::ArrayRef<TemplateParameterList*> Expansions);
+                                 ArrayRef<TemplateParameterList *> Expansions);
 
   static TemplateTemplateParmDecl *CreateDeserialized(ASTContext &C,
                                                       unsigned ID);
@@ -1324,7 +1344,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TemplateTemplateParmDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == TemplateTemplateParm; }
 
   friend class ASTDeclReader;
@@ -1447,6 +1466,23 @@ public:
     return getSpecializationKind() == TSK_ExplicitSpecialization;
   }
 
+  /// \brief True if this declaration is an explicit specialization,
+  /// explicit instantiation declaration, or explicit instantiation
+  /// definition.
+  bool isExplicitInstantiationOrSpecialization() const {
+    switch (getTemplateSpecializationKind()) {
+    case TSK_ExplicitSpecialization:
+    case TSK_ExplicitInstantiationDeclaration:
+    case TSK_ExplicitInstantiationDefinition:
+      return true;
+
+    case TSK_Undeclared:
+    case TSK_ImplicitInstantiation:
+      return false;
+    }
+    llvm_unreachable("bad template specialization kind");
+  }
+
   void setSpecializationKind(TemplateSpecializationKind TSK) {
     SpecializationKind = TSK;
   }
@@ -1478,8 +1514,7 @@ public:
           = SpecializedTemplate.dyn_cast<SpecializedPartialSpecialization*>())
       return PartialSpec->PartialSpecialization;
 
-    return const_cast<ClassTemplateDecl*>(
-                             SpecializedTemplate.get<ClassTemplateDecl*>());
+    return SpecializedTemplate.get<ClassTemplateDecl*>();
   }
 
   /// \brief Retrieve the class template or class template partial
@@ -1491,8 +1526,7 @@ public:
           = SpecializedTemplate.dyn_cast<SpecializedPartialSpecialization*>())
       return PartialSpec->PartialSpecialization;
 
-    return const_cast<ClassTemplateDecl*>(
-                             SpecializedTemplate.get<ClassTemplateDecl*>());
+    return SpecializedTemplate.get<ClassTemplateDecl*>();
   }
 
   /// \brief Retrieve the set of template arguments that should be used
@@ -1589,14 +1623,6 @@ public:
   static bool classofKind(Kind K) {
     return K >= firstClassTemplateSpecialization &&
            K <= lastClassTemplateSpecialization;
-  }
-
-  static bool classof(const ClassTemplateSpecializationDecl *) {
-    return true;
-  }
-
-  static bool classof(const ClassTemplatePartialSpecializationDecl *) {
-    return true;
   }
 
   friend class ASTDeclReader;
@@ -1767,10 +1793,6 @@ public:
     return K == ClassTemplatePartialSpecialization;
   }
 
-  static bool classof(const ClassTemplatePartialSpecializationDecl *) {
-    return true;
-  }
-
   friend class ASTDeclReader;
   friend class ASTDeclWriter;
 };
@@ -1824,7 +1846,7 @@ protected:
     : RedeclarableTemplateDecl(ClassTemplate, 0, SourceLocation(),
                                DeclarationName(), 0, 0) { }
 
-  CommonBase *newCommon(ASTContext &C);
+  CommonBase *newCommon(ASTContext &C) const;
 
   Common *getCommonPtr() {
     return static_cast<Common *>(RedeclarableTemplateDecl::getCommonPtr());
@@ -1972,7 +1994,6 @@ public:
 
   // Implement isa/cast/dyncast support
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const ClassTemplateDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == ClassTemplate; }
 
   friend class ASTDeclReader;
@@ -2070,7 +2091,6 @@ public:
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == Decl::FriendTemplate; }
-  static bool classof(const FriendTemplateDecl *D) { return true; }
 
   friend class ASTDeclReader;
 };
@@ -2091,7 +2111,7 @@ protected:
                         TemplateParameterList *Params, NamedDecl *Decl)
     : RedeclarableTemplateDecl(TypeAliasTemplate, DC, L, Name, Params, Decl) { }
 
-  CommonBase *newCommon(ASTContext &C);
+  CommonBase *newCommon(ASTContext &C) const;
 
   Common *getCommonPtr() {
     return static_cast<Common *>(RedeclarableTemplateDecl::getCommonPtr());
@@ -2145,7 +2165,6 @@ public:
 
   // Implement isa/cast/dyncast support
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TypeAliasTemplateDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == TypeAliasTemplate; }
 
   friend class ASTDeclReader;
@@ -2208,9 +2227,6 @@ public:
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) {
     return K == Decl::ClassScopeFunctionSpecialization;
-  }
-  static bool classof(const ClassScopeFunctionSpecializationDecl *D) {
-    return true;
   }
 
   friend class ASTDeclReader;

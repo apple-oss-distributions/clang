@@ -22,9 +22,9 @@
 #define LLVM_CODEGEN_LIVEINTERVAL_H
 
 #include "llvm/ADT/IntEqClasses.h"
-#include "llvm/Support/Allocator.h"
-#include "llvm/Support/AlignOf.h"
 #include "llvm/CodeGen/SlotIndexes.h"
+#include "llvm/Support/AlignOf.h"
+#include "llvm/Support/Allocator.h"
 #include <cassert>
 #include <climits>
 
@@ -396,6 +396,15 @@ namespace llvm {
     bool isInOneLiveRange(SlotIndex Start, SlotIndex End) const {
       const_iterator r = find(Start);
       return r != end() && r->containsRange(Start, End);
+    }
+
+    /// True iff this live range is a single segment that lies between the
+    /// specified boundaries, exclusively. Vregs live across a backedge are not
+    /// considered local. The boundaries are expected to lie within an extended
+    /// basic block, so vregs that are not live out should contain no holes.
+    bool isLocal(SlotIndex Start, SlotIndex End) const {
+      return beginIndex() > Start.getBaseIndex() &&
+        endIndex() < End.getBoundaryIndex();
     }
 
     /// removeRange - Remove the specified range from this interval.  Note that

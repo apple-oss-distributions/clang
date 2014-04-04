@@ -12,16 +12,16 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/IntrinsicLowering.h"
-#include "llvm/Constants.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/IRBuilder.h"
-#include "llvm/Module.h"
-#include "llvm/Type.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetData.h"
 using namespace llvm;
 
 template <class ArgIt>
@@ -413,22 +413,30 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
   }
 
   case Intrinsic::stacksave:
-  case Intrinsic::stackrestore: {
     if (!Warned)
-      errs() << "WARNING: this target does not support the llvm.stack"
-             << (Callee->getIntrinsicID() == Intrinsic::stacksave ?
-               "save" : "restore") << " intrinsic.\n";
+      Context.emitWarning("this target does not support the "
+                          "llvm.stacksave intrinsic");
     Warned = true;
-    if (Callee->getIntrinsicID() == Intrinsic::stacksave)
-      CI->replaceAllUsesWith(Constant::getNullValue(CI->getType()));
+    CI->replaceAllUsesWith(Constant::getNullValue(CI->getType()));
     break;
-  }
+
+  case Intrinsic::stackrestore:
+    if (!Warned)
+      Context.emitWarning("this target does not support the "
+                          "llvm.stackrestore intrinsic");
+    Warned = true;
+    break;
     
   case Intrinsic::returnaddress:
+    Context.emitWarning("this target does not support the "
+                        "llvm.returnaddress intrinsic");
+    CI->replaceAllUsesWith(ConstantPointerNull::get(
+                                            cast<PointerType>(CI->getType())));
+    break;
+
   case Intrinsic::frameaddress:
-    errs() << "WARNING: this target does not support the llvm."
-           << (Callee->getIntrinsicID() == Intrinsic::returnaddress ?
-             "return" : "frame") << "address intrinsic.\n";
+    Context.emitWarning("this target does not support the "
+                        "llvm.frameaddress intrinsic");
     CI->replaceAllUsesWith(ConstantPointerNull::get(
                                             cast<PointerType>(CI->getType())));
     break;
@@ -438,12 +446,12 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
 
   case Intrinsic::pcmarker:
     break;    // Simply strip out pcmarker on unsupported architectures
-  case Intrinsic::readcyclecounter: {
-    errs() << "WARNING: this target does not support the llvm.readcyclecoun"
-           << "ter intrinsic.  It is being lowered to a constant 0\n";
+  case Intrinsic::readcyclecounter:
+    Context.emitWarning("this target does not support the "
+                        "llvm.readcyclecounter intrinsic; "
+                        "it is being lowered to a constant 0");
     CI->replaceAllUsesWith(ConstantInt::get(Type::getInt64Ty(Context), 0));
     break;
-  }
 
   case Intrinsic::dbg_declare:
     break;    // Simply strip out debugging intrinsics
@@ -457,7 +465,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     break;   // Strip out annotate intrinsic
     
   case Intrinsic::memcpy: {
-    IntegerType *IntPtr = TD.getIntPtrType(Context);
+    Type *IntPtr = TD.getIntPtrType(Context);
     Value *Size = Builder.CreateIntCast(CI->getArgOperand(2), IntPtr,
                                         /* isSigned */ false);
     Value *Ops[3];
@@ -468,7 +476,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     break;
   }
   case Intrinsic::memmove: {
-    IntegerType *IntPtr = TD.getIntPtrType(Context);
+    Type *IntPtr = TD.getIntPtrType(Context);
     Value *Size = Builder.CreateIntCast(CI->getArgOperand(2), IntPtr,
                                         /* isSigned */ false);
     Value *Ops[3];
@@ -479,7 +487,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     break;
   }
   case Intrinsic::memset: {
-    IntegerType *IntPtr = TD.getIntPtrType(Context);
+    Type *IntPtr = TD.getIntPtrType(Context);
     Value *Size = Builder.CreateIntCast(CI->getArgOperand(2), IntPtr,
                                         /* isSigned */ false);
     Value *Ops[3];

@@ -50,17 +50,17 @@ struct DlIteratePhdrCtx {
 static void NOINLINE InitModule(ModuleDesc *m) {
   int outfd[2] = {};
   if (pipe(&outfd[0])) {
-    TsanPrintf("ThreadSanitizer: outfd pipe() failed (%d)\n", errno);
+    Printf("ThreadSanitizer: outfd pipe() failed (%d)\n", errno);
     Die();
   }
   int infd[2] = {};
   if (pipe(&infd[0])) {
-    TsanPrintf("ThreadSanitizer: infd pipe() failed (%d)\n", errno);
+    Printf("ThreadSanitizer: infd pipe() failed (%d)\n", errno);
     Die();
   }
   int pid = fork();
   if (pid == 0) {
-    flags()->log_fileno = STDERR_FILENO;
+    __sanitizer_set_report_fd(STDERR_FILENO);
     internal_close(STDOUT_FILENO);
     internal_close(STDIN_FILENO);
     internal_dup2(outfd[0], STDIN_FILENO);
@@ -74,7 +74,7 @@ static void NOINLINE InitModule(ModuleDesc *m) {
     execl("/usr/bin/addr2line", "/usr/bin/addr2line", "-Cfe", m->fullname, 0);
     _exit(0);
   } else if (pid < 0) {
-    TsanPrintf("ThreadSanitizer: failed to fork symbolizer\n");
+    Printf("ThreadSanitizer: failed to fork symbolizer\n");
     Die();
   }
   internal_close(outfd[0]);
@@ -104,11 +104,11 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   m->base = (uptr)info->dlpi_addr;
   m->inp_fd = -1;
   m->out_fd = -1;
-  DPrintf("Module %s %zx\n", m->name, m->base);
+  DPrintf2("Module %s %zx\n", m->name, m->base);
   for (int i = 0; i < info->dlpi_phnum; i++) {
     const Elf64_Phdr *s = &info->dlpi_phdr[i];
-    DPrintf("  Section p_type=%zx p_offset=%zx p_vaddr=%zx p_paddr=%zx"
-            " p_filesz=%zx p_memsz=%zx p_flags=%zx p_align=%zx\n",
+    DPrintf2("  Section p_type=%zx p_offset=%zx p_vaddr=%zx p_paddr=%zx"
+        " p_filesz=%zx p_memsz=%zx p_flags=%zx p_align=%zx\n",
             (uptr)s->p_type, (uptr)s->p_offset, (uptr)s->p_vaddr,
             (uptr)s->p_paddr, (uptr)s->p_filesz, (uptr)s->p_memsz,
             (uptr)s->p_flags, (uptr)s->p_align);
@@ -121,7 +121,7 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
     sec->end = sec->base + s->p_memsz;
     sec->next = ctx->sections;
     ctx->sections = sec;
-    DPrintf("  Section %zx-%zx\n", sec->base, sec->end);
+    DPrintf2("  Section %zx-%zx\n", sec->base, sec->end);
   }
   return 0;
 }
@@ -155,14 +155,14 @@ ReportStack *SymbolizeCodeAddr2Line(uptr addr) {
   char addrstr[32];
   internal_snprintf(addrstr, sizeof(addrstr), "%p\n", (void*)offset);
   if (0 >= internal_write(m->out_fd, addrstr, internal_strlen(addrstr))) {
-    TsanPrintf("ThreadSanitizer: can't write from symbolizer (%d, %d)\n",
+    Printf("ThreadSanitizer: can't write from symbolizer (%d, %d)\n",
         m->out_fd, errno);
     Die();
   }
   InternalScopedBuffer<char> func(1024);
   ssize_t len = internal_read(m->inp_fd, func.data(), func.size() - 1);
   if (len <= 0) {
-    TsanPrintf("ThreadSanitizer: can't read from symbolizer (%d, %d)\n",
+    Printf("ThreadSanitizer: can't read from symbolizer (%d, %d)\n",
         m->inp_fd, errno);
     Die();
   }

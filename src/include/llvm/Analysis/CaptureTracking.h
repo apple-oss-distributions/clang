@@ -14,9 +14,9 @@
 #ifndef LLVM_ANALYSIS_CAPTURETRACKING_H
 #define LLVM_ANALYSIS_CAPTURETRACKING_H
 
-#include "llvm/Constants.h"
-#include "llvm/Instructions.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/CallSite.h"
 
 namespace llvm {
@@ -46,7 +46,7 @@ namespace llvm {
     /// capture) return false. To search it, return true.
     ///
     /// U->getUser() is always an Instruction.
-    virtual bool shouldExplore(Use *U) = 0;
+    virtual bool shouldExplore(Use *U);
 
     /// captured - Information about the pointer was captured by the user of
     /// use U. Return true to stop the traversal or false to continue looking

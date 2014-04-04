@@ -91,19 +91,29 @@ const interpose_substitution substitutions[]
   INTERPOSE_FUNCTION(dispatch_after_f),
   INTERPOSE_FUNCTION(dispatch_barrier_async_f),
   INTERPOSE_FUNCTION(dispatch_group_async_f),
-
+#ifndef MISSING_BLOCKS_SUPPORT
   INTERPOSE_FUNCTION(dispatch_group_async),
   INTERPOSE_FUNCTION(dispatch_async),
   INTERPOSE_FUNCTION(dispatch_after),
   INTERPOSE_FUNCTION(dispatch_source_set_event_handler),
   INTERPOSE_FUNCTION(dispatch_source_set_cancel_handler),
-
+#endif
   INTERPOSE_FUNCTION(signal),
   INTERPOSE_FUNCTION(sigaction),
 
-  INTERPOSE_FUNCTION(__CFInitialize),
-  INTERPOSE_FUNCTION(CFStringCreateCopy),
+  INTERPOSE_FUNCTION(malloc_create_zone),
+  INTERPOSE_FUNCTION(malloc_default_zone),
+  INTERPOSE_FUNCTION(malloc_default_purgeable_zone),
+  INTERPOSE_FUNCTION(malloc_make_purgeable),
+  INTERPOSE_FUNCTION(malloc_make_nonpurgeable),
+  INTERPOSE_FUNCTION(malloc_set_zone_name),
+  INTERPOSE_FUNCTION(malloc),
   INTERPOSE_FUNCTION(free),
+  INTERPOSE_FUNCTION(realloc),
+  INTERPOSE_FUNCTION(calloc),
+  INTERPOSE_FUNCTION(valloc),
+  INTERPOSE_FUNCTION(malloc_good_size),
+  INTERPOSE_FUNCTION(posix_memalign),
 };
 
 }  // namespace __asan

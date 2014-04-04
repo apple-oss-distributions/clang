@@ -12,12 +12,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "InstCombine.h"
-#include "llvm/IntrinsicInst.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/Loads.h"
-#include "llvm/Target/TargetData.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
-#include "llvm/ADT/Statistic.h"
 using namespace llvm;
 
 STATISTIC(NumDeadStore,    "Number of dead stores eliminated");
@@ -150,25 +150,6 @@ isOnlyCopiedFromConstantGlobal(AllocaInst *AI,
   return 0;
 }
 
-/// getPointeeAlignment - Compute the minimum alignment of the value pointed
-/// to by the given pointer.
-static unsigned getPointeeAlignment(Value *V, const TargetData &TD) {
-  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(V))
-    if (CE->getOpcode() == Instruction::BitCast ||
-        (CE->getOpcode() == Instruction::GetElementPtr &&
-         cast<GEPOperator>(CE)->hasAllZeroIndices()))
-      return getPointeeAlignment(CE->getOperand(0), TD);
-
-  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(V))
-    if (!GV->isDeclaration())
-      return TD.getPreferredAlignment(GV);
-
-  if (PointerType *PT = dyn_cast<PointerType>(V->getType()))
-    return TD.getABITypeAlignment(PT->getElementType());
-
-  return 0;
-}
-
 Instruction *InstCombiner::visitAllocaInst(AllocaInst &AI) {
   // Ensure that the alloca array size argument has type intptr_t, so that
   // any casting is exposed early.
@@ -264,7 +245,7 @@ Instruction *InstCombiner::visitAllocaInst(AllocaInst &AI) {
     }
   }
 
-  if (TD) {
+  if (AI.getAlignment()) {
     // Check to see if this allocation is only modified by a memcpy/memmove from
     // a constant global whose alignment is equal to or exceeds that of the
     // allocation.  If this is the case, we can change all users to use
@@ -273,7 +254,9 @@ Instruction *InstCombiner::visitAllocaInst(AllocaInst &AI) {
     // is only subsequently read.
     SmallVector<Instruction *, 4> ToDelete;
     if (MemTransferInst *Copy = isOnlyCopiedFromConstantGlobal(&AI, ToDelete)) {
-      if (AI.getAlignment() <= getPointeeAlignment(Copy->getSource(), *TD)) {
+      unsigned SourceAlign = getOrEnforceKnownAlignment(Copy->getSource(),
+                                                        AI.getAlignment(), TD);
+      if (AI.getAlignment() <= SourceAlign) {
         DEBUG(dbgs() << "Found alloca equal to global: " << AI << '\n');
         DEBUG(dbgs() << "  memcpy = " << *Copy << '\n');
         for (unsigned i = 0, e = ToDelete.size(); i != e; ++i)
@@ -297,7 +280,7 @@ Instruction *InstCombiner::visitAllocaInst(AllocaInst &AI) {
 
 /// InstCombineLoadCast - Fold 'load (cast P)' -> cast (load P)' when possible.
 static Instruction *InstCombineLoadCast(InstCombiner &IC, LoadInst &LI,
-                                        const TargetData *TD) {
+                                        const DataLayout *TD) {
   User *CI = cast<User>(LI.getOperand(0));
   Value *CastOp = CI->getOperand(0);
 
@@ -327,14 +310,14 @@ static Instruction *InstCombineLoadCast(InstCombiner &IC, LoadInst &LI,
             SrcPTy = SrcTy->getElementType();
           }
 
-      if (IC.getTargetData() &&
+      if (IC.getDataLayout() &&
           (SrcPTy->isIntegerTy() || SrcPTy->isPointerTy() || 
             SrcPTy->isVectorTy()) &&
           // Do not allow turning this into a load of an integer, which is then
           // casted to a pointer, this pessimizes pointer analysis a lot.
           (SrcPTy->isPointerTy() == LI.getType()->isPointerTy()) &&
-          IC.getTargetData()->getTypeSizeInBits(SrcPTy) ==
-               IC.getTargetData()->getTypeSizeInBits(DestPTy)) {
+          IC.getDataLayout()->getTypeSizeInBits(SrcPTy) ==
+               IC.getDataLayout()->getTypeSizeInBits(DestPTy)) {
 
         // Okay, we are casting from one integer or pointer type to another of
         // the same size.  Instead of casting the pointer before the load, cast
@@ -512,11 +495,11 @@ static Instruction *InstCombineStoreToCast(InstCombiner &IC, StoreInst &SI) {
   
   // If the pointers point into different address spaces or if they point to
   // values with different sizes, we can't do the transformation.
-  if (!IC.getTargetData() ||
+  if (!IC.getDataLayout() ||
       SrcTy->getAddressSpace() != 
         cast<PointerType>(CI->getType())->getAddressSpace() ||
-      IC.getTargetData()->getTypeSizeInBits(SrcPTy) !=
-      IC.getTargetData()->getTypeSizeInBits(DestPTy))
+      IC.getDataLayout()->getTypeSizeInBits(SrcPTy) !=
+      IC.getDataLayout()->getTypeSizeInBits(DestPTy))
     return 0;
 
   // Okay, we are casting from one integer or pointer type to another of
@@ -819,6 +802,13 @@ bool InstCombiner::SimplifyStoreAtEndOfBlock(StoreInst &SI) {
   InsertNewInstBefore(NewSI, *BBI);
   NewSI->setDebugLoc(OtherStore->getDebugLoc()); 
 
+  // If the two stores had the same TBAA tag, preserve it.
+  if (MDNode *TBAATag = SI.getMetadata(LLVMContext::MD_tbaa))
+    if ((TBAATag = MDNode::getMostGenericTBAA(TBAATag,
+                               OtherStore->getMetadata(LLVMContext::MD_tbaa))))
+      NewSI->setMetadata(LLVMContext::MD_tbaa, TBAATag);
+
+  
   // Nuke the old stores.
   EraseInstFromFunction(SI);
   EraseInstFromFunction(*OtherStore);

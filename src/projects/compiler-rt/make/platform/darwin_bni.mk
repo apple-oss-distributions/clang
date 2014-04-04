@@ -14,6 +14,7 @@ ifneq (,$(SDKROOT))
 	RANLIB := $(shell xcrun -sdk $(SDKROOT) -find ranlib) 
 	STRIP := $(shell xcrun -sdk $(SDKROOT) -find strip) 
 	LIPO := $(shell xcrun -sdk $(SDKROOT) -find lipo)
+	DSYMUTIL := $(shell xcrun -sdk $(SDKROOT) -find dsymutil)
 endif
 
 ifneq ($(IPHONEOS_DEPLOYMENT_TARGET),)
@@ -113,4 +114,14 @@ FUNCTIONS.armv7 := $(FUNCTIONS) \
                 modsi3 umodsi3 udivsi3 divsi3 udivmodsi4 divmodsi4
 
 FUNCTIONS.armv7s := $(FUNCTIONS.armv7)
+
+FUNCTIONS.arm64 :=  divti3 modti3 \
+					udivmodti4 \
+					udivti3 umodti3 \
+					powisf2 powidf2 \
+					clzti2 \
+					fixdfti fixsfti \
+					fixunsdfti fixunssfti fixunssfti \
+					floattidf floattisf floatuntidf floatuntisf \
+					gcc_personality_v0
 

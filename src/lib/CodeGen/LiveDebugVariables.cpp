@@ -21,11 +21,6 @@
 
 #define DEBUG_TYPE "livedebug"
 #include "LiveDebugVariables.h"
-#include "VirtRegMap.h"
-#include "llvm/Constants.h"
-#include "llvm/DebugInfo.h"
-#include "llvm/Metadata.h"
-#include "llvm/Value.h"
 #include "llvm/ADT/IntervalMap.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/LexicalScopes.h"
@@ -35,6 +30,11 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/VirtRegMap.h"
+#include "llvm/DebugInfo.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Target/TargetInstrInfo.h"
@@ -64,7 +64,8 @@ void LiveDebugVariables::getAnalysisUsage(AnalysisUsage &AU) const {
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
-LiveDebugVariables::LiveDebugVariables() : MachineFunctionPass(ID), pImpl(0) {
+LiveDebugVariables::LiveDebugVariables() : MachineFunctionPass(ID), pImpl(0),
+                                           EmitDone(false), ModifiedMF(false) {
   initializeLiveDebugVariablesPass(*PassRegistry::getPassRegistry());
 }
 
@@ -701,12 +702,17 @@ bool LiveDebugVariables::runOnMachineFunction(MachineFunction &mf) {
     return false;
   if (!pImpl)
     pImpl = new LDVImpl(this);
-  return static_cast<LDVImpl*>(pImpl)->runOnMachineFunction(mf);
+  ModifiedMF = static_cast<LDVImpl*>(pImpl)->runOnMachineFunction(mf);
+  return ModifiedMF;
 }
 
 void LiveDebugVariables::releaseMemory() {
-  if (pImpl)
+  if (pImpl) {
     static_cast<LDVImpl*>(pImpl)->clear();
+    // Make sure we call emitDebugValues if the machine function was modified.
+    assert((!ModifiedMF || EmitDone) &&
+           "Dbg values are not emitted in LDV");
+  }
 }
 
 LiveDebugVariables::~LiveDebugVariables() {
@@ -1014,8 +1020,10 @@ void LDVImpl::emitDebugValues(VirtRegMap *VRM) {
 }
 
 void LiveDebugVariables::emitDebugValues(VirtRegMap *VRM) {
-  if (pImpl)
+  if (pImpl) {
     static_cast<LDVImpl*>(pImpl)->emitDebugValues(VRM);
+    EmitDone = true;
+  }
 }
 
 

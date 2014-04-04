@@ -44,7 +44,7 @@ void AsanThreadRegistry::Init() {
 }
 
 void AsanThreadRegistry::RegisterThread(AsanThread *thread) {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   u32 tid = n_threads_;
   n_threads_++;
   CHECK(n_threads_ < kMaxNumberOfThreads);
@@ -56,7 +56,7 @@ void AsanThreadRegistry::RegisterThread(AsanThread *thread) {
 }
 
 void AsanThreadRegistry::UnregisterThread(AsanThread *thread) {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   FlushToAccumulatedStatsUnlocked(&thread->stats());
   AsanThreadSummary *summary = thread->summary();
   CHECK(summary);
@@ -104,38 +104,46 @@ AsanStats &AsanThreadRegistry::GetCurrentThreadStats() {
   return (t) ? t->stats() : main_thread_.stats();
 }
 
-AsanStats AsanThreadRegistry::GetAccumulatedStats() {
-  ScopedLock lock(&mu_);
+void AsanThreadRegistry::GetAccumulatedStats(AsanStats *stats) {
+  BlockingMutexLock lock(&mu_);
   UpdateAccumulatedStatsUnlocked();
-  return accumulated_stats_;
+  internal_memcpy(stats, &accumulated_stats_, sizeof(accumulated_stats_));
 }
 
 uptr AsanThreadRegistry::GetCurrentAllocatedBytes() {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   UpdateAccumulatedStatsUnlocked();
-  return accumulated_stats_.malloced - accumulated_stats_.freed;
+  uptr malloced = accumulated_stats_.malloced;
+  uptr freed = accumulated_stats_.freed;
+  // Return sane value if malloced < freed due to racy
+  // way we update accumulated stats.
+  return (malloced > freed) ? malloced - freed : 1;
 }
 
 uptr AsanThreadRegistry::GetHeapSize() {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   UpdateAccumulatedStatsUnlocked();
-  return accumulated_stats_.mmaped;
+  return accumulated_stats_.mmaped - accumulated_stats_.munmaped;
 }
 
 uptr AsanThreadRegistry::GetFreeBytes() {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   UpdateAccumulatedStatsUnlocked();
-  return accumulated_stats_.mmaped
-         - accumulated_stats_.malloced
-         - accumulated_stats_.malloced_redzones
-         + accumulated_stats_.really_freed
-         + accumulated_stats_.really_freed_redzones;
+  uptr total_free = accumulated_stats_.mmaped
+                  - accumulated_stats_.munmaped
+                  + accumulated_stats_.really_freed
+                  + accumulated_stats_.really_freed_redzones;
+  uptr total_used = accumulated_stats_.malloced
+                  + accumulated_stats_.malloced_redzones;
+  // Return sane value if total_free < total_used due to racy
+  // way we update accumulated stats.
+  return (total_free > total_used) ? total_free - total_used : 1;
 }
 
 // Return several stats counters with a single call to
 // UpdateAccumulatedStatsUnlocked().
 void AsanThreadRegistry::FillMallocStatistics(AsanMallocStats *malloc_stats) {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   UpdateAccumulatedStatsUnlocked();
   malloc_stats->blocks_in_use = accumulated_stats_.mallocs;
   malloc_stats->size_in_use = accumulated_stats_.malloced;
@@ -150,7 +158,7 @@ AsanThreadSummary *AsanThreadRegistry::FindByTid(u32 tid) {
 }
 
 AsanThread *AsanThreadRegistry::FindThreadByStackAddress(uptr addr) {
-  ScopedLock lock(&mu_);
+  BlockingMutexLock lock(&mu_);
   for (u32 tid = 0; tid < n_threads_; tid++) {
     AsanThread *t = thread_summaries_[tid]->thread();
     if (!t || !(t->fake_stack().StackSize())) continue;

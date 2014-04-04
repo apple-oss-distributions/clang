@@ -108,7 +108,13 @@ unsigned MipsELFObjectWriter::GetRelocType(const MCValue &Target,
     Type = ELF::R_MIPS_64;
     break;
   case FK_GPRel_4:
-    Type = ELF::R_MIPS_GPREL32;
+    if (isN64()) {
+      Type = setRType((unsigned)ELF::R_MIPS_GPREL32, Type);
+      Type = setRType2((unsigned)ELF::R_MIPS_64, Type);
+      Type = setRType3((unsigned)ELF::R_MIPS_NONE, Type);
+    }
+    else
+      Type = ELF::R_MIPS_GPREL32;
     break;
   case Mips::fixup_Mips_GPREL16:
     Type = ELF::R_MIPS_GPREL16;
@@ -178,6 +184,18 @@ unsigned MipsELFObjectWriter::GetRelocType(const MCValue &Target,
     break;
   case Mips::fixup_Mips_HIGHEST:
     Type = ELF::R_MIPS_HIGHEST;
+    break;
+  case Mips::fixup_Mips_GOT_HI16:
+    Type = ELF::R_MIPS_GOT_HI16;
+    break;
+  case Mips::fixup_Mips_GOT_LO16:
+    Type = ELF::R_MIPS_GOT_LO16;
+    break;
+  case Mips::fixup_Mips_CALL_HI16:
+    Type = ELF::R_MIPS_CALL_HI16;
+    break;
+  case Mips::fixup_Mips_CALL_LO16:
+    Type = ELF::R_MIPS_CALL_LO16;
     break;
   }
   return Type;

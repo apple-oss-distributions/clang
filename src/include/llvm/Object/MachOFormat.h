@@ -43,6 +43,7 @@ namespace mach {
     CTM_i386      = 7,
     CTM_x86_64    = CTM_i386 | CTFM_ArchABI64,
     CTM_ARM       = 12,
+    CTM_ARM64     = CTM_ARM | CTFM_ArchABI64,
     CTM_SPARC     = 14,
     CTM_PowerPC   = 18,
     CTM_PowerPC64 = CTM_PowerPC | CTFM_ArchABI64
@@ -64,7 +65,15 @@ namespace mach {
     CSARM_V7     = 9,
     CSARM_V7F    = 10,
     CSARM_V7S    = 11,
-    CSARM_V7K    = 12
+    CSARM_V7K    = 12,
+    CSARM_V6M    = 14,
+    CSARM_V7M    = 15,
+    CSARM_V7EM   = 16
+  };
+
+  /// \brief ARM64 Machine Subtypes.
+  enum CPUSubtypeARM64 {
+    CSARM64_ALL = 0
   };
 
   /// \brief PowerPC Machine Subtypes.
@@ -145,7 +154,8 @@ namespace macho {
     LCT_CodeSignature = 0x1d,
     LCT_SegmentSplitInfo = 0x1e,
     LCT_FunctionStarts = 0x26,
-    LCT_DataInCode = 0x29
+    LCT_DataInCode = 0x29,
+    LCT_LinkerOptions = 0x2D
   };
 
   /// \brief Load command structure.
@@ -233,9 +243,21 @@ namespace macho {
     uint32_t DataSize;
   };
 
+  struct LinkerOptionsLoadCommand {
+    uint32_t Type;
+    uint32_t Size;
+    uint32_t Count;
+    // Load command is followed by Count number of zero-terminated UTF8 strings,
+    // and then zero-filled to be 4-byte aligned.
+  };
+
   /// @}
   /// @name Section Data
   /// @{
+
+  enum SectionFlags {
+    SF_PureInstructions = 0x80000000
+  };
 
   struct Section {
     char Name[16];
@@ -388,7 +410,24 @@ namespace macho {
     RIT_ARM_ThumbBranch32Bit = 7,
     RIT_ARM_Half = 8,
     RIT_ARM_HalfDifference = 9
+  };
 
+  /// ARM64 uses its own relocation types. Like x86_64, the Common types
+  /// are not re-used.
+  enum RelocationInfoTypeARM64 {
+    RIT_ARM64_Unsigned = 0,       // for pointers
+    RIT_ARM64_Subtractor,         // must be followed by a RIT_ARM64_UNSIGNED
+    RIT_ARM64_Branch26,           // a B/BL instruction with 26-bit displacement
+    RIT_ARM64_Page21,             // pc-rel distance to page of target
+    RIT_ARM64_Pageoff12,          // offset within page, scaled by r_length
+    RIT_ARM64_GOT_Load_Page21,    // pc-rel distance to page of GOT slot
+    RIT_ARM64_GOT_Load_Pageoff12, // offset within page of GOT slot,
+                                  // scaled by r_length
+    RIT_ARM64_Pointer_To_GOT,     // for pointers to GOT slots
+    RIT_ARM64_TLVP_Load_Page21,   // pc-rel distance to page of TLVP slot
+    RIT_ARM64_TLVP_Load_Pageoff12,// offset within page of TLVP slot,
+                                  // scaled by r_length
+    RIT_ARM64_Addend              // must be followed by PAGE21 or PAGEOFF12
   };
 
 } // end namespace macho

@@ -118,11 +118,16 @@ def FeatureBMI     : SubtargetFeature<"bmi", "HasBMI", "true",
                                       "Support BMI instructions">;
 def FeatureBMI2    : SubtargetFeature<"bmi2", "HasBMI2", "true",
                                       "Support BMI2 instructions">;
+def FeatureRTM     : SubtargetFeature<"rtm", "HasRTM", "true",
+                                      "Support RTM instructions">;
 def FeatureLeaForSP : SubtargetFeature<"lea-sp", "UseLeaForSP", "true",
                                      "Use LEA for adjusting the stack pointer">;
 def FeatureSlowDivide : SubtargetFeature<"idiv-to-divb",
                                      "HasSlowDivide", "true",
                                      "Use small divide for positive values less than 256">;
+def FeaturePadShortFunctions : SubtargetFeature<"pad-short-functions",
+                                     "PadShortFunctions", "true",
+                                     "Pad short functions">;
 
 //===----------------------------------------------------------------------===//
 // X86 processors supported.
@@ -153,7 +158,8 @@ def : Proc<"pentium3m",       [FeatureSSE1, FeatureSlowBTMem]>;
 def : Proc<"pentium-m",       [FeatureSSE2, FeatureSlowBTMem]>;
 def : Proc<"pentium4",        [FeatureSSE2]>;
 def : Proc<"pentium4m",       [FeatureSSE2, FeatureSlowBTMem]>;
-def : Proc<"x86-64",          [FeatureSSE2, Feature64Bit, FeatureSlowBTMem]>;
+def : Proc<"x86-64",          [FeatureSSE2, Feature64Bit, FeatureSlowBTMem,
+                               FeatureFastUAMem]>;
 def : Proc<"yonah",           [FeatureSSE3, FeatureSlowBTMem]>;
 def : Proc<"prescott",        [FeatureSSE3, FeatureSlowBTMem]>;
 def : Proc<"nocona",          [FeatureSSE3, FeatureCMPXCHG16B,
@@ -162,9 +168,9 @@ def : Proc<"core2",           [FeatureSSSE3, FeatureCMPXCHG16B,
                                FeatureSlowBTMem]>;
 def : Proc<"penryn",          [FeatureSSE41, FeatureCMPXCHG16B,
                                FeatureSlowBTMem]>;
-def : AtomProc<"atom",        [ProcIntelAtom, FeatureSSE3, FeatureCMPXCHG16B,
+def : AtomProc<"atom",        [ProcIntelAtom, FeatureSSSE3, FeatureCMPXCHG16B,
                                FeatureMOVBE, FeatureSlowBTMem, FeatureLeaForSP,
-                               FeatureSlowDivide]>;
+                               FeatureSlowDivide, FeaturePadShortFunctions]>;
 // "Arrandale" along with corei3 and corei5
 def : Proc<"corei7",          [FeatureSSE42, FeatureCMPXCHG16B,
                                FeatureSlowBTMem, FeatureFastUAMem,
@@ -180,19 +186,20 @@ def : Proc<"westmere",        [FeatureSSE42, FeatureCMPXCHG16B,
 // Sandy Bridge
 // SSE is not listed here since llvm treats AVX as a reimplementation of SSE,
 // rather than a superset.
-def : Proc<"corei7-avx",      [FeatureAVX, FeatureCMPXCHG16B, FeaturePOPCNT,
-                               FeatureAES, FeaturePCLMUL]>;
+def : Proc<"corei7-avx",      [FeatureAVX, FeatureCMPXCHG16B, FeatureFastUAMem,
+                               FeaturePOPCNT, FeatureAES, FeaturePCLMUL]>;
 // Ivy Bridge
-def : Proc<"core-avx-i",      [FeatureAVX, FeatureCMPXCHG16B, FeaturePOPCNT,
-                               FeatureAES, FeaturePCLMUL,
+def : Proc<"core-avx-i",      [FeatureAVX, FeatureCMPXCHG16B, FeatureFastUAMem,
+                               FeaturePOPCNT, FeatureAES, FeaturePCLMUL,
                                FeatureRDRAND, FeatureF16C, FeatureFSGSBase]>;
 
 // Haswell
-def : Proc<"core-avx2",       [FeatureAVX2, FeatureCMPXCHG16B, FeaturePOPCNT,
-                               FeatureAES, FeaturePCLMUL, FeatureRDRAND,
-                               FeatureF16C, FeatureFSGSBase,
+def : Proc<"core-avx2",       [FeatureAVX2, FeatureCMPXCHG16B, FeatureFastUAMem,
+                               FeaturePOPCNT, FeatureAES, FeaturePCLMUL,
+                               FeatureRDRAND, FeatureF16C, FeatureFSGSBase,
                                FeatureMOVBE, FeatureLZCNT, FeatureBMI,
-                               FeatureBMI2, FeatureFMA]>;
+                               FeatureBMI2, FeatureFMA,
+                               FeatureRTM]>;
 
 def : Proc<"k6",              [FeatureMMX]>;
 def : Proc<"k6-2",            [Feature3DNow]>;
@@ -270,6 +277,9 @@ def ATTAsmParser : AsmParser {
 def ATTAsmParserVariant : AsmParserVariant {
   int Variant = 0;
 
+  // Variant name.
+  string Name = "att";
+
   // Discard comments in assembly strings.
   string CommentDelimiter = "#";
 
@@ -279,6 +289,9 @@ def ATTAsmParserVariant : AsmParserVariant {
 
 def IntelAsmParserVariant : AsmParserVariant {
   int Variant = 1;
+
+  // Variant name.
+  string Name = "intel";
 
   // Discard comments in assembly strings.
   string CommentDelimiter = ";";

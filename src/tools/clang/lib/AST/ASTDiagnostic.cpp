@@ -11,12 +11,11 @@
 //
 //===----------------------------------------------------------------------===//
 #include "clang/AST/ASTDiagnostic.h"
-
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclObjC.h"
-#include "clang/AST/TemplateBase.h"
-#include "clang/AST/ExprCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/ExprCXX.h"
+#include "clang/AST/TemplateBase.h"
 #include "clang/AST/Type.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
@@ -397,7 +396,7 @@ class TemplateDiff {
   QualType ToType;
 
   /// Str - Storage for the output stream.
-  llvm::SmallString<128> Str;
+  SmallString<128> Str;
 
   /// OS - The stream used to construct the output strings.
   llvm::raw_svector_ostream OS;
@@ -433,6 +432,15 @@ class TemplateDiff {
       /// FromQual, ToQual - Qualifiers for template types.
       Qualifiers FromQual, ToQual;
 
+      /// FromInt, ToInt - APSInt's for integral arguments.
+      llvm::APSInt FromInt, ToInt;
+
+      /// IsValidFromInt, IsValidToInt - Whether the APSInt's are valid.
+      bool IsValidFromInt, IsValidToInt;
+
+      /// FromValueDecl, ToValueDecl - Whether the argument is a decl.
+      ValueDecl *FromValueDecl, *ToValueDecl;
+
       /// FromDefault, ToDefault - Whether the argument is a default argument.
       bool FromDefault, ToDefault;
 
@@ -442,11 +450,12 @@ class TemplateDiff {
       DiffNode(unsigned ParentNode = 0)
         : NextNode(0), ChildNode(0), ParentNode(ParentNode),
           FromType(), ToType(), FromExpr(0), ToExpr(0), FromTD(0), ToTD(0),
-          FromDefault(false), ToDefault(false), Same(false) { }
+          IsValidFromInt(false), IsValidToInt(false), FromValueDecl(0),
+          ToValueDecl(0), FromDefault(false), ToDefault(false), Same(false) { }
     };
 
     /// FlatTree - A flattened tree used to store the DiffNodes.
-    llvm::SmallVector<DiffNode, 16> FlatTree;
+    SmallVector<DiffNode, 16> FlatTree;
 
     /// CurrentNode - The index of the current node being used.
     unsigned CurrentNode;
@@ -483,10 +492,25 @@ class TemplateDiff {
       FlatTree[CurrentNode].ToExpr = ToExpr;
     }
 
+    /// SetNode - Set FromInt and ToInt of the current node.
+    void SetNode(llvm::APSInt FromInt, llvm::APSInt ToInt,
+                 bool IsValidFromInt, bool IsValidToInt) {
+      FlatTree[CurrentNode].FromInt = FromInt;
+      FlatTree[CurrentNode].ToInt = ToInt;
+      FlatTree[CurrentNode].IsValidFromInt = IsValidFromInt;
+      FlatTree[CurrentNode].IsValidToInt = IsValidToInt;
+    }
+
     /// SetNode - Set FromQual and ToQual of the current node.
     void SetNode(Qualifiers FromQual, Qualifiers ToQual) {
       FlatTree[CurrentNode].FromQual = FromQual;
       FlatTree[CurrentNode].ToQual = ToQual;
+    }
+
+    /// SetNode - Set FromValueDecl and ToValueDecl of the current node.
+    void SetNode(ValueDecl *FromValueDecl, ValueDecl *ToValueDecl) {
+      FlatTree[CurrentNode].FromValueDecl = FromValueDecl;
+      FlatTree[CurrentNode].ToValueDecl = ToValueDecl;
     }
 
     /// SetSame - Sets the same flag of the current node.
@@ -566,6 +590,17 @@ class TemplateDiff {
              (FlatTree[ReadNode].FromTD || FlatTree[ReadNode].ToTD);
     }
 
+    /// NodeIsAPSInt - Returns true if the arugments are stored in APSInt's.
+    bool NodeIsAPSInt() {
+      return FlatTree[ReadNode].IsValidFromInt ||
+             FlatTree[ReadNode].IsValidToInt;
+    }
+
+    /// NodeIsDecl - Returns true if the arguments are stored as Decl's.
+    bool NodeIsValueDecl() {
+      return FlatTree[ReadNode].FromValueDecl || FlatTree[ReadNode].ToValueDecl;
+    }
+
     /// GetNode - Gets the FromType and ToType.
     void GetNode(QualType &FromType, QualType &ToType) {
       FromType = FlatTree[ReadNode].FromType;
@@ -584,10 +619,25 @@ class TemplateDiff {
       ToTD = FlatTree[ReadNode].ToTD;
     }
 
+    /// GetNode - Gets the FromInt and ToInt.
+    void GetNode(llvm::APSInt &FromInt, llvm::APSInt &ToInt,
+                 bool &IsValidFromInt, bool &IsValidToInt) {
+      FromInt = FlatTree[ReadNode].FromInt;
+      ToInt = FlatTree[ReadNode].ToInt;
+      IsValidFromInt = FlatTree[ReadNode].IsValidFromInt;
+      IsValidToInt = FlatTree[ReadNode].IsValidToInt;
+    }
+
     /// GetNode - Gets the FromQual and ToQual.
     void GetNode(Qualifiers &FromQual, Qualifiers &ToQual) {
       FromQual = FlatTree[ReadNode].FromQual;
       ToQual = FlatTree[ReadNode].ToQual;
+    }
+
+    /// GetNode - Gets the FromValueDecl and ToValueDecl.
+    void GetNode(ValueDecl *&FromValueDecl, ValueDecl *&ToValueDecl) {
+      FromValueDecl = FlatTree[ReadNode].FromValueDecl;
+      ToValueDecl = FlatTree[ReadNode].ToValueDecl;
     }
 
     /// NodeIsSame - Returns true the arguments are the same.
@@ -817,12 +867,73 @@ class TemplateDiff {
       if (NonTypeTemplateParmDecl *DefaultNTTPD =
               dyn_cast<NonTypeTemplateParmDecl>(ParamND)) {
         Expr *FromExpr, *ToExpr;
-        GetExpr(FromIter, DefaultNTTPD, FromExpr);
-        GetExpr(ToIter, DefaultNTTPD, ToExpr);
-        Tree.SetNode(FromExpr, ToExpr);
-        Tree.SetSame(IsEqualExpr(Context, FromExpr, ToExpr));
-        Tree.SetDefault(FromIter.isEnd() && FromExpr,
-                        ToIter.isEnd() && ToExpr);
+        llvm::APSInt FromInt, ToInt;
+        ValueDecl *FromValueDecl = 0, *ToValueDecl = 0;
+        unsigned ParamWidth = 128; // Safe default
+        if (DefaultNTTPD->getType()->isIntegralOrEnumerationType())
+          ParamWidth = Context.getIntWidth(DefaultNTTPD->getType());
+        bool HasFromInt = !FromIter.isEnd() &&
+                          FromIter->getKind() == TemplateArgument::Integral;
+        bool HasToInt = !ToIter.isEnd() &&
+                        ToIter->getKind() == TemplateArgument::Integral;
+        bool HasFromValueDecl =
+            !FromIter.isEnd() &&
+            FromIter->getKind() == TemplateArgument::Declaration;
+        bool HasToValueDecl =
+            !ToIter.isEnd() &&
+            ToIter->getKind() == TemplateArgument::Declaration;
+
+        assert(((!HasFromInt && !HasToInt) ||
+                (!HasFromValueDecl && !HasToValueDecl)) &&
+               "Template argument cannot be both integer and declaration");
+
+        if (HasFromInt)
+          FromInt = FromIter->getAsIntegral();
+        else if (HasFromValueDecl)
+          FromValueDecl = FromIter->getAsDecl();
+        else
+          GetExpr(FromIter, DefaultNTTPD, FromExpr);
+
+        if (HasToInt)
+          ToInt = ToIter->getAsIntegral();
+        else if (HasToValueDecl)
+          ToValueDecl = ToIter->getAsDecl();
+        else
+          GetExpr(ToIter, DefaultNTTPD, ToExpr);
+
+        if (!HasFromInt && !HasToInt && !HasFromValueDecl && !HasToValueDecl) {
+          Tree.SetNode(FromExpr, ToExpr);
+          Tree.SetSame(IsEqualExpr(Context, ParamWidth, FromExpr, ToExpr));
+          Tree.SetDefault(FromIter.isEnd() && FromExpr,
+                          ToIter.isEnd() && ToExpr);
+        } else if (HasFromInt || HasToInt) {
+          if (!HasFromInt && FromExpr) {
+            FromInt = FromExpr->EvaluateKnownConstInt(Context);
+            HasFromInt = true;
+          }
+          if (!HasToInt && ToExpr) {
+            ToInt = ToExpr->EvaluateKnownConstInt(Context);
+            HasToInt = true;
+          }
+          Tree.SetNode(FromInt, ToInt, HasFromInt, HasToInt);
+          Tree.SetSame(IsSameConvertedInt(ParamWidth, FromInt, ToInt));
+          Tree.SetDefault(FromIter.isEnd() && HasFromInt,
+                          ToIter.isEnd() && HasToInt);
+        } else {
+          if (!HasFromValueDecl && FromExpr) {
+            DeclRefExpr *DRE = cast<DeclRefExpr>(FromExpr);
+            FromValueDecl = cast<ValueDecl>(DRE->getDecl());
+          }
+          if (!HasToValueDecl && ToExpr) {
+            DeclRefExpr *DRE = cast<DeclRefExpr>(ToExpr);
+            ToValueDecl = cast<ValueDecl>(DRE->getDecl());
+          }
+          Tree.SetNode(FromValueDecl, ToValueDecl);
+          Tree.SetSame(FromValueDecl->getCanonicalDecl() ==
+                       ToValueDecl->getCanonicalDecl());
+          Tree.SetDefault(FromIter.isEnd() && FromValueDecl,
+                          ToIter.isEnd() && ToValueDecl);
+        }
       }
 
       // Handle Templates
@@ -858,8 +969,8 @@ class TemplateDiff {
   /// even if the template arguments are not.
   static bool hasSameBaseTemplate(const TemplateSpecializationType *FromTST,
                                   const TemplateSpecializationType *ToTST) {
-    return FromTST->getTemplateName().getAsTemplateDecl()->getIdentifier() ==
-           ToTST->getTemplateName().getAsTemplateDecl()->getIdentifier();
+    return FromTST->getTemplateName().getAsTemplateDecl()->getCanonicalDecl() ==
+           ToTST->getTemplateName().getAsTemplateDecl()->getCanonicalDecl();
   }
 
   /// hasSameTemplate - Returns true if both types are specialized from the
@@ -951,8 +1062,18 @@ class TemplateDiff {
       ArgDecl = DefaultTD;
   }
 
+  /// IsSameConvertedInt - Returns true if both integers are equal when
+  /// converted to an integer type with the given width.
+  static bool IsSameConvertedInt(unsigned Width, const llvm::APSInt &X,
+                                 const llvm::APSInt &Y) {
+    llvm::APInt ConvertedX = X.extOrTrunc(Width);
+    llvm::APInt ConvertedY = Y.extOrTrunc(Width);
+    return ConvertedX == ConvertedY;
+  }
+
   /// IsEqualExpr - Returns true if the expressions evaluate to the same value.
-  static bool IsEqualExpr(ASTContext &Context, Expr *FromExpr, Expr *ToExpr) {
+  static bool IsEqualExpr(ASTContext &Context, unsigned ParamWidth,
+                          Expr *FromExpr, Expr *ToExpr) {
     if (FromExpr == ToExpr)
       return true;
 
@@ -974,7 +1095,7 @@ class TemplateDiff {
     Expr::EvalResult FromResult, ToResult;
     if (!FromExpr->EvaluateAsRValue(FromResult, Context) ||
         !ToExpr->EvaluateAsRValue(ToResult, Context))
-      assert(0 && "Template arguments must be known at compile time.");
+      return false;
 
     APValue &FromVal = FromResult.Val;
     APValue &ToVal = ToResult.Val;
@@ -983,7 +1104,7 @@ class TemplateDiff {
 
     switch (FromVal.getKind()) {
       case APValue::Int:
-        return FromVal.getInt() == ToVal.getInt();
+        return IsSameConvertedInt(ParamWidth, FromVal.getInt(), ToVal.getInt());
       case APValue::LValue: {
         APValue::LValueBase FromBase = FromVal.getLValueBase();
         APValue::LValueBase ToBase = ToVal.getLValueBase();
@@ -1038,6 +1159,24 @@ class TemplateDiff {
                               Tree.ToDefault(), Tree.NodeIsSame());
         return;
       }
+
+      if (Tree.NodeIsAPSInt()) {
+        llvm::APSInt FromInt, ToInt;
+        bool IsValidFromInt, IsValidToInt;
+        Tree.GetNode(FromInt, ToInt, IsValidFromInt, IsValidToInt);
+        PrintAPSInt(FromInt, ToInt, IsValidFromInt, IsValidToInt,
+                    Tree.FromDefault(), Tree.ToDefault(), Tree.NodeIsSame());
+        return;
+      }
+
+      if (Tree.NodeIsValueDecl()) {
+        ValueDecl *FromValueDecl, *ToValueDecl;
+        Tree.GetNode(FromValueDecl, ToValueDecl);
+        PrintValueDecl(FromValueDecl, ToValueDecl, Tree.FromDefault(),
+                       Tree.ToDefault(), Tree.NodeIsSame());
+        return;
+      }
+
       llvm_unreachable("Unable to deduce template difference.");
     }
 
@@ -1045,7 +1184,12 @@ class TemplateDiff {
     TemplateDecl *FromTD, *ToTD;
     Tree.GetNode(FromTD, ToTD);
 
-    assert(Tree.HasChildren() && "Template difference not found in diff tree.");
+    if (!Tree.HasChildren()) {
+      // If we're dealing with a template specialization with zero
+      // arguments, there are no children; special-case this.
+      OS << FromTD->getNameAsString() << "<>";
+      return;
+    }
 
     Qualifiers FromQual, ToQual;
     Tree.GetNode(FromQual, ToQual);
@@ -1210,6 +1354,63 @@ class TemplateDiff {
       Unbold();
       OS << ']';
     }
+  }
+
+  /// PrintAPSInt - Handles printing of integral arguments, highlighting
+  /// argument differences.
+  void PrintAPSInt(llvm::APSInt FromInt, llvm::APSInt ToInt,
+                   bool IsValidFromInt, bool IsValidToInt, bool FromDefault,
+                   bool ToDefault, bool Same) {
+    assert((IsValidFromInt || IsValidToInt) &&
+           "Only one integral argument may be missing.");
+
+    if (Same) {
+      OS << FromInt.toString(10);
+    } else if (!PrintTree) {
+      OS << (FromDefault ? "(default) " : "");
+      Bold();
+      OS << (IsValidFromInt ? FromInt.toString(10) : "(no argument)");
+      Unbold();
+    } else {
+      OS << (FromDefault ? "[(default) " : "[");
+      Bold();
+      OS << (IsValidFromInt ? FromInt.toString(10) : "(no argument)");
+      Unbold();
+      OS << " != " << (ToDefault ? "(default) " : "");
+      Bold();
+      OS << (IsValidToInt ? ToInt.toString(10) : "(no argument)");
+      Unbold();
+      OS << ']';
+    }
+  }
+
+  
+  /// PrintDecl - Handles printing of Decl arguments, highlighting
+  /// argument differences.
+  void PrintValueDecl(ValueDecl *FromValueDecl, ValueDecl *ToValueDecl,
+                      bool FromDefault, bool ToDefault, bool Same) {
+    assert((FromValueDecl || ToValueDecl) &&
+           "Only one Decl argument may be NULL");
+
+    if (Same) {
+      OS << FromValueDecl->getName();
+    } else if (!PrintTree) {
+      OS << (FromDefault ? "(default) " : "");
+      Bold();
+      OS << (FromValueDecl ? FromValueDecl->getName() : "(no argument)");
+      Unbold();
+    } else {
+      OS << (FromDefault ? "[(default) " : "[");
+      Bold();
+      OS << (FromValueDecl ? FromValueDecl->getName() : "(no argument)");
+      Unbold();
+      OS << " != " << (ToDefault ? "(default) " : "");
+      Bold();
+      OS << (ToValueDecl ? ToValueDecl->getName() : "(no argument)");
+      Unbold();
+      OS << ']';
+    }
+
   }
 
   // Prints the appropriate placeholder for elided template arguments.

@@ -18,6 +18,7 @@
 namespace llvm {
 class BasicBlock;
 class BasicBlockPass;
+class Pass;
 
 //===----------------------------------------------------------------------===//
 /// @brief Vectorize configuration.
@@ -105,6 +106,12 @@ struct VectorizeConfig {
 //
 BasicBlockPass *
 createBBVectorizePass(const VectorizeConfig &C = VectorizeConfig());
+
+//===----------------------------------------------------------------------===//
+//
+// LoopVectorize - Create a loop vectorization pass.
+//
+Pass *createLoopVectorizePass();
 
 //===----------------------------------------------------------------------===//
 /// @brief Vectorize the BasicBlock.

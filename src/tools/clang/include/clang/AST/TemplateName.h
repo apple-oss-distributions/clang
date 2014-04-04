@@ -15,9 +15,9 @@
 #define LLVM_CLANG_AST_TEMPLATENAME_H
 
 #include "clang/Basic/LLVM.h"
+#include "clang/Basic/OperatorKinds.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/PointerUnion.h"
-#include "clang/Basic/OperatorKinds.h"
 
 namespace clang {
   
@@ -307,6 +307,9 @@ public:
   /// one).
   void print(raw_ostream &OS, const PrintingPolicy &Policy,
              bool SuppressNNS = false) const;
+
+  /// \brief Debugging aid that dumps the template name.
+  void dump(raw_ostream &OS) const;
 
   /// \brief Debugging aid that dumps the template name to standard
   /// error.

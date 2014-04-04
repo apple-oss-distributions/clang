@@ -25,15 +25,19 @@ static const char *StripPathPrefix(const char *filepath,
 }
 
 // ----------------------- StackTrace ----------------------------- {{{1
-// PCs in stack traces are actually the return addresses, that is,
-// addresses of the next instructions after the call. That's why we
-// decrement them.
-static uptr patch_pc(uptr pc) {
+uptr StackTrace::GetPreviousInstructionPc(uptr pc) {
 #ifdef __arm__
   // Cancel Thumb bit.
   pc = pc & (~1);
 #endif
+#if defined(__powerpc__) || defined(__powerpc64__)
+  // PCs are always 4 byte aligned.
+  return pc - 4;
+#elif defined(__sparc__)
+  return pc - 8;
+#else
   return pc - 1;
+#endif
 }
 
 static void PrintStackFramePrefix(uptr frame_num, uptr pc) {
@@ -60,11 +64,13 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
                             bool symbolize, const char *strip_file_prefix,
                             SymbolizeCallback symbolize_callback ) {
   MemoryMappingLayout proc_maps;
-  InternalScopedBuffer<char> buff(kPageSize * 2);
+  InternalScopedBuffer<char> buff(GetPageSizeCached() * 2);
   InternalScopedBuffer<AddressInfo> addr_frames(64);
   uptr frame_num = 0;
   for (uptr i = 0; i < size && addr[i]; i++) {
-    uptr pc = patch_pc(addr[i]);
+    // PCs in stack traces are actually the return addresses, that is,
+    // addresses of the next instructions after the call.
+    uptr pc = GetPreviousInstructionPc(addr[i]);
     uptr addr_frames_num = 0;  // The number of stack frames for current
                                // instruction address.
     if (symbolize_callback) {
@@ -77,7 +83,8 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
         Printf(" %s\n", StripPathPrefix(buff.data(), strip_file_prefix));
         frame_num++;
       }
-    } else if (symbolize) {
+    }
+    if (symbolize && addr_frames_num == 0) {
       // Use our own (online) symbolizer, if necessary.
       addr_frames_num = SymbolizeCode(pc, addr_frames.data(),
                                       addr_frames.size());
@@ -122,18 +129,26 @@ void StackTrace::FastUnwindStack(uptr pc, uptr bp,
                                  uptr stack_top, uptr stack_bottom) {
   CHECK(size == 0 && trace[0] == pc);
   size = 1;
-  uptr *frame = (uptr*)bp;
-  uptr *prev_frame = frame;
+  uhwptr *frame = (uhwptr *)bp;
+  uhwptr *prev_frame = frame;
   while (frame >= prev_frame &&
-         frame < (uptr*)stack_top - 2 &&
-         frame > (uptr*)stack_bottom &&
+         frame < (uhwptr *)stack_top - 2 &&
+         frame > (uhwptr *)stack_bottom &&
          size < max_size) {
-    uptr pc1 = frame[1];
+    uhwptr pc1 = frame[1];
     if (pc1 != pc) {
-      trace[size++] = pc1;
+      trace[size++] = (uptr) pc1;
     }
     prev_frame = frame;
-    frame = (uptr*)frame[0];
+    frame = (uhwptr *)frame[0];
+  }
+}
+
+void StackTrace::PopStackFrames(uptr count) {
+  CHECK(size >= count);
+  size -= count;
+  for (uptr i = 0; i < size; i++) {
+    trace[i] = trace[i + count];
   }
 }
 
@@ -142,7 +157,7 @@ void StackTrace::FastUnwindStack(uptr pc, uptr bp,
 // the previous one, we record a 31-bit offset instead of the full pc.
 SANITIZER_INTERFACE_ATTRIBUTE
 uptr StackTrace::CompressStack(StackTrace *stack, u32 *compressed, uptr size) {
-#if __WORDSIZE == 32
+#if SANITIZER_WORDSIZE == 32
   // Don't compress, just copy.
   uptr res = 0;
   for (uptr i = 0; i < stack->size && i < size; i++) {
@@ -183,7 +198,7 @@ uptr StackTrace::CompressStack(StackTrace *stack, u32 *compressed, uptr size) {
     compressed[c_index] = 0;
   if (c_index + 1 < size)
     compressed[c_index + 1] = 0;
-#endif  // __WORDSIZE
+#endif  // SANITIZER_WORDSIZE
 
   // debug-only code
 #if 0
@@ -206,7 +221,7 @@ uptr StackTrace::CompressStack(StackTrace *stack, u32 *compressed, uptr size) {
 SANITIZER_INTERFACE_ATTRIBUTE
 void StackTrace::UncompressStack(StackTrace *stack,
                                  u32 *compressed, uptr size) {
-#if __WORDSIZE == 32
+#if SANITIZER_WORDSIZE == 32
   // Don't uncompress, just copy.
   stack->size = 0;
   for (uptr i = 0; i < size && i < kStackTraceMax; i++) {
@@ -241,7 +256,7 @@ void StackTrace::UncompressStack(StackTrace *stack,
     stack->trace[stack->size++] = pc;
     prev_pc = pc;
   }
-#endif  // __WORDSIZE
+#endif  // SANITIZER_WORDSIZE
 }
 
 }  // namespace __sanitizer

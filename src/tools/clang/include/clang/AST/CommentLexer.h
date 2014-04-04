@@ -15,9 +15,10 @@
 #define LLVM_CLANG_AST_COMMENT_LEXER_H
 
 #include "clang/Basic/SourceManager.h"
-#include "llvm/ADT/StringRef.h"
+#include "clang/Basic/Diagnostic.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -34,8 +35,9 @@ enum TokenKind {
   eof,
   newline,
   text,
-  unknown_command, // Command that does not have an ID.
-  command,         // Command with an ID.
+  unknown_command,   // Command that does not have an ID.
+  backslash_command, // Command with an ID, that used backslash marker.
+  at_command,        // Command with an ID, that used 'at' marker.
   verbatim_block_begin,
   verbatim_block_line,
   verbatim_block_end,
@@ -75,7 +77,7 @@ class Token {
   /// unused (command spelling can be found with CommandTraits).  Otherwise,
   /// contains the length of the string that starts at TextPtr.
   unsigned IntVal;
-
+  
 public:
   SourceLocation getLocation() const LLVM_READONLY { return Loc; }
   void setLocation(SourceLocation SL) { Loc = SL; }
@@ -118,12 +120,12 @@ public:
   }
 
   unsigned getCommandID() const LLVM_READONLY {
-    assert(is(tok::command));
+    assert(is(tok::backslash_command) || is(tok::at_command));
     return IntVal;
   }
 
   void setCommandID(unsigned ID) {
-    assert(is(tok::command));
+    assert(is(tok::backslash_command) || is(tok::at_command));
     IntVal = ID;
   }
 
@@ -226,6 +228,8 @@ private:
   /// computed (for example, resolved decimal character references).
   llvm::BumpPtrAllocator &Allocator;
 
+  DiagnosticsEngine &Diags;
+  
   const CommandTraits &Traits;
 
   const char *const BufferStart;
@@ -282,11 +286,18 @@ private:
   /// it stands for (e.g., "<").
   StringRef resolveHTMLNamedCharacterReference(StringRef Name) const;
 
+  /// Given a Doxygen-supported named character reference (e.g., "&trade;"),
+  /// it returns its UTF8 encoding.
+  StringRef HTMLDoxygenCharacterReference(StringRef Name) const;
+
   /// Given a Unicode codepoint as base-10 integer, return the character.
   StringRef resolveHTMLDecimalCharacterReference(StringRef Name) const;
 
   /// Given a Unicode codepoint as base-16 integer, return the character.
   StringRef resolveHTMLHexCharacterReference(StringRef Name) const;
+  
+  /// Helper routine to do part of the work for resolveHTMLHexCharacterReference.
+  StringRef helperResolveHTMLHexCharacterReference(unsigned CodePoint) const;
 
   void formTokenWithChars(Token &Result, const char *TokEnd,
                           tok::TokenKind Kind) {
@@ -313,6 +324,10 @@ private:
 
     const unsigned CharNo = Loc - BufferStart;
     return FileLoc.getLocWithOffset(CharNo);
+  }
+
+  DiagnosticBuilder Diag(SourceLocation Loc, unsigned DiagID) {
+    return Diags.Report(Loc, DiagID);
   }
 
   /// Eat string matching regexp \code \s*\* \endcode.
@@ -345,7 +360,8 @@ private:
   void lexHTMLEndTag(Token &T);
 
 public:
-  Lexer(llvm::BumpPtrAllocator &Allocator, const CommandTraits &Traits,
+  Lexer(llvm::BumpPtrAllocator &Allocator, DiagnosticsEngine &Diags,
+        const CommandTraits &Traits,
         SourceLocation FileLoc,
         const char *BufferStart, const char *BufferEnd);
 

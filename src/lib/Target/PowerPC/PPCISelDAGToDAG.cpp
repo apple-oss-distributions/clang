@@ -14,22 +14,24 @@
 
 #define DEBUG_TYPE "ppc-codegen"
 #include "PPC.h"
-#include "PPCTargetMachine.h"
 #include "MCTargetDesc/PPCPredicates.h"
-#include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "PPCTargetMachine.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
-#include "llvm/Target/TargetOptions.h"
-#include "llvm/Constants.h"
-#include "llvm/Function.h"
-#include "llvm/GlobalValue.h"
-#include "llvm/Intrinsics.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetOptions.h"
 using namespace llvm;
 
 namespace {
@@ -53,7 +55,9 @@ namespace {
       GlobalBaseReg = 0;
       SelectionDAGISel::runOnMachineFunction(MF);
 
-      InsertVRSaveCode(MF);
+      if (!PPCSubTarget.isSVR4ABI())
+        InsertVRSaveCode(MF);
+
       return true;
     }
 
@@ -621,6 +625,88 @@ static unsigned getCRIdxForSetCC(ISD::CondCode CC, bool &Invert, int &Other) {
   }
 }
 
+// getVCmpInst: return the vector compare instruction for the specified
+// vector type and condition code. Since this is for altivec specific code,
+// only support the altivec types (v16i8, v8i16, v4i32, and v4f32).
+static unsigned int getVCmpInst(MVT::SimpleValueType VecVT, ISD::CondCode CC) {
+  switch (CC) {
+    case ISD::SETEQ:
+    case ISD::SETUEQ:
+    case ISD::SETNE:
+    case ISD::SETUNE:
+      if (VecVT == MVT::v16i8)
+        return PPC::VCMPEQUB;
+      else if (VecVT == MVT::v8i16)
+        return PPC::VCMPEQUH;
+      else if (VecVT == MVT::v4i32)
+        return PPC::VCMPEQUW;
+      // v4f32 != v4f32 could be translate to unordered not equal
+      else if (VecVT == MVT::v4f32)
+        return PPC::VCMPEQFP;
+      break;
+    case ISD::SETLT:
+    case ISD::SETGT:
+    case ISD::SETLE:
+    case ISD::SETGE:
+      if (VecVT == MVT::v16i8)
+        return PPC::VCMPGTSB;
+      else if (VecVT == MVT::v8i16)
+        return PPC::VCMPGTSH;
+      else if (VecVT == MVT::v4i32)
+        return PPC::VCMPGTSW;
+      else if (VecVT == MVT::v4f32)
+        return PPC::VCMPGTFP;
+      break;
+    case ISD::SETULT:
+    case ISD::SETUGT:
+    case ISD::SETUGE:
+    case ISD::SETULE:
+      if (VecVT == MVT::v16i8)
+        return PPC::VCMPGTUB;
+      else if (VecVT == MVT::v8i16)
+        return PPC::VCMPGTUH;
+      else if (VecVT == MVT::v4i32)
+        return PPC::VCMPGTUW;
+      break;
+    case ISD::SETOEQ:
+      if (VecVT == MVT::v4f32)
+        return PPC::VCMPEQFP;
+      break;
+    case ISD::SETOLT:
+    case ISD::SETOGT:
+    case ISD::SETOLE:
+      if (VecVT == MVT::v4f32)
+        return PPC::VCMPGTFP;
+      break;
+    case ISD::SETOGE:
+      if (VecVT == MVT::v4f32)
+        return PPC::VCMPGEFP;
+      break;
+    default:
+      break;
+  }
+  llvm_unreachable("Invalid integer vector compare condition");
+}
+
+// getVCmpEQInst: return the equal compare instruction for the specified vector
+// type. Since this is for altivec specific code, only support the altivec
+// types (v16i8, v8i16, v4i32, and v4f32).
+static unsigned int getVCmpEQInst(MVT::SimpleValueType VecVT) {
+  switch (VecVT) {
+    case MVT::v16i8:
+      return PPC::VCMPEQUB;
+    case MVT::v8i16:
+      return PPC::VCMPEQUH;
+    case MVT::v4i32:
+      return PPC::VCMPEQUW;
+    case MVT::v4f32:
+      return PPC::VCMPEQFP;
+    default:
+      llvm_unreachable("Invalid integer vector compare condition");
+  }
+}
+
+
 SDNode *PPCDAGToDAGISel::SelectSETCC(SDNode *N) {
   DebugLoc dl = N->getDebugLoc();
   unsigned Imm;
@@ -701,10 +787,67 @@ SDNode *PPCDAGToDAGISel::SelectSETCC(SDNode *N) {
     }
   }
 
+  SDValue LHS = N->getOperand(0);
+  SDValue RHS = N->getOperand(1);
+
+  // Altivec Vector compare instructions do not set any CR register by default and
+  // vector compare operations return the same type as the operands.
+  if (LHS.getValueType().isVector()) {
+    EVT VecVT = LHS.getValueType();
+    MVT::SimpleValueType VT = VecVT.getSimpleVT().SimpleTy;
+    unsigned int VCmpInst = getVCmpInst(VT, CC);
+
+    switch (CC) {
+      case ISD::SETEQ:
+      case ISD::SETOEQ:
+      case ISD::SETUEQ:
+        return CurDAG->SelectNodeTo(N, VCmpInst, VecVT, LHS, RHS);
+      case ISD::SETNE:
+      case ISD::SETONE:
+      case ISD::SETUNE: {
+        SDValue VCmp(CurDAG->getMachineNode(VCmpInst, dl, VecVT, LHS, RHS), 0);
+        return CurDAG->SelectNodeTo(N, PPC::VNOR, VecVT, VCmp, VCmp);
+      } 
+      case ISD::SETLT:
+      case ISD::SETOLT:
+      case ISD::SETULT:
+        return CurDAG->SelectNodeTo(N, VCmpInst, VecVT, RHS, LHS);
+      case ISD::SETGT:
+      case ISD::SETOGT:
+      case ISD::SETUGT:
+        return CurDAG->SelectNodeTo(N, VCmpInst, VecVT, LHS, RHS);
+      case ISD::SETGE:
+      case ISD::SETOGE:
+      case ISD::SETUGE: {
+        // Small optimization: Altivec provides a 'Vector Compare Greater Than
+        // or Equal To' instruction (vcmpgefp), so in this case there is no
+        // need for extra logic for the equal compare.
+        if (VecVT.getSimpleVT().isFloatingPoint()) {
+          return CurDAG->SelectNodeTo(N, VCmpInst, VecVT, LHS, RHS);
+        } else {
+          SDValue VCmpGT(CurDAG->getMachineNode(VCmpInst, dl, VecVT, LHS, RHS), 0);
+          unsigned int VCmpEQInst = getVCmpEQInst(VT);
+          SDValue VCmpEQ(CurDAG->getMachineNode(VCmpEQInst, dl, VecVT, LHS, RHS), 0);
+          return CurDAG->SelectNodeTo(N, PPC::VOR, VecVT, VCmpGT, VCmpEQ);
+        }
+      }
+      case ISD::SETLE:
+      case ISD::SETOLE:
+      case ISD::SETULE: {
+        SDValue VCmpLE(CurDAG->getMachineNode(VCmpInst, dl, VecVT, RHS, LHS), 0);
+        unsigned int VCmpEQInst = getVCmpEQInst(VT);
+        SDValue VCmpEQ(CurDAG->getMachineNode(VCmpEQInst, dl, VecVT, LHS, RHS), 0);
+        return CurDAG->SelectNodeTo(N, PPC::VOR, VecVT, VCmpLE, VCmpEQ);
+      }
+      default:
+        llvm_unreachable("Invalid vector compare type: should be expanded by legalize");
+    }
+  }
+
   bool Inv;
   int OtherCondIdx;
   unsigned Idx = getCRIdxForSetCC(CC, Inv, OtherCondIdx);
-  SDValue CCReg = SelectCC(N->getOperand(0), N->getOperand(1), CC, dl);
+  SDValue CCReg = SelectCC(LHS, RHS, CC, dl);
   SDValue IntCR;
 
   // Force the ccreg into CR7.
@@ -717,7 +860,7 @@ SDNode *PPCDAGToDAGISel::SelectSETCC(SDNode *N) {
   if (PPCSubTarget.hasMFOCRF() && OtherCondIdx == -1)
     IntCR = SDValue(CurDAG->getMachineNode(PPC::MFOCRF, dl, MVT::i32, CR7Reg,
                                            CCReg), 0);
- else
+  else
     IntCR = SDValue(CurDAG->getMachineNode(PPC::MFCRpseud, dl, MVT::i32,
                                            CR7Reg, CCReg), 0);
 
@@ -1126,6 +1269,52 @@ SDNode *PPCDAGToDAGISel::Select(SDNode *N) {
     Chain = SDValue(CurDAG->getMachineNode(Opc, dl, MVT::Glue, Target,
                                            Chain), 0);
     return CurDAG->SelectNodeTo(N, Reg, MVT::Other, Chain);
+  }
+  case PPCISD::TOC_ENTRY: {
+    assert (PPCSubTarget.isPPC64() && "Only supported for 64-bit ABI");
+
+    // For medium code model, we generate two instructions as described
+    // below.  Otherwise we allow SelectCodeCommon to handle this, selecting
+    // one of LDtoc, LDtocJTI, and LDtocCPT.
+    if (TM.getCodeModel() != CodeModel::Medium)
+      break;
+
+    // The first source operand is a TargetGlobalAddress or a
+    // TargetJumpTable.  If it is an externally defined symbol, a symbol
+    // with common linkage, a function address, or a jump table address,
+    // we generate:
+    //   LDtocL(<ga:@sym>, ADDIStocHA(%X2, <ga:@sym>))
+    // Otherwise we generate:
+    //   ADDItocL(ADDIStocHA(%X2, <ga:@sym>), <ga:@sym>)
+    SDValue GA = N->getOperand(0);
+    SDValue TOCbase = N->getOperand(1);
+    SDNode *Tmp = CurDAG->getMachineNode(PPC::ADDIStocHA, dl, MVT::i64,
+                                        TOCbase, GA);
+
+    if (isa<JumpTableSDNode>(GA))
+      return CurDAG->getMachineNode(PPC::LDtocL, dl, MVT::i64, GA,
+                                    SDValue(Tmp, 0));
+
+    if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(GA)) {
+      const GlobalValue *GValue = G->getGlobal();
+      const GlobalAlias *GAlias = dyn_cast<GlobalAlias>(GValue);
+      const GlobalValue *RealGValue = GAlias ?
+        GAlias->resolveAliasedGlobal(false) : GValue;
+      const GlobalVariable *GVar = dyn_cast<GlobalVariable>(RealGValue);
+      assert((GVar || isa<Function>(RealGValue)) &&
+             "Unexpected global value subclass!");
+
+      // An external variable is one without an initializer.  For these,
+      // for variables with common linkage, and for Functions, generate
+      // the LDtocL form.
+      if (!GVar || !GVar->hasInitializer() || RealGValue->hasCommonLinkage() ||
+          RealGValue->hasAvailableExternallyLinkage())
+        return CurDAG->getMachineNode(PPC::LDtocL, dl, MVT::i64, GA,
+                                      SDValue(Tmp, 0));
+    }
+
+    return CurDAG->getMachineNode(PPC::ADDItocL, dl, MVT::i64,
+                                  SDValue(Tmp, 0), GA);
   }
   }
 

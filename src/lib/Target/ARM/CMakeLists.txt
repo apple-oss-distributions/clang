@@ -11,7 +11,6 @@ tablegen(LLVM ARMGenDAGISel.inc -gen-dag-isel)
 tablegen(LLVM ARMGenFastISel.inc -gen-fast-isel)
 tablegen(LLVM ARMGenCallingConv.inc -gen-callingconv)
 tablegen(LLVM ARMGenSubtargetInfo.inc -gen-subtarget)
-tablegen(LLVM ARMGenEDInfo.inc -gen-enhanced-disassembly-info)
 tablegen(LLVM ARMGenDisassemblerTables.inc -gen-disassembler)
 add_public_tablegen_target(ARMCommonTableGen)
 
@@ -22,7 +21,6 @@ add_llvm_target(ARMCodeGen
   ARMCodeEmitter.cpp
   ARMConstantIslandPass.cpp
   ARMConstantPoolValue.cpp
-  ARMELFWriterInfo.cpp
   ARMExpandPseudoInsts.cpp
   ARMFastISel.cpp
   ARMFrameLowering.cpp
@@ -39,6 +37,7 @@ add_llvm_target(ARMCodeGen
   ARMSubtarget.cpp
   ARMTargetMachine.cpp
   ARMTargetObjectFile.cpp
+  ARMTargetTransformInfo.cpp
   MLxExpansionPass.cpp
   Thumb1FrameLowering.cpp
   Thumb1InstrInfo.cpp

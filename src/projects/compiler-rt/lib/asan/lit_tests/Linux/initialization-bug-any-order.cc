@@ -3,10 +3,10 @@
 // independently on order in which we list source files.
 
 // RUN: %clangxx_asan -m64 -O0 %s %p/../Helpers/initialization-bug-extra.cc\
-// RUN:   -mllvm -asan-initialization-order -o %t && %t 2>&1 \
+// RUN:   -fsanitize=init-order -o %t && %t 2>&1 \
 // RUN:    | %symbolize | FileCheck %s
 // RUN: %clangxx_asan -m64 -O0 %p/../Helpers/initialization-bug-extra.cc %s\
-// RUN:   -mllvm -asan-initialization-order -o %t && %t 2>&1 \
+// RUN:   -fsanitize=init-order -o %t && %t 2>&1 \
 // RUN:    | %symbolize | FileCheck %s
 
 // Do not test with optimization -- the error may be optimized away.
@@ -20,9 +20,9 @@
 extern int y;
 int __attribute__((noinline)) initX() {
   return y + 1;
-  // CHECK: {{AddressSanitizer initialization-order-fiasco}}
+  // CHECK: {{AddressSanitizer: initialization-order-fiasco}}
   // CHECK: {{READ of size .* at 0x.* thread T0}}
-  // CHECK: {{#0 0x.* in .*initX.* .*initialization-bug-any-order.cc:22}}
+  // CHECK: {{#0 0x.* in .*initX.* .*initialization-bug-any-order.cc:}}[[@LINE-3]]
   // CHECK: {{0x.* is located 0 bytes inside of global variable .*y.*}}
 }
 

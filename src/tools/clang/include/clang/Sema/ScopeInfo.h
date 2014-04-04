@@ -91,13 +91,13 @@ public:
   /// \brief Whether this function contains any indirect gotos.
   bool HasIndirectGoto;
 
-  /// A flag that is set when parsing a -dealloc method and no [super dealloc]
-  /// call was found yet.
-  bool ObjCShouldCallSuperDealloc;
+  /// \brief Whether a statement was dropped because it was invalid.
+  bool HasDroppedStmt;
 
-  /// A flag that is set when parsing a -finalize method and no [super finalize]
-  /// call was found yet.
-  bool ObjCShouldCallSuperFinalize;
+  /// A flag that is set when parsing a method that must call super's
+  /// implementation, such as \c -dealloc, \c -finalize, or any method marked
+  /// with \c __attribute__((objc_requires_super)).
+  bool ObjCShouldCallSuper;
 
   /// \brief Used to determine if errors occurred in this function or block.
   DiagnosticErrorTrap ErrorTrap;
@@ -290,9 +290,14 @@ public:
     HasIndirectGoto = true;
   }
 
+  void setHasDroppedStmt() {
+    HasDroppedStmt = true;
+  }
+
   bool NeedsScopeChecking() const {
-    return HasIndirectGoto ||
-          (HasBranchProtectedScope && HasBranchIntoScope);
+    return !HasDroppedStmt &&
+        (HasIndirectGoto ||
+          (HasBranchProtectedScope && HasBranchIntoScope));
   }
   
   FunctionScopeInfo(DiagnosticsEngine &Diag)
@@ -300,8 +305,8 @@ public:
       HasBranchProtectedScope(false),
       HasBranchIntoScope(false),
       HasIndirectGoto(false),
-      ObjCShouldCallSuperDealloc(false),
-      ObjCShouldCallSuperFinalize(false),
+      HasDroppedStmt(false),
+      ObjCShouldCallSuper(false),
       ErrorTrap(Diag) { }
 
   virtual ~FunctionScopeInfo();
@@ -309,8 +314,6 @@ public:
   /// \brief Clear out the information in this function scope, making it
   /// suitable for reuse.
   void Clear();
-
-  static bool classof(const FunctionScopeInfo *FSI) { return true; }
 };
 
 class CapturingScopeInfo : public FunctionScopeInfo {
@@ -460,7 +463,6 @@ public:
   static bool classof(const FunctionScopeInfo *FSI) { 
     return FSI->Kind == SK_Block || FSI->Kind == SK_Lambda; 
   }
-  static bool classof(const CapturingScopeInfo *BSI) { return true; }
 };
 
 /// \brief Retains information about a block that is currently being parsed.
@@ -488,7 +490,6 @@ public:
   static bool classof(const FunctionScopeInfo *FSI) { 
     return FSI->Kind == SK_Block; 
   }
-  static bool classof(const BlockScopeInfo *BSI) { return true; }
 };
 
 class LambdaScopeInfo : public CapturingScopeInfo {
@@ -519,11 +520,11 @@ public:
   bool ContainsUnexpandedParameterPack;
 
   /// \brief Variables used to index into by-copy array captures.
-  llvm::SmallVector<VarDecl *, 4> ArrayIndexVars;
+  SmallVector<VarDecl *, 4> ArrayIndexVars;
 
   /// \brief Offsets into the ArrayIndexVars array at which each capture starts
   /// its list of array index variables.
-  llvm::SmallVector<unsigned, 4> ArrayIndexStarts;
+  SmallVector<unsigned, 4> ArrayIndexStarts;
   
   LambdaScopeInfo(DiagnosticsEngine &Diag, CXXRecordDecl *Lambda,
                   CXXMethodDecl *CallOperator)
@@ -544,8 +545,6 @@ public:
   static bool classof(const FunctionScopeInfo *FSI) {
     return FSI->Kind == SK_Lambda; 
   }
-  static bool classof(const LambdaScopeInfo *BSI) { return true; }
-
 };
 
 

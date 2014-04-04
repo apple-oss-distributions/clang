@@ -16,6 +16,7 @@
 #include "MCTargetDesc/X86BaseInfo.h"
 #include "MCTargetDesc/X86FixupKinds.h"
 #include "llvm/MC/MCCodeEmitter.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrInfo.h"
@@ -51,8 +52,8 @@ public:
     return (STI.getFeatureBits() & X86::Mode64Bit) == 0;
   }
 
-  static unsigned GetX86RegNum(const MCOperand &MO) {
-    return X86_MC::getX86RegNum(MO.getReg());
+  unsigned GetX86RegNum(const MCOperand &MO) const {
+    return Ctx.getRegisterInfo().getEncodingValue(MO.getReg()) & 0x7;
   }
 
   // On regular x86, both XMM0-XMM7 and XMM8-XMM15 are encoded in the range
@@ -64,8 +65,8 @@ public:
   //  VEX.VVVV    => XMM9 => ~9
   //
   // See table 4-35 of Intel AVX Programming Reference for details.
-  static unsigned char getVEXRegisterEncoding(const MCInst &MI,
-                                              unsigned OpNum) {
+  unsigned char getVEXRegisterEncoding(const MCInst &MI,
+                                       unsigned OpNum) const {
     unsigned SrcReg = MI.getOperand(OpNum).getReg();
     unsigned SrcRegNum = GetX86RegNum(MI.getOperand(OpNum));
     if (X86II::isX86_64ExtendedReg(SrcReg))
@@ -1116,17 +1117,14 @@ EncodeInstruction(const MCInst &MI, raw_ostream &OS,
                      TSFlags, CurByte, OS, Fixups);
     CurOp += X86::AddrNumOperands;
     break;
-  case X86II::MRM_C1: case X86II::MRM_C2:
-  case X86II::MRM_C3: case X86II::MRM_C4:
-  case X86II::MRM_C8: case X86II::MRM_C9:
-  case X86II::MRM_D0: case X86II::MRM_D1:
-  case X86II::MRM_D4: case X86II::MRM_D8:
-  case X86II::MRM_D9: case X86II::MRM_DA:
-  case X86II::MRM_DB: case X86II::MRM_DC:
-  case X86II::MRM_DD: case X86II::MRM_DE:
-  case X86II::MRM_DF: case X86II::MRM_E8:
-  case X86II::MRM_F0: case X86II::MRM_F8:
-  case X86II::MRM_F9:
+  case X86II::MRM_C1: case X86II::MRM_C2: case X86II::MRM_C3:
+  case X86II::MRM_C4: case X86II::MRM_C8: case X86II::MRM_C9:
+  case X86II::MRM_D0: case X86II::MRM_D1: case X86II::MRM_D4:
+  case X86II::MRM_D5: case X86II::MRM_D6: case X86II::MRM_D8:
+  case X86II::MRM_D9: case X86II::MRM_DA: case X86II::MRM_DB:
+  case X86II::MRM_DC: case X86II::MRM_DD: case X86II::MRM_DE:
+  case X86II::MRM_DF: case X86II::MRM_E8: case X86II::MRM_F0:
+  case X86II::MRM_F8: case X86II::MRM_F9:
     EmitByte(BaseOpcode, CurByte, OS);
 
     unsigned char MRM;
@@ -1141,6 +1139,8 @@ EncodeInstruction(const MCInst &MI, raw_ostream &OS,
     case X86II::MRM_D0: MRM = 0xD0; break;
     case X86II::MRM_D1: MRM = 0xD1; break;
     case X86II::MRM_D4: MRM = 0xD4; break;
+    case X86II::MRM_D5: MRM = 0xD5; break;
+    case X86II::MRM_D6: MRM = 0xD6; break;
     case X86II::MRM_D8: MRM = 0xD8; break;
     case X86II::MRM_D9: MRM = 0xD9; break;
     case X86II::MRM_DA: MRM = 0xDA; break;

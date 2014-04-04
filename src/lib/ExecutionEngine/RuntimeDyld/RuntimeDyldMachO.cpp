@@ -12,20 +12,22 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "dyld"
-#include "llvm/ADT/OwningPtr.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/STLExtras.h"
 #include "RuntimeDyldMachO.h"
+#include "llvm/ADT/OwningPtr.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
 using namespace llvm;
 using namespace llvm::object;
 
 namespace llvm {
 
-void RuntimeDyldMachO::resolveRelocation(uint8_t *LocalAddress,
-                                         uint64_t FinalAddress,
+void RuntimeDyldMachO::resolveRelocation(const SectionEntry &Section,
+                                         uint64_t Offset,
                                          uint64_t Value,
                                          uint32_t Type,
                                          int64_t Addend) {
+  uint8_t *LocalAddress = Section.Address + Offset;
+  uint64_t FinalAddress = Section.LoadAddress + Offset;
   bool isPCRel = (Type >> 24) & 1;
   unsigned MachoType = (Type >> 28) & 0xf;
   unsigned Size = 1 << ((Type >> 25) & 3);
@@ -70,6 +72,14 @@ void RuntimeDyldMachO::resolveRelocation(uint8_t *LocalAddress,
                          MachoType,
                          Size,
                          Addend);
+  case Triple::arm64:
+    resolveARM64Relocation(LocalAddress,
+                           FinalAddress,
+                           (uintptr_t)Value,
+                           isPCRel,
+                           MachoType,
+                           Size,
+                           Addend);
     break;
   }
 }
@@ -94,6 +104,7 @@ bool RuntimeDyldMachO::resolveI386Relocation(uint8_t *LocalAddress,
       *p++ = (uint8_t)(ValueToWrite & 0xff);
       ValueToWrite >>= 8;
     }
+    return false;
   }
   case macho::RIT_Difference:
   case macho::RIT_Generic_LocalDifference:
@@ -202,6 +213,57 @@ bool RuntimeDyldMachO::resolveARMRelocation(uint8_t *LocalAddress,
   return false;
 }
 
+bool RuntimeDyldMachO::resolveARM64Relocation(uint8_t *LocalAddress,
+                                              uint64_t FinalAddress,
+                                              uint64_t Value,
+                                              bool isPCRel,
+                                              unsigned Type,
+                                              unsigned Size,
+                                              int64_t Addend) {
+  // If the relocation is PC-relative, the value to be encoded is the
+  // pointer difference.
+  if (isPCRel)
+    Value -= FinalAddress;
+
+  switch(Type) {
+  default:
+    llvm_unreachable("Invalid relocation type!");
+  case macho::RIT_ARM64_Unsigned: {
+    // Mask in the target value a byte at a time (we don't have an alignment
+    // guarantee for the target address, so this is safest).
+    uint8_t *p = (uint8_t*)LocalAddress;
+    for (unsigned i = 0; i < Size; ++i) {
+      *p++ = (uint8_t)Value;
+      Value >>= 8;
+    }
+    break;
+  }
+  case macho::RIT_ARM64_Branch26: {
+    // Mask the value into the target address. We know instructions are
+    // 32-bit aligned, so we can do it all at once.
+    uint32_t *p = (uint32_t*)LocalAddress;
+    // The low two bits of the value are not encoded.
+    Value >>= 2;
+    // Mask the value to 26 bits.
+    Value &= 0x3ffffff;
+    // Insert the value into the instruction.
+    *p = (*p & ~0x3ffffff) | Value;
+    break;
+  }
+  case macho::RIT_ARM64_Subtractor:
+  case macho::RIT_ARM64_Page21:
+  case macho::RIT_ARM64_Pageoff12:
+  case macho::RIT_ARM64_GOT_Load_Page21:
+  case macho::RIT_ARM64_GOT_Load_Pageoff12:
+  case macho::RIT_ARM64_Pointer_To_GOT:
+  case macho::RIT_ARM64_TLVP_Load_Page21:
+  case macho::RIT_ARM64_TLVP_Load_Pageoff12:
+  case macho::RIT_ARM64_Addend:
+    return Error("Relocation type not implemented yet!");
+  }
+  return false;
+}
+
 void RuntimeDyldMachO::processRelocationRef(const ObjRelocationInfo &Rel,
                                             ObjectImage &Obj,
                                             ObjSectionToIDMap &ObjSectionToID,
@@ -211,7 +273,6 @@ void RuntimeDyldMachO::processRelocationRef(const ObjRelocationInfo &Rel,
   uint32_t RelType = (uint32_t) (Rel.Type & 0xffffffffL);
   RelocationValueRef Value;
   SectionEntry &Section = Sections[Rel.SectionID];
-  uint8_t *Target = Section.Address + Rel.Offset;
 
   bool isExtern = (RelType >> 27) & 1;
   if (isExtern) {
@@ -265,7 +326,7 @@ void RuntimeDyldMachO::processRelocationRef(const ObjRelocationInfo &Rel,
     //  Look up for existing stub.
     StubMap::const_iterator i = Stubs.find(Value);
     if (i != Stubs.end())
-      resolveRelocation(Target, (uint64_t)Target,
+      resolveRelocation(Section, Rel.Offset,
                         (uint64_t)Section.Address + i->second,
                         RelType, 0);
     else {
@@ -279,7 +340,7 @@ void RuntimeDyldMachO::processRelocationRef(const ObjRelocationInfo &Rel,
         addRelocationForSymbol(RE, Value.SymbolName);
       else
         addRelocationForSection(RE, Value.SectionID);
-      resolveRelocation(Target, (uint64_t)Target,
+      resolveRelocation(Section, Rel.Offset,
                         (uint64_t)Section.Address + Section.StubOffset,
                         RelType, 0);
       Section.StubOffset += getMaxStubSize();
@@ -295,8 +356,10 @@ void RuntimeDyldMachO::processRelocationRef(const ObjRelocationInfo &Rel,
 
 
 bool RuntimeDyldMachO::isCompatibleFormat(
-        const MemoryBuffer *InputBuffer) const {
-  StringRef Magic = InputBuffer->getBuffer().slice(0, 4);
+        const ObjectBuffer *InputBuffer) const {
+  if (InputBuffer->getBufferSize() < 4)
+    return false;
+  StringRef Magic(InputBuffer->getBufferStart(), 4);
   if (Magic == "\xFE\xED\xFA\xCE") return true;
   if (Magic == "\xCE\xFA\xED\xFE") return true;
   if (Magic == "\xFE\xED\xFA\xCF") return true;

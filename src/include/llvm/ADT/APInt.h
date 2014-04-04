@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_APINT_H
-#define LLVM_APINT_H
+#ifndef LLVM_ADT_APINT_H
+#define LLVM_ADT_APINT_H
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Compiler.h"
@@ -274,7 +274,7 @@ public:
       initSlowCase(that);
   }
 
-#if LLVM_USE_RVALUE_REFERENCES
+#if LLVM_HAS_RVALUE_REFERENCES
   /// @brief Move Constructor.
   APInt(APInt&& that) : BitWidth(that.BitWidth), VAL(that.VAL) {
     that.BitWidth = 0;
@@ -601,7 +601,7 @@ public:
     return AssignSlowCase(RHS);
   }
 
-#if LLVM_USE_RVALUE_REFERENCES
+#if LLVM_HAS_RVALUE_REFERENCES
   /// @brief Move assignment operator.
   APInt& operator=(APInt&& that) {
     if (!isSingleWord())
@@ -760,7 +760,7 @@ public:
   APInt shl(unsigned shiftAmt) const {
     assert(shiftAmt <= BitWidth && "Invalid shift amount");
     if (isSingleWord()) {
-      if (shiftAmt == BitWidth)
+      if (shiftAmt >= BitWidth)
         return APInt(BitWidth, 0); // avoid undefined shift results
       return APInt(BitWidth, VAL << shiftAmt);
     }
@@ -1191,7 +1191,8 @@ public:
   /// APInt. This is used in conjunction with getActiveData to extract the raw
   /// value of the APInt.
   unsigned getActiveWords() const {
-    return whichWord(getActiveBits()-1) + 1;
+    unsigned numActiveBits = getActiveBits();
+    return numActiveBits ? whichWord(numActiveBits - 1) + 1 : 1;
   }
 
   /// Computes the minimum bit width for this APInt while considering it to be
@@ -1780,6 +1781,9 @@ inline APInt Not(const APInt& APIVal) {
 
 } // End of APIntOps namespace
 
+  // See friend declaration above. This additional declaration is required in
+  // order to compile LLVM with IBM xlC compiler.
+  hash_code hash_value(const APInt &Arg);
 } // End of llvm namespace
 
 #endif

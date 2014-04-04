@@ -15,9 +15,8 @@
 #ifndef CLANG_CODEGEN_CXXABI_H
 #define CLANG_CODEGEN_CXXABI_H
 
-#include "clang/Basic/LLVM.h"
-
 #include "CodeGenFunction.h"
+#include "clang/Basic/LLVM.h"
 
 namespace llvm {
   class Constant;
@@ -82,6 +81,10 @@ public:
   MangleContext &getMangleContext() {
     return *MangleCtx;
   }
+
+  /// Returns true if the given instance method is one of the
+  /// kinds that the ABI says returns 'this'.
+  virtual bool HasThisReturn(GlobalDecl GD) const { return false; }
 
   /// Find the LLVM type used to represent the given member pointer
   /// type.
@@ -205,6 +208,9 @@ public:
   /// Gets the pure virtual member call function.
   virtual StringRef GetPureVirtualCallName() = 0;
 
+  /// Gets the deleted virtual member call name.
+  virtual StringRef GetDeletedVirtualCallName() = 0;
+
   /**************************** Array cookies ******************************/
 
   /// Returns the extra size required in order to store the array
@@ -290,18 +296,35 @@ public:
   ///
   /// \param dtor - a function taking a single pointer argument
   /// \param addr - a pointer to pass to the destructor function.
-  virtual void registerGlobalDtor(CodeGenFunction &CGF, llvm::Constant *dtor,
-                                  llvm::Constant *addr);
+  virtual void registerGlobalDtor(CodeGenFunction &CGF, const VarDecl &D,
+                                  llvm::Constant *dtor, llvm::Constant *addr);
 
-  /***************************** Virtual Tables *******************************/
+  /*************************** thread_local initialization ********************/
 
-  /// Generates and emits the virtual tables for a class.
-  virtual void EmitVTables(const CXXRecordDecl *Class) = 0;
+  /// Emits ABI-required functions necessary to initialize thread_local
+  /// variables in this translation unit.
+  ///
+  /// \param Decls The thread_local declarations in this translation unit.
+  /// \param InitFunc If this translation unit contains any non-constant
+  ///        initialization or non-trivial destruction for thread_local
+  ///        variables, a function to perform the initialization. Otherwise, 0.
+  virtual void EmitThreadLocalInitFuncs(
+      llvm::ArrayRef<std::pair<const VarDecl *, llvm::GlobalVariable *> > Decls,
+      llvm::Function *InitFunc);
+
+  /// Emit a reference to a non-local thread_local variable (including
+  /// triggering the initialization of all thread_local variables in its
+  /// translation unit).
+  virtual LValue EmitThreadLocalDeclRefExpr(CodeGenFunction &CGF,
+                                            const DeclRefExpr *DRE);
 };
 
-/// Creates an instance of a C++ ABI class.
-CGCXXABI *CreateARMCXXABI(CodeGenModule &CGM);
+// Create an instance of a C++ ABI class:
+
+/// Creates an Itanium-family ABI.
 CGCXXABI *CreateItaniumCXXABI(CodeGenModule &CGM);
+
+/// Creates a Microsoft-family ABI.
 CGCXXABI *CreateMicrosoftCXXABI(CodeGenModule &CGM);
 
 }

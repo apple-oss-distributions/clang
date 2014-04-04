@@ -15,9 +15,9 @@
 #define ARMSUBTARGET_H
 
 #include "MCTargetDesc/ARMMCTargetDesc.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
-#include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/MC/MCInstrItineraries.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 #include <string>
 
 #define GET_SUBTARGETINFO_HEADER
@@ -30,7 +30,7 @@ class StringRef;
 class ARMSubtarget : public ARMGenSubtargetInfo {
 protected:
   enum ARMProcFamilyEnum {
-    Others, CortexA8, CortexA9, CortexA15, Swift
+    Others, CortexA5, CortexA8, CortexA9, CortexA15, CortexR5, Swift
   };
 
   /// ARMProcFamily - ARM processor family: Cortex-A8, Cortex-A9, and others.
@@ -44,6 +44,7 @@ protected:
   bool HasV6Ops;
   bool HasV6T2Ops;
   bool HasV7Ops;
+  bool HasV8Ops;
 
   /// HasVFPv2, HasVFPv3, HasVFPv4, HasNEON - Specify what
   /// floating point ISAs are supported.
@@ -82,6 +83,10 @@ protected:
   /// IsMClass - True if the subtarget belongs to the 'M' profile of CPUs -
   /// v6m, v7m for example.
   bool IsMClass;
+
+  /// HasVFPScalarFP - True if the subtarget supports the ARMv8 VFP Scalar FP
+  /// instructions.
+  bool HasVFPScalarFP;
 
   /// NoARM - True if subtarget does not support ARM mode execution.
   bool NoARM;
@@ -132,17 +137,25 @@ protected:
   /// CPSR setting instruction.
   bool AvoidCPSRPartialUpdate;
 
+  /// AvoidMOVsShifterOperand - If true, codegen should avoid using flag setting
+  /// movs with shifter operand (i.e. asr, lsl, lsr).
+  bool AvoidMOVsShifterOperand;
+
   /// HasRAS - Some processors perform return stack prediction. CodeGen should
   /// avoid issue "normal" call instructions to callees which do not return.
   bool HasRAS;
 
   /// HasMPExtension - True if the subtarget supports Multiprocessing
-  /// extension (ARMv7 only).
+  /// extension (ARMv7+ only).
   bool HasMPExtension;
 
   /// FPOnlySP - If true, the floating point unit only supports single
   /// precision.
   bool FPOnlySP;
+
+  /// AvoidRegSoReg - If true, then register-shifted register operations are
+  /// deprecated and should be avoided.
+  bool AvoidRegSoReg;
 
   /// AllowsUnalignedMem - If true, the subtarget allows unaligned memory
   /// accesses for some types.  For details, see
@@ -205,6 +218,7 @@ protected:
   bool hasV6T2Ops() const { return HasV6T2Ops; }
   bool hasV7Ops()   const { return HasV7Ops;  }
 
+  bool isCortexA5() const { return ARMProcFamily == CortexA5; }
   bool isCortexA7() const { return CPUString == "cortex-a7"; }
   bool isCortexA8() const { return ARMProcFamily == CortexA8; }
   bool isCortexA9() const { return ARMProcFamily == CortexA9; }
@@ -212,6 +226,7 @@ protected:
   bool isSwift()    const { return ARMProcFamily == Swift; }
   bool isCortexM3() const { return CPUString == "cortex-m3"; }
   bool isLikeA9() const { return isCortexA9() || isCortexA15(); }
+  bool isCortexR5() const { return ARMProcFamily == CortexR5; }
 
   bool hasARMOps() const { return !NoARM; }
 
@@ -231,8 +246,10 @@ protected:
   bool hasVMLxForwarding() const { return HasVMLxForwarding; }
   bool isFPBrccSlow() const { return SlowFPBrcc; }
   bool isFPOnlySP() const { return FPOnlySP; }
+  bool avoidRegSoReg() const { return AvoidRegSoReg; }
   bool prefers32BitThumb() const { return Pref32BitThumb; }
   bool avoidCPSRPartialUpdate() const { return AvoidCPSRPartialUpdate; }
+  bool avoidMOVsShifterOperand() const { return AvoidMOVsShifterOperand; }
   bool hasRAS() const { return HasRAS; }
   bool hasMPExtension() const { return HasMPExtension; }
   bool hasThumb2DSP() const { return Thumb2DSP; }
@@ -245,7 +262,7 @@ protected:
   bool isTargetIOS() const { return TargetTriple.getOS() == Triple::IOS; }
   bool isTargetDarwin() const { return TargetTriple.isOSDarwin(); }
   bool isTargetNaCl() const {
-    return TargetTriple.getOS() == Triple::NativeClient;
+    return TargetTriple.getOS() == Triple::NaCl;
   }
   bool isTargetELF() const { return !isTargetDarwin(); }
 
@@ -270,6 +287,10 @@ protected:
 
 
   unsigned getMispredictionPenalty() const;
+  
+  /// This function returns true if the target has sincos() routine in its
+  /// compiler runtime or math libraries.
+  bool hasSinCos() const;
 
   /// enablePostRAScheduler - True at 'More' optimization.
   bool enablePostRAScheduler(CodeGenOpt::Level OptLevel,

@@ -13,12 +13,16 @@ SubDirs :=
 # Add arch specific optimized implementations.
 SubDirs += i386 ppc x86_64 arm
 
+# Add ARM64 dir.
+SubDirs += arm64
+
 # Add other submodules.
 SubDirs += asan
 SubDirs += interception
 SubDirs += profile
 SubDirs += sanitizer_common
 SubDirs += tsan
+SubDirs += ubsan
 
 # FIXME: We don't currently support building an atomic library, and as it must
 # be a separate library from the runtime library, we need to remove its source

@@ -13,16 +13,16 @@
 
 #define DEBUG_TYPE "interpreter"
 #include "Interpreter.h"
-#include "llvm/Constants.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/Instructions.h"
-#include "llvm/CodeGen/IntrinsicLowering.h"
-#include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/IntrinsicLowering.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/Support/MathExtras.h"
 #include <algorithm>
 #include <cmath>
@@ -1169,10 +1169,12 @@ void Interpreter::visitVAArgInst(VAArgInst &I) {
                       .VarArgs[VAList.UIntPairVal.second];
   Type *Ty = I.getType();
   switch (Ty->getTypeID()) {
-    case Type::IntegerTyID: Dest.IntVal = Src.IntVal;
-    IMPLEMENT_VAARG(Pointer);
-    IMPLEMENT_VAARG(Float);
-    IMPLEMENT_VAARG(Double);
+  case Type::IntegerTyID:
+    Dest.IntVal = Src.IntVal;
+    break;
+  IMPLEMENT_VAARG(Pointer);
+  IMPLEMENT_VAARG(Float);
+  IMPLEMENT_VAARG(Double);
   default:
     dbgs() << "Unhandled dest type for vaarg instruction: " << *Ty << "\n";
     llvm_unreachable(0);

@@ -10,11 +10,11 @@
 #include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Config/config.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Mutex.h"
 #include "llvm/Support/ThreadLocal.h"
-#include "llvm/Support/ErrorHandling.h"
-#include <setjmp.h>
 #include <cstdio>
+#include <setjmp.h>
 using namespace llvm;
 
 namespace {
@@ -28,15 +28,22 @@ struct CrashRecoveryContextImpl {
   std::string Backtrace;
   ::jmp_buf JumpBuffer;
   volatile unsigned Failed : 1;
+  unsigned SwitchedThread : 1;
 
 public:
   CrashRecoveryContextImpl(CrashRecoveryContext *CRC) : CRC(CRC),
-                                                        Failed(false) {
+                                                        Failed(false),
+                                                        SwitchedThread(false) {
     CurrentContext.set(this);
   }
   ~CrashRecoveryContextImpl() {
-    CurrentContext.erase();
+    if (!SwitchedThread)
+      CurrentContext.erase();
   }
+
+  /// \brief Called when the separate crash-recovery thread was finished, to
+  /// indicate that we don't need to clear the thread-local CurrentContext.
+  void setSwitchedThread() { SwitchedThread = true; }
 
   void HandleCrash() {
     // Eliminate the current context entry, to avoid re-entering in case the
@@ -342,5 +349,7 @@ bool CrashRecoveryContext::RunSafelyOnThread(void (*Fn)(void*), void *UserData,
                                              unsigned RequestedStackSize) {
   RunSafelyOnThreadInfo Info = { Fn, UserData, this, false };
   llvm_execute_on_thread(RunSafelyOnThread_Dispatch, &Info, RequestedStackSize);
+  if (CrashRecoveryContextImpl *CRC = (CrashRecoveryContextImpl *)Impl)
+    CRC->setSwitchedThread();
   return Info.Result;
 }

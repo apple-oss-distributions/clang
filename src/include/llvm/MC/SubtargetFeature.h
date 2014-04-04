@@ -18,9 +18,9 @@
 #ifndef LLVM_MC_SUBTARGETFEATURE_H
 #define LLVM_MC_SUBTARGETFEATURE_H
 
-#include <vector>
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/DataTypes.h"
+#include <vector>
 
 namespace llvm {
   class raw_ostream;
@@ -94,10 +94,6 @@ public:
                           size_t CPUTableSize,
                           const SubtargetFeatureKV *FeatureTable,
                           size_t FeatureTableSize);
-
-  /// Get scheduling itinerary of a CPU.
-  const void *getItinerary(const StringRef CPU,
-                           const SubtargetInfoKV *Table, size_t TableSize);
 
   /// Print feature string.
   void print(raw_ostream &OS) const;

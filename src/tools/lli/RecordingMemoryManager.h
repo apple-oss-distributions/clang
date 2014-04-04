@@ -33,7 +33,7 @@ private:
 
 public:
   RecordingMemoryManager() {}
-  virtual ~RecordingMemoryManager() {}
+  virtual ~RecordingMemoryManager();
 
   typedef SmallVectorImpl<Allocation>::const_iterator const_data_iterator;
   typedef SmallVectorImpl<Allocation>::const_iterator const_code_iterator;
@@ -47,10 +47,13 @@ public:
                                        unsigned SectionID);
 
   uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
-                                       unsigned SectionID);
+                                       unsigned SectionID, bool IsReadOnly);
 
   void *getPointerToNamedFunction(const std::string &Name,
                                   bool AbortOnFailure = true);
+
+  bool applyPermissions(std::string *ErrMsg) { return false; }
+
   // The following obsolete JITMemoryManager calls are stubbed out for
   // this model.
   void setMemoryWritable();

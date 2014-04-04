@@ -12,12 +12,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_DIBUILDER_H
-#define LLVM_ANALYSIS_DIBUILDER_H
+#ifndef LLVM_DIBUILDER_H
+#define LLVM_DIBUILDER_H
 
-#include "llvm/Support/DataTypes.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/DataTypes.h"
 
 namespace llvm {
   class BasicBlock;
@@ -126,6 +126,11 @@ namespace llvm {
                              uint64_t AlignInBits = 0, 
                              StringRef Name = StringRef());
 
+    /// \brief Create debugging information entry for a pointer to member.
+    /// @param PointeeTy Type pointed to by this pointer.
+    /// @param Class Type for which this pointer points to members of.
+    DIType createMemberPointerType(DIType PointeeTy, DIType Class);
+
     /// createReferenceType - Create debugging information entry for a c++
     /// style reference or rvalue reference type.
     DIType createReferenceType(unsigned Tag, DIType RTy);
@@ -166,6 +171,19 @@ namespace llvm {
                             unsigned LineNo, uint64_t SizeInBits, 
                             uint64_t AlignInBits, uint64_t OffsetInBits, 
                             unsigned Flags, DIType Ty);
+
+    /// createStaticMemberType - Create debugging information entry for a
+    /// C++ static data member.
+    /// @param Scope      Member scope.
+    /// @param Name       Member name.
+    /// @param File       File where this member is declared.
+    /// @param LineNo     Line number.
+    /// @param Ty         Type of the static member.
+    /// @param Flags      Flags to encode member attribute, e.g. private.
+    /// @param Val        Const initializer of the member.
+    DIType createStaticMemberType(DIDescriptor Scope, StringRef Name,
+                                  DIFile File, unsigned LineNo, DIType Ty,
+                                  unsigned Flags, llvm::Value *Val);
 
     /// createObjCIVar - Create debugging information entry for Objective-C
     /// instance variable.
@@ -371,7 +389,7 @@ namespace llvm {
 
     /// getOrCreateSubrange - Create a descriptor for a value range.  This
     /// implicitly uniques the values returned.
-    DISubrange getOrCreateSubrange(int64_t Lo, int64_t Hi);
+    DISubrange getOrCreateSubrange(int64_t Lo, int64_t Count);
 
     /// createGlobalVariable - Create a new descriptor for the specified global.
     /// @param Name        Name of the variable.
@@ -397,10 +415,12 @@ namespace llvm {
     /// @param isLocalToUnit Boolean flag indicate whether this variable is
     ///                      externally visible or not.
     /// @param Val         llvm::Value of the variable.
+    /// @param Decl        Reference to the corresponding declaration.
     DIGlobalVariable
     createStaticVariable(DIDescriptor Context, StringRef Name, 
                          StringRef LinkageName, DIFile File, unsigned LineNo, 
-                         DIType Ty, bool isLocalToUnit, llvm::Value *Val);
+                         DIType Ty, bool isLocalToUnit, llvm::Value *Val,
+                         MDNode *Decl = NULL);
 
 
     /// createLocalVariable - Create a new descriptor for the specified 

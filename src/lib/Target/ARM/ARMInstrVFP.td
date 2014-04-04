@@ -464,6 +464,185 @@ def VCVTTSH: ASuI<0b11101, 0b11, 0b0011, 0b11, 0, (outs SPR:$Sd), (ins SPR:$Sm),
                  /* FIXME */ IIC_fpCVTHS, "vcvtt", ".f16.f32\t$Sd, $Sm",
                  [/* For disassembly only; pattern left blank */]>;
 
+// Between half-precision and double-precision.
+class BaseVCVTHxD<string opc, string extAndOps, bit top, bit convert_from_half,
+                  dag oops, dag iops>
+      : VFPAI<oops, iops, VFPUnaryFrm, IIC_fpCVTSD, opc, extAndOps, []>,
+      Requires<[HasV8]> {
+  let Inst{27-23} = 0b11101;
+  let Inst{21-17} = 0b11001;
+  let Inst{16}    = convert_from_half;
+  let Inst{11-9}  = 0b101;
+  let Inst{8}     = 0b1;     // uses_double
+  let Inst{7}     = top;
+  let Inst{6}     = 0b1;
+  let Inst{4}     = 0;
+}
+class BaseVCVTDH<string opc, string extAndOps, bit top>
+      : BaseVCVTHxD<opc, extAndOps, top, 0b1, (outs DPR:$Dd), (ins SPR:$Sm)> {
+  // Instruction operands.
+  bits<5> Dd;
+  bits<5> Sm;
+
+  // Encode instruction operands. This encoding is used for convert_from_half
+  let Inst{3-0}   = Sm{4-1};
+  let Inst{5}     = Sm{0};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{22}    = Dd{4};
+}
+class BaseVCVTHD<string opc, string extAndOps, bit top>
+      : BaseVCVTHxD<opc, extAndOps, top, 0b0, (outs SPR:$Sd), (ins DPR:$Dm)> {
+  // Instruction operands.
+  bits<5> Sd;
+  bits<5> Dm;
+
+  // Encode instruction operands. This encoding is used for !convert_from_half
+  let Inst{3-0}   = Dm{3-0};
+  let Inst{5}     = Dm{4};
+  let Inst{15-12} = Sd{4-1};
+  let Inst{22}    = Sd{0};
+}
+def VCVTTDH  : BaseVCVTDH<"vcvtt", ".f64.f16\t$Dd, $Sm", 0b1>;
+def VCVTBDH  : BaseVCVTDH<"vcvtb", ".f64.f16\t$Dd, $Sm", 0b0>;
+def VCVTTHD  : BaseVCVTHD<"vcvtt", ".f16.f64\t$Sd, $Dm", 0b1>;
+def VCVTBHD  : BaseVCVTHD<"vcvtb", ".f16.f64\t$Sd, $Dm", 0b0>;
+
+// VFP Floating-point Round to Integral Floating-point --- Round to Zero and
+// Round using FPSCR
+class BaseVFPVRINT<string opc, bit op, bit op2, string extAndOps, bit sz,
+                dag oops, dag iops>
+      : VFPAI<oops, iops, VFPUnaryFrm, IIC_fpCVTSD, opc, extAndOps, []>,
+      Requires<[HasV8]> {
+  let Inst{27-23} = 0b11101;
+  let Inst{21-20} = 0b11;
+  let Inst{19-17} = 0b011;
+  let Inst{16} = op;
+  let Inst{11-9} = 0b101;
+  let Inst{8} = sz;
+  let Inst{7} = op2;
+  let Inst{6} = 1;
+  let Inst{4} = 0;
+}
+class VRINT32<string opc, bit op, bit op2>
+    : BaseVFPVRINT<opc, op, op2, ".f32.f32\t$Sd,$Sm", 0b0, (outs SPR:$Sd),
+                (ins SPR:$Sm)> {
+  bits<5> Sd;
+  bits<5> Sm;
+  let Inst{22} = Sd{0};
+  let Inst{15-12} = Sd{4-1};
+  let Inst{5} = Sm{0};
+  let Inst{3-0} = Sm{4-1};
+}
+class VRINT64<string opc, bit op, bit op2>
+    : BaseVFPVRINT<opc, op, op2, ".f64.f64\t$Dd,$Dm", 0b1, (outs DPR:$Dd), 
+                (ins DPR:$Dm)> {
+  bits<5> Dd;
+  bits<5> Dm;
+  let Inst{22} = Dd{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{5} = Dm{4};
+  let Inst{3-0} = Dm{3-0};
+}
+multiclass VRINT<string opc, bit op, bit op2> {
+  def F32 : VRINT32<opc, op, op2>;
+  def F64 : VRINT64<opc, op, op2>;
+}
+defm VRINTZ : VRINT<"vrintz", 0b0, 0b1>;
+defm VRINTR : VRINT<"vrintr", 0b0, 0b0>;
+defm VRINTX : VRINT<"vrintx", 0b1, 0b0>;
+
+// VRINT without conditional
+class BaseVRINTnoCond<string opc, bits<2> RM, string extAndOps, bit sz, 
+                      dag oops, dag iops>
+      : AInoP<oops, iops, MiscFrm, NoItinerary, opc, extAndOps, []>,
+      Requires<[HasV8]> {
+  let Inst{31-28} = 0b1111;
+  let Inst{27-23} = 0b11101;
+  let Inst{21-20} = 0b11;
+  let Inst{19-18} = 0b10;
+  let Inst{17-16} = RM;
+  let Inst{11-9} = 0b101;
+  let Inst{8} = sz;
+  let Inst{7} = 0b0;
+  let Inst{6} = 0b1;
+  let Inst{4} = 0b0;
+}
+class VRINT32noCond<string opc, bits<2> RM>
+    : BaseVRINTnoCond<opc, RM, ".f32.f32\t$Sd,$Sm", 0b0, (outs SPR:$Sd),
+                     (ins SPR:$Sm)> {
+  bits<5> Sd;
+  bits<5> Sm;
+  let Inst{22} = Sd{0};
+  let Inst{15-12} = Sd{4-1};
+  let Inst{5} = Sm{0};
+  let Inst{3-0} = Sm{4-1};
+}
+class VRINT64noCond<string opc, bits<2> RM>
+    : BaseVRINTnoCond<opc, RM, ".f64.f64\t$Dd,$Dm", 0b1, (outs DPR:$Dd),
+                      (ins DPR:$Dm)> {
+  bits<5> Dd;
+  bits<5> Dm;
+  let Inst{22} = Dd{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{5} = Dm{4};
+  let Inst{3-0} = Dm{3-0};
+}
+multiclass VRINTnoCond<string opc, bits<2> RM> {
+  def F32 : VRINT32noCond<opc, RM>;
+  def F64 : VRINT64noCond<opc, RM>;
+}
+defm VRINTA : VRINTnoCond<"vrinta", 0b00>;
+defm VRINTN : VRINTnoCond<"vrintn", 0b01>;
+defm VRINTP : VRINTnoCond<"vrintp", 0b10>;
+defm VRINTM : VRINTnoCond<"vrintm", 0b11>;
+
+// SIMD Floating-point Round
+class BASEFRINTSIMD<string opc, bits<3> op, string extAndOps, bit Q, dag oops,
+                    dag iops>
+      : AInoP<oops, iops, MiscFrm, NoItinerary, opc, extAndOps, []>,
+      Requires<[HasV8]> {
+  let Inst{31-28} = 0b1111;
+  let Inst{27-23} = 0b00111;
+  let Inst{21-20} = 0b11;
+  let Inst{19-18} = 0b10;
+  let Inst{17-16} = 0b10;
+  let Inst{11} = 0b0;
+  let Inst{10} = 0b1;
+  let Inst{9-7} = op;
+  let Inst{6} = Q;
+  let Inst{4} = 0b0;
+}
+class VRINTSIMDQ<string opc, bits<3> op>
+  : BASEFRINTSIMD<opc, op, ".f32.f32\t$Qd, $Qm", 0b1, (outs QPR:$Qd),
+                  (ins QPR:$Qm)> {
+  bits<5> Qd;
+  bits<5> Qm;
+  let Inst{22} = Qd{4};
+  let Inst{15-12} = Qd{3-0};
+  let Inst{5} = Qm{4};
+  let Inst{3-0} = Qm{3-0};
+}
+class VRINTSIMDD<string opc, bits<3> op> 
+  : BASEFRINTSIMD<opc, op, ".f32.f32\t$Dd, $Dm", 0b0, (outs DPR:$Dd),
+                  (ins DPR:$Dm)> {
+  bits<5> Dd;
+  bits<5> Dm;
+  let Inst{22} = Dd{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{5} = Dm{4};
+  let Inst{3-0} = Dm{3-0};
+}
+multiclass VRINT_SIMD<string opc, bits<3> op> {
+  def Q : VRINTSIMDQ<opc, op>;
+  def D : VRINTSIMDD<opc, op>;
+}
+defm VRINT_SIMDN : VRINT_SIMD<"vrintn", 0b000>;
+defm VRINT_SIMDX : VRINT_SIMD<"vrintx", 0b001>;
+defm VRINT_SIMDA : VRINT_SIMD<"vrinta", 0b010>;
+defm VRINT_SIMDZ : VRINT_SIMD<"vrintz", 0b011>;
+defm VRINT_SIMDM : VRINT_SIMD<"vrintm", 0b101>;
+defm VRINT_SIMDP : VRINT_SIMD<"vrintp", 0b111>;
+
 def VNEGD  : ADuI<0b11101, 0b11, 0b0001, 0b01, 0,
                   (outs DPR:$Dd), (ins DPR:$Dm),
                   IIC_fpUNA64, "vneg", ".f64\t$Dd, $Dm",
@@ -1069,6 +1248,258 @@ def : Pat<(fsub_mlx (fmul_su DPR:$a, (f64 DPR:$b)), DPR:$dstin),
 def : Pat<(fsub_mlx (fmul_su SPR:$a, SPR:$b), SPR:$dstin),
           (VNMLSS SPR:$dstin, SPR:$a, SPR:$b)>,
           Requires<[HasVFP2,DontUseNEONForFP,UseFPVMLx,DontUseFusedMAC]>;
+
+//===----------------------------------------------------------------------===//
+// ARMv8 VFP Scalar Floating-point
+//
+def VSELCondCodeOperand : AsmOperandClass { 
+  let Name = "VSELCondCode"; 
+  let DiagnosticType = "VSELcond";
+}
+def vsel_pred : PredicateOperand<OtherVT, (ops i32imm, i32imm),
+                                     (ops (i32 14), (i32 zero_reg))> {
+  let PrintMethod = "printPredicateOperand";
+  let ParserMatchClass = VSELCondCodeOperand;
+  let EncoderMethod = "getVSELcondValue";
+  let DecoderMethod = "DecodeVSELPredicateOperand";
+}
+
+// Floating-point Selection: vsel<fc>
+class BaseVSEL<string asm, bit sz, dag oops, dag iops>
+      : InstARM<AddrModeNone, 4, IndexModeNone, MiscFrm, GenericDomain, "",
+                NoItinerary>,
+      Requires<[HasV8]> {
+  let OutOperandList = oops;
+  let InOperandList = !con(iops, (ins vsel_pred:$p));
+  bits<2> p;
+  let AsmString = !strconcat("vsel", "${p}", asm);
+  let Pattern = [];
+  list<Predicate> Predicates = [IsARM];
+  let Inst{31-28} = 0b1111;
+  let Inst{27-23} = 0b11100;
+  let Inst{21-20} = p;
+  let Inst{11-9} = 0b101;
+  let Inst{8} = sz;
+  let Inst{6} = 0;
+  let Inst{4} = 0;
+}
+def VSEL32 
+    : BaseVSEL<".f32\t$Sd,$Sn,$Sm", 0b0, (outs SPR:$Sd), 
+               (ins SPR:$Sn, SPR:$Sm)> {
+  bits<5> Sd;
+  bits<5> Sn;
+  bits<5> Sm;
+  let Inst{22} = Sd{0};
+  let Inst{19-16} = Sn{4-1};
+  let Inst{15-12} = Sd{4-1};
+  let Inst{7} = Sn{0};
+  let Inst{5} = Sm{0};
+  let Inst{3-0} = Sm{4-1};
+}
+def VSEL64
+    : BaseVSEL<".f64\t$Dd,$Dn,$Dm", 0b1, (outs DPR:$Dd),
+               (ins DPR:$Dn, DPR:$Dm)> {
+  bits<5> Dd;
+  bits<5> Dn;
+  bits<5> Dm;
+  let Inst{22} = Dd{4};
+  let Inst{19-16} = Dn{3-0};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{7} = Dn{4};
+  let Inst{5} = Dm{4};
+  let Inst{3-0} = Dm{3-0};
+}
+
+// VFP vmax and vmin
+def VMAXNM64 : ADbIv8A32const<0b11101, 0b00, 0b0, 0b0,
+                     (outs DPR:$Dd), (ins DPR:$Dn, DPR:$Dm),
+                     // FIXME: need a FP conditional move itinerary
+                     NoItinerary,
+                     "vmaxnm", ".f64\t$Dd, $Dn, $Dm",
+                []>, Requires<[HasV8]>;
+def VMAXNM32 : ASbIv8A32const<0b11101, 0b00, 0b0, 0b0,
+                     (outs SPR:$Sd), (ins SPR:$Sn, SPR:$Sm),
+                     // FIXME: need a FP conditional move itinerary
+                     NoItinerary,
+                     "vmaxnm", ".f32\t$Sd, $Sn, $Sm",
+                []>, Requires<[HasV8]>;
+
+def VMINNM64 : ADbIv8A32const<0b11101, 0b00, 0b1, 0b0,
+                     (outs DPR:$Dd), (ins DPR:$Dn, DPR:$Dm),
+                     // FIXME: need a FP conditional move itinerary
+                     NoItinerary,
+                     "vminnm", ".f64\t$Dd, $Dn, $Dm",
+                []>, Requires<[HasV8]>;
+def VMINNM32 : ASbIv8A32const<0b11101, 0b00, 0b1, 0b0,
+                     (outs SPR:$Sd), (ins SPR:$Sn, SPR:$Sm),
+                     // FIXME: need a FP conditional move itinerary
+                     NoItinerary,
+                     "vminnm", ".f32\t$Sd, $Sn, $Sm",
+                []>, Requires<[HasV8]>;
+
+// SIMD vmax and vmin
+// ARMv8 A32, Quad, binary, const
+class BaseSIMDV8<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
+                dag iops, string opc, string asm>
+      : VFPV8A32const<oops, iops, AddrModeNone, 4, IndexModeNone, VFPBinaryFrm, 
+                NoItinerary, opc, asm, "", []>, Requires<[HasV8]> {
+  let Inst{27-23} = opcod1;
+  let Inst{21-20} = opcod2;
+  let Inst{11-8}  = 0b1111;
+  let Inst{6}     = op6;
+  let Inst{4}     = op4;
+}
+
+// ARMv8 A32, Quad, binary, const
+class SIMDV8Q<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
+              dag iops, string opc, string asm>
+      : BaseSIMDV8<opcod1, opcod2, op6, op4, oops, iops, opc, asm> {
+  // Instruction operands.
+  bits<5> Qd;
+  bits<5> Qn;
+  bits<5> Qm;
+
+  // Encode instruction operands.
+  let Inst{3-0}   = Qm{3-0};
+  let Inst{5}     = Qm{4};
+  let Inst{19-16} = Qn{3-0};
+  let Inst{7}     = Qn{4};
+  let Inst{15-12} = Qd{3-0};
+  let Inst{22}    = Qd{4};
+}
+
+class SIMDV8D<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
+              dag iops, string opc, string asm>
+      : BaseSIMDV8<opcod1, opcod2, op6, op4, oops, iops, opc, asm> {
+  // Instruction operands.
+  bits<5> Dd;
+  bits<5> Dn;
+  bits<5> Dm;
+
+  // Encode instruction operands.
+  let Inst{3-0}   = Dm{3-0};
+  let Inst{5}     = Dm{4};
+  let Inst{19-16} = Dn{3-0};
+  let Inst{7}     = Dn{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{22}    = Dd{4};
+}
+
+def VMAXNMV32q : SIMDV8Q<0b11110, 0b00, 0b1, 0b1, (outs QPR:$Qd),
+                         (ins QPR:$Qn, QPR:$Qm), "vmaxnm", 
+                         ".f32\t$Qd, $Qn, $Qm">;
+def VMINNMV32q : SIMDV8Q<0b11110, 0b10, 0b1, 0b1, (outs QPR:$Qd), 
+                         (ins QPR:$Qn, QPR:$Qm), "vminnm", 
+                         ".f32\t$Qd, $Qn, $Qm">;
+def VMAXNMV32d : SIMDV8D<0b11110, 0b00, 0b0, 0b1, (outs DPR:$Dd),
+                         (ins DPR:$Dn, DPR:$Dm), "vmaxnm", 
+                         ".f32\t$Dd, $Dn, $Dm">;
+def VMINNMV32d : SIMDV8D<0b11110, 0b10, 0b0, 0b1, (outs DPR:$Dd), 
+                         (ins DPR:$Dn, DPR:$Dm), "vminnm",
+                         ".f32\t$Dd, $Dn, $Dm">;
+
+// Super class for  VFP VCVTs.  Bits for encoding registers are handled in
+// subclasses.
+class CommonVCVT_VFP<dag oops, dag iops, string rndMode, string ext, bits<2> RM,
+                      bits<1> isDouble, bits<1> isSigned>
+      : AInoP<oops, iops, MiscFrm, NoItinerary,
+           !strconcat("vcvt", rndMode), ext, []>, 
+      Requires<[HasV8]> {
+  bits<5> Sd;
+  let Inst{31-28} = 0b1111;
+  let Inst{27-23} = 0b11101;
+  let Inst{22} = Sd{4};
+  let Inst{21-20} = 0b11;
+  let Inst{19-18} = 0b11;
+  let Inst{17-16} = RM;
+  let Inst{15-12} = Sd{3-0};
+  let Inst{11-9} = 0b101;
+  let Inst{8} = isDouble;
+  let Inst{7} = isSigned;
+  let Inst{6} = 0b1;
+  let Inst{4} = 0b0;
+}
+class BaseVCVTMultiSD<string rndMode, string ext, bits<2> RM, bits<1> isSigned>
+      : CommonVCVT_VFP<(outs SPR:$Sd), (ins DPR:$Dm), rndMode,
+                       !strconcat(ext, "\t$Sd, $Dm"), RM, 0b1, isSigned> {
+  bits<5> Dm;
+  let Inst{5} = Dm{4};
+  let Inst{3-0} = Dm{3-0};
+}
+class BaseVCVTMultiSS<string rndMode, string ext, bits<2> RM, bits<1> isSigned>
+      : CommonVCVT_VFP<(outs SPR:$Sd), (ins SPR:$Sm), rndMode,
+                       !strconcat(ext, "\t$Sd, $Sm"), RM, 0b0, isSigned> {
+  bits<5> Sm;
+  let Inst{5} = Sm{4};
+  let Inst{3-0} = Sm{3-0};
+}
+multiclass VCVTMulti<string rndMode, bits<2> RM> {
+    def S32F64 : BaseVCVTMultiSD<rndMode, ".s32.f64", RM, 0b1>;
+    def S32F32 : BaseVCVTMultiSS<rndMode, ".s32.f32", RM, 0b1>;
+    def U32F64 : BaseVCVTMultiSD<rndMode, ".u32.f64", RM, 0b0>;
+    def U32F32 : BaseVCVTMultiSS<rndMode, ".u32.f32", RM, 0b0>;
+}
+defm VCVTA : VCVTMulti<"a", 0b00>;
+defm VCVTN : VCVTMulti<"n", 0b01>;
+defm VCVTP : VCVTMulti<"p", 0b10>;
+defm VCVTM : VCVTMulti<"m", 0b11>;
+
+// SIMD vcvt
+// 31-28: 0b1111 27-23: 0b11111 22: D 21-20: 0b11 19-18: size 17-16: 0b11
+// 15-12: Vd 11: 0b0 10: 0b0 9-8: RM 7: op 6: Q 5: M 4: 0b0 3-0: Vm
+// VCVT<r>.S32.F32 Dd, Dm;  VCVT<r>.S32.F32 Qd, Qm
+// VCVT<r>.U32.F32 Dd, Dm; VCVT<r>.U32.F32 Qd, Qm
+// Super class for  SIMD VCVTs.  Bits for encoding registers are handled in
+// subclasses.
+class CommonVCVT_SIMD<dag oops, dag iops, string rndMode, string ext, 
+                      bits<2> RM, bits<1> isQ, bits<1> isUnSigned>
+      : AInoP<oops, iops, MiscFrm, NoItinerary,
+             !strconcat("vcvt", rndMode), ext, []>,
+      Requires<[HasV8]> {
+  bits<5> Sd;
+  let Inst{31-28} = 0b1111;
+  let Inst{27-23} = 0b11111;
+  let Inst{21-20} = 0b11;
+  let Inst{19-18} = 0b10;
+  let Inst{17-16} = 0b11;
+  let Inst{11} = 0b0;
+  let Inst{10} = 0b0;
+  let Inst{9-8} = RM;
+  let Inst{7} = isUnSigned;
+  let Inst{6} = isQ;
+  let Inst{4} = 0b0;
+}
+class BaseVCVTMultiQ<string rndMode, string ext, bits<2> RM, bits<1> isUnSigned>
+      : CommonVCVT_SIMD<(outs QPR:$Qd), (ins QPR:$Qm), rndMode,
+                        !strconcat(ext, "\t$Qd, $Qm"), RM, 0b1, isUnSigned> {
+  bits<5> Qm;
+  bits<5> Qd;
+  let Inst{22} = Qd{4};
+  let Inst{15-12} = Qd{3-0};
+  let Inst{5} = Qm{4};
+  let Inst{3-0} = Qm{3-0};
+}
+class BaseVCVTMultiD<string rndMode, string ext, bits<2> RM, bits<1> isUnSigned>
+      : CommonVCVT_SIMD<(outs DPR:$Dd), (ins DPR:$Dm), rndMode,
+                        !strconcat(ext, "\t$Dd, $Dm"), RM, 0b0, isUnSigned> {
+  // CHECK encoding
+  bits<5> Dm;
+  bits<5> Dd;
+  let Inst{22} = Dd{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{5} = Dm{4};
+  let Inst{3-0} = Dm{3-0};
+}
+multiclass VCVTMultiSIMD<string rndMode, bits<2> RM> {
+    def S32F32Q : BaseVCVTMultiQ<rndMode, ".s32.f32", RM, 0b0>;
+    def U32F32Q : BaseVCVTMultiQ<rndMode, ".u32.f32", RM, 0b1>;
+    def S32F32D : BaseVCVTMultiD<rndMode, ".s32.f32", RM, 0b0>;
+    def U32F32D : BaseVCVTMultiD<rndMode, ".u32.f32", RM, 0b1>;
+}
+defm VCVTA_SIMD : VCVTMultiSIMD<"a", 0b00>;
+defm VCVTN_SIMD : VCVTMultiSIMD<"n", 0b01>;
+defm VCVTP_SIMD : VCVTMultiSIMD<"p", 0b10>;
+defm VCVTM_SIMD : VCVTMultiSIMD<"m", 0b11>;
 
 //===----------------------------------------------------------------------===//
 // Fused FP Multiply-Accumulate Operations.

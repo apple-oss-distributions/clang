@@ -1,8 +1,10 @@
 CLANG_LEVEL := ../../..
 TD_SRC_DIR = $(PROJ_SRC_DIR)/../Basic
-BUILT_SOURCES = Attrs.inc AttrImpl.inc StmtNodes.inc DeclNodes.inc \
+BUILT_SOURCES = Attrs.inc AttrImpl.inc AttrDump.inc \
+                StmtNodes.inc DeclNodes.inc \
                 CommentNodes.inc CommentHTMLTags.inc \
-                CommentHTMLTagsProperties.inc CommentCommandInfo.inc
+                CommentHTMLTagsProperties.inc CommentCommandInfo.inc \
+                CommentCommandList.inc
 
 TABLEGEN_INC_FILES_COMMON = 1
 
@@ -18,6 +20,12 @@ $(ObjDir)/AttrImpl.inc.tmp : $(TD_SRC_DIR)/Attr.td $(CLANG_TBLGEN) \
                               $(ObjDir)/.dir
 	$(Echo) "Building Clang attribute implementations with tblgen"
 	$(Verb) $(ClangTableGen) -gen-clang-attr-impl -o $(call SYSPATH, $@) \
+		-I $(PROJ_SRC_DIR)/../../ $<
+
+$(ObjDir)/AttrDump.inc.tmp : $(TD_SRC_DIR)/Attr.td $(CLANG_TBLGEN) \
+                              $(ObjDir)/.dir
+	$(Echo) "Building Clang attribute dumper with tblgen"
+	$(Verb) $(ClangTableGen) -gen-clang-attr-dump -o $(call SYSPATH, $@) \
 		-I $(PROJ_SRC_DIR)/../../ $<
 
 $(ObjDir)/StmtNodes.inc.tmp : $(TD_SRC_DIR)/StmtNodes.td $(CLANG_TBLGEN) \
@@ -49,4 +57,9 @@ $(ObjDir)/CommentCommandInfo.inc.tmp : $(PROJ_SRC_DIR)/CommentCommands.td \
                                               $(CLANG_TBLGEN) $(ObjDir)/.dir
 	$(Echo) "Building Clang comment command info with tblgen"
 	$(Verb) $(ClangTableGen) -gen-clang-comment-command-info -o $(call SYSPATH, $@) $<
+
+$(ObjDir)/CommentCommandList.inc.tmp : $(PROJ_SRC_DIR)/CommentCommands.td \
+                                              $(CLANG_TBLGEN) $(ObjDir)/.dir
+	$(Echo) "Building Clang list of comment commands with tblgen"
+	$(Verb) $(ClangTableGen) -gen-clang-comment-command-list -o $(call SYSPATH, $@) $<
 

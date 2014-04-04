@@ -13,12 +13,13 @@
 #ifndef LLVM_CLANG_SEMA_INITIALIZATION_H
 #define LLVM_CLANG_SEMA_INITIALIZATION_H
 
-#include "clang/Sema/Ownership.h"
-#include "clang/Sema/Overload.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/UnresolvedSet.h"
 #include "clang/Basic/SourceLocation.h"
+#include "clang/Sema/Overload.h"
+#include "clang/Sema/Ownership.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/SmallVector.h"
 #include <cassert>
@@ -74,7 +75,10 @@ public:
     EK_ComplexElement,
     /// \brief The entity being initialized is the field that captures a 
     /// variable in a lambda.
-    EK_LambdaCapture
+    EK_LambdaCapture,
+    /// \brief The entity being initialized is the initializer for a compound
+    /// literal.
+    EK_CompoundLiteralInit
   };
   
 private:
@@ -97,8 +101,8 @@ private:
     /// low bit indicating whether the parameter is "consumed".
     uintptr_t Parameter;
     
-    /// \brief When Kind == EK_Temporary, the type source information for
-    /// the temporary.
+    /// \brief When Kind == EK_Temporary or EK_CompoundLiteralInit, the type
+    /// source information for the temporary.
     TypeSourceInfo *TypeInfo;
     
     struct {
@@ -172,17 +176,25 @@ public:
   static InitializedEntity InitializeVariable(VarDecl *Var) {
     return InitializedEntity(Var);
   }
-  
+
   /// \brief Create the initialization entity for a parameter.
   static InitializedEntity InitializeParameter(ASTContext &Context,
                                                ParmVarDecl *Parm) {
+    return InitializeParameter(Context, Parm, Parm->getType());
+  }
+
+  /// \brief Create the initialization entity for a parameter, but use
+  /// another type.
+  static InitializedEntity InitializeParameter(ASTContext &Context,
+                                               ParmVarDecl *Parm,
+                                               QualType Type) {
     bool Consumed = (Context.getLangOpts().ObjCAutoRefCount &&
                      Parm->hasAttr<NSConsumedAttr>());
 
     InitializedEntity Entity;
     Entity.Kind = EK_Parameter;
-    Entity.Type = Context.getVariableArrayDecayedType(
-                                       Parm->getType().getUnqualifiedType());
+    Entity.Type =
+      Context.getVariableArrayDecayedType(Type.getUnqualifiedType());
     Entity.Parent = 0;
     Entity.Parameter
       = (static_cast<uintptr_t>(Consumed) | reinterpret_cast<uintptr_t>(Parm));
@@ -274,7 +286,16 @@ public:
                                                    SourceLocation Loc) {
     return InitializedEntity(Var, Field, Loc);
   }
-                                                   
+
+  /// \brief Create the entity for a compound literal initializer.
+  static InitializedEntity InitializeCompoundLiteralInit(TypeSourceInfo *TSI) {
+    InitializedEntity Result(EK_CompoundLiteralInit, SourceLocation(),
+                             TSI->getType());
+    Result.TypeInfo = TSI;
+    return Result;
+  }
+
+
   /// \brief Determine the kind of initialization.
   EntityKind getKind() const { return Kind; }
   
@@ -289,7 +310,7 @@ public:
   /// \brief Retrieve complete type-source information for the object being 
   /// constructed, if known.
   TypeSourceInfo *getTypeSourceInfo() const {
-    if (Kind == EK_Temporary)
+    if (Kind == EK_Temporary || Kind == EK_CompoundLiteralInit)
       return TypeInfo;
     
     return 0;
@@ -581,6 +602,8 @@ public:
     SK_QualificationConversionXValue,
     /// \brief Perform a qualification conversion, producing an lvalue.
     SK_QualificationConversionLValue,
+    /// \brief Perform a load from a glvalue, producing an rvalue.
+    SK_LValueToRValue,
     /// \brief Perform an implicit conversion sequence.
     SK_ConversionSequence,
     /// \brief Perform list-initialization without a constructor
@@ -615,7 +638,9 @@ public:
     /// \brief Produce an Objective-C object pointer.
     SK_ProduceObjCObject,
     /// \brief Construct a std::initializer_list from an initializer list.
-    SK_StdInitializerList
+    SK_StdInitializerList,
+    /// \brief Passing zero to a function where OpenCL event_t is expected.
+    SK_OCLZeroEvent
   };
   
   /// \brief A single step in the initialization sequence.
@@ -892,6 +917,12 @@ public:
   void AddQualificationConversionStep(QualType Ty,
                                      ExprValueKind Category);
   
+  /// \brief Add a new step that performs a load of the given type.
+  ///
+  /// Although the term "LValueToRValue" is conventional, this applies to both
+  /// lvalues and xvalues.
+  void AddLValueToRValueStep(QualType Ty);
+
   /// \brief Add a new step that applies an implicit conversion sequence.
   void AddConversionSequenceStep(const ImplicitConversionSequence &ICS,
                                  QualType T);
@@ -943,6 +974,10 @@ public:
   /// \brief Add a step to construct a std::initializer_list object from an
   /// initializer list.
   void AddStdInitializerListConstructionStep(QualType T);
+
+  /// \brief Add a step to initialize an OpenCL event_t from a NULL
+  /// constant.
+  void AddOCLZeroEventStep(QualType T);
 
   /// \brief Add steps to unwrap a initializer list for a reference around a
   /// single element and rewrap it at the end.

@@ -20,17 +20,17 @@
 
 #define DEBUG_TYPE "functionattrs"
 #include "llvm/Transforms/IPO.h"
-#include "llvm/CallGraphSCCPass.h"
-#include "llvm/GlobalVariable.h"
-#include "llvm/IntrinsicInst.h"
-#include "llvm/LLVMContext.h"
-#include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/Analysis/CallGraph.h"
-#include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/UniqueVector.h"
+#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/CallGraph.h"
+#include "llvm/Analysis/CallGraphSCCPass.h"
+#include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/InstIterator.h"
 using namespace llvm;
 
@@ -212,10 +212,16 @@ bool FunctionAttrs::AddReadAttrs(const CallGraphSCC &SCC) {
     MadeChange = true;
 
     // Clear out any existing attributes.
-    F->removeAttribute(~0, Attribute::ReadOnly | Attribute::ReadNone);
+    AttrBuilder B;
+    B.addAttribute(Attribute::ReadOnly)
+      .addAttribute(Attribute::ReadNone);
+    F->removeAttributes(AttributeSet::FunctionIndex,
+                        AttributeSet::get(F->getContext(),
+                                          AttributeSet::FunctionIndex, B));
 
     // Add in the new attribute.
-    F->addAttribute(~0, ReadsMemory? Attribute::ReadOnly : Attribute::ReadNone);
+    F->addAttribute(AttributeSet::FunctionIndex,
+                    ReadsMemory ? Attribute::ReadOnly : Attribute::ReadNone);
 
     if (ReadsMemory)
       ++NumReadOnly;
@@ -275,8 +281,6 @@ namespace {
       : Captured(false), SCCNodes(SCCNodes) {}
 
     void tooManyUses() { Captured = true; }
-
-    bool shouldExplore(Use *U) { return true; }
 
     bool captured(Use *U) {
       CallSite CS(U->getUser());
@@ -352,6 +356,9 @@ bool FunctionAttrs::AddNoCaptureAttrs(const CallGraphSCC &SCC) {
 
   ArgumentGraph AG;
 
+  AttrBuilder B;
+  B.addAttribute(Attribute::NoCapture);
+
   // Check each function in turn, determining which pointer arguments are not
   // captured.
   for (CallGraphSCC::iterator I = SCC.begin(), E = SCC.end(); I != E; ++I) {
@@ -373,7 +380,7 @@ bool FunctionAttrs::AddNoCaptureAttrs(const CallGraphSCC &SCC) {
       for (Function::arg_iterator A = F->arg_begin(), E = F->arg_end();
            A != E; ++A) {
         if (A->getType()->isPointerTy() && !A->hasNoCaptureAttr()) {
-          A->addAttr(Attribute::NoCapture);
+          A->addAttr(AttributeSet::get(F->getContext(), A->getArgNo() + 1, B));
           ++NumNoCapture;
           Changed = true;
         }
@@ -388,7 +395,7 @@ bool FunctionAttrs::AddNoCaptureAttrs(const CallGraphSCC &SCC) {
         if (!Tracker.Captured) {
           if (Tracker.Uses.empty()) {
             // If it's trivially not captured, mark it nocapture now.
-            A->addAttr(Attribute::NoCapture);
+            A->addAttr(AttributeSet::get(F->getContext(), A->getArgNo()+1, B));
             ++NumNoCapture;
             Changed = true;
           } else {
@@ -421,7 +428,11 @@ bool FunctionAttrs::AddNoCaptureAttrs(const CallGraphSCC &SCC) {
       // eg. "void f(int* x) { if (...) f(x); }"
       if (ArgumentSCC[0]->Uses.size() == 1 &&
           ArgumentSCC[0]->Uses[0] == ArgumentSCC[0]) {
-        ArgumentSCC[0]->Definition->addAttr(Attribute::NoCapture);
+        ArgumentSCC[0]->
+          Definition->
+          addAttr(AttributeSet::get(ArgumentSCC[0]->Definition->getContext(),
+                                    ArgumentSCC[0]->Definition->getArgNo() + 1,
+                                    B));
         ++NumNoCapture;
         Changed = true;
       }
@@ -463,7 +474,7 @@ bool FunctionAttrs::AddNoCaptureAttrs(const CallGraphSCC &SCC) {
 
     for (unsigned i = 0, e = ArgumentSCC.size(); i != e; ++i) {
       Argument *A = ArgumentSCC[i]->Definition;
-      A->addAttr(Attribute::NoCapture);
+      A->addAttr(AttributeSet::get(A->getContext(), A->getArgNo() + 1, B));
       ++NumNoCapture;
       Changed = true;
     }
@@ -476,13 +487,13 @@ bool FunctionAttrs::AddNoCaptureAttrs(const CallGraphSCC &SCC) {
 /// or a pointer that doesn't alias any other pointer visible to the caller.
 bool FunctionAttrs::IsFunctionMallocLike(Function *F,
                               SmallPtrSet<Function*, 8> &SCCNodes) const {
-  UniqueVector<Value *> FlowsToReturn;
+  SmallSetVector<Value *, 8> FlowsToReturn;
   for (Function::iterator I = F->begin(), E = F->end(); I != E; ++I)
     if (ReturnInst *Ret = dyn_cast<ReturnInst>(I->getTerminator()))
       FlowsToReturn.insert(Ret->getReturnValue());
 
   for (unsigned i = 0; i != FlowsToReturn.size(); ++i) {
-    Value *RetVal = FlowsToReturn[i+1];   // UniqueVector[0] is reserved.
+    Value *RetVal = FlowsToReturn[i];
 
     if (Constant *C = dyn_cast<Constant>(RetVal)) {
       if (!C->isNullValue() && !isa<UndefValue>(C))

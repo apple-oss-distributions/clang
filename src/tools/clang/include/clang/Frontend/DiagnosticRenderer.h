@@ -19,6 +19,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/SourceLocation.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerUnion.h"
 
 namespace clang {
@@ -44,7 +45,7 @@ typedef llvm::PointerUnion<const Diagnostic *,
 class DiagnosticRenderer {
 protected:
   const LangOptions &LangOpts;
-  const DiagnosticOptions &DiagOpts;
+  IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts;
   
   /// \brief The location of the previous diagnostic if known.
   ///
@@ -66,7 +67,7 @@ protected:
   DiagnosticsEngine::Level LastLevel;
 
   DiagnosticRenderer(const LangOptions &LangOpts,
-                     const DiagnosticOptions &DiagOpts);
+                     DiagnosticOptions *DiagOpts);
   
   virtual ~DiagnosticRenderer();
   
@@ -92,7 +93,13 @@ protected:
   
   virtual void emitIncludeLocation(SourceLocation Loc, PresumedLoc PLoc,
                                    const SourceManager &SM) = 0;
-  
+  virtual void emitImportLocation(SourceLocation Loc, PresumedLoc PLoc,
+                                  StringRef ModuleName,
+                                  const SourceManager &SM) = 0;
+  virtual void emitBuildingModuleLocation(SourceLocation Loc, PresumedLoc PLoc,
+                                          StringRef ModuleName,
+                                          const SourceManager &SM) = 0;
+
   virtual void beginDiagnostic(DiagOrStoredDiag D,
                                DiagnosticsEngine::Level Level) {}
   virtual void endDiagnostic(DiagOrStoredDiag D,
@@ -100,16 +107,23 @@ protected:
 
   
 private:
-  void emitIncludeStack(SourceLocation Loc, DiagnosticsEngine::Level Level,
-                        const SourceManager &SM);
+  void emitIncludeStack(SourceLocation Loc, PresumedLoc PLoc,
+                        DiagnosticsEngine::Level Level, const SourceManager &SM);
   void emitIncludeStackRecursively(SourceLocation Loc, const SourceManager &SM);
-  void emitMacroExpansionsAndCarets(SourceLocation Loc,
-                                    DiagnosticsEngine::Level Level,
-                                    SmallVectorImpl<CharSourceRange>& Ranges,
-                                    ArrayRef<FixItHint> Hints,
-                                    const SourceManager &SM,
-                                    unsigned &MacroDepth,
-                                    unsigned OnMacroInst = 0);
+  void emitImportStack(SourceLocation Loc, const SourceManager &SM);
+  void emitImportStackRecursively(SourceLocation Loc, StringRef ModuleName,
+                                  const SourceManager &SM);
+  void emitModuleBuildStack(const SourceManager &SM);
+  void emitCaret(SourceLocation Loc, DiagnosticsEngine::Level Level,
+                 ArrayRef<CharSourceRange> Ranges, ArrayRef<FixItHint> Hints,
+                 const SourceManager &SM);
+  void emitMacroExpansions(SourceLocation Loc,
+                           DiagnosticsEngine::Level Level,
+                           ArrayRef<CharSourceRange> Ranges,
+                           ArrayRef<FixItHint> Hints,
+                           const SourceManager &SM,
+                           unsigned &MacroDepth,
+                           unsigned OnMacroInst = 0);
 public:
   /// \brief Emit a diagnostic.
   ///
@@ -139,7 +153,7 @@ public:
 class DiagnosticNoteRenderer : public DiagnosticRenderer {
 public:
   DiagnosticNoteRenderer(const LangOptions &LangOpts,
-                         const DiagnosticOptions &DiagOpts)
+                         DiagnosticOptions *DiagOpts)
     : DiagnosticRenderer(LangOpts, DiagOpts) {}
   
   virtual ~DiagnosticNoteRenderer();
@@ -149,7 +163,15 @@ public:
   virtual void emitIncludeLocation(SourceLocation Loc,
                                    PresumedLoc PLoc,
                                    const SourceManager &SM);
-  
+
+  virtual void emitImportLocation(SourceLocation Loc, PresumedLoc PLoc,
+                                  StringRef ModuleName,
+                                  const SourceManager &SM);
+
+  virtual void emitBuildingModuleLocation(SourceLocation Loc, PresumedLoc PLoc,
+                                          StringRef ModuleName,
+                                          const SourceManager &SM);
+
   virtual void emitNote(SourceLocation Loc, StringRef Message,
                         const SourceManager *SM) = 0;
 };

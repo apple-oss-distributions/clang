@@ -14,22 +14,22 @@
 
 #define DEBUG_TYPE "jit"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
-
-#include "llvm/Constants.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/Module.h"
-#include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ExecutionEngine/GenericValue.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/Host.h"
 #include "llvm/Support/MutexGuard.h"
+#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/DynamicLibrary.h"
-#include "llvm/Support/Host.h"
-#include "llvm/Support/TargetRegistry.h"
-#include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetMachine.h"
 #include <cmath>
 #include <cstring>
@@ -91,11 +91,11 @@ class GVMemoryBlock : public CallbackVH {
 public:
   /// \brief Returns the address the GlobalVariable should be written into.  The
   /// GVMemoryBlock object prefixes that.
-  static char *Create(const GlobalVariable *GV, const TargetData& TD) {
+  static char *Create(const GlobalVariable *GV, const DataLayout& TD) {
     Type *ElTy = GV->getType()->getElementType();
     size_t GVSize = (size_t)TD.getTypeAllocSize(ElTy);
     void *RawMemory = ::operator new(
-      TargetData::RoundUpAlignment(sizeof(GVMemoryBlock),
+      DataLayout::RoundUpAlignment(sizeof(GVMemoryBlock),
                                    TD.getPreferredAlignment(GV))
       + GVSize);
     new(RawMemory) GVMemoryBlock(GV);
@@ -113,7 +113,7 @@ public:
 }  // anonymous namespace
 
 char *ExecutionEngine::getMemoryForGV(const GlobalVariable *GV) {
-  return GVMemoryBlock::Create(GV, *getTargetData());
+  return GVMemoryBlock::Create(GV, *getDataLayout());
 }
 
 bool ExecutionEngine::removeModule(Module *M) {
@@ -267,7 +267,7 @@ public:
 void *ArgvArray::reset(LLVMContext &C, ExecutionEngine *EE,
                        const std::vector<std::string> &InputArgv) {
   clear();  // Free the old contents.
-  unsigned PtrSize = EE->getTargetData()->getPointerSize();
+  unsigned PtrSize = EE->getDataLayout()->getPointerSize();
   Array = new char[(InputArgv.size()+1)*PtrSize];
 
   DEBUG(dbgs() << "JIT: ARGV = " << (void*)Array << "\n");
@@ -342,7 +342,7 @@ void ExecutionEngine::runStaticConstructorsDestructors(bool isDtors) {
 #ifndef NDEBUG
 /// isTargetNullPtr - Return whether the target pointer stored at Loc is null.
 static bool isTargetNullPtr(ExecutionEngine *EE, void *Loc) {
-  unsigned PtrSize = EE->getTargetData()->getPointerSize();
+  unsigned PtrSize = EE->getDataLayout()->getPointerSize();
   for (unsigned i = 0; i < PtrSize; ++i)
     if (*(i + (uint8_t*)Loc))
       return false;
@@ -556,11 +556,11 @@ GenericValue ExecutionEngine::getConstantValue(const Constant *C) {
     case Instruction::GetElementPtr: {
       // Compute the index
       GenericValue Result = getConstantValue(Op0);
-      SmallVector<Value*, 8> Indices(CE->op_begin()+1, CE->op_end());
-      uint64_t Offset = TD->getIndexedOffset(Op0->getType(), Indices);
+      APInt Offset(TD->getPointerSizeInBits(), 0);
+      cast<GEPOperator>(CE)->accumulateConstantOffset(*TD, Offset);
 
       char* tmp = (char*) Result.PointerVal;
-      Result = PTOGV(tmp + Offset);
+      Result = PTOGV(tmp + Offset.getSExtValue());
       return Result;
     }
     case Instruction::Trunc: {
@@ -632,7 +632,7 @@ GenericValue ExecutionEngine::getConstantValue(const Constant *C) {
       else if (Op0->getType()->isDoubleTy())
         GV.IntVal = APIntOps::RoundDoubleToAPInt(GV.DoubleVal, BitWidth);
       else if (Op0->getType()->isX86_FP80Ty()) {
-        APFloat apf = APFloat(GV.IntVal);
+        APFloat apf = APFloat(APFloat::x87DoubleExtended, GV.IntVal);
         uint64_t v;
         bool ignored;
         (void)apf.convertToInteger(&v, BitWidth,
@@ -644,15 +644,17 @@ GenericValue ExecutionEngine::getConstantValue(const Constant *C) {
     }
     case Instruction::PtrToInt: {
       GenericValue GV = getConstantValue(Op0);
-      uint32_t PtrWidth = TD->getPointerSizeInBits();
+      uint32_t PtrWidth = TD->getTypeSizeInBits(Op0->getType());
+      assert(PtrWidth <= 64 && "Bad pointer width");
       GV.IntVal = APInt(PtrWidth, uintptr_t(GV.PointerVal));
+      uint32_t IntWidth = TD->getTypeSizeInBits(CE->getType());
+      GV.IntVal = GV.IntVal.zextOrTrunc(IntWidth);
       return GV;
     }
     case Instruction::IntToPtr: {
       GenericValue GV = getConstantValue(Op0);
-      uint32_t PtrWidth = TD->getPointerSizeInBits();
-      if (PtrWidth != GV.IntVal.getBitWidth())
-        GV.IntVal = GV.IntVal.zextOrTrunc(PtrWidth);
+      uint32_t PtrWidth = TD->getTypeSizeInBits(CE->getType());
+      GV.IntVal = GV.IntVal.zextOrTrunc(PtrWidth);
       assert(GV.IntVal.getBitWidth() <= 64 && "Bad pointer width");
       GV.PointerVal = PointerTy(uintptr_t(GV.IntVal.getZExtValue()));
       return GV;
@@ -749,27 +751,32 @@ GenericValue ExecutionEngine::getConstantValue(const Constant *C) {
       case Type::X86_FP80TyID:
       case Type::PPC_FP128TyID:
       case Type::FP128TyID: {
-        APFloat apfLHS = APFloat(LHS.IntVal);
+        const fltSemantics &Sem = CE->getOperand(0)->getType()->getFltSemantics();
+        APFloat apfLHS = APFloat(Sem, LHS.IntVal);
         switch (CE->getOpcode()) {
           default: llvm_unreachable("Invalid long double opcode");
           case Instruction::FAdd:
-            apfLHS.add(APFloat(RHS.IntVal), APFloat::rmNearestTiesToEven);
+            apfLHS.add(APFloat(Sem, RHS.IntVal), APFloat::rmNearestTiesToEven);
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           case Instruction::FSub:
-            apfLHS.subtract(APFloat(RHS.IntVal), APFloat::rmNearestTiesToEven);
+            apfLHS.subtract(APFloat(Sem, RHS.IntVal),
+                            APFloat::rmNearestTiesToEven);
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           case Instruction::FMul:
-            apfLHS.multiply(APFloat(RHS.IntVal), APFloat::rmNearestTiesToEven);
+            apfLHS.multiply(APFloat(Sem, RHS.IntVal),
+                            APFloat::rmNearestTiesToEven);
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           case Instruction::FDiv:
-            apfLHS.divide(APFloat(RHS.IntVal), APFloat::rmNearestTiesToEven);
+            apfLHS.divide(APFloat(Sem, RHS.IntVal),
+                          APFloat::rmNearestTiesToEven);
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           case Instruction::FRem:
-            apfLHS.mod(APFloat(RHS.IntVal), APFloat::rmNearestTiesToEven);
+            apfLHS.mod(APFloat(Sem, RHS.IntVal),
+                       APFloat::rmNearestTiesToEven);
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           }
@@ -856,7 +863,7 @@ static void StoreIntToMemory(const APInt &IntVal, uint8_t *Dst,
 
 void ExecutionEngine::StoreValueToMemory(const GenericValue &Val,
                                          GenericValue *Ptr, Type *Ty) {
-  const unsigned StoreBytes = getTargetData()->getTypeStoreSize(Ty);
+  const unsigned StoreBytes = getDataLayout()->getTypeStoreSize(Ty);
 
   switch (Ty->getTypeID()) {
   case Type::IntegerTyID:
@@ -882,7 +889,7 @@ void ExecutionEngine::StoreValueToMemory(const GenericValue &Val,
     dbgs() << "Cannot store value of type " << *Ty << "!\n";
   }
 
-  if (sys::isLittleEndianHost() != getTargetData()->isLittleEndian())
+  if (sys::isLittleEndianHost() != getDataLayout()->isLittleEndian())
     // Host and target are different endian - reverse the stored bytes.
     std::reverse((uint8_t*)Ptr, StoreBytes + (uint8_t*)Ptr);
 }
@@ -891,7 +898,8 @@ void ExecutionEngine::StoreValueToMemory(const GenericValue &Val,
 /// from Src into IntVal, which is assumed to be wide enough and to hold zero.
 static void LoadIntFromMemory(APInt &IntVal, uint8_t *Src, unsigned LoadBytes) {
   assert((IntVal.getBitWidth()+7)/8 >= LoadBytes && "Integer too small!");
-  uint8_t *Dst = (uint8_t *)IntVal.getRawData();
+  uint8_t *Dst = reinterpret_cast<uint8_t *>(
+                   const_cast<uint64_t *>(IntVal.getRawData()));
 
   if (sys::isLittleEndianHost())
     // Little-endian host - the destination must be ordered from LSB to MSB.
@@ -918,7 +926,7 @@ static void LoadIntFromMemory(APInt &IntVal, uint8_t *Src, unsigned LoadBytes) {
 void ExecutionEngine::LoadValueFromMemory(GenericValue &Result,
                                           GenericValue *Ptr,
                                           Type *Ty) {
-  const unsigned LoadBytes = getTargetData()->getTypeStoreSize(Ty);
+  const unsigned LoadBytes = getDataLayout()->getTypeStoreSize(Ty);
 
   switch (Ty->getTypeID()) {
   case Type::IntegerTyID:
@@ -959,20 +967,20 @@ void ExecutionEngine::InitializeMemory(const Constant *Init, void *Addr) {
   
   if (const ConstantVector *CP = dyn_cast<ConstantVector>(Init)) {
     unsigned ElementSize =
-      getTargetData()->getTypeAllocSize(CP->getType()->getElementType());
+      getDataLayout()->getTypeAllocSize(CP->getType()->getElementType());
     for (unsigned i = 0, e = CP->getNumOperands(); i != e; ++i)
       InitializeMemory(CP->getOperand(i), (char*)Addr+i*ElementSize);
     return;
   }
   
   if (isa<ConstantAggregateZero>(Init)) {
-    memset(Addr, 0, (size_t)getTargetData()->getTypeAllocSize(Init->getType()));
+    memset(Addr, 0, (size_t)getDataLayout()->getTypeAllocSize(Init->getType()));
     return;
   }
   
   if (const ConstantArray *CPA = dyn_cast<ConstantArray>(Init)) {
     unsigned ElementSize =
-      getTargetData()->getTypeAllocSize(CPA->getType()->getElementType());
+      getDataLayout()->getTypeAllocSize(CPA->getType()->getElementType());
     for (unsigned i = 0, e = CPA->getNumOperands(); i != e; ++i)
       InitializeMemory(CPA->getOperand(i), (char*)Addr+i*ElementSize);
     return;
@@ -980,7 +988,7 @@ void ExecutionEngine::InitializeMemory(const Constant *Init, void *Addr) {
   
   if (const ConstantStruct *CPS = dyn_cast<ConstantStruct>(Init)) {
     const StructLayout *SL =
-      getTargetData()->getStructLayout(cast<StructType>(CPS->getType()));
+      getDataLayout()->getStructLayout(cast<StructType>(CPS->getType()));
     for (unsigned i = 0, e = CPS->getNumOperands(); i != e; ++i)
       InitializeMemory(CPS->getOperand(i), (char*)Addr+SL->getElementOffset(i));
     return;
@@ -1127,7 +1135,7 @@ void ExecutionEngine::EmitGlobalVariable(const GlobalVariable *GV) {
     InitializeMemory(GV->getInitializer(), GA);
 
   Type *ElTy = GV->getType()->getElementType();
-  size_t GVSize = (size_t)getTargetData()->getTypeAllocSize(ElTy);
+  size_t GVSize = (size_t)getDataLayout()->getTypeAllocSize(ElTy);
   NumInitBytes += (unsigned)GVSize;
   ++NumGlobals;
 }

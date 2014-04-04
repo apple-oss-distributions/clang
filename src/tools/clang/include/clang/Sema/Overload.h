@@ -751,9 +751,11 @@ namespace clang {
     OverloadCandidateSet(const OverloadCandidateSet &) LLVM_DELETED_FUNCTION;
     void operator=(const OverloadCandidateSet &) LLVM_DELETED_FUNCTION;
 
+    void destroyCandidates();
+
   public:
     OverloadCandidateSet(SourceLocation Loc) : Loc(Loc), NumInlineSequences(0){}
-    ~OverloadCandidateSet() { clear(); }
+    ~OverloadCandidateSet() { destroyCandidates(); }
 
     SourceLocation getLocation() const { return Loc; }
 
@@ -807,8 +809,8 @@ namespace clang {
 
     void NoteCandidates(Sema &S,
                         OverloadCandidateDisplayKind OCD,
-                        llvm::ArrayRef<Expr *> Args,
-                        const char *Opc = 0,
+                        ArrayRef<Expr *> Args,
+                        StringRef Opc = "",
                         SourceLocation Loc = SourceLocation());
   };
 

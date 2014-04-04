@@ -8,18 +8,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCObjectFileInfo.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionCOFF.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionMachO.h"
-#include "llvm/ADT/Triple.h"
 using namespace llvm;
 
 void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
   // MachO
   IsFunctionEHFrameSymbolPrivate = false;
   SupportsWeakOmittedEHFrame = false;
+
+  if (T.isOSDarwin() && T.getArch() == Triple::arm64)
+    SupportsCompactUnwindWithoutEHFrame = true;
 
   PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel
     | dwarf::DW_EH_PE_sdata4;
@@ -145,11 +148,18 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
   LSDASection = Ctx->getMachOSection("__TEXT", "__gcc_except_tab", 0,
                                      SectionKind::getReadOnlyWithRel());
 
-  if (T.isMacOSX() && !T.isMacOSXVersionLT(10, 6))
+  if ((T.isMacOSX() && !T.isMacOSXVersionLT(10, 6)) ||
+      (T.isOSDarwin() && T.getArch() == Triple::arm64)) {
     CompactUnwindSection =
       Ctx->getMachOSection("__LD", "__compact_unwind",
                            MCSectionMachO::S_ATTR_DEBUG,
                            SectionKind::getReadOnly());
+
+    if (T.getArch() == Triple::x86_64 || T.getArch() == Triple::x86)
+      CompactUnwindDwarfEHFrameOnly = 0x04000000;
+    else if (T.getArch() == Triple::arm64)
+      CompactUnwindDwarfEHFrameOnly = 0x03000000;
+  }
 
   // Debug Information.
   DwarfAccelNamesSection =
@@ -256,6 +266,14 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
       TTypeEncoding = (CMModel == CodeModel::Small)
         ? dwarf::DW_EH_PE_udata4 : dwarf::DW_EH_PE_absptr;
     }
+  } else if (T.getArch() == Triple::ppc64) {
+    PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+      dwarf::DW_EH_PE_udata8;
+    FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+    LSDAEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_udata8;
+    FDEEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_udata8;
+    TTypeEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+      dwarf::DW_EH_PE_udata8;
   }
 
   // Solaris requires different flags for .eh_frame to seemingly every other
@@ -391,6 +409,46 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
                        SectionKind::getMetadata());
   DwarfMacroInfoSection =
     Ctx->getELFSection(".debug_macinfo", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+
+  // DWARF5 Experimental Debug Info
+
+  // Accelerator Tables
+  DwarfAccelNamesSection =
+    Ctx->getELFSection(".apple_names", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfAccelObjCSection =
+    Ctx->getELFSection(".apple_objc", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfAccelNamespaceSection =
+    Ctx->getELFSection(".apple_namespaces", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfAccelTypesSection =
+    Ctx->getELFSection(".apple_types", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+
+  // Fission Sections
+  DwarfInfoDWOSection =
+    Ctx->getELFSection(".debug_info.dwo", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfAbbrevDWOSection =
+    Ctx->getELFSection(".debug_abbrev.dwo", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfStrDWOSection =
+    Ctx->getELFSection(".debug_str.dwo", ELF::SHT_PROGBITS,
+                       ELF::SHF_MERGE | ELF::SHF_STRINGS,
+                       SectionKind::getMergeable1ByteCString());
+  DwarfLineDWOSection =
+    Ctx->getELFSection(".debug_line.dwo", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfLocDWOSection =
+    Ctx->getELFSection(".debug_loc.dwo", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfStrOffDWOSection =
+    Ctx->getELFSection(".debug_str_offsets.dwo", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfAddrSection =
+    Ctx->getELFSection(".debug_addr", ELF::SHT_PROGBITS, 0,
                        SectionKind::getMetadata());
 }
 
@@ -542,9 +600,12 @@ void MCObjectFileInfo::InitMCObjectFileInfo(StringRef TT, Reloc::Model relocm,
   CommDirectiveSupportsAlignment = true;
   SupportsWeakOmittedEHFrame = true;
   IsFunctionEHFrameSymbolPrivate = true;
+  SupportsCompactUnwindWithoutEHFrame = false;
 
   PersonalityEncoding = LSDAEncoding = FDEEncoding = FDECFIEncoding =
     TTypeEncoding = dwarf::DW_EH_PE_absptr;
+
+  CompactUnwindDwarfEHFrameOnly = 0;
 
   EHFrameSection = 0;             // Created on demand.
   CompactUnwindSection = 0;       // Used only by selected targets.
@@ -559,12 +620,14 @@ void MCObjectFileInfo::InitMCObjectFileInfo(StringRef TT, Reloc::Model relocm,
   // cellspu-apple-darwin. Perhaps we should fix in Triple?
   if ((Arch == Triple::x86 || Arch == Triple::x86_64 ||
        Arch == Triple::arm || Arch == Triple::thumb ||
+       Arch == Triple::arm64 ||
        Arch == Triple::ppc || Arch == Triple::ppc64 ||
        Arch == Triple::UnknownArch) &&
       (T.isOSDarwin() || T.getEnvironment() == Triple::MachO)) {
     Env = IsMachO;
     InitMachOMCObjectFileInfo(T);
   } else if ((Arch == Triple::x86 || Arch == Triple::x86_64) &&
+             (T.getEnvironment() != Triple::ELF) &&
              (T.getOS() == Triple::MinGW32 || T.getOS() == Triple::Cygwin ||
               T.getOS() == Triple::Win32)) {
     Env = IsCOFF;

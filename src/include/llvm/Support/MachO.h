@@ -685,6 +685,7 @@ namespace llvm {
       CPUTypeI386      = 7,
       CPUTypeX86_64    = CPUTypeI386 | CPUArchABI64,
       CPUTypeARM       = 12,
+      CPUTypeARM64     = CPUTypeARM | CPUArchABI64,
       CPUTypeSPARC     = 14,
       CPUTypePowerPC   = 18,
       CPUTypePowerPC64 = CPUTypePowerPC | CPUArchABI64,

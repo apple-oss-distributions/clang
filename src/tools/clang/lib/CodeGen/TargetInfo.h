@@ -15,8 +15,8 @@
 #ifndef CLANG_CODEGEN_TARGETINFO_H
 #define CLANG_CODEGEN_TARGETINFO_H
 
-#include "clang/Basic/LLVM.h"
 #include "clang/AST/Type.h"
+#include "clang/Basic/LLVM.h"
 #include "llvm/ADT/StringRef.h"
 
 namespace llvm {
@@ -116,6 +116,12 @@ namespace clang {
       return Ty;
     }
 
+    /// doesReturnSlotInterfereWithArgs - Return true if the target uses an
+    /// argument slot for an 'sret' type.
+    virtual bool doesReturnSlotInterfereWithArgs() const {
+      return true;
+    }
+
     /// Retrieve the address of a function to call immediately before
     /// calling objc_retainAutoreleasedReturnValue.  The
     /// implementation of objc_autoreleaseReturnValue sniffs the
@@ -158,10 +164,20 @@ namespace clang {
     ///   - the conventions are substantively different in how they pass
     ///     arguments, because in this case using the variadic convention
     ///     will lead to C99 violations.
-    /// It is not necessarily correct when arguments are passed in the
-    /// same way and some out-of-band information is passed for the
-    /// benefit of variadic callees, as is the case for x86-64.
-    /// In this case the ABI should be consulted.
+    ///
+    /// However, some platforms make the conventions identical except
+    /// for passing additional out-of-band information to a variadic
+    /// function: for example, x86-64 passes the number of SSE
+    /// arguments in %al.  On these platforms, it is desireable to
+    /// call unprototyped functions using the variadic convention so
+    /// that unprototyped calls to varargs functions still succeed.
+    ///
+    /// Relatedly, platforms which pass the fixed arguments to this:
+    ///   A foo(B, C, D);
+    /// differently than they would pass them to this:
+    ///   A foo(B, C, D, ...);
+    /// may need to adjust the debugger-support code in Sema to do the
+    /// right thing when calling a function with no know signature.
     virtual bool isNoProtoCallVariadic(const CodeGen::CallArgList &args,
                                        const FunctionNoProtoType *fnType) const;
   };

@@ -49,7 +49,8 @@ Context::Context()
   , nmissed_expected()
   , thread_mtx(MutexTypeThreads, StatMtxThreads)
   , racy_stacks(MBlockRacyStacks)
-  , racy_addresses(MBlockRacyAddresses) {
+  , racy_addresses(MBlockRacyAddresses)
+  , fired_suppressions(MBlockRacyAddresses) {
 }
 
 // The objects are allocated in TLS, so one may rely on zero-initialization.
@@ -83,7 +84,8 @@ ThreadContext::ThreadContext(int tid)
   , epoch0()
   , epoch1()
   , dead_info()
-  , dead_next() {
+  , dead_next()
+  , name() {
 }
 
 static void WriteMemoryProfile(char *buf, uptr buf_size, int num) {
@@ -138,7 +140,7 @@ static void InitializeMemoryProfile() {
       flags()->profile_memory, GetPid());
   fd_t fd = internal_open(filename.data(), true);
   if (fd == kInvalidFd) {
-    TsanPrintf("Failed to open memory profile file '%s'\n", &filename[0]);
+    Printf("Failed to open memory profile file '%s'\n", &filename[0]);
     Die();
   }
   internal_start_thread(&MemoryProfileThread, (void*)(uptr)fd);
@@ -160,6 +162,20 @@ static void InitializeMemoryFlush() {
   internal_start_thread(&MemoryFlushThread, 0);
 }
 
+void MapShadow(uptr addr, uptr size) {
+  MmapFixedNoReserve(MemToShadow(addr), size * kShadowMultiplier);
+}
+
+void MapThreadTrace(uptr addr, uptr size) {
+  DPrintf("#0: Mapping trace at %p-%p(0x%zx)\n", addr, addr + size, size);
+  CHECK_GE(addr, kTraceMemBegin);
+  CHECK_LE(addr + size, kTraceMemBegin + kTraceMemSize);
+  if (addr != (uptr)MmapFixedNoReserve(addr, size)) {
+    Printf("FATAL: ThreadSanitizer can not mmap thread trace\n");
+    Die();
+  }
+}
+
 void Initialize(ThreadState *thr) {
   // Thread safe because done before all threads exist.
   static bool is_initialized = false;
@@ -178,24 +194,37 @@ void Initialize(ThreadState *thr) {
   InitializeMutex();
   InitializeDynamicAnnotations();
   ctx = new(ctx_placeholder) Context;
+#ifndef TSAN_GO
   InitializeShadowMemory();
+#endif
   ctx->dead_list_size = 0;
   ctx->dead_list_head = 0;
   ctx->dead_list_tail = 0;
   InitializeFlags(&ctx->flags, env);
+  // Setup correct file descriptor for error reports.
+  if (internal_strcmp(flags()->log_path, "stdout") == 0)
+    __sanitizer_set_report_fd(kStdoutFd);
+  else if (internal_strcmp(flags()->log_path, "stderr") == 0)
+    __sanitizer_set_report_fd(kStderrFd);
+  else
+    __sanitizer_set_report_path(flags()->log_path);
   InitializeSuppressions();
 #ifndef TSAN_GO
   // Initialize external symbolizer before internal threads are started.
   const char *external_symbolizer = flags()->external_symbolizer_path;
   if (external_symbolizer != 0 && external_symbolizer[0] != '\0') {
-    InitializeExternalSymbolizer(external_symbolizer);
+    if (!InitializeExternalSymbolizer(external_symbolizer)) {
+      Printf("Failed to start external symbolizer: '%s'\n",
+             external_symbolizer);
+      Die();
+    }
   }
 #endif
   InitializeMemoryProfile();
   InitializeMemoryFlush();
 
   if (ctx->flags.verbosity)
-    TsanPrintf("***** Running under ThreadSanitizer v2 (pid %d) *****\n",
+    Printf("***** Running under ThreadSanitizer v2 (pid %d) *****\n",
                GetPid());
 
   // Initialize thread 0.
@@ -207,7 +236,7 @@ void Initialize(ThreadState *thr) {
   ctx->initialized = true;
 
   if (flags()->stop_on_start) {
-    TsanPrintf("ThreadSanitizer is suspended at startup (pid %d)."
+    Printf("ThreadSanitizer is suspended at startup (pid %d)."
            " Call __tsan_resume().\n",
            GetPid());
     while (__tsan_resumed == 0);
@@ -219,23 +248,36 @@ int Finalize(ThreadState *thr) {
   Context *ctx = __tsan::ctx;
   bool failed = false;
 
+  if (flags()->atexit_sleep_ms > 0 && ThreadCount(thr) > 1)
+    SleepForMillis(flags()->atexit_sleep_ms);
+
   // Wait for pending reports.
   ctx->report_mtx.Lock();
   ctx->report_mtx.Unlock();
+
+#ifndef TSAN_GO
+  if (ctx->flags.verbosity)
+    AllocatorPrintStats();
+#endif
 
   ThreadFinalize(thr);
 
   if (ctx->nreported) {
     failed = true;
-    TsanPrintf("ThreadSanitizer: reported %d warnings\n", ctx->nreported);
+#ifndef TSAN_GO
+    Printf("ThreadSanitizer: reported %d warnings\n", ctx->nreported);
+#else
+    Printf("Found %d data race(s)\n", ctx->nreported);
+#endif
   }
 
   if (ctx->nmissed_expected) {
     failed = true;
-    TsanPrintf("ThreadSanitizer: missed %d expected races\n",
+    Printf("ThreadSanitizer: missed %d expected races\n",
         ctx->nmissed_expected);
   }
 
+  StatAggregate(ctx->stat, thr->stat);
   StatOutput(ctx->stat);
   return failed ? flags()->exitcode : 0;
 }
@@ -260,11 +302,26 @@ void TraceSwitch(ThreadState *thr) {
   thr->nomalloc++;
   ScopedInRtl in_rtl;
   Lock l(&thr->trace.mtx);
-  unsigned trace = (thr->fast_state.epoch() / kTracePartSize) % kTraceParts;
+  unsigned trace = (thr->fast_state.epoch() / kTracePartSize) % TraceParts();
   TraceHeader *hdr = &thr->trace.headers[trace];
   hdr->epoch0 = thr->fast_state.epoch();
   hdr->stack0.ObtainCurrent(thr, 0);
+  hdr->mset0 = thr->mset;
   thr->nomalloc--;
+}
+
+uptr TraceTopPC(ThreadState *thr) {
+  Event *events = (Event*)GetThreadTrace(thr->tid);
+  uptr pc = events[thr->fast_state.GetTracePos()];
+  return pc;
+}
+
+uptr TraceSize() {
+  return (uptr)(1ull << (kTracePartSizeBits + flags()->history_size + 1));
+}
+
+uptr TraceParts() {
+  return TraceSize() / kTracePartSize;
 }
 
 #ifndef TSAN_GO
@@ -310,11 +367,11 @@ static inline bool BothReads(Shadow s, int kAccessIsWrite) {
   return !kAccessIsWrite && !s.is_write();
 }
 
-static inline bool OldIsRWStronger(Shadow old, int kAccessIsWrite) {
+static inline bool OldIsRWNotWeaker(Shadow old, int kAccessIsWrite) {
   return old.is_write() || !kAccessIsWrite;
 }
 
-static inline bool OldIsRWWeaker(Shadow old, int kAccessIsWrite) {
+static inline bool OldIsRWWeakerOrEqual(Shadow old, int kAccessIsWrite) {
   return !old.is_write() || kAccessIsWrite;
 }
 
@@ -323,12 +380,12 @@ static inline bool OldIsInSameSynchEpoch(Shadow old, ThreadState *thr) {
 }
 
 static inline bool HappensBefore(Shadow old, ThreadState *thr) {
-  return thr->clock.get(old.tid()) >= old.epoch();
+  return thr->clock.get(old.TidWithIgnore()) >= old.epoch();
 }
 
 ALWAYS_INLINE
 void MemoryAccessImpl(ThreadState *thr, uptr addr,
-    int kAccessSizeLog, bool kAccessIsWrite, FastState fast_state,
+    int kAccessSizeLog, bool kAccessIsWrite,
     u64 *shadow_mem, Shadow cur) {
   StatInc(thr, StatMop);
   StatInc(thr, kAccessIsWrite ? StatMopWrite : StatMopRead);
@@ -404,7 +461,7 @@ ALWAYS_INLINE
 void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
     int kAccessSizeLog, bool kAccessIsWrite) {
   u64 *shadow_mem = (u64*)MemToShadow(addr);
-  DPrintf2("#%d: tsan::OnMemoryAccess: @%p %p size=%d"
+  DPrintf2("#%d: MemoryAccess: @%p %p size=%d"
       " is_write=%d shadow_mem=%p {%zx, %zx, %zx, %zx}\n",
       (int)thr->fast_state.tid(), (void*)pc, (void*)addr,
       (int)(1 << kAccessSizeLog), kAccessIsWrite, shadow_mem,
@@ -412,11 +469,11 @@ void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
       (uptr)shadow_mem[2], (uptr)shadow_mem[3]);
 #if TSAN_DEBUG
   if (!IsAppMem(addr)) {
-    TsanPrintf("Access to non app mem %zx\n", addr);
+    Printf("Access to non app mem %zx\n", addr);
     DCHECK(IsAppMem(addr));
   }
   if (!IsShadowMem((uptr)shadow_mem)) {
-    TsanPrintf("Bad shadow addr %p (%zx)\n", shadow_mem, addr);
+    Printf("Bad shadow addr %p (%zx)\n", shadow_mem, addr);
     DCHECK(IsShadowMem((uptr)shadow_mem));
   }
 #endif
@@ -432,9 +489,9 @@ void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
 
   // We must not store to the trace if we do not store to the shadow.
   // That is, this call must be moved somewhere below.
-  TraceAddEvent(thr, fast_state.epoch(), EventTypeMop, pc);
+  TraceAddEvent(thr, fast_state, EventTypeMop, pc);
 
-  MemoryAccessImpl(thr, addr, kAccessSizeLog, kAccessIsWrite, fast_state,
+  MemoryAccessImpl(thr, addr, kAccessSizeLog, kAccessIsWrite,
       shadow_mem, cur);
 }
 
@@ -483,6 +540,7 @@ void MemoryResetRange(ThreadState *thr, uptr pc, uptr addr, uptr size) {
 void MemoryRangeFreed(ThreadState *thr, uptr pc, uptr addr, uptr size) {
   MemoryAccessRange(thr, pc, addr, size, true);
   Shadow s(thr->fast_state);
+  s.ClearIgnoreBit();
   s.MarkAsFreed();
   s.SetWrite(true);
   s.SetAddr0AndSizeLog(0, 3);
@@ -491,17 +549,19 @@ void MemoryRangeFreed(ThreadState *thr, uptr pc, uptr addr, uptr size) {
 
 void MemoryRangeImitateWrite(ThreadState *thr, uptr pc, uptr addr, uptr size) {
   Shadow s(thr->fast_state);
+  s.ClearIgnoreBit();
   s.SetWrite(true);
   s.SetAddr0AndSizeLog(0, 3);
   MemoryRangeSet(thr, pc, addr, size, s.raw());
 }
 
+ALWAYS_INLINE
 void FuncEntry(ThreadState *thr, uptr pc) {
   DCHECK_EQ(thr->in_rtl, 0);
   StatInc(thr, StatFuncEnter);
   DPrintf2("#%d: FuncEntry %p\n", (int)thr->fast_state.tid(), (void*)pc);
   thr->fast_state.IncrementEpoch();
-  TraceAddEvent(thr, thr->fast_state.epoch(), EventTypeFuncEnter, pc);
+  TraceAddEvent(thr, thr->fast_state, EventTypeFuncEnter, pc);
 
   // Shadow stack maintenance can be replaced with
   // stack unwinding during trace switch (which presumably must be faster).
@@ -525,12 +585,13 @@ void FuncEntry(ThreadState *thr, uptr pc) {
   thr->shadow_stack_pos++;
 }
 
+ALWAYS_INLINE
 void FuncExit(ThreadState *thr) {
   DCHECK_EQ(thr->in_rtl, 0);
   StatInc(thr, StatFuncExit);
   DPrintf2("#%d: FuncExit\n", (int)thr->fast_state.tid());
   thr->fast_state.IncrementEpoch();
-  TraceAddEvent(thr, thr->fast_state.epoch(), EventTypeFuncExit, 0);
+  TraceAddEvent(thr, thr->fast_state, EventTypeFuncExit, 0);
 
   DCHECK_GT(thr->shadow_stack_pos, &thr->shadow_stack[0]);
 #ifndef TSAN_GO

@@ -11,17 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_MEMORY_DEPENDENCE_H
-#define LLVM_ANALYSIS_MEMORY_DEPENDENCE_H
+#ifndef LLVM_ANALYSIS_MEMORYDEPENDENCEANALYSIS_H
+#define LLVM_ANALYSIS_MEMORYDEPENDENCEANALYSIS_H
 
-#include "llvm/BasicBlock.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/ValueHandle.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/PointerIntPair.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/ValueHandle.h"
 
 namespace llvm {
   class Function;
@@ -29,7 +29,7 @@ namespace llvm {
   class Instruction;
   class CallSite;
   class AliasAnalysis;
-  class TargetData;
+  class DataLayout;
   class MemoryDependenceAnalysis;
   class PredIteratorCache;
   class DominatorTree;
@@ -323,7 +323,7 @@ namespace llvm {
     
     /// Current AA implementation, just a cache.
     AliasAnalysis *AA;
-    TargetData *TD;
+    DataLayout *TD;
     DominatorTree *DT;
     OwningPtr<PredIteratorCache> PredCache;
   public:
@@ -391,16 +391,18 @@ namespace llvm {
     /// getPointerDependencyFrom - Return the instruction on which a memory
     /// location depends.  If isLoad is true, this routine ignores may-aliases
     /// with read-only operations.  If isLoad is false, this routine ignores
-    /// may-aliases with reads from read-only locations.
+    /// may-aliases with reads from read-only locations. If possible, pass
+    /// the query instruction as well; this function may take advantage of 
+    /// the metadata annotated to the query instruction to refine the result.
     ///
     /// Note that this is an uncached query, and thus may be inefficient.
     ///
     MemDepResult getPointerDependencyFrom(const AliasAnalysis::Location &Loc,
                                           bool isLoad, 
                                           BasicBlock::iterator ScanIt,
-                                          BasicBlock *BB);
-    
-    
+                                          BasicBlock *BB,
+                                          Instruction *QueryInst = 0);
+
     /// getLoadLoadClobberFullWidthSize - This is a little bit of analysis that
     /// looks at a memory location for a load (specified by MemLocBase, Offs,
     /// and Size) and compares it against a load.  If the specified load could
@@ -412,7 +414,7 @@ namespace llvm {
                                                     int64_t MemLocOffs,
                                                     unsigned MemLocSize,
                                                     const LoadInst *LI,
-                                                    const TargetData &TD);
+                                                    const DataLayout &TD);
     
   private:
     MemDepResult getCallSiteDependencyFrom(CallSite C, bool isReadOnlyCall,

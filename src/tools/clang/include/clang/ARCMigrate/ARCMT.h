@@ -11,6 +11,7 @@
 #define LLVM_CLANG_ARCMIGRATE_ARCMT_H
 
 #include "clang/ARCMigrate/FileRemapper.h"
+#include "clang/Basic/SourceLocation.h"
 #include "clang/Frontend/CompilerInvocation.h"
 
 namespace clang {
@@ -96,6 +97,8 @@ class MigrationProcess {
   FileRemapper Remapper;
 
 public:
+  bool HadARCErrors;
+
   MigrationProcess(const CompilerInvocation &CI, DiagnosticConsumer *diagClient,
                    StringRef outputDir = StringRef());
 

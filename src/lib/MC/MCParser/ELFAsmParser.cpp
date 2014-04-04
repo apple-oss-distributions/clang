@@ -22,10 +22,12 @@ using namespace llvm;
 namespace {
 
 class ELFAsmParser : public MCAsmParserExtension {
-  template<bool (ELFAsmParser::*Handler)(StringRef, SMLoc)>
+  template<bool (ELFAsmParser::*HandlerMethod)(StringRef, SMLoc)>
   void AddDirectiveHandler(StringRef Directive) {
-    getParser().AddDirectiveHandler(this, Directive,
-                                    HandleDirective<ELFAsmParser, Handler>);
+    MCAsmParser::ExtensionDirectiveHandler Handler = std::make_pair(
+        this, HandleDirective<ELFAsmParser, HandlerMethod>);
+
+    getParser().AddDirectiveHandler(Directive, Handler);
   }
 
   bool ParseSectionSwitch(StringRef Section, unsigned Type,
@@ -517,7 +519,7 @@ bool ELFAsmParser::ParseDirectiveIdent(StringRef, SMLoc) {
     getStreamer().EmitIntValue(0, 1);
     SeenIdent = true;
   }
-  getStreamer().EmitBytes(Data, 0);
+  getStreamer().EmitBytes(Data);
   getStreamer().EmitIntValue(0, 1);
   getStreamer().PopSection();
   return false;
@@ -569,7 +571,7 @@ bool ELFAsmParser::ParseDirectiveVersion(StringRef, SMLoc) {
   getStreamer().EmitIntValue(Data.size()+1, 4); // namesz.
   getStreamer().EmitIntValue(0, 4);             // descsz = 0 (no description).
   getStreamer().EmitIntValue(1, 4);             // type = NT_VERSION.
-  getStreamer().EmitBytes(Data, 0);             // name.
+  getStreamer().EmitBytes(Data);                // name.
   getStreamer().EmitIntValue(0, 1);             // terminate the string.
   getStreamer().EmitValueToAlignment(4);        // ensure 4 byte alignment.
   getStreamer().PopSection();

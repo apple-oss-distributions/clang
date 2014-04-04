@@ -14,12 +14,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "X86DisassemblerShared.h"
 #include "X86RecognizableInstr.h"
+#include "X86DisassemblerShared.h"
 #include "X86ModRMFilters.h"
-
 #include "llvm/Support/ErrorHandling.h"
-
 #include <string>
 
 using namespace llvm;
@@ -38,14 +36,16 @@ using namespace llvm;
   MAP(D0, 45)           \
   MAP(D1, 46)           \
   MAP(D4, 47)           \
-  MAP(D8, 48)           \
-  MAP(D9, 49)           \
-  MAP(DA, 50)           \
-  MAP(DB, 51)           \
-  MAP(DC, 52)           \
-  MAP(DD, 53)           \
-  MAP(DE, 54)           \
-  MAP(DF, 55)
+  MAP(D5, 48)           \
+  MAP(D6, 49)           \
+  MAP(D8, 50)           \
+  MAP(D9, 51)           \
+  MAP(DA, 52)           \
+  MAP(DB, 53)           \
+  MAP(DC, 54)           \
+  MAP(DD, 55)           \
+  MAP(DE, 56)           \
+  MAP(DF, 57)
 
 // A clone of X86 since we can't depend on something that is generated.
 namespace X86Local {
@@ -763,6 +763,17 @@ void RecognizableInstr::emitInstructionSpecifier(DisassemblerTables &tables) {
     // operand 2 is a 16-bit immediate
     HANDLE_OPERAND(immediate)
     HANDLE_OPERAND(immediate)
+    break;
+  case X86Local::MRM_F8:
+    if (Opcode == 0xc6) {
+      assert(numPhysicalOperands == 1 &&
+             "Unexpected number of operands for X86Local::MRM_F8");
+      HANDLE_OPERAND(immediate)
+    } else if (Opcode == 0xc7) {
+      assert(numPhysicalOperands == 1 &&
+             "Unexpected number of operands for X86Local::MRM_F8");
+      HANDLE_OPERAND(relocation)
+    }
     break;
   case X86Local::MRMInitReg:
     // Ignored.

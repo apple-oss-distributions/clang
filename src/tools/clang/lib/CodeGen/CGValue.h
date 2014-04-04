@@ -18,6 +18,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/Type.h"
+#include "llvm/IR/Metadata.h"
 
 namespace llvm {
   class Constant;
@@ -27,7 +28,7 @@ namespace llvm {
 namespace clang {
 namespace CodeGen {
   class AggValueSlot;
-  class CGBitFieldInfo;
+  struct CGBitFieldInfo;
 
 /// RValue - This trivial value class is used to represent the result of an
 /// expression that is evaluated.  It can be one of three things: either a
@@ -96,6 +97,10 @@ public:
   }
 };
 
+/// Does an ARC strong l-value have precise lifetime?
+enum ARCPreciseLifetime_t {
+  ARCImpreciseLifetime, ARCPreciseLifetime
+};
 
 /// LValue - This represents an lvalue references.  Because C/C++ allow
 /// bitfields, this is not a simple LLVM pointer, it may be a pointer plus a
@@ -146,6 +151,10 @@ class LValue {
   // Lvalue is a thread local reference
   bool ThreadLocalRef : 1;
 
+  // Lvalue has ARC imprecise lifetime.  We store this inverted to try
+  // to make the default bitfield pattern all-zeroes.
+  bool ImpreciseLifetime : 1;
+
   Expr *BaseIvarExp;
 
   /// TBAAInfo - TBAA information to attach to dereferences of this LValue.
@@ -163,6 +172,7 @@ private:
 
     // Initialize Objective-C flags.
     this->Ivar = this->ObjIsArray = this->NonGC = this->GlobalObjCRef = false;
+    this->ImpreciseLifetime = false;
     this->ThreadLocalRef = false;
     this->BaseIvarExp = 0;
     this->TBAAInfo = TBAAInfo;
@@ -200,6 +210,13 @@ public:
 
   bool isThreadLocalRef() const { return ThreadLocalRef; }
   void setThreadLocalRef(bool Value) { ThreadLocalRef = Value;}
+
+  ARCPreciseLifetime_t isARCPreciseLifetime() const {
+    return ARCPreciseLifetime_t(!ImpreciseLifetime);
+  }
+  void setARCPreciseLifetime(ARCPreciseLifetime_t value) {
+    ImpreciseLifetime = (value == ARCImpreciseLifetime);
+  }
 
   bool isObjCWeak() const {
     return Quals.getObjCGCAttr() == Qualifiers::Weak;
@@ -245,7 +262,7 @@ public:
   }
 
   // bitfield lvalue
-  llvm::Value *getBitFieldBaseAddr() const {
+  llvm::Value *getBitFieldAddr() const {
     assert(isBitField());
     return V;
   }
@@ -289,16 +306,16 @@ public:
 
   /// \brief Create a new object to represent a bit-field access.
   ///
-  /// \param BaseValue - The base address of the structure containing the
-  /// bit-field.
+  /// \param Addr - The base address of the bit-field sequence this
+  /// bit-field refers to.
   /// \param Info - The information describing how to perform the bit-field
   /// access.
-  static LValue MakeBitfield(llvm::Value *BaseValue,
+  static LValue MakeBitfield(llvm::Value *Addr,
                              const CGBitFieldInfo &Info,
                              QualType type, CharUnits Alignment) {
     LValue R;
     R.LVType = BitField;
-    R.V = BaseValue;
+    R.V = Addr;
     R.BitFieldInfo = &Info;
     R.Initialize(type, type.getQualifiers(), Alignment);
     return R;
@@ -411,6 +428,10 @@ public:
     return Quals.hasVolatile();
   }
 
+  void setVolatile(bool flag) {
+    Quals.setVolatile(flag);
+  }
+  
   Qualifiers::ObjCLifetime getObjCLifetime() const {
     return Quals.getObjCLifetime();
   }

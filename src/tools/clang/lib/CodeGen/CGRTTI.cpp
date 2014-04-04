@@ -13,10 +13,10 @@
 
 #include "CodeGenModule.h"
 #include "CGCXXABI.h"
+#include "CGObjCRuntime.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/Type.h"
 #include "clang/Frontend/CodeGenOptions.h"
-#include "CGObjCRuntime.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -191,6 +191,13 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
     case BuiltinType::Char32:
     case BuiltinType::Int128:
     case BuiltinType::UInt128:
+    case BuiltinType::OCLImage1d:
+    case BuiltinType::OCLImage1dArray:
+    case BuiltinType::OCLImage1dBuffer:
+    case BuiltinType::OCLImage2d:
+    case BuiltinType::OCLImage2dArray:
+    case BuiltinType::OCLImage3d:
+    case BuiltinType::OCLEvent:
       return true;
       
     case BuiltinType::Dependent:
@@ -244,10 +251,12 @@ static bool IsStandardLibraryRTTIDescriptor(QualType Ty) {
 /// the given type exists somewhere else, and that we should not emit the type
 /// information in this translation unit.  Assumes that it is not a
 /// standard-library type.
-static bool ShouldUseExternalRTTIDescriptor(CodeGenModule &CGM, QualType Ty) {
+static bool ShouldUseExternalRTTIDescriptor(CodeGenModule &CGM,
+                                            QualType Ty) {
   ASTContext &Context = CGM.getContext();
 
-  // If RTTI is disabled, don't consider key functions.
+  // If RTTI is disabled, assume it might be disabled in the
+  // translation unit that defines any potential key function, too.
   if (!Context.getLangOpts().RTTI) return false;
 
   if (const RecordType *RecordTy = dyn_cast<RecordType>(Ty)) {
@@ -258,7 +267,9 @@ static bool ShouldUseExternalRTTIDescriptor(CodeGenModule &CGM, QualType Ty) {
     if (!RD->isDynamicClass())
       return false;
 
-    return !CGM.getVTables().ShouldEmitVTableInThisTU(RD);
+    // FIXME: this may need to be reconsidered if the key function
+    // changes.
+    return CGM.getVTables().isVTableExternal(RD);
   }
   
   return false;
@@ -546,6 +557,51 @@ maybeUpdateRTTILinkage(CodeGenModule &CGM, llvm::GlobalVariable *GV,
   TypeNameGV->setLinkage(Linkage);
 }
 
+/// What sort of unique-RTTI behavior should we use?
+enum UniqueRTTIKind {
+  /// We are guaranteeing, or need to guarantee, that the RTTI string
+  /// is unique.
+  UniqueRTTI,
+
+  /// We are not guaranteeing uniqueness for the RTTI string, so we
+  /// can demote to hidden visibility and use string comparisons.
+  NonUniqueHiddenRTTI,
+
+  /// We are not guaranteeing uniqueness for the RTTI string, so we
+  /// have to use string comparisons, but we also have to emit it with
+  /// non-hidden visibility.
+  NonUniqueVisibleRTTI
+};
+
+/// What sort of uniqueness rules should we use for the RTTI for the
+/// given type?
+static UniqueRTTIKind classifyUniqueRTTI(CodeGenModule &CGM, QualType canTy,
+                                   llvm::GlobalValue::LinkageTypes linkage) {
+  // We only support non-unique RTTI on iOS64.
+  // FIXME: abstract this into CGCXXABI after this code moves to trunk.
+  if (CGM.getTarget().getCXXABI().getKind() != TargetCXXABI::iOS64)
+    return UniqueRTTI;
+
+  // It's only necessary for linkonce_odr or weak_odr linkage.
+  if (linkage != llvm::GlobalValue::LinkOnceODRLinkage &&
+      linkage != llvm::GlobalValue::WeakODRLinkage)
+    return UniqueRTTI;
+
+  // It's only necessary with default visibility.
+  if (canTy->getVisibility() != DefaultVisibility)
+    return UniqueRTTI;
+
+  // If we're not required to publish this symbol, hide it.
+  if (linkage == llvm::GlobalValue::LinkOnceODRLinkage)
+    return NonUniqueHiddenRTTI;
+
+  // If we're required to publish this symbol, as we might be under an
+  // explicit instantiation, leave it with default visibility but
+  // enable string-comparisons.
+  assert(linkage == llvm::GlobalValue::WeakODRLinkage);
+  return NonUniqueVisibleRTTI;
+}
+
 llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   // We want to operate on the canonical type.
   Ty = CGM.getContext().getCanonicalType(Ty);
@@ -581,8 +637,23 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   
   // And the name.
   llvm::GlobalVariable *TypeName = GetAddrOfTypeName(Ty, Linkage);
+  llvm::Constant *typeNameField;
 
-  Fields.push_back(llvm::ConstantExpr::getBitCast(TypeName, CGM.Int8PtrTy));
+  // If we're supposed to demote the visibility, be sure to set a flag
+  // to use a string comparison for type_info comparisons.
+  UniqueRTTIKind uniqueRTTI = classifyUniqueRTTI(CGM, Ty, Linkage);
+  if (uniqueRTTI != UniqueRTTI) {
+    // The flag is the sign bit, which on ARM64 is defined to be clear
+    // for global pointers.  This is very ARM64-specific.
+    typeNameField = llvm::ConstantExpr::getPtrToInt(TypeName, CGM.Int64Ty);
+    llvm::Constant *flag =
+      llvm::ConstantInt::get(CGM.Int64Ty, ((uint64_t)1) << 63);
+    typeNameField = llvm::ConstantExpr::getAdd(typeNameField, flag);
+    typeNameField = llvm::ConstantExpr::getIntToPtr(typeNameField, CGM.Int8PtrTy);
+  } else {
+    typeNameField = llvm::ConstantExpr::getBitCast(TypeName, CGM.Int8PtrTy);
+  }
+  Fields.push_back(typeNameField);
 
   switch (Ty->getTypeClass()) {
 #define TYPE(Class, Base)
@@ -700,6 +771,12 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   
     TypeInfoVisibility = minVisibility(TypeInfoVisibility, Ty->getVisibility());
     GV->setVisibility(CodeGenModule::GetLLVMVisibility(TypeInfoVisibility));
+  }
+
+  // FIXME: integrate this better into the above when we move to trunk
+  if (uniqueRTTI == NonUniqueHiddenRTTI) {
+    TypeName->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
   }
 
   GV->setUnnamedAddr(true);
@@ -977,7 +1054,7 @@ llvm::Constant *CodeGenModule::GetAddrOfRTTIDescriptor(QualType Ty,
   // Return a bogus pointer if RTTI is disabled, unless it's for EH.
   // FIXME: should we even be calling this method if RTTI is disabled
   // and it's not for EH?
-  if (!ForEH && !getContext().getLangOpts().RTTI)
+  if (!ForEH && !getLangOpts().RTTI)
     return llvm::Constant::getNullValue(Int8PtrTy);
   
   if (ForEH && Ty->isObjCObjectPointerType() &&

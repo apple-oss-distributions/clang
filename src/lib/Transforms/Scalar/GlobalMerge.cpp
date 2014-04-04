@@ -53,19 +53,19 @@
 
 #define DEBUG_TYPE "global-merge"
 #include "llvm/Transforms/Scalar.h"
-#include "llvm/Attributes.h"
-#include "llvm/Constants.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/Function.h"
-#include "llvm/GlobalVariable.h"
-#include "llvm/Instructions.h"
-#include "llvm/Intrinsics.h"
-#include "llvm/Module.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
-#include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
-#include "llvm/ADT/Statistic.h"
 using namespace llvm;
 
 STATISTIC(NumMerged      , "Number of globals merged");
@@ -76,7 +76,7 @@ namespace {
     const TargetLowering *TLI;
 
     bool doMerge(SmallVectorImpl<GlobalVariable*> &Globals,
-                 Module &M, bool isConst) const;
+                 Module &M, bool isConst, unsigned AddrSpace) const;
 
   public:
     static char ID;             // Pass identification, replacement for typeid.
@@ -98,9 +98,9 @@ namespace {
     }
 
     struct GlobalCmp {
-      const TargetData *TD;
+      const DataLayout *TD;
 
-      GlobalCmp(const TargetData *td) : TD(td) { }
+      GlobalCmp(const DataLayout *td) : TD(td) { }
 
       bool operator()(const GlobalVariable *GV1, const GlobalVariable *GV2) {
         Type *Ty1 = cast<PointerType>(GV1->getType())->getElementType();
@@ -118,8 +118,8 @@ INITIALIZE_PASS(GlobalMerge, "global-merge",
 
 
 bool GlobalMerge::doMerge(SmallVectorImpl<GlobalVariable*> &Globals,
-                             Module &M, bool isConst) const {
-  const TargetData *TD = TLI->getTargetData();
+                          Module &M, bool isConst, unsigned AddrSpace) const {
+  const DataLayout *TD = TLI->getDataLayout();
 
   // FIXME: Infer the maximum possible offset depending on the actual users
   // (these max offsets are different for the users inside Thumb or ARM
@@ -150,7 +150,9 @@ bool GlobalMerge::doMerge(SmallVectorImpl<GlobalVariable*> &Globals,
     Constant *MergedInit = ConstantStruct::get(MergedTy, Inits);
     GlobalVariable *MergedGV = new GlobalVariable(M, MergedTy, isConst,
                                                   GlobalValue::InternalLinkage,
-                                                  MergedInit, "_MergedGlobals");
+                                                  MergedInit, "_MergedGlobals",
+                                                  0, GlobalVariable::NotThreadLocal,
+                                                  AddrSpace);
     for (size_t k = i; k < j; ++k) {
       Constant *Idx[2] = {
         ConstantInt::get(Int32Ty, 0),
@@ -169,8 +171,9 @@ bool GlobalMerge::doMerge(SmallVectorImpl<GlobalVariable*> &Globals,
 
 
 bool GlobalMerge::doInitialization(Module &M) {
-  SmallVector<GlobalVariable*, 16> Globals, ConstGlobals, BSSGlobals;
-  const TargetData *TD = TLI->getTargetData();
+  DenseMap<unsigned, SmallVector<GlobalVariable*, 16> > Globals, ConstGlobals,
+                                                        BSSGlobals;
+  const DataLayout *TD = TLI->getDataLayout();
   unsigned MaxOffset = TLI->getMaximalGlobalOffset();
   bool Changed = false;
 
@@ -180,6 +183,11 @@ bool GlobalMerge::doInitialization(Module &M) {
     // Merge is safe for "normal" internal globals only
     if (!I->hasLocalLinkage() || I->isThreadLocal() || I->hasSection())
       continue;
+
+    PointerType *PT = dyn_cast<PointerType>(I->getType());
+    assert(PT && "Global variable is not a pointer!");
+
+    unsigned AddressSpace = PT->getAddressSpace();
 
     // Ignore fancy-aligned globals for now.
     unsigned Alignment = TD->getPreferredAlignment(I);
@@ -195,18 +203,23 @@ bool GlobalMerge::doInitialization(Module &M) {
     if (TD->getTypeAllocSize(Ty) < MaxOffset) {
       if (TargetLoweringObjectFile::getKindForGlobal(I, TLI->getTargetMachine())
           .isBSSLocal())
-        BSSGlobals.push_back(I);
+        BSSGlobals[AddressSpace].push_back(I);
       else if (I->isConstant())
-        ConstGlobals.push_back(I);
+        ConstGlobals[AddressSpace].push_back(I);
       else
-        Globals.push_back(I);
+        Globals[AddressSpace].push_back(I);
     }
   }
 
-  if (Globals.size() > 1)
-    Changed |= doMerge(Globals, M, false);
-  if (BSSGlobals.size() > 1)
-    Changed |= doMerge(BSSGlobals, M, false);
+  for (DenseMap<unsigned, SmallVector<GlobalVariable*, 16> >::iterator
+       I = Globals.begin(), E = Globals.end(); I != E; ++I)
+    if (I->second.size() > 1)
+      Changed |= doMerge(I->second, M, false, I->first);
+
+  for (DenseMap<unsigned, SmallVector<GlobalVariable*, 16> >::iterator
+       I = BSSGlobals.begin(), E = BSSGlobals.end(); I != E; ++I)
+    if (I->second.size() > 1)
+      Changed |= doMerge(I->second, M, false, I->first);
 
   // FIXME: This currently breaks the EH processing due to way how the
   // typeinfo detection works. We might want to detect the TIs and ignore

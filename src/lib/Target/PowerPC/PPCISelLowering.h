@@ -17,8 +17,8 @@
 
 #include "PPC.h"
 #include "PPCSubtarget.h"
-#include "llvm/Target/TargetLowering.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/Target/TargetLowering.h"
 
 namespace llvm {
   namespace PPCISD {
@@ -178,6 +178,65 @@ namespace llvm {
       CR6SET,
       CR6UNSET,
 
+      /// G8RC = ADDIS_GOT_TPREL_HA %X2, Symbol - Used by the initial-exec
+      /// TLS model, produces an ADDIS8 instruction that adds the GOT
+      /// base to sym@got@tprel@ha.
+      ADDIS_GOT_TPREL_HA,
+
+      /// G8RC = LD_GOT_TPREL_L Symbol, G8RReg - Used by the initial-exec
+      /// TLS model, produces a LD instruction with base register G8RReg
+      /// and offset sym@got@tprel@l.  This completes the addition that
+      /// finds the offset of "sym" relative to the thread pointer.
+      LD_GOT_TPREL_L,
+
+      /// G8RC = ADD_TLS G8RReg, Symbol - Used by the initial-exec TLS
+      /// model, produces an ADD instruction that adds the contents of
+      /// G8RReg to the thread pointer.  Symbol contains a relocation
+      /// sym@tls which is to be replaced by the thread pointer and
+      /// identifies to the linker that the instruction is part of a
+      /// TLS sequence.
+      ADD_TLS,
+
+      /// G8RC = ADDIS_TLSGD_HA %X2, Symbol - For the general-dynamic TLS
+      /// model, produces an ADDIS8 instruction that adds the GOT base
+      /// register to sym@got@tlsgd@ha.
+      ADDIS_TLSGD_HA,
+
+      /// G8RC = ADDI_TLSGD_L G8RReg, Symbol - For the general-dynamic TLS
+      /// model, produces an ADDI8 instruction that adds G8RReg to
+      /// sym@got@tlsgd@l.
+      ADDI_TLSGD_L,
+
+      /// G8RC = GET_TLS_ADDR %X3, Symbol - For the general-dynamic TLS
+      /// model, produces a call to __tls_get_addr(sym@tlsgd).
+      GET_TLS_ADDR,
+
+      /// G8RC = ADDIS_TLSLD_HA %X2, Symbol - For the local-dynamic TLS
+      /// model, produces an ADDIS8 instruction that adds the GOT base
+      /// register to sym@got@tlsld@ha.
+      ADDIS_TLSLD_HA,
+
+      /// G8RC = ADDI_TLSLD_L G8RReg, Symbol - For the local-dynamic TLS
+      /// model, produces an ADDI8 instruction that adds G8RReg to
+      /// sym@got@tlsld@l.
+      ADDI_TLSLD_L,
+
+      /// G8RC = GET_TLSLD_ADDR %X3, Symbol - For the local-dynamic TLS
+      /// model, produces a call to __tls_get_addr(sym@tlsld).
+      GET_TLSLD_ADDR,
+
+      /// G8RC = ADDIS_DTPREL_HA %X3, Symbol, Chain - For the
+      /// local-dynamic TLS model, produces an ADDIS8 instruction
+      /// that adds X3 to sym@dtprel@ha.  The Chain operand is needed 
+      /// to tie this in place following a copy to %X3 from the result
+      /// of a GET_TLSLD_ADDR.
+      ADDIS_DTPREL_HA,
+
+      /// G8RC = ADDI_DTPREL_L G8RReg, Symbol - For the local-dynamic TLS
+      /// model, produces an ADDI8 instruction that adds G8RReg to
+      /// sym@got@dtprel@l.
+      ADDI_DTPREL_L,
+
       /// STD_32 - This is the STD instruction for use with "32-bit" registers.
       STD_32 = ISD::FIRST_TARGET_MEMORY_OPCODE,
 
@@ -191,7 +250,21 @@ namespace llvm {
       /// byte-swapping load instruction.  It loads "Type" bits, byte swaps it,
       /// then puts it in the bottom bits of the GPRC.  TYPE can be either i16
       /// or i32.
-      LBRX
+      LBRX,
+
+      /// G8RC = ADDIS_TOC_HA %X2, Symbol - For medium code model, produces
+      /// an ADDIS8 instruction that adds the TOC base register to sym@toc@ha.
+      ADDIS_TOC_HA,
+
+      /// G8RC = LD_TOC_L Symbol, G8RReg - For medium code model, produces a
+      /// LD instruction with base register G8RReg and offset sym@toc@l.
+      /// Preceded by an ADDIS_TOC_HA to form a full 32-bit offset.
+      LD_TOC_L,
+
+      /// G8RC = ADDI_TOC_L G8RReg, Symbol - For medium code model, produces
+      /// an ADDI8 instruction that adds G8RReg to sym@toc@l.
+      /// Preceded by an ADDIS_TOC_HA to form a full 32-bit offset.
+      ADDI_TOC_L
     };
   }
 
@@ -358,16 +431,15 @@ namespace llvm {
     /// lowering. If DstAlign is zero that means it's safe to destination
     /// alignment can satisfy any constraint. Similarly if SrcAlign is zero it
     /// means there isn't a need to check it against alignment requirement,
-    /// probably because the source does not need to be loaded. If
-    /// 'IsZeroVal' is true, that means it's safe to return a
-    /// non-scalar-integer type, e.g. empty string source, constant, or loaded
-    /// from memory. 'MemcpyStrSrc' indicates whether the memcpy source is
-    /// constant so it does not need to be loaded.
+    /// probably because the source does not need to be loaded. If 'IsMemset' is
+    /// true, that means it's expanding a memset. If 'ZeroMemset' is true, that
+    /// means it's a memset of zero. 'MemcpyStrSrc' indicates whether the memcpy
+    /// source is constant so it does not need to be loaded.
     /// It returns EVT::Other if the type should be determined using generic
     /// target-independent logic.
     virtual EVT
-    getOptimalMemOpType(uint64_t Size, unsigned DstAlign, unsigned SrcAlign,
-                        bool IsZeroVal, bool MemcpyStrSrc,
+    getOptimalMemOpType(uint64_t Size, unsigned DstAlign, unsigned SrcAlign, 
+                        bool IsMemset, bool ZeroMemset, bool MemcpyStrSrc,
                         MachineFunction &MF) const;
 
     /// isFMAFasterThanMulAndAdd - Return true if an FMA operation is faster than
@@ -467,7 +539,22 @@ namespace llvm {
                   DebugLoc dl, SelectionDAG &DAG) const;
 
     SDValue
-      LowerFormalArguments_Darwin_Or_64SVR4(SDValue Chain,
+      extendArgForPPC64(ISD::ArgFlagsTy Flags, EVT ObjectVT, SelectionDAG &DAG,
+                        SDValue ArgVal, DebugLoc dl) const;
+
+    void
+      setMinReservedArea(MachineFunction &MF, SelectionDAG &DAG,
+                         unsigned nAltivecParamsAtEnd,
+                         unsigned MinReservedArea, bool isPPC64) const;
+
+    SDValue
+      LowerFormalArguments_Darwin(SDValue Chain,
+                                  CallingConv::ID CallConv, bool isVarArg,
+                                  const SmallVectorImpl<ISD::InputArg> &Ins,
+                                  DebugLoc dl, SelectionDAG &DAG,
+                                  SmallVectorImpl<SDValue> &InVals) const;
+    SDValue
+      LowerFormalArguments_64SVR4(SDValue Chain,
                                   CallingConv::ID CallConv, bool isVarArg,
                                   const SmallVectorImpl<ISD::InputArg> &Ins,
                                   DebugLoc dl, SelectionDAG &DAG,
@@ -480,7 +567,21 @@ namespace llvm {
                                   SmallVectorImpl<SDValue> &InVals) const;
 
     SDValue
-      LowerCall_Darwin_Or_64SVR4(SDValue Chain, SDValue Callee,
+      createMemcpyOutsideCallSeq(SDValue Arg, SDValue PtrOff,
+                                 SDValue CallSeqStart, ISD::ArgFlagsTy Flags,
+                                 SelectionDAG &DAG, DebugLoc dl) const;
+
+    SDValue
+      LowerCall_Darwin(SDValue Chain, SDValue Callee,
+                       CallingConv::ID CallConv,
+                       bool isVarArg, bool isTailCall,
+                       const SmallVectorImpl<ISD::OutputArg> &Outs,
+                       const SmallVectorImpl<SDValue> &OutVals,
+                       const SmallVectorImpl<ISD::InputArg> &Ins,
+                       DebugLoc dl, SelectionDAG &DAG,
+                       SmallVectorImpl<SDValue> &InVals) const;
+    SDValue
+      LowerCall_64SVR4(SDValue Chain, SDValue Callee,
                        CallingConv::ID CallConv,
                        bool isVarArg, bool isTailCall,
                        const SmallVectorImpl<ISD::OutputArg> &Outs,

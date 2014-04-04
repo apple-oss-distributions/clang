@@ -15,8 +15,8 @@
 #include "Mips.h"
 #include "MipsFrameLowering.h"
 #include "MipsInstrInfo.h"
-#include "llvm/PassManager.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/PassManager.h"
 #include "llvm/Support/TargetRegistry.h"
 using namespace llvm;
 
@@ -43,17 +43,18 @@ MipsTargetMachine(const Target &T, StringRef TT,
                   bool isLittle)
   : LLVMTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
     Subtarget(TT, CPU, FS, isLittle, RM),
-    DataLayout(isLittle ?
+    DL(isLittle ?
                (Subtarget.isABI_N64() ?
-                "e-p:64:64:64-i8:8:32-i16:16:32-i64:64:64-f128:128:128-n32" :
-                "e-p:32:32:32-i8:8:32-i16:16:32-i64:64:64-n32") :
+                "e-p:64:64:64-i8:8:32-i16:16:32-i64:64:64-f128:128:128-"
+                "n32:64-S128" :
+                "e-p:32:32:32-i8:8:32-i16:16:32-i64:64:64-n32-S64") :
                (Subtarget.isABI_N64() ?
-                "E-p:64:64:64-i8:8:32-i16:16:32-i64:64:64-f128:128:128-n32" :
-                "E-p:32:32:32-i8:8:32-i16:16:32-i64:64:64-n32")),
+                "E-p:64:64:64-i8:8:32-i16:16:32-i64:64:64-f128:128:128-"
+                "n32:64-S128" :
+                "E-p:32:32:32-i8:8:32-i16:16:32-i64:64:64-n32-S64")),
     InstrInfo(MipsInstrInfo::create(*this)),
     FrameLowering(MipsFrameLowering::create(*this, Subtarget)),
-    TLInfo(*this), TSInfo(*this), JITInfo(),
-    ELFWriterInfo(false, isLittle) {
+    TLInfo(*this), TSInfo(*this), JITInfo() {
 }
 
 void MipsebTargetMachine::anchor() { }

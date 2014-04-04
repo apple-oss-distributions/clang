@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <libkern/OSAtomic.h>
 
 namespace __sanitizer {
 
@@ -80,6 +81,14 @@ int internal_sched_yield() {
 }
 
 // ----------------- sanitizer_common.h
+bool FileExists(const char *filename) {
+  struct stat st;
+  if (stat(filename, &st))
+    return false;
+  // Sanity check: filename is a regular file.
+  return S_ISREG(st.st_mode);
+}
+
 uptr GetTid() {
   return reinterpret_cast<uptr>(pthread_self());
 }
@@ -118,6 +127,10 @@ void ReExec() {
   UNIMPLEMENTED();
 }
 
+void PrepareForSandboxing() {
+  // Nothing here for now.
+}
+
 // ----------------- sanitizer_procmaps.h
 
 MemoryMappingLayout::MemoryMappingLayout() {
@@ -152,6 +165,15 @@ void MemoryMappingLayout::Reset() {
   current_load_cmd_addr_ = 0;
   current_magic_ = 0;
   current_filetype_ = 0;
+}
+
+// static
+void MemoryMappingLayout::CacheMemoryMappings() {
+  // No-op on Mac for now.
+}
+
+void MemoryMappingLayout::LoadFromCache() {
+  // No-op on Mac for now.
 }
 
 // Next and NextSegmentLoad were inspired by base/sysinfo.cc in
@@ -244,6 +266,25 @@ bool MemoryMappingLayout::GetObjectNameAndOffset(uptr addr, uptr *offset,
                                                  char filename[],
                                                  uptr filename_size) {
   return IterateForObjectNameAndOffset(addr, offset, filename, filename_size);
+}
+
+BlockingMutex::BlockingMutex(LinkerInitialized) {
+  // We assume that OS_SPINLOCK_INIT is zero
+}
+
+void BlockingMutex::Lock() {
+  CHECK(sizeof(OSSpinLock) <= sizeof(opaque_storage_));
+  CHECK(OS_SPINLOCK_INIT == 0);
+  CHECK(owner_ != (uptr)pthread_self());
+  OSSpinLockLock((OSSpinLock*)&opaque_storage_);
+  CHECK(!owner_);
+  owner_ = (uptr)pthread_self();
+}
+
+void BlockingMutex::Unlock() {
+  CHECK(owner_ == (uptr)pthread_self());
+  owner_ = 0;
+  OSSpinLockUnlock((OSSpinLock*)&opaque_storage_);
 }
 
 }  // namespace __sanitizer

@@ -366,7 +366,8 @@ enum {
   R_X86_64_SIZE64     = 33,
   R_X86_64_GOTPC32_TLSDESC = 34,
   R_X86_64_TLSDESC_CALL    = 35,
-  R_X86_64_TLSDESC    = 36
+  R_X86_64_TLSDESC    = 36,
+  R_X86_64_IRELATIVE  = 37
 };
 
 // i386 relocations.
@@ -457,21 +458,40 @@ enum {
   R_PPC_REL14                 = 11,
   R_PPC_REL14_BRTAKEN         = 12,
   R_PPC_REL14_BRNTAKEN        = 13,
-  R_PPC_REL32                 = 26
+  R_PPC_REL32                 = 26,
+  R_PPC_TPREL16_LO            = 70,
+  R_PPC_TPREL16_HA            = 72
 };
 
 // ELF Relocation types for PPC64
 enum {
+  R_PPC64_ADDR32              = 1,
   R_PPC64_ADDR16_LO           = 4,
   R_PPC64_ADDR16_HI           = 5,
   R_PPC64_ADDR14              = 7,
   R_PPC64_REL24               = 10,
+  R_PPC64_REL32               = 26,
   R_PPC64_ADDR64              = 38,
   R_PPC64_ADDR16_HIGHER       = 39,
   R_PPC64_ADDR16_HIGHEST      = 41,
+  R_PPC64_REL64               = 44,
   R_PPC64_TOC16               = 47,
+  R_PPC64_TOC16_LO            = 48,
+  R_PPC64_TOC16_HA            = 50,
   R_PPC64_TOC                 = 51,
-  R_PPC64_TOC16_DS            = 63
+  R_PPC64_TOC16_DS            = 63,
+  R_PPC64_TOC16_LO_DS         = 64,
+  R_PPC64_TLS                 = 67,
+  R_PPC64_DTPREL16_LO         = 75,
+  R_PPC64_DTPREL16_HA         = 77,
+  R_PPC64_GOT_TLSGD16_LO      = 80,
+  R_PPC64_GOT_TLSGD16_HA      = 82,
+  R_PPC64_GOT_TLSLD16_LO      = 84,
+  R_PPC64_GOT_TLSLD16_HA      = 86,
+  R_PPC64_GOT_TPREL16_LO_DS   = 88,
+  R_PPC64_GOT_TPREL16_HA      = 90,
+  R_PPC64_TLSGD               = 107,
+  R_PPC64_TLSLD               = 108
 };
 
 // ARM Specific e_flags
@@ -689,8 +709,36 @@ enum {
   R_MIPS_NUM               = 218
 };
 
+// Hexagon Specific e_flags
+// Release 5 ABI
+enum {
+  // Object processor version flags, bits[3:0]
+  EF_HEXAGON_MACH_V2      = 0x00000001,   // Hexagon V2
+  EF_HEXAGON_MACH_V3      = 0x00000002,   // Hexagon V3
+  EF_HEXAGON_MACH_V4      = 0x00000003,   // Hexagon V4
+  EF_HEXAGON_MACH_V5      = 0x00000004,   // Hexagon V5
+
+  // Highest ISA version flags
+  EF_HEXAGON_ISA_MACH     = 0x00000000,   // Same as specified in bits[3:0]
+                                          // of e_flags
+  EF_HEXAGON_ISA_V2       = 0x00000010,   // Hexagon V2 ISA
+  EF_HEXAGON_ISA_V3       = 0x00000020,   // Hexagon V3 ISA
+  EF_HEXAGON_ISA_V4       = 0x00000030,   // Hexagon V4 ISA
+  EF_HEXAGON_ISA_V5       = 0x00000040    // Hexagon V5 ISA
+};
+
+// Hexagon specific Section indexes for common small data
+// Release 5 ABI 
+enum {
+  SHN_HEXAGON_SCOMMON     = 0xff00,       // Other access sizes
+  SHN_HEXAGON_SCOMMON_1   = 0xff01,       // Byte-sized access
+  SHN_HEXAGON_SCOMMON_2   = 0xff02,       // Half-word-sized access
+  SHN_HEXAGON_SCOMMON_4   = 0xff03,       // Word-sized access
+  SHN_HEXAGON_SCOMMON_8   = 0xff04        // Double-word-size access
+};   
+
 // ELF Relocation types for Hexagon
-// Release 5 ABI - Document: 80-V9418-3 Rev. J
+// Release 5 ABI
 enum {
   R_HEX_NONE              =  0,
   R_HEX_B22_PCREL         =  1,
@@ -858,8 +906,12 @@ enum {
   SHT_ARM_ATTRIBUTES      = 0x70000003U,
   SHT_ARM_DEBUGOVERLAY    = 0x70000004U,
   SHT_ARM_OVERLAYSECTION  = 0x70000005U,
-
+  SHT_HEX_ORDERED         = 0x70000000, // Link editor is to sort the entries in 
+                                        // this section based on their sizes
   SHT_X86_64_UNWIND       = 0x70000001, // Unwind information
+
+  SHT_MIPS_REGINFO        = 0x70000006, // Register usage information
+  SHT_MIPS_OPTIONS        = 0x7000000d, // General options
 
   SHT_HIPROC        = 0x7fffffff, // Highest processor architecture-specific type.
   SHT_LOUSER        = 0x80000000, // Lowest type reserved for applications.
@@ -923,7 +975,14 @@ enum {
   // sets this flag besides being able to refer to data in a section that does
   // not set it; likewise, a small code model object can refer only to code in a
   // section that does not set this flag.
-  SHF_X86_64_LARGE = 0x10000000
+  SHF_X86_64_LARGE = 0x10000000,
+
+  // All sections with the GPREL flag are grouped into a global data area 
+  // for faster accesses
+  SHF_HEX_GPREL = 0x10000000,
+
+  // Do not strip this section. FIXME: We need target specific SHF_ enums.
+  SHF_MIPS_NOSTRIP = 0x8000000
 };
 
 // Section Group Flags
@@ -1053,14 +1112,14 @@ struct Elf64_Rel {
 
   // These accessors and mutators correspond to the ELF64_R_SYM, ELF64_R_TYPE,
   // and ELF64_R_INFO macros defined in the ELF specification:
-  Elf64_Xword getSymbol() const { return (r_info >> 32); }
-  unsigned char getType() const {
-    return (unsigned char) (r_info & 0xffffffffL);
+  Elf64_Word getSymbol() const { return (r_info >> 32); }
+  Elf64_Word getType() const {
+    return (Elf64_Word) (r_info & 0xffffffffL);
   }
-  void setSymbol(Elf32_Word s) { setSymbolAndType(s, getType()); }
-  void setType(unsigned char t) { setSymbolAndType(getSymbol(), t); }
-  void setSymbolAndType(Elf64_Xword s, unsigned char t) {
-    r_info = (s << 32) + (t&0xffffffffL);
+  void setSymbol(Elf64_Word s) { setSymbolAndType(s, getType()); }
+  void setType(Elf64_Word t) { setSymbolAndType(getSymbol(), t); }
+  void setSymbolAndType(Elf64_Word s, Elf64_Word t) {
+    r_info = ((Elf64_Xword)s << 32) + (t&0xffffffffL);
   }
 };
 
@@ -1072,14 +1131,14 @@ struct Elf64_Rela {
 
   // These accessors and mutators correspond to the ELF64_R_SYM, ELF64_R_TYPE,
   // and ELF64_R_INFO macros defined in the ELF specification:
-  Elf64_Xword getSymbol() const { return (r_info >> 32); }
-  unsigned char getType() const {
-    return (unsigned char) (r_info & 0xffffffffL);
+  Elf64_Word getSymbol() const { return (r_info >> 32); }
+  Elf64_Word getType() const {
+    return (Elf64_Word) (r_info & 0xffffffffL);
   }
-  void setSymbol(Elf64_Xword s) { setSymbolAndType(s, getType()); }
-  void setType(unsigned char t) { setSymbolAndType(getSymbol(), t); }
-  void setSymbolAndType(Elf64_Xword s, unsigned char t) {
-    r_info = (s << 32) + (t&0xffffffffL);
+  void setSymbol(Elf64_Word s) { setSymbolAndType(s, getType()); }
+  void setType(Elf64_Word t) { setSymbolAndType(getSymbol(), t); }
+  void setSymbolAndType(Elf64_Word s, Elf64_Word t) {
+    r_info = ((Elf64_Xword)s << 32) + (t&0xffffffffL);
   }
 };
 
@@ -1118,6 +1177,9 @@ enum {
   PT_PHDR    = 6, // The program header table itself.
   PT_TLS     = 7, // The thread-local storage template.
   PT_LOOS    = 0x60000000, // Lowest operating system-specific pt entry type.
+  PT_HIOS    = 0x6fffffff, // Highest operating system-specific pt entry type.
+  PT_LOPROC  = 0x70000000, // Lowest processor-specific program hdr entry type.
+  PT_HIPROC  = 0x7fffffff, // Highest processor-specific program hdr entry type.
 
   // x86-64 program header types.
   // These all contain stack unwind tables.
@@ -1128,9 +1190,11 @@ enum {
   PT_GNU_STACK  = 0x6474e551, // Indicates stack executability.
   PT_GNU_RELRO  = 0x6474e552, // Read-only after relocation.
 
-  PT_HIOS    = 0x6fffffff, // Highest operating system-specific pt entry type.
-  PT_LOPROC  = 0x70000000, // Lowest processor-specific program hdr entry type.
-  PT_HIPROC  = 0x7fffffff  // Highest processor-specific program hdr entry type.
+  // ARM program header types.
+  PT_ARM_ARCHEXT = 0x70000000, // Platform architecture compatibility information
+  // These all contain stack unwind tables.
+  PT_ARM_EXIDX   = 0x70000001,
+  PT_ARM_UNWIND  = 0x70000001
 };
 
 // Segment flag bits.

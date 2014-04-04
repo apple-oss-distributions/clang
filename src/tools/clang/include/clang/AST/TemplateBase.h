@@ -15,8 +15,8 @@
 #ifndef LLVM_CLANG_AST_TEMPLATEBASE_H
 #define LLVM_CLANG_AST_TEMPLATEBASE_H
 
-#include "clang/AST/Type.h"
 #include "clang/AST/TemplateName.h"
+#include "clang/AST/Type.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
@@ -315,6 +315,12 @@ public:
   unsigned pack_size() const {
     assert(Kind == Pack);
     return Args.NumArgs;
+  }
+
+  /// \brief Return the array of arguments in this template argument pack.
+  llvm::ArrayRef<TemplateArgument> getPackAsArray() const {
+    assert(Kind == Pack);
+    return llvm::ArrayRef<TemplateArgument>(Args.Args, Args.NumArgs);
   }
 
   /// \brief Determines whether two template arguments are superficially the

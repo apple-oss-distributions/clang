@@ -12,6 +12,7 @@
 #include "DWARFContext.h"
 #include "DWARFDebugAbbrev.h"
 #include "DWARFFormValue.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -39,7 +40,7 @@ void DWARFDebugInfoEntryMinimal::dump(raw_ostream &OS,
         OS << format(" [%u] %c\n", abbrCode,
                      AbbrevDecl->hasChildren() ? '*' : ' ');
 
-        // Dump all data in the .debug_info for the attributes
+        // Dump all data in the DIE for the attributes.
         const uint32_t numAttributes = AbbrevDecl->getNumAttributes();
         for (uint32_t i = 0; i != numAttributes; ++i) {
           uint16_t attr = AbbrevDecl->getAttrByIndex(i);
@@ -113,9 +114,14 @@ bool DWARFDebugInfoEntryMinimal::extractFast(const DWARFCompileUnit *cu,
     uint32_t i;
     uint16_t form;
     for (i=0; i<numAttributes; ++i) {
+
       form = AbbrevDecl->getFormByIndex(i);
 
-      const uint8_t fixed_skip_size = fixed_form_sizes[form];
+      // FIXME: Currently we're checking if this is less than the last
+      // entry in the fixed_form_sizes table, but this should be changed
+      // to use dynamic dispatch.
+      const uint8_t fixed_skip_size = (form < DW_FORM_ref_sig8) ?
+                                       fixed_form_sizes[form] : 0;
       if (fixed_skip_size)
         offset += fixed_skip_size;
       else {
@@ -187,6 +193,8 @@ bool DWARFDebugInfoEntryMinimal::extractFast(const DWARFCompileUnit *cu,
           case DW_FORM_sdata:
           case DW_FORM_udata:
           case DW_FORM_ref_udata:
+          case DW_FORM_GNU_str_index:
+          case DW_FORM_GNU_addr_index:
             debug_info_data.getULEB128(&offset);
             break;
 
@@ -195,11 +203,9 @@ bool DWARFDebugInfoEntryMinimal::extractFast(const DWARFCompileUnit *cu,
             form = debug_info_data.getULEB128(&offset);
             break;
 
+            // FIXME: 64-bit for DWARF64
           case DW_FORM_sec_offset:
-            if (cu->getAddressByteSize() == 4)
-              debug_info_data.getU32(offset_ptr);
-            else
-              debug_info_data.getU64(offset_ptr);
+            debug_info_data.getU32(offset_ptr);
             break;
 
           default:
@@ -207,7 +213,6 @@ bool DWARFDebugInfoEntryMinimal::extractFast(const DWARFCompileUnit *cu,
             return false;
           }
           offset += form_size;
-
         } while (form_is_indirect);
       }
     }
@@ -327,6 +332,8 @@ DWARFDebugInfoEntryMinimal::extract(const DWARFCompileUnit *cu,
               case DW_FORM_sdata:
               case DW_FORM_udata:
               case DW_FORM_ref_udata:
+              case DW_FORM_GNU_str_index:
+              case DW_FORM_GNU_addr_index:
                 debug_info_data.getULEB128(&offset);
                 break;
 
@@ -335,13 +342,11 @@ DWARFDebugInfoEntryMinimal::extract(const DWARFCompileUnit *cu,
                 form_is_indirect = true;
                 break;
 
+                // FIXME: 64-bit for DWARF64.
               case DW_FORM_sec_offset:
-                if (cu->getAddressByteSize() == 4)
-                  debug_info_data.getU32(offset_ptr);
-                else
-                  debug_info_data.getU64(offset_ptr);
+                debug_info_data.getU32(offset_ptr);
                 break;
-                
+
               default:
                 *offset_ptr = offset;
                 return false;
@@ -411,13 +416,13 @@ DWARFDebugInfoEntryMinimal::getAttributeValue(const DWARFCompileUnit *cu,
 
 const char*
 DWARFDebugInfoEntryMinimal::getAttributeValueAsString(
-    const DWARFCompileUnit* cu,
-    const uint16_t attr,
-    const char* fail_value) const {
+                                                     const DWARFCompileUnit* cu,
+                                                     const uint16_t attr,
+                                                     const char* fail_value)
+                                                     const {
   DWARFFormValue form_value;
   if (getAttributeValue(cu, attr, form_value)) {
-    DataExtractor stringExtractor(cu->getContext().getStringSection(),
-        false, 0);
+    DataExtractor stringExtractor(cu->getStringSection(), false, 0);
     return form_value.getAsCString(&stringExtractor);
   }
   return fail_value;
@@ -425,9 +430,9 @@ DWARFDebugInfoEntryMinimal::getAttributeValueAsString(
 
 uint64_t
 DWARFDebugInfoEntryMinimal::getAttributeValueAsUnsigned(
-    const DWARFCompileUnit* cu,
-    const uint16_t attr,
-    uint64_t fail_value) const {
+                                                    const DWARFCompileUnit* cu,
+                                                    const uint16_t attr,
+                                                    uint64_t fail_value) const {
   DWARFFormValue form_value;
   if (getAttributeValue(cu, attr, form_value))
       return form_value.getUnsigned();
@@ -436,9 +441,9 @@ DWARFDebugInfoEntryMinimal::getAttributeValueAsUnsigned(
 
 int64_t
 DWARFDebugInfoEntryMinimal::getAttributeValueAsSigned(
-    const DWARFCompileUnit* cu,
-    const uint16_t attr,
-    int64_t fail_value) const {
+                                                     const DWARFCompileUnit* cu,
+                                                     const uint16_t attr,
+                                                     int64_t fail_value) const {
   DWARFFormValue form_value;
   if (getAttributeValue(cu, attr, form_value))
       return form_value.getSigned();
@@ -447,9 +452,10 @@ DWARFDebugInfoEntryMinimal::getAttributeValueAsSigned(
 
 uint64_t
 DWARFDebugInfoEntryMinimal::getAttributeValueAsReference(
-                                                  const DWARFCompileUnit* cu,
-                                                  const uint16_t attr,
-                                                  uint64_t fail_value) const {
+                                                     const DWARFCompileUnit* cu,
+                                                     const uint16_t attr,
+                                                     uint64_t fail_value)
+                                                     const {
   DWARFFormValue form_value;
   if (getAttributeValue(cu, attr, form_value))
       return form_value.getReference(cu);
@@ -457,7 +463,8 @@ DWARFDebugInfoEntryMinimal::getAttributeValueAsReference(
 }
 
 bool DWARFDebugInfoEntryMinimal::getLowAndHighPC(const DWARFCompileUnit *CU,
-    uint64_t &LowPC, uint64_t &HighPC) const {
+                                                 uint64_t &LowPC,
+                                                 uint64_t &HighPC) const {
   HighPC = -1ULL;
   LowPC = getAttributeValueAsUnsigned(CU, DW_AT_low_pc, -1ULL);
   if (LowPC != -1ULL)
@@ -488,7 +495,9 @@ DWARFDebugInfoEntryMinimal::buildAddressRangeTable(const DWARFCompileUnit *CU,
 
 bool
 DWARFDebugInfoEntryMinimal::addressRangeContainsAddress(
-    const DWARFCompileUnit *CU, const uint64_t Address) const {
+                                                     const DWARFCompileUnit *CU,
+                                                     const uint64_t Address)
+                                                     const {
   if (isNULL())
     return false;
   uint64_t LowPC, HighPC;
@@ -505,8 +514,8 @@ DWARFDebugInfoEntryMinimal::addressRangeContainsAddress(
 }
 
 const char*
-DWARFDebugInfoEntryMinimal::getSubroutineName(
-    const DWARFCompileUnit *CU) const {
+DWARFDebugInfoEntryMinimal::getSubroutineName(const DWARFCompileUnit *CU)
+                                                                         const {
   if (!isSubroutineDIE())
     return 0;
   // Try to get mangled name if possible.
@@ -540,9 +549,10 @@ DWARFDebugInfoEntryMinimal::getSubroutineName(
   return 0;
 }
 
-void DWARFDebugInfoEntryMinimal::getCallerFrame(
-    const DWARFCompileUnit *CU, uint32_t &CallFile, uint32_t &CallLine,
-    uint32_t &CallColumn) const {
+void DWARFDebugInfoEntryMinimal::getCallerFrame(const DWARFCompileUnit *CU,
+                                                uint32_t &CallFile,
+                                                uint32_t &CallLine,
+                                                uint32_t &CallColumn) const {
   CallFile = getAttributeValueAsUnsigned(CU, DW_AT_call_file, 0);
   CallLine = getAttributeValueAsUnsigned(CU, DW_AT_call_line, 0);
   CallColumn = getAttributeValueAsUnsigned(CU, DW_AT_call_column, 0);
@@ -550,7 +560,9 @@ void DWARFDebugInfoEntryMinimal::getCallerFrame(
 
 DWARFDebugInfoEntryMinimal::InlinedChain
 DWARFDebugInfoEntryMinimal::getInlinedChainForAddress(
-    const DWARFCompileUnit *CU, const uint64_t Address) const {
+                                                     const DWARFCompileUnit *CU,
+                                                     const uint64_t Address)
+                                                     const {
   DWARFDebugInfoEntryMinimal::InlinedChain InlinedChain;
   if (isNULL())
     return InlinedChain;

@@ -15,12 +15,13 @@
 #define LLVM_ASMPARSER_LLPARSER_H
 
 #include "LLLexer.h"
-#include "llvm/Attributes.h"
-#include "llvm/Instructions.h"
-#include "llvm/Module.h"
-#include "llvm/Type.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/IR/Type.h"
 #include "llvm/Support/ValueHandle.h"
 #include <map>
 
@@ -55,7 +56,7 @@ namespace llvm {
       t_ConstantStruct,           // Value in ConstantStructElts.
       t_PackedConstantStruct      // Value in ConstantStructElts.
     } Kind;
-    
+
     LLLexer::LocTy Loc;
     unsigned UIntVal;
     std::string StrVal, StrVal2;
@@ -65,23 +66,23 @@ namespace llvm {
     MDNode *MDNodeVal;
     MDString *MDStringVal;
     Constant **ConstantStructElts;
-    
+
     ValID() : Kind(t_LocalID), APFloatVal(0.0) {}
     ~ValID() {
       if (Kind == t_ConstantStruct || Kind == t_PackedConstantStruct)
         delete [] ConstantStructElts;
     }
-    
+
     bool operator<(const ValID &RHS) const {
       if (Kind == t_LocalID || Kind == t_GlobalID)
         return UIntVal < RHS.UIntVal;
       assert((Kind == t_LocalName || Kind == t_GlobalName ||
-              Kind == t_ConstantStruct || Kind == t_PackedConstantStruct) && 
+              Kind == t_ConstantStruct || Kind == t_PackedConstantStruct) &&
              "Ordering not defined for this ValID kind yet");
       return StrVal < RHS.StrVal;
     }
   };
-  
+
   class LLParser {
   public:
     typedef LLLexer::LocTy LocTy;
@@ -89,7 +90,7 @@ namespace llvm {
     LLVMContext &Context;
     LLLexer Lex;
     Module *M;
-    
+
     // Instruction metadata resolution.  Each instruction can have a list of
     // MDRef info associated with them.
     //
@@ -110,7 +111,7 @@ namespace llvm {
     // have processed a use of the type but not a definition yet.
     StringMap<std::pair<Type*, LocTy> > NamedTypes;
     std::vector<std::pair<Type*, LocTy> > NumberedTypes;
-    
+
     std::vector<TrackingVH<MDNode> > NumberedMetadata;
     std::map<unsigned, std::pair<TrackingVH<MDNode>, LocTy> > ForwardRefMDNodes;
 
@@ -118,14 +119,14 @@ namespace llvm {
     std::map<std::string, std::pair<GlobalValue*, LocTy> > ForwardRefVals;
     std::map<unsigned, std::pair<GlobalValue*, LocTy> > ForwardRefValIDs;
     std::vector<GlobalValue*> NumberedVals;
-    
+
     // References to blockaddress.  The key is the function ValID, the value is
     // a list of references to blocks in that function.
     std::map<ValID, std::vector<std::pair<ValID, GlobalValue*> > >
       ForwardRefBlockAddresses;
-    
+
   public:
-    LLParser(MemoryBuffer *F, SourceMgr &SM, SMDiagnostic &Err, Module *m) : 
+    LLParser(MemoryBuffer *F, SourceMgr &SM, SMDiagnostic &Err, Module *m) :
       Context(m->getContext()), Lex(F, SM, Err, m->getContext()),
       M(m) {}
     bool Run();
@@ -154,6 +155,21 @@ namespace llvm {
       Lex.Lex();
       return true;
     }
+
+    FastMathFlags EatFastMathFlagsIfPresent() {
+      FastMathFlags FMF;
+      while (true)
+        switch (Lex.getKind()) {
+        case lltok::kw_fast: FMF.setUnsafeAlgebra();   Lex.Lex(); continue;
+        case lltok::kw_nnan: FMF.setNoNaNs();          Lex.Lex(); continue;
+        case lltok::kw_ninf: FMF.setNoInfs();          Lex.Lex(); continue;
+        case lltok::kw_nsz:  FMF.setNoSignedZeros();   Lex.Lex(); continue;
+        case lltok::kw_arcp: FMF.setAllowReciprocal(); Lex.Lex(); continue;
+        default: return FMF;
+        }
+      return FMF;
+    }
+
     bool ParseOptionalToken(lltok::Kind T, bool &Present, LocTy *Loc = 0) {
       if (Lex.getKind() != T) {
         Present = false;
@@ -175,7 +191,9 @@ namespace llvm {
     bool ParseTLSModel(GlobalVariable::ThreadLocalMode &TLM);
     bool ParseOptionalThreadLocal(GlobalVariable::ThreadLocalMode &TLM);
     bool ParseOptionalAddrSpace(unsigned &AddrSpace);
-    bool ParseOptionalAttrs(Attributes &Attrs, unsigned AttrKind);
+    bool ParseOptionalFuncAttrs(AttrBuilder &B);
+    bool ParseOptionalParamAttrs(AttrBuilder &B);
+    bool ParseOptionalReturnAttrs(AttrBuilder &B);
     bool ParseOptionalLinkage(unsigned &Linkage, bool &HasLinkage);
     bool ParseOptionalLinkage(unsigned &Linkage) {
       bool HasLinkage; return ParseOptionalLinkage(Linkage, HasLinkage);
@@ -200,8 +218,8 @@ namespace llvm {
     bool ParseTopLevelEntities();
     bool ValidateEndOfModule();
     bool ParseTargetDefinition();
-    bool ParseDepLibs();
     bool ParseModuleAsm();
+    bool ParseDepLibs();        // FIXME: Remove in 4.0.
     bool ParseUnnamedType();
     bool ParseNamedType();
     bool ParseDeclare();
@@ -241,7 +259,7 @@ namespace llvm {
       std::map<std::string, std::pair<Value*, LocTy> > ForwardRefVals;
       std::map<unsigned, std::pair<Value*, LocTy> > ForwardRefValIDs;
       std::vector<Value*> NumberedVals;
-      
+
       /// FunctionNumber - If this is an unnamed function, this is the slot
       /// number of it, otherwise it is -1.
       int FunctionNumber;
@@ -308,8 +326,8 @@ namespace llvm {
     struct ParamInfo {
       LocTy Loc;
       Value *V;
-      Attributes Attrs;
-      ParamInfo(LocTy loc, Value *v, Attributes attrs)
+      AttributeSet Attrs;
+      ParamInfo(LocTy loc, Value *v, AttributeSet attrs)
         : Loc(loc), V(v), Attrs(attrs) {}
     };
     bool ParseParameterList(SmallVectorImpl<ParamInfo> &ArgList,
@@ -329,9 +347,9 @@ namespace llvm {
     struct ArgInfo {
       LocTy Loc;
       Type *Ty;
-      Attributes Attrs;
+      AttributeSet Attrs;
       std::string Name;
-      ArgInfo(LocTy L, Type *ty, Attributes Attr, const std::string &N)
+      ArgInfo(LocTy L, Type *ty, AttributeSet Attr, const std::string &N)
         : Loc(L), Ty(ty), Attrs(Attr), Name(N) {}
     };
     bool ParseArgumentList(SmallVectorImpl<ArgInfo> &ArgList, bool &isVarArg);
@@ -375,8 +393,8 @@ namespace llvm {
     int ParseGetElementPtr(Instruction *&I, PerFunctionState &PFS);
     int ParseExtractValue(Instruction *&I, PerFunctionState &PFS);
     int ParseInsertValue(Instruction *&I, PerFunctionState &PFS);
-    
-    bool ResolveForwardRefBlockAddresses(Function *TheFn, 
+
+    bool ResolveForwardRefBlockAddresses(Function *TheFn,
                              std::vector<std::pair<ValID, GlobalValue*> > &Refs,
                                          PerFunctionState *PFS);
   };

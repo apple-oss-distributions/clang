@@ -49,6 +49,9 @@ def ssub_0  : SubRegIndex;
 def ssub_1  : SubRegIndex;
 def ssub_2  : SubRegIndex<[dsub_1, ssub_0]>;
 def ssub_3  : SubRegIndex<[dsub_1, ssub_1]>;
+
+def gsub_0  : SubRegIndex;
+def gsub_1  : SubRegIndex;
 // Let TableGen synthesize the remaining 12 ssub_* indices.
 // We don't need to name them.
 }
@@ -247,12 +250,17 @@ def CCR : RegisterClass<"ARM", [i32], 32, (add CPSR)> {
 }
 
 // Scalar single precision floating point register class..
-// FIXME: Allocation order changed to s0, s2, s4, ... as a quick hack to
-// avoid partial-write dependencies on D registers (S registers are
-// renamed as portions of D registers).
-def SPR : RegisterClass<"ARM", [f32], 32, (add (decimate
-                                                (sequence "S%u", 0, 31), 2),
-                                               (sequence "S%u", 0, 31))>;
+// FIXME: Allocation order changed to s0, s4, ... as a quick hack to
+// avoid partial-write dependencies on D and Q registers (S registers are
+// renamed as portions of D/Q registers).
+// <rdar://problem/13036362>
+def SPR : RegisterClass<"ARM", [f32], 32, (sequence "S%u", 0, 31)> {
+  let AltOrders = [(add (decimate SPR, 4),
+                        (decimate SPR, 2),
+                        (decimate (rotl SPR, 1), 4),
+                        (decimate (rotl SPR, 1), 2))];
+  let AltOrderSelect = [{ return 1; }];
+}
 
 // Subset of SPR which can be used as a source of NEON scalars for 16-bit
 // operations
@@ -264,8 +272,9 @@ def SPR_8 : RegisterClass<"ARM", [f32], 32, (sequence "S%u", 0, 15)>;
 // is double-word alignment though.
 def DPR : RegisterClass<"ARM", [f64, v8i8, v4i16, v2i32, v1i64, v2f32], 64,
                         (sequence "D%u", 0, 31)> {
-  // Allocate non-VFP2 registers D16-D31 first.
-  let AltOrders = [(rotl DPR, 16)];
+  // Allocate non-VFP2 registers D16-D31 first, and prefer even registers.
+  // <rdar://problem/13036362>
+  let AltOrders = [(add (decimate (rotl DPR, 16), 2), (rotl DPR, 16))];
   let AltOrderSelect = [{ return 1; }];
 }
 
@@ -311,6 +320,17 @@ def DPair : RegisterClass<"ARM", [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64],
   // Prefer even-odd pairs as they are easier to copy.
   let AltOrders = [(add (rotl QPR, 8), (rotl DPair, 16))];
   let AltOrderSelect = [{ return 1; }];
+}
+
+// Pseudo-registers representing even-odd pairs of GPRs from R1 to R13/SP.
+// These are needed by instructions (e.g. ldrexd/strexd) requiring even-odd GPRs.
+def Tuples2R : RegisterTuples<[gsub_0, gsub_1],
+                              [(add R0, R2, R4, R6, R8, R10, R12),
+                               (add R1, R3, R5, R7, R9, R11, SP)]>;
+
+// Register class representing a pair of even-odd GPRs.
+def GPRPair : RegisterClass<"ARM", [untyped], 64, (add Tuples2R)> {
+  let Size = 64; // 2 x 32 bits, we have no predefined type of that size.
 }
 
 // Pseudo-registers representing 3 consecutive D registers.

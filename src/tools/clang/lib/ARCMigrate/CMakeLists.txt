@@ -9,15 +9,17 @@ add_clang_library(clangARCMigrate
   TransAutoreleasePool.cpp
   TransBlockObjCVariable.cpp
   TransEmptyStatementsAndDealloc.cpp
-  TransformActions.cpp
-  Transforms.cpp
   TransGCAttrs.cpp
   TransGCCalls.cpp
   TransProperties.cpp
+  TransProtectedScope.cpp
   TransRetainReleaseDealloc.cpp
   TransUnbridgedCasts.cpp
   TransUnusedInitDelegate.cpp
   TransZeroOutPropsInDealloc.cpp
+  TransformActions.cpp
+  Transforms.cpp
+  XCTMT.cpp
   )
 
 add_dependencies(clangARCMigrate

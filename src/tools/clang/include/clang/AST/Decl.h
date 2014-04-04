@@ -16,33 +16,34 @@
 
 #include "clang/AST/APValue.h"
 #include "clang/AST/DeclBase.h"
-#include "clang/AST/Redeclarable.h"
 #include "clang/AST/DeclarationName.h"
 #include "clang/AST/ExternalASTSource.h"
+#include "clang/AST/Redeclarable.h"
+#include "clang/AST/Type.h"
 #include "clang/Basic/Linkage.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/Compiler.h"
 
 namespace clang {
+struct ASTTemplateArgumentListInfo;
 class CXXTemporary;
+class CompoundStmt;
+class DependentFunctionTemplateSpecializationInfo;
 class Expr;
 class FunctionTemplateDecl;
-class Stmt;
-class CompoundStmt;
-class StringLiteral;
-class NestedNameSpecifier;
-class TemplateParameterList;
-class TemplateArgumentList;
-struct ASTTemplateArgumentListInfo;
-class MemberSpecializationInfo;
 class FunctionTemplateSpecializationInfo;
-class DependentFunctionTemplateSpecializationInfo;
+class LabelStmt;
+class MemberSpecializationInfo;
+class Module;
+class NestedNameSpecifier;
+class Stmt;
+class StringLiteral;
+class TemplateArgumentList;
+class TemplateParameterList;
 class TypeLoc;
 class UnresolvedSetImpl;
-class LabelStmt;
-class Module;
-  
+
 /// \brief A container of type source information.
 ///
 /// A client can read the relevant info using TypeLoc wrappers, e.g:
@@ -88,7 +89,6 @@ public:
   static TranslationUnitDecl *Create(ASTContext &C);
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TranslationUnitDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == TranslationUnit; }
   static DeclContext *castToDeclContext(const TranslationUnitDecl *D) {
     return static_cast<DeclContext *>(const_cast<TranslationUnitDecl*>(D));
@@ -109,6 +109,7 @@ class NamedDecl : public Decl {
 
 private:
   NamedDecl *getUnderlyingDeclImpl();
+  void verifyLinkage() const;
 
 protected:
   NamedDecl(Kind DK, DeclContext *DC, SourceLocation L, DeclarationName N)
@@ -213,113 +214,27 @@ public:
   /// a C++ class.
   bool isCXXInstanceMember() const;
 
-  class LinkageInfo {
-    uint8_t linkage_    : 4;
-    uint8_t visibility_ : 3;
-    uint8_t explicit_   : 1;
-
-    void setVisibility(Visibility V, bool E) { visibility_ = V; explicit_ = E; }
-  public:
-    LinkageInfo() : linkage_(ExternalLinkage), visibility_(DefaultVisibility),
-                    explicit_(false) {}
-    LinkageInfo(Linkage L, Visibility V, bool E)
-      : linkage_(L), visibility_(V), explicit_(E) {
-      assert(linkage() == L && visibility() == V && visibilityExplicit() == E &&
-             "Enum truncated!");
-    }
-
-    static LinkageInfo external() {
-      return LinkageInfo();
-    }
-    static LinkageInfo internal() {
-      return LinkageInfo(InternalLinkage, DefaultVisibility, false);
-    }
-    static LinkageInfo uniqueExternal() {
-      return LinkageInfo(UniqueExternalLinkage, DefaultVisibility, false);
-    }
-    static LinkageInfo none() {
-      return LinkageInfo(NoLinkage, DefaultVisibility, false);
-    }
-
-    Linkage linkage() const { return (Linkage)linkage_; }
-    Visibility visibility() const { return (Visibility)visibility_; }
-    bool visibilityExplicit() const { return explicit_; }
-
-    void setLinkage(Linkage L) { linkage_ = L; }
-    void mergeLinkage(Linkage L) {
-      setLinkage(minLinkage(linkage(), L));
-    }
-    void mergeLinkage(LinkageInfo Other) {
-      mergeLinkage(Other.linkage());
-    }
-
-    // Merge the visibility V giving preference to explicit ones.
-    // This is used, for example, when merging the visibility of a class
-    // down to one of its members. If the member has no explicit visibility,
-    // the class visibility wins.
-    void mergeVisibility(Visibility V, bool E = false) {
-      // Never increase the visibility
-      if (visibility() < V)
-        return;
-
-      // If we have an explicit visibility, keep it
-      if (visibilityExplicit())
-        return;
-
-      setVisibility(V, E);
-    }
-    // Merge the visibility V, keeping the most restrictive one.
-    // This is used for cases like merging the visibility of a template
-    // argument to an instantiation. If we already have a hidden class,
-    // no argument should give it default visibility.
-    void mergeVisibilityWithMin(Visibility V, bool E = false) {
-      // Never increase the visibility
-      if (visibility() < V)
-        return;
-
-      // FIXME: this
-      // If this visibility is explicit, keep it.
-      if (visibilityExplicit() && !E)
-        return;
-
-      // should be replaced with this
-      // Don't lose the explicit bit for nothing
-      //      if (visibility() == V && visibilityExplicit())
-      //        return;
-
-      setVisibility(V, E);
-    }
-    void mergeVisibility(LinkageInfo Other) {
-      mergeVisibility(Other.visibility(), Other.visibilityExplicit());
-    }
-    void mergeVisibilityWithMin(LinkageInfo Other) {
-      mergeVisibilityWithMin(Other.visibility(), Other.visibilityExplicit());
-    }
-
-    void merge(LinkageInfo Other) {
-      mergeLinkage(Other);
-      mergeVisibility(Other);
-    }
-    void mergeWithMin(LinkageInfo Other) {
-      mergeLinkage(Other);
-      mergeVisibilityWithMin(Other);
-    }
-  };
-
   /// \brief Determine what kind of linkage this entity has.
   Linkage getLinkage() const;
 
   /// \brief Determines the visibility of this entity.
   Visibility getVisibility() const {
-    return getLinkageAndVisibility().visibility();
+    return getLinkageAndVisibility().getVisibility();
   }
 
   /// \brief Determines the linkage and visibility of this entity.
   LinkageInfo getLinkageAndVisibility() const;
 
+  /// Kinds of explicit visibility.
+  enum ExplicitVisibilityKind {
+    VisibilityForType,
+    VisibilityForValue
+  };
+
   /// \brief If visibility was explicitly specified for this
   /// declaration, return that visibility.
-  llvm::Optional<Visibility> getExplicitVisibility() const;
+  llvm::Optional<Visibility>
+  getExplicitVisibility(ExplicitVisibilityKind kind) const;
 
   /// \brief Clear the linkage cache in response to a change
   /// to the declaration.
@@ -340,7 +255,6 @@ public:
   }
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const NamedDecl *D) { return true; }
   static bool classofKind(Kind K) { return K >= firstNamed && K <= lastNamed; }
 };
 
@@ -386,7 +300,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const LabelDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == Label; }
 };
 
@@ -512,7 +425,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const NamespaceDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == Namespace; }
   static DeclContext *castToDeclContext(const NamespaceDecl *D) {
     return static_cast<DeclContext *>(const_cast<NamespaceDecl*>(D));
@@ -542,13 +454,10 @@ public:
 
   /// \brief Determine whether this symbol is weakly-imported,
   ///        or declared with the weak or weak-ref attr.
-  bool isWeak() const {
-    return hasAttr<WeakAttr>() || hasAttr<WeakRefAttr>() || isWeakImported();
-  }
+  bool isWeak() const;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const ValueDecl *D) { return true; }
   static bool classofKind(Kind K) { return K >= firstValue && K <= lastValue; }
 };
 
@@ -669,7 +578,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const DeclaratorDecl *D) { return true; }
   static bool classofKind(Kind K) {
     return K >= firstDeclarator && K <= lastDeclarator;
   }
@@ -727,6 +635,13 @@ public:
     ListInit  ///< Direct list-initialization (C++11)
   };
 
+  /// \brief Kinds of thread-local storage.
+  enum TLSKind {
+    TLS_None,   ///< Not a TLS variable.
+    TLS_Static, ///< TLS with a known-constant initializer.
+    TLS_Dynamic ///< TLS with a dynamic initializer.
+  };
+
 protected:
   /// \brief Placeholder type used in Init to denote an unparsed C++ default
   /// argument.
@@ -751,7 +666,7 @@ private:
 
     unsigned SClass : 3;
     unsigned SClassAsWritten : 3;
-    unsigned ThreadSpecified : 1;
+    unsigned TLSKind : 2;
     unsigned InitStyle : 2;
 
     /// \brief Whether this variable is the exception variable in a C++ catch
@@ -774,7 +689,7 @@ private:
     /// \brief Whether this variable is (C++0x) constexpr.
     unsigned IsConstexpr : 1;
   };
-  enum { NumVarDeclBits = 14 };
+  enum { NumVarDeclBits = 15 };
 
   friend class ASTDeclReader;
   friend class StmtIteratorBase;
@@ -802,7 +717,7 @@ protected:
     /// Otherwise, the number of function parameter scopes enclosing
     /// the function parameter scope in which this parameter was
     /// declared.
-    unsigned ScopeDepthOrObjCQuals : 7;
+    unsigned ScopeDepthOrObjCQuals : 6;
 
     /// The number of parameters preceding this parameter in the
     /// function parameter scope in which it was declared.
@@ -865,9 +780,9 @@ public:
     VarDeclBits.SClassAsWritten = SC;
   }
 
-  void setThreadSpecified(bool T) { VarDeclBits.ThreadSpecified = T; }
-  bool isThreadSpecified() const {
-    return VarDeclBits.ThreadSpecified;
+  void setTLSKind(TLSKind TLS) { VarDeclBits.TLSKind = TLS; }
+  TLSKind getTLSKind() const {
+    return static_cast<TLSKind>(VarDeclBits.TLSKind);
   }
 
   /// hasLocalStorage - Returns true if a variable with function scope
@@ -900,9 +815,14 @@ public:
   ///  as static variables declared within a function.
   bool hasGlobalStorage() const { return !hasLocalStorage(); }
 
+  /// Compute the language linkage.
+  LanguageLinkage getLanguageLinkage() const;
+
   /// \brief Determines whether this variable is a variable with
   /// external, C linkage.
-  bool isExternC() const;
+  bool isExternC() const {
+    return getLanguageLinkage() == CLanguageLinkage;
+  }
 
   /// isLocalVarDecl - Returns true for local variable declarations
   /// other than parameters.  Note that this includes static variables
@@ -1093,8 +1013,7 @@ public:
   /// not a constant expression. Returns a pointer to the value if evaluation
   /// succeeded, 0 otherwise.
   APValue *evaluateValue() const;
-  APValue *evaluateValue(
-    llvm::SmallVectorImpl<PartialDiagnosticAt> &Notes) const;
+  APValue *evaluateValue(SmallVectorImpl<PartialDiagnosticAt> &Notes) const;
 
   /// \brief Return the already-evaluated value of this variable's
   /// initializer, or NULL if the value is not yet known. Returns pointer
@@ -1211,7 +1130,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const VarDecl *D) { return true; }
   static bool classofKind(Kind K) { return K >= firstVar && K <= lastVar; }
 };
 
@@ -1232,7 +1150,6 @@ public:
   }
 
   // Implement isa/cast/dyncast/etc.
-  static bool classof(const ImplicitParamDecl *D) { return true; }
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == ImplicitParam; }
 };
@@ -1402,7 +1319,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const ParmVarDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == ParmVar; }
 
 private:
@@ -1460,7 +1376,7 @@ private:
   /// DeclsInPrototypeScope - Array of pointers to NamedDecls for
   /// decls defined in the function prototype that are not parameters. E.g.
   /// 'enum Y' in 'void f(enum Y {AA} x) {}'.
-  llvm::ArrayRef<NamedDecl*> DeclsInPrototypeScope;
+  ArrayRef<NamedDecl *> DeclsInPrototypeScope;
 
   LazyDeclStmtPtr Body;
 
@@ -1481,6 +1397,10 @@ private:
   bool HasImplicitReturnZero : 1;
   bool IsLateTemplateParsed : 1;
   bool IsConstexpr : 1;
+
+  /// \brief Indicates if the function was a definition but its body was
+  /// skipped.
+  unsigned HasSkippedBody : 1;
 
   /// \brief End part of this FunctionDecl's source range.
   ///
@@ -1547,7 +1467,7 @@ private:
   void setInstantiationOfMemberFunction(ASTContext &C, FunctionDecl *FD,
                                         TemplateSpecializationKind TSK);
 
-  void setParams(ASTContext &C, llvm::ArrayRef<ParmVarDecl *> NewParamInfo);
+  void setParams(ASTContext &C, ArrayRef<ParmVarDecl *> NewParamInfo);
 
 protected:
   FunctionDecl(Kind DK, DeclContext *DC, SourceLocation StartLoc,
@@ -1565,7 +1485,8 @@ protected:
       HasWrittenPrototype(true), IsDeleted(false), IsTrivial(false),
       IsDefaulted(false), IsExplicitlyDefaulted(false),
       HasImplicitReturnZero(false), IsLateTemplateParsed(false),
-      IsConstexpr(isConstexprSpecified), EndRangeLoc(NameInfo.getEndLoc()),
+      IsConstexpr(isConstexprSpecified), HasSkippedBody(false),
+      EndRangeLoc(NameInfo.getEndLoc()),
       TemplateOrSpecialization(),
       DNLoc(NameInfo.getInfo()) {}
 
@@ -1741,7 +1662,7 @@ public:
 
   /// Whether this is a (C++11) constexpr function or constexpr constructor.
   bool isConstexpr() const { return IsConstexpr; }
-  void setConstexpr(bool IC);
+  void setConstexpr(bool IC) { IsConstexpr = IC; }
 
   /// \brief Whether this function has been deleted.
   ///
@@ -1785,12 +1706,25 @@ public:
   /// This function must be an allocation or deallocation function.
   bool isReservedGlobalPlacementOperator() const;
 
+  /// Compute the language linkage.
+  LanguageLinkage getLanguageLinkage() const;
+
   /// \brief Determines whether this function is a function with
   /// external, C linkage.
-  bool isExternC() const;
+  bool isExternC() const {
+    return getLanguageLinkage() == CLanguageLinkage;
+  }
 
   /// \brief Determines whether this is a global function.
   bool isGlobal() const;
+
+  /// \brief Determines whether this function is known to be 'noreturn', through
+  /// an attribute on its declaration or its type.
+  bool isNoReturn() const;
+
+  /// \brief True if the function was a definition but its body was skipped.
+  bool hasSkippedBody() const { return HasSkippedBody; }
+  void setHasSkippedBody(bool Skipped = true) { HasSkippedBody = Skipped; }
 
   void setPreviousDeclaration(FunctionDecl * PrevDecl);
 
@@ -1823,14 +1757,14 @@ public:
     assert(i < getNumParams() && "Illegal param #");
     return ParamInfo[i];
   }
-  void setParams(llvm::ArrayRef<ParmVarDecl *> NewParamInfo) {
+  void setParams(ArrayRef<ParmVarDecl *> NewParamInfo) {
     setParams(getASTContext(), NewParamInfo);
   }
 
-  const llvm::ArrayRef<NamedDecl*> &getDeclsInPrototypeScope() const {
+  const ArrayRef<NamedDecl *> &getDeclsInPrototypeScope() const {
     return DeclsInPrototypeScope;
   }
-  void setDeclsInPrototypeScope(llvm::ArrayRef<NamedDecl *> NewDecls);
+  void setDeclsInPrototypeScope(ArrayRef<NamedDecl *> NewDecls);
 
   /// getMinRequiredArguments - Returns the minimum number of arguments
   /// needed to call this function. This may be fewer than the number of
@@ -1872,7 +1806,7 @@ public:
   /// \brief Determine whether this function should be inlined, because it is
   /// either marked "inline" or "constexpr" or is a member function of a class
   /// that was defined in the class body.
-  bool isInlined() const;
+  bool isInlined() const { return IsInline; }
 
   bool isInlineDefinitionExternallyVisible() const;
 
@@ -1917,7 +1851,9 @@ public:
   /// \brief If this function is an instantiation of a member function of a
   /// class template specialization, retrieves the member specialization
   /// information.
-  MemberSpecializationInfo *getMemberSpecializationInfo() const;
+  MemberSpecializationInfo *getMemberSpecializationInfo() const {
+    return TemplateOrSpecialization.dyn_cast<MemberSpecializationInfo*>();
+  }
 
   /// \brief Specify that this record is an instantiation of the
   /// member function FD.
@@ -2073,7 +2009,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const FunctionDecl *D) { return true; }
   static bool classofKind(Kind K) {
     return K >= firstFunction && K <= lastFunction;
   }
@@ -2207,7 +2142,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const FieldDecl *D) { return true; }
   static bool classofKind(Kind K) { return K >= firstField && K <= lastField; }
 
   friend class ASTDeclReader;
@@ -2246,7 +2180,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const EnumConstantDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == EnumConstant; }
 
   friend class StmtIteratorBase;
@@ -2290,7 +2223,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const IndirectFieldDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == IndirectField; }
   friend class ASTDeclReader;
 };
@@ -2337,7 +2269,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TypeDecl *D) { return true; }
   static bool classofKind(Kind K) { return K >= firstType && K <= lastType; }
 };
 
@@ -2393,7 +2324,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TypedefNameDecl *D) { return true; }
   static bool classofKind(Kind K) {
     return K >= firstTypedefName && K <= lastTypedefName;
   }
@@ -2416,7 +2346,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TypedefDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == Typedef; }
 };
 
@@ -2437,7 +2366,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TypeAliasDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == TypeAlias; }
 };
 
@@ -2486,8 +2414,14 @@ protected:
   bool IsScopedUsingClassTag : 1;
 
   /// IsFixed - True if this is an enumeration with fixed underlying type. Only
-  /// possible in C++11 or Microsoft extensions mode.
+  /// possible in C++11, Microsoft extensions, or Objective C mode.
   bool IsFixed : 1;
+
+  /// \brief Indicates whether it is possible for declarations of this kind
+  /// to have an out-of-date definition.
+  ///
+  /// This option is only enabled when modules are enabled.
+  bool MayHaveOutOfDateDef : 1;
 
 private:
   SourceLocation RBraceLoc;
@@ -2633,6 +2567,25 @@ public:
   bool isUnion()  const { return getTagKind() == TTK_Union; }
   bool isEnum()   const { return getTagKind() == TTK_Enum; }
 
+  /// Is this tag type named, either directly or via being defined in
+  /// a typedef of this type?
+  ///
+  /// C++11 [basic.link]p8:
+  ///   A type is said to have linkage if and only if:
+  ///     - it is a class or enumeration type that is named (or has a
+  ///       name for linkage purposes) and the name has linkage; ...
+  /// C++11 [dcl.typedef]p9:
+  ///   If the typedef declaration defines an unnamed class (or enum),
+  ///   the first typedef-name declared by the declaration to be that
+  ///   class type (or enum type) is used to denote the class type (or
+  ///   enum type) for linkage purposes only.
+  ///
+  /// C does not have an analogous rule, but the same concept is
+  /// nonetheless useful in some places.
+  bool hasNameForLinkage() const {
+    return (getDeclName() || getTypedefNameForAnonDecl());
+  }
+
   TypedefNameDecl *getTypedefNameForAnonDecl() const {
     return hasExtInfo() ? 0 :
            TypedefNameDeclOrQualifier.get<TypedefNameDecl*>();
@@ -2669,7 +2622,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const TagDecl *D) { return true; }
   static bool classofKind(Kind K) { return K >= firstTag && K <= lastTag; }
 
   static DeclContext *castToDeclContext(const TagDecl *D) {
@@ -2848,18 +2800,18 @@ public:
     NumNegativeBits = Num;
   }
 
-  /// \brief Returns true if this is a C++0x scoped enumeration.
+  /// \brief Returns true if this is a C++11 scoped enumeration.
   bool isScoped() const {
     return IsScoped;
   }
 
-  /// \brief Returns true if this is a C++0x scoped enumeration.
+  /// \brief Returns true if this is a C++11 scoped enumeration.
   bool isScopedUsingClassTag() const {
     return IsScopedUsingClassTag;
   }
 
-  /// \brief Returns true if this is a C++0x enumeration with fixed underlying
-  /// type.
+  /// \brief Returns true if this is an Objective-C, C++11, or
+  /// Microsoft-style enumeration with a fixed underlying type.
   bool isFixed() const {
     return IsFixed;
   }
@@ -2899,7 +2851,6 @@ public:
   }
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const EnumDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == Enum; }
 
   friend class ASTDeclReader;
@@ -2925,6 +2876,10 @@ class RecordDecl : public TagDecl {
   /// HasObjectMember - This is true if this struct has at least one member
   /// containing an Objective-C object pointer type.
   bool HasObjectMember : 1;
+  
+  /// HasVolatileMember - This is true if struct has at least one member of
+  /// 'volatile' type.
+  bool HasVolatileMember : 1;
 
   /// \brief Whether the field declarations of this record have been loaded
   /// from external storage. To avoid unnecessary deserialization of
@@ -2981,6 +2936,9 @@ public:
   bool hasObjectMember() const { return HasObjectMember; }
   void setHasObjectMember (bool val) { HasObjectMember = val; }
 
+  bool hasVolatileMember() const { return HasVolatileMember; }
+  void setHasVolatileMember (bool val) { HasVolatileMember = val; }
+  
   /// \brief Determines whether this declaration represents the
   /// injected class name.
   ///
@@ -3030,10 +2988,14 @@ public:
   virtual void completeDefinition();
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const RecordDecl *D) { return true; }
   static bool classofKind(Kind K) {
     return K >= firstRecord && K <= lastRecord;
   }
+
+  /// isMsStrust - Get whether or not this is an ms_struct which can
+  /// be turned on with an attribute, pragma, or -mms-bitfields
+  /// commandline option.
+  bool isMsStruct(const ASTContext &C) const;
 
 private:
   /// \brief Deserialize just the fields.
@@ -3066,7 +3028,6 @@ public:
   void setAsmString(StringLiteral *Asm) { AsmString = Asm; }
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const FileScopeAsmDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == FileScopeAsm; }
 };
 
@@ -3177,7 +3138,7 @@ public:
     assert(i < getNumParams() && "Illegal param #");
     return ParamInfo[i];
   }
-  void setParams(llvm::ArrayRef<ParmVarDecl *> NewParamInfo);
+  void setParams(ArrayRef<ParmVarDecl *> NewParamInfo);
 
   /// hasCaptures - True if this block (or its nested blocks) captures
   /// anything of local storage from its enclosing scopes.
@@ -3212,7 +3173,6 @@ public:
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const BlockDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == Block; }
   static DeclContext *castToDeclContext(const BlockDecl *D) {
     return static_cast<DeclContext *>(const_cast<BlockDecl*>(D));
@@ -3227,7 +3187,7 @@ public:
 ///
 /// An import declaration imports the named module (or submodule). For example:
 /// \code
-///   @__experimental_modules_import std.vector;
+///   @import std.vector;
 /// \endcode
 ///
 /// Import declarations can also be implicitly generated from
@@ -3286,7 +3246,6 @@ public:
   virtual SourceRange getSourceRange() const LLVM_READONLY;
   
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
-  static bool classof(const ImportDecl *D) { return true; }
   static bool classofKind(Kind K) { return K == Import; }
 };
   
@@ -3317,10 +3276,10 @@ void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
     // Point to previous. Make sure that this is actually the most recent
     // redeclaration, or we can build invalid chains. If the most recent
     // redeclaration is invalid, it won't be PrevDecl, but we want it anyway.
-    RedeclLink = PreviousDeclLink(
-                   llvm::cast<decl_type>(PrevDecl->getMostRecentDecl()));
     First = PrevDecl->getFirstDeclaration();
     assert(First->RedeclLink.NextIsLatest() && "Expected first");
+    decl_type *MostRecent = First->RedeclLink.getNext();
+    RedeclLink = PreviousDeclLink(cast<decl_type>(MostRecent));
   } else {
     // Make this first.
     First = static_cast<decl_type*>(this);

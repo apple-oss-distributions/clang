@@ -194,6 +194,8 @@ def HasV6T2          : Predicate<"Subtarget->hasV6T2Ops()">,
 def NoV6T2           : Predicate<"!Subtarget->hasV6T2Ops()">;
 def HasV7            : Predicate<"Subtarget->hasV7Ops()">,
                                  AssemblerPredicate<"HasV7Ops", "armv7">;
+def HasV8            : Predicate<"Subtarget->hasV8Ops()">,
+                                  AssemblerPredicate<"HasV8Ops", "armv8">;
 def NoVFP            : Predicate<"!Subtarget->hasVFP2()">;
 def HasVFP2          : Predicate<"Subtarget->hasVFP2()">,
                                  AssemblerPredicate<"FeatureVFP2", "VFP2">;
@@ -416,6 +418,8 @@ def reglist : Operand<i32> {
   let PrintMethod = "printRegisterList";
   let DecoderMethod = "DecodeRegListOperand";
 }
+
+def GPRPairOp : RegisterOperand<GPRPair, "printGPRPairOperand">;
 
 def DPRRegListAsmOperand : AsmOperandClass { let Name = "DPRRegList"; }
 def dpr_reglist : Operand<i32> {
@@ -1622,6 +1626,18 @@ def ATOMCMPXCHG6432 : PseudoInst<(outs GPR:$dst1, GPR:$dst2),
                                  (ins GPR:$addr, GPR:$cmp1, GPR:$cmp2,
                                       GPR:$set1, GPR:$set2),
                                  NoItinerary, []>;
+def ATOMMIN6432  : PseudoInst<(outs GPR:$dst1, GPR:$dst2),
+                              (ins GPR:$addr, GPR:$src1, GPR:$src2),
+                              NoItinerary, []>;
+def ATOMUMIN6432  : PseudoInst<(outs GPR:$dst1, GPR:$dst2),
+                              (ins GPR:$addr, GPR:$src1, GPR:$src2),
+                              NoItinerary, []>;
+def ATOMMAX6432  : PseudoInst<(outs GPR:$dst1, GPR:$dst2),
+                              (ins GPR:$addr, GPR:$src1, GPR:$src2),
+                              NoItinerary, []>;
+def ATOMUMAX6432  : PseudoInst<(outs GPR:$dst1, GPR:$dst2),
+                              (ins GPR:$addr, GPR:$src1, GPR:$src2),
+                              NoItinerary, []>;
 }
 
 def HINT : AI<(outs), (ins imm0_255:$imm), MiscFrm, NoItinerary,
@@ -2064,6 +2080,18 @@ def SRSIB : SRSI<0, "srsib\tsp, $mode"> {
 def SRSIB_UPD : SRSI<1, "srsib\tsp!, $mode"> {
   let Inst{24-23} = 0b11;
 }
+
+def : ARMInstAlias<"srsda $mode", (SRSDA imm0_31:$mode)>;
+def : ARMInstAlias<"srsda $mode!", (SRSDA_UPD imm0_31:$mode)>;
+
+def : ARMInstAlias<"srsdb $mode", (SRSDB imm0_31:$mode)>;
+def : ARMInstAlias<"srsdb $mode!", (SRSDB_UPD imm0_31:$mode)>;
+
+def : ARMInstAlias<"srsia $mode", (SRSIA imm0_31:$mode)>;
+def : ARMInstAlias<"srsia $mode!", (SRSIA_UPD imm0_31:$mode)>;
+
+def : ARMInstAlias<"srsib $mode", (SRSIB imm0_31:$mode)>;
+def : ARMInstAlias<"srsib $mode!", (SRSIB_UPD imm0_31:$mode)>;
 
 // Return From Exception
 class RFEI<bit wb, string asm>
@@ -3869,8 +3897,13 @@ def PKHTB : APKHI<0b01101000, 1, (outs GPRnopc:$Rd),
 
 // Alternate cases for PKHTB where identities eliminate some nodes.  Note that
 // a shift amount of 0 is *not legal* here, it is PKHBT instead.
+// We also can not replace a srl (17..31) by an arithmetic shift we would use in
+// pkhtb src1, src2, asr (17..31).
 def : ARMV6Pat<(or (and GPRnopc:$src1, 0xFFFF0000),
-                   (srl GPRnopc:$src2, imm16_31:$sh)),
+                   (srl GPRnopc:$src2, imm16:$sh)),
+               (PKHTB GPRnopc:$src1, GPRnopc:$src2, imm16:$sh)>;
+def : ARMV6Pat<(or (and GPRnopc:$src1, 0xFFFF0000),
+                   (sra GPRnopc:$src2, imm16_31:$sh)),
                (PKHTB GPRnopc:$src1, GPRnopc:$src2, imm16_31:$sh)>;
 def : ARMV6Pat<(or (and GPRnopc:$src1, 0xFFFF0000),
                    (and (srl GPRnopc:$src2, imm1_15:$sh), 0xFFFF)),
@@ -4229,8 +4262,8 @@ def LDREXH : AIldrex<0b11, (outs GPR:$Rt), (ins addr_offset_none:$addr),
 def LDREX  : AIldrex<0b00, (outs GPR:$Rt), (ins addr_offset_none:$addr),
                      NoItinerary, "ldrex", "\t$Rt, $addr", []>;
 let hasExtraDefRegAllocReq = 1 in
-def LDREXD: AIldrex<0b01, (outs GPR:$Rt, GPR:$Rt2),(ins addr_offset_none:$addr),
-                      NoItinerary, "ldrexd", "\t$Rt, $Rt2, $addr", []> {
+def LDREXD: AIldrex<0b01, (outs GPRPairOp:$Rt),(ins addr_offset_none:$addr),
+                      NoItinerary, "ldrexd", "\t$Rt, $addr", []> {
   let DecoderMethod = "DecodeDoubleRegLoad";
 }
 }
@@ -4244,8 +4277,8 @@ def STREX : AIstrex<0b00, (outs GPR:$Rd), (ins GPR:$Rt, addr_offset_none:$addr),
                     NoItinerary, "strex", "\t$Rd, $Rt, $addr", []>;
 let hasExtraSrcRegAllocReq = 1 in
 def STREXD : AIstrex<0b01, (outs GPR:$Rd),
-                    (ins GPR:$Rt, GPR:$Rt2, addr_offset_none:$addr),
-                    NoItinerary, "strexd", "\t$Rd, $Rt, $Rt2, $addr", []> {
+                    (ins GPRPairOp:$Rt, addr_offset_none:$addr),
+                    NoItinerary, "strexd", "\t$Rd, $Rt, $addr", []> {
   let DecoderMethod = "DecodeDoubleRegStore";
 }
 }
@@ -4743,20 +4776,12 @@ def Int_eh_sjlj_longjmp : PseudoInst<(outs), (ins GPR:$src, GPR:$scratch),
                                 Requires<[IsARM, IsIOS]>;
 }
 
-// eh.sjlj.dispatchsetup pseudo-instructions.
-// These pseudos are used for both ARM and Thumb2. Any differences are
-// handled when the pseudo is expanded (which happens before any passes
-// that need the instruction size).
-let Defs =
-  [ R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  R8,  R9,  R10, R11, R12, LR, CPSR,
-    Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15 ],
-  isBarrier = 1 in
+// eh.sjlj.dispatchsetup pseudo-instruction.
+// This pseudo is used for both ARM and Thumb. Any differences are handled when
+// the pseudo is expanded (which happens before any passes that need the
+// instruction size).
+let isBarrier = 1 in
 def Int_eh_sjlj_dispatchsetup : PseudoInst<(outs), (ins), NoItinerary, []>;
-
-let Defs =
-  [ R0,  R1,  R2,  R3,  R4,  R5,  R6,  R7,  R8,  R9,  R10, R11, R12, LR, CPSR ],
-  isBarrier = 1 in
-def Int_eh_sjlj_dispatchsetup_nofp : PseudoInst<(outs), (ins), NoItinerary, []>;
 
 
 //===----------------------------------------------------------------------===//

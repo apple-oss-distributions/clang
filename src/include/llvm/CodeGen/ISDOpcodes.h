@@ -450,11 +450,14 @@ namespace ISD {
 
     /// FNEG, FABS, FSQRT, FSIN, FCOS, FPOWI, FPOW,
     /// FLOG, FLOG2, FLOG10, FEXP, FEXP2,
-    /// FCEIL, FTRUNC, FRINT, FNEARBYINT, FFLOOR - Perform various unary
-    /// floating point operations. These are inspired by libm.
+    /// FCEIL, FTRUNC, FRINT, FNEARBYINT, FFLOOR, FROUND, FLRINT - Perform
+    /// various unary floating point operations. These are inspired by libm.
     FNEG, FABS, FSQRT, FSIN, FCOS, FPOWI, FPOW,
     FLOG, FLOG2, FLOG10, FEXP, FEXP2,
-    FCEIL, FTRUNC, FRINT, FNEARBYINT, FFLOOR,
+    FCEIL, FTRUNC, FRINT, FNEARBYINT, FFLOOR, FROUND, FLRINT,
+    
+    /// FSINCOS - Compute both fsin and fcos as a single operation.
+    FSINCOS,
 
     /// LOAD and STORE have token chains as their first operand, then the same
     /// operands as an LLVM load/store instruction, then an offset node that

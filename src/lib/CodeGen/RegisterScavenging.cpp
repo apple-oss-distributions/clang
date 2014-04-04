@@ -16,21 +16,17 @@
 
 #define DEBUG_TYPE "reg-scavenging"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/STLExtras.h"
+#include "llvm/Target/TargetRegisterInfo.h"
 using namespace llvm;
 
 /// setUsed - Set the register and its sub-registers as being used.
@@ -43,7 +39,7 @@ void RegScavenger::setUsed(unsigned Reg) {
 
 bool RegScavenger::isAliasUsed(unsigned Reg) const {
   for (MCRegAliasIterator AI(Reg, TRI, true); AI.isValid(); ++AI)
-    if (isUsed(*AI))
+    if (isUsed(*AI, *AI == Reg))
       return true;
   return false;
 }
@@ -320,6 +316,16 @@ unsigned RegScavenger::findSurvivorReg(MachineBasicBlock::iterator StartMI,
   return Survivor;
 }
 
+static unsigned getFrameIndexOperandNum(MachineInstr *MI) {
+  unsigned i = 0;
+  while (!MI->getOperand(i).isFI()) {
+    ++i;
+    assert(i < MI->getNumOperands() &&
+           "Instr doesn't have FrameIndex operand!");
+  }
+  return i;
+}
+
 unsigned RegScavenger::scavengeRegister(const TargetRegisterClass *RC,
                                         MachineBasicBlock::iterator I,
                                         int SPAdj) {
@@ -368,12 +374,16 @@ unsigned RegScavenger::scavengeRegister(const TargetRegisterClass *RC,
            "Cannot scavenge register without an emergency spill slot!");
     TII->storeRegToStackSlot(*MBB, I, SReg, true, ScavengingFrameIndex, RC,TRI);
     MachineBasicBlock::iterator II = prior(I);
-    TRI->eliminateFrameIndex(II, SPAdj, this);
+
+    unsigned FIOperandNum = getFrameIndexOperandNum(II);
+    TRI->eliminateFrameIndex(II, SPAdj, FIOperandNum, this);
 
     // Restore the scavenged register before its use (or first terminator).
     TII->loadRegFromStackSlot(*MBB, UseMI, SReg, ScavengingFrameIndex, RC, TRI);
     II = prior(UseMI);
-    TRI->eliminateFrameIndex(II, SPAdj, this);
+
+    FIOperandNum = getFrameIndexOperandNum(II);
+    TRI->eliminateFrameIndex(II, SPAdj, FIOperandNum, this);
   }
 
   ScavengeRestore = prior(UseMI);

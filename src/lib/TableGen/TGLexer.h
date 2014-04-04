@@ -15,9 +15,9 @@
 #define TGLEXER_H
 
 #include "llvm/Support/DataTypes.h"
+#include <cassert>
 #include <string>
 #include <vector>
-#include <cassert>
 
 namespace llvm {
 class MemoryBuffer;
@@ -46,7 +46,7 @@ namespace tgtok {
     MultiClass, String,
     
     // !keywords.
-    XConcat, XSRA, XSRL, XSHL, XStrConcat, XCast, XSubst,
+    XConcat, XADD, XSRA, XSRL, XSHL, XStrConcat, XCast, XSubst,
     XForEach, XHead, XTail, XEmpty, XIf, XEq,
 
     // Integer value.

@@ -25,12 +25,11 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/system_error.h"
 #include "llvm/Support/YAMLParser.h"
-
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/system_error.h"
 #include <vector>
 
 using namespace llvm;
@@ -791,7 +790,8 @@ template <typename value_type>
 raw_ostream &operator <<( raw_ostream &OS
                         , const binary_le_impl<value_type> &BLE) {
   char Buffer[sizeof(BLE.Value)];
-  support::endian::write_le<value_type, support::unaligned>(Buffer, BLE.Value);
+  support::endian::write<value_type, support::little, support::unaligned>(
+    Buffer, BLE.Value);
   OS.write(Buffer, sizeof(BLE.Value));
   return OS;
 }

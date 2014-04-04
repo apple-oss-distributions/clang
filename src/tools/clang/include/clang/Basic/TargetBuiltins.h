@@ -31,6 +31,16 @@ namespace clang {
     };
   }
 
+  /// \brief ARM64 builtins
+  namespace ARM64 {
+    enum {
+        LastTIBuiltin = clang::Builtin::FirstTSBuiltin-1,
+#define BUILTIN(ID, TYPE, ATTRS) BI##ID,
+#include "clang/Basic/BuiltinsARM64.def"
+        LastTSBuiltin
+    };
+  }
+
   /// \brief PPC builtins
   namespace PPC {
     enum {
@@ -82,7 +92,8 @@ namespace clang {
       Poly8,
       Poly16,
       Float16,
-      Float32
+      Float32,
+      Float64
     };
 
     NeonTypeFlags(unsigned F) : Flags(F) {}

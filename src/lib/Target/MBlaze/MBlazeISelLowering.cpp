@@ -15,14 +15,9 @@
 #define DEBUG_TYPE "mblaze-lower"
 #include "MBlazeISelLowering.h"
 #include "MBlazeMachineFunction.h"
+#include "MBlazeSubtarget.h"
 #include "MBlazeTargetMachine.h"
 #include "MBlazeTargetObjectFile.h"
-#include "MBlazeSubtarget.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/Function.h"
-#include "llvm/GlobalVariable.h"
-#include "llvm/Intrinsics.h"
-#include "llvm/CallingConv.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -30,6 +25,11 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
 #include "llvm/CodeGen/ValueTypes.h"
+#include "llvm/IR/CallingConv.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -81,6 +81,7 @@ MBlazeTargetLowering::MBlazeTargetLowering(MBlazeTargetMachine &TM)
   setOperationAction(ISD::FCOPYSIGN,  MVT::f64, Expand);
   setOperationAction(ISD::FSIN,       MVT::f32, Expand);
   setOperationAction(ISD::FCOS,       MVT::f32, Expand);
+  setOperationAction(ISD::FSINCOS,    MVT::f32, Expand);
   setOperationAction(ISD::FPOWI,      MVT::f32, Expand);
   setOperationAction(ISD::FPOW,       MVT::f32, Expand);
   setOperationAction(ISD::FLOG,       MVT::f32, Expand);

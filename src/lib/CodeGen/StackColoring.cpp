@@ -22,39 +22,38 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "stackcoloring"
-#include "MachineTraceMetrics.h"
-#include "llvm/Function.h"
-#include "llvm/Module.h"
+#include "llvm/CodeGen/Passes.h"
 #include "llvm/ADT/BitVector.h"
-#include "llvm/Analysis/Dominators.h"
-#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SparseSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/Dominators.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/LiveInterval.h"
-#include "llvm/CodeGen/MachineLoopInfo.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
 #include "llvm/CodeGen/MachineDominators.h"
-#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/MachineFrameInfo.h"
-#include "llvm/CodeGen/MachineMemOperand.h"
-#include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/DebugInfo.h"
-#include "llvm/Instructions.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCInstrItineraries.h"
-#include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetInstrInfo.h"
+#include "llvm/Target/TargetRegisterInfo.h"
 
 using namespace llvm;
 
@@ -411,17 +410,14 @@ void StackColoring::calculateLiveIntervals(unsigned NumSlots) {
     }
 
     // Create the interval of the blocks that we previously found to be 'alive'.
-    BitVector Alive = BlockLiveness[MBB].LiveIn;
-    Alive |= BlockLiveness[MBB].LiveOut;
-
-    if (Alive.any()) {
-      for (int pos = Alive.find_first(); pos != -1;
-           pos = Alive.find_next(pos)) {
-        if (!Starts[pos].isValid())
-          Starts[pos] = Indexes->getMBBStartIdx(MBB);
-        if (!Finishes[pos].isValid())
-          Finishes[pos] = Indexes->getMBBEndIdx(MBB);
-      }
+    BlockLifetimeInfo &MBBLiveness = BlockLiveness[MBB];
+    for (int pos = MBBLiveness.LiveIn.find_first(); pos != -1;
+         pos = MBBLiveness.LiveIn.find_next(pos)) {
+      Starts[pos] = Indexes->getMBBStartIdx(MBB);
+    }
+    for (int pos = MBBLiveness.LiveOut.find_first(); pos != -1;
+         pos = MBBLiveness.LiveOut.find_next(pos)) {
+      Finishes[pos] = Indexes->getMBBEndIdx(MBB);
     }
 
     for (unsigned i = 0; i < NumSlots; ++i) {
@@ -509,6 +505,10 @@ void StackColoring::remapInstructions(DenseMap<int, int> &SlotRemap) {
         const Value *V = MMO->getValue();
 
         if (!V)
+          continue;
+
+        const PseudoSourceValue *PSV = dyn_cast<const PseudoSourceValue>(V);
+        if (PSV && PSV->isConstant(MFI))
           continue;
 
         // Climb up and find the original alloca.
@@ -720,7 +720,9 @@ bool StackColoring::runOnMachineFunction(MachineFunction &Func) {
   // and continue.
 
   // Sort the slots according to their size. Place unused slots at the end.
-  std::sort(SortedSlots.begin(), SortedSlots.end(), SlotSizeSorter(MFI));
+  // Use stable sort to guarantee deterministic code generation.
+  std::stable_sort(SortedSlots.begin(), SortedSlots.end(),
+                   SlotSizeSorter(MFI));
 
   bool Chanded = true;
   while (Chanded) {

@@ -9,21 +9,20 @@
 
 #define DEBUG_TYPE "arm-disassembler"
 
+#include "llvm/MC/MCDisassembler.h"
 #include "MCTargetDesc/ARMAddressingModes.h"
-#include "MCTargetDesc/ARMMCExpr.h"
 #include "MCTargetDesc/ARMBaseInfo.h"
-#include "llvm/MC/EDInstInfo.h"
+#include "MCTargetDesc/ARMMCExpr.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCFixedLenDisassembler.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrDesc.h"
-#include "llvm/MC/MCExpr.h"
-#include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCDisassembler.h"
-#include "llvm/MC/MCFixedLenDisassembler.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
+#include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
 #include <vector>
@@ -105,10 +104,6 @@ public:
                               uint64_t address,
                               raw_ostream &vStream,
                               raw_ostream &cStream) const;
-
-  /// getEDInfo - See MCDisassembler.
-  const EDInstInfo *getEDInfo() const;
-private:
 };
 
 /// ThumbDisassembler - Thumb disassembler for all Thumb platforms.
@@ -131,8 +126,6 @@ public:
                               raw_ostream &vStream,
                               raw_ostream &cStream) const;
 
-  /// getEDInfo - See MCDisassembler.
-  const EDInstInfo *getEDInfo() const;
 private:
   mutable ITStatus ITBlock;
   DecodeStatus AddThumbPredicate(MCInst&) const;
@@ -188,6 +181,8 @@ static DecodeStatus DecodeDPairSpacedRegisterClass(MCInst &Inst,
                                const void *Decoder);
 
 static DecodeStatus DecodePredicateOperand(MCInst &Inst, unsigned Val,
+                               uint64_t Address, const void *Decoder);
+static DecodeStatus DecodeVSELPredicateOperand(MCInst &Inst, unsigned Val,
                                uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeCCOutOperand(MCInst &Inst, unsigned Val,
                                uint64_t Address, const void *Decoder);
@@ -385,7 +380,6 @@ static DecodeStatus DecodeLDR(MCInst &Inst, unsigned Val,
 static DecodeStatus DecodeMRRC2(llvm::MCInst &Inst, unsigned Val,
                                 uint64_t Address, const void *Decoder);
 #include "ARMGenDisassemblerTables.inc"
-#include "ARMGenEDInfo.inc"
 
 static MCDisassembler *createARMDisassembler(const Target &T, const MCSubtargetInfo &STI) {
   return new ARMDisassembler(STI);
@@ -393,14 +387,6 @@ static MCDisassembler *createARMDisassembler(const Target &T, const MCSubtargetI
 
 static MCDisassembler *createThumbDisassembler(const Target &T, const MCSubtargetInfo &STI) {
   return new ThumbDisassembler(STI);
-}
-
-const EDInstInfo *ARMDisassembler::getEDInfo() const {
-  return instInfoARM;
-}
-
-const EDInstInfo *ThumbDisassembler::getEDInfo() const {
-  return instInfoARM;
 }
 
 DecodeStatus ARMDisassembler::getInstruction(MCInst &MI, uint64_t &Size,
@@ -525,8 +511,9 @@ static bool tryAddingSymbolicOperand(uint64_t Address, int32_t Value,
     else
        ReferenceType = LLVMDisassembler_ReferenceType_InOut_None;
     const char *ReferenceName;
-    const char *Name = SymbolLookUp(DisInfo, Value, &ReferenceType, Address,
-                                    &ReferenceName);
+    uint64_t SymbolValue = 0x00000000ffffffffULL & Value;
+    const char *Name = SymbolLookUp(DisInfo, SymbolValue, &ReferenceType,
+                                    Address, &ReferenceName);
     if (Name) {
       SymbolicOp.AddSymbol.Name = Name;
       SymbolicOp.AddSymbol.Present = true;
@@ -1108,6 +1095,18 @@ static DecodeStatus DecodePredicateOperand(MCInst &Inst, unsigned Val,
   return MCDisassembler::Success;
 }
 
+static DecodeStatus DecodeVSELPredicateOperand(MCInst &Inst, unsigned Val,
+                                               uint64_t Address,
+                                               const void *Decoder) {
+  // fail if not GE, GT, EQ, or VS
+  switch (Val) {
+    default: return MCDisassembler::Fail;
+    case ARMCC::GE: case ARMCC::GT: case ARMCC::EQ: case ARMCC::VS: break;
+  }
+  Inst.addOperand(MCOperand::CreateImm(Val));
+  return MCDisassembler::Success;
+}
+
 static DecodeStatus DecodeCCOutOperand(MCInst &Inst, unsigned Val,
                                uint64_t Address, const void *Decoder) {
   if (Val)
@@ -1280,7 +1279,13 @@ static DecodeStatus DecodeBitfieldMaskOperand(MCInst &Inst, unsigned Val,
   unsigned lsb = fieldFromInstruction(Val, 0, 5);
 
   DecodeStatus S = MCDisassembler::Success;
-  if (lsb > msb) Check(S, MCDisassembler::SoftFail);
+  if (lsb > msb) {
+    Check(S, MCDisassembler::SoftFail);
+    // The check above will cause the warning for the "potentially undefined
+    // instruction encoding" but we can't build a bad MCOperand value here
+    // with a lsb > msb or else printing the MCInst will cause a crash.
+    lsb = msb;
+  }
 
   uint32_t msb_mask = 0xFFFFFFFF;
   if (msb != 31) msb_mask = (1U << (msb+1)) - 1;
@@ -3058,9 +3063,9 @@ static DecodeStatus DecodeT2BROperand(MCInst &Inst, unsigned Val,
 
 static DecodeStatus DecodeThumbCmpBROperand(MCInst &Inst, unsigned Val,
                                  uint64_t Address, const void *Decoder) {
-  if (!tryAddingSymbolicOperand(Address, Address + SignExtend32<7>(Val<<1) + 4,
+  if (!tryAddingSymbolicOperand(Address, Address + (Val<<1) + 4,
                                 true, 2, Inst, Decoder))
-    Inst.addOperand(MCOperand::CreateImm(SignExtend32<7>(Val << 1)));
+    Inst.addOperand(MCOperand::CreateImm(Val << 1));
   return MCDisassembler::Success;
 }
 
@@ -3287,7 +3292,7 @@ static DecodeStatus DecodeT2LdStPre(MCInst &Inst, unsigned Insn,
       return MCDisassembler::Fail;
   }
 
-  if (!Check(S, DecoderGPRRegisterClass(Inst, Rt, Address, Decoder)))
+  if (!Check(S, DecodeGPRRegisterClass(Inst, Rt, Address, Decoder)))
     return MCDisassembler::Fail;
 
   if (load) {

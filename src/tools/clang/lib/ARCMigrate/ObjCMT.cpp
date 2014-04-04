@@ -7,20 +7,23 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "XCTMT.h"
 #include "clang/ARCMigrate/ARCMTActions.h"
+#include "clang/AST/ASTConsumer.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/NSAPI.h"
+#include "clang/AST/ParentMap.h"
+#include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Basic/FileManager.h"
+#include "clang/Edit/Commit.h"
+#include "clang/Edit/EditedSource.h"
+#include "clang/Edit/EditsReceiver.h"
+#include "clang/Edit/Rewriters.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/MultiplexConsumer.h"
-#include "clang/AST/ASTContext.h"
-#include "clang/AST/RecursiveASTVisitor.h"
-#include "clang/AST/NSAPI.h"
-#include "clang/AST/ASTConsumer.h"
-#include "clang/Edit/Rewriters.h"
-#include "clang/Edit/EditedSource.h"
-#include "clang/Edit/Commit.h"
-#include "clang/Edit/EditsReceiver.h"
-#include "clang/Rewrite/Core/Rewriter.h"
+#include "clang/Lex/PPConditionalDirectiveRecord.h"
 #include "clang/Lex/Preprocessor.h"
-#include "clang/Basic/FileManager.h"
+#include "clang/Rewrite/Core/Rewriter.h"
 #include "llvm/ADT/SmallString.h"
 
 using namespace clang;
@@ -35,11 +38,11 @@ public:
   std::string MigrateDir;
   bool MigrateLiterals;
   bool MigrateSubscripting;
-  llvm::OwningPtr<NSAPI> NSAPIObj;
-  llvm::OwningPtr<edit::EditedSource> Editor;
+  OwningPtr<NSAPI> NSAPIObj;
+  OwningPtr<edit::EditedSource> Editor;
   FileRemapper &Remapper;
   FileManager &FileMgr;
-  const PreprocessingRecord *PPRec;
+  const PPConditionalDirectiveRecord *PPRec;
   bool IsOutputFile;
 
   ObjCMigrateASTConsumer(StringRef migrateDir,
@@ -47,7 +50,7 @@ public:
                          bool migrateSubscripting,
                          FileRemapper &remapper,
                          FileManager &fileMgr,
-                         const PreprocessingRecord *PPRec,
+                         const PPConditionalDirectiveRecord *PPRec,
                          bool isOutputFile = false)
   : MigrateDir(migrateDir),
     MigrateLiterals(migrateLiterals),
@@ -93,6 +96,9 @@ ObjCMigrateAction::ObjCMigrateAction(FrontendAction *WrappedAction,
 
 ASTConsumer *ObjCMigrateAction::CreateASTConsumer(CompilerInstance &CI,
                                                   StringRef InFile) {
+  PPConditionalDirectiveRecord *
+    PPRec = new PPConditionalDirectiveRecord(CompInst->getSourceManager());
+  CompInst->getPreprocessor().addPPCallbacks(PPRec);
   ASTConsumer *
     WrappedConsumer = WrapperFrontendAction::CreateASTConsumer(CI, InFile);
   ASTConsumer *MTConsumer = new ObjCMigrateASTConsumer(MigrateDir,
@@ -100,7 +106,7 @@ ASTConsumer *ObjCMigrateAction::CreateASTConsumer(CompilerInstance &CI,
                                                        MigrateSubscripting,
                                                        Remapper,
                                                     CompInst->getFileManager(),
-                          CompInst->getPreprocessor().getPreprocessingRecord()); 
+                                                       PPRec);
   ASTConsumer *Consumers[] = { MTConsumer, WrappedConsumer };
   return new MultiplexConsumer(Consumers);
 }
@@ -110,17 +116,17 @@ bool ObjCMigrateAction::BeginInvocation(CompilerInstance &CI) {
                         /*ignoreIfFilesChanges=*/true);
   CompInst = &CI;
   CI.getDiagnostics().setIgnoreAllWarnings(true);
-  CI.getPreprocessorOpts().DetailedRecord = true;
-  CI.getPreprocessorOpts().DetailedRecordConditionalDirectives = true;
   return true;
 }
 
 namespace {
 class ObjCMigrator : public RecursiveASTVisitor<ObjCMigrator> {
   ObjCMigrateASTConsumer &Consumer;
+  ParentMap &PMap;
 
 public:
-  ObjCMigrator(ObjCMigrateASTConsumer &consumer) : Consumer(consumer) { }
+  ObjCMigrator(ObjCMigrateASTConsumer &consumer, ParentMap &PMap)
+    : Consumer(consumer), PMap(PMap) { }
 
   bool shouldVisitTemplateInstantiations() const { return false; }
   bool shouldWalkTypesOfTypeLocs() const { return false; }
@@ -128,7 +134,7 @@ public:
   bool VisitObjCMessageExpr(ObjCMessageExpr *E) {
     if (Consumer.MigrateLiterals) {
       edit::Commit commit(*Consumer.Editor);
-      edit::rewriteToObjCLiteralSyntax(E, *Consumer.NSAPIObj, commit);
+      edit::rewriteToObjCLiteralSyntax(E, *Consumer.NSAPIObj, commit, &PMap);
       Consumer.Editor->commit(commit);
     }
 
@@ -151,6 +157,23 @@ public:
     return WalkUpFromObjCMessageExpr(E);
   }
 };
+
+class BodyMigrator : public RecursiveASTVisitor<BodyMigrator> {
+  ObjCMigrateASTConsumer &Consumer;
+  OwningPtr<ParentMap> PMap;
+
+public:
+  BodyMigrator(ObjCMigrateASTConsumer &consumer) : Consumer(consumer) { }
+
+  bool shouldVisitTemplateInstantiations() const { return false; }
+  bool shouldWalkTypesOfTypeLocs() const { return false; }
+
+  bool TraverseStmt(Stmt *S) {
+    PMap.reset(new ParentMap(S));
+    ObjCMigrator(Consumer, *PMap).TraverseStmt(S);
+    return true;
+  }
+};
 }
 
 void ObjCMigrateASTConsumer::migrateDecl(Decl *D) {
@@ -159,7 +182,7 @@ void ObjCMigrateASTConsumer::migrateDecl(Decl *D) {
   if (isa<ObjCMethodDecl>(D))
     return; // Wait for the ObjC container declaration.
 
-  ObjCMigrator(*this).TraverseDecl(D);
+  BodyMigrator(*this).TraverseDecl(D);
 }
 
 namespace {
@@ -191,13 +214,13 @@ void ObjCMigrateASTConsumer::HandleTranslationUnit(ASTContext &Ctx) {
     RewriteBuffer &buf = I->second;
     const FileEntry *file = Ctx.getSourceManager().getFileEntryForID(FID);
     assert(file);
-    llvm::SmallString<512> newText;
+    SmallString<512> newText;
     llvm::raw_svector_ostream vecOS(newText);
     buf.write(vecOS);
     vecOS.flush();
     llvm::MemoryBuffer *memBuf = llvm::MemoryBuffer::getMemBufferCopy(
                    StringRef(newText.data(), newText.size()), file->getName());
-    llvm::SmallString<64> filePath(file->getName());
+    SmallString<64> filePath(file->getName());
     FileMgr.FixupRelativePath(filePath);
     Remapper.remap(filePath.str(), memBuf);
   }
@@ -209,20 +232,145 @@ void ObjCMigrateASTConsumer::HandleTranslationUnit(ASTContext &Ctx) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// XCTMigrate
+//===----------------------------------------------------------------------===//
+namespace {
+
+class XCMTPPCallbacks : public PPCallbacks {
+  XCTMigrator *XCTM;
+
+public:
+  XCMTPPCallbacks() : XCTM(0) {}
+  void setMigrator(XCTMigrator *Mig) { XCTM = Mig; }
+
+  virtual void MacroExpands(const Token &MacroNameTok, const MacroDirective *MD,
+                            SourceRange Range, const MacroArgs *Args) {
+    XCTM->migrateMacro(MacroNameTok.getIdentifierInfo(), Range,
+                       MD->getMacroInfo()->getDefinitionLoc(), Args, MD);
+  }
+  virtual void InclusionDirective(SourceLocation HashLoc,
+                                  const Token &IncludeTok,
+                                  StringRef FileName,
+                                  bool IsAngled,
+                                  CharSourceRange FilenameRange,
+                                  const FileEntry *File,
+                                  StringRef SearchPath,
+                                  StringRef RelativePath,
+                                  const Module *Imported) {
+    XCTM->migrateInclude(FileName, FilenameRange, HashLoc, IsAngled);
+  }
+
+};
+
+class XCTMigrateASTConsumer : public ASTConsumer {
+  void migrateDecl(Decl *D);
+
+public:
+  std::string MigrateDir;
+  OwningPtr<edit::EditedSource> Editor;
+  FileRemapper &Remapper;
+  FileManager &FileMgr;
+  const PPConditionalDirectiveRecord *PPRec;
+  XCMTPPCallbacks &XCTMTPP;
+  OwningPtr<XCTMigrator> XCTM;
+
+  XCTMigrateASTConsumer(StringRef migrateDir,
+                        FileRemapper &remapper,
+                        FileManager &fileMgr,
+                        const PPConditionalDirectiveRecord *PPRec,
+                        XCMTPPCallbacks &XCTMTPP)
+  : MigrateDir(migrateDir),
+    Remapper(remapper), FileMgr(fileMgr), PPRec(PPRec), XCTMTPP(XCTMTPP) { }
+
+protected:
+  virtual void Initialize(ASTContext &Context) {
+    Editor.reset(new edit::EditedSource(Context.getSourceManager(),
+                                        Context.getLangOpts(),
+                                        PPRec));
+    XCTM.reset(new XCTMigrator(*Editor, Context));
+    XCTMTPP.setMigrator(XCTM.get());
+  }
+
+  virtual bool HandleTopLevelDecl(DeclGroupRef DG) {
+    for (DeclGroupRef::iterator I = DG.begin(), E = DG.end(); I != E; ++I)
+      migrateDecl(*I);
+    return true;
+  }
+  virtual void HandleInterestingDecl(DeclGroupRef DG) {
+    // Ignore decls from the PCH.
+  }
+  virtual void HandleTopLevelDeclInObjCContainer(DeclGroupRef DG) {
+    XCTMigrateASTConsumer::HandleTopLevelDecl(DG);
+  }
+
+  virtual void HandleTranslationUnit(ASTContext &Ctx);
+};
+}
+
+void XCTMigrateASTConsumer::migrateDecl(Decl *D) {
+  if (!D)
+    return;
+  if (isa<ObjCMethodDecl>(D))
+    return; // Wait for the ObjC container declaration.
+
+  XCTM->visit(D);
+}
+
+void XCTMigrateASTConsumer::HandleTranslationUnit(ASTContext &Ctx) {
+  Rewriter rewriter(Ctx.getSourceManager(), Ctx.getLangOpts());
+  RewritesReceiver Rec(rewriter);
+  Editor->applyRewrites(Rec);
+
+  for (Rewriter::buffer_iterator
+        I = rewriter.buffer_begin(), E = rewriter.buffer_end(); I != E; ++I) {
+    FileID FID = I->first;
+    RewriteBuffer &buf = I->second;
+    const FileEntry *file = Ctx.getSourceManager().getFileEntryForID(FID);
+    assert(file);
+    SmallString<512> newText;
+    llvm::raw_svector_ostream vecOS(newText);
+    buf.write(vecOS);
+    vecOS.flush();
+    llvm::MemoryBuffer *memBuf = llvm::MemoryBuffer::getMemBufferCopy(
+                   StringRef(newText.data(), newText.size()), file->getName());
+    SmallString<64> filePath(file->getName());
+    FileMgr.FixupRelativePath(filePath);
+    Remapper.remap(filePath.str(), memBuf);
+  }
+
+  Remapper.flushToFile(MigrateDir, Ctx.getDiagnostics());
+}
+
+//===----------------------------------------------------------------------===//
+// MigrateSourceAction
+//===----------------------------------------------------------------------===//
+
 bool MigrateSourceAction::BeginInvocation(CompilerInstance &CI) {
+  if (CI.getFrontendOpts().XCTMigrate)
+    XCTMigrator::handleInvocation(CI);
   CI.getDiagnostics().setIgnoreAllWarnings(true);
-  CI.getPreprocessorOpts().DetailedRecord = true;
-  CI.getPreprocessorOpts().DetailedRecordConditionalDirectives = true;
   return true;
 }
 
 ASTConsumer *MigrateSourceAction::CreateASTConsumer(CompilerInstance &CI,
                                                   StringRef InFile) {
+  PPConditionalDirectiveRecord *
+    PPRec = new PPConditionalDirectiveRecord(CI.getSourceManager());
+  CI.getPreprocessor().addPPCallbacks(PPRec);
+  if (CI.getFrontendOpts().XCTMigrate) {
+    XCMTPPCallbacks *XCTMTPP = new XCMTPPCallbacks();
+    CI.getPreprocessor().addPPCallbacks(XCTMTPP);
+    return new XCTMigrateASTConsumer(CI.getFrontendOpts().OutputFile,
+                                     Remapper,
+                                     CI.getFileManager(),
+                                     PPRec, *XCTMTPP);
+  }
   return new ObjCMigrateASTConsumer(CI.getFrontendOpts().OutputFile,
                                     /*MigrateLiterals=*/true,
                                     /*MigrateSubscripting=*/true,
                                     Remapper,
                                     CI.getFileManager(),
-                                  CI.getPreprocessor().getPreprocessingRecord(),
+                                    PPRec,
                                     /*isOutputFile=*/true); 
 }

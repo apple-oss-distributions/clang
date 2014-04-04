@@ -20,8 +20,8 @@
 // http://code.google.com/p/address-sanitizer/wiki/AddressSanitizerAlgorithm
 
 #if ASAN_FLEXIBLE_MAPPING_AND_OFFSET == 1
-extern __attribute__((visibility("default"))) uptr __asan_mapping_scale;
-extern __attribute__((visibility("default"))) uptr __asan_mapping_offset;
+extern SANITIZER_INTERFACE_ATTRIBUTE uptr __asan_mapping_scale;
+extern SANITIZER_INTERFACE_ATTRIBUTE uptr __asan_mapping_offset;
 # define SHADOW_SCALE (__asan_mapping_scale)
 # define SHADOW_OFFSET (__asan_mapping_offset)
 #else
@@ -30,24 +30,21 @@ extern __attribute__((visibility("default"))) uptr __asan_mapping_offset;
 #  define SHADOW_OFFSET (0)
 # else
 #  define SHADOW_SCALE (3)
-#  if __WORDSIZE == 32
+#  if SANITIZER_WORDSIZE == 32
 #   define SHADOW_OFFSET (1 << 29)
 #  else
-#   define SHADOW_OFFSET (1ULL << 44)
+#   if defined(__powerpc64__)
+#    define SHADOW_OFFSET (1ULL << 41)
+#   else
+#    define SHADOW_OFFSET (1ULL << 44)
+#   endif
 #  endif
 # endif
 #endif  // ASAN_FLEXIBLE_MAPPING_AND_OFFSET
 
 #define SHADOW_GRANULARITY (1ULL << SHADOW_SCALE)
-#define MEM_TO_SHADOW(mem) (((mem) >> SHADOW_SCALE) | (SHADOW_OFFSET))
+#define MEM_TO_SHADOW(mem) (((mem) >> SHADOW_SCALE) + (SHADOW_OFFSET))
 #define SHADOW_TO_MEM(shadow) (((shadow) - SHADOW_OFFSET) << SHADOW_SCALE)
-
-#if __WORDSIZE == 64
-  static const uptr kHighMemEnd = 0x00007fffffffffffUL;
-#else  // __WORDSIZE == 32
-  static const uptr kHighMemEnd = 0xffffffff;
-#endif  // __WORDSIZE
-
 
 #define kLowMemBeg      0
 #define kLowMemEnd      (SHADOW_OFFSET ? SHADOW_OFFSET - 1 : 0)
@@ -60,13 +57,18 @@ extern __attribute__((visibility("default"))) uptr __asan_mapping_offset;
 #define kHighShadowBeg  MEM_TO_SHADOW(kHighMemBeg)
 #define kHighShadowEnd  MEM_TO_SHADOW(kHighMemEnd)
 
-#define kShadowGapBeg   (kLowShadowEnd ? kLowShadowEnd + 1 : 16 * kPageSize)
+// With the zero shadow base we can not actually map pages starting from 0.
+// This constant is somewhat arbitrary.
+#define kZeroBaseShadowStart (1 << 18)
+
+#define kShadowGapBeg   (kLowShadowEnd ? kLowShadowEnd + 1 \
+                                       : kZeroBaseShadowStart)
 #define kShadowGapEnd   (kHighShadowBeg - 1)
 
-#define kGlobalAndStackRedzone \
-      (SHADOW_GRANULARITY < 32 ? 32 : SHADOW_GRANULARITY)
-
 namespace __asan {
+
+SANITIZER_INTERFACE_ATTRIBUTE
+extern uptr kHighMemEnd;  // Initialized in __asan_init.
 
 static inline bool AddrIsInLowMem(uptr a) {
   return a < kLowMemEnd;
@@ -98,6 +100,10 @@ static inline bool AddrIsInShadow(uptr a) {
 }
 
 static inline bool AddrIsInShadowGap(uptr a) {
+  // In zero-based shadow mode we treat addresses near zero as addresses
+  // in shadow gap as well.
+  if (SHADOW_OFFSET == 0)
+    return a <= kShadowGapEnd;
   return a >= kShadowGapBeg && a <= kShadowGapEnd;
 }
 

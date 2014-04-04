@@ -21,8 +21,8 @@
 
 /* Need these includes to support the LLVM 'cast' template for the C++ 'wrap' 
    and 'unwrap' conversion functions. */
-#include "llvm/IRBuilder.h"
-#include "llvm/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
 #include "llvm/PassRegistry.h"
 
 extern "C" {
@@ -173,10 +173,11 @@ typedef enum {
     LLVMUWTable = 1 << 30,
     LLVMNonLazyBind = 1 << 31
 
-    /* FIXME: This attribute is currently not included in the C API as
+    /* FIXME: These attributes are currently not included in the C API as
        a temporary measure until the API/ABI impact to the C API is understood
        and the path forward agreed upon.
-    LLVMAddressSafety = 1ULL << 32
+    LLVMAddressSafety = 1ULL << 32,
+    LLVMStackProtectStrongAttribute = 1ULL<<33
     */
 } LLVMAttribute;
 
@@ -1803,7 +1804,7 @@ LLVMAttribute LLVMGetAttribute(LLVMValueRef Arg);
  * Set the alignment for a function parameter.
  *
  * @see llvm::Argument::addAttr()
- * @see llvm::Attribute::constructAlignmentFromInt()
+ * @see llvm::AttrBuilder::addAlignmentAttr()
  */
 void LLVMSetParamAlignment(LLVMValueRef Arg, unsigned align);
 

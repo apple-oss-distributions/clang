@@ -12,8 +12,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "ARMMCTargetDesc.h"
-#include "ARMMCAsmInfo.h"
 #include "ARMBaseInfo.h"
+#include "ARMELFStreamer.h"
+#include "ARMMCAsmInfo.h"
 #include "InstPrinter/ARMInstPrinter.h"
 #include "llvm/MC/MCCodeGenInfo.h"
 #include "llvm/MC/MCInstrAnalysis.h"
@@ -55,7 +56,11 @@ std::string ARM_MC::ParseARMTriple(StringRef TT, StringRef CPU) {
   std::string ARMArchFeature;
   if (Idx) {
     unsigned SubVer = TT[Idx];
-    if (SubVer >= '7' && SubVer <= '9') {
+    if (SubVer >= '8' && SubVer <= '9') {
+      // v8: FeatureNEON, FeatureDB, FeatureDSPThumb2, FeatureAvoidRegSoReg
+      // FIXME: also implies Swift
+      ARMArchFeature = "+swift,+v7,+neon,+db,+t2dsp,+avoid-regsoreg";
+    } else if (SubVer == '7') {
       if (Len >= Idx+2 && TT[Idx+1] == 'm') {
         if (NoCPU)
           // v7m: FeatureNoARM, FeatureDB, FeatureHWDiv, FeatureMClass
@@ -144,7 +149,7 @@ static MCInstrInfo *createARMMCInstrInfo() {
 
 static MCRegisterInfo *createARMMCRegisterInfo(StringRef Triple) {
   MCRegisterInfo *X = new MCRegisterInfo();
-  InitARMMCRegisterInfo(X, ARM::LR);
+  InitARMMCRegisterInfo(X, ARM::LR, 0, 0, ARM::PC);
   return X;
 }
 
@@ -186,7 +191,8 @@ static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
     llvm_unreachable("ARM does not support Windows COFF format");
   }
 
-  return createELFStreamer(Ctx, MAB, OS, Emitter, false, NoExecStack);
+  return createARMELFStreamer(Ctx, MAB, OS, Emitter, false, NoExecStack,
+                              TheTriple.getArch() == Triple::thumb);
 }
 
 static MCInstPrinter *createARMMCInstPrinter(const Target &T,

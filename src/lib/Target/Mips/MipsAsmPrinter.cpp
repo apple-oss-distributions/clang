@@ -13,32 +13,31 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "mips-asm-printer"
-#include "Mips.h"
-#include "MipsAsmPrinter.h"
-#include "MipsDirectObjLower.h"
-#include "MipsInstrInfo.h"
-#include "MipsMCInstLower.h"
 #include "InstPrinter/MipsInstPrinter.h"
 #include "MCTargetDesc/MipsBaseInfo.h"
+#include "Mips.h"
+#include "MipsAsmPrinter.h"
+#include "MipsInstrInfo.h"
+#include "MipsMCInstLower.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/BasicBlock.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
-#include "llvm/InlineAsm.h"
-#include "llvm/Instructions.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/TargetRegistry.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/Mangler.h"
-#include "llvm/Target/TargetData.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetOptions.h"
 
@@ -76,22 +75,6 @@ void MipsAsmPrinter::EmitInstruction(const MachineInstr *MI) {
   do {
     MCInst TmpInst0;
     MCInstLowering.Lower(I++, TmpInst0);
-
-    // Direct object specific instruction lowering
-    if (!OutStreamer.hasRawTextSupport()){
-      switch (TmpInst0.getOpcode()) {
-      // If shift amount is >= 32 it the inst needs to be lowered further
-      case Mips::DSLL:
-      case Mips::DSRL:
-      case Mips::DSRA:
-        Mips::LowerLargeShift(TmpInst0);
-        break;
-        // Double extract instruction is chosen by pos and size operands
-      case Mips::DEXT:
-      case Mips::DINS:
-        Mips::LowerDextDins(TmpInst0);
-      }
-    }
 
     OutStreamer.EmitInstruction(TmpInst0);
   } while ((I != E) && I->isInsideBundle()); // Delay slot check
@@ -156,7 +139,7 @@ void MipsAsmPrinter::printSavedRegsBitmask(raw_ostream &O) {
     if (Mips::CPURegsRegClass.contains(Reg))
       break;
 
-    unsigned RegNum = getMipsRegisterNumbering(Reg);
+    unsigned RegNum = TM.getRegisterInfo()->getEncodingValue(Reg);
     if (Mips::AFGR64RegClass.contains(Reg)) {
       FPUBitmask |= (3 << RegNum);
       CSFPRegsSize += AFGR64RegSize;
@@ -171,7 +154,7 @@ void MipsAsmPrinter::printSavedRegsBitmask(raw_ostream &O) {
   // Set CPU Bitmask.
   for (; i != e; ++i) {
     unsigned Reg = CSI[i].getReg();
-    unsigned RegNum = getMipsRegisterNumbering(Reg);
+    unsigned RegNum = TM.getRegisterInfo()->getEncodingValue(Reg);
     CPUBitmask |= (1 << RegNum);
   }
 
@@ -256,8 +239,7 @@ void MipsAsmPrinter::EmitFunctionBodyStart() {
 
     OutStreamer.EmitRawText(StringRef("\t.set\tnoreorder"));
     OutStreamer.EmitRawText(StringRef("\t.set\tnomacro"));
-    if (MipsFI->getEmitNOAT())
-      OutStreamer.EmitRawText(StringRef("\t.set\tnoat"));
+    OutStreamer.EmitRawText(StringRef("\t.set\tnoat"));
   }
 }
 
@@ -268,9 +250,7 @@ void MipsAsmPrinter::EmitFunctionBodyEnd() {
   // always be at the function end, and we can't emit and
   // break with BB logic.
   if (OutStreamer.hasRawTextSupport()) {
-    if (MipsFI->getEmitNOAT())
-      OutStreamer.EmitRawText(StringRef("\t.set\tat"));
-
+    OutStreamer.EmitRawText(StringRef("\t.set\tat"));
     OutStreamer.EmitRawText(StringRef("\t.set\tmacro"));
     OutStreamer.EmitRawText(StringRef("\t.set\treorder"));
     OutStreamer.EmitRawText("\t.end\t" + Twine(CurrentFnSym->getName()));
@@ -560,6 +540,14 @@ void MipsAsmPrinter::EmitStartOfAsmFile(Module &M) {
   // return to previous section
   if (OutStreamer.hasRawTextSupport())
     OutStreamer.EmitRawText(StringRef("\t.previous"));
+
+}
+
+void MipsAsmPrinter::EmitEndOfAsmFile(Module &M) {
+
+  // Emit Mips ELF register info
+  Subtarget->getMReginfo().emitMipsReginfoSectionCG(
+             OutStreamer, getObjFileLowering(), *Subtarget);
 }
 
 MachineLocation

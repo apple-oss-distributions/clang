@@ -67,8 +67,8 @@ Post_Install_RootLinks := 0
 Post_Install_OpenSourceLicense := 0
 # Install to .../usr
 Install_Path_Suffix := usr
-# Include x86 and ARM backends.
-LLVM_Backends := x86,arm
+# Include x86, ARM, and ARM64 backends.
+LLVM_Backends := x86,arm,arm64
 # Don't use extra make variables.
 Extra_Make_Variables :=
 # Don't install any archive files.
@@ -100,10 +100,6 @@ else
 # Install root links and license when no install location is set.
 ifeq ($(INSTALL_LOCATION),)
 Post_Install_OpenSourceLicense := 1
-endif
-
-ifneq ($(Clang_Extra_Backends),)
-LLVM_Backends := $(LLVM_Backends),$(Clang_Extra_Backends)
 endif
 
 endif
@@ -340,6 +336,10 @@ MAKE            := env MAKEFLAGS= $(MAKE_COMMAND)
 Sources		= $(SRCROOT)/src
 Configure	= $(Sources)/configure
 Install_Flags	= DESTDIR=$(OBJROOT)/install-$$arch ONLY_MAN_DOCS=1
+Library_SearchPaths = "$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/lib"
+ifneq ($(Clang_libLTO_SearchPath),)
+	Library_SearchPaths += ":$(Clang_libLTO_SearchPath)"
+endif
 
 OSV		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceVersions
 OSL		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceLicenses
@@ -454,7 +454,7 @@ build-clang_final: configure-clang_final
 	  fi; \
 	  time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch \
 	    $(Build_Target) CLANG_ORDER_FILE=$${order_file} \
-	    DYLD_LIBRARY_PATH="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/lib" ; \
+	    DYLD_LIBRARY_PATH="$(Library_SearchPaths)" ; \
 	done
 
 # This is a special target which uses the build compiler to generate order file
@@ -485,7 +485,7 @@ build-clang_final_ordered: build-clang_final
 		  -C "$(OBJROOT)/$$arch/tools/clang/tools/driver" \
 		  $(Clang_Make_Variables) \
 		  "CLANG_ORDER_FILE=$(OBJROOT)/order-data/$$arch/clang.order" \
-	          DYLD_LIBRARY_PATH="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/lib" ; \
+	          DYLD_LIBRARY_PATH="$(Library_SearchPaths)" ; \
 	done
 
 build-clang_stage1: configure-clang_stage1
@@ -566,9 +566,13 @@ install-lto-h:
 	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
 	$(INSTALL_FILE) $(Sources)/include/llvm-c/lto.h $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
 
+# We install a copy of the clang-parse-diagnostics-file utility into
+# /usr/local/bin, for use by B&I's XBS_SEND_WARNINGS_EMAIL parameter.
+#
+# This file always installs to /usr/local/bin.
 install-clang-diagnostic:
-	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/local/bin
-	$(INSTALL) $(Sources)/utils/clang-parse-diagnostics-file $(DSTROOT)/$(Install_Prefix)/local/bin/
+	$(MKDIR) -p $(DSTROOT)/usr/local/bin
+	$(INSTALL) $(Sources)/utils/clang-parse-diagnostics-file $(DSTROOT)/usr/local/bin/
 
 ##
 # Cross Compilation Build Support

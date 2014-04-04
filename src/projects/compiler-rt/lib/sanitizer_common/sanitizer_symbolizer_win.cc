@@ -22,13 +22,15 @@ namespace __sanitizer {
 bool StartSymbolizerSubprocess(const char *path_to_symbolizer,
                                int *input_fd, int *output_fd) {
   UNIMPLEMENTED();
-  return false;
 }
 
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules) {
   UNIMPLEMENTED();
-  return 0;
 };
+
+const char *Demangle(const char *MangledName) {
+  return MangledName;
+}
 
 }  // namespace __sanitizer
 

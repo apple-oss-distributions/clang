@@ -47,6 +47,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/system_error.h"
 
@@ -92,9 +93,9 @@ static std::string getText(const SourceManager &SourceManager, const T &Node) {
   return std::string(Text, End.second - Start.second);
 }
 
-// Return true if expr needs to be put in parens when it is an
-// argument of a prefix unary operator, e.g. when it is a binary or
-// ternary operator syntactically.
+// Return true if expr needs to be put in parens when it is an argument of a
+// prefix unary operator, e.g. when it is a binary or ternary operator
+// syntactically.
 static bool needParensAfterUnaryOperator(const Expr &ExprNode) {
   if (dyn_cast<clang::BinaryOperator>(&ExprNode) ||
       dyn_cast<clang::ConditionalOperator>(&ExprNode)) {
@@ -177,6 +178,7 @@ cl::list<std::string> SourcePaths(
   cl::OneOrMore);
 
 int main(int argc, const char **argv) {
+  llvm::sys::PrintStackTraceOnErrorSignal();
   llvm::OwningPtr<CompilationDatabase> Compilations(
     tooling::FixedCompilationDatabase::loadFromCommandLine(argc, argv));
   cl::ParseCommandLineOptions(argc, argv);
@@ -232,6 +234,5 @@ int main(int argc, const char **argv) {
                   callee(methodDecl(hasName(StringCStrMethod))),
                   on(id("arg", expr())))))),
       &Callback);
-  return Tool.run(newFrontendActionFactory(&Finder));
+  return Tool.runAndSave(newFrontendActionFactory(&Finder));
 }
-

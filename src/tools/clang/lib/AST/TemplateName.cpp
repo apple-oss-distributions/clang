@@ -1,4 +1,4 @@
-//===--- TemplateName.h - C++ Template Name Representation-------*- C++ -*-===//
+//===--- TemplateName.cpp - C++ Template Name Representation---------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,10 +12,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/TemplateName.h"
-#include "clang/AST/TemplateBase.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/PrettyPrinter.h"
+#include "clang/AST/TemplateBase.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/LangOptions.h"
 #include "llvm/Support/raw_ostream.h"
@@ -168,9 +168,13 @@ const DiagnosticBuilder &clang::operator<<(const DiagnosticBuilder &DB,
   return DB << NameStr;
 }
 
-void TemplateName::dump() const {
+void TemplateName::dump(raw_ostream &OS) const {
   LangOptions LO;  // FIXME!
   LO.CPlusPlus = true;
   LO.Bool = true;
-  print(llvm::errs(), PrintingPolicy(LO));
+  print(OS, PrintingPolicy(LO));
+}
+
+void TemplateName::dump() const {
+  dump(llvm::errs());
 }

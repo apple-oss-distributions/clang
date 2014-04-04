@@ -1,4 +1,4 @@
-//===--- Tranforms.cpp - Tranformations to ARC mode -----------------------===//
+//===--- Transforms.cpp - Transformations to ARC mode ---------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -9,16 +9,17 @@
 
 #include "Transforms.h"
 #include "Internals.h"
-#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/StmtVisitor.h"
+#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Sema/Sema.h"
 #include "clang/Sema/SemaDiagnostic.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include <map>
 
 using namespace clang;
@@ -70,13 +71,22 @@ bool trans::isPlusOneAssign(const BinaryOperator *E) {
   if (E->getOpcode() != BO_Assign)
     return false;
 
+  return isPlusOne(E->getRHS());
+}
+
+bool trans::isPlusOne(const Expr *E) {
+  if (!E)
+    return false;
+  if (const ExprWithCleanups *EWC = dyn_cast<ExprWithCleanups>(E))
+    E = EWC->getSubExpr();
+
   if (const ObjCMessageExpr *
-        ME = dyn_cast<ObjCMessageExpr>(E->getRHS()->IgnoreParenCasts()))
+        ME = dyn_cast<ObjCMessageExpr>(E->IgnoreParenCasts()))
     if (ME->getMethodFamily() == OMF_retain)
       return true;
 
   if (const CallExpr *
-        callE = dyn_cast<CallExpr>(E->getRHS()->IgnoreParenCasts())) {
+        callE = dyn_cast<CallExpr>(E->IgnoreParenCasts())) {
     if (const FunctionDecl *FD = callE->getDirectCallee()) {
       if (FD->getAttr<CFReturnsRetainedAttr>())
         return true;
@@ -97,7 +107,7 @@ bool trans::isPlusOneAssign(const BinaryOperator *E) {
     }
   }
 
-  const ImplicitCastExpr *implCE = dyn_cast<ImplicitCastExpr>(E->getRHS());
+  const ImplicitCastExpr *implCE = dyn_cast<ImplicitCastExpr>(E);
   while (implCE && implCE->getCastKind() ==  CK_BitCast)
     implCE = dyn_cast<ImplicitCastExpr>(implCE->getSubExpr());
 
@@ -563,6 +573,7 @@ static void traverseAST(MigrationPass &pass) {
   }
   MigrateCtx.addTraverser(new PropertyRewriteTraverser());
   MigrateCtx.addTraverser(new BlockObjCVariableTraverser());
+  MigrateCtx.addTraverser(new ProtectedScopeTraverser());
 
   MigrateCtx.traverse(pass.Ctx.getTranslationUnitDecl());
 }

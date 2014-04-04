@@ -14,8 +14,8 @@
 #ifndef LLVM_OBJECT_ARCHIVE_H
 #define LLVM_OBJECT_ARCHIVE_H
 
-#include "llvm/Object/Binary.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Object/Binary.h"
 #include "llvm/Support/DataTypes.h"
 
 namespace llvm {
@@ -122,6 +122,16 @@ public:
 
   Archive(MemoryBuffer *source, error_code &ec);
 
+  enum Kind {
+    K_GNU,
+    K_BSD,
+    K_COFF
+  };
+
+  Kind kind() const { 
+    return Format;
+  }
+
   child_iterator begin_children(bool skip_internal = true) const;
   child_iterator end_children() const;
 
@@ -129,14 +139,17 @@ public:
   symbol_iterator end_symbols() const;
 
   // Cast methods.
-  static inline bool classof(Archive const *v) { return true; }
   static inline bool classof(Binary const *v) {
     return v->isArchive();
   }
 
+  // check if a symbol is in the archive
+  child_iterator findSym(StringRef name) const;
+
 private:
   child_iterator SymbolTable;
   child_iterator StringTable;
+  Kind Format;
 };
 
 }

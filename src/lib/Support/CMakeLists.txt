@@ -1,9 +1,3 @@
-## FIXME: This only requires RTTI because tblgen uses it.  Fix that.
-set(LLVM_REQUIRES_RTTI 1)
-if( MINGW )
-  set(LLVM_REQUIRES_EH 1)
-endif()
-
 add_llvm_library(LLVMSupport
   APFloat.cpp
   APInt.cpp
@@ -56,6 +50,7 @@ add_llvm_library(LLVMSupport
   Triple.cpp
   Twine.cpp
   YAMLParser.cpp
+  YAMLTraits.cpp
   raw_os_ostream.cpp
   raw_ostream.cpp
   regcomp.c

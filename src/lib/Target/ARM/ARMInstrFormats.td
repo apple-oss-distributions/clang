@@ -1365,6 +1365,37 @@ class VFPXI<dag oops, dag iops, AddrMode am, int sz,
   list<Predicate> Predicates = [HasVFP2];
 }
 
+// ARMv8 A32 VFP Scalar Floating-point with cond
+class VFPV8A32cond<dag oops, dag iops, AddrMode am, int sz,
+               IndexMode im, Format f, InstrItinClass itin,
+               string opc, string asm, string cstr, list<dag> pattern>
+  : InstARM<am, sz, im, f, VFPDomain, cstr, itin> {
+  bits<4> p;
+  let Inst{31-28} = p;
+  let OutOperandList = oops;
+  let InOperandList = !con(iops, (ins pred:$p));
+  let AsmString = !strconcat(opc, "${p}", asm);
+  let Pattern = pattern;
+  let PostEncoderMethod = "VFPThumb2PostEncoder";
+  let DecoderNamespace = "VFP";
+  list<Predicate> Predicates = [HasV8];
+}
+
+// ARMv8 A32 VFP Scalar Floating-point with cond
+class VFPV8A32const<dag oops, dag iops, AddrMode am, int sz,
+               IndexMode im, Format f, InstrItinClass itin,
+               string opc, string asm, string cstr, list<dag> pattern>
+  : InstARM<am, sz, im, f, VFPDomain, cstr, itin> {
+  let Inst{31-28} = 0b1111;
+  let InOperandList = iops;
+  let OutOperandList = oops;
+  let AsmString = !strconcat(opc, asm);
+  let Pattern = pattern;
+  let PostEncoderMethod = "VFPThumb2PostEncoder";
+  let DecoderNamespace = "VFP";
+  list<Predicate> Predicates = [HasV8];
+}
+
 class VFPAI<dag oops, dag iops, Format f, InstrItinClass itin,
             string opc, string asm, list<dag> pattern>
   : VFPI<oops, iops, AddrModeNone, 4, IndexModeNone, f, itin,
@@ -1527,10 +1558,91 @@ class ADbI<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
   let Inst{4}     = op4;
 }
 
+// ARMv8 A32, Double precision, binary, cond
+class ADbIv8A32cond<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
+                dag iops, InstrItinClass itin, string opc, string asm,
+                list<dag> pattern>
+  : VFPV8A32cond<oops, iops, AddrModeNone, 4, IndexModeNone, VFPBinaryFrm, itin,
+             opc, asm, "", pattern> {
+  // Instruction operands.
+  bits<5> Dd;
+  bits<5> Dn;
+  bits<5> Dm;
+
+  // Encode instruction operands.
+  let Inst{3-0}   = Dm{3-0};
+  let Inst{5}     = Dm{4};
+  let Inst{19-16} = Dn{3-0};
+  let Inst{7}     = Dn{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{22}    = Dd{4};
+
+  let Inst{27-23} = opcod1;
+  let Inst{21-20} = opcod2;
+  let Inst{11-9}  = 0b101;
+  let Inst{8}     = 1;          // Double precision
+  let Inst{6}     = op6;
+  let Inst{4}     = op4;
+}
+
+// ARMv8 A32, Double precision, binary, const
+class ADbIv8A32const<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
+                dag iops, InstrItinClass itin, string opc, string asm,
+                list<dag> pattern>
+  : VFPV8A32const<oops, iops, AddrModeNone, 4, IndexModeNone, VFPBinaryFrm, itin,
+             opc, asm, "", pattern> {
+  // Instruction operands.
+  bits<5> Dd;
+  bits<5> Dn;
+  bits<5> Dm;
+
+  // Encode instruction operands.
+  let Inst{3-0}   = Dm{3-0};
+  let Inst{5}     = Dm{4};
+  let Inst{19-16} = Dn{3-0};
+  let Inst{7}     = Dn{4};
+  let Inst{15-12} = Dd{3-0};
+  let Inst{22}    = Dd{4};
+
+  let Inst{27-23} = opcod1;
+  let Inst{21-20} = opcod2;
+  let Inst{11-9}  = 0b101;
+  let Inst{8}     = 1;          // Double precision
+  let Inst{6}     = op6;
+  let Inst{4}     = op4;
+}
+
+// ARMv8 A32, Single precision, binary, const
+class ASbIv8A32const<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
+                dag iops, InstrItinClass itin, string opc, string asm,
+                list<dag> pattern>
+  : VFPV8A32const<oops, iops, AddrModeNone, 4, IndexModeNone, VFPBinaryFrm, itin,
+             opc, asm, "", pattern> {
+  // Instruction operands.
+  bits<5> Sd;
+  bits<5> Sn;
+  bits<5> Sm;
+
+  // Encode instruction operands.
+  let Inst{3-0}   = Sm{3-0};
+  let Inst{5}     = Sm{4};
+  let Inst{19-16} = Sn{3-0};
+  let Inst{7}     = Sn{4};
+  let Inst{15-12} = Sd{3-0};
+  let Inst{22}    = Sd{4};
+
+  let Inst{27-23} = opcod1;
+  let Inst{21-20} = opcod2;
+  let Inst{11-9}  = 0b101;
+  let Inst{8}     = 0;          // Single precision
+  let Inst{6}     = op6;
+  let Inst{4}     = op4;
+}
+
 // Single precision, unary
 class ASuI<bits<5> opcod1, bits<2> opcod2, bits<4> opcod3, bits<2> opcod4,
            bit opcod5, dag oops, dag iops, InstrItinClass itin, string opc,
-           string asm, list<dag> pattern>
+           string asm, list<dag> pattern, bit isDouble = 0b0>
   : VFPAI<oops, iops, VFPUnaryFrm, itin, opc, asm, pattern> {
   // Instruction operands.
   bits<5> Sd;
@@ -1546,7 +1658,7 @@ class ASuI<bits<5> opcod1, bits<2> opcod2, bits<4> opcod3, bits<2> opcod4,
   let Inst{21-20} = opcod2;
   let Inst{19-16} = opcod3;
   let Inst{11-9}  = 0b101;
-  let Inst{8}     = 0;          // Single precision
+  let Inst{8}     = isDouble;
   let Inst{7-6}   = opcod4;
   let Inst{4}     = opcod5;
 }

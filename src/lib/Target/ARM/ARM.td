@@ -59,6 +59,9 @@ def FeatureSlowFPBrcc : SubtargetFeature<"slow-fp-brcc", "SlowFPBrcc", "true",
                                          "FP compare + branch is slow">;
 def FeatureVFPOnlySP : SubtargetFeature<"fp-only-sp", "FPOnlySP", "true",
                           "Floating point unit supports single precision only">;
+def FeatureAvoidRegSoReg : SubtargetFeature<"avoid-regsoreg", "AvoidRegSoReg",
+                                            "true",
+                            "Avoid deprecated register-shifted reg operations">;
 
 // Some processors have FP multiply-accumulate instructions that don't
 // play nicely with other VFP / NEON instructions, and it's generally better
@@ -90,6 +93,10 @@ def FeatureAvoidPartialCPSR : SubtargetFeature<"avoid-partial-cpsr",
                                                "AvoidCPSRPartialUpdate", "true",
                                  "Avoid CPSR partial update for OOO execution">;
 
+def FeatureAvoidMOVsShOp : SubtargetFeature<"avoid-movs-shop",
+                                            "AvoidMOVsShifterOperand", "true",
+                                "Avoid movs instructions with shifter operand">;
+
 // Some processors perform return stack prediction. CodeGen should avoid issue
 // "normal" call instructions to callees which do not return.
 def FeatureHasRAS : SubtargetFeature<"ras", "HasRAS", "true",
@@ -106,6 +113,10 @@ def FeatureMP : SubtargetFeature<"mp", "HasMPExtension", "true",
 // M-series ISA?
 def FeatureMClass : SubtargetFeature<"mclass", "IsMClass", "true",
                                      "Is microcontroller profile ('M' series)">;
+
+// VFP Scalar FP extension.
+def FeatureVFPScalarFP : SubtargetFeature<"VFPScalarFP", "HasVFPScalarFP", 
+                                          "true", "Supports v8 VFP Scalar FP">;
 
 // ARM ISAs.
 def HasV4TOps   : SubtargetFeature<"v4t", "HasV4TOps", "true",
@@ -125,6 +136,12 @@ def HasV6T2Ops  : SubtargetFeature<"v6t2", "HasV6T2Ops", "true",
 def HasV7Ops    : SubtargetFeature<"v7", "HasV7Ops", "true",
                                    "Support ARM v7 instructions",
                                    [HasV6T2Ops]>;
+// FIXME: ARMv8 for A32 has more than VFPScalarFP.  It also has: 1) Partial
+// deprecation of IT.  2) Load-Acquire/Store-Release  3) Advanced SIMD FP
+// 4) Crypto 5) System Instructions
+def HasV8Ops    : SubtargetFeature<"v8", "HasV8Ops", "true",
+                                    "Support ARM v8 instructions",
+                                    [FeatureVFPScalarFP]>;
 
 //===----------------------------------------------------------------------===//
 // ARM Processors supported.
@@ -133,6 +150,11 @@ def HasV7Ops    : SubtargetFeature<"v7", "HasV7Ops", "true",
 include "ARMSchedule.td"
 
 // ARM processor families.
+def ProcA5      : SubtargetFeature<"a5", "ARMProcFamily", "CortexA5",
+                                   "Cortex-A5 ARM processors",
+                                   [FeatureSlowFPBrcc, FeatureNEONForFP,
+                                    FeatureHasSlowFPVMLx, FeatureVMLxForwarding,
+                                    FeatureT2XtPk]>;
 def ProcA8      : SubtargetFeature<"a8", "ARMProcFamily", "CortexA8",
                                    "Cortex-A8 ARM processors",
                                    [FeatureSlowFPBrcc, FeatureNEONForFP,
@@ -149,6 +171,7 @@ def ProcSwift   : SubtargetFeature<"swift", "ARMProcFamily", "Swift",
                                    [FeatureNEONForFP, FeatureT2XtPk,
                                     FeatureVFP4, FeatureMP, FeatureHWDiv,
                                     FeatureHWDivARM, FeatureAvoidPartialCPSR,
+                                    FeatureAvoidMOVsShOp,
                                     FeatureHasSlowFPVMLx]>;
 
 // FIXME: It has not been determined if A15 has these features.
@@ -156,6 +179,13 @@ def ProcA15      : SubtargetFeature<"a15", "ARMProcFamily", "CortexA15",
                                    "Cortex-A15 ARM processors",
                                    [FeatureT2XtPk, FeatureFP16,
                                     FeatureAvoidPartialCPSR]>;
+def ProcR5      : SubtargetFeature<"r5", "ARMProcFamily", "CortexR5",
+                                   "Cortex-R5 ARM processors",
+                                   [FeatureSlowFPBrcc,
+                                    FeatureHWDiv, FeatureHWDivARM,
+                                    FeatureHasSlowFPVMLx,
+                                    FeatureAvoidPartialCPSR,
+                                    FeatureT2XtPk]>;
 
 class ProcNoItin<string Name, list<SubtargetFeature> Features>
  : Processor<Name, NoItineraries, Features>;
@@ -221,6 +251,11 @@ def : Processor<"arm1156t2f-s",     ARMV6Itineraries, [HasV6T2Ops, FeatureVFP2,
                                                        FeatureDSPThumb2]>;
 
 // V7a Processors.
+// FIXME: A5 has currently the same Schedule model as A8
+def : ProcessorModel<"cortex-a5",   CortexA8Model,
+                                    [ProcA5, HasV7Ops, FeatureNEON, FeatureDB,
+                                     FeatureVFP4, FeatureDSPThumb2,
+                                     FeatureHasRAS]>;
 // FIXME: Cortex-A7 definition is similar to A8, but it has VFP4 and div
 // instructions.
 def : ProcessorModel<"cortex-a7",   CortexA8Model,
@@ -246,6 +281,11 @@ def : ProcessorModel<"cortex-a9-mp", CortexA9Model,
 def : ProcessorModel<"cortex-a15",   CortexA9Model,
                                     [ProcA15, HasV7Ops, FeatureNEON, FeatureDB,
                                      FeatureDSPThumb2, FeatureHasRAS]>;
+// FIXME: R5 has currently the same ProcessorModel as A8.
+def : ProcessorModel<"cortex-r5",   CortexA8Model,
+                                    [ProcR5, HasV7Ops, FeatureDB,
+                                     FeatureVFP3, FeatureDSPThumb2,
+                                     FeatureHasRAS]>;
 
 // V7M Processors.
 def : ProcNoItin<"cortex-m3",       [HasV7Ops,
@@ -264,6 +304,12 @@ def : ProcessorModel<"swift",       SwiftModel,
                                     [ProcSwift, HasV7Ops, FeatureNEON,
                                      FeatureDB, FeatureDSPThumb2,
                                      FeatureHasRAS]>;
+
+// Cyclone Processors.
+def : ProcessorModel<"cyclone",     SwiftModel,
+                                    [ProcSwift, HasV8Ops, HasV7Ops, FeatureNEON,
+                                     FeatureDB, FeatureDSPThumb2,
+                                     FeatureHasRAS, FeatureAvoidRegSoReg]>;
 
 //===----------------------------------------------------------------------===//
 // Register File Description

@@ -15,11 +15,11 @@
 #ifndef LLVM_OBJECT_MACHO_H
 #define LLVM_OBJECT_MACHO_H
 
-#include "llvm/Object/ObjectFile.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Object/MachOObject.h"
+#include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/MachO.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/SmallVector.h"
 
 namespace llvm {
 namespace object {
@@ -44,12 +44,16 @@ public:
   virtual unsigned getArch() const;
   virtual StringRef getLoadName() const;
 
+  // In a MachO file, sections have a segment name. This is used in the .o
+  // files. They have a single segment, but this field specifies which segment
+  // a section should be put in in the final object.
+  error_code getSectionFinalSegmentName(DataRefImpl Sec, StringRef &Res) const;
+
   MachOObject *getObject() { return MachOObj.get(); }
 
   static inline bool classof(const Binary *v) {
     return v->isMachO();
   }
-  static inline bool classof(const MachOObjectFile *v) { return true; }
 
 protected:
   virtual error_code getSymbolNext(DataRefImpl Symb, SymbolRef &Res) const;
@@ -62,6 +66,7 @@ protected:
   virtual error_code getSymbolType(DataRefImpl Symb, SymbolRef::Type &Res) const;
   virtual error_code getSymbolSection(DataRefImpl Symb,
                                       section_iterator &Res) const;
+  virtual error_code getSymbolValue(DataRefImpl Symb, uint64_t &Val) const;
 
   virtual error_code getSectionNext(DataRefImpl Sec, SectionRef &Res) const;
   virtual error_code getSectionName(DataRefImpl Sec, StringRef &Res) const;
@@ -76,6 +81,7 @@ protected:
                                                    bool &Res) const;
   virtual error_code isSectionVirtual(DataRefImpl Sec, bool &Res) const;
   virtual error_code isSectionZeroInit(DataRefImpl Sec, bool &Res) const;
+  virtual error_code isSectionReadOnlyData(DataRefImpl Sec, bool &Res) const;
   virtual error_code sectionContainsSymbol(DataRefImpl DRI, DataRefImpl S,
                                            bool &Result) const;
   virtual relocation_iterator getSectionRelBegin(DataRefImpl Sec) const;
