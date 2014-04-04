@@ -117,14 +117,12 @@ private:
                                raw_ostream &O);
 
   void printFPImmOperand(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListOne64(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListTwo64(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListThree64(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListFour64(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListOne128(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListTwo128(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListThree128(const MCInst *MI, unsigned OpNum, raw_ostream &O);
-  void printVectorListFour128(const MCInst *MI, unsigned OpNum, raw_ostream &O);
+
+  /// Print a list of vector registers where the type suffix is implicit
+  /// (i.e. attached to the instruction rather than the registers).
+  template<unsigned NumRegs, unsigned RegSize>
+  void printImplicitlyTypedVectorList(const MCInst *MI, unsigned OpNum,
+                                      raw_ostream &O);
 
   void printVectorIndex(const MCInst *MI, unsigned OpNum, raw_ostream &O);
   void printAdrpLabel(const MCInst *MI, unsigned OpNum, raw_ostream &O);

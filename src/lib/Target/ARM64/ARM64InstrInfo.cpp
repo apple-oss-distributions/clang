@@ -30,7 +30,7 @@ using namespace llvm;
 
 ARM64InstrInfo::ARM64InstrInfo(const ARM64Subtarget &STI)
   : ARM64GenInstrInfo(ARM64::ADJCALLSTACKDOWN, ARM64::ADJCALLSTACKUP),
-    RI(this), Subtarget(STI) {}
+    RI(this, &STI), Subtarget(STI) {}
 
 /// GetInstSize - Return the number of bytes of code the specified
 /// instruction may be.  This returns the maximum number of bytes.
@@ -795,11 +795,12 @@ unsigned ARM64InstrInfo::isGPRZero(const MachineInstr *MI) const {
     break;
   case ARM64::MOVZWi:
   case ARM64::MOVZXi: // movz Rd, #0 (LSL #0)
-    if (MI->getOperand(1).getImm() == 0) {
+    if (MI->getOperand(1).isImm() && MI->getOperand(1).getImm() == 0) {
       assert(MI->getDesc().getNumOperands() == 3
              && MI->getOperand(2).getImm() == 0 && "invalid MOVZi operands");
       return true;
     }
+    break;
   case ARM64::ANDWri: // and Rd, Rzr, #imm
     return MI->getOperand(1).getReg() == ARM64::WZR;
   case ARM64::ANDXri:
@@ -1073,10 +1074,10 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                                      &ARM64::GPR64spRegClass);
         unsigned SrcRegX  = TRI->getMatchingSuperReg(SrcReg, ARM64::sub_32,
                                                      &ARM64::GPR64spRegClass);
-        // This instruction is reading and writing X registers.  This may upset the
-        // register scavenger and machine verifier, so we need to indicate that we
-        // are reading an undefined value from SrcRegX, but a proper value from
-        // SrcReg.
+        // This instruction is reading and writing X registers.  This may upset
+        // the register scavenger and machine verifier, so we need to indicate
+        // that we are reading an undefined value from SrcRegX, but a proper
+        // value from SrcReg.
         BuildMI(MBB, I, DL, get(ARM64::ADDXri), DestRegX)
           .addReg(SrcRegX, RegState::Undef)
           .addImm(0).addImm(ARM64_AM::getShifterImm(ARM64_AM::LSL, 0))
@@ -1097,10 +1098,10 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                                      &ARM64::GPR64spRegClass);
         unsigned SrcRegX  = TRI->getMatchingSuperReg(SrcReg, ARM64::sub_32,
                                                      &ARM64::GPR64spRegClass);
-        // This instruction is reading and writing X registers.  This may upset the
-        // register scavenger and machine verifier, so we need to indicate that we
-        // are reading an undefined value from SrcRegX, but a proper value from
-        // SrcReg.
+        // This instruction is reading and writing X registers.  This may upset
+        // the register scavenger and machine verifier, so we need to indicate
+        // that we are reading an undefined value from SrcRegX, but a proper
+        // value from SrcReg.
         BuildMI(MBB, I, DL, get(ARM64::ORRXrr), DestRegX)
           .addReg(ARM64::XZR)
           .addReg(SrcRegX, RegState::Undef)
@@ -1140,24 +1141,24 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       ARM64::DDDDRegClass.contains(SrcReg)) {
     const TargetRegisterInfo *TRI = &getRegisterInfo();
     const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::vsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB0, DestReg, ARM64::dsub0, RegState::Define, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::dsub0, 0, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::dsub0, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::vsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB1, DestReg, ARM64::dsub1, RegState::Define, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::dsub1, 0, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::dsub1, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB2, DestReg, ARM64::vsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB2, DestReg, ARM64::dsub2, RegState::Define, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::dsub2, 0, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::dsub2, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB3 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB3, DestReg, ARM64::vsub3, RegState::Define, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::vsub3, 0, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::vsub3, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB3, DestReg, ARM64::dsub3, RegState::Define, TRI);
+    AddSubReg(MIB3, SrcReg, ARM64::dsub3, 0, TRI);
+    AddSubReg(MIB3, SrcReg, ARM64::dsub3, getKillRegState(KillSrc), TRI);
 
     return;
   }
@@ -1167,19 +1168,19 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       ARM64::DDDRegClass.contains(SrcReg)) {
     const TargetRegisterInfo *TRI = &getRegisterInfo();
     const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::vsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB0, DestReg, ARM64::dsub0, RegState::Define, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::dsub0, 0, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::dsub0, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::vsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB1, DestReg, ARM64::dsub1, RegState::Define, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::dsub1, 0, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::dsub1, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB2, DestReg, ARM64::vsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB2, DestReg, ARM64::dsub2, RegState::Define, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::dsub2, 0, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::dsub2, getKillRegState(KillSrc), TRI);
 
     return;
   }
@@ -1189,14 +1190,14 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       ARM64::DDRegClass.contains(SrcReg)) {
     const TargetRegisterInfo *TRI = &getRegisterInfo();
     const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::vsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB0, DestReg, ARM64::dsub0, RegState::Define, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::dsub0, 0, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::dsub0, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::vsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB1, DestReg, ARM64::dsub1, RegState::Define, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::dsub1, 0, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::dsub1, getKillRegState(KillSrc), TRI);
 
     return;
   }
@@ -1206,24 +1207,24 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       ARM64::QQQQRegClass.contains(SrcReg)) {
     const TargetRegisterInfo *TRI = &getRegisterInfo();
     const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB0, DestReg, ARM64::vsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB0, DestReg, ARM64::qsub0, RegState::Define, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::qsub0, 0, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::qsub0, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB1, DestReg, ARM64::vsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB1, DestReg, ARM64::qsub1, RegState::Define, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::qsub1, 0, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::qsub1, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB2, DestReg, ARM64::vsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB2, DestReg, ARM64::qsub2, RegState::Define, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::qsub2, 0, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::qsub2, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB3 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB3, DestReg, ARM64::vsub3, RegState::Define, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::vsub3, 0, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::vsub3, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB3, DestReg, ARM64::qsub3, RegState::Define, TRI);
+    AddSubReg(MIB3, SrcReg, ARM64::qsub3, 0, TRI);
+    AddSubReg(MIB3, SrcReg, ARM64::qsub3, getKillRegState(KillSrc), TRI);
 
     return;
   }
@@ -1233,19 +1234,19 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       ARM64::QQQRegClass.contains(SrcReg)) {
     const TargetRegisterInfo *TRI = &getRegisterInfo();
     const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::vsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB0, DestReg, ARM64::qsub0, RegState::Define, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::qsub0, 0, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::qsub0, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::vsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB1, DestReg, ARM64::qsub1, RegState::Define, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::qsub1, 0, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::qsub1, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB2, DestReg, ARM64::vsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::vsub2, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB2, DestReg, ARM64::qsub2, RegState::Define, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::qsub2, 0, TRI);
+    AddSubReg(MIB2, SrcReg, ARM64::qsub2, getKillRegState(KillSrc), TRI);
 
     return;
   }
@@ -1255,14 +1256,14 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       ARM64::QQRegClass.contains(SrcReg)) {
     const TargetRegisterInfo *TRI = &getRegisterInfo();
     const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB0, DestReg, ARM64::vsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::vsub0, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB0, DestReg, ARM64::qsub0, RegState::Define, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::qsub0, 0, TRI);
+    AddSubReg(MIB0, SrcReg, ARM64::qsub0, getKillRegState(KillSrc), TRI);
 
     const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB1, DestReg, ARM64::vsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::vsub1, getKillRegState(KillSrc), TRI);
+    AddSubReg(MIB1, DestReg, ARM64::qsub1, RegState::Define, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::qsub1, 0, TRI);
+    AddSubReg(MIB1, SrcReg, ARM64::qsub1, getKillRegState(KillSrc), TRI);
 
     return;
   }

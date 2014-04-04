@@ -79,6 +79,8 @@ public:
                                     unsigned &Offset,
                                     const TargetRegisterInfo *TRI) const;
 
+  virtual bool enableClusterLoads() const { return true; }
+
   virtual bool shouldClusterLoads(MachineInstr *FirstLdSt,
                                   MachineInstr *SecondLdSt,
                                   unsigned NumLoads) const;

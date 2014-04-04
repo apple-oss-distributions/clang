@@ -10,6 +10,7 @@
 #include "IndexingContext.h"
 #include "CIndexDiagnostic.h"
 #include "CXTranslationUnit.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Frontend/ASTUnit.h"
@@ -93,17 +94,19 @@ AttrListInfo::AttrListInfo(const Decl *D, IndexingContext &IdxCtx)
 
     const IBOutletCollectionAttr *
       IBAttr = cast<IBOutletCollectionAttr>(IBInfo.A);
+    SourceLocation InterfaceLocStart =
+        IBAttr->getInterfaceLoc()->getTypeLoc().getLocStart();
     IBInfo.IBCollInfo.attrInfo = &IBInfo;
-    IBInfo.IBCollInfo.classLoc = IdxCtx.getIndexLoc(IBAttr->getInterfaceLoc());
+    IBInfo.IBCollInfo.classLoc = IdxCtx.getIndexLoc(InterfaceLocStart);
     IBInfo.IBCollInfo.objcClass = 0;
     IBInfo.IBCollInfo.classCursor = clang_getNullCursor();
     QualType Ty = IBAttr->getInterface();
-    if (const ObjCInterfaceType *InterTy = Ty->getAs<ObjCInterfaceType>()) {
-      if (const ObjCInterfaceDecl *InterD = InterTy->getInterface()) {
+    if (const ObjCObjectType *ObjectTy = Ty->getAs<ObjCObjectType>()) {
+      if (const ObjCInterfaceDecl *InterD = ObjectTy->getInterface()) {
         IdxCtx.getEntityInfo(InterD, IBInfo.ClassInfo, SA);
         IBInfo.IBCollInfo.objcClass = &IBInfo.ClassInfo;
-        IBInfo.IBCollInfo.classCursor = MakeCursorObjCClassRef(InterD,
-                                        IBAttr->getInterfaceLoc(), IdxCtx.CXTU);
+        IBInfo.IBCollInfo.classCursor =
+            MakeCursorObjCClassRef(InterD, InterfaceLocStart, IdxCtx.CXTU);
       }
     }
   }
@@ -165,16 +168,16 @@ SourceLocation IndexingContext::CXXBasesListInfo::getBaseLoc(
   if (TL.isNull())
     return Loc;
 
-  if (const QualifiedTypeLoc *QL = dyn_cast<QualifiedTypeLoc>(&TL))
-    TL = QL->getUnqualifiedLoc();
+  if (QualifiedTypeLoc QL = TL.getAs<QualifiedTypeLoc>())
+    TL = QL.getUnqualifiedLoc();
 
-  if (const ElaboratedTypeLoc *EL = dyn_cast<ElaboratedTypeLoc>(&TL))
-    return EL->getNamedTypeLoc().getBeginLoc();
-  if (const DependentNameTypeLoc *DL = dyn_cast<DependentNameTypeLoc>(&TL))
-    return DL->getNameLoc();
-  if (const DependentTemplateSpecializationTypeLoc *
-        DTL = dyn_cast<DependentTemplateSpecializationTypeLoc>(&TL))
-    return DTL->getTemplateNameLoc();
+  if (ElaboratedTypeLoc EL = TL.getAs<ElaboratedTypeLoc>())
+    return EL.getNamedTypeLoc().getBeginLoc();
+  if (DependentNameTypeLoc DL = TL.getAs<DependentNameTypeLoc>())
+    return DL.getNameLoc();
+  if (DependentTemplateSpecializationTypeLoc DTL =
+          TL.getAs<DependentTemplateSpecializationTypeLoc>())
+    return DTL.getTemplateNameLoc();
 
   return Loc;
 }
@@ -210,11 +213,13 @@ bool IndexingContext::isFunctionLocalDecl(const Decl *D) {
     return false;
 
   if (const NamedDecl *ND = dyn_cast<NamedDecl>(D)) {
-    switch (ND->getLinkage()) {
+    switch (ND->getFormalLinkage()) {
     case NoLinkage:
+    case VisibleNoLinkage:
     case InternalLinkage:
       return true;
     case UniqueExternalLinkage:
+      llvm_unreachable("Not a sema linkage");
     case ExternalLinkage:
       return false;
     }
@@ -378,19 +383,25 @@ bool IndexingContext::handleFunction(const FunctionDecl *D) {
     isContainer = false;
   }
 
-  DeclInfo DInfo(!D->isFirstDeclaration(), isDef, isContainer);
+  DeclInfo DInfo(!D->isFirstDecl(), isDef, isContainer);
   if (isSkipped)
     DInfo.flags |= CXIdxDeclFlag_Skipped;
   return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
 }
 
 bool IndexingContext::handleVar(const VarDecl *D) {
-  DeclInfo DInfo(!D->isFirstDeclaration(), D->isThisDeclarationADefinition(),
+  DeclInfo DInfo(!D->isFirstDecl(), D->isThisDeclarationADefinition(),
                  /*isContainer=*/false);
   return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
 }
 
 bool IndexingContext::handleField(const FieldDecl *D) {
+  DeclInfo DInfo(/*isRedeclaration=*/false, /*isDefinition=*/true,
+                 /*isContainer=*/false);
+  return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
+}
+
+bool IndexingContext::handleMSProperty(const MSPropertyDecl *D) {
   DeclInfo DInfo(/*isRedeclaration=*/false, /*isDefinition=*/true,
                  /*isContainer=*/false);
   return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
@@ -406,13 +417,13 @@ bool IndexingContext::handleTagDecl(const TagDecl *D) {
   if (const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(D))
     return handleCXXRecordDecl(CXXRD, D);
 
-  DeclInfo DInfo(!D->isFirstDeclaration(), D->isThisDeclarationADefinition(),
+  DeclInfo DInfo(!D->isFirstDecl(), D->isThisDeclarationADefinition(),
                  D->isThisDeclarationADefinition());
   return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
 }
 
 bool IndexingContext::handleTypedefName(const TypedefNameDecl *D) {
-  DeclInfo DInfo(!D->isFirstDeclaration(), /*isDefinition=*/true,
+  DeclInfo DInfo(!D->isFirstDecl(), /*isDefinition=*/true,
                  /*isContainer=*/false);
   return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
 }

@@ -16,14 +16,15 @@
 #define AMDGPU_ASMPRINTER_H
 
 #include "llvm/CodeGen/AsmPrinter.h"
+#include <string>
+#include <vector>
 
 namespace llvm {
 
 class AMDGPUAsmPrinter : public AsmPrinter {
 
 public:
-  explicit AMDGPUAsmPrinter(TargetMachine &TM, MCStreamer &Streamer)
-    : AsmPrinter(TM, Streamer) { }
+  explicit AMDGPUAsmPrinter(TargetMachine &TM, MCStreamer &Streamer);
 
   virtual bool runOnMachineFunction(MachineFunction &MF);
 
@@ -33,10 +34,16 @@ public:
 
   /// \brief Emit register usage information so that the GPU driver
   /// can correctly setup the GPU state.
-  void EmitProgramInfo(MachineFunction &MF);
+  void EmitProgramInfoR600(MachineFunction &MF);
+  void EmitProgramInfoSI(MachineFunction &MF);
 
   /// Implemented in AMDGPUMCInstLower.cpp
   virtual void EmitInstruction(const MachineInstr *MI);
+
+protected:
+  bool DisasmEnabled;
+  std::vector<std::string> DisasmLines, HexLines;
+  size_t DisasmLineMaxLen;
 };
 
 } // End anonymous llvm

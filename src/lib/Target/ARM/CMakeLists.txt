@@ -15,6 +15,7 @@ tablegen(LLVM ARMGenDisassemblerTables.inc -gen-disassembler)
 add_public_tablegen_target(ARMCommonTableGen)
 
 add_llvm_target(ARMCodeGen
+  A15SDOptimizer.cpp
   ARMAsmPrinter.cpp
   ARMBaseInstrInfo.cpp
   ARMBaseRegisterInfo.cpp
@@ -48,7 +49,7 @@ add_llvm_target(ARMCodeGen
   Thumb2SizeReduction.cpp
   )
 
-add_dependencies(LLVMARMCodeGen intrinsics_gen)
+add_dependencies(LLVMARMCodeGen ARMCommonTableGen intrinsics_gen)
 
 # workaround for hanging compilation on MSVC9, 10
 if( MSVC_VERSION EQUAL 1600 OR MSVC_VERSION EQUAL 1500 )

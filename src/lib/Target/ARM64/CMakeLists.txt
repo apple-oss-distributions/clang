@@ -18,6 +18,8 @@ add_llvm_target(ARM64CodeGen
   ARM64AdvSIMDScalarPass.cpp
   ARM64AsmPrinter.cpp
   ARM64BranchRelaxation.cpp
+  ARM64CleanupLocalDynamicTLSPass.cpp
+  ARM64CollectLOH.cpp
   ARM64ConditionalCompares.cpp
   ARM64DeadRegisterDefinitionsPass.cpp
   ARM64ExpandPseudoInsts.cpp

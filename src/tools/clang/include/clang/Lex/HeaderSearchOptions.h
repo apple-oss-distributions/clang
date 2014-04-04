@@ -95,6 +95,9 @@ public:
   /// Note: Only used for testing!
   unsigned DisableModuleHash : 1;
 
+  /// \brief Interpret module maps.  This option is implied by full modules.
+  unsigned ModuleMaps : 1;
+
   /// \brief The interval (in seconds) between pruning operations.
   ///
   /// This operation is expensive, because it requires Clang to walk through
@@ -117,9 +120,8 @@ public:
   /// of computing the module hash.
   llvm::SetVector<std::string> ModulesIgnoreMacros;
 
-  /// Indicate whether the sysroot is implicit, and the header search should be
-  /// adjusted accordingly.
-  unsigned SysrootIsImplicit : 1;
+  /// \brief The set of user-provided module-map-files.
+  llvm::SetVector<std::string> ModuleMapFiles;
 
   /// Include the compiler builtin includes.
   unsigned UseBuiltinIncludes : 1;
@@ -138,10 +140,9 @@ public:
 
 public:
   HeaderSearchOptions(StringRef _Sysroot = "/")
-    : Sysroot(_Sysroot), DisableModuleHash(0),
+    : Sysroot(_Sysroot), DisableModuleHash(0), ModuleMaps(0),
       ModuleCachePruneInterval(7*24*60*60),
       ModuleCachePruneAfter(31*24*60*60),
-      SysrootIsImplicit(false),
       UseBuiltinIncludes(true),
       UseStandardSystemIncludes(true), UseStandardCXXIncludes(true),
       UseLibcxx(false), Verbose(false) {}

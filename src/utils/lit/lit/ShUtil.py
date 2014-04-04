@@ -1,7 +1,8 @@
+from __future__ import absolute_import
 import itertools
 
-import Util
-from ShCommands import Command, Pipeline, Seq
+import lit.util
+from lit.ShCommands import Command, Pipeline, Seq
 
 class ShLexer:
     def __init__(self, data, win32Escapes = False):
@@ -35,7 +36,7 @@ class ShLexer:
         if ('|' in chunk or '&' in chunk or 
             '<' in chunk or '>' in chunk or
             "'" in chunk or '"' in chunk or
-            '\\' in chunk):
+            ';' in chunk or '\\' in chunk):
             return None
         
         self.pos = self.pos - 1 + len(chunk)
@@ -48,7 +49,7 @@ class ShLexer:
             str = c
         while self.pos != self.end:
             c = self.look()
-            if c.isspace() or c in "|&":
+            if c.isspace() or c in "|&;":
                 break
             elif c in '><':
                 # This is an annoying case; we treat '2>' as a single token so
@@ -74,8 +75,8 @@ class ShLexer:
                 # Outside of a string, '\\' escapes everything.
                 self.eat()
                 if self.pos == self.end:
-                    Util.warning("escape at end of quoted argument in: %r" % 
-                                 self.data)
+                    lit.util.warning(
+                        "escape at end of quoted argument in: %r" % self.data)
                     return str
                 str += self.eat()
             else:
@@ -92,8 +93,8 @@ class ShLexer:
                 # Inside a '"' quoted string, '\\' only escapes the quote
                 # character and backslash, otherwise it is preserved.
                 if self.pos == self.end:
-                    Util.warning("escape at end of quoted argument in: %r" % 
-                                 self.data)
+                    lit.util.warning(
+                        "escape at end of quoted argument in: %r" % self.data)
                     return str
                 c = self.eat()
                 if c == '"': # 
@@ -104,7 +105,7 @@ class ShLexer:
                     str += '\\' + c
             else:
                 str += c
-        Util.warning("missing quote character in %r" % self.data)
+        lit.util.warning("missing quote character in %r" % self.data)
         return str
     
     def lex_arg_checked(self, c):
@@ -116,9 +117,11 @@ class ShLexer:
         reference = self.lex_arg_slow(c)
         if res is not None:
             if res != reference:
-                raise ValueError,"Fast path failure: %r != %r" % (res, reference)
+                raise ValueError("Fast path failure: %r != %r" % (
+                        res, reference))
             if self.pos != end:
-                raise ValueError,"Fast path failure: %r != %r" % (self.pos, end)
+                raise ValueError("Fast path failure: %r != %r" % (
+                        self.pos, end))
         return reference
         
     def lex_arg(self, c):
@@ -166,28 +169,28 @@ class ShLexer:
 ###
  
 class ShParser:
-    def __init__(self, data, win32Escapes = False):
+    def __init__(self, data, win32Escapes = False, pipefail = False):
         self.data = data
+        self.pipefail = pipefail
         self.tokens = ShLexer(data, win32Escapes = win32Escapes).lex()
     
     def lex(self):
-        try:
-            return self.tokens.next()
-        except StopIteration:
-            return None
+        for item in self.tokens:
+            return item
+        return None
     
     def look(self):
-        next = self.lex()
-        if next is not None:
-            self.tokens = itertools.chain([next], self.tokens)
-        return next
+        token = self.lex()
+        if token is not None:
+            self.tokens = itertools.chain([token], self.tokens)
+        return token
     
     def parse_command(self):
         tok = self.lex()
         if not tok:
-            raise ValueError,"empty command!"
+            raise ValueError("empty command!")
         if isinstance(tok, tuple):
-            raise ValueError,"syntax error near unexpected token %r" % tok[0]
+            raise ValueError("syntax error near unexpected token %r" % tok[0])
         
         args = [tok]
         redirects = []
@@ -212,7 +215,7 @@ class ShParser:
             op = self.lex()
             arg = self.lex()
             if not arg:
-                raise ValueError,"syntax error near token %r" % op[0]
+                raise ValueError("syntax error near token %r" % op[0])
             redirects.append((op, arg))
 
         return Command(args, redirects)
@@ -224,7 +227,7 @@ class ShParser:
         while self.look() == ('|',):
             self.lex()
             commands.append(self.parse_command())
-        return Pipeline(commands, negate)
+        return Pipeline(commands, negate, self.pipefail)
             
     def parse(self):
         lhs = self.parse_pipeline()
@@ -234,7 +237,8 @@ class ShParser:
             assert isinstance(operator, tuple) and len(operator) == 1
 
             if not self.look():
-                raise ValueError, "missing argument to operator %r" % operator[0]
+                raise ValueError(
+                    "missing argument to operator %r" % operator[0])
             
             # FIXME: Operator precedence!!
             lhs = Seq(lhs, operator[0], self.parse_pipeline())
@@ -250,9 +254,9 @@ class TestShLexer(unittest.TestCase):
         return list(ShLexer(str, *args, **kwargs).lex())
 
     def test_basic(self):
-        self.assertEqual(self.lex('a|b>c&d<e'),
+        self.assertEqual(self.lex('a|b>c&d<e;f'),
                          ['a', ('|',), 'b', ('>',), 'c', ('&',), 'd', 
-                          ('<',), 'e'])
+                          ('<',), 'e', (';',), 'f'])
 
     def test_redirection_tokens(self):
         self.assertEqual(self.lex('a2>c'),
@@ -341,6 +345,11 @@ class TestShParse(unittest.TestCase):
                                  Pipeline([Command(['b'], [])], False)),
                              '||',
                              Pipeline([Command(['c'], [])], False)))
+
+        self.assertEqual(self.parse('a; b'),
+                         Seq(Pipeline([Command(['a'], [])], False),
+                             ';',
+                             Pipeline([Command(['b'], [])], False)))
 
 if __name__ == '__main__':
     unittest.main()

@@ -100,7 +100,7 @@ public:
   }
 
   void dump(raw_ostream &OS) const {
-    static const char *Table[] = {
+    static const char *const Table[] = {
       "Allocated",
       "Released",
       "Relinquished"
@@ -282,14 +282,14 @@ private:
   /// Check if the function is known free memory, or if it is
   /// "interesting" and should be modeled explicitly.
   ///
-  /// \param EscapingSymbol A function might not free memory in general, but
-  ///   could be known to free a particular symbol. In this case, false is
+  /// \param [out] EscapingSymbol A function might not free memory in general, 
+  ///   but could be known to free a particular symbol. In this case, false is
   ///   returned and the single escaping symbol is returned through the out
   ///   parameter.
   ///
   /// We assume that pointers do not escape through calls to system functions
   /// not handled by this checker.
-  bool mayFreeAnyEscapedMemoryOrIsModelledExplicitely(const CallEvent *Call,
+  bool mayFreeAnyEscapedMemoryOrIsModeledExplicitly(const CallEvent *Call,
                                    ProgramStateRef State,
                                    SymbolRef &EscapingSymbol) const;
 
@@ -313,7 +313,7 @@ private:
                      const Expr *DeallocExpr) const;
   void ReportMismatchedDealloc(CheckerContext &C, SourceRange Range,
                                const Expr *DeallocExpr, const RefState *RS,
-                               SymbolRef Sym) const;
+                               SymbolRef Sym, bool OwnershipTransferred) const;
   void ReportOffsetFree(CheckerContext &C, SVal ArgVal, SourceRange Range, 
                         const Expr *DeallocExpr, 
                         const Expr *AllocExpr = 0) const;
@@ -1042,7 +1042,7 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
         RsBase->getAllocationFamily() == getAllocationFamily(C, ParentExpr);
       if (!DeallocMatchesAlloc) {
         ReportMismatchedDealloc(C, ArgExpr->getSourceRange(),
-                                ParentExpr, RsBase, SymBase);
+                                ParentExpr, RsBase, SymBase, Hold);
         return 0;
       }
 
@@ -1060,7 +1060,7 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
     }
   }
 
-  ReleasedAllocated = (RsBase != 0);
+  ReleasedAllocated = (RsBase != 0) && RsBase->isAllocated();
 
   // Clean out the info on previous call to free return info.
   State = State->remove<FreeReturnValue>(SymBase);
@@ -1260,7 +1260,8 @@ void MallocChecker::ReportMismatchedDealloc(CheckerContext &C,
                                             SourceRange Range,
                                             const Expr *DeallocExpr, 
                                             const RefState *RS,
-                                            SymbolRef Sym) const {
+                                            SymbolRef Sym, 
+                                            bool OwnershipTransferred) const {
 
   if (!Filter.CMismatchedDeallocatorChecker)
     return;
@@ -1279,15 +1280,27 @@ void MallocChecker::ReportMismatchedDealloc(CheckerContext &C,
     SmallString<20> DeallocBuf;
     llvm::raw_svector_ostream DeallocOs(DeallocBuf);
 
-    os << "Memory";
-    if (printAllocDeallocName(AllocOs, C, AllocExpr))
-      os << " allocated by " << AllocOs.str();
+    if (OwnershipTransferred) {
+      if (printAllocDeallocName(DeallocOs, C, DeallocExpr))
+        os << DeallocOs.str() << " cannot";
+      else 
+        os << "Cannot";
 
-    os << " should be deallocated by ";
-      printExpectedDeallocName(os, RS->getAllocationFamily());
+      os << " take ownership of memory";
 
-    if (printAllocDeallocName(DeallocOs, C, DeallocExpr))
-      os << ", not " << DeallocOs.str();
+      if (printAllocDeallocName(AllocOs, C, AllocExpr))
+        os << " allocated by " << AllocOs.str();
+    } else {
+      os << "Memory";
+      if (printAllocDeallocName(AllocOs, C, AllocExpr))
+        os << " allocated by " << AllocOs.str();
+
+      os << " should be deallocated by ";
+        printExpectedDeallocName(os, RS->getAllocationFamily());
+
+      if (printAllocDeallocName(DeallocOs, C, DeallocExpr))
+        os << ", not " << DeallocOs.str();
+    }
 
     BugReport *R = new BugReport(*BT_MismatchedDealloc, os.str(), N);
     R->markInteresting(Sym);
@@ -1670,8 +1683,8 @@ void MallocChecker::checkDeadSymbols(SymbolReaper &SymReaper,
   if (!Errors.empty()) {
     static SimpleProgramPointTag Tag("MallocChecker : DeadSymbolsLeak");
     N = C.addTransition(C.getState(), C.getPredecessor(), &Tag);
-    for (SmallVector<SymbolRef, 2>::iterator
-        I = Errors.begin(), E = Errors.end(); I != E; ++I) {
+    for (SmallVectorImpl<SymbolRef>::iterator
+           I = Errors.begin(), E = Errors.end(); I != E; ++I) {
       reportLeak(*I, N, C);
     }
   }
@@ -1790,7 +1803,8 @@ bool MallocChecker::isReleased(SymbolRef Sym, CheckerContext &C) const {
 bool MallocChecker::checkUseAfterFree(SymbolRef Sym, CheckerContext &C,
                                       const Stmt *S) const {
 
-  if (isReleased(Sym, C)) {
+  // FIXME: Handle destructor called from delete more precisely.
+  if (isReleased(Sym, C) && S) {
     ReportUseAfterFree(C, S->getSourceRange(), Sym);
     return true;
   }
@@ -1848,12 +1862,13 @@ ProgramStateRef MallocChecker::evalAssume(ProgramStateRef state,
   return state;
 }
 
-bool MallocChecker::mayFreeAnyEscapedMemoryOrIsModelledExplicitely(
+bool MallocChecker::mayFreeAnyEscapedMemoryOrIsModeledExplicitly(
                                               const CallEvent *Call,
                                               ProgramStateRef State,
                                               SymbolRef &EscapingSymbol) const {
   assert(Call);
-
+  EscapingSymbol = 0;
+  
   // For now, assume that any C++ call can free memory.
   // TODO: If we want to be more optimistic here, we'll need to make sure that
   // regions escape to C++ containers. They seem to do that even now, but for
@@ -2030,8 +2045,8 @@ ProgramStateRef MallocChecker::checkPointerEscapeAux(ProgramStateRef State,
   // call later, keep tracking the top level arguments.
   SymbolRef EscapingSymbol = 0;
   if (Kind == PSK_DirectEscapeOnCall &&
-      !mayFreeAnyEscapedMemoryOrIsModelledExplicitely(Call, State,
-                                                      EscapingSymbol) &&
+      !mayFreeAnyEscapedMemoryOrIsModeledExplicitly(Call, State,
+                                                    EscapingSymbol) &&
       !EscapingSymbol) {
     return State;
   }
@@ -2173,6 +2188,14 @@ void MallocChecker::printState(raw_ostream &Out, ProgramStateRef State,
   }
 }
 
+void ento::registerNewDeleteLeaksChecker(CheckerManager &mgr) {
+  registerCStringCheckerBasic(mgr);
+  mgr.registerChecker<MallocChecker>()->Filter.CNewDeleteLeaksChecker = true;
+  // We currently treat NewDeleteLeaks checker as a subchecker of NewDelete 
+  // checker.
+  mgr.registerChecker<MallocChecker>()->Filter.CNewDeleteChecker = true;
+}
+
 #define REGISTER_CHECKER(name) \
 void ento::register##name(CheckerManager &mgr) {\
   registerCStringCheckerBasic(mgr); \
@@ -2182,5 +2205,4 @@ void ento::register##name(CheckerManager &mgr) {\
 REGISTER_CHECKER(MallocPessimistic)
 REGISTER_CHECKER(MallocOptimistic)
 REGISTER_CHECKER(NewDeleteChecker)
-REGISTER_CHECKER(NewDeleteLeaksChecker)
 REGISTER_CHECKER(MismatchedDeallocatorChecker)

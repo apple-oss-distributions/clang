@@ -65,6 +65,8 @@ Default_Install_Root := $(DT_TOOLCHAIN_DIR)
 # Don't install root links or license.
 Post_Install_RootLinks := 0
 Post_Install_OpenSourceLicense := 0
+# Install the magic file that enables use of -fobjc-gc for Apple-internal use.
+Post_Install_EnableObjCGC := 1
 # Install to .../usr
 Install_Path_Suffix := usr
 # Include x86, ARM, and ARM64 backends.
@@ -74,7 +76,7 @@ Extra_Make_Variables :=
 # Don't install any archive files.
 Extra_Make_Variables += NO_INSTALL_ARCHIVES=1
 # LLVM level install target is 'install-clang.
-LLVM_Install_Target := install-clang
+LLVM_Install_Target := OPTIONAL_DIRS=tools/llvm-cov install-clang
 
 ##
 # Per Project/Target Configuration
@@ -166,7 +168,7 @@ endif
 ifeq ($(Clang_Build_All), 1)
 Clang_Build_Target := all
 else ifeq ($(Clang_Build_All), 0)
-Clang_Build_Target := clang-only
+Clang_Build_Target := ONLY_TOOLS="clang lto llvm-cov" all
 else
 $(error "invalid setting for clang build all mode: '$(Clang_Build_All)'")
 endif
@@ -242,6 +244,16 @@ Clang_Make_Variables += LLVM_LTO_VERSION_OFFSET=3000
 
 # Set extra compile options.
 Extra_Options := $(Clang_Extra_Options)
+Final_Extra_Options := $(Extra_Options) $(Clang_Final_Extra_Options)
+
+# Enable LTO if requested.
+ifeq ($(Clang_Enable_LTO),1)
+Final_Extra_Options += -flto -gline-tables-only
+else ifeq ($(Clang_Enable_LTO),0)
+Final_Extra_Options += -g
+else
+$(error "invalid setting for Clang_Enable_LTO: '$(Clang_Enable_LTO)'")
+endif
 
 # Set configure flags.
 Common_Configure_Flags = \
@@ -254,6 +266,7 @@ Common_Configure_Flags = \
 		  --without-llvmgcc --without-llvmgxx \
 		  --disable-bindings \
 		  --disable-doxygen \
+		  --disable-zlib \
 		  --enable-backtraces=no \
 		  --enable-libcpp \
 		  --with-bug-report-url="http://developer.apple.com/bugreporter/"
@@ -261,7 +274,7 @@ Stage1_Configure_Flags = $(Common_Configure_Flags) \
                   --with-extra-options="$(Extra_Options)"
 Configure_Flags = $(Common_Configure_Flags) \
                   --with-internal-prefix="$(Install_Prefix)/local" \
-                  --with-extra-options="$(Extra_Options) $(Clang_Final_Extra_Options)"
+                  --with-extra-options="$(Final_Extra_Options)"
 
 CC := $(shell xcrun -find clang)
 CXX := $(shell xcrun -find clang++)
@@ -289,6 +302,13 @@ ifeq ($(Post_Install_OpenSourceLicense),1)
 Extra_Clang_Install_Targets += install-clang-opensourcelicense
 else ifneq ($(Post_Install_OpenSourceLicense),0)
 $(error "unknown value for post install of open source license: '$(Post_Install_OpenSourceLicense)'")
+endif
+
+# Install the magic file to enable internal use of -fobjc-gc?
+ifeq ($(Post_Install_EnableObjCGC),1)
+Extra_Clang_Install_Targets += install-clang-enableobjcgc
+else ifneq ($(Post_Install_EnableObjCGC),0)
+$(error "unknown value for post install of enable_objc_gc: '$(Post_Install_EnableObjCGC)'")
 endif
 
 # Select stage1 compiler to build.
@@ -357,6 +377,15 @@ PATH := ${OBJROOT}/bin:${PATH}
 
 SYSCTL := $(shell if [ `sysctl -n hw.activecpu` -ge 8 -a `sysctl -n hw.memsize` -le 2147483648 ]; then echo 4; else sysctl -n hw.activecpu; fi)
 
+# At this point, we know that Clang_Enable_LTO/Clang_Build_All are either 0 or
+# 1, so we don't need to check for improper values.
+SYSCTL_FINAL := $(SYSCTL)
+ifeq ($(Clang_Enable_LTO),1)
+ifeq ($(Clang_Build_All),1)
+SYSCTL_FINAL := 1
+endif
+endif
+
 # Default is to build Clang.
 install: install-clang
 
@@ -408,6 +437,7 @@ installhdrs:
 .PHONY: configure-clang_final configure-clang_singlestage configure-clang_stage2
 .PHONY: configure-clang_stage1
 .PHONY: install-clang-rootlinks install-clang-opensourcelicense
+.PHONY: install-clang-enableobjcgc
 
 install-clang: install-clang_final $(Extra_Clang_Install_Targets)
 
@@ -430,6 +460,7 @@ install-clang_final: build-clang
 	$(_v) ln -sf clang++ $(DSTROOT)/$(Install_Prefix)/bin/c++
 	$(_v) ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1
 	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1
+	$(_v) ln -sf llvm-cov $(DSTROOT)/$(Install_Prefix)/bin/gcov
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
 	@echo "Copying executables into SYMROOT..."
 	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
@@ -437,7 +468,7 @@ install-clang_final: build-clang
 	$(_v) cd $(SYMROOT) && find . -perm -0111 -type f -print | \
 	  xargs -n 1 -P $(SYSCTL) $(DSYMUTIL)
 	@echo "Stripping executables in DSTROOT..."
-	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -Sx
+	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -S
 	@echo "Setting permissions for executables in DSTROOT..."
 	$(_v)- $(CHOWN) -R root:wheel $(DSTROOT) $(SYMROOT)
 
@@ -452,7 +483,7 @@ build-clang_final: configure-clang_final
 	  else  \
 	    order_file=$(SRCROOT)/static-order-files/$$arch/clang.order; \
 	  fi; \
-	  time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/$$arch \
+	  time $(MAKE) -j$(SYSCTL_FINAL) -C $(OBJROOT)/$$arch \
 	    $(Build_Target) CLANG_ORDER_FILE=$${order_file} \
 	    DYLD_LIBRARY_PATH="$(Library_SearchPaths)" ; \
 	done
@@ -481,7 +512,7 @@ build-clang_final_ordered: build-clang_final
 	        echo "Rebuilding With Order File" && \
 		mv "$(OBJROOT)/$$arch/$(Build_Mode)/bin/clang" \
 		  "$(OBJROOT)/$$arch/$(Build_Mode)/bin/clang.preorder" && \
-		$(MAKE) -j$(SYSCTL) \
+		$(MAKE) -j$(SYSCTL_FINAL) \
 		  -C "$(OBJROOT)/$$arch/tools/clang/tools/driver" \
 		  $(Clang_Make_Variables) \
 		  "CLANG_ORDER_FILE=$(OBJROOT)/order-data/$$arch/clang.order" \
@@ -557,6 +588,10 @@ install-clang-opensourcelicense: install-clang_final
 	$(INSTALL_FILE) $(Sources)/LICENSE.TXT $(OSL)/clang-llvm.txt
 	$(INSTALL_FILE) $(Sources)/tools/clang/LICENSE.TXT $(OSL)/clang.txt
 
+install-clang-enableobjcgc: install-clang_final
+	$(MKDIR) $(DSTROOT)/$(Install_Prefix)/local/lib/clang
+	echo 1 > $(DSTROOT)/$(Install_Prefix)/local/lib/clang/enable_objc_gc
+
 install-clang-links:
 	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/bin
 	ln -sf ../../../../../usr/bin/clang $(DSTROOT)/$(Install_Prefix)/bin/clang
@@ -601,7 +636,7 @@ install-cross: build-cross
 	$(_v) cd $(SYMROOT) && find . -perm -0111 -type f -print | \
 	  xargs -n 1 -P $(SYSCTL) $(DSYMUTIL)
 	@echo "Stripping executables in DSTROOT..."
-	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -Sx
+	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -S
 	@echo "Setting permissions for executables in DSTROOT..."
 	$(_v)- $(CHOWN) -R root:wheel $(DSTROOT) $(SYMROOT)
 
@@ -641,6 +676,7 @@ setup-tools-cross:
 	  cc=`echo $$gcc | sed -e 's/gcc/cc/' -e 's/g/c/'` && \
 	  clang=`echo $$gcc | sed -e 's/gcc/clang/' -e 's/^g/clang/'` && \
 	  prog=`xcrun -find $$cc` && \
+	  sysroot=`xcrun -sdk $(SDKROOT) --show-sdk-path` && \
 	  ln -s $$prog $(OBJROOT)/bin/$$gcc && \
 	  ln -s $$prog $(OBJROOT)/bin/$$clang && \
 	  script=$(OBJROOT)/bin/arm-apple-darwin10-$$gcc && \
@@ -648,7 +684,7 @@ setup-tools-cross:
 	  echo "ARCH='-arch armv7'" >> $$script && \
 	  echo 'for i in $$@ ; do if [ "$$i" == "-arch" ] ; then' \
 	    ' ARCH= ; fi ; done' >> $$script && \
-	  echo exec $$prog '$$ARCH -isysroot '$(SDKROOT)' "$$@"' >> $$script &&\
+	  echo exec $$prog '$$ARCH -isysroot '$$sysroot' "$$@"' >> $$script &&\
 	  chmod a+x $$script || exit 1 ; \
 	done
 

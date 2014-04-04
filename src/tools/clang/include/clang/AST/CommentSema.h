@@ -208,7 +208,11 @@ public:
 
   bool isFunctionDecl();
   bool isAnyFunctionDecl();
+
+  /// \returns \c true if declaration that this comment is attached to declares
+  /// a function pointer.
   bool isFunctionPointerVarDecl();
+  bool isFunctionOrMethodVariadic();
   bool isObjCMethodDecl();
   bool isObjCPropertyDecl();
   bool isTemplateOrSpecialization();
@@ -217,6 +221,8 @@ public:
   bool isUnionDecl();
   bool isObjCInterfaceDecl();
   bool isObjCProtocolDecl();
+  bool isClassTemplateDecl();
+  bool isFunctionTemplateDecl();
 
   ArrayRef<const ParmVarDecl *> getParamVars();
 

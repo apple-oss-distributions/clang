@@ -15,6 +15,7 @@
 #include "ARM64TargetMachine.h"
 #include "MCTargetDesc/ARM64AddressingModes.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
+#include "llvm/IR/Function.h"   // To access function attributes.
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
@@ -37,14 +38,24 @@ class ARM64DAGToDAGISel : public SelectionDAGISel {
   /// make the right decision when generating code for different targets.
   const ARM64Subtarget *Subtarget;
 
+  bool ForCodeSize;
+
 public:
   explicit ARM64DAGToDAGISel(ARM64TargetMachine &tm,
                            CodeGenOpt::Level OptLevel)
     : SelectionDAGISel(tm, OptLevel), TM(tm),
-      Subtarget(&TM.getSubtarget<ARM64Subtarget>()) {}
+      Subtarget(&TM.getSubtarget<ARM64Subtarget>()), ForCodeSize(false) {}
 
   virtual const char *getPassName() const {
     return "ARM64 Instruction Selection";
+  }
+
+  virtual bool runOnMachineFunction(MachineFunction &MF) {
+    AttributeSet FnAttrs = MF.getFunction()->getAttributes();
+    ForCodeSize = FnAttrs.hasAttribute(AttributeSet::FunctionIndex,
+                                       Attribute::OptimizeForSize) ||
+      FnAttrs.hasAttribute(AttributeSet::FunctionIndex, Attribute::MinSize);
+    return SelectionDAGISel::runOnMachineFunction(MF);
   }
 
   SDNode *Select(SDNode *Node);
@@ -55,6 +66,8 @@ public:
                                             char ConstraintCode,
                                             std::vector<SDValue> &OutOps);
 
+  SDNode* SelectMLAV64LaneV128(SDNode *N);
+  SDNode* SelectMULLV64LaneV128(unsigned IntNo, SDNode *N);
   bool SelectArithExtendedRegister(SDValue N, SDValue &Reg, SDValue &Shift);
   bool SelectArithImmed(SDValue N, SDValue &Val, SDValue &Shift);
   bool SelectNegArithImmed(SDValue N, SDValue &Val, SDValue &Shift);
@@ -128,7 +141,8 @@ public:
 
   SDNode *SelectIndexedLoad(SDNode *N, bool &Done);
 
-  SDNode *SelectLoad(SDNode *N, unsigned NumVecs, unsigned Opc);
+  SDNode *SelectLoad(SDNode *N, unsigned NumVecs,
+                     unsigned Opc, unsigned SubRegIdx);
   SDNode *SelectLoadLane(SDNode *N, unsigned NumVecs, unsigned Opc);
 
   SDNode *SelectStore(SDNode *N, unsigned NumVecs, unsigned Opc);
@@ -136,6 +150,9 @@ public:
 
   SDNode *SelectSIMDAddSubNarrowing(unsigned IntNo, SDNode *Node);
   SDNode *SelectSIMDXtnNarrowing(unsigned IntNo, SDNode *Node);
+
+  SDNode *SelectAtomic(SDNode *Node, unsigned Op8, unsigned Op16,
+                       unsigned Op32, unsigned Op64);
 
   SDNode *SelectBitfieldExtractOp(SDNode *N);
   SDNode *SelectBitfieldInsertOp(SDNode *N);
@@ -154,6 +171,9 @@ private:
                               SDValue &Base, SDValue &OffImm);
   bool SelectAddrModeRO(SDValue N, unsigned Size,
                         SDValue &Base, SDValue& Offset, SDValue &Imm);
+  bool isWorthFolding(SDValue V) const;
+  bool SelectExtendedSHL(SDValue N, unsigned Size,
+                         SDValue& Offset, SDValue &Imm);
 };
 } // end anonymous namespace
 
@@ -246,6 +266,12 @@ bool ARM64DAGToDAGISel::SelectNegArithImmed(SDValue N,
 
   // The immediate operand must be a 24-bit zero-extended immediate.
   uint64_t Immed = cast<ConstantSDNode>(N.getNode())->getZExtValue();
+
+  // This negation is almost always valid, but "cmp wN, #0" and "cmn wN, #0"
+  // have the opposite effect on the C flag, so this pattern mustn't match under
+  // those circumstances.
+  if (Immed == 0) return false;
+
   if (N.getValueType() == MVT::i32)
     Immed = ~((uint32_t)Immed) + 1;
   else
@@ -269,6 +295,15 @@ static ARM64_AM::ShiftType getShiftTypeForNode(SDValue N) {
   }
 }
 
+/// \brief Determine wether it is worth to fold V into an extended register.
+bool ARM64DAGToDAGISel::isWorthFolding(SDValue V) const {
+  // it hurts if the a value is used at least twice, unless we are optimizing
+  // for code size.
+  if (ForCodeSize || V.hasOneUse())
+    return true;
+  return false;
+}
+
 /// SelectShiftedRegister - Select a "shifted register" operand.  If the value
 /// is not shifted, set the Shift operand to default of "LSL 0".  The logical
 /// instructions allow the shifted register to be rotated, but the arithmetic
@@ -288,7 +323,7 @@ bool ARM64DAGToDAGISel::SelectShiftedRegister(SDValue N, bool AllowROR,
 
     Reg = N.getOperand(0);
     Shift = CurDAG->getTargetConstant(ShVal, MVT::i32);
-    return true;
+    return isWorthFolding(N);
   }
 
   return false;
@@ -296,7 +331,8 @@ bool ARM64DAGToDAGISel::SelectShiftedRegister(SDValue N, bool AllowROR,
 
 /// getExtendTypeForNode - Translate an extend node to the corresponding
 /// ExtendType value.
-static ARM64_AM::ExtendType getExtendTypeForNode(SDValue N) {
+static ARM64_AM::ExtendType getExtendTypeForNode(SDValue N,
+                                                 bool IsLoadStore = false) {
   if (N.getOpcode() == ISD::SIGN_EXTEND ||
       N.getOpcode() == ISD::SIGN_EXTEND_INREG) {
     EVT SrcVT;
@@ -305,9 +341,9 @@ static ARM64_AM::ExtendType getExtendTypeForNode(SDValue N) {
     else
       SrcVT = N.getOperand(0).getValueType();
 
-    if (SrcVT == MVT::i8)
+    if (!IsLoadStore && SrcVT == MVT::i8)
       return ARM64_AM::SXTB;
-    else if (SrcVT == MVT::i16)
+    else if (!IsLoadStore && SrcVT == MVT::i16)
       return ARM64_AM::SXTH;
     else if (SrcVT == MVT::i32)
       return ARM64_AM::SXTW;
@@ -318,9 +354,9 @@ static ARM64_AM::ExtendType getExtendTypeForNode(SDValue N) {
   } else if (N.getOpcode() == ISD::ZERO_EXTEND ||
              N.getOpcode() == ISD::ANY_EXTEND) {
     EVT SrcVT = N.getOperand(0).getValueType();
-    if (SrcVT == MVT::i8)
+    if (!IsLoadStore && SrcVT == MVT::i8)
       return ARM64_AM::UXTB;
-    else if (SrcVT == MVT::i16)
+    else if (!IsLoadStore && SrcVT == MVT::i16)
       return ARM64_AM::UXTH;
     else if (SrcVT == MVT::i32)
       return ARM64_AM::UXTW;
@@ -337,9 +373,9 @@ static ARM64_AM::ExtendType getExtendTypeForNode(SDValue N) {
     default:
       return ARM64_AM::InvalidExtend;
     case 0xFF:
-      return ARM64_AM::UXTB;
+      return !IsLoadStore ? ARM64_AM::UXTB : ARM64_AM::InvalidExtend;
     case 0xFFFF:
-      return ARM64_AM::UXTH;
+      return !IsLoadStore ? ARM64_AM::UXTH : ARM64_AM::InvalidExtend;
     case 0xFFFFFFFF:
       return ARM64_AM::UXTW;
     }
@@ -348,6 +384,109 @@ static ARM64_AM::ExtendType getExtendTypeForNode(SDValue N) {
   return ARM64_AM::InvalidExtend;
 }
 
+// Helper for SelectMLAV64LaneV128 - Recognize high lane extracts.
+static bool checkHighLaneIndex(SDNode *DL, SDValue &LaneOp, int &LaneIdx) {
+  if (DL->getOpcode() != ARM64ISD::DUPLANE16 &&
+      DL->getOpcode() != ARM64ISD::DUPLANE32)
+    return false;
+
+  SDValue SV = DL->getOperand(0);
+  if (SV.getOpcode() != ISD::INSERT_SUBVECTOR)
+    return false;
+
+  SDValue EV = SV.getOperand(1);
+  if (EV.getOpcode() != ISD::EXTRACT_SUBVECTOR)
+    return false;
+
+  ConstantSDNode *DLidx = cast<ConstantSDNode>(DL->getOperand(1).getNode());
+  ConstantSDNode *EVidx = cast<ConstantSDNode>(EV.getOperand(1).getNode());
+  LaneIdx = DLidx->getSExtValue() + EVidx->getSExtValue();
+  LaneOp = EV.getOperand(0);
+
+  return true;
+}
+
+// Helper for SelectOpcV64LaneV128 - Recogzine operatinos where one operand is a
+// high lane extract.
+static bool checkV64LaneV128(SDValue Op0, SDValue Op1,
+                             SDValue &StdOp, SDValue &LaneOp, int &LaneIdx) {
+
+  if (!checkHighLaneIndex(Op0.getNode(), LaneOp, LaneIdx)) {
+    std::swap(Op0, Op1);
+    if (!checkHighLaneIndex(Op0.getNode(), LaneOp, LaneIdx))
+      return false;
+  }
+  StdOp = Op1;
+  return true;
+}
+
+/// SelectMLAV64LaneV128 - ARM64 supports 64-bit vector MLAs (v4i16 and v2i32)
+/// where one multiplicand is a lane in the upper half of a 128-bit vector.
+/// Recognize and select this so that we don't emit unnecessary lane extracts.
+SDNode* ARM64DAGToDAGISel::SelectMLAV64LaneV128(SDNode *N) {
+  SDValue Op0 = N->getOperand(0);
+  SDValue Op1 = N->getOperand(1);
+  SDValue MLAOp1; // Will hold ordinary multiplicand for MLA.
+  SDValue MLAOp2; // Will hold lane-accessed multiplicand for MLA.
+  int LaneIdx = -1; // Will hold the lane index.
+
+  if (Op1.getOpcode() != ISD::MUL ||
+      !checkV64LaneV128(Op1.getOperand(0), Op1.getOperand(1), MLAOp1, MLAOp2,
+                        LaneIdx)) {
+    std::swap(Op0, Op1);
+    if (Op1.getOpcode() != ISD::MUL ||
+        !checkV64LaneV128(Op1.getOperand(0), Op1.getOperand(1), MLAOp1, MLAOp2,
+                          LaneIdx))
+      return 0;
+  }
+
+  SDValue LaneIdxVal = CurDAG->getTargetConstant(LaneIdx, MVT::i64);
+
+  SDValue Ops[] = { Op0, MLAOp1, MLAOp2, LaneIdxVal };
+
+  unsigned MLAOpc = ~0U;
+
+  switch (N->getSimpleValueType(0).SimpleTy) {
+    default: llvm_unreachable("Unrecognized MLA.");
+    case MVT::v4i16: MLAOpc = ARM64::MLAv4i16_indexed; break;
+    case MVT::v2i32: MLAOpc = ARM64::MLAv2i32_indexed; break;
+  }
+
+  return CurDAG->getMachineNode(MLAOpc, SDLoc(N), N->getValueType(0), Ops);
+}
+
+SDNode* ARM64DAGToDAGISel::SelectMULLV64LaneV128(unsigned IntNo, SDNode *N) {
+  SDValue SMULLOp0;
+  SDValue SMULLOp1;
+  int LaneIdx;
+
+  if (!checkV64LaneV128(N->getOperand(1), N->getOperand(2), SMULLOp0, SMULLOp1,
+                        LaneIdx))
+    return 0;
+
+  SDValue LaneIdxVal = CurDAG->getTargetConstant(LaneIdx, MVT::i64);
+
+  SDValue Ops[] = { SMULLOp0, SMULLOp1, LaneIdxVal };
+
+  unsigned SMULLOpc = ~0U;
+
+  if (IntNo == Intrinsic::arm64_neon_smull) {
+    switch (N->getSimpleValueType(0).SimpleTy) {
+      default: llvm_unreachable("Unrecognized SMULL.");
+      case MVT::v4i32: SMULLOpc = ARM64::SMULLv4i16_indexed; break;
+      case MVT::v2i64: SMULLOpc = ARM64::SMULLv2i32_indexed; break;
+    }
+  } else if (IntNo == Intrinsic::arm64_neon_umull) {
+    switch (N->getSimpleValueType(0).SimpleTy) {
+      default: llvm_unreachable("Unrecognized SMULL.");
+      case MVT::v4i32: SMULLOpc = ARM64::UMULLv4i16_indexed; break;
+      case MVT::v2i64: SMULLOpc = ARM64::UMULLv2i32_indexed; break;
+    }
+  } else
+    llvm_unreachable("Unrecognized intrinsic.");
+
+  return CurDAG->getMachineNode(SMULLOpc, SDLoc(N), N->getValueType(0), Ops);
+}
 
 /// SelectArithExtendedRegister - Select a "extended register" operand.  This
 /// operand folds in an extend followed by an optional left shift.
@@ -383,12 +522,13 @@ bool ARM64DAGToDAGISel::SelectArithExtendedRegister(SDValue N,
       Ext != ARM64_AM::SXTX) {
     SDValue SubReg = CurDAG->getTargetConstant(ARM64::sub_32, MVT::i32);
     MachineSDNode *Node = CurDAG->getMachineNode(TargetOpcode::EXTRACT_SUBREG,
-                                        N.getDebugLoc(), MVT::i32, Reg, SubReg);
+                                                 SDLoc(N), MVT::i32,
+                                                 Reg, SubReg);
     Reg = SDValue(Node, 0);
   }
 
   Shift = CurDAG->getTargetConstant(getArithExtendImm(Ext, ShiftVal), MVT::i32);
-  return true;
+  return isWorthFolding(N);
 }
 
 /// SelectAddrModeIndexed - Select a "register plus scaled unsigned 12-bit
@@ -396,9 +536,10 @@ bool ARM64DAGToDAGISel::SelectArithExtendedRegister(SDValue N,
 /// reference, which determines the scale.
 bool ARM64DAGToDAGISel::SelectAddrModeIndexed(SDValue N, unsigned Size,
                                               SDValue &Base, SDValue &OffImm) {
+  const TargetLowering *TLI = getTargetLowering();
   if (N.getOpcode() == ISD::FrameIndex) {
     int FI = cast<FrameIndexSDNode>(N)->getIndex();
-    Base = CurDAG->getTargetFrameIndex(FI, TLI.getPointerTy());
+    Base = CurDAG->getTargetFrameIndex(FI, TLI->getPointerTy());
     OffImm = CurDAG->getTargetConstant(0, MVT::i64);
     return true;
   }
@@ -422,7 +563,7 @@ bool ARM64DAGToDAGISel::SelectAddrModeIndexed(SDValue N, unsigned Size,
         Base = N.getOperand(0);
         if (Base.getOpcode() == ISD::FrameIndex) {
           int FI = cast<FrameIndexSDNode>(Base)->getIndex();
-          Base = CurDAG->getTargetFrameIndex(FI, TLI.getPointerTy());
+          Base = CurDAG->getTargetFrameIndex(FI, TLI->getPointerTy());
         }
         OffImm = CurDAG->getTargetConstant(RHSC >> Scale, MVT::i64);
         return true;
@@ -463,7 +604,8 @@ bool ARM64DAGToDAGISel::SelectAddrModeUnscaled(SDValue N, unsigned Size,
       Base = N.getOperand(0);
       if (Base.getOpcode() == ISD::FrameIndex) {
         int FI = cast<FrameIndexSDNode>(Base)->getIndex();
-        Base = CurDAG->getTargetFrameIndex(FI, TLI.getPointerTy());
+        const TargetLowering *TLI = getTargetLowering();
+        Base = CurDAG->getTargetFrameIndex(FI, TLI->getPointerTy());
       }
       OffImm = CurDAG->getTargetConstant(RHSC, MVT::i64);
       return true;
@@ -472,24 +614,54 @@ bool ARM64DAGToDAGISel::SelectAddrModeUnscaled(SDValue N, unsigned Size,
   return false;
 }
 
+static SDValue Widen(SelectionDAG *CurDAG, SDValue N) {
+  SDValue SubReg = CurDAG->getTargetConstant(ARM64::sub_32, MVT::i32);
+  SDValue ImpDef = SDValue(CurDAG->getMachineNode(TargetOpcode::IMPLICIT_DEF,
+                                                  SDLoc(N), MVT::i64), 0);
+  MachineSDNode *Node = CurDAG->getMachineNode(TargetOpcode::INSERT_SUBREG,
+                                               SDLoc(N), MVT::i64, ImpDef,
+                                               N, SubReg);
+  return SDValue(Node, 0);
+}
+
 static SDValue WidenIfNeeded(SelectionDAG *CurDAG, SDValue N) {
   if (N.getValueType() == MVT::i32) {
-    SDValue SubReg = CurDAG->getTargetConstant(ARM64::sub_32, MVT::i32);
-    SDValue Undef = CurDAG->getUNDEF(MVT::i64);
-    MachineSDNode *Node = CurDAG->getMachineNode(TargetOpcode::INSERT_SUBREG,
-            N.getDebugLoc(), MVT::i64, Undef, N, SubReg);
-    return SDValue(Node, 0);
+    return Widen(CurDAG, N);
   }
 
   return N;
 }
 
-static bool ValidLoadStoreExtend(ARM64_AM::ExtendType Ext) {
-  if (Ext == ARM64_AM::UXTW || Ext == ARM64_AM::UXTX ||
-      Ext == ARM64_AM::SXTW || Ext == ARM64_AM::SXTX)
-    return true;
+/// \brief Check if the given SHL node (\p N), can be used to form an
+/// extended register for an addressing mode.
+bool ARM64DAGToDAGISel::SelectExtendedSHL(SDValue N, unsigned Size,
+                                          SDValue& Offset, SDValue &Imm) {
+  assert(N.getOpcode() == ISD::SHL && "Invalid opcode.");
+  ConstantSDNode *CSD = dyn_cast<ConstantSDNode>(N.getOperand(1));
+  if (CSD && (CSD->getZExtValue() & 0x7) == CSD->getZExtValue()) {
+
+    ARM64_AM::ExtendType Ext = getExtendTypeForNode(N.getOperand(0), true);
+    if (Ext == ARM64_AM::InvalidExtend) {
+      Ext = ARM64_AM::UXTX;
+      Offset = WidenIfNeeded(CurDAG, N.getOperand(0));
+    } else {
+      Offset = WidenIfNeeded(CurDAG, N.getOperand(0).getOperand(0));
+    }
+
+    unsigned LegalShiftVal = Log2_32(Size);
+    unsigned ShiftVal = CSD->getZExtValue();
+
+    if (ShiftVal != 0 && ShiftVal != LegalShiftVal)
+      return false;
+
+    Imm =
+      CurDAG->getTargetConstant(ARM64_AM::getMemExtendImm(Ext, ShiftVal != 0),
+                                MVT::i32);
+    if (isWorthFolding(N))
+      return true;
+  }
   return false;
-}
+ }
 
 bool ARM64DAGToDAGISel::SelectAddrModeRO(SDValue N, unsigned Size,
                                  SDValue &Base, SDValue& Offset, SDValue &Imm) {
@@ -500,86 +672,6 @@ bool ARM64DAGToDAGISel::SelectAddrModeRO(SDValue N, unsigned Size,
   // We don't want to match immediate adds here, because they are better lowered
   // to the register-immediate addressing modes.
   if (isa<ConstantSDNode>(LHS) || isa<ConstantSDNode>(RHS)) return false;
-  ARM64_AM::ExtendType Ext = ARM64_AM::UXTX;
-
-  // Try to match a shifted extend on the RHS.
-  if (RHS.getOpcode() == ISD::SHL) {
-    ConstantSDNode *CSD = dyn_cast<ConstantSDNode>(RHS.getOperand(1));
-    if (CSD && (CSD->getZExtValue() & 0x7) == CSD->getZExtValue()) {
-      Base = LHS;
-
-      Ext = getExtendTypeForNode(RHS.getOperand(0));
-      if (Ext == ARM64_AM::InvalidExtend) {
-        Ext = ARM64_AM::UXTX;
-        Offset = WidenIfNeeded(CurDAG, RHS.getOperand(0));
-      } else {
-        Offset = WidenIfNeeded(CurDAG, RHS.getOperand(0).getOperand(0));
-      }
-
-      if (!ValidLoadStoreExtend(Ext))
-        return false;
-
-      unsigned LegalShiftVal = Log2_32(Size);
-      unsigned ShiftVal = CSD->getZExtValue();
-
-      if (ShiftVal != 0 && ShiftVal != LegalShiftVal)
-        return false;
-
-      Imm = CurDAG->getTargetConstant(
-                         ARM64_AM::getMemExtendImm(Ext, ShiftVal != 0),
-                    MVT::i32);
-      return true;
-    }
-  }
-
-  // Try to match a shifted extend on the LHS.
-  if (LHS.getOpcode() == ISD::SHL) {
-    ConstantSDNode *CSD = dyn_cast<ConstantSDNode>(LHS.getOperand(1));
-    if (CSD && (CSD->getZExtValue() & 0x7) == CSD->getZExtValue()) {
-      Base = RHS;
-
-      Ext = getExtendTypeForNode(LHS.getOperand(0));
-      if (Ext == ARM64_AM::InvalidExtend) {
-        Ext = ARM64_AM::UXTX;
-        Offset = WidenIfNeeded(CurDAG, LHS.getOperand(0));
-      } else {
-        Offset = WidenIfNeeded(CurDAG, LHS.getOperand(0).getOperand(0));
-      }
-
-      if (!ValidLoadStoreExtend(Ext))
-        return false;
-
-      unsigned LegalShiftVal = Log2_32(Size);
-      unsigned ShiftVal = CSD->getZExtValue();
-
-      if (ShiftVal != 0 && ShiftVal != LegalShiftVal)
-        return false;
-
-      Imm = CurDAG->getTargetConstant(
-                         ARM64_AM::getMemExtendImm(Ext, ShiftVal != 0),
-                    MVT::i32);
-      return true;
-    }
-  }
-
-  // Try to match an unshifted extend on the LHS.
-  if ((Ext = getExtendTypeForNode(LHS)) != ARM64_AM::InvalidExtend) {
-    Base = RHS;
-    Offset = WidenIfNeeded(CurDAG, LHS.getOperand(0));
-    Imm = CurDAG->getTargetConstant(ARM64_AM::getMemExtendImm(Ext, false),
-                                    MVT::i32);
-    return ValidLoadStoreExtend(Ext);
-  }
-
-  // Try to match an unshifted extend on the RHS.
-  if ((Ext = getExtendTypeForNode(RHS)) !=
-             ARM64_AM::InvalidExtend) {
-    Base = LHS;
-    Offset = WidenIfNeeded(CurDAG, RHS.getOperand(0));
-    Imm = CurDAG->getTargetConstant(ARM64_AM::getMemExtendImm(Ext, false),
-                                    MVT::i32);
-    return ValidLoadStoreExtend(Ext);
-  }
 
   // Check if this particular node is reused in any non-memory related
   // operation.  If yes, do not try to fold this node into the address
@@ -590,105 +682,146 @@ bool ARM64DAGToDAGISel::SelectAddrModeRO(SDValue N, unsigned Size,
     if (!isa<MemSDNode>(*UI)) return false;
   }
 
+  // Remember if it is worth folding N when it produces extended register.
+  bool IsExtendedRegisterWorthFolding = isWorthFolding(N);
+
+  // Try to match a shifted extend on the RHS.
+  if (IsExtendedRegisterWorthFolding && RHS.getOpcode() == ISD::SHL
+      && SelectExtendedSHL(RHS, Size, Offset, Imm)) {
+    Base = LHS;
+    return true;
+  }
+
+  // Try to match a shifted extend on the LHS.
+  if (IsExtendedRegisterWorthFolding && LHS.getOpcode() == ISD::SHL
+      && SelectExtendedSHL(LHS, Size, Offset, Imm)) {
+    Base = RHS;
+    return true;
+  }
+
+  ARM64_AM::ExtendType Ext = ARM64_AM::UXTX;
+  // Try to match an unshifted extend on the LHS.
+  if (IsExtendedRegisterWorthFolding &&
+      (Ext = getExtendTypeForNode(LHS, true)) != ARM64_AM::InvalidExtend) {
+    Base = RHS;
+    Offset = WidenIfNeeded(CurDAG, LHS.getOperand(0));
+    Imm = CurDAG->getTargetConstant(ARM64_AM::getMemExtendImm(Ext, false),
+                                    MVT::i32);
+    if (isWorthFolding(LHS))
+      return true;
+  }
+
+  // Try to match an unshifted extend on the RHS.
+  if (IsExtendedRegisterWorthFolding &&
+      (Ext = getExtendTypeForNode(RHS, true)) != ARM64_AM::InvalidExtend) {
+    Base = LHS;
+    Offset = WidenIfNeeded(CurDAG, RHS.getOperand(0));
+    Imm = CurDAG->getTargetConstant(ARM64_AM::getMemExtendImm(Ext, false),
+                                    MVT::i32);
+    if (isWorthFolding(RHS))
+      return true;
+  }
+
   // Match any non-shifted, non-extend, non-immediate add expression.
   Base = LHS;
   Offset = WidenIfNeeded(CurDAG, RHS);
   Ext = ARM64_AM::UXTX;
   Imm = CurDAG->getTargetConstant(ARM64_AM::getMemExtendImm(Ext, false),
                                   MVT::i32);
-  return ValidLoadStoreExtend(Ext);
+  // Reg1 + Reg2 is free: no check needed.
+  return true;
 }
 
 /// PairQRegs - Form 2 consecutive Q registers.
 ///
 SDNode *ARM64DAGToDAGISel::PairQRegs(SDValue V0, SDValue V1) {
-  DebugLoc dl = V0.getNode()->getDebugLoc();
+  SDLoc dl(V0.getNode());
   SDValue RegClass = CurDAG->getTargetConstant(ARM64::QQRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::vsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::vsub1, MVT::i32);
+  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::qsub0, MVT::i32);
+  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::qsub1, MVT::i32);
   const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1 };
   return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops, 5);
+                                Ops);
 }
 
 /// TripleQRegs - Form 3 consecutive Q registers.
 ///
 SDNode *ARM64DAGToDAGISel::TripleQRegs(SDValue V0, SDValue V1,
                                      SDValue V2) {
-  DebugLoc dl = V0.getNode()->getDebugLoc();
+  SDLoc dl(V0.getNode());
   SDValue RegClass = CurDAG->getTargetConstant(ARM64::QQQRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::vsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::vsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::vsub2, MVT::i32);
+  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::qsub0, MVT::i32);
+  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::qsub1, MVT::i32);
+  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::qsub2, MVT::i32);
   const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
                                     V2, SubReg2 };
   return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops, 7);
+                                Ops);
 }
 
 /// QuadQRegs - Form 4 consecutive Q registers.
 ///
 SDNode *ARM64DAGToDAGISel::QuadQRegs(SDValue V0, SDValue V1,
                                    SDValue V2, SDValue V3) {
-  DebugLoc dl = V0.getNode()->getDebugLoc();
+  SDLoc dl(V0.getNode());
   SDValue RegClass = CurDAG->getTargetConstant(ARM64::QQQQRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::vsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::vsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::vsub2, MVT::i32);
-  SDValue SubReg3 = CurDAG->getTargetConstant(ARM64::vsub3, MVT::i32);
+  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::qsub0, MVT::i32);
+  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::qsub1, MVT::i32);
+  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::qsub2, MVT::i32);
+  SDValue SubReg3 = CurDAG->getTargetConstant(ARM64::qsub3, MVT::i32);
   const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
                                     V2, SubReg2, V3, SubReg3 };
   return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops, 9);
+                                Ops);
 }
 
 /// PairQRegs - Form 2 consecutive D registers.
 ///
 SDNode *ARM64DAGToDAGISel::PairDRegs(SDValue V0, SDValue V1) {
-  DebugLoc dl = V0.getNode()->getDebugLoc();
+  SDLoc dl(V0.getNode());
   SDValue RegClass = CurDAG->getTargetConstant(ARM64::DDRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::vsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::vsub1, MVT::i32);
+  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::dsub0, MVT::i32);
+  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::dsub1, MVT::i32);
   const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1 };
   return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops, 5);
+                                Ops);
 }
 
 /// TripleQRegs - Form 3 consecutive D registers.
 ///
 SDNode *ARM64DAGToDAGISel::TripleDRegs(SDValue V0, SDValue V1,
                                      SDValue V2) {
-  DebugLoc dl = V0.getNode()->getDebugLoc();
+  SDLoc dl(V0.getNode());
   SDValue RegClass = CurDAG->getTargetConstant(ARM64::DDDRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::vsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::vsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::vsub2, MVT::i32);
+  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::dsub0, MVT::i32);
+  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::dsub1, MVT::i32);
+  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::dsub2, MVT::i32);
   const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
                                     V2, SubReg2 };
   return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops, 7);
+                                Ops);
 }
 
 /// QuadQRegs - Form 4 consecutive D registers.
 ///
 SDNode *ARM64DAGToDAGISel::QuadDRegs(SDValue V0, SDValue V1,
                                    SDValue V2, SDValue V3) {
-  DebugLoc dl = V0.getNode()->getDebugLoc();
+  SDLoc dl(V0.getNode());
   SDValue RegClass = CurDAG->getTargetConstant(ARM64::DDDDRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::vsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::vsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::vsub2, MVT::i32);
-  SDValue SubReg3 = CurDAG->getTargetConstant(ARM64::vsub3, MVT::i32);
+  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::dsub0, MVT::i32);
+  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::dsub1, MVT::i32);
+  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::dsub2, MVT::i32);
+  SDValue SubReg3 = CurDAG->getTargetConstant(ARM64::dsub3, MVT::i32);
   const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
                                     V2, SubReg2, V3, SubReg3 };
   return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, 
-                                MVT::Untyped, Ops, 9);
+                                MVT::Untyped, Ops);
 }
 
 
 SDNode *ARM64DAGToDAGISel::SelectTable(SDNode *N, unsigned NumVecs, 
                                        unsigned Opc, bool isExt) {
-  DebugLoc dl = N->getDebugLoc();
+  SDLoc dl(N);
   EVT VT = N->getValueType(0);
 
   unsigned ExtOff = isExt;
@@ -712,7 +845,7 @@ SDNode *ARM64DAGToDAGISel::SelectTable(SDNode *N, unsigned NumVecs,
   if (isExt) Ops.push_back(N->getOperand(1));
   Ops.push_back(RegSeq);
   Ops.push_back(N->getOperand(NumVecs+ExtOff+1));
-  return CurDAG->getMachineNode(Opc, dl, VT, Ops.data(), Ops.size());
+  return CurDAG->getMachineNode(Opc, dl, VT, Ops);
 }
 
 SDNode *ARM64DAGToDAGISel::SelectIndexedLoad(SDNode *N, bool &Done) {
@@ -783,13 +916,13 @@ SDNode *ARM64DAGToDAGISel::SelectIndexedLoad(SDNode *N, bool &Done) {
   int OffsetVal = (int)OffsetOp->getZExtValue();
   SDValue Offset = CurDAG->getTargetConstant(OffsetVal, MVT::i64);
   SDValue Ops[]= { Base, Offset, Chain };
-  SDNode *Res = CurDAG->getMachineNode(Opcode, N->getDebugLoc(),
-                                       DstVT, MVT::i64, MVT::Other, Ops, 3);
+  SDNode *Res = CurDAG->getMachineNode(Opcode, SDLoc(N),
+                                       DstVT, MVT::i64, MVT::Other, Ops);
   // Either way, we're replacing the node, so tell the caller that.
   Done = true;
   if (InsertTo64) {
     SDValue SubReg = CurDAG->getTargetConstant(ARM64::sub_32, MVT::i32);
-    SDNode *Sub = CurDAG->getMachineNode(ARM64::SUBREG_TO_REG, N->getDebugLoc(),
+    SDNode *Sub = CurDAG->getMachineNode(ARM64::SUBREG_TO_REG, SDLoc(N),
                                          MVT::i64,
                                          CurDAG->getTargetConstant(0, MVT::i64),
                                          SDValue(Res, 0),
@@ -803,8 +936,8 @@ SDNode *ARM64DAGToDAGISel::SelectIndexedLoad(SDNode *N, bool &Done) {
 }
 
 SDNode *ARM64DAGToDAGISel::SelectLoad(SDNode *N, unsigned NumVecs,
-                                      unsigned Opc) {
-  DebugLoc dl = N->getDebugLoc();
+                                      unsigned Opc, unsigned SubRegIdx) {
+  SDLoc dl(N);
   EVT VT = N->getValueType(0);
   SDValue Chain = N->getOperand(0);
 
@@ -816,7 +949,7 @@ SDNode *ARM64DAGToDAGISel::SelectLoad(SDNode *N, unsigned NumVecs,
   ResTys.push_back(MVT::Untyped);
   ResTys.push_back(MVT::Other);
 
-  SDNode *Ld = CurDAG->getMachineNode(Opc, dl, ResTys, Ops.data(), Ops.size());
+  SDNode *Ld = CurDAG->getMachineNode(Opc, dl, ResTys, Ops);
   SDValue SuperReg = SDValue(Ld, 0);
 
 
@@ -827,17 +960,17 @@ SDNode *ARM64DAGToDAGISel::SelectLoad(SDNode *N, unsigned NumVecs,
   switch (NumVecs) {
     case 4:
       ReplaceUses(SDValue(N, 3),
-        CurDAG->getTargetExtractSubreg(ARM64::vsub3, dl, VT, SuperReg));
+        CurDAG->getTargetExtractSubreg(SubRegIdx + 3, dl, VT, SuperReg));
       // FALLTHROUGH
     case 3:
       ReplaceUses(SDValue(N, 2),
-        CurDAG->getTargetExtractSubreg(ARM64::vsub2, dl, VT, SuperReg));
+        CurDAG->getTargetExtractSubreg(SubRegIdx + 2, dl, VT, SuperReg));
       // FALLTHROUGH
     case 2:
       ReplaceUses(SDValue(N, 1),
-        CurDAG->getTargetExtractSubreg(ARM64::vsub1, dl, VT, SuperReg));
+        CurDAG->getTargetExtractSubreg(SubRegIdx + 1, dl, VT, SuperReg));
       ReplaceUses(SDValue(N, 0),
-        CurDAG->getTargetExtractSubreg(ARM64::vsub0, dl, VT, SuperReg));
+        CurDAG->getTargetExtractSubreg(SubRegIdx, dl, VT, SuperReg));
       break;
     case 1:
       ReplaceUses(SDValue(N, 0), SuperReg);
@@ -852,7 +985,7 @@ SDNode *ARM64DAGToDAGISel::SelectLoad(SDNode *N, unsigned NumVecs,
 
 SDNode *ARM64DAGToDAGISel::SelectStore(SDNode *N, unsigned NumVecs, 
                                        unsigned Opc) {
-  DebugLoc dl = N->getDebugLoc();
+  SDLoc dl(N);
   EVT VT = N->getOperand(2)->getValueType(0);
 
   // Form a REG_SEQUENCE to force register allocation.
@@ -885,8 +1018,7 @@ SDNode *ARM64DAGToDAGISel::SelectStore(SDNode *N, unsigned NumVecs,
   Ops.push_back(RegSeq);
   Ops.push_back(N->getOperand(NumVecs+2));
   Ops.push_back(N->getOperand(0));
-  SDNode *St = CurDAG->getMachineNode(Opc, dl, N->getValueType(0),
-                                      Ops.data(), Ops.size());
+  SDNode *St = CurDAG->getMachineNode(Opc, dl, N->getValueType(0), Ops);
 
   return St;
 }
@@ -898,7 +1030,7 @@ static SDValue WidenVector(SDValue V64Reg, SelectionDAG &DAG) {
   unsigned NarrowSize = VT.getVectorNumElements();
   MVT EltTy = VT.getVectorElementType().getSimpleVT();
   MVT WideTy = MVT::getVectorVT(EltTy, 2*NarrowSize);
-  DebugLoc DL = V64Reg.getDebugLoc();
+  SDLoc DL(V64Reg);
 
   SDValue Undef =
     SDValue(DAG.getMachineNode(TargetOpcode::IMPLICIT_DEF, DL, WideTy), 0);
@@ -912,16 +1044,16 @@ static SDValue NarrowVector(SDValue V128Reg, SelectionDAG &DAG) {
   unsigned WideSize = VT.getVectorNumElements();
   MVT EltTy = VT.getVectorElementType().getSimpleVT();
   MVT NarrowTy = MVT::getVectorVT(EltTy, WideSize / 2);
-  DebugLoc DL = V128Reg.getDebugLoc();
 
-  return DAG.getTargetExtractSubreg(ARM64::dsub, DL, NarrowTy, V128Reg);
+  return DAG.getTargetExtractSubreg(ARM64::dsub, SDLoc(V128Reg),
+                                    NarrowTy, V128Reg);
 }
 
 
 
 SDNode *ARM64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs, 
                                           unsigned Opc) {
-  DebugLoc dl = N->getDebugLoc();
+  SDLoc dl(N);
   EVT VT = N->getValueType(0);
   bool Narrow = VT.getSizeInBits() == 64;
 
@@ -967,14 +1099,14 @@ SDNode *ARM64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs,
   Ops.push_back(CurDAG->getTargetConstant(LaneNo, MVT::i64));
   Ops.push_back(N->getOperand(NumVecs+3));
   Ops.push_back(N->getOperand(0));
-  SDNode *Ld = CurDAG->getMachineNode(Opc, dl, ResTys, Ops.data(), Ops.size());
+  SDNode *Ld = CurDAG->getMachineNode(Opc, dl, ResTys, Ops);
   SDValue SuperReg = SDValue(Ld, 0);
 
   EVT WideVT = RegSeq.getOperand(1)->getValueType(0);
   switch (NumVecs) {
   case 4: {
     SDValue NV3 =
-      CurDAG->getTargetExtractSubreg(ARM64::vsub3, dl, WideVT, SuperReg);
+      CurDAG->getTargetExtractSubreg(ARM64::qsub3, dl, WideVT, SuperReg);
     if (Narrow)
       ReplaceUses(SDValue(N, 3), NarrowVector(NV3, *CurDAG));
     else
@@ -983,7 +1115,7 @@ SDNode *ARM64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs,
     // FALLTHROUGH
   case 3: {
     SDValue NV2 =
-      CurDAG->getTargetExtractSubreg(ARM64::vsub2, dl, WideVT, SuperReg);
+      CurDAG->getTargetExtractSubreg(ARM64::qsub2, dl, WideVT, SuperReg);
     if (Narrow)
       ReplaceUses(SDValue(N, 2), NarrowVector(NV2, *CurDAG));
     else
@@ -992,9 +1124,9 @@ SDNode *ARM64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs,
     // FALLTHROUGH
   case 2: {
     SDValue NV1 =
-      CurDAG->getTargetExtractSubreg(ARM64::vsub1, dl, WideVT, SuperReg);
+      CurDAG->getTargetExtractSubreg(ARM64::qsub1, dl, WideVT, SuperReg);
     SDValue NV0 =
-      CurDAG->getTargetExtractSubreg(ARM64::vsub0, dl, WideVT, SuperReg);
+      CurDAG->getTargetExtractSubreg(ARM64::qsub0, dl, WideVT, SuperReg);
     if (Narrow) {
       ReplaceUses(SDValue(N, 1), NarrowVector(NV1, *CurDAG));
       ReplaceUses(SDValue(N, 0), NarrowVector(NV0, *CurDAG));
@@ -1014,7 +1146,7 @@ SDNode *ARM64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs,
 
 SDNode *ARM64DAGToDAGISel::SelectStoreLane(SDNode *N, unsigned NumVecs, 
                                            unsigned Opc) {
-  DebugLoc dl = N->getDebugLoc();
+  SDLoc dl(N);
   EVT VT = N->getOperand(2)->getValueType(0);
   bool Narrow = VT.getSizeInBits() == 64;
 
@@ -1056,8 +1188,7 @@ SDNode *ARM64DAGToDAGISel::SelectStoreLane(SDNode *N, unsigned NumVecs,
   Ops.push_back(CurDAG->getTargetConstant(LaneNo, MVT::i64));
   Ops.push_back(N->getOperand(NumVecs+3));
   Ops.push_back(N->getOperand(0));
-  SDNode *St = 
-    CurDAG->getMachineNode(Opc, dl, MVT::Other, Ops.data(), Ops.size());
+  SDNode *St = CurDAG->getMachineNode(Opc, dl, MVT::Other, Ops);
 
   // Transfer memoperands.
   MachineSDNode::mmo_iterator MemOp = MF->allocateMemRefsArray(1);
@@ -1067,118 +1198,41 @@ SDNode *ARM64DAGToDAGISel::SelectStoreLane(SDNode *N, unsigned NumVecs,
   return St;
 }
 
-static unsigned getAddSubNarrowingOpcode(unsigned IntNo, EVT Ty) {
-  switch(IntNo) {
-  default:
-    assert(0 && "Unexpected intrinsic!");
-  case Intrinsic::arm64_neon_addhn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::ADDHNv8i16_v16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::ADDHNv4i32_v8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::ADDHNv2i64_v4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_raddhn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::RADDHNv8i16_v16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::RADDHNv4i32_v8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::RADDHNv2i64_v4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_subhn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::SUBHNv8i16_v16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::SUBHNv4i32_v8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::SUBHNv2i64_v4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_rsubhn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::RSUBHNv8i16_v16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::RSUBHNv4i32_v8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::RSUBHNv2i64_v4i32;
-    assert(0 && "Unexected datatype!");
-  }
-}
+SDNode *ARM64DAGToDAGISel::SelectAtomic(SDNode *Node, unsigned Op8,
+                                        unsigned Op16,unsigned Op32,
+                                        unsigned Op64) {
+  // Mostly direct translation to the given operations, except that we preserve
+  // the AtomicOrdering for use later on.
+  AtomicSDNode *AN = cast<AtomicSDNode>(Node);
+  EVT VT = AN->getMemoryVT();
 
-SDNode *ARM64DAGToDAGISel::SelectSIMDAddSubNarrowing(unsigned IntNo,
-                                                     SDNode *Node) {
-  // We have to custom lower these instructions because the result register
-  // and the first source register are tied, but are not of the same
-  // register class. The source is a subreg of the destination.
-  DebugLoc dl = Node->getDebugLoc();
-  unsigned Opc = getAddSubNarrowingOpcode(IntNo,
-                                          Node->getOperand(1)->getValueType(0));
-  SDValue SrcReg = WidenVector(Node->getOperand(1), *CurDAG);
-  return CurDAG->getMachineNode(Opc, dl, Node->getValueType(0), SrcReg,
-                                Node->getOperand(2),
-                                Node->getOperand(3));
-}
+  unsigned Op;
+  if (VT == MVT::i8)
+    Op = Op8;
+  else if (VT == MVT::i16)
+    Op = Op16;
+  else if (VT == MVT::i32)
+    Op = Op32;
+  else if (VT == MVT::i64)
+    Op = Op64;
+  else
+    llvm_unreachable("Unexpected atomic operation");
 
-static unsigned getXtnNarrowingOpcode(unsigned IntNo, EVT Ty) {
-  switch(IntNo) {
-  default:
-    assert(0 && "Unexpected intrinsic!");
-  case Intrinsic::arm64_neon_xtn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::XTNv16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::XTNv8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::XTNv4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_sqxtn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::SQXTNv16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::SQXTNv8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::SQXTNv4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_uqxtn2:
-    if (Ty == MVT::v8i8)
-      return ARM64::UQXTNv16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::UQXTNv8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::UQXTNv4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_sqxtun2:
-    if (Ty == MVT::v8i8)
-      return ARM64::SQXTUNv16i8;
-    if (Ty == MVT::v4i16)
-      return ARM64::SQXTUNv8i16;
-    if (Ty == MVT::v2i32)
-      return ARM64::SQXTUNv4i32;
-    assert(0 && "Unexected datatype!");
-  case Intrinsic::arm64_neon_fcvtxn2:
-    if (Ty == MVT::v2f32)
-      return ARM64::FCVTXNv4f32;
-    assert(0 && "Unexected datatype!");
-  }
-}
+  SmallVector<SDValue, 4> Ops;
+  for (unsigned i = 1; i < AN->getNumOperands(); ++i)
+      Ops.push_back(AN->getOperand(i));
 
-SDNode *ARM64DAGToDAGISel::SelectSIMDXtnNarrowing(unsigned IntNo, 
-                                                  SDNode *Node) {
-  // We have to custom lower these instructions because the result register
-  // and the source register are tied, but are not of the same
-  // register class. The source is a subreg of the destination.
-  DebugLoc dl = Node->getDebugLoc();
-  unsigned Opc = getXtnNarrowingOpcode(IntNo,
-                                       Node->getOperand(1)->getValueType(0));
-  SDValue SrcReg = WidenVector(Node->getOperand(1), *CurDAG);
-  return CurDAG->getMachineNode(Opc, dl, Node->getValueType(0), SrcReg,
-                                Node->getOperand(2));
+  Ops.push_back(CurDAG->getTargetConstant(AN->getOrdering(), MVT::i32));
+  Ops.push_back(AN->getOperand(0)); // Chain moves to the end
+
+  return CurDAG->SelectNodeTo(Node, Op,
+                              AN->getValueType(0), MVT::Other,
+                              &Ops[0], Ops.size());
 }
 
 static bool
-isBitfieldExtractOpFromAnd(SDNode *N, unsigned &Opc, SDValue &Opd0,
-                           unsigned &LSB, unsigned &MSB,
+isBitfieldExtractOpFromAnd(SelectionDAG *CurDAG, SDNode *N, unsigned &Opc,
+                           SDValue &Opd0, unsigned &LSB, unsigned &MSB,
                            unsigned NumberOfIgnoredLowBits,
                            bool BiggerPattern) {
   assert(N->getOpcode() == ISD::AND &&
@@ -1215,11 +1269,18 @@ isBitfieldExtractOpFromAnd(SDNode *N, unsigned &Opc, SDValue &Opd0,
   if (And_imm & (And_imm + 1))
     return false;
 
+  bool ClampMSB = false;
   uint64_t Srl_imm = 0;
-  if (isOpcWithIntImmediate(Op0, ISD::SRL, Srl_imm)) {
-
-    assert(Srl_imm > 0 && Srl_imm < VT.getSizeInBits() &&
-           "bad amount in shift node!");
+  // Handle the SRL + ANY_EXTEND case.
+  if (VT == MVT::i64 && Op0->getOpcode() == ISD::ANY_EXTEND
+      && isOpcWithIntImmediate(Op0->getOperand(0).getNode(), ISD::SRL,
+                               Srl_imm)) {
+    // Extend the incoming operand of the SRL to 64-bit.
+    Opd0 = Widen(CurDAG, Op0->getOperand(0).getOperand(0));
+    // Make sure to clamp the MSB so that we preserve the semantics of the
+    // original operations.
+    ClampMSB = true;
+  } else if (isOpcWithIntImmediate(Op0, ISD::SRL, Srl_imm)) {
     Opd0 = Op0->getOperand(0);
   } else if (BiggerPattern) {
     // Let's pretend a 0 shift right has been performed.
@@ -1230,10 +1291,21 @@ isBitfieldExtractOpFromAnd(SDNode *N, unsigned &Opc, SDValue &Opd0,
     Opd0 = N->getOperand(0);
   } else
     return false;
+
+  assert((BiggerPattern || (Srl_imm > 0 && Srl_imm < VT.getSizeInBits())) &&
+         "bad amount in shift node!");
+
   LSB = Srl_imm;
   MSB = Srl_imm + (VT == MVT::i32 ?
                    CountTrailingOnes_32(And_imm) :
                    CountTrailingOnes_64(And_imm)) - 1;
+  if (ClampMSB)
+    // Since we're moving the extend before the right shift operation, we need
+    // to clamp the MSB to make sure we don't shift in undefined bits instead of
+    // the zeros which would get shifted in with the original right shift
+    // operation.
+    MSB = MSB > 31 ? 31 : MSB;
+
   Opc = VT == MVT::i32 ? ARM64::UBFMWri : ARM64::UBFMXri;
   return true;
 }
@@ -1338,8 +1410,8 @@ isBitfieldExtractOpFromShr(SDNode *N, unsigned &Opc, SDValue &Opd0,
 }
 
 static bool
-isBitfieldExtractOp(SDNode *N, unsigned &Opc, SDValue &Opd0,
-                    unsigned &LSB, unsigned &MSB,
+isBitfieldExtractOp(SelectionDAG *CurDAG, SDNode *N, unsigned &Opc,
+                    SDValue &Opd0, unsigned &LSB, unsigned &MSB,
                     unsigned NumberOfIgnoredLowBits = 0,
                     bool BiggerPattern = false) {
   if (N->getValueType(0) != MVT::i32 &&
@@ -1352,7 +1424,7 @@ isBitfieldExtractOp(SDNode *N, unsigned &Opc, SDValue &Opd0,
       return false;
     break;
   case ISD::AND:
-    return isBitfieldExtractOpFromAnd(N, Opc, Opd0, LSB, MSB,
+    return isBitfieldExtractOpFromAnd(CurDAG, N, Opc, Opd0, LSB, MSB,
                                       NumberOfIgnoredLowBits, BiggerPattern);
   case ISD::SRL:
   case ISD::SRA:
@@ -1379,7 +1451,7 @@ isBitfieldExtractOp(SDNode *N, unsigned &Opc, SDValue &Opd0,
 SDNode *ARM64DAGToDAGISel::SelectBitfieldExtractOp(SDNode *N) {
   unsigned Opc, LSB, MSB;
   SDValue Opd0;
-  if (!isBitfieldExtractOp(N, Opc, Opd0, LSB, MSB))
+  if (!isBitfieldExtractOp(CurDAG, N, Opc, Opd0, LSB, MSB))
     return NULL;
 
   EVT VT = N->getValueType(0);
@@ -1641,7 +1713,7 @@ isBitfieldInsertOpFromOr(SDNode *N, unsigned &Opc, SDValue &Opd0,
     unsigned BFXOpc;
     // Set Opd1, LSB and MSB arguments by looking for
     // c = ubfm b, imm, imm2
-    if (!isBitfieldExtractOp(OrOpd0, BFXOpc, Opd1, LSB, MSB,
+    if (!isBitfieldExtractOp(CurDAG, OrOpd0, BFXOpc, Opd1, LSB, MSB,
                              NumberOfIgnoredLowBits, true))
       continue;
 
@@ -1755,7 +1827,7 @@ SDNode *ARM64DAGToDAGISel::SelectLIBM(SDNode *N) {
   }
   }
 
-  DebugLoc dl = N->getDebugLoc();
+  SDLoc dl(N);
   SDValue In = N->getOperand(0);
   SmallVector<SDValue, 2> Ops;
   Ops.push_back(In);
@@ -1765,7 +1837,7 @@ SDNode *ARM64DAGToDAGISel::SelectLIBM(SDNode *N) {
     Ops.push_back(SDValue(FRINTX, 1));
   }
 
-  return CurDAG->getMachineNode(Opc, dl, VT, Ops.data(), Ops.size());
+  return CurDAG->getMachineNode(Opc, dl, VT, Ops);
 }
 
 SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
@@ -1779,6 +1851,7 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     DEBUG(errs() << "== ";
           Node->dump(CurDAG);
           errs() << "\n");
+    Node->setNodeId(-1);
     return NULL;
   }
 
@@ -1788,6 +1861,84 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
 
   switch (Node->getOpcode()) {
   default: break;
+
+  case ISD::ADD:
+    if (SDNode *I = SelectMLAV64LaneV128(Node))
+      return I;
+    break;
+
+  case ISD::ATOMIC_LOAD_ADD:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_ADD_I8,
+                        ARM64::ATOMIC_LOAD_ADD_I16,
+                        ARM64::ATOMIC_LOAD_ADD_I32,
+                        ARM64::ATOMIC_LOAD_ADD_I64);
+  case ISD::ATOMIC_LOAD_SUB:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_SUB_I8,
+                        ARM64::ATOMIC_LOAD_SUB_I16,
+                        ARM64::ATOMIC_LOAD_SUB_I32,
+                        ARM64::ATOMIC_LOAD_SUB_I64);
+  case ISD::ATOMIC_LOAD_AND:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_AND_I8,
+                        ARM64::ATOMIC_LOAD_AND_I16,
+                        ARM64::ATOMIC_LOAD_AND_I32,
+                        ARM64::ATOMIC_LOAD_AND_I64);
+  case ISD::ATOMIC_LOAD_OR:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_OR_I8,
+                        ARM64::ATOMIC_LOAD_OR_I16,
+                        ARM64::ATOMIC_LOAD_OR_I32,
+                        ARM64::ATOMIC_LOAD_OR_I64);
+  case ISD::ATOMIC_LOAD_XOR:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_XOR_I8,
+                        ARM64::ATOMIC_LOAD_XOR_I16,
+                        ARM64::ATOMIC_LOAD_XOR_I32,
+                        ARM64::ATOMIC_LOAD_XOR_I64);
+  case ISD::ATOMIC_LOAD_NAND:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_NAND_I8,
+                        ARM64::ATOMIC_LOAD_NAND_I16,
+                        ARM64::ATOMIC_LOAD_NAND_I32,
+                        ARM64::ATOMIC_LOAD_NAND_I64);
+  case ISD::ATOMIC_LOAD_MIN:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_MIN_I8,
+                        ARM64::ATOMIC_LOAD_MIN_I16,
+                        ARM64::ATOMIC_LOAD_MIN_I32,
+                        ARM64::ATOMIC_LOAD_MIN_I64);
+  case ISD::ATOMIC_LOAD_MAX:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_MAX_I8,
+                        ARM64::ATOMIC_LOAD_MAX_I16,
+                        ARM64::ATOMIC_LOAD_MAX_I32,
+                        ARM64::ATOMIC_LOAD_MAX_I64);
+  case ISD::ATOMIC_LOAD_UMIN:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_UMIN_I8,
+                        ARM64::ATOMIC_LOAD_UMIN_I16,
+                        ARM64::ATOMIC_LOAD_UMIN_I32,
+                        ARM64::ATOMIC_LOAD_UMIN_I64);
+  case ISD::ATOMIC_LOAD_UMAX:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_LOAD_UMAX_I8,
+                        ARM64::ATOMIC_LOAD_UMAX_I16,
+                        ARM64::ATOMIC_LOAD_UMAX_I32,
+                        ARM64::ATOMIC_LOAD_UMAX_I64);
+  case ISD::ATOMIC_SWAP:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_SWAP_I8,
+                        ARM64::ATOMIC_SWAP_I16,
+                        ARM64::ATOMIC_SWAP_I32,
+                        ARM64::ATOMIC_SWAP_I64);
+  case ISD::ATOMIC_CMP_SWAP:
+    return SelectAtomic(Node,
+                        ARM64::ATOMIC_CMP_SWAP_I8,
+                        ARM64::ATOMIC_CMP_SWAP_I16,
+                        ARM64::ATOMIC_CMP_SWAP_I32,
+                        ARM64::ATOMIC_CMP_SWAP_I64);
 
   case ISD::LOAD: {
     // Try to select as an indexed load. Fall through to normal processing
@@ -1837,7 +1988,7 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     case 8:  assert(0 && "unexpected zext-requiring extract element!");
     }
     SDValue Extract =
-        CurDAG->getTargetExtractSubreg(SubReg, Node->getDebugLoc(), VT,
+        CurDAG->getTargetExtractSubreg(SubReg, SDLoc(Node), VT,
                                        Node->getOperand(0));
     DEBUG(dbgs() << "ISEL: Custom selection!\n=> ");
     DEBUG(Extract->dumpr(CurDAG));
@@ -1850,12 +2001,10 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     ConstantSDNode *ConstNode = cast<ConstantSDNode>(Node);
     if (ConstNode->isNullValue()) {
       if (VT == MVT::i32)
-        return CurDAG->getCopyFromReg(CurDAG->getEntryNode(),
-                                      Node->getDebugLoc(),
+        return CurDAG->getCopyFromReg(CurDAG->getEntryNode(), SDLoc(Node),
                                       ARM64::WZR, MVT::i32).getNode();
       else if (VT == MVT::i64)
-        return CurDAG->getCopyFromReg(CurDAG->getEntryNode(),
-                                      Node->getDebugLoc(),
+        return CurDAG->getCopyFromReg(CurDAG->getEntryNode(), SDLoc(Node),
                                       ARM64::XZR, MVT::i64).getNode();
 
     }
@@ -1866,7 +2015,8 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     // Selects to ADDXri FI, 0 which in turn will become ADDXri SP, imm.
     int FI = cast<FrameIndexSDNode>(Node)->getIndex();
     unsigned Shifter = ARM64_AM::getShifterImm(ARM64_AM::LSL, 0);
-    SDValue TFI = CurDAG->getTargetFrameIndex(FI, TLI.getPointerTy());
+    const TargetLowering *TLI = getTargetLowering();
+    SDValue TFI = CurDAG->getTargetFrameIndex(FI, TLI->getPointerTy());
     SDValue Ops[] = { TFI, CurDAG->getTargetConstant(0, MVT::i32),
                       CurDAG->getTargetConstant(Shifter, MVT::i32) };
     return CurDAG->SelectNodeTo(Node, ARM64::ADDXri, MVT::i64, Ops, 3);
@@ -1876,113 +2026,150 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     switch (IntNo) {
       default:
         break;
+      case Intrinsic::arm64_ldxp: {
+        SDValue MemAddr = Node->getOperand(2);
+        SDLoc DL(Node);
+        SDValue Chain = Node->getOperand(0);
+
+        SDNode *Ld = CurDAG->getMachineNode(
+            ARM64::LDXPX, DL, MVT::i64, MVT::i64, MVT::Other, MemAddr, Chain);
+
+        // Transfer memoperands.
+        MachineSDNode::mmo_iterator MemOp = MF->allocateMemRefsArray(1);
+        MemOp[0] = cast<MemIntrinsicSDNode>(Node)->getMemOperand();
+        cast<MachineSDNode>(Ld)->setMemRefs(MemOp, MemOp + 1);
+        return Ld;
+      }
+      case Intrinsic::arm64_stxp: {
+        SDLoc DL(Node);
+        SDValue Chain = Node->getOperand(0);
+        SDValue ValLo = Node->getOperand(2);
+        SDValue ValHi = Node->getOperand(3);
+        SDValue MemAddr = Node->getOperand(4);
+
+        // Place arguments in the right order.
+        SmallVector<SDValue, 7> Ops;
+        Ops.push_back(ValLo);
+        Ops.push_back(ValHi);
+        Ops.push_back(MemAddr);
+        Ops.push_back(Chain);
+
+        SDNode *St =
+            CurDAG->getMachineNode(ARM64::STXPX, DL, MVT::i32, MVT::Other, Ops);
+        // Transfer memoperands.
+        MachineSDNode::mmo_iterator MemOp = MF->allocateMemRefsArray(1);
+        MemOp[0] = cast<MemIntrinsicSDNode>(Node)->getMemOperand();
+        cast<MachineSDNode>(St)->setMemRefs(MemOp, MemOp + 1);
+
+        return St;
+      }
       case Intrinsic::arm64_neon_ld2:
         if (VT == MVT::v8i8)
-          return SelectLoad(Node, 2, ARM64::LD2Twov8b);
+          return SelectLoad(Node, 2, ARM64::LD2Twov8b, ARM64::dsub0);
         else if (VT == MVT::v16i8)
-          return SelectLoad(Node, 2, ARM64::LD2Twov16b);
+          return SelectLoad(Node, 2, ARM64::LD2Twov16b, ARM64::qsub0);
         else if (VT == MVT::v4i16)
-          return SelectLoad(Node, 2, ARM64::LD2Twov4h);
+          return SelectLoad(Node, 2, ARM64::LD2Twov4h, ARM64::dsub0);
         else if (VT == MVT::v8i16)
-          return SelectLoad(Node, 2, ARM64::LD2Twov8h);
+          return SelectLoad(Node, 2, ARM64::LD2Twov8h, ARM64::qsub0);
         else if (VT == MVT::v2i32 || VT == MVT::v2f32)
-          return SelectLoad(Node, 2, ARM64::LD2Twov2s);
+          return SelectLoad(Node, 2, ARM64::LD2Twov2s, ARM64::dsub0);
         else if (VT == MVT::v4i32 || VT == MVT::v4f32)
-          return SelectLoad(Node, 2, ARM64::LD2Twov4s);
+          return SelectLoad(Node, 2, ARM64::LD2Twov4s, ARM64::qsub0);
         else if (VT == MVT::v1i64 || VT == MVT::v1f64)
-          return SelectLoad(Node, 2, ARM64::LD1Twov1d);
+          return SelectLoad(Node, 2, ARM64::LD1Twov1d, ARM64::dsub0);
         else if (VT == MVT::v2i64 || VT == MVT::v2f64)
-          return SelectLoad(Node, 2, ARM64::LD2Twov2d);
+          return SelectLoad(Node, 2, ARM64::LD2Twov2d, ARM64::qsub0);
         break;
       case Intrinsic::arm64_neon_ld3:
         if (VT == MVT::v8i8)
-          return SelectLoad(Node, 3, ARM64::LD3Threev8b);
+          return SelectLoad(Node, 3, ARM64::LD3Threev8b, ARM64::dsub0);
         else if (VT == MVT::v16i8)
-          return SelectLoad(Node, 3, ARM64::LD3Threev16b);
+          return SelectLoad(Node, 3, ARM64::LD3Threev16b, ARM64::qsub0);
         else if (VT == MVT::v4i16)
-          return SelectLoad(Node, 3, ARM64::LD3Threev4h);
+          return SelectLoad(Node, 3, ARM64::LD3Threev4h, ARM64::dsub0);
         else if (VT == MVT::v8i16)
-          return SelectLoad(Node, 3, ARM64::LD3Threev8h);
+          return SelectLoad(Node, 3, ARM64::LD3Threev8h, ARM64::qsub0);
         else if (VT == MVT::v2i32 || VT == MVT::v2f32)
-          return SelectLoad(Node, 3, ARM64::LD3Threev2s);
+          return SelectLoad(Node, 3, ARM64::LD3Threev2s, ARM64::dsub0);
         else if (VT == MVT::v4i32 || VT == MVT::v4f32)
-          return SelectLoad(Node, 3, ARM64::LD3Threev4s);
+          return SelectLoad(Node, 3, ARM64::LD3Threev4s, ARM64::qsub0);
         else if (VT == MVT::v1i64 || VT == MVT::v1f64)
-          return SelectLoad(Node, 3, ARM64::LD1Threev1d);
+          return SelectLoad(Node, 3, ARM64::LD1Threev1d, ARM64::dsub0);
         else if (VT == MVT::v2i64 || VT == MVT::v2f64)
-          return SelectLoad(Node, 3, ARM64::LD3Threev2d);
+          return SelectLoad(Node, 3, ARM64::LD3Threev2d, ARM64::qsub0);
         break;
       case Intrinsic::arm64_neon_ld4:
         if (VT == MVT::v8i8)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv8b);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv8b, ARM64::dsub0);
         else if (VT == MVT::v16i8)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv16b);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv16b, ARM64::qsub0);
         else if (VT == MVT::v4i16)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv4h);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv4h, ARM64::dsub0);
         else if (VT == MVT::v8i16)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv8h);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv8h, ARM64::qsub0);
         else if (VT == MVT::v2i32 || VT == MVT::v2f32)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv2s);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv2s, ARM64::dsub0);
         else if (VT == MVT::v4i32 || VT == MVT::v4f32)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv4s);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv4s, ARM64::qsub0);
         else if (VT == MVT::v1i64 || VT == MVT::v1f64)
-          return SelectLoad(Node, 4, ARM64::LD1Fourv1d);
+          return SelectLoad(Node, 4, ARM64::LD1Fourv1d, ARM64::dsub0);
         else if (VT == MVT::v2i64 || VT == MVT::v2f64)
-          return SelectLoad(Node, 4, ARM64::LD4Fourv2d);
+          return SelectLoad(Node, 4, ARM64::LD4Fourv2d, ARM64::qsub0);
         break;
       case Intrinsic::arm64_neon_ld2r:
         if (VT == MVT::v8i8)
-          return SelectLoad(Node, 2, ARM64::LD2Rv8b);
+          return SelectLoad(Node, 2, ARM64::LD2Rv8b, ARM64::dsub0);
         else if (VT == MVT::v16i8)
-          return SelectLoad(Node, 2, ARM64::LD2Rv16b);
+          return SelectLoad(Node, 2, ARM64::LD2Rv16b, ARM64::qsub0);
         else if (VT == MVT::v4i16)
-          return SelectLoad(Node, 2, ARM64::LD2Rv4h);
+          return SelectLoad(Node, 2, ARM64::LD2Rv4h, ARM64::dsub0);
         else if (VT == MVT::v8i16)
-          return SelectLoad(Node, 2, ARM64::LD2Rv8h);
+          return SelectLoad(Node, 2, ARM64::LD2Rv8h, ARM64::qsub0);
         else if (VT == MVT::v2i32 || VT == MVT::v2f32)
-          return SelectLoad(Node, 2, ARM64::LD2Rv2s);
+          return SelectLoad(Node, 2, ARM64::LD2Rv2s, ARM64::dsub0);
         else if (VT == MVT::v4i32 || VT == MVT::v4f32)
-          return SelectLoad(Node, 2, ARM64::LD2Rv4s);
+          return SelectLoad(Node, 2, ARM64::LD2Rv4s, ARM64::qsub0);
         else if (VT == MVT::v1i64 || VT == MVT::v1f64)
-          return SelectLoad(Node, 2, ARM64::LD2Rv1d);
+          return SelectLoad(Node, 2, ARM64::LD2Rv1d, ARM64::dsub0);
         else if (VT == MVT::v2i64 || VT == MVT::v2f64)
-          return SelectLoad(Node, 2, ARM64::LD2Rv2d);
+          return SelectLoad(Node, 2, ARM64::LD2Rv2d, ARM64::qsub0);
         break;
       case Intrinsic::arm64_neon_ld3r:
         if (VT == MVT::v8i8)
-          return SelectLoad(Node, 3, ARM64::LD3Rv8b);
+          return SelectLoad(Node, 3, ARM64::LD3Rv8b, ARM64::dsub0);
         else if (VT == MVT::v16i8)
-          return SelectLoad(Node, 3, ARM64::LD3Rv16b);
+          return SelectLoad(Node, 3, ARM64::LD3Rv16b, ARM64::qsub0);
         else if (VT == MVT::v4i16)
-          return SelectLoad(Node, 3, ARM64::LD3Rv4h);
+          return SelectLoad(Node, 3, ARM64::LD3Rv4h, ARM64::dsub0);
         else if (VT == MVT::v8i16)
-          return SelectLoad(Node, 3, ARM64::LD3Rv8h);
+          return SelectLoad(Node, 3, ARM64::LD3Rv8h, ARM64::qsub0);
         else if (VT == MVT::v2i32 || VT == MVT::v2f32)
-          return SelectLoad(Node, 3, ARM64::LD3Rv2s);
+          return SelectLoad(Node, 3, ARM64::LD3Rv2s, ARM64::dsub0);
         else if (VT == MVT::v4i32 || VT == MVT::v4f32)
-          return SelectLoad(Node, 3, ARM64::LD3Rv4s);
+          return SelectLoad(Node, 3, ARM64::LD3Rv4s, ARM64::qsub0);
         else if (VT == MVT::v1i64 || VT == MVT::v1f64)
-          return SelectLoad(Node, 3, ARM64::LD4Rv1d);
+          return SelectLoad(Node, 3, ARM64::LD4Rv1d, ARM64::dsub0);
         else if (VT == MVT::v2i64 || VT == MVT::v2f64)
-          return SelectLoad(Node, 3, ARM64::LD3Rv2d);
+          return SelectLoad(Node, 3, ARM64::LD3Rv2d, ARM64::qsub0);
         break;
       case Intrinsic::arm64_neon_ld4r:
         if (VT == MVT::v8i8)
-          return SelectLoad(Node, 4, ARM64::LD4Rv8b);
+          return SelectLoad(Node, 4, ARM64::LD4Rv8b, ARM64::dsub0);
         else if (VT == MVT::v16i8)
-          return SelectLoad(Node, 4, ARM64::LD4Rv16b);
+          return SelectLoad(Node, 4, ARM64::LD4Rv16b, ARM64::qsub0);
         else if (VT == MVT::v4i16)
-          return SelectLoad(Node, 4, ARM64::LD4Rv4h);
+          return SelectLoad(Node, 4, ARM64::LD4Rv4h, ARM64::dsub0);
         else if (VT == MVT::v8i16)
-          return SelectLoad(Node, 4, ARM64::LD4Rv8h);
+          return SelectLoad(Node, 4, ARM64::LD4Rv8h, ARM64::qsub0);
         else if (VT == MVT::v2i32 || VT == MVT::v2f32)
-          return SelectLoad(Node, 4, ARM64::LD4Rv2s);
+          return SelectLoad(Node, 4, ARM64::LD4Rv2s, ARM64::dsub0);
         else if (VT == MVT::v4i32 || VT == MVT::v4f32)
-          return SelectLoad(Node, 4, ARM64::LD4Rv4s);
+          return SelectLoad(Node, 4, ARM64::LD4Rv4s, ARM64::qsub0);
         else if (VT == MVT::v1i64 || VT == MVT::v1f64)
-          return SelectLoad(Node, 4, ARM64::LD4Rv1d);
+          return SelectLoad(Node, 4, ARM64::LD4Rv1d, ARM64::dsub0);
         else if (VT == MVT::v2i64 || VT == MVT::v2f64)
-          return SelectLoad(Node, 4, ARM64::LD4Rv2d);
+          return SelectLoad(Node, 4, ARM64::LD4Rv2d, ARM64::qsub0);
         break;
       case Intrinsic::arm64_neon_ld2lane:
         if (VT == MVT::v16i8 || VT == MVT::v8i8)
@@ -2028,11 +2215,6 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     switch (IntNo) {
       default:
         break;
-      case Intrinsic::arm64_neon_rsubhn2:
-      case Intrinsic::arm64_neon_subhn2:
-      case Intrinsic::arm64_neon_raddhn2:
-      case Intrinsic::arm64_neon_addhn2:
-        return SelectSIMDAddSubNarrowing(IntNo, Node);
       case Intrinsic::arm64_neon_tbl2:
         return SelectTable(Node, 2, VT == MVT::v8i8 ?
                             ARM64::TBLv8i8Two :
@@ -2063,21 +2245,18 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
                             ARM64::TBXv8i8Four :
                             ARM64::TBXv16i8Four,
                            true);
-      case Intrinsic::arm64_neon_xtn2:
-      case Intrinsic::arm64_neon_sqxtn2:
-      case Intrinsic::arm64_neon_uqxtn2:
-      case Intrinsic::arm64_neon_sqxtun2:
-      case Intrinsic::arm64_neon_fcvtxn2:
-        // only do argument narrowing for two argument form
-        if (Node->getNumOperands() == 3)
-          return SelectSIMDXtnNarrowing(IntNo, Node);
+      case Intrinsic::arm64_neon_smull:
+      case Intrinsic::arm64_neon_umull:
+        if (SDNode *N = SelectMULLV64LaneV128(IntNo, Node))
+          return N;
         break;
     }
     break;
   }
   case ISD::INTRINSIC_VOID: {
     unsigned IntNo = cast<ConstantSDNode>(Node->getOperand(1))->getZExtValue();
-    VT = Node->getOperand(2)->getValueType(0);
+    if (Node->getNumOperands() >= 3)
+      VT = Node->getOperand(2)->getValueType(0);
     switch (IntNo) {
       default:
         break;

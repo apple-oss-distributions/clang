@@ -21,9 +21,7 @@
 
 using namespace llvm;
 
-namespace llvm {
-FunctionPass *createSplitBBatBarPass();
-}
+namespace llvm { FunctionPass *createSplitBBatBarPass(); }
 
 char NVPTXSplitBBatBar::ID = 0;
 
@@ -38,7 +36,7 @@ bool NVPTXSplitBBatBar::runOnFunction(Function &F) {
     BasicBlock::iterator II = IB;
     BasicBlock::iterator IE = BI->end();
 
-    // Skit the first intruction. No splitting is needed at this
+    // Skit the first instruction. No splitting is needed at this
     // point even if this is a bar.
     while (II != IE) {
       if (IntrinsicInst *inst = dyn_cast<IntrinsicInst>(II)) {
@@ -72,6 +70,4 @@ bool NVPTXSplitBBatBar::runOnFunction(Function &F) {
 // This interface will most likely not be necessary, because this pass will
 // not be invoked by the driver, but will be used as a prerequisite to
 // another pass.
-FunctionPass *llvm::createSplitBBatBarPass() {
-  return new NVPTXSplitBBatBar();
-}
+FunctionPass *llvm::createSplitBBatBarPass() { return new NVPTXSplitBBatBar(); }

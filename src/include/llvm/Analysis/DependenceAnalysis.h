@@ -61,11 +61,20 @@ namespace llvm {
   /// cases (for output, flow, and anti dependences), the dependence implies
   /// an ordering, where the source must precede the destination; in contrast,
   /// input dependences are unordered.
+  ///
+  /// When a dependence graph is built, each Dependence will be a member of
+  /// the set of predecessor edges for its destination instruction and a set
+  /// if successor edges for its source instruction. These sets are represented
+  /// as singly-linked lists, with the "next" fields stored in the dependence
+  /// itelf.
   class Dependence {
   public:
     Dependence(Instruction *Source,
                Instruction *Destination) :
-      Src(Source), Dst(Destination) {}
+      Src(Source),
+      Dst(Destination),
+      NextPredecessor(NULL),
+      NextSuccessor(NULL) {}
     virtual ~Dependence() {}
 
     /// Dependence::DVEntry - Each level in the distance/direction vector
@@ -164,18 +173,43 @@ namespace llvm {
     /// variable associated with the loop at this level.
     virtual bool isScalar(unsigned Level) const;
 
+    /// getNextPredecessor - Returns the value of the NextPredecessor
+    /// field.
+    const Dependence *getNextPredecessor() const {
+      return NextPredecessor;
+    }
+    
+    /// getNextSuccessor - Returns the value of the NextSuccessor
+    /// field.
+    const Dependence *getNextSuccessor() const {
+      return NextSuccessor;
+    }
+    
+    /// setNextPredecessor - Sets the value of the NextPredecessor
+    /// field.
+    void setNextPredecessor(const Dependence *pred) {
+      NextPredecessor = pred;
+    }
+    
+    /// setNextSuccessor - Sets the value of the NextSuccessor
+    /// field.
+    void setNextSuccessor(const Dependence *succ) {
+      NextSuccessor = succ;
+    }
+    
     /// dump - For debugging purposes, dumps a dependence to OS.
     ///
     void dump(raw_ostream &OS) const;
   private:
     Instruction *Src, *Dst;
+    const Dependence *NextPredecessor, *NextSuccessor;
     friend class DependenceAnalysis;
   };
 
 
   /// FullDependence - This class represents a dependence between two memory
   /// references in a function. It contains detailed information about the
-  /// dependence (direction vectors, etc) and is used when the compiler is
+  /// dependence (direction vectors, etc.) and is used when the compiler is
   /// able to accurately analyze the interaction of the references; that is,
   /// it is not a confused dependence (see Dependence). In most cases
   /// (for output, flow, and anti dependences), the dependence implies an
@@ -244,8 +278,8 @@ namespace llvm {
   /// DependenceAnalysis - This class is the main dependence-analysis driver.
   ///
   class DependenceAnalysis : public FunctionPass {
-    void operator=(const DependenceAnalysis &);     // do not implement
-    DependenceAnalysis(const DependenceAnalysis &); // do not implement
+    void operator=(const DependenceAnalysis &) LLVM_DELETED_FUNCTION;
+    DependenceAnalysis(const DependenceAnalysis &) LLVM_DELETED_FUNCTION;
   public:
     /// depends - Tests for a dependence between the Src and Dst instructions.
     /// Returns NULL if no dependence; otherwise, returns a Dependence (or a
@@ -257,7 +291,7 @@ namespace llvm {
                         Instruction *Dst,
                         bool PossiblyLoopIndependent);
 
-    /// getSplitIteration - Give a dependence that's splitable at some
+    /// getSplitIteration - Give a dependence that's splittable at some
     /// particular level, return the iteration that should be used to split
     /// the loop.
     ///
@@ -815,7 +849,7 @@ namespace llvm {
     bool propagate(const SCEV *&Src,
                    const SCEV *&Dst,
                    SmallBitVector &Loops,
-                   SmallVector<Constraint, 4> &Constraints,
+                   SmallVectorImpl<Constraint> &Constraints,
                    bool &Consistent);
 
     /// propagateDistance - Attempt to propagate a distance

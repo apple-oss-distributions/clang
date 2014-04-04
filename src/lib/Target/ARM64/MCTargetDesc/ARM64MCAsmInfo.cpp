@@ -17,9 +17,8 @@
 #include "ARM64MCAsmInfo.h"
 using namespace llvm;
 
-ARM64MCAsmInfo::ARM64MCAsmInfo() {
+ARM64MCAsmInfoDarwin::ARM64MCAsmInfoDarwin() {
   PrivateGlobalPrefix = "L";
-  PCSymbol=".";
   SeparatorString = "%%";
   CommentString = ";";
   PointerSize = CalleeSaveStackSlotSize = 8;
@@ -34,9 +33,9 @@ ARM64MCAsmInfo::ARM64MCAsmInfo() {
 }
 
 const MCExpr *
-ARM64MCAsmInfo::getExprForPersonalitySymbol(const MCSymbol *Sym,
-                                            unsigned Encoding,
-                                            MCStreamer &Streamer) const {
+ARM64MCAsmInfoDarwin::getExprForPersonalitySymbol(const MCSymbol *Sym,
+                                                  unsigned Encoding,
+                                                  MCStreamer &Streamer) const {
   // On Darwin, we can reference dwarf symbols with foo@GOT-., which
   // is an indirect pc-relative reference. The default implementation
   // won't reference using the GOT, so we need this target-specific
@@ -48,4 +47,29 @@ ARM64MCAsmInfo::getExprForPersonalitySymbol(const MCSymbol *Sym,
   Streamer.EmitLabel(PCSym);
   const MCExpr *PC = MCSymbolRefExpr::Create(PCSym, Context);
   return MCBinaryExpr::CreateSub(Res, PC, Context);
+}
+
+ARM64MCAsmInfoELF::ARM64MCAsmInfoELF() {
+  PointerSize = 8;
+
+  // ".comm align is in bytes but .align is pow-2."
+  AlignmentIsInBytes = false;
+
+  CommentString = "//";
+  PrivateGlobalPrefix = ".L";
+  Code32Directive = ".code\t32";
+
+  Data16bitsDirective = "\t.hword\t";
+  Data32bitsDirective = "\t.word\t";
+  Data64bitsDirective = "\t.xword\t";
+
+  UseDataRegionDirectives = false;
+
+  WeakRefDirective = "\t.weak\t";
+
+  HasLEB128 = true;
+  SupportsDebugInformation = true;
+
+  // Exceptions handling
+  ExceptionsType = ExceptionHandling::DwarfCFI;
 }

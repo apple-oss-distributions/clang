@@ -14,7 +14,7 @@
 #include "clang/Tooling/FileMatchTrie.h"
 #include "clang/Tooling/JSONCompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
-#include "llvm/Support/PathV2.h"
+#include "llvm/Support/Path.h"
 #include "gtest/gtest.h"
 
 namespace clang {
@@ -391,6 +391,12 @@ TEST(unescapeJsonCommandLine, ParsesQuotedStringWithoutClosingQuote) {
   EXPECT_EQ("", Empty[0]);
 }
 
+TEST(unescapeJsonCommandLine, ParsesSingleQuotedString) {
+  std::vector<std::string> Args = unescapeJsonCommandLine("a'\\\\b \\\"c\\\"'");
+  ASSERT_EQ(1ul, Args.size());
+  EXPECT_EQ("a\\b \"c\"", Args[0]);
+}
+
 TEST(FixedCompilationDatabase, ReturnsFixedCommandLine) {
   std::vector<std::string> CommandLine;
   CommandLine.push_back("one");
@@ -447,7 +453,7 @@ TEST(ParseFixedCompilationDatabase, ReturnsArgumentsAfterDoubleDash) {
   const char *Argv[] = { "1", "2", "--\0no-constant-folding", "3", "4" };
   OwningPtr<FixedCompilationDatabase> Database(
       FixedCompilationDatabase::loadFromCommandLine(Argc, Argv));
-  ASSERT_TRUE(Database);
+  ASSERT_TRUE(Database.isValid());
   std::vector<CompileCommand> Result =
     Database->getCompileCommands("source");
   ASSERT_EQ(1ul, Result.size());
@@ -466,7 +472,7 @@ TEST(ParseFixedCompilationDatabase, ReturnsEmptyCommandLine) {
   const char *Argv[] = { "1", "2", "--\0no-constant-folding" };
   OwningPtr<FixedCompilationDatabase> Database(
       FixedCompilationDatabase::loadFromCommandLine(Argc, Argv));
-  ASSERT_TRUE(Database);
+  ASSERT_TRUE(Database.isValid());
   std::vector<CompileCommand> Result =
     Database->getCompileCommands("source");
   ASSERT_EQ(1ul, Result.size());

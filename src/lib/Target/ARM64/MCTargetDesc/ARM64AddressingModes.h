@@ -266,7 +266,7 @@ static inline bool processLogicalImmediate(uint64_t imm, unsigned regSize,
   // Second, determine the rotation to make the element be: 0^m 1^n.
   for (unsigned i = 0; i < size; ++i) {
     eltVal = ror(eltVal, size);
-    uint32_t clz = CountLeadingZeros_64(eltVal) - (64 - size);
+    uint32_t clz = countLeadingZeros(eltVal) - (64 - size);
     uint32_t cto = CountTrailingOnes_64(eltVal);
 
     if (clz + cto == size) {
@@ -321,7 +321,7 @@ static inline uint64_t decodeLogicalImmediate(uint64_t val, unsigned regSize) {
   unsigned imms = val & 0x3f;
 
   assert((regSize == 64 || N == 0) && "undefined logical immediate encoding");
-  int len = 31 - CountLeadingZeros_32((N << 6) | (~imms & 0x3f));
+  int len = 31 - countLeadingZeros((N << 6) | (~imms & 0x3f));
   assert(len >= 0 && "undefined logical immediate encoding");
   unsigned size = (1 << len);
   unsigned R = immr & (size - 1);
@@ -337,6 +337,28 @@ static inline uint64_t decodeLogicalImmediate(uint64_t val, unsigned regSize) {
     size *= 2;
   }
   return pattern;
+}
+
+/// isValidDecodeLogicalImmediate - Check to see if the logical immediate value
+/// in the form "N:immr:imms" (where the immr and imms fields are each 6 bits)
+/// is a valid encoding for an integer value with regSize bits.
+static inline bool isValidDecodeLogicalImmediate(uint64_t val,
+                                                 unsigned regSize) {
+  // Extract the N and imms fields needed for checking.
+  unsigned N = (val >> 12) & 1;
+  unsigned imms = val & 0x3f;
+
+  if (regSize == 32 && N != 0) // undefined logical immediate encoding
+    return false;
+  int len = 31 - countLeadingZeros((N << 6) | (~imms & 0x3f));
+  if (len < 0) // undefined logical immediate encoding
+    return false;
+  unsigned size = (1 << len);
+  unsigned S = imms & (size - 1);
+  if (S == size - 1) // undefined logical immediate encoding
+    return false;
+
+  return true;
 }
 
 //===----------------------------------------------------------------------===//

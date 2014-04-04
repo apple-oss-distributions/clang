@@ -1,4 +1,4 @@
-//===- ObjCARCUtil.cpp - ObjC ARC Optimization --------*- mode: c++ -*-----===//
+//===- ObjCARCUtil.cpp - ObjC ARC Optimization ----------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -112,6 +112,8 @@ InstructionClass llvm::objcarc::GetFunctionClass(const Function *F) {
           .Case("objc_retain_autorelease",    IC_FusedRetainAutorelease)
           .Case("objc_retainAutorelease",     IC_FusedRetainAutorelease)
           .Case("objc_retainAutoreleaseReturnValue",IC_FusedRetainAutoreleaseRV)
+          .Case("objc_sync_enter", IC_User)
+          .Case("objc_sync_exit", IC_User)
           .Default(IC_CallOrUser);
 
       // Argument is i8**
@@ -145,6 +147,14 @@ InstructionClass llvm::objcarc::GetFunctionClass(const Function *F) {
                 return StringSwitch<InstructionClass>(F->getName())
                   .Case("objc_moveWeak",              IC_MoveWeak)
                   .Case("objc_copyWeak",              IC_CopyWeak)
+                  // Ignore annotation calls. This is important to stop the
+                  // optimizer from treating annotations as uses which would
+                  // make the state of the pointers they are attempting to
+                  // elucidate to be incorrect.
+                  .Case("llvm.arc.annotation.topdown.bbstart", IC_None)
+                  .Case("llvm.arc.annotation.topdown.bbend", IC_None)
+                  .Case("llvm.arc.annotation.bottomup.bbstart", IC_None)
+                  .Case("llvm.arc.annotation.bottomup.bbend", IC_None)
                   .Default(IC_CallOrUser);
           }
 

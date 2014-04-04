@@ -20,6 +20,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/StmtObjC.h"
 #include "clang/Basic/Diagnostic.h"
+#include "clang/CodeGen/CGFunctionInfo.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CallSite.h"
 #include "llvm/IR/DataLayout.h"
@@ -468,8 +469,8 @@ void CodeGenFunction::StartObjCMethod(const ObjCMethodDecl *OMD,
                                       SourceLocation StartLoc) {
   FunctionArgList args;
   // Check if we should generate debug info for this method.
-  if (!OMD->hasAttr<NoDebugAttr>())
-    maybeInitializeDebugInfo();
+  if (OMD->hasAttr<NoDebugAttr>())
+    DebugInfo = NULL; // disable debug info indefinitely for this function
 
   llvm::Function *Fn = CGM.getObjCRuntime().GenerateMethod(OMD, CD);
 
@@ -505,7 +506,8 @@ static llvm::Value *emitARCRetainLoadOfScalar(CodeGenFunction &CGF,
 /// its pointer, name, and types registered in the class struture.
 void CodeGenFunction::GenerateObjCMethod(const ObjCMethodDecl *OMD) {
   StartObjCMethod(OMD, OMD->getClassInterface(), OMD->getLocStart());
-  EmitStmt(OMD->getBody());
+  assert(isa<CompoundStmt>(OMD->getBody()));
+  EmitCompoundStmtWithoutScope(*cast<CompoundStmt>(OMD->getBody()));
   FinishFunction(OMD->getBodyRBrace());
 }
 
@@ -714,7 +716,7 @@ PropertyImplStrategy::PropertyImplStrategy(CodeGenModule &CGM,
   }
 
   llvm::Triple::ArchType arch =
-    CGM.getContext().getTargetInfo().getTriple().getArch();
+    CGM.getTarget().getTriple().getArch();
 
   // Most architectures require memory to fit within a single cache
   // line, so the alignment has to be at least the size of the access.
@@ -923,16 +925,21 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
     LValue LV = EmitLValueForIvar(TypeOfSelfObject(), LoadObjCSelf(), ivar, 0);
 
     QualType ivarType = ivar->getType();
-    if (ivarType->isAnyComplexType()) {
-      ComplexPairTy pair = LoadComplexFromAddr(LV.getAddress(),
-                                               LV.isVolatileQualified());
-      StoreComplexToAddr(pair, ReturnValue, LV.isVolatileQualified());
-    } else if (hasAggregateLLVMType(ivarType)) {
+    switch (getEvaluationKind(ivarType)) {
+    case TEK_Complex: {
+      ComplexPairTy pair = EmitLoadOfComplex(LV, SourceLocation());
+      EmitStoreOfComplex(pair,
+                         MakeNaturalAlignAddrLValue(ReturnValue, ivarType),
+                         /*init*/ true);
+      return;
+    }
+    case TEK_Aggregate:
       // The return value slot is guaranteed to not be aliased, but
       // that's not necessarily the same as "on the stack", so
       // we still potentially need objc_memmove_collectable.
       EmitAggregateCopy(ReturnValue, LV.getAddress(), ivarType);
-    } else {
+      return;
+    case TEK_Scalar: {
       llvm::Value *value;
       if (propType->isReferenceType()) {
         value = LV.getAddress();
@@ -944,7 +951,7 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
         // Otherwise we want to do a simple load, suppressing the
         // final autorelease.
         } else {
-          value = EmitLoadOfLValue(LV).getScalarVal();
+          value = EmitLoadOfLValue(LV, SourceLocation()).getScalarVal();
           AutoreleaseResult = false;
         }
 
@@ -954,8 +961,10 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
       }
       
       EmitReturnOfRValue(RValue::get(value), propType);
+      return;
     }
-    return;
+    }
+    llvm_unreachable("bad evaluation kind");
   }
 
   }
@@ -1041,8 +1050,6 @@ static void emitCPPObjectAtomicSetterCall(CodeGenFunction &CGF,
                                                       FunctionType::ExtInfo(),
                                                       RequiredArgs::All),
                copyCppAtomicObjectFn, ReturnValueSlot(), args);
-  
-
 }
 
 
@@ -1397,7 +1404,7 @@ llvm::Value *CodeGenFunction::LoadObjCSelf() {
   VarDecl *Self = cast<ObjCMethodDecl>(CurFuncDecl)->getSelfDecl();
   DeclRefExpr DRE(Self, /*is enclosing local*/ (CurFuncDecl != CurCodeDecl),
                   Self->getType(), VK_LValue, SourceLocation());
-  return EmitLoadOfScalar(EmitDeclRefLValue(&DRE));
+  return EmitLoadOfScalar(EmitDeclRefLValue(&DRE), SourceLocation());
 }
 
 QualType CodeGenFunction::TypeOfSelfObject() {
@@ -1518,10 +1525,13 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
   llvm::Value *initialMutations =
     Builder.CreateLoad(StateMutationsPtr, "forcoll.initial-mutations");
 
+  RegionCounter Cnt = getPGORegionCounter(&S);
+
   // Start looping.  This is the point we return to whenever we have a
   // fresh, non-empty batch of objects.
   llvm::BasicBlock *LoopBodyBB = createBasicBlock("forcoll.loopbody");
   EmitBlock(LoopBodyBB);
+  Cnt.beginRegion(Builder);
 
   // The current index into the buffer.
   llvm::PHINode *index = Builder.CreatePHI(UnsignedLongLTy, 3, "forcoll.index");
@@ -1618,7 +1628,7 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
     EmitAutoVarCleanups(variable);
 
   // Perform the loop body, setting up break and continue labels.
-  BreakContinueStack.push_back(BreakContinue(LoopEnd, AfterBody));
+  BreakContinueStack.push_back(BreakContinue(LoopEnd, AfterBody, &Cnt));
   {
     RunCleanupsScope Scope(*this);
     EmitStmt(S.getBody());
@@ -1637,6 +1647,7 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
   llvm::Value *indexPlusOne
     = Builder.CreateAdd(index, llvm::ConstantInt::get(UnsignedLongLTy, 1));
 
+  // TODO: We should probably model this as a "continue" for PGO
   // If we haven't overrun the buffer yet, we can continue.
   Builder.CreateCondBr(Builder.CreateICmpULT(indexPlusOne, count),
                        LoopBodyBB, FetchMoreBB);
@@ -1660,6 +1671,8 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
   index->addIncoming(zero, Builder.GetInsertBlock());
   count->addIncoming(refetchCount, Builder.GetInsertBlock());
 
+  // TODO: We should be applying PGO weights here, but this needs to handle the
+  // branch before FetchMoreBB or we risk getting the numbers wrong.
   Builder.CreateCondBr(Builder.CreateICmpEQ(refetchCount, zero),
                        EmptyBB, LoopBodyBB);
 
@@ -1682,6 +1695,7 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
     PopCleanupBlock();
 
   EmitBlock(LoopEnd.getBlock());
+  // TODO: Once we calculate PGO weights above, set the region count here
 }
 
 void CodeGenFunction::EmitObjCAtTryStmt(const ObjCAtTryStmt &S) {
@@ -1753,16 +1767,16 @@ static llvm::Constant *createARCRuntimeFunction(CodeGenModule &CGM,
   llvm::Constant *fn = CGM.CreateRuntimeFunction(type, fnName);
 
   if (llvm::Function *f = dyn_cast<llvm::Function>(fn)) {
-  // If the target runtime doesn't naturally support ARC, emit weak
-  // references to the runtime support library.  We don't really
-  // permit this to fail, but we need a particular relocation style.
+    // If the target runtime doesn't naturally support ARC, emit weak
+    // references to the runtime support library.  We don't really
+    // permit this to fail, but we need a particular relocation style.
     if (!CGM.getLangOpts().ObjCRuntime.hasNativeARC()) {
       f->setLinkage(llvm::Function::ExternalWeakLinkage);
     } else if (fnName == "objc_retain" || fnName  == "objc_release") {
       // If we have Native ARC, set nonlazybind attribute for these APIs for
       // performance.
       f->addFnAttr(llvm::Attribute::NonLazyBind);
-  }
+    }
   }
 
   return fn;
@@ -1779,9 +1793,8 @@ static llvm::Value *emitARCValueOperation(CodeGenFunction &CGF,
   if (isa<llvm::ConstantPointerNull>(value)) return value;
 
   if (!fn) {
-    std::vector<llvm::Type*> args(1, CGF.Int8PtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(CGF.Int8PtrTy, args, false);
+      llvm::FunctionType::get(CGF.Int8PtrTy, CGF.Int8PtrTy, false);
     fn = createARCRuntimeFunction(CGF.CGM, fnType, fnName);
   }
 
@@ -1805,9 +1818,8 @@ static llvm::Value *emitARCLoadOperation(CodeGenFunction &CGF,
                                          llvm::Constant *&fn,
                                          StringRef fnName) {
   if (!fn) {
-    std::vector<llvm::Type*> args(1, CGF.Int8PtrPtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(CGF.Int8PtrTy, args, false);
+      llvm::FunctionType::get(CGF.Int8PtrTy, CGF.Int8PtrPtrTy, false);
     fn = createARCRuntimeFunction(CGF.CGM, fnType, fnName);
   }
 
@@ -1868,7 +1880,8 @@ static void emitARCCopyOperation(CodeGenFunction &CGF,
   assert(dst->getType() == src->getType());
 
   if (!fn) {
-    std::vector<llvm::Type*> argTypes(2, CGF.Int8PtrPtrTy);
+    llvm::Type *argTypes[] = { CGF.Int8PtrPtrTy, CGF.Int8PtrPtrTy };
+
     llvm::FunctionType *fnType
       = llvm::FunctionType::get(CGF.Builder.getVoidTy(), argTypes, false);
     fn = createARCRuntimeFunction(CGF.CGM, fnType, fnName);
@@ -1987,9 +2000,8 @@ void CodeGenFunction::EmitARCRelease(llvm::Value *value,
 
   llvm::Constant *&fn = CGM.getARCEntrypoints().objc_release;
   if (!fn) {
-    std::vector<llvm::Type*> args(1, Int8PtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(Builder.getVoidTy(), args, false);
+      llvm::FunctionType::get(Builder.getVoidTy(), Int8PtrTy, false);
     fn = createARCRuntimeFunction(CGM, fnType, "objc_release");
   }
 
@@ -2079,7 +2091,7 @@ llvm::Value *CodeGenFunction::EmitARCStoreStrong(LValue dst,
   newValue = EmitARCRetain(type, newValue);
 
   // Read the old value.
-  llvm::Value *oldValue = EmitLoadOfScalar(dst);
+  llvm::Value *oldValue = EmitLoadOfScalar(dst, SourceLocation());
 
   // Store.  We do this before the release so that any deallocs won't
   // see the old value.
@@ -2197,9 +2209,8 @@ void CodeGenFunction::EmitARCInitWeak(llvm::Value *addr, llvm::Value *value) {
 void CodeGenFunction::EmitARCDestroyWeak(llvm::Value *addr) {
   llvm::Constant *&fn = CGM.getARCEntrypoints().objc_destroyWeak;
   if (!fn) {
-    std::vector<llvm::Type*> args(1, Int8PtrPtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(Builder.getVoidTy(), args, false);
+      llvm::FunctionType::get(Builder.getVoidTy(), Int8PtrPtrTy, false);
     fn = createARCRuntimeFunction(CGM, fnType, "objc_destroyWeak");
   }
 
@@ -2247,9 +2258,8 @@ void CodeGenFunction::EmitObjCAutoreleasePoolPop(llvm::Value *value) {
 
   llvm::Constant *&fn = CGM.getRREntrypoints().objc_autoreleasePoolPop;
   if (!fn) {
-    std::vector<llvm::Type*> args(1, Int8PtrTy);
     llvm::FunctionType *fnType =
-      llvm::FunctionType::get(Builder.getVoidTy(), args, false);
+      llvm::FunctionType::get(Builder.getVoidTy(), Int8PtrTy, false);
 
     // We don't want to use a weak import here; instead we should not
     // fall into this path.
@@ -2352,7 +2362,8 @@ static TryEmitResult tryEmitARCRetainLoadOfScalar(CodeGenFunction &CGF,
   case Qualifiers::OCL_ExplicitNone:
   case Qualifiers::OCL_Strong:
   case Qualifiers::OCL_Autoreleasing:
-    return TryEmitResult(CGF.EmitLoadOfLValue(lvalue).getScalarVal(),
+    return TryEmitResult(CGF.EmitLoadOfLValue(lvalue,
+                                              SourceLocation()).getScalarVal(),
                          false);
 
   case Qualifiers::OCL_Weak:
@@ -2378,7 +2389,8 @@ static TryEmitResult tryEmitARCRetainLoadOfScalar(CodeGenFunction &CGF,
     LValue lv = CGF.EmitLValue(e);
     
     // Load the object pointer.
-    llvm::Value *result = CGF.EmitLoadOfLValue(lv).getScalarVal();
+    llvm::Value *result = CGF.EmitLoadOfLValue(lv,
+                                               SourceLocation()).getScalarVal();
     
     // Set the source pointer to NULL.
     CGF.EmitStoreOfScalar(getNullForVariable(lv.getAddress()), lv);
@@ -2781,8 +2793,7 @@ CodeGenFunction::EmitARCStoreStrong(const BinaryOperator *e,
 
   // If the RHS was emitted retained, expand this.
   if (hasImmediateRetain) {
-    llvm::Value *oldValue =
-      EmitLoadOfScalar(lvalue);
+    llvm::Value *oldValue = EmitLoadOfScalar(lvalue, SourceLocation());
     EmitStoreOfScalar(value, lvalue);
     EmitARCRelease(oldValue, lvalue.isARCPreciseLifetime());
   } else {
@@ -2876,7 +2887,6 @@ CodeGenFunction::GenerateObjCAtomicSetterCopyHelperFunction(
                                           SourceLocation(),
                                           SourceLocation(), II, C.VoidTy, 0,
                                           SC_Static,
-                                          SC_None,
                                           false,
                                           false);
   
@@ -2902,9 +2912,6 @@ CodeGenFunction::GenerateObjCAtomicSetterCopyHelperFunction(
     llvm::Function::Create(LTy, llvm::GlobalValue::InternalLinkage,
                            "__assign_helper_atomic_property_",
                            &CGM.getModule());
-  
-  // Initialize debug info if needed.
-  maybeInitializeDebugInfo();
   
   StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
   
@@ -2961,7 +2968,6 @@ CodeGenFunction::GenerateObjCAtomicGetterCopyHelperFunction(
                                           SourceLocation(),
                                           SourceLocation(), II, C.VoidTy, 0,
                                           SC_Static,
-                                          SC_None,
                                           false,
                                           false);
   
@@ -2986,9 +2992,6 @@ CodeGenFunction::GenerateObjCAtomicGetterCopyHelperFunction(
   llvm::Function *Fn =
   llvm::Function::Create(LTy, llvm::GlobalValue::InternalLinkage,
                          "__copy_helper_atomic_property_", &CGM.getModule());
-  
-  // Initialize debug info if needed.
-  maybeInitializeDebugInfo();
   
   StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
   

@@ -34,6 +34,7 @@ namespace clang {
 class DirectoryEntry;
 class FileEntry;
 class FileManager;
+class IdentifierIterator;
 
 namespace serialization {
   class ModuleFile;
@@ -117,8 +118,8 @@ class GlobalModuleIndex {
   explicit GlobalModuleIndex(llvm::MemoryBuffer *Buffer,
                              llvm::BitstreamCursor Cursor);
 
-  GlobalModuleIndex(const GlobalModuleIndex &); // DO NOT IMPLEMENT
-  GlobalModuleIndex &operator=(const GlobalModuleIndex &); // DO NOT IMPLEMENT
+  GlobalModuleIndex(const GlobalModuleIndex &) LLVM_DELETED_FUNCTION;
+  GlobalModuleIndex &operator=(const GlobalModuleIndex &) LLVM_DELETED_FUNCTION;
 
 public:
   ~GlobalModuleIndex();

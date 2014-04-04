@@ -1,4 +1,4 @@
-//===-- Mips16RegisterInfo.cpp - MIPS16 Register Information -== ----------===//
+//===-- Mips16RegisterInfo.cpp - MIPS16 Register Information --------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Mips16RegisterInfo.h"
+#include "Mips16InstrInfo.h"
 #include "Mips.h"
 #include "Mips16InstrInfo.h"
 #include "MipsAnalyzeImmediate.h"
@@ -23,6 +24,7 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/DebugInfo.h"
 #include "llvm/IR/Constants.h"
@@ -39,17 +41,16 @@
 
 using namespace llvm;
 
-Mips16RegisterInfo::Mips16RegisterInfo(const MipsSubtarget &ST,
-    const Mips16InstrInfo &I)
-  : MipsRegisterInfo(ST), TII(I) {}
+Mips16RegisterInfo::Mips16RegisterInfo(const MipsSubtarget &ST)
+  : MipsRegisterInfo(ST) {}
 
 bool Mips16RegisterInfo::requiresRegisterScavenging
   (const MachineFunction &MF) const {
-  return true;
+  return false;
 }
 bool Mips16RegisterInfo::requiresFrameIndexScavenging
   (const MachineFunction &MF) const {
-  return true;
+  return false;
 }
 
 bool Mips16RegisterInfo::useFPForScavengingIndex
@@ -64,30 +65,16 @@ bool Mips16RegisterInfo::saveScavengerRegister
    const TargetRegisterClass *RC,
    unsigned Reg) const {
   DebugLoc DL;
+  const TargetInstrInfo &TII = *MBB.getParent()->getTarget().getInstrInfo();
   TII.copyPhysReg(MBB, I, DL, Mips::T0, Reg, true);
   TII.copyPhysReg(MBB, UseMI, DL, Reg, Mips::T0, true);
   return true;
 }
 
-// This function eliminate ADJCALLSTACKDOWN,
-// ADJCALLSTACKUP pseudo instructions
-void Mips16RegisterInfo::
-eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
-                              MachineBasicBlock::iterator I) const {
-  const TargetFrameLowering *TFI = MF.getTarget().getFrameLowering();
-
-  if (!TFI->hasReservedCallFrame(MF)) {
-    int64_t Amount = I->getOperand(0).getImm();
-
-    if (I->getOpcode() == Mips::ADJCALLSTACKDOWN)
-      Amount = -Amount;
-
-    const Mips16InstrInfo *II = static_cast<const Mips16InstrInfo*>(&TII);
-
-    II->adjustStackPtr(Mips::SP, Amount, MBB, I);
-  }
-
-  MBB.erase(I);
+const TargetRegisterClass *
+Mips16RegisterInfo::intRegClass(unsigned Size) const {
+  assert(Size == 4);
+  return &Mips::CPU16RegsRegClass;
 }
 
 void Mips16RegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
@@ -140,17 +127,26 @@ void Mips16RegisterInfo::eliminateFI(MachineBasicBlock::iterator II,
   //   by adding the size of the stack:
   //   incoming argument, callee-saved register location or local variable.
   int64_t Offset;
+  bool IsKill = false;
   Offset = SPOffset + (int64_t)StackSize;
   Offset += MI.getOperand(OpNo + 1).getImm();
 
 
   DEBUG(errs() << "Offset     : " << Offset << "\n" << "<--------->\n");
 
-  if (!MI.isDebugValue() && ( ((FrameReg != Mips::SP) && !isInt<16>(Offset)) ||
-      ((FrameReg == Mips::SP) && !isInt<15>(Offset)) )) {
-    llvm_unreachable("frame offset does not fit in instruction");
+  if (!MI.isDebugValue() &&
+      !Mips16InstrInfo::validImmediate(MI.getOpcode(), FrameReg, Offset)) {
+    MachineBasicBlock &MBB = *MI.getParent();
+    DebugLoc DL = II->getDebugLoc();
+    unsigned NewImm;
+    const Mips16InstrInfo &TII =
+      *static_cast<const Mips16InstrInfo*>(
+        MBB.getParent()->getTarget().getInstrInfo());
+    FrameReg = TII.loadImmediate(FrameReg, Offset, MBB, II, DL, NewImm);
+    Offset = SignExtend64<16>(NewImm);
+    IsKill = true;
   }
-  MI.getOperand(OpNo).ChangeToRegister(FrameReg, false);
+  MI.getOperand(OpNo).ChangeToRegister(FrameReg, false, false, IsKill);
   MI.getOperand(OpNo + 1).ChangeToImmediate(Offset);
 
 

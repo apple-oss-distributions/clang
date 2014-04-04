@@ -56,6 +56,10 @@ struct HeaderFileInfo {
 
   /// \brief Whether this header is part of the module that we are building.
   unsigned isCompilingModuleHeader : 1;
+
+  /// \brief Whether this header is part of the module that we are building.
+  /// This is an instance of ModuleMap::ModuleHeaderRole.
+  unsigned HeaderRole : 2;
   
   /// \brief Whether this structure is considered to already have been
   /// "resolved", meaning that it was loaded from the external source.
@@ -97,6 +101,7 @@ struct HeaderFileInfo {
   HeaderFileInfo()
     : isImport(false), isPragmaOnce(false), DirInfo(SrcMgr::C_User), 
       External(false), isModuleHeader(false), isCompilingModuleHeader(false),
+      HeaderRole(ModuleMap::NormalHeader),
       Resolved(false), IndexHeaderMapHeader(false),
       NumIncludes(0), ControllingMacroID(0), ControllingMacro(0)  {}
 
@@ -109,6 +114,16 @@ struct HeaderFileInfo {
   bool isNonDefault() const {
     return isImport || isPragmaOnce || NumIncludes || ControllingMacro || 
       ControllingMacroID;
+  }
+
+  /// \brief Get the HeaderRole properly typed.
+  ModuleMap::ModuleHeaderRole getHeaderRole() const {
+    return static_cast<ModuleMap::ModuleHeaderRole>(HeaderRole);
+  }
+
+  /// \brief Set the HeaderRole properly typed.
+  void setHeaderRole(ModuleMap::ModuleHeaderRole Role) {
+    HeaderRole = Role;
   }
 };
 
@@ -217,6 +232,8 @@ class HeaderSearch {
   unsigned NumMultiIncludeFileOptzn;
   unsigned NumFrameworkLookups, NumSubFrameworkLookups;
 
+  bool EnabledModules;
+
   // HeaderSearch doesn't support default or copy construction.
   HeaderSearch(const HeaderSearch&) LLVM_DELETED_FUNCTION;
   void operator=(const HeaderSearch&) LLVM_DELETED_FUNCTION;
@@ -225,7 +242,7 @@ class HeaderSearch {
   
 public:
   HeaderSearch(IntrusiveRefCntPtr<HeaderSearchOptions> HSOpts,
-               FileManager &FM, DiagnosticsEngine &Diags,
+               SourceManager &SourceMgr, DiagnosticsEngine &Diags,
                const LangOptions &LangOpts, const TargetInfo *Target);
   ~HeaderSearch();
 
@@ -264,7 +281,7 @@ public:
 
   /// \brief Checks whether the map exists or not.
   bool HasIncludeAliasMap() const {
-    return IncludeAliases;
+    return IncludeAliases.isValid();
   }
 
   /// \brief Map the source include name to the dest include name.
@@ -357,7 +374,7 @@ public:
                               const FileEntry *CurFileEnt,
                               SmallVectorImpl<char> *SearchPath,
                               SmallVectorImpl<char> *RelativePath,
-                              Module **SuggestedModule,
+                              ModuleMap::KnownHeader *SuggestedModule,
                               bool SkipCache = false);
 
   /// \brief Look up a subframework for the specified \#include file.
@@ -371,7 +388,7 @@ public:
       const FileEntry *RelativeFileEnt,
       SmallVectorImpl<char> *SearchPath,
       SmallVectorImpl<char> *RelativePath,
-      Module **SuggestedModule);
+      ModuleMap::KnownHeader *SuggestedModule);
 
   /// \brief Look up the specified framework name in our framework cache.
   /// \returns The DirectoryEntry it is in if we know, null otherwise.
@@ -408,7 +425,9 @@ public:
   }
 
   /// \brief Mark the specified file as part of a module.
-  void MarkFileModuleHeader(const FileEntry *File, bool IsCompiledModuleHeader);
+  void MarkFileModuleHeader(const FileEntry *File,
+                            ModuleMap::ModuleHeaderRole Role,
+                            bool IsCompiledModuleHeader);
 
   /// \brief Increment the count for the number of times the specified
   /// FileEntry has been entered.
@@ -425,6 +444,11 @@ public:
     getFileInfo(File).ControllingMacro = ControllingMacro;
   }
 
+  /// \brief Return true if this is the first time encountering this header.
+  bool FirstTimeLexingFile(const FileEntry *File) {
+    return getFileInfo(File).NumIncludes == 1;
+  }
+
   /// \brief Determine whether this file is intended to be safe from
   /// multiple inclusions, e.g., it has \#pragma once or a controlling
   /// macro.
@@ -435,6 +459,9 @@ public:
   /// CreateHeaderMap - This method returns a HeaderMap for the specified
   /// FileEntry, uniquing them through the 'HeaderMaps' datastructure.
   const HeaderMap *CreateHeaderMap(const FileEntry *FE);
+
+  /// Returns true if modules are enabled.
+  bool enabledModules() const { return EnabledModules; }
 
   /// \brief Retrieve the name of the module file that should be used to 
   /// load the given module.
@@ -469,6 +496,7 @@ public:
 
   /// \brief Determine whether there is a module map that may map the header
   /// with the given file name to a (sub)module.
+  /// Always returns false if modules are disabled.
   ///
   /// \param Filename The name of the file.
   ///
@@ -483,7 +511,7 @@ public:
   /// \brief Retrieve the module that corresponds to the given file, if any.
   ///
   /// \param File The header that we wish to map to a module.
-  Module *findModuleForHeader(const FileEntry *File) const;
+  ModuleMap::KnownHeader findModuleForHeader(const FileEntry *File) const;
   
   /// \brief Read the contents of the given module map file.
   ///

@@ -156,8 +156,17 @@ CXX = @CXX@
 # Path to the CC binary, which use used by testcases for native builds.
 CC := @CC@
 
+# C/C++ preprocessor flags.
+CPPFLAGS += @CPPFLAGS@
+
+# C compiler flags.
+CFLAGS += @CFLAGS@
+
+# C++ compiler flags.
+CXXFLAGS += @CXXFLAGS@
+
 # Linker flags.
-LDFLAGS+=@LDFLAGS@
+LDFLAGS += @LDFLAGS@
 
 # Path to the library archiver program.
 AR_PATH = @AR@
@@ -179,6 +188,7 @@ RANLIB     := @RANLIB@
 RM         := @RM@
 SED        := @SED@
 TAR        := @TAR@
+PYTHON     := @PYTHON@
 
 # Paths to miscellaneous programs we hope are present but might not be
 BZIP2      := @BZIP2@
@@ -224,6 +234,9 @@ ENABLE_LIBCPP = @ENABLE_LIBCPP@
 
 # When ENABLE_CXX11 is enabled, LLVM uses c++11 mode by default to build.
 ENABLE_CXX11 = @ENABLE_CXX11@
+
+# When ENABLE_SPLIT_DWARF is enabled, LLVM uses -gfission to build in debug mode.
+ENABLE_SPLIT_DWARF = @ENABLE_SPLIT_DWARF@
 
 # When ENABLE_CLANG_ARCMT is enabled, clang will have ARCMigrationTool.
 ENABLE_CLANG_ARCMT = @ENABLE_CLANG_ARCMT@
@@ -290,7 +303,10 @@ ENABLE_DOCS = @ENABLE_DOCS@
 ENABLE_DOXYGEN = @ENABLE_DOXYGEN@
 
 # Do we want to enable threads?
-ENABLE_THREADS := @ENABLE_THREADS@
+ENABLE_THREADS := @LLVM_ENABLE_THREADS@
+
+# Do we want to enable zlib?
+ENABLE_ZLIB := @LLVM_ENABLE_ZLIB@
 
 # Do we want to build with position independent code?
 ENABLE_PIC := @ENABLE_PIC@
@@ -365,8 +381,6 @@ COVERED_SWITCH_DEFAULT = @COVERED_SWITCH_DEFAULT@
 NO_UNINITIALIZED = @NO_UNINITIALIZED@
 # -Wno-maybe-uninitialized
 NO_MAYBE_UNINITIALIZED = @NO_MAYBE_UNINITIALIZED@
-# -Wno-nested-anon-types
-NO_NESTED_ANON_TYPES = @NO_NESTED_ANON_TYPES@
 
 # Was polly found in tools/polly?
 LLVM_HAS_POLLY = @LLVM_HAS_POLLY@

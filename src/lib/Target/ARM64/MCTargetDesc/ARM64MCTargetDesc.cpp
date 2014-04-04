@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ARM64MCTargetDesc.h"
+#include "ARM64ELFStreamer.h"
 #include "ARM64MCAsmInfo.h"
 #include "InstPrinter/ARM64InstPrinter.h"
 #include "llvm/MC/MCCodeGenInfo.h"
@@ -53,13 +54,22 @@ static MCRegisterInfo *createARM64MCRegisterInfo(StringRef Triple) {
   return X;
 }
 
-static MCAsmInfo *createARM64MCAsmInfo(const Target &T, StringRef TT) {
-  MCAsmInfo *MAI = new ARM64MCAsmInfo();
+static MCAsmInfo *createARM64MCAsmInfo(const MCRegisterInfo &MRI,
+                                       StringRef TT) {
+  Triple TheTriple(TT);
 
-   // Initial state of the frame pointer is SP.
-  MachineLocation Dst(MachineLocation::VirtualFP);
-  MachineLocation Src(ARM64::SP, 0);
-  MAI->addInitialFrameState(0, Dst, Src);
+  MCAsmInfo *MAI;
+  if (TheTriple.isOSDarwin())
+    MAI = new ARM64MCAsmInfoDarwin();
+  else {
+    assert(TheTriple.isOSBinFormatELF() && "Only expect Darwin or ELF");
+    MAI = new ARM64MCAsmInfoELF();
+  }
+
+  // Initial state of the frame pointer is SP.
+  unsigned Reg = MRI.getDwarfRegNum(ARM64::SP, true);
+  MCCFIInstruction Inst = MCCFIInstruction::createDefCfa(0, Reg, 0);
+  MAI->addInitialFrameState(Inst);
 
   return MAI;
 }
@@ -67,10 +77,36 @@ static MCAsmInfo *createARM64MCAsmInfo(const Target &T, StringRef TT) {
 MCCodeGenInfo *createARM64MCCodeGenInfo(StringRef TT, Reloc::Model RM,
                                         CodeModel::Model CM,
                                         CodeGenOpt::Level OL) {
+  Triple TheTriple(TT);
   MCCodeGenInfo *X = new MCCodeGenInfo();
-  // ARM64 is always PIC.
-  X->InitMCCodeGenInfo(Reloc::PIC_, CM, OL);
+
+  if (TheTriple.isOSDarwin()) {
+    // ARM64 Darwin is always PIC.
+    X->InitMCCodeGenInfo(Reloc::PIC_, CM, OL);
+    return X;
+  }
+
+  assert(TheTriple.isOSBinFormatELF() && "Only expect Darwin and ELF targets");
+
+  if (RM == Reloc::Default || RM == Reloc::DynamicNoPIC) {
+    // On ELF platforms the default static relocation model has a smart enough
+    // linker to cope with referencing external symbols defined in a shared
+    // library. Hence DynamicNoPIC doesn't need to be promoted to PIC.
+    RM = Reloc::Static;
+  }
+
+  if (CM == CodeModel::Default)
+    CM = CodeModel::Small;
+  else if (CM == CodeModel::JITDefault) {
+    // The default MCJIT memory managers make no guarantees about where they can
+    // find an executable page; JITed code needs to be able to refer to globals
+    // no matter how far away they are.
+    CM = CodeModel::Large;
+  }
+
+  X->InitMCCodeGenInfo(RM, CM, OL);
   return X;
+
 }
 
 static MCInstPrinter *createARM64MCInstPrinter(const Target &T,
@@ -95,8 +131,7 @@ static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
     return createMachOStreamer(Ctx, TAB, OS, Emitter, RelaxAll,
                                /*LabelSections*/true);
 
-  llvm_unreachable("Unsupported object file format.");
-  return NULL;
+  return createARM64ELFStreamer(Ctx, TAB, OS, Emitter, RelaxAll, NoExecStack);
 }
 
 

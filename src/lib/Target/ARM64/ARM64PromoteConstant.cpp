@@ -86,6 +86,10 @@ namespace {
   public:
     static char ID;
     ARM64PromoteConstant() : ModulePass(ID) {}
+
+    virtual const char *getPassName() const {
+      return "ARM64 Promote Constant";
+    }
     
     /// Iterate over the functions and promote the interesting constants into
     /// global variables with module scope.
@@ -540,35 +544,10 @@ bool ARM64PromoteConstant::computeAndInsertDefinitions(Constant *Val) {
   return insertDefinitions(Val, InsertPtsPerFunc);
 }
 
-// workaround for rdar://13363576
-static bool isSafeToConvertTy(const Type *Ty) {
-  // filter out type that contains large integer constant those bitwidth is not
-  // a multiple of 64 bits.
-  
-  // if it is a compound type, check each of its composant.
-  // Otherwise, check the actual size.
-  if (Ty->isStructTy()) {
-    for (unsigned EltIdx = 0, EndEltIdx = Ty->getStructNumElements();
-         EltIdx < EndEltIdx; ++EltIdx)
-      if (!isSafeToConvertTy(Ty->getStructElementType(EltIdx)))
-        return false;
-    return true;
-  }
-  if (Ty->isVectorTy() || Ty->isArrayTy())
-    return isSafeToConvertTy(Ty->getSequentialElementType());
- 
-  const IntegerType *IntTy = dyn_cast<const IntegerType>(Ty);
-  if (!IntTy)
-    return true;
-  unsigned BitWidth = IntTy->getBitWidth();
-  return BitWidth <= 64 || (BitWidth & 63) == 0;
-}
-
 bool ARM64PromoteConstant::promoteConstant(Constant *Cst) {
   assert(Cst && "Given variable is not a valid constant.");
   
-  // isSafeToConvertTy check is a workaround for rdar://13363576
-  if (!shouldConvert(Cst) || !isSafeToConvertTy(Cst->getType()))
+  if (!shouldConvert(Cst))
     return false;
     
   DEBUG(dbgs() << "******************************\n");

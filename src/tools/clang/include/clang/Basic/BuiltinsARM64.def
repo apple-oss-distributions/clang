@@ -14,6 +14,13 @@
 
 // The format of this database matches clang/Basic/Builtins.def.
 
+// In libgcc
+BUILTIN(__clear_cache, "vv*v*", "")
+
+BUILTIN(__builtin_arm_ldrex, "v.", "t")
+BUILTIN(__builtin_arm_strex, "i.", "t")
+BUILTIN(__builtin_arm_clrex, "v", "")
+
 // SIMD
 #define GET_NEON_BUILTINS
 #include "clang/Basic/arm64_simd.inc"

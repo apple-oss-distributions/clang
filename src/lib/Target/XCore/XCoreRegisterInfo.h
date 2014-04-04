@@ -25,8 +25,6 @@ class TargetInstrInfo;
 
 struct XCoreRegisterInfo : public XCoreGenRegisterInfo {
 private:
-  const TargetInstrInfo &TII;
-
   void loadConstant(MachineBasicBlock &MBB,
                   MachineBasicBlock::iterator I,
                   unsigned DstReg, int64_t Value, DebugLoc dl) const;
@@ -40,7 +38,7 @@ private:
                   unsigned DstReg, int Offset, DebugLoc dl) const;
 
 public:
-  XCoreRegisterInfo(const TargetInstrInfo &tii);
+  XCoreRegisterInfo();
 
   /// Code Generation virtual methods...
 
@@ -53,10 +51,6 @@ public:
   bool trackLivenessAfterRegAlloc(const MachineFunction &MF) const;
 
   bool useFPForScavengingIndex(const MachineFunction &MF) const;
-
-  void eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                     MachineBasicBlock &MBB,
-                                     MachineBasicBlock::iterator I) const;
 
   void eliminateFrameIndex(MachineBasicBlock::iterator II,
                            int SPAdj, unsigned FIOperandNum,

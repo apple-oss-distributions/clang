@@ -12,6 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/Dwarf.h"
+#include "llvm/Support/ErrorHandling.h"
+
 using namespace llvm;
 using namespace dwarf;
 
@@ -59,8 +61,8 @@ const char *llvm::dwarf::TagString(unsigned Tag) {
   case DW_TAG_namelist_item:             return "DW_TAG_namelist_item";
   case DW_TAG_packed_type:               return "DW_TAG_packed_type";
   case DW_TAG_subprogram:                return "DW_TAG_subprogram";
-  case DW_TAG_template_type_parameter:  return "DW_TAG_template_type_parameter";
-  case DW_TAG_template_value_parameter:return "DW_TAG_template_value_parameter";
+  case DW_TAG_template_type_parameter:   return "DW_TAG_template_type_parameter";
+  case DW_TAG_template_value_parameter:  return "DW_TAG_template_value_parameter";
   case DW_TAG_thrown_type:               return "DW_TAG_thrown_type";
   case DW_TAG_try_block:                 return "DW_TAG_try_block";
   case DW_TAG_variant_part:              return "DW_TAG_variant_part";
@@ -82,6 +84,9 @@ const char *llvm::dwarf::TagString(unsigned Tag) {
   case DW_TAG_arg_variable:              return "DW_TAG_arg_variable";
   case DW_TAG_rvalue_reference_type:     return "DW_TAG_rvalue_reference_type";
   case DW_TAG_template_alias:            return "DW_TAG_template_alias";
+  case DW_TAG_coarray_type:              return "DW_TAG_coarray_type";
+  case DW_TAG_generic_subrange:          return "DW_TAG_generic_subrange";
+  case DW_TAG_dynamic_type:              return "DW_TAG_generic_subrange";
   case DW_TAG_MIPS_loop:                 return "DW_TAG_MIPS_loop";
   case DW_TAG_type_unit:                 return "DW_TAG_type_unit";
   case DW_TAG_format_label:              return "DW_TAG_format_label";
@@ -204,6 +209,16 @@ const char *llvm::dwarf::AttributeString(unsigned Attribute) {
   case DW_AT_const_expr:                 return "DW_AT_const_expr";
   case DW_AT_enum_class:                 return "DW_AT_enum_class";
   case DW_AT_linkage_name:               return "DW_AT_linkage_name";
+  case DW_AT_string_length_bit_size:     return "DW_AT_string_length_bit_size";
+  case DW_AT_string_length_byte_size:    return "DW_AT_string_length_byte_size";
+  case DW_AT_rank:                       return "DW_AT_rank";
+  case DW_AT_str_offsets_base:           return "DW_AT_str_offsets_base";
+  case DW_AT_addr_base:                  return "DW_AT_addr_base";
+  case DW_AT_ranges_base:                return "DW_AT_ranges_base";
+  case DW_AT_dwo_id:                     return "DW_AT_dwo_id";
+  case DW_AT_dwo_name:                   return "DW_AT_dwo_name";
+  case DW_AT_reference:                  return "DW_AT_reference";
+  case DW_AT_rvalue_reference:           return "DW_AT_rvalue_reference";
   case DW_AT_MIPS_loop_begin:            return "DW_AT_MIPS_loop_begin";
   case DW_AT_MIPS_tail_loop_begin:       return "DW_AT_MIPS_tail_loop_begin";
   case DW_AT_MIPS_epilog_begin:          return "DW_AT_MIPS_epilog_begin";
@@ -230,6 +245,7 @@ const char *llvm::dwarf::AttributeString(unsigned Attribute) {
   case DW_AT_body_end:                   return "DW_AT_body_end";
   case DW_AT_GNU_vector:                 return "DW_AT_GNU_vector";
   case DW_AT_GNU_template_name:          return "DW_AT_GNU_template_name";
+  case DW_AT_GNU_odr_signature:          return "DW_AT_GNU_odr_signature";
   case DW_AT_MIPS_assumed_size:          return "DW_AT_MIPS_assumed_size";
   case DW_AT_lo_user:                    return "DW_AT_lo_user";
   case DW_AT_hi_user:                    return "DW_AT_hi_user";
@@ -453,10 +469,11 @@ const char *llvm::dwarf::OperationEncodingString(unsigned Encoding) {
   case DW_OP_bit_piece:                  return "DW_OP_bit_piece";
   case DW_OP_implicit_value:             return "DW_OP_implicit_value";
   case DW_OP_stack_value:                return "DW_OP_stack_value";
-  case DW_OP_lo_user:                    return "DW_OP_lo_user";
-  case DW_OP_hi_user:                    return "DW_OP_hi_user";
 
-    // DWARF5 Fission Proposal Op Extensions
+  // GNU thread-local storage
+  case DW_OP_GNU_push_tls_address:       return "DW_OP_GNU_push_tls_address";
+
+  // DWARF5 Fission Proposal Op Extensions
   case DW_OP_GNU_addr_index:             return "DW_OP_GNU_addr_index";
   case DW_OP_GNU_const_index:            return "DW_OP_GNU_const_index";
   }
@@ -572,6 +589,14 @@ const char *llvm::dwarf::LanguageString(unsigned Language) {
   case DW_LANG_ObjC_plus_plus:           return "DW_LANG_ObjC_plus_plus";
   case DW_LANG_UPC:                      return "DW_LANG_UPC";
   case DW_LANG_D:                        return "DW_LANG_D";
+  case DW_LANG_Python:                   return "DW_LANG_Python";
+  case DW_LANG_OpenCL:                   return "DW_LANG_OpenCL";
+  case DW_LANG_Go:                       return "DW_LANG_Go";
+  case DW_LANG_Modula3:                  return "DW_LANG_Modula3";
+  case DW_LANG_Haskell:                  return "DW_LANG_Haskell";
+  case DW_LANG_C_plus_plus_03:           return "DW_LANG_C_plus_plus_03";
+  case DW_LANG_C_plus_plus_11:           return "DW_LANG_C_plus_plus_11";
+  case DW_LANG_OCaml:                    return "DW_LANG_OCaml";
   case DW_LANG_lo_user:                  return "DW_LANG_lo_user";
   case DW_LANG_hi_user:                  return "DW_LANG_hi_user";
   }
@@ -688,6 +713,7 @@ const char *llvm::dwarf::MacinfoString(unsigned Encoding) {
 /// encodings.
 const char *llvm::dwarf::CallFrameString(unsigned Encoding) {
   switch (Encoding) {
+  case DW_CFA_nop:                       return "DW_CFA_nop";
   case DW_CFA_advance_loc:               return "DW_CFA_advance_loc";
   case DW_CFA_offset:                    return "DW_CFA_offset";
   case DW_CFA_restore:                   return "DW_CFA_restore";
@@ -720,4 +746,52 @@ const char *llvm::dwarf::CallFrameString(unsigned Encoding) {
   case DW_CFA_hi_user:                   return "DW_CFA_hi_user";
   }
   return 0;
+}
+
+const char *llvm::dwarf::AtomTypeString(unsigned AT) {
+  switch (AT) {
+  case dwarf::DW_ATOM_null:
+    return "DW_ATOM_null";
+  case dwarf::DW_ATOM_die_offset:
+    return "DW_ATOM_die_offset";
+  case DW_ATOM_cu_offset:
+    return "DW_ATOM_cu_offset";
+  case DW_ATOM_die_tag:
+    return "DW_ATOM_die_tag";
+  case DW_ATOM_type_flags:
+    return "DW_ATOM_type_flags";
+  }
+  return 0;
+}
+
+const char *llvm::dwarf::GDBIndexEntryKindString(GDBIndexEntryKind Kind) {
+  switch (Kind) {
+  case GIEK_NONE:
+    return "NONE";
+  case GIEK_TYPE:
+    return "TYPE";
+  case GIEK_VARIABLE:
+    return "VARIABLE";
+  case GIEK_FUNCTION:
+    return "FUNCTION";
+  case GIEK_OTHER:
+    return "OTHER";
+  case GIEK_UNUSED5:
+    return "UNUSED5";
+  case GIEK_UNUSED6:
+    return "UNUSED6";
+  case GIEK_UNUSED7:
+    return "UNUSED7";
+  }
+  llvm_unreachable("Unknown GDBIndexEntryKind value");
+}
+
+const char *llvm::dwarf::GDBIndexEntryLinkageString(GDBIndexEntryLinkage Linkage) {
+  switch (Linkage) {
+  case GIEL_EXTERNAL:
+    return "EXTERNAL";
+  case GIEL_STATIC:
+    return "STATIC";
+  }
+  llvm_unreachable("Unknown GDBIndexEntryLinkage value");
 }

@@ -64,8 +64,8 @@ const MCInstrDesc *ScheduleDAG::getNodeDesc(const SDNode *Node) const {
 /// specified node.
 bool SUnit::addPred(const SDep &D, bool Required) {
   // If this node already has this depenence, don't add a redundant one.
-  for (SmallVector<SDep, 4>::iterator I = Preds.begin(), E = Preds.end();
-       I != E; ++I) {
+  for (SmallVectorImpl<SDep>::iterator I = Preds.begin(), E = Preds.end();
+         I != E; ++I) {
     // Zero-latency weak edges may be added purely for heuristic ordering. Don't
     // add them if another kind of edge already exists.
     if (!Required && I->getSUnit() == D.getSUnit())
@@ -77,7 +77,7 @@ bool SUnit::addPred(const SDep &D, bool Required) {
         // Find the corresponding successor in N.
         SDep ForwardD = *I;
         ForwardD.setSUnit(this);
-        for (SmallVector<SDep, 4>::iterator II = PredSU->Succs.begin(),
+        for (SmallVectorImpl<SDep>::iterator II = PredSU->Succs.begin(),
                EE = PredSU->Succs.end(); II != EE; ++II) {
           if (*II == ForwardD) {
             II->setLatency(D.getLatency());
@@ -132,23 +132,17 @@ bool SUnit::addPred(const SDep &D, bool Required) {
 /// the specified node.
 void SUnit::removePred(const SDep &D) {
   // Find the matching predecessor.
-  for (SmallVector<SDep, 4>::iterator I = Preds.begin(), E = Preds.end();
-       I != E; ++I)
+  for (SmallVectorImpl<SDep>::iterator I = Preds.begin(), E = Preds.end();
+         I != E; ++I)
     if (*I == D) {
-      bool FoundSucc = false;
       // Find the corresponding successor in N.
       SDep P = D;
       P.setSUnit(this);
       SUnit *N = D.getSUnit();
-      for (SmallVector<SDep, 4>::iterator II = N->Succs.begin(),
-             EE = N->Succs.end(); II != EE; ++II)
-        if (*II == P) {
-          FoundSucc = true;
-          N->Succs.erase(II);
-          break;
-        }
-      assert(FoundSucc && "Mismatching preds / succs lists!");
-      (void)FoundSucc;
+      SmallVectorImpl<SDep>::iterator Succ = std::find(N->Succs.begin(),
+                                                       N->Succs.end(), P);
+      assert(Succ != N->Succs.end() && "Mismatching preds / succs lists!");
+      N->Succs.erase(Succ);
       Preds.erase(I);
       // Update the bookkeeping.
       if (P.getKind() == SDep::Data) {
@@ -335,8 +329,8 @@ void SUnit::dumpAll(const ScheduleDAG *G) const {
     dbgs() << "  # weak succs left  : " << WeakSuccsLeft << "\n";
   dbgs() << "  # rdefs left       : " << NumRegDefsLeft << "\n";
   dbgs() << "  Latency            : " << Latency << "\n";
-  dbgs() << "  Depth              : " << Depth << "\n";
-  dbgs() << "  Height             : " << Height << "\n";
+  dbgs() << "  Depth              : " << getDepth() << "\n";
+  dbgs() << "  Height             : " << getHeight() << "\n";
 
   if (Preds.size() != 0) {
     dbgs() << "  Predecessors:\n";
@@ -373,6 +367,8 @@ void SUnit::dumpAll(const ScheduleDAG *G) const {
       if (I->isArtificial())
         dbgs() << " *";
       dbgs() << ": Latency=" << I->getLatency();
+      if (I->isAssignedRegDep())
+        dbgs() << " Reg=" << PrintReg(I->getReg(), G->TRI);
       dbgs() << "\n";
     }
   }

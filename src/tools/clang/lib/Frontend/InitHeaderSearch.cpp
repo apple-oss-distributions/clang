@@ -24,6 +24,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -43,22 +44,12 @@ class InitHeaderSearch {
   HeaderSearch &Headers;
   bool Verbose;
   std::string IncludeSysroot;
-  bool SysrootIsImplicit;
-
-public:
   bool HasSysroot;
 
-private:
-  /// AddPathInternal - Add the specified path to the specified group list,
-  /// without performing any additional processing.
-  void AddPathInternal(const Twine &Path, IncludeDirGroup Group,
-                       bool isFramework, bool WasImplicit);
-
 public:
-  InitHeaderSearch(HeaderSearch &HS, const HeaderSearchOptions &HSOpts)
-    : Headers(HS), Verbose(HSOpts.Verbose), IncludeSysroot(HSOpts.Sysroot),
-      SysrootIsImplicit(HSOpts.SysrootIsImplicit),
-      HasSysroot(!(IncludeSysroot.empty() || IncludeSysroot == "/")) {
+  InitHeaderSearch(HeaderSearch &HS, bool verbose, StringRef sysroot)
+    : Headers(HS), Verbose(verbose), IncludeSysroot(sysroot),
+      HasSysroot(!(sysroot.empty() || sysroot == "/")) {
   }
 
   /// AddPath - Add the specified path to the specified group list, prefixing
@@ -133,40 +124,16 @@ void InitHeaderSearch::AddPath(const Twine &Path, IncludeDirGroup Group,
     SmallString<256> MappedPathStorage;
     StringRef MappedPathStr = Path.toStringRef(MappedPathStorage);
     if (CanPrefixSysroot(MappedPathStr)) {
-      AddPathInternal(IncludeSysroot + Path, Group, isFramework, false);
-
-      // If implicit sysroot behavior is enabled, also add the unmapped path.
-      if (SysrootIsImplicit)
-        AddPathInternal(Path, Group, isFramework, true);
+      AddUnmappedPath(IncludeSysroot + Path, Group, isFramework);
       return;
     }
   }
 
-  AddPathInternal(Path, Group, isFramework, false);
+  AddUnmappedPath(Path, Group, isFramework);
 }
 
 void InitHeaderSearch::AddUnmappedPath(const Twine &Path, IncludeDirGroup Group,
                                        bool isFramework) {
-  // If implicit sysroot behavior is enabled, also add the path implicitly
-  // mapped into the sysroot. We make sure to put this ahead of the unmapped
-  // path, because we expect that when an explicitly mentioned path exists
-  // inside the SDK, it should take precedence. This is particularly important
-  // with frameworks, as the compiler only looks inside the first framework
-  // found for any specific framework name.
-  if (HasSysroot && SysrootIsImplicit) {
-    SmallString<256> MappedPathStorage;
-    StringRef MappedPathStr = Path.toStringRef(MappedPathStorage);
-    if (CanPrefixSysroot(MappedPathStr)) {
-      AddPathInternal(IncludeSysroot + Path, Group, isFramework, true);
-    }
-  }
-
-  // Add the unmapped path.
-  AddPathInternal(Path, Group, isFramework, false);
-}
-
-void InitHeaderSearch::AddPathInternal(const Twine &Path, IncludeDirGroup Group,
-                                       bool isFramework, bool WasImplicit) {
   assert(!Path.isTriviallyEmpty() && "can't handle empty path here");
 
   FileManager &FM = Headers.getFileMgr();
@@ -204,7 +171,7 @@ void InitHeaderSearch::AddPathInternal(const Twine &Path, IncludeDirGroup Group,
     }
   }
 
-  if (Verbose && !WasImplicit)
+  if (Verbose)
     llvm::errs() << "ignoring nonexistent directory \""
                  << MappedPathStr << "\"\n";
 }
@@ -276,8 +243,8 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
   if (HSOpts.UseBuiltinIncludes) {
     // Ignore the sys root, we *always* look for clang headers relative to
     // supplied path.
-    llvm::sys::Path P(HSOpts.ResourceDir);
-    P.appendComponent("include");
+    SmallString<128> P = StringRef(HSOpts.ResourceDir);
+    llvm::sys::path::append(P, "include");
     AddUnmappedPath(P.str(), ExternCSystem, false);
   }
 
@@ -344,15 +311,20 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     break;
   case llvm::Triple::MinGW32: { 
       // mingw-w64 crt include paths
-      llvm::sys::Path P(HSOpts.ResourceDir);
-      P.appendComponent("../../../i686-w64-mingw32/include"); // <sysroot>/i686-w64-mingw32/include
+      // <sysroot>/i686-w64-mingw32/include
+      SmallString<128> P = StringRef(HSOpts.ResourceDir);
+      llvm::sys::path::append(P, "../../../i686-w64-mingw32/include");
       AddPath(P.str(), System, false);
-      P = llvm::sys::Path(HSOpts.ResourceDir);
-      P.appendComponent("../../../x86_64-w64-mingw32/include"); // <sysroot>/x86_64-w64-mingw32/include
+
+      // <sysroot>/x86_64-w64-mingw32/include
+      P.resize(HSOpts.ResourceDir.size());
+      llvm::sys::path::append(P, "../../../x86_64-w64-mingw32/include");
       AddPath(P.str(), System, false);
+
       // mingw.org crt include paths
-      P = llvm::sys::Path(HSOpts.ResourceDir);
-      P.appendComponent("../../../include"); // <sysroot>/include
+      // <sysroot>/include
+      P.resize(HSOpts.ResourceDir.size());
+      llvm::sys::path::append(P, "../../../include");
       AddPath(P.str(), System, false);
       AddPath("/mingw/include", System, false);
 #if defined(_WIN32)
@@ -399,7 +371,20 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
     // Only add this directory if the compiler is actually installed in a
     // toolchain or the command line tools directory.
     if (P.endswith(".xctoolchain/usr") || P.endswith("/CommandLineTools/usr")) {
-      AddPathInternal(P + "/include", ExternCSystem, false, false);
+      AddUnmappedPath(P + "/include", ExternCSystem, false);
+
+      // If this is a toolchain directory, but not the default one, also add the
+      // default. See:
+      //
+      //   <rdar://problem/14796042> FlexLexer.h is missing from command-line
+      //   tools and SDKs.
+      if (P.endswith(".xctoolchain/usr") &&
+          !P.endswith("/XcodeDefault.xctoolchain/usr")) {
+        P = llvm::sys::path::parent_path(P);
+        P = llvm::sys::path::parent_path(P);
+        AddUnmappedPath(P + "/XcodeDefault.xctoolchain/usr/include",
+                        ExternCSystem, false);
+      }
     }
 
     AddPath("/usr/include", ExternCSystem, false);
@@ -456,6 +441,7 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple, const HeaderSearchOp
 
   case llvm::Triple::Cygwin:
     // Cygwin-1.7
+    AddMinGWCPlusPlusIncludePaths("/usr/lib/gcc", "i686-pc-cygwin", "4.7.3");
     AddMinGWCPlusPlusIncludePaths("/usr/lib/gcc", "i686-pc-cygwin", "4.5.3");
     AddMinGWCPlusPlusIncludePaths("/usr/lib/gcc", "i686-pc-cygwin", "4.3.4");
     // g++-4 / Cygwin-1.5
@@ -476,6 +462,7 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple, const HeaderSearchOp
     // mingw.org C++ include paths
     AddMinGWCPlusPlusIncludePaths("/mingw/lib/gcc", "mingw32", "4.5.2"); //MSYS
 #if defined(_WIN32)
+    AddMinGWCPlusPlusIncludePaths("c:/MinGW/lib/gcc", "mingw32", "4.8.1");
     AddMinGWCPlusPlusIncludePaths("c:/MinGW/lib/gcc", "mingw32", "4.6.2");
     AddMinGWCPlusPlusIncludePaths("c:/MinGW/lib/gcc", "mingw32", "4.6.1");
     AddMinGWCPlusPlusIncludePaths("c:/MinGW/lib/gcc", "mingw32", "4.5.2");
@@ -485,15 +472,15 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple, const HeaderSearchOp
 #endif
     break;
   case llvm::Triple::DragonFly:
-    AddPath("/usr/include/c++/4.1", CXXSystem, false);
+    if (llvm::sys::fs::exists("/usr/lib/gcc47"))
+      AddPath("/usr/include/c++/4.7", CXXSystem, false);
+    else
+      AddPath("/usr/include/c++/4.4", CXXSystem, false);
     break;
   case llvm::Triple::FreeBSD:
     // FreeBSD 8.0
     // FreeBSD 7.3
     AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.2", "", "", "", triple);
-    break;
-  case llvm::Triple::NetBSD:
-    AddGnuCPlusPlusIncludePaths("/usr/include/g++", "", "", "", triple);
     break;
   case llvm::Triple::OpenBSD: {
     std::string t = triple.getTriple();
@@ -543,14 +530,14 @@ void InitHeaderSearch::AddDefaultIncludePaths(const LangOptions &Lang,
       if (triple.isOSDarwin()) {
         // On Darwin, libc++ may be installed alongside the compiler in
         // lib/c++/v1.
-        llvm::sys::Path P(HSOpts.ResourceDir);
-        if (!P.isEmpty()) {
-          P.eraseComponent();  // Remove version from foo/lib/clang/version
-          P.eraseComponent();  // Remove clang from foo/lib/clang
+        if (!HSOpts.ResourceDir.empty()) {
+          // Remove version from foo/lib/clang/version
+          StringRef NoVer = llvm::sys::path::parent_path(HSOpts.ResourceDir);
+          // Remove clang from foo/lib/clang
+          SmallString<128> P = llvm::sys::path::parent_path(NoVer);
           
           // Get foo/lib/c++/v1
-          P.appendComponent("c++");
-          P.appendComponent("v1");
+          llvm::sys::path::append(P, "c++", "v1");
           AddUnmappedPath(P.str(), CXXSystem, false);
         }
       }
@@ -740,7 +727,7 @@ void clang::ApplyHeaderSearchOptions(HeaderSearch &HS,
                                      const HeaderSearchOptions &HSOpts,
                                      const LangOptions &Lang,
                                      const llvm::Triple &Triple) {
-  InitHeaderSearch Init(HS, HSOpts);
+  InitHeaderSearch Init(HS, HSOpts.Verbose, HSOpts.Sysroot);
 
   // Add the user defined entries.
   for (unsigned i = 0, e = HSOpts.UserEntries.size(); i != e; ++i) {
@@ -760,8 +747,8 @@ void clang::ApplyHeaderSearchOptions(HeaderSearch &HS,
 
   if (HSOpts.UseBuiltinIncludes) {
     // Set up the builtin include directory in the module map.
-    llvm::sys::Path P(HSOpts.ResourceDir);
-    P.appendComponent("include");
+    SmallString<128> P = StringRef(HSOpts.ResourceDir);
+    llvm::sys::path::append(P, "include");
     if (const DirectoryEntry *Dir = HS.getFileMgr().getDirectory(P.str()))
       HS.getModuleMap().setBuiltinIncludeDir(Dir);
   }

@@ -65,7 +65,6 @@ class TestData {
 };
 
 const int kThreads = 8;
-const int kWriteRate = 1024;
 #if SANITIZER_DEBUG
 const int kIters = 16*1024;
 #else
@@ -90,6 +89,12 @@ static void *try_thread(void *param) {
     data->Backoff();
   }
   return 0;
+}
+
+template<typename MutexType>
+static void check_locked(MutexType *mtx) {
+  GenericScopedLock<MutexType> l(mtx);
+  mtx->CheckLocked();
 }
 
 TEST(SanitizerCommon, SpinMutex) {
@@ -123,6 +128,7 @@ TEST(SanitizerCommon, BlockingMutex) {
     pthread_create(&threads[i], 0, lock_thread<BlockingMutex>, &data);
   for (int i = 0; i < kThreads; i++)
     pthread_join(threads[i], 0);
+  check_locked(mtx);
 }
 
 }  // namespace __sanitizer

@@ -15,20 +15,18 @@
 #include "R600RegisterInfo.h"
 #include "AMDGPUTargetMachine.h"
 #include "R600Defines.h"
+#include "R600InstrInfo.h"
 #include "R600MachineFunctionInfo.h"
 
 using namespace llvm;
 
-R600RegisterInfo::R600RegisterInfo(AMDGPUTargetMachine &tm,
-    const TargetInstrInfo &tii)
-: AMDGPURegisterInfo(tm, tii),
-  TM(tm),
-  TII(tii)
-  { }
+R600RegisterInfo::R600RegisterInfo(AMDGPUTargetMachine &tm)
+: AMDGPURegisterInfo(tm),
+  TM(tm)
+  { RCW.RegWeight = 0; RCW.WeightLimit = 0;}
 
 BitVector R600RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
-  const R600MachineFunctionInfo * MFI = MF.getInfo<R600MachineFunctionInfo>();
 
   Reserved.set(AMDGPU::ZERO);
   Reserved.set(AMDGPU::HALF);
@@ -43,12 +41,21 @@ BitVector R600RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   Reserved.set(AMDGPU::PRED_SEL_OFF);
   Reserved.set(AMDGPU::PRED_SEL_ZERO);
   Reserved.set(AMDGPU::PRED_SEL_ONE);
+  Reserved.set(AMDGPU::INDIRECT_BASE_ADDR);
 
-  for (std::vector<unsigned>::const_iterator I = MFI->ReservedRegs.begin(),
-                                    E = MFI->ReservedRegs.end(); I != E; ++I) {
+  for (TargetRegisterClass::iterator I = AMDGPU::R600_AddrRegClass.begin(),
+                        E = AMDGPU::R600_AddrRegClass.end(); I != E; ++I) {
     Reserved.set(*I);
   }
 
+  const R600InstrInfo *RII =
+    static_cast<const R600InstrInfo*>(TM.getInstrInfo());
+  std::vector<unsigned> IndirectRegs = RII->getIndirectReservedRegs(MF);
+  for (std::vector<unsigned>::iterator I = IndirectRegs.begin(),
+                                       E = IndirectRegs.end();
+                                       I != E; ++I) {
+    Reserved.set(*I);
+  }
   return Reserved;
 }
 
@@ -74,12 +81,7 @@ const TargetRegisterClass * R600RegisterInfo::getCFGStructurizerRegClass(
   }
 }
 
-unsigned R600RegisterInfo::getSubRegFromChannel(unsigned Channel) const {
-  switch (Channel) {
-    default: assert(!"Invalid channel index"); return 0;
-    case 0: return AMDGPU::sel_x;
-    case 1: return AMDGPU::sel_y;
-    case 2: return AMDGPU::sel_z;
-    case 3: return AMDGPU::sel_w;
-  }
+const RegClassWeight &R600RegisterInfo::getRegClassWeight(
+  const TargetRegisterClass *RC) const {
+  return RCW;
 }

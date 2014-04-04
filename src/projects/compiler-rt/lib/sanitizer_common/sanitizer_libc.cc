@@ -10,6 +10,7 @@
 // This file is shared between AddressSanitizer and ThreadSanitizer
 // run-time libraries. See sanitizer_libc.h for details.
 //===----------------------------------------------------------------------===//
+#include "sanitizer_allocator_internal.h"
 #include "sanitizer_common.h"
 #include "sanitizer_libc.h"
 
@@ -124,6 +125,13 @@ char* internal_strchr(const char *s, int c) {
   }
 }
 
+char *internal_strchrnul(const char *s, int c) {
+  char *res = internal_strchr(s, c);
+  if (!res)
+    res = (char*)s + internal_strlen(s);
+  return res;
+}
+
 char *internal_strrchr(const char *s, int c) {
   const char *res = 0;
   for (uptr i = 0; s[i]; i++) {
@@ -151,8 +159,7 @@ char *internal_strncpy(char *dst, const char *src, uptr n) {
   uptr i;
   for (i = 0; i < n && src[i]; i++)
     dst[i] = src[i];
-  for (; i < n; i++)
-    dst[i] = '\0';
+  internal_memset(dst + i, '\0', n - i);
   return dst;
 }
 
@@ -206,7 +213,7 @@ s64 internal_simple_strtoll(const char *nptr, char **endptr, int base) {
 }
 
 bool mem_is_zero(const char *beg, uptr size) {
-  CHECK_LE(size, 1UL << FIRST_32_SECOND_64(30, 40));  // Sanity check.
+  CHECK_LE(size, 1ULL << FIRST_32_SECOND_64(30, 40));  // Sanity check.
   const char *end = beg + size;
   uptr *aligned_beg = (uptr *)RoundUpTo((uptr)beg, sizeof(uptr));
   uptr *aligned_end = (uptr *)RoundDownTo((uptr)end, sizeof(uptr));

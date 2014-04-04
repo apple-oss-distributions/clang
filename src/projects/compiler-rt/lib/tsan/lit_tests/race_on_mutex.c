@@ -1,4 +1,4 @@
-// RUN: %clang_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clang_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -34,7 +34,7 @@ int main() {
 }
 
 // CHECK:      WARNING: ThreadSanitizer: data race
-// CHECK-NEXT:   Read of size 1 at {{.*}} by thread T2:
+// CHECK-NEXT:   Atomic read of size 1 at {{.*}} by thread T2:
 // CHECK-NEXT:     #0 pthread_mutex_lock
 // CHECK-NEXT:     #1 Thread2{{.*}} {{.*}}race_on_mutex.c:20{{(:3)?}} ({{.*}})
 // CHECK:        Previous write of size 1 at {{.*}} by thread T1:

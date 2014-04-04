@@ -27,13 +27,12 @@ class MSP430TargetMachine;
 struct MSP430RegisterInfo : public MSP430GenRegisterInfo {
 private:
   MSP430TargetMachine &TM;
-  const TargetInstrInfo &TII;
 
   /// StackAlign - Default stack alignment.
   ///
   unsigned StackAlign;
 public:
-  MSP430RegisterInfo(MSP430TargetMachine &tm, const TargetInstrInfo &tii);
+  MSP430RegisterInfo(MSP430TargetMachine &tm);
 
   /// Code Generation virtual methods...
   const uint16_t *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
@@ -41,10 +40,6 @@ public:
   BitVector getReservedRegs(const MachineFunction &MF) const;
   const TargetRegisterClass*
   getPointerRegClass(const MachineFunction &MF, unsigned Kind = 0) const;
-
-  void eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                     MachineBasicBlock &MBB,
-                                     MachineBasicBlock::iterator I) const;
 
   void eliminateFrameIndex(MachineBasicBlock::iterator II,
                            int SPAdj, unsigned FIOperandNum,

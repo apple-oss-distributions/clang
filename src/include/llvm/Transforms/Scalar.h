@@ -23,6 +23,7 @@ class GetElementPtrInst;
 class PassInfo;
 class TerminatorInst;
 class TargetLowering;
+class TargetMachine;
 
 //===----------------------------------------------------------------------===//
 //
@@ -119,7 +120,7 @@ Pass *createLICMPass();
 //
 Pass *createLoopStrengthReducePass();
 
-Pass *createGlobalMergePass(const TargetLowering *TLI = 0);
+Pass *createGlobalMergePass(const TargetMachine *TM = 0);
 
 //===----------------------------------------------------------------------===//
 //
@@ -137,7 +138,8 @@ Pass *createLoopInstSimplifyPass();
 //
 // LoopUnroll - This pass is a simple loop unrolling pass.
 //
-Pass *createLoopUnrollPass(int Threshold = -1, int Count = -1, int AllowPartial = -1);
+Pass *createLoopUnrollPass(int Threshold = -1, int Count = -1,
+                           int AllowPartial = -1, int Runtime = -1);
 
 //===----------------------------------------------------------------------===//
 //
@@ -199,6 +201,19 @@ FunctionPass *createCFGSimplificationPass();
 
 //===----------------------------------------------------------------------===//
 //
+// FlattenCFG - flatten CFG, reduce number of conditional branches by using
+// parallel-and and parallel-or mode, etc...
+//
+FunctionPass *createFlattenCFGPass();
+
+//===----------------------------------------------------------------------===//
+//
+// CFG Structurization - Remove irreducible control flow
+//
+Pass *createStructurizeCFGPass();
+
+//===----------------------------------------------------------------------===//
+//
 // BreakCriticalEdges - Break all of the critical edges in the CFG by inserting
 // a dummy basic block. This pass may be "required" by passes that cannot deal
 // with critical edges. For this usage, a pass must call:
@@ -247,17 +262,9 @@ extern char &LowerSwitchID;
 // purpose "my LLVM-to-LLVM pass doesn't support the invoke instruction yet"
 // lowering pass.
 //
-FunctionPass *createLowerInvokePass(const TargetLowering *TLI = 0);
-FunctionPass *createLowerInvokePass(const TargetLowering *TLI,
-                                    bool useExpensiveEHSupport);
+FunctionPass *createLowerInvokePass(const TargetMachine *TM = 0,
+                                    bool useExpensiveEHSupport = false);
 extern char &LowerInvokePassID;
-
-//===----------------------------------------------------------------------===//
-//
-// BlockPlacement - This pass reorders basic blocks in order to increase the
-// number of fall-through conditional branches.
-//
-FunctionPass *createBlockPlacementPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -297,15 +304,9 @@ Pass *createLoopDeletionPass();
   
 //===----------------------------------------------------------------------===//
 //
-/// createSimplifyLibCallsPass - This pass optimizes specific calls to
-/// specific well-known (library) functions.
-FunctionPass *createSimplifyLibCallsPass();
-
-//===----------------------------------------------------------------------===//
-//
 // CodeGenPrepare - This pass prepares a function for instruction selection.
 //
-FunctionPass *createCodeGenPreparePass(const TargetLowering *TLI = 0);
+FunctionPass *createCodeGenPreparePass(const TargetMachine *TM = 0);
 
 //===----------------------------------------------------------------------===//
 //
@@ -342,10 +343,17 @@ extern char &InstructionSimplifierID;
 
 //===----------------------------------------------------------------------===//
 //
-// LowerExpectIntriniscs - Removes llvm.expect intrinsics and creates
+// LowerExpectIntrinsics - Removes llvm.expect intrinsics and creates
 // "block_weights" metadata.
 FunctionPass *createLowerExpectIntrinsicPass();
 
+
+//===----------------------------------------------------------------------===//
+//
+// PartiallyInlineLibCalls - Tries to inline the fast path of library
+// calls such as sqrt.
+//
+FunctionPass *createPartiallyInlineLibCallsPass();
 
 } // End llvm namespace
 

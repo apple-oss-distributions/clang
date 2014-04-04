@@ -14,6 +14,7 @@
 #include "ARM64RegisterInfo.h"
 #include "ARM64FrameLowering.h"
 #include "ARM64InstrInfo.h"
+#include "ARM64Subtarget.h"
 #include "MCTargetDesc/ARM64AddressingModes.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -30,8 +31,9 @@
 
 using namespace llvm;
 
-ARM64RegisterInfo::ARM64RegisterInfo(const ARM64InstrInfo *tii)
-  : ARM64GenRegisterInfo(ARM64::LR), TII(tii) {
+ARM64RegisterInfo::ARM64RegisterInfo(const ARM64InstrInfo *tii,
+                                     const ARM64Subtarget *sti)
+  : ARM64GenRegisterInfo(ARM64::LR), TII(tii), STI(sti) {
 }
 
 const uint16_t *ARM64RegisterInfo::
@@ -43,21 +45,46 @@ const uint32_t *ARM64RegisterInfo::getCallPreservedMask(CallingConv::ID) const {
   return CSR_ARM64_AAPCS_RegMask;
 }
 
+const uint32_t *ARM64RegisterInfo::getTLSCallPreservedMask() const {
+  if (STI->isTargetDarwin())
+    return CSR_ARM64_TLS_Darwin_RegMask;
+
+  assert(STI->isTargetELF() && "only expect Darwin or ELF TLS");
+  return CSR_ARM64_TLS_ELF_RegMask;
+}
+
+const uint32_t*
+ARM64RegisterInfo::getThisReturnPreservedMask(CallingConv::ID) const {
+  // This should return a register mask that is the same as that returned by
+  // getCallPreservedMask but that additionally preserves the register used for
+  // the first i64 argument (which must also be the register used to return a
+  // single i64 return value)
+  //
+  // In case that the calling convention does not use the same register for
+  // both, the function should return NULL (does not currently apply)
+  return CSR_ARM64_AAPCS_ThisReturn_RegMask;
+}
+
 BitVector ARM64RegisterInfo::
 getReservedRegs(const MachineFunction &MF) const {
+  const TargetFrameLowering *TFI = MF.getTarget().getFrameLowering();
+
   // FIXME: avoid re-calculating this everytime.
   BitVector Reserved(getNumRegs());
   Reserved.set(ARM64::SP);
   Reserved.set(ARM64::XZR);
   Reserved.set(ARM64::WSP);
   Reserved.set(ARM64::WZR);
-  Reserved.set(ARM64::LR);
-  Reserved.set(ARM64::W30);
-  Reserved.set(ARM64::FP);
-  Reserved.set(ARM64::W29);
 
-  Reserved.set(ARM64::X18); // Platform register
-  Reserved.set(ARM64::W18);
+  if (TFI->hasFP(MF) || STI->isTargetDarwin()) {
+    Reserved.set(ARM64::FP);
+    Reserved.set(ARM64::W29);
+  }
+
+  if (STI->isTargetDarwin()) {
+    Reserved.set(ARM64::X18); // Platform register
+    Reserved.set(ARM64::W18);
+  }
 
   if (hasBasePointer(MF)) {
     Reserved.set(ARM64::X19);
@@ -77,14 +104,13 @@ bool ARM64RegisterInfo::isReservedReg(const MachineFunction &MF,
   case ARM64::XZR:
   case ARM64::WSP:
   case ARM64::WZR:
-  case ARM64::LR:
-  case ARM64::W30:
+    return true;
   case ARM64::X18:
   case ARM64::W18:
-    return true;
+    return STI->isTargetDarwin();
   case ARM64::FP:
   case ARM64::W29:
-    return TFI->hasFP(MF);
+    return TFI->hasFP(MF) || STI->isTargetDarwin();
   case ARM64::W19:
   case ARM64::X19:
     return hasBasePointer(MF);
@@ -132,37 +158,6 @@ bool ARM64RegisterInfo::hasBasePointer(const MachineFunction &MF) const {
   }
 
   return false;
-}
-
-void ARM64RegisterInfo::eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                          MachineBasicBlock &MBB,
-                                          MachineBasicBlock::iterator I) const {
-  const TargetFrameLowering *TFI = MF.getTarget().getFrameLowering();
-  if (!TFI->hasReservedCallFrame(MF)) {
-    // If we have alloca, convert as follows:
-    // ADJCALLSTACKDOWN -> sub, sp, sp, amount
-    // ADJCALLSTACKUP   -> add, sp, sp, amount
-    MachineInstr *Old = I;
-    DebugLoc DL = Old->getDebugLoc();
-    unsigned Amount = Old->getOperand(0).getImm();
-    if (Amount != 0) {
-      // We need to keep the stack aligned properly.  To do this, we round the
-      // amount of space needed for the outgoing arguments up to the next
-      // alignment boundary.
-      unsigned Align = TFI->getStackAlignment();
-      Amount = (Amount+Align-1)/Align*Align;
-
-      // Replace the pseudo instruction with a new instruction...
-      unsigned Opc = Old->getOpcode();
-      if (Opc == ARM64::ADJCALLSTACKDOWN) {
-        emitFrameOffset(MBB, I, DL, ARM64::SP, ARM64::SP, -Amount, TII);
-      } else {
-        assert(Opc == ARM64::ADJCALLSTACKUP && "expected ADJCALLSTACKUP");
-        emitFrameOffset(MBB, I, DL, ARM64::SP, ARM64::SP, Amount, TII);
-      }
-    }
-  }
-  MBB.erase(I);
 }
 
 unsigned ARM64RegisterInfo::getFrameRegister(const MachineFunction &MF) const {
@@ -340,7 +335,7 @@ void ARM64RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   if (rewriteARM64FrameIndex(MI, FIOperandNum, FrameReg, Offset, TII))
     return;
 
-  assert((!RS || RS->getScavengingFrameIndex() != FrameIndex) &&
+  assert((!RS || !RS->isScavengingFrameIndex(FrameIndex)) &&
          "Emergency spill slot is out of reach");
 
   // If we get here, the immediate doesn't fit into the instruction.  We folded
@@ -434,19 +429,103 @@ unsigned getXRegFromWReg(unsigned Reg) {
   return Reg;
 }
 
+unsigned getBRegFromDReg(unsigned Reg) {
+  switch (Reg) {
+  case ARM64::D0:  return ARM64::B0;
+  case ARM64::D1:  return ARM64::B1;
+  case ARM64::D2:  return ARM64::B2;
+  case ARM64::D3:  return ARM64::B3;
+  case ARM64::D4:  return ARM64::B4;
+  case ARM64::D5:  return ARM64::B5;
+  case ARM64::D6:  return ARM64::B6;
+  case ARM64::D7:  return ARM64::B7;
+  case ARM64::D8:  return ARM64::B8;
+  case ARM64::D9:  return ARM64::B9;
+  case ARM64::D10: return ARM64::B10;
+  case ARM64::D11: return ARM64::B11;
+  case ARM64::D12: return ARM64::B12;
+  case ARM64::D13: return ARM64::B13;
+  case ARM64::D14: return ARM64::B14;
+  case ARM64::D15: return ARM64::B15;
+  case ARM64::D16: return ARM64::B16;
+  case ARM64::D17: return ARM64::B17;
+  case ARM64::D18: return ARM64::B18;
+  case ARM64::D19: return ARM64::B19;
+  case ARM64::D20: return ARM64::B20;
+  case ARM64::D21: return ARM64::B21;
+  case ARM64::D22: return ARM64::B22;
+  case ARM64::D23: return ARM64::B23;
+  case ARM64::D24: return ARM64::B24;
+  case ARM64::D25: return ARM64::B25;
+  case ARM64::D26: return ARM64::B26;
+  case ARM64::D27: return ARM64::B27;
+  case ARM64::D28: return ARM64::B28;
+  case ARM64::D29: return ARM64::B29;
+  case ARM64::D30: return ARM64::B30;
+  case ARM64::D31: return ARM64::B31;
+  }
+  // For anything else, return it unchanged.
+  return Reg;
+}
+
+unsigned getDRegFromBReg(unsigned Reg) {
+  switch (Reg) {
+  case ARM64::B0:  return ARM64::D0;
+  case ARM64::B1:  return ARM64::D1;
+  case ARM64::B2:  return ARM64::D2;
+  case ARM64::B3:  return ARM64::D3;
+  case ARM64::B4:  return ARM64::D4;
+  case ARM64::B5:  return ARM64::D5;
+  case ARM64::B6:  return ARM64::D6;
+  case ARM64::B7:  return ARM64::D7;
+  case ARM64::B8:  return ARM64::D8;
+  case ARM64::B9:  return ARM64::D9;
+  case ARM64::B10: return ARM64::D10;
+  case ARM64::B11: return ARM64::D11;
+  case ARM64::B12: return ARM64::D12;
+  case ARM64::B13: return ARM64::D13;
+  case ARM64::B14: return ARM64::D14;
+  case ARM64::B15: return ARM64::D15;
+  case ARM64::B16: return ARM64::D16;
+  case ARM64::B17: return ARM64::D17;
+  case ARM64::B18: return ARM64::D18;
+  case ARM64::B19: return ARM64::D19;
+  case ARM64::B20: return ARM64::D20;
+  case ARM64::B21: return ARM64::D21;
+  case ARM64::B22: return ARM64::D22;
+  case ARM64::B23: return ARM64::D23;
+  case ARM64::B24: return ARM64::D24;
+  case ARM64::B25: return ARM64::D25;
+  case ARM64::B26: return ARM64::D26;
+  case ARM64::B27: return ARM64::D27;
+  case ARM64::B28: return ARM64::D28;
+  case ARM64::B29: return ARM64::D29;
+  case ARM64::B30: return ARM64::D30;
+  case ARM64::B31: return ARM64::D31;
+  }
+  // For anything else, return it unchanged.
+  return Reg;
+}
+
 unsigned ARM64RegisterInfo::getRegPressureLimit(const TargetRegisterClass *RC,
                                                 MachineFunction &MF) const {
+  const TargetFrameLowering *TFI = MF.getTarget().getFrameLowering();
+
   switch (RC->getID()) {
   default:
     return 0;
   case ARM64::GPR32RegClassID:
   case ARM64::GPR32spRegClassID:
+  case ARM64::GPR32allRegClassID:
   case ARM64::GPR64spRegClassID:
+  case ARM64::GPR64allRegClassID:
   case ARM64::GPR64RegClassID:
   case ARM64::GPR32commonRegClassID:
   case ARM64::GPR64commonRegClassID:
-    return 27; // XZR, SP, FP, LR, and X18 are reserved.
-
+    return 32 - 1                                         // XZR/SP
+              - (TFI->hasFP(MF) || STI->isTargetDarwin()) // FP
+              - STI->isTargetDarwin()       // X18 reserved as platform register
+              - hasBasePointer(MF);                       // X19
   case ARM64::FPR8RegClassID:
   case ARM64::FPR16RegClassID:
   case ARM64::FPR32RegClassID:

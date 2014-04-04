@@ -91,7 +91,10 @@ public:
     TryScope = 0x2000,
 
     /// \brief This is the scope for a function-level C++ try or catch scope.
-    FnTryCatchScope = 0x4000
+    FnTryCatchScope = 0x4000,
+
+    /// \brief This is the scope of OpenMP executable directive
+    OpenMPDirectiveScope = 0x8000
   };
 private:
   /// The parent scope for this scope.  This is null for the translation-unit
@@ -143,11 +146,10 @@ private:
   typedef llvm::SmallPtrSet<Decl *, 32> DeclSetTy;
   DeclSetTy DeclsInScope;
 
-  /// Entity - The entity with which this scope is associated. For
+  /// The DeclContext with which this scope is associated. For
   /// example, the entity of a class scope is the class itself, the
-  /// entity of a function scope is a function, etc. This field is
-  /// maintained by the Action implementation.
-  void *Entity;
+  /// entity of a function scope is a function, etc.
+  DeclContext *Entity;
 
   typedef SmallVector<UsingDirectiveDecl *, 2> UsingDirectivesTy;
   UsingDirectivesTy UsingDirectives;
@@ -236,11 +238,15 @@ public:
     return DeclsInScope.count(D) != 0;
   }
 
-  void* getEntity() const { return Entity; }
-  void setEntity(void *E) { Entity = E; }
+  DeclContext *getEntity() const { return Entity; }
+  void setEntity(DeclContext *E) { Entity = E; }
 
   bool hasErrorOccurred() const { return ErrorTrap.hasErrorOccurred(); }
-                           
+
+  bool hasUnrecoverableErrorOccurred() const {
+    return ErrorTrap.hasUnrecoverableErrorOccurred();
+  }
+
   /// isClassScope - Return true if this scope is a class/struct/union scope.
   bool isClassScope() const {
     return (getFlags() & Scope::ClassScope);
@@ -267,6 +273,18 @@ public:
     return false;
   }
 
+  /// isInObjcMethodOuterScope - Return true if this scope is an
+  /// Objective-C method outer most body.
+  bool isInObjcMethodOuterScope() const {
+    if (const Scope *S = this) {
+      // If this scope is an objc method scope, then we succeed.
+      if (S->getFlags() & ObjCMethodScope)
+        return true;
+    }
+    return false;
+  }
+
+  
   /// isTemplateParamScope - Return true if this scope is a C++
   /// template parameter scope.
   bool isTemplateParamScope() const {
@@ -297,7 +315,12 @@ public:
     }
     return false;
   }
-  
+
+  /// \brief Determines whether this scope is the OpenMP directive scope
+  bool isOpenMPDirectiveScope() const {
+    return (getFlags() & Scope::OpenMPDirectiveScope);
+  }
+
   /// \brief Determine whether this scope is a C++ 'try' block.
   bool isTryScope() const { return getFlags() & Scope::TryScope; }
 

@@ -146,7 +146,7 @@ public:
     _LIBCPP_INLINE_VISIBILITY
     const char *__name_for_load() const _NOEXCEPT
         {uintptr_t __data = __type_name;
-#if 1 // #ifndef __arm64__
+#if 1
          __data &= ~_LIBCPP_NONUNIQUE_RTTI_BIT;
 #endif
          return reinterpret_cast<const char*>(__data);}

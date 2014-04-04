@@ -1,8 +1,13 @@
 set(LLVM_LINK_COMPONENTS support)
 
 add_clang_library(clangFormat
-  UnwrappedLineParser.cpp
+  BreakableToken.cpp
+  ContinuationIndenter.cpp
   Format.cpp
+  FormatToken.cpp
+  TokenAnnotator.cpp
+  UnwrappedLineParser.cpp
+  WhitespaceManager.cpp
   )
 
 add_dependencies(clangFormat

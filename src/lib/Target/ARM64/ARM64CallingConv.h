@@ -31,10 +31,12 @@ static bool CC_ARM64_Custom_i1i8i16_Reg(unsigned ValNo, MVT ValVT, MVT LocVT,
                                       ISD::ArgFlagsTy ArgFlags,
                                       CCState &State) {
   static const uint16_t RegList1[] = {
-    ARM64::W0, ARM64::W1, ARM64::W2, ARM64::W3, ARM64::W4, ARM64::W5, ARM64::W6, ARM64::W7
+    ARM64::W0, ARM64::W1, ARM64::W2, ARM64::W3, ARM64::W4, ARM64::W5,
+    ARM64::W6, ARM64::W7
   };
   static const uint16_t RegList2[] = {
-    ARM64::X0, ARM64::X1, ARM64::X2, ARM64::X3, ARM64::X4, ARM64::X5, ARM64::X6, ARM64::X7
+    ARM64::X0, ARM64::X1, ARM64::X2, ARM64::X3, ARM64::X4, ARM64::X5,
+    ARM64::X6, ARM64::X7
   };
   if (unsigned Reg = State.AllocateReg(RegList1, RegList2, 8)) {
     // Customized extra section for handling i1/i8/i16:

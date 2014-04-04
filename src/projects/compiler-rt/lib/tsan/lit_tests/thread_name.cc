@@ -1,4 +1,4 @@
-// RUN: %clangxx_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clangxx_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -15,7 +15,7 @@ void *Thread1(void *x) {
 }
 
 void *Thread2(void *x) {
-#if defined(__linux__) && __GLIBC_PREREQ(2, 12)
+#if SANITIZER_LINUX && __GLIBC_PREREQ(2, 12)
   pthread_setname_np(pthread_self(), "Thread2");
 #else
   AnnotateThreadName(__FILE__, __LINE__, "Thread2");

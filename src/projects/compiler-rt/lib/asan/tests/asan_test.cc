@@ -111,6 +111,24 @@ TEST(AddressSanitizer, CallocTest) {
   free(a);
 }
 
+TEST(AddressSanitizer, CallocReturnsZeroMem) {
+  size_t sizes[] = {16, 1000, 10000, 100000, 2100000};
+  for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); s++) {
+    size_t size = sizes[s];
+    for (size_t iter = 0; iter < 5; iter++) {
+      char *x = Ident((char*)calloc(1, size));
+      EXPECT_EQ(x[0], 0);
+      EXPECT_EQ(x[size - 1], 0);
+      EXPECT_EQ(x[size / 2], 0);
+      EXPECT_EQ(x[size / 3], 0);
+      EXPECT_EQ(x[size / 4], 0);
+      memset(x, 0x42, size);
+      free(Ident(x));
+      free(Ident(malloc(Ident(1 << 27))));  // Try to drain the quarantine.
+    }
+  }
+}
+
 TEST(AddressSanitizer, VallocTest) {
   void *a = valloc(100);
   EXPECT_EQ(0U, (uintptr_t)a % kPageSize);
@@ -170,6 +188,27 @@ TEST(AddressSanitizer, UAF_char) {
   EXPECT_DEATH(uaf_test<U1>(kLargeMalloc, kLargeMalloc / 2), uaf_string);
 }
 
+TEST(AddressSanitizer, UAF_long_double) {
+  if (sizeof(long double) == sizeof(double)) return;
+  long double *p = Ident(new long double[10]);
+  EXPECT_DEATH(Ident(p)[12] = 0, "WRITE of size 1[06]");
+  EXPECT_DEATH(Ident(p)[0] = Ident(p)[12], "READ of size 1[06]");
+  delete [] Ident(p);
+}
+
+struct Packed5 {
+  int x;
+  char c;
+} __attribute__((packed));
+
+
+TEST(AddressSanitizer, UAF_Packed5) {
+  Packed5 *p = Ident(new Packed5[2]);
+  EXPECT_DEATH(p[0] = p[3], "READ of size 5");
+  EXPECT_DEATH(p[3] = p[0], "WRITE of size 5");
+  delete [] Ident(p);
+}
+
 #if ASAN_HAS_BLACKLIST
 TEST(AddressSanitizer, IgnoreTest) {
   int *x = Ident(new int);
@@ -204,16 +243,6 @@ TEST(AddressSanitizer, BitFieldNegativeTest) {
   x->a = 0;
   x->b = 0;
   delete Ident(x);
-}
-
-TEST(AddressSanitizer, OutOfMemoryTest) {
-  size_t size = SANITIZER_WORDSIZE == 64 ? (size_t)(1ULL << 48) : (0xf0000000);
-  EXPECT_EQ(0, realloc(0, size));
-  EXPECT_EQ(0, realloc(0, ~Ident(0)));
-  EXPECT_EQ(0, malloc(size));
-  EXPECT_EQ(0, malloc(~Ident(0)));
-  EXPECT_EQ(0, calloc(1, size));
-  EXPECT_EQ(0, calloc(1, ~Ident(0)));
 }
 
 #if ASAN_NEEDS_SEGV
@@ -256,41 +285,6 @@ TEST(AddressSanitizer, SignalTest) {
 }  // namespace
 #endif
 
-static void MallocStress(size_t n) {
-  uint32_t seed = my_rand();
-  for (size_t iter = 0; iter < 10; iter++) {
-    vector<void *> vec;
-    for (size_t i = 0; i < n; i++) {
-      if ((i % 3) == 0) {
-        if (vec.empty()) continue;
-        size_t idx = my_rand_r(&seed) % vec.size();
-        void *ptr = vec[idx];
-        vec[idx] = vec.back();
-        vec.pop_back();
-        free_aaa(ptr);
-      } else {
-        size_t size = my_rand_r(&seed) % 1000 + 1;
-#ifndef __APPLE__
-        size_t alignment = 1 << (my_rand_r(&seed) % 7 + 3);
-        char *ptr = (char*)memalign_aaa(alignment, size);
-#else
-        char *ptr = (char*) malloc_aaa(size);
-#endif
-        vec.push_back(ptr);
-        ptr[0] = 0;
-        ptr[size-1] = 0;
-        ptr[size/2] = 0;
-      }
-    }
-    for (size_t i = 0; i < vec.size(); i++)
-      free_aaa(vec[i]);
-  }
-}
-
-TEST(AddressSanitizer, MallocStressTest) {
-  MallocStress((ASAN_LOW_MEMORY) ? 20000 : 200000);
-}
-
 static void TestLargeMalloc(size_t size) {
   char buff[1024];
   sprintf(buff, "is located 1 bytes to the left of %lu-byte", (long)size);
@@ -298,26 +292,17 @@ static void TestLargeMalloc(size_t size) {
 }
 
 TEST(AddressSanitizer, LargeMallocTest) {
-  for (int i = 113; i < (1 << 28); i = i * 2 + 13) {
+  const int max_size = (SANITIZER_WORDSIZE == 32) ? 1 << 26 : 1 << 28;
+  for (int i = 113; i < max_size; i = i * 2 + 13) {
     TestLargeMalloc(i);
   }
 }
 
-#if ASAN_LOW_MEMORY != 1
 TEST(AddressSanitizer, HugeMallocTest) {
-#ifdef __APPLE__
-  // It was empirically found out that 1215 megabytes is the maximum amount of
-  // memory available to the process under AddressSanitizer on 32-bit Mac 10.6.
-  // 32-bit Mac 10.7 gives even less (< 1G).
-  // (the libSystem malloc() allows allocating up to 2300 megabytes without
-  // ASan).
-  size_t n_megs = SANITIZER_WORDSIZE == 32 ? 500 : 4100;
-#else
-  size_t n_megs = SANITIZER_WORDSIZE == 32 ? 2600 : 4100;
-#endif
+  if (SANITIZER_WORDSIZE != 64) return;
+  size_t n_megs = 4100;
   TestLargeMalloc(n_megs << 20);
 }
-#endif
 
 #ifndef __APPLE__
 void MemalignRun(size_t align, size_t size, int idx) {
@@ -336,19 +321,6 @@ TEST(AddressSanitizer, memalign) {
   }
 }
 #endif
-
-TEST(AddressSanitizer, ThreadedMallocStressTest) {
-  const int kNumThreads = 4;
-  const int kNumIterations = (ASAN_LOW_MEMORY) ? 10000 : 100000;
-  pthread_t t[kNumThreads];
-  for (int i = 0; i < kNumThreads; i++) {
-    PTHREAD_CREATE(&t[i], 0, (void* (*)(void *x))MallocStress,
-        (void*)kNumIterations);
-  }
-  for (int i = 0; i < kNumThreads; i++) {
-    PTHREAD_JOIN(t[i], 0);
-  }
-}
 
 void *ManyThreadsWorker(void *a) {
   for (int iter = 0; iter < 100; iter++) {
@@ -383,12 +355,43 @@ TEST(AddressSanitizer, ReallocTest) {
   free(ptr);
   // Realloc pointer returned by malloc(0).
   int *ptr2 = Ident((int*)malloc(0));
-  fprintf(stderr, "Malloc(0): %p\n", ptr2);
   ptr2 = Ident((int*)realloc(ptr2, sizeof(*ptr2)));
-  fprintf(stderr, "Realloc(0, 4): %p\n", ptr2);
   *ptr2 = 42;
   EXPECT_EQ(42, *ptr2);
   free(ptr2);
+}
+
+TEST(AddressSanitizer, ReallocFreedPointerTest) {
+  void *ptr = Ident(malloc(42));
+  ASSERT_TRUE(NULL != ptr);
+  free(ptr);
+  EXPECT_DEATH(ptr = realloc(ptr, 77), "attempting double-free");
+}
+
+TEST(AddressSanitizer, ReallocInvalidPointerTest) {
+  void *ptr = Ident(malloc(42));
+  EXPECT_DEATH(ptr = realloc((int*)ptr + 1, 77), "attempting free.*not malloc");
+  free(ptr);
+}
+
+TEST(AddressSanitizer, ZeroSizeMallocTest) {
+  // Test that malloc(0) and similar functions don't return NULL.
+  void *ptr = Ident(malloc(0));
+  EXPECT_TRUE(NULL != ptr);
+  free(ptr);
+#if !defined(__APPLE__) && !defined(ANDROID) && !defined(__ANDROID__)
+  int pm_res = posix_memalign(&ptr, 1<<20, 0);
+  EXPECT_EQ(0, pm_res);
+  EXPECT_TRUE(NULL != ptr);
+  free(ptr);
+#endif
+  int *int_ptr = new int[0];
+  int *int_ptr2 = new int[0];
+  EXPECT_TRUE(NULL != int_ptr);
+  EXPECT_TRUE(NULL != int_ptr2);
+  EXPECT_NE(int_ptr, int_ptr2);
+  delete[] int_ptr;
+  delete[] int_ptr2;
 }
 
 #ifndef __APPLE__
@@ -407,6 +410,7 @@ TEST(AddressSanitizer, MallocUsableSizeTest) {
                kMallocUsableSizeErrorMsg);
   free(array);
   EXPECT_DEATH(malloc_usable_size(array), kMallocUsableSizeErrorMsg);
+  delete int_ptr;
 }
 #endif
 
@@ -418,8 +422,10 @@ void WrongFree() {
 }
 
 TEST(AddressSanitizer, WrongFreeTest) {
-  EXPECT_DEATH(WrongFree(),
-               "ERROR: AddressSanitizer: attempting free.*not malloc");
+  EXPECT_DEATH(WrongFree(), ASAN_PCRE_DOTALL
+               "ERROR: AddressSanitizer: attempting free.*not malloc"
+               ".*is located 4 bytes inside of 400-byte region"
+               ".*allocated by thread");
 }
 
 void DoubleFree() {
@@ -481,6 +487,9 @@ TEST(AddressSanitizer, ManyStackObjectsTest) {
   EXPECT_DEATH(Ident(ZZZ)[-1] = 0, ASAN_PCRE_DOTALL "XXX.*YYY.*ZZZ");
 }
 
+#if 0  // This test requires online symbolizer.
+// Moved to lit_tests/stack-oob-frames.cc.
+// Reenable here once we have online symbolizer by default.
 NOINLINE static void Frame0(int frame, char *a, char *b, char *c) {
   char d[4] = {0};
   char *D = Ident(d);
@@ -516,6 +525,7 @@ TEST(AddressSanitizer, GuiltyStackFrame2Test) {
 TEST(AddressSanitizer, GuiltyStackFrame3Test) {
   EXPECT_DEATH(Frame3(3), "located .*in frame <.*Frame3");
 }
+#endif
 
 NOINLINE void LongJmpFunc1(jmp_buf buf) {
   // create three red zones for these two stack objects.
@@ -579,7 +589,10 @@ TEST(AddressSanitizer, LongJmpTest) {
   }
 }
 
-#if not defined(__ANDROID__)
+#if !defined(__ANDROID__) && \
+    !defined(__powerpc64__) && !defined(__powerpc__)
+// Does not work on Power:
+// https://code.google.com/p/address-sanitizer/issues/detail?id=185
 TEST(AddressSanitizer, BuiltinLongJmpTest) {
   static jmp_buf buf;
   if (!__builtin_setjmp((void**)buf)) {
@@ -677,7 +690,8 @@ TEST(AddressSanitizer, Store128Test) {
 string RightOOBErrorMessage(int oob_distance, bool is_write) {
   assert(oob_distance >= 0);
   char expected_str[100];
-  sprintf(expected_str, ASAN_PCRE_DOTALL "%s.*located %d bytes to the right",
+  sprintf(expected_str, ASAN_PCRE_DOTALL
+          "buffer-overflow.*%s.*located %d bytes to the right",
           is_write ? "WRITE" : "READ", oob_distance);
   return string(expected_str);
 }
@@ -885,7 +899,11 @@ TEST(AddressSanitizer, ShadowGapTest) {
 #if SANITIZER_WORDSIZE == 32
   char *addr = (char*)0x22000000;
 #else
+# if defined(__powerpc64__)
+  char *addr = (char*)0x024000800000;
+# else
   char *addr = (char*)0x0000100000080000;
+# endif
 #endif
   EXPECT_DEATH(*addr = 1, "AddressSanitizer: SEGV on unknown");
 }
@@ -1081,20 +1099,21 @@ TEST(AddressSanitizer, LargeStructCopyTest) {
   *Ident(&a) = *Ident(&a);
 }
 
-ATTRIBUTE_NO_ADDRESS_SAFETY_ANALYSIS
-static void NoAddressSafety() {
+ATTRIBUTE_NO_SANITIZE_ADDRESS
+static void NoSanitizeAddress() {
   char *foo = new char[10];
   Ident(foo)[10] = 0;
   delete [] foo;
 }
 
-TEST(AddressSanitizer, AttributeNoAddressSafetyTest) {
-  Ident(NoAddressSafety)();
+TEST(AddressSanitizer, AttributeNoSanitizeAddressTest) {
+  Ident(NoSanitizeAddress)();
 }
 
-// TODO(glider): Enable this test on Mac.
 // It doesn't work on Android, as calls to new/delete go through malloc/free.
-#if !defined(__APPLE__) && !defined(ANDROID) && !defined(__ANDROID__)
+// Neither it does on OS X, see
+// https://code.google.com/p/address-sanitizer/issues/detail?id=131.
+#if !defined(ANDROID) && !defined(__ANDROID__) && !defined(__APPLE__)
 static string MismatchStr(const string &str) {
   return string("AddressSanitizer: alloc-dealloc-mismatch \\(") + str;
 }
@@ -1207,4 +1226,17 @@ TEST(AddressSanitizer, LongDoubleNegativeTest) {
   static long double c;
   memcpy(Ident(&a), Ident(&b), sizeof(long double));
   memcpy(Ident(&c), Ident(&b), sizeof(long double));
+}
+
+TEST(AddressSanitizer, pthread_getschedparam) {
+  int policy;
+  struct sched_param param;
+  EXPECT_DEATH(
+      pthread_getschedparam(pthread_self(), &policy, Ident(&param) + 2),
+      "AddressSanitizer: stack-buffer-.*flow");
+  EXPECT_DEATH(
+      pthread_getschedparam(pthread_self(), Ident(&policy) - 1, &param),
+      "AddressSanitizer: stack-buffer-.*flow");
+  int res = pthread_getschedparam(pthread_self(), &policy, &param);
+  ASSERT_EQ(0, res);
 }

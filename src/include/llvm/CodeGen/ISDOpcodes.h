@@ -77,18 +77,6 @@ namespace ISD {
     /// adjustment during unwind.
     FRAME_TO_ARGS_OFFSET,
 
-    /// RESULT, OUTCHAIN = EXCEPTIONADDR(INCHAIN) - This node represents the
-    /// address of the exception block on entry to an landing pad block.
-    EXCEPTIONADDR,
-
-    /// RESULT, OUTCHAIN = LSDAADDR(INCHAIN) - This node represents the
-    /// address of the Language Specific Data Area for the enclosing function.
-    LSDAADDR,
-
-    /// RESULT, OUTCHAIN = EHSELECTION(INCHAIN, EXCEPTION) - This node
-    /// represents the selection index of the exception thrown.
-    EHSELECTION,
-
     /// OUTCHAIN = EH_RETURN(INCHAIN, OFFSET, HANDLER) - This node represents
     /// 'eh_return' gcc dwarf builtin, which is used to return from
     /// exception. The general meaning is: adjust stack by OFFSET and pass
@@ -311,8 +299,10 @@ namespace ISD {
     /// the shift amount can be any type, but care must be taken to ensure it is
     /// large enough.  TLI.getShiftAmountTy() is i8 on some targets, but before
     /// legalization, types like i1024 can occur and i8 doesn't have enough bits
-    /// to represent the shift amount.  By convention, DAGCombine and
-    /// SelectionDAGBuilder forces these shift amounts to i32 for simplicity.
+    /// to represent the shift amount.
+    /// When the 1st operand is a vector, the shift amount must be in the same
+    /// type. (TLI.getShiftAmountTy() will return the same type when the input
+    /// type is a vector.)
     SHL, SRA, SRL, ROTL, ROTR,
 
     /// Byte Swap and Counting operators.
@@ -450,11 +440,11 @@ namespace ISD {
 
     /// FNEG, FABS, FSQRT, FSIN, FCOS, FPOWI, FPOW,
     /// FLOG, FLOG2, FLOG10, FEXP, FEXP2,
-    /// FCEIL, FTRUNC, FRINT, FNEARBYINT, FFLOOR, FROUND, FLRINT - Perform
-    /// various unary floating point operations. These are inspired by libm.
+    /// FCEIL, FTRUNC, FRINT, FNEARBYINT, FROUND, FFLOOR - Perform various unary
+    /// floating point operations. These are inspired by libm.
     FNEG, FABS, FSQRT, FSIN, FCOS, FPOWI, FPOW,
     FLOG, FLOG2, FLOG10, FEXP, FEXP2,
-    FCEIL, FTRUNC, FRINT, FNEARBYINT, FFLOOR, FROUND, FLRINT,
+    FCEIL, FTRUNC, FRINT, FNEARBYINT, FROUND, FFLOOR,
     
     /// FSINCOS - Compute both fsin and fcos as a single operation.
     FSINCOS,
@@ -600,14 +590,6 @@ namespace ISD {
     /// specifier.
     PREFETCH,
 
-    /// OUTCHAIN = MEMBARRIER(INCHAIN, load-load, load-store, store-load,
-    ///                       store-store, device)
-    /// This corresponds to the memory.barrier intrinsic.
-    /// it takes an input chain, 4 operands to specify the type of barrier, an
-    /// operand specifying if the barrier applies to device and uncached memory
-    /// and produces an output chain.
-    MEMBARRIER,
-
     /// OUTCHAIN = ATOMIC_FENCE(INCHAIN, ordering, scope)
     /// This corresponds to the fence instruction. It takes an input chain, and
     /// two integer constants: an AtomicOrdering and a SynchronizationScope.
@@ -622,11 +604,17 @@ namespace ISD {
     ATOMIC_STORE,
 
     /// Val, OUTCHAIN = ATOMIC_CMP_SWAP(INCHAIN, ptr, cmp, swap)
+    /// For double-word atomic operations:
+    /// ValLo, ValHi, OUTCHAIN = ATOMIC_CMP_SWAP(INCHAIN, ptr, cmpLo, cmpHi,
+    ///                                          swapLo, swapHi)
     /// This corresponds to the cmpxchg instruction.
     ATOMIC_CMP_SWAP,
 
     /// Val, OUTCHAIN = ATOMIC_SWAP(INCHAIN, ptr, amt)
     /// Val, OUTCHAIN = ATOMIC_LOAD_[OpName](INCHAIN, ptr, amt)
+    /// For double-word atomic operations:
+    /// ValLo, ValHi, OUTCHAIN = ATOMIC_SWAP(INCHAIN, ptr, amtLo, amtHi)
+    /// ValLo, ValHi, OUTCHAIN = ATOMIC_LOAD_[OpName](INCHAIN, ptr, amtLo, amtHi)
     /// These correspond to the atomicrmw instruction.
     ATOMIC_SWAP,
     ATOMIC_LOAD_ADD,
@@ -653,7 +641,7 @@ namespace ISD {
   /// which do not reference a specific memory location should be less than
   /// this value. Those that do must not be less than this value, and can
   /// be used with SelectionDAG::getMemIntrinsicNode.
-  static const int FIRST_TARGET_MEMORY_OPCODE = BUILTIN_OP_END+150;
+  static const int FIRST_TARGET_MEMORY_OPCODE = BUILTIN_OP_END+180;
 
   //===--------------------------------------------------------------------===//
   /// MemIndexedMode enum - This enum defines the load / store indexed

@@ -17,11 +17,10 @@
 #include "llvm/MC/MCMachObjectWriter.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCValue.h"
-#include "llvm/Object/MachOFormat.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MachO.h"
 using namespace llvm;
-using namespace llvm::object;
 
 namespace {
 class ARM64MachObjectWriter : public MCMachObjectTargetWriter {
@@ -47,7 +46,7 @@ bool ARM64MachObjectWriter::getARM64FixupKindMachOInfo(const MCFixup &Fixup,
                                                      const MCSymbolRefExpr *Sym,
                                                      unsigned &Log2Size,
                                                      const MCAssembler &Asm) {
-  RelocType = unsigned(macho::RIT_ARM64_Unsigned);
+  RelocType = unsigned(MachO::ARM64_RELOC_UNSIGNED);
   Log2Size = ~0U;
 
   switch ((unsigned)Fixup.getKind()) {
@@ -63,26 +62,34 @@ bool ARM64MachObjectWriter::getARM64FixupKindMachOInfo(const MCFixup &Fixup,
   case FK_Data_4:
     Log2Size = llvm::Log2_32(4);
     if (Sym->getKind() == MCSymbolRefExpr::VK_GOT)
-      RelocType = unsigned(macho::RIT_ARM64_Pointer_To_GOT);
+      RelocType = unsigned(MachO::ARM64_RELOC_POINTER_TO_GOT);
     return true;
   case FK_Data_8:
     Log2Size = llvm::Log2_32(8);
     if (Sym->getKind() == MCSymbolRefExpr::VK_GOT)
-      RelocType = unsigned(macho::RIT_ARM64_Pointer_To_GOT);
+      RelocType = unsigned(MachO::ARM64_RELOC_POINTER_TO_GOT);
     return true;
-  case ARM64::fixup_arm64_imm12:
+  case ARM64::fixup_arm64_add_imm12:
+  case ARM64::fixup_arm64_ldst_imm12_scale1:
+  case ARM64::fixup_arm64_ldst_imm12_scale2:
+  case ARM64::fixup_arm64_ldst_imm12_scale4:
+  case ARM64::fixup_arm64_ldst_imm12_scale8:
+  case ARM64::fixup_arm64_ldst_imm12_scale16:
     Log2Size = llvm::Log2_32(4);
     switch(Sym->getKind()) {
     default:
       assert(0 && "Unexpected symbol reference variant kind!");
     case MCSymbolRefExpr::VK_PAGEOFF:
-      RelocType = unsigned(macho::RIT_ARM64_Pageoff12);
+      RelocType = unsigned(MachO::ARM64_RELOC_PAGEOFF12);
       return true;
     case MCSymbolRefExpr::VK_GOTPAGEOFF:
-      RelocType = unsigned(macho::RIT_ARM64_GOT_Load_Pageoff12);
+      RelocType = unsigned(MachO::ARM64_RELOC_GOT_LOAD_PAGEOFF12);
+      return true;
+    case MCSymbolRefExpr::VK_TLVPPAGEOFF:
+      RelocType = unsigned(MachO::ARM64_RELOC_TLVP_LOAD_PAGEOFF12);
       return true;
     }
-  case ARM64::fixup_arm64_pcrel_adrlo:
+  case ARM64::fixup_arm64_pcrel_adrp_imm21:
     Log2Size = llvm::Log2_32(4);
     // This encompasses the relocation for the whole 21-bit value.
     switch(Sym->getKind()) {
@@ -90,16 +97,20 @@ bool ARM64MachObjectWriter::getARM64FixupKindMachOInfo(const MCFixup &Fixup,
       Asm.getContext().FatalError(Fixup.getLoc(),
                                   "ADR/ADRP relocations must be GOT relative");
     case MCSymbolRefExpr::VK_PAGE:
-      RelocType = unsigned(macho::RIT_ARM64_Page21);
+      RelocType = unsigned(MachO::ARM64_RELOC_PAGE21);
       return true;
     case MCSymbolRefExpr::VK_GOTPAGE:
-      RelocType = unsigned(macho::RIT_ARM64_GOT_Load_Page21);
+      RelocType = unsigned(MachO::ARM64_RELOC_GOT_LOAD_PAGE21);
+      return true;
+    case MCSymbolRefExpr::VK_TLVPPAGE:
+      RelocType = unsigned(MachO::ARM64_RELOC_TLVP_LOAD_PAGE21);
       return true;
     }
     return true;
   case ARM64::fixup_arm64_pcrel_branch26:
+  case ARM64::fixup_arm64_pcrel_call26:
     Log2Size = llvm::Log2_32(4);
-    RelocType = unsigned(macho::RIT_ARM64_Branch26);
+    RelocType = unsigned(MachO::ARM64_RELOC_BRANCH26);
     return true;
   }
 }
@@ -122,23 +133,7 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
   unsigned Type = 0;
   unsigned Kind = Fixup.getKind();
 
-  // All ARM64 text relocations should refer to the address of the instruction,
-  // not an address in the instruction where the Fixup referenced, so align the
-  // fixup offset value to account for that.
-  //
-  switch (Kind) {
-  case FK_Data_1:
-  case FK_Data_2:
-  case FK_Data_4:
-  case FK_Data_8:
-    // Data relocations don't need any tweaking.
-    FixupOffset += Fixup.getOffset();
-    break;
-  default:
-    // Everything else is an instruction relocation.
-    FixupOffset += (Fixup.getOffset() & ~3ULL);
-    break;
-  }
+  FixupOffset += Fixup.getOffset();
 
   // ARM64 pcrel relocation addends do not include the section offset.
   if (IsPCRel)
@@ -147,15 +142,9 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
   // ADRP fixups use relocations for the whole symbol value and only
   // put the addend in the instruction itself. Clear out any value the
   // generic code figured out from the sybmol definition.
-  if (Kind == ARM64::fixup_arm64_pcrel_adrlo ||
-      Kind == ARM64::fixup_arm64_pcrel_adrhi ||
+  if (Kind == ARM64::fixup_arm64_pcrel_adrp_imm21 ||
       Kind == ARM64::fixup_arm64_pcrel_imm19)
     FixedValue = 0;
-
-  // Some fixup kinds don't need relocations (i.e., it's implied by other
-  // fixups that are also expected on the same insn).
-  if (Kind == ARM64::fixup_arm64_pcrel_adrhi)
-    return;
 
   // imm19 relocations are for conditional branches, which require
   // assembler local symbols. If we got here, that's not what we have,
@@ -189,7 +178,7 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
   if (Target.isAbsolute()) { // constant
     // FIXME: Should this always be extern?
     // SymbolNum of 0 indicates the absolute section.
-    Type = macho::RIT_ARM64_Unsigned;
+    Type = MachO::ARM64_RELOC_UNSIGNED;
     Index = 0;
 
     if (IsPCRel) {
@@ -219,15 +208,15 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
       // SymB is the PC, so use a PC-rel pointer-to-GOT relocation.
       Index = A_Base->getIndex();
       IsExtern = 1;
-      Type = macho::RIT_ARM64_Pointer_To_GOT;
+      Type = MachO::ARM64_RELOC_POINTER_TO_GOT;
       IsPCRel = 1;
-      macho::RelocationEntry MRE;
-      MRE.Word0 = FixupOffset;
-      MRE.Word1 = ((Index     <<  0) |
-                   (IsPCRel   << 24) |
-                   (Log2Size  << 25) |
-                   (IsExtern  << 27) |
-                   (Type      << 28));
+      MachO::any_relocation_info MRE;
+      MRE.r_word0 = FixupOffset;
+      MRE.r_word1 = ((Index     <<  0) |
+                     (IsPCRel   << 24) |
+                     (Log2Size  << 25) |
+                     (IsExtern  << 27) |
+                     (Type      << 28));
       Writer->addRelocation(Fragment->getParent(), MRE);
       return;
     } else if (Target.getSymA()->getKind() != MCSymbolRefExpr::VK_None ||
@@ -274,20 +263,20 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
 
     Index = A_Base->getIndex();
     IsExtern = 1;
-    Type = macho::RIT_ARM64_Unsigned;
+    Type = MachO::ARM64_RELOC_UNSIGNED;
 
-    macho::RelocationEntry MRE;
-    MRE.Word0 = FixupOffset;
-    MRE.Word1 = ((Index     <<  0) |
-                 (IsPCRel   << 24) |
-                 (Log2Size  << 25) |
-                 (IsExtern  << 27) |
-                 (Type      << 28));
+    MachO::any_relocation_info MRE;
+    MRE.r_word0 = FixupOffset;
+    MRE.r_word1 = ((Index     <<  0) |
+                   (IsPCRel   << 24) |
+                   (Log2Size  << 25) |
+                   (IsExtern  << 27) |
+                   (Type      << 28));
     Writer->addRelocation(Fragment->getParent(), MRE);
 
     Index = B_Base->getIndex();
     IsExtern = 1;
-    Type = macho::RIT_ARM64_Subtractor;
+    Type = MachO::ARM64_RELOC_SUBTRACTOR;
   } else { // A + constant
     const MCSymbol *Symbol = &Target.getSymA()->getSymbol();
     MCSymbolData &SD = Asm.getSymbolData(*Symbol);
@@ -376,21 +365,22 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
   // If the relocation kind is Branch26, Page21, or Pageoff12, any addend
   // is represented via an Addend relocation, not encoded directly into
   // the instruction.
-  if ((Type == macho::RIT_ARM64_Branch26 || Type == macho::RIT_ARM64_Page21 ||
-       Type == macho::RIT_ARM64_Pageoff12) && Value) {
+  if ((Type == MachO::ARM64_RELOC_BRANCH26 ||
+       Type == MachO::ARM64_RELOC_PAGE21 ||
+       Type == MachO::ARM64_RELOC_PAGEOFF12) && Value) {
     assert((Value & 0xff000000) == 0 && "Added relocation out of range!");
 
-    macho::RelocationEntry MRE;
-    MRE.Word0 = FixupOffset;
-    MRE.Word1 = ((Index     <<  0) |
-                 (IsPCRel   << 24) |
-                 (Log2Size  << 25) |
-                 (IsExtern  << 27) |
-                 (Type      << 28));
+    MachO::any_relocation_info MRE;
+    MRE.r_word0 = FixupOffset;
+    MRE.r_word1 = ((Index     <<  0) |
+                   (IsPCRel   << 24) |
+                   (Log2Size  << 25) |
+                   (IsExtern  << 27) |
+                   (Type      << 28));
     Writer->addRelocation(Fragment->getParent(), MRE);
 
     // Now set up the Addend relocation.
-    Type = macho::RIT_ARM64_Addend;
+    Type = MachO::ARM64_RELOC_ADDEND;
     Index = Value;
     IsPCRel = 0;
     Log2Size = 2;
@@ -404,13 +394,13 @@ void ARM64MachObjectWriter::RecordRelocation(MachObjectWriter *Writer,
   FixedValue = Value;
 
   // struct relocation_info (8 bytes)
-  macho::RelocationEntry MRE;
-  MRE.Word0 = FixupOffset;
-  MRE.Word1 = ((Index     <<  0) |
-               (IsPCRel   << 24) |
-               (Log2Size  << 25) |
-               (IsExtern  << 27) |
-               (Type      << 28));
+  MachO::any_relocation_info MRE;
+  MRE.r_word0 = FixupOffset;
+  MRE.r_word1 = ((Index     <<  0) |
+                 (IsPCRel   << 24) |
+                 (Log2Size  << 25) |
+                 (IsExtern  << 27) |
+                 (Type      << 28));
   Writer->addRelocation(Fragment->getParent(), MRE);
 }
 

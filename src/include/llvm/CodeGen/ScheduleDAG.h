@@ -17,11 +17,10 @@
 #define LLVM_CODEGEN_SCHEDULEDAG_H
 
 #include "llvm/ADT/BitVector.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/Target/TargetLowering.h"
 
 namespace llvm {
@@ -91,11 +90,6 @@ namespace llvm {
     /// the value of the Latency field of the predecessor, however advanced
     /// models may provide additional information about specific edges.
     unsigned Latency;
-    /// Record MinLatency seperately from "expected" Latency.
-    ///
-    /// FIXME: this field is not packed on LP64. Convert to 16-bit DAG edge
-    /// latency after introducing saturating truncation.
-    unsigned MinLatency;
 
   public:
     /// SDep - Construct a null SDep. This is only for use by container
@@ -121,10 +115,9 @@ namespace llvm {
         Latency = 1;
         break;
       }
-      MinLatency = Latency;
     }
     SDep(SUnit *S, OrderKind kind)
-      : Dep(S, Order), Contents(), Latency(0), MinLatency(0) {
+      : Dep(S, Order), Contents(), Latency(0) {
       Contents.OrdKind = kind;
     }
 
@@ -143,8 +136,7 @@ namespace llvm {
     }
 
     bool operator==(const SDep &Other) const {
-      return overlaps(Other)
-        && Latency == Other.Latency && MinLatency == Other.MinLatency;
+      return overlaps(Other) && Latency == Other.Latency;
     }
 
     bool operator!=(const SDep &Other) const {
@@ -162,18 +154,6 @@ namespace llvm {
     /// setLatency - Set the latency for this edge.
     void setLatency(unsigned Lat) {
       Latency = Lat;
-    }
-
-    /// getMinLatency - Return the minimum latency for this edge. Minimum
-    /// latency is used for scheduling groups, while normal (expected) latency
-    /// is for instruction cost and critical path.
-    unsigned getMinLatency() const {
-      return MinLatency;
-    }
-
-    /// setMinLatency - Set the minimum latency for this edge.
-    void setMinLatency(unsigned Lat) {
-      MinLatency = Lat;
     }
 
     //// getSUnit - Return the SUnit to which this edge points.
@@ -268,7 +248,7 @@ namespace llvm {
   /// SUnit - Scheduling unit. This is a node in the scheduling DAG.
   class SUnit {
   private:
-    enum { BoundaryID = ~0u };
+    enum LLVM_ENUM_INT_TYPE(unsigned) { BoundaryID = ~0u };
 
     SDNode *Node;                       // Representative node.
     MachineInstr *Instr;                // Alternatively, a MachineInstr.
@@ -283,10 +263,10 @@ namespace llvm {
     SmallVector<SDep, 4> Preds;  // All sunit predecessors.
     SmallVector<SDep, 4> Succs;  // All sunit successors.
 
-    typedef SmallVector<SDep, 4>::iterator pred_iterator;
-    typedef SmallVector<SDep, 4>::iterator succ_iterator;
-    typedef SmallVector<SDep, 4>::const_iterator const_pred_iterator;
-    typedef SmallVector<SDep, 4>::const_iterator const_succ_iterator;
+    typedef SmallVectorImpl<SDep>::iterator pred_iterator;
+    typedef SmallVectorImpl<SDep>::iterator succ_iterator;
+    typedef SmallVectorImpl<SDep>::const_iterator const_pred_iterator;
+    typedef SmallVectorImpl<SDep>::const_iterator const_succ_iterator;
 
     unsigned NodeNum;                   // Entry # of node in the node vector.
     unsigned NodeQueueId;               // Queue id of node.

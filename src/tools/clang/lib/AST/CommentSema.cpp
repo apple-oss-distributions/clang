@@ -98,10 +98,10 @@ void Sema::checkFunctionDeclVerbatimLine(const BlockCommandComment *Comment) {
   unsigned DiagSelect;
   switch (Comment->getCommandID()) {
     case CommandTraits::KCI_function:
-      DiagSelect = !isAnyFunctionDecl() ? 1 : 0;
+      DiagSelect = (!isAnyFunctionDecl() && !isFunctionTemplateDecl())? 1 : 0;
       break;
     case CommandTraits::KCI_functiongroup:
-      DiagSelect = !isAnyFunctionDecl() ? 2 : 0;
+      DiagSelect = (!isAnyFunctionDecl() && !isFunctionTemplateDecl())? 2 : 0;
       break;
     case CommandTraits::KCI_method:
       DiagSelect = !isObjCMethodDecl() ? 3 : 0;
@@ -130,7 +130,7 @@ void Sema::checkContainerDeclVerbatimLine(const BlockCommandComment *Comment) {
   unsigned DiagSelect;
   switch (Comment->getCommandID()) {
     case CommandTraits::KCI_class:
-      DiagSelect = !isClassOrStructDecl() ? 1 : 0;
+      DiagSelect = (!isClassOrStructDecl() && !isClassTemplateDecl()) ? 1 : 0;
       // Allow @class command on @interface declarations.
       // FIXME. Currently, \class and @class are indistinguishable. So,
       // \class is also allowed on an @interface declaration
@@ -515,8 +515,7 @@ HTMLEndTagComment *Sema::actOnHTMLEndTag(SourceLocation LocBegin,
   }
 
   while (!HTMLOpenTags.empty()) {
-    const HTMLStartTagComment *HST = HTMLOpenTags.back();
-    HTMLOpenTags.pop_back();
+    const HTMLStartTagComment *HST = HTMLOpenTags.pop_back_val();
     StringRef LastNotClosedTagName = HST->getTagName();
     if (LastNotClosedTagName == TagName)
       break;
@@ -726,6 +725,10 @@ void Sema::resolveParamCommandIndexes(const FullComment *FC) {
     // Check that referenced parameter name is in the function decl.
     const unsigned ResolvedParamIndex = resolveParmVarReference(ParamName,
                                                                 ParamVars);
+    if (ResolvedParamIndex == ParamCommandComment::VarArgParamIndex) {
+      PCC->setIsVarArgParam();
+      continue;
+    }
     if (ResolvedParamIndex == ParamCommandComment::InvalidParamIndex) {
       UnresolvedParamCommands.push_back(PCC);
       continue;
@@ -796,14 +799,24 @@ bool Sema::isAnyFunctionDecl() {
   return isFunctionDecl() && ThisDeclInfo->CurrentDecl &&
          isa<FunctionDecl>(ThisDeclInfo->CurrentDecl);
 }
-  
+
+bool Sema::isFunctionOrMethodVariadic() {
+  if (!isAnyFunctionDecl() && !isObjCMethodDecl())
+    return false;
+  if (const FunctionDecl *FD =
+        dyn_cast<FunctionDecl>(ThisDeclInfo->CurrentDecl))
+    return FD->isVariadic();
+  if (const ObjCMethodDecl *MD =
+        dyn_cast<ObjCMethodDecl>(ThisDeclInfo->CurrentDecl))
+    return MD->isVariadic();
+  return false;
+}
+
 bool Sema::isObjCMethodDecl() {
   return isFunctionDecl() && ThisDeclInfo->CurrentDecl &&
          isa<ObjCMethodDecl>(ThisDeclInfo->CurrentDecl);
 }
-  
-/// isFunctionPointerVarDecl - returns 'true' if declaration is a pointer to
-/// function decl.
+
 bool Sema::isFunctionPointerVarDecl() {
   if (!ThisDeclInfo)
     return false;
@@ -863,6 +876,24 @@ bool Sema::isClassOrStructDecl() {
          isa<RecordDecl>(ThisDeclInfo->CurrentDecl) &&
          !isUnionDecl();
 }
+  
+bool Sema::isClassTemplateDecl() {
+  if (!ThisDeclInfo)
+    return false;
+  if (!ThisDeclInfo->IsFilled)
+    inspectThisDecl();
+  return ThisDeclInfo->CurrentDecl &&
+          (isa<ClassTemplateDecl>(ThisDeclInfo->CurrentDecl));
+}
+
+bool Sema::isFunctionTemplateDecl() {
+  if (!ThisDeclInfo)
+    return false;
+  if (!ThisDeclInfo->IsFilled)
+    inspectThisDecl();
+  return ThisDeclInfo->CurrentDecl &&
+  (isa<FunctionTemplateDecl>(ThisDeclInfo->CurrentDecl));
+}
 
 bool Sema::isObjCInterfaceDecl() {
   if (!ThisDeclInfo)
@@ -899,6 +930,8 @@ unsigned Sema::resolveParmVarReference(StringRef Name,
     if (II && II->getName() == Name)
       return i;
   }
+  if (Name == "..." && isFunctionOrMethodVariadic())
+    return ParamCommandComment::VarArgParamIndex;
   return ParamCommandComment::InvalidParamIndex;
 }
 

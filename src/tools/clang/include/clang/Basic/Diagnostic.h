@@ -21,7 +21,6 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/Support/type_traits.h"
 #include <list>
 #include <vector>
@@ -175,7 +174,6 @@ private:
   bool SuppressAllDiagnostics;   // Suppress all diagnostics.
   bool ElideType;                // Elide common types of templates.
   bool PrintTemplateTree;        // Print a tree when comparing templates.
-  bool WarnOnSpellCheck;         // Emit warning when spellcheck is initiated.
   bool ShowColors;               // Color printing is enabled.
   OverloadsShown ShowOverloads;  // Which overload candidates to show.
   unsigned ErrorLimit;           // Cap of # errors emitted, 0 -> no limit.
@@ -436,8 +434,8 @@ public:
   ///
   /// If this and IgnoreAllWarnings are both set, then that one wins.
   void setEnableAllWarnings(bool Val) { EnableAllWarnings = Val; }
-  bool getEnableAllWarnngs() const { return EnableAllWarnings; }
-  
+  bool getEnableAllWarnings() const { return EnableAllWarnings; }
+
   /// \brief When set to true, any warnings reported are issued as errors.
   void setWarningsAsErrors(bool Val) { WarningsAsErrors = Val; }
   bool getWarningsAsErrors() const { return WarningsAsErrors; }
@@ -467,10 +465,6 @@ public:
   /// tree format.
   void setPrintTemplateTree(bool Val = false) { PrintTemplateTree = Val; }
   bool getPrintTemplateTree() { return PrintTemplateTree; }
-
-  /// \brief Warn when spellchecking is initated, for testing.
-  void setWarnOnSpellCheck(bool Val = false) { WarnOnSpellCheck = Val; }
-  bool getWarnOnSpellCheck() { return WarnOnSpellCheck; }
  
   /// \brief Set color printing, so the type diffing will inject color markers
   /// into the output.
@@ -495,7 +489,14 @@ public:
       FatalErrorOccurred = true;
     LastDiagLevel = DiagnosticIDs::Ignored;
   }
-  
+
+  /// \brief Determine whether the previous diagnostic was ignored. This can
+  /// be used by clients that want to determine whether notes attached to a
+  /// diagnostic will be suppressed.
+  bool isLastDiagnosticIgnored() const {
+    return LastDiagLevel == DiagnosticIDs::Ignored;
+  }
+
   /// \brief Controls whether otherwise-unmapped extension diagnostics are
   /// mapped onto ignore/warning/error. 
   ///
@@ -588,7 +589,7 @@ public:
 
   /// \brief Return an ID for a diagnostic with the specified message and level.
   ///
-  /// If this is the first request for this diagnosic, it is registered and
+  /// If this is the first request for this diagnostic, it is registered and
   /// created, otherwise the existing ID is returned.
   unsigned getCustomDiagID(Level L, StringRef Message) {
     return Diags->getCustomDiagID((DiagnosticIDs::Level)L, Message);
@@ -988,6 +989,10 @@ public:
   bool hasMaxRanges() const {
     return NumRanges == DiagnosticsEngine::MaxRanges;
   }
+
+  bool hasMaxFixItHints() const {
+    return NumFixits == DiagnosticsEngine::MaxFixItHints;
+  }
 };
 
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
@@ -1217,7 +1222,7 @@ public:
   ~StoredDiagnostic();
 
   /// \brief Evaluates true when this object stores a diagnostic.
-  operator bool() const { return Message.size() > 0; }
+  LLVM_EXPLICIT operator bool() const { return Message.size() > 0; }
 
   unsigned getID() const { return ID; }
   DiagnosticsEngine::Level getLevel() const { return Level; }
@@ -1301,10 +1306,6 @@ public:
   /// warnings and errors.
   virtual void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
                                 const Diagnostic &Info);
-  
-  /// \brief Clone the diagnostic consumer, producing an equivalent consumer
-  /// that can be used in a different context.
-  virtual DiagnosticConsumer *clone(DiagnosticsEngine &Diags) const = 0;
 };
 
 /// \brief A diagnostic client that ignores all diagnostics.
@@ -1313,9 +1314,6 @@ class IgnoringDiagConsumer : public DiagnosticConsumer {
   void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
                         const Diagnostic &Info) {
     // Just ignore it.
-  }
-  DiagnosticConsumer *clone(DiagnosticsEngine &Diags) const {
-    return new IgnoringDiagConsumer();
   }
 };
 
@@ -1335,8 +1333,6 @@ public:
   virtual void clear();
 
   virtual bool IncludeInDiagnosticCounts() const;
-
-  virtual DiagnosticConsumer *clone(DiagnosticsEngine &Diags) const;
 };
 
 // Struct used for sending info about how a type should be printed.

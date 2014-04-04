@@ -19,7 +19,9 @@ set(ADTSources
   IntervalMapTest.cpp
   IntrusiveRefCntPtrTest.cpp
   MapVectorTest.cpp
+  OptionalTest.cpp
   PackedVectorTest.cpp
+  PointerUnionTest.cpp
   SCCIteratorTest.cpp
   SmallPtrSetTest.cpp
   SmallStringTest.cpp

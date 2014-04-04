@@ -103,8 +103,8 @@ bool PreprocessingRecord::isEntityInFileID(iterator PPEI, FileID FID) {
 
     // See if the external source can see if the entity is in the file without
     // deserializing it.
-    llvm::Optional<bool>
-      IsInFile = ExternalSource->isPreprocessedEntityInFileID(LoadedIndex, FID);
+    Optional<bool> IsInFile =
+        ExternalSource->isPreprocessedEntityInFileID(LoadedIndex, FID);
     if (IsInFile.hasValue())
       return IsInFile.getValue();
 
@@ -398,7 +398,8 @@ void PreprocessingRecord::Ifndef(SourceLocation Loc, const Token &MacroNameTok,
 }
 
 void PreprocessingRecord::Defined(const Token &MacroNameTok,
-                                  const MacroDirective *MD) {
+                                  const MacroDirective *MD,
+                                  SourceRange Range) {
   // This is not actually a macro expansion but record it as a macro reference.
   if (MD)
     addMacroExpansion(MacroNameTok, MD->getMacroInfo(),

@@ -52,7 +52,12 @@ foreach my $s (@sources)
     sub eachfile {
 	my $destname = $dest . '/' . $File::Find::name;
 	if (-d) {
-	    (mkdir $destname or error ("$destname: $!")) unless (-d $destname);
+	    if (-l) {
+		    my $link1 = readlink;
+				symlink $link1,$destname or error ("$destname: $!");
+	    } else {
+	      (mkdir $destname or error ("$destname: $!")) unless (-d $destname);
+	    }
 	} elsif (-l) {
 	    my $link1 = readlink;
 	    defined $link1 or error ("$s/$_: $!");

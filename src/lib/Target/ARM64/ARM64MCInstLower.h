@@ -10,6 +10,7 @@
 #ifndef ARM64_MCINSTLOWER_H
 #define ARM64_MCINSTLOWER_H
 
+#include "llvm/ADT/Triple.h"
 #include "llvm/Support/Compiler.h"
 
 namespace llvm {
@@ -28,14 +29,19 @@ namespace llvm {
   /// into an MCInst.
 class LLVM_LIBRARY_VISIBILITY ARM64MCInstLower {
   MCContext &Ctx;
-
   AsmPrinter &Printer;
+  Triple TargetTriple;
+
 public:
-  ARM64MCInstLower(MCContext &ctx, Mangler &mang, AsmPrinter &printer)
-    : Ctx(ctx), Printer(printer) {}
+  ARM64MCInstLower(MCContext &ctx, Mangler &mang, AsmPrinter &printer);
+
   bool lowerOperand(const MachineOperand &MO, MCOperand &MCOp) const;
   void Lower(const MachineInstr *MI, MCInst &OutMI) const;
 
+  MCOperand lowerSymbolOperandDarwin(const MachineOperand &MO,
+                                     MCSymbol *Sym) const;
+  MCOperand lowerSymbolOperandELF(const MachineOperand &MO,
+                                  MCSymbol *Sym) const;
   MCOperand LowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym) const;
 
   MCSymbol *GetGlobalAddressSymbol(const MachineOperand &MO) const;

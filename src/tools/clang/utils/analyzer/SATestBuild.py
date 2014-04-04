@@ -168,7 +168,7 @@ SBOutputDirName = "ScanBuildResults"
 SBOutputDirReferencePrefix = "Ref"
 
 # The list of checkers used during analyzes.
-# Currently, consists of all the non experimental checkers, plus a few alpha
+# Currently, consists of all the non-experimental checkers, plus a few alpha
 # checkers we don't want to regress on.
 Checkers="alpha.unix.SimpleStream,alpha.security.taint,alpha.cplusplus.NewDeleteLeaks,core,cplusplus,deadcode,security,unix,osx"
 
@@ -208,10 +208,14 @@ def runScanBuild(Dir, SBOutputDir, PBuildLogFile):
     SBOptions += "-plist-html -o " + SBOutputDir + " "
     SBOptions += "-enable-checker " + Checkers + " "  
     SBOptions += "--keep-empty "
+    # Always use ccc-analyze to ensure that we can locate the failures 
+    # directory.
+    SBOptions += "--override-compiler "
     try:
         SBCommandFile = open(BuildScriptPath, "r")
         SBPrefix = "scan-build " + SBOptions + " "
         for Command in SBCommandFile:
+            Command = Command.strip()
             # If using 'make', auto imply a -jX argument
             # to speed up analysis.  xcodebuild will
             # automatically use the maximum number of cores.
@@ -359,7 +363,7 @@ def checkBuild(SBOutputDir):
     if TotalFailed == 0:
         CleanUpEmptyPlists(SBOutputDir)
         Plists = glob.glob(SBOutputDir + "/*/*.plist")
-        print "Number of bug reports (non empty plist files) produced: %d" %\
+        print "Number of bug reports (non-empty plist files) produced: %d" %\
            len(Plists)
         return;
     
@@ -410,8 +414,10 @@ def runCmpResults(Dir):
     RefList = glob.glob(RefDir + "/*") 
     NewList = glob.glob(NewDir + "/*")
     
-    # Log folders are also located in the results dir, so ignore them. 
-    RefList.remove(os.path.join(RefDir, LogFolderName))
+    # Log folders are also located in the results dir, so ignore them.
+    RefLogDir = os.path.join(RefDir, LogFolderName)
+    if RefLogDir in RefList:
+        RefList.remove(RefLogDir)
     NewList.remove(os.path.join(NewDir, LogFolderName))
     
     if len(RefList) == 0 or len(NewList) == 0:

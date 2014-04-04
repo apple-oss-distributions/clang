@@ -1,4 +1,4 @@
-// RUN: %clang -fsanitize=alignment %s -O3 -o %t
+// RUN: %clangxx -fsanitize=alignment %s -O3 -o %t
 // RUN: %t l0 && %t s0 && %t r0 && %t m0 && %t f0 && %t n0
 // RUN: %t l1 2>&1 | FileCheck %s --check-prefix=CHECK-LOAD --strict-whitespace
 // RUN: %t s1 2>&1 | FileCheck %s --check-prefix=CHECK-STORE
@@ -64,7 +64,7 @@ int main(int, char **argv) {
 
   case 'n':
     // FIXME: Provide a better source location here.
-    // CHECK-NEW: misaligned{{.*}}:0x{{[0-9a-f]*}}: runtime error: constructor call on misaligned address [[PTR:0x[0-9a-f]*]] for type 'S', which requires 4 byte alignment
+    // CHECK-NEW: misaligned{{.*}}+0x{{[0-9a-f]*}}): runtime error: constructor call on misaligned address [[PTR:0x[0-9a-f]*]] for type 'S', which requires 4 byte alignment
     // CHECK-NEW-NEXT: [[PTR]]: note: pointer points here
     // CHECK-NEW-NEXT: {{^ 00 00 00 01 02 03 04  05}}
     // CHECK-NEW-NEXT: {{^             \^}}

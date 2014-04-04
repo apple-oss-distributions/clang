@@ -41,16 +41,13 @@
 #cmakedefine01 LLVM_HAS_ATOMICS
 
 /* Host triple LLVM will be executed on */
-#cmakedefine LLVM_HOSTTRIPLE "${LLVM_HOSTTRIPLE}"
+#cmakedefine LLVM_HOST_TRIPLE "${LLVM_HOST_TRIPLE}"
 
 /* Installation directory for include files */
 #cmakedefine LLVM_INCLUDEDIR "${LLVM_INCLUDEDIR}"
 
 /* Installation directory for .info files */
 #cmakedefine LLVM_INFODIR "${LLVM_INFODIR}"
-
-/* Installation directory for libraries */
-#cmakedefine LLVM_LIBDIR "${LLVM_LIBDIR}"
 
 /* Installation directory for man pages */
 #cmakedefine LLVM_MANDIR "${LLVM_MANDIR}"
@@ -123,5 +120,8 @@
 
 /* Minor version of the LLVM API */
 #cmakedefine LLVM_VERSION_MINOR ${LLVM_VERSION_MINOR}
+
+/* Define to 1 if you have the <sanitizer/msan_interface.h> header file. */
+#cmakedefine HAVE_SANITIZER_MSAN_INTERFACE_H ${HAVE_SANITIZER_MSAN_INTERFACE_H}
 
 #endif

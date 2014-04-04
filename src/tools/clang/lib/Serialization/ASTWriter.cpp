@@ -108,6 +108,11 @@ void ASTTypeWriter::VisitPointerType(const PointerType *T) {
   Code = TYPE_POINTER;
 }
 
+void ASTTypeWriter::VisitDecayedType(const DecayedType *T) {
+  Writer.AddTypeRef(T->getOriginalType(), Record);
+  Code = TYPE_DECAYED;
+}
+
 void ASTTypeWriter::VisitBlockPointerType(const BlockPointerType *T) {
   Writer.AddTypeRef(T->getPointeeType(), Record);
   Code = TYPE_BLOCK_POINTER;
@@ -245,6 +250,9 @@ void ASTTypeWriter::VisitUnaryTransformType(const UnaryTransformType *T) {
 
 void ASTTypeWriter::VisitAutoType(const AutoType *T) {
   Writer.AddTypeRef(T->getDeducedType(), Record);
+  Record.push_back(T->isDecltypeAuto());
+  if (T->getDeducedType().isNull())
+    Record.push_back(T->isDependentType());
   Code = TYPE_AUTO;
 }
 
@@ -354,7 +362,7 @@ ASTTypeWriter::VisitDependentTemplateSpecializationType(
 
 void ASTTypeWriter::VisitPackExpansionType(const PackExpansionType *T) {
   Writer.AddTypeRef(T->getPattern(), Record);
-  if (llvm::Optional<unsigned> NumExpansions = T->getNumExpansions())
+  if (Optional<unsigned> NumExpansions = T->getNumExpansions())
     Record.push_back(*NumExpansions + 1);
   else
     Record.push_back(0);
@@ -443,6 +451,9 @@ void TypeLocWriter::VisitComplexTypeLoc(ComplexTypeLoc TL) {
 }
 void TypeLocWriter::VisitPointerTypeLoc(PointerTypeLoc TL) {
   Writer.AddSourceLocation(TL.getStarLoc(), Record);
+}
+void TypeLocWriter::VisitDecayedTypeLoc(DecayedTypeLoc TL) {
+  // nothing to do
 }
 void TypeLocWriter::VisitBlockPointerTypeLoc(BlockPointerTypeLoc TL) {
   Writer.AddSourceLocation(TL.getCaretLoc(), Record);
@@ -732,6 +743,7 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(EXPR_CXX_CONST_CAST);
   RECORD(EXPR_CXX_FUNCTIONAL_CAST);
   RECORD(EXPR_USER_DEFINED_LITERAL);
+  RECORD(EXPR_CXX_STD_INITIALIZER_LIST);
   RECORD(EXPR_CXX_BOOL_LITERAL);
   RECORD(EXPR_CXX_NULL_PTR_LITERAL);
   RECORD(EXPR_CXX_TYPEID_EXPR);
@@ -794,7 +806,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(DECL_OFFSET);
   RECORD(IDENTIFIER_OFFSET);
   RECORD(IDENTIFIER_TABLE);
-  RECORD(EXTERNAL_DEFINITIONS);
+  RECORD(EAGERLY_DESERIALIZED_DECLS);
   RECORD(SPECIAL_TYPES);
   RECORD(STATISTICS);
   RECORD(TENTATIVE_DEFINITIONS);
@@ -825,7 +837,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(OPENCL_EXTENSIONS);
   RECORD(DELEGATING_CTORS);
   RECORD(KNOWN_NAMESPACES);
-  RECORD(UNDEFINED_INTERNALS);
+  RECORD(UNDEFINED_BUT_USED);
   RECORD(MODULE_OFFSET_MAP);
   RECORD(SOURCE_MANAGER_LINE_TABLE);
   RECORD(OBJC_CATEGORIES_MAP);
@@ -836,6 +848,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(OBJC_CATEGORIES);
   RECORD(MACRO_OFFSET);
   RECORD(MACRO_TABLE);
+  RECORD(LATE_PARSED_TEMPLATE);
 
   // SourceManager Block.
   BLOCK(SOURCE_MANAGER_BLOCK);
@@ -907,6 +920,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(DECL_OBJC_PROPERTY);
   RECORD(DECL_OBJC_PROPERTY_IMPL);
   RECORD(DECL_FIELD);
+  RECORD(DECL_MS_PROPERTY);
   RECORD(DECL_VAR);
   RECORD(DECL_IMPLICIT_PARAM);
   RECORD(DECL_PARM_VAR);
@@ -933,6 +947,9 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(DECL_CLASS_TEMPLATE);
   RECORD(DECL_CLASS_TEMPLATE_SPECIALIZATION);
   RECORD(DECL_CLASS_TEMPLATE_PARTIAL_SPECIALIZATION);
+  RECORD(DECL_VAR_TEMPLATE);
+  RECORD(DECL_VAR_TEMPLATE_SPECIALIZATION);
+  RECORD(DECL_VAR_TEMPLATE_PARTIAL_SPECIALIZATION);
   RECORD(DECL_FUNCTION_TEMPLATE);
   RECORD(DECL_TEMPLATE_TYPE_PARM);
   RECORD(DECL_NON_TYPE_TEMPLATE_PARM);
@@ -1069,6 +1086,7 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
        I != IEnd; ++I) {
     AddString(*I, Record);
   }
+  Record.push_back(LangOpts.CommentOpts.ParseAllComments);
 
   Stream.EmitRecord(LANGUAGE_OPTIONS, Record);
 
@@ -1485,7 +1503,8 @@ namespace {
       using namespace clang::io;
       uint64_t Start = Out.tell(); (void)Start;
       
-      unsigned char Flags = (Data.isImport << 5)
+      unsigned char Flags = (Data.HeaderRole << 6)
+                          | (Data.isImport << 5)
                           | (Data.isPragmaOnce << 4)
                           | (Data.DirInfo << 2)
                           | (Data.Resolved << 1)
@@ -1516,7 +1535,7 @@ namespace {
       Emit32(Out, Offset);
 
       if (Data.isModuleHeader) {
-        Module *Mod = HS.findModuleForHeader(key.FE);
+        Module *Mod = HS.findModuleForHeader(key.FE).getModule();
         Emit32(Out, Writer.getExistingSubmoduleID(Mod));
       }
 
@@ -1842,12 +1861,10 @@ public:
 };
 } // end anonymous namespace
 
-static int compareMacroDirectives(const void *XPtr, const void *YPtr) {
-  const std::pair<const IdentifierInfo *, MacroDirective *> &X =
-    *(const std::pair<const IdentifierInfo *, MacroDirective *>*)XPtr;
-  const std::pair<const IdentifierInfo *, MacroDirective *> &Y =
-    *(const std::pair<const IdentifierInfo *, MacroDirective *>*)YPtr;
-  return X.first->getName().compare(Y.first->getName());
+static int compareMacroDirectives(
+    const std::pair<const IdentifierInfo *, MacroDirective *> *X,
+    const std::pair<const IdentifierInfo *, MacroDirective *> *Y) {
+  return X->first->getName().compare(Y->first->getName());
 }
 
 static bool shouldIgnoreMacro(MacroDirective *MD, bool IsModule,
@@ -2261,13 +2278,19 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
 
   Abbrev = new BitCodeAbbrev();
   Abbrev->Add(BitCodeAbbrevOp(SUBMODULE_REQUIRES));
-  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Feature
+  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // State
+  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob));     // Feature
   unsigned RequiresAbbrev = Stream.EmitAbbrev(Abbrev);
 
   Abbrev = new BitCodeAbbrev();
   Abbrev->Add(BitCodeAbbrevOp(SUBMODULE_EXCLUDED_HEADER));
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Name
   unsigned ExcludedHeaderAbbrev = Stream.EmitAbbrev(Abbrev);
+
+  Abbrev = new BitCodeAbbrev();
+  Abbrev->Add(BitCodeAbbrevOp(SUBMODULE_PRIVATE_HEADER));
+  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Name
+  unsigned PrivateHeaderAbbrev = Stream.EmitAbbrev(Abbrev);
 
   Abbrev = new BitCodeAbbrev();
   Abbrev->Add(BitCodeAbbrevOp(SUBMODULE_LINK_LIBRARY));
@@ -2320,12 +2343,12 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
     Stream.EmitRecordWithBlob(DefinitionAbbrev, Record, Mod->Name);
     
     // Emit the requirements.
-    for (unsigned I = 0, N = Mod->Requires.size(); I != N; ++I) {
+    for (unsigned I = 0, N = Mod->Requirements.size(); I != N; ++I) {
       Record.clear();
       Record.push_back(SUBMODULE_REQUIRES);
+      Record.push_back(Mod->Requirements[I].second);
       Stream.EmitRecordWithBlob(RequiresAbbrev, Record,
-                                Mod->Requires[I].data(),
-                                Mod->Requires[I].size());
+                                Mod->Requirements[I].first);
     }
 
     // Emit the umbrella header, if there is one.
@@ -2342,11 +2365,11 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
     }
     
     // Emit the headers.
-    for (unsigned I = 0, N = Mod->Headers.size(); I != N; ++I) {
+    for (unsigned I = 0, N = Mod->NormalHeaders.size(); I != N; ++I) {
       Record.clear();
       Record.push_back(SUBMODULE_HEADER);
       Stream.EmitRecordWithBlob(HeaderAbbrev, Record, 
-                                Mod->Headers[I]->getName());
+                                Mod->NormalHeaders[I]->getName());
     }
     // Emit the excluded headers.
     for (unsigned I = 0, N = Mod->ExcludedHeaders.size(); I != N; ++I) {
@@ -2354,6 +2377,13 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
       Record.push_back(SUBMODULE_EXCLUDED_HEADER);
       Stream.EmitRecordWithBlob(ExcludedHeaderAbbrev, Record, 
                                 Mod->ExcludedHeaders[I]->getName());
+    }
+    // Emit the private headers.
+    for (unsigned I = 0, N = Mod->PrivateHeaders.size(); I != N; ++I) {
+      Record.clear();
+      Record.push_back(SUBMODULE_PRIVATE_HEADER);
+      Stream.EmitRecordWithBlob(PrivateHeaderAbbrev, Record, 
+                                Mod->PrivateHeaders[I]->getName());
     }
     ArrayRef<const FileEntry *>
       TopHeaders = Mod->getTopHeaders(PP->getFileManager());
@@ -2391,6 +2421,10 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
       }
       Stream.EmitRecord(SUBMODULE_EXPORTS, Record);
     }
+
+    //FIXME: How do we emit the 'use'd modules?  They may not be submodules.
+    // Might be unnecessary as use declarations are only used to build the
+    // module itself.
 
     // Emit the link libraries.
     for (unsigned I = 0, N = Mod->LinkLibraries.size(); I != N; ++I) {
@@ -3108,7 +3142,7 @@ public:
     // Only emit declarations that aren't from a chained PCH, though.
     SmallVector<Decl *, 16> Decls(IdResolver.begin(II),
                                   IdResolver.end());
-    for (SmallVector<Decl *, 16>::reverse_iterator D = Decls.rbegin(),
+    for (SmallVectorImpl<Decl *>::reverse_iterator D = Decls.rbegin(),
                                                 DEnd = Decls.rend();
          D != DEnd; ++D)
       clang::io::Emit32(Out, Writer.getDeclID(getMostRecentLocalDecl(*D)));
@@ -3360,8 +3394,6 @@ uint64_t ASTWriter::WriteDeclContextVisibleBlock(ASTContext &Context,
 
   // If not in C++, we perform name lookup for the translation unit via the
   // IdentifierInfo chains, don't bother to build a visible-declarations table.
-  // FIXME: In C++ we need the visible declarations in order to "see" the
-  // friend declarations, is there a way to do this without writing the table ?
   if (DC->isTranslationUnit() && !Context.getLangOpts().CPlusPlus)
     return 0;
 
@@ -3500,7 +3532,7 @@ void ASTWriter::WriteRedeclarations() {
 
   for (unsigned I = 0, N = Redeclarations.size(); I != N; ++I) {
     Decl *First = Redeclarations[I];
-    assert(First->getPreviousDecl() == 0 && "Not the first declaration?");
+    assert(First->isFirstDecl() && "Not the first declaration?");
     
     Decl *MostRecent = First->getMostRecentDecl();
     
@@ -3645,6 +3677,30 @@ void ASTWriter::WriteMergedDecls() {
   Stream.EmitRecord(MERGED_DECLARATIONS, Record);
 }
 
+void ASTWriter::WriteLateParsedTemplates(Sema &SemaRef) {
+  Sema::LateParsedTemplateMapT &LPTMap = SemaRef.LateParsedTemplateMap;
+
+  if (LPTMap.empty())
+    return;
+
+  RecordData Record;
+  for (Sema::LateParsedTemplateMapT::iterator It = LPTMap.begin(),
+                                              ItEnd = LPTMap.end();
+       It != ItEnd; ++It) {
+    LateParsedTemplate *LPT = It->second;
+    AddDeclRef(It->first, Record);
+    AddDeclRef(LPT->D, Record);
+    Record.push_back(LPT->Toks.size());
+
+    for (CachedTokens::iterator TokIt = LPT->Toks.begin(),
+                                TokEnd = LPT->Toks.end();
+         TokIt != TokEnd; ++TokIt) {
+      AddToken(*TokIt, Record);
+    }
+  }
+  Stream.EmitRecord(LATE_PARSED_TEMPLATE, Record);
+}
+
 //===----------------------------------------------------------------------===//
 // General Serialization Routines
 //===----------------------------------------------------------------------===//
@@ -3685,11 +3741,11 @@ void ASTWriter::AddString(StringRef Str, RecordDataImpl &Record) {
 void ASTWriter::AddVersionTuple(const VersionTuple &Version,
                                 RecordDataImpl &Record) {
   Record.push_back(Version.getMajor());
-  if (llvm::Optional<unsigned> Minor = Version.getMinor())
+  if (Optional<unsigned> Minor = Version.getMinor())
     Record.push_back(*Minor + 1);
   else
     Record.push_back(0);
-  if (llvm::Optional<unsigned> Subminor = Version.getSubminor())
+  if (Optional<unsigned> Subminor = Version.getSubminor())
     Record.push_back(*Subminor + 1);
   else
     Record.push_back(0);
@@ -3826,8 +3882,9 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
     // FIXME: Modules won't like this at all.
     IdentifierTable &Table = PP.getIdentifierTable();
     SmallVector<const char *, 32> BuiltinNames;
-    Context.BuiltinInfo.GetBuiltinNames(BuiltinNames,
-                                        Context.getLangOpts().NoBuiltin);
+    if (!Context.getLangOpts().NoBuiltin) {
+      Context.BuiltinInfo.GetBuiltinNames(BuiltinNames);
+    }
     for (unsigned I = 0, N = BuiltinNames.size(); I != N; ++I)
       getIdentifierRef(&Table.get(BuiltinNames[I]));
   }
@@ -3947,14 +4004,15 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
       AddDeclRef(I->first, KnownNamespaces);
   }
 
-  // Build a record of all used, undefined objects with internal linkage.
-  RecordData UndefinedInternals;
-  for (llvm::MapVector<NamedDecl*, SourceLocation>::iterator
-            I = SemaRef.UndefinedInternals.begin(),
-         IEnd = SemaRef.UndefinedInternals.end();
-       I != IEnd; ++I) {
-    AddDeclRef(I->first, UndefinedInternals);
-    AddSourceLocation(I->second, UndefinedInternals);
+  // Build a record of all used, undefined objects that require definitions.
+  RecordData UndefinedButUsed;
+
+  SmallVector<std::pair<NamedDecl *, SourceLocation>, 16> Undefined;
+  SemaRef.getUndefinedButUsed(Undefined);
+  for (SmallVectorImpl<std::pair<NamedDecl *, SourceLocation> >::iterator
+         I = Undefined.begin(), E = Undefined.end(); I != E; ++I) {
+    AddDeclRef(I->first, UndefinedButUsed);
+    AddSourceLocation(I->second, UndefinedButUsed);
   }
 
   // Write the control block
@@ -4011,7 +4069,7 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
 
   // Make sure visible decls, added to DeclContexts previously loaded from
   // an AST file, are registered for serialization.
-  for (SmallVector<const Decl *, 16>::iterator
+  for (SmallVectorImpl<const Decl *>::iterator
          I = UpdatingVisibleDecls.begin(),
          E = UpdatingVisibleDecls.end(); I != E; ++I) {
     GetDeclRef(*I);
@@ -4134,8 +4192,8 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   Stream.EmitRecord(SPECIAL_TYPES, SpecialTypes);
 
   // Write the record containing external, unnamed definitions.
-  if (!ExternalDefinitions.empty())
-    Stream.EmitRecord(EXTERNAL_DEFINITIONS, ExternalDefinitions);
+  if (!EagerlyDeserializedDecls.empty())
+    Stream.EmitRecord(EAGERLY_DESERIALIZED_DECLS, EagerlyDeserializedDecls);
 
   // Write the record containing tentative definitions.
   if (!TentativeDefinitions.empty())
@@ -4187,9 +4245,9 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   if (!KnownNamespaces.empty())
     Stream.EmitRecord(KNOWN_NAMESPACES, KnownNamespaces);
 
-  // Write the undefined internal functions and variables.
-  if (!UndefinedInternals.empty())
-    Stream.EmitRecord(UNDEFINED_INTERNALS, UndefinedInternals);
+  // Write the undefined internal functions and variables, and inline functions.
+  if (!UndefinedButUsed.empty())
+    Stream.EmitRecord(UNDEFINED_BUT_USED, UndefinedButUsed);
   
   // Write the visible updates to DeclContexts.
   for (llvm::SmallPtrSet<const DeclContext *, 16>::iterator
@@ -4225,7 +4283,8 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   WriteRedeclarations();
   WriteMergedDecls();
   WriteObjCCategories();
-  
+  WriteLateParsedTemplates(SemaRef);
+
   // Some simple statistics
   Record.clear();
   Record.push_back(NumStatements);
@@ -4256,8 +4315,15 @@ void ASTWriter::ResolveDeclUpdatesBlocks() {
         URec[Idx] = GetDeclRef(reinterpret_cast<Decl *>(URec[Idx]));
         ++Idx;
         break;
-          
+
       case UPD_CXX_INSTANTIATED_STATIC_DATA_MEMBER:
+      case UPD_DECL_MARKED_USED:
+        ++Idx;
+        break;
+
+      case UPD_CXX_DEDUCED_RETURN_TYPE:
+        URec[Idx] = GetOrCreateTypeID(
+            QualType::getFromOpaquePtr(reinterpret_cast<void *>(URec[Idx])));
         ++Idx;
         break;
       }
@@ -4294,8 +4360,8 @@ void ASTWriter::WriteDeclReplacementsBlock() {
     return;
 
   RecordData Record;
-  for (SmallVector<ReplacedDeclInfo, 16>::iterator
-           I = ReplacedDecls.begin(), E = ReplacedDecls.end(); I != E; ++I) {
+  for (SmallVectorImpl<ReplacedDeclInfo>::iterator
+         I = ReplacedDecls.begin(), E = ReplacedDecls.end(); I != E; ++I) {
     Record.push_back(I->ID);
     Record.push_back(I->Offset);
     Record.push_back(I->Loc);
@@ -4474,11 +4540,13 @@ void ASTWriter::AddTypeRef(QualType T, RecordDataImpl &Record) {
 }
 
 TypeID ASTWriter::GetOrCreateTypeID( QualType T) {
+  assert(Context);
   return MakeTypeID(*Context, T,
               std::bind1st(std::mem_fun(&ASTWriter::GetOrCreateTypeIdx), this));
 }
 
 TypeID ASTWriter::getTypeID(QualType T) const {
+  assert(Context);
   return MakeTypeID(*Context, T,
               std::bind1st(std::mem_fun(&ASTWriter::getTypeIdx), this));
 }
@@ -4559,11 +4627,6 @@ DeclID ASTWriter::getDeclID(const Decl *D) {
   return DeclIDs[D];
 }
 
-static inline bool compLocDecl(std::pair<unsigned, serialization::DeclID> L,
-                               std::pair<unsigned, serialization::DeclID> R) {
-  return L.first < R.first;
-}
-
 void ASTWriter::associateDeclWithFile(const Decl *D, DeclID ID) {
   assert(ID);
   assert(D);
@@ -4602,8 +4665,8 @@ void ASTWriter::associateDeclWithFile(const Decl *D, DeclID ID) {
     return;
   }
 
-  LocDeclIDsTy::iterator
-    I = std::upper_bound(Decls.begin(), Decls.end(), LocDecl, compLocDecl);
+  LocDeclIDsTy::iterator I =
+      std::upper_bound(Decls.begin(), Decls.end(), LocDecl, llvm::less_first());
 
   Decls.insert(I, LocDecl);
 }
@@ -4861,7 +4924,7 @@ void ASTWriter::AddTemplateArgument(const TemplateArgument &Arg,
     break;
   case TemplateArgument::TemplateExpansion:
     AddTemplateName(Arg.getAsTemplateOrTemplatePattern(), Record);
-    if (llvm::Optional<unsigned> NumExpansions = Arg.getNumTemplateExpansions())
+    if (Optional<unsigned> NumExpansions = Arg.getNumTemplateExpansions())
       Record.push_back(*NumExpansions + 1);
     else
       Record.push_back(0);
@@ -4902,6 +4965,17 @@ ASTWriter::AddTemplateArgumentList(const TemplateArgumentList *TemplateArgs,
     AddTemplateArgument(TemplateArgs->get(i), Record);
 }
 
+void
+ASTWriter::AddASTTemplateArgumentListInfo
+(const ASTTemplateArgumentListInfo *ASTTemplArgList, RecordDataImpl &Record) {
+  assert(ASTTemplArgList && "No ASTTemplArgList!");
+  AddSourceLocation(ASTTemplArgList->LAngleLoc, Record);
+  AddSourceLocation(ASTTemplArgList->RAngleLoc, Record);
+  Record.push_back(ASTTemplArgList->NumTemplateArgs);
+  const TemplateArgumentLoc *TemplArgs = ASTTemplArgList->getTemplateArgs();
+  for (int i=0, e = ASTTemplArgList->NumTemplateArgs; i != e; ++i)
+    AddTemplateArgumentLoc(TemplArgs[i], Record);
+}
 
 void
 ASTWriter::AddUnresolvedSet(const ASTUnresolvedSet &Set, RecordDataImpl &Record) {
@@ -5032,8 +5106,6 @@ void ASTWriter::AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Rec
   Record.push_back(Data.ImplicitCopyAssignmentHasConstParam);
   Record.push_back(Data.HasDeclaredCopyConstructorWithConstParam);
   Record.push_back(Data.HasDeclaredCopyAssignmentWithConstParam);
-  Record.push_back(Data.FailedImplicitMoveConstructor);
-  Record.push_back(Data.FailedImplicitMoveAssignment);
   // IsLambda bit is already saved.
 
   Record.push_back(Data.NumBases);
@@ -5047,15 +5119,17 @@ void ASTWriter::AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Rec
     AddCXXBaseSpecifiersRef(Data.getVBases(), Data.getVBases() + Data.NumVBases, 
                             Record);
 
-  AddUnresolvedSet(Data.Conversions, Record);
-  AddUnresolvedSet(Data.VisibleConversions, Record);
+  AddUnresolvedSet(Data.Conversions.get(*Context), Record);
+  AddUnresolvedSet(Data.VisibleConversions.get(*Context), Record);
   // Data.Definition is the owning decl, no need to write it. 
-  AddDeclRef(Data.FirstFriend, Record);
+  AddDeclRef(D->getFirstFriend(), Record);
   
   // Add lambda-specific data.
   if (Data.IsLambda) {
     CXXRecordDecl::LambdaDefinitionData &Lambda = D->getLambdaData();
     Record.push_back(Lambda.Dependent);
+    Record.push_back(Lambda.IsGenericLambda);
+    Record.push_back(Lambda.CaptureDefault);
     Record.push_back(Lambda.NumCaptures);
     Record.push_back(Lambda.NumExplicitCaptures);
     Record.push_back(Lambda.ManglingNumber);
@@ -5065,12 +5139,20 @@ void ASTWriter::AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Rec
       LambdaExpr::Capture &Capture = Lambda.Captures[I];
       AddSourceLocation(Capture.getLocation(), Record);
       Record.push_back(Capture.isImplicit());
-      Record.push_back(Capture.getCaptureKind()); // FIXME: stable!
-      VarDecl *Var = Capture.capturesVariable()? Capture.getCapturedVar() : 0;
-      AddDeclRef(Var, Record);
-      AddSourceLocation(Capture.isPackExpansion()? Capture.getEllipsisLoc()
-                                                 : SourceLocation(), 
-                        Record);
+      Record.push_back(Capture.getCaptureKind());
+      switch (Capture.getCaptureKind()) {
+      case LCK_This:
+        break;
+      case LCK_ByCopy:
+      case LCK_ByRef:
+        VarDecl *Var =
+            Capture.capturesVariable() ? Capture.getCapturedVar() : 0;
+        AddDeclRef(Var, Record);
+        AddSourceLocation(Capture.isPackExpansion() ? Capture.getEllipsisLoc()
+                                                    : SourceLocation(),
+                          Record);
+        break;
+      }
     }
   }
 }
@@ -5202,6 +5284,19 @@ void ASTWriter::AddedCXXTemplateSpecialization(const ClassTemplateDecl *TD,
   Record.push_back(reinterpret_cast<uint64_t>(D));
 }
 
+void ASTWriter::AddedCXXTemplateSpecialization(
+    const VarTemplateDecl *TD, const VarTemplateSpecializationDecl *D) {
+  // The specializations set is kept in the canonical template.
+  assert(!WritingAST && "Already writing the AST!");
+  TD = TD->getCanonicalDecl();
+  if (!(!D->isFromASTFile() && TD->isFromASTFile()))
+    return; // Not a source specialization added to a template from PCH.
+
+  UpdateRecord &Record = DeclUpdates[TD];
+  Record.push_back(UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION);
+  Record.push_back(reinterpret_cast<uint64_t>(D));
+}
+
 void ASTWriter::AddedCXXTemplateSpecialization(const FunctionTemplateDecl *TD,
                                                const FunctionDecl *D) {
   // The specializations set is kept in the canonical template.
@@ -5213,6 +5308,17 @@ void ASTWriter::AddedCXXTemplateSpecialization(const FunctionTemplateDecl *TD,
   UpdateRecord &Record = DeclUpdates[TD];
   Record.push_back(UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION);
   Record.push_back(reinterpret_cast<uint64_t>(D));
+}
+
+void ASTWriter::DeducedReturnType(const FunctionDecl *FD, QualType ReturnType) {
+  assert(!WritingAST && "Already writing the AST!");
+  FD = FD->getCanonicalDecl();
+  if (!FD->isFromASTFile())
+    return; // Not a function declared in PCH and defined outside.
+
+  UpdateRecord &Record = DeclUpdates[FD];
+  Record.push_back(UPD_CXX_DEDUCED_RETURN_TYPE);
+  Record.push_back(reinterpret_cast<uint64_t>(ReturnType.getAsOpaquePtr()));
 }
 
 void ASTWriter::CompletedImplicitDefinition(const FunctionDecl *D) {
@@ -5262,4 +5368,13 @@ void ASTWriter::AddedObjCPropertyInClassExtension(const ObjCPropertyDecl *Prop,
     return; // Declaration not imported from PCH.
 
   RewriteDecl(D);
+}
+
+void ASTWriter::DeclarationMarkedUsed(const Decl *D) {
+  assert(!WritingAST && "Already writing the AST!");
+  if (!D->isFromASTFile())
+    return;
+
+  UpdateRecord &Record = DeclUpdates[D];
+  Record.push_back(UPD_DECL_MARKED_USED);
 }

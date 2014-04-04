@@ -27,8 +27,10 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/Function.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Operator.h"
@@ -131,6 +133,7 @@ private:
 
   // Call handling routines.
   private:
+  CCAssignFn *CCAssignFnForCall() const;
   bool ProcessCallArgs(SmallVectorImpl<Value*> &Args,
                        SmallVectorImpl<unsigned> &ArgRegs,
                        SmallVectorImpl<MVT> &ArgVTs,
@@ -163,6 +166,11 @@ public:
 } // end anonymous namespace
 
 #include "ARM64GenCallingConv.inc"
+
+CCAssignFn *ARM64FastISel::CCAssignFnForCall() const {
+    return Subtarget->isTargetDarwin() ? CC_ARM64_DarwinPCS : CC_ARM64_AAPCS;
+  }
+
 
 unsigned ARM64FastISel::TargetMaterializeAlloca(const AllocaInst *AI) {
   assert (TLI.getValueType(AI->getType(), true) == MVT::i64 &&
@@ -222,12 +230,25 @@ unsigned ARM64FastISel::ARM64MaterializeFP(const ConstantFP *CFP, MVT VT) {
   unsigned Opc = is64bit ? ARM64::LDRDui : ARM64::LDRSui;
   unsigned ResultReg = createResultReg(TLI.getRegClassFor(VT));
   BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(Opc), ResultReg)
-    .addReg(ADRPReg).addConstantPoolIndex(Idx, 0, ARM64II::MO_PAGEOFF);
+    .addReg(ADRPReg)
+    .addConstantPoolIndex(Idx, 0, ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
   return ResultReg;
 }
 
 unsigned ARM64FastISel::ARM64MaterializeGV(const GlobalValue *GV) {
-  unsigned char OpFlags = Subtarget->ClassifyGlobalReference(GV);
+  // We can't handle thread-local variables quickly yet. Unfortunately we have
+  // to peer through any aliases to find out if that rule applies.
+  const GlobalValue *TLSGV = GV;
+  if (const GlobalAlias *GA = dyn_cast<GlobalAlias>(GV))
+    TLSGV = GA->resolveAliasedGlobal(false);
+
+  if (const GlobalVariable *GVar = dyn_cast<GlobalVariable>(TLSGV))
+    if (GVar->isThreadLocal())
+      return 0;
+
+
+  unsigned char OpFlags
+      = Subtarget->ClassifyGlobalReference(GV, TM.getRelocationModel());
 
   EVT DestEVT = TLI.getValueType(GV->getType(), true);
   if (!DestEVT.isSimple()) return 0;
@@ -243,15 +264,17 @@ unsigned ARM64FastISel::ARM64MaterializeGV(const GlobalValue *GV) {
       .addGlobalAddress(GV, 0, ARM64II::MO_GOT | ARM64II::MO_PAGE);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::LDRXui),
             ResultReg)
-      .addReg(ADRPReg).addGlobalAddress(GV, 0, ARM64II::MO_GOT |
-                                         ARM64II::MO_PAGEOFF);
+      .addReg(ADRPReg)
+      .addGlobalAddress(GV, 0,
+                        ARM64II::MO_GOT | ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
   } else {
     // ADRP + ADDX
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::ADRP), ADRPReg)
       .addGlobalAddress(GV, 0, ARM64II::MO_PAGE);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::ADDXri),
             ResultReg)
-      .addReg(ADRPReg).addGlobalAddress(GV, 0, ARM64II::MO_PAGEOFF).addImm(0);
+      .addReg(ADRPReg)
+      .addGlobalAddress(GV, 0, ARM64II::MO_PAGEOFF | ARM64II::MO_NC).addImm(0);
   }
   return ResultReg;
 }
@@ -743,6 +766,11 @@ bool ARM64FastISel::SelectBranch(const Instruction *I) {
       unsigned CondReg = getRegForValue(TI->getOperand(0));
       if (CondReg == 0) return false;
 
+      // Issue an extract_subreg to get the lower 32-bits.
+      if (SrcVT == MVT::i64)
+        CondReg = FastEmitInst_extractsubreg(MVT::i32, CondReg, /*Kill=*/true,
+                                             ARM64::sub_32);
+
       unsigned ANDReg = createResultReg(&ARM64::GPR32RegClass);
       BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::ANDWri),
               ANDReg)
@@ -782,7 +810,7 @@ bool ARM64FastISel::SelectBranch(const Instruction *I) {
   // and it left a value for us in a virtual register.  Ergo, we test
   // the one-bit value left in the virtual register.
   BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::SUBSWri),
-          CondReg)
+          ARM64::WZR)
     .addReg(CondReg).addImm(0).addImm(0);
 
   unsigned CC = ARM64CC::NE;
@@ -1096,7 +1124,7 @@ bool ARM64FastISel::ProcessCallArgs(SmallVectorImpl<Value*> &Args,
                                     unsigned &NumBytes) {
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CC, false, *FuncInfo.MF, TM, ArgLocs, *Context);
-  CCInfo.AnalyzeCallOperands(ArgVTs, ArgFlags, CC_ARM64_AAPCS);
+  CCInfo.AnalyzeCallOperands(ArgVTs, ArgFlags, CCAssignFnForCall());
 
   // Get a count of how many bytes are to be pushed on the stack.
   NumBytes = CCInfo.getNextStackOffset();
@@ -1172,7 +1200,7 @@ bool ARM64FastISel::FinishCall(MVT RetVT, SmallVectorImpl<unsigned> &UsedRegs,
   if (RetVT != MVT::isVoid) {
     SmallVector<CCValAssign, 16> RVLocs;
     CCState CCInfo(CC, false, *FuncInfo.MF, TM, RVLocs, *Context);
-    CCInfo.AnalyzeCallResult(RetVT, CC_ARM64_AAPCS);
+    CCInfo.AnalyzeCallResult(RetVT, CCAssignFnForCall());
 
     // Only handle a single return value.
     if (RVLocs.size() != 1)
@@ -1444,6 +1472,9 @@ bool ARM64FastISel::SelectRet(const Instruction *I) {
   if (F.isVarArg())
     return false;
 
+  // Build a list of return value registers.
+  SmallVector<unsigned, 4> RetRegs;
+
   if (Ret->getNumOperands() > 0) {
     CallingConv::ID CC = F.getCallingConv();
     SmallVector<ISD::OutputArg, 4> Outs;
@@ -1500,12 +1531,14 @@ bool ARM64FastISel::SelectRet(const Instruction *I) {
             DestReg)
       .addReg(SrcReg);
 
-    // Mark the register as live out of the function.
-    MRI.addLiveOut(VA.getLocReg());
+    // Add register to return instruction.
+    RetRegs.push_back(VA.getLocReg());
   }
 
-  BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::RET))
-    .addReg(ARM64::LR);
+  MachineInstrBuilder MIB =
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::RET_ReallyLR));
+  for (unsigned i = 0, e = RetRegs.size(); i != e; ++i)
+    MIB.addReg(RetRegs[i], RegState::Implicit);
   return true;
 }
 
@@ -1551,10 +1584,14 @@ bool ARM64FastISel::SelectTrunc(const Instruction *I) {
         Mask = 0xffff;
         break;
     }
+    // Issue an extract_subreg to get the lower 32-bits.
+    unsigned Reg32 = FastEmitInst_extractsubreg(MVT::i32, SrcReg, /*Kill=*/true,
+                                                ARM64::sub_32);
+    // Create the AND instruction which performs the actual truncation.
     unsigned ANDReg = createResultReg(&ARM64::GPR32RegClass);
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(ARM64::ANDWri),
             ANDReg)
-      .addReg(SrcReg).addImm(ARM64_AM::encodeLogicalImmediate(Mask, 32));
+      .addReg(Reg32).addImm(ARM64_AM::encodeLogicalImmediate(Mask, 32));
     SrcReg = ANDReg;
   }
 
@@ -1791,7 +1828,7 @@ bool ARM64FastISel::TargetSelectInstruction(const Instruction *I) {
   }
   return false;
   // Silence warnings.
-  (void)CC_ARM64_AAPCS_VarArg;
+  (void)CC_ARM64_DarwinPCS_VarArg;
 }
 
 namespace llvm {

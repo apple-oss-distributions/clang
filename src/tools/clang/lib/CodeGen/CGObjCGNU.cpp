@@ -225,7 +225,7 @@ protected:
   /// Returns a property name and encoding string.
   llvm::Constant *MakePropertyEncodingString(const ObjCPropertyDecl *PD,
                                              const Decl *Container) {
-    ObjCRuntime R = CGM.getLangOpts().ObjCRuntime;
+    const ObjCRuntime &R = CGM.getLangOpts().ObjCRuntime;
     if ((R.getKind() == ObjCRuntime::GNUstep) &&
         (R.getVersion() >= VersionTuple(1, 6))) {
       std::string NameAndAttributes;
@@ -236,10 +236,39 @@ protected:
       NameAndAttributes += TypeStr;
       NameAndAttributes += '\0';
       NameAndAttributes += PD->getNameAsString();
+      NameAndAttributes += '\0';
       return llvm::ConstantExpr::getGetElementPtr(
           CGM.GetAddrOfConstantString(NameAndAttributes), Zeros);
     }
     return MakeConstantString(PD->getNameAsString());
+  }
+  /// Push the property attributes into two structure fields. 
+  void PushPropertyAttributes(std::vector<llvm::Constant*> &Fields,
+      ObjCPropertyDecl *property, bool isSynthesized=true, bool
+      isDynamic=true) {
+    int attrs = property->getPropertyAttributes();
+    // For read-only properties, clear the copy and retain flags
+    if (attrs & ObjCPropertyDecl::OBJC_PR_readonly) {
+      attrs &= ~ObjCPropertyDecl::OBJC_PR_copy;
+      attrs &= ~ObjCPropertyDecl::OBJC_PR_retain;
+      attrs &= ~ObjCPropertyDecl::OBJC_PR_weak;
+      attrs &= ~ObjCPropertyDecl::OBJC_PR_strong;
+    }
+    // The first flags field has the same attribute values as clang uses internally
+    Fields.push_back(llvm::ConstantInt::get(Int8Ty, attrs & 0xff));
+    attrs >>= 8;
+    attrs <<= 2;
+    // For protocol properties, synthesized and dynamic have no meaning, so we
+    // reuse these flags to indicate that this is a protocol property (both set
+    // has no meaning, as a property can't be both synthesized and dynamic)
+    attrs |= isSynthesized ? (1<<0) : 0;
+    attrs |= isDynamic ? (1<<1) : 0;
+    // The second field is the next four fields left shifted by two, with the
+    // low bit set to indicate whether the field is synthesized or dynamic.
+    Fields.push_back(llvm::ConstantInt::get(Int8Ty, attrs & 0xff));
+    // Two padding fields
+    Fields.push_back(llvm::ConstantInt::get(Int8Ty, 0));
+    Fields.push_back(llvm::ConstantInt::get(Int8Ty, 0));
   }
   /// Ensures that the value has the required type, by inserting a bitcast if
   /// required.  This function lets us avoid inserting bitcasts that are
@@ -425,13 +454,15 @@ protected:
   virtual llvm::Value *LookupIMP(CodeGenFunction &CGF,
                                  llvm::Value *&Receiver,
                                  llvm::Value *cmd,
-                                 llvm::MDNode *node) = 0;
+                                 llvm::MDNode *node,
+                                 MessageSendInfo &MSI) = 0;
   /// Looks up the method for sending a message to a superclass.  This
   /// mechanism differs between the GCC and GNU runtimes, so this method must
   /// be overridden in subclasses.
   virtual llvm::Value *LookupIMPSuper(CodeGenFunction &CGF,
                                       llvm::Value *ObjCSuper,
-                                      llvm::Value *cmd) = 0;
+                                      llvm::Value *cmd,
+                                      MessageSendInfo &MSI) = 0;
   /// Libobjc2 uses a bitfield representation where small(ish) bitfields are
   /// stored in a 64-bit value with the low bit set to 1 and the remaining 63
   /// bits set to their values, LSB first, while larger ones are stored in a
@@ -567,7 +598,8 @@ protected:
   virtual llvm::Value *LookupIMP(CodeGenFunction &CGF,
                                  llvm::Value *&Receiver,
                                  llvm::Value *cmd,
-                                 llvm::MDNode *node) {
+                                 llvm::MDNode *node,
+                                 MessageSendInfo &MSI) {
     CGBuilderTy &Builder = CGF.Builder;
     llvm::Value *args[] = {
             EnforceType(Builder, Receiver, IdTy),
@@ -578,7 +610,8 @@ protected:
   }
   virtual llvm::Value *LookupIMPSuper(CodeGenFunction &CGF,
                                       llvm::Value *ObjCSuper,
-                                      llvm::Value *cmd) {
+                                      llvm::Value *cmd,
+                                      MessageSendInfo &MSI) {
       CGBuilderTy &Builder = CGF.Builder;
       llvm::Value *lookupArgs[] = {EnforceType(Builder, ObjCSuper,
           PtrToObjCSuperTy), cmd};
@@ -626,7 +659,8 @@ class CGObjCGNUstep : public CGObjCGNU {
     virtual llvm::Value *LookupIMP(CodeGenFunction &CGF,
                                    llvm::Value *&Receiver,
                                    llvm::Value *cmd,
-                                   llvm::MDNode *node) {
+                                   llvm::MDNode *node,
+                                   MessageSendInfo &MSI) {
       CGBuilderTy &Builder = CGF.Builder;
       llvm::Function *LookupFn = SlotLookupFn;
 
@@ -664,7 +698,8 @@ class CGObjCGNUstep : public CGObjCGNU {
     }
     virtual llvm::Value *LookupIMPSuper(CodeGenFunction &CGF,
                                         llvm::Value *ObjCSuper,
-                                        llvm::Value *cmd) {
+                                        llvm::Value *cmd,
+                                        MessageSendInfo &MSI) {
       CGBuilderTy &Builder = CGF.Builder;
       llvm::Value *lookupArgs[] = {ObjCSuper, cmd};
 
@@ -676,7 +711,7 @@ class CGObjCGNUstep : public CGObjCGNU {
     }
   public:
     CGObjCGNUstep(CodeGenModule &Mod) : CGObjCGNU(Mod, 9, 3) {
-      ObjCRuntime R = CGM.getLangOpts().ObjCRuntime;
+      const ObjCRuntime &R = CGM.getLangOpts().ObjCRuntime;
 
       llvm::StructType *SlotStructTy = llvm::StructType::get(PtrTy,
           PtrTy, PtrTy, IntTy, IMPTy, NULL);
@@ -768,31 +803,46 @@ protected:
   /// The GCC ABI message lookup function.  Returns an IMP pointing to the
   /// method implementation for this message.
   LazyRuntimeFunction MsgLookupFn;
+  /// stret lookup function.  While this does not seem to make sense at the
+  /// first look, this is required to call the correct forwarding function.
+  LazyRuntimeFunction MsgLookupFnSRet;
   /// The GCC ABI superclass message lookup function.  Takes a pointer to a
   /// structure describing the receiver and the class, and a selector as
   /// arguments.  Returns the IMP for the corresponding method.
-  LazyRuntimeFunction MsgLookupSuperFn;
+  LazyRuntimeFunction MsgLookupSuperFn, MsgLookupSuperFnSRet;
 
   virtual llvm::Value *LookupIMP(CodeGenFunction &CGF,
                                  llvm::Value *&Receiver,
                                  llvm::Value *cmd,
-                                 llvm::MDNode *node) {
+                                 llvm::MDNode *node,
+                                 MessageSendInfo &MSI) {
     CGBuilderTy &Builder = CGF.Builder;
     llvm::Value *args[] = {
             EnforceType(Builder, Receiver, IdTy),
             EnforceType(Builder, cmd, SelectorTy) };
-    llvm::CallSite imp = CGF.EmitRuntimeCallOrInvoke(MsgLookupFn, args);
+
+    llvm::CallSite imp;
+    if (CGM.ReturnTypeUsesSRet(MSI.CallInfo))
+      imp = CGF.EmitRuntimeCallOrInvoke(MsgLookupFnSRet, args);
+    else
+      imp = CGF.EmitRuntimeCallOrInvoke(MsgLookupFn, args);
+
     imp->setMetadata(msgSendMDKind, node);
     return imp.getInstruction();
   }
 
   virtual llvm::Value *LookupIMPSuper(CodeGenFunction &CGF,
                                       llvm::Value *ObjCSuper,
-                                      llvm::Value *cmd) {
+                                      llvm::Value *cmd,
+                                      MessageSendInfo &MSI) {
       CGBuilderTy &Builder = CGF.Builder;
       llvm::Value *lookupArgs[] = {EnforceType(Builder, ObjCSuper,
           PtrToObjCSuperTy), cmd};
-      return CGF.EmitNounwindRuntimeCall(MsgLookupSuperFn, lookupArgs);
+
+      if (CGM.ReturnTypeUsesSRet(MSI.CallInfo))
+        return CGF.EmitNounwindRuntimeCall(MsgLookupSuperFnSRet, lookupArgs);
+      else
+        return CGF.EmitNounwindRuntimeCall(MsgLookupSuperFn, lookupArgs);
     }
 
   virtual llvm::Value *GetClassNamed(CodeGenFunction &CGF,
@@ -818,9 +868,13 @@ public:
   CGObjCObjFW(CodeGenModule &Mod): CGObjCGNU(Mod, 9, 3) {
     // IMP objc_msg_lookup(id, SEL);
     MsgLookupFn.init(&CGM, "objc_msg_lookup", IMPTy, IdTy, SelectorTy, NULL);
+    MsgLookupFnSRet.init(&CGM, "objc_msg_lookup_stret", IMPTy, IdTy,
+                         SelectorTy, NULL);
     // IMP objc_msg_lookup_super(struct objc_super*, SEL);
     MsgLookupSuperFn.init(&CGM, "objc_msg_lookup_super", IMPTy,
                           PtrToObjCSuperTy, SelectorTy, NULL);
+    MsgLookupSuperFnSRet.init(&CGM, "objc_msg_lookup_super_stret", IMPTy,
+                              PtrToObjCSuperTy, SelectorTy, NULL);
   }
 };
 } // end anonymous namespace
@@ -1012,7 +1066,7 @@ llvm::Value *CGObjCGNU::EmitNSAutoreleasePoolClassRef(CodeGenFunction &CGF) {
 llvm::Value *CGObjCGNU::GetSelector(CodeGenFunction &CGF, Selector Sel,
     const std::string &TypeEncoding, bool lval) {
 
-  SmallVector<TypedSelector, 2> &Types = SelectorTable[Sel];
+  SmallVectorImpl<TypedSelector> &Types = SelectorTable[Sel];
   llvm::GlobalAlias *SelValue = 0;
 
 
@@ -1262,7 +1316,7 @@ CGObjCGNU::GenerateMessageSendSuper(CodeGenFunction &CGF,
   ObjCSuper = EnforceType(Builder, ObjCSuper, PtrToObjCSuperTy);
 
   // Get the IMP
-  llvm::Value *imp = LookupIMPSuper(CGF, ObjCSuper, cmd);
+  llvm::Value *imp = LookupIMPSuper(CGF, ObjCSuper, cmd, MSI);
   imp = EnforceType(Builder, imp, MSI.MessengerType);
 
   llvm::Value *impMD[] = {
@@ -1361,7 +1415,7 @@ CGObjCGNU::GenerateMessageSend(CodeGenFunction &CGF,
   // given platform), so we 
   switch (CGM.getCodeGenOpts().getObjCDispatchMethod()) {
     case CodeGenOptions::Legacy:
-      imp = LookupIMP(CGF, Receiver, cmd, node);
+      imp = LookupIMP(CGF, Receiver, cmd, node, MSI);
       break;
     case CodeGenOptions::Mixed:
     case CodeGenOptions::NonLegacy:
@@ -1385,8 +1439,7 @@ CGObjCGNU::GenerateMessageSend(CodeGenFunction &CGF,
   imp = EnforceType(Builder, imp, MSI.MessengerType);
 
   llvm::Instruction *call;
-  RValue msgRet = CGF.EmitCall(MSI.CallInfo, imp, Return, ActualArgs,
-      0, &call);
+  RValue msgRet = CGF.EmitCall(MSI.CallInfo, imp, Return, ActualArgs, 0, &call);
   call->setMetadata(msgSendMDKind, node);
 
 
@@ -1787,8 +1840,8 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
   // simplify the runtime library by allowing it to use the same data
   // structures for protocol metadata everywhere.
   llvm::StructType *PropertyMetadataTy = llvm::StructType::get(
-          PtrToInt8Ty, Int8Ty, Int8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty,
-          PtrToInt8Ty, NULL);
+          PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
+          PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, NULL);
   std::vector<llvm::Constant*> Properties;
   std::vector<llvm::Constant*> OptionalProperties;
 
@@ -1800,12 +1853,9 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
     std::vector<llvm::Constant*> Fields;
     ObjCPropertyDecl *property = *iter;
 
+    Fields.push_back(MakePropertyEncodingString(property, 0));
+    PushPropertyAttributes(Fields, property);
 
-    Fields.push_back(MakePropertyEncodingString(property, PD));
-
-    Fields.push_back(llvm::ConstantInt::get(Int8Ty,
-                property->getPropertyAttributes()));
-    Fields.push_back(llvm::ConstantInt::get(Int8Ty, 0));
     if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
       std::string TypeStr;
       Context.getObjCEncodingForMethodDecl(getter,TypeStr);
@@ -2035,14 +2085,12 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplementationDecl *OI
         SmallVectorImpl<Selector> &InstanceMethodSels,
         SmallVectorImpl<llvm::Constant*> &InstanceMethodTypes) {
   ASTContext &Context = CGM.getContext();
-  //
-  // Property metadata: name, attributes, isSynthesized, setter name, setter
-  // types, getter name, getter types.
+  // Property metadata: name, attributes, attributes2, padding1, padding2,
+  // setter name, setter types, getter name, getter types.
   llvm::StructType *PropertyMetadataTy = llvm::StructType::get(
-          PtrToInt8Ty, Int8Ty, Int8Ty, PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty,
-          PtrToInt8Ty, NULL);
+          PtrToInt8Ty, Int8Ty, Int8Ty, Int8Ty, Int8Ty, PtrToInt8Ty,
+          PtrToInt8Ty, PtrToInt8Ty, PtrToInt8Ty, NULL);
   std::vector<llvm::Constant*> Properties;
-
 
   // Add all of the property methods need adding to the method list and to the
   // property metadata list.
@@ -2054,11 +2102,11 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplementationDecl *OI
     ObjCPropertyImplDecl *propertyImpl = *iter;
     bool isSynthesized = (propertyImpl->getPropertyImplementation() == 
         ObjCPropertyImplDecl::Synthesize);
+    bool isDynamic = (propertyImpl->getPropertyImplementation() == 
+        ObjCPropertyImplDecl::Dynamic);
 
     Fields.push_back(MakePropertyEncodingString(property, OID));
-    Fields.push_back(llvm::ConstantInt::get(Int8Ty,
-                property->getPropertyAttributes()));
-    Fields.push_back(llvm::ConstantInt::get(Int8Ty, isSynthesized));
+    PushPropertyAttributes(Fields, property, isSynthesized, isDynamic);
     if (ObjCMethodDecl *getter = property->getGetterMethodDecl()) {
       std::string TypeStr;
       Context.getObjCEncodingForMethodDecl(getter,TypeStr);

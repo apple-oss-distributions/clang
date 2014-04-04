@@ -12,10 +12,13 @@
 // Linux-specific code.
 //===----------------------------------------------------------------------===//
 
-#ifdef __linux__
+#include "sanitizer_common/sanitizer_platform.h"
+#if SANITIZER_LINUX
 
 #include "msan.h"
 
+#include <elf.h>
+#include <link.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -42,7 +45,7 @@ static const uptr kOriginsBeg = kBad2Beg;
 static const uptr kOriginsEnd = kBad2End;
 
 bool InitShadow(bool prot1, bool prot2, bool map_shadow, bool init_origins) {
-  if (flags()->verbosity) {
+  if (common_flags()->verbosity) {
     Printf("__msan_init %p\n", &__msan_init);
     Printf("Memory   : %p %p\n", kMemBeg, kMemEnd);
     Printf("Bad2     : %p %p\n", kBad2Beg, kBad2End);
@@ -87,6 +90,7 @@ static void MsanAtExit(void) {
 void InstallAtExitHandler() {
   atexit(MsanAtExit);
 }
-}
+
+}  // namespace __msan
 
 #endif  // __linux__

@@ -1,13 +1,13 @@
 ======================
-LLVM 3.3 Release Notes
+LLVM 3.4 Release Notes
 ======================
 
 .. contents::
     :local:
 
 .. warning::
-   These are in-progress notes for the upcoming LLVM 3.3 release.  You may
-   prefer the `LLVM 3.2 Release Notes <http://llvm.org/releases/3.2/docs
+   These are in-progress notes for the upcoming LLVM 3.4 release.  You may
+   prefer the `LLVM 3.3 Release Notes <http://llvm.org/releases/3.3/docs
    /ReleaseNotes.html>`_.
 
 
@@ -15,7 +15,7 @@ Introduction
 ============
 
 This document contains the release notes for the LLVM Compiler Infrastructure,
-release 3.3.  Here we describe the status of LLVM, including major improvements
+release 3.4.  Here we describe the status of LLVM, including major improvements
 from the previous release, improvements in various subprojects of LLVM, and
 some of the current users of the code.  All LLVM releases may be downloaded
 from the `LLVM releases web site <http://llvm.org/releases/>`_.
@@ -41,16 +41,44 @@ Non-comprehensive list of changes in this release
    functionality, or simply have a lot to talk about), see the `NOTE` below
    for adding a new subsection.
 
-* The CellSPU port has been removed.  It can still be found in older versions.
+* This is expected to be the last release of LLVM which compiles using a C++98
+  toolchain. We expect to start using some C++11 features in LLVM and other
+  sub-projects starting after this release. That said, we are committed to
+  supporting a reasonable set of modern C++ toolchains as the host compiler on
+  all of the platforms. This will at least include Visual Studio 2012 on
+  Windows, and Clang 3.1 or GCC 4.7.x on Mac and Linux. The final set of
+  compilers (and the C++11 features they support) is not set in stone, but we
+  wanted users of LLVM to have a heads up that the next release will involve
+  a substantial change in the host toolchain requirements.
 
-* The IR-level extended linker APIs (for example, to link bitcode files out of
-  archives) have been removed. Any existing clients of these features should
-  move to using a linker with integrated LTO support.
+* The regression tests now fail if any command in a pipe fails. To disable it in
+  a directory, just add ``config.pipefail = False`` to its ``lit.local.cfg``.
+  See :doc:`Lit <CommandGuide/lit>` for the details.
 
-* LLVM and Clang's documentation has been migrated to the `Sphinx
-  <http://sphinx-doc.org/>`_ documentation generation system which uses
-  easy-to-write reStructuredText. See `llvm/docs/README.txt` for more
-  information.
+* Support for exception handling has been removed from the old JIT. Use MCJIT
+  if you need EH support.
+
+* The R600 backend is not marked experimental anymore and is built by default.
+
+* APFloat::isNormal() was renamed to APFloat::isFiniteNonZero() and
+  APFloat::isIEEENormal() was renamed to APFloat::isNormal(). This ensures that
+  APFloat::isNormal() conforms to IEEE-754R-2008.
+
+* The library call simplification pass has been removed.  Its functionality
+  has been integrated into the instruction combiner and function attribute
+  marking passes.
+
+* Support for building using Visual Studio 2008 has been dropped. Use VS 2010
+  or later instead. For more information, see the `Getting Started using Visual
+  Studio <GettingStartedVS.html>`_ page.
+
+* The Loop Vectorizer that was previously enabled for -O3 is now enabled for
+  -Os and -O2.
+
+* The new SLP Vectorizer is now enabled by default.
+
+* llvm-ar now uses the new Object library and produces archives and
+  symbol tables in the gnu format.
 
 * ... next change ...
 
@@ -63,6 +91,15 @@ Non-comprehensive list of changes in this release
    -------------------
 
    Makes programs 10x faster by doing Special New Thing.
+
+
+External Open Source Projects Using LLVM 3.4
+============================================
+
+An exciting aspect of LLVM is that it is used as an enabling technology for
+a lot of other language and tools projects. This section lists some of the
+projects that have already been updated to work with LLVM 3.4.
+
 
 Additional Information
 ======================

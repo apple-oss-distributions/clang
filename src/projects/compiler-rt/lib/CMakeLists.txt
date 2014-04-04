@@ -1,22 +1,28 @@
 # First, add the subdirectories which contain feature-based runtime libraries
 # and several convenience helper libraries.
-if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux")
-  # AddressSanitizer is supported on Linux and Mac OS X.
-  # Windows support is work in progress.
-  add_subdirectory(asan)
-  add_subdirectory(interception)
-  add_subdirectory(sanitizer_common)
-  if(NOT ANDROID)
-    add_subdirectory(ubsan)
+
+# Don't build sanitizers in the bootstrap build.
+if(LLVM_USE_SANITIZER STREQUAL "")
+  if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux|Windows")
+    # AddressSanitizer is supported on Linux and Mac OS X.
+    # Windows support is experimental.
+    add_subdirectory(asan)
+    add_subdirectory(interception)
+    add_subdirectory(sanitizer_common)
+    if(NOT ANDROID AND NOT MSVC)
+      add_subdirectory(lsan)
+      add_subdirectory(profile)
+      add_subdirectory(ubsan)
+    endif()
+  endif()
+  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" AND NOT ANDROID)
+    # ThreadSanitizer and MemorySanitizer are supported on Linux only.
+    add_subdirectory(tsan)
+    add_subdirectory(msan)
+    add_subdirectory(msandr)
+    add_subdirectory(dfsan)
   endif()
 endif()
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" AND NOT ANDROID)
-  # ThreadSanitizer and MemorySanitizer are supported on Linux only.
-  add_subdirectory(tsan)
-  add_subdirectory(msan)
-endif()
-
-# FIXME: Add support for the profile library.
 
 # The top-level lib directory contains a large amount of C code which provides
 # generic implementations of the core runtime library along with optimized
@@ -36,6 +42,8 @@ set(GENERIC_SOURCES
   ashlti3.c
   ashrdi3.c
   ashrti3.c
+  # FIXME: atomic.c may only be compiled if host compiler understands _Atomic
+  # atomic.c
   clear_cache.c
   clzdi2.c
   clzsi2.c
@@ -178,10 +186,22 @@ set(i386_SOURCES
   i386/umoddi3.S
   ${GENERIC_SOURCES})
 
-foreach(arch x86_64 i386)
-  if(CAN_TARGET_${arch})
-    add_compiler_rt_static_runtime(clang_rt.${arch} ${arch}
-      SOURCES ${${arch}_SOURCES}
-      CFLAGS "-std=c99")
-  endif()
-endforeach()
+if (NOT MSVC)
+  foreach(arch x86_64 i386)
+    if(CAN_TARGET_${arch})
+      add_compiler_rt_static_runtime(clang_rt.${arch} ${arch}
+        SOURCES ${${arch}_SOURCES}
+        CFLAGS "-std=c99")
+    endif()
+  endforeach()
+endif()
+
+# Generate configs for running lit and unit tests.
+configure_lit_site_cfg(
+  ${CMAKE_CURRENT_SOURCE_DIR}/lit.common.configured.in
+  ${CMAKE_CURRENT_BINARY_DIR}/lit.common.configured)
+
+configure_lit_site_cfg(
+  ${CMAKE_CURRENT_SOURCE_DIR}/lit.common.unit.configured.in
+  ${CMAKE_CURRENT_BINARY_DIR}/lit.common.unit.configured)
+

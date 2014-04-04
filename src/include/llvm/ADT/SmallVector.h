@@ -16,6 +16,7 @@
 
 #include "llvm/Support/AlignOf.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/type_traits.h"
 #include <algorithm>
 #include <cassert>
@@ -52,7 +53,7 @@ public:
     return size_t((char*)CapacityX - (char*)BeginX);
   }
 
-  bool empty() const { return BeginX == EndX; }
+  bool LLVM_ATTRIBUTE_UNUSED_RESULT empty() const { return BeginX == EndX; }
 };
 
 template <typename T, unsigned N> struct SmallVectorStorage;
@@ -267,7 +268,8 @@ template <typename T, bool isPodLike>
 void SmallVectorTemplateBase<T, isPodLike>::grow(size_t MinSize) {
   size_t CurCapacity = this->capacity();
   size_t CurSize = this->size();
-  size_t NewCapacity = 2*CurCapacity + 1; // Always grow, even from zero.
+  // Always grow, even from zero.  
+  size_t NewCapacity = size_t(NextPowerOf2(CurCapacity+2));
   if (NewCapacity < MinSize)
     NewCapacity = MinSize;
   T *NewElts = static_cast<T*>(malloc(NewCapacity*sizeof(T)));
@@ -425,7 +427,7 @@ public:
       this->grow(N);
   }
 
-  T pop_back_val() {
+  T LLVM_ATTRIBUTE_UNUSED_RESULT pop_back_val() {
 #if LLVM_HAS_RVALUE_REFERENCES
     T Result = ::std::move(this->back());
 #else

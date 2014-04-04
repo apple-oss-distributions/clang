@@ -36,6 +36,9 @@ protected:
   /// CPUString - String name of used CPU.
   std::string CPUString;
 
+  /// TargetTriple - What processor and OS we're targeting.
+  Triple TargetTriple;
+
  public:
   /// This constructor initializes the data members to match that
   /// of the specified triple.
@@ -50,6 +53,10 @@ protected:
 
   bool hasZeroCycleZeroing() const { return HasZeroCycleZeroing; }
 
+  bool isTargetDarwin() const { return TargetTriple.isOSDarwin(); }
+
+  bool isTargetELF() const { return TargetTriple.isOSBinFormatELF(); }
+
   /// getMaxInlineSizeThreshold - Returns the maximum memset / memcpy size
   /// that still makes it profitable to inline the call.
   unsigned getMaxInlineSizeThreshold() const {
@@ -62,7 +69,8 @@ protected:
 
   /// ClassifyGlobalReference - Find the target operand flags that describe
   /// how a global value should be referenced for the current subtarget.
-  unsigned char ClassifyGlobalReference(const GlobalValue *GV) const;
+  unsigned char ClassifyGlobalReference(const GlobalValue *GV,
+                                        Reloc::Model RelocM) const;
 
   /// This function returns the name of a function which has an interface
   /// like the non-standard bzero function, if such a function exists on
@@ -70,6 +78,11 @@ protected:
   /// memset with zero passed as the second argument. Otherwise it
   /// returns null.
   const char *getBZeroEntry() const;
+
+  void overrideSchedPolicy(MachineSchedPolicy &Policy,
+                           MachineInstr *begin,
+                           MachineInstr *end,
+                           unsigned NumRegionInstrs) const;
 };
 } // End llvm namespace
 

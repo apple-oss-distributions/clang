@@ -25,9 +25,20 @@ CheckArches = \
     done; \
     echo $$result)
 
+XCRun = \
+  $(shell \
+    result=`xcrun -find $(1) 2> /dev/null`; \
+    if [ "$$?" != "0" ]; then result=$(1); fi; \
+    echo $$result)
+
 ###
 
-CC := clang
+CC       := $(call XCRun,clang)
+AR       := $(call XCRun,ar)
+RANLIB   := $(call XCRun,ranlib)
+STRIP    := $(call XCRun,strip)
+LIPO     := $(call XCRun,lipo)
+DSYMUTIL := $(call XCRun,dsymutil)
 
 Configs :=
 UniversalArchs :=
@@ -70,10 +81,6 @@ Configs += profile_ios
 UniversalArchs.profile_ios := $(call CheckArches,i386 x86_64 armv7,profile_ios)
 
 # Configurations which define the ASAN support functions.
-# Apple Internal: Disable building asan libraries. <rdar://problem/12423266>
-#Configs += asan_osx
-#UniversalArchs.asan_osx := $(call CheckArches,i386 x86_64,asan_osx)
-
 #Configs += asan_osx_dynamic
 #UniversalArchs.asan_osx_dynamic := $(call CheckArches,i386 x86_64,asan_osx_dynamic)
 
@@ -90,13 +97,11 @@ UniversalArchs.ubsan_osx := $(call CheckArches,i386 x86_64,ubsan_osx)
 # object files. If we are on that platform, strip out all ARM archs. We still
 # build the libraries themselves so that Clang can find them where it expects
 # them, even though they might not have an expected slice.
-ifneq ($(shell which sw_vers),)
-ifneq ($(shell sw_vers -productVersion | grep 10.6),)
+ifneq ($(shell test -x /usr/bin/sw_vers && sw_vers -productVersion | grep 10.6),)
 UniversalArchs.ios := $(filter-out armv7, $(UniversalArchs.ios))
 UniversalArchs.cc_kext := $(filter-out armv7, $(UniversalArchs.cc_kext))
 UniversalArchs.cc_kext_ios5 := $(filter-out armv7, $(UniversalArchs.cc_kext_ios5))
 UniversalArchs.profile_ios := $(filter-out armv7, $(UniversalArchs.profile_ios))
-endif
 endif
 
 ### ARM64 Support ###
@@ -134,27 +139,24 @@ CFLAGS := -Wall -Werror -O3 -fomit-frame-pointer
 OSX_DEPLOYMENT_ARGS := -mmacosx-version-min=10.4
 IOS_DEPLOYMENT_ARGS := -mios-version-min=1.0
 IOS6_DEPLOYMENT_ARGS := -mios-version-min=6.0
-IOS7_DEPLOYMENT_ARGS := -mios-version-min=7.0
 IOSSIM_DEPLOYMENT_ARGS := -mios-simulator-version-min=1.0
 
 # Use our stub SDK as the sysroot to support more portable building.
 OSX_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
 IOS_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
 IOS6_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
-IOS7_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
 IOSSIM_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
 
 CFLAGS.eprintf		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.10.4		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 # FIXME: We can't build ASAN with our stub SDK yet.
-CFLAGS.asan_osx         := $(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin \
-                           -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
 CFLAGS.asan_osx_dynamic := \
-	$(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin \
+	$(CFLAGS) -mmacosx-version-min=10.6 -fno-builtin \
+	-gline-tables-only \
 	-DMAC_INTERPOSE_FUNCTIONS=1 \
   -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
 
-CFLAGS.ubsan_osx	:= $(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin
+CFLAGS.ubsan_osx	:= $(CFLAGS) -mmacosx-version-min=10.6 -fno-builtin
 
 CFLAGS.ios.i386		:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.ios.x86_64	:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
@@ -162,7 +164,7 @@ CFLAGS.ios.armv7	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7f	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7k	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7s	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
-CFLAGS.ios.arm64	:= $(CFLAGS) $(IOS7_DEPLOYMENT_ARGS)
+CFLAGS.ios.arm64	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 CFLAGS.osx.i386		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.osx.x86_64	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.i386	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
@@ -171,7 +173,7 @@ CFLAGS.cc_kext.armv7	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.armv7f	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.armv7k	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.armv7s	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.arm64	:= $(CFLAGS) $(IOS7_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext.arm64	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext_ios5.armv7  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext_ios5.armv7f := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext_ios5.armv7k := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
@@ -184,7 +186,7 @@ CFLAGS.profile_ios.armv7  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7f := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7k := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7s := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
-CFLAGS.profile_ios.arm64  := $(CFLAGS) $(IOS7_DEPLOYMENT_ARGS)
+CFLAGS.profile_ios.arm64  := $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 
 # Configure the asan_osx_dynamic library to be built shared.
 SHARED_LIBRARY.asan_osx_dynamic := 1
@@ -203,16 +205,15 @@ FUNCTIONS.ios.arm64 := dummy
 
 FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4
 
-FUNCTIONS.profile_osx := GCDAProfiling
-FUNCTIONS.profile_ios := GCDAProfiling
+FUNCTIONS.profile_osx := GCDAProfiling PGOProfiling
+FUNCTIONS.profile_ios := GCDAProfiling PGOProfiling
 
-FUNCTIONS.asan_osx := $(AsanFunctions) $(InterceptionFunctions) \
-                                       $(SanitizerCommonFunctions)
 FUNCTIONS.asan_osx_dynamic := $(AsanFunctions) $(InterceptionFunctions) \
                               $(SanitizerCommonFunctions) \
 	                      $(AsanDynamicFunctions)
 
-FUNCTIONS.ubsan_osx := $(UbsanFunctions) $(SanitizerCommonFunctions)
+FUNCTIONS.ubsan_osx := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                       $(SanitizerCommonFunctions)
 
 CCKEXT_COMMON_FUNCTIONS := \
 	absvdi2 \

@@ -15,6 +15,8 @@
 #include "llvm/IR/LLVMContext.h"
 #include "LLVMContextImpl.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -78,55 +80,82 @@ void LLVMContext::removeModule(Module *M) {
 // Recoverable Backend Errors
 //===----------------------------------------------------------------------===//
 
-void LLVMContext::setDiagnosticHandler(DiagHandlerTy DiagHandler,
-                                       void *DiagContext) {
-  pImpl->DiagHandler = DiagHandler;
-  pImpl->DiagContext = DiagContext;
+void LLVMContext::
+setInlineAsmDiagnosticHandler(InlineAsmDiagHandlerTy DiagHandler,
+                              void *DiagContext) {
+  pImpl->InlineAsmDiagHandler = DiagHandler;
+  pImpl->InlineAsmDiagContext = DiagContext;
 }
 
-/// getDiagnosticHandler - Return the diagnostic handler set by
-/// setDiagnosticHandler.
-LLVMContext::DiagHandlerTy LLVMContext::getDiagnosticHandler() const {
-  return pImpl->DiagHandler;
+/// getInlineAsmDiagnosticHandler - Return the diagnostic handler set by
+/// setInlineAsmDiagnosticHandler.
+LLVMContext::InlineAsmDiagHandlerTy
+LLVMContext::getInlineAsmDiagnosticHandler() const {
+  return pImpl->InlineAsmDiagHandler;
 }
 
-/// getDiagnosticContext - Return the diagnostic context set by
-/// setDiagnosticHandler.
+/// getInlineAsmDiagnosticContext - Return the diagnostic context set by
+/// setInlineAsmDiagnosticHandler.
+void *LLVMContext::getInlineAsmDiagnosticContext() const {
+  return pImpl->InlineAsmDiagContext;
+}
+
+void LLVMContext::setDiagnosticHandler(DiagnosticHandlerTy DiagnosticHandler,
+                                       void *DiagnosticContext) {
+  pImpl->DiagnosticHandler = DiagnosticHandler;
+  pImpl->DiagnosticContext = DiagnosticContext;
+}
+
+LLVMContext::DiagnosticHandlerTy LLVMContext::getDiagnosticHandler() const {
+  return pImpl->DiagnosticHandler;
+}
+
 void *LLVMContext::getDiagnosticContext() const {
-  return pImpl->DiagContext;
+  return pImpl->DiagnosticContext;
 }
 
 void LLVMContext::emitError(const Twine &ErrorStr) {
   emitError(0U, ErrorStr);
 }
 
-void LLVMContext::emitWarning(const Twine &ErrorStr) {
-  emitWarning(0U, ErrorStr);
-}
-
-static unsigned getSrcLocation(const Instruction *I) {
+void LLVMContext::emitError(const Instruction *I, const Twine &ErrorStr) {
   unsigned LocCookie = 0;
   if (const MDNode *SrcLoc = I->getMetadata("srcloc")) {
     if (SrcLoc->getNumOperands() != 0)
       if (const ConstantInt *CI = dyn_cast<ConstantInt>(SrcLoc->getOperand(0)))
         LocCookie = CI->getZExtValue();
   }
-  return LocCookie;
-}
-
-void LLVMContext::emitError(const Instruction *I, const Twine &ErrorStr) {
-  unsigned LocCookie = getSrcLocation(I);
   return emitError(LocCookie, ErrorStr);
 }
 
-void LLVMContext::emitWarning(const Instruction *I, const Twine &ErrorStr) {
-  unsigned LocCookie = getSrcLocation(I);
-  return emitWarning(LocCookie, ErrorStr);
+void LLVMContext::diagnose(const DiagnosticInfo &DI) {
+  // If there is a report handler, use it.
+  if (pImpl->DiagnosticHandler != 0) {
+    pImpl->DiagnosticHandler(DI, pImpl->DiagnosticContext);
+    return;
+  }
+  // Otherwise, print the message with a prefix based on the severity.
+  std::string MsgStorage;
+  raw_string_ostream Stream(MsgStorage);
+  DiagnosticPrinterRawOStream DP(Stream);
+  DI.print(DP);
+  Stream.flush();
+  switch (DI.getSeverity()) {
+  case DS_Error:
+    errs() << "error: " << MsgStorage << "\n";
+    exit(1);
+  case DS_Warning:
+    errs() << "warning: " << MsgStorage << "\n";
+    break;
+  case DS_Note:
+    errs() << "note: " << MsgStorage << "\n";
+    break;
+  }
 }
 
 void LLVMContext::emitError(unsigned LocCookie, const Twine &ErrorStr) {
   // If there is no error handler installed, just print the error and exit.
-  if (pImpl->DiagHandler == 0) {
+  if (pImpl->InlineAsmDiagHandler == 0) {
     errs() << "error: " << ErrorStr << "\n";
     exit(1);
   }
@@ -134,20 +163,7 @@ void LLVMContext::emitError(unsigned LocCookie, const Twine &ErrorStr) {
   // If we do have an error handler, we can report the error and keep going.
   SMDiagnostic Diag("", SourceMgr::DK_Error, ErrorStr.str());
 
-  pImpl->DiagHandler(Diag, pImpl->DiagContext, LocCookie);
-}
-
-void LLVMContext::emitWarning(unsigned LocCookie, const Twine &ErrorStr) {
-  // If there is no handler installed, just print the warning.
-  if (pImpl->DiagHandler == 0) {
-    errs() << "warning: " << ErrorStr << "\n";
-    return;
-  }
-
-  // If we do have a handler, we can report the warning.
-  SMDiagnostic Diag("", SourceMgr::DK_Warning, ErrorStr.str());
-
-  pImpl->DiagHandler(Diag, pImpl->DiagContext, LocCookie);
+  pImpl->InlineAsmDiagHandler(Diag, pImpl->InlineAsmDiagContext, LocCookie);
 }
 
 //===----------------------------------------------------------------------===//
@@ -160,12 +176,13 @@ static bool isValidName(StringRef MDName) {
   if (MDName.empty())
     return false;
 
-  if (!std::isalpha(MDName[0]))
+  if (!std::isalpha(static_cast<unsigned char>(MDName[0])))
     return false;
 
   for (StringRef::iterator I = MDName.begin() + 1, E = MDName.end(); I != E;
        ++I) {
-    if (!std::isalnum(*I) && *I != '_' && *I != '-' && *I != '.')
+    if (!std::isalnum(static_cast<unsigned char>(*I)) && *I != '_' &&
+        *I != '-' && *I != '.')
       return false;
   }
   return true;

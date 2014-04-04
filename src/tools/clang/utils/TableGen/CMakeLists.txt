@@ -4,10 +4,11 @@ add_tablegen(clang-tblgen CLANG
   ClangASTNodesEmitter.cpp
   ClangAttrEmitter.cpp
   ClangCommentCommandInfoEmitter.cpp
+  ClangCommentHTMLNamedCharacterReferenceEmitter.cpp
   ClangCommentHTMLTagsEmitter.cpp
   ClangDiagnosticsEmitter.cpp
   ClangSACheckersEmitter.cpp
+  ARM64NeonEmitter.cpp
   NeonEmitter.cpp
-  OptParserEmitter.cpp
   TableGen.cpp
   )

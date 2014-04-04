@@ -349,15 +349,15 @@ namespace clang {
       /// IDs).
       IDENTIFIER_TABLE = 5,
 
-      /// \brief Record code for the array of external definitions.
+      /// \brief Record code for the array of eagerly deserialized decls.
       ///
-      /// The AST file contains a list of all of the unnamed external
-      /// definitions present within the parsed headers, stored as an
-      /// array of declaration IDs. These external definitions will be
+      /// The AST file contains a list of all of the declarations that should be
+      /// eagerly deserialized present within the parsed headers, stored as an
+      /// array of declaration IDs. These declarations will be
       /// reported to the AST consumer after the AST file has been
       /// read, since their presence can affect the semantics of the
       /// program (e.g., for code generation).
-      EXTERNAL_DEFINITIONS = 6,
+      EAGERLY_DESERIALIZED_DECLS = 6,
 
       /// \brief Record code for the set of non-builtin, special
       /// types.
@@ -533,9 +533,12 @@ namespace clang {
       /// macro directive history for the identifier.
       MACRO_TABLE = 48,
 
-      /// \brief Record code for undefined but used internal functions and
-      /// variables.
-      UNDEFINED_INTERNALS = 49
+      /// \brief Record code for undefined but used functions and variables that
+      /// need a definition in this TU.
+      UNDEFINED_BUT_USED = 49,
+
+      /// \brief Record code for late parsed template functions.
+      LATE_PARSED_TEMPLATE = 50
     };
 
     /// \brief Record types used within a source manager block.
@@ -623,7 +626,9 @@ namespace clang {
       /// \brief Specifies a configuration macro for this module.
       SUBMODULE_CONFIG_MACRO = 11,
       /// \brief Specifies a conflict with another module.
-      SUBMODULE_CONFLICT = 12
+      SUBMODULE_CONFLICT = 12,
+      /// \brief Specifies a header that is private to this submodule.
+      SUBMODULE_PRIVATE_HEADER = 13
     };
 
     /// \brief Record types used within a comments block.
@@ -734,7 +739,10 @@ namespace clang {
       PREDEF_TYPE_IMAGE2D_ARR_ID = 42,
       /// \brief OpenCL 3d image type.
       PREDEF_TYPE_IMAGE3D_ID    = 43,
-      PREDEF_TYPE_EVENT_ID      = 44
+      /// \brief OpenCL event type.
+      PREDEF_TYPE_EVENT_ID      = 44,
+      /// \brief OpenCL sampler type.
+      PREDEF_TYPE_SAMPLER_ID    = 45
     };
 
     /// \brief The number of predefined type IDs that are reserved for
@@ -831,7 +839,9 @@ namespace clang {
       /// \brief A UnaryTransformType record.
       TYPE_UNARY_TRANSFORM       = 39,
       /// \brief An AtomicType record.
-      TYPE_ATOMIC                = 40
+      TYPE_ATOMIC                = 40,
+      /// \brief A DecayedType record.
+      TYPE_DECAYED               = 41
     };
 
     /// \brief The type IDs for special types constructed by semantic
@@ -948,6 +958,8 @@ namespace clang {
       DECL_OBJC_PROPERTY_IMPL,
       /// \brief A FieldDecl record.
       DECL_FIELD,
+      /// \brief A MSPropertyDecl record.
+      DECL_MS_PROPERTY,
       /// \brief A VarDecl record.
       DECL_VAR,
       /// \brief An ImplicitParamDecl record.
@@ -958,6 +970,8 @@ namespace clang {
       DECL_FILE_SCOPE_ASM,
       /// \brief A BlockDecl record.
       DECL_BLOCK,
+      /// \brief A CapturedDecl record.
+      DECL_CAPTURED,
       /// \brief A record that stores the set of declarations that are
       /// lexically stored within a given DeclContext.
       ///
@@ -1016,6 +1030,12 @@ namespace clang {
       DECL_CLASS_TEMPLATE_SPECIALIZATION,
       /// \brief A ClassTemplatePartialSpecializationDecl record.
       DECL_CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+      /// \brief A VarTemplateDecl record.
+      DECL_VAR_TEMPLATE,
+      /// \brief A VarTemplateSpecializationDecl record.
+      DECL_VAR_TEMPLATE_SPECIALIZATION,
+      /// \brief A VarTemplatePartialSpecializationDecl record.
+      DECL_VAR_TEMPLATE_PARTIAL_SPECIALIZATION,
       /// \brief A FunctionTemplateDecl record.
       DECL_FUNCTION_TEMPLATE,
       /// \brief A TemplateTypeParmDecl record.
@@ -1042,7 +1062,11 @@ namespace clang {
       /// function specialization. (Microsoft extension).
       DECL_CLASS_SCOPE_FUNCTION_SPECIALIZATION,
       /// \brief An ImportDecl recording a module import.
-      DECL_IMPORT
+      DECL_IMPORT,
+      /// \brief An OMPThreadPrivateDecl record.
+      DECL_OMP_THREADPRIVATE,
+      /// \brief An EmptyDecl record.
+      DECL_EMPTY
     };
 
     /// \brief Record codes for each kind of statement or expression.
@@ -1094,6 +1118,8 @@ namespace clang {
       STMT_RETURN,
       /// \brief A DeclStmt record.
       STMT_DECL,
+      /// \brief A CapturedStmt record.
+      STMT_CAPTURED,
       /// \brief A GCC-style AsmStmt record.
       STMT_GCCASM,
       /// \brief A MS-style AsmStmt record.
@@ -1160,6 +1186,8 @@ namespace clang {
       EXPR_GNU_NULL,
       /// \brief A ShuffleVectorExpr record.
       EXPR_SHUFFLE_VECTOR,
+      /// \brief A ConvertVectorExpr record.
+      EXPR_CONVERT_VECTOR,
       /// \brief BlockExpr
       EXPR_BLOCK,
       /// \brief A GenericSelectionExpr record.
@@ -1246,6 +1274,8 @@ namespace clang {
       EXPR_CXX_FUNCTIONAL_CAST,
       /// \brief A UserDefinedLiteral record.
       EXPR_USER_DEFINED_LITERAL,
+      /// \brief A CXXStdInitializerListExpr record.
+      EXPR_CXX_STD_INITIALIZER_LIST,
       /// \brief A CXXBoolLiteralExpr record.
       EXPR_CXX_BOOL_LITERAL,
       EXPR_CXX_NULL_PTR_LITERAL,  // CXXNullPtrLiteralExpr
@@ -1254,6 +1284,7 @@ namespace clang {
       EXPR_CXX_THIS,              // CXXThisExpr
       EXPR_CXX_THROW,             // CXXThrowExpr
       EXPR_CXX_DEFAULT_ARG,       // CXXDefaultArgExpr
+      EXPR_CXX_DEFAULT_INIT,      // CXXDefaultInitExpr
       EXPR_CXX_BIND_TEMPORARY,    // CXXBindTemporaryExpr
 
       EXPR_CXX_SCALAR_VALUE_INIT, // CXXScalarValueInitExpr
@@ -1293,12 +1324,16 @@ namespace clang {
       EXPR_ASTYPE,                 // AsTypeExpr
 
       // Microsoft
+      EXPR_CXX_PROPERTY_REF_EXPR, // MSPropertyRefExpr
       EXPR_CXX_UUIDOF_EXPR,       // CXXUuidofExpr (of expr).
       EXPR_CXX_UUIDOF_TYPE,       // CXXUuidofExpr (of type).
       STMT_SEH_EXCEPT,            // SEHExceptStmt
       STMT_SEH_FINALLY,           // SEHFinallyStmt
       STMT_SEH_TRY,               // SEHTryStmt
-      
+
+      // OpenMP drectives
+      STMT_OMP_PARALLEL_DIRECTIVE,
+
       // ARC
       EXPR_OBJC_BRIDGED_CAST,     // ObjCBridgedCastExpr
       

@@ -1,4 +1,4 @@
-//===--- XCTMT.h - Xcode Test Migrate Tool --------------------------------===//
+//===--- XCTMT.h - XCTest Migrate Tool ------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //

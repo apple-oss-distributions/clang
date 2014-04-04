@@ -20,12 +20,24 @@
 
 namespace llvm {
 
+class AMDGPUMachineFunction;
 class MachineRegisterInfo;
 
 class AMDGPUTargetLowering : public TargetLowering {
 private:
+  void ExtractVectorElements(SDValue Op, SelectionDAG &DAG,
+                             SmallVectorImpl<SDValue> &Args,
+                             unsigned Start, unsigned Count) const;
+  SDValue LowerEXTRACT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
+  /// \brief Lower vector stores by merging the vector elements into an integer
+  /// of the same bitwidth.
+  SDValue MergeVectorStore(const SDValue &Op, SelectionDAG &DAG) const;
+  /// \brief Split a vector store into multiple scalar stores.
+  /// \returns The resulting chain. 
   SDValue LowerUDIVREM(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerUINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
 
 protected:
 
@@ -33,32 +45,57 @@ protected:
   /// MachineFunction.
   ///
   /// \returns a RegisterSDNode representing Reg.
-  SDValue CreateLiveInRegister(SelectionDAG &DAG, const TargetRegisterClass *RC,
-                                                  unsigned Reg, EVT VT) const;
-
+  virtual SDValue CreateLiveInRegister(SelectionDAG &DAG,
+                                       const TargetRegisterClass *RC,
+                                       unsigned Reg, EVT VT) const;
+  SDValue LowerGlobalAddress(AMDGPUMachineFunction *MFI, SDValue Op,
+                             SelectionDAG &DAG) const;
+  /// \brief Split a vector load into multiple scalar loads.
+  SDValue SplitVectorLoad(const SDValue &Op, SelectionDAG &DAG) const;
+  SDValue SplitVectorStore(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSTORE(SDValue Op, SelectionDAG &DAG) const;
   bool isHWTrueValue(SDValue Op) const;
   bool isHWFalseValue(SDValue Op) const;
+
+  /// The SelectionDAGBuilder will automatically promote function arguments
+  /// with illegal types.  However, this does not work for the AMDGPU targets
+  /// since the function arguments are stored in memory as these illegal types.
+  /// In order to handle this properly we need to get the origianl types sizes
+  /// from the LLVM IR Function and fixup the ISD:InputArg values before
+  /// passing them to AnalyzeFormalArguments()
+  void getOriginalFunctionArgs(SelectionDAG &DAG,
+                               const Function *F,
+                               const SmallVectorImpl<ISD::InputArg> &Ins,
+                               SmallVectorImpl<ISD::InputArg> &OrigIns) const;
+  void AnalyzeFormalArguments(CCState &State,
+                              const SmallVectorImpl<ISD::InputArg> &Ins) const;
 
 public:
   AMDGPUTargetLowering(TargetMachine &TM);
 
-  virtual SDValue LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv,
-                             bool isVarArg,
-                             const SmallVectorImpl<ISD::InputArg> &Ins,
-                             DebugLoc DL, SelectionDAG &DAG,
-                             SmallVectorImpl<SDValue> &InVals) const;
-
+  virtual bool isFAbsFree(EVT VT) const;
+  virtual bool isFNegFree(EVT VT) const;
+  virtual MVT getVectorIdxTy() const;
   virtual SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                               bool isVarArg,
                               const SmallVectorImpl<ISD::OutputArg> &Outs,
                               const SmallVectorImpl<SDValue> &OutVals,
-                              DebugLoc DL, SelectionDAG &DAG) const;
+                              SDLoc DL, SelectionDAG &DAG) const;
+  virtual SDValue LowerCall(CallLoweringInfo &CLI,
+                            SmallVectorImpl<SDValue> &InVals) const {
+    CLI.Callee.dump();
+    llvm_unreachable("Undefined function");
+  }
 
   virtual SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerIntrinsicIABS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerIntrinsicLRP(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerMinMax(SDValue Op, SelectionDAG &DAG) const;
   virtual const char* getTargetNodeName(unsigned Opcode) const;
+
+  virtual SDNode *PostISelFolding(MachineSDNode *N, SelectionDAG &DAG) const {
+    return N;
+  }
 
 // Functions defined in AMDILISelLowering.cpp
 public:
@@ -103,16 +140,16 @@ namespace AMDGPUISD {
 enum {
   // AMDIL ISD Opcodes
   FIRST_NUMBER = ISD::BUILTIN_OP_END,
-  MAD,         // 32bit Fused Multiply Add instruction
   CALL,        // Function call based on a single integer
   UMUL,        // 32bit unsigned multiplication
   DIV_INF,      // Divide with infinity returned on zero divisor
   RET_FLAG,
   BRANCH_COND,
   // End AMDIL ISD Opcodes
-  BITALIGN,
   DWORDADDR,
   FRACT,
+  COS_HW,
+  SIN_HW,
   FMAX,
   SMAX,
   UMAX,
@@ -120,25 +157,26 @@ enum {
   SMIN,
   UMIN,
   URECIP,
-  INTERP,
-  INTERP_P0,
+  DOT4,
+  TEXTURE_FETCH,
   EXPORT,
   CONST_ADDRESS,
+  REGISTER_LOAD,
+  REGISTER_STORE,
+  LOAD_INPUT,
+  SAMPLE,
+  SAMPLEB,
+  SAMPLED,
+  SAMPLEL,
+  FIRST_MEM_OPCODE_NUMBER = ISD::FIRST_TARGET_MEMORY_OPCODE,
+  STORE_MSKOR,
+  LOAD_CONSTANT,
+  TBUFFER_STORE_FORMAT,
   LAST_AMDGPU_ISD_NUMBER
 };
 
 
 } // End namespace AMDGPUISD
-
-namespace SIISD {
-
-enum {
-  SI_FIRST = AMDGPUISD::LAST_AMDGPU_ISD_NUMBER,
-  VCC_AND,
-  VCC_BITCAST
-};
-
-} // End namespace SIISD
 
 } // End namespace llvm
 

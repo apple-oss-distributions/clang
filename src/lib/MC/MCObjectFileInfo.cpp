@@ -42,6 +42,9 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
     = Ctx->getMachOSection("__DATA", "__data", 0,
                            SectionKind::getDataRel());
 
+  // BSSSection might not be expected initialized on msvc.
+  BSSSection = 0;
+
   TLSDataSection // .tdata
     = Ctx->getMachOSection("__DATA", "__thread_data",
                            MCSectionMachO::S_THREAD_LOCAL_REGULAR,
@@ -82,7 +85,8 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
   // to using it in -static mode.
   SixteenByteConstantSection = 0;
   if (RelocM != Reloc::Static &&
-      T.getArch() != Triple::x86_64 && T.getArch() != Triple::ppc64)
+      T.getArch() != Triple::x86_64 && T.getArch() != Triple::ppc64 &&
+      T.getArch() != Triple::ppc64le)
     SixteenByteConstantSection =   // .literal16
       Ctx->getMachOSection("__TEXT", "__literal16",
                            MCSectionMachO::S_16BYTE_LITERALS,
@@ -196,8 +200,20 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
     Ctx->getMachOSection("__DWARF", "__debug_frame",
                          MCSectionMachO::S_ATTR_DEBUG,
                          SectionKind::getMetadata());
+  DwarfPubNamesSection =
+    Ctx->getMachOSection("__DWARF", "__debug_pubnames",
+                         MCSectionMachO::S_ATTR_DEBUG,
+                         SectionKind::getMetadata());
   DwarfPubTypesSection =
     Ctx->getMachOSection("__DWARF", "__debug_pubtypes",
+                         MCSectionMachO::S_ATTR_DEBUG,
+                         SectionKind::getMetadata());
+  DwarfGnuPubNamesSection =
+    Ctx->getMachOSection("__DWARF", "__debug_gnu_pubn",
+                         MCSectionMachO::S_ATTR_DEBUG,
+                         SectionKind::getMetadata());
+  DwarfGnuPubTypesSection =
+    Ctx->getMachOSection("__DWARF", "__debug_gnu_pubt",
                          MCSectionMachO::S_ATTR_DEBUG,
                          SectionKind::getMetadata());
   DwarfStrSection =
@@ -224,11 +240,23 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
     Ctx->getMachOSection("__DWARF", "__debug_inlined",
                          MCSectionMachO::S_ATTR_DEBUG,
                          SectionKind::getMetadata());
+  StackMapSection =
+    Ctx->getMachOSection("__LLVM_STACKMAPS", "__llvm_stackmaps", 0,
+                         SectionKind::getMetadata());
 
   TLSExtraDataSection = TLSTLVSection;
 }
 
 void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
+  if (T.getArch() == Triple::mips ||
+      T.getArch() == Triple::mipsel)
+    FDECFIEncoding = dwarf::DW_EH_PE_sdata4;
+  else if (T.getArch() == Triple::mips64 ||
+           T.getArch() == Triple::mips64el)
+    FDECFIEncoding = dwarf::DW_EH_PE_sdata8;
+  else
+    FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+
   if (T.getArch() == Triple::x86) {
     PersonalityEncoding = (RelocM == Reloc::PIC_)
      ? dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
@@ -236,15 +264,13 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
     LSDAEncoding = (RelocM == Reloc::PIC_)
       ? dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
       : dwarf::DW_EH_PE_absptr;
-    FDEEncoding = FDECFIEncoding = (RelocM == Reloc::PIC_)
+    FDEEncoding = (RelocM == Reloc::PIC_)
       ? dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
       : dwarf::DW_EH_PE_absptr;
     TTypeEncoding = (RelocM == Reloc::PIC_)
      ? dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4
      : dwarf::DW_EH_PE_absptr;
   } else if (T.getArch() == Triple::x86_64) {
-    FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
-
     if (RelocM == Reloc::PIC_) {
       PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
         ((CMModel == CodeModel::Small || CMModel == CodeModel::Medium)
@@ -266,14 +292,46 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
       TTypeEncoding = (CMModel == CodeModel::Small)
         ? dwarf::DW_EH_PE_udata4 : dwarf::DW_EH_PE_absptr;
     }
-  } else if (T.getArch() == Triple::ppc64) {
+  }  else if (T.getArch() ==  Triple::aarch64) {
+    // The small model guarantees static code/data size < 4GB, but not where it
+    // will be in memory. Most of these could end up >2GB away so even a signed
+    // pc-relative 32-bit address is insufficient, theoretically.
+    if (RelocM == Reloc::PIC_) {
+      PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+        dwarf::DW_EH_PE_sdata8;
+      LSDAEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata8;
+      FDEEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+      TTypeEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+        dwarf::DW_EH_PE_sdata8;
+    } else {
+      PersonalityEncoding = dwarf::DW_EH_PE_absptr;
+      LSDAEncoding = dwarf::DW_EH_PE_absptr;
+      FDEEncoding = dwarf::DW_EH_PE_udata4;
+      TTypeEncoding = dwarf::DW_EH_PE_absptr;
+    }
+  } else if (T.getArch() == Triple::ppc64 || T.getArch() == Triple::ppc64le) {
     PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
       dwarf::DW_EH_PE_udata8;
-    FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
     LSDAEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_udata8;
     FDEEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_udata8;
     TTypeEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
       dwarf::DW_EH_PE_udata8;
+  } else if (T.getArch() == Triple::systemz) {
+    // All currently-defined code models guarantee that 4-byte PC-relative
+    // values will be in range.
+    if (RelocM == Reloc::PIC_) {
+      PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+        dwarf::DW_EH_PE_sdata4;
+      LSDAEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+      FDEEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
+      TTypeEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel |
+        dwarf::DW_EH_PE_sdata4;
+    } else {
+      PersonalityEncoding = dwarf::DW_EH_PE_absptr;
+      LSDAEncoding = dwarf::DW_EH_PE_absptr;
+      FDEEncoding = dwarf::DW_EH_PE_absptr;
+      TTypeEncoding = dwarf::DW_EH_PE_absptr;
+    }
   }
 
   // Solaris requires different flags for .eh_frame to seemingly every other
@@ -391,8 +449,17 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
   DwarfFrameSection =
     Ctx->getELFSection(".debug_frame", ELF::SHT_PROGBITS, 0,
                        SectionKind::getMetadata());
+  DwarfPubNamesSection =
+    Ctx->getELFSection(".debug_pubnames", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
   DwarfPubTypesSection =
     Ctx->getELFSection(".debug_pubtypes", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfGnuPubNamesSection =
+    Ctx->getELFSection(".debug_gnu_pubnames", ELF::SHT_PROGBITS, 0,
+                       SectionKind::getMetadata());
+  DwarfGnuPubTypesSection =
+    Ctx->getELFSection(".debug_gnu_pubtypes", ELF::SHT_PROGBITS, 0,
                        SectionKind::getMetadata());
   DwarfStrSection =
     Ctx->getELFSection(".debug_str", ELF::SHT_PROGBITS,
@@ -455,6 +522,12 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
 
 void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
   // COFF
+  BSSSection =
+    Ctx->getCOFFSection(".bss",
+                        COFF::IMAGE_SCN_CNT_UNINITIALIZED_DATA |
+                        COFF::IMAGE_SCN_MEM_READ |
+                        COFF::IMAGE_SCN_MEM_WRITE,
+                        SectionKind::getBSS());
   TextSection =
     Ctx->getCOFFSection(".text",
                         COFF::IMAGE_SCN_CNT_CODE |
@@ -534,8 +607,23 @@ void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
                         COFF::IMAGE_SCN_MEM_DISCARDABLE |
                         COFF::IMAGE_SCN_MEM_READ,
                         SectionKind::getMetadata());
+  DwarfPubNamesSection =
+    Ctx->getCOFFSection(".debug_pubnames",
+                        COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                        COFF::IMAGE_SCN_MEM_READ,
+                        SectionKind::getMetadata());
   DwarfPubTypesSection =
     Ctx->getCOFFSection(".debug_pubtypes",
+                        COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                        COFF::IMAGE_SCN_MEM_READ,
+                        SectionKind::getMetadata());
+  DwarfGnuPubNamesSection =
+    Ctx->getCOFFSection(".debug_gnu_pubnames",
+                        COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                        COFF::IMAGE_SCN_MEM_READ,
+                        SectionKind::getMetadata());
+  DwarfGnuPubTypesSection =
+    Ctx->getCOFFSection(".debug_gnu_pubtypes",
                         COFF::IMAGE_SCN_MEM_DISCARDABLE |
                         COFF::IMAGE_SCN_MEM_READ,
                         SectionKind::getMetadata());

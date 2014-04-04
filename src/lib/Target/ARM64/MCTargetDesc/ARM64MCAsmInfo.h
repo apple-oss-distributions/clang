@@ -20,12 +20,16 @@ namespace llvm {
   class Target;
   class StringRef;
   class MCStreamer;
-  struct ARM64MCAsmInfo : public MCAsmInfoDarwin {
-    explicit ARM64MCAsmInfo();
+  struct ARM64MCAsmInfoDarwin : public MCAsmInfoDarwin {
+    explicit ARM64MCAsmInfoDarwin();
     virtual const MCExpr *
     getExprForPersonalitySymbol(const MCSymbol *Sym,
                                 unsigned Encoding,
                                 MCStreamer &Streamer) const;
+  };
+
+  struct ARM64MCAsmInfoELF : public MCAsmInfo {
+    explicit ARM64MCAsmInfoELF();
   };
 
 } // namespace llvm

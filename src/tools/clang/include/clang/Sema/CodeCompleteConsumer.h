@@ -271,22 +271,17 @@ private:
   QualType BaseType;
 
   /// \brief The identifiers for Objective-C selector parts.
-  IdentifierInfo **SelIdents;
-
-  /// \brief The number of Objective-C selector parts.
-  unsigned NumSelIdents;
+  ArrayRef<IdentifierInfo *> SelIdents;
 
 public:
   /// \brief Construct a new code-completion context of the given kind.
-  CodeCompletionContext(enum Kind Kind) : Kind(Kind), SelIdents(NULL),
-                                          NumSelIdents(0) { }
+  CodeCompletionContext(enum Kind Kind) : Kind(Kind), SelIdents(None) { }
 
   /// \brief Construct a new code-completion context of the given kind.
   CodeCompletionContext(enum Kind Kind, QualType T,
-                        IdentifierInfo **SelIdents = NULL,
-                        unsigned NumSelIdents = 0) : Kind(Kind),
-                                                     SelIdents(SelIdents),
-                                                    NumSelIdents(NumSelIdents) {
+                        ArrayRef<IdentifierInfo *> SelIdents = None)
+                        : Kind(Kind),
+                          SelIdents(SelIdents) {
     if (Kind == CCC_DotMemberAccess || Kind == CCC_ArrowMemberAccess ||
         Kind == CCC_ObjCPropertyAccess || Kind == CCC_ObjCClassMessage ||
         Kind == CCC_ObjCInstanceMessage)
@@ -308,10 +303,7 @@ public:
   QualType getBaseType() const { return BaseType; }
 
   /// \brief Retrieve the Objective-C selector identifiers.
-  IdentifierInfo **getSelIdents() const { return SelIdents; }
-
-  /// \brief Retrieve the number of Objective-C selector identifiers.
-  unsigned getNumSelIdents() const { return NumSelIdents; }
+  ArrayRef<IdentifierInfo *> getSelIdents() const { return SelIdents; }
 
   /// \brief Determines whether we want C++ constructors as results within this
   /// context.
@@ -746,7 +738,7 @@ public:
                        unsigned Priority = CCP_CodePattern,
                        CXCursorKind CursorKind = CXCursor_NotImplemented,
                    CXAvailabilityKind Availability = CXAvailability_Available,
-                       NamedDecl *D = 0)
+                       const NamedDecl *D = 0)
     : Declaration(D), Pattern(Pattern), Priority(Priority), StartParameter(0),
       Kind(RK_Pattern), CursorKind(CursorKind), Availability(Availability),
       Hidden(false), QualifierIsInformative(0),

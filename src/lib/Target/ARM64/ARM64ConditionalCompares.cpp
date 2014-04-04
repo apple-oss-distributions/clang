@@ -115,7 +115,7 @@ STATISTIC(NumCompBranches, "Number of cbz/cbnz branches converted");
 //       b.eq Tail
 //    ...
 //    Tail:
-//   	bl	_foo
+//      bl _foo
 //
 //  Becomes:
 //
@@ -125,7 +125,7 @@ STATISTIC(NumCompBranches, "Number of cbz/cbnz branches converted");
 //       b.eq Tail
 //    ...
 //    Tail:
-//   	bl	_foo
+//      bl _foo
 //
 // The ccmp condition code is the one that would cause the Head terminator to
 // branch to CmpBB.

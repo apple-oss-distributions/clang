@@ -2,6 +2,7 @@ set(LLVM_LINK_COMPONENTS
   asmparser
   bitreader
   bitwriter
+  irreader
   instrumentation
   ipo
   linker
@@ -10,6 +11,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_clang_library(clangCodeGen
   BackendUtil.cpp
+  CGAtomic.cpp
   CGBlocks.cpp
   CGBuiltin.cpp
   CGCall.cpp
@@ -39,13 +41,16 @@ add_clang_library(clangCodeGen
   CGStmt.cpp
   CGVTables.cpp
   CGVTT.cpp
+  CodeGenABITypes.cpp
   CodeGenAction.cpp
   CodeGenFunction.cpp
   CodeGenModule.cpp
   CodeGenTBAA.cpp
   CodeGenTypes.cpp
+  CodeGenPGO.cpp
   ItaniumCXXABI.cpp
   MicrosoftCXXABI.cpp
+  MicrosoftVBTables.cpp
   ModuleBuilder.cpp
   TargetInfo.cpp
   )

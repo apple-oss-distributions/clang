@@ -13,20 +13,15 @@
 
 #include "llvm/Linker.h"
 #include "llvm-c/Linker.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/TypeFinder.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
-#include "llvm/Transforms/Utils/ValueMapper.h"
 #include <cctype>
 using namespace llvm;
 
@@ -35,6 +30,8 @@ using namespace llvm;
 //===----------------------------------------------------------------------===//
 
 namespace {
+  typedef SmallPtrSet<StructType*, 32> TypeSet;
+
 class TypeMapTy : public ValueMapTypeRemapper {
   /// MappedTypes - This is a mapping from a source type to a destination type
   /// to use.
@@ -55,6 +52,9 @@ class TypeMapTy : public ValueMapTypeRemapper {
   SmallPtrSet<StructType*, 16> DstResolvedOpaqueTypes;
 
 public:
+  TypeMapTy(TypeSet &Set) : DstStructTypesSet(Set) {}
+
+  TypeSet &DstStructTypesSet;
   /// addTypeMapping - Indicate that the specified type in the destination
   /// module is conceptually equivalent to the specified type in the source
   /// module.
@@ -331,13 +331,20 @@ Type *TypeMapTy::getImpl(Type *Ty) {
   StructType *STy = cast<StructType>(Ty);
   
   // If the type is opaque, we can just use it directly.
-  if (STy->isOpaque())
+  if (STy->isOpaque()) {
+    // A named structure type from src module is used. Add it to the Set of
+    // identified structs in the destination module.
+    DstStructTypesSet.insert(STy);
     return *Entry = STy;
+  }
   
   // Otherwise we create a new type and resolve its body later.  This will be
   // resolved by the top level of get().
   SrcDefinitionsToResolve.push_back(STy);
   StructType *DTy = StructType::create(STy->getContext());
+  // A new identified structure type was created. Add it to the set of
+  // identified structs in the destination module.
+  DstStructTypesSet.insert(DTy);
   DstResolvedOpaqueTypes.insert(DTy);
   return *Entry = DTy;
 }
@@ -347,12 +354,32 @@ Type *TypeMapTy::getImpl(Type *Ty) {
 //===----------------------------------------------------------------------===//
 
 namespace {
+  class ModuleLinker;
+
+  /// ValueMaterializerTy - Creates prototypes for functions that are lazily
+  /// linked on the fly. This speeds up linking for modules with many
+  /// lazily linked functions of which few get used.
+  class ValueMaterializerTy : public ValueMaterializer {
+    TypeMapTy &TypeMap;
+    Module *DstM;
+    std::vector<Function*> &LazilyLinkFunctions;
+  public:
+    ValueMaterializerTy(TypeMapTy &TypeMap, Module *DstM,
+                        std::vector<Function*> &LazilyLinkFunctions) :
+      ValueMaterializer(), TypeMap(TypeMap), DstM(DstM),
+      LazilyLinkFunctions(LazilyLinkFunctions) {
+    }
+
+    virtual Value *materializeValueFor(Value *V);
+  };
+
   /// ModuleLinker - This is an implementation class for the LinkModules
   /// function, which is the entrypoint for this file.
   class ModuleLinker {
     Module *DstM, *SrcM;
     
     TypeMapTy TypeMap; 
+    ValueMaterializerTy ValMaterializer;
 
     /// ValueMap - Mapping of values from what they used to be in Src, to what
     /// they are now in DstM.  ValueToValueMapTy is a ValueMap, which involves
@@ -379,8 +406,10 @@ namespace {
   public:
     std::string ErrorMsg;
     
-    ModuleLinker(Module *dstM, Module *srcM, unsigned mode)
-      : DstM(dstM), SrcM(srcM), Mode(mode) { }
+    ModuleLinker(Module *dstM, TypeSet &Set, Module *srcM, unsigned mode)
+      : DstM(dstM), SrcM(srcM), TypeMap(Set),
+        ValMaterializer(TypeMap, DstM, LazilyLinkFunctions),
+        Mode(mode) { }
     
     bool run();
     
@@ -480,6 +509,20 @@ static bool isLessConstraining(GlobalValue::VisibilityTypes a,
     return true;
   return false;
 }
+
+Value *ValueMaterializerTy::materializeValueFor(Value *V) {
+  Function *SF = dyn_cast<Function>(V);
+  if (!SF)
+    return NULL;
+
+  Function *DF = Function::Create(TypeMap.get(SF->getFunctionType()),
+                                  SF->getLinkage(), SF->getName(), DstM);
+  copyGVAttributes(DF, SF);
+
+  LazilyLinkFunctions.push_back(SF);
+  return DF;
+}
+
 
 /// getLinkageResult - This analyzes the two global values and determines what
 /// the result will look like in the destination module.  In particular, it
@@ -594,11 +637,6 @@ void ModuleLinker::computeTypeMapping() {
   SmallPtrSet<StructType*, 32> SrcStructTypesSet(SrcStructTypes.begin(),
                                                  SrcStructTypes.end());
 
-  TypeFinder DstStructTypes;
-  DstStructTypes.run(*DstM, true);
-  SmallPtrSet<StructType*, 32> DstStructTypesSet(DstStructTypes.begin(),
-                                                 DstStructTypes.end());
-
   for (unsigned i = 0, e = SrcStructTypes.size(); i != e; ++i) {
     StructType *ST = SrcStructTypes[i];
     if (!ST->hasName()) continue;
@@ -606,7 +644,8 @@ void ModuleLinker::computeTypeMapping() {
     // Check to see if there is a dot in the name followed by a digit.
     size_t DotPos = ST->getName().rfind('.');
     if (DotPos == 0 || DotPos == StringRef::npos ||
-        ST->getName().back() == '.' || !isdigit(ST->getName()[DotPos+1]))
+        ST->getName().back() == '.' ||
+        !isdigit(static_cast<unsigned char>(ST->getName()[DotPos+1])))
       continue;
     
     // Check to see if the destination module has a struct with the prefix name.
@@ -628,7 +667,7 @@ void ModuleLinker::computeTypeMapping() {
       // we prefer to take the '%C' version. So we are then left with both
       // '%C.1' and '%C' being used for the same types. This leads to some
       // variables using one type and some using the other.
-      if (!SrcStructTypesSet.count(DST) && DstStructTypesSet.count(DST))
+      if (!SrcStructTypesSet.count(DST) && TypeMap.DstStructTypesSet.count(DST))
         TypeMap.addTypeMapping(DST, ST);
   }
 
@@ -666,7 +705,11 @@ bool ModuleLinker::linkAppendingVarProto(GlobalVariable *DstGV,
   if (DstGV->getVisibility() != SrcGV->getVisibility())
     return emitError(
             "Appending variables with different visibility need to be linked!");
-  
+
+  if (DstGV->hasUnnamedAddr() != SrcGV->hasUnnamedAddr())
+    return emitError(
+        "Appending variables with different unnamed_addr need to be linked!");
+
   if (DstGV->getSection() != SrcGV->getSection())
     return emitError(
           "Appending variables with different section name need to be linked!");
@@ -708,6 +751,7 @@ bool ModuleLinker::linkAppendingVarProto(GlobalVariable *DstGV,
 bool ModuleLinker::linkGlobalProto(GlobalVariable *SGV) {
   GlobalValue *DGV = getLinkedToGlobal(SGV);
   llvm::Optional<GlobalValue::VisibilityTypes> NewVisibility;
+  bool HasUnnamedAddr = SGV->hasUnnamedAddr();
 
   if (DGV) {
     // Concatenation of appending linkage variables is magic and handled later.
@@ -722,6 +766,7 @@ bool ModuleLinker::linkGlobalProto(GlobalVariable *SGV) {
     if (getLinkageResult(DGV, SGV, NewLinkage, NV, LinkFromSrc))
       return true;
     NewVisibility = NV;
+    HasUnnamedAddr = HasUnnamedAddr && DGV->hasUnnamedAddr();
 
     // If we're not linking from the source, then keep the definition that we
     // have.
@@ -730,10 +775,11 @@ bool ModuleLinker::linkGlobalProto(GlobalVariable *SGV) {
       if (GlobalVariable *DGVar = dyn_cast<GlobalVariable>(DGV))
         if (DGVar->isDeclaration() && SGV->isConstant() && !DGVar->isConstant())
           DGVar->setConstant(true);
-      
-      // Set calculated linkage and visibility.
+
+      // Set calculated linkage, visibility and unnamed_addr.
       DGV->setLinkage(NewLinkage);
       DGV->setVisibility(*NewVisibility);
+      DGV->setUnnamedAddr(HasUnnamedAddr);
 
       // Make sure to remember this mapping.
       ValueMap[SGV] = ConstantExpr::getBitCast(DGV,TypeMap.get(SGV->getType()));
@@ -759,6 +805,7 @@ bool ModuleLinker::linkGlobalProto(GlobalVariable *SGV) {
   copyGVAttributes(NewDGV, SGV);
   if (NewVisibility)
     NewDGV->setVisibility(*NewVisibility);
+  NewDGV->setUnnamedAddr(HasUnnamedAddr);
 
   if (DGV) {
     DGV->replaceAllUsesWith(ConstantExpr::getBitCast(NewDGV, DGV->getType()));
@@ -775,6 +822,7 @@ bool ModuleLinker::linkGlobalProto(GlobalVariable *SGV) {
 bool ModuleLinker::linkFunctionProto(Function *SF) {
   GlobalValue *DGV = getLinkedToGlobal(SF);
   llvm::Optional<GlobalValue::VisibilityTypes> NewVisibility;
+  bool HasUnnamedAddr = SF->hasUnnamedAddr();
 
   if (DGV) {
     GlobalValue::LinkageTypes NewLinkage = GlobalValue::InternalLinkage;
@@ -783,11 +831,13 @@ bool ModuleLinker::linkFunctionProto(Function *SF) {
     if (getLinkageResult(DGV, SF, NewLinkage, NV, LinkFromSrc))
       return true;
     NewVisibility = NV;
+    HasUnnamedAddr = HasUnnamedAddr && DGV->hasUnnamedAddr();
 
     if (!LinkFromSrc) {
       // Set calculated linkage
       DGV->setLinkage(NewLinkage);
       DGV->setVisibility(*NewVisibility);
+      DGV->setUnnamedAddr(HasUnnamedAddr);
 
       // Make sure to remember this mapping.
       ValueMap[SF] = ConstantExpr::getBitCast(DGV, TypeMap.get(SF->getType()));
@@ -800,6 +850,14 @@ bool ModuleLinker::linkFunctionProto(Function *SF) {
     }
   }
   
+  // If the function is to be lazily linked, don't create it just yet.
+  // The ValueMaterializerTy will deal with creating it if it's used.
+  if (!DGV && (SF->hasLocalLinkage() || SF->hasLinkOnceLinkage() ||
+               SF->hasAvailableExternallyLinkage())) {
+    DoNotLinkFromSource.insert(SF);
+    return false;
+  }
+
   // If there is no linkage to be performed or we are linking from the source,
   // bring SF over.
   Function *NewDF = Function::Create(TypeMap.get(SF->getFunctionType()),
@@ -807,18 +865,12 @@ bool ModuleLinker::linkFunctionProto(Function *SF) {
   copyGVAttributes(NewDF, SF);
   if (NewVisibility)
     NewDF->setVisibility(*NewVisibility);
+  NewDF->setUnnamedAddr(HasUnnamedAddr);
 
   if (DGV) {
     // Any uses of DF need to change to NewDF, with cast.
     DGV->replaceAllUsesWith(ConstantExpr::getBitCast(NewDF, DGV->getType()));
     DGV->eraseFromParent();
-  } else {
-    // Internal, LO_ODR, or LO linkage - stick in set to ignore and lazily link.
-    if (SF->hasLocalLinkage() || SF->hasLinkOnceLinkage() ||
-        SF->hasAvailableExternallyLinkage()) {
-      DoNotLinkFromSource.insert(SF);
-      LazilyLinkFunctions.push_back(SF);
-    }
   }
   
   ValueMap[SF] = NewDF;
@@ -885,7 +937,7 @@ void ModuleLinker::linkAppendingVarInit(const AppendingVarInfo &AVI) {
   SmallVector<Constant*, 16> Elements;
   getArrayElements(AVI.DstInit, Elements);
   
-  Constant *SrcInit = MapValue(AVI.SrcInit, ValueMap, RF_None, &TypeMap);
+  Constant *SrcInit = MapValue(AVI.SrcInit, ValueMap, RF_None, &TypeMap, &ValMaterializer);
   getArrayElements(SrcInit, Elements);
   
   ArrayType *NewType = cast<ArrayType>(AVI.NewGV->getType()->getElementType());
@@ -906,7 +958,7 @@ void ModuleLinker::linkGlobalInits() {
     GlobalVariable *DGV = cast<GlobalVariable>(ValueMap[I]);
     // Figure out what the initializer looks like in the dest module.
     DGV->setInitializer(MapValue(I->getInitializer(), ValueMap,
-                                 RF_None, &TypeMap));
+                                 RF_None, &TypeMap, &ValMaterializer));
   }
 }
 
@@ -936,12 +988,14 @@ void ModuleLinker::linkFunctionBody(Function *Dst, Function *Src) {
     // functions and patch them up to point to the local versions.
     for (Function::iterator BB = Dst->begin(), BE = Dst->end(); BB != BE; ++BB)
       for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I)
-        RemapInstruction(I, ValueMap, RF_IgnoreMissingEntries, &TypeMap);
+        RemapInstruction(I, ValueMap, RF_IgnoreMissingEntries,
+                         &TypeMap, &ValMaterializer);
     
   } else {
     // Clone the body of the function into the dest function.
     SmallVector<ReturnInst*, 8> Returns; // Ignore returns.
-    CloneFunctionInto(Dst, Src, ValueMap, false, Returns, "", NULL, &TypeMap);
+    CloneFunctionInto(Dst, Src, ValueMap, false, Returns, "", NULL,
+                      &TypeMap, &ValMaterializer);
   }
   
   // There is no need to map the arguments anymore.
@@ -959,7 +1013,8 @@ void ModuleLinker::linkAliasBodies() {
       continue;
     if (Constant *Aliasee = I->getAliasee()) {
       GlobalAlias *DA = cast<GlobalAlias>(ValueMap[I]);
-      DA->setAliasee(MapValue(Aliasee, ValueMap, RF_None, &TypeMap));
+      DA->setAliasee(MapValue(Aliasee, ValueMap, RF_None,
+                              &TypeMap, &ValMaterializer));
     }
   }
 }
@@ -976,7 +1031,7 @@ void ModuleLinker::linkNamedMDNodes() {
     // Add Src elements into Dest node.
     for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
       DestNMD->addOperand(MapValue(I->getOperand(i), ValueMap,
-                                   RF_None, &TypeMap));
+                                   RF_None, &TypeMap, &ValMaterializer));
   }
 }
 
@@ -1206,6 +1261,13 @@ bool ModuleLinker::run() {
     // Skip if not linking from source.
     if (DoNotLinkFromSource.count(SF)) continue;
     
+    Function *DF = cast<Function>(ValueMap[SF]);
+    if (SF->hasPrefixData()) {
+      // Link in the prefix data.
+      DF->setPrefixData(MapValue(
+          SF->getPrefixData(), ValueMap, RF_None, &TypeMap, &ValMaterializer));
+    }
+
     // Skip if no body (function is external) or materialize.
     if (SF->isDeclaration()) {
       if (!SF->isMaterializable())
@@ -1214,7 +1276,7 @@ bool ModuleLinker::run() {
         return true;
     }
     
-    linkFunctionBody(cast<Function>(ValueMap[SF]), SF);
+    linkFunctionBody(DF, SF);
     SF->Dematerialize();
   }
 
@@ -1236,48 +1298,43 @@ bool ModuleLinker::run() {
     LinkedInAnyFunctions = false;
     
     for(std::vector<Function*>::iterator I = LazilyLinkFunctions.begin(),
-        E = LazilyLinkFunctions.end(); I != E; ++I) {
-      if (!*I)
-        continue;
-      
+        E = LazilyLinkFunctions.end(); I != E; ++I) {      
       Function *SF = *I;
-      Function *DF = cast<Function>(ValueMap[SF]);
-      
-      if (!DF->use_empty()) {
-        
-        // Materialize if necessary.
-        if (SF->isDeclaration()) {
-          if (!SF->isMaterializable())
-            continue;
-          if (SF->Materialize(&ErrorMsg))
-            return true;
-        }
-        
-        // Link in function body.
-        linkFunctionBody(DF, SF);
-        SF->Dematerialize();
+      if (!SF)
+        continue;
 
-        // "Remove" from vector by setting the element to 0.
-        *I = 0;
-        
-        // Set flag to indicate we may have more functions to lazily link in
-        // since we linked in a function.
-        LinkedInAnyFunctions = true;
+      Function *DF = cast<Function>(ValueMap[SF]);
+      if (SF->hasPrefixData()) {
+        // Link in the prefix data.
+        DF->setPrefixData(MapValue(SF->getPrefixData(),
+                                   ValueMap,
+                                   RF_None,
+                                   &TypeMap,
+                                   &ValMaterializer));
       }
+
+      // Materialize if necessary.
+      if (SF->isDeclaration()) {
+        if (!SF->isMaterializable())
+          continue;
+        if (SF->Materialize(&ErrorMsg))
+          return true;
+      }
+      
+      // Erase from vector *before* the function body is linked - linkFunctionBody could
+      // invalidate I.
+      LazilyLinkFunctions.erase(I);
+
+      // Link in function body.
+      linkFunctionBody(DF, SF);
+      SF->Dematerialize();
+
+      // Set flag to indicate we may have more functions to lazily link in
+      // since we linked in a function.
+      LinkedInAnyFunctions = true;
+      break;
     }
   } while (LinkedInAnyFunctions);
-  
-  // Remove any prototypes of functions that were not actually linked in.
-  for(std::vector<Function*>::iterator I = LazilyLinkFunctions.begin(),
-      E = LazilyLinkFunctions.end(); I != E; ++I) {
-    if (!*I)
-      continue;
-    
-    Function *SF = *I;
-    Function *DF = cast<Function>(ValueMap[SF]);
-    if (DF->use_empty())
-      DF->eraseFromParent();
-  }
   
   // Now that all of the types from the source are used, resolve any structs
   // copied over to the dest that didn't exist there.
@@ -1286,24 +1343,43 @@ bool ModuleLinker::run() {
   return false;
 }
 
+Linker::Linker(Module *M) : Composite(M) {
+  TypeFinder StructTypes;
+  StructTypes.run(*M, true);
+  IdentifiedStructTypes.insert(StructTypes.begin(), StructTypes.end());
+}
+
+Linker::~Linker() {
+}
+
+void Linker::deleteModule() {
+  delete Composite;
+  Composite = NULL;
+}
+
+bool Linker::linkInModule(Module *Src, unsigned Mode, std::string *ErrorMsg) {
+  ModuleLinker TheLinker(Composite, IdentifiedStructTypes, Src, Mode);
+  if (TheLinker.run()) {
+    if (ErrorMsg)
+      *ErrorMsg = TheLinker.ErrorMsg;
+    return true;
+  }
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // LinkModules entrypoint.
 //===----------------------------------------------------------------------===//
 
 /// LinkModules - This function links two modules together, with the resulting
-/// left module modified to be the composite of the two input modules.  If an
+/// Dest module modified to be the composite of the two input modules.  If an
 /// error occurs, true is returned and ErrorMsg (if not null) is set to indicate
 /// the problem.  Upon failure, the Dest module could be in a modified state,
 /// and shouldn't be relied on to be consistent.
 bool Linker::LinkModules(Module *Dest, Module *Src, unsigned Mode, 
                          std::string *ErrorMsg) {
-  ModuleLinker TheLinker(Dest, Src, Mode);
-  if (TheLinker.run()) {
-    if (ErrorMsg) *ErrorMsg = TheLinker.ErrorMsg;
-    return true;
-  }
-
-  return false;
+  Linker L(Dest);
+  return L.linkInModule(Src, Mode, ErrorMsg);
 }
 
 //===----------------------------------------------------------------------===//

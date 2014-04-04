@@ -19,6 +19,7 @@
 #define LLVM_IR_GLOBALVALUE_H
 
 #include "llvm/IR/Constant.h"
+#include "llvm/IR/DerivedTypes.h"
 
 namespace llvm {
 
@@ -34,7 +35,6 @@ public:
     AvailableExternallyLinkage, ///< Available for inspection, not emission.
     LinkOnceAnyLinkage, ///< Keep one copy of function when linking (inline)
     LinkOnceODRLinkage, ///< Same, but only replaced by something equivalent.
-    LinkOnceODRAutoHideLinkage, ///< Like LinkOnceODRLinkage but addr not taken.
     WeakAnyLinkage,     ///< Keep one copy of named function when linking (weak)
     WeakODRLinkage,     ///< Same, but only replaced by something equivalent.
     AppendingLinkage,   ///< Special purpose, only applies to global arrays
@@ -105,7 +105,7 @@ public:
 
   /// getType - Global values are always pointers.
   inline PointerType *getType() const {
-    return reinterpret_cast<PointerType*>(User::getType());
+    return cast<PointerType>(User::getType());
   }
 
   static LinkageTypes getLinkOnceLinkage(bool ODR) {
@@ -122,12 +122,7 @@ public:
     return Linkage == AvailableExternallyLinkage;
   }
   static bool isLinkOnceLinkage(LinkageTypes Linkage) {
-    return Linkage == LinkOnceAnyLinkage ||
-           Linkage == LinkOnceODRLinkage ||
-           Linkage == LinkOnceODRAutoHideLinkage;
-  }
-  static bool isLinkOnceODRAutoHideLinkage(LinkageTypes Linkage) {
-    return Linkage == LinkOnceODRAutoHideLinkage;
+    return Linkage == LinkOnceAnyLinkage || Linkage == LinkOnceODRLinkage;
   }
   static bool isWeakLinkage(LinkageTypes Linkage) {
     return Linkage == WeakAnyLinkage || Linkage == WeakODRLinkage;
@@ -191,7 +186,6 @@ public:
            Linkage == WeakODRLinkage ||
            Linkage == LinkOnceAnyLinkage ||
            Linkage == LinkOnceODRLinkage ||
-           Linkage == LinkOnceODRAutoHideLinkage ||
            Linkage == CommonLinkage ||
            Linkage == ExternalWeakLinkage ||
            Linkage == LinkerPrivateWeakLinkage;
@@ -203,9 +197,6 @@ public:
   }
   bool hasLinkOnceLinkage() const {
     return isLinkOnceLinkage(Linkage);
-  }
-  bool hasLinkOnceODRAutoHideLinkage() const {
-    return isLinkOnceODRAutoHideLinkage(Linkage);
   }
   bool hasWeakLinkage() const {
     return isWeakLinkage(Linkage);
@@ -237,6 +228,15 @@ public:
   /// copyAttributesFrom - copy all additional attributes (those not needed to
   /// create a GlobalValue) from the GlobalValue Src to this one.
   virtual void copyAttributesFrom(const GlobalValue *Src);
+
+  /// getRealLinkageName - If special LLVM prefix that is used to inform the asm
+  /// printer to not emit usual symbol prefix before the symbol name is used
+  /// then return linkage name after skipping this special LLVM prefix.
+  static StringRef getRealLinkageName(StringRef Name) {
+    if (!Name.empty() && Name[0] == '\1')
+      return Name.substr(1);
+    return Name;
+  }
 
 /// @name Materialization
 /// Materialization is used to construct functions only as they're needed. This

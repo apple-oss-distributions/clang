@@ -10,7 +10,7 @@
 /// \file
 /// \brief Defines the SourceManager interface.
 ///
-/// There are three different types of locations in a file: a spelling
+/// There are three different types of locations in a %file: a spelling
 /// location, an expansion location, and a presumed location.
 ///
 /// Given an example of:
@@ -79,7 +79,7 @@ namespace SrcMgr {
   };
 
   /// \brief One instance of this struct is kept for every file loaded or used.
-  ////
+  ///
   /// This object owns the MemoryBuffer object.
   class ContentCache {
     enum CCFlags {
@@ -587,13 +587,13 @@ class SourceManager : public RefCountedBase<SourceManager> {
   ///
   /// Positive FileIDs are indexes into this table. Entry 0 indicates an invalid
   /// expansion.
-  std::vector<SrcMgr::SLocEntry> LocalSLocEntryTable;
+  SmallVector<SrcMgr::SLocEntry, 0> LocalSLocEntryTable;
 
   /// \brief The table of SLocEntries that are loaded from other modules.
   ///
   /// Negative FileIDs are indexes into this table. To get from ID to an index,
   /// use (-ID - 2).
-  mutable std::vector<SrcMgr::SLocEntry> LoadedSLocEntryTable;
+  mutable SmallVector<SrcMgr::SLocEntry, 0> LoadedSLocEntryTable;
 
   /// \brief The starting offset of the next local SLocEntry.
   ///
@@ -1161,6 +1161,22 @@ public:
   /// expansion but not the expansion of an argument to a function-like macro.
   bool isMacroBodyExpansion(SourceLocation Loc) const;
 
+  /// \brief Returns true if the given MacroID location points at the beginning
+  /// of the immediate macro expansion.
+  ///
+  /// \param MacroBegin If non-null and function returns true, it is set to the
+  /// begin location of the immediate macro expansion.
+  bool isAtStartOfImmediateMacroExpansion(SourceLocation Loc,
+                                          SourceLocation *MacroBegin = 0) const;
+
+  /// \brief Returns true if the given MacroID location points at the character
+  /// end of the immediate macro expansion.
+  ///
+  /// \param MacroEnd If non-null and function returns true, it is set to the
+  /// character end location of the immediate macro expansion.
+  bool isAtEndOfImmediateMacroExpansion(SourceLocation Loc,
+                                        SourceLocation *MacroEnd = 0) const;
+
   /// \brief Returns true if \p Loc is inside the [\p Start, +\p Length)
   /// chunk of the source location address space.
   ///
@@ -1276,14 +1292,28 @@ public:
   PresumedLoc getPresumedLoc(SourceLocation Loc,
                              bool UseLineDirectives = true) const;
 
-  /// \brief Returns true if both SourceLocations correspond to the same file.
-  bool isFromSameFile(SourceLocation Loc1, SourceLocation Loc2) const {
+  /// \brief Returns whether the PresumedLoc for a given SourceLocation is 
+  /// in the main file.
+  ///
+  /// This computes the "presumed" location for a SourceLocation, then checks
+  /// whether it came from a file other than the main file. This is different
+  /// from isWrittenInMainFile() because it takes line marker directives into
+  /// account.
+  bool isInMainFile(SourceLocation Loc) const;
+
+  /// \brief Returns true if the spelling locations for both SourceLocations
+  /// are part of the same file buffer.
+  ///
+  /// This check ignores line marker directives.
+  bool isWrittenInSameFile(SourceLocation Loc1, SourceLocation Loc2) const {
     return getFileID(Loc1) == getFileID(Loc2);
   }
 
-  /// \brief Returns true if the file of provided SourceLocation is the main
-  /// file.
-  bool isFromMainFile(SourceLocation Loc) const {
+  /// \brief Returns true if the spelling location for the given location
+  /// is in the main file buffer.
+  ///
+  /// This check ignores line marker directives.
+  bool isWrittenInMainFile(SourceLocation Loc) const {
     return getFileID(Loc) == getMainFileID();
   }
 
@@ -1569,6 +1599,14 @@ private:
     // local and loaded entries.
     return SLocOffset < getSLocEntryByID(FID.ID+1).getOffset();
   }
+
+  /// \brief Returns the previous in-order FileID or an invalid FileID if there
+  /// is no previous one.
+  FileID getPreviousFileID(FileID FID) const;
+
+  /// \brief Returns the next in-order FileID or an invalid FileID if there is
+  /// no next one.
+  FileID getNextFileID(FileID FID) const;
 
   /// \brief Create a new fileID for the specified ContentCache and
   /// include position.

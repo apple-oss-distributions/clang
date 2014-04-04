@@ -128,7 +128,7 @@ namespace {
         // If the block size isn't a multiple of the known bits, assume the
         // worst case padding.
         if (Size & ((1u << Bits) - 1))
-          Bits = CountTrailingZeros_32(Size);
+          Bits = countTrailingZeros(Size);
         return Bits;
       }
 
@@ -753,6 +753,7 @@ initializeFunctionInfo(const std::vector<MachineInstr*> &CPEMIs) {
             Scale = 4;
             break;
 
+          case ARM::LDRBi12:
           case ARM::LDRi12:
           case ARM::LDRcp:
           case ARM::t2LDRpci:
@@ -1468,7 +1469,7 @@ void ARMConstantIslands::removeDeadCPEMI(MachineInstr *CPEMI) {
   if (CPEBB->empty()) {
     BBInfo[CPEBB->getNumber()].Size = 0;
 
-    // This block no longer needs to be aligned. <rdar://problem/10534709>.
+    // This block no longer needs to be aligned.
     CPEBB->setAlignment(0);
   } else
     // Entries are sorted by descending alignment, so realign from the front.

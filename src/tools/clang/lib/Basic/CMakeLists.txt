@@ -3,8 +3,6 @@ set(LLVM_LINK_COMPONENTS mc)
 add_clang_library(clangBasic
   Builtins.cpp
   CharInfo.cpp
-  ConvertUTF.c
-  ConvertUTFWrapper.cpp
   Diagnostic.cpp
   DiagnosticIDs.cpp
   FileManager.cpp
@@ -13,6 +11,7 @@ add_clang_library(clangBasic
   LangOptions.cpp
   Module.cpp
   ObjCRuntime.cpp
+  OpenMPKinds.cpp
   OperatorPrecedence.cpp
   SourceLocation.cpp
   SourceManager.cpp

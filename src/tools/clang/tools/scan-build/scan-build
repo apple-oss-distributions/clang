@@ -17,6 +17,7 @@ use warnings;
 use FindBin qw($RealBin);
 use Digest::MD5;
 use File::Basename;
+use File::Find;
 use Term::ANSIColor;
 use Term::ANSIColor qw(:constants);
 use Cwd qw/ getcwd abs_path /;
@@ -31,7 +32,9 @@ my $TERM = $ENV{'TERM'};
 my $UseColor = (defined $TERM and $TERM =~ 'xterm-.*color' and -t STDOUT
                 and defined $ENV{'SCAN_BUILD_COLOR'});
 
-my $UserName = HtmlEscape(getpwuid($<) || 'unknown');
+# Portability: getpwuid is not implemented for Win32 (see Perl language 
+# reference, perlport), use getlogin instead.
+my $UserName = HtmlEscape(getlogin() || getpwuid($<) || 'unknown');
 my $HostName = HtmlEscape(hostname() || 'unknown');
 my $CurrentDir = HtmlEscape(getcwd());
 my $CurrentDirSuffix = basename($CurrentDir);
@@ -57,6 +60,16 @@ sub Diag {
   }  
 }
 
+sub ErrorDiag {
+  if ($UseColor) {
+    print STDERR BOLD, RED "$Prog: ";
+    print STDERR RESET, RED @_;
+    print STDERR RESET;
+  } else {
+    print STDERR "$Prog: @_";
+  }  
+}
+
 sub DiagCrashes {
   my $Dir = shift;
   Diag ("The analyzer encountered problems on some source files.\n");
@@ -67,14 +80,14 @@ sub DiagCrashes {
 
 sub DieDiag {
   if ($UseColor) {
-    print BOLD, RED "$Prog: ";
-    print RESET, RED @_;
-    print RESET;
+    print STDERR BOLD, RED "$Prog: ";
+    print STDERR RESET, RED @_;
+    print STDERR RESET;
   }
   else {
-    print "$Prog: ", @_;
+    print STDERR "$Prog: ", @_;
   }
-  exit(0);
+  exit 1;
 }
 
 ##----------------------------------------------------------------------------##
@@ -89,7 +102,7 @@ if (grep /^--help-checkers$/, @ARGV) {
 	my ($sign, $name, @text) = split ' ', $_;
 	print $name, $/ if $sign eq '+';
     }
-    exit 1;
+    exit 0;
 }
 
 ##----------------------------------------------------------------------------##
@@ -110,8 +123,7 @@ sub GetHTMLRunDir {
   my $Dir = shift @_;    
   my $TmpMode = 0;
   if (!defined $Dir) {
-    $Dir = $ENV{'TMPDIR'};
-    if (!defined $Dir) { $Dir = "/tmp"; }
+    $Dir = $ENV{'TMPDIR'} || $ENV{'TEMP'} || $ENV{'TMP'} || "/tmp";
     $TmpMode = 1;
   }
   
@@ -123,7 +135,13 @@ sub GetHTMLRunDir {
   my $year  = $CurrentTime[5] + 1900;
   my $day   = $CurrentTime[3];
   my $month = $CurrentTime[4] + 1;
-  my $DateString = sprintf("%d-%02d-%02d", $year, $month, $day);
+  my $hour =  $CurrentTime[2];
+  my $min =   $CurrentTime[1];
+  my $sec =   $CurrentTime[0];
+
+  my $TimeString = sprintf("%02d%02d%02d", $hour, $min, $sec);
+  my $DateString = sprintf("%d-%02d-%02d-%s-$$",
+                           $year, $month, $day, $TimeString);
   
   # Determine the run number.  
   my $RunNumber;
@@ -150,9 +168,11 @@ sub GetHTMLRunDir {
       next if ($x[0] != $year);
       next if ($x[1] != $month);
       next if ($x[2] != $day);
+      next if ($x[3] != $TimeString);
+      next if ($x[4] != $$);
       
-      if ($x[3] > $max) {
-        $max = $x[3];
+      if ($x[5] > $max) {
+        $max = $x[5];
       }      
     }
     
@@ -471,6 +491,18 @@ sub CalcStats {
 # Postprocess - Postprocess the results of an analysis scan.
 ##----------------------------------------------------------------------------##
 
+my @filesFound;
+my $baseDir;
+sub FileWanted { 
+    my $baseDirRegEx = quotemeta $baseDir;
+    my $file = $File::Find::name;
+    if ($file =~ /report-.*\.html$/) {
+       my $relative_file = $file;
+       $relative_file =~ s/$baseDirRegEx//g;
+       push @filesFound, $relative_file;
+    }
+}
+
 sub Postprocess {
   
   my $Dir           = shift;
@@ -484,23 +516,23 @@ sub Postprocess {
     Diag("No bugs found.\n");
     return 0;
   }
-  
-  opendir(DIR, $Dir);
-  my @files = grep { /^report-.*\.html$/ } readdir(DIR);
-  closedir(DIR);
 
-  if (scalar(@files) == 0 and ! -e "$Dir/failures") {
+  $baseDir = $Dir . "/";
+  find({ wanted => \&FileWanted, follow => 0}, $Dir);
+
+  if (scalar(@filesFound) == 0 and ! -e "$Dir/failures") {
     if (! $KeepEmpty) {
       Diag("Removing directory '$Dir' because it contains no reports.\n");
       system ("rm", "-fR", $Dir);
     }
+    Diag("No bugs found.\n");
     return 0;
   }
   
   # Scan each report file and build an index.  
   my @Index;
   my @Stats;
-  foreach my $file (@files) { ScanFile(\@Index, $Dir, $file, \@Stats); }
+  foreach my $file (@filesFound) { ScanFile(\@Index, $Dir, $file, \@Stats); }
   
   # Scan the failures directory and use the information in the .info files
   # to update the common prefix directory.
@@ -602,7 +634,7 @@ print OUT <<ENDTEXT;
 </table>
 ENDTEXT
 
-  if (scalar(@files)) {
+  if (scalar(@filesFound)) {
     # Print out the summary table.
     my %Totals;
 
@@ -873,6 +905,9 @@ sub SetEnv {
   }
 }
 
+# The flag corresponding to the --override-compiler command line option.
+my $OverrideCompiler = 0; 
+
 sub RunXcodebuild {
   my $Args = shift;
   my $IgnoreErrors = shift;
@@ -882,6 +917,47 @@ sub RunXcodebuild {
 
   if ($IgnoreErrors) {
     AddIfNotPresent($Args,"-PBXBuildsContinueAfterErrors=YES");
+  }
+
+  # Detect the version of Xcode.  If Xcode 4.6 or higher, use new
+  # in situ support for analyzer interposition without needed to override
+  # the compiler.
+  open(DETECT_XCODE, "-|", $Args->[0], "-version") or
+    die "error: cannot detect version of xcodebuild\n";
+
+  my $oldBehavior = 1;
+
+  while(<DETECT_XCODE>) {
+    if (/^Xcode (.+)$/) {
+      my $ver = $1;
+      if ($ver =~ /^([0-9]+[.][0-9]+)[^0-9]?/) {
+        if ($1 >= 4.6) {
+          $oldBehavior = 0;
+          last;
+        }
+      }
+    }
+  }
+  close(DETECT_XCODE);
+  
+  # If --override-compiler is explicitely requested, resort to the old 
+  # behavior regardless of Xcode version.
+  if ($OverrideCompiler) {
+    $oldBehavior = 1;
+  }
+  
+  if ($oldBehavior == 0) {
+    my $OutputDir = $Options->{"OUTPUT_DIR"};
+    my $CLANG = $Options->{"CLANG"};
+    my $OtherFlags = $Options->{"CCC_ANALYZER_ANALYSIS"};
+    push @$Args,
+        "RUN_CLANG_STATIC_ANALYZER=YES",
+        "CLANG_ANALYZER_OUTPUT=plist-html",
+        "CLANG_ANALYZER_EXEC=$CLANG",
+        "CLANG_ANALYZER_OUTPUT_DIR=$OutputDir",
+        "CLANG_ANALYZER_OTHER_FLAGS=$OtherFlags";
+
+    return (system(@$Args) >> 8);
   }
   
   # Default to old behavior where we insert a bogus compiler.
@@ -918,16 +994,11 @@ sub RunBuildCommand {
   my $CCAnalyzer = shift;
   my $CXXAnalyzer = shift;
   my $Options = shift;
-  
-  # Get only the part of the command after the last '/'.
-  if ($Cmd =~ /\/([^\/]+)$/) {
-    $Cmd = $1;
-  }
-  
-  if ($Cmd eq "xcodebuild") {
+
+  if ($Cmd =~ /\bxcodebuild$/) {
     return RunXcodebuild($Args, $IgnoreErrors, $CCAnalyzer, $CXXAnalyzer, $Options);
   }
-  
+
   # Setup the environment.
   SetEnv($Options);
   
@@ -955,10 +1026,10 @@ sub RunBuildCommand {
     shift @$Args;
     unshift @$Args, $CXXAnalyzer;
   }
-  elsif ($IgnoreErrors) {
-    if ($Cmd eq "make" or $Cmd eq "gmake") {
-      AddIfNotPresent($Args, "CC=$CCAnalyzer");
-      AddIfNotPresent($Args, "CXX=$CXXAnalyzer");
+  elsif ($Cmd eq "make" or $Cmd eq "gmake") {
+    AddIfNotPresent($Args, "CC=$CCAnalyzer");
+    AddIfNotPresent($Args, "CXX=$CXXAnalyzer");
+    if ($IgnoreErrors) {
       AddIfNotPresent($Args,"-k");
       AddIfNotPresent($Args,"-i");
     }
@@ -1090,6 +1161,10 @@ ADVANCED OPTIONS:
 
    Don't remove the build results directory even if no issues were reported.
 
+ --override-compiler 
+   Always resort to the ccc-analyzer even when better interposition methods 
+   are available.
+   
 CONTROLLING CHECKERS:
 
  A default group of checkers are always run unless explicitly disabled.
@@ -1264,15 +1339,13 @@ my $InternalStats;
 my $OutputFormat = "html";
 my $AnalyzerStats = 0;
 my $MaxLoop = 0;
+my $RequestDisplayHelp = 0;
+my $ForceDisplayHelp = 0;
+my $AnalyzerDiscoveryMethod;
 
 if (!@ARGV) {
-  DisplayHelp();
-  exit 1;
+  $ForceDisplayHelp = 1
 }
-
-
-my $displayHelp = 0;
-my $AnalyzerDiscoveryMethod;
 
 while (@ARGV) {
   
@@ -1281,7 +1354,7 @@ while (@ARGV) {
   my $arg = $ARGV[0];
 
   if ($arg eq "-h" or $arg eq "--help") {
-    $displayHelp = 1;
+    $RequestDisplayHelp = 1;
     shift @ARGV;
     next;
   }
@@ -1455,15 +1528,21 @@ while (@ARGV) {
     $KeepEmpty = 1;
     next;
   }
+
+  if ($arg eq "--override-compiler") {
+    shift @ARGV;
+    $OverrideCompiler = 1;
+    next;
+  }
   
   DieDiag("unrecognized option '$arg'\n") if ($arg =~ /^-/);
   
   last;
 }
 
-if (!@ARGV and $displayHelp == 0) {
-  Diag("No build command specified.\n\n");
-  $displayHelp = 1;
+if (!@ARGV and !$RequestDisplayHelp) {
+  ErrorDiag("No build command specified.\n\n");
+  $ForceDisplayHelp = 1;
 }
 
 # Find 'clang'
@@ -1473,7 +1552,7 @@ if (!defined $AnalyzerDiscoveryMethod) {
     $Clang = Cwd::realpath("$RealBin/clang");
   }
   if (!defined $Clang || ! -x $Clang) {
-    if (!$displayHelp) {
+    if (!$RequestDisplayHelp && !$ForceDisplayHelp) {
       DieDiag("error: Cannot find an executable 'clang' relative to scan-build." .
    	          "  Consider using --use-analyzer to pick a version of 'clang' to use for static analysis.\n");
     }
@@ -1494,21 +1573,30 @@ else {
   }
   else {
     $Clang = Cwd::realpath($AnalyzerDiscoveryMethod);
-	if (! -x $Clang) {
-   	  DieDiag("Cannot find an executable clang at '$Clang'\n");
+	if (!defined $Clang or not -x $Clang) {
+   	  DieDiag("Cannot find an executable clang at '$AnalyzerDiscoveryMethod'\n");
 	}
   }
 }
 
-if ($displayHelp) {
+if ($ForceDisplayHelp || $RequestDisplayHelp) {
   DisplayHelp();
-  exit 1;
+  exit $ForceDisplayHelp;
 }
 
 $ClangCXX = $Clang;
-$ClangCXX =~ s/\-\d+\.\d+$//;
-$ClangCXX .= "++";
-$ClangVersion = HtmlEscape(`$Clang --version`);
+# Determine operating system under which this copy of Perl was built.
+my $IsWinBuild = ($^O =~/msys|cygwin|MSWin32/);
+if($IsWinBuild) {
+  $ClangCXX =~ s/.exe$/++.exe/;
+}
+else {
+  $ClangCXX =~ s/\-\d+\.\d+$//;
+  $ClangCXX .= "++";
+}
+
+# Make sure to use "" to handle paths with spaces.
+$ClangVersion = HtmlEscape(`"$Clang" --version`);
 
 # Determine where results go.
 $CmdArgs = HtmlEscape(join(' ', map(ShellEscape($_), @ARGV)));
@@ -1524,13 +1612,17 @@ my $AbsRealBin = Cwd::realpath($RealBin);
 my $Cmd = "$AbsRealBin/libexec/ccc-analyzer";
 my $CmdCXX = "$AbsRealBin/libexec/c++-analyzer";
 
-if (!defined $Cmd || ! -x $Cmd) {
+# Portability: use less strict but portable check -e (file exists) instead of 
+# non-portable -x (file is executable). On some windows ports -x just checks
+# file extension to determine if a file is executable (see Perl language 
+# reference, perlport)
+if (!defined $Cmd || ! -e $Cmd) {
   $Cmd = "$AbsRealBin/ccc-analyzer";
-  DieDiag("Executable 'ccc-analyzer' does not exist at '$Cmd'\n") if(! -x $Cmd);
+  DieDiag("'ccc-analyzer' does not exist at '$Cmd'\n") if(! -e $Cmd);
 }
-if (!defined $CmdCXX || ! -x $CmdCXX) {
+if (!defined $CmdCXX || ! -e $CmdCXX) {
   $CmdCXX = "$AbsRealBin/c++-analyzer";
-  DieDiag("Executable 'c++-analyzer' does not exist at '$CmdCXX'\n") if(! -x $CmdCXX);
+  DieDiag("'c++-analyzer' does not exist at '$CmdCXX'\n") if(! -e $CmdCXX);
 }
 
 Diag("Using '$Clang' for static analysis\n");

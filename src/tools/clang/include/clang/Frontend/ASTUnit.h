@@ -25,12 +25,12 @@
 #include "clang/Lex/ModuleLoader.h"
 #include "clang/Lex/PreprocessingRecord.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
-#include "clang/Sema/Sema.h"
 #include "clang/Serialization/ASTBitCodes.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/Support/MD5.h"
 #include "llvm/Support/Path.h"
 #include <cassert>
 #include <map>
@@ -44,6 +44,7 @@ namespace llvm {
 }
 
 namespace clang {
+class Sema;
 class ASTContext;
 class ASTReader;
 class CodeCompleteConsumer;
@@ -74,7 +75,7 @@ private:
   IntrusiveRefCntPtr<ASTContext>          Ctx;
   IntrusiveRefCntPtr<TargetOptions>       TargetOpts;
   IntrusiveRefCntPtr<HeaderSearchOptions> HSOpts;
-  ASTReader *Reader;
+  IntrusiveRefCntPtr<ASTReader> Reader;
   bool HadModuleLoaderFatalFailure;
 
   struct ASTWriterData;
@@ -205,8 +206,35 @@ public:
     return Preamble;
   }
 
-private:
+  /// Data that allows us to tell if a file that was used in a preambule was
+  /// changed.
+  struct PreambleFileHash {
+    /// All files have size set.
+    off_t Size;
 
+    /// Modification time is set for files that are on disk.  For memory
+    /// buffers it is zero.
+    time_t ModTime;
+
+    /// Memory buffers have MD5 instead of modification time.  We don't
+    /// compute MD5 for on-disk files because we hope that modification time is
+    /// enough to tell if the file was changed.
+    llvm::MD5::MD5Result MD5;
+
+    static PreambleFileHash createForFile(off_t Size, time_t ModTime);
+    static PreambleFileHash
+    createForMemoryBuffer(const llvm::MemoryBuffer *Buffer);
+
+    friend bool operator==(const PreambleFileHash &LHS,
+                           const PreambleFileHash &RHS);
+
+    friend bool operator!=(const PreambleFileHash &LHS,
+                           const PreambleFileHash &RHS) {
+      return !(LHS == RHS);
+    }
+  };
+
+private:
   /// \brief The contents of the preamble that has been precompiled to
   /// \c PreambleFile.
   PreambleData Preamble;
@@ -226,7 +254,7 @@ private:
   ///
   /// If any of the files have changed from one compile to the next,
   /// the preamble must be thrown away.
-  llvm::StringMap<std::pair<off_t, time_t> > FilesInPreamble;
+  llvm::StringMap<PreambleFileHash> FilesInPreamble;
 
   /// \brief When non-NULL, this is the buffer used to store the contents of
   /// the main file when it has been padded for use with the precompiled
@@ -457,7 +485,7 @@ public:
   void setASTContext(ASTContext *ctx) { Ctx = ctx; }
   void setPreprocessor(Preprocessor *pp);
 
-  bool hasSema() const { return TheSema; }
+  bool hasSema() const { return TheSema.isValid(); }
   Sema &getSema() const { 
     assert(TheSema && "ASTUnit does not have a Sema object!");
     return *TheSema; 
@@ -478,8 +506,8 @@ public:
   /// \brief Add a temporary file that the ASTUnit depends on.
   ///
   /// This file will be erased when the ASTUnit is destroyed.
-  void addTemporaryFile(const llvm::sys::Path &TempFile);
-                        
+  void addTemporaryFile(StringRef TempFile);
+
   bool getOnlyLocalDecls() const { return OnlyLocalDecls; }
 
   bool getOwnsRemappedFileBuffers() const { return OwnsRemappedFileBuffers; }
@@ -699,10 +727,10 @@ public:
   /// lifetime is expected to extend past that of the returned ASTUnit.
   ///
   /// \param Action - The ASTFrontendAction to invoke. Its ownership is not
-  /// transfered.
+  /// transferred.
   ///
   /// \param Unit - optionally an already created ASTUnit. Its ownership is not
-  /// transfered.
+  /// transferred.
   ///
   /// \param Persistent - if true the returned ASTUnit will be complete.
   /// false means the caller is only interested in getting info through the

@@ -231,7 +231,7 @@ ProgramStateRef CStringChecker::checkNonNull(CheckerContext &C,
       return NULL;
 
     if (!BT_Null)
-      BT_Null.reset(new BuiltinBug("Unix API",
+      BT_Null.reset(new BuiltinBug(categories::UnixAPI,
         "Null pointer argument in call to byte string function"));
 
     SmallString<80> buf;
@@ -525,7 +525,7 @@ void CStringChecker::emitOverlapBug(CheckerContext &C, ProgramStateRef state,
     return;
 
   if (!BT_Overlap)
-    BT_Overlap.reset(new BugType("Unix API", "Improper arguments"));
+    BT_Overlap.reset(new BugType(categories::UnixAPI, "Improper arguments"));
 
   // Generate a report for this bug.
   BugReport *report = 
@@ -661,7 +661,7 @@ SVal CStringChecker::getCStringLengthForRegion(CheckerContext &C,
     if (Recorded)
       return *Recorded;
   }
-  
+
   // Otherwise, get a new symbol and update the state.
   SValBuilder &svalBuilder = C.getSValBuilder();
   QualType sizeTy = svalBuilder.getContext().getSizeType();
@@ -669,8 +669,21 @@ SVal CStringChecker::getCStringLengthForRegion(CheckerContext &C,
                                                     MR, Ex, sizeTy,
                                                     C.blockCount());
 
-  if (!hypothetical)
+  if (!hypothetical) {
+    if (Optional<NonLoc> strLn = strLength.getAs<NonLoc>()) {
+      // In case of unbounded calls strlen etc bound the range to SIZE_MAX/4
+      BasicValueFactory &BVF = svalBuilder.getBasicValueFactory();
+      const llvm::APSInt &maxValInt = BVF.getMaxValue(sizeTy);
+      llvm::APSInt fourInt = APSIntType(maxValInt).getValue(4);
+      const llvm::APSInt *maxLengthInt = BVF.evalAPSInt(BO_Div, maxValInt,
+                                                        fourInt);
+      NonLoc maxLength = svalBuilder.makeIntVal(*maxLengthInt);
+      SVal evalLength = svalBuilder.evalBinOpNN(state, BO_LE, *strLn,
+                                                maxLength, sizeTy);
+      state = state->assume(evalLength.castAs<DefinedOrUnknownSVal>(), true);
+    }
     state = state->set<CStringLength>(MR, strLength);
+  }
 
   return strLength;
 }
@@ -689,7 +702,7 @@ SVal CStringChecker::getCStringLength(CheckerContext &C, ProgramStateRef &state,
 
       if (ExplodedNode *N = C.addTransition(state)) {
         if (!BT_NotCString)
-          BT_NotCString.reset(new BuiltinBug("Unix API",
+          BT_NotCString.reset(new BuiltinBug(categories::UnixAPI,
             "Argument is not a null-terminated string."));
 
         SmallString<120> buf;
@@ -749,7 +762,7 @@ SVal CStringChecker::getCStringLength(CheckerContext &C, ProgramStateRef &state,
 
     if (ExplodedNode *N = C.addTransition(state)) {
       if (!BT_NotCString)
-        BT_NotCString.reset(new BuiltinBug("Unix API",
+        BT_NotCString.reset(new BuiltinBug(categories::UnixAPI,
           "Argument is not a null-terminated string."));
 
       SmallString<120> buf;
@@ -2018,10 +2031,7 @@ void CStringChecker::checkDeadSymbols(SymbolReaper &SR,
 
 #define REGISTER_CHECKER(name) \
 void ento::register##name(CheckerManager &mgr) {\
-  static CStringChecker *TheChecker = 0; \
-  if (TheChecker == 0) \
-    TheChecker = mgr.registerChecker<CStringChecker>(); \
-  TheChecker->Filter.Check##name = true; \
+  mgr.registerChecker<CStringChecker>()->Filter.Check##name = true; \
 }
 
 REGISTER_CHECKER(CStringNullArg)

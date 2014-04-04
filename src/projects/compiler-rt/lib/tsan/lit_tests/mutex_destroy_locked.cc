@@ -1,4 +1,4 @@
-// RUN: %clangxx_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clangxx_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <unistd.h>
 
@@ -19,3 +19,4 @@ int main() {
 // CHECK:   Mutex {{.*}} created at:
 // CHECK:     #0 pthread_mutex_init
 // CHECK:     #1 main
+// CHECK: SUMMARY: ThreadSanitizer: destroy of a locked mutex{{.*}}main

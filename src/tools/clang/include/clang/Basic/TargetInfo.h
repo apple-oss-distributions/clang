@@ -66,6 +66,7 @@ protected:
   unsigned char LongWidth, LongAlign;
   unsigned char LongLongWidth, LongLongAlign;
   unsigned char SuitableAlign;
+  unsigned char MinGlobalAlign;
   unsigned char MaxAtomicPromoteWidth, MaxAtomicInlineWidth;
   unsigned short MaxVectorAlign;
   const char *DescriptionString;
@@ -85,7 +86,7 @@ protected:
   unsigned ComplexLongDoubleUsesFP2Ret : 1;
 
   // TargetInfo Constructor.  Default initializes all fields.
-  TargetInfo(const std::string &T);
+  TargetInfo(const llvm::Triple &T);
 
 public:
   /// \brief Construct a target for the given options.
@@ -111,6 +112,8 @@ public:
   ///===---- Target Data Type Query Methods -------------------------------===//
   enum IntType {
     NoInt = 0,
+    SignedChar,
+    UnsignedChar,
     SignedShort,
     UnsignedShort,
     SignedInt,
@@ -122,6 +125,7 @@ public:
   };
 
   enum RealType {
+    NoFloat = 255,
     Float = 0,
     Double,
     LongDouble
@@ -135,6 +139,10 @@ public:
 
     /// typedef void* __builtin_va_list;
     VoidPtrBuiltinVaList,
+
+    /// __builtin_va_list as defind by the AArch64 ABI
+    /// http://infocenter.arm.com/help/topic/com.arm.doc.ihi0055a/IHI0055A_aapcs64.pdf
+    AArch64ABIBuiltinVaList,
 
     /// __builtin_va_list as defined by the PNaCl ABI:
     /// http://www.chromium.org/nativeclient/pnacl/bitcode-abi#TOC-Machine-Types
@@ -152,7 +160,16 @@ public:
     /// __builtin_va_list as defined by ARM AAPCS ABI
     /// http://infocenter.arm.com
     //        /help/topic/com.arm.doc.ihi0042d/IHI0042D_aapcs.pdf
-    AAPCSABIBuiltinVaList
+    AAPCSABIBuiltinVaList,
+
+    // typedef struct __va_list_tag
+    //   {
+    //     long __gpr;
+    //     long __fpr;
+    //     void *__overflow_arg_area;
+    //     void *__reg_save_area;
+    //   } va_list[1];
+    SystemZBuiltinVaList
   };
 
 protected:
@@ -185,6 +202,10 @@ protected:
   /// zero length bitfield, regardless of the zero length bitfield type.
   unsigned ZeroLengthBitfieldBoundary;
 
+  /// \brief Specify if mangling based on address space map should be used or
+  /// not for language specific address spaces
+  bool UseAddrSpaceMapMangling;
+
 public:
   IntType getSizeType() const { return SizeType; }
   IntType getIntMaxType() const { return IntMaxType; }
@@ -205,6 +226,12 @@ public:
   ///
   /// For example, SignedInt -> getIntWidth().
   unsigned getTypeWidth(IntType T) const;
+
+  /// \brief Return integer type with specified width.
+  IntType getIntTypeByWidth(unsigned BitWidth, bool IsSigned) const;
+
+  /// \brief Return floating point type with specified width.
+  RealType getRealTypeByWidth(unsigned BitWidth) const;
 
   /// \brief Return the alignment (in bits) of the specified integer type enum.
   ///
@@ -261,6 +288,10 @@ public:
   /// \brief Return the alignment that is suitable for storing any
   /// object with a fundamental alignment requirement.
   unsigned getSuitableAlign() const { return SuitableAlign; }
+
+  /// getMinGlobalAlign - Return the minimum alignment of a global variable,
+  /// unless its alignment is explicitly reduced via attributes.
+  unsigned getMinGlobalAlign() const { return MinGlobalAlign; }
 
   /// getWCharWidth/Align - Return the size of 'wchar_t' for this target, in
   /// bits.
@@ -327,11 +358,11 @@ public:
   unsigned getUnwindWordWidth() const { return getPointerWidth(0); }
 
   /// \brief Return the "preferred" register width on this target.
-  uint64_t getRegisterWidth() const {
+  unsigned getRegisterWidth() const {
     // Currently we assume the register width on the target matches the pointer
     // width, we can introduce a new variable for this if/when some target wants
     // it.
-    return LongWidth; 
+    return PointerWidth;
   }
 
   /// \brief Returns the default value of the __USER_LABEL_PREFIX__ macro,
@@ -402,6 +433,12 @@ public:
   /// of Objective-C message passing on this target.
   bool useObjCFP2RetForComplexLongDouble() const {
     return ComplexLongDoubleUsesFP2Ret;
+  }
+
+  /// \brief Specify if mangling based on address space map should be used or
+  /// not for language specific address spaces
+  bool useAddressSpaceMapMangling() const {
+    return UseAddrSpaceMapMangling;
   }
 
   ///===---- Other target property query methods --------------------------===//
@@ -567,8 +604,6 @@ public:
   /// either; the entire thing is pretty badly mangled.
   virtual bool hasProtectedVisibility() const { return true; }
 
-  virtual bool useGlobalsForAutomaticVariables() const { return false; }
-
   /// \brief Return the section to use for CFString literals, or 0 if no
   /// special section is used.
   virtual const char *getCFStringSection() const {
@@ -637,6 +672,13 @@ public:
     return false;
   }
 
+  /// \brief Use the specified unit for FP math.
+  ///
+  /// \return False on error (invalid unit name).
+  virtual bool setFPMath(StringRef Name) {
+    return false;
+  }
+
   /// \brief Use this specified C++ ABI.
   ///
   /// \return False on error (invalid C++ ABI name).
@@ -656,12 +698,10 @@ public:
 
   /// \brief Enable or disable a specific target feature;
   /// the feature name must be valid.
-  ///
-  /// \return False on error (invalid feature name).
-  virtual bool setFeatureEnabled(llvm::StringMap<bool> &Features,
+  virtual void setFeatureEnabled(llvm::StringMap<bool> &Features,
                                  StringRef Name,
                                  bool Enabled) const {
-    return false;
+    Features[Name] = Enabled;
   }
 
   /// \brief Perform initialization based on the user configured
@@ -671,7 +711,11 @@ public:
   ///
   /// The target may modify the features list, to change which options are
   /// passed onwards to the backend.
-  virtual void HandleTargetFeatures(std::vector<std::string> &Features) {
+  ///
+  /// \return  False on error.
+  virtual bool handleTargetFeatures(std::vector<std::string> &Features,
+                                    DiagnosticsEngine &Diags) {
+    return true;
   }
 
   /// \brief Determine whether the given target has the given feature.
@@ -754,7 +798,6 @@ public:
       default:
         return CCCR_Warning;
       case CC_C:
-      case CC_Default:
         return CCCR_OK;
     }
   }
@@ -774,7 +817,7 @@ protected:
   virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
                                 unsigned &NumAliases) const = 0;
   virtual void getGCCAddlRegNames(const AddlRegName *&Addl,
-				  unsigned &NumAddl) const {
+                                  unsigned &NumAddl) const {
     Addl = 0;
     NumAddl = 0;
   }

@@ -1,4 +1,4 @@
-//===-- SIInstrInfo.h - SI Instruction Info Interface ---------------------===//
+//===-- SIInstrInfo.h - SI Instruction Info Interface -----------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -35,29 +35,67 @@ public:
                            unsigned DestReg, unsigned SrcReg,
                            bool KillSrc) const;
 
-  /// \returns the encoding type of this instruction.
-  unsigned getEncodingType(const MachineInstr &MI) const;
+  unsigned commuteOpcode(unsigned Opcode) const;
 
-  /// \returns the size of this instructions encoding in number of bytes.
-  unsigned getEncodingBytes(const MachineInstr &MI) const;
-
-  virtual MachineInstr * getMovImmInstr(MachineFunction *MF, unsigned DstReg,
-                                        int64_t Imm) const;
+  virtual MachineInstr *commuteInstruction(MachineInstr *MI,
+                                           bool NewMI=false) const;
 
   virtual unsigned getIEQOpcode() const { assert(!"Implement"); return 0;}
+  MachineInstr *buildMovInstr(MachineBasicBlock *MBB,
+                              MachineBasicBlock::iterator I,
+                              unsigned DstReg, unsigned SrcReg) const;
   virtual bool isMov(unsigned Opcode) const;
 
   virtual bool isSafeToMoveRegClassDefs(const TargetRegisterClass *RC) const;
+  int isMIMG(uint16_t Opcode) const;
+  int isSMRD(uint16_t Opcode) const;
+  bool isVOP1(uint16_t Opcode) const;
+  bool isVOP2(uint16_t Opcode) const;
+  bool isVOP3(uint16_t Opcode) const;
+  bool isVOPC(uint16_t Opcode) const;
+  bool isInlineConstant(const MachineOperand &MO) const;
+  bool isLiteralConstant(const MachineOperand &MO) const;
+
+  virtual bool verifyInstruction(const MachineInstr *MI,
+                                 StringRef &ErrInfo) const;
+  virtual int getIndirectIndexBegin(const MachineFunction &MF) const;
+
+  virtual int getIndirectIndexEnd(const MachineFunction &MF) const;
+
+  virtual unsigned calculateIndirectAddress(unsigned RegIndex,
+                                            unsigned Channel) const;
+
+  virtual const TargetRegisterClass *getIndirectAddrRegClass() const;
+
+  virtual MachineInstrBuilder buildIndirectWrite(MachineBasicBlock *MBB,
+                                                 MachineBasicBlock::iterator I,
+                                                 unsigned ValueReg,
+                                                 unsigned Address,
+                                                 unsigned OffsetReg) const;
+
+  virtual MachineInstrBuilder buildIndirectRead(MachineBasicBlock *MBB,
+                                                MachineBasicBlock::iterator I,
+                                                unsigned ValueReg,
+                                                unsigned Address,
+                                                unsigned OffsetReg) const;
   };
+
+namespace AMDGPU {
+
+  int getVOPe64(uint16_t Opcode);
+  int getCommuteRev(uint16_t Opcode);
+  int getCommuteOrig(uint16_t Opcode);
+
+} // End namespace AMDGPU
 
 } // End namespace llvm
 
 namespace SIInstrFlags {
   enum Flags {
     // First 4 bits are the instruction encoding
-    VM_CNT = 1 << 4,
-    EXP_CNT = 1 << 5,
-    LGKM_CNT = 1 << 6
+    VM_CNT = 1 << 0,
+    EXP_CNT = 1 << 1,
+    LGKM_CNT = 1 << 2
   };
 }
 

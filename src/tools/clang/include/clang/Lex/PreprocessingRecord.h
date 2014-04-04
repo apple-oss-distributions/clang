@@ -278,9 +278,9 @@ namespace clang {
 
     /// \brief Optionally returns true or false if the preallocated preprocessed
     /// entity with index \p Index came from file \p FID.
-    virtual llvm::Optional<bool> isPreprocessedEntityInFileID(unsigned Index,
-                                                              FileID FID) {
-      return llvm::Optional<bool>();
+    virtual Optional<bool> isPreprocessedEntityInFileID(unsigned Index,
+                                                        FileID FID) {
+      return None;
     }
   };
   
@@ -576,7 +576,8 @@ namespace clang {
     virtual void Ifndef(SourceLocation Loc, const Token &MacroNameTok,
                         const MacroDirective *MD);
     /// \brief Hook called whenever the 'defined' operator is seen.
-    virtual void Defined(const Token &MacroNameTok, const MacroDirective *MD);
+    virtual void Defined(const Token &MacroNameTok, const MacroDirective *MD,
+                         SourceRange Range);
 
     void addMacroExpansion(const Token &Id, const MacroInfo *MI,
                            SourceRange Range);

@@ -62,7 +62,7 @@ public:
   // Pass Pipeline Configuration
   virtual TargetPassConfig *createPassConfig(PassManagerBase &PM);
 
-  /// \brief Register X86 analysis passes with a pass manager.
+  /// \brief Register ARM64 analysis passes with a pass manager.
   virtual void addAnalysisPasses(PassManagerBase &PM);
 
 };

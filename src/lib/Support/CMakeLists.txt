@@ -7,7 +7,10 @@ add_llvm_library(LLVMSupport
   BranchProbability.cpp
   circular_raw_ostream.cpp
   CommandLine.cpp
+  Compression.cpp
   ConstantRange.cpp
+  ConvertUTF.c
+  ConvertUTFWrapper.cpp
   CrashRecoveryContext.cpp
   DataExtractor.cpp
   DataStream.cpp
@@ -32,6 +35,7 @@ add_llvm_library(LLVMSupport
   ManagedStatic.cpp
   MemoryBuffer.cpp
   MemoryObject.cpp
+  MD5.cpp
   PluginLoader.cpp
   PrettyStackTrace.cpp
   Regex.cpp
@@ -44,11 +48,13 @@ add_llvm_library(LLVMSupport
   StringMap.cpp
   StringPool.cpp
   StringRef.cpp
+  StringRefMemoryObject.cpp
   SystemUtils.cpp
   Timer.cpp
   ToolOutputFile.cpp
   Triple.cpp
   Twine.cpp
+  Unicode.cpp
   YAMLParser.cpp
   YAMLTraits.cpp
   raw_os_ostream.cpp
@@ -69,7 +75,6 @@ add_llvm_library(LLVMSupport
   Memory.cpp
   Mutex.cpp
   Path.cpp
-  PathV2.cpp
   Process.cpp
   Program.cpp
   RWMutex.cpp
@@ -81,11 +86,11 @@ add_llvm_library(LLVMSupport
   Threading.cpp
   TimeValue.cpp
   Valgrind.cpp
+  Watchdog.cpp
   Unix/Host.inc
   Unix/Memory.inc
   Unix/Mutex.inc
   Unix/Path.inc
-  Unix/PathV2.inc
   Unix/Process.inc
   Unix/Program.inc
   Unix/RWMutex.inc
@@ -93,12 +98,12 @@ add_llvm_library(LLVMSupport
   Unix/system_error.inc
   Unix/ThreadLocal.inc
   Unix/TimeValue.inc
+  Unix/Watchdog.inc
   Windows/DynamicLibrary.inc
   Windows/Host.inc
   Windows/Memory.inc
   Windows/Mutex.inc
   Windows/Path.inc
-  Windows/PathV2.inc
   Windows/Process.inc
   Windows/Program.inc
   Windows/RWMutex.inc
@@ -106,4 +111,5 @@ add_llvm_library(LLVMSupport
   Windows/system_error.inc
   Windows/ThreadLocal.inc
   Windows/TimeValue.inc
+  Windows/Watchdog.inc
   )

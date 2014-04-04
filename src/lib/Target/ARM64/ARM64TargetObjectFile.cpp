@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ARM64TargetObjectFile.h"
+#include "ARM64TargetMachine.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCStreamer.h"
@@ -15,6 +16,12 @@
 #include "llvm/Support/Dwarf.h"
 using namespace llvm;
 using namespace dwarf;
+
+void ARM64_ELFTargetObjectFile::Initialize(MCContext &Ctx,
+                                           const TargetMachine &TM) {
+  TargetLoweringObjectFileELF::Initialize(Ctx, TM);
+  InitializeELF(TM.Options.UseInitArray);
+}
 
 const MCExpr *ARM64_MachoTargetObjectFile::
 getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
@@ -26,7 +33,7 @@ getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
   // won't reference using the GOT, so we need this target-specific
   // version.
   if (Encoding & (DW_EH_PE_indirect | DW_EH_PE_pcrel)) {
-    const MCSymbol *Sym = Mang->getSymbol(GV);
+    const MCSymbol *Sym = getSymbol(*Mang, GV);
     const MCExpr *Res =
       MCSymbolRefExpr::Create(Sym, MCSymbolRefExpr::VK_GOT, getContext());
     MCSymbol *PCSym = getContext().CreateTempSymbol();
@@ -42,6 +49,5 @@ getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
 MCSymbol *ARM64_MachoTargetObjectFile::
 getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
                         MachineModuleInfo *MMI) const {
-  return Mang->getSymbol(GV);
+  return getSymbol(*Mang, GV);
 }
-

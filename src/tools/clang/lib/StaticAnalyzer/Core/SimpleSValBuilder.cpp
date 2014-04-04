@@ -97,7 +97,7 @@ SVal SimpleSValBuilder::evalCastFromNonLoc(NonLoc val, QualType castTy) {
     return UnknownVal();
   }
 
-  // If value is a non integer constant, produce unknown.
+  // If value is a non-integer constant, produce unknown.
   if (!val.getAs<nonloc::ConcreteInt>())
     return UnknownVal();
 
@@ -108,7 +108,7 @@ SVal SimpleSValBuilder::evalCastFromNonLoc(NonLoc val, QualType castTy) {
   }
 
   // Only handle casts from integers to integers - if val is an integer constant
-  // being cast to a non integer type, produce unknown.
+  // being cast to a non-integer type, produce unknown.
   if (!isLocType && !castTy->isIntegralOrEnumerationType())
     return UnknownVal();
 
@@ -136,6 +136,32 @@ SVal SimpleSValBuilder::evalCastFromLoc(Loc val, QualType castTy) {
   //  lifted into a union type.
   if (castTy->isUnionType())
     return UnknownVal();
+
+  // Casting a Loc to a bool will almost always be true,
+  // unless this is a weak function or a symbolic region.
+  if (castTy->isBooleanType()) {
+    switch (val.getSubKind()) {
+      case loc::MemRegionKind: {
+        const MemRegion *R = val.castAs<loc::MemRegionVal>().getRegion();
+        if (const FunctionTextRegion *FTR = dyn_cast<FunctionTextRegion>(R))
+          if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(FTR->getDecl()))
+            if (FD->isWeak())
+              // FIXME: Currently we are using an extent symbol here,
+              // because there are no generic region address metadata
+              // symbols to use, only content metadata.
+              return nonloc::SymbolVal(SymMgr.getExtentSymbol(FTR));
+
+        if (const SymbolicRegion *SymR = R->getSymbolicBase())
+          return nonloc::SymbolVal(SymR->getSymbol());
+
+        // FALL-THROUGH
+      }
+
+      case loc::GotoLabelKind:
+        // Labels and non-symbolic memory regions are always true.
+        return makeTruthVal(true, castTy);
+    }
+  }
 
   if (castTy->isIntegralOrEnumerationType()) {
     unsigned BitWidth = Context.getTypeSize(castTy);
@@ -668,7 +694,7 @@ SVal SimpleSValBuilder::evalBinOpLL(ProgramStateRef state,
     if (Optional<loc::ConcreteInt> rInt = rhs.getAs<loc::ConcreteInt>()) {
       // If one of the operands is a symbol and the other is a constant,
       // build an expression for use by the constraint manager.
-      if (SymbolRef lSym = lhs.getAsLocSymbol())
+      if (SymbolRef lSym = lhs.getAsLocSymbol(true))
         return MakeSymIntVal(lSym, op, rInt->getValue(), resultTy);
 
       // Special case comparisons to NULL.
@@ -676,19 +702,14 @@ SVal SimpleSValBuilder::evalBinOpLL(ProgramStateRef state,
       // build constraints. The address of any non-symbolic region is guaranteed
       // to be non-NULL.
       if (rInt->isZeroConstant()) {
-        switch (op) {
-        default:
-          break;
-        case BO_Sub:
+        if (op == BO_Sub)
           return evalCastFromLoc(lhs, resultTy);
-        case BO_EQ:
-        case BO_LT:
-        case BO_LE:
-          return makeTruthVal(false, resultTy);
-        case BO_NE:
-        case BO_GT:
-        case BO_GE:
-          return makeTruthVal(true, resultTy);
+
+        if (BinaryOperator::isComparisonOp(op)) {
+          QualType boolType = getContext().BoolTy;
+          NonLoc l = evalCastFromLoc(lhs, boolType).castAs<NonLoc>();
+          NonLoc r = makeTruthVal(false, boolType).castAs<NonLoc>();
+          return evalBinOpNN(state, op, l, r, resultTy);
         }
       }
 
@@ -837,31 +858,12 @@ SVal SimpleSValBuilder::evalBinOpLL(ProgramStateRef state,
 SVal SimpleSValBuilder::evalBinOpLN(ProgramStateRef state,
                                   BinaryOperator::Opcode op,
                                   Loc lhs, NonLoc rhs, QualType resultTy) {
-  
+  assert(!BinaryOperator::isComparisonOp(op) &&
+         "arguments to comparison ops must be of the same type");
+
   // Special case: rhs is a zero constant.
   if (rhs.isZeroConstant())
     return lhs;
-  
-  // Special case: 'rhs' is an integer that has the same width as a pointer and
-  // we are using the integer location in a comparison.  Normally this cannot be
-  // triggered, but transfer functions like those for OSCompareAndSwapBarrier32
-  // can generate comparisons that trigger this code.
-  // FIXME: Are all locations guaranteed to have pointer width?
-  if (BinaryOperator::isComparisonOp(op)) {
-    if (Optional<nonloc::ConcreteInt> rhsInt =
-            rhs.getAs<nonloc::ConcreteInt>()) {
-      const llvm::APSInt *x = &rhsInt->getValue();
-      ASTContext &ctx = Context;
-      if (ctx.getTypeSize(ctx.VoidPtrTy) == x->getBitWidth()) {
-        // Convert the signedness of the integer (if necessary).
-        if (x->isSigned())
-          x = &getBasicValueFactory().getValue(*x, true);
-
-        return evalBinOpLL(state, op, lhs, loc::ConcreteInt(*x), resultTy);
-      }
-    }
-    return UnknownVal();
-  }
   
   // We are dealing with pointer arithmetic.
 

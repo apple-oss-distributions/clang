@@ -36,7 +36,6 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/Mangler.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetOptions.h"
 using namespace llvm;
 using namespace dwarf;
 
@@ -53,10 +52,10 @@ TargetLoweringObjectFileELF::getCFIPersonalitySymbol(const GlobalValue *GV,
   default:
     report_fatal_error("We do not support this DWARF encoding yet!");
   case dwarf::DW_EH_PE_absptr:
-    return  Mang->getSymbol(GV);
+    return  getSymbol(*Mang, GV);
   case dwarf::DW_EH_PE_pcrel: {
     return getContext().GetOrCreateSymbol(StringRef("DW.ref.") +
-                                          Mang->getSymbol(GV)->getName());
+                                          getSymbol(*Mang, GV)->getName());
   }
   }
 }
@@ -105,7 +104,7 @@ getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
     MCSymbol *SSym = getContext().GetOrCreateSymbol(Name.str());
     MachineModuleInfoImpl::StubValueTy &StubSym = ELFMMI.getGVStubEntry(SSym);
     if (StubSym.getPointer() == 0) {
-      MCSymbol *Sym = Mang->getSymbol(GV);
+      MCSymbol *Sym = getSymbol(*Mang, GV);
       StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());
     }
 
@@ -253,7 +252,7 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
     Prefix = getSectionPrefixForGlobal(Kind);
 
     SmallString<128> Name(Prefix, Prefix+strlen(Prefix));
-    MCSymbol *Sym = Mang->getSymbol(GV);
+    MCSymbol *Sym = getSymbol(*Mang, GV);
     Name.append(Sym->getName().begin(), Sym->getName().end());
     StringRef Group = "";
     unsigned Flags = getELFSectionFlags(Kind);
@@ -615,7 +614,7 @@ shouldEmitUsedDirectiveFor(const GlobalValue *GV, Mangler *Mang) const {
     // FIXME: ObjC metadata is currently emitted as internal symbols that have
     // \1L and \0l prefixes on them.  Fix them to be Private/LinkerPrivate and
     // this horrible hack can go away.
-    MCSymbol *Sym = Mang->getSymbol(GV);
+    MCSymbol *Sym = getSymbol(*Mang, GV);
     if (Sym->getName()[0] == 'L' || Sym->getName()[0] == 'l')
       return false;
   }
@@ -644,7 +643,7 @@ getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
       GV->hasHiddenVisibility() ? MachOMMI.getHiddenGVStubEntry(SSym) :
                                   MachOMMI.getGVStubEntry(SSym);
     if (StubSym.getPointer() == 0) {
-      MCSymbol *Sym = Mang->getSymbol(GV);
+      MCSymbol *Sym = getSymbol(*Mang, GV);
       StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());
     }
 
@@ -673,7 +672,7 @@ getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
   MCSymbol *SSym = getContext().GetOrCreateSymbol(Name.str());
   MachineModuleInfoImpl::StubValueTy &StubSym = MachOMMI.getGVStubEntry(SSym);
   if (StubSym.getPointer() == 0) {
-    MCSymbol *Sym = Mang->getSymbol(GV);
+    MCSymbol *Sym = getSymbol(*Mang, GV);
     StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());
   }
 
@@ -728,14 +727,13 @@ getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
   if (GV->isWeakForLinker()) {
     Selection = COFF::IMAGE_COMDAT_SELECT_ANY;
     Characteristics |= COFF::IMAGE_SCN_LNK_COMDAT;
-    MCSymbol *Sym = Mang->getSymbol(GV);
     Name.append("$");
-    Name.append(Sym->getName().begin() + 1, Sym->getName().end());
+    Mang->getNameWithPrefix(Name, GV, false, false);
   }
   return getContext().getCOFFSection(Name,
                                      Characteristics,
-                                     Selection,
-                                     Kind);
+                                     Kind,
+                                     Selection);
 }
 
 static const char *getCOFFSectionPrefixForUniqueGlobal(SectionKind Kind) {
@@ -743,8 +741,11 @@ static const char *getCOFFSectionPrefixForUniqueGlobal(SectionKind Kind) {
     return ".text$";
   if (Kind.isBSS ())
     return ".bss$";
-  if (Kind.isThreadLocal())
-    return ".tls$";
+  if (Kind.isThreadLocal()) {
+    // 'LLVM' is just an arbitary string to ensure that the section name gets
+    // sorted in between '.tls$AAA' and '.tls$ZZZ' by the linker.
+    return ".tls$LLVM";
+  }
   if (Kind.isWriteable())
     return ".data$";
   return ".rdata$";
@@ -760,23 +761,74 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
   if (GV->isWeakForLinker()) {
     const char *Prefix = getCOFFSectionPrefixForUniqueGlobal(Kind);
     SmallString<128> Name(Prefix, Prefix+strlen(Prefix));
-    MCSymbol *Sym = Mang->getSymbol(GV);
-    Name.append(Sym->getName().begin() + 1, Sym->getName().end());
+    Mang->getNameWithPrefix(Name, GV, false, false);
 
     unsigned Characteristics = getCOFFSectionFlags(Kind);
 
     Characteristics |= COFF::IMAGE_SCN_LNK_COMDAT;
 
     return getContext().getCOFFSection(Name.str(), Characteristics,
-                          COFF::IMAGE_COMDAT_SELECT_ANY, Kind);
+                                       Kind, COFF::IMAGE_COMDAT_SELECT_ANY);
   }
 
   if (Kind.isText())
-    return getTextSection();
+    return TextSection;
 
   if (Kind.isThreadLocal())
-    return getTLSDataSection();
+    return TLSDataSection;
 
-  return getDataSection();
+  if (Kind.isReadOnly())
+    return ReadOnlySection;
+
+  if (Kind.isBSS())
+    return BSSSection;
+
+  return DataSection;
 }
 
+void TargetLoweringObjectFileCOFF::
+emitModuleFlags(MCStreamer &Streamer,
+                ArrayRef<Module::ModuleFlagEntry> ModuleFlags,
+                Mangler *Mang, const TargetMachine &TM) const {
+  MDNode *LinkerOptions = 0;
+
+  // Look for the "Linker Options" flag, since it's the only one we support.
+  for (ArrayRef<Module::ModuleFlagEntry>::iterator
+       i = ModuleFlags.begin(), e = ModuleFlags.end(); i != e; ++i) {
+    const Module::ModuleFlagEntry &MFE = *i;
+    StringRef Key = MFE.Key->getString();
+    Value *Val = MFE.Val;
+    if (Key == "Linker Options") {
+      LinkerOptions = cast<MDNode>(Val);
+      break;
+    }
+  }
+  if (!LinkerOptions)
+    return;
+
+  // Emit the linker options to the linker .drectve section.  According to the
+  // spec, this section is a space-separated string containing flags for linker.
+  const MCSection *Sec = getDrectveSection();
+  Streamer.SwitchSection(Sec);
+  for (unsigned i = 0, e = LinkerOptions->getNumOperands(); i != e; ++i) {
+    MDNode *MDOptions = cast<MDNode>(LinkerOptions->getOperand(i));
+    for (unsigned ii = 0, ie = MDOptions->getNumOperands(); ii != ie; ++ii) {
+      MDString *MDOption = cast<MDString>(MDOptions->getOperand(ii));
+      StringRef Op = MDOption->getString();
+      // Lead with a space for consistency with our dllexport implementation.
+      std::string Escaped(" ");
+      if (Op.find(" ") != StringRef::npos) {
+        // The PE-COFF spec says args with spaces must be quoted.  It doesn't say
+        // how to escape quotes, but it probably uses this algorithm:
+        // http://msdn.microsoft.com/en-us/library/17w5ykft(v=vs.85).aspx
+        // FIXME: Reuse escaping code from Support/Windows/Program.inc
+        Escaped.push_back('\"');
+        Escaped.append(Op);
+        Escaped.push_back('\"');
+      } else {
+        Escaped.append(Op);
+      }
+      Streamer.EmitBytes(Escaped);
+    }
+  }
+}

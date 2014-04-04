@@ -126,7 +126,7 @@ public:
   }
 };
 
-  
+
 /// BitstreamEntry - When advancing through a bitstream cursor, each advance can
 /// discover a few different kinds of entries:
 ///   Error    - Malformed bitcode was found.
@@ -142,7 +142,7 @@ struct BitstreamEntry {
     SubBlock,
     Record
   } Kind;
-  
+
   unsigned ID;
 
   static BitstreamEntry getError() {
@@ -170,12 +170,17 @@ class BitstreamCursor {
   BitstreamReader *BitStream;
   size_t NextChar;
 
-  /// CurWord - This is the current data we have pulled from the stream but have
-  /// not returned to the client.
-  uint32_t CurWord;
+
+  /// CurWord/word_t - This is the current data we have pulled from the stream
+  /// but have not returned to the client.  This is specifically and
+  /// intentionally defined to follow the word size of the host machine for
+  /// efficiency.  We use word_t in places that are aware of this to make it
+  /// perfectly explicit what is going on.
+  typedef uint32_t word_t;
+  word_t CurWord;
 
   /// BitsInCurWord - This is the number of bits in CurWord that are valid. This
-  /// is always from [0...31] inclusive.
+  /// is always from [0...31/63] inclusive (depending on word size).
   unsigned BitsInCurWord;
 
   // CurCodeSize - This is the declared size of code values used for the current
@@ -194,7 +199,7 @@ class BitstreamCursor {
   /// BlockScope - This tracks the codesize of parent blocks.
   SmallVector<Block, 8> BlockScope;
 
-  
+
 public:
   BitstreamCursor() : BitStream(0), NextChar(0) {
   }
@@ -226,7 +231,7 @@ public:
   void operator=(const BitstreamCursor &RHS);
 
   void freeState();
-  
+
   bool isEndPos(size_t pos) {
     return BitStream->getBitcodeBytes().isObjectEnd(static_cast<uint64_t>(pos));
   }
@@ -239,7 +244,7 @@ public:
 
   uint32_t getWord(size_t pos) {
     uint8_t buf[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
-    BitStream->getBitcodeBytes().readBytes(pos, sizeof(buf), buf, NULL);
+    BitStream->getBitcodeBytes().readBytes(pos, sizeof(buf), buf);
     return *reinterpret_cast<support::ulittle32_t *>(buf);
   }
 
@@ -273,7 +278,7 @@ public:
     /// returned just like normal records.
     AF_DontAutoprocessAbbrevs = 2
   };
-  
+
   /// advance - Advance the current bitstream, returning the next entry in the
   /// stream.
   BitstreamEntry advance(unsigned Flags = 0) {
@@ -285,10 +290,10 @@ public:
           return BitstreamEntry::getError();
         return BitstreamEntry::getEndBlock();
       }
-      
+
       if (Code == bitc::ENTER_SUBBLOCK)
         return BitstreamEntry::getSubBlock(ReadSubBlockID());
-      
+
       if (Code == bitc::DEFINE_ABBREV &&
           !(Flags & AF_DontAutoprocessAbbrevs)) {
         // We read and accumulate abbrev's, the client can't do anything with
@@ -309,7 +314,7 @@ public:
       BitstreamEntry Entry = advance(Flags);
       if (Entry.Kind != BitstreamEntry::SubBlock)
         return Entry;
-      
+
       // If we found a sub-block, just skip over it and check the next entry.
       if (SkipBlock())
         return BitstreamEntry::getError();
@@ -318,8 +323,8 @@ public:
 
   /// JumpToBit - Reset the stream to the specified bit number.
   void JumpToBit(uint64_t BitNo) {
-    uintptr_t ByteNo = uintptr_t(BitNo/8) & ~3;
-    uintptr_t WordBitNo = uintptr_t(BitNo) & 31;
+    uintptr_t ByteNo = uintptr_t(BitNo/8) & ~(sizeof(word_t)-1);
+    unsigned WordBitNo = unsigned(BitNo & (sizeof(word_t)*8-1));
     assert(canSkipToPos(ByteNo) && "Invalid location");
 
     // Move the cursor to the right word.
@@ -328,16 +333,22 @@ public:
     CurWord = 0;
 
     // Skip over any bits that are already consumed.
-    if (WordBitNo)
-      Read(static_cast<unsigned>(WordBitNo));
+    if (WordBitNo) {
+      if (sizeof(word_t) > 4)
+        Read64(WordBitNo);
+      else
+        Read(WordBitNo);
+    }
   }
 
 
   uint32_t Read(unsigned NumBits) {
-    assert(NumBits <= 32 && "Cannot return more than 32 bits!");
+    assert(NumBits && NumBits <= 32 &&
+           "Cannot return zero or more than 32 bits!");
+
     // If the field is fully contained by CurWord, return it quickly.
     if (BitsInCurWord >= NumBits) {
-      uint32_t R = CurWord & ((1U << NumBits)-1);
+      uint32_t R = uint32_t(CurWord) & (~0U >> (32-NumBits));
       CurWord >>= NumBits;
       BitsInCurWord -= NumBits;
       return R;
@@ -350,24 +361,36 @@ public:
       return 0;
     }
 
-    unsigned R = CurWord;
+    uint32_t R = uint32_t(CurWord);
 
     // Read the next word from the stream.
-    CurWord = getWord(NextChar);
-    NextChar += 4;
+    uint8_t Array[sizeof(word_t)] = {0};
+
+    BitStream->getBitcodeBytes().readBytes(NextChar, sizeof(Array), Array);
+
+    // Handle big-endian byte-swapping if necessary.
+    support::detail::packed_endian_specific_integral
+      <word_t, support::little, support::unaligned> EndianValue;
+    memcpy(&EndianValue, Array, sizeof(Array));
+
+    CurWord = EndianValue;
+
+    NextChar += sizeof(word_t);
 
     // Extract NumBits-BitsInCurWord from what we just read.
     unsigned BitsLeft = NumBits-BitsInCurWord;
 
-    // Be careful here, BitsLeft is in the range [1..32] inclusive.
-    R |= (CurWord & (~0U >> (32-BitsLeft))) << BitsInCurWord;
+    // Be careful here, BitsLeft is in the range [1..32]/[1..64] inclusive.
+    R |= uint32_t((CurWord & (word_t(~0ULL) >> (sizeof(word_t)*8-BitsLeft)))
+                    << BitsInCurWord);
 
-    // BitsLeft bits have just been used up from CurWord.
-    if (BitsLeft != 32)
+    // BitsLeft bits have just been used up from CurWord.  BitsLeft is in the
+    // range [1..32]/[1..64] so be careful how we shift.
+    if (BitsLeft != sizeof(word_t)*8)
       CurWord >>= BitsLeft;
     else
       CurWord = 0;
-    BitsInCurWord = 32-BitsLeft;
+    BitsInCurWord = sizeof(word_t)*8-BitsLeft;
     return R;
   }
 
@@ -416,10 +439,21 @@ public:
     }
   }
 
+private:
   void SkipToFourByteBoundary() {
+    // If word_t is 64-bits and if we've read less than 32 bits, just dump
+    // the bits we have up to the next 32-bit boundary.
+    if (sizeof(word_t) > 4 &&
+        BitsInCurWord >= 32) {
+      CurWord >>= BitsInCurWord-32;
+      BitsInCurWord = 32;
+      return;
+    }
+
     BitsInCurWord = 0;
     CurWord = 0;
   }
+public:
 
   unsigned ReadCode() {
     return Read(CurCodeSize);
@@ -443,22 +477,22 @@ public:
     // don't care what code widths are used inside of it.
     ReadVBR(bitc::CodeLenWidth);
     SkipToFourByteBoundary();
-    unsigned NumWords = Read(bitc::BlockSizeWidth);
+    unsigned NumFourBytes = Read(bitc::BlockSizeWidth);
 
     // Check that the block wasn't partially defined, and that the offset isn't
     // bogus.
-    size_t SkipTo = NextChar + NumWords*4;
-    if (AtEndOfStream() || !canSkipToPos(SkipTo))
+    size_t SkipTo = GetCurrentBitNo() + NumFourBytes*4*8;
+    if (AtEndOfStream() || !canSkipToPos(SkipTo/8))
       return true;
 
-    NextChar = SkipTo;
+    JumpToBit(SkipTo);
     return false;
   }
 
   /// EnterSubBlock - Having read the ENTER_SUBBLOCK abbrevid, enter
   /// the block, and return true if the block has an error.
   bool EnterSubBlock(unsigned BlockID, unsigned *NumWordsP = 0);
-  
+
   bool ReadBlockEnd() {
     if (BlockScope.empty()) return true;
 
@@ -494,7 +528,7 @@ private:
   void readAbbreviatedField(const BitCodeAbbrevOp &Op,
                             SmallVectorImpl<uint64_t> &Vals);
   void skipAbbreviatedField(const BitCodeAbbrevOp &Op);
-  
+
 public:
 
   /// getAbbrev - Return the abbreviation for the specified AbbrevId.
@@ -506,7 +540,7 @@ public:
 
   /// skipRecord - Read the current record and discard it.
   void skipRecord(unsigned AbbrevID);
-  
+
   unsigned readRecord(unsigned AbbrevID, SmallVectorImpl<uint64_t> &Vals,
                       StringRef *Blob = 0);
 
@@ -514,7 +548,7 @@ public:
   // Abbrev Processing
   //===--------------------------------------------------------------------===//
   void ReadAbbrevRecord();
-  
+
   bool ReadBlockInfoBlock();
 };
 

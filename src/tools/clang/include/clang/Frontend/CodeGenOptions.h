@@ -50,12 +50,20 @@ public:
   };
 
   enum DebugInfoKind {
-    NoDebugInfo,          // Don't generate debug info.
-    DebugLineTablesOnly,  // Emit only debug info necessary for generating
-                          // line number tables (-gline-tables-only).
-    LimitedDebugInfo,     // Limit generated debug info to reduce size
-                          // (-flimit-debug-info).
-    FullDebugInfo         // Generate complete debug info.
+    NoDebugInfo,          /// Don't generate debug info.
+
+    DebugLineTablesOnly,  /// Emit only debug info necessary for generating
+                          /// line number tables (-gline-tables-only).
+
+    LimitedDebugInfo,     /// Limit generated debug info to reduce size
+                          /// (-fno-standalone-debug). This emits
+                          /// forward decls for types that could be
+                          /// replaced with forward decls in the source
+                          /// code. For dynamic C++ classes type info
+                          /// is only emitted int the module that
+                          /// contains the classe's vtable.
+
+    FullDebugInfo         /// Generate complete debug info.
   };
 
   enum TLSModel {
@@ -71,12 +79,21 @@ public:
     FPC_Fast        // Aggressively fuse FP ops (E.g. FMA).
   };
 
+  enum StructReturnConventionKind {
+    SRCK_Default,  // No special option was passed.
+    SRCK_OnStack,  // Small structs on the stack (-fpcc-struct-return).
+    SRCK_InRegs    // Small structs in registers (-freg-struct-return).
+  };
+
   /// The code model to use (-mcmodel).
   std::string CodeModel;
 
   /// The filename with path we use for coverage files. The extension will be
   /// replaced.
   std::string CoverageFile;
+
+  /// The version string to put into coverage files.
+  char CoverageVersion[4];
 
   /// Enable additional debugging information.
   std::string DebugPass;
@@ -102,6 +119,10 @@ public:
   /// file, for example with -save-temps.
   std::string MainFileName;
 
+  /// The name for the split debug info file that we'll break out. This is used
+  /// in the backend for setting the name in the skeleton cu.
+  std::string SplitDwarfFile;
+
   /// The name of the relocation model to use.
   std::string RelocationModel;
 
@@ -114,6 +135,12 @@ public:
 
   /// A list of command-line options to forward to the LLVM backend.
   std::vector<std::string> BackendOptions;
+
+  /// A list of dependent libraries.
+  std::vector<std::string> DependentLibraries;
+
+  /// Name of the profile file to use as input for -fprofile-instr-use
+  std::string InstrProfileInput;
 
 public:
   // Define accessors/mutators for code generation options of enumeration type.
@@ -130,6 +157,7 @@ public:
 #include "clang/Frontend/CodeGenOptions.def"
 
     RelocationModel = "pic";
+    memcpy(CoverageVersion, "402*", 4);
   }
 };
 

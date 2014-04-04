@@ -14,18 +14,21 @@
 
 #define DEBUG_TYPE "asm-printer"
 #include "ARM64.h"
+#include "ARM64MachineFunctionInfo.h"
 #include "ARM64MCInstLower.h"
 #include "ARM64RegisterInfo.h"
 #include "InstPrinter/ARM64InstPrinter.h"
-#include "llvm/DebugInfo.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/DebugInfo.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCLinkerOptimizationHint.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -37,7 +40,8 @@ class ARM64AsmPrinter : public AsmPrinter {
   ARM64MCInstLower MCInstLowering;
 public:
   ARM64AsmPrinter(TargetMachine &TM, MCStreamer &Streamer)
-    : AsmPrinter(TM, Streamer), MCInstLowering(OutContext, *Mang, *this) {}
+    : AsmPrinter(TM, Streamer), MCInstLowering(OutContext, *Mang, *this),
+      ARM64FI(NULL), LOHLabelCounter(0) {}
 
   virtual const char *getPassName() const {
     return "ARM64 Assembly Printer";
@@ -62,11 +66,17 @@ public:
     AU.setPreservesAll();
   }
 
+  bool runOnMachineFunction(MachineFunction &F) {
+    ARM64FI = F.getInfo<ARM64FunctionInfo>();
+    return AsmPrinter::runOnMachineFunction(F);
+  }
+
 private:
   MachineLocation getDebugValueLocation(const MachineInstr *MI) const;
   void printOperand(const MachineInstr *MI, unsigned OpNum, raw_ostream &O);
   bool printAsmMRegister(const MachineOperand &MO, char Mode, raw_ostream &O);
-  bool printAsmRegInClass(const MachineOperand &MO, const TargetRegisterClass *RC,
+  bool printAsmRegInClass(const MachineOperand &MO,
+                          const TargetRegisterClass *RC,
                           bool isVector, raw_ostream &O);
 
   bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNum,
@@ -77,8 +87,19 @@ private:
                              const char *ExtraCode, raw_ostream &O);
 
   void PrintDebugValueComment(const MachineInstr *MI, raw_ostream &OS);
+
+  void EmitFunctionBodyEnd();
+
   MCSymbol *GetCPISymbol(unsigned CPID) const;
   void EmitEndOfAsmFile(Module &M);
+  ARM64FunctionInfo *ARM64FI;
+
+  /// \brief Emit the LOHs contained in ARM64FI.
+  void EmitLOHs();
+
+  typedef std::map<const MachineInstr *, MCSymbol *> MInstToMCSymbol;
+  MInstToMCSymbol LOHInstToLabel;
+  unsigned LOHLabelCounter;
 };
 
 } // end of anonymous namespace
@@ -107,12 +128,44 @@ getDebugValueLocation(const MachineInstr *MI) const {
   return Location;
 }
 
+void ARM64AsmPrinter::EmitLOHs() {
+  const ARM64FunctionInfo::MILOHDirectives &LOHs =
+    const_cast<const ARM64FunctionInfo *>(ARM64FI)->getLOHContainer().
+      getDirectives();
+  SmallVector<MCSymbol *, 3> MCArgs;
 
+  for (ARM64FunctionInfo::MILOHDirectives::const_iterator It = LOHs.begin(),
+         EndIt = LOHs.end(); It != EndIt; ++It) {
+    const ARM64FunctionInfo::MILOHArgs &MIArgs = It->getArgs();
+    for (ARM64FunctionInfo::MILOHArgs::const_iterator MIArgsIt = MIArgs.begin(),
+           EndMIArgsIt = MIArgs.end(); MIArgsIt != EndMIArgsIt; ++MIArgsIt) {
+      MInstToMCSymbol::iterator LabelIt = LOHInstToLabel.find(*MIArgsIt);
+      assert(LabelIt != LOHInstToLabel.end() &&
+             "Label hasn't been inserted for LOH related instruction");
+      MCArgs.push_back(LabelIt->second);
+    }
+    OutStreamer.EmitLOHDirective(It->getKind(), MCArgs);
+    MCArgs.clear();
+  }
+}
+
+void ARM64AsmPrinter::EmitFunctionBodyEnd() {
+  if (!ARM64FI->getLOHRelated().empty())
+    EmitLOHs();
+}
 
 /// GetCPISymbol - Return the symbol for the specified constant pool entry.
 MCSymbol *ARM64AsmPrinter::GetCPISymbol(unsigned CPID) const {
+  // Darwin uses a linker-private symbol name for constant-pools (to
+  // avoid addends on the relocation?), ELF has no such concept and
+  // uses a normal private symbol.
+  if (MAI->getLinkerPrivateGlobalPrefix()[0])
+    return OutContext.GetOrCreateSymbol
+      (Twine(MAI->getLinkerPrivateGlobalPrefix()) + "CPI" +
+       Twine(getFunctionNumber()) + "_" + Twine(CPID));
+
   return OutContext.GetOrCreateSymbol
-    (Twine(MAI->getLinkerPrivateGlobalPrefix()) + "CPI" +
+    (Twine(MAI->getPrivateGlobalPrefix()) + "CPI" +
      Twine(getFunctionNumber()) + "_" + Twine(CPID));
 }
 
@@ -216,7 +269,8 @@ bool ARM64AsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNum,
     }
   }
 
-  // According to ARM we should emit x and v registers unless we have a modifier.
+  // According to ARM, we should emit x and v registers unless we have a
+  // modifier.
   if (MO.isReg()) {
     unsigned Reg = MO.getReg();
 
@@ -308,6 +362,14 @@ void ARM64AsmPrinter::EmitInstruction(const MachineInstr *MI) {
   if (emitPseudoExpansionLowering(OutStreamer, MI))
     return;
 
+  if (ARM64FI->getLOHRelated().count(MI)) {
+    // Generate a label for LOH related instruction
+    MCSymbol *LOHLabel = GetTempSymbol("loh", LOHLabelCounter++);
+    // Associate the instruction with the label
+    LOHInstToLabel[MI] = LOHLabel;
+    OutStreamer.EmitLabel(LOHLabel);
+  }
+
   // Do any manual lowerings.
   switch (MI->getOpcode()) {
   default: break;
@@ -389,6 +451,27 @@ void ARM64AsmPrinter::EmitInstruction(const MachineInstr *MI) {
     TmpInst.setOpcode(ARM64::B);
     TmpInst.addOperand(Dest);
     OutStreamer.EmitInstruction(TmpInst);
+    return;
+  }
+  case ARM64::TLSDESC_BLR: {
+    MCOperand Callee, Sym;
+    MCInstLowering.lowerOperand(MI->getOperand(0), Callee);
+    MCInstLowering.lowerOperand(MI->getOperand(1), Sym);
+
+    // First emit a relocation-annotation. This expands to no code, but requests
+    // the following instruction gets an R_AARCH64_TLSDESC_CALL.
+    MCInst TLSDescCall;
+    TLSDescCall.setOpcode(ARM64::TLSDESCCALL);
+    TLSDescCall.addOperand(Sym);
+    OutStreamer.EmitInstruction(TLSDescCall);
+
+    // Other than that it's just a normal indirect call to the function loaded
+    // from the descriptor.
+    MCInst BLR;
+    BLR.setOpcode(ARM64::BLR);
+    BLR.addOperand(Callee);
+    OutStreamer.EmitInstruction(BLR);
+
     return;
   }
   }

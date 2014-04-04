@@ -35,8 +35,11 @@ MCCodeEmitter *createARM64MCCodeEmitter(const MCInstrInfo &MCII,
                                         const MCRegisterInfo &MRI,
                                         const MCSubtargetInfo &STI,
                                         MCContext &Ctx);
-MCAsmBackend *createARM64AsmBackend(const Target &T, StringRef TT,
-                                    StringRef CPU);
+MCAsmBackend *createARM64AsmBackend(const Target &T, const MCRegisterInfo &MRI,
+                                    StringRef TT, StringRef CPU);
+
+MCObjectWriter *createARM64ELFObjectWriter(raw_ostream &OS,
+                                           uint8_t OSABI);
 
 MCObjectWriter *createARM64MachObjectWriter(raw_ostream &OS,
                                             uint32_t CPUType,

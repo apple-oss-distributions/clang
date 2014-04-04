@@ -426,14 +426,6 @@ namespace llvm {
     /// resolution.
     void ForgetSymbolicName(Instruction *I, const SCEV *SymName);
 
-    /// getBECount - Subtract the end and start values and divide by the step,
-    /// rounding up, to get the number of times the backedge is executed. Return
-    /// CouldNotCompute if an intermediate computation overflows.
-    const SCEV *getBECount(const SCEV *Start,
-                           const SCEV *End,
-                           const SCEV *Step,
-                           bool NoWrap);
-
     /// getBackedgeTakenInfo - Return the BackedgeTakenInfo for the given
     /// loop, lazily computing new values if the loop hasn't been analyzed
     /// yet.
@@ -498,6 +490,8 @@ namespace llvm {
     /// less-than is signed.
     ExitLimit HowManyLessThans(const SCEV *LHS, const SCEV *RHS,
                                const Loop *L, bool isSigned, bool IsSubExpr);
+    ExitLimit HowManyGreaterThans(const SCEV *LHS, const SCEV *RHS,
+                                  const Loop *L, bool isSigned, bool IsSubExpr);
 
     /// getPredecessorWithUniqueSuccessorForBB - Return a predecessor of BB
     /// (which may not be an immediate predecessor) which has exactly one
@@ -545,7 +539,7 @@ namespace llvm {
     /// forgetMemoizedResults - Drop memoized information computed for S.
     void forgetMemoizedResults(const SCEV *S);
 
-    /// return false iff given SCEV contains a SCEVUnknown with NULL value-
+    /// Return false iff given SCEV contains a SCEVUnknown with NULL value-
     /// pointer.
     bool checkValidity(const SCEV *S) const;
 
@@ -636,21 +630,15 @@ namespace llvm {
     const SCEV *getUnknown(Value *V);
     const SCEV *getCouldNotCompute();
 
-    /// getSizeOfExpr - Return an expression for sizeof on the given type.
+    /// getSizeOfExpr - Return an expression for sizeof AllocTy that is type
+    /// IntTy
     ///
-    const SCEV *getSizeOfExpr(Type *AllocTy);
+    const SCEV *getSizeOfExpr(Type *IntTy, Type *AllocTy);
 
-    /// getAlignOfExpr - Return an expression for alignof on the given type.
+    /// getOffsetOfExpr - Return an expression for offsetof on the given field
+    /// with type IntTy
     ///
-    const SCEV *getAlignOfExpr(Type *AllocTy);
-
-    /// getOffsetOfExpr - Return an expression for offsetof on the given field.
-    ///
-    const SCEV *getOffsetOfExpr(StructType *STy, unsigned FieldNo);
-
-    /// getOffsetOfExpr - Return an expression for offsetof on the given field.
-    ///
-    const SCEV *getOffsetOfExpr(Type *CTy, Constant *FieldNo);
+    const SCEV *getOffsetOfExpr(Type *IntTy, StructType *STy, unsigned FieldNo);
 
     /// getNegativeSCEV - Return the SCEV object corresponding to -V.
     ///
@@ -841,7 +829,7 @@ namespace llvm {
 
     /// SimplifyICmpOperands - Simplify LHS and RHS in a comparison with
     /// predicate Pred. Return true iff any changes were made. If the
-    /// operands are provably equal or inequal, LHS and RHS are set to
+    /// operands are provably equal or unequal, LHS and RHS are set to
     /// the same value and Pred is set to either ICMP_EQ or ICMP_NE.
     ///
     bool SimplifyICmpOperands(ICmpInst::Predicate &Pred,
@@ -884,6 +872,24 @@ namespace llvm {
     virtual void getAnalysisUsage(AnalysisUsage &AU) const;
     virtual void print(raw_ostream &OS, const Module* = 0) const;
     virtual void verifyAnalysis() const;
+
+  private:
+    /// Compute the backedge taken count knowing the interval difference, the
+    /// stride and presence of the equality in the comparison.
+    const SCEV *computeBECount(const SCEV *Delta, const SCEV *Stride,
+                               bool Equality);
+
+    /// Verify if an linear IV with positive stride can overflow when in a 
+    /// less-than comparison, knowing the invariant term of the comparison,
+    /// the stride and the knowledge of NSW/NUW flags on the recurrence.
+    bool doesIVOverflowOnLT(const SCEV *RHS, const SCEV *Stride,
+                            bool IsSigned, bool NoWrap);
+
+    /// Verify if an linear IV with negative stride can overflow when in a 
+    /// greater-than comparison, knowing the invariant term of the comparison,
+    /// the stride and the knowledge of NSW/NUW flags on the recurrence.
+    bool doesIVOverflowOnGT(const SCEV *RHS, const SCEV *Stride,
+                            bool IsSigned, bool NoWrap);
 
   private:
     FoldingSet<SCEV> UniqueSCEVs;

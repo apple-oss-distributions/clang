@@ -20,8 +20,8 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ParentMap.h"
-#include "clang/AST/StmtCXX.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/AST/StmtCXX.h"
 #include "clang/Analysis/CFG.h"
 #include "clang/Analysis/ProgramPoint.h"
 #include "clang/Basic/SourceManager.h"
@@ -164,13 +164,6 @@ static bool removeUnneededCalls(PathPieces &pieces, BugReport *R,
     IntrusiveRefCntPtr<PathDiagnosticPiece> piece(pieces.front());
     pieces.pop_front();
     
-    // Throw away pieces with invalid locations. Note that we can't throw away
-    // calls just yet because they might have something interesting inside them.
-    // If so, their locations will be adjusted as necessary later.
-    if (piece->getKind() != PathDiagnosticPiece::Call &&
-        piece->getLocation().asLocation().isInvalid())
-      continue;
-
     switch (piece->getKind()) {
       case PathDiagnosticPiece::Call: {
         PathDiagnosticCallPiece *call = cast<PathDiagnosticCallPiece>(piece);
@@ -220,8 +213,7 @@ static bool hasImplicitBody(const Decl *D) {
 }
 
 /// Recursively scan through a path and make sure that all call pieces have
-/// valid locations. Note that all other pieces with invalid locations should
-/// have already been pruned out.
+/// valid locations. 
 static void adjustCallLocations(PathPieces &Pieces,
                                 PathDiagnosticLocation *LastCallLocation = 0) {
   for (PathPieces::iterator I = Pieces.begin(), E = Pieces.end(); I != E; ++I) {
@@ -251,6 +243,61 @@ static void adjustCallLocations(PathPieces &Pieces,
 
     assert(ThisCallLocation && "Outermost call has an invalid location");
     adjustCallLocations(Call->path, ThisCallLocation);
+  }
+}
+
+/// Remove edges in and out of C++ default initializer expressions. These are
+/// for fields that have in-class initializers, as opposed to being initialized
+/// explicitly in a constructor or braced list.
+static void removeEdgesToDefaultInitializers(PathPieces &Pieces) {
+  for (PathPieces::iterator I = Pieces.begin(), E = Pieces.end(); I != E;) {
+    if (PathDiagnosticCallPiece *C = dyn_cast<PathDiagnosticCallPiece>(*I))
+      removeEdgesToDefaultInitializers(C->path);
+
+    if (PathDiagnosticMacroPiece *M = dyn_cast<PathDiagnosticMacroPiece>(*I))
+      removeEdgesToDefaultInitializers(M->subPieces);
+
+    if (PathDiagnosticControlFlowPiece *CF =
+          dyn_cast<PathDiagnosticControlFlowPiece>(*I)) {
+      const Stmt *Start = CF->getStartLocation().asStmt();
+      const Stmt *End = CF->getEndLocation().asStmt();
+      if (Start && isa<CXXDefaultInitExpr>(Start)) {
+        I = Pieces.erase(I);
+        continue;
+      } else if (End && isa<CXXDefaultInitExpr>(End)) {
+        PathPieces::iterator Next = llvm::next(I);
+        if (Next != E) {
+          if (PathDiagnosticControlFlowPiece *NextCF =
+                dyn_cast<PathDiagnosticControlFlowPiece>(*Next)) {
+            NextCF->setStartLocation(CF->getStartLocation());
+          }
+        }
+        I = Pieces.erase(I);
+        continue;
+      }
+    }
+
+    I++;
+  }
+}
+
+/// Remove all pieces with invalid locations as these cannot be serialized.
+/// We might have pieces with invalid locations as a result of inlining Body
+/// Farm generated functions.
+static void removePiecesWithInvalidLocations(PathPieces &Pieces) {
+  for (PathPieces::iterator I = Pieces.begin(), E = Pieces.end(); I != E;) {
+    if (PathDiagnosticCallPiece *C = dyn_cast<PathDiagnosticCallPiece>(*I))
+      removePiecesWithInvalidLocations(C->path);
+
+    if (PathDiagnosticMacroPiece *M = dyn_cast<PathDiagnosticMacroPiece>(*I))
+      removePiecesWithInvalidLocations(M->subPieces);
+
+    if (!(*I)->getLocation().isValid() ||
+        !(*I)->getLocation().asLocation().isValid()) {
+      I = Pieces.erase(I);
+      continue;
+    }
+    I++;
   }
 }
 
@@ -1580,8 +1627,12 @@ static const Stmt *getTerminatorCondition(const CFGBlock *B) {
   return S;
 }
 
-static const char *StrEnteringLoop = "Entering loop body";
-static const char *StrLoopBodyZero = "Loop body executed 0 times";
+static const char StrEnteringLoop[] = "Entering loop body";
+static const char StrLoopBodyZero[] = "Loop body executed 0 times";
+static const char StrLoopRangeEmpty[] =
+  "Loop body skipped when range is empty";
+static const char StrLoopCollectionEmpty[] =
+  "Loop body skipped when collection is empty";
 
 static bool
 GenerateAlternateExtensivePathDiagnostic(PathDiagnostic& PD,
@@ -1780,10 +1831,15 @@ GenerateAlternateExtensivePathDiagnostic(PathDiagnostic& PD,
 
             if (isJumpToFalseBranch(&*BE)) {
               if (!IsInLoopBody) {
-                str = StrLoopBodyZero;
+                if (isa<ObjCForCollectionStmt>(Term)) {
+                  str = StrLoopCollectionEmpty;
+                } else if (isa<CXXForRangeStmt>(Term)) {
+                  str = StrLoopRangeEmpty;
+                } else {
+                  str = StrLoopBodyZero;
+                }
               }
-            }
-            else {
+            } else {
               str = StrEnteringLoop;
             }
 
@@ -1796,9 +1852,8 @@ GenerateAlternateExtensivePathDiagnostic(PathDiagnostic& PD,
                             PE->getLocation(), PDB.LC);
               PD.getActivePath().push_front(PE);
             }
-          }
-          else if (isa<BreakStmt>(Term) || isa<ContinueStmt>(Term) ||
-                   isa<GotoStmt>(Term)) {
+          } else if (isa<BreakStmt>(Term) || isa<ContinueStmt>(Term) ||
+                     isa<GotoStmt>(Term)) {
             PathDiagnosticLocation L(Term, SM, PDB.LC);
             addEdgeToPath(PD.getActivePath(), PrevLoc, L, PDB.LC);
           }
@@ -1833,7 +1888,7 @@ GenerateAlternateExtensivePathDiagnostic(PathDiagnostic& PD,
   return report->isValid();
 }
 
-const Stmt *getLocStmt(PathDiagnosticLocation L) {
+static const Stmt *getLocStmt(PathDiagnosticLocation L) {
   if (!L.isValid())
     return 0;
   return L.asStmt();
@@ -2027,7 +2082,8 @@ static void simplifySimpleBranches(PathPieces &pieces) {
       PathDiagnosticEventPiece *EV = dyn_cast<PathDiagnosticEventPiece>(*NextI);
       if (EV) {
         StringRef S = EV->getString();
-        if (S == StrEnteringLoop || S == StrLoopBodyZero) {
+        if (S == StrEnteringLoop || S == StrLoopBodyZero ||
+            S == StrLoopCollectionEmpty || S == StrLoopRangeEmpty) {
           ++NextI;
           continue;
         }
@@ -2223,7 +2279,7 @@ static void removePunyEdges(PathPieces &path,
     SourceLocation FirstLoc = start->getLocStart();
     SourceLocation SecondLoc = end->getLocStart();
 
-    if (!SM.isFromSameFile(FirstLoc, SecondLoc))
+    if (!SM.isWrittenInSameFile(FirstLoc, SecondLoc))
       continue;
     if (SM.isBeforeInTranslationUnit(SecondLoc, FirstLoc))
       std::swap(SecondLoc, FirstLoc);
@@ -2478,7 +2534,7 @@ static void dropFunctionEntryEdge(PathPieces &Path,
 //===----------------------------------------------------------------------===//
 // Methods for BugType and subclasses.
 //===----------------------------------------------------------------------===//
-BugType::~BugType() { }
+void BugType::anchor() { }
 
 void BugType::FlushReports(BugReporter &BR) {}
 
@@ -2641,10 +2697,8 @@ void BugReport::pushInterestingSymbolsAndRegions() {
 }
 
 void BugReport::popInterestingSymbolsAndRegions() {
-  delete interestingSymbols.back();
-  interestingSymbols.pop_back();
-  delete interestingRegions.back();
-  interestingRegions.pop_back();
+  delete interestingSymbols.pop_back_val();
+  delete interestingRegions.pop_back_val();
 }
 
 const Stmt *BugReport::getStmt() const {
@@ -2731,7 +2785,7 @@ void BugReporter::FlushReports() {
   SmallVector<const BugType*, 16> bugTypes;
   for (BugTypesTy::iterator I=BugTypes.begin(), E=BugTypes.end(); I!=E; ++I)
     bugTypes.push_back(*I);
-  for (SmallVector<const BugType*, 16>::iterator
+  for (SmallVectorImpl<const BugType *>::iterator
          I = bugTypes.begin(), E = bugTypes.end(); I != E; ++I)
     const_cast<BugType*>(*I)->FlushReports(*this);
 
@@ -3153,7 +3207,9 @@ bool GRBugReporter::generatePathDiagnostic(PathDiagnostic& PD,
         (void)stillHasNotes;
       }
 
+      // Redirect all call pieces to have valid locations.
       adjustCallLocations(PD.getMutablePieces());
+      removePiecesWithInvalidLocations(PD.getMutablePieces());
 
       if (ActiveScheme == PathDiagnosticConsumer::AlternateExtensive) {
         SourceManager &SM = getSourceManager();
@@ -3169,9 +3225,11 @@ bool GRBugReporter::generatePathDiagnostic(PathDiagnostic& PD,
         dropFunctionEntryEdge(PD.getMutablePieces(), LCM, SM);
       }
 
-      // Remove messages that are basically the same.
+      // Remove messages that are basically the same, and edges that may not
+      // make sense.
       // We have to do this after edge optimization in the Extensive mode.
       removeRedundantMsgs(PD.getMutablePieces());
+      removeEdgesToDefaultInitializers(PD.getMutablePieces());
     }
 
     // We found a report and didn't suppress it.
@@ -3192,6 +3250,9 @@ void BugReporter::emitReport(BugReport* R) {
   // Defensive checking: throw the bug away if it comes from a BodyFarm-
   // generated body. We do this very early because report processing relies
   // on the report's location being valid.
+  // FIXME: Valid bugs can occur in BodyFarm-generated bodies, so really we
+  // need to just find a reasonable location like we do later on with the path
+  // pieces.
   if (const ExplodedNode *E = R->getErrorNode()) {
     const LocationContext *LCtx = E->getLocationContext();
     if (LCtx->getAnalysisDeclContext()->isBodyAutosynthesized())
@@ -3414,13 +3475,15 @@ void BugReporter::EmitBasicReport(const Decl *DeclWithIssue,
                                   StringRef name,
                                   StringRef category,
                                   StringRef str, PathDiagnosticLocation Loc,
-                                  SourceRange* RBeg, unsigned NumRanges) {
+                                  ArrayRef<SourceRange> Ranges) {
 
   // 'BT' is owned by BugReporter.
   BugType *BT = getBugTypeForName(name, category);
   BugReport *R = new BugReport(*BT, str, Loc);
   R->setDeclWithIssue(DeclWithIssue);
-  for ( ; NumRanges > 0 ; --NumRanges, ++RBeg) R->addRange(*RBeg);
+  for (ArrayRef<SourceRange>::iterator I = Ranges.begin(), E = Ranges.end();
+       I != E; ++I)
+    R->addRange(*I);
   emitReport(R);
 }
 

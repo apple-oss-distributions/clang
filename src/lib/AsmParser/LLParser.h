@@ -107,6 +107,8 @@ namespace llvm {
     };
     DenseMap<Instruction*, std::vector<MDRef> > ForwardRefInstMetadata;
 
+    SmallVector<Instruction*, 64> InstsWithTBAATag;
+
     // Type resolution handling data structures.  The location is set when we
     // have processed a use of the type but not a definition yet.
     StringMap<std::pair<Type*, LocTy> > NamedTypes;
@@ -124,6 +126,10 @@ namespace llvm {
     // a list of references to blocks in that function.
     std::map<ValID, std::vector<std::pair<ValID, GlobalValue*> > >
       ForwardRefBlockAddresses;
+
+    // Attribute builder reference information.
+    std::map<Value*, std::vector<unsigned> > ForwardRefAttrGroups;
+    std::map<unsigned, AttrBuilder> NumberedAttrBuilders;
 
   public:
     LLParser(MemoryBuffer *F, SourceMgr &SM, SMDiagnostic &Err, Module *m) :
@@ -191,7 +197,6 @@ namespace llvm {
     bool ParseTLSModel(GlobalVariable::ThreadLocalMode &TLM);
     bool ParseOptionalThreadLocal(GlobalVariable::ThreadLocalMode &TLM);
     bool ParseOptionalAddrSpace(unsigned &AddrSpace);
-    bool ParseOptionalFuncAttrs(AttrBuilder &B);
     bool ParseOptionalParamAttrs(AttrBuilder &B);
     bool ParseOptionalReturnAttrs(AttrBuilder &B);
     bool ParseOptionalLinkage(unsigned &Linkage, bool &HasLinkage);
@@ -236,6 +241,10 @@ namespace llvm {
     bool ParseMDString(MDString *&Result);
     bool ParseMDNodeID(MDNode *&Result);
     bool ParseMDNodeID(MDNode *&Result, unsigned &SlotNo);
+    bool ParseUnnamedAttrGrp();
+    bool ParseFnAttributeValuePairs(AttrBuilder &B,
+                                    std::vector<unsigned> &FwdRefAttrGrps,
+                                    bool inAttrGrp, LocTy &BuiltinLoc);
 
     // Type Parsing.
     bool ParseType(Type *&Result, bool AllowVoid = false);

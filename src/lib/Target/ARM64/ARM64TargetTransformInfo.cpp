@@ -111,6 +111,15 @@ public:
   virtual unsigned getArithmeticInstrCost(unsigned Opcode, Type *Ty,
                                  OperandValueKind Opd1Info = OK_AnyValue,
                                  OperandValueKind Opd2Info = OK_AnyValue) const;
+
+  virtual unsigned getAddressComputationCost(Type *Ty, bool IsComplex) const;
+
+  virtual unsigned getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
+                                      Type *CondTy) const;
+
+  virtual unsigned getMemoryOpCost(unsigned Opcode, Type *Src,
+                                   unsigned Alignment,
+                                   unsigned AddressSpace) const;
   /// @}
 
 };
@@ -142,7 +151,7 @@ unsigned ARM64TTI::getIntImmCost(const APInt &Imm,Type *Ty) const {
   if (BitSize == 32)
     Val &= (1LL << 32) - 1;
 
-  unsigned LZ = CountLeadingZeros_64(Val);
+  unsigned LZ = countLeadingZeros((uint64_t)Val);
   unsigned Shift = (63 - LZ) / 16;
   // MOVZ is free so return true for one or fewer MOVK.
   return (Shift == 0) ? 1 : Shift;
@@ -156,7 +165,8 @@ ARM64TTI::PopcntSupportKind ARM64TTI::getPopcntSupport(unsigned TyWidth) const {
   return PSK_Software;
 }
 
-unsigned ARM64TTI::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) const {
+unsigned ARM64TTI::getCastInstrCost(unsigned Opcode, Type *Dst,
+                                    Type *Src) const {
   int ISD = TLI->InstructionOpcodeToISD(Opcode);
   assert(ISD && "Invalid opcode");
 
@@ -185,6 +195,8 @@ unsigned ARM64TTI::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) const
     { ISD::FP_TO_UINT,  MVT::v2i64, MVT::v2f64,  1 },
     { ISD::FP_TO_UINT,  MVT::v2i32, MVT::v2f64,  1 },
     { ISD::FP_TO_SINT,  MVT::v2i32, MVT::v2f64,  1 },
+    { ISD::FP_TO_UINT,  MVT::v2i64, MVT::v2f64,  4 },
+    { ISD::FP_TO_SINT,  MVT::v2i64, MVT::v2f64,  4 },
   };
 
   int Idx = ConvertCostTableLookup<MVT>(ConversionTbl,
@@ -245,3 +257,80 @@ unsigned ARM64TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
   }
 }
 
+unsigned ARM64TTI::getAddressComputationCost(Type *Ty, bool IsComplex) const {
+  // Address computations in vectorized code with non-consecutive addresses will
+  // likely result in more instructions compared to scalar code where the
+  // computation can more often be merged into the index mode. The resulting
+  // extra micro-ops can significantly decrease throughput.
+  unsigned NumVectorInstToHideOverhead = 10;
+
+  if (Ty->isVectorTy() && IsComplex)
+    return NumVectorInstToHideOverhead;
+
+  // In many cases the address computation is not merged into the instruction
+  // addressing mode.
+  return 1;
+}
+
+unsigned ARM64TTI::getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
+                                    Type *CondTy) const {
+
+  int ISD = TLI->InstructionOpcodeToISD(Opcode);
+  // We don't lower vector selects well that are wider than the register width.
+  if (ValTy->isVectorTy() && ISD == ISD::SELECT) {
+    // We would need this many instructions to hide the scalarization happening.
+    unsigned AmortizationCost = 20;
+    static const TypeConversionCostTblEntry<MVT::SimpleValueType>
+      VectorSelectTbl[] = {
+      { ISD::SELECT, MVT::v16i1, MVT::v16i16, 16 * AmortizationCost },
+      { ISD::SELECT, MVT::v8i1, MVT::v8i32,   8 * AmortizationCost },
+      { ISD::SELECT, MVT::v16i1, MVT::v16i32, 16 * AmortizationCost },
+      { ISD::SELECT, MVT::v4i1, MVT::v4i64,   4 * AmortizationCost },
+      { ISD::SELECT, MVT::v8i1, MVT::v8i64,   8 * AmortizationCost },
+      { ISD::SELECT, MVT::v16i1, MVT::v16i64, 16 * AmortizationCost }
+    };
+
+    EVT SelCondTy = TLI->getValueType(CondTy);
+    EVT SelValTy = TLI->getValueType(ValTy);
+    if (SelCondTy.isSimple() && SelValTy.isSimple()) {
+      int Idx = ConvertCostTableLookup(VectorSelectTbl, ISD,
+                                       SelCondTy.getSimpleVT(),
+                                       SelValTy.getSimpleVT());
+      if (Idx != -1)
+        return VectorSelectTbl[Idx].Cost;
+    }
+
+  }
+  return TargetTransformInfo::getCmpSelInstrCost(Opcode, ValTy, CondTy);
+}
+
+unsigned ARM64TTI::getMemoryOpCost(unsigned Opcode, Type *Src,
+                                   unsigned Alignment,
+                                   unsigned AddressSpace) const {
+  std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(Src);
+
+  if (Opcode == Instruction::Store &&
+      Src->isVectorTy() && Alignment != 16 &&
+      Src->getVectorElementType()->isIntegerTy(64)) {
+    // Unaligned stores are extremely inefficient. We don't split
+    // unaligned v2i64 stores because the negative impact that has shown in
+    // practice on inlined memcpy code.
+    // We make v2i64 stores expensive so that we will only vectorize if there
+    // are 6 other instructions getting vectorized.
+    unsigned AmortizationCost = 6;
+
+    return LT.first * 2 * AmortizationCost;
+  }
+
+  if (Src->isVectorTy() && Src->getVectorElementType()->isIntegerTy(8) &&
+      Src->getVectorNumElements() < 8) {
+    // We scalarize the loads/stores because there is not v.4b register and we
+    // have to promote the elements to v.4h.
+    unsigned NumVecElts = Src->getVectorNumElements();
+    unsigned NumVectorizableInstsToAmortize = NumVecElts*2;
+    // We generate 2 instructions per vector element.
+    return NumVectorizableInstsToAmortize * NumVecElts * 2;
+  }
+
+  return LT.first;
+}

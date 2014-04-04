@@ -1,4 +1,4 @@
-// RUN: %clangxx_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clangxx_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -10,13 +10,15 @@ char *data1 = new char[10];
 char *data2 = new char[10];
 
 void *Thread1(void *x) {
-  memcpy(data+5, data1, 1);
+  static volatile int size = 1;
+  memcpy(data+5, data1, size);
   return NULL;
 }
 
 void *Thread2(void *x) {
+  static volatile int size = 4;
   sleep(1);
-  memcpy(data+3, data2, 4);
+  memcpy(data+3, data2, size);
   return NULL;
 }
 

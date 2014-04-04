@@ -44,8 +44,6 @@ def FeatureN64         : SubtargetFeature<"n64", "MipsABI", "N64",
                                 "Enable n64 ABI">;
 def FeatureEABI        : SubtargetFeature<"eabi", "MipsABI", "EABI",
                                 "Enable eabi ABI">;
-def FeatureAndroid     : SubtargetFeature<"android", "IsAndroid", "true",
-                                "Target is android">;
 def FeatureVFPU        : SubtargetFeature<"vfpu", "HasVFPU",
                                 "true", "Enable vector FPU instructions.">;
 def FeatureSEInReg     : SubtargetFeature<"seinreg", "HasSEInReg", "true",
@@ -80,6 +78,11 @@ def FeatureDSP : SubtargetFeature<"dsp", "HasDSP", "true", "Mips DSP ASE">;
 def FeatureDSPR2 : SubtargetFeature<"dspr2", "HasDSPR2", "true",
                                     "Mips DSP-R2 ASE", [FeatureDSP]>;
 
+def FeatureMSA : SubtargetFeature<"msa", "HasMSA", "true", "Mips MSA ASE">;
+
+def FeatureMicroMips  : SubtargetFeature<"micromips", "InMicroMipsMode", "true",
+                                         "microMips mode">;
+
 //===----------------------------------------------------------------------===//
 // Mips processors supported.
 //===----------------------------------------------------------------------===//
@@ -100,6 +103,7 @@ def MipsAsmWriter : AsmWriter {
 
 def MipsAsmParser : AsmParser {
   let ShouldEmitMatchRegisterName = 0;
+  let MnemonicContainsDot = 1;
 }
 
 def MipsAsmParserVariant : AsmParserVariant {

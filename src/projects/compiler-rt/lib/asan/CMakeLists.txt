@@ -1,7 +1,6 @@
 # Build for the AddressSanitizer runtime support library.
 
 set(ASAN_SOURCES
-  asan_allocator.cc
   asan_allocator2.cc
   asan_fake_stack.cc
   asan_globals.cc
@@ -14,23 +13,25 @@ set(ASAN_SOURCES
   asan_new_delete.cc
   asan_poisoning.cc
   asan_posix.cc
+  asan_preinit.cc
   asan_report.cc
   asan_rtl.cc
   asan_stack.cc
   asan_stats.cc
   asan_thread.cc
-  asan_thread_registry.cc
-  asan_win.cc
-  )
-
-set(ASAN_DYLIB_SOURCES
-  ${ASAN_SOURCES}
-  dynamic/asan_interceptors_dynamic.cc
-  )
+  asan_win.cc)
 
 include_directories(..)
 
-set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+if (NOT MSVC)
+  set(ASAN_CFLAGS
+    ${SANITIZER_COMMON_CFLAGS}
+    -fno-rtti)
+else()
+  set(ASAN_CFLAGS
+    ${SANITIZER_COMMON_CFLAGS}
+    /GR-)
+endif()
 
 set(ASAN_COMMON_DEFINITIONS
   ASAN_HAS_EXCEPTIONS=1)
@@ -40,50 +41,70 @@ if(ANDROID)
     ASAN_FLEXIBLE_MAPPING_AND_OFFSET=0
     ASAN_NEEDS_SEGV=0
     ASAN_LOW_MEMORY=1)
+elseif(MSVC)
+  list(APPEND ASAN_COMMON_DEFINITIONS
+    ASAN_FLEXIBLE_MAPPING_AND_OFFSET=0
+    ASAN_NEEDS_SEGV=0)
 else()
   list(APPEND ASAN_COMMON_DEFINITIONS
     ASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
     ASAN_NEEDS_SEGV=1)
 endif()
 
-set(ASAN_DYLIB_DEFINITIONS
-  ${ASAN_COMMON_DEFINITIONS}
-  MAC_INTERPOSE_FUNCTIONS=1)
-
 # Architectures supported by ASan.
 filter_available_targets(ASAN_SUPPORTED_ARCH
-  x86_64 i386 powerpc64 powerpc)
+  x86_64 i386 powerpc64)
 
+# Compile ASan sources into an object library.
+if(APPLE)
+  foreach(os ${SANITIZER_COMMON_SUPPORTED_DARWIN_OS})
+    add_compiler_rt_darwin_object_library(RTAsan ${os}
+      ARCH ${ASAN_SUPPORTED_ARCH}
+      SOURCES ${ASAN_SOURCES}
+      CFLAGS ${ASAN_CFLAGS}
+      DEFS ${ASAN_COMMON_DEFINITIONS})
+  endforeach()
+elseif(ANDROID)
+  add_library(RTAsan.arm.android OBJECT ${ASAN_SOURCES})
+  set_target_compile_flags(RTAsan.arm.android ${ASAN_CFLAGS})
+  set_property(TARGET RTAsan.arm.android APPEND PROPERTY
+    COMPILE_DEFINITIONS ${ASAN_COMMON_DEFINITIONS})
+else()
+  foreach(arch ${ASAN_SUPPORTED_ARCH})
+    add_compiler_rt_object_library(RTAsan ${arch}
+      SOURCES ${ASAN_SOURCES} CFLAGS ${ASAN_CFLAGS}
+      DEFS ${ASAN_COMMON_DEFINITIONS})
+  endforeach()
+endif()
+
+# Build ASan runtimes shipped with Clang.
 set(ASAN_RUNTIME_LIBRARIES)
 if(APPLE)
-  # Build universal binary on APPLE.
-  add_compiler_rt_osx_static_runtime(clang_rt.asan_osx
-    ARCH ${ASAN_SUPPORTED_ARCH}
-    SOURCES ${ASAN_SOURCES}
-            $<TARGET_OBJECTS:RTInterception.osx>
-            $<TARGET_OBJECTS:RTSanitizerCommon.osx>
-    CFLAGS ${ASAN_CFLAGS}
-    DEFS ${ASAN_COMMON_DEFINITIONS})
-  list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan_osx)
-
-  add_compiler_rt_osx_dynamic_runtime(clang_rt.asan_osx_dynamic
-    ARCH ${ASAN_SUPPORTED_ARCH}
-    SOURCES ${ASAN_DYLIB_SOURCES}
-            $<TARGET_OBJECTS:RTInterception.osx>
-            $<TARGET_OBJECTS:RTSanitizerCommon.osx>
-    CFLAGS ${ASAN_CFLAGS}
-    DEFS ${ASAN_DYLIB_DEFINITIONS}
+  foreach (os ${SANITIZER_COMMON_SUPPORTED_DARWIN_OS})
     # Dynamic lookup is needed because shadow scale and offset are
     # provided by the instrumented modules.
-    LINKFLAGS "-framework Foundation"
-              "-undefined dynamic_lookup")
-  list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan_osx_dynamic)
+    set(ASAN_RUNTIME_LDFLAGS
+        "-undefined dynamic_lookup")
+    if (os STREQUAL "osx")
+      list(APPEND ASAN_RUNTIME_LDFLAGS "-framework Foundation")
+    endif()
+    add_compiler_rt_darwin_dynamic_runtime(clang_rt.asan_${os}_dynamic ${os}
+      ARCH ${ASAN_SUPPORTED_ARCH}
+      SOURCES $<TARGET_OBJECTS:RTAsan.${os}>
+              $<TARGET_OBJECTS:RTInterception.${os}>
+              $<TARGET_OBJECTS:RTSanitizerCommon.${os}>
+              $<TARGET_OBJECTS:RTLSanCommon.${os}>
+      CFLAGS ${ASAN_CFLAGS}
+      DEFS ${ASAN_COMMON_DEFINITIONS}
+      LINKFLAGS ${ASAN_RUNTIME_LDFLAGS})
+    list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan_${os}_dynamic)
+  endforeach()
+
 elseif(ANDROID)
   add_library(clang_rt.asan-arm-android SHARED
-    ${ASAN_SOURCES}
+    $<TARGET_OBJECTS:RTAsan.arm.android>
     $<TARGET_OBJECTS:RTInterception.arm.android>
-    $<TARGET_OBJECTS:RTSanitizerCommon.arm.android>
-    )
+    $<TARGET_OBJECTS:RTSanitizerCommon.arm.android>)
   set_target_compile_flags(clang_rt.asan-arm-android
     ${ASAN_CFLAGS})
   set_property(TARGET clang_rt.asan-arm-android APPEND PROPERTY
@@ -91,17 +112,39 @@ elseif(ANDROID)
   target_link_libraries(clang_rt.asan-arm-android dl)
   list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan-arm-android)
 else()
-  # Otherwise, build separate libraries for each target.
+  # Build separate libraries for each target.
   foreach(arch ${ASAN_SUPPORTED_ARCH})
+    set(ASAN_RUNTIME_OBJECTS
+      $<TARGET_OBJECTS:RTAsan.${arch}>
+      $<TARGET_OBJECTS:RTInterception.${arch}>
+      $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
+      $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>)
+    if (NOT MSVC)
+      # We can't build Leak Sanitizer on Windows yet.
+      list(APPEND ASAN_RUNTIME_OBJECTS $<TARGET_OBJECTS:RTLSanCommon.${arch}>)
+    endif()
+
     add_compiler_rt_static_runtime(clang_rt.asan-${arch} ${arch}
-      SOURCES ${ASAN_SOURCES}
-              $<TARGET_OBJECTS:RTInterception.${arch}>
-              $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
+      SOURCES ${ASAN_RUNTIME_OBJECTS}
       CFLAGS ${ASAN_CFLAGS}
       DEFS ${ASAN_COMMON_DEFINITIONS})
     list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan-${arch})
+    if (UNIX AND NOT ${arch} STREQUAL "i386")
+      add_sanitizer_rt_symbols(clang_rt.asan-${arch} asan.syms.extra)
+      list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan-${arch}-symbols)
+    endif()
+
+    if (WIN32)
+      add_compiler_rt_static_runtime(clang_rt.asan_dll_thunk-${arch} ${arch}
+      SOURCES asan_dll_thunk.cc
+      CFLAGS ${ASAN_CFLAGS} -DASAN_DLL_THUNK
+      DEFS ${ASAN_COMMON_DEFINITIONS})
+      list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan_dll_thunk-${arch})
+    endif()
   endforeach()
 endif()
+
+add_compiler_rt_resource_file(asan_blacklist asan_blacklist.txt)
 
 if(LLVM_INCLUDE_TESTS)
   add_subdirectory(tests)

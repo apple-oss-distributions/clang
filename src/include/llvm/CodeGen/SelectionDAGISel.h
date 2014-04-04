@@ -30,7 +30,6 @@ namespace llvm {
   class MachineInstr;
   class TargetLowering;
   class TargetLibraryInfo;
-  class TargetInstrInfo;
   class TargetTransformInfo;
   class FunctionLoweringInfo;
   class ScheduleHazardRecognizer;
@@ -42,8 +41,7 @@ namespace llvm {
 /// pattern-matching instruction selectors.
 class SelectionDAGISel : public MachineFunctionPass {
 public:
-  const TargetMachine &TM;
-  const TargetLowering &TLI;
+  TargetMachine &TM;
   const TargetLibraryInfo *LibInfo;
   const TargetTransformInfo *TTI;
   FunctionLoweringInfo *FuncInfo;
@@ -56,11 +54,13 @@ public:
   CodeGenOpt::Level OptLevel;
   static char ID;
 
-  explicit SelectionDAGISel(const TargetMachine &tm,
+  explicit SelectionDAGISel(TargetMachine &tm,
                             CodeGenOpt::Level OL = CodeGenOpt::Default);
   virtual ~SelectionDAGISel();
 
-  const TargetLowering &getTargetLowering() { return TLI; }
+  const TargetLowering *getTargetLowering() const {
+    return TM.getTargetLowering();
+  }
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const;
 
@@ -113,6 +113,8 @@ public:
     OPC_MoveChild,
     OPC_MoveParent,
     OPC_CheckSame,
+    OPC_CheckChild0Same, OPC_CheckChild1Same,
+    OPC_CheckChild2Same, OPC_CheckChild3Same,
     OPC_CheckPatternPredicate,
     OPC_CheckPredicate,
     OPC_CheckOpcode,
@@ -249,16 +251,23 @@ private:
                     const SDValue *Ops, unsigned NumOps, unsigned EmitNodeInfo);
 
   void PrepareEHLandingPad();
-  void SelectAllBasicBlocks(const Function &Fn);
-  bool TryToFoldFastISelLoad(const LoadInst *LI, const Instruction *FoldInst,
-                             FastISel *FastIS);
-  void FinishBasicBlock();
 
+  /// \brief Perform instruction selection on all basic blocks in the function.
+  void SelectAllBasicBlocks(const Function &Fn);
+
+  /// \brief Perform instruction selection on a single basic block, for
+  /// instructions between \p Begin and \p End.  \p HadTailCall will be set
+  /// to true if a call in the block was translated as a tail call.
   void SelectBasicBlock(BasicBlock::const_iterator Begin,
                         BasicBlock::const_iterator End,
                         bool &HadTailCall);
+  void FinishBasicBlock();
+
   void CodeGenAndEmitDAG();
-  void LowerArguments(const BasicBlock *BB);
+
+  /// \brief Generate instructions for lowering the incoming arguments of the
+  /// given function.
+  void LowerArguments(const Function &F);
 
   void ComputeLiveOutVRegInfo();
 

@@ -13,6 +13,7 @@
 
 #include "clang/Sema/DeclSpec.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/TypeLoc.h"
@@ -170,6 +171,9 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
                                              SourceLocation LocalRangeEnd,
                                              Declarator &TheDeclarator,
                                              TypeResult TrailingReturnType) {
+  assert(!(TypeQuals & DeclSpec::TQ_atomic) &&
+         "function cannot have _Atomic qualifier");
+
   DeclaratorChunk I;
   I.Kind                        = Function;
   I.Loc                         = LocalRangeBegin;
@@ -287,7 +291,13 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_image2d_t:
     case TST_image2d_array_t:
     case TST_image3d_t:
+    case TST_sampler_t:
     case TST_event_t:
+      return false;
+
+    case TST_decltype_auto:
+      // This must have an initializer, so can't be a function declaration,
+      // even if the initializer has function type.
       return false;
 
     case TST_decltype:
@@ -314,6 +324,19 @@ bool Declarator::isDeclarationOfFunction() const {
   }
 
   llvm_unreachable("Invalid TypeSpecType!");
+}
+
+bool Declarator::isStaticMember() {
+  assert(getContext() == MemberContext);
+  return getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static ||
+         CXXMethodDecl::isStaticOverloadedOperator(
+             getName().OperatorFunctionId.Operator);
+}
+
+bool DeclSpec::hasTagDefinition() const {
+  if (!TypeSpecOwned)
+    return false;
+  return cast<TagDecl>(getRepAsDecl())->isCompleteDefinition();
 }
 
 /// getParsedSpecifiers - Return a bitmask of which flavors of specifiers this
@@ -430,6 +453,7 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T) {
   case DeclSpec::TST_typeofExpr:  return "typeof";
   case DeclSpec::TST_auto:        return "auto";
   case DeclSpec::TST_decltype:    return "(decltype)";
+  case DeclSpec::TST_decltype_auto: return "decltype(auto)";
   case DeclSpec::TST_underlyingType: return "__underlying_type";
   case DeclSpec::TST_unknown_anytype: return "__unknown_anytype";
   case DeclSpec::TST_atomic: return "_Atomic";
@@ -439,6 +463,7 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T) {
   case DeclSpec::TST_image2d_t:   return "image2d_t";
   case DeclSpec::TST_image2d_array_t: return "image2d_array_t";
   case DeclSpec::TST_image3d_t:   return "image3d_t";
+  case DeclSpec::TST_sampler_t:   return "sampler_t";
   case DeclSpec::TST_event_t:     return "event_t";
   case DeclSpec::TST_error:       return "(error)";
   }
@@ -451,6 +476,7 @@ const char *DeclSpec::getSpecifierName(TQ T) {
   case DeclSpec::TQ_const:       return "const";
   case DeclSpec::TQ_restrict:    return "restrict";
   case DeclSpec::TQ_volatile:    return "volatile";
+  case DeclSpec::TQ_atomic:      return "_Atomic";
   }
   llvm_unreachable("Unknown typespec!");
 }
@@ -488,7 +514,7 @@ bool DeclSpec::SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
   }
 
   if (StorageClassSpec != SCS_unspecified) {
-    // Maybe this is an attempt to use C++0x 'auto' outside of C++0x mode.
+    // Maybe this is an attempt to use C++11 'auto' outside of C++11 mode.
     bool isInvalid = true;
     if (TypeSpecType == TST_unspecified && S.getLangOpts().CPlusPlus) {
       if (SC == SCS_auto)
@@ -695,6 +721,20 @@ bool DeclSpec::SetTypeAltiVecPixel(bool isAltiVecPixel, SourceLocation Loc,
   return false;
 }
 
+bool DeclSpec::SetTypeAltiVecBool(bool isAltiVecBool, SourceLocation Loc,
+                          const char *&PrevSpec, unsigned &DiagID) {
+  if (!TypeAltiVecVector || TypeAltiVecBool ||
+      (TypeSpecType != TST_unspecified)) {
+    PrevSpec = DeclSpec::getSpecifierName((TST) TypeSpecType);
+    DiagID = diag::err_invalid_vector_bool_decl_spec;
+    return true;
+  }
+  TypeAltiVecBool = isAltiVecBool;
+  TSTLoc = Loc;
+  TSTNameLoc = Loc;
+  return false;
+}
+
 bool DeclSpec::SetTypeSpecError() {
   TypeSpecType = TST_error;
   TypeSpecOwned = false;
@@ -717,12 +757,14 @@ bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
   TypeQualifiers |= T;
 
   switch (T) {
-  default: llvm_unreachable("Unknown type qualifier!");
-  case TQ_const:    TQ_constLoc = Loc; break;
-  case TQ_restrict: TQ_restrictLoc = Loc; break;
-  case TQ_volatile: TQ_volatileLoc = Loc; break;
+  case TQ_unspecified: break;
+  case TQ_const:    TQ_constLoc = Loc; return false;
+  case TQ_restrict: TQ_restrictLoc = Loc; return false;
+  case TQ_volatile: TQ_volatileLoc = Loc; return false;
+  case TQ_atomic:   TQ_atomicLoc = Loc; return false;
   }
-  return false;
+
+  llvm_unreachable("Unknown type qualifier!");
 }
 
 bool DeclSpec::setFunctionSpecInline(SourceLocation Loc) {
@@ -816,15 +858,6 @@ void DeclSpec::SaveWrittenBuiltinSpecs() {
   }
 }
 
-void DeclSpec::SaveStorageSpecifierAsWritten() {
-  if (SCS_extern_in_linkage_spec && StorageClassSpec == SCS_extern)
-    // If 'extern' is part of a linkage specification,
-    // then it is not a storage class "as written".
-    StorageClassSpecAsWritten = SCS_unspecified;
-  else
-    StorageClassSpecAsWritten = StorageClassSpec;
-}
-
 /// Finish - This does final analysis of the declspec, rejecting things like
 /// "_Imaginary" (lacking an FP type).  This returns a diagnostic to issue or
 /// diag::NUM_DIAGNOSTICS if there is no error.  After calling this method,
@@ -832,9 +865,41 @@ void DeclSpec::SaveStorageSpecifierAsWritten() {
 void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   // Before possibly changing their values, save specs as written.
   SaveWrittenBuiltinSpecs();
-  SaveStorageSpecifierAsWritten();
 
   // Check the type specifier components first.
+
+  // If decltype(auto) is used, no other type specifiers are permitted.
+  if (TypeSpecType == TST_decltype_auto &&
+      (TypeSpecWidth != TSW_unspecified ||
+       TypeSpecComplex != TSC_unspecified ||
+       TypeSpecSign != TSS_unspecified ||
+       TypeAltiVecVector || TypeAltiVecPixel || TypeAltiVecBool ||
+       TypeQualifiers)) {
+    const unsigned NumLocs = 8;
+    SourceLocation ExtraLocs[NumLocs] = {
+      TSWLoc, TSCLoc, TSSLoc, AltiVecLoc,
+      TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc, TQ_atomicLoc
+    };
+    FixItHint Hints[NumLocs];
+    SourceLocation FirstLoc;
+    for (unsigned I = 0; I != NumLocs; ++I) {
+      if (!ExtraLocs[I].isInvalid()) {
+        if (FirstLoc.isInvalid() ||
+            PP.getSourceManager().isBeforeInTranslationUnit(ExtraLocs[I],
+                                                            FirstLoc))
+          FirstLoc = ExtraLocs[I];
+        Hints[I] = FixItHint::CreateRemoval(ExtraLocs[I]);
+      }
+    }
+    TypeSpecWidth = TSW_unspecified;
+    TypeSpecComplex = TSC_unspecified;
+    TypeSpecSign = TSS_unspecified;
+    TypeAltiVecVector = TypeAltiVecPixel = TypeAltiVecBool = false;
+    TypeQualifiers = 0;
+    Diag(D, TSTLoc, diag::err_decltype_auto_cannot_be_combined)
+      << Hints[0] << Hints[1] << Hints[2] << Hints[3]
+      << Hints[4] << Hints[5] << Hints[6] << Hints[7];
+  }
 
   // Validate and finalize AltiVec vector declspec.
   if (TypeAltiVecVector) {
@@ -966,16 +1031,15 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   // the type specifier is not optional, but we got 'auto' as a storage
   // class specifier, then assume this is an attempt to use C++0x's 'auto'
   // type specifier.
-  // FIXME: Does Microsoft really support implicit int in C++?
-  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().MicrosoftExt &&
+  if (PP.getLangOpts().CPlusPlus &&
       TypeSpecType == TST_unspecified && StorageClassSpec == SCS_auto) {
     TypeSpecType = TST_auto;
-    StorageClassSpec = StorageClassSpecAsWritten = SCS_unspecified;
+    StorageClassSpec = SCS_unspecified;
     TSTLoc = TSTNameLoc = StorageClassSpecLoc;
     StorageClassSpecLoc = SourceLocation();
   }
   // Diagnose if we've recovered from an ill-formed 'auto' storage class
-  // specifier in a pre-C++0x dialect of C++.
+  // specifier in a pre-C++11 dialect of C++.
   if (!PP.getLangOpts().CPlusPlus11 && TypeSpecType == TST_auto)
     Diag(D, TSTLoc, diag::ext_auto_type_specifier);
   if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().CPlusPlus11 &&
@@ -1060,6 +1124,7 @@ bool VirtSpecifiers::SetSpecifier(Specifier VS, SourceLocation Loc,
   switch (VS) {
   default: llvm_unreachable("Unknown specifier!");
   case VS_Override: VS_overrideLoc = Loc; break;
+  case VS_Sealed:
   case VS_Final:    VS_finalLoc = Loc; break;
   }
 
@@ -1071,5 +1136,6 @@ const char *VirtSpecifiers::getSpecifierName(Specifier VS) {
   default: llvm_unreachable("Unknown specifier");
   case VS_Override: return "override";
   case VS_Final: return "final";
+  case VS_Sealed: return "sealed";
   }
 }

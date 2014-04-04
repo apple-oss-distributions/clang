@@ -67,6 +67,15 @@ struct ShiftOutOfBoundsData {
 RECOVERABLE(shift_out_of_bounds, ShiftOutOfBoundsData *Data,
             ValueHandle LHS, ValueHandle RHS)
 
+struct OutOfBoundsData {
+  SourceLocation Loc;
+  const TypeDescriptor &ArrayType;
+  const TypeDescriptor &IndexType;
+};
+
+/// \brief Handle an array index out of bounds error.
+RECOVERABLE(out_of_bounds, OutOfBoundsData *Data, ValueHandle Index)
+
 struct UnreachableData {
   SourceLocation Loc;
 };
@@ -96,12 +105,21 @@ struct FloatCastOverflowData {
 RECOVERABLE(float_cast_overflow, FloatCastOverflowData *Data, ValueHandle From)
 
 struct InvalidValueData {
-  // FIXME: SourceLocation Loc;
+  SourceLocation Loc;
   const TypeDescriptor &Type;
 };
 
 /// \brief Handle a load of an invalid value for the type.
 RECOVERABLE(load_invalid_value, InvalidValueData *Data, ValueHandle Val)
+
+struct FunctionTypeMismatchData {
+  SourceLocation Loc;
+  const TypeDescriptor &Type;
+};
+
+RECOVERABLE(function_type_mismatch,
+            FunctionTypeMismatchData *Data,
+            ValueHandle Val)
 
 }
 

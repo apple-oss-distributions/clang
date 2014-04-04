@@ -744,8 +744,8 @@ FormatDiagnostic(const char *DiagStr, const char *DiagEnd,
         const char *Pipe = ScanFormat(Argument, Argument + ArgumentLen, '|');
         const char *FirstDollar = ScanFormat(Argument, Pipe, '$');
         const char *SecondDollar = ScanFormat(FirstDollar + 1, Pipe, '$');
-        const char ArgStr1[] = { '%', (char) ('0' + ArgNo) };
-        const char ArgStr2[] = { '%', (char) ('0' + ArgNo2) };
+        const char ArgStr1[] = { '%', static_cast<char>('0' + ArgNo) };
+        const char ArgStr2[] = { '%', static_cast<char>('0' + ArgNo2) };
         FormatDiagnostic(Argument, FirstDollar, OutStr);
         FormatDiagnostic(ArgStr1, ArgStr1 + 2, OutStr);
         FormatDiagnostic(FirstDollar + 1, SecondDollar, OutStr);
@@ -955,11 +955,10 @@ StoredDiagnostic::StoredDiagnostic(DiagnosticsEngine::Level Level,
 StoredDiagnostic::StoredDiagnostic(DiagnosticsEngine::Level Level, unsigned ID,
                                    StringRef Message, FullSourceLoc Loc,
                                    ArrayRef<CharSourceRange> Ranges,
-                                   ArrayRef<FixItHint> Fixits)
-  : ID(ID), Level(Level), Loc(Loc), Message(Message) 
+                                   ArrayRef<FixItHint> FixIts)
+  : ID(ID), Level(Level), Loc(Loc), Message(Message), 
+    Ranges(Ranges.begin(), Ranges.end()), FixIts(FixIts.begin(), FixIts.end())
 {
-  this->Ranges.assign(Ranges.begin(), Ranges.end());
-  this->FixIts.assign(FixIts.begin(), FixIts.end());
 }
 
 StoredDiagnostic::~StoredDiagnostic() { }
@@ -987,11 +986,6 @@ void ForwardingDiagnosticConsumer::clear() {
 
 bool ForwardingDiagnosticConsumer::IncludeInDiagnosticCounts() const {
   return Target.IncludeInDiagnosticCounts();
-}
-
-DiagnosticConsumer *
-ForwardingDiagnosticConsumer::clone(DiagnosticsEngine &Diags) const {
-  return new ForwardingDiagnosticConsumer(Target);
 }
 
 PartialDiagnostic::StorageAllocator::StorageAllocator() {

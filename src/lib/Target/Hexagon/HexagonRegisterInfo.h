@@ -44,9 +44,8 @@ class Type;
 
 struct HexagonRegisterInfo : public HexagonGenRegisterInfo {
   HexagonSubtarget &Subtarget;
-  const HexagonInstrInfo &TII;
 
-  HexagonRegisterInfo(HexagonSubtarget &st, const HexagonInstrInfo &tii);
+  HexagonRegisterInfo(HexagonSubtarget &st);
 
   /// Code Generation virtual methods...
   const uint16_t *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
@@ -55,10 +54,6 @@ struct HexagonRegisterInfo : public HexagonGenRegisterInfo {
                                      const MachineFunction *MF = 0) const;
 
   BitVector getReservedRegs(const MachineFunction &MF) const;
-
-  void eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                     MachineBasicBlock &MBB,
-                                     MachineBasicBlock::iterator I) const;
 
   void eliminateFrameIndex(MachineBasicBlock::iterator II,
                            int SPAdj, unsigned FIOperandNum,
@@ -82,17 +77,7 @@ struct HexagonRegisterInfo : public HexagonGenRegisterInfo {
   unsigned getRARegister() const;
   unsigned getFrameRegister(const MachineFunction &MF) const;
   unsigned getFrameRegister() const;
-  void getInitialFrameState(std::vector<MachineMove> &Moves) const;
   unsigned getStackRegister() const;
-
-  // Exception handling queries.
-  unsigned getEHExceptionRegister() const;
-  unsigned getEHHandlerRegister() const;
-  const RegClassWeight &getRegClassWeight(const TargetRegisterClass *RC) const;
-  unsigned getNumRegPressureSets() const;
-  const char *getRegPressureSetName(unsigned Idx) const;
-  unsigned getRegPressureSetLimit(unsigned Idx) const;
-  const int* getRegClassPressureSets(const TargetRegisterClass *RC) const;
 };
 
 } // end namespace llvm

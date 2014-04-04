@@ -38,6 +38,7 @@ class ParentMap;
 class ProgramPoint;
 class SourceManager;
 class Stmt;
+class CallExpr;
 
 namespace ento {
 
@@ -97,7 +98,6 @@ public:
   enum PathGenerationScheme { None, Minimal, Extensive, AlternateExtensive };
   virtual PathGenerationScheme getGenerationScheme() const { return Minimal; }
   virtual bool supportsLogicalOpControlFlow() const { return false; }
-  virtual bool supportsAllBlockEdges() const { return false; }
   
   /// Return true if the PathDiagnosticConsumer supports individual
   /// PathDiagnostics that span multiple files.
@@ -291,7 +291,7 @@ public:
   /// for the diagnostic location.
   static const Stmt *getStmt(const ExplodedNode *N);
 
-  /// \brief Retrieve the statement corresponding to the sucessor node.
+  /// \brief Retrieve the statement corresponding to the successor node.
   static const Stmt *getNextStmt(const ExplodedNode *N);
 };
 
@@ -522,7 +522,7 @@ public:
   }
   
   bool hasCallStackHint() {
-    return (CallStackHint != 0);
+    return CallStackHint.isValid();
   }
 
   /// Produce the hint for the given node. The node contains 

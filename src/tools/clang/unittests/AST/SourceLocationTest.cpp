@@ -21,175 +21,12 @@
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Tooling/Tooling.h"
 #include "gtest/gtest.h"
+#include "MatchVerifier.h"
 
 namespace clang {
 namespace ast_matchers {
 
-using clang::tooling::newFrontendActionFactory;
-using clang::tooling::runToolOnCodeWithArgs;
-using clang::tooling::FrontendActionFactory;
-
-enum Language { Lang_C, Lang_C89, Lang_CXX };
-
-/// \brief Base class for verifying some property of nodes found by a matcher.
-///
-/// FIXME: This class should be shared with other AST tests.
-template <typename NodeType>
-class MatchVerifier : public MatchFinder::MatchCallback {
-public:
-  template <typename MatcherType>
-  testing::AssertionResult match(const std::string &Code,
-                                 const MatcherType &AMatcher) {
-    return match(Code, AMatcher, Lang_CXX);
-  }
-
-  template <typename MatcherType>
-  testing::AssertionResult match(const std::string &Code,
-                                 const MatcherType &AMatcher, Language L);
-
-protected:
-  virtual void run(const MatchFinder::MatchResult &Result);
-  virtual void verify(const MatchFinder::MatchResult &Result,
-                      const NodeType &Node) = 0;
-
-  void setFailure(const Twine &Result) {
-    Verified = false;
-    VerifyResult = Result.str();
-  }
-
-private:
-  bool Verified;
-  std::string VerifyResult;
-};
-
-/// \brief Runs a matcher over some code, and returns the result of the
-/// verifier for the matched node.
-template <typename NodeType> template <typename MatcherType>
-testing::AssertionResult MatchVerifier<NodeType>::match(
-    const std::string &Code, const MatcherType &AMatcher, Language L) {
-  MatchFinder Finder;
-  Finder.addMatcher(AMatcher.bind(""), this);
-  OwningPtr<FrontendActionFactory> Factory(newFrontendActionFactory(&Finder));
-
-  std::vector<std::string> Args;
-  StringRef FileName;
-  switch (L) {
-  case Lang_C:
-    Args.push_back("-std=c99");
-    FileName = "input.c";
-    break;
-  case Lang_C89:
-    Args.push_back("-std=c89");
-    FileName = "input.c";
-    break;
-  case Lang_CXX:
-    Args.push_back("-std=c++98");
-    FileName = "input.cc";
-    break;
-  }
-
-  // Default to failure in case callback is never called
-  setFailure("Could not find match");
-  if (!runToolOnCodeWithArgs(Factory->create(), Code, Args, FileName))
-    return testing::AssertionFailure() << "Parsing error";
-  if (!Verified)
-    return testing::AssertionFailure() << VerifyResult;
-  return testing::AssertionSuccess();
-}
-
-template <typename NodeType>
-void MatchVerifier<NodeType>::run(const MatchFinder::MatchResult &Result) {
-  const NodeType *Node = Result.Nodes.getNodeAs<NodeType>("");
-  if (!Node) {
-    setFailure("Matched node has wrong type");
-  } else {
-    // Callback has been called, default to success
-    Verified = true;
-    verify(Result, *Node);
-  }
-}
-
-/// \brief Verify whether a node has the correct source location.
-///
-/// By default, Node.getSourceLocation() is checked. This can be changed
-/// by overriding getLocation().
-template <typename NodeType>
-class LocationVerifier : public MatchVerifier<NodeType> {
-public:
-  void expectLocation(unsigned Line, unsigned Column) {
-    ExpectLine = Line;
-    ExpectColumn = Column;
-  }
-
-protected:
-  void verify(const MatchFinder::MatchResult &Result, const NodeType &Node) {
-    SourceLocation Loc = getLocation(Node);
-    unsigned Line = Result.SourceManager->getSpellingLineNumber(Loc);
-    unsigned Column = Result.SourceManager->getSpellingColumnNumber(Loc);
-    if (Line != ExpectLine || Column != ExpectColumn) {
-      std::string MsgStr;
-      llvm::raw_string_ostream Msg(MsgStr);
-      Msg << "Expected location <" << ExpectLine << ":" << ExpectColumn
-          << ">, found <";
-      Loc.print(Msg, *Result.SourceManager);
-      Msg << '>';
-      this->setFailure(Msg.str());
-    }
-  }
-
-  virtual SourceLocation getLocation(const NodeType &Node) {
-    return Node.getLocation();
-  }
-
-private:
-  unsigned ExpectLine, ExpectColumn;
-};
-
-/// \brief Verify whether a node has the correct source range.
-///
-/// By default, Node.getSourceRange() is checked. This can be changed
-/// by overriding getRange().
-template <typename NodeType>
-class RangeVerifier : public MatchVerifier<NodeType> {
-public:
-  void expectRange(unsigned BeginLine, unsigned BeginColumn,
-                   unsigned EndLine, unsigned EndColumn) {
-    ExpectBeginLine = BeginLine;
-    ExpectBeginColumn = BeginColumn;
-    ExpectEndLine = EndLine;
-    ExpectEndColumn = EndColumn;
-  }
-
-protected:
-  void verify(const MatchFinder::MatchResult &Result, const NodeType &Node) {
-    SourceRange R = getRange(Node);
-    SourceLocation Begin = R.getBegin();
-    SourceLocation End = R.getEnd();
-    unsigned BeginLine = Result.SourceManager->getSpellingLineNumber(Begin);
-    unsigned BeginColumn = Result.SourceManager->getSpellingColumnNumber(Begin);
-    unsigned EndLine = Result.SourceManager->getSpellingLineNumber(End);
-    unsigned EndColumn = Result.SourceManager->getSpellingColumnNumber(End);
-    if (BeginLine != ExpectBeginLine || BeginColumn != ExpectBeginColumn ||
-        EndLine != ExpectEndLine || EndColumn != ExpectEndColumn) {
-      std::string MsgStr;
-      llvm::raw_string_ostream Msg(MsgStr);
-      Msg << "Expected range <" << ExpectBeginLine << ":" << ExpectBeginColumn
-          << '-' << ExpectEndLine << ":" << ExpectEndColumn << ">, found <";
-      Begin.print(Msg, *Result.SourceManager);
-      Msg << '-';
-      End.print(Msg, *Result.SourceManager);
-      Msg << '>';
-      this->setFailure(Msg.str());
-    }
-  }
-
-  virtual SourceRange getRange(const NodeType &Node) {
-    return Node.getSourceRange();
-  }
-
-private:
-  unsigned ExpectBeginLine, ExpectBeginColumn, ExpectEndLine, ExpectEndColumn;
-};
+// FIXME: Pull the *Verifier tests into their own test file.
 
 TEST(MatchVerifier, ParseError) {
   LocationVerifier<VarDecl> Verifier;
@@ -283,6 +120,150 @@ TEST(CXXConstructorDecl, NoRetFunTypeLocRange) {
   RangeVerifier<CXXConstructorDecl> Verifier;
   Verifier.expectRange(1, 11, 1, 13);
   EXPECT_TRUE(Verifier.match("class C { C(); };", functionDecl()));
+}
+
+TEST(CompoundLiteralExpr, CompoundVectorLiteralRange) {
+  RangeVerifier<CompoundLiteralExpr> Verifier;
+  Verifier.expectRange(2, 11, 2, 22);
+  EXPECT_TRUE(Verifier.match(
+                  "typedef int int2 __attribute__((ext_vector_type(2)));\n"
+                  "int2 i2 = (int2){1, 2};", compoundLiteralExpr()));
+}
+
+TEST(CompoundLiteralExpr, ParensCompoundVectorLiteralRange) {
+  RangeVerifier<CompoundLiteralExpr> Verifier;
+  Verifier.expectRange(2, 20, 2, 31);
+  EXPECT_TRUE(Verifier.match(
+                  "typedef int int2 __attribute__((ext_vector_type(2)));\n"
+                  "constant int2 i2 = (int2)(1, 2);", 
+                  compoundLiteralExpr(), Lang_OpenCL));
+}
+
+TEST(InitListExpr, VectorLiteralListBraceRange) {
+  RangeVerifier<InitListExpr> Verifier;
+  Verifier.expectRange(2, 17, 2, 22);
+  EXPECT_TRUE(Verifier.match(
+                  "typedef int int2 __attribute__((ext_vector_type(2)));\n"
+                  "int2 i2 = (int2){1, 2};", initListExpr()));
+}
+
+TEST(InitListExpr, VectorLiteralInitListParens) {
+  RangeVerifier<InitListExpr> Verifier;
+  Verifier.expectRange(2, 26, 2, 31);
+  EXPECT_TRUE(Verifier.match(
+                  "typedef int int2 __attribute__((ext_vector_type(2)));\n"
+                  "constant int2 i2 = (int2)(1, 2);", initListExpr(), Lang_OpenCL));
+}
+
+class TemplateAngleBracketLocRangeVerifier : public RangeVerifier<TypeLoc> {
+protected:
+  virtual SourceRange getRange(const TypeLoc &Node) {
+    TemplateSpecializationTypeLoc T =
+        Node.getUnqualifiedLoc().castAs<TemplateSpecializationTypeLoc>();
+    assert(!T.isNull());
+    return SourceRange(T.getLAngleLoc(), T.getRAngleLoc());
+  }
+};
+
+TEST(TemplateSpecializationTypeLoc, AngleBracketLocations) {
+  TemplateAngleBracketLocRangeVerifier Verifier;
+  Verifier.expectRange(2, 8, 2, 10);
+  EXPECT_TRUE(Verifier.match(
+      "template<typename T> struct A {}; struct B{}; void f(\n"
+      "const A<B>&);",
+      loc(templateSpecializationType())));
+}
+
+TEST(CXXNewExpr, TypeParenRange) {
+  RangeVerifier<CXXNewExpr> Verifier;
+  Verifier.expectRange(1, 10, 1, 18);
+  EXPECT_TRUE(Verifier.match("int* a = new (int);", newExpr()));
+}
+
+class UnaryTransformTypeLocParensRangeVerifier : public RangeVerifier<TypeLoc> {
+protected:
+  virtual SourceRange getRange(const TypeLoc &Node) {
+    UnaryTransformTypeLoc T =
+        Node.getUnqualifiedLoc().castAs<UnaryTransformTypeLoc>();
+    assert(!T.isNull());
+    return SourceRange(T.getLParenLoc(), T.getRParenLoc());
+  }
+};
+
+TEST(UnaryTransformTypeLoc, ParensRange) {
+  UnaryTransformTypeLocParensRangeVerifier Verifier;
+  Verifier.expectRange(3, 26, 3, 28);
+  EXPECT_TRUE(Verifier.match(
+      "template <typename T>\n"
+      "struct S {\n"
+      "typedef __underlying_type(T) type;\n"
+      "};",
+      loc(unaryTransformType())));
+}
+
+TEST(CXXFunctionalCastExpr, SourceRange) {
+  RangeVerifier<CXXFunctionalCastExpr> Verifier;
+  Verifier.expectRange(2, 10, 2, 14);
+  EXPECT_TRUE(Verifier.match(
+      "int foo() {\n"
+      "  return int{};\n"
+      "}",
+      functionalCastExpr(), Lang_CXX11));
+}
+
+TEST(CXXTemporaryObjectExpr, SourceRange) {
+  RangeVerifier<CXXTemporaryObjectExpr> Verifier;
+  Verifier.expectRange(2, 6, 2, 12);
+  EXPECT_TRUE(Verifier.match(
+      "struct A { A(int, int); };\n"
+      "A a( A{0, 0} );",
+      temporaryObjectExpr(), Lang_CXX11));
+}
+
+TEST(CXXUnresolvedConstructExpr, SourceRange) {
+  RangeVerifier<CXXUnresolvedConstructExpr> Verifier;
+  Verifier.expectRange(3, 10, 3, 12);
+  std::vector<std::string> Args;
+  Args.push_back("-fno-delayed-template-parsing");
+  EXPECT_TRUE(Verifier.match(
+      "template <typename U>\n"
+      "U foo() {\n"
+      "  return U{};\n"
+      "}",
+      unresolvedConstructExpr(), Args, Lang_CXX11));
+}
+
+TEST(UsingDecl, SourceRange) {
+  RangeVerifier<UsingDecl> Verifier;
+  Verifier.expectRange(2, 22, 2, 25);
+  EXPECT_TRUE(Verifier.match(
+      "class B { protected: int i; };\n"
+      "class D : public B { B::i; };",
+      usingDecl()));
+}
+
+TEST(UnresolvedUsingValueDecl, SourceRange) {
+  RangeVerifier<UnresolvedUsingValueDecl> Verifier;
+  Verifier.expectRange(3, 3, 3, 6);
+  EXPECT_TRUE(Verifier.match(
+      "template <typename B>\n"
+      "class D : public B {\n"
+      "  B::i;\n"
+      "};",
+      unresolvedUsingValueDecl()));
+}
+
+TEST(FriendDecl, InstantiationSourceRange) {
+  RangeVerifier<FriendDecl> Verifier;
+  Verifier.expectRange(4, 3, 4, 35);
+  EXPECT_TRUE(Verifier.match(
+      "template <typename T> class S;\n"
+      "template<class T> void operator+(S<T> x);\n"
+      "template<class T> struct S {\n"
+      "  friend void operator+<>(S<T> src);\n"
+      "};\n"
+      "void test(S<double> s) { +s; }",
+      friendDecl(hasParent(recordDecl(isTemplateInstantiation())))));
 }
 
 } // end namespace ast_matchers

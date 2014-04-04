@@ -61,7 +61,14 @@ $(OBJROOT)/libcompiler_rt-%.dylib : $(OBJROOT)/darwin_bni/Release/%/libcompiler_
 	   $(OBJROOT)/version.c -arch $* -dynamiclib \
 	   -install_name /usr/lib/system/libcompiler_rt.dylib \
 	   -compatibility_version 1 -current_version $(RC_ProjectSourceVersion) \
-	   -nodefaultlibs -lSystem -umbrella System -dead_strip \
+	   -nodefaultlibs -umbrella System -dead_strip \
+	   -Wl,-upward-lunwind \
+	   -Wl,-upward-lsystem_m \
+	   -Wl,-upward-lsystem_c \
+	   -Wl,-upward-lsystem_kernel \
+	   -Wl,-upward-lsystem_platform \
+	   -Wl,-ldyld \
+	   -L$(SDKROOT)/usr/lib/system \
 	   $(DYLIB_FLAGS) -Wl,-force_load,$^ -o $@ 
 
 # Rule to make fat dylib
@@ -108,10 +115,14 @@ $(SYMROOT)/libcompiler_rt-dyld.a : $(foreach arch,$(RC_ARCHS), \
 
 
 # Copy results to DSTROOT.
-install-iOS-Simulator: $(SYMROOT)/libcompiler_rt_sim.dylib
+install-iOS-Simulator: $(SYMROOT)/libcompiler_rt_sim.dylib \
+                       $(SYMROOT)/libcompiler_rt-dyld.a
 	mkdir -p $(DSTROOT)/$(SDKROOT)/usr/lib/system
 	$(call GetCNAVar,STRIP,Platform.darwin_bni,Release,) -S $(SYMROOT)/libcompiler_rt_sim.dylib \
 	    -o $(DSTROOT)/$(SDKROOT)/usr/lib/system/libcompiler_rt_sim.dylib
+	mkdir -p $(DSTROOT)/$(SDKROOT)/usr/local/lib/dyld
+	cp $(SYMROOT)/libcompiler_rt-dyld.a  \
+				    $(DSTROOT)/$(SDKROOT)/usr/local/lib/dyld/libcompiler_rt.a
   
 # Rule to make fat dylib
 $(SYMROOT)/libcompiler_rt_sim.dylib: $(foreach arch,$(RC_ARCHS), \
@@ -127,7 +138,12 @@ $(OBJROOT)/libcompiler_rt_sim-%.dylib : $(OBJROOT)/darwin_bni/Release/%/libcompi
 	   -install_name /usr/lib/system/libcompiler_rt_sim.dylib \
 	   -compatibility_version 1 -current_version $(RC_ProjectSourceVersion) \
      -Wl,-unexported_symbol,___enable_execute_stack \
-	   -nostdlib -lsystem_sim_m -lsystem_sim_c -ldyld_sim -lunwind_sim -Wl,-upward-lSystem \
-     -umbrella System -Wl,-no_implicit_dylibs -L$(SDKROOT)/usr/lib/system -dead_strip \
+	   -nostdlib \
+	   -Wl,-upward-lunwind_sim \
+	   -Wl,-upward-lsystem_sim_m \
+	   -Wl,-upward-lsystem_sim_c \
+	   -ldyld_sim \
+	   -Wl,-upward-lSystem \
+	   -umbrella System -Wl,-no_implicit_dylibs -L$(SDKROOT)/usr/lib/system -dead_strip \
 	   $(DYLIB_FLAGS) -Wl,-force_load,$^ -o $@ 
 

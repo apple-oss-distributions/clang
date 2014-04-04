@@ -17,8 +17,10 @@
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCLinkerOptimizationHint.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/DataTypes.h"
+#include <algorithm>
 #include <vector> // FIXME: Shouldn't be needed.
 
 namespace llvm {
@@ -451,7 +453,7 @@ class MCLEBFragment : public MCFragment {
 
   SmallString<8> Contents;
 public:
-  MCLEBFragment(const MCExpr &Value_, bool IsSigned_, MCSectionData *SD)
+  MCLEBFragment(const MCExpr &Value_, bool IsSigned_, MCSectionData *SD = 0)
     : MCFragment(FT_LEB, SD),
       Value(&Value_), IsSigned(IsSigned_) { Contents.push_back(0); }
 
@@ -487,7 +489,7 @@ class MCDwarfLineAddrFragment : public MCFragment {
 
 public:
   MCDwarfLineAddrFragment(int64_t _LineDelta, const MCExpr &_AddrDelta,
-                      MCSectionData *SD)
+                      MCSectionData *SD = 0)
     : MCFragment(FT_Dwarf, SD),
       LineDelta(_LineDelta), AddrDelta(&_AddrDelta) { Contents.push_back(0); }
 
@@ -518,7 +520,7 @@ class MCDwarfCallFrameFragment : public MCFragment {
   SmallString<8> Contents;
 
 public:
-  MCDwarfCallFrameFragment(const MCExpr &_AddrDelta,  MCSectionData *SD)
+  MCDwarfCallFrameFragment(const MCExpr &_AddrDelta,  MCSectionData *SD = 0)
     : MCFragment(FT_DwarfFrame, SD),
       AddrDelta(&_AddrDelta) { Contents.push_back(0); }
 
@@ -590,6 +592,10 @@ private:
   /// it.
   unsigned HasInstructions : 1;
 
+  /// Mapping from subsection number to insertion point for subsection numbers
+  /// below that number.
+  SmallVector<std::pair<unsigned, MCFragment *>, 1> SubsectionFragmentMap;
+
   /// @}
 
 public:
@@ -632,6 +638,8 @@ public:
   size_t size() const { return Fragments.size(); }
 
   bool empty() const { return Fragments.empty(); }
+
+  iterator getSubsectionInsertionPoint(unsigned Subsection);
 
   bool isBundleLocked() const {
     return BundleLockState != NotBundleLocked;
@@ -810,6 +818,9 @@ public:
   typedef SymbolDataListType::const_iterator const_symbol_iterator;
   typedef SymbolDataListType::iterator symbol_iterator;
 
+  typedef std::vector<std::string> FileNameVectorType;
+  typedef FileNameVectorType::const_iterator const_file_name_iterator;
+
   typedef std::vector<IndirectSymbolData>::const_iterator
     const_indirect_symbol_iterator;
   typedef std::vector<IndirectSymbolData>::iterator indirect_symbol_iterator;
@@ -853,6 +864,9 @@ private:
   /// The list of linker options to propagate into the object file.
   std::vector<std::vector<std::string> > LinkerOptions;
 
+  /// List of declared file names
+  FileNameVectorType FileNames;
+
   /// The set of function symbols for which a .thumb_func directive has
   /// been seen.
   //
@@ -870,6 +884,17 @@ private:
   unsigned RelaxAll : 1;
   unsigned NoExecStack : 1;
   unsigned SubsectionsViaSymbols : 1;
+
+  /// ELF specific e_header flags
+  // It would be good if there were an MCELFAssembler class to hold this.
+  // ELF header flags are used both by the integrated and standalone assemblers.
+  // Access to the flags is necessary in cases where assembler directives affect
+  // which flags to be set.
+  unsigned ELFHeaderEFlags;
+
+  /// Used to communicate Linker Optimization Hint information between
+  /// the Streamer and the .o writer
+  MCLOHContainer LOHContainer;
 
 private:
   /// Evaluate a fixup to a relocatable expression and the value which should be
@@ -947,6 +972,10 @@ public:
 
   /// Flag a function symbol as the target of a .thumb_func directive.
   void setIsThumbFunc(const MCSymbol *Func) { ThumbFuncs.insert(Func); }
+
+  /// ELF e_header flags
+  unsigned getELFHeaderEFlags() const {return ELFHeaderEFlags;}
+  void setELFHeaderEFlags(unsigned Flags) { ELFHeaderEFlags = Flags;}
 
 public:
   /// Construct a new assembler instance.
@@ -1099,6 +1128,19 @@ public:
   size_t data_region_size() const { return DataRegions.size(); }
 
   /// @}
+  /// @name Data Region List Access
+  /// @{
+
+  // FIXME: This is a total hack, this should not be here. Once things are
+  // factored so that the streamer has direct access to the .o writer, it can
+  // disappear.
+  MCLOHContainer & getLOHContainer() {
+    return LOHContainer;
+  }
+  const MCLOHContainer & getLOHContainer() const {
+    return const_cast<MCAssembler *>(this)->getLOHContainer();
+  }
+  /// @}
   /// @name Backend Data Access
   /// @{
 
@@ -1134,6 +1176,20 @@ public:
       Entry = new MCSymbolData(Symbol, 0, 0, this);
 
     return *Entry;
+  }
+
+  const_file_name_iterator file_names_begin() const {
+    return FileNames.begin();
+  }
+
+  const_file_name_iterator file_names_end() const {
+    return FileNames.end();
+  }
+
+  void addFileName(StringRef FileName) {
+    if (std::find(file_names_begin(), file_names_end(), FileName) ==
+        file_names_end())
+      FileNames.push_back(FileName);
   }
 
   /// @}

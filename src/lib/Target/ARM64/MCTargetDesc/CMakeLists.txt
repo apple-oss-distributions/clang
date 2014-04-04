@@ -1,7 +1,10 @@
 add_llvm_library(LLVMARM64Desc
   ARM64AsmBackend.cpp
+  ARM64ELFObjectWriter.cpp
+  ARM64ELFStreamer.cpp
   ARM64MCAsmInfo.cpp
   ARM64MCCodeEmitter.cpp
+  ARM64MCExpr.cpp
   ARM64MCTargetDesc.cpp
   ARM64MachObjectWriter.cpp
 )

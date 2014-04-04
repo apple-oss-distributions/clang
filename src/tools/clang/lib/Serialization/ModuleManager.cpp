@@ -12,10 +12,10 @@
 //
 //===----------------------------------------------------------------------===//
 #include "clang/Lex/ModuleMap.h"
-#include "clang/Serialization/ModuleManager.h"
 #include "clang/Serialization/GlobalModuleIndex.h"
+#include "clang/Serialization/ModuleManager.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/PathV2.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/system_error.h"
 
@@ -62,16 +62,17 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
   // Look for the file entry. This only fails if the expected size or
   // modification time differ.
   const FileEntry *Entry;
-  if (lookupModuleFile(FileName, ExpectedSize, ExpectedModTime, Entry))
+  if (lookupModuleFile(FileName, ExpectedSize, ExpectedModTime, Entry)) {
+    ErrorStr = "module file out of date";
     return OutOfDate;
+  }
 
   if (!Entry && FileName != "-") {
-    ErrorStr = "file not found";
+    ErrorStr = "module file not found";
     return Missing;
   }
 
   // Check whether we already loaded this module, before
-  AddModuleResult Result = AlreadyLoaded;
   ModuleFile *&ModuleEntry = Modules[Entry];
   bool NewModule = false;
   if (!ModuleEntry) {
@@ -107,8 +108,6 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
     // Initialize the stream
     New->StreamFile.init((const unsigned char *)New->Buffer->getBufferStart(),
                          (const unsigned char *)New->Buffer->getBufferEnd());
-
-    Result = NewlyLoaded;
   }
   
   if (ImportedBy) {
@@ -335,8 +334,7 @@ ModuleManager::visit(bool (*Visitor)(ModuleFile &M, void *UserData),
         break;
 
       // Pop the next module off the stack.
-      NextModule = State->Stack.back();
-      State->Stack.pop_back();
+      NextModule = State->Stack.pop_back_val();
     } while (true);
   }
 

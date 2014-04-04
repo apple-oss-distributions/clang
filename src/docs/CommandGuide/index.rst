@@ -21,13 +21,13 @@ Basic Commands
    lli
    llvm-link
    llvm-ar
-   llvm-ranlib
    llvm-nm
    llvm-prof
    llvm-config
    llvm-diff
    llvm-cov
    llvm-stress
+   llvm-symbolizer
 
 Debugging Tools
 ~~~~~~~~~~~~~~~
@@ -49,3 +49,4 @@ Developer Tools
    tblgen
    lit
    llvm-build
+   llvm-readobj

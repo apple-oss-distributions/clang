@@ -29,18 +29,16 @@ EnableStPairSuppress("arm64-stp-suppress", cl::Hidden,
                      cl::desc("Suppress STP for ARM64"),
                      cl::init(true));
 
-// Option to override the default behavior of the compiler.
-// FIXME: Should we merge the option of the ARM backend with
-// this one?
-static cl::opt<bool>
-EnableGlobalMerge("arm64-global-merge", cl::Hidden,
-                  cl::desc("Enable global merge pass for ARM64"),
-                  cl::init(true));
-
 static cl::opt<bool>
 EnablePromoteConstant("arm64-promote-const", cl::Hidden,
                       cl::desc("Enable the promote constant pass"),
                       cl::init(true));
+
+static cl::opt<bool>
+EnableCollectLOH("arm64-collect-loh", cl::Hidden,
+                  cl::desc("Enable the pass that emits the linker"
+                           " optimization hints (LOH)"),
+                  cl::init(true));
 
 extern "C" void LLVMInitializeARM64Target() {
   // Register the target.
@@ -57,12 +55,13 @@ ARM64TargetMachine::ARM64TargetMachine(const Target &T, StringRef TT,
   : LLVMTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
     Subtarget(TT, CPU, FS),
     DL(std::string("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
-                   "i64:64:64-f32:32:32-f64:64:64-v64:64:64-"
+                   "i64:64:64-f32:32:32-f64:64:64-f128:128:128-v64:64:64-"
                    "v128:128:128-a0:0:64-n32:64-S128")),
     InstrInfo(Subtarget),
     TLInfo(*this),
-    FrameLowering(Subtarget),
+    FrameLowering(*this, Subtarget),
     TSInfo(*this) {
+  initAsmInfo();
 }
 
 namespace {
@@ -90,7 +89,7 @@ void ARM64TargetMachine::addAnalysisPasses(PassManagerBase &PM) {
   // Add first the target-independent BasicTTI pass, then our ARM64 pass. This
   // allows the ARM64 pass to delegate to the target independent layer when
   // appropriate.
-  PM.add(createBasicTargetTransformInfoPass(getTargetLowering()));
+  PM.add(createBasicTargetTransformInfoPass(this));
   PM.add(createARM64TargetTransformInfoPass(this));
 }
 
@@ -103,13 +102,14 @@ bool ARM64PassConfig::addPreISel() {
   // Change GlobalValue Private linkage to LinkerPrivate for the Darwin linker.
   // FIXME: Do we need this anymore? We should be handling this in MC via
   // sections at this point.
-  addPass(createARM64SetGlobalLinkage());
+  if (TM->getSubtarget<ARM64Subtarget>().isTargetDarwin())
+    addPass(createARM64SetGlobalLinkage());
   // Run promote constant before global merge, so that the promoted constants
   // get a chance to be merged
   if (TM->getOptLevel() != CodeGenOpt::None && EnablePromoteConstant)
     addPass(createARM64PromoteConstantPass());
-  if (TM->getOptLevel() != CodeGenOpt::None && EnableGlobalMerge)
-    addPass(createGlobalMergePass(TM->getTargetLowering()));
+  if (TM->getOptLevel() != CodeGenOpt::None)
+    addPass(createGlobalMergePass(TM));
   if (TM->getOptLevel() != CodeGenOpt::None)
     addPass(createARM64AddressTypePromotionPass());
   return false;
@@ -117,6 +117,13 @@ bool ARM64PassConfig::addPreISel() {
 
 bool ARM64PassConfig::addInstSelector() {
   addPass(createARM64ISelDag(getARM64TargetMachine(), getOptLevel()));
+
+  // For ELF, cleanup any local-dynamic TLS accesses (i.e. combine as many
+  // references to _TLS_MODULE_BASE_ as possible.
+  if (TM->getSubtarget<ARM64Subtarget>().isTargetELF() &&
+      getOptLevel() != CodeGenOpt::None)
+    addPass(createARM64CleanupLocalDynamicTLSPass());
+
   return false;
 }
 
@@ -153,5 +160,7 @@ bool ARM64PassConfig::addPreEmitPass() {
   // Relax conditional branch instructions if they're otherwise out of
   // range of their destination.
   addPass(createARM64BranchRelaxation());
+  if (TM->getOptLevel() != CodeGenOpt::None && EnableCollectLOH)
+    addPass(createARM64CollectLOHPass());
   return true;
 }

@@ -10,6 +10,7 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -21,11 +22,15 @@
 #include <cstdlib>
 using namespace llvm;
 
-MCStreamer::MCStreamer(StreamerKind Kind, MCContext &Ctx)
-    : Kind(Kind), Context(Ctx), EmitEHFrame(true), EmitDebugFrame(false),
-      CurrentW64UnwindInfo(0), LastSymbol(0), AutoInitSections(false) {
-  const MCSection *section = NULL;
-  SectionStack.push_back(std::make_pair(section, section));
+MCTargetStreamer::~MCTargetStreamer() {}
+
+MCStreamer::MCStreamer(MCContext &Ctx, MCTargetStreamer *TargetStreamer)
+    : Context(Ctx), TargetStreamer(TargetStreamer), EmitEHFrame(true),
+      EmitDebugFrame(false), CurrentW64UnwindInfo(0), LastSymbol(0),
+      AutoInitSections(false) {
+  SectionStack.push_back(std::pair<MCSectionSubPair, MCSectionSubPair>());
+  if (TargetStreamer)
+    TargetStreamer->setStreamer(this);
 }
 
 MCStreamer::~MCStreamer() {
@@ -36,13 +41,13 @@ MCStreamer::~MCStreamer() {
 void MCStreamer::reset() {
   for (unsigned i = 0; i < getNumW64UnwindInfos(); ++i)
     delete W64UnwindInfos[i];
+  W64UnwindInfos.clear();
   EmitEHFrame = true;
   EmitDebugFrame = false;
   CurrentW64UnwindInfo = 0;
   LastSymbol = 0;
-  const MCSection *section = NULL;
   SectionStack.clear();
-  SectionStack.push_back(std::make_pair(section, section));  
+  SectionStack.push_back(std::pair<MCSectionSubPair, MCSectionSubPair>());
 }
 
 const MCExpr *MCStreamer::BuildSymbolDiff(MCContext &Context,
@@ -59,7 +64,7 @@ const MCExpr *MCStreamer::BuildSymbolDiff(MCContext &Context,
 }
 
 const MCExpr *MCStreamer::ForceExpAbs(const MCExpr* Expr) {
-  if (Context.getAsmInfo().hasAggressiveSymbolFolding() ||
+  if (Context.getAsmInfo()->hasAggressiveSymbolFolding() ||
       isa<MCSymbolRefExpr>(Expr))
     return Expr;
 
@@ -71,6 +76,13 @@ const MCExpr *MCStreamer::ForceExpAbs(const MCExpr* Expr) {
 raw_ostream &MCStreamer::GetCommentOS() {
   // By default, discard comments.
   return nulls();
+}
+
+void MCStreamer::generateCompactUnwindEncodings(MCAsmBackend *MAB) {
+  for (std::vector<MCDwarfFrameInfo>::iterator I = FrameInfos.begin(),
+         E = FrameInfos.end(); I != E; ++I)
+    I->CompactUnwindEncoding =
+      (MAB ? MAB->generateCompactUnwindEncoding(I->Instructions) : 0);
 }
 
 void MCStreamer::EmitDwarfSetLineAddr(int64_t LineDelta,
@@ -87,55 +99,49 @@ void MCStreamer::EmitDwarfSetLineAddr(int64_t LineDelta,
 
 /// EmitIntValue - Special case of EmitValue that avoids the client having to
 /// pass in a MCExpr for constant integers.
-void MCStreamer::EmitIntValue(uint64_t Value, unsigned Size,
-                              unsigned AddrSpace) {
+void MCStreamer::EmitIntValue(uint64_t Value, unsigned Size) {
   assert(Size <= 8 && "Invalid size");
   assert((isUIntN(8 * Size, Value) || isIntN(8 * Size, Value)) &&
          "Invalid size");
   char buf[8];
-  const bool isLittleEndian = Context.getAsmInfo().isLittleEndian();
+  const bool isLittleEndian = Context.getAsmInfo()->isLittleEndian();
   for (unsigned i = 0; i != Size; ++i) {
     unsigned index = isLittleEndian ? i : (Size - i - 1);
     buf[i] = uint8_t(Value >> (index * 8));
   }
-  EmitBytes(StringRef(buf, Size), AddrSpace);
+  EmitBytes(StringRef(buf, Size));
 }
 
 /// EmitULEB128Value - Special case of EmitULEB128Value that avoids the
 /// client having to pass in a MCExpr for constant integers.
-void MCStreamer::EmitULEB128IntValue(uint64_t Value, unsigned Padding,
-				     unsigned AddrSpace) {
+void MCStreamer::EmitULEB128IntValue(uint64_t Value, unsigned Padding) {
   SmallString<128> Tmp;
   raw_svector_ostream OSE(Tmp);
   encodeULEB128(Value, OSE, Padding);
-  EmitBytes(OSE.str(), AddrSpace);
+  EmitBytes(OSE.str());
 }
 
 /// EmitSLEB128Value - Special case of EmitSLEB128Value that avoids the
 /// client having to pass in a MCExpr for constant integers.
-void MCStreamer::EmitSLEB128IntValue(int64_t Value, unsigned AddrSpace) {
+void MCStreamer::EmitSLEB128IntValue(int64_t Value) {
   SmallString<128> Tmp;
   raw_svector_ostream OSE(Tmp);
   encodeSLEB128(Value, OSE);
-  EmitBytes(OSE.str(), AddrSpace);
+  EmitBytes(OSE.str());
 }
 
-void MCStreamer::EmitAbsValue(const MCExpr *Value, unsigned Size,
-                              unsigned AddrSpace) {
+void MCStreamer::EmitAbsValue(const MCExpr *Value, unsigned Size) {
   const MCExpr *ABS = ForceExpAbs(Value);
-  EmitValue(ABS, Size, AddrSpace);
+  EmitValue(ABS, Size);
 }
 
 
-void MCStreamer::EmitValue(const MCExpr *Value, unsigned Size,
-                           unsigned AddrSpace) {
-  EmitValueImpl(Value, Size, AddrSpace);
+void MCStreamer::EmitValue(const MCExpr *Value, unsigned Size) {
+  EmitValueImpl(Value, Size);
 }
 
-void MCStreamer::EmitSymbolValue(const MCSymbol *Sym, unsigned Size,
-                                  unsigned AddrSpace) {
-  EmitValueImpl(MCSymbolRefExpr::Create(Sym, getContext()), Size,
-                AddrSpace);
+void MCStreamer::EmitSymbolValue(const MCSymbol *Sym, unsigned Size) {
+  EmitValueImpl(MCSymbolRefExpr::Create(Sym, getContext()), Size);
 }
 
 void MCStreamer::EmitGPRel64Value(const MCExpr *Value) {
@@ -148,11 +154,15 @@ void MCStreamer::EmitGPRel32Value(const MCExpr *Value) {
 
 /// EmitFill - Emit NumBytes bytes worth of the value specified by
 /// FillValue.  This implements directives such as '.space'.
-void MCStreamer::EmitFill(uint64_t NumBytes, uint8_t FillValue,
-                          unsigned AddrSpace) {
+void MCStreamer::EmitFill(uint64_t NumBytes, uint8_t FillValue) {
   const MCExpr *E = MCConstantExpr::Create(FillValue, getContext());
   for (uint64_t i = 0, e = NumBytes; i != e; ++i)
-    EmitValue(E, 1, AddrSpace);
+    EmitValue(E, 1);
+}
+
+/// The implementation in this class just redirects to EmitFill.
+void MCStreamer::EmitZeros(uint64_t NumBytes) {
+  EmitFill(NumBytes, 0);
 }
 
 bool MCStreamer::EmitDwarfFileDirective(unsigned FileNo,
@@ -172,7 +182,7 @@ void MCStreamer::EmitDwarfLocDirective(unsigned FileNo, unsigned Line,
 
 MCDwarfFrameInfo *MCStreamer::getCurrentFrameInfo() {
   if (FrameInfos.empty())
-    return NULL;
+    return 0;
   return &FrameInfos.back();
 }
 
@@ -186,17 +196,28 @@ void MCStreamer::EmitEHSymAttributes(const MCSymbol *Symbol,
                                      MCSymbol *EHSymbol) {
 }
 
+void MCStreamer::AssignSection(MCSymbol *Symbol, const MCSection *Section) {
+  if (Section)
+    Symbol->setSection(*Section);
+  else
+    Symbol->setUndefined();
+
+  // As we emit symbols into a section, track the order so that they can
+  // be sorted upon later. Zero is reserved to mean 'unemitted'.
+  SymbolOrdering[Symbol] = 1 + SymbolOrdering.size();
+}
+
 void MCStreamer::EmitLabel(MCSymbol *Symbol) {
   assert(!Symbol->isVariable() && "Cannot emit a variable symbol!");
-  assert(getCurrentSection() && "Cannot emit before setting section!");
-  Symbol->setSection(*getCurrentSection());
+  assert(getCurrentSection().first && "Cannot emit before setting section!");
+  AssignSection(Symbol, getCurrentSection().first);
   LastSymbol = Symbol;
 }
 
 void MCStreamer::EmitDebugLabel(MCSymbol *Symbol) {
   assert(!Symbol->isVariable() && "Cannot emit a variable symbol!");
-  assert(getCurrentSection() && "Cannot emit before setting section!");
-  Symbol->setSection(*getCurrentSection());
+  assert(getCurrentSection().first && "Cannot emit before setting section!");
+  AssignSection(Symbol, getCurrentSection().first);
   LastSymbol = Symbol;
 }
 
@@ -230,7 +251,7 @@ void MCStreamer::RecordProcStart(MCDwarfFrameInfo &Frame) {
   Frame.Function = LastSymbol;
   // If the function is externally visible, we need to create a local
   // symbol to avoid relocations.
-  StringRef Prefix = getContext().getAsmInfo().getPrivateGlobalPrefix();
+  StringRef Prefix = getContext().getAsmInfo()->getPrivateGlobalPrefix();
   if (LastSymbol && LastSymbol->getName().startswith(Prefix)) {
     Frame.Begin = LastSymbol;
   } else {
@@ -383,6 +404,14 @@ void MCStreamer::EmitCFIRegister(int64_t Register1, int64_t Register2) {
   CurFrame->Instructions.push_back(Instruction);
 }
 
+void MCStreamer::EmitCFIWindowSave() {
+  MCSymbol *Label = EmitCFICommon();
+  MCCFIInstruction Instruction =
+    MCCFIInstruction::createWindowSave(Label);
+  MCDwarfFrameInfo *CurFrame = getCurrentFrameInfo();
+  CurFrame->Instructions.push_back(Instruction);
+}
+
 void MCStreamer::setCurrentW64UnwindInfo(MCWin64EHUnwindInfo *Frame) {
   W64UnwindInfos.push_back(Frame);
   CurrentW64UnwindInfo = W64UnwindInfos.back();
@@ -473,7 +502,9 @@ void MCStreamer::EmitWin64EHSetFrame(unsigned Register, unsigned Offset) {
     report_fatal_error("Frame register and offset already specified!");
   if (Offset & 0x0F)
     report_fatal_error("Misaligned frame pointer offset!");
-  MCWin64EHInstruction Inst(Win64EH::UOP_SetFPReg, NULL, Register, Offset);
+  MCSymbol *Label = getContext().CreateTempSymbol();
+  MCWin64EHInstruction Inst(Win64EH::UOP_SetFPReg, Label, Register, Offset);
+  EmitLabel(Label);
   CurFrame->LastFrameInst = CurFrame->Instructions.size();
   CurFrame->Instructions.push_back(Inst);
 }
@@ -537,54 +568,10 @@ void MCStreamer::EmitCOFFSecRel32(MCSymbol const *Symbol) {
   llvm_unreachable("This file format doesn't support this directive");
 }
 
-void MCStreamer::EmitFnStart() {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitFnEnd() {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitCantUnwind() {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitHandlerData() {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitPersonality(const MCSymbol *Personality) {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitSetFP(unsigned FpReg, unsigned SpReg, int64_t Offset) {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitPad(int64_t Offset) {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitRegSave(const SmallVectorImpl<unsigned> &RegList, bool) {
-  errs() << "Not implemented yet\n";
-  abort();
-}
-
-void MCStreamer::EmitTCEntry(const MCSymbol &S) {
-  llvm_unreachable("Unsupported method");
-}
-
 /// EmitRawText - If this file is backed by an assembly streamer, this dumps
 /// the specified string in the output .s file.  This capability is
 /// indicated by the hasRawTextSupport() predicate.
-void MCStreamer::EmitRawText(StringRef String) {
+void MCStreamer::EmitRawTextImpl(StringRef String) {
   errs() << "EmitRawText called on an MCStreamer that doesn't support it, "
   " something must not be fully mc'ized\n";
   abort();
@@ -592,19 +579,18 @@ void MCStreamer::EmitRawText(StringRef String) {
 
 void MCStreamer::EmitRawText(const Twine &T) {
   SmallString<128> Str;
-  T.toVector(Str);
-  EmitRawText(Str.str());
+  EmitRawTextImpl(T.toStringRef(Str));
 }
 
-void MCStreamer::EmitFrames(bool usingCFI) {
+void MCStreamer::EmitFrames(MCAsmBackend *MAB, bool usingCFI) {
   if (!getNumFrameInfos())
     return;
 
   if (EmitEHFrame)
-    MCDwarfFrameEmitter::Emit(*this, usingCFI, true);
+    MCDwarfFrameEmitter::Emit(*this, MAB, usingCFI, true);
 
   if (EmitDebugFrame)
-    MCDwarfFrameEmitter::Emit(*this, usingCFI, false);
+    MCDwarfFrameEmitter::Emit(*this, MAB, usingCFI, false);
 }
 
 void MCStreamer::EmitW64Tables() {
@@ -619,4 +605,9 @@ void MCStreamer::Finish() {
     report_fatal_error("Unfinished frame!");
 
   FinishImpl();
+}
+
+MCSymbolData &MCStreamer::getOrCreateSymbolData(MCSymbol *Symbol) {
+  report_fatal_error("Not supported!");
+  return *(static_cast<MCSymbolData*>(0));
 }

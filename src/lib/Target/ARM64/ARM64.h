@@ -41,6 +41,9 @@ FunctionPass *createARM64AddressTypePromotionPass();
 /// \brief Creates an ARM-specific Target Transformation Info pass.
 ImmutablePass *createARM64TargetTransformInfoPass(const ARM64TargetMachine *TM);
 
+FunctionPass *createARM64CleanupLocalDynamicTLSPass();
+
+FunctionPass *createARM64CollectLOHPass();
 } // end namespace llvm
 
 #endif

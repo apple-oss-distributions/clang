@@ -15,6 +15,7 @@
 #include "MCTargetDesc/ARM64AddressingModes.h"
 #include "MCTargetDesc/ARM64BaseInfo.h"
 #include "MCTargetDesc/ARM64FixupKinds.h"
+#include "MCTargetDesc/ARM64MCExpr.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInst.h"
@@ -53,6 +54,14 @@ public:
   unsigned getMachineOpValue(const MCInst &MI,const MCOperand &MO,
                              SmallVectorImpl<MCFixup> &Fixups) const;
 
+  /// getAMIndexed8OpValue - Return encoding info for base register
+  /// and 12-bit unsigned immediate attached to a load, store or prfm
+  /// instruction. If operand requires a relocation, record it and
+  /// return zero in that part of the encoding.
+  template<uint32_t FixupKind>
+  uint32_t getAMIndexed8OpValue(const MCInst &MI, unsigned OpIdx,
+                                SmallVectorImpl<MCFixup> &Fixups) const;
+
   /// getAdrLabelOpValue - Return encoding info for 21-bit immediate ADR label
   /// target.
   uint32_t getAdrLabelOpValue(const MCInst &MI, unsigned OpIdx,
@@ -78,9 +87,15 @@ public:
   uint32_t getBranchTargetOpValue(const MCInst &MI, unsigned OpIdx,
                                   SmallVectorImpl<MCFixup> &) const;
 
+  /// getMoveWideImmOpValue - Return the encoded value for the immediate operand
+  /// of a MOVZ or MOVK instruction.
+  uint32_t getMoveWideImmOpValue(const MCInst &MI, unsigned OpIdx,
+                                SmallVectorImpl<MCFixup> &Fixups) const;
+
   /// getVecShifterOpValue - Return the encoded value for the vector shifter.
   uint32_t getVecShifterOpValue(const MCInst &MI, unsigned OpIdx,
                                 SmallVectorImpl<MCFixup> &Fixups) const;
+
 
   /// getMoveVecShifterOpValue - Return the encoded value for the vector move
   /// shifter (MSL).
@@ -123,6 +138,8 @@ public:
   uint32_t getSIMDShift16OpValue(const MCInst &MI, unsigned OpIdx,
                                  SmallVectorImpl<MCFixup> &Fixups) const;
 
+  unsigned fixMOVZ(const MCInst &MI, unsigned EncodedValue) const;
+
   void EmitByte(unsigned char C, raw_ostream &OS) const {
     OS << (char)C;
   }
@@ -154,19 +171,35 @@ unsigned ARM64MCCodeEmitter::
 getMachineOpValue(const MCInst &MI, const MCOperand &MO,
                   SmallVectorImpl<MCFixup> &Fixups) const {
   if (MO.isReg())
-    return Ctx.getRegisterInfo().getEncodingValue(MO.getReg());
-  else if (MO.isImm())
+    return Ctx.getRegisterInfo()->getEncodingValue(MO.getReg());
+  else {
+    assert(MO.isImm() && "did not expect relocated expression");
     return static_cast<unsigned>(MO.getImm());
-  else if (MO.isExpr()) {
-    MCFixupKind Kind = MCFixupKind(ARM64::fixup_arm64_imm12);
-    Fixups.push_back(MCFixup::Create(1, MO.getExpr(), Kind, MI.getLoc()));
-
-    ++MCNumFixups;
-    return 0;
   }
 
   assert (0 && "Unable to encode MCOperand!");
   return 0;
+}
+
+template<uint32_t FixupKind> uint32_t
+ARM64MCCodeEmitter::getAMIndexed8OpValue(const MCInst &MI, unsigned OpIdx,
+                                       SmallVectorImpl<MCFixup> &Fixups) const {
+  unsigned BaseReg = MI.getOperand(OpIdx).getReg();
+  BaseReg = Ctx.getRegisterInfo()->getEncodingValue(BaseReg);
+
+  const MCOperand &MO = MI.getOperand(OpIdx+1);
+  uint32_t ImmVal = 0;
+
+  if (MO.isImm())
+    ImmVal = static_cast<uint32_t>(MO.getImm());
+  else {
+    assert(MO.isExpr() && "unable to encode load/store imm operand");
+    MCFixupKind Kind = MCFixupKind(FixupKind);
+    Fixups.push_back(MCFixup::Create(0, MO.getExpr(), Kind, MI.getLoc()));
+    ++MCNumFixups;
+  }
+
+  return BaseReg | (ImmVal << 5);
 }
 
 /// getAdrLabelOpValue - Return encoding info for 21-bit immediate ADR label
@@ -181,15 +214,12 @@ getAdrLabelOpValue(const MCInst &MI, unsigned OpIdx,
   assert(MO.isExpr() && "Unexpected ADR target type!");
   const MCExpr *Expr = MO.getExpr();
 
-  // The adrhi fixup is the high 19 bits.
-  MCFixupKind Kind = MCFixupKind(ARM64::fixup_arm64_pcrel_adrhi);
+  MCFixupKind Kind = MI.getOpcode() == ARM64::ADR ?
+      MCFixupKind(ARM64::fixup_arm64_pcrel_adr_imm21) :
+      MCFixupKind(ARM64::fixup_arm64_pcrel_adrp_imm21);
   Fixups.push_back(MCFixup::Create(0, Expr, Kind, MI.getLoc()));
 
-  // The immlo fixup is the low 2 bits.
-  Kind = MCFixupKind(ARM64::fixup_arm64_pcrel_adrlo);
-  Fixups.push_back(MCFixup::Create(3, Expr, Kind, MI.getLoc()));
-
-  MCNumFixups += 2;
+  MCNumFixups += 1;
 
   // All of the information is in the fixup.
   return 0;
@@ -216,8 +246,8 @@ getAddSubImmOpValue(const MCInst &MI, unsigned OpIdx,
   assert(ShiftVal == 0 && "shift not allowed on add/sub immediate with fixup");
 
   // Encode the 12 bits of the fixup.
-  MCFixupKind Kind = MCFixupKind(ARM64::fixup_arm64_imm12);
-  Fixups.push_back(MCFixup::Create(1, Expr, Kind, MI.getLoc()));
+  MCFixupKind Kind = MCFixupKind(ARM64::fixup_arm64_add_imm12);
+  Fixups.push_back(MCFixup::Create(0, Expr, Kind, MI.getLoc()));
 
   ++MCNumFixups;
 
@@ -243,6 +273,23 @@ getCondBranchTargetOpValue(const MCInst &MI, unsigned OpIdx,
   // All of the information is in the fixup.
   return 0;
 }
+
+uint32_t ARM64MCCodeEmitter::
+getMoveWideImmOpValue(const MCInst &MI, unsigned OpIdx,
+                      SmallVectorImpl<MCFixup> &Fixups) const {
+  const MCOperand &MO = MI.getOperand(OpIdx);
+
+  if (MO.isImm()) return MO.getImm();
+  assert(MO.isExpr() && "Unexpected movz/movk immediate");
+
+  Fixups.push_back(MCFixup::Create(
+      0, MO.getExpr(), MCFixupKind(ARM64::fixup_arm64_movw), MI.getLoc()));
+
+  ++MCNumFixups;
+
+  return 0;
+}
+
 
 /// getTestBranchTargetOpValue - Return the encoded value for a test-bit-and-
 /// branch target.
@@ -275,7 +322,9 @@ getBranchTargetOpValue(const MCInst &MI, unsigned OpIdx,
   if (MO.isImm()) return MO.getImm();
   assert(MO.isExpr() && "Unexpected ADR target type!");
 
-  MCFixupKind Kind = MCFixupKind(ARM64::fixup_arm64_pcrel_branch26);
+  MCFixupKind Kind = MI.getOpcode() == ARM64::BL ?
+      MCFixupKind(ARM64::fixup_arm64_pcrel_call26) :
+      MCFixupKind(ARM64::fixup_arm64_pcrel_branch26);
   Fixups.push_back(MCFixup::Create(0, MO.getExpr(), Kind, MI.getLoc()));
 
   ++MCNumFixups;
@@ -427,9 +476,33 @@ getMoveVecShifterOpValue(const MCInst &MI, unsigned OpIdx,
   return ShiftVal == 8 ? 0 : 1;
 }
 
+unsigned
+ARM64MCCodeEmitter::fixMOVZ(const MCInst &MI, unsigned EncodedValue) const {
+  // If one of the signed fixup kinds is applied to a MOVZ instruction, the
+  // eventual result could be either a MOVZ or a MOVN. It's the MCCodeEmitter's
+  // job to ensure that any bits possibly affected by this are 0. This means we
+  // must zero out bit 30 (essentially emitting a MOVN).
+  MCOperand UImm16MO = MI.getOperand(1);
+
+  // Nothing to do if there's no fixup.
+  if (UImm16MO.isImm())
+    return EncodedValue;
+
+  return EncodedValue & ~(1u << 30);
+}
+
 void ARM64MCCodeEmitter::
 EncodeInstruction(const MCInst &MI, raw_ostream &OS,
                   SmallVectorImpl<MCFixup> &Fixups) const {
+  if (MI.getOpcode() == ARM64::TLSDESCCALL) {
+    // This is a directive which applies an R_AARCH64_TLSDESC_CALL to the
+    // following (BLR) instruction. It doesn't emit any code itself so it
+    // doesn't go through the normal TableGenerated channels.
+    MCFixupKind Fixup = MCFixupKind(ARM64::fixup_arm64_tlsdesc_call);
+    Fixups.push_back(MCFixup::Create(0, MI.getOperand(0).getExpr(), Fixup));
+    return;
+  }
+
   uint64_t Binary = getBinaryCodeForInstr(MI, Fixups);
   EmitConstant(Binary, 4, OS);
   ++MCNumEmitted;  // Keep track of the # of mi's emitted.

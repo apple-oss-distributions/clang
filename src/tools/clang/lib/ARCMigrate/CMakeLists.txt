@@ -41,4 +41,5 @@ target_link_libraries(clangARCMigrate
   clangFrontend
   clangRewriteCore
   clangRewriteFrontend
+  clangStaticAnalyzerCheckers
   )

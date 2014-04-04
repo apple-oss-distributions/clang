@@ -24,7 +24,7 @@ ARM64SelectionDAGInfo::~ARM64SelectionDAGInfo() {
 }
 
 SDValue
-ARM64SelectionDAGInfo::EmitTargetCodeForMemset(SelectionDAG &DAG, DebugLoc dl,
+ARM64SelectionDAGInfo::EmitTargetCodeForMemset(SelectionDAG &DAG, SDLoc dl,
                                                SDValue Chain,
                                                SDValue Dst, SDValue Src,
                                                SDValue Size, unsigned Align,

@@ -23,6 +23,7 @@
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtObjC.h"
 #include "clang/Basic/LangOptions.h"
+#include "clang/CodeGen/CGFunctionInfo.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
@@ -1896,7 +1897,7 @@ CGObjCCommonMac::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
     Fn = (ObjCABI == 2) ? ObjCTypes.getSendFp2RetFn2(IsSuper)
       : ObjCTypes.getSendFp2retFn(IsSuper);
   } else {
-    // arm64 uses objc_msgSend for stret methods and yet null reciver check 
+    // arm64 uses objc_msgSend for stret methods and yet null receiver check 
     // must be made for it.
     if (!IsSuper && CGM.ReturnTypeUsesSRet(MSI.CallInfo))
       nullReturn.init(CGF, Arg0);
@@ -1954,8 +1955,8 @@ llvm::Constant *CGObjCCommonMac::BuildGCBlockLayout(CodeGenModule &CGM,
   bool hasUnion = false;
   SkipIvars.clear();
   IvarsInfo.clear();
-  unsigned WordSizeInBits = CGM.getContext().getTargetInfo().getPointerWidth(0);
-  unsigned ByteSizeInBits = CGM.getContext().getTargetInfo().getCharWidth();
+  unsigned WordSizeInBits = CGM.getTarget().getPointerWidth(0);
+  unsigned ByteSizeInBits = CGM.getTarget().getCharWidth();
   
   // __isa is the first field in block descriptor and must assume by runtime's
   // convention that it is GC'able.
@@ -2082,7 +2083,7 @@ void CGObjCCommonMac::BuildRCRecordLayout(const llvm::StructLayout *RecLayout,
   
   if (RecFields.empty())
     return;
-  unsigned ByteSizeInBits = CGM.getContext().getTargetInfo().getCharWidth();
+  unsigned ByteSizeInBits = CGM.getTarget().getCharWidth();
   
   for (unsigned i = 0, e = RecFields.size(); i != e; ++i) {
     const FieldDecl *Field = RecFields[i];
@@ -2321,8 +2322,8 @@ llvm::Constant *CGObjCCommonMac::getBitmapBlockLayout(bool ComputeByrefLayout) {
   llvm::Constant *nullPtr = llvm::Constant::getNullValue(CGM.Int8PtrTy);
   if (RunSkipBlockVars.empty())
     return nullPtr;
-  unsigned WordSizeInBits = CGM.getContext().getTargetInfo().getPointerWidth(0);
-  unsigned ByteSizeInBits = CGM.getContext().getTargetInfo().getCharWidth();
+  unsigned WordSizeInBits = CGM.getTarget().getPointerWidth(0);
+  unsigned ByteSizeInBits = CGM.getTarget().getCharWidth();
   unsigned WordSizeInBytes = WordSizeInBits/ByteSizeInBits;
   
   // Sort on byte position; captures might not be allocated in order,
@@ -2398,7 +2399,7 @@ llvm::Constant *CGObjCCommonMac::getBitmapBlockLayout(bool ComputeByrefLayout) {
         printf("\n Inline instruction for BYREF variable layout: ");
       else
         printf("\n Inline instruction for block variable layout: ");
-      printf("0x0%llx\n", (unsigned long long)Result);
+      printf("0x0%" PRIx64 "\n", Result);
     }
     if (WordSizeInBytes == 8) {
       const llvm::APInt Instruction(64, Result);
@@ -2473,8 +2474,8 @@ llvm::Constant *CGObjCCommonMac::BuildRCBlockLayout(CodeGenModule &CGM,
   RunSkipBlockVars.clear();
   bool hasUnion = false;
   
-  unsigned WordSizeInBits = CGM.getContext().getTargetInfo().getPointerWidth(0);
-  unsigned ByteSizeInBits = CGM.getContext().getTargetInfo().getCharWidth();
+  unsigned WordSizeInBits = CGM.getTarget().getPointerWidth(0);
+  unsigned ByteSizeInBits = CGM.getTarget().getCharWidth();
   unsigned WordSizeInBytes = WordSizeInBits/ByteSizeInBits;
   
   const BlockDecl *blockDecl = blockInfo.getBlockDecl();
@@ -4353,7 +4354,7 @@ void CGObjCCommonMac::EmitImageInfo() {
 
   // Indicate whether we're compiling this to run on a simulator.
   const llvm::Triple &Triple = CGM.getTarget().getTriple();
-  if (Triple.getOS() == llvm::Triple::IOS &&
+  if (Triple.isiOS() &&
       (Triple.getArch() == llvm::Triple::x86 ||
        Triple.getArch() == llvm::Triple::x86_64))
     Mod.addModuleFlag(llvm::Module::Error, "Objective-C Is Simulated",
@@ -4542,8 +4543,8 @@ void CGObjCCommonMac::BuildAggrIvarLayout(const ObjCImplementationDecl *OI,
 
   if (RecFields.empty())
     return;
-  unsigned WordSizeInBits = CGM.getContext().getTargetInfo().getPointerWidth(0);
-  unsigned ByteSizeInBits = CGM.getContext().getTargetInfo().getCharWidth();
+  unsigned WordSizeInBits = CGM.getTarget().getPointerWidth(0);
+  unsigned ByteSizeInBits = CGM.getTarget().getCharWidth();
   if (!RD && CGM.getLangOpts().ObjCAutoRefCount) {
     const FieldDecl *FirstField = RecFields[0];
     FirstFieldDelta = 
@@ -5769,6 +5770,9 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassMetaData(
   };
   if (!Values[1])
     Values[1] = llvm::Constant::getNullValue(ObjCTypes.ClassnfABIPtrTy);
+  if (!Values[3])
+    Values[3] = llvm::Constant::getNullValue(
+                  llvm::PointerType::getUnqual(ObjCTypes.ImpnfABITy));
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.ClassnfABITy,
                                                    Values);
   llvm::GlobalVariable *GV = GetClassGlobal(ClassName);
@@ -5812,14 +5816,21 @@ void CGObjCNonFragileABIMac::GenerateClass(const ObjCImplementationDecl *ID) {
       llvm::GlobalValue::ExternalLinkage,
       0,
       "_objc_empty_cache");
-
-    ObjCEmptyVtableVar = new llvm::GlobalVariable(
-      CGM.getModule(),
-      ObjCTypes.ImpnfABITy,
-      false,
-      llvm::GlobalValue::ExternalLinkage,
-      0,
-      "_objc_empty_vtable");
+    
+    // Make this entry NULL for any iOS device target, any iOS simulator target,
+    // OS X with deployment target 10.9 or later.
+    const llvm::Triple &Triple = CGM.getTarget().getTriple();
+    if (Triple.isiOS() || (Triple.isMacOSX() && !Triple.isMacOSXVersionLT(10, 9)))
+      // This entry will be null.
+      ObjCEmptyVtableVar = 0;
+    else
+      ObjCEmptyVtableVar = new llvm::GlobalVariable(
+                                                    CGM.getModule(),
+                                                    ObjCTypes.ImpnfABITy,
+                                                    false,
+                                                    llvm::GlobalValue::ExternalLinkage,
+                                                    0,
+                                                    "_objc_empty_vtable");
   }
   assert(ID->getClassInterface() &&
          "CGObjCNonFragileABIMac::GenerateClass - class is 0");
@@ -6491,9 +6502,10 @@ llvm::Value *CGObjCNonFragileABIMac::EmitIvarOffset(
   llvm::Value *IvarOffsetValue = ObjCIvarOffsetVariable(Interface, Ivar);
   IvarOffsetValue = CGF.Builder.CreateLoad(IvarOffsetValue, "ivar");
   if (IsIvarOffsetKnownIdempotent(CGF, Interface, Ivar))
-    if (llvm::LoadInst *LI = cast<llvm::LoadInst>(IvarOffsetValue))
-      LI->setMetadata(CGM.getModule().getMDKindID("invariant.load"),
-                      llvm::MDNode::get(VMContext, ArrayRef<llvm::Value*>()));
+    cast<llvm::LoadInst>(IvarOffsetValue)
+      ->setMetadata(CGM.getModule().getMDKindID("invariant.load"),
+                    llvm::MDNode::get(VMContext, ArrayRef<llvm::Value*>()));
+
   // This could be 32bit int or 64bit integer depending on the architecture.
   // Cast it to 64bit integer value, if it is a 32bit integer ivar offset value
   //  as this is what caller always expectes.

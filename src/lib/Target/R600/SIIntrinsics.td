@@ -14,33 +14,45 @@
 
 let TargetPrefix = "SI", isTarget = 1 in {
 
+  def int_SI_tid : Intrinsic <[llvm_i32_ty], [], [IntrNoMem]>;
   def int_SI_packf16 : Intrinsic <[llvm_i32_ty], [llvm_float_ty, llvm_float_ty], [IntrNoMem]>;
   def int_SI_export : Intrinsic <[], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_float_ty, llvm_float_ty, llvm_float_ty, llvm_float_ty], []>;
-  /* XXX: We may need a seperate intrinsic here for loading integer values */
-  def int_SI_load_const : Intrinsic <[llvm_float_ty], [llvm_i64_ty, llvm_i32_ty], []>;
-  def int_SI_vs_load_buffer_index : Intrinsic <[llvm_i32_ty], [], [IntrNoMem]>;
-  def int_SI_vs_load_input : Intrinsic <[llvm_v4f32_ty], [llvm_v4i32_ty, llvm_i16_ty, llvm_i32_ty], [IntrReadMem]> ;
-  def int_SI_wqm : Intrinsic <[], [], []>;
+  def int_SI_load_const : Intrinsic <[llvm_float_ty], [llvm_anyint_ty, llvm_i32_ty], [IntrNoMem]>;
+  def int_SI_vs_load_input : Intrinsic <[llvm_v4f32_ty], [llvm_anyint_ty, llvm_i16_ty, llvm_i32_ty], [IntrNoMem]> ;
 
-  class Sample : Intrinsic <[llvm_v4f32_ty], [llvm_i32_ty, llvm_v4f32_ty, llvm_v8i32_ty, llvm_v4i32_ty, llvm_i32_ty], [IntrReadMem]>;
+  // Fully-flexible TBUFFER_STORE_FORMAT_* except for the ADDR64 bit, which is not exposed
+  def int_SI_tbuffer_store : Intrinsic <
+    [],
+    [llvm_anyint_ty, // rsrc(SGPR)
+     llvm_anyint_ty, // vdata(VGPR), overloaded for types i32, v2i32, v4i32
+     llvm_i32_ty,    // num_channels(imm), selects opcode suffix: 1=X, 2=XY, 3=XYZ, 4=XYZW
+     llvm_i32_ty,    // vaddr(VGPR)
+     llvm_i32_ty,    // soffset(SGPR)
+     llvm_i32_ty,    // inst_offset(imm)
+     llvm_i32_ty,    // dfmt(imm)
+     llvm_i32_ty,    // nfmt(imm)
+     llvm_i32_ty,    // offen(imm)
+     llvm_i32_ty,    // idxen(imm)
+     llvm_i32_ty,    // glc(imm)
+     llvm_i32_ty,    // slc(imm)
+     llvm_i32_ty],   // tfe(imm)
+    []>;
+
+  class Sample : Intrinsic <[llvm_v4f32_ty], [llvm_anyvector_ty, llvm_v32i8_ty, llvm_anyint_ty, llvm_i32_ty], [IntrNoMem]>;
 
   def int_SI_sample : Sample;
-  def int_SI_sample_bias : Sample;
-  def int_SI_sample_lod : Sample;
+  def int_SI_sampleb : Sample;
+  def int_SI_sampled : Sample;
+  def int_SI_samplel : Sample;
+
+  def int_SI_imageload : Intrinsic <[llvm_v4i32_ty], [llvm_anyvector_ty, llvm_v32i8_ty, llvm_i32_ty], [IntrNoMem]>;
+
+  def int_SI_resinfo : Intrinsic <[llvm_v4i32_ty], [llvm_i32_ty, llvm_v32i8_ty, llvm_i32_ty], [IntrNoMem]>;
 
   /* Interpolation Intrinsics */
 
-  def int_SI_set_M0 : Intrinsic <[llvm_i32_ty], [llvm_i32_ty]>;
-  class Interp : Intrinsic <[llvm_float_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrReadMem]>;
-
-  def int_SI_fs_interp_linear_center : Interp;
-  def int_SI_fs_interp_linear_centroid : Interp;
-  def int_SI_fs_interp_persp_center : Interp;
-  def int_SI_fs_interp_persp_centroid : Interp;
-  def int_SI_fs_interp_constant : Interp;
-
-  def int_SI_fs_read_face : Intrinsic <[llvm_float_ty], [], [IntrNoMem]>;
-  def int_SI_fs_read_pos : Intrinsic <[llvm_float_ty], [llvm_i32_ty], [IntrNoMem]>;
+  def int_SI_fs_constant : Intrinsic <[llvm_float_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
+  def int_SI_fs_interp : Intrinsic <[llvm_float_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_v2i32_ty], [IntrNoMem]>;
 
   /* Control flow Intrinsics */
 

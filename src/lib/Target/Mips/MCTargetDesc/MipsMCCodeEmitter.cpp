@@ -13,7 +13,6 @@
 //
 #define DEBUG_TYPE "mccodeemitter"
 #include "MCTargetDesc/MipsBaseInfo.h"
-#include "MCTargetDesc/MipsDirectObjLower.h"
 #include "MCTargetDesc/MipsFixupKinds.h"
 #include "MCTargetDesc/MipsMCTargetDesc.h"
 #include "llvm/ADT/APFloat.h"
@@ -27,6 +26,9 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/raw_ostream.h"
 
+#define GET_INSTRMAP_INFO
+#include "MipsGenInstrInfo.inc"
+
 using namespace llvm;
 
 namespace {
@@ -35,11 +37,16 @@ class MipsMCCodeEmitter : public MCCodeEmitter {
   void operator=(const MipsMCCodeEmitter &) LLVM_DELETED_FUNCTION;
   const MCInstrInfo &MCII;
   MCContext &Ctx;
+  const MCSubtargetInfo &STI;
   bool IsLittleEndian;
+  bool IsMicroMips;
 
 public:
-  MipsMCCodeEmitter(const MCInstrInfo &mcii, MCContext &Ctx_, bool IsLittle) :
-    MCII(mcii), Ctx(Ctx_), IsLittleEndian(IsLittle) {}
+  MipsMCCodeEmitter(const MCInstrInfo &mcii, MCContext &Ctx_,
+                    const MCSubtargetInfo &sti, bool IsLittle) :
+    MCII(mcii), Ctx(Ctx_), STI (sti), IsLittleEndian(IsLittle) {
+      IsMicroMips = STI.getFeatureBits() & Mips::FeatureMicroMips;
+    }
 
   ~MipsMCCodeEmitter() {}
 
@@ -49,9 +56,17 @@ public:
 
   void EmitInstruction(uint64_t Val, unsigned Size, raw_ostream &OS) const {
     // Output the instruction encoding in little endian byte order.
-    for (unsigned i = 0; i < Size; ++i) {
-      unsigned Shift = IsLittleEndian ? i * 8 : (Size - 1 - i) * 8;
-      EmitByte((Val >> Shift) & 0xff, OS);
+    // Little-endian byte ordering:
+    //   mips32r2:   4 | 3 | 2 | 1
+    //   microMIPS:  2 | 1 | 4 | 3
+    if (IsLittleEndian && Size == 4 && IsMicroMips) {
+      EmitInstruction(Val>>16, 2, OS);
+      EmitInstruction(Val, 2, OS);
+    } else {
+      for (unsigned i = 0; i < Size; ++i) {
+        unsigned Shift = IsLittleEndian ? i * 8 : (Size - 1 - i) * 8;
+        EmitByte((Val >> Shift) & 0xff, OS);
+      }
     }
   }
 
@@ -69,11 +84,23 @@ public:
    unsigned getJumpTargetOpValue(const MCInst &MI, unsigned OpNo,
                                  SmallVectorImpl<MCFixup> &Fixups) const;
 
+  // getBranchJumpOpValueMM - Return binary encoding of the microMIPS jump
+  // target operand. If the machine operand requires relocation,
+  // record the relocation and return zero.
+  unsigned getJumpTargetOpValueMM(const MCInst &MI, unsigned OpNo,
+                                  SmallVectorImpl<MCFixup> &Fixups) const;
+
    // getBranchTargetOpValue - Return binary encoding of the branch
    // target operand. If the machine operand requires relocation,
    // record the relocation and return zero.
   unsigned getBranchTargetOpValue(const MCInst &MI, unsigned OpNo,
                                   SmallVectorImpl<MCFixup> &Fixups) const;
+
+  // getBranchTargetOpValue - Return binary encoding of the microMIPS branch
+  // target operand. If the machine operand requires relocation,
+  // record the relocation and return zero.
+  unsigned getBranchTargetOpValueMM(const MCInst &MI, unsigned OpNo,
+                                    SmallVectorImpl<MCFixup> &Fixups) const;
 
    // getMachineOpValue - Return binary encoding of operand. If the machin
    // operand requires relocation, record the relocation and return zero.
@@ -82,10 +109,15 @@ public:
 
   unsigned getMemEncoding(const MCInst &MI, unsigned OpNo,
                           SmallVectorImpl<MCFixup> &Fixups) const;
+  unsigned getMemEncodingMMImm12(const MCInst &MI, unsigned OpNo,
+                                 SmallVectorImpl<MCFixup> &Fixups) const;
   unsigned getSizeExtEncoding(const MCInst &MI, unsigned OpNo,
                               SmallVectorImpl<MCFixup> &Fixups) const;
   unsigned getSizeInsEncoding(const MCInst &MI, unsigned OpNo,
                               SmallVectorImpl<MCFixup> &Fixups) const;
+
+  unsigned
+  getExprOpValue(const MCExpr *Expr,SmallVectorImpl<MCFixup> &Fixups) const;
 
 }; // class MipsMCCodeEmitter
 }  // namespace
@@ -95,7 +127,7 @@ MCCodeEmitter *llvm::createMipsMCCodeEmitterEB(const MCInstrInfo &MCII,
                                                const MCSubtargetInfo &STI,
                                                MCContext &Ctx)
 {
-  return new MipsMCCodeEmitter(MCII, Ctx, false);
+  return new MipsMCCodeEmitter(MCII, Ctx, STI, false);
 }
 
 MCCodeEmitter *llvm::createMipsMCCodeEmitterEL(const MCInstrInfo &MCII,
@@ -103,11 +135,77 @@ MCCodeEmitter *llvm::createMipsMCCodeEmitterEL(const MCInstrInfo &MCII,
                                                const MCSubtargetInfo &STI,
                                                MCContext &Ctx)
 {
-  return new MipsMCCodeEmitter(MCII, Ctx, true);
+  return new MipsMCCodeEmitter(MCII, Ctx, STI, true);
+}
+
+
+// If the D<shift> instruction has a shift amount that is greater
+// than 31 (checked in calling routine), lower it to a D<shift>32 instruction
+static void LowerLargeShift(MCInst& Inst) {
+
+  assert(Inst.getNumOperands() == 3 && "Invalid no. of operands for shift!");
+  assert(Inst.getOperand(2).isImm());
+
+  int64_t Shift = Inst.getOperand(2).getImm();
+  if (Shift <= 31)
+    return; // Do nothing
+  Shift -= 32;
+
+  // saminus32
+  Inst.getOperand(2).setImm(Shift);
+
+  switch (Inst.getOpcode()) {
+  default:
+    // Calling function is not synchronized
+    llvm_unreachable("Unexpected shift instruction");
+  case Mips::DSLL:
+    Inst.setOpcode(Mips::DSLL32);
+    return;
+  case Mips::DSRL:
+    Inst.setOpcode(Mips::DSRL32);
+    return;
+  case Mips::DSRA:
+    Inst.setOpcode(Mips::DSRA32);
+    return;
+  case Mips::DROTR:
+    Inst.setOpcode(Mips::DROTR32);
+    return;
+  }
+}
+
+// Pick a DEXT or DINS instruction variant based on the pos and size operands
+static void LowerDextDins(MCInst& InstIn) {
+  int Opcode = InstIn.getOpcode();
+
+  if (Opcode == Mips::DEXT)
+    assert(InstIn.getNumOperands() == 4 &&
+           "Invalid no. of machine operands for DEXT!");
+  else // Only DEXT and DINS are possible
+    assert(InstIn.getNumOperands() == 5 &&
+           "Invalid no. of machine operands for DINS!");
+
+  assert(InstIn.getOperand(2).isImm());
+  int64_t pos = InstIn.getOperand(2).getImm();
+  assert(InstIn.getOperand(3).isImm());
+  int64_t size = InstIn.getOperand(3).getImm();
+
+  if (size <= 32) {
+    if (pos < 32)  // DEXT/DINS, do nothing
+      return;
+    // DEXTU/DINSU
+    InstIn.getOperand(2).setImm(pos - 32);
+    InstIn.setOpcode((Opcode == Mips::DEXT) ? Mips::DEXTU : Mips::DINSU);
+    return;
+  }
+  // DEXTM/DINSM
+  assert(pos < 32 && "DEXT/DINS cannot have both size and pos > 32");
+  InstIn.getOperand(3).setImm(size - 32);
+  InstIn.setOpcode((Opcode == Mips::DEXT) ? Mips::DEXTM : Mips::DINSM);
+  return;
 }
 
 /// EncodeInstruction - Emit the instruction.
-/// Size the instruction (currently only 4 bytes
+/// Size the instruction with Desc.getSize().
 void MipsMCCodeEmitter::
 EncodeInstruction(const MCInst &MI, raw_ostream &OS,
                   SmallVectorImpl<MCFixup> &Fixups) const
@@ -123,14 +221,16 @@ EncodeInstruction(const MCInst &MI, raw_ostream &OS,
   case Mips::DSLL:
   case Mips::DSRL:
   case Mips::DSRA:
-    Mips::LowerLargeShift(TmpInst);
+  case Mips::DROTR:
+    LowerLargeShift(TmpInst);
     break;
     // Double extract instruction is chosen by pos and size operands
   case Mips::DEXT:
   case Mips::DINS:
-    Mips::LowerDextDins(TmpInst);
+    LowerDextDins(TmpInst);
   }
 
+  unsigned long N = Fixups.size();
   uint32_t Binary = getBinaryCodeForInstr(TmpInst, Fixups);
 
   // Check for unimplemented opcodes.
@@ -140,13 +240,18 @@ EncodeInstruction(const MCInst &MI, raw_ostream &OS,
   if ((Opcode != Mips::NOP) && (Opcode != Mips::SLL) && !Binary)
     llvm_unreachable("unimplemented opcode in EncodeInstruction()");
 
-  const MCInstrDesc &Desc = MCII.get(TmpInst.getOpcode());
-  uint64_t TSFlags = Desc.TSFlags;
+  if (STI.getFeatureBits() & Mips::FeatureMicroMips) {
+    int NewOpcode = Mips::Std2MicroMips (Opcode, Mips::Arch_micromips);
+    if (NewOpcode != -1) {
+      if (Fixups.size() > N)
+        Fixups.pop_back();
+      Opcode = NewOpcode;
+      TmpInst.setOpcode (NewOpcode);
+      Binary = getBinaryCodeForInstr(TmpInst, Fixups);
+    }
+  }
 
-  // Pseudo instructions don't get encoded and shouldn't be here
-  // in the first place!
-  if ((TSFlags & MipsII::FormMask) == MipsII::Pseudo)
-    llvm_unreachable("Pseudo opcode found in EncodeInstruction()");
+  const MCInstrDesc &Desc = MCII.get(TmpInst.getOpcode());
 
   // Get byte count of instruction
   unsigned Size = Desc.getSize();
@@ -165,14 +270,37 @@ getBranchTargetOpValue(const MCInst &MI, unsigned OpNo,
 
   const MCOperand &MO = MI.getOperand(OpNo);
 
-  // If the destination is an immediate, we have nothing to do.
-  if (MO.isImm()) return MO.getImm();
+  // If the destination is an immediate, divide by 4.
+  if (MO.isImm()) return MO.getImm() >> 2;
+
   assert(MO.isExpr() &&
          "getBranchTargetOpValue expects only expressions or immediates");
 
   const MCExpr *Expr = MO.getExpr();
   Fixups.push_back(MCFixup::Create(0, Expr,
                                    MCFixupKind(Mips::fixup_Mips_PC16)));
+  return 0;
+}
+
+/// getBranchTargetOpValue - Return binary encoding of the microMIPS branch
+/// target operand. If the machine operand requires relocation,
+/// record the relocation and return zero.
+unsigned MipsMCCodeEmitter::
+getBranchTargetOpValueMM(const MCInst &MI, unsigned OpNo,
+                         SmallVectorImpl<MCFixup> &Fixups) const {
+
+  const MCOperand &MO = MI.getOperand(OpNo);
+
+  // If the destination is an immediate, divide by 2.
+  if (MO.isImm()) return MO.getImm() >> 1;
+
+  assert(MO.isExpr() &&
+         "getBranchTargetOpValueMM expects only expressions or immediates");
+
+  const MCExpr *Expr = MO.getExpr();
+  Fixups.push_back(MCFixup::Create(0, Expr,
+                   MCFixupKind(Mips::
+                               fixup_MICROMIPS_PC16_S1)));
   return 0;
 }
 
@@ -184,8 +312,9 @@ getJumpTargetOpValue(const MCInst &MI, unsigned OpNo,
                      SmallVectorImpl<MCFixup> &Fixups) const {
 
   const MCOperand &MO = MI.getOperand(OpNo);
-  // If the destination is an immediate, we have nothing to do.
-  if (MO.isImm()) return MO.getImm();
+  // If the destination is an immediate, divide by 4.
+  if (MO.isImm()) return MO.getImm()>>2;
+
   assert(MO.isExpr() &&
          "getJumpTargetOpValue expects only expressions or an immediate");
 
@@ -195,35 +324,41 @@ getJumpTargetOpValue(const MCInst &MI, unsigned OpNo,
   return 0;
 }
 
-/// getMachineOpValue - Return binary encoding of operand. If the machine
-/// operand requires relocation, record the relocation and return zero.
 unsigned MipsMCCodeEmitter::
-getMachineOpValue(const MCInst &MI, const MCOperand &MO,
-                  SmallVectorImpl<MCFixup> &Fixups) const {
-  if (MO.isReg()) {
-    unsigned Reg = MO.getReg();
-    unsigned RegNo = Ctx.getRegisterInfo().getEncodingValue(Reg);
-    return RegNo;
-  } else if (MO.isImm()) {
-    return static_cast<unsigned>(MO.getImm());
-  } else if (MO.isFPImm()) {
-    return static_cast<unsigned>(APFloat(MO.getFPImm())
-        .bitcastToAPInt().getHiBits(32).getLimitedValue());
-  }
+getJumpTargetOpValueMM(const MCInst &MI, unsigned OpNo,
+                       SmallVectorImpl<MCFixup> &Fixups) const {
 
-  // MO must be an Expr.
-  assert(MO.isExpr());
+  const MCOperand &MO = MI.getOperand(OpNo);
+  // If the destination is an immediate, divide by 2.
+  if (MO.isImm()) return MO.getImm() >> 1;
+
+  assert(MO.isExpr() &&
+         "getJumpTargetOpValueMM expects only expressions or an immediate");
 
   const MCExpr *Expr = MO.getExpr();
-  MCExpr::ExprKind Kind = Expr->getKind();
+  Fixups.push_back(MCFixup::Create(0, Expr,
+                                   MCFixupKind(Mips::fixup_MICROMIPS_26_S1)));
+  return 0;
+}
 
-  if (Kind == MCExpr::Binary) {
-    Expr = static_cast<const MCBinaryExpr*>(Expr)->getLHS();
-    Kind = Expr->getKind();
+unsigned MipsMCCodeEmitter::
+getExprOpValue(const MCExpr *Expr,SmallVectorImpl<MCFixup> &Fixups) const {
+  int64_t Res;
+
+  if (Expr->EvaluateAsAbsolute(Res))
+    return Res;
+
+  MCExpr::ExprKind Kind = Expr->getKind();
+  if (Kind == MCExpr::Constant) {
+    return cast<MCConstantExpr>(Expr)->getValue();
   }
 
-  assert (Kind == MCExpr::SymbolRef);
-
+  if (Kind == MCExpr::Binary) {
+    unsigned Res = getExprOpValue(cast<MCBinaryExpr>(Expr)->getLHS(), Fixups);
+    Res += getExprOpValue(cast<MCBinaryExpr>(Expr)->getRHS(), Fixups);
+    return Res;
+  }
+  if (Kind == MCExpr::SymbolRef) {
   Mips::Fixups FixupKind = Mips::Fixups(0);
 
   switch(cast<MCSymbolRefExpr>(Expr)->getKind()) {
@@ -236,31 +371,39 @@ getMachineOpValue(const MCInst &MI, const MCOperand &MO,
     FixupKind = Mips::fixup_Mips_GPOFF_LO;
     break;
   case MCSymbolRefExpr::VK_Mips_GOT_PAGE :
-    FixupKind = Mips::fixup_Mips_GOT_PAGE;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_GOT_PAGE
+                            : Mips::fixup_Mips_GOT_PAGE;
     break;
   case MCSymbolRefExpr::VK_Mips_GOT_OFST :
-    FixupKind = Mips::fixup_Mips_GOT_OFST;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_GOT_OFST
+                            : Mips::fixup_Mips_GOT_OFST;
     break;
   case MCSymbolRefExpr::VK_Mips_GOT_DISP :
-    FixupKind = Mips::fixup_Mips_GOT_DISP;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_GOT_DISP
+                            : Mips::fixup_Mips_GOT_DISP;
     break;
   case MCSymbolRefExpr::VK_Mips_GPREL:
     FixupKind = Mips::fixup_Mips_GPREL16;
     break;
   case MCSymbolRefExpr::VK_Mips_GOT_CALL:
-    FixupKind = Mips::fixup_Mips_CALL16;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_CALL16
+                            : Mips::fixup_Mips_CALL16;
     break;
   case MCSymbolRefExpr::VK_Mips_GOT16:
-    FixupKind = Mips::fixup_Mips_GOT_Global;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_GOT16
+                            : Mips::fixup_Mips_GOT_Global;
     break;
   case MCSymbolRefExpr::VK_Mips_GOT:
-    FixupKind = Mips::fixup_Mips_GOT_Local;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_GOT16
+                            : Mips::fixup_Mips_GOT_Local;
     break;
   case MCSymbolRefExpr::VK_Mips_ABS_HI:
-    FixupKind = Mips::fixup_Mips_HI16;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_HI16
+                            : Mips::fixup_Mips_HI16;
     break;
   case MCSymbolRefExpr::VK_Mips_ABS_LO:
-    FixupKind = Mips::fixup_Mips_LO16;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_LO16
+                            : Mips::fixup_Mips_LO16;
     break;
   case MCSymbolRefExpr::VK_Mips_TLSGD:
     FixupKind = Mips::fixup_Mips_TLSGD;
@@ -269,19 +412,23 @@ getMachineOpValue(const MCInst &MI, const MCOperand &MO,
     FixupKind = Mips::fixup_Mips_TLSLDM;
     break;
   case MCSymbolRefExpr::VK_Mips_DTPREL_HI:
-    FixupKind = Mips::fixup_Mips_DTPREL_HI;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_TLS_DTPREL_HI16
+                            : Mips::fixup_Mips_DTPREL_HI;
     break;
   case MCSymbolRefExpr::VK_Mips_DTPREL_LO:
-    FixupKind = Mips::fixup_Mips_DTPREL_LO;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_TLS_DTPREL_LO16
+                            : Mips::fixup_Mips_DTPREL_LO;
     break;
   case MCSymbolRefExpr::VK_Mips_GOTTPREL:
     FixupKind = Mips::fixup_Mips_GOTTPREL;
     break;
   case MCSymbolRefExpr::VK_Mips_TPREL_HI:
-    FixupKind = Mips::fixup_Mips_TPREL_HI;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_TLS_TPREL_HI16
+                            : Mips::fixup_Mips_TPREL_HI;
     break;
   case MCSymbolRefExpr::VK_Mips_TPREL_LO:
-    FixupKind = Mips::fixup_Mips_TPREL_LO;
+    FixupKind = IsMicroMips ? Mips::fixup_MICROMIPS_TLS_TPREL_LO16
+                            : Mips::fixup_Mips_TPREL_LO;
     break;
   case MCSymbolRefExpr::VK_Mips_HIGHER:
     FixupKind = Mips::fixup_Mips_HIGHER;
@@ -303,10 +450,30 @@ getMachineOpValue(const MCInst &MI, const MCOperand &MO,
     break;
   } // switch
 
-  Fixups.push_back(MCFixup::Create(0, MO.getExpr(), MCFixupKind(FixupKind)));
-
-  // All of the information is in the fixup.
+    Fixups.push_back(MCFixup::Create(0, Expr, MCFixupKind(FixupKind)));
+    return 0;
+  }
   return 0;
+}
+
+/// getMachineOpValue - Return binary encoding of operand. If the machine
+/// operand requires relocation, record the relocation and return zero.
+unsigned MipsMCCodeEmitter::
+getMachineOpValue(const MCInst &MI, const MCOperand &MO,
+                  SmallVectorImpl<MCFixup> &Fixups) const {
+  if (MO.isReg()) {
+    unsigned Reg = MO.getReg();
+    unsigned RegNo = Ctx.getRegisterInfo()->getEncodingValue(Reg);
+    return RegNo;
+  } else if (MO.isImm()) {
+    return static_cast<unsigned>(MO.getImm());
+  } else if (MO.isFPImm()) {
+    return static_cast<unsigned>(APFloat(MO.getFPImm())
+        .bitcastToAPInt().getHiBits(32).getLimitedValue());
+  }
+  // MO must be an Expr.
+  assert(MO.isExpr());
+  return getExprOpValue(MO.getExpr(),Fixups);
 }
 
 /// getMemEncoding - Return binary encoding of memory related operand.
@@ -320,6 +487,17 @@ MipsMCCodeEmitter::getMemEncoding(const MCInst &MI, unsigned OpNo,
   unsigned OffBits = getMachineOpValue(MI, MI.getOperand(OpNo+1), Fixups);
 
   return (OffBits & 0xFFFF) | RegBits;
+}
+
+unsigned MipsMCCodeEmitter::
+getMemEncodingMMImm12(const MCInst &MI, unsigned OpNo,
+                      SmallVectorImpl<MCFixup> &Fixups) const {
+  // Base register is encoded in bits 20-16, offset is encoded in bits 11-0.
+  assert(MI.getOperand(OpNo).isReg());
+  unsigned RegBits = getMachineOpValue(MI, MI.getOperand(OpNo), Fixups) << 16;
+  unsigned OffBits = getMachineOpValue(MI, MI.getOperand(OpNo+1), Fixups);
+
+  return (OffBits & 0x0FFF) | RegBits;
 }
 
 unsigned

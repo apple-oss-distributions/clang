@@ -67,10 +67,13 @@ struct CommandInfo {
   /// a template parameter (\\tparam or an alias).
   unsigned IsTParamCommand : 1;
 
+  /// True if this command is \\throws or an alias.
+  unsigned IsThrowsCommand : 1;
+
   /// True if this command is \\deprecated or an alias.
   unsigned IsDeprecatedCommand : 1;
-  
-  /// \brief True if this is a \headerfile-like documentation
+
+  /// \brief True if this is a \\headerfile-like command.
   unsigned IsHeaderfileCommand : 1;
 
   /// True if we don't want to warn about this command being passed an empty
@@ -105,10 +108,10 @@ struct CommandInfo {
   unsigned IsFunctionDeclarationCommand : 1;
 
   /// \brief True if block command is further describing a container API; such
-  /// as @coclass, @classdesign, etc.
+  /// as \@coclass, \@classdesign, etc.
   unsigned IsRecordLikeDetailCommand : 1;
   
-  /// \brief True if block command is a container API; such as @interface.
+  /// \brief True if block command is a container API; such as \@interface.
   unsigned IsRecordLikeDeclarationCommand : 1;
   
   /// \brief True if this command is unknown.  This \c CommandInfo object was

@@ -16,18 +16,19 @@
 #include "AMDGPUInstrInfo.h"
 #include "AMDGPURegisterInfo.h"
 #include "AMDGPUTargetMachine.h"
-#include "AMDIL.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 
 #define GET_INSTRINFO_CTOR
+#define GET_INSTRINFO_NAMED_OPS
+#define GET_INSTRMAP_INFO
 #include "AMDGPUGenInstrInfo.inc"
 
 using namespace llvm;
 
 AMDGPUInstrInfo::AMDGPUInstrInfo(TargetMachine &tm)
-  : AMDGPUGenInstrInfo(0,0), RI(tm, *this), TM(tm) { }
+  : AMDGPUGenInstrInfo(-1,-1), RI(tm), TM(tm) { }
 
 const AMDGPURegisterInfo &AMDGPUInstrInfo::getRegisterInfo() const {
   return RI;
@@ -98,27 +99,6 @@ bool AMDGPUInstrInfo::getNextBranchInstr(MachineBasicBlock::iterator &iter,
   return false;
 }
 
-MachineBasicBlock::iterator skipFlowControl(MachineBasicBlock *MBB) {
-  MachineBasicBlock::iterator tmp = MBB->end();
-  if (!MBB->size()) {
-    return MBB->end();
-  }
-  while (--tmp) {
-    if (tmp->getOpcode() == AMDGPU::ENDLOOP
-        || tmp->getOpcode() == AMDGPU::ENDIF
-        || tmp->getOpcode() == AMDGPU::ELSE) {
-      if (tmp == MBB->begin()) {
-        return tmp;
-      } else {
-        continue;
-      }
-    }  else {
-      return ++tmp;
-    }
-  }
-  return MBB->end();
-}
-
 void
 AMDGPUInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                                     MachineBasicBlock::iterator MI,
@@ -137,6 +117,43 @@ AMDGPUInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
                                      const TargetRegisterInfo *TRI) const {
   assert(!"Not Implemented");
 }
+
+bool AMDGPUInstrInfo::expandPostRAPseudo (MachineBasicBlock::iterator MI) const {
+  MachineBasicBlock *MBB = MI->getParent();
+
+  if (isRegisterLoad(*MI)) {
+    unsigned RegIndex = MI->getOperand(2).getImm();
+    unsigned Channel = MI->getOperand(3).getImm();
+    unsigned Address = calculateIndirectAddress(RegIndex, Channel);
+    unsigned OffsetReg = MI->getOperand(1).getReg();
+    if (OffsetReg == AMDGPU::INDIRECT_BASE_ADDR) {
+      buildMovInstr(MBB, MI, MI->getOperand(0).getReg(),
+                    getIndirectAddrRegClass()->getRegister(Address));
+    } else {
+      buildIndirectRead(MBB, MI, MI->getOperand(0).getReg(),
+                        Address, OffsetReg);
+    }
+  } else if (isRegisterStore(*MI)) {
+    unsigned RegIndex = MI->getOperand(2).getImm();
+    unsigned Channel = MI->getOperand(3).getImm();
+    unsigned Address = calculateIndirectAddress(RegIndex, Channel);
+    unsigned OffsetReg = MI->getOperand(1).getReg();
+    if (OffsetReg == AMDGPU::INDIRECT_BASE_ADDR) {
+      buildMovInstr(MBB, MI, getIndirectAddrRegClass()->getRegister(Address),
+                    MI->getOperand(0).getReg());
+    } else {
+      buildIndirectWrite(MBB, MI, MI->getOperand(0).getReg(),
+                        calculateIndirectAddress(RegIndex, Channel),
+                        OffsetReg);
+    }
+  } else {
+    return false;
+  }
+
+  MBB->erase(MI);
+  return true;
+}
+
 
 MachineInstr *
 AMDGPUInstrInfo::foldMemoryOperandImpl(MachineFunction &MF,
@@ -234,7 +251,16 @@ AMDGPUInstrInfo::isSafeToMoveRegClassDefs(const TargetRegisterClass *RC) const {
   // TODO: Implement this function
   return true;
 }
- 
+
+bool AMDGPUInstrInfo::isRegisterStore(const MachineInstr &MI) const {
+  return get(MI.getOpcode()).TSFlags & AMDGPU_FLAG_REGISTER_STORE;
+}
+
+bool AMDGPUInstrInfo::isRegisterLoad(const MachineInstr &MI) const {
+  return get(MI.getOpcode()).TSFlags & AMDGPU_FLAG_REGISTER_LOAD;
+}
+
+
 void AMDGPUInstrInfo::convertToISA(MachineInstr & MI, MachineFunction &MF,
     DebugLoc DL) const {
   MachineRegisterInfo &MRI = MF.getRegInfo();
@@ -253,5 +279,14 @@ void AMDGPUInstrInfo::convertToISA(MachineInstr & MI, MachineFunction &MF,
         MRI.setRegClass(MO.getReg(), newRegClass);
       }
     }
+  }
+}
+
+int AMDGPUInstrInfo::getMaskedMIMGOp(uint16_t Opcode, unsigned Channels) const {
+  switch (Channels) {
+  default: return Opcode;
+  case 1: return AMDGPU::getMaskedMIMGOp(Opcode, AMDGPU::Channels_1);
+  case 2: return AMDGPU::getMaskedMIMGOp(Opcode, AMDGPU::Channels_2);
+  case 3: return AMDGPU::getMaskedMIMGOp(Opcode, AMDGPU::Channels_3);
   }
 }

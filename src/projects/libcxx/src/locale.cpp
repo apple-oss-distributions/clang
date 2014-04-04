@@ -18,19 +18,27 @@
 #include "codecvt"
 #include "vector"
 #include "algorithm"
-#include "algorithm"
 #include "typeinfo"
-#include "type_traits"
+#ifndef _LIBCPP_NO_EXCEPTIONS
+#  include "type_traits"
+#endif
 #include "clocale"
 #include "cstring"
 #include "cwctype"
 #include "__sso_allocator"
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
 #include <support/win32/locale_win32.h>
-#else // _WIN32
+#else // _LIBCPP_MSVCRT
 #include <langinfo.h>
-#endif // _!WIN32
+#endif // !_LIBCPP_MSVCRT
 #include <stdlib.h>
+#include <stdio.h>
+
+// On Linux, wint_t and wchar_t have different signed-ness, and this causes
+// lots of noise in the build log, but no bugs that I know of. 
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#endif
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
@@ -101,6 +109,11 @@ countof(const T * const begin, const T * const end)
 
 }
 
+#if defined(_AIX)
+// Set priority to INT_MIN + 256 + 150
+# pragma priority ( -2147483242 )
+#endif
+
 const locale::category locale::none;
 const locale::category locale::collate;
 const locale::category locale::ctype;
@@ -110,14 +123,23 @@ const locale::category locale::time;
 const locale::category locale::messages;
 const locale::category locale::all;
 
+#if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wpadded"
+#endif
 
 class _LIBCPP_HIDDEN locale::__imp
     : public facet
 {
     enum {N = 28};
+#if defined(_LIBCPP_MSVC)
+// FIXME: MSVC doesn't support aligned parameters by value.
+// I can't get the __sso_allocator to work here
+// for MSVC I think for this reason.
+    vector<facet*> facets_;
+#else
     vector<facet*, __sso_allocator<facet*, N> > facets_;
+#endif
     string         name_;
 public:
     explicit __imp(size_t refs = 0);
@@ -141,7 +163,9 @@ private:
     template <class F> void install_from(const __imp& other);
 };
 
+#if defined(__clang__)
 #pragma clang diagnostic pop
+#endif
 
 locale::__imp::__imp(size_t refs)
     : facet(refs),
@@ -226,8 +250,10 @@ locale::__imp::__imp(const string& name, size_t refs)
 
 // NOTE avoid the `base class should be explicitly initialized in the
 // copy constructor` warning emitted by GCC
+#if defined(__clang__) || _GNUC_VER >= 406
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wextra"
+#endif
 
 locale::__imp::__imp(const __imp& other)
     : facets_(max<size_t>(N, other.facets_.size())),
@@ -239,7 +265,9 @@ locale::__imp::__imp(const __imp& other)
             facets_[i]->__add_shared();
 }
 
+#if defined(__clang__) || _GNUC_VER >= 406
 #pragma GCC diagnostic pop
+#endif
 
 locale::__imp::__imp(const __imp& other, const string& name, locale::category c)
     : facets_(N),
@@ -747,7 +775,7 @@ ctype<wchar_t>::~ctype()
 bool
 ctype<wchar_t>::do_is(mask m, char_type c) const
 {
-    return isascii(c) ? ctype<char>::classic_table()[c] & m : false;
+    return isascii(c) ? (ctype<char>::classic_table()[c] & m) != 0 : false;
 }
 
 const wchar_t*
@@ -782,7 +810,7 @@ ctype<wchar_t>::do_toupper(char_type c) const
 {
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
     return isascii(c) ? _DefaultRuneLocale.__mapupper[c] : c;
-#elif defined(__GLIBC__)
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
     return isascii(c) ? ctype<char>::__classic_upper_table()[c] : c;
 #else
     return (isascii(c) && iswlower_l(c, __cloc())) ? c-L'a'+L'A' : c;
@@ -795,7 +823,7 @@ ctype<wchar_t>::do_toupper(char_type* low, const char_type* high) const
     for (; low != high; ++low)
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
         *low = isascii(*low) ? _DefaultRuneLocale.__mapupper[*low] : *low;
-#elif defined(__GLIBC__)
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
         *low = isascii(*low) ? ctype<char>::__classic_upper_table()[*low]
                              : *low;
 #else
@@ -809,7 +837,7 @@ ctype<wchar_t>::do_tolower(char_type c) const
 {
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
     return isascii(c) ? _DefaultRuneLocale.__maplower[c] : c;
-#elif defined(__GLIBC__)
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
     return isascii(c) ? ctype<char>::__classic_lower_table()[c] : c;
 #else
     return (isascii(c) && isupper_l(c, __cloc())) ? c-L'A'+'a' : c;
@@ -822,7 +850,7 @@ ctype<wchar_t>::do_tolower(char_type* low, const char_type* high) const
     for (; low != high; ++low)
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
         *low = isascii(*low) ? _DefaultRuneLocale.__maplower[*low] : *low;
-#elif defined(__GLIBC__)
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
         *low = isascii(*low) ? ctype<char>::__classic_lower_table()[*low]
                              : *low;
 #else
@@ -889,8 +917,11 @@ ctype<char>::do_toupper(char_type c) const
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
     return isascii(c) ?
       static_cast<char>(_DefaultRuneLocale.__mapupper[static_cast<ptrdiff_t>(c)]) : c;
-#elif defined(__GLIBC__)
-    return isascii(c) ? __classic_upper_table()[static_cast<size_t>(c)] : c;
+#elif defined(__NetBSD__)
+    return static_cast<char>(__classic_upper_table()[static_cast<unsigned char>(c)]);
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN)
+    return isascii(c) ? 
+      static_cast<char>(__classic_upper_table()[static_cast<unsigned char>(c)]) : c;
 #else
     return (isascii(c) && islower_l(c, __cloc())) ? c-'a'+'A' : c;
 #endif
@@ -903,8 +934,11 @@ ctype<char>::do_toupper(char_type* low, const char_type* high) const
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
         *low = isascii(*low) ?
           static_cast<char>(_DefaultRuneLocale.__mapupper[static_cast<ptrdiff_t>(*low)]) : *low;
-#elif defined(__GLIBC__)
-        *low = isascii(*low) ? __classic_upper_table()[static_cast<size_t>(*low)] : *low;
+#elif defined(__NetBSD__)
+        *low = static_cast<char>(__classic_upper_table()[static_cast<unsigned char>(*low)]);
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN)
+        *low = isascii(*low) ?
+          static_cast<char>(__classic_upper_table()[static_cast<size_t>(*low)]) : *low;
 #else
         *low = (isascii(*low) && islower_l(*low, __cloc())) ? *low-'a'+'A' : *low;
 #endif
@@ -917,8 +951,11 @@ ctype<char>::do_tolower(char_type c) const
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
     return isascii(c) ?
       static_cast<char>(_DefaultRuneLocale.__maplower[static_cast<ptrdiff_t>(c)]) : c;
-#elif defined(__GLIBC__)
-    return isascii(c) ? __classic_lower_table()[static_cast<size_t>(c)] : c;
+#elif defined(__NetBSD__)
+    return static_cast<char>(__classic_lower_table()[static_cast<unsigned char>(c)]);
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
+    return isascii(c) ?
+      static_cast<char>(__classic_lower_table()[static_cast<size_t>(c)]) : c;
 #else
     return (isascii(c) && isupper_l(c, __cloc())) ? c-'A'+'a' : c;
 #endif
@@ -930,8 +967,10 @@ ctype<char>::do_tolower(char_type* low, const char_type* high) const
     for (; low != high; ++low)
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
         *low = isascii(*low) ? static_cast<char>(_DefaultRuneLocale.__maplower[static_cast<ptrdiff_t>(*low)]) : *low;
-#elif defined(__GLIBC__)
-        *low = isascii(*low) ? __classic_lower_table()[static_cast<size_t>(*low)] : *low;
+#elif defined(__NetBSD__)
+        *low = static_cast<char>(__classic_lower_table()[static_cast<unsigned char>(*low)]);
+#elif defined(__GLIBC__) || defined(EMSCRIPTEN)
+        *low = isascii(*low) ? static_cast<char>(__classic_lower_table()[static_cast<size_t>(*low)]) : *low;
 #else
         *low = (isascii(*low) && isupper_l(*low, __cloc())) ? *low-'A'+'a' : *low;
 #endif
@@ -971,23 +1010,36 @@ ctype<char>::do_narrow(const char_type* low, const char_type* high, char dfault,
     return low;
 }
 
+#ifdef EMSCRIPTEN
+extern "C" const unsigned short ** __ctype_b_loc();
+extern "C" const int ** __ctype_tolower_loc();
+extern "C" const int ** __ctype_toupper_loc();
+#endif
+
 const ctype<char>::mask*
 ctype<char>::classic_table()  _NOEXCEPT
 {
 #if defined(__APPLE__) || defined(__FreeBSD__)
     return _DefaultRuneLocale.__runetype;
+#elif defined(__NetBSD__)
+    return _C_ctype_tab_ + 1;
 #elif defined(__GLIBC__)
     return __cloc()->__ctype_b;
 #elif __sun__
     return __ctype_mask;
-#elif _WIN32
+#elif defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     return _ctype+1; // internal ctype mask table defined in msvcrt.dll
 // This is assumed to be safe, which is a nonsense assumption because we're
 // going to end up dereferencing it later...
+#elif defined(EMSCRIPTEN)
+    return *__ctype_b_loc();
+#elif defined(_AIX)
+    return (const unsigned long *)__lc_ctype_ptr->obj->mask;
 #else
     // Platform not supported: abort so the person doing the port knows what to
     // fix
 # warning  ctype<char>::classic_table() is not implemented
+    printf("ctype<char>::classic_table() is not implemented\n");
     abort();
     return NULL;
 #endif
@@ -1005,7 +1057,32 @@ ctype<char>::__classic_upper_table() _NOEXCEPT
 {
     return __cloc()->__ctype_toupper;
 }
-#endif // __GLIBC__
+#elif __NetBSD__
+const short*
+ctype<char>::__classic_lower_table() _NOEXCEPT
+{
+    return _C_tolower_tab_ + 1;
+}
+
+const short*
+ctype<char>::__classic_upper_table() _NOEXCEPT
+{
+    return _C_toupper_tab_ + 1;
+}
+
+#elif defined(EMSCRIPTEN)
+const int*
+ctype<char>::__classic_lower_table() _NOEXCEPT
+{
+    return *__ctype_tolower_loc();
+}
+
+const int*
+ctype<char>::__classic_upper_table() _NOEXCEPT
+{
+    return *__ctype_toupper_loc();
+}
+#endif // __GLIBC__ || EMSCRIPTEN || __NETBSD__
 
 // template <> class ctype_byname<char>
 
@@ -1039,28 +1116,28 @@ ctype_byname<char>::~ctype_byname()
 char
 ctype_byname<char>::do_toupper(char_type c) const
 {
-    return static_cast<char>(toupper_l(c, __l));
+    return static_cast<char>(toupper_l(static_cast<unsigned char>(c), __l));
 }
 
 const char*
 ctype_byname<char>::do_toupper(char_type* low, const char_type* high) const
 {
     for (; low != high; ++low)
-        *low = static_cast<char>(toupper_l(*low, __l));
+        *low = static_cast<char>(toupper_l(static_cast<unsigned char>(*low), __l));
     return low;
 }
 
 char
 ctype_byname<char>::do_tolower(char_type c) const
 {
-    return static_cast<char>(tolower_l(c, __l));
+    return static_cast<char>(tolower_l(static_cast<unsigned char>(c), __l));
 }
 
 const char*
 ctype_byname<char>::do_tolower(char_type* low, const char_type* high) const
 {
     for (; low != high; ++low)
-        *low = static_cast<char>(tolower_l(*low, __l));
+        *low = static_cast<char>(tolower_l(static_cast<unsigned char>(*low), __l));
     return low;
 }
 
@@ -1100,16 +1177,17 @@ ctype_byname<wchar_t>::do_is(mask m, char_type c) const
     return static_cast<bool>(iswctype_l(c, m, __l));
 #else
     bool result = false;
-    if (m & space) result |= (iswspace_l(c, __l) != 0);
-    if (m & print) result |= (iswprint_l(c, __l) != 0);
-    if (m & cntrl) result |= (iswcntrl_l(c, __l) != 0);
-    if (m & upper) result |= (iswupper_l(c, __l) != 0);
-    if (m & lower) result |= (iswlower_l(c, __l) != 0);
-    if (m & alpha) result |= (iswalpha_l(c, __l) != 0);
-    if (m & digit) result |= (iswdigit_l(c, __l) != 0);
-    if (m & punct) result |= (iswpunct_l(c, __l) != 0);
-    if (m & xdigit) result |= (iswxdigit_l(c, __l) != 0);
-    if (m & blank) result |= (iswblank_l(c, __l) != 0);
+    wint_t ch = static_cast<wint_t>(c);
+    if (m & space) result |= (iswspace_l(ch, __l) != 0);
+    if (m & print) result |= (iswprint_l(ch, __l) != 0);
+    if (m & cntrl) result |= (iswcntrl_l(ch, __l) != 0);
+    if (m & upper) result |= (iswupper_l(ch, __l) != 0);
+    if (m & lower) result |= (iswlower_l(ch, __l) != 0);
+    if (m & alpha) result |= (iswalpha_l(ch, __l) != 0);
+    if (m & digit) result |= (iswdigit_l(ch, __l) != 0);
+    if (m & punct) result |= (iswpunct_l(ch, __l) != 0);
+    if (m & xdigit) result |= (iswxdigit_l(ch, __l) != 0);
+    if (m & blank) result |= (iswblank_l(ch, __l) != 0);
     return result;
 #endif
 }
@@ -1124,23 +1202,24 @@ ctype_byname<wchar_t>::do_is(const char_type* low, const char_type* high, mask* 
         else
         {
             *vec = 0;
-            if (iswspace_l(*low, __l))
+            wint_t ch = static_cast<wint_t>(*low);
+            if (iswspace_l(ch, __l))
                 *vec |= space;
-            if (iswprint_l(*low, __l))
+            if (iswprint_l(ch, __l))
                 *vec |= print;
-            if (iswcntrl_l(*low, __l))
+            if (iswcntrl_l(ch, __l))
                 *vec |= cntrl;
-            if (iswupper_l(*low, __l))
+            if (iswupper_l(ch, __l))
                 *vec |= upper;
-            if (iswlower_l(*low, __l))
+            if (iswlower_l(ch, __l))
                 *vec |= lower;
-            if (iswalpha_l(*low, __l))
+            if (iswalpha_l(ch, __l))
                 *vec |= alpha;
-            if (iswdigit_l(*low, __l))
+            if (iswdigit_l(ch, __l))
                 *vec |= digit;
-            if (iswpunct_l(*low, __l))
+            if (iswpunct_l(ch, __l))
                 *vec |= punct;
-            if (iswxdigit_l(*low, __l))
+            if (iswxdigit_l(ch, __l))
                 *vec |= xdigit;
         }
     }
@@ -1156,16 +1235,17 @@ ctype_byname<wchar_t>::do_scan_is(mask m, const char_type* low, const char_type*
         if (iswctype_l(*low, m, __l))
             break;
 #else
-        if (m & space && iswspace_l(*low, __l)) break;
-        if (m & print && iswprint_l(*low, __l)) break;
-        if (m & cntrl && iswcntrl_l(*low, __l)) break;
-        if (m & upper && iswupper_l(*low, __l)) break;
-        if (m & lower && iswlower_l(*low, __l)) break;
-        if (m & alpha && iswalpha_l(*low, __l)) break;
-        if (m & digit && iswdigit_l(*low, __l)) break;
-        if (m & punct && iswpunct_l(*low, __l)) break;
-        if (m & xdigit && iswxdigit_l(*low, __l)) break;
-        if (m & blank && iswblank_l(*low, __l)) break;
+        wint_t ch = static_cast<wint_t>(*low);
+        if (m & space && iswspace_l(ch, __l)) break;
+        if (m & print && iswprint_l(ch, __l)) break;
+        if (m & cntrl && iswcntrl_l(ch, __l)) break;
+        if (m & upper && iswupper_l(ch, __l)) break;
+        if (m & lower && iswlower_l(ch, __l)) break;
+        if (m & alpha && iswalpha_l(ch, __l)) break;
+        if (m & digit && iswdigit_l(ch, __l)) break;
+        if (m & punct && iswpunct_l(ch, __l)) break;
+        if (m & xdigit && iswxdigit_l(ch, __l)) break;
+        if (m & blank && iswblank_l(ch, __l)) break;
 #endif
     }
     return low;
@@ -1180,16 +1260,17 @@ ctype_byname<wchar_t>::do_scan_not(mask m, const char_type* low, const char_type
         if (!iswctype_l(*low, m, __l))
             break;
 #else
-        if (m & space && iswspace_l(*low, __l)) continue;
-        if (m & print && iswprint_l(*low, __l)) continue;
-        if (m & cntrl && iswcntrl_l(*low, __l)) continue;
-        if (m & upper && iswupper_l(*low, __l)) continue;
-        if (m & lower && iswlower_l(*low, __l)) continue;
-        if (m & alpha && iswalpha_l(*low, __l)) continue;
-        if (m & digit && iswdigit_l(*low, __l)) continue;
-        if (m & punct && iswpunct_l(*low, __l)) continue;
-        if (m & xdigit && iswxdigit_l(*low, __l)) continue;
-        if (m & blank && iswblank_l(*low, __l)) continue;
+        wint_t ch = static_cast<wint_t>(*low);
+        if (m & space && iswspace_l(ch, __l)) continue;
+        if (m & print && iswprint_l(ch, __l)) continue;
+        if (m & cntrl && iswcntrl_l(ch, __l)) continue;
+        if (m & upper && iswupper_l(ch, __l)) continue;
+        if (m & lower && iswlower_l(ch, __l)) continue;
+        if (m & alpha && iswalpha_l(ch, __l)) continue;
+        if (m & digit && iswdigit_l(ch, __l)) continue;
+        if (m & punct && iswpunct_l(ch, __l)) continue;
+        if (m & xdigit && iswxdigit_l(ch, __l)) continue;
+        if (m & blank && iswblank_l(ch, __l)) continue;
         break;
 #endif
     }
@@ -1339,7 +1420,7 @@ locale::id codecvt<wchar_t, char, mbstate_t>::id;
 
 codecvt<wchar_t, char, mbstate_t>::codecvt(size_t refs)
     : locale::facet(refs),
-      __l(0)
+      __l(_LIBCPP_GET_C_LOCALE)
 {
 }
 
@@ -1356,7 +1437,7 @@ codecvt<wchar_t, char, mbstate_t>::codecvt(const char* nm, size_t refs)
 
 codecvt<wchar_t, char, mbstate_t>::~codecvt()
 {
-    if (__l != 0)
+    if (__l != _LIBCPP_GET_C_LOCALE)
         freelocale(__l);
 }
 
@@ -1374,7 +1455,7 @@ codecvt<wchar_t, char, mbstate_t>::do_out(state_type& st,
     to_nxt = to;
     for (frm_nxt = frm; frm != frm_end && to != to_end; frm = frm_nxt, to = to_nxt)
     {
-        // save state in case needed to reover to_nxt on error
+        // save state in case it is needed to recover to_nxt on error
         mbstate_t save_state = st;
 #ifdef _LIBCPP_LOCALE__L_EXTENSIONS
         size_t n = wcsnrtombs_l(to, &frm_nxt, static_cast<size_t>(fend-frm),
@@ -1443,7 +1524,7 @@ codecvt<wchar_t, char, mbstate_t>::do_in(state_type& st,
     to_nxt = to;
     for (frm_nxt = frm; frm != frm_end && to != to_end; frm = frm_nxt, to = to_nxt)
     {
-        // save state in case needed to reover to_nxt on error
+        // save state in case it is needed to recover to_nxt on error
         mbstate_t save_state = st;
 #ifdef _LIBCPP_LOCALE__L_EXTENSIONS
         size_t n = mbsnrtowcs_l(to, &frm_nxt, static_cast<size_t>(fend-frm),
@@ -1589,9 +1670,9 @@ int
 codecvt<wchar_t, char, mbstate_t>::do_max_length() const  _NOEXCEPT
 {
 #ifdef _LIBCPP_LOCALE__L_EXTENSIONS
-    return __l == 0 ? 1 : MB_CUR_MAX_L(__l);
+    return __l == 0 ? 1 : static_cast<int>(  MB_CUR_MAX_L(__l));
 #else
-    return __l == 0 ? 1 : __mb_cur_max_l(__l);
+    return __l == 0 ? 1 : static_cast<int>(__mb_cur_max_l(__l));
 #endif
 }
 
@@ -3143,14 +3224,25 @@ __codecvt_utf8<wchar_t>::do_out(state_type&,
     const intern_type* frm, const intern_type* frm_end, const intern_type*& frm_nxt,
     extern_type* to, extern_type* to_end, extern_type*& to_nxt) const
 {
+#if _WIN32
+    const uint16_t* _frm = reinterpret_cast<const uint16_t*>(frm);
+    const uint16_t* _frm_end = reinterpret_cast<const uint16_t*>(frm_end);
+    const uint16_t* _frm_nxt = _frm;
+#else
     const uint32_t* _frm = reinterpret_cast<const uint32_t*>(frm);
     const uint32_t* _frm_end = reinterpret_cast<const uint32_t*>(frm_end);
     const uint32_t* _frm_nxt = _frm;
+#endif
     uint8_t* _to = reinterpret_cast<uint8_t*>(to);
     uint8_t* _to_end = reinterpret_cast<uint8_t*>(to_end);
     uint8_t* _to_nxt = _to;
+#if _WIN32
+    result r = ucs2_to_utf8(_frm, _frm_end, _frm_nxt, _to, _to_end, _to_nxt,
+                            _Maxcode_, _Mode_);
+#else
     result r = ucs4_to_utf8(_frm, _frm_end, _frm_nxt, _to, _to_end, _to_nxt,
                             _Maxcode_, _Mode_);
+#endif
     frm_nxt = frm + (_frm_nxt - _frm);
     to_nxt = to + (_to_nxt - _to);
     return r;
@@ -3164,11 +3256,19 @@ __codecvt_utf8<wchar_t>::do_in(state_type&,
     const uint8_t* _frm = reinterpret_cast<const uint8_t*>(frm);
     const uint8_t* _frm_end = reinterpret_cast<const uint8_t*>(frm_end);
     const uint8_t* _frm_nxt = _frm;
+#if _WIN32
+    uint16_t* _to = reinterpret_cast<uint16_t*>(to);
+    uint16_t* _to_end = reinterpret_cast<uint16_t*>(to_end);
+    uint16_t* _to_nxt = _to;
+    result r = utf8_to_ucs2(_frm, _frm_end, _frm_nxt, _to, _to_end, _to_nxt,
+                            _Maxcode_, _Mode_);
+#else
     uint32_t* _to = reinterpret_cast<uint32_t*>(to);
     uint32_t* _to_end = reinterpret_cast<uint32_t*>(to_end);
     uint32_t* _to_nxt = _to;
     result r = utf8_to_ucs4(_frm, _frm_end, _frm_nxt, _to, _to_end, _to_nxt,
                             _Maxcode_, _Mode_);
+#endif
     frm_nxt = frm + (_frm_nxt - _frm);
     to_nxt = to + (_to_nxt - _to);
     return r;
@@ -4270,7 +4370,7 @@ __num_put_base::__format_float(char* __fmtp, const char* __len,
     if (__flags & ios_base::showpoint)
         *__fmtp++ = '#';
     ios_base::fmtflags floatfield = __flags & ios_base::floatfield;
-    bool uppercase = __flags & ios_base::uppercase;
+    bool uppercase = (__flags & ios_base::uppercase) != 0;
     if (floatfield == (ios_base::fixed | ios_base::scientific))
         specify_precision = false;
     else
@@ -4601,9 +4701,12 @@ __time_get::~__time_get()
 {
     freelocale(__loc_);
 }
-
+#if defined(__clang__)
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#if defined(__GNUG__)
 #pragma GCC   diagnostic ignored "-Wmissing-field-initializers"
+#endif
 
 template <>
 string
@@ -4749,7 +4852,9 @@ __time_get_storage<char>::__analyze(char fmt, const ctype<char>& ct)
     return result;
 }
 
+#if defined(__clang__)
 #pragma clang diagnostic ignored "-Wmissing-braces"
+#endif
 
 template <>
 wstring
@@ -5282,7 +5387,7 @@ __time_put::__time_put(const string& nm)
 
 __time_put::~__time_put()
 {
-    if (__loc_)
+    if (__loc_ != _LIBCPP_GET_C_LOCALE)
         freelocale(__loc_);
 }
 
@@ -5768,19 +5873,19 @@ moneypunct_byname<char, true>::init(const char* nm)
         __frac_digits_ = lc->int_frac_digits;
     else
         __frac_digits_ = base::do_frac_digits();
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     if (lc->p_sign_posn == 0)
-#else // _WIN32
+#else // _LIBCPP_MSVCRT
     if (lc->int_p_sign_posn == 0)
-#endif //_WIN32
+#endif // !_LIBCPP_MSVCRT
         __positive_sign_ = "()";
     else
         __positive_sign_ = lc->positive_sign;
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     if(lc->n_sign_posn == 0)
-#else // _WIN32
+#else // _LIBCPP_MSVCRT
     if (lc->int_n_sign_posn == 0)
-#endif // _WIN32
+#endif // !_LIBCPP_MSVCRT
         __negative_sign_ = "()";
     else
         __negative_sign_ = lc->negative_sign;
@@ -5788,19 +5893,19 @@ moneypunct_byname<char, true>::init(const char* nm)
     // the same places in curr_symbol since there's no way to
     // represent anything else.
     string_type __dummy_curr_symbol = __curr_symbol_;
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     __init_pat(__pos_format_, __dummy_curr_symbol, true,
                lc->p_cs_precedes, lc->p_sep_by_space, lc->p_sign_posn, ' ');
     __init_pat(__neg_format_, __curr_symbol_, true,
                lc->n_cs_precedes, lc->n_sep_by_space, lc->n_sign_posn, ' ');
-#else
+#else // _LIBCPP_MSVCRT
     __init_pat(__pos_format_, __dummy_curr_symbol, true,
                lc->int_p_cs_precedes, lc->int_p_sep_by_space,
                lc->int_p_sign_posn, ' ');
     __init_pat(__neg_format_, __curr_symbol_, true,
                lc->int_n_cs_precedes, lc->int_n_sep_by_space,
                lc->int_n_sign_posn, ' ');
-#endif // _WIN32
+#endif // !_LIBCPP_MSVCRT
 }
 
 template<>
@@ -5927,11 +6032,11 @@ moneypunct_byname<wchar_t, true>::init(const char* nm)
         __frac_digits_ = lc->int_frac_digits;
     else
         __frac_digits_ = base::do_frac_digits();
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     if (lc->p_sign_posn == 0)
-#else // _WIN32
+#else // _LIBCPP_MSVCRT
     if (lc->int_p_sign_posn == 0)
-#endif // _WIN32
+#endif // !_LIBCPP_MSVCRT
         __positive_sign_ = L"()";
     else
     {
@@ -5947,11 +6052,11 @@ moneypunct_byname<wchar_t, true>::init(const char* nm)
         wbe = wbuf + j;
         __positive_sign_.assign(wbuf, wbe);
     }
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     if (lc->n_sign_posn == 0)
-#else // _WIN32
+#else // _LIBCPP_MSVCRT
     if (lc->int_n_sign_posn == 0)
-#endif // _WIN32
+#endif // !_LIBCPP_MSVCRT
         __negative_sign_ = L"()";
     else
     {
@@ -5971,19 +6076,19 @@ moneypunct_byname<wchar_t, true>::init(const char* nm)
     // the same places in curr_symbol since there's no way to
     // represent anything else.
     string_type __dummy_curr_symbol = __curr_symbol_;
-#if _WIN32
+#if defined(_LIBCPP_MSVCRT) || defined(__MINGW32__)
     __init_pat(__pos_format_, __dummy_curr_symbol, true,
                lc->p_cs_precedes, lc->p_sep_by_space, lc->p_sign_posn, L' ');
     __init_pat(__neg_format_, __curr_symbol_, true,
                lc->n_cs_precedes, lc->n_sep_by_space, lc->n_sign_posn, L' ');
-#else // _WIN32
+#else // _LIBCPP_MSVCRT
     __init_pat(__pos_format_, __dummy_curr_symbol, true,
                lc->int_p_cs_precedes, lc->int_p_sep_by_space,
                lc->int_p_sign_posn, L' ');
     __init_pat(__neg_format_, __curr_symbol_, true,
                lc->int_n_cs_precedes, lc->int_n_sep_by_space,
                lc->int_n_sign_posn, L' ');
-#endif // _WIN32
+#endif // !_LIBCPP_MSVCRT
 }
 
 void __do_nothing(void*) {}
@@ -5992,6 +6097,8 @@ void __throw_runtime_error(const char* msg)
 {
 #ifndef _LIBCPP_NO_EXCEPTIONS
     throw runtime_error(msg);
+#else
+    (void)msg;
 #endif
 }
 

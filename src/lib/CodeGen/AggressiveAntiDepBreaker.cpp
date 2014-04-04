@@ -151,23 +151,7 @@ void AggressiveAntiDepBreaker::StartBlock(MachineBasicBlock *BB) {
   std::vector<unsigned> &KillIndices = State->GetKillIndices();
   std::vector<unsigned> &DefIndices = State->GetDefIndices();
 
-  // Determine the live-out physregs for this block.
-  if (IsReturnBlock) {
-    // In a return block, examine the function live-out regs.
-    for (MachineRegisterInfo::liveout_iterator I = MRI.liveout_begin(),
-         E = MRI.liveout_end(); I != E; ++I) {
-      for (MCRegAliasIterator AI(*I, TRI, true); AI.isValid(); ++AI) {
-        unsigned Reg = *AI;
-        State->UnionGroups(Reg, 0);
-        KillIndices[Reg] = BB->size();
-        DefIndices[Reg] = ~0u;
-      }
-    }
-  }
-
-  // In a non-return block, examine the live-in regs of all successors.
-  // Note a return block can have successors if the return instruction is
-  // predicated.
+  // Examine the live-in regs of all successors.
   for (MachineBasicBlock::succ_iterator SI = BB->succ_begin(),
          SE = BB->succ_end(); SI != SE; ++SI)
     for (MachineBasicBlock::livein_iterator I = (*SI)->livein_begin(),
@@ -263,8 +247,8 @@ void AggressiveAntiDepBreaker::GetPassthruRegs(MachineInstr *MI,
     if ((MO.isDef() && MI->isRegTiedToUseOperand(i)) ||
         IsImplicitDefUse(MI, MO)) {
       const unsigned Reg = MO.getReg();
-      PassthruRegs.insert(Reg);
-      for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs)
+      for (MCSubRegIterator SubRegs(Reg, TRI, /*IncludeSelf=*/true);
+           SubRegs.isValid(); ++SubRegs)
         PassthruRegs.insert(*SubRegs);
     }
   }
@@ -798,7 +782,7 @@ unsigned AggressiveAntiDepBreaker::BreakAntiDependencies(
     if (MI == CriticalPathMI) {
       CriticalPathSU = CriticalPathStep(CriticalPathSU);
       CriticalPathMI = (CriticalPathSU) ? CriticalPathSU->getInstr() : 0;
-    } else {
+    } else if (CriticalPathSet.any()) {
       ExcludeRegs = &CriticalPathSet;
     }
 

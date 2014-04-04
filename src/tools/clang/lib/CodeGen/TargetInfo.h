@@ -18,8 +18,10 @@
 #include "clang/AST/Type.h"
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/SmallString.h"
 
 namespace llvm {
+  class Constant;
   class GlobalValue;
   class Type;
   class Value;
@@ -110,8 +112,13 @@ namespace clang {
       return Address;
     }
 
+    /// Corrects the low-level LLVM type for a given constraint and "usual"
+    /// type.
+    ///
+    /// \returns A pointer to a new LLVM type, possibly the same as the original
+    /// on success; 0 on failure.
     virtual llvm::Type* adjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
-                                            StringRef Constraint, 
+                                            StringRef Constraint,
                                             llvm::Type* Ty) const {
       return Ty;
     }
@@ -134,6 +141,13 @@ namespace clang {
     /// empty if none is required.
     virtual StringRef getARCRetainAutoreleasedReturnValueMarker() const {
       return "";
+    }
+
+    /// Return a constant used by UBSan as a signature to identify functions
+    /// possessing type information, or 0 if the platform is unsupported.
+    virtual llvm::Constant *getUBSanFunctionSignature(
+        CodeGen::CodeGenModule &CGM) const {
+      return 0;
     }
 
     /// Determine whether a call to an unprototyped functions under
@@ -180,6 +194,17 @@ namespace clang {
     /// right thing when calling a function with no know signature.
     virtual bool isNoProtoCallVariadic(const CodeGen::CallArgList &args,
                                        const FunctionNoProtoType *fnType) const;
+
+    /// Gets the linker options necessary to link a dependent library on this
+    /// platform.
+    virtual void getDependentLibraryOption(llvm::StringRef Lib,
+                                           llvm::SmallString<24> &Opt) const;
+
+    /// Gets the linker options necessary to detect object file mismatches on
+    /// this platform.
+    virtual void getDetectMismatchOption(llvm::StringRef Name,
+                                         llvm::StringRef Value,
+                                         llvm::SmallString<32> &Opt) const {}
   };
 }
 

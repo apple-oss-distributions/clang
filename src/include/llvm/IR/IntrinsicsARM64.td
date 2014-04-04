@@ -11,6 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
+let TargetPrefix = "arm64" in {
+
+def int_arm64_ldxr : Intrinsic<[llvm_i64_ty], [llvm_anyptr_ty]>;
+def int_arm64_stxr : Intrinsic<[llvm_i32_ty], [llvm_i64_ty, llvm_anyptr_ty]>;
+def int_arm64_clrex : Intrinsic<[]>;
+
+def int_arm64_ldxp : Intrinsic<[llvm_i64_ty, llvm_i64_ty], [llvm_ptr_ty]>;
+def int_arm64_stxp : Intrinsic<[llvm_i32_ty], [llvm_i64_ty, llvm_i64_ty,
+    llvm_ptr_ty]>;
+
+}
 
 //===----------------------------------------------------------------------===//
 // Advanced SIMD (NEON)
@@ -51,12 +62,6 @@ let TargetPrefix = "arm64" in {  // All intrinsics start with "llvm.arm64.".
   class AdvSIMD_2VectorArg_Intrinsic
     : Intrinsic<[llvm_anyvector_ty], [LLVMMatchType<0>, LLVMMatchType<0>],
                 [IntrNoMem]>;
-  class AdvSIMD_2VectorArg_Expand_Intrinsic
-    : Intrinsic<[llvm_anyvector_ty], [llvm_anyvector_ty, LLVMMatchType<1>],
-                [IntrNoMem]>;
-  class AdvSIMD_2VectorArg_Expand_Wide_Intrinsic
-    : Intrinsic<[llvm_anyvector_ty], [LLVMMatchType<0>, llvm_anyvector_ty],
-                [IntrNoMem]>;
   class AdvSIMD_2VectorArg_Long_Intrinsic
     : Intrinsic<[llvm_anyvector_ty],
              [LLVMTruncatedElementVectorType<0>,
@@ -83,10 +88,6 @@ let TargetPrefix = "arm64" in {  // All intrinsics start with "llvm.arm64.".
     : Intrinsic<[llvm_anyvector_ty],
                 [llvm_anyvector_ty],
                 [IntrNoMem]>;
-  class AdvSIMD_2VectorArg_Scalar_Expand_Intrinsic
-    : Intrinsic<[llvm_anyvector_ty],
-                [llvm_anyvector_ty, llvm_i32_ty],
-                [IntrNoMem]>;
   class AdvSIMD_2VectorArg_Scalar_Wide_BySize_Intrinsic
     : Intrinsic<[llvm_anyvector_ty],
                 [LLVMTruncatedElementVectorType<0>],
@@ -107,16 +108,6 @@ let TargetPrefix = "arm64" in {  // All intrinsics start with "llvm.arm64.".
   class AdvSIMD_3VectorArg_Scalar_Intrinsic
       : Intrinsic<[llvm_anyvector_ty],
                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty],
-               [IntrNoMem]>;
-  class AdvSIMD_3VectorArg_Expand_Intrinsic
-      : Intrinsic<[llvm_anyvector_ty],
-               [llvm_anyvector_ty, LLVMMatchType<1>, LLVMMatchType<1>],
-               [IntrNoMem]>;
-  class AdvSIMD_3VectorArg_Long_Intrinsic
-      : Intrinsic<[llvm_anyvector_ty],
-               [LLVMMatchType<0>,
-                LLVMTruncatedElementVectorType<0>,
-                LLVMTruncatedElementVectorType<0>],
                [IntrNoMem]>;
   class AdvSIMD_3VectorArg_Tied_Narrow_Intrinsic
       : Intrinsic<[llvm_anyvector_ty],
@@ -145,10 +136,6 @@ let Properties = [IntrNoMem] in {
   def int_arm64_neon_saddlv : AdvSIMD_1VectorArg_Int_Across_Intrinsic;
   def int_arm64_neon_uaddlv : AdvSIMD_1VectorArg_Int_Across_Intrinsic;
 
-  // Vector Wide Add
-  def int_arm64_neon_saddw2 : AdvSIMD_2VectorArg_Expand_Wide_Intrinsic;
-  def int_arm64_neon_uaddw2 : AdvSIMD_2VectorArg_Expand_Wide_Intrinsic;
-
   // Vector Halving Add
   def int_arm64_neon_shadd : AdvSIMD_2VectorArg_Intrinsic;
   def int_arm64_neon_uhadd : AdvSIMD_2VectorArg_Intrinsic;
@@ -164,11 +151,9 @@ let Properties = [IntrNoMem] in {
 
   // Vector Add High-Half
   def int_arm64_neon_addhn : AdvSIMD_2VectorArg_Narrow_Intrinsic;
-  def int_arm64_neon_addhn2 : AdvSIMD_3VectorArg_Tied_Narrow_Intrinsic;
 
   // Vector Rounding Add High-Half
   def int_arm64_neon_raddhn : AdvSIMD_2VectorArg_Narrow_Intrinsic;
-  def int_arm64_neon_raddhn2 : AdvSIMD_3VectorArg_Tied_Narrow_Intrinsic;
 
   // Vector Saturating Doubling Multiply High
   def int_arm64_neon_sqdmulh : AdvSIMD_2VectorArg_Intrinsic;
@@ -195,17 +180,8 @@ let Properties = [IntrNoMem] in {
 
   // Vector Saturating Doubling Long Multiply
   def int_arm64_neon_sqdmull : AdvSIMD_2VectorArg_Long_Intrinsic;
-  def int_arm64_neon_sqdmull2 : AdvSIMD_2VectorArg_Expand_Intrinsic;
   def int_arm64_neon_sqdmulls_scalar
     : Intrinsic<[llvm_i64_ty], [llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
-
-  // Vector Long Subtract
-  def int_arm64_neon_ssubl2 : AdvSIMD_2VectorArg_Expand_Intrinsic;
-  def int_arm64_neon_usubl2 : AdvSIMD_2VectorArg_Expand_Intrinsic;
-
-  // Vector Wide Subtract
-  def int_arm64_neon_ssubw2 : AdvSIMD_2VectorArg_Expand_Wide_Intrinsic;
-  def int_arm64_neon_usubw2 : AdvSIMD_2VectorArg_Expand_Wide_Intrinsic;
 
   // Vector Halving Subtract
   def int_arm64_neon_shsub : AdvSIMD_2VectorArg_Intrinsic;
@@ -217,11 +193,9 @@ let Properties = [IntrNoMem] in {
 
   // Vector Subtract High-Half
   def int_arm64_neon_subhn : AdvSIMD_2VectorArg_Narrow_Intrinsic;
-  def int_arm64_neon_subhn2 : AdvSIMD_3VectorArg_Tied_Narrow_Intrinsic;
 
   // Vector Rounding Subtract High-Half
   def int_arm64_neon_rsubhn : AdvSIMD_2VectorArg_Narrow_Intrinsic;
-  def int_arm64_neon_rsubhn2 : AdvSIMD_3VectorArg_Tied_Narrow_Intrinsic;
 
   // Vector Compare Absolute Greater-than-or-equal
   def int_arm64_neon_facge : AdvSIMD_2VectorArg_Intrinsic;
@@ -243,8 +217,6 @@ let Properties = [IntrNoMem] in {
   // pattern fragments this ends up generating.
   def int_arm64_neon_sabdl : AdvSIMD_2VectorArg_Long_Intrinsic;
   def int_arm64_neon_uabdl : AdvSIMD_2VectorArg_Long_Intrinsic;
-  def int_arm64_neon_sabdl2 : AdvSIMD_2VectorArg_Expand_Intrinsic;
-  def int_arm64_neon_uabdl2 : AdvSIMD_2VectorArg_Expand_Intrinsic;
 
   // Vector Max
   def int_arm64_neon_smax : AdvSIMD_2VectorArg_Intrinsic;
@@ -324,31 +296,23 @@ let Properties = [IntrNoMem] in {
 
   // Vector Narrowing Saturating Shift Right by Constant
   def int_arm64_neon_shrn : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_shrn2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
 
   // Vector Signed->Unsigned Narrowing Saturating Shift Right by Constant
   def int_arm64_neon_sqshrun : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_sqshrun2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
 
   // Vector Signed->Unsigned Rounding Narrowing Saturating Shift Right by Const
   def int_arm64_neon_sqrshrun : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_sqrshrun2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
 
   // Vector Narrowing Shift Right by Constant
   def int_arm64_neon_sqshrn : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
   def int_arm64_neon_uqshrn : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_sqshrn2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
-  def int_arm64_neon_uqshrn2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
 
   // Vector Rounding Narrowing Shift Right by Constant
   def int_arm64_neon_rshrn : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_rshrn2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
 
   // Vector Rounding Narrowing Saturating Shift Right by Constant
   def int_arm64_neon_sqrshrn : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_sqrshrn2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
   def int_arm64_neon_uqrshrn : AdvSIMD_2VectorArg_Scalar_Narrow_Intrinsic;
-  def int_arm64_neon_uqrshrn2 : AdvSIMD_3VectorArg_Scalar_Tied_Narrow_Intrinsic;
 
   // Vector Shift Left
   def int_arm64_neon_sshl : AdvSIMD_2IntArg_Intrinsic;
@@ -358,9 +322,6 @@ let Properties = [IntrNoMem] in {
   def int_arm64_neon_shll : AdvSIMD_2VectorArg_Scalar_Wide_BySize_Intrinsic;
   def int_arm64_neon_sshll : AdvSIMD_2VectorArg_Scalar_Wide_Intrinsic;
   def int_arm64_neon_ushll : AdvSIMD_2VectorArg_Scalar_Wide_Intrinsic;
-  def int_arm64_neon_shll2 : AdvSIMD_2VectorArg_Scalar_Expand_BySize_Intrinsic;
-  def int_arm64_neon_sshll2 : AdvSIMD_2VectorArg_Scalar_Expand_Intrinsic;
-  def int_arm64_neon_ushll2 : AdvSIMD_2VectorArg_Scalar_Expand_Intrinsic;
 
   // Vector Shift Right by Constant and Insert
   def int_arm64_neon_vsri : AdvSIMD_3VectorArg_Scalar_Intrinsic;
@@ -368,21 +329,15 @@ let Properties = [IntrNoMem] in {
   // Vector Shift Left by Constant and Insert
   def int_arm64_neon_vsli : AdvSIMD_3VectorArg_Scalar_Intrinsic;
 
-  // Vector Narrow
-  def int_arm64_neon_xtn2 : AdvSIMD_2VectorArg_Tied_Narrow_Intrinsic;
-
   // Vector Saturating Narrow
   def int_arm64_neon_scalar_sqxtn: AdvSIMD_1IntArg_Narrow_Intrinsic;
   def int_arm64_neon_scalar_uqxtn : AdvSIMD_1IntArg_Narrow_Intrinsic;
   def int_arm64_neon_sqxtn : AdvSIMD_1VectorArg_Narrow_Intrinsic;
   def int_arm64_neon_uqxtn : AdvSIMD_1VectorArg_Narrow_Intrinsic;
-  def int_arm64_neon_sqxtn2 : AdvSIMD_2VectorArg_Tied_Narrow_Intrinsic;
-  def int_arm64_neon_uqxtn2 : AdvSIMD_2VectorArg_Tied_Narrow_Intrinsic;
 
   // Vector Saturating Extract and Unsigned Narrow
   def int_arm64_neon_scalar_sqxtun : AdvSIMD_1IntArg_Narrow_Intrinsic;
   def int_arm64_neon_sqxtun : AdvSIMD_1VectorArg_Narrow_Intrinsic;
-  def int_arm64_neon_sqxtun2 : AdvSIMD_2VectorArg_Tied_Narrow_Intrinsic;
 
   // Vector Absolute Value
   def int_arm64_neon_abs : AdvSIMD_1VectorArg_Intrinsic;
@@ -412,18 +367,6 @@ let Properties = [IntrNoMem] in {
     : Intrinsic<[llvm_v4i16_ty], [llvm_v4f32_ty], [IntrNoMem]>;
   def int_arm64_neon_vcvthf2fp
     : Intrinsic<[llvm_v4f32_ty], [llvm_v4i16_ty], [IntrNoMem]>;
-    
-  // Vector Conversions Between Single-Precision and Double-Precision.
-  def int_arm64_neon_vcvtfp2df
-    : Intrinsic<[llvm_v2f64_ty], [llvm_v2f32_ty], [IntrNoMem]>;
-  def int_arm64_neon_vcvthighfp2df
-    : Intrinsic<[llvm_v2f64_ty], [llvm_v4f32_ty], [IntrNoMem]>;
-
-  // Vector FP Narrowing
-  def int_arm64_neon_vcvtdf2fp
-    : Intrinsic<[llvm_v2f32_ty], [llvm_v2f64_ty], [IntrNoMem]>;
-  def int_arm64_neon_vcvthighdf2fp
-    : Intrinsic<[llvm_v4f32_ty], [llvm_v2f32_ty, llvm_v2f64_ty], [IntrNoMem]>;
 
   // Vector Conversions Between Floating-point and Fixed-point.
   def int_arm64_neon_vcvtfp2fxs : AdvSIMD_CvtFPToFx_Intrinsic;
@@ -454,7 +397,6 @@ let Properties = [IntrNoMem] in {
 
   // Vector FP Inexact Narrowing
   def int_arm64_neon_fcvtxn : AdvSIMD_1VectorArg_Expand_Intrinsic;
-  def int_arm64_neon_fcvtxn2 : AdvSIMD_2VectorArg_Tied_Narrow_Intrinsic;
 
   // Scalar FP Inexact Narrowing
   def int_arm64_sisd_fcvtxn : Intrinsic<[llvm_float_ty], [llvm_double_ty],

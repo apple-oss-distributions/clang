@@ -143,12 +143,13 @@ class ObjCArrayLiteral : public Expr {
     : Expr(ObjCArrayLiteralClass, Empty), NumElements(NumElements) {}
 
 public:
-  static ObjCArrayLiteral *Create(ASTContext &C, 
+  static ObjCArrayLiteral *Create(const ASTContext &C,
                                   ArrayRef<Expr *> Elements,
                                   QualType T, ObjCMethodDecl * Method,
                                   SourceRange SR);
 
-  static ObjCArrayLiteral *CreateEmpty(ASTContext &C, unsigned NumElements);
+  static ObjCArrayLiteral *CreateEmpty(const ASTContext &C,
+                                       unsigned NumElements);
 
   SourceLocation getLocStart() const LLVM_READONLY { return Range.getBegin(); }
   SourceLocation getLocEnd() const LLVM_READONLY { return Range.getEnd(); }
@@ -206,12 +207,18 @@ struct ObjCDictionaryElement {
   
   /// \brief The number of elements this pack expansion will expand to, if
   /// this is a pack expansion and is known.
-  llvm::Optional<unsigned> NumExpansions;
+  Optional<unsigned> NumExpansions;
 
   /// \brief Determines whether this dictionary element is a pack expansion.
   bool isPackExpansion() const { return EllipsisLoc.isValid(); }
 };
+} // end namespace clang
 
+namespace llvm {
+template <> struct isPodLike<clang::ObjCDictionaryElement> : llvm::true_type {};
+}
+
+namespace clang {
 /// ObjCDictionaryLiteral - AST node to represent objective-c dictionary 
 /// literals; as in:  @{@"name" : NSUserName(), @"date" : [NSDate date] };
 class ObjCDictionaryLiteral : public Expr {
@@ -283,13 +290,13 @@ class ObjCDictionaryLiteral : public Expr {
   }
 
 public:
-  static ObjCDictionaryLiteral *Create(ASTContext &C,
+  static ObjCDictionaryLiteral *Create(const ASTContext &C,
                                        ArrayRef<ObjCDictionaryElement> VK, 
                                        bool HasPackExpansions,
                                        QualType T, ObjCMethodDecl *method,
                                        SourceRange SR);
   
-  static ObjCDictionaryLiteral *CreateEmpty(ASTContext &C, 
+  static ObjCDictionaryLiteral *CreateEmpty(const ASTContext &C,
                                             unsigned NumElements,
                                             bool HasPackExpansions);
   
@@ -300,8 +307,7 @@ public:
   ObjCDictionaryElement getKeyValueElement(unsigned Index) const {
     assert((Index < NumElements) && "Arg access out of range!");
     const KeyValuePair &KV = getKeyValues()[Index];
-    ObjCDictionaryElement Result = { KV.Key, KV.Value, SourceLocation(),
-                                     llvm::Optional<unsigned>() };
+    ObjCDictionaryElement Result = { KV.Key, KV.Value, SourceLocation(), None };
     if (HasPackExpansions) {
       const ExpansionData &Expansion = getExpansionData()[Index];
       Result.EllipsisLoc = Expansion.EllipsisLoc;
@@ -412,9 +418,13 @@ public:
   child_range children() { return child_range(); }
 };
 
-/// ObjCProtocolExpr used for protocol expression in Objective-C.  This is used
-/// as: @protocol(foo), as in:
-///   obj conformsToProtocol:@protocol(foo)]
+/// ObjCProtocolExpr used for protocol expression in Objective-C.
+///
+/// This is used as: \@protocol(foo), as in:
+/// \code
+///   [obj conformsToProtocol:@protocol(foo)]
+/// \endcode
+///
 /// The return type is "Protocol*".
 class ObjCProtocolExpr : public Expr {
   ObjCProtocolDecl *TheProtocol;
@@ -798,7 +808,7 @@ public:
   explicit ObjCSubscriptRefExpr(EmptyShell Empty)
     : Expr(ObjCSubscriptRefExprClass, Empty) {}
   
-  static ObjCSubscriptRefExpr *Create(ASTContext &C,
+  static ObjCSubscriptRefExpr *Create(const ASTContext &C,
                                       Expr *base,
                                       Expr *key, QualType T, 
                                       ObjCMethodDecl *getMethod,
@@ -994,13 +1004,13 @@ class ObjCMessageExpr : public Expr {
     return getNumSelectorLocs();
   }
 
-  static ObjCMessageExpr *alloc(ASTContext &C,
+  static ObjCMessageExpr *alloc(const ASTContext &C,
                                 ArrayRef<Expr *> Args,
                                 SourceLocation RBraceLoc,
                                 ArrayRef<SourceLocation> SelLocs,
                                 Selector Sel,
                                 SelectorLocationsKind &SelLocsK);
-  static ObjCMessageExpr *alloc(ASTContext &C,
+  static ObjCMessageExpr *alloc(const ASTContext &C,
                                 unsigned NumArgs,
                                 unsigned NumStoredSelLocs);
 
@@ -1042,7 +1052,7 @@ public:
   /// \param Args The message send arguments.
   ///
   /// \param RBracLoc The location of the closing square bracket ']'.
-  static ObjCMessageExpr *Create(ASTContext &Context, QualType T, 
+  static ObjCMessageExpr *Create(const ASTContext &Context, QualType T,
                                  ExprValueKind VK,
                                  SourceLocation LBracLoc,
                                  SourceLocation SuperLoc,
@@ -1078,7 +1088,7 @@ public:
   /// \param Args The message send arguments.
   ///
   /// \param RBracLoc The location of the closing square bracket ']'.
-  static ObjCMessageExpr *Create(ASTContext &Context, QualType T,
+  static ObjCMessageExpr *Create(const ASTContext &Context, QualType T,
                                  ExprValueKind VK,
                                  SourceLocation LBracLoc,
                                  TypeSourceInfo *Receiver,
@@ -1112,7 +1122,7 @@ public:
   /// \param Args The message send arguments.
   ///
   /// \param RBracLoc The location of the closing square bracket ']'.
-  static ObjCMessageExpr *Create(ASTContext &Context, QualType T,
+  static ObjCMessageExpr *Create(const ASTContext &Context, QualType T,
                                  ExprValueKind VK,
                                  SourceLocation LBracLoc,
                                  Expr *Receiver,
@@ -1130,7 +1140,7 @@ public:
   ///
   /// \param NumArgs The number of message arguments, not including
   /// the receiver.
-  static ObjCMessageExpr *CreateEmpty(ASTContext &Context,
+  static ObjCMessageExpr *CreateEmpty(const ASTContext &Context,
                                       unsigned NumArgs,
                                       unsigned NumStoredSelLocs);
 

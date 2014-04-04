@@ -25,6 +25,7 @@ namespace llvm {
   class DataLayout;
   class StringRef;
   class MDNode;
+  class TargetLibraryInfo;
 
   /// ComputeMaskedBits - Determine which of the bits specified in Mask are
   /// known to be either zero or one and return them in the KnownZero/KnownOne
@@ -117,10 +118,10 @@ namespace llvm {
   /// it can be expressed as a base pointer plus a constant offset.  Return the
   /// base and offset to the caller.
   Value *GetPointerBaseWithConstantOffset(Value *Ptr, int64_t &Offset,
-                                          const DataLayout &TD);
+                                          const DataLayout *TD);
   static inline const Value *
   GetPointerBaseWithConstantOffset(const Value *Ptr, int64_t &Offset,
-                                   const DataLayout &TD) {
+                                   const DataLayout *TD) {
     return GetPointerBaseWithConstantOffset(const_cast<Value*>(Ptr), Offset,TD);
   }
   
@@ -182,6 +183,11 @@ namespace llvm {
   /// for such instructions, moving them may change the resulting value.
   bool isSafeToSpeculativelyExecute(const Value *V,
                                     const DataLayout *TD = 0);
+
+  /// isKnownNonNull - Return true if this pointer couldn't possibly be null by
+  /// its definition.  This returns true for allocas, non-extern-weak globals
+  /// and byval arguments.
+  bool isKnownNonNull(const Value *V, const TargetLibraryInfo *TLI = 0);
 
 } // end namespace llvm
 

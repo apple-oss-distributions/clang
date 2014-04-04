@@ -14,49 +14,77 @@
 
 def CycloneModel : SchedMachineModel {
   let IssueWidth = 6; // 6 micro-ops are dispatched per cycle.
-  let MinLatency = 0; // Data dependencies are allowed within dispatch groups.
+  let MicroOpBufferSize = 192; // Based on the reorder buffer.
   let LoadLatency = 4; // Optimistic load latency.
-  let ILPWindow = 10; // Expect hardware buffers to hide some latency.
   let MispredictPenalty = 16; // 14-19 cycles are typical.
 }
 
 //===----------------------------------------------------------------------===//
 // Define each kind of processor resource and number available on Cyclone.
 
-// 4 integer pipes.
-def CyUnitI : ProcResource<4>;
+// 4 integer pipes
+def CyUnitI : ProcResource<4> {
+  let BufferSize = 48;
+}
 
 // 2 branch units: I[0..1]
-def CyUnitB : ProcResource<2> { let Super  = CyUnitI; }
+def CyUnitB : ProcResource<2> {
+  let Super  = CyUnitI;
+  let BufferSize = 24;
+}
 
 // 1 indirect-branch unit: I[0]
-def CyUnitBR : ProcResource<1> { let Super  = CyUnitB; }
+def CyUnitBR : ProcResource<1> {
+  let Super  = CyUnitB;
+}
 
 // 2 shifter pipes: I[2..3]
 // When an instruction consumes a CyUnitIS, it also consumes a CyUnitI
-def CyUnitIS : ProcResource<2> { let Super = CyUnitI; }
+def CyUnitIS : ProcResource<2> {
+  let Super = CyUnitI;
+  let BufferSize = 24;
+}
 
 // 1 mul pipe: I[0]
-def CyUnitIM : ProcResource<1> { let Super = CyUnitBR; }
+def CyUnitIM : ProcResource<1> {
+  let Super = CyUnitBR;
+  let BufferSize = 32;
+}
 
 // 1 div pipe: I[1]
-def CyUnitID : ProcResource<1> { let Super = CyUnitB; }
+def CyUnitID : ProcResource<1> {
+  let Super = CyUnitB;
+  let BufferSize = 16;
+}
 
 // 1 integer division unit. This is driven by the ID pipe, but only
 // consumes the pipe for one cycle at issue and another cycle at writeback.
 def CyUnitIntDiv : ProcResource<1>;
 
 // 2 ld/st pipes.
-def CyUnitLS : ProcResource<2>;
+def CyUnitLS : ProcResource<2> {
+  let BufferSize = 28;
+}
 
 // 3 fp/vector pipes.
-def CyUnitV : ProcResource<3>;
+def CyUnitV : ProcResource<3> {
+  let BufferSize = 48;
+}
 // 2 fp/vector arithmetic and multiply pipes: V[0-1]
-def CyUnitVM : ProcResource<2> { let Super = CyUnitV; }
+def CyUnitVM : ProcResource<2> {
+  let Super = CyUnitV;
+  let BufferSize = 32;
+}
 // 1 fp/vector division/sqrt pipe: V[2]
-def CyUnitVD : ProcResource<1> { let Super = CyUnitV; }
+def CyUnitVD : ProcResource<1> {
+  let Super = CyUnitV;
+  let BufferSize = 16;
+}
 // 1 fp compare pipe: V[0]
-def CyUnitVC : ProcResource<1> { let Super = CyUnitVM; }
+def CyUnitVC : ProcResource<1> {
+  let Super = CyUnitVM;
+  let BufferSize = 16;
+}
 
 // 2 fp division/square-root units.  These are driven by the VD pipe,
 // but only consume the pipe for one cycle at issue and a cycle at writeback.
@@ -398,7 +426,7 @@ def : InstRW<[CyWriteVABD], (instregex "SABDv","UABDv",
 
 // FABS,FNEG are WriteF
 
-def : InstRW<[CyWriteV4], (instrs FADDPv2i32p,FADDPv4f32)>;
+def : InstRW<[CyWriteV4], (instrs FADDPv2i32p)>;
 def : InstRW<[CyWriteV5], (instrs FADDPv2i64p)>;
 
 def : InstRW<[CyWriteV3], (instregex "FMAXPv2i","FMAXNMPv2i",
@@ -642,9 +670,9 @@ def : InstRW<[WriteVLDShuffle, ReadVLD],          (instrs LD1i64)>;
 def : InstRW<[WriteVLDShuffle, ReadVLD, WriteAdr],(instrs LD1i64_POST)>;
 
 def : InstRW<[WriteVLDShuffle],
-             (instregex "LD1ROnev(8b|4h|2s|1d|16b|8h|4s|2d)$")>;
+             (instregex "LD1Rv(8b|4h|2s|1d|16b|8h|4s|2d)$")>;
 def : InstRW<[WriteVLDShuffle, WriteAdr],
-             (instregex "LD1ROnev(8b|4h|2s|1d|16b|8h|4s|2d)_POST$")>;
+             (instregex "LD1Rv(8b|4h|2s|1d|16b|8h|4s|2d)_POST$")>;
 
 def : InstRW<[WriteVLDShuffle, WriteV],
              (instregex "LD2Twov(8b|4h|2s)$")>;
@@ -660,7 +688,7 @@ def : InstRW<[WriteVLDShuffle, ReadVLD, WriteV],
 def : InstRW<[WriteVLDShuffle, ReadVLD, WriteAdr, WriteV],
              (instregex "LD2i(8|16|32)_POST")>;
 def : InstRW<[WriteVLDShuffle, ReadVLD, WriteV],
-             (instregex "LD2i64")>;
+             (instregex "LD2i64$")>;
 def : InstRW<[WriteVLDShuffle, ReadVLD, WriteAdr, WriteV],
              (instregex "LD2i64_POST")>;
 
@@ -684,7 +712,7 @@ def : InstRW<[WriteVLDShuffle, ReadVLD, WriteAdr, WriteV, WriteV],
              (instregex "LD3i(8|16|32)_POST")>;
 
 def : InstRW<[WriteVLDShuffle, ReadVLD, WriteVLDShuffle, WriteV],
-             (instregex "LD3i64")>;
+             (instregex "LD3i64$")>;
 def : InstRW<[WriteVLDShuffle, ReadVLD, WriteAdr, WriteVLDShuffle, WriteV],
              (instregex "LD3i64_POST")>;
 

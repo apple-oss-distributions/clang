@@ -184,6 +184,18 @@ static void addMemorySanitizerPass(const PassManagerBuilder &Builder,
   const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
   PM.add(createMemorySanitizerPass(CGOpts.SanitizeMemoryTrackOrigins,
                                    CGOpts.SanitizerBlacklistFile));
+
+  // MemorySanitizer inserts complex instrumentation that mostly follows
+  // the logic of the original code, but operates on "shadow" values.
+  // It can benefit from re-running some general purpose optimization passes.
+  if (Builder.OptLevel > 0) {
+    PM.add(createEarlyCSEPass());
+    PM.add(createReassociatePass());
+    PM.add(createLICMPass());
+    PM.add(createGVNPass());
+    PM.add(createInstructionCombiningPass());
+    PM.add(createDeadStoreEliminationPass());
+  }
 }
 
 static void addThreadSanitizerPass(const PassManagerBuilder &Builder,
@@ -192,6 +204,14 @@ static void addThreadSanitizerPass(const PassManagerBuilder &Builder,
       static_cast<const PassManagerBuilderWrapper&>(Builder);
   const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
   PM.add(createThreadSanitizerPass(CGOpts.SanitizerBlacklistFile));
+}
+
+static void addDataFlowSanitizerPass(const PassManagerBuilder &Builder,
+                                     PassManagerBase &PM) {
+  const PassManagerBuilderWrapper &BuilderWrapper =
+      static_cast<const PassManagerBuilderWrapper&>(Builder);
+  const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
+  PM.add(createDataFlowSanitizerPass(CGOpts.SanitizerBlacklistFile));
 }
 
 void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
@@ -208,8 +228,10 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
   PassManagerBuilderWrapper PMBuilder(CodeGenOpts, LangOpts);
   PMBuilder.OptLevel = OptLevel;
   PMBuilder.SizeLevel = CodeGenOpts.OptimizeSize;
+  PMBuilder.BBVectorize = CodeGenOpts.VectorizeBB;
+  PMBuilder.SLPVectorize = CodeGenOpts.VectorizeSLP;
+  PMBuilder.LoopVectorize = CodeGenOpts.VectorizeLoop;
 
-  PMBuilder.DisableSimplifyLibCalls = !CodeGenOpts.SimplifyLibCalls;
   PMBuilder.DisableUnitAtATime = !CodeGenOpts.UnitAtATime;
   PMBuilder.DisableUnrollLoops = !CodeGenOpts.UnrollLoops;
 
@@ -223,7 +245,7 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
                            addObjCARCOptPass);
   }
 
-  if (LangOpts.Sanitize.Bounds) {
+  if (LangOpts.Sanitize.LocalBounds) {
     PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
                            addBoundsCheckingPass);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
@@ -249,6 +271,13 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
                            addThreadSanitizerPass);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
                            addThreadSanitizerPass);
+  }
+
+  if (LangOpts.Sanitize.DataFlow) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addDataFlowSanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addDataFlowSanitizerPass);
   }
 
   // Figure out TargetLibraryInfo.
@@ -290,13 +319,19 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
   // Set up the per-module pass manager.
   PassManager *MPM = getPerModulePasses(TM);
 
-  if (CodeGenOpts.EmitGcovArcs || CodeGenOpts.EmitGcovNotes) {
-    MPM->add(createGCOVProfilerPass(CodeGenOpts.EmitGcovNotes,
-                                    CodeGenOpts.EmitGcovArcs,
-                                    TargetTriple.isMacOSX(),
-                                    false,
-                                    CodeGenOpts.DisableRedZone));
-
+  if (!CodeGenOpts.DisableGCov &&
+      (CodeGenOpts.EmitGcovArcs || CodeGenOpts.EmitGcovNotes)) {
+    // Not using 'GCOVOptions::getDefault' allows us to avoid exiting if
+    // LLVM's -default-gcov-version flag is set to something invalid.
+    GCOVOptions Options;
+    Options.EmitNotes = CodeGenOpts.EmitGcovNotes;
+    Options.EmitData = CodeGenOpts.EmitGcovArcs;
+    memcpy(Options.Version, CodeGenOpts.CoverageVersion, 4);
+    Options.UseCfgChecksum = CodeGenOpts.CoverageExtraChecksum;
+    Options.NoRedZone = CodeGenOpts.DisableRedZone;
+    Options.FunctionNamesInData =
+        !CodeGenOpts.CoverageNoFunctionNamesInData;
+    MPM->add(createGCOVProfilerPass(Options));
     if (CodeGenOpts.getDebugInfo() == CodeGenOptions::NoDebugInfo)
       MPM->add(createStripSymbolsPass(true));
   }
@@ -392,13 +427,10 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
   // Set frame pointer elimination mode.
   if (!CodeGenOpts.DisableFPElim) {
     Options.NoFramePointerElim = false;
-    Options.NoFramePointerElimNonLeaf = false;
   } else if (CodeGenOpts.OmitLeafFramePointer) {
     Options.NoFramePointerElim = false;
-    Options.NoFramePointerElimNonLeaf = true;
   } else {
     Options.NoFramePointerElim = true;
-    Options.NoFramePointerElimNonLeaf = true;
   }
 
   if (CodeGenOpts.UseInitArray)
@@ -434,11 +466,10 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
   Options.UnsafeFPMath = CodeGenOpts.UnsafeFPMath;
   Options.UseSoftFloat = CodeGenOpts.SoftFloat;
   Options.StackAlignmentOverride = CodeGenOpts.StackAlignment;
-  Options.RealignStack = CodeGenOpts.StackRealignment;
   Options.DisableTailCalls = CodeGenOpts.DisableTailCalls;
   Options.TrapFuncName = CodeGenOpts.TrapFuncName;
   Options.PositionIndependentExecutable = LangOpts.PIELevel != 0;
-  Options.SSPBufferSize = CodeGenOpts.SSPBufferSize;
+  Options.EnableSegmentedStacks = CodeGenOpts.EnableSegmentedStacks;
 
   TargetMachine *TM = TheTarget->createTargetMachine(Triple, TargetOpts.CPU,
                                                      FeaturesStr, Options,
@@ -510,6 +541,7 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
                       Action != Backend_EmitLL);
   TargetMachine *TM = CreateTargetMachine(UsesCodeGen);
   if (UsesCodeGen && !TM) return;
+  llvm::OwningPtr<TargetMachine> TMOwner(CodeGenOpts.DisableFree ? 0 : TM);
   CreatePasses(TM);
 
   switch (Action) {

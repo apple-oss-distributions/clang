@@ -584,6 +584,10 @@ struct DenseMapInfo<AliasAnalysis::Location> {
 /// function.
 bool isNoAliasCall(const Value *V);
 
+/// isNoAliasArgument - Return true if this is an argument with the noalias
+/// attribute.
+bool isNoAliasArgument(const Value *V);
+
 /// isIdentifiedObject - Return true if this pointer refers to a distinct and
 /// identifiable object.  This returns true for:
 ///    Global Variables and Functions (but not Global Aliases)
@@ -592,11 +596,6 @@ bool isNoAliasCall(const Value *V);
 ///    NoAlias returns (e.g. calls to malloc)
 ///
 bool isIdentifiedObject(const Value *V);
-
-/// isKnownNonNull - Return true if this pointer couldn't possibly be null by
-/// its definition.  This returns true for allocas, non-extern-weak globals and
-/// byval arguments.
-bool isKnownNonNull(const Value *V);
 
 } // End llvm namespace
 

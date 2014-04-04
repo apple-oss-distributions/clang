@@ -89,7 +89,7 @@ static llvm::Constant *getEndCatchFn(CodeGenModule &CGM) {
 }
 
 static llvm::Constant *getUnexpectedFn(CodeGenModule &CGM) {
-  // void __cxa_call_unexepcted(void *thrown_exception);
+  // void __cxa_call_unexpected(void *thrown_exception);
 
   llvm::FunctionType *FTy =
     llvm::FunctionType::get(CGM.VoidTy, CGM.Int8PtrTy, /*IsVarArgs=*/false);
@@ -766,11 +766,9 @@ llvm::BasicBlock *CodeGenFunction::EmitLandingPad() {
 
   // Save the current IR generation state.
   CGBuilderTy::InsertPoint savedIP = Builder.saveAndClearIP();
-  SourceLocation SavedLocation;
-  if (CGDebugInfo *DI = getDebugInfo()) {
-    SavedLocation = DI->getLocation();
+  SaveAndRestoreLocation AutoRestoreLocation(*this, Builder);
+  if (CGDebugInfo *DI = getDebugInfo())
     DI->EmitLocation(Builder, CurEHLocation);
-  }
 
   const EHPersonality &personality = EHPersonality::get(getLangOpts());
 
@@ -892,8 +890,6 @@ llvm::BasicBlock *CodeGenFunction::EmitLandingPad() {
 
   // Restore the old IR generation state.
   Builder.restoreIP(savedIP);
-  if (CGDebugInfo *DI = getDebugInfo())
-    DI->EmitLocation(Builder, SavedLocation);
 
   return lpad;
 }
@@ -945,7 +941,8 @@ static llvm::Value *CallBeginCatch(CodeGenFunction &CGF,
 /// parameter during catch initialization.
 static void InitCatchParam(CodeGenFunction &CGF,
                            const VarDecl &CatchParam,
-                           llvm::Value *ParamAddr) {
+                           llvm::Value *ParamAddr,
+                           SourceLocation Loc) {
   // Load the exception from where the landing pad saved it.
   llvm::Value *Exn = CGF.getExceptionFromSlot();
 
@@ -1013,10 +1010,9 @@ static void InitCatchParam(CodeGenFunction &CGF,
     return;
   }
 
-  // Non-aggregates (plus complexes).
-  bool IsComplex = false;
-  if (!CGF.hasAggregateLLVMType(CatchType) ||
-      (IsComplex = CatchType->isAnyComplexType())) {
+  // Scalars and complexes.
+  TypeEvaluationKind TEK = CGF.getEvaluationKind(CatchType);
+  if (TEK != TEK_Aggregate) {
     llvm::Value *AdjustedExn = CallBeginCatch(CGF, Exn, false);
     
     // If the catch type is a pointer type, __cxa_begin_catch returns
@@ -1048,17 +1044,23 @@ static void InitCatchParam(CodeGenFunction &CGF,
     llvm::Type *PtrTy = LLVMCatchTy->getPointerTo(0); // addrspace 0 ok
     llvm::Value *Cast = CGF.Builder.CreateBitCast(AdjustedExn, PtrTy);
 
-    if (IsComplex) {
-      CGF.StoreComplexToAddr(CGF.LoadComplexFromAddr(Cast, /*volatile*/ false),
-                             ParamAddr, /*volatile*/ false);
-    } else {
-      unsigned Alignment =
-        CGF.getContext().getDeclAlign(&CatchParam).getQuantity();
-      llvm::Value *ExnLoad = CGF.Builder.CreateLoad(Cast, "exn.scalar");
-      CGF.EmitStoreOfScalar(ExnLoad, ParamAddr, /*volatile*/ false, Alignment,
-                            CatchType);
+    LValue srcLV = CGF.MakeNaturalAlignAddrLValue(Cast, CatchType);
+    LValue destLV = CGF.MakeAddrLValue(ParamAddr, CatchType,
+                                  CGF.getContext().getDeclAlign(&CatchParam));
+    switch (TEK) {
+    case TEK_Complex:
+      CGF.EmitStoreOfComplex(CGF.EmitLoadOfComplex(srcLV, Loc), destLV,
+                             /*init*/ true);
+      return;
+    case TEK_Scalar: {
+      llvm::Value *ExnLoad = CGF.EmitLoadOfScalar(srcLV, Loc);
+      CGF.EmitStoreOfScalar(ExnLoad, destLV, /*init*/ true);
+      return;
     }
-    return;
+    case TEK_Aggregate:
+      llvm_unreachable("evaluation kind filtered out!");
+    }
+    llvm_unreachable("bad evaluation kind");
   }
 
   assert(isa<RecordType>(CatchType) && "unexpected catch type!");
@@ -1145,7 +1147,7 @@ static void BeginCatch(CodeGenFunction &CGF, const CXXCatchStmt *S) {
 
   // Emit the local.
   CodeGenFunction::AutoVarEmission var = CGF.EmitAutoVarAlloca(*CatchParam);
-  InitCatchParam(CGF, *CatchParam, var.getObjectAddress(CGF));
+  InitCatchParam(CGF, *CatchParam, var.getObjectAddress(CGF), S->getLocStart());
   CGF.EmitAutoVarCleanups(var);
 }
 
@@ -1288,6 +1290,10 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
     // Initialize the catch variable and set up the cleanups.
     BeginCatch(*this, C);
 
+    // Emit the PGO counter increment.
+    RegionCounter CatchCnt = getPGORegionCounter(C);
+    CatchCnt.beginRegion(Builder);
+
     // Perform the body of the catch.
     EmitStmt(C->getHandlerBlock());
 
@@ -1314,7 +1320,9 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
       Builder.CreateBr(ContBB);
   }
 
+  RegionCounter ContCnt = getPGORegionCounter(&S);
   EmitBlock(ContBB);
+  ContCnt.beginRegion(Builder);
 }
 
 namespace {
@@ -1691,4 +1699,8 @@ llvm::BasicBlock *CodeGenFunction::getEHResumeBlock(bool isCleanup) {
   Builder.restoreIP(SavedIP);
 
   return EHResumeBlock;
+}
+
+void CodeGenFunction::EmitSEHTryStmt(const SEHTryStmt &S) {
+  CGM.ErrorUnsupported(&S, "SEH __try");
 }

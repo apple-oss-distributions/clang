@@ -18,7 +18,7 @@ using namespace llvm;
 namespace {
 
 ErrorOr<int> t1() {return 1;}
-ErrorOr<int> t2() {return make_error_code(errc::invalid_argument);}
+ErrorOr<int> t2() { return errc::invalid_argument; }
 
 TEST(ErrorOr, SimpleValue) {
   ErrorOr<int> a = t1();
@@ -45,47 +45,22 @@ TEST(ErrorOr, Types) {
   *a = 42;
   EXPECT_EQ(42, x);
 
-  EXPECT_FALSE(ErrorOr<void>(make_error_code(errc::broken_pipe)));
-  EXPECT_TRUE(ErrorOr<void>(make_error_code(errc::success)));
-
 #if LLVM_HAS_CXX11_STDLIB
   // Move only types.
   EXPECT_EQ(3, **t3());
 #endif
 }
-} // end anon namespace
 
-struct InvalidArgError {
-  InvalidArgError() {}
-  InvalidArgError(std::string S) : ArgName(S) {}
-  std::string ArgName;
-};
+struct B {};
+struct D : B {};
 
-namespace llvm {
-template<>
-struct ErrorOrUserDataTraits<InvalidArgError> : true_type {
-  static error_code error() {
-    return make_error_code(errc::invalid_argument);
-  }
-};
-} // end namespace llvm
+TEST(ErrorOr, Covariant) {
+  ErrorOr<B*> b(ErrorOr<D*>(0));
+  b = ErrorOr<D*>(0);
 
-ErrorOr<int> t4() {
-  return InvalidArgError("adena");
-}
-
-ErrorOr<void> t5() {
-  return InvalidArgError("pie");
-}
-
-namespace {
-TEST(ErrorOr, UserErrorData) {
-  ErrorOr<int> a = t4();
-  EXPECT_EQ(errc::invalid_argument, a);
-  EXPECT_EQ("adena", t4().getError<InvalidArgError>().ArgName);
-  
-  ErrorOr<void> b = t5();
-  EXPECT_EQ(errc::invalid_argument, b);
-  EXPECT_EQ("pie", b.getError<InvalidArgError>().ArgName);
+#if LLVM_HAS_CXX11_STDLIB
+  ErrorOr<std::unique_ptr<B> > b1(ErrorOr<std::unique_ptr<D> >(0));
+  b1 = ErrorOr<std::unique_ptr<D> >(0);
+#endif
 }
 } // end anon namespace

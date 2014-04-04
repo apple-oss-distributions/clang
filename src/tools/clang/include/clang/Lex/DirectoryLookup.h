@@ -16,6 +16,7 @@
 
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Lex/ModuleMap.h"
 
 namespace clang {
 class HeaderMap;
@@ -163,7 +164,7 @@ public:
   const FileEntry *LookupFile(StringRef Filename, HeaderSearch &HS,
                               SmallVectorImpl<char> *SearchPath,
                               SmallVectorImpl<char> *RelativePath,
-                              Module **SuggestedModule,
+                              ModuleMap::KnownHeader *SuggestedModule,
                               bool &InUserSpecifiedSystemFramework) const;
 
 private:
@@ -171,7 +172,7 @@ private:
       StringRef Filename, HeaderSearch &HS,
       SmallVectorImpl<char> *SearchPath,
       SmallVectorImpl<char> *RelativePath,
-      Module **SuggestedModule,
+      ModuleMap::KnownHeader *SuggestedModule,
       bool &InUserSpecifiedSystemHeader) const;
 
 };

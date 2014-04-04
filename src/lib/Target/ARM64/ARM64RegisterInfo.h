@@ -20,6 +20,7 @@
 namespace llvm {
 
 class ARM64InstrInfo;
+class ARM64Subtarget;
 class MachineFunction;
 class RegScavenger;
 class TargetRegisterClass;
@@ -27,23 +28,35 @@ class TargetRegisterClass;
 struct ARM64RegisterInfo : public ARM64GenRegisterInfo {
 private:
   const ARM64InstrInfo *TII;
+  const ARM64Subtarget *STI;
 
 public:
-  ARM64RegisterInfo(const ARM64InstrInfo *tii);
+  ARM64RegisterInfo(const ARM64InstrInfo *tii, const ARM64Subtarget *sti);
 
   /// Code Generation virtual methods...
   bool isReservedReg(const MachineFunction &MF, unsigned Reg) const;
   const uint16_t *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
   const uint32_t *getCallPreservedMask(CallingConv::ID) const;
 
+  // Calls involved in thread-local variable lookup save more registers than
+  // normal calls, so they need a different mask to represent this.
+  const uint32_t *getTLSCallPreservedMask() const;
+
+  /// getThisReturnPreservedMask - Returns a call preserved mask specific to the
+  /// case that 'returned' is on an i64 first argument if the calling convention
+  /// is one that can (partially) model this attribute with a preserved mask
+  /// (i.e. it is a calling convention that uses the same register for the first
+  /// i64 argument and an i64 return value)
+  ///
+  /// Should return NULL in the case that the calling convention does not have
+  /// this property
+  const uint32_t *getThisReturnPreservedMask(CallingConv::ID) const;
+ 
   BitVector getReservedRegs(const MachineFunction &MF) const;
   const TargetRegisterClass* getPointerRegClass(const MachineFunction &MF,
                                                 unsigned Kind = 0) const;
   const TargetRegisterClass*
   getCrossCopyRegClass(const TargetRegisterClass *RC) const;
-  void eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                     MachineBasicBlock &MBB,
-                                     MachineBasicBlock::iterator I) const;
 
   bool requiresRegisterScavenging(const MachineFunction &MF) const;
   bool useFPForScavengingIndex(const MachineFunction &MF) const;
@@ -74,6 +87,9 @@ public:
 
 unsigned getWRegFromXReg(unsigned Reg);
 unsigned getXRegFromWReg(unsigned Reg);
+
+unsigned getBRegFromDReg(unsigned Reg);
+unsigned getDRegFromBReg(unsigned Reg);
 
 } // end namespace llvm
 

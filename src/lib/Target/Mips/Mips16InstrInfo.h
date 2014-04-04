@@ -48,25 +48,27 @@ public:
                            unsigned DestReg, unsigned SrcReg,
                            bool KillSrc) const;
 
-  virtual void storeRegToStackSlot(MachineBasicBlock &MBB,
-                                   MachineBasicBlock::iterator MBBI,
-                                   unsigned SrcReg, bool isKill, int FrameIndex,
-                                   const TargetRegisterClass *RC,
-                                   const TargetRegisterInfo *TRI) const;
+  virtual void storeRegToStack(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+                               unsigned SrcReg, bool isKill, int FrameIndex,
+                               const TargetRegisterClass *RC,
+                               const TargetRegisterInfo *TRI,
+                               int64_t Offset) const;
 
-  virtual void loadRegFromStackSlot(MachineBasicBlock &MBB,
-                                    MachineBasicBlock::iterator MBBI,
-                                    unsigned DestReg, int FrameIndex,
-                                    const TargetRegisterClass *RC,
-                                    const TargetRegisterInfo *TRI) const;
+  virtual void loadRegFromStack(MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MBBI,
+                                unsigned DestReg, int FrameIndex,
+                                const TargetRegisterClass *RC,
+                                const TargetRegisterInfo *TRI,
+                                int64_t Offset) const;
 
   virtual bool expandPostRAPseudo(MachineBasicBlock::iterator MI) const;
 
-  virtual unsigned GetOppositeBranchOpc(unsigned Opc) const;
+  virtual unsigned getOppositeBranchOpc(unsigned Opc) const;
 
   // Adjust SP by FrameSize bytes. Save RA, S0, S1
   void makeFrame(unsigned SP, int64_t FrameSize, MachineBasicBlock &MBB,
-                      MachineBasicBlock::iterator I) const;
+                 MachineBasicBlock::iterator I) const;
 
   // Adjust SP by FrameSize bytes. Restore RA, S0, S1
   void restoreFrame(unsigned SP, int64_t FrameSize, MachineBasicBlock &MBB,
@@ -77,15 +79,37 @@ public:
   void adjustStackPtr(unsigned SP, int64_t Amount, MachineBasicBlock &MBB,
                       MachineBasicBlock::iterator I) const;
 
-  /// Emit a series of instructions to load an immediate. If NewImm is a
-  /// non-NULL parameter, the last instruction is not emitted, but instead
-  /// its immediate operand is returned in NewImm.
-  unsigned loadImmediate(int64_t Imm, MachineBasicBlock &MBB,
+  /// Emit a series of instructions to load an immediate.
+  // This is to adjust some FrameReg. We return the new register to be used
+  // in place of FrameReg and the adjusted immediate field (&NewImm)
+  //
+  unsigned loadImmediate(unsigned FrameReg,
+                         int64_t Imm, MachineBasicBlock &MBB,
                          MachineBasicBlock::iterator II, DebugLoc DL,
-                         unsigned *NewImm) const;
+                         unsigned &NewImm) const;
+
+  unsigned basicLoadImmediate(unsigned FrameReg,
+                              int64_t Imm, MachineBasicBlock &MBB,
+                              MachineBasicBlock::iterator II, DebugLoc DL,
+                              unsigned &NewImm) const;
+
+  static bool validImmediate(unsigned Opcode, unsigned Reg, int64_t Amount);
+
+  static bool validSpImm8(int offset) {
+    return ((offset & 7) == 0) && isInt<11>(offset);
+  }
+
+  //
+  // build the proper one based on the Imm field
+  //
+
+  const MCInstrDesc& AddiuSpImm(int64_t Imm) const;
+
+  void BuildAddiuSpImm
+    (MachineBasicBlock &MBB, MachineBasicBlock::iterator I, int64_t Imm) const;
 
 private:
-  virtual unsigned GetAnalyzableBrOpc(unsigned Opc) const;
+  virtual unsigned getAnalyzableBrOpc(unsigned Opc) const;
 
   void ExpandRetRA16(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
                    unsigned Opc) const;
@@ -99,7 +123,6 @@ private:
   void adjustStackPtrBigUnrestricted(unsigned SP, int64_t Amount,
                                      MachineBasicBlock &MBB,
                                      MachineBasicBlock::iterator I) const;
-
 
 };
 

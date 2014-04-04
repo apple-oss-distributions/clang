@@ -140,12 +140,6 @@ public:
     // Non-ARC warnings are ignored.
     Diags.setLastDiagnosticIgnored();
   }
-  
-  DiagnosticConsumer *clone(DiagnosticsEngine &Diags) const {
-    // Just drop any diagnostics that come from cloned consumers; they'll
-    // have different source managers anyway.
-    return new IgnoringDiagConsumer();
-  }
 };
 
 } // end anonymous namespace
@@ -156,7 +150,7 @@ static bool HasARCRuntime(CompilerInvocation &origCI) {
   // and avoid unrelated complications.
   llvm::Triple triple(origCI.getTargetOpts().Triple);
 
-  if (triple.getOS() == llvm::Triple::IOS)
+  if (triple.isiOS())
     return triple.getOSMajorVersion() >= 5;
 
   if (triple.getOS() == llvm::Triple::Darwin)
@@ -276,8 +270,6 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
     return true;
   }
 
-  bool hadARCErrors = capturedDiags.hasErrors();
-
   // Don't filter diagnostics anymore.
   Diags->setClient(DiagClient, /*ShouldOwnClient=*/false);
 
@@ -329,15 +321,6 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
   DiagClient->EndSourceFile();
   errRec.FinishCapture();
 
-  if (hadARCErrors) {
-    // If we are migrating code that gets the '-fobjc-arc' flag, make sure
-    // to remove it so that we don't get errors from normal compilation.
-    origCI.getLangOpts()->ObjCAutoRefCount = false;
-    // Disable auto-synthesize to avoid "@synthesize of 'weak' property is only
-    // allowed in ARC" errors.
-    origCI.getLangOpts()->ObjCDefaultSynthProperties = false;
-  }
-
   return capturedDiags.hasErrors() || testAct.hasReportedErrors();
 }
 
@@ -387,14 +370,6 @@ static bool applyTransforms(CompilerInvocation &origCI,
     origCI.getLangOpts()->ObjCAutoRefCount = true;
     return migration.getRemapper().overwriteOriginal(*Diags);
   } else {
-    if (migration.HadARCErrors) {
-      // If we are migrating code that gets the '-fobjc-arc' flag, make sure
-      // to remove it so that we don't get errors from normal compilation.
-      origCI.getLangOpts()->ObjCAutoRefCount = false;
-      // Disable auto-synthesize to avoid "@synthesize of 'weak' property is only
-      // allowed in ARC" errors.
-      origCI.getLangOpts()->ObjCDefaultSynthProperties = false;
-    }
     return migration.getRemapper().flushToDisk(outputDir, *Diags);
   }
 }
@@ -441,44 +416,6 @@ bool arcmt::getFileRemappings(std::vector<std::pair<std::string,std::string> > &
   return false;
 }
 
-bool arcmt::getFileRemappingsFromFileList(
-                        std::vector<std::pair<std::string,std::string> > &remap,
-                        ArrayRef<StringRef> remapFiles,
-                        DiagnosticConsumer *DiagClient) {
-  bool hasErrorOccurred = false;
-  llvm::StringMap<bool> Uniquer;
-
-  IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
-      new DiagnosticsEngine(DiagID, new DiagnosticOptions,
-                            DiagClient, /*ShouldOwnClient=*/false));
-
-  for (ArrayRef<StringRef>::iterator
-         I = remapFiles.begin(), E = remapFiles.end(); I != E; ++I) {
-    StringRef file = *I;
-
-    FileRemapper remapper;
-    bool err = remapper.initFromFile(file, *Diags,
-                                     /*ignoreIfFilesChanged=*/true);
-    hasErrorOccurred = hasErrorOccurred || err;
-    if (err)
-      continue;
-
-    PreprocessorOptions PPOpts;
-    remapper.applyMappings(PPOpts);
-    for (PreprocessorOptions::remapped_file_iterator
-           RI = PPOpts.remapped_file_begin(), RE = PPOpts.remapped_file_end();
-           RI != RE; ++RI) {
-      bool &inserted = Uniquer[RI->first];
-      if (inserted)
-        continue;
-      inserted = true;
-      remap.push_back(*RI);
-    }
-  }
-
-  return hasErrorOccurred;
-}
 
 //===----------------------------------------------------------------------===//
 // CollectTransformActions.

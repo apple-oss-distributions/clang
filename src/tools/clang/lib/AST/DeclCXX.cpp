@@ -10,9 +10,9 @@
 // This file implements the C++ related Decl classes.
 //
 //===----------------------------------------------------------------------===//
-
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTLambda.h"
 #include "clang/AST/ASTMutationListener.h"
 #include "clang/AST/CXXInheritance.h"
 #include "clang/AST/DeclTemplate.h"
@@ -33,6 +33,17 @@ void AccessSpecDecl::anchor() { }
 AccessSpecDecl *AccessSpecDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   void *Mem = AllocateDeserializedDecl(C, ID, sizeof(AccessSpecDecl));
   return new (Mem) AccessSpecDecl(EmptyShell());
+}
+
+void LazyASTUnresolvedSet::getFromExternalSource(ASTContext &C) const {
+  ExternalASTSource *Source = C.getExternalSource();
+  assert(Impl.Decls.isLazy() && "getFromExternalSource for non-lazy set");
+  assert(Source && "getFromExternalSource with no external source");
+
+  for (ASTUnresolvedSet::iterator I = Impl.begin(); I != Impl.end(); ++I)
+    I.setDecl(cast<NamedDecl>(Source->GetExternalDecl(
+        reinterpret_cast<uintptr_t>(I.getDecl()) >> 2)));
+  Impl.Decls.setLazy(false);
 }
 
 CXXRecordDecl::DefinitionData::DefinitionData(CXXRecordDecl *D)
@@ -60,9 +71,8 @@ CXXRecordDecl::DefinitionData::DefinitionData(CXXRecordDecl *D)
     ImplicitCopyAssignmentHasConstParam(true),
     HasDeclaredCopyConstructorWithConstParam(false),
     HasDeclaredCopyAssignmentWithConstParam(false),
-    FailedImplicitMoveConstructor(false), FailedImplicitMoveAssignment(false),
     IsLambda(false), NumBases(0), NumVBases(0), Bases(), VBases(),
-    Definition(D), FirstFriend(0) {
+    Definition(D), FirstFriend() {
 }
 
 CXXBaseSpecifier *CXXRecordDecl::DefinitionData::getBasesSlowCase() const {
@@ -97,12 +107,17 @@ CXXRecordDecl *CXXRecordDecl::Create(const ASTContext &C, TagKind TK,
 
 CXXRecordDecl *CXXRecordDecl::CreateLambda(const ASTContext &C, DeclContext *DC,
                                            TypeSourceInfo *Info, SourceLocation Loc,
-                                           bool Dependent) {
+                                           bool Dependent, bool IsGeneric, 
+                                           LambdaCaptureDefault CaptureDefault) {
   CXXRecordDecl* R = new (C) CXXRecordDecl(CXXRecord, TTK_Class, DC, Loc, Loc,
                                            0, 0);
   R->IsBeingDefined = true;
-  R->DefinitionData = new (C) struct LambdaDefinitionData(R, Info, Dependent);
+  R->DefinitionData = new (C) struct LambdaDefinitionData(R, Info, 
+                                                          Dependent, 
+                                                          IsGeneric, 
+                                                          CaptureDefault);
   R->MayHaveOutOfDateDef = false;
+  R->setImplicit(true);
   C.getTypeDeclType(R, /*PrevDecl=*/0);
   return R;
 }
@@ -186,7 +201,7 @@ CXXRecordDecl::setBases(CXXBaseSpecifier const * const *Bases,
       data().IsStandardLayout = false;
 
     // Record if this base is the first non-literal field or base.
-    if (!hasNonLiteralTypeFieldsOrBases() && !BaseType->isLiteralType())
+    if (!hasNonLiteralTypeFieldsOrBases() && !BaseType->isLiteralType(C))
       data().HasNonLiteralTypeFieldsOrBases = true;
     
     // Now go through all virtual bases of this base and add them.
@@ -505,7 +520,7 @@ void CXXRecordDecl::addedMember(Decl *D) {
     // C++ [dcl.init.aggr]p1:
     //   An aggregate is an array or a class with no user-declared
     //   constructors [...].
-    // C++0x [dcl.init.aggr]p1:
+    // C++11 [dcl.init.aggr]p1:
     //   An aggregate is an array or a class with no user-provided
     //   constructors [...].
     if (getASTContext().getLangOpts().CPlusPlus11
@@ -552,18 +567,16 @@ void CXXRecordDecl::addedMember(Decl *D) {
 
       if (Conversion->getPrimaryTemplate()) {
         // We don't record specializations.
-      } else if (FunTmpl) {
-        if (FunTmpl->getPreviousDecl())
-          data().Conversions.replace(FunTmpl->getPreviousDecl(),
-                                     FunTmpl, AS);
-        else
-          data().Conversions.addDecl(getASTContext(), FunTmpl, AS);
       } else {
-        if (Conversion->getPreviousDecl())
-          data().Conversions.replace(Conversion->getPreviousDecl(),
-                                     Conversion, AS);
+        ASTContext &Ctx = getASTContext();
+        ASTUnresolvedSet &Conversions = data().Conversions.get(Ctx);
+        NamedDecl *Primary =
+            FunTmpl ? cast<NamedDecl>(FunTmpl) : cast<NamedDecl>(Conversion);
+        if (Primary->getPreviousDecl())
+          Conversions.replace(cast<NamedDecl>(Primary->getPreviousDecl()),
+                              Primary, AS);
         else
-          data().Conversions.addDecl(getASTContext(), Conversion, AS);
+          Conversions.addDecl(Ctx, Primary, AS);
       }
     }
 
@@ -662,7 +675,7 @@ void CXXRecordDecl::addedMember(Decl *D) {
       if (!Context.getLangOpts().ObjCAutoRefCount ||
           T.getObjCLifetime() != Qualifiers::OCL_ExplicitNone)
         setHasObjectMember(true);
-    } else if (!T.isPODType(Context))
+    } else if (!T.isCXX98PODType(Context))
       data().PlainOldData = false;
     
     if (T->isReferenceType()) {
@@ -676,7 +689,7 @@ void CXXRecordDecl::addedMember(Decl *D) {
     }
 
     // Record if this field is the first non-literal or volatile field or base.
-    if (!T->isLiteralType() || T.isVolatileQualified())
+    if (!T->isLiteralType(Context) || T.isVolatileQualified())
       data().HasNonLiteralTypeFieldsOrBases = true;
 
     if (Field->hasInClassInitializer()) {
@@ -690,7 +703,10 @@ void CXXRecordDecl::addedMember(Decl *D) {
       // C++11 [dcl.init.aggr]p1:
       //   An aggregate is a [...] class with [...] no
       //   brace-or-equal-initializers for non-static data members.
-      data().Aggregate = false;
+      //
+      // This rule was removed in C++1y.
+      if (!getASTContext().getLangOpts().CPlusPlus1y)
+        data().Aggregate = false;
 
       // C++11 [class]p10:
       //   A POD struct is [...] a trivial class.
@@ -708,6 +724,13 @@ void CXXRecordDecl::addedMember(Decl *D) {
       CXXRecordDecl* FieldRec = cast<CXXRecordDecl>(RecordTy->getDecl());
       if (FieldRec->getDefinition()) {
         addedClassSubobject(FieldRec);
+
+        // We may need to perform overload resolution to determine whether a
+        // field can be moved if it's const or volatile qualified.
+        if (T.getCVRQualifiers() & (Qualifiers::Const | Qualifiers::Volatile)) {
+          data().NeedOverloadResolutionForMoveConstructor = true;
+          data().NeedOverloadResolutionForMoveAssignment = true;
+        }
 
         // C++11 [class.ctor]p5, C++11 [class.copy]p11:
         //   A defaulted [special member] for a class X is defined as
@@ -842,7 +865,7 @@ void CXXRecordDecl::addedMember(Decl *D) {
       }
     } else {
       // Base element type of field is a non-class type.
-      if (!T->isLiteralType() ||
+      if (!T->isLiteralType(Context) ||
           (!Field->hasInClassInitializer() && !isUnion()))
         data().DefaultedDefaultConstructorIsConstexpr = false;
 
@@ -877,10 +900,13 @@ void CXXRecordDecl::addedMember(Decl *D) {
   }
   
   // Handle using declarations of conversion functions.
-  if (UsingShadowDecl *Shadow = dyn_cast<UsingShadowDecl>(D))
+  if (UsingShadowDecl *Shadow = dyn_cast<UsingShadowDecl>(D)) {
     if (Shadow->getDeclName().getNameKind()
-          == DeclarationName::CXXConversionFunctionName)
-      data().Conversions.addDecl(getASTContext(), Shadow, Shadow->getAccess());
+          == DeclarationName::CXXConversionFunctionName) {
+      ASTContext &Ctx = getASTContext();
+      data().Conversions.get(Ctx).addDecl(Ctx, Shadow, Shadow->getAccess());
+    }
+  }
 }
 
 void CXXRecordDecl::finishedDefaultedOrDeletedMember(CXXMethodDecl *D) {
@@ -926,6 +952,43 @@ bool CXXRecordDecl::isCLike() const {
 
   return isPOD() && data().HasOnlyCMembers;
 }
+ 
+bool CXXRecordDecl::isGenericLambda() const { 
+  if (!isLambda()) return false;
+  return getLambdaData().IsGenericLambda;
+}
+
+CXXMethodDecl* CXXRecordDecl::getLambdaCallOperator() const {
+  if (!isLambda()) return 0;
+  DeclarationName Name = 
+    getASTContext().DeclarationNames.getCXXOperatorName(OO_Call);
+  DeclContext::lookup_const_result Calls = lookup(Name);
+
+  assert(!Calls.empty() && "Missing lambda call operator!");
+  assert(Calls.size() == 1 && "More than one lambda call operator!"); 
+   
+  NamedDecl *CallOp = Calls.front();
+  if (FunctionTemplateDecl *CallOpTmpl = 
+                    dyn_cast<FunctionTemplateDecl>(CallOp)) 
+    return cast<CXXMethodDecl>(CallOpTmpl->getTemplatedDecl());
+  
+  return cast<CXXMethodDecl>(CallOp);
+}
+
+CXXMethodDecl* CXXRecordDecl::getLambdaStaticInvoker() const {
+  if (!isLambda()) return 0;
+  DeclarationName Name = 
+    &getASTContext().Idents.get(getLambdaStaticInvokerName());
+  DeclContext::lookup_const_result Invoker = lookup(Name);
+  if (Invoker.empty()) return 0;
+  assert(Invoker.size() == 1 && "More than one static invoker operator!");  
+  NamedDecl *InvokerFun = Invoker.front();
+  if (FunctionTemplateDecl *InvokerTemplate =
+                  dyn_cast<FunctionTemplateDecl>(InvokerFun)) 
+    return cast<CXXMethodDecl>(InvokerTemplate->getTemplatedDecl());
+  
+  return cast<CXXMethodDecl>(InvokerFun); 
+}
 
 void CXXRecordDecl::getCaptureFields(
        llvm::DenseMap<const VarDecl *, FieldDecl *> &Captures,
@@ -937,15 +1000,22 @@ void CXXRecordDecl::getCaptureFields(
   RecordDecl::field_iterator Field = field_begin();
   for (LambdaExpr::Capture *C = Lambda.Captures, *CEnd = C + Lambda.NumCaptures;
        C != CEnd; ++C, ++Field) {
-    if (C->capturesThis()) {
+    if (C->capturesThis())
       ThisCapture = *Field;
-      continue;
-    }
-
-    Captures[C->getCapturedVar()] = *Field;
+    else if (C->capturesVariable())
+      Captures[C->getCapturedVar()] = *Field;
   }
+  assert(Field == field_end());
 }
 
+TemplateParameterList * 
+CXXRecordDecl::getGenericLambdaTemplateParameterList() const {
+  if (!isLambda()) return 0;
+  CXXMethodDecl *CallOp = getLambdaCallOperator();     
+  if (FunctionTemplateDecl *Tmpl = CallOp->getDescribedFunctionTemplate())
+    return Tmpl->getTemplateParameters();
+  return 0;
+}
 
 static CanQualType GetConversionType(ASTContext &Context, NamedDecl *Conv) {
   QualType T;
@@ -1082,16 +1152,21 @@ static void CollectVisibleConversions(ASTContext &Context,
 /// in current class; including conversion function templates.
 std::pair<CXXRecordDecl::conversion_iterator,CXXRecordDecl::conversion_iterator>
 CXXRecordDecl::getVisibleConversionFunctions() {
-  // If root class, all conversions are visible.
-  if (bases_begin() == bases_end())
-    return std::make_pair(data().Conversions.begin(), data().Conversions.end());
-  // If visible conversion list is already evaluated, return it.
-  if (!data().ComputedVisibleConversions) {
-    CollectVisibleConversions(getASTContext(), this, data().VisibleConversions);
-    data().ComputedVisibleConversions = true;
+  ASTContext &Ctx = getASTContext();
+
+  ASTUnresolvedSet *Set;
+  if (bases_begin() == bases_end()) {
+    // If root class, all conversions are visible.
+    Set = &data().Conversions.get(Ctx);
+  } else {
+    Set = &data().VisibleConversions.get(Ctx);
+    // If visible conversion list is not evaluated, evaluate it.
+    if (!data().ComputedVisibleConversions) {
+      CollectVisibleConversions(Ctx, this, *Set);
+      data().ComputedVisibleConversions = true;
+    }
   }
-  return std::make_pair(data().VisibleConversions.begin(),
-                        data().VisibleConversions.end());
+  return std::make_pair(Set->begin(), Set->end());
 }
 
 void CXXRecordDecl::removeConversion(const NamedDecl *ConvDecl) {
@@ -1106,7 +1181,7 @@ void CXXRecordDecl::removeConversion(const NamedDecl *ConvDecl) {
   // with sufficiently large numbers of directly-declared conversions
   // that asymptotic behavior matters.
 
-  ASTUnresolvedSet &Convs = data().Conversions;
+  ASTUnresolvedSet &Convs = data().Conversions.get(getASTContext());
   for (unsigned I = 0, E = Convs.size(); I != E; ++I) {
     if (Convs[I].getDecl() == ConvDecl) {
       Convs.erase(I);
@@ -1232,8 +1307,7 @@ void CXXRecordDecl::completeDefinition(CXXFinalOverriderMap *FinalOverriders) {
   }
   
   // Set access bits correctly on the directly-declared conversions.
-  for (UnresolvedSetIterator I = data().Conversions.begin(), 
-                             E = data().Conversions.end(); 
+  for (conversion_iterator I = conversion_begin(), E = conversion_end();
        I != E; ++I)
     I.setAccess((*I)->getAccess());
 }
@@ -1256,6 +1330,16 @@ bool CXXRecordDecl::mayBeAbstract() const {
 }
 
 void CXXMethodDecl::anchor() { }
+
+bool CXXMethodDecl::isStatic() const {
+  const CXXMethodDecl *MD = getCanonicalDecl();
+
+  if (MD->getStorageClass() == SC_Static)
+    return true;
+
+  OverloadedOperatorKind OOK = getDeclName().getCXXOverloadedOperator();
+  return isStaticOverloadedOperator(OOK);
+}
 
 static bool recursivelyOverrides(const CXXMethodDecl *DerivedMD,
                                  const CXXMethodDecl *BaseMD) {
@@ -1318,10 +1402,10 @@ CXXMethodDecl::Create(ASTContext &C, CXXRecordDecl *RD,
                       SourceLocation StartLoc,
                       const DeclarationNameInfo &NameInfo,
                       QualType T, TypeSourceInfo *TInfo,
-                      bool isStatic, StorageClass SCAsWritten, bool isInline,
+                      StorageClass SC, bool isInline,
                       bool isConstexpr, SourceLocation EndLocation) {
   return new (C) CXXMethodDecl(CXXMethod, RD, StartLoc, NameInfo, T, TInfo,
-                               isStatic, SCAsWritten, isInline, isConstexpr,
+                               SC, isInline, isConstexpr,
                                EndLocation);
 }
 
@@ -1329,7 +1413,7 @@ CXXMethodDecl *CXXMethodDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   void *Mem = AllocateDeserializedDecl(C, ID, sizeof(CXXMethodDecl));
   return new (Mem) CXXMethodDecl(CXXMethod, 0, SourceLocation(), 
                                  DeclarationNameInfo(), QualType(),
-                                 0, false, SC_None, false, false,
+                                 0, SC_None, false, false,
                                  SourceLocation());
 }
 
@@ -1382,7 +1466,8 @@ bool CXXMethodDecl::isCopyAssignmentOperator() const {
   //  type X, X&, const X&, volatile X& or const volatile X&.
   if (/*operator=*/getOverloadedOperator() != OO_Equal ||
       /*non-static*/ isStatic() || 
-      /*non-template*/getPrimaryTemplate() || getDescribedFunctionTemplate())
+      /*non-template*/getPrimaryTemplate() || getDescribedFunctionTemplate() ||
+      getNumParams() != 1)
     return false;
       
   QualType ParamType = getParamDecl(0)->getType();
@@ -1401,7 +1486,8 @@ bool CXXMethodDecl::isMoveAssignmentOperator() const {
   //  non-template member function of class X with exactly one parameter of type
   //  X&&, const X&&, volatile X&&, or const volatile X&&.
   if (getOverloadedOperator() != OO_Equal || isStatic() ||
-      getPrimaryTemplate() || getDescribedFunctionTemplate())
+      getPrimaryTemplate() || getDescribedFunctionTemplate() ||
+      getNumParams() != 1)
     return false;
 
   QualType ParamType = getParamDecl(0)->getType();
@@ -1466,10 +1552,16 @@ bool CXXMethodDecl::hasInlineBody() const {
 }
 
 bool CXXMethodDecl::isLambdaStaticInvoker() const {
-  return getParent()->isLambda() && 
-         getIdentifier() && getIdentifier()->getName() == "__invoke";
+  const CXXRecordDecl *P = getParent();
+  if (P->isLambda()) {
+    if (const CXXMethodDecl *StaticInvoker = P->getLambdaStaticInvoker()) {
+      if (StaticInvoker == this) return true;
+      if (P->isGenericLambda() && this->isFunctionTemplateSpecialization())
+        return StaticInvoker == this->getPrimaryTemplate()->getTemplatedDecl();
+    }
+  }
+  return false;
 }
-
 
 CXXCtorInitializer::CXXCtorInitializer(ASTContext &Context,
                                        TypeSourceInfo *TInfo, bool IsVirtual,
@@ -1790,14 +1882,14 @@ LinkageSpecDecl *LinkageSpecDecl::Create(ASTContext &C,
                                          SourceLocation ExternLoc,
                                          SourceLocation LangLoc,
                                          LanguageIDs Lang,
-                                         SourceLocation RBraceLoc) {
-  return new (C) LinkageSpecDecl(DC, ExternLoc, LangLoc, Lang, RBraceLoc);
+                                         bool HasBraces) {
+  return new (C) LinkageSpecDecl(DC, ExternLoc, LangLoc, Lang, HasBraces);
 }
 
 LinkageSpecDecl *LinkageSpecDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   void *Mem = AllocateDeserializedDecl(C, ID, sizeof(LinkageSpecDecl));
   return new (Mem) LinkageSpecDecl(0, SourceLocation(), SourceLocation(),
-                                   lang_c, SourceLocation());
+                                   lang_c, false);
 }
 
 void UsingDirectiveDecl::anchor() { }
@@ -1839,7 +1931,7 @@ NamespaceDecl::NamespaceDecl(DeclContext *DC, bool Inline,
   : NamedDecl(Namespace, DC, IdLoc, Id), DeclContext(Namespace),
     LocStart(StartLoc), RBraceLoc(), AnonOrFirstNamespaceAndInline(0, Inline) 
 {
-  setPreviousDeclaration(PrevDecl);
+  setPreviousDecl(PrevDecl);
   
   if (PrevDecl)
     AnonOrFirstNamespaceAndInline.setPointer(PrevDecl->getOriginalNamespace());
@@ -1933,14 +2025,20 @@ void UsingDecl::removeShadowDecl(UsingShadowDecl *S) {
 UsingDecl *UsingDecl::Create(ASTContext &C, DeclContext *DC, SourceLocation UL,
                              NestedNameSpecifierLoc QualifierLoc,
                              const DeclarationNameInfo &NameInfo,
-                             bool IsTypeNameArg) {
-  return new (C) UsingDecl(DC, UL, QualifierLoc, NameInfo, IsTypeNameArg);
+                             bool HasTypename) {
+  return new (C) UsingDecl(DC, UL, QualifierLoc, NameInfo, HasTypename);
 }
 
 UsingDecl *UsingDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   void *Mem = AllocateDeserializedDecl(C, ID, sizeof(UsingDecl));
   return new (Mem) UsingDecl(0, SourceLocation(), NestedNameSpecifierLoc(),
                              DeclarationNameInfo(), false);
+}
+
+SourceRange UsingDecl::getSourceRange() const {
+  SourceLocation Begin = isAccessDeclaration()
+    ? getQualifierLoc().getBeginLoc() : UsingLocation;
+  return SourceRange(Begin, getNameInfo().getEndLoc());
 }
 
 void UnresolvedUsingValueDecl::anchor() { }
@@ -1960,6 +2058,12 @@ UnresolvedUsingValueDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   return new (Mem) UnresolvedUsingValueDecl(0, QualType(), SourceLocation(),
                                             NestedNameSpecifierLoc(),
                                             DeclarationNameInfo());
+}
+
+SourceRange UnresolvedUsingValueDecl::getSourceRange() const {
+  SourceLocation Begin = isAccessDeclaration()
+    ? getQualifierLoc().getBeginLoc() : UsingLocation;
+  return SourceRange(Begin, getNameInfo().getEndLoc());
 }
 
 void UnresolvedUsingTypenameDecl::anchor() { }

@@ -20,18 +20,24 @@ class ARM64Reg<bits<16> enc, string n, list<Register> subregs = [],
 }
 
 let Namespace = "ARM64" in {
-  def sub_32 : SubRegIndex;
+  def sub_32 : SubRegIndex<32>;
 
-  def bsub : SubRegIndex;
-  def hsub : SubRegIndex;
-  def ssub : SubRegIndex;
-  def dsub : SubRegIndex;
-  def qhisub : SubRegIndex;
-  def qsub : SubRegIndex;
-  def vsub0 : SubRegIndex;
-  def vsub1 : SubRegIndex;
-  def vsub2 : SubRegIndex;
-  def vsub3 : SubRegIndex;
+  def bsub : SubRegIndex<8>;
+  def hsub : SubRegIndex<16>;
+  def ssub : SubRegIndex<32>;
+  def dsub : SubRegIndex<32>;
+  def qhisub : SubRegIndex<64>;
+  def qsub : SubRegIndex<64>;
+  // Note: Code depends on these having consecutive numbers
+  def dsub0 : SubRegIndex<64>;
+  def dsub1 : SubRegIndex<64>;
+  def dsub2 : SubRegIndex<64>;
+  def dsub3 : SubRegIndex<64>;
+  // Note: Code depends on these having consecutive numbers
+  def qsub0 : SubRegIndex<128>;
+  def qsub1 : SubRegIndex<128>;
+  def qsub2 : SubRegIndex<128>;
+  def qsub3 : SubRegIndex<128>;
 }
 
 let Namespace = "ARM64" in {
@@ -373,7 +379,7 @@ def FPR64 : RegisterClass<"ARM64", [f64, i64, v2f32, v1f64, v8i8, v4i16, v2i32,
 // normalize 128-bit vectors to v2f64 for arg passing and such, so use
 // that here.
 def FPR128 : RegisterClass<"ARM64",
-                           [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64],
+                           [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64, f128],
                            128, (sequence "Q%u", 0, 31)>;
 
 // The lower 16 vector registers.  Some instructions can only take registers
@@ -383,11 +389,11 @@ def FPR128_lo : RegisterClass<"ARM64",
                               128, (trunc FPR128, 16)>;
 
 // Pairs, triples, and quads of 64-bit vector registers.
-def DSeqPairs : RegisterTuples<[vsub0, vsub1], [(rotl FPR64, 0), (rotl FPR64, 1)]>;
-def DSeqTriples : RegisterTuples<[vsub0, vsub1, vsub2],
+def DSeqPairs : RegisterTuples<[dsub0, dsub1], [(rotl FPR64, 0), (rotl FPR64, 1)]>;
+def DSeqTriples : RegisterTuples<[dsub0, dsub1, dsub2],
                                  [(rotl FPR64, 0), (rotl FPR64, 1),
                                   (rotl FPR64, 2)]>;
-def DSeqQuads : RegisterTuples<[vsub0, vsub1, vsub2, vsub3],
+def DSeqQuads : RegisterTuples<[dsub0, dsub1, dsub2, dsub3],
                                [(rotl FPR64, 0), (rotl FPR64, 1),
                                 (rotl FPR64, 2), (rotl FPR64, 3)]>;
 def DD   : RegisterClass<"ARM64", [untyped], 64, (add DSeqPairs)> {
@@ -401,11 +407,11 @@ def DDDD : RegisterClass<"ARM64", [untyped], 64, (add DSeqQuads)> {
 }
 
 // Pairs, triples, and quads of 128-bit vector registers.
-def QSeqPairs : RegisterTuples<[vsub0, vsub1], [(rotl FPR128, 0), (rotl FPR128, 1)]>;
-def QSeqTriples : RegisterTuples<[vsub0, vsub1, vsub2],
+def QSeqPairs : RegisterTuples<[qsub0, qsub1], [(rotl FPR128, 0), (rotl FPR128, 1)]>;
+def QSeqTriples : RegisterTuples<[qsub0, qsub1, qsub2],
                                  [(rotl FPR128, 0), (rotl FPR128, 1),
                                   (rotl FPR128, 2)]>;
-def QSeqQuads : RegisterTuples<[vsub0, vsub1, vsub2, vsub3],
+def QSeqQuads : RegisterTuples<[qsub0, qsub1, qsub2, qsub3],
                                [(rotl FPR128, 0), (rotl FPR128, 1),
                                 (rotl FPR128, 2), (rotl FPR128, 3)]>;
 def QQ   : RegisterClass<"ARM64", [untyped], 128, (add QSeqPairs)> {
@@ -428,55 +434,129 @@ def V128 : RegisterOperand<FPR128, "printVRegOperand">;
 def V128_lo : RegisterOperand<FPR128_lo, "printVRegOperand">;
 }
 
-def VectorList1_64AsmOperand : AsmOperandClass {
-  let Name = "VectorListOne64";
-}
-def VectorList1_128AsmOperand : AsmOperandClass {
-  let Name = "VectorListOne128";
-}
-def VectorList2_64AsmOperand : AsmOperandClass {
-  let Name = "VectorListTwo64";
-}
-def VectorList2_128AsmOperand : AsmOperandClass {
-  let Name = "VectorListTwo128";
-}
-def VectorList3_64AsmOperand : AsmOperandClass {
-  let Name = "VectorListThree64";
-}
-def VectorList3_128AsmOperand : AsmOperandClass {
-  let Name = "VectorListThree128";
-}
-def VectorList4_64AsmOperand : AsmOperandClass {
-  let Name = "VectorListFour64";
-}
-def VectorList4_128AsmOperand : AsmOperandClass {
-  let Name = "VectorListFour128";
+class TypedVecListAsmOperand<int count, int regsize, int lanes, string kind>
+    : AsmOperandClass {
+  let Name = "TypedVectorList" # count # "_" # lanes # kind;
+
+  let PredicateMethod
+      = "isTypedVectorList<" # count # ", " # lanes # ", '" # kind # "'>";
+  let RenderMethod = "addVectorList" # regsize # "Operands<" # count # ">";
 }
 
-def VecListOne64  : RegisterOperand<FPR64, "printVectorListOne64"> {
-  let ParserMatchClass = VectorList1_64AsmOperand;
+class TypedVecListRegOperand<RegisterClass Reg,
+                             int count, int lanes, string kind>
+    : RegisterOperand<Reg, "printTypedVectorList<" # count # ", "
+                                                   # lanes # ", '"
+                                                   # kind # "'>">;
+
+multiclass VectorList<int count, RegisterClass Reg64, RegisterClass Reg128> {
+  // With implicit types (probably on instruction instead). E.g. { v0, v1 }
+  def _64AsmOperand : AsmOperandClass {
+    let Name = NAME # "64";
+    let PredicateMethod = "isImplicitlyTypedVectorList<" # count # ">";
+    let RenderMethod = "addVectorList64Operands<" # count # ">";
+  }
+
+  def "64" : RegisterOperand<Reg64,
+                          "printImplicitlyTypedVectorList<" # count # ", 64>"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_64AsmOperand");
+  }
+
+  def _128AsmOperand : AsmOperandClass {
+    let Name = NAME # "128";
+    let PredicateMethod = "isImplicitlyTypedVectorList<" # count # ">";
+    let RenderMethod = "addVectorList128Operands<" # count # ">";
+  }
+
+  def "128" : RegisterOperand<Reg128,
+                         "printImplicitlyTypedVectorList<" # count # ", 128>"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_128AsmOperand");
+  }
+
+  // 64-bit register lists with explicit type.
+
+  // { v0.8b, v1.8b }
+  def _8bAsmOperand : TypedVecListAsmOperand<count, 64, 8, "b">;
+  def "8b" : TypedVecListRegOperand<Reg64, count, 8, "b"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_8bAsmOperand");
+  }
+
+  // { v0.4h, v1.4h }
+  def _4hAsmOperand : TypedVecListAsmOperand<count, 64, 4, "h">;
+  def "4h" : TypedVecListRegOperand<Reg64, count, 4, "h"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_4hAsmOperand");
+  }
+
+  // { v0.2s, v1.2s }
+  def _2sAsmOperand : TypedVecListAsmOperand<count, 64, 2, "s">;
+  def "2s" : TypedVecListRegOperand<Reg64, count, 2, "s"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_2sAsmOperand");
+  }
+
+  // { v0.1d, v1.1d }
+  def _1dAsmOperand : TypedVecListAsmOperand<count, 64, 1, "d">;
+  def "1d" : TypedVecListRegOperand<Reg64, count, 1, "d"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_1dAsmOperand");
+  }
+
+  // 128-bit register lists with explicit type
+
+  // { v0.16b, v1.16b }
+  def _16bAsmOperand : TypedVecListAsmOperand<count, 128, 16, "b">;
+  def "16b" : TypedVecListRegOperand<Reg128, count, 16, "b"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_16bAsmOperand");
+  }
+
+  // { v0.8h, v1.8h }
+  def _8hAsmOperand : TypedVecListAsmOperand<count, 128, 8, "h">;
+  def "8h" : TypedVecListRegOperand<Reg128, count, 8, "h"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_8hAsmOperand");
+  }
+
+  // { v0.4s, v1.4s }
+  def _4sAsmOperand : TypedVecListAsmOperand<count, 128, 4, "s">;
+  def "4s" : TypedVecListRegOperand<Reg128, count, 4, "s"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_4sAsmOperand");
+  }
+
+  // { v0.2d, v1.2d }
+  def _2dAsmOperand : TypedVecListAsmOperand<count, 128, 2, "d">;
+  def "2d" : TypedVecListRegOperand<Reg128, count, 2, "d"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_2dAsmOperand");
+  }
+
+  // { v0.b, v1.b }
+  def _bAsmOperand : TypedVecListAsmOperand<count, 128, 0, "b">;
+  def "b" : TypedVecListRegOperand<Reg128, count, 0, "b"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_bAsmOperand");
+  }
+
+  // { v0.h, v1.h }
+  def _hAsmOperand : TypedVecListAsmOperand<count, 128, 0, "h">;
+  def "h" : TypedVecListRegOperand<Reg128, count, 0, "h"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_hAsmOperand");
+  }
+
+  // { v0.s, v1.s }
+  def _sAsmOperand : TypedVecListAsmOperand<count, 128, 0, "s">;
+  def "s" : TypedVecListRegOperand<Reg128, count, 0, "s"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_sAsmOperand");
+  }
+
+  // { v0.d, v1.d }
+  def _dAsmOperand : TypedVecListAsmOperand<count, 128, 0, "d">;
+  def "d" : TypedVecListRegOperand<Reg128, count, 0, "d"> {
+    let ParserMatchClass = !cast<AsmOperandClass>(NAME # "_dAsmOperand");
+  }
+
+
 }
-def VecListOne128 : RegisterOperand<FPR128, "printVectorListOne128"> {
-  let ParserMatchClass = VectorList1_128AsmOperand;
-}
-def VecListTwo64  : RegisterOperand<DD, "printVectorListTwo64"> {
-  let ParserMatchClass = VectorList2_64AsmOperand;
-}
-def VecListTwo128 : RegisterOperand<QQ, "printVectorListTwo128"> {
-  let ParserMatchClass = VectorList2_128AsmOperand;
-}
-def VecListThree64  : RegisterOperand<DDD, "printVectorListThree64"> {
-  let ParserMatchClass = VectorList3_64AsmOperand;
-}
-def VecListThree128 : RegisterOperand<QQQ, "printVectorListThree128"> {
-  let ParserMatchClass = VectorList3_128AsmOperand;
-}
-def VecListFour64  : RegisterOperand<DDDD, "printVectorListFour64"> {
-  let ParserMatchClass = VectorList4_64AsmOperand;
-}
-def VecListFour128 : RegisterOperand<QQQQ, "printVectorListFour128"> {
-  let ParserMatchClass = VectorList4_128AsmOperand;
-}
+
+defm VecListOne   : VectorList<1, FPR64, FPR128>;
+defm VecListTwo   : VectorList<2, DD,    QQ>;
+defm VecListThree : VectorList<3, DDD,   QQQ>;
+defm VecListFour  : VectorList<4, DDDD,  QQQQ>;
+
 
 // Register operand versions of the scalar FP registers.
 def FPR16Op : RegisterOperand<FPR16, "printOperand">;

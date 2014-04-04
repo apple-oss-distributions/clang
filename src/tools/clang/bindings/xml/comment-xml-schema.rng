@@ -75,7 +75,6 @@
       <optional>
         <ref name="USR" />
       </optional>
-      <!-- TODO: Add exception specification. -->
       <optional>
         <ref name="Headerfile" />
       </optional>
@@ -90,6 +89,9 @@
       </optional>
       <optional>
         <ref name="Parameters" />
+      </optional>
+      <optional>
+        <ref name="Exceptions" />
       </optional>
       <zeroOrMore>
         <ref name="Availability" />
@@ -410,9 +412,14 @@
             </data>
           </element>
           <optional>
-            <element name="Index">
-              <data type="nonNegativeInteger" />
-            </element>
+            <choice>
+              <element name="Index">
+                <data type="nonNegativeInteger" />
+              </element>
+              <element name="IsVarArg">
+                <empty />
+              </element>
+            </choice>
           </optional>
           <element name="Direction">
             <attribute name="isExplicit">
@@ -435,10 +442,18 @@
     </element>
   </define>
 
+  <define name="Exceptions">
+    <element name="Exceptions">
+      <oneOrMore>
+        <ref name="TextBlockContent" />
+      </oneOrMore>
+    </element>
+  </define>
+
   <define name="Availability">
     <element name="Availability">
       <attribute name="distribution">
-          <data type="string" />
+        <data type="string" />
       </attribute>
       <optional>
         <element name="IntroducedInVersion">

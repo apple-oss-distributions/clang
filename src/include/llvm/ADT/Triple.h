@@ -14,37 +14,41 @@
 
 // Some system headers or GCC predefined macros conflict with identifiers in
 // this file.  Undefine them here.
+#undef NetBSD
 #undef mips
 #undef sparc
 
 namespace llvm {
 
-/// Triple - Helper class for working with target triples.
+/// Triple - Helper class for working with autoconf configuration names. For
+/// historical reasons, we also call these 'triples' (they used to contain
+/// exactly three fields).
 ///
-/// Target triples are strings in the canonical form:
+/// Configuration names are strings in the canonical form:
 ///   ARCHITECTURE-VENDOR-OPERATING_SYSTEM
 /// or
 ///   ARCHITECTURE-VENDOR-OPERATING_SYSTEM-ENVIRONMENT
 ///
 /// This class is used for clients which want to support arbitrary
-/// target triples, but also want to implement certain special
-/// behavior for particular targets. This class isolates the mapping
-/// from the components of the target triple to well known IDs.
+/// configuration names, but also want to implement certain special
+/// behavior for particular configurations. This class isolates the mapping
+/// from the components of the configuration name to well known IDs.
 ///
 /// At its core the Triple class is designed to be a wrapper for a triple
 /// string; the constructor does not change or normalize the triple string.
 /// Clients that need to handle the non-canonical triples that users often
 /// specify should use the normalize method.
 ///
-/// See autoconf/config.guess for a glimpse into what triples look like in
-/// practice.
+/// See autoconf/config.guess for a glimpse into what configuration names
+/// look like in practice.
 class Triple {
 public:
   enum ArchType {
     UnknownArch,
 
-    arm,     // ARM; arm, armv.*, xscale
-    arm64,   // ARM; arm64
+    arm,     // ARM: arm, armv.*, xscale
+    arm64,   // ARM: arm64
+    aarch64, // AArch64: aarch64
     hexagon, // Hexagon: hexagon
     mips,    // MIPS: mips, mipsallegrex
     mipsel,  // MIPSEL: mipsel, mipsallegrexel
@@ -53,15 +57,16 @@ public:
     msp430,  // MSP430: msp430
     ppc,     // PPC: powerpc
     ppc64,   // PPC64: powerpc64, ppu
+    ppc64le, // PPC64LE: powerpc64le
     r600,    // R600: AMD GPUs HD2XXX - HD6XXX
     sparc,   // Sparc: sparc
     sparcv9, // Sparcv9: Sparcv9
+    systemz, // SystemZ: s390x
     tce,     // TCE (http://tce.cs.tut.fi/): tce
     thumb,   // Thumb: thumb, thumbv.*
     x86,     // X86: i[3-9]86
     x86_64,  // X86-64: amd64, x86_64
     xcore,   // XCore: xcore
-    mblaze,  // MBlaze: mblaze
     nvptx,   // NVPTX: 32-bit
     nvptx64, // NVPTX: 64-bit
     gpu_32,  // OpenCL generic GPU: (32-bit)
@@ -80,7 +85,8 @@ public:
     BGP,
     BGQ,
     Freescale,
-    IBM
+    IBM,
+    NVIDIA
   };
   enum OSType {
     UnknownOS,
@@ -106,7 +112,9 @@ public:
     NaCl,       // Native Client
     CNK,        // BG/P Compute-Node Kernel
     Bitrig,
-    AIX
+    AIX,
+    CUDA,       // NVIDIA CUDA
+    NVCL        // NVIDIA OpenCL
   };
   enum EnvironmentType {
     UnknownEnvironment,
@@ -314,7 +322,12 @@ public:
     return getOS() == Triple::Cygwin || getOS() == Triple::MinGW32;
   }
 
-  /// isOSWindows - Is this a "Windows" OS.
+  /// \brief Is this a "Windows" OS targeting a "MSVCRT.dll" environment.
+  bool isOSMSVCRT() const {
+    return getOS() == Triple::Win32 || getOS() == Triple::MinGW32;
+  }
+
+  /// \brief Tests whether the OS is Windows.
   bool isOSWindows() const {
     return getOS() == Triple::Win32 || isOSCygMing();
   }
@@ -322,6 +335,11 @@ public:
   /// \brief Tests whether the OS is NaCl (Native Client)
   bool isOSNaCl() const {
     return getOS() == Triple::NaCl;
+  }
+
+  /// \brief Tests whether the OS is Linux.
+  bool isOSLinux() const {
+    return getOS() == Triple::Linux;
   }
 
   /// \brief Tests whether the OS uses the ELF binary format.

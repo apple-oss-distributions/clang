@@ -41,6 +41,21 @@ using namespace clang;
 // C99 6.8: Statements and Blocks.
 //===----------------------------------------------------------------------===//
 
+/// \brief Parse a standalone statement (for instance, as the body of an 'if',
+/// 'while', or 'for').
+StmtResult Parser::ParseStatement(SourceLocation *TrailingElseLoc) {
+  StmtResult Res;
+
+  // We may get back a null statement if we found a #pragma. Keep going until
+  // we get an actual statement.
+  do {
+    StmtVector Stmts;
+    Res = ParseStatementOrDeclaration(Stmts, true, TrailingElseLoc);
+  } while (!Res.isInvalid() && !Res.get());
+
+  return Res;
+}
+
 /// ParseStatementOrDeclaration - Read 'statement' or 'declaration'.
 ///       StatementOrDeclaration:
 ///         statement
@@ -111,6 +126,38 @@ Parser::ParseStatementOrDeclaration(StmtVector &Stmts, bool OnlyStatement,
   return Actions.ProcessStmtAttributes(Res.get(), Attrs.getList(), Attrs.Range);
 }
 
+namespace {
+class StatementFilterCCC : public CorrectionCandidateCallback {
+public:
+  StatementFilterCCC(Token nextTok) : NextToken(nextTok) {
+    WantTypeSpecifiers = nextTok.is(tok::l_paren) || nextTok.is(tok::less) ||
+                         nextTok.is(tok::identifier) || nextTok.is(tok::star) ||
+                         nextTok.is(tok::amp) || nextTok.is(tok::l_square);
+    WantExpressionKeywords = nextTok.is(tok::l_paren) ||
+                             nextTok.is(tok::identifier) ||
+                             nextTok.is(tok::arrow) || nextTok.is(tok::period);
+    WantRemainingKeywords = nextTok.is(tok::l_paren) || nextTok.is(tok::semi) ||
+                            nextTok.is(tok::identifier) ||
+                            nextTok.is(tok::l_brace);
+    WantCXXNamedCasts = false;
+  }
+
+  virtual bool ValidateCandidate(const TypoCorrection &candidate) {
+    if (FieldDecl *FD = candidate.getCorrectionDeclAs<FieldDecl>())
+      return !candidate.getCorrectionSpecifier() || isa<ObjCIvarDecl>(FD);
+    if (NextToken.is(tok::equal))
+      return candidate.getCorrectionDeclAs<VarDecl>();
+    if (NextToken.is(tok::period) &&
+        candidate.getCorrectionDeclAs<NamespaceDecl>())
+      return false;
+    return CorrectionCandidateCallback::ValidateCandidate(candidate);
+  }
+
+private:
+  Token NextToken;
+};
+}
+
 StmtResult
 Parser::ParseStatementOrDeclarationAfterAttributes(StmtVector &Stmts,
           bool OnlyStatement, SourceLocation *TrailingElseLoc,
@@ -149,21 +196,8 @@ Retry:
     if (Next.isNot(tok::coloncolon)) {
       // Try to limit which sets of keywords should be included in typo
       // correction based on what the next token is.
-      // FIXME: Pass the next token into the CorrectionCandidateCallback and
-      //        do this filtering in a more fine-grained manner.
-      CorrectionCandidateCallback DefaultValidator;
-      DefaultValidator.WantTypeSpecifiers =
-          Next.is(tok::l_paren) || Next.is(tok::less) ||
-          Next.is(tok::identifier) || Next.is(tok::star) ||
-          Next.is(tok::amp) || Next.is(tok::l_square);
-      DefaultValidator.WantExpressionKeywords =
-          Next.is(tok::l_paren) || Next.is(tok::identifier) ||
-          Next.is(tok::arrow) || Next.is(tok::period);
-      DefaultValidator.WantRemainingKeywords =
-          Next.is(tok::l_paren) || Next.is(tok::semi) ||
-          Next.is(tok::identifier) || Next.is(tok::l_brace);
-      DefaultValidator.WantCXXNamedCasts = false;
-      if (TryAnnotateName(/*IsAddressOfOperand*/false, &DefaultValidator)
+      StatementFilterCCC Validator(Next);
+      if (TryAnnotateName(/*IsAddressOfOperand*/false, &Validator)
             == ANK_Error) {
         // Handle errors here by skipping up to the next semicolon or '}', and
         // eat the semicolon if that's what stopped us.
@@ -301,6 +335,15 @@ Retry:
     ProhibitAttributes(Attrs);
     HandlePragmaOpenCLExtension();
     return StmtEmpty();
+
+  case tok::annot_pragma_captured:
+    ProhibitAttributes(Attrs);
+    return HandlePragmaCaptured();
+
+  case tok::annot_pragma_openmp:
+    ProhibitAttributes(Attrs);
+    return ParseOpenMPDeclarativeOrExecutableDirective();
+
   }
 
   // If we reached this code, the statement must end in a semicolon.
@@ -790,7 +833,6 @@ StmtResult Parser::ParseCompoundStatementBody(bool isStmtExpr) {
   // only allowed at the start of a compound stmt regardless of the language.
   while (Tok.is(tok::kw___label__)) {
     SourceLocation LabelLoc = ConsumeToken();
-    Diag(LabelLoc, diag::ext_gnu_local_label);
 
     SmallVector<Decl *, 8> DeclsInGroup;
     while (1) {
@@ -809,8 +851,8 @@ StmtResult Parser::ParseCompoundStatementBody(bool isStmtExpr) {
     }
 
     DeclSpec DS(AttrFactory);
-    DeclGroupPtrTy Res = Actions.FinalizeDeclaratorGroup(getCurScope(), DS,
-                                      DeclsInGroup.data(), DeclsInGroup.size());
+    DeclGroupPtrTy Res =
+        Actions.FinalizeDeclaratorGroup(getCurScope(), DS, DeclsInGroup);
     StmtResult R = Actions.ActOnDeclStmt(Res, LabelLoc, Tok.getLocation());
 
     ExpectAndConsumeSemi(diag::err_expected_semi_declaration);
@@ -1287,14 +1329,12 @@ StmtResult Parser::ParseDoStatement() {
     return StmtError();
   }
 
-  // Parse the parenthesized condition.
+  // Parse the parenthesized expression.
   BalancedDelimiterTracker T(*this, tok::l_paren);
   T.consumeOpen();
 
-  // FIXME: Do not just parse the attribute contents and throw them away
-  ParsedAttributesWithRange attrs(AttrFactory);
-  MaybeParseCXX11Attributes(attrs);
-  ProhibitAttributes(attrs);
+  // A do-while expression is not a condition, so can't have attributes.
+  DiagnoseAndSkipCXX11Attributes();
 
   ExprResult Cond = ParseExpression();
   T.consumeClose();
@@ -1850,30 +1890,33 @@ ExprResult Parser::ParseMSAsmIdentifier(llvm::SmallVectorImpl<Token> &LineToks,
                                     TemplateKWLoc,
                                     Id);
 
-  // If we've run into the poison token we inserted before, or there
-  // was a parsing error, then claim the entire line.
-  if (Invalid || Tok.is(EndOfStream)) {
-    NumLineToksConsumed = LineToks.size() - 2;
-
-    // Otherwise, claim up to the start of the next token.
+  // Figure out how many tokens we are into LineToks.
+  unsigned LineIndex = 0;
+  if (Tok.is(EndOfStream)) {
+    LineIndex = LineToks.size() - 2;
   } else {
-    // Figure out how many tokens we are into LineToks.
-    unsigned LineIndex = 0;
     while (LineToks[LineIndex].getLocation() != Tok.getLocation()) {
       LineIndex++;
       assert(LineIndex < LineToks.size() - 2); // we added two extra tokens
     }
+  }
 
+  // If we've run into the poison token we inserted before, or there
+  // was a parsing error, then claim the entire line.
+  if (Invalid || Tok.is(EndOfStream)) {
+    NumLineToksConsumed = LineToks.size() - 2;
+  } else {
+    // Otherwise, claim up to the start of the next token.
     NumLineToksConsumed = LineIndex;
   }
-      
-  // Finally, restore the old parsing state by consuming all the
-  // tokens we staged before, implicitly killing off the
-  // token-lexer we pushed.
-  for (unsigned n = LineToks.size() - 2 - NumLineToksConsumed; n != 0; --n) {
+
+  // Finally, restore the old parsing state by consuming all the tokens we
+  // staged before, implicitly killing off the token-lexer we pushed.
+  for (unsigned i = 0, e = LineToks.size() - LineIndex - 2; i != e; ++i) {
     ConsumeAnyToken();
   }
-  ConsumeToken(EndOfStream);
+  assert(Tok.is(EndOfStream));
+  ConsumeToken();
 
   // Leave LineToks in its original state.
   LineToks.pop_back();
@@ -2059,14 +2102,22 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
   // We need an actual supported target.
   llvm::Triple TheTriple = Actions.Context.getTargetInfo().getTriple();
   llvm::Triple::ArchType ArchTy = TheTriple.getArch();
+  const std::string &TT = TheTriple.getTriple();
+  const llvm::Target *TheTarget = 0;
   bool UnsupportedArch = (ArchTy != llvm::Triple::x86 &&
                           ArchTy != llvm::Triple::x86_64);
-  if (UnsupportedArch)
+  if (UnsupportedArch) {
     Diag(AsmLoc, diag::err_msasm_unsupported_arch) << TheTriple.getArchName();
-    
+  } else {
+    std::string Error;
+    TheTarget = llvm::TargetRegistry::lookupTarget(TT, Error);
+    if (!TheTarget)
+      Diag(AsmLoc, diag::err_msasm_unable_to_create_target) << Error;
+  }
+
   // If we don't support assembly, or the assembly is empty, we don't
   // need to instantiate the AsmParser, etc.
-  if (UnsupportedArch || AsmToks.empty()) {
+  if (!TheTarget || AsmToks.empty()) {
     return Actions.ActOnMSAsmStmt(AsmLoc, LBraceLoc, AsmToks, StringRef(),
                                   /*NumOutputs*/ 0, /*NumInputs*/ 0,
                                   ConstraintRefs, ClobberRefs, Exprs, EndLoc);
@@ -2078,19 +2129,16 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
   if (buildMSAsmString(PP, AsmLoc, AsmToks, TokOffsets, AsmString))
     return StmtError();
 
-  // Find the target and create the target specific parser.
-  std::string Error;
-  const std::string &TT = TheTriple.getTriple();
-  const llvm::Target *TheTarget = llvm::TargetRegistry::lookupTarget(TT, Error);
-
-  OwningPtr<llvm::MCAsmInfo> MAI(TheTarget->createMCAsmInfo(TT));
   OwningPtr<llvm::MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TT));
+  OwningPtr<llvm::MCAsmInfo> MAI(TheTarget->createMCAsmInfo(*MRI, TT));
+  // Get the instruction descriptor.
+  const llvm::MCInstrInfo *MII = TheTarget->createMCInstrInfo(); 
   OwningPtr<llvm::MCObjectFileInfo> MOFI(new llvm::MCObjectFileInfo());
   OwningPtr<llvm::MCSubtargetInfo>
     STI(TheTarget->createMCSubtargetInfo(TT, "", ""));
 
   llvm::SourceMgr TempSrcMgr;
-  llvm::MCContext Ctx(*MAI, *MRI, MOFI.get(), &TempSrcMgr);
+  llvm::MCContext Ctx(MAI.get(), MRI.get(), MOFI.get(), &TempSrcMgr);
   llvm::MemoryBuffer *Buffer =
     llvm::MemoryBuffer::getMemBuffer(AsmString, "<MS inline asm>");
 
@@ -2101,10 +2149,8 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
   OwningPtr<llvm::MCAsmParser>
     Parser(createMCAsmParser(TempSrcMgr, Ctx, *Str.get(), *MAI));
   OwningPtr<llvm::MCTargetAsmParser>
-    TargetParser(TheTarget->createMCAsmParser(*STI, *Parser));
+    TargetParser(TheTarget->createMCAsmParser(*STI, *Parser, *MII));
 
-  // Get the instruction descriptor.
-  const llvm::MCInstrInfo *MII = TheTarget->createMCInstrInfo(); 
   llvm::MCInstPrinter *IP =
     TheTarget->createMCInstPrinter(1, *MAI, *MII, *MRI, *STI);
 
@@ -2126,7 +2172,7 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
   SmallVector<std::pair<void *, bool>, 4> OpExprs;
   SmallVector<std::string, 4> Constraints;
   SmallVector<std::string, 4> Clobbers;
-  if (Parser->ParseMSInlineAsm(AsmLoc.getPtrEncoding(), AsmStringIR,
+  if (Parser->parseMSInlineAsm(AsmLoc.getPtrEncoding(), AsmStringIR,
                                NumOutputs, NumInputs, OpExprs, Constraints,
                                Clobbers, MII, IP, Callback))
     return StmtError();
@@ -2198,6 +2244,9 @@ StmtResult Parser::ParseAsmStatement(bool &msAsm) {
     Diag(Loc, diag::w_asm_qualifier_ignored) << "const";
   if (DS.getTypeQualifiers() & DeclSpec::TQ_restrict)
     Diag(Loc, diag::w_asm_qualifier_ignored) << "restrict";
+  // FIXME: Once GCC supports _Atomic, check whether it permits it here.
+  if (DS.getTypeQualifiers() & DeclSpec::TQ_atomic)
+    Diag(Loc, diag::w_asm_qualifier_ignored) << "_Atomic";
 
   // Remember if this was a volatile asm.
   bool isVolatile = DS.getTypeQualifiers() & DeclSpec::TQ_volatile;
@@ -2384,8 +2433,7 @@ Decl *Parser::ParseFunctionStatementBody(Decl *Decl, ParseScope &BodyScope) {
   // If the function body could not be parsed, make a bogus compoundstmt.
   if (FnBody.isInvalid()) {
     Sema::CompoundScopeRAII CompoundScope(Actions);
-    FnBody = Actions.ActOnCompoundStmt(LBraceLoc, LBraceLoc,
-                                       MultiStmtArg(), false);
+    FnBody = Actions.ActOnCompoundStmt(LBraceLoc, LBraceLoc, None, false);
   }
 
   BodyScope.Exit();
@@ -2422,8 +2470,7 @@ Decl *Parser::ParseFunctionTryBlock(Decl *Decl, ParseScope &BodyScope) {
   // compound statement as the body.
   if (FnBody.isInvalid()) {
     Sema::CompoundScopeRAII CompoundScope(Actions);
-    FnBody = Actions.ActOnCompoundStmt(LBraceLoc, LBraceLoc,
-                                       MultiStmtArg(), false);
+    FnBody = Actions.ActOnCompoundStmt(LBraceLoc, LBraceLoc, None, false);
   }
 
   BodyScope.Exit();
@@ -2519,9 +2566,10 @@ StmtResult Parser::ParseCXXTryBlockCommon(SourceLocation TryLoc, bool FnTry) {
   }
   else {
     StmtVector Handlers;
-    ParsedAttributesWithRange attrs(AttrFactory);
-    MaybeParseCXX11Attributes(attrs);
-    ProhibitAttributes(attrs);
+
+    // C++11 attributes can't appear here, despite this context seeming
+    // statement-like.
+    DiagnoseAndSkipCXX11Attributes();
 
     if (Tok.isNot(tok::kw_catch))
       return StmtError(Diag(Tok, diag::err_expected_catch));
@@ -2535,7 +2583,7 @@ StmtResult Parser::ParseCXXTryBlockCommon(SourceLocation TryLoc, bool FnTry) {
     if (Handlers.empty())
       return StmtError();
 
-    return Actions.ActOnCXXTryBlock(TryLoc, TryBlock.take(),Handlers);
+    return Actions.ActOnCXXTryBlock(TryLoc, TryBlock.take(), Handlers);
   }
 }
 

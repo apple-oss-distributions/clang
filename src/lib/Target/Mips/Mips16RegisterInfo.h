@@ -20,14 +20,8 @@ namespace llvm {
 class Mips16InstrInfo;
 
 class Mips16RegisterInfo : public MipsRegisterInfo {
-  const Mips16InstrInfo &TII;
 public:
-  Mips16RegisterInfo(const MipsSubtarget &Subtarget,
-                     const Mips16InstrInfo &TII);
-
-  void eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                     MachineBasicBlock &MBB,
-                                     MachineBasicBlock::iterator I) const;
+  Mips16RegisterInfo(const MipsSubtarget &Subtarget);
 
   bool requiresRegisterScavenging(const MachineFunction &MF) const;
 
@@ -40,6 +34,8 @@ public:
                                      MachineBasicBlock::iterator &UseMI,
                                      const TargetRegisterClass *RC,
                                      unsigned Reg) const;
+
+  virtual const TargetRegisterClass *intRegClass(unsigned Size) const;
 
 private:
   virtual void eliminateFI(MachineBasicBlock::iterator II, unsigned OpNo,

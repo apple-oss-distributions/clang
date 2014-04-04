@@ -155,7 +155,7 @@ private:
             if (FD->getName() == "CFRetain" && 
                 FD->getNumParams() == 1 &&
                 FD->getParent()->isTranslationUnit() &&
-                FD->getLinkage() == ExternalLinkage) {
+                FD->isExternallyVisible()) {
               Expr *Arg = callE->getArg(0);
               if (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(Arg)) {
                 const Expr *sub = ICE->getSubExpr();
@@ -420,7 +420,7 @@ private:
             FD = dyn_cast_or_null<FunctionDecl>(callE->getCalleeDecl()))
         if (FD->getName() == "CFRetain" && FD->getNumParams() == 1 &&
             FD->getParent()->isTranslationUnit() &&
-            FD->getLinkage() == ExternalLinkage)
+            FD->isExternallyVisible())
           return true;
 
     return false;

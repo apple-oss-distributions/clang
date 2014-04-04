@@ -15,6 +15,7 @@
 #include "ARM64Disassembler.h"
 #include "ARM64Subtarget.h"
 #include "MCTargetDesc/ARM64BaseInfo.h"
+#include "MCTargetDesc/ARM64AddressingModes.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCContext.h"
@@ -68,7 +69,8 @@ static DecodeStatus DecodeFixedPointScaleImm(llvm::MCInst &Inst, unsigned Imm,
                                      uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeCondBranchTarget(llvm::MCInst &Inst, unsigned Imm,
                                    uint64_t Address, const void *Decoder);
-
+static DecodeStatus DecodeSystemRegister(llvm::MCInst &Inst, unsigned Imm,
+                                   uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeThreeAddrSRegInstruction(llvm::MCInst &Inst, uint32_t insn,
                                            uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeMoveImmInstruction(llvm::MCInst &Inst, uint32_t insn,
@@ -84,6 +86,8 @@ static DecodeStatus DecodePairLdStInstruction(llvm::MCInst &Inst, uint32_t insn,
 static DecodeStatus DecodeRegOffsetLdStInstruction(llvm::MCInst &Inst, uint32_t insn,
                                            uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeAddSubERegInstruction(llvm::MCInst &Inst, uint32_t insn,
+                                        uint64_t Address, const void *Decoder);
+static DecodeStatus DecodeLogicalImmInstruction(llvm::MCInst &Inst, uint32_t insn,
                                         uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeModImmInstruction(llvm::MCInst &Inst, uint32_t insn,
                                     uint64_t Address, const void *Decoder);
@@ -152,7 +156,7 @@ DecodeStatus ARM64Disassembler::getInstruction(MCInst &MI, uint64_t &Size,
   uint8_t bytes[4];
 
   // We want to read exactly 4 bytes of data.
-  if (Region.readBytes(Address, 4, (uint8_t*)bytes, NULL) == -1)
+  if (Region.readBytes(Address, 4, (uint8_t*)bytes) == -1)
     return Fail;
 
   // Encoded as a small-endian 32-bit word in the stream.
@@ -195,19 +199,23 @@ static MCSymbolRefExpr::VariantKind getVariant(uint64_t
 /// tryAddingSymbolicOperand - tryAddingSymbolicOperand trys to add a symbolic
 /// operand in place of the immediate Value in the MCInst.  The immediate
 /// Value has not had any PC adjustment made by the caller. If the instruction
-/// adds the PC to the immediate Value then InstsAddsAddressToValue is Success,
-/// else Fail.  If the getOpInfo() function was set as part of the
+/// is a branch that adds the PC to the immediate Value then isBranch is
+/// Success, else Fail.  If the getOpInfo() function was set as part of the
 /// setupForSymbolicDisassembly() call then that function is called to get any
 /// symbolic information at the Address for this instrution.  If that returns
 /// non-zero then the symbolic information it returns is used to create an
 /// MCExpr and that is added as an operand to the MCInst.  If getOpInfo()
-/// returns zero and InstsAddsAddressToValue is Success then a symbol look up for
+/// returns zero and isBranch is Success then a symbol look up for
 /// Address + Value is done and if a symbol is found an MCExpr is created with
-/// that, else an MCExpr with Address + Value is created.  This function
-/// returns Success if it adds an operand to the MCInst and Fail otherwise.
+/// that, else an MCExpr with Address + Value is created.  If getOpInfo()
+/// returns zero and isBranch is Fail then the the Opcode of the MCInst is
+/// tested and for ADRP an other instructions that help to load of pointers
+/// a symbol look up is done to see it is returns a specific reference type
+/// to add to the comment stream.  This function returns Success if it adds
+/// an operand to the MCInst and Fail otherwise.
 bool ARM64Disassembler::tryAddingSymbolicOperand(uint64_t Address,
                                                  int Value,
-                                                 bool InstsAddsAddressToValue,
+                                                 bool isBranch,
                                                  uint64_t InstSize,
                                                  MCInst &MI,
                                                  uint32_t insn) const {
@@ -223,7 +231,7 @@ bool ARM64Disassembler::tryAddingSymbolicOperand(uint64_t Address,
   LLVMSymbolLookupCallback SymbolLookUp = getLLVMSymbolLookupCallback();
   if (!getOpInfo ||
       !getOpInfo(DisInfo, Address, 0 /* Offset */, InstSize, 1, &SymbolicOp)) {
-    if (InstsAddsAddressToValue) {
+    if (isBranch) {
       if (SymbolLookUp) {
         ReferenceType = LLVMDisassembler_ReferenceType_In_Branch;
         Name = SymbolLookUp(DisInfo, Address + Value, &ReferenceType, Address,
@@ -238,6 +246,9 @@ bool ARM64Disassembler::tryAddingSymbolicOperand(uint64_t Address,
         }
         if(ReferenceType == LLVMDisassembler_ReferenceType_Out_SymbolStub)
           (*CommentStream) << "symbol stub for: " << ReferenceName;
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_Objc_Message)
+	  (*CommentStream) << "Objc message: " << ReferenceName;
       }
       else {
         return false;
@@ -255,13 +266,49 @@ bool ARM64Disassembler::tryAddingSymbolicOperand(uint64_t Address,
         return false;
       }
     }
-    else if(MI.getOpcode() == ARM64::ADDXri) {
+    else if(MI.getOpcode() == ARM64::ADDXri ||
+	    MI.getOpcode() == ARM64::LDRXui ||
+	    MI.getOpcode() == ARM64::LDRXl ||
+	    MI.getOpcode() == ARM64::ADR) {
       if (SymbolLookUp) {
-	ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_ADDXri;
-	Name = SymbolLookUp(DisInfo, insn, &ReferenceType, Address,
-			    &ReferenceName);
-	if(ReferenceType == LLVMDisassembler_ReferenceType_Out_LitPool_CstrAddr)
-	  (*CommentStream) << "literal pool for: " << ReferenceName;
+	if(MI.getOpcode() == ARM64::ADDXri)
+	  ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_ADDXri;
+	else if(MI.getOpcode() == ARM64::LDRXui)
+	  ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_LDRXui;
+        if(MI.getOpcode() == ARM64::LDRXl){
+          ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_LDRXl;
+          Name = SymbolLookUp(DisInfo, Address + Value, &ReferenceType, Address,
+                              &ReferenceName);
+        }
+        else if(MI.getOpcode() == ARM64::ADR){
+          ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_ADR;
+          Name = SymbolLookUp(DisInfo, Address + Value, &ReferenceType, Address,
+                              &ReferenceName);
+        }
+        else{
+          Name = SymbolLookUp(DisInfo, insn, &ReferenceType, Address,
+                              &ReferenceName);
+        }
+	if(ReferenceType == LLVMDisassembler_ReferenceType_Out_LitPool_SymAddr)
+	  (*CommentStream) << "literal pool symbol address: " << ReferenceName;
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_LitPool_CstrAddr)
+	  (*CommentStream) << "literal pool for: \"" << ReferenceName << "\"";
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_Objc_CFString_Ref)
+	  (*CommentStream) << "Objc cfstring ref: @\"" << ReferenceName << "\"";
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_Objc_Message)
+	  (*CommentStream) << "Objc message: " << ReferenceName;
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_Objc_Message_Ref)
+	  (*CommentStream) << "Objc message ref: " << ReferenceName;
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_Objc_Selector_Ref)
+	  (*CommentStream) << "Objc selector ref: " << ReferenceName;
+	else if(ReferenceType ==
+		LLVMDisassembler_ReferenceType_Out_Objc_Class_Ref)
+	  (*CommentStream) << "Objc class ref: " << ReferenceName;
       }
       else {
         return false;
@@ -664,8 +711,16 @@ static DecodeStatus DecodeCondBranchTarget(llvm::MCInst &Inst, unsigned Imm,
   // Sign-extend 19-bit immediate.
   if (ImmVal & (1 << (19 - 1))) ImmVal |= ~((1LL << 19) - 1);
 
-  if (!Dis->tryAddingSymbolicOperand(Addr, ImmVal << 2, Success, 4, Inst))
+  if (!Dis->tryAddingSymbolicOperand(Addr, ImmVal << 2,
+                                     Inst.getOpcode() != ARM64::LDRXl, 4, Inst))
     Inst.addOperand(MCOperand::CreateImm(ImmVal));
+  return Success;
+}
+
+static DecodeStatus DecodeSystemRegister(llvm::MCInst &Inst, unsigned Imm,
+                                         uint64_t Address,
+                                         const void *Decoder) {
+  Inst.addOperand(MCOperand::CreateImm(Imm | 0x8000));
   return Success;
 }
 
@@ -805,6 +860,9 @@ static DecodeStatus DecodeMoveImmInstruction(llvm::MCInst &Inst, uint32_t insn,
       break;
   }
 
+  if (Inst.getOpcode() == ARM64::MOVKWi || Inst.getOpcode() == ARM64::MOVKXi)
+    Inst.addOperand(Inst.getOperand(0));
+
   Inst.addOperand(MCOperand::CreateImm(imm));
   Inst.addOperand(MCOperand::CreateImm(shift));
   return Success;
@@ -864,7 +922,7 @@ static DecodeStatus DecodeUnsignedLdStInstruction(llvm::MCInst &Inst, uint32_t i
   }
 
   DecodeGPR64spRegisterClass(Inst, Rn, Addr, Decoder);
-  if (!Dis->tryAddingSymbolicOperand(Addr, offset, Fail, 4, Inst))
+  if (!Dis->tryAddingSymbolicOperand(Addr, offset, Fail, 4, Inst, insn))
     Inst.addOperand(MCOperand::CreateImm(offset));
   return Success;
 }
@@ -1259,6 +1317,31 @@ static DecodeStatus DecodeAddSubERegInstruction(llvm::MCInst &Inst, uint32_t ins
   return Success;
 }
 
+static DecodeStatus DecodeLogicalImmInstruction(llvm::MCInst &Inst,
+                         uint32_t insn, uint64_t Addr, const void *Decoder) {
+  unsigned Rd = fieldFromInstruction(insn, 0, 5);
+  unsigned Rn = fieldFromInstruction(insn, 5, 5);
+  unsigned Datasize = fieldFromInstruction(insn, 31, 1);
+  unsigned imm;
+
+  if (Datasize) {
+    DecodeGPR64spRegisterClass(Inst, Rd, Addr, Decoder);
+    DecodeGPR64spRegisterClass(Inst, Rn, Addr, Decoder);
+    imm = fieldFromInstruction(insn, 10, 13);
+    if (!ARM64_AM::isValidDecodeLogicalImmediate(imm, 64))
+      return Fail;
+  }
+  else {
+    DecodeGPR32RegisterClass(Inst, Rd, Addr, Decoder);
+    DecodeGPR32RegisterClass(Inst, Rn, Addr, Decoder);
+    imm = fieldFromInstruction(insn, 10, 12);
+    if (!ARM64_AM::isValidDecodeLogicalImmediate(imm, 32))
+      return Fail;
+  }
+  Inst.addOperand(MCOperand::CreateImm(imm));
+  return Success;
+}
+
 static DecodeStatus DecodeModImmInstruction(llvm::MCInst &Inst, uint32_t insn,
                                     uint64_t Addr, const void *Decoder) {
   unsigned Rd = fieldFromInstruction(insn, 0, 5);
@@ -1606,24 +1689,24 @@ static DecodeStatus DecodeSIMDLdStSingle(llvm::MCInst &Inst, uint32_t insn,
   switch (Inst.getOpcode()) {
     default:
       return Fail;
-    case ARM64::LD1ROnev8b:
-    case ARM64::LD1ROnev8b_POST:
-    case ARM64::LD1ROnev4h:
-    case ARM64::LD1ROnev4h_POST:
-    case ARM64::LD1ROnev2s:
-    case ARM64::LD1ROnev2s_POST:
-    case ARM64::LD1ROnev1d:
-    case ARM64::LD1ROnev1d_POST:
+    case ARM64::LD1Rv8b:
+    case ARM64::LD1Rv8b_POST:
+    case ARM64::LD1Rv4h:
+    case ARM64::LD1Rv4h_POST:
+    case ARM64::LD1Rv2s:
+    case ARM64::LD1Rv2s_POST:
+    case ARM64::LD1Rv1d:
+    case ARM64::LD1Rv1d_POST:
       DecodeFPR64RegisterClass(Inst, Rt, Addr, Decoder);
       break;
-    case ARM64::LD1ROnev16b:
-    case ARM64::LD1ROnev16b_POST:
-    case ARM64::LD1ROnev8h:
-    case ARM64::LD1ROnev8h_POST:
-    case ARM64::LD1ROnev4s:
-    case ARM64::LD1ROnev4s_POST:
-    case ARM64::LD1ROnev2d:
-    case ARM64::LD1ROnev2d_POST:
+    case ARM64::LD1Rv16b:
+    case ARM64::LD1Rv16b_POST:
+    case ARM64::LD1Rv8h:
+    case ARM64::LD1Rv8h_POST:
+    case ARM64::LD1Rv4s:
+    case ARM64::LD1Rv4s_POST:
+    case ARM64::LD1Rv2d:
+    case ARM64::LD1Rv2d_POST:
     case ARM64::ST1i8:
     case ARM64::ST1i8_POST:
     case ARM64::ST1i16:
@@ -1721,22 +1804,22 @@ static DecodeStatus DecodeSIMDLdStSingle(llvm::MCInst &Inst, uint32_t insn,
   }
 
   switch (Inst.getOpcode()) {
-    case ARM64::LD1ROnev8b:
-    case ARM64::LD1ROnev8b_POST:
-    case ARM64::LD1ROnev16b:
-    case ARM64::LD1ROnev16b_POST:
-    case ARM64::LD1ROnev4h:
-    case ARM64::LD1ROnev4h_POST:
-    case ARM64::LD1ROnev8h:
-    case ARM64::LD1ROnev8h_POST:
-    case ARM64::LD1ROnev4s:
-    case ARM64::LD1ROnev4s_POST:
-    case ARM64::LD1ROnev2s:
-    case ARM64::LD1ROnev2s_POST:
-    case ARM64::LD1ROnev1d:
-    case ARM64::LD1ROnev1d_POST:
-    case ARM64::LD1ROnev2d:
-    case ARM64::LD1ROnev2d_POST:
+    case ARM64::LD1Rv8b:
+    case ARM64::LD1Rv8b_POST:
+    case ARM64::LD1Rv16b:
+    case ARM64::LD1Rv16b_POST:
+    case ARM64::LD1Rv4h:
+    case ARM64::LD1Rv4h_POST:
+    case ARM64::LD1Rv8h:
+    case ARM64::LD1Rv8h_POST:
+    case ARM64::LD1Rv4s:
+    case ARM64::LD1Rv4s_POST:
+    case ARM64::LD1Rv2s:
+    case ARM64::LD1Rv2s_POST:
+    case ARM64::LD1Rv1d:
+    case ARM64::LD1Rv1d_POST:
+    case ARM64::LD1Rv2d:
+    case ARM64::LD1Rv2d_POST:
     case ARM64::LD2Rv8b:
     case ARM64::LD2Rv8b_POST:
     case ARM64::LD2Rv16b:
@@ -1797,14 +1880,14 @@ static DecodeStatus DecodeSIMDLdStSingle(llvm::MCInst &Inst, uint32_t insn,
     case ARM64::ST1i16_POST:
     case ARM64::ST1i32_POST:
     case ARM64::ST1i64_POST:
-    case ARM64::LD1ROnev8b_POST:
-    case ARM64::LD1ROnev16b_POST:
-    case ARM64::LD1ROnev4h_POST:
-    case ARM64::LD1ROnev8h_POST:
-    case ARM64::LD1ROnev2s_POST:
-    case ARM64::LD1ROnev4s_POST:
-    case ARM64::LD1ROnev1d_POST:
-    case ARM64::LD1ROnev2d_POST:
+    case ARM64::LD1Rv8b_POST:
+    case ARM64::LD1Rv16b_POST:
+    case ARM64::LD1Rv4h_POST:
+    case ARM64::LD1Rv8h_POST:
+    case ARM64::LD1Rv2s_POST:
+    case ARM64::LD1Rv4s_POST:
+    case ARM64::LD1Rv1d_POST:
+    case ARM64::LD1Rv2d_POST:
     case ARM64::ST2i8_POST:
     case ARM64::ST2i16_POST:
     case ARM64::ST2i32_POST:

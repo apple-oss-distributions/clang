@@ -796,7 +796,9 @@ In general, names should be in camel case (e.g. ``TextFileReader`` and
   
 As an exception, classes that mimic STL classes can have member names in STL's
 style of lower-case words separated by underscores (e.g. ``begin()``,
-``push_back()``, and ``empty()``).
+``push_back()``, and ``empty()``). Classes that provide multiple
+iterators should add a singular prefix to ``begin()`` and ``end()``
+(e.g. ``global_begin()`` and ``use_begin()``).
 
 Here are some examples of good and bad names:
 
@@ -1087,6 +1089,34 @@ flushes the output stream.  In other words, these are equivalent:
 
 Most of the time, you probably have no reason to flush the output stream, so
 it's better to use a literal ``'\n'``.
+
+Don't use ``inline`` when defining a function in a class definition
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A member function defined in a class definition is implicitly inline, so don't
+put the ``inline`` keyword in this case.
+
+Don't:
+
+.. code-block:: c++
+
+  class Foo {
+  public:
+    inline void bar() {
+      // ...
+    }
+  };
+
+Do:
+
+.. code-block:: c++
+
+  class Foo {
+  public:
+    void bar() {
+      // ...
+    }
+  };
 
 Microscopic Details
 -------------------

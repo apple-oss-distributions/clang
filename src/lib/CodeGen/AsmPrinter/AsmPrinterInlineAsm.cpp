@@ -38,7 +38,7 @@ using namespace llvm;
 namespace {
   struct SrcMgrDiagInfo {
     const MDNode *LocInfo;
-    LLVMContext::DiagHandlerTy DiagHandler;
+    LLVMContext::InlineAsmDiagHandlerTy DiagHandler;
     void *DiagContext;
   };
 }
@@ -88,15 +88,15 @@ void AsmPrinter::EmitInlineAsm(StringRef Str, const MDNode *LocMDNode,
   SourceMgr SrcMgr;
   SrcMgrDiagInfo DiagInfo;
 
-  // If the current LLVMContext has a diagnostic handler, set it in SourceMgr.
+  // If the current LLVMContext has an inline asm handler, set it in SourceMgr.
   LLVMContext &LLVMCtx = MMI->getModule()->getContext();
   bool HasDiagHandler = false;
-  if (LLVMCtx.getDiagnosticHandler() != 0) {
+  if (LLVMCtx.getInlineAsmDiagnosticHandler() != 0) {
     // If the source manager has an issue, we arrange for srcMgrDiagHandler
     // to be invoked, getting DiagInfo passed into it.
     DiagInfo.LocInfo = LocMDNode;
-    DiagInfo.DiagHandler = LLVMCtx.getDiagnosticHandler();
-    DiagInfo.DiagContext = LLVMCtx.getDiagnosticContext();
+    DiagInfo.DiagHandler = LLVMCtx.getInlineAsmDiagnosticHandler();
+    DiagInfo.DiagContext = LLVMCtx.getInlineAsmDiagnosticContext();
     SrcMgr.setDiagHandler(srcMgrDiagHandler, &DiagInfo);
     HasDiagHandler = true;
   }
@@ -123,7 +123,7 @@ void AsmPrinter::EmitInlineAsm(StringRef Str, const MDNode *LocMDNode,
                                              TM.getTargetCPU(),
                                              TM.getTargetFeatureString()));
   OwningPtr<MCTargetAsmParser>
-    TAP(TM.getTarget().createMCAsmParser(*STI, *Parser));
+    TAP(TM.getTarget().createMCAsmParser(*STI, *Parser, *MII));
   if (!TAP)
     report_fatal_error("Inline asm not supported by this streamer because"
                        " we don't have an asm parser for this target\n");
@@ -213,7 +213,7 @@ static void EmitMSInlineAsmStr(const char *AsmStr, const MachineInstr *MI,
       } else {
         unsigned OpFlags = MI->getOperand(OpNo).getImm();
         ++OpNo;  // Skip over the ID number.
-        
+
         if (InlineAsm::isMemKind(OpFlags)) {
           Error = AP->PrintAsmMemoryOperand(MI, OpNo, InlineAsmVariant,
                                             /*Modifier*/ 0, OS);

@@ -17,11 +17,9 @@
 
 using namespace llvm;
 
-AMDGPURegisterInfo::AMDGPURegisterInfo(TargetMachine &tm,
-    const TargetInstrInfo &tii)
+AMDGPURegisterInfo::AMDGPURegisterInfo(TargetMachine &tm)
 : AMDGPUGenRegisterInfo(0),
-  TM(tm),
-  TII(tii)
+  TM(tm)
   { }
 
 //===----------------------------------------------------------------------===//
@@ -46,6 +44,23 @@ void AMDGPURegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator MI,
 unsigned AMDGPURegisterInfo::getFrameRegister(const MachineFunction &MF) const {
   assert(!"Subroutines not supported yet");
   return 0;
+}
+
+unsigned AMDGPURegisterInfo::getSubRegFromChannel(unsigned Channel) const {
+  static const unsigned SubRegs[] = {
+    AMDGPU::sub0, AMDGPU::sub1, AMDGPU::sub2, AMDGPU::sub3, AMDGPU::sub4,
+    AMDGPU::sub5, AMDGPU::sub6, AMDGPU::sub7, AMDGPU::sub8, AMDGPU::sub9,
+    AMDGPU::sub10, AMDGPU::sub11, AMDGPU::sub12, AMDGPU::sub13, AMDGPU::sub14,
+    AMDGPU::sub15
+  };
+
+  assert (Channel < array_lengthof(SubRegs));
+  return SubRegs[Channel];
+}
+
+unsigned AMDGPURegisterInfo::getIndirectSubReg(unsigned IndirectIndex) const {
+
+  return getSubRegFromChannel(IndirectIndex);
 }
 
 #define GET_REGINFO_TARGET_DESC

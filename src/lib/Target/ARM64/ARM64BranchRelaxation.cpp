@@ -1,4 +1,4 @@
-//===-- ARM64BranchRelaxation.cpp - ARM64 constant islands ------------------===//
+//===-- ARM64BranchRelaxation.cpp - ARM64 branch relaxation ---------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -173,9 +173,9 @@ void ARM64BranchRelaxation::computeBlockSize(MachineBasicBlock *MBB) {
   BlockInfo[MBB->getNumber()].Size = Size;
 }
 
-/// getInstrOffset - Return the current offset of the specified machine instruction
-/// from the start of the function.  This offset changes as stuff is moved
-/// around inside the function.
+/// getInstrOffset - Return the current offset of the specified machine
+/// instruction from the start of the function.  This offset changes as stuff is
+/// moved around inside the function.
 unsigned ARM64BranchRelaxation::getInstrOffset(MachineInstr *MI) const {
   MachineBasicBlock *MBB = MI->getParent();
 

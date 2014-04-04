@@ -90,7 +90,7 @@ CGIOperandList::CGIOperandList(Record *R) : TheDef(R) {
       if (unsigned NumArgs = MIOpInfo->getNumArgs())
         NumOps = NumArgs;
 
-      if (Rec->isSubClassOf("PredicateOperand"))
+      if (Rec->isSubClassOf("PredicateOp"))
         isPredicable = true;
       else if (Rec->isSubClassOf("OptionalDefOperand"))
         hasOptionalDef = true;
@@ -192,6 +192,7 @@ CGIOperandList::ParseOperandName(const std::string &Op, bool AllowWholeOp) {
 
   // Otherwise, didn't find it!
   PrintFatalError(TheDef->getName() + ": unknown suboperand name in '" + Op + "'");
+  return std::make_pair(0U, 0U);
 }
 
 static void ParseConstraint(const std::string &CStr, CGIOperandList &Ops) {
@@ -336,6 +337,20 @@ CodeGenInstruction::CodeGenInstruction(Record *R)
 
   // Parse the DisableEncoding field.
   Operands.ProcessDisableEncoding(R->getValueAsString("DisableEncoding"));
+
+  // First check for a ComplexDeprecationPredicate.
+  if (R->getValue("ComplexDeprecationPredicate")) {
+    HasComplexDeprecationPredicate = true;
+    DeprecatedReason = R->getValueAsString("ComplexDeprecationPredicate");
+  } else if (RecordVal *Dep = R->getValue("DeprecatedFeatureMask")) {
+    // Check if we have a Subtarget feature mask.
+    HasComplexDeprecationPredicate = false;
+    DeprecatedReason = Dep->getValue()->getAsString();
+  } else {
+    // This instruction isn't deprecated.
+    HasComplexDeprecationPredicate = false;
+    DeprecatedReason = "";
+  }
 }
 
 /// HasOneImplicitDefWithKnownVT - If the instruction has at least one
@@ -418,6 +433,7 @@ bool CodeGenInstAlias::tryAliasOpMatch(DagInit *Result, unsigned AliasOpNo,
                                        ResultOperand &ResOp) {
   Init *Arg = Result->getArg(AliasOpNo);
   DefInit *ADI = dyn_cast<DefInit>(Arg);
+  Record *ResultRecord = ADI ? ADI->getDef() : 0;
 
   if (ADI && ADI->getDef() == InstOpRec) {
     // If the operand is a record, it must have a name, and the record type
@@ -425,19 +441,25 @@ bool CodeGenInstAlias::tryAliasOpMatch(DagInit *Result, unsigned AliasOpNo,
     if (Result->getArgName(AliasOpNo).empty())
       PrintFatalError(Loc, "result argument #" + utostr(AliasOpNo) +
                     " must have a name!");
-    ResOp = ResultOperand(Result->getArgName(AliasOpNo), ADI->getDef());
+    ResOp = ResultOperand(Result->getArgName(AliasOpNo), ResultRecord);
     return true;
   }
 
   // For register operands, the source register class can be a subclass
   // of the instruction register class, not just an exact match.
+  if (InstOpRec->isSubClassOf("RegisterOperand"))
+    InstOpRec = InstOpRec->getValueAsDef("RegClass");
+
+  if (ADI && ADI->getDef()->isSubClassOf("RegisterOperand"))
+    ADI = ADI->getDef()->getValueAsDef("RegClass")->getDefInit();
+
   if (ADI && ADI->getDef()->isSubClassOf("RegisterClass")) {
     if (!InstOpRec->isSubClassOf("RegisterClass"))
       return false;
     if (!T.getRegisterClass(InstOpRec)
               .hasSubClass(&T.getRegisterClass(ADI->getDef())))
       return false;
-    ResOp = ResultOperand(Result->getArgName(AliasOpNo), ADI->getDef());
+    ResOp = ResultOperand(Result->getArgName(AliasOpNo), ResultRecord);
     return true;
   }
 
@@ -449,9 +471,6 @@ bool CodeGenInstAlias::tryAliasOpMatch(DagInit *Result, unsigned AliasOpNo,
       // want the register class of it.
       InstOpRec = cast<DefInit>(DI->getArg(0))->getDef();
     }
-
-    if (InstOpRec->isSubClassOf("RegisterOperand"))
-      InstOpRec = InstOpRec->getValueAsDef("RegClass");
 
     if (!InstOpRec->isSubClassOf("RegisterClass"))
       return false;
@@ -466,7 +485,7 @@ bool CodeGenInstAlias::tryAliasOpMatch(DagInit *Result, unsigned AliasOpNo,
       PrintFatalError(Loc, "result fixed register argument must "
                       "not have a name!");
 
-    ResOp = ResultOperand(ADI->getDef());
+    ResOp = ResultOperand(ResultRecord);
     return true;
   }
 

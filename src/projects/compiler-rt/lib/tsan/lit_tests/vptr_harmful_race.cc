@@ -1,7 +1,8 @@
-// RUN: %clangxx_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clangxx_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdio.h>
+#include <unistd.h>
 
 struct A {
   A() {
@@ -34,6 +35,7 @@ void *Thread1(void *x) {
 }
 
 void *Thread2(void *x) {
+  sleep(1);
   delete obj;
   return NULL;
 }
@@ -46,4 +48,4 @@ int main() {
   pthread_join(t[1], NULL);
 }
 
-// CHECK: WARNING: ThreadSanitizer: data race
+// CHECK: WARNING: ThreadSanitizer: data race on vptr

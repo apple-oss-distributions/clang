@@ -355,14 +355,9 @@ static void computeBlockInfo(CodeGenModule &CGM, CodeGenFunction *CGF,
 
   // First, 'this'.
   if (block->capturesCXXThis()) {
-    const DeclContext *DC = block->getDeclContext();
-    for (; isa<BlockDecl>(DC); DC = cast<BlockDecl>(DC)->getDeclContext())
-      ;
-    QualType thisType;
-    if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(DC))
-      thisType = C.getPointerType(C.getRecordType(RD));
-    else
-      thisType = cast<CXXMethodDecl>(DC)->getThisType(C);
+    assert(CGF && CGF->CurFuncDecl && isa<CXXMethodDecl>(CGF->CurFuncDecl) &&
+           "Can't capture 'this' outside a method");
+    QualType thisType = cast<CXXMethodDecl>(CGF->CurFuncDecl)->getThisType(C);
 
     llvm::Type *llvmType = CGM.getTypes().ConvertType(thisType);
     std::pair<CharUnits,CharUnits> tinfo
@@ -839,7 +834,7 @@ llvm::Value *CodeGenFunction::EmitBlockLiteral(const CGBlockInfo &blockInfo) {
                type->isBlockPointerType()) {
       // Load the block and do a simple retain.
       LValue srcLV = MakeAddrLValue(src, type, align);
-      llvm::Value *value = EmitLoadOfScalar(srcLV);
+      llvm::Value *value = EmitLoadOfScalar(srcLV, SourceLocation());
       value = EmitARCRetainNonBlock(value);
 
       // Do a primitive store to the block field.
@@ -936,7 +931,7 @@ llvm::Type *CodeGenModule::getGenericBlockLiteralType() {
 }
 
 
-RValue CodeGenFunction::EmitBlockCallExpr(const CallExpr* E, 
+RValue CodeGenFunction::EmitBlockCallExpr(const CallExpr *E, 
                                           ReturnValueSlot ReturnValue) {
   const BlockPointerType *BPT =
     E->getCallee()->getType()->getAs<BlockPointerType>();
@@ -1094,8 +1089,6 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
                                        bool IsLambdaConversionToBlock) {
   const BlockDecl *blockDecl = blockInfo.getBlockDecl();
 
-  // Check if we should generate debug info for this block function.
-  maybeInitializeDebugInfo();
   CurGD = GD;
   
   BlockInfo = &blockInfo;
@@ -1169,9 +1162,8 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
     Alloca->setAlignment(Align);
     // Set the DebugLocation to empty, so the store is recognized as a
     // frame setup instruction by llvm::DwarfDebug::beginFunction().
-    Builder.DisableDebugLocations();
+    NoLocation NL(*this, Builder);
     Builder.CreateAlignedStore(BlockPointer, Alloca, Align);
-    Builder.EnableDebugLocations();
     BlockPointerDbgLoc = Alloca;
   }
 
@@ -1242,7 +1234,7 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
     }
     // Recover location if it was changed in the above loop.
     DI->EmitLocation(Builder,
-        cast<CompoundStmt>(blockDecl->getBody())->getRBracLoc());
+                     cast<CompoundStmt>(blockDecl->getBody())->getRBracLoc());
   }
 
   // And resume where we left off.
@@ -1309,18 +1301,17 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
   IdentifierInfo *II
     = &CGM.getContext().Idents.get("__copy_helper_block_");
 
-  // Check if we should generate debug info for this block helper function.
-  maybeInitializeDebugInfo();
-
   FunctionDecl *FD = FunctionDecl::Create(C,
                                           C.getTranslationUnitDecl(),
                                           SourceLocation(),
                                           SourceLocation(), II, C.VoidTy, 0,
                                           SC_Static,
-                                          SC_None,
                                           false,
                                           false);
+  // Create a scope with an artificial location for the body of this function.
+  ArtificialLocation AL(*this, Builder);
   StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
+  AL.Emit();
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
 
@@ -1482,9 +1473,6 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
     llvm::Function::Create(LTy, llvm::GlobalValue::InternalLinkage,
                            "__destroy_helper_block_", &CGM.getModule());
 
-  // Check if we should generate debug info for this block destroy function.
-  maybeInitializeDebugInfo();
-
   IdentifierInfo *II
     = &CGM.getContext().Idents.get("__destroy_helper_block_");
 
@@ -1492,9 +1480,11 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
                                           SourceLocation(),
                                           SourceLocation(), II, C.VoidTy, 0,
                                           SC_Static,
-                                          SC_None,
                                           false, false);
+  // Create a scope with an artificial location for the body of this function.
+  ArtificialLocation AL(*this, Builder);
   StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
+  AL.Emit();
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
 
@@ -1783,11 +1773,8 @@ generateByrefCopyHelper(CodeGenFunction &CGF,
                                           SourceLocation(),
                                           SourceLocation(), II, R, 0,
                                           SC_Static,
-                                          SC_None,
                                           false, false);
 
-  // Initialize debug info if necessary.
-  CGF.maybeInitializeDebugInfo();
   CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
 
   if (byrefInfo.needsCopy()) {
@@ -1858,10 +1845,7 @@ generateByrefDisposeHelper(CodeGenFunction &CGF,
                                           SourceLocation(),
                                           SourceLocation(), II, R, 0,
                                           SC_Static,
-                                          SC_None,
                                           false, false);
-  // Initialize debug info if necessary.
-  CGF.maybeInitializeDebugInfo();
   CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
 
   if (byrefInfo.needsDispose()) {
@@ -2067,7 +2051,8 @@ llvm::Type *CodeGenFunction::BuildByRefType(const VarDecl *D) {
 
   bool Packed = false;
   CharUnits Align = getContext().getDeclAlign(D);
-  if (Align > getContext().toCharUnitsFromBits(Target.getPointerAlign(0))) {
+  if (Align >
+      getContext().toCharUnitsFromBits(getTarget().getPointerAlign(0))) {
     // We have to insert padding.
     
     // The struct above has 2 32-bit integers.

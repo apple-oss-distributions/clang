@@ -452,7 +452,23 @@ enum SystemRegister {
   FPEXC32_EL2 = 0xe298,
 
   // Cyclone specific system registers
-  CPM_IOACC_CTL_EL3 = 0xff90
+  CPM_IOACC_CTL_EL3 = 0xff90,
+
+  // Architectural system registers
+  ID_PFR0_EL1 = 0xc008,
+  ID_PFR1_EL1 = 0xc009,
+  ID_DFR0_EL1 = 0xc00a,
+  ID_AFR0_EL1 = 0xc00b,
+  ID_ISAR0_EL1 = 0xc010,
+  ID_ISAR1_EL1 = 0xc011,
+  ID_ISAR2_EL1 = 0xc012,
+  ID_ISAR3_EL1 = 0xc013,
+  ID_ISAR4_EL1 = 0xc014,
+  ID_ISAR5_EL1 = 0xc015,
+  AFSR1_EL1 = 0xc289, // note same as old AIFSR_EL1
+  AFSR0_EL1 = 0xc288, // note same as old ADFSR_EL1
+  REVIDR_EL1 = 0xc006 // note same as old ECOIDR_EL1
+
 };
 #undef A64_SYSREG_ENC
 
@@ -483,7 +499,6 @@ static inline const char *getSystemRegisterName(SystemRegister Reg) {
   case MIDR_EL1: return "MIDR_EL1";
   case CTR_EL0: return "CTR_EL0";
   case MPIDR_EL1: return "MPIDR_EL1";
-  case ECOIDR_EL1: return "ECOIDR_EL1";
   case DCZID_EL0: return "DCZID_EL0";
   case MVFR0_EL1: return "MVFR0_EL1";
   case MVFR1_EL1: return "MVFR1_EL1";
@@ -525,8 +540,6 @@ static inline const char *getSystemRegisterName(SystemRegister Reg) {
   case TCR_EL2: return "TCR_EL2";
   case TCR_EL3: return "TCR_EL3";
   case VTCR_EL2: return "VTCR_EL2";
-  case ADFSR_EL1: return "ADFSR_EL1";
-  case AIFSR_EL1: return "AIFSR_EL1";
   case ADFSR_EL2: return "ADFSR_EL2";
   case AIFSR_EL2: return "AIFSR_EL2";
   case ADFSR_EL3: return "ADFSR_EL3";
@@ -733,6 +746,19 @@ static inline const char *getSystemRegisterName(SystemRegister Reg) {
   case DBGDEVID2: return "DBGDEVID2";
   case DBGDEVID1: return "DBGDEVID1";
   case DBGDEVID0: return "DBGDEVID0";
+  case ID_PFR0_EL1: return "ID_PFR0_EL1";
+  case ID_PFR1_EL1: return "ID_PFR1_EL1";
+  case ID_DFR0_EL1: return "ID_DFR0_EL1";
+  case ID_AFR0_EL1: return "ID_AFR0_EL1";
+  case ID_ISAR0_EL1: return "ID_ISAR0_EL1";
+  case ID_ISAR1_EL1: return "ID_ISAR1_EL1";
+  case ID_ISAR2_EL1: return "ID_ISAR2_EL1";
+  case ID_ISAR3_EL1: return "ID_ISAR3_EL1";
+  case ID_ISAR4_EL1: return "ID_ISAR4_EL1";
+  case ID_ISAR5_EL1: return "ID_ISAR5_EL1";
+  case AFSR1_EL1: return "AFSR1_EL1";
+  case AFSR0_EL1: return "AFSR0_EL1";
+  case REVIDR_EL1: return "REVIDR_EL1";
   }
 }
 
@@ -762,6 +788,8 @@ namespace ARM64II {
 
     MO_NO_FLAG,
 
+    MO_FRAGMENT = 0x7,
+
     /// MO_PAGE - A symbol operand with this flag represents the pc-relative
     /// offset of the 4K page containing the symbol.  This is used with the
     /// ADRP instruction.
@@ -772,10 +800,37 @@ namespace ARM64II {
     /// to produce the complete address.
     MO_PAGEOFF = 2,
 
+    /// MO_G3 - A symbol operand with this flag (granule 3) represents the high
+    /// 16-bits of a 64-bit address, used in a MOVZ or MOVK instruction
+    MO_G3 = 3,
+
+    /// MO_G2 - A symbol operand with this flag (granule 2) represents the bits
+    /// 32-47 of a 64-bit address, used in a MOVZ or MOVK instruction
+    MO_G2 = 4,
+
+    /// MO_G1 - A symbol operand with this flag (granule 1) represents the bits
+    /// 16-31 of a 64-bit address, used in a MOVZ or MOVK instruction
+    MO_G1 = 5,
+
+    /// MO_G0 - A symbol operand with this flag (granule 0) represents the bits
+    /// 0-15 of a 64-bit address, used in a MOVZ or MOVK instruction
+    MO_G0 = 6,
+
     /// MO_GOT - This flag indicates that a symbol operand represents the
     /// address of the GOT entry for the symbol, rather than the address of
     /// the symbol itself.
-    MO_GOT = 4
+    MO_GOT = 8,
+
+    /// MO_NC - Indicates whether the linker is expected to check the symbol
+    /// reference for overflow. For example in an ADRP/ADD pair of relocations
+    /// the ADRP usually does check, but not the ADD.
+    MO_NC = 0x10,
+
+    /// MO_TLS - Indicates that the operand being accessed is some kind of
+    /// thread-local symbol. On Darwin, only one type of thread-local access
+    /// exists (pre linker-relaxation), but on ELF the TLSModel used for the
+    /// referee will affect interpretation.
+    MO_TLS = 0x20
   };
 } // end namespace ARM64II
 

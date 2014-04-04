@@ -21,8 +21,10 @@ using namespace clang;
 
 namespace {
 /// Get comment kind and bool describing if it is a trailing comment.
-std::pair<RawComment::CommentKind, bool> getCommentKind(StringRef Comment) {
-  if (Comment.size() < 3 || Comment[0] != '/')
+std::pair<RawComment::CommentKind, bool> getCommentKind(StringRef Comment,
+                                                        bool ParseAllComments) {
+  const size_t MinCommentLength = ParseAllComments ? 2 : 3;
+  if ((Comment.size() < MinCommentLength) || Comment[0] != '/')
     return std::make_pair(RawComment::RCK_Invalid, false);
 
   RawComment::CommentKind K;
@@ -63,10 +65,10 @@ bool mergedCommentIsTrailingComment(StringRef Comment) {
 } // unnamed namespace
 
 RawComment::RawComment(const SourceManager &SourceMgr, SourceRange SR,
-                       bool Merged) :
+                       bool Merged, bool ParseAllComments) :
     Range(SR), RawTextValid(false), BriefTextValid(false),
     IsAttached(false), IsAlmostTrailingComment(false),
-    BeginLineValid(false), EndLineValid(false) {
+    ParseAllComments(ParseAllComments) {
   // Extract raw comment text, if possible.
   if (SR.getBegin() == SR.getEnd() || getRawText(SourceMgr).empty()) {
     Kind = RCK_Invalid;
@@ -75,7 +77,7 @@ RawComment::RawComment(const SourceManager &SourceMgr, SourceRange SR,
 
   if (!Merged) {
     // Guess comment kind.
-    std::pair<CommentKind, bool> K = getCommentKind(RawText);
+    std::pair<CommentKind, bool> K = getCommentKind(RawText, ParseAllComments);
     Kind = K.first;
     IsTrailingComment = K.second;
 
@@ -85,26 +87,6 @@ RawComment::RawComment(const SourceManager &SourceMgr, SourceRange SR,
     Kind = RCK_Merged;
     IsTrailingComment = mergedCommentIsTrailingComment(RawText);
   }
-}
-
-unsigned RawComment::getBeginLine(const SourceManager &SM) const {
-  if (BeginLineValid)
-    return BeginLine;
-
-  std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(Range.getBegin());
-  BeginLine = SM.getLineNumber(LocInfo.first, LocInfo.second);
-  BeginLineValid = true;
-  return BeginLine;
-}
-
-unsigned RawComment::getEndLine(const SourceManager &SM) const {
-  if (EndLineValid)
-    return EndLine;
-
-  std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(Range.getEnd());
-  EndLine = SM.getLineNumber(LocInfo.first, LocInfo.second);
-  EndLineValid = true;
-  return EndLine;
 }
 
 StringRef RawComment::getRawTextSlow(const SourceManager &SourceMgr) const {
@@ -181,13 +163,9 @@ comments::FullComment *RawComment::parse(const ASTContext &Context,
   return P.parseFullComment();
 }
 
-namespace {
-bool containsOnlyWhitespace(StringRef Str) {
-  return Str.find_first_not_of(" \t\f\v\r\n") == StringRef::npos;
-}
-
-bool onlyWhitespaceBetween(SourceManager &SM,
-                           SourceLocation Loc1, SourceLocation Loc2) {
+static bool onlyWhitespaceBetween(SourceManager &SM,
+                                  SourceLocation Loc1, SourceLocation Loc2,
+                                  unsigned MaxNewlinesAllowed) {
   std::pair<FileID, unsigned> Loc1Info = SM.getDecomposedLoc(Loc1);
   std::pair<FileID, unsigned> Loc2Info = SM.getDecomposedLoc(Loc2);
 
@@ -200,10 +178,38 @@ bool onlyWhitespaceBetween(SourceManager &SM,
   if (Invalid)
     return false;
 
-  StringRef Text(Buffer + Loc1Info.second, Loc2Info.second - Loc1Info.second);
-  return containsOnlyWhitespace(Text);
+  unsigned NumNewlines = 0;
+  assert(Loc1Info.second <= Loc2Info.second && "Loc1 after Loc2!");
+  // Look for non-whitespace characters and remember any newlines seen.
+  for (unsigned I = Loc1Info.second; I != Loc2Info.second; ++I) {
+    switch (Buffer[I]) {
+    default:
+      return false;
+    case ' ':
+    case '\t':
+    case '\f':
+    case '\v':
+      break;
+    case '\r':
+    case '\n':
+      ++NumNewlines;
+
+      // Check if we have found more than the maximum allowed number of
+      // newlines.
+      if (NumNewlines > MaxNewlinesAllowed)
+        return false;
+
+      // Collapse \r\n and \n\r into a single newline.
+      if (I + 1 != Loc2Info.second &&
+          (Buffer[I + 1] == '\n' || Buffer[I + 1] == '\r') &&
+          Buffer[I] != Buffer[I + 1])
+        ++I;
+      break;
+    }
+  }
+
+  return true;
 }
-} // unnamed namespace
 
 void RawCommentList::addComment(const RawComment &RC,
                                 llvm::BumpPtrAllocator &Allocator) {
@@ -212,22 +218,12 @@ void RawCommentList::addComment(const RawComment &RC,
 
   // Check if the comments are not in source order.
   while (!Comments.empty() &&
-         !SourceMgr.isBeforeInTranslationUnit(
-              Comments.back()->getSourceRange().getBegin(),
-              RC.getSourceRange().getBegin())) {
+         !SourceMgr.isBeforeInTranslationUnit(Comments.back()->getLocStart(),
+                                              RC.getLocStart())) {
     // If they are, just pop a few last comments that don't fit.
     // This happens if an \#include directive contains comments.
     Comments.pop_back();
   }
-
-  if (OnlyWhitespaceSeen) {
-    if (!onlyWhitespaceBetween(SourceMgr,
-                               PrevCommentEndLoc,
-                               RC.getSourceRange().getBegin()))
-      OnlyWhitespaceSeen = false;
-  }
-
-  PrevCommentEndLoc = RC.getSourceRange().getEnd();
 
   // Ordinary comments are not interesting for us.
   if (RC.isOrdinary())
@@ -237,7 +233,6 @@ void RawCommentList::addComment(const RawComment &RC,
   // anything to merge it with).
   if (Comments.empty()) {
     Comments.push_back(new (Allocator) RawComment(RC));
-    OnlyWhitespaceSeen = true;
     return;
   }
 
@@ -247,21 +242,13 @@ void RawCommentList::addComment(const RawComment &RC,
   // Merge comments only if there is only whitespace between them.
   // Can't merge trailing and non-trailing comments.
   // Merge comments if they are on same or consecutive lines.
-  bool Merged = false;
-  if (OnlyWhitespaceSeen &&
-      (C1.isTrailingComment() == C2.isTrailingComment())) {
-    unsigned C1EndLine = C1.getEndLine(SourceMgr);
-    unsigned C2BeginLine = C2.getBeginLine(SourceMgr);
-    if (C1EndLine + 1 == C2BeginLine || C1EndLine == C2BeginLine) {
-      SourceRange MergedRange(C1.getSourceRange().getBegin(),
-                              C2.getSourceRange().getEnd());
-      *Comments.back() = RawComment(SourceMgr, MergedRange, true);
-      Merged = true;
-    }
-  }
-  if (!Merged)
+  if (C1.isTrailingComment() == C2.isTrailingComment() &&
+      onlyWhitespaceBetween(SourceMgr, C1.getLocEnd(), C2.getLocStart(),
+                            /*MaxNewlinesAllowed=*/1)) {
+    SourceRange MergedRange(C1.getLocStart(), C2.getLocEnd());
+    *Comments.back() = RawComment(SourceMgr, MergedRange, true,
+                                  RC.isParseAllComments());
+  } else {
     Comments.push_back(new (Allocator) RawComment(RC));
-
-  OnlyWhitespaceSeen = true;
+  }
 }
-

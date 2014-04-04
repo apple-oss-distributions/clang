@@ -16,6 +16,7 @@
 #include "CXCursor.h"
 #include "CXString.h"
 #include "SimpleFormatContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/CommentCommandTraits.h"
 #include "clang/AST/CommentVisitor.h"
 #include "clang/AST/Decl.h"
@@ -24,6 +25,7 @@
 #include "clang/Lex/Lexer.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <climits>
@@ -268,7 +270,7 @@ unsigned clang_ParamCommandComment_isParamIndexValid(CXComment CXC) {
 
 unsigned clang_ParamCommandComment_getParamIndex(CXComment CXC) {
   const ParamCommandComment *PCC = getASTNodeAs<ParamCommandComment>(CXC);
-  if (!PCC || !PCC->isParamIndexValid())
+  if (!PCC || !PCC->isParamIndexValid() || PCC->isVarArgParam())
     return ParamCommandComment::InvalidParamIndex;
 
   return PCC->getParamIndex();
@@ -358,19 +360,27 @@ CXString clang_VerbatimLineComment_getText(CXComment CXC) {
 
 namespace {
 
-/// This comparison will sort parameters with valid index by index and
-/// invalid (unresolved) parameters last.
+/// This comparison will sort parameters with valid index by index, then vararg
+/// parameters, and invalid (unresolved) parameters last.
 class ParamCommandCommentCompareIndex {
 public:
   bool operator()(const ParamCommandComment *LHS,
                   const ParamCommandComment *RHS) const {
     unsigned LHSIndex = UINT_MAX;
     unsigned RHSIndex = UINT_MAX;
-    if (LHS->isParamIndexValid())
-      LHSIndex = LHS->getParamIndex();
-    if (RHS->isParamIndexValid())
-      RHSIndex = RHS->getParamIndex();
 
+    if (LHS->isParamIndexValid()) {
+      if (LHS->isVarArgParam())
+        LHSIndex = UINT_MAX - 1;
+      else
+        LHSIndex = LHS->getParamIndex();
+    }
+    if (RHS->isParamIndexValid()) {
+      if (RHS->isVarArgParam())
+        RHSIndex = UINT_MAX - 1;
+      else
+        RHSIndex = RHS->getParamIndex();
+    }
     return LHSIndex < RHSIndex;
   }
 };
@@ -415,6 +425,7 @@ struct FullCommentParts {
   SmallVector<const BlockCommandComment *, 4> Returns;
   SmallVector<const ParamCommandComment *, 8> Params;
   SmallVector<const TParamCommandComment *, 4> TParams;
+  llvm::TinyPtrVector<const BlockCommandComment *> Exceptions;
   SmallVector<const BlockContentComment *, 8> MiscBlocks;
 };
 
@@ -454,6 +465,10 @@ FullCommentParts::FullCommentParts(const FullComment *C,
       }
       if (Info->IsReturnsCommand) {
         Returns.push_back(BCC);
+        break;
+      }
+      if (Info->IsThrowsCommand) {
+        Exceptions.push_back(BCC);
         break;
       }
       MiscBlocks.push_back(BCC);
@@ -671,10 +686,15 @@ void CommentASTToHTMLConverter::visitBlockCommandComment(
 void CommentASTToHTMLConverter::visitParamCommandComment(
                                   const ParamCommandComment *C) {
   if (C->isParamIndexValid()) {
-    Result << "<dt class=\"param-name-index-"
-           << C->getParamIndex()
-           << "\">";
-    appendToResultWithHTMLEscaping(C->getParamName(FC));
+    if (C->isVarArgParam()) {
+      Result << "<dt class=\"param-name-index-vararg\">";
+      appendToResultWithHTMLEscaping(C->getParamNameAsWritten());
+    } else {
+      Result << "<dt class=\"param-name-index-"
+             << C->getParamIndex()
+             << "\">";
+      appendToResultWithHTMLEscaping(C->getParamName(FC));
+    }
   } else {
     Result << "<dt class=\"param-name-index-invalid\">";
     appendToResultWithHTMLEscaping(C->getParamNameAsWritten());
@@ -682,9 +702,12 @@ void CommentASTToHTMLConverter::visitParamCommandComment(
   Result << "</dt>";
 
   if (C->isParamIndexValid()) {
-    Result << "<dd class=\"param-descr-index-"
-           << C->getParamIndex()
-           << "\">";
+    if (C->isVarArgParam())
+      Result << "<dd class=\"param-descr-index-vararg\">";
+    else
+      Result << "<dd class=\"param-descr-index-"
+             << C->getParamIndex()
+             << "\">";
   } else
     Result << "<dd class=\"param-descr-index-invalid\">";
 
@@ -1070,8 +1093,12 @@ void CommentASTToXMLConverter::visitParamCommandComment(const ParamCommandCommen
                                                        : C->getParamNameAsWritten());
   Result << "</Name>";
 
-  if (C->isParamIndexValid())
-    Result << "<Index>" << C->getParamIndex() << "</Index>";
+  if (C->isParamIndexValid()) {
+    if (C->isVarArgParam())
+      Result << "<IsVarArg />";
+    else
+      Result << "<Index>" << C->getParamIndex() << "</Index>";
+  }
 
   Result << "<Direction isExplicit=\"" << C->isDirectionExplicit() << "\">";
   switch (C->getDirection()) {
@@ -1112,9 +1139,14 @@ void CommentASTToXMLConverter::visitVerbatimBlockComment(
   if (NumLines == 0)
     return;
 
-  Result << llvm::StringSwitch<const char *>(C->getCommandName(Traits))
-      .Case("code", "<Verbatim xml:space=\"preserve\" kind=\"code\">")
-      .Default("<Verbatim xml:space=\"preserve\" kind=\"verbatim\">");
+  switch (C->getCommandID()) {
+  case CommandTraits::KCI_code:
+    Result << "<Verbatim xml:space=\"preserve\" kind=\"code\">";
+    break;
+  default:
+    Result << "<Verbatim xml:space=\"preserve\" kind=\"verbatim\">";
+    break;
+  }
   for (unsigned i = 0; i != NumLines; ++i) {
     appendToResultWithXMLEscaping(C->getText(i));
     if (i + 1 != NumLines)
@@ -1294,6 +1326,13 @@ void CommentASTToXMLConverter::visitFullComment(const FullComment *C) {
     for (unsigned i = 0, e = Parts.Params.size(); i != e; ++i)
       visit(Parts.Params[i]);
     Result << "</Parameters>";
+  }
+
+  if (Parts.Exceptions.size() != 0) {
+    Result << "<Exceptions>";
+    for (unsigned i = 0, e = Parts.Exceptions.size(); i != e; ++i)
+      visit(Parts.Exceptions[i]);
+    Result << "</Exceptions>";
   }
 
   if (Parts.Returns.size() != 0) {

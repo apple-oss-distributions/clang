@@ -26,7 +26,7 @@ def FeatureZCRegMove : SubtargetFeature<"zcm", "HasZeroCycleRegMove", "true",
 
 /// Cyclone has instructions which zero registers for "free".
 def FeatureZCZeroing : SubtargetFeature<"zcz", "HasZeroCycleZeroing", "true",
-                                        "Has zereo-cycle zeroing instructions">;
+                                        "Has zero-cycle zeroing instructions">;
 
 //===----------------------------------------------------------------------===//
 // Register File Description

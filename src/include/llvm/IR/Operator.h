@@ -33,8 +33,8 @@ class ConstantExpr;
 ///
 class Operator : public User {
 private:
-  // Do not implement any of these. The Operator class is intended to be used
-  // as a utility, and is never itself instantiated.
+  // The Operator class is intended to be used as a utility, and is never itself
+  // instantiated.
   void *operator new(size_t, unsigned) LLVM_DELETED_FUNCTION;
   void *operator new(size_t s) LLVM_DELETED_FUNCTION;
   Operator() LLVM_DELETED_FUNCTION;
@@ -439,8 +439,8 @@ public:
   /// offset of this GEP if the GEP is in fact constant. If the GEP is not
   /// all-constant, it returns false and the value of the offset APInt is
   /// undefined (it is *not* preserved!). The APInt passed into this routine
-  /// must be at least as wide as the IntPtr type for the address space of
-  /// the base GEP pointer.
+  /// must be at exactly as wide as the IntPtr type for the address space of the
+  /// base GEP pointer.
   bool accumulateConstantOffset(const DataLayout &DL, APInt &Offset) const {
     assert(Offset.getBitWidth() ==
            DL.getPointerSizeInBits(getPointerAddressSpace()) &&

@@ -22,18 +22,18 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/RecordLayout.h"
+#include "clang/CodeGen/CGFunctionInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Module.h"
 using namespace clang;
 using namespace CodeGen;
 
-CodeGenTypes::CodeGenTypes(CodeGenModule &CGM)
-  : Context(CGM.getContext()), Target(Context.getTargetInfo()),
-    TheModule(CGM.getModule()), TheDataLayout(CGM.getDataLayout()),
-    TheABIInfo(CGM.getTargetCodeGenInfo().getABIInfo()),
-    TheCXXABI(CGM.getCXXABI()),
-    CodeGenOpts(CGM.getCodeGenOpts()), CGM(CGM) {
+CodeGenTypes::CodeGenTypes(CodeGenModule &cgm)
+  : CGM(cgm), Context(cgm.getContext()), TheModule(cgm.getModule()),
+    TheDataLayout(cgm.getDataLayout()),
+    Target(cgm.getTarget()), TheCXXABI(cgm.getCXXABI()),
+    TheABIInfo(cgm.getTargetCodeGenInfo().getABIInfo()) {
   SkippedLayout = false;
 }
 
@@ -61,14 +61,14 @@ void CodeGenTypes::addRecordTypeName(const RecordDecl *RD,
     // FIXME: We should not have to check for a null decl context here.
     // Right now we do it because the implicit Obj-C decls don't have one.
     if (RD->getDeclContext())
-      OS << RD->getQualifiedNameAsString();
+      RD->printQualifiedName(OS);
     else
       RD->printName(OS);
   } else if (const TypedefNameDecl *TDD = RD->getTypedefNameForAnonDecl()) {
     // FIXME: We should not have to check for a null decl context here.
     // Right now we do it because the implicit Obj-C decls don't have one.
     if (TDD->getDeclContext())
-      OS << TDD->getQualifiedNameAsString();
+      TDD->printQualifiedName(OS);
     else
       TDD->printName(OS);
   } else
@@ -260,6 +260,11 @@ void CodeGenTypes::UpdateCompletedType(const TagDecl *TD) {
   // yet, we'll just do it lazily.
   if (RecordDeclTypes.count(Context.getTagDeclType(RD).getTypePtr()))
     ConvertRecordDeclType(RD);
+
+  // If necessary, provide the full definition of a type only used with a
+  // declaration so far.
+  if (CGDebugInfo *DI = CGM.getModuleDebugInfo())
+    DI->completeType(RD);
 }
 
 static llvm::Type *getTypeForFormat(llvm::LLVMContext &VMContext,
@@ -378,6 +383,7 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     case BuiltinType::OCLImage2d:
     case BuiltinType::OCLImage2dArray:
     case BuiltinType::OCLImage3d:
+    case BuiltinType::OCLSampler:
     case BuiltinType::OCLEvent:
       ResultType = CGM.getOpenCLRuntime().convertOpenCLSpecificType(Ty);
       break;
@@ -391,6 +397,8 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     }
     break;
   }
+  case Type::Auto:
+    llvm_unreachable("Unexpected undeduced auto type!");
   case Type::Complex: {
     llvm::Type *EltTy = ConvertType(cast<ComplexType>(Ty)->getElementType());
     ResultType = llvm::StructType::get(EltTy, EltTy, NULL);
@@ -581,7 +589,21 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
   }
 
   case Type::Atomic: {
-    ResultType = ConvertType(cast<AtomicType>(Ty)->getValueType());
+    QualType valueType = cast<AtomicType>(Ty)->getValueType();
+    ResultType = ConvertTypeForMem(valueType);
+
+    // Pad out to the inflated size if necessary.
+    uint64_t valueSize = Context.getTypeSize(valueType);
+    uint64_t atomicSize = Context.getTypeSize(Ty);
+    if (valueSize != atomicSize) {
+      assert(valueSize < atomicSize);
+      llvm::Type *elts[] = {
+        ResultType,
+        llvm::ArrayType::get(CGM.Int8Ty, (atomicSize - valueSize) / 8)
+      };
+      ResultType = llvm::StructType::get(getLLVMContext(),
+                                         llvm::makeArrayRef(elts));
+    }
     break;
   }
   }
@@ -590,6 +612,14 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
   
   TypeCache[Ty] = ResultType;
   return ResultType;
+}
+
+bool CodeGenModule::isPaddedAtomicType(QualType type) {
+  return isPaddedAtomicType(type->castAs<AtomicType>());
+}
+
+bool CodeGenModule::isPaddedAtomicType(const AtomicType *type) {
+  return Context.getTypeSize(type) != Context.getTypeSize(type->getValueType());
 }
 
 /// ConvertRecordDeclType - Lay out a tagged decl type like struct or union.

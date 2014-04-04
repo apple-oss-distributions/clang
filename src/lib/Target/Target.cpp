@@ -16,12 +16,30 @@
 #include "llvm-c/Initialization.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Value.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/PassManager.h"
 #include "llvm/Target/TargetLibraryInfo.h"
 #include <cstring>
 
 using namespace llvm;
+
+inline DataLayout *unwrap(LLVMTargetDataRef P) {
+  return reinterpret_cast<DataLayout*>(P);
+}
+
+inline LLVMTargetDataRef wrap(const DataLayout *P) {
+  return reinterpret_cast<LLVMTargetDataRef>(const_cast<DataLayout*>(P));
+}
+
+inline TargetLibraryInfo *unwrap(LLVMTargetLibraryInfoRef P) {
+  return reinterpret_cast<TargetLibraryInfo*>(P);
+}
+
+inline LLVMTargetLibraryInfoRef wrap(const TargetLibraryInfo *P) {
+  TargetLibraryInfo *X = const_cast<TargetLibraryInfo*>(P);
+  return reinterpret_cast<LLVMTargetLibraryInfoRef>(X);
+}
 
 void llvm::initializeTarget(PassRegistry &Registry) {
   initializeDataLayoutPass(Registry);
@@ -68,6 +86,14 @@ LLVMTypeRef LLVMIntPtrType(LLVMTargetDataRef TD) {
 
 LLVMTypeRef LLVMIntPtrTypeForAS(LLVMTargetDataRef TD, unsigned AS) {
   return wrap(unwrap(TD)->getIntPtrType(getGlobalContext(), AS));
+}
+
+LLVMTypeRef LLVMIntPtrTypeInContext(LLVMContextRef C, LLVMTargetDataRef TD) {
+  return wrap(unwrap(TD)->getIntPtrType(*unwrap(C)));
+}
+
+LLVMTypeRef LLVMIntPtrTypeForASInContext(LLVMContextRef C, LLVMTargetDataRef TD, unsigned AS) {
+  return wrap(unwrap(TD)->getIntPtrType(*unwrap(C), AS));
 }
 
 unsigned long long LLVMSizeOfTypeInBits(LLVMTargetDataRef TD, LLVMTypeRef Ty) {

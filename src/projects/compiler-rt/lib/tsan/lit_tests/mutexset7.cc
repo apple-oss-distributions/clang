@@ -1,9 +1,10 @@
-// RUN: %clangxx_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clangxx_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
 
 int Global;
+__thread int huge[1024*1024];
 
 void *Thread1(void *x) {
   sleep(1);

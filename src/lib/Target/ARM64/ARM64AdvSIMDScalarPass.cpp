@@ -232,7 +232,9 @@ bool ARM64AdvSIMDScalar::isProfitableToTransform(const MachineInstr *MI) const {
     // directly use the FPR64, so we don't invalidate AllUsesAreCopies. It's
     // preferable to have it use the FPR64 in most cases, as if the source
     // vector is an IMPLICIT_DEF, the INSERT_SUBREG just goes away entirely.
-    else if (Use->getOpcode() == ARM64::INSERT_SUBREG)
+    // Ditto for a lane insert.
+    else if (Use->getOpcode() == ARM64::INSERT_SUBREG ||
+             Use->getOpcode() == ARM64::INSvi64gpr)
       ;
     else
       AllUsesAreCopies = false;

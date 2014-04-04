@@ -128,19 +128,11 @@ public:
 #endif
 };
 
-template<typename T> struct simplify_type;
-
-template <typename T>
-struct simplify_type<const Optional<T> > {
-  typedef const T* SimpleType;
-  static SimpleType getSimplifiedValue(const Optional<T> &Val) {
-    return Val.getPointer();
-  }
+template <typename T> struct isPodLike;
+template <typename T> struct isPodLike<Optional<T> > {
+  // An Optional<T> is pod-like if T is.
+  static const bool value = isPodLike<T>::value;
 };
-
-template <typename T>
-struct simplify_type<Optional<T> >
-  : public simplify_type<const Optional<T> > {};
 
 /// \brief Poison comparison between two \c Optional objects. Clients needs to
 /// explicitly compare the underlying values and account for empty \c Optional

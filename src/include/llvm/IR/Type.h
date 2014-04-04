@@ -17,8 +17,10 @@
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm-c/Core.h"
 
 namespace llvm {
 
@@ -322,6 +324,14 @@ public:
   subtype_iterator subtype_begin() const { return ContainedTys; }
   subtype_iterator subtype_end() const { return &ContainedTys[NumContainedTys];}
 
+  typedef std::reverse_iterator<subtype_iterator> subtype_reverse_iterator;
+  subtype_reverse_iterator subtype_rbegin() const {
+    return subtype_reverse_iterator(subtype_end());
+  }
+  subtype_reverse_iterator subtype_rend() const {
+    return subtype_reverse_iterator(subtype_begin());
+  }
+
   /// getContainedType - This method is used to implement the type iterator
   /// (defined a the end of the file).  For derived types, this returns the
   /// types 'contained' in the derived type.
@@ -467,6 +477,19 @@ template <> struct GraphTraits<const Type*> {
   }
 };
 
+// Create wrappers for C Binding types (see CBindingWrapping.h).
+DEFINE_ISA_CONVERSION_FUNCTIONS(Type, LLVMTypeRef)
+
+/* Specialized opaque type conversions.
+ */
+inline Type **unwrap(LLVMTypeRef* Tys) {
+  return reinterpret_cast<Type**>(Tys);
+}
+
+inline LLVMTypeRef *wrap(Type **Tys) {
+  return reinterpret_cast<LLVMTypeRef*>(const_cast<Type**>(Tys));
+}
+  
 } // End llvm namespace
 
 #endif

@@ -12,10 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 let Namespace = "AMDGPU" in {
-  def sel_x : SubRegIndex;
-  def sel_y : SubRegIndex;
-  def sel_z : SubRegIndex;
-  def sel_w : SubRegIndex;
+
+foreach Index = 0-15 in {
+  // Indices are used in a variety of ways here, so don't set a size/offset.
+  def sub#Index : SubRegIndex<-1, -1>;
+}
+
+def INDIRECT_BASE_ADDR : Register <"INDIRECT_BASE_ADDR">;
+
 }
 
 include "R600RegisterInfo.td"

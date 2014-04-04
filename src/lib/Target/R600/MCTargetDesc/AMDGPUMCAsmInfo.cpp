@@ -11,7 +11,7 @@
 #include "AMDGPUMCAsmInfo.h"
 
 using namespace llvm;
-AMDGPUMCAsmInfo::AMDGPUMCAsmInfo(const Target &T, StringRef &TT) : MCAsmInfo() {
+AMDGPUMCAsmInfo::AMDGPUMCAsmInfo(StringRef &TT) : MCAsmInfo() {
   HasSingleParameterDotFile = false;
   WeakDefDirective = 0;
   //===------------------------------------------------------------------===//
@@ -21,7 +21,6 @@ AMDGPUMCAsmInfo::AMDGPUMCAsmInfo(const Target &T, StringRef &TT) : MCAsmInfo() {
   HasStaticCtorDtorReferenceInStaticMode = false;
   LinkerRequiresNonEmptyDwarfLines = true;
   MaxInstLength = 16;
-  PCSymbol = "$";
   SeparatorString = "\n";
   CommentColumn = 40;
   CommentString = ";";
@@ -56,27 +55,16 @@ AMDGPUMCAsmInfo::AMDGPUMCAsmInfo(const Target &T, StringRef &TT) : MCAsmInfo() {
 
   //===--- Global Variable Emission Directives --------------------------===//
   GlobalDirective = ".global";
-  ExternDirective = ".extern";
   HasSetDirective = false;
   HasAggressiveSymbolFolding = true;
   COMMDirectiveAlignmentIsInBytes = false;
   HasDotTypeDotSizeDirective = false;
   HasNoDeadStrip = true;
-  HasSymbolResolver = false;
   WeakRefDirective = ".weakref\t";
   LinkOnceDirective = 0;
   //===--- Dwarf Emission Directives -----------------------------------===//
   HasLEB128 = true;
   SupportsDebugInformation = true;
-  ExceptionsType = ExceptionHandling::None;
-  DwarfUsesInlineInfoSection = false;
-  DwarfSectionOffsetDirective = ".offset";
-
-}
-
-const char*
-AMDGPUMCAsmInfo::getDataASDirective(unsigned int Size, unsigned int AS) const {
-  return 0;
 }
 
 const MCSection*

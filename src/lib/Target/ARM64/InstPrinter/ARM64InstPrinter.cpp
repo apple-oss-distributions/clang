@@ -212,6 +212,30 @@ void ARM64InstPrinter::printInst(const MCInst *MI, raw_ostream &O,
     }
   }
 
+  // Symbolic operands for MOVZ, MOVN and MOVK already imply a shift
+  // (e.g. :gottprel_g1: is always going to be "lsl #16") so it should not be
+  // printed.
+  if ((Opcode == ARM64::MOVZXi || Opcode == ARM64::MOVZWi ||
+       Opcode == ARM64::MOVNXi || Opcode == ARM64::MOVNWi) &&
+      MI->getOperand(1).isExpr()) {
+    if (Opcode == ARM64::MOVZXi || Opcode == ARM64::MOVZWi)
+      O << "\tmovz\t";
+    else
+      O << "\tmovn\t";
+
+    O << getRegisterName(MI->getOperand(0).getReg()) << ", #"
+      << *MI->getOperand(1).getExpr();
+    return;
+  }
+
+  if ((Opcode == ARM64::MOVKXi || Opcode == ARM64::MOVKWi) &&
+      MI->getOperand(2).isExpr()) {
+    O << "\tmovk\t"
+      << getRegisterName(MI->getOperand(0).getReg()) << ", #"
+      << *MI->getOperand(2).getExpr();
+    return;
+  }
+
   // HINT #[0-5] should print as nop, yield, wfe, wfi, sev, and sevl,
   // respectively.
   if (Opcode == ARM64::HINT && MI->getOperand(0).getImm() < 6) {
@@ -437,6 +461,7 @@ bool ARM64InstPrinter::printSysAlias(const MCInst *MI, raw_ostream &O) {
         case 1: Asm = "tlbi\tvae2is";    break;
         case 4: Asm = "tlbi\talle1is";   break;
         case 5: Asm = "tlbi\tvale2is";   break;
+        case 6: Asm = "tlbi\tvmalls12e1is"; break;
         }
         break;
       case 6:
@@ -445,6 +470,18 @@ bool ARM64InstPrinter::printSysAlias(const MCInst *MI, raw_ostream &O) {
         case 0: Asm = "tlbi\talle3is";   break;
         case 1: Asm = "tlbi\tvae3is";    break;
         case 5: Asm = "tlbi\tvale3is";   break;
+        }
+        break;
+      }
+      break;
+    case 4:
+      switch (Op1Val) {
+      default: break;
+      case 4:
+        switch (Op2Val) {
+        default: break;
+        case 1: Asm = "tlbi\tipas2e1";  break;
+        case 5: Asm = "tlbi\tipas2le1"; break;
         }
         break;
       }
@@ -470,6 +507,7 @@ bool ARM64InstPrinter::printSysAlias(const MCInst *MI, raw_ostream &O) {
         case 1: Asm = "tlbi\tvae2";      break;
         case 4: Asm = "tlbi\talle1";     break;
         case 5: Asm = "tlbi\tvale2";     break;
+        case 6: Asm = "tlbi\tvmalls12e1"; break;
         }
         break;
       case 6:
@@ -855,75 +893,30 @@ static unsigned getNextVectorRegister(unsigned Reg, unsigned Stride = 1) {
   return Reg;
 }
 
-void ARM64InstPrinter::printVectorListOne128(const MCInst *MI, unsigned OpNum,
-                                          raw_ostream &O) {
+template<unsigned NumRegs, unsigned RegSize>
+void ARM64InstPrinter::printImplicitlyTypedVectorList(const MCInst *MI,
+                                                      unsigned OpNum,
+                                                      raw_ostream &O) {
   unsigned Reg = MI->getOperand(OpNum).getReg();
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << " }";
-}
 
-void ARM64InstPrinter::printVectorListOne64(const MCInst *MI, unsigned OpNum,
-                                          raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::D0 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << " }";
-}
+  // Get the first register in the tupple if needed
+  if (NumRegs > 1)
+    Reg = MRI.getSubReg(Reg, RegSize == 64 ? ARM64::dsub0 : ARM64::qsub0);
 
-void ARM64InstPrinter::printVectorListTwo128(const MCInst *MI, unsigned OpNum,
-                                          raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::Q0_Q1 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << ", "
-    << getRegisterName(getNextVectorRegister(Reg), ARM64::vreg) << " }";
-}
+  // Convert it to a Q-register if needed.
+  if (RegSize == 64) {
+    const MCRegisterClass &FPR128RC = MRI.getRegClass(ARM64::FPR128RegClassID);
+    Reg = MRI.getMatchingSuperReg(Reg, ARM64::dsub, &FPR128RC);
+  }
 
-void ARM64InstPrinter::printVectorListTwo64(const MCInst *MI, unsigned OpNum,
-                                          raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::D0_D1 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << ", "
-    << getRegisterName(getNextVectorRegister(Reg), ARM64::vreg) << " }";
-}
+  O << "{ ";
 
+  for (unsigned i = 0; i < NumRegs; ++i, Reg = getNextVectorRegister(Reg)) {
+    O << getRegisterName(Reg, ARM64::vreg);
+    if (i + 1 != NumRegs) O << ", ";
+  }
 
-void ARM64InstPrinter::printVectorListThree128(const MCInst *MI, unsigned OpNum,
-                                            raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::Q0_Q1_Q2 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << " }";
-}
-
-void ARM64InstPrinter::printVectorListThree64(const MCInst *MI, unsigned OpNum,
-                                            raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::D0_D1_D2 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << " }";
-}
-
-void ARM64InstPrinter::printVectorListFour128(const MCInst *MI, unsigned OpNum,
-                                           raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::Q0_Q1_Q2_Q3 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << " }";
-}
-
-void ARM64InstPrinter::printVectorListFour64(const MCInst *MI, unsigned OpNum,
-                                           raw_ostream &O) {
-  unsigned Reg = MI->getOperand(OpNum).getReg() - ARM64::D0_D1_D2_D3 + ARM64::Q0;
-  O << "{ " << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << ", ";
-  Reg = getNextVectorRegister(Reg);
-  O << getRegisterName(Reg, ARM64::vreg) << " }";
+  O << " }";
 }
 
 void ARM64InstPrinter::printVectorIndex(const MCInst *MI, unsigned OpNum,
@@ -988,10 +981,18 @@ void ARM64InstPrinter::printSystemRegister(const MCInst *MI, unsigned OpNo,
   unsigned Val = MI->getOperand(OpNo).getImm();
   const char *Name =
       ARM64SYS::getSystemRegisterName((ARM64SYS::SystemRegister)Val);
-  if (Name)
+  if (Name) {
     O << Name;
-  else
-    O << "#" << Val;
+    return;
+  }
+
+  unsigned Op0 = 2 | ((Val >> 14) & 1);
+  unsigned Op1 = (Val >> 11) & 7;
+  unsigned CRn = (Val >> 7) & 0xf;
+  unsigned CRm = (Val >> 3) & 0xf;
+  unsigned Op2 = Val & 7;
+
+  O << 'S' << Op0 << '_' << Op1 << "_C" << CRn << "_C" << CRm << '_' << Op2;
 }
 
 void ARM64InstPrinter::printSystemCPSRField(const MCInst *MI, unsigned OpNo,

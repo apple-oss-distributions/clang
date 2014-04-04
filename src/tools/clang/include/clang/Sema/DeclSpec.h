@@ -226,19 +226,14 @@ public:
     SCS_private_extern,
     SCS_mutable
   };
-  /// \brief Thread storage-class-specifier. These can be combined with
-  /// SCS_extern and SCS_static.
-  enum TSCS {
-    TSCS_unspecified,
-    /// GNU __thread.
-    TSCS___thread,
-    /// C++11 thread_local. Implies 'static' at block scope, but not at
-    /// class scope.
-    TSCS_thread_local,
-    /// C11 _Thread_local. Must be combined with either 'static' or 'extern'
-    /// if used at block scope.
-    TSCS__Thread_local
-  };
+
+  // Import thread storage class specifier enumeration and constants.
+  // These can be combined with SCS_extern and SCS_static.
+  typedef ThreadStorageClassSpecifier TSCS;
+  static const TSCS TSCS_unspecified = clang::TSCS_unspecified;
+  static const TSCS TSCS___thread = clang::TSCS___thread;
+  static const TSCS TSCS_thread_local = clang::TSCS_thread_local;
+  static const TSCS TSCS__Thread_local = clang::TSCS__Thread_local;
 
   // Import type specifier width enumeration and constants.
   typedef TypeSpecifierWidth TSW;
@@ -285,6 +280,7 @@ public:
   static const TST TST_typeofType = clang::TST_typeofType;
   static const TST TST_typeofExpr = clang::TST_typeofExpr;
   static const TST TST_decltype = clang::TST_decltype;
+  static const TST TST_decltype_auto = clang::TST_decltype_auto;
   static const TST TST_underlyingType = clang::TST_underlyingType;
   static const TST TST_auto = clang::TST_auto;
   static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
@@ -295,6 +291,7 @@ public:
   static const TST TST_image2d_t = clang::TST_image2d_t;
   static const TST TST_image2d_array_t = clang::TST_image2d_array_t;
   static const TST TST_image3d_t = clang::TST_image3d_t;
+  static const TST TST_sampler_t = clang::TST_sampler_t;
   static const TST TST_event_t = clang::TST_event_t;
   static const TST TST_error = clang::TST_error;
 
@@ -303,7 +300,10 @@ public:
     TQ_unspecified = 0,
     TQ_const       = 1,
     TQ_restrict    = 2,
-    TQ_volatile    = 4
+    TQ_volatile    = 4,
+    // This has no corresponding Qualifiers::TQ value, because it's not treated
+    // as a qualifier in our type system.
+    TQ_atomic      = 8
   };
 
   /// ParsedSpecifiers - Flags to query which specifiers were applied.  This is
@@ -333,7 +333,7 @@ private:
   unsigned TypeSpecOwned : 1;
 
   // type-qualifiers
-  unsigned TypeQualifiers : 3;  // Bitwise OR of TQ.
+  unsigned TypeQualifiers : 4;  // Bitwise OR of TQ.
 
   // function-specifier
   unsigned FS_inline_specified : 1;
@@ -346,8 +346,6 @@ private:
 
   // constexpr-specifier
   unsigned Constexpr_specified : 1;
-
-  /*SCS*/unsigned StorageClassSpecAsWritten : 3;
 
   union {
     UnionParsedType TypeRep;
@@ -381,13 +379,12 @@ private:
   /// TSTNameLoc provides source range info for tag types.
   SourceLocation TSTNameLoc;
   SourceRange TypeofParensRange;
-  SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc;
+  SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc, TQ_atomicLoc;
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc, FS_noreturnLoc;
   SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc;
 
   WrittenBuiltinSpecs writtenBS;
   void SaveWrittenBuiltinSpecs();
-  void SaveStorageSpecifierAsWritten();
 
   ObjCDeclSpec *ObjCQualifiers;
 
@@ -427,7 +424,6 @@ public:
       FS_noreturn_specified(false),
       Friend_specified(false),
       Constexpr_specified(false),
-      StorageClassSpecAsWritten(SCS_unspecified),
       Attrs(attrFactory),
       ProtocolQualifiers(0),
       NumProtocolQualifiers(0),
@@ -460,6 +456,12 @@ public:
     SCS_extern_in_linkage_spec = false;
     StorageClassSpecLoc        = SourceLocation();
     ThreadStorageClassSpecLoc  = SourceLocation();
+  }
+
+  void ClearTypeSpecType() {
+    TypeSpecType = DeclSpec::TST_unspecified;
+    TypeSpecOwned = false;
+    TSTLoc = SourceLocation();
   }
 
   // type-specifier
@@ -504,6 +506,12 @@ public:
   SourceRange getTypeofParensRange() const { return TypeofParensRange; }
   void setTypeofParensRange(SourceRange range) { TypeofParensRange = range; }
 
+  bool containsPlaceholderType() const {
+    return TypeSpecType == TST_auto || TypeSpecType == TST_decltype_auto;
+  }
+
+  bool hasTagDefinition() const;
+
   /// \brief Turn a type-specifier-type into a string like "_Bool" or "union".
   static const char *getSpecifierName(DeclSpec::TST T);
   static const char *getSpecifierName(DeclSpec::TQ Q);
@@ -520,6 +528,7 @@ public:
   SourceLocation getConstSpecLoc() const { return TQ_constLoc; }
   SourceLocation getRestrictSpecLoc() const { return TQ_restrictLoc; }
   SourceLocation getVolatileSpecLoc() const { return TQ_volatileLoc; }
+  SourceLocation getAtomicSpecLoc() const { return TQ_atomicLoc; }
 
   /// \brief Clear out all of the type qualifiers.
   void ClearTypeQualifiers() {
@@ -527,6 +536,7 @@ public:
     TQ_constLoc = SourceLocation();
     TQ_restrictLoc = SourceLocation();
     TQ_volatileLoc = SourceLocation();
+    TQ_atomicLoc = SourceLocation();
   }
 
   // function-specifier
@@ -564,10 +574,6 @@ public:
   /// \brief Return a bitmask of which flavors of specifiers this
   /// DeclSpec includes.
   unsigned getParsedSpecifiers() const;
-
-  SCS getStorageClassSpecAsWritten() const {
-    return (SCS)StorageClassSpecAsWritten;
-  }
 
   /// isEmpty - Return true if this declaration specifier is completely empty:
   /// no tokens were parsed in the production of it.
@@ -616,6 +622,8 @@ public:
   bool SetTypeAltiVecVector(bool isAltiVecVector, SourceLocation Loc,
                        const char *&PrevSpec, unsigned &DiagID);
   bool SetTypeAltiVecPixel(bool isAltiVecPixel, SourceLocation Loc,
+                       const char *&PrevSpec, unsigned &DiagID);
+  bool SetTypeAltiVecBool(bool isAltiVecBool, SourceLocation Loc,
                        const char *&PrevSpec, unsigned &DiagID);
   bool SetTypeSpecError();
   void UpdateDeclRep(Decl *Rep) {
@@ -838,6 +846,20 @@ public:
     IK_ImplicitSelfParam
   } Kind;
 
+  struct OFI {
+    /// \brief The kind of overloaded operator.
+    OverloadedOperatorKind Operator;
+
+    /// \brief The source locations of the individual tokens that name
+    /// the operator, e.g., the "new", "[", and "]" tokens in 
+    /// operator new []. 
+    ///
+    /// Different operators have different numbers of tokens in their name,
+    /// up to three. Any remaining source locations in this array will be
+    /// set to an invalid value for operators with fewer than three tokens.
+    unsigned SymbolLocations[3];
+  };
+
   /// \brief Anonymous union that holds extra data associated with the
   /// parsed unqualified-id.
   union {
@@ -847,19 +869,7 @@ public:
     
     /// \brief When Kind == IK_OperatorFunctionId, the overloaded operator
     /// that we parsed.
-    struct {
-      /// \brief The kind of overloaded operator.
-      OverloadedOperatorKind Operator;
-      
-      /// \brief The source locations of the individual tokens that name
-      /// the operator, e.g., the "new", "[", and "]" tokens in 
-      /// operator new []. 
-      ///
-      /// Different operators have different numbers of tokens in their name,
-      /// up to three. Any remaining source locations in this array will be
-      /// set to an invalid value for operators with fewer than three tokens.
-      unsigned SymbolLocations[3];
-    } OperatorFunctionId;
+    struct OFI OperatorFunctionId;
     
     /// \brief When Kind == IK_ConversionFunctionId, the type that the 
     /// conversion function names.
@@ -1040,8 +1050,8 @@ struct DeclaratorChunk {
   };
 
   struct PointerTypeInfo : TypeInfoCommon {
-    /// The type qualifiers: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers: const/volatile/restrict/atomic.
+    unsigned TypeQuals : 4;
 
     /// The location of the const-qualifier, if any.
     unsigned ConstQualLoc;
@@ -1051,6 +1061,9 @@ struct DeclaratorChunk {
 
     /// The location of the restrict-qualifier, if any.
     unsigned RestrictQualLoc;
+
+    /// The location of the _Atomic-qualifier, if any.
+    unsigned AtomicQualLoc;
 
     void destroy() {
     }
@@ -1066,8 +1079,8 @@ struct DeclaratorChunk {
   };
 
   struct ArrayTypeInfo : TypeInfoCommon {
-    /// The type qualifiers for the array: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers for the array: const/volatile/restrict/_Atomic.
+    unsigned TypeQuals : 4;
 
     /// True if this dimension included the 'static' keyword.
     bool hasStatic : 1;
@@ -1289,16 +1302,16 @@ struct DeclaratorChunk {
 
   struct BlockPointerTypeInfo : TypeInfoCommon {
     /// For now, sema will catch these as invalid.
-    /// The type qualifiers: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers: const/volatile/restrict/_Atomic.
+    unsigned TypeQuals : 4;
 
     void destroy() {
     }
   };
 
   struct MemberPointerTypeInfo : TypeInfoCommon {
-    /// The type qualifiers: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers: const/volatile/restrict/_Atomic.
+    unsigned TypeQuals : 4;
     // CXXScopeSpec has a constructor, so it can't be a direct member.
     // So we need some pointer-aligned storage and a bit of trickery.
     union {
@@ -1495,8 +1508,10 @@ public:
     CXXNewContext,       // C++ new-expression.
     CXXCatchContext,     // C++ catch exception-declaration
     ObjCCatchContext,    // Objective-C catch exception-declaration
-    BlockLiteralContext,  // Block literal declarator.
+    BlockLiteralContext, // Block literal declarator.
     LambdaExprContext,   // Lambda-expression declarator.
+    LambdaExprParameterContext, // Lambda-expression parameter declarator.
+    ConversionIdContext, // C++ conversion-type-id.
     TrailingReturnContext, // C++11 trailing-type-specifier.
     TemplateTypeArgContext, // Template type argument.
     AliasDeclContext,    // C++11 alias-declaration.
@@ -1571,7 +1586,6 @@ public:
   ~Declarator() {
     clear();
   }
-
   /// getDeclSpec - Return the declaration-specifier that this declarator was
   /// declared with.
   const DeclSpec &getDeclSpec() const { return DS; }
@@ -1600,7 +1614,8 @@ public:
   bool isPrototypeContext() const {
     return (Context == PrototypeContext ||
             Context == ObjCParameterContext ||
-            Context == ObjCResultContext);
+            Context == ObjCResultContext ||
+            Context == LambdaExprParameterContext);
   }
 
   /// \brief Get the source range that spans this declarator.
@@ -1664,6 +1679,7 @@ public:
     case AliasDeclContext:
     case AliasTemplateContext:
     case PrototypeContext:
+    case LambdaExprParameterContext:
     case ObjCParameterContext:
     case ObjCResultContext:
     case TemplateParamContext:
@@ -1672,6 +1688,7 @@ public:
     case ObjCCatchContext:
     case BlockLiteralContext:
     case LambdaExprContext:
+    case ConversionIdContext:
     case TemplateTypeArgContext:
     case TrailingReturnContext:
       return true;
@@ -1691,6 +1708,7 @@ public:
     case ForContext:
     case ConditionContext:
     case PrototypeContext:
+    case LambdaExprParameterContext:
     case TemplateParamContext:
     case CXXCatchContext:
     case ObjCCatchContext:
@@ -1704,9 +1722,43 @@ public:
     case ObjCResultContext:
     case BlockLiteralContext:
     case LambdaExprContext:
+    case ConversionIdContext:
     case TemplateTypeArgContext:
     case TrailingReturnContext:
       return false;
+    }
+    llvm_unreachable("unknown context kind!");
+  }
+
+  /// diagnoseIdentifier - Return true if the identifier is prohibited and
+  /// should be diagnosed (because it cannot be anything else).
+  bool diagnoseIdentifier() const {
+    switch (Context) {
+    case FileContext:
+    case KNRTypeListContext:
+    case MemberContext:
+    case BlockContext:
+    case ForContext:
+    case ConditionContext:
+    case PrototypeContext:
+    case LambdaExprParameterContext:
+    case TemplateParamContext:
+    case CXXCatchContext:
+    case ObjCCatchContext:
+    case TypeNameContext:
+    case ConversionIdContext:
+    case ObjCParameterContext:
+    case ObjCResultContext:
+    case BlockLiteralContext:
+    case CXXNewContext:
+    case LambdaExprContext:
+      return false;
+
+    case AliasDeclContext:
+    case AliasTemplateContext:
+    case TemplateTypeArgContext:
+    case TrailingReturnContext:
+      return true;
     }
     llvm_unreachable("unknown context kind!");
   }
@@ -1742,6 +1794,7 @@ public:
     case KNRTypeListContext:
     case MemberContext:
     case PrototypeContext:
+    case LambdaExprParameterContext:
     case ObjCParameterContext:
     case ObjCResultContext:
     case TemplateParamContext:
@@ -1753,6 +1806,7 @@ public:
     case AliasTemplateContext:
     case BlockLiteralContext:
     case LambdaExprContext:
+    case ConversionIdContext:
     case TemplateTypeArgContext:
     case TrailingReturnContext:
       return false;
@@ -1927,6 +1981,7 @@ public:
     case AliasDeclContext:
     case AliasTemplateContext:
     case PrototypeContext:
+    case LambdaExprParameterContext:
     case ObjCParameterContext:
     case ObjCResultContext:
     case TemplateParamContext:
@@ -1935,6 +1990,7 @@ public:
     case ObjCCatchContext:
     case BlockLiteralContext:
     case LambdaExprContext:
+    case ConversionIdContext:
     case TemplateTypeArgContext:
     case TrailingReturnContext:
       return false;
@@ -1987,7 +2043,7 @@ public:
 
   /// \brief Return a source range list of C++11 attributes associated
   /// with the declarator.
-  void getCXX11AttributeRanges(SmallVector<SourceRange, 4> &Ranges) {
+  void getCXX11AttributeRanges(SmallVectorImpl<SourceRange> &Ranges) {
     AttributeList *AttrList = Attrs.getList();
     while (AttrList) {
       if (AttrList->isCXX11Attribute())
@@ -2030,6 +2086,16 @@ public:
     return (FunctionDefinitionKind)FunctionDefinition; 
   }
 
+  /// Returns true if this declares a real member and not a friend.
+  bool isFirstDeclarationOfMember() {
+    return getContext() == MemberContext && !getDeclSpec().isFriendSpecified();
+  }
+
+  /// Returns true if this declares a static member.  This cannot be called on a
+  /// declarator outside of a MemberContext because we won't know until
+  /// redeclaration time if the decl is static.
+  bool isStaticMember();
+
   void setRedeclaration(bool Val) { Redeclaration = Val; }
   bool isRedeclaration() const { return Redeclaration; }
 };
@@ -2049,7 +2115,8 @@ public:
   enum Specifier {
     VS_None = 0,
     VS_Override = 1,
-    VS_Final = 2
+    VS_Final = 2,
+    VS_Sealed = 4
   };
 
   VirtSpecifiers() : Specifiers(0) { }
@@ -2060,7 +2127,8 @@ public:
   bool isOverrideSpecified() const { return Specifiers & VS_Override; }
   SourceLocation getOverrideLoc() const { return VS_overrideLoc; }
 
-  bool isFinalSpecified() const { return Specifiers & VS_Final; }
+  bool isFinalSpecified() const { return Specifiers & (VS_Final | VS_Sealed); }
+  bool isFinalSpelledSealed() const { return Specifiers & VS_Sealed; }
   SourceLocation getFinalLoc() const { return VS_finalLoc; }
 
   void clear() { Specifiers = 0; }
@@ -2080,13 +2148,16 @@ private:
 struct LambdaCapture {
   LambdaCaptureKind Kind;
   SourceLocation Loc;
-  IdentifierInfo* Id;
+  IdentifierInfo *Id;
   SourceLocation EllipsisLoc;
-  
+  ExprResult Init;
+  ParsedType InitCaptureType;
   LambdaCapture(LambdaCaptureKind Kind, SourceLocation Loc,
-                IdentifierInfo* Id = 0,
-                SourceLocation EllipsisLoc = SourceLocation())
-    : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc)
+                IdentifierInfo* Id,
+                SourceLocation EllipsisLoc,
+                ExprResult Init, ParsedType InitCaptureType)
+    : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc), Init(Init),
+        InitCaptureType(InitCaptureType)
   {}
 };
 
@@ -2103,11 +2174,13 @@ struct LambdaIntroducer {
   /// \brief Append a capture in a lambda introducer.
   void addCapture(LambdaCaptureKind Kind,
                   SourceLocation Loc,
-                  IdentifierInfo* Id = 0, 
-                  SourceLocation EllipsisLoc = SourceLocation()) {
-    Captures.push_back(LambdaCapture(Kind, Loc, Id, EllipsisLoc));
+                  IdentifierInfo* Id,
+                  SourceLocation EllipsisLoc,
+                  ExprResult Init, 
+                  ParsedType InitCaptureType) {
+    Captures.push_back(LambdaCapture(Kind, Loc, Id, EllipsisLoc, Init, 
+        InitCaptureType));
   }
-
 };
 
 } // end namespace clang

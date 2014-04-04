@@ -24,6 +24,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace clang {
 struct ASTTemplateArgumentListInfo;
@@ -43,6 +44,7 @@ class TemplateArgumentList;
 class TemplateParameterList;
 class TypeLoc;
 class UnresolvedSetImpl;
+class VarTemplateDecl;
 
 /// \brief A container of type source information.
 ///
@@ -109,7 +111,6 @@ class NamedDecl : public Decl {
 
 private:
   NamedDecl *getUnderlyingDeclImpl();
-  void verifyLinkage() const;
 
 protected:
   NamedDecl(Kind DK, DeclContext *DC, SourceLocation L, DeclarationName N)
@@ -142,7 +143,7 @@ public:
   // FIXME: Deprecated, move clients to getName().
   std::string getNameAsString() const { return Name.getAsString(); }
 
-  void printName(raw_ostream &os) const { return Name.printName(os); }
+  void printName(raw_ostream &os) const { os << Name; }
 
   /// getDeclName - Get the actual, stored name of the declaration,
   /// which may be a special name.
@@ -151,32 +152,29 @@ public:
   /// \brief Set the name of this declaration.
   void setDeclName(DeclarationName N) { Name = N; }
 
-  /// getQualifiedNameAsString - Returns human-readable qualified name for
+  /// printQualifiedName - Returns human-readable qualified name for
   /// declaration, like A::B::i, for i being member of namespace A::B.
   /// If declaration is not member of context which can be named (record,
-  /// namespace), it will return same result as getNameAsString().
+  /// namespace), it will return same result as printName().
   /// Creating this name is expensive, so it should be called only when
   /// performance doesn't matter.
+  void printQualifiedName(raw_ostream &OS) const;
+  void printQualifiedName(raw_ostream &OS, const PrintingPolicy &Policy) const;
+
+  // FIXME: Remove string versions.
   std::string getQualifiedNameAsString() const;
   std::string getQualifiedNameAsString(const PrintingPolicy &Policy) const;
 
   /// getNameForDiagnostic - Appends a human-readable name for this
-  /// declaration into the given string.
+  /// declaration into the given stream.
   ///
   /// This is the method invoked by Sema when displaying a NamedDecl
   /// in a diagnostic.  It does not necessarily produce the same
-  /// result as getNameAsString(); for example, class template
+  /// result as printName(); for example, class template
   /// specializations are printed with their template arguments.
-  ///
-  /// TODO: use an API that doesn't require so many temporary strings
-  virtual void getNameForDiagnostic(std::string &S,
+  virtual void getNameForDiagnostic(raw_ostream &OS,
                                     const PrintingPolicy &Policy,
-                                    bool Qualified) const {
-    if (Qualified)
-      S += getQualifiedNameAsString(Policy);
-    else
-      S += getNameAsString();
-  }
+                                    bool Qualified) const;
 
   /// declarationReplaces - Determine whether this declaration, if
   /// known to be well-formed within its context, will replace the
@@ -192,10 +190,13 @@ public:
 
   using Decl::isModulePrivate;
   using Decl::setModulePrivate;
-  
+
   /// \brief Determine whether this declaration is hidden from name lookup.
   bool isHidden() const { return Hidden; }
-  
+
+  /// \brief Set whether this declaration is hidden from name lookup.
+  void setHidden(bool Hide) { Hidden = Hide; }
+
   /// \brief Determine whether this declaration is a C++ class member.
   bool isCXXClassMember() const {
     const DeclContext *DC = getDeclContext();
@@ -215,7 +216,25 @@ public:
   bool isCXXInstanceMember() const;
 
   /// \brief Determine what kind of linkage this entity has.
-  Linkage getLinkage() const;
+  /// This is not the linkage as defined by the standard or the codegen notion
+  /// of linkage. It is just an implementation detail that is used to compute
+  /// those.
+  Linkage getLinkageInternal() const;
+
+  /// \brief Get the linkage from a semantic point of view. Entities in
+  /// anonymous namespaces are external (in c++98).
+  Linkage getFormalLinkage() const {
+    return clang::getFormalLinkage(getLinkageInternal());
+  }
+
+  /// \brief True if this decl has external linkage.
+  bool hasExternalFormalLinkage() const {
+    return isExternalFormalLinkage(getLinkageInternal());
+  }
+
+  bool isExternallyVisible() const {
+    return clang::isExternallyVisible(getLinkageInternal());
+  }
 
   /// \brief Determines the visibility of this entity.
   Visibility getVisibility() const {
@@ -233,12 +252,22 @@ public:
 
   /// \brief If visibility was explicitly specified for this
   /// declaration, return that visibility.
-  llvm::Optional<Visibility>
+  Optional<Visibility>
   getExplicitVisibility(ExplicitVisibilityKind kind) const;
 
-  /// \brief Clear the linkage cache in response to a change
-  /// to the declaration.
-  void ClearLinkageCache();
+  /// \brief True if the computed linkage is valid. Used for consistency
+  /// checking. Should always return true.
+  bool isLinkageValid() const;
+
+  /// \brief True if something has required us to compute the linkage
+  /// of this declaration.
+  ///
+  /// Language features which can retroactively change linkage (like a
+  /// typedef name for linkage purposes) may need to consider this,
+  /// but hopefully only in transitory ways during parsing.
+  bool hasLinkageBeenComputed() const {
+    return hasCachedLinkage();
+  }
 
   /// \brief Looks through UsingDecls and ObjCCompatibleAliasDecls for
   /// the underlying named decl.
@@ -252,6 +281,13 @@ public:
   }
   const NamedDecl *getUnderlyingDecl() const {
     return const_cast<NamedDecl*>(this)->getUnderlyingDecl();
+  }
+
+  NamedDecl *getMostRecentDecl() {
+    return cast<NamedDecl>(static_cast<Decl *>(this)->getMostRecentDecl());
+  }
+  const NamedDecl *getMostRecentDecl() const {
+    return const_cast<NamedDecl*>(this)->getMostRecentDecl();
   }
 
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -349,6 +385,7 @@ public:
   using redeclarable_base::redecls_end;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
+  using redeclarable_base::isFirstDecl;
 
   /// \brief Returns true if this is an anonymous namespace declaration.
   ///
@@ -375,7 +412,7 @@ public:
 
   /// \brief Get the original (first) namespace declaration.
   NamespaceDecl *getOriginalNamespace() {
-    if (isFirstDeclaration())
+    if (isFirstDecl())
       return this;
 
     return AnonOrFirstNamespaceAndInline.getPointer();
@@ -383,7 +420,7 @@ public:
 
   /// \brief Get the original (first) namespace declaration.
   const NamespaceDecl *getOriginalNamespace() const {
-    if (isFirstDeclaration())
+    if (isFirstDecl())
       return this;
 
     return AnonOrFirstNamespaceAndInline.getPointer();
@@ -392,9 +429,7 @@ public:
   /// \brief Return true if this declaration is an original (first) declaration
   /// of the namespace. This is false for non-original (subsequent) namespace
   /// declarations and anonymous namespaces.
-  bool isOriginalNamespace() const {
-    return isFirstDeclaration();
-  }
+  bool isOriginalNamespace() const { return isFirstDecl(); }
 
   /// \brief Retrieve the anonymous namespace nested inside this namespace,
   /// if any.
@@ -665,8 +700,7 @@ private:
     friend class ASTDeclReader;
 
     unsigned SClass : 3;
-    unsigned SClassAsWritten : 3;
-    unsigned TLSKind : 2;
+    unsigned TSCSpec : 2;
     unsigned InitStyle : 2;
 
     /// \brief Whether this variable is the exception variable in a C++ catch
@@ -688,11 +722,21 @@ private:
 
     /// \brief Whether this variable is (C++0x) constexpr.
     unsigned IsConstexpr : 1;
+
+    /// \brief Whether this variable is the implicit variable for a lambda
+    /// init-capture.
+    unsigned IsInitCapture : 1;
+
+    /// \brief Whether this local extern variable's previous declaration was
+    /// declared in the same block scope. This controls whether we should merge
+    /// the type of this declaration with its previous declaration.
+    unsigned PreviousDeclInSameBlockScope : 1;
   };
-  enum { NumVarDeclBits = 15 };
+  enum { NumVarDeclBits = 14 };
 
   friend class ASTDeclReader;
   friend class StmtIteratorBase;
+  friend class ASTNodeImporter;
 
 protected:
   enum { NumParameterIndexBits = 8 };
@@ -717,7 +761,7 @@ protected:
     /// Otherwise, the number of function parameter scopes enclosing
     /// the function parameter scope in which this parameter was
     /// declared.
-    unsigned ScopeDepthOrObjCQuals : 6;
+    unsigned ScopeDepthOrObjCQuals : 7;
 
     /// The number of parameters preceding this parameter in the
     /// function parameter scope in which it was declared.
@@ -731,17 +775,8 @@ protected:
   };
 
   VarDecl(Kind DK, DeclContext *DC, SourceLocation StartLoc,
-          SourceLocation IdLoc, IdentifierInfo *Id,
-          QualType T, TypeSourceInfo *TInfo, StorageClass SC,
-          StorageClass SCAsWritten)
-    : DeclaratorDecl(DK, DC, IdLoc, Id, T, TInfo, StartLoc), Init() {
-    assert(sizeof(VarDeclBitfields) <= sizeof(unsigned));
-    assert(sizeof(ParmVarDeclBitfields) <= sizeof(unsigned));
-    AllBits = 0;
-    VarDeclBits.SClass = SC;
-    VarDeclBits.SClassAsWritten = SCAsWritten;
-    // Everything else is implicitly initialized to false.
-  }
+          SourceLocation IdLoc, IdentifierInfo *Id, QualType T,
+          TypeSourceInfo *TInfo, StorageClass SC);
 
   typedef Redeclarable<VarDecl> redeclarable_base;
   virtual VarDecl *getNextRedeclaration() { return RedeclLink.getNext(); }
@@ -758,38 +793,49 @@ public:
   using redeclarable_base::redecls_end;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
+  using redeclarable_base::isFirstDecl;
 
   static VarDecl *Create(ASTContext &C, DeclContext *DC,
                          SourceLocation StartLoc, SourceLocation IdLoc,
                          IdentifierInfo *Id, QualType T, TypeSourceInfo *TInfo,
-                         StorageClass S, StorageClass SCAsWritten);
+                         StorageClass S);
 
   static VarDecl *CreateDeserialized(ASTContext &C, unsigned ID);
   
   virtual SourceRange getSourceRange() const LLVM_READONLY;
 
+  /// \brief Returns the storage class as written in the source. For the
+  /// computed linkage of symbol, see getLinkage.
   StorageClass getStorageClass() const {
     return (StorageClass) VarDeclBits.SClass;
   }
-  StorageClass getStorageClassAsWritten() const {
-    return (StorageClass) VarDeclBits.SClassAsWritten;
-  }
   void setStorageClass(StorageClass SC);
-  void setStorageClassAsWritten(StorageClass SC) {
-    assert(isLegalForVariable(SC));
-    VarDeclBits.SClassAsWritten = SC;
-  }
 
-  void setTLSKind(TLSKind TLS) { VarDeclBits.TLSKind = TLS; }
+  void setTSCSpec(ThreadStorageClassSpecifier TSC) {
+    VarDeclBits.TSCSpec = TSC;
+  }
+  ThreadStorageClassSpecifier getTSCSpec() const {
+    return static_cast<ThreadStorageClassSpecifier>(VarDeclBits.TSCSpec);
+  }
   TLSKind getTLSKind() const {
-    return static_cast<TLSKind>(VarDeclBits.TLSKind);
+    switch (VarDeclBits.TSCSpec) {
+    case TSCS_unspecified:
+      return TLS_None;
+    case TSCS___thread: // Fall through.
+    case TSCS__Thread_local:
+      return TLS_Static;
+    case TSCS_thread_local:
+      return TLS_Dynamic;
+    }
+    llvm_unreachable("Unknown thread storage class specifier!");
   }
 
   /// hasLocalStorage - Returns true if a variable with function scope
   ///  is a non-static local variable.
   bool hasLocalStorage() const {
     if (getStorageClass() == SC_None)
-      return !isFileVarDecl();
+      // Second check is for C++11 [dcl.stc]p4.
+      return !isFileVarDecl() && getTSCSpec() == TSCS_unspecified;
 
     // Return true for:  Auto, Register.
     // Return false for: Extern, Static, PrivateExtern, OpenCLWorkGroupLocal.
@@ -800,29 +846,45 @@ public:
   /// isStaticLocal - Returns true if a variable with function scope is a
   /// static local variable.
   bool isStaticLocal() const {
-    return getStorageClass() == SC_Static && !isFileVarDecl();
+    return (getStorageClass() == SC_Static ||
+            // C++11 [dcl.stc]p4
+            (getStorageClass() == SC_None && getTSCSpec() == TSCS_thread_local))
+      && !isFileVarDecl();
   }
 
-  /// hasExternStorage - Returns true if a variable has extern or
-  /// __private_extern__ storage.
+  /// \brief Returns true if a variable has extern or __private_extern__
+  /// storage.
   bool hasExternalStorage() const {
     return getStorageClass() == SC_Extern ||
            getStorageClass() == SC_PrivateExtern;
   }
 
-  /// hasGlobalStorage - Returns true for all variables that do not
-  ///  have local storage.  This includs all global variables as well
-  ///  as static variables declared within a function.
+  /// \brief Returns true for all variables that do not have local storage.
+  ///
+  /// This includes all global variables as well as static variables declared
+  /// within a function.
   bool hasGlobalStorage() const { return !hasLocalStorage(); }
 
-  /// Compute the language linkage.
+  /// \brief Get the storage duration of this variable, per C++ [basic.stc].
+  StorageDuration getStorageDuration() const {
+    return hasLocalStorage() ? SD_Automatic :
+           getTSCSpec() ? SD_Thread : SD_Static;
+  }
+
+  /// \brief Compute the language linkage.
   LanguageLinkage getLanguageLinkage() const;
 
   /// \brief Determines whether this variable is a variable with
   /// external, C linkage.
-  bool isExternC() const {
-    return getLanguageLinkage() == CLanguageLinkage;
-  }
+  bool isExternC() const;
+
+  /// \brief Determines whether this variable's context is, or is nested within,
+  /// a C++ extern "C" linkage spec.
+  bool isInExternCContext() const;
+
+  /// \brief Determines whether this variable's context is, or is nested within,
+  /// a C++ extern "C++" linkage spec.
+  bool isInExternCXXContext() const;
 
   /// isLocalVarDecl - Returns true for local variable declarations
   /// other than parameters.  Note that this includes static variables
@@ -833,7 +895,7 @@ public:
   bool isLocalVarDecl() const {
     if (getKind() != Decl::Var)
       return false;
-    if (const DeclContext *DC = getDeclContext())
+    if (const DeclContext *DC = getLexicalDeclContext())
       return DC->getRedeclContext()->isFunctionOrMethod();
     return false;
   }
@@ -843,7 +905,7 @@ public:
   bool isFunctionOrMethodVarDecl() const {
     if (getKind() != Decl::Var)
       return false;
-    const DeclContext *DC = getDeclContext()->getRedeclContext();
+    const DeclContext *DC = getLexicalDeclContext()->getRedeclContext();
     return DC->isFunctionOrMethod() && DC->getDeclKind() != Decl::Block;
   }
 
@@ -894,10 +956,6 @@ public:
     return const_cast<VarDecl*>(this)->getActingDefinition();
   }
 
-  /// \brief Determine whether this is a tentative definition of a
-  /// variable in C.
-  bool isTentativeDefinitionNow() const;
-
   /// \brief Get the real (not just tentative) definition for this declaration.
   VarDecl *getDefinition(ASTContext &);
   const VarDecl *getDefinition(ASTContext &C) const {
@@ -919,10 +977,11 @@ public:
 
   /// isFileVarDecl - Returns true for file scoped variable declaration.
   bool isFileVarDecl() const {
-    if (getKind() != Decl::Var)
+    Kind K = getKind();
+    if (K == ParmVar || K == ImplicitParam)
       return false;
 
-    if (getDeclContext()->getRedeclContext()->isFileContext())
+    if (getLexicalDeclContext()->getRedeclContext()->isFileContext())
       return true;
 
     if (isStaticDataMember())
@@ -985,20 +1044,6 @@ public:
   }
 
   void setInit(Expr *I);
-
-  /// \brief Determine whether this variable is a reference that
-  /// extends the lifetime of its temporary initializer.
-  ///
-  /// A reference extends the lifetime of its temporary initializer if
-  /// it's initializer is an rvalue that would normally go out of scope
-  /// at the end of the initializer (a full expression). In such cases,
-  /// the reference itself takes ownership of the temporary, which will
-  /// be destroyed when the reference goes out of scope. For example:
-  ///
-  /// \code
-  /// const int &r = 1.0; // creates a temporary of type 'int'
-  /// \endcode
-  bool extendsLifetimeOfTemporary() const;
 
   /// \brief Determine whether this variable's value can be used in a
   /// constant expression, according to the relevant language standard.
@@ -1109,14 +1154,33 @@ public:
   bool isConstexpr() const { return VarDeclBits.IsConstexpr; }
   void setConstexpr(bool IC) { VarDeclBits.IsConstexpr = IC; }
 
+  /// Whether this variable is the implicit variable for a lambda init-capture.
+  bool isInitCapture() const { return VarDeclBits.IsInitCapture; }
+  void setInitCapture(bool IC) { VarDeclBits.IsInitCapture = IC; }
+
+  /// Whether this local extern variable declaration's previous declaration
+  /// was declared in the same block scope. Only correct in C++.
+  bool isPreviousDeclInSameBlockScope() const {
+    return VarDeclBits.PreviousDeclInSameBlockScope;
+  }
+  void setPreviousDeclInSameBlockScope(bool Same) {
+    VarDeclBits.PreviousDeclInSameBlockScope = Same;
+  }
+
   /// \brief If this variable is an instantiated static data member of a
   /// class template specialization, returns the templated static data member
   /// from which it was instantiated.
   VarDecl *getInstantiatedFromStaticDataMember() const;
 
-  /// \brief If this variable is a static data member, determine what kind of
+  /// \brief If this variable is an instantiation of a variable template or a
+  /// static data member of a class template, determine what kind of
   /// template specialization or instantiation this is.
   TemplateSpecializationKind getTemplateSpecializationKind() const;
+
+  /// \brief If this variable is an instantiation of a variable template or a
+  /// static data member of a class template, determine its point of
+  /// instantiation.
+  SourceLocation getPointOfInstantiation() const;
 
   /// \brief If this variable is an instantiation of a static data member of a
   /// class template specialization, retrieves the member specialization
@@ -1127,6 +1191,26 @@ public:
   /// data member of a class template, set the template specialiation kind.
   void setTemplateSpecializationKind(TemplateSpecializationKind TSK,
                         SourceLocation PointOfInstantiation = SourceLocation());
+
+  /// \brief Specify that this variable is an instantiation of the
+  /// static data member VD.
+  void setInstantiationOfStaticDataMember(VarDecl *VD,
+                                          TemplateSpecializationKind TSK);
+
+  /// \brief Retrieves the variable template that is described by this
+  /// variable declaration.
+  ///
+  /// Every variable template is represented as a VarTemplateDecl and a
+  /// VarDecl. The former contains template properties (such as
+  /// the template parameter lists) while the latter contains the
+  /// actual description of the template's
+  /// contents. VarTemplateDecl::getTemplatedDecl() retrieves the
+  /// VarDecl that from a VarTemplateDecl, while
+  /// getDescribedVarTemplate() retrieves the VarTemplateDecl from
+  /// a VarDecl.
+  VarTemplateDecl *getDescribedVarTemplate() const;
+
+  void setDescribedVarTemplate(VarTemplateDecl *Template);
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -1145,7 +1229,7 @@ public:
   ImplicitParamDecl(DeclContext *DC, SourceLocation IdLoc,
                     IdentifierInfo *Id, QualType Type)
     : VarDecl(ImplicitParam, DC, IdLoc, IdLoc, Id, Type,
-              /*tinfo*/ 0, SC_None, SC_None) {
+              /*tinfo*/ 0, SC_None) {
     setImplicit();
   }
 
@@ -1164,8 +1248,8 @@ protected:
   ParmVarDecl(Kind DK, DeclContext *DC, SourceLocation StartLoc,
               SourceLocation IdLoc, IdentifierInfo *Id,
               QualType T, TypeSourceInfo *TInfo,
-              StorageClass S, StorageClass SCAsWritten, Expr *DefArg)
-    : VarDecl(DK, DC, StartLoc, IdLoc, Id, T, TInfo, S, SCAsWritten) {
+              StorageClass S, Expr *DefArg)
+    : VarDecl(DK, DC, StartLoc, IdLoc, Id, T, TInfo, S) {
     assert(ParmVarDeclBits.HasInheritedDefaultArg == false);
     assert(ParmVarDeclBits.IsKNRPromoted == false);
     assert(ParmVarDeclBits.IsObjCMethodParam == false);
@@ -1177,8 +1261,7 @@ public:
                              SourceLocation StartLoc,
                              SourceLocation IdLoc, IdentifierInfo *Id,
                              QualType T, TypeSourceInfo *TInfo,
-                             StorageClass S, StorageClass SCAsWritten,
-                             Expr *DefArg);
+                             StorageClass S, Expr *DefArg);
 
   static ParmVarDecl *CreateDeserialized(ASTContext &C, unsigned ID);
   
@@ -1301,11 +1384,7 @@ public:
     ParmVarDeclBits.HasInheritedDefaultArg = I;
   }
 
-  QualType getOriginalType() const {
-    if (getTypeSourceInfo())
-      return getTypeSourceInfo()->getType();
-    return getType();
-  }
+  QualType getOriginalType() const;
 
   /// \brief Determine whether this parameter is actually a function
   /// parameter pack.
@@ -1383,7 +1462,6 @@ private:
   // FIXME: This can be packed into the bitfields in Decl.
   // NOTE: VC++ treats enums as signed, avoid using the StorageClass enum
   unsigned SClass : 2;
-  unsigned SClassAsWritten : 2;
   bool IsInline : 1;
   bool IsInlineSpecified : 1;
   bool IsVirtualAsWritten : 1;
@@ -1473,13 +1551,13 @@ protected:
   FunctionDecl(Kind DK, DeclContext *DC, SourceLocation StartLoc,
                const DeclarationNameInfo &NameInfo,
                QualType T, TypeSourceInfo *TInfo,
-               StorageClass S, StorageClass SCAsWritten, bool isInlineSpecified,
+               StorageClass S, bool isInlineSpecified,
                bool isConstexprSpecified)
     : DeclaratorDecl(DK, DC, NameInfo.getLoc(), NameInfo.getName(), T, TInfo,
                      StartLoc),
       DeclContext(DK),
       ParamInfo(0), Body(),
-      SClass(S), SClassAsWritten(SCAsWritten),
+      SClass(S),
       IsInline(isInlineSpecified), IsInlineSpecified(isInlineSpecified),
       IsVirtualAsWritten(false), IsPure(false), HasInheritedPrototype(false),
       HasWrittenPrototype(true), IsDeleted(false), IsTrivial(false),
@@ -1505,19 +1583,19 @@ public:
   using redeclarable_base::redecls_end;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
+  using redeclarable_base::isFirstDecl;
 
   static FunctionDecl *Create(ASTContext &C, DeclContext *DC,
                               SourceLocation StartLoc, SourceLocation NLoc,
                               DeclarationName N, QualType T,
                               TypeSourceInfo *TInfo,
-                              StorageClass SC = SC_None,
-                              StorageClass SCAsWritten = SC_None,
+                              StorageClass SC,
                               bool isInlineSpecified = false,
                               bool hasWrittenPrototype = true,
                               bool isConstexprSpecified = false) {
     DeclarationNameInfo NameInfo(N, NLoc);
     return FunctionDecl::Create(C, DC, StartLoc, NameInfo, T, TInfo,
-                                SC, SCAsWritten,
+                                SC,
                                 isInlineSpecified, hasWrittenPrototype,
                                 isConstexprSpecified);
   }
@@ -1526,10 +1604,9 @@ public:
                               SourceLocation StartLoc,
                               const DeclarationNameInfo &NameInfo,
                               QualType T, TypeSourceInfo *TInfo,
-                              StorageClass SC = SC_None,
-                              StorageClass SCAsWritten = SC_None,
-                              bool isInlineSpecified = false,
-                              bool hasWrittenPrototype = true,
+                              StorageClass SC,
+                              bool isInlineSpecified,
+                              bool hasWrittenPrototype,
                               bool isConstexprSpecified = false);
 
   static FunctionDecl *CreateDeserialized(ASTContext &C, unsigned ID);
@@ -1538,7 +1615,7 @@ public:
     return DeclarationNameInfo(getDeclName(), getLocation(), DNLoc);
   }
 
-  virtual void getNameForDiagnostic(std::string &S,
+  virtual void getNameForDiagnostic(raw_ostream &OS,
                                     const PrintingPolicy &Policy,
                                     bool Qualified) const;
 
@@ -1691,6 +1768,10 @@ public:
   /// entry point into an executable program.
   bool isMain() const;
 
+  /// \brief Determines whether this function is a MSVCRT user defined entry
+  /// point.
+  bool isMSVCRTEntryPoint() const;
+
   /// \brief Determines whether this operator new or delete is one
   /// of the reserved global placement operators:
   ///    void *operator new(size_t, void *);
@@ -1706,14 +1787,42 @@ public:
   /// This function must be an allocation or deallocation function.
   bool isReservedGlobalPlacementOperator() const;
 
+  /// \brief Determines whether this function is one of the replaceable
+  /// global allocation functions:
+  ///    void *operator new(size_t);
+  ///    void *operator new(size_t, const std::nothrow_t &) noexcept;
+  ///    void *operator new[](size_t);
+  ///    void *operator new[](size_t, const std::nothrow_t &) noexcept;
+  ///    void operator delete(void *) noexcept;
+  ///    void operator delete(void *, std::size_t) noexcept;      [C++1y]
+  ///    void operator delete(void *, const std::nothrow_t &) noexcept;
+  ///    void operator delete[](void *) noexcept;
+  ///    void operator delete[](void *, std::size_t) noexcept;    [C++1y]
+  ///    void operator delete[](void *, const std::nothrow_t &) noexcept;
+  /// These functions have special behavior under C++1y [expr.new]:
+  ///    An implementation is allowed to omit a call to a replaceable global
+  ///    allocation function. [...]
+  bool isReplaceableGlobalAllocationFunction() const;
+
+  /// \brief Determine whether this function is a sized global deallocation
+  /// function in C++1y. If so, find and return the corresponding unsized
+  /// deallocation function.
+  FunctionDecl *getCorrespondingUnsizedGlobalDeallocationFunction() const;
+
   /// Compute the language linkage.
   LanguageLinkage getLanguageLinkage() const;
 
   /// \brief Determines whether this function is a function with
   /// external, C linkage.
-  bool isExternC() const {
-    return getLanguageLinkage() == CLanguageLinkage;
-  }
+  bool isExternC() const;
+
+  /// \brief Determines whether this function's context is, or is nested within,
+  /// a C++ extern "C" linkage spec.
+  bool isInExternCContext() const;
+
+  /// \brief Determines whether this function's context is, or is nested within,
+  /// a C++ extern "C++" linkage spec.
+  bool isInExternCXXContext() const;
 
   /// \brief Determines whether this is a global function.
   bool isGlobal() const;
@@ -1781,12 +1890,9 @@ public:
     return getType()->getAs<FunctionType>()->getCallResultType(getASTContext());
   }
 
+  /// \brief Returns the storage class as written in the source. For the
+  /// computed linkage of symbol, see getLinkage.
   StorageClass getStorageClass() const { return StorageClass(SClass); }
-  void setStorageClass(StorageClass SC);
-
-  StorageClass getStorageClassAsWritten() const {
-    return StorageClass(SClassAsWritten);
-  }
 
   /// \brief Determine whether the "inline" keyword was specified for this
   /// function.
@@ -2026,7 +2132,7 @@ public:
 
 /// FieldDecl - An instance of this class is created by Sema::ActOnField to
 /// represent a member of a struct/union/class.
-class FieldDecl : public DeclaratorDecl {
+class FieldDecl : public DeclaratorDecl, public Mergeable<FieldDecl> {
   // FIXME: This can be packed into the bitfields in Decl.
   bool Mutable : 1;
   mutable unsigned CachedFieldIndex : 31;
@@ -2140,6 +2246,10 @@ public:
 
   SourceRange getSourceRange() const LLVM_READONLY;
 
+  /// Retrieves the canonical declaration of this field.
+  FieldDecl *getCanonicalDecl() { return getFirstDecl(); }
+  const FieldDecl *getCanonicalDecl() const { return getFirstDecl(); }
+
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K >= firstField && K <= lastField; }
@@ -2152,7 +2262,7 @@ public:
 /// that is defined.  For example, in "enum X {a,b}", each of a/b are
 /// EnumConstantDecl's, X is an instance of EnumDecl, and the type of a/b is a
 /// TagType for the X EnumDecl.
-class EnumConstantDecl : public ValueDecl {
+class EnumConstantDecl : public ValueDecl, public Mergeable<EnumConstantDecl> {
   Stmt *Init; // an integer constant expression
   llvm::APSInt Val; // The value.
 protected:
@@ -2177,6 +2287,10 @@ public:
   void setInitVal(const llvm::APSInt &V) { Val = V; }
 
   SourceRange getSourceRange() const LLVM_READONLY;
+
+  /// Retrieves the canonical declaration of this enumerator.
+  EnumConstantDecl *getCanonicalDecl() { return getFirstDecl(); }
+  const EnumConstantDecl *getCanonicalDecl() const { return getFirstDecl(); }
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -2276,14 +2390,14 @@ public:
 /// Base class for declarations which introduce a typedef-name.
 class TypedefNameDecl : public TypeDecl, public Redeclarable<TypedefNameDecl> {
   virtual void anchor();
-  /// UnderlyingType - This is the type the typedef is set to.
-  TypeSourceInfo *TInfo;
+  typedef std::pair<TypeSourceInfo*, QualType> ModedTInfo;
+  llvm::PointerUnion<TypeSourceInfo*, ModedTInfo*> MaybeModedTInfo;
 
 protected:
   TypedefNameDecl(Kind DK, DeclContext *DC, SourceLocation StartLoc,
                   SourceLocation IdLoc, IdentifierInfo *Id,
                   TypeSourceInfo *TInfo)
-    : TypeDecl(DK, DC, IdLoc, Id, StartLoc), TInfo(TInfo) {}
+    : TypeDecl(DK, DC, IdLoc, Id, StartLoc), MaybeModedTInfo(TInfo) {}
 
   typedef Redeclarable<TypedefNameDecl> redeclarable_base;
   virtual TypedefNameDecl *getNextRedeclaration() {
@@ -2302,25 +2416,30 @@ public:
   using redeclarable_base::redecls_end;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
+  using redeclarable_base::isFirstDecl;
+
+  bool isModed() const { return MaybeModedTInfo.is<ModedTInfo*>(); }
 
   TypeSourceInfo *getTypeSourceInfo() const {
-    return TInfo;
+    return isModed()
+      ? MaybeModedTInfo.get<ModedTInfo*>()->first
+      : MaybeModedTInfo.get<TypeSourceInfo*>();
+  }
+  QualType getUnderlyingType() const {
+    return isModed()
+      ? MaybeModedTInfo.get<ModedTInfo*>()->second
+      : MaybeModedTInfo.get<TypeSourceInfo*>()->getType();
+  }
+  void setTypeSourceInfo(TypeSourceInfo *newType) {
+    MaybeModedTInfo = newType;
+  }
+  void setModedTypeSourceInfo(TypeSourceInfo *unmodedTSI, QualType modedTy) {
+    MaybeModedTInfo = new (getASTContext()) ModedTInfo(unmodedTSI, modedTy);
   }
 
   /// Retrieves the canonical declaration of this typedef-name.
-  TypedefNameDecl *getCanonicalDecl() {
-    return getFirstDeclaration();
-  }
-  const TypedefNameDecl *getCanonicalDecl() const {
-    return getFirstDeclaration();
-  }
-
-  QualType getUnderlyingType() const {
-    return TInfo->getType();
-  }
-  void setTypeSourceInfo(TypeSourceInfo *newType) {
-    TInfo = newType;
-  }
+  TypedefNameDecl *getCanonicalDecl() { return getFirstDecl(); }
+  const TypedefNameDecl *getCanonicalDecl() const { return getFirstDecl(); }
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -2423,6 +2542,9 @@ protected:
   /// This option is only enabled when modules are enabled.
   bool MayHaveOutOfDateDef : 1;
 
+  /// Has the full definition of this type been required by a use somewhere in
+  /// the TU.
+  bool IsCompleteDefinitionRequired : 1;
 private:
   SourceLocation RBraceLoc;
 
@@ -2430,33 +2552,33 @@ private:
   // to be used for the (uncommon) case of out-of-line declarations.
   typedef QualifierInfo ExtInfo;
 
-  /// TypedefNameDeclOrQualifier - If the (out-of-line) tag declaration name
+  /// \brief If the (out-of-line) tag declaration name
   /// is qualified, it points to the qualifier info (nns and range);
   /// otherwise, if the tag declaration is anonymous and it is part of
   /// a typedef or alias, it points to the TypedefNameDecl (used for mangling);
+  /// otherwise, if the tag declaration is anonymous and it is used as a
+  /// declaration specifier for variables, it points to the first VarDecl (used
+  /// for mangling);
   /// otherwise, it is a null (TypedefNameDecl) pointer.
-  llvm::PointerUnion<TypedefNameDecl*, ExtInfo*> TypedefNameDeclOrQualifier;
+  llvm::PointerUnion<NamedDecl *, ExtInfo *> NamedDeclOrQualifier;
 
-  bool hasExtInfo() const { return TypedefNameDeclOrQualifier.is<ExtInfo*>(); }
-  ExtInfo *getExtInfo() { return TypedefNameDeclOrQualifier.get<ExtInfo*>(); }
+  bool hasExtInfo() const { return NamedDeclOrQualifier.is<ExtInfo *>(); }
+  ExtInfo *getExtInfo() { return NamedDeclOrQualifier.get<ExtInfo *>(); }
   const ExtInfo *getExtInfo() const {
-    return TypedefNameDeclOrQualifier.get<ExtInfo*>();
+    return NamedDeclOrQualifier.get<ExtInfo *>();
   }
 
 protected:
-  TagDecl(Kind DK, TagKind TK, DeclContext *DC,
-          SourceLocation L, IdentifierInfo *Id,
-          TagDecl *PrevDecl, SourceLocation StartL)
-    : TypeDecl(DK, DC, L, Id, StartL), DeclContext(DK),
-      TypedefNameDeclOrQualifier((TypedefNameDecl*) 0) {
+  TagDecl(Kind DK, TagKind TK, DeclContext *DC, SourceLocation L,
+          IdentifierInfo *Id, TagDecl *PrevDecl, SourceLocation StartL)
+      : TypeDecl(DK, DC, L, Id, StartL), DeclContext(DK), TagDeclKind(TK),
+        IsCompleteDefinition(false), IsBeingDefined(false),
+        IsEmbeddedInDeclarator(false), IsFreeStanding(false),
+        IsCompleteDefinitionRequired(false),
+        NamedDeclOrQualifier((NamedDecl *)0) {
     assert((DK != Enum || TK == TTK_Enum) &&
            "EnumDecl not matched with TTK_Enum");
-    TagDeclKind = TK;
-    IsCompleteDefinition = false;
-    IsBeingDefined = false;
-    IsEmbeddedInDeclarator = false;
-    IsFreeStanding = false;
-    setPreviousDeclaration(PrevDecl);
+    setPreviousDecl(PrevDecl);
   }
 
   typedef Redeclarable<TagDecl> redeclarable_base;
@@ -2479,6 +2601,7 @@ public:
   using redeclarable_base::redecls_end;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
+  using redeclarable_base::isFirstDecl;
 
   SourceLocation getRBraceLoc() const { return RBraceLoc; }
   void setRBraceLoc(SourceLocation L) { RBraceLoc = L; }
@@ -2507,6 +2630,12 @@ public:
   /// fully specified.
   bool isCompleteDefinition() const {
     return IsCompleteDefinition;
+  }
+
+  /// \brief Return true if this complete decl is
+  /// required to be complete for some existing use.
+  bool isCompleteDefinitionRequired() const {
+    return IsCompleteDefinitionRequired;
   }
 
   /// isBeingDefined - Return true if this decl is currently being defined.
@@ -2550,6 +2679,10 @@ public:
 
   void setCompleteDefinition(bool V) { IsCompleteDefinition = V; }
 
+  void setCompleteDefinitionRequired(bool V = true) {
+    IsCompleteDefinitionRequired = V;
+  }
+
   // FIXME: Return StringRef;
   const char *getKindName() const {
     return TypeWithKeyword::getTagTypeKindName(getTagKind());
@@ -2586,10 +2719,21 @@ public:
     return (getDeclName() || getTypedefNameForAnonDecl());
   }
 
-  TypedefNameDecl *getTypedefNameForAnonDecl() const {
-    return hasExtInfo() ? 0 :
-           TypedefNameDeclOrQualifier.get<TypedefNameDecl*>();
+  bool hasDeclaratorForAnonDecl() const {
+    return dyn_cast_or_null<DeclaratorDecl>(
+        NamedDeclOrQualifier.get<NamedDecl *>());
   }
+  DeclaratorDecl *getDeclaratorForAnonDecl() const {
+    return hasExtInfo() ? 0 : dyn_cast_or_null<DeclaratorDecl>(
+                                  NamedDeclOrQualifier.get<NamedDecl *>());
+  }
+
+  TypedefNameDecl *getTypedefNameForAnonDecl() const {
+    return hasExtInfo() ? 0 : dyn_cast_or_null<TypedefNameDecl>(
+                                  NamedDeclOrQualifier.get<NamedDecl *>());
+  }
+
+  void setDeclaratorForAnonDecl(DeclaratorDecl *DD) { NamedDeclOrQualifier = DD; }
 
   void setTypedefNameForAnonDecl(TypedefNameDecl *TDD);
 
@@ -2689,21 +2833,22 @@ public:
     return cast<EnumDecl>(TagDecl::getCanonicalDecl());
   }
   const EnumDecl *getCanonicalDecl() const {
-    return cast<EnumDecl>(TagDecl::getCanonicalDecl());
+    return const_cast<EnumDecl*>(this)->getCanonicalDecl();
   }
 
-  const EnumDecl *getPreviousDecl() const {
-    return cast_or_null<EnumDecl>(TagDecl::getPreviousDecl());
-  }
   EnumDecl *getPreviousDecl() {
-    return cast_or_null<EnumDecl>(TagDecl::getPreviousDecl());
+    return cast_or_null<EnumDecl>(
+            static_cast<TagDecl *>(this)->getPreviousDecl());
+  }
+  const EnumDecl *getPreviousDecl() const {
+    return const_cast<EnumDecl*>(this)->getPreviousDecl();
   }
 
-  const EnumDecl *getMostRecentDecl() const {
-    return cast<EnumDecl>(TagDecl::getMostRecentDecl());
-  }
   EnumDecl *getMostRecentDecl() {
-    return cast<EnumDecl>(TagDecl::getMostRecentDecl());
+    return cast<EnumDecl>(static_cast<TagDecl *>(this)->getMostRecentDecl());
+  }
+  const EnumDecl *getMostRecentDecl() const {
+    return const_cast<EnumDecl*>(this)->getMostRecentDecl();
   }
 
   EnumDecl *getDefinition() const {
@@ -2899,18 +3044,19 @@ public:
                             IdentifierInfo *Id, RecordDecl* PrevDecl = 0);
   static RecordDecl *CreateDeserialized(const ASTContext &C, unsigned ID);
 
-  const RecordDecl *getPreviousDecl() const {
-    return cast_or_null<RecordDecl>(TagDecl::getPreviousDecl());
-  }
   RecordDecl *getPreviousDecl() {
-    return cast_or_null<RecordDecl>(TagDecl::getPreviousDecl());
+    return cast_or_null<RecordDecl>(
+            static_cast<TagDecl *>(this)->getPreviousDecl());
+  }
+  const RecordDecl *getPreviousDecl() const {
+    return const_cast<RecordDecl*>(this)->getPreviousDecl();
   }
 
-  const RecordDecl *getMostRecentDecl() const {
-    return cast<RecordDecl>(TagDecl::getMostRecentDecl());
-  }
   RecordDecl *getMostRecentDecl() {
-    return cast<RecordDecl>(TagDecl::getMostRecentDecl());
+    return cast<RecordDecl>(static_cast<TagDecl *>(this)->getMostRecentDecl());
+  }
+  const RecordDecl *getMostRecentDecl() const {
+    return const_cast<RecordDecl*>(this)->getMostRecentDecl();
   }
 
   bool hasFlexibleArrayMember() const { return HasFlexibleArrayMember; }
@@ -3093,13 +3239,17 @@ private:
   Capture *Captures;
   unsigned NumCaptures;
 
+  unsigned ManglingNumber;
+  Decl *ManglingContextDecl;
+
 protected:
   BlockDecl(DeclContext *DC, SourceLocation CaretLoc)
     : Decl(Block, DC, CaretLoc), DeclContext(Block),
       IsVariadic(false), CapturesCXXThis(false),
       BlockMissingReturnType(true), IsConversionFromLambda(false),
       ParamInfo(0), NumParams(0), Body(0),
-      SignatureAsWritten(0), Captures(0), NumCaptures(0) {}
+      SignatureAsWritten(0), Captures(0), NumCaptures(0),
+      ManglingNumber(0), ManglingContextDecl(0) {}
 
 public:
   static BlockDecl *Create(ASTContext &C, DeclContext *DC, SourceLocation L); 
@@ -3169,6 +3319,18 @@ public:
                    const Capture *end,
                    bool capturesCXXThis);
 
+   unsigned getBlockManglingNumber() const {
+     return ManglingNumber;
+   }
+   Decl *getBlockManglingContextDecl() const {
+     return ManglingContextDecl;    
+   }
+
+  void setBlockMangling(unsigned Number, Decl *Ctx) {
+    ManglingNumber = Number;
+    ManglingContextDecl = Ctx;
+  }
+
   virtual SourceRange getSourceRange() const LLVM_READONLY;
 
   // Implement isa/cast/dyncast/etc.
@@ -3180,6 +3342,67 @@ public:
   static BlockDecl *castFromDeclContext(const DeclContext *DC) {
     return static_cast<BlockDecl *>(const_cast<DeclContext*>(DC));
   }
+};
+
+/// \brief This represents the body of a CapturedStmt, and serves as its
+/// DeclContext.
+class CapturedDecl : public Decl, public DeclContext {
+private:
+  /// \brief The number of parameters to the outlined function.
+  unsigned NumParams;
+  /// \brief The body of the outlined function.
+  Stmt *Body;
+
+  explicit CapturedDecl(DeclContext *DC, unsigned NumParams)
+    : Decl(Captured, DC, SourceLocation()), DeclContext(Captured),
+      NumParams(NumParams), Body(0) { }
+
+  ImplicitParamDecl **getParams() const {
+    return reinterpret_cast<ImplicitParamDecl **>(
+             const_cast<CapturedDecl *>(this) + 1);
+  }
+
+public:
+  static CapturedDecl *Create(ASTContext &C, DeclContext *DC, unsigned NumParams);
+  static CapturedDecl *CreateDeserialized(ASTContext &C, unsigned ID,
+                                          unsigned NumParams);
+
+  Stmt *getBody() const { return Body; }
+  void setBody(Stmt *B) { Body = B; }
+
+  unsigned getNumParams() const { return NumParams; }
+
+  ImplicitParamDecl *getParam(unsigned i) const {
+    assert(i < NumParams);
+    return getParams()[i];
+  }
+  void setParam(unsigned i, ImplicitParamDecl *P) {
+    assert(i < NumParams);
+    getParams()[i] = P;
+  }
+
+  /// \brief Retrieve the parameter containing captured variables.
+  ImplicitParamDecl *getContextParam() const { return getParam(0); }
+  void setContextParam(ImplicitParamDecl *P) { setParam(0, P); }
+
+  typedef ImplicitParamDecl **param_iterator;
+  /// \brief Retrieve an iterator pointing to the first parameter decl.
+  param_iterator param_begin() const { return getParams(); }
+  /// \brief Retrieve an iterator one past the last parameter decl.
+  param_iterator param_end() const { return getParams() + NumParams; }
+
+  // Implement isa/cast/dyncast/etc.
+  static bool classof(const Decl *D) { return classofKind(D->getKind()); }
+  static bool classofKind(Kind K) { return K == Captured; }
+  static DeclContext *castToDeclContext(const CapturedDecl *D) {
+    return static_cast<DeclContext *>(const_cast<CapturedDecl *>(D));
+  }
+  static CapturedDecl *castFromDeclContext(const DeclContext *DC) {
+    return static_cast<CapturedDecl *>(const_cast<DeclContext *>(DC));
+  }
+
+  friend class ASTDeclReader;
+  friend class ASTDeclWriter;
 };
 
 /// \brief Describes a module import declaration, which makes the contents
@@ -3248,7 +3471,21 @@ public:
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == Import; }
 };
-  
+
+/// \brief Represents an empty-declaration.
+class EmptyDecl : public Decl {
+  virtual void anchor();
+  EmptyDecl(DeclContext *DC, SourceLocation L)
+    : Decl(Empty, DC, L) { }
+
+public:
+  static EmptyDecl *Create(ASTContext &C, DeclContext *DC,
+                           SourceLocation L);
+  static EmptyDecl *CreateDeserialized(ASTContext &C, unsigned ID);
+
+  static bool classof(const Decl *D) { return classofKind(D->getKind()); }
+  static bool classofKind(Kind K) { return K == Empty; }
+};
 
 /// Insertion operator for diagnostics.  This allows sending NamedDecl's
 /// into a diagnostic with <<.
@@ -3266,7 +3503,7 @@ inline const PartialDiagnostic &operator<<(const PartialDiagnostic &PD,
 }
 
 template<typename decl_type>
-void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
+void Redeclarable<decl_type>::setPreviousDecl(decl_type *PrevDecl) {
   // Note: This routine is implemented here because we need both NamedDecl
   // and Redeclarable to be defined.
 
@@ -3276,10 +3513,16 @@ void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
     // Point to previous. Make sure that this is actually the most recent
     // redeclaration, or we can build invalid chains. If the most recent
     // redeclaration is invalid, it won't be PrevDecl, but we want it anyway.
-    First = PrevDecl->getFirstDeclaration();
+    First = PrevDecl->getFirstDecl();
     assert(First->RedeclLink.NextIsLatest() && "Expected first");
     decl_type *MostRecent = First->RedeclLink.getNext();
     RedeclLink = PreviousDeclLink(cast<decl_type>(MostRecent));
+
+    // If the declaration was previously visible, a redeclaration of it remains
+    // visible even if it wouldn't be visible by itself.
+    static_cast<decl_type*>(this)->IdentifierNamespace |=
+      MostRecent->getIdentifierNamespace() &
+      (Decl::IDNS_Ordinary | Decl::IDNS_Tag | Decl::IDNS_Type);
   } else {
     // Make this first.
     First = static_cast<decl_type*>(this);
@@ -3287,8 +3530,8 @@ void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
 
   // First one will point to this one as latest.
   First->RedeclLink = LatestDeclLink(static_cast<decl_type*>(this));
-  if (NamedDecl *ND = dyn_cast<NamedDecl>(static_cast<decl_type*>(this)))
-    ND->ClearLinkageCache();
+  assert(!isa<NamedDecl>(static_cast<decl_type*>(this)) ||
+         cast<NamedDecl>(static_cast<decl_type*>(this))->isLinkageValid());
 }
 
 // Inline function definitions.

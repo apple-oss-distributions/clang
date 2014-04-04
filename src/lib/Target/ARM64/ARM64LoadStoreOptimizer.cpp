@@ -690,7 +690,7 @@ bool ARM64LoadStoreOpt::optimizeBlock(MachineBasicBlock &MBB) {
   //    as a base-reg writeback.
   //      e.g.,
   //        ldr x0, [x2]
-  //        add x0, x0, #4
+  //        add x2, x2, #4
   //        ; becomes
   //        ldr x0, [x2], #4
 

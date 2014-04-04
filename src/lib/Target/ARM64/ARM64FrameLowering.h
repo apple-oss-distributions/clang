@@ -17,20 +17,25 @@
 #include "llvm/Target/TargetFrameLowering.h"
 
 namespace llvm {
-  class ARM64Subtarget;
+
+class ARM64Subtarget;
+class ARM64TargetMachine;
 
 class ARM64FrameLowering : public TargetFrameLowering {
-protected:
-  const ARM64Subtarget &STI;
-
+  const ARM64TargetMachine &TM;
 public:
-  explicit ARM64FrameLowering(const ARM64Subtarget &sti)
-    : TargetFrameLowering(StackGrowsDown, 16, -16, 16,
-                          false/*StackRealignable*/), STI(sti) {
+  explicit ARM64FrameLowering(const ARM64TargetMachine &TM,
+                              const ARM64Subtarget &STI)
+    : TargetFrameLowering(StackGrowsDown, 16, 0, 16,
+                          false/*StackRealignable*/), TM(TM) {
   }
 
   void emitCalleeSavedFrameMoves(MachineFunction &MF, MCSymbol *Label,
                                  unsigned FramePtr) const;
+
+  void eliminateCallFramePseudoInstr(MachineFunction &MF,
+                                     MachineBasicBlock &MBB,
+                                     MachineBasicBlock::iterator I) const;
 
   /// emitProlog/emitEpilog - These methods insert prolog and epilog code into
   /// the function.
@@ -60,8 +65,6 @@ public:
 
   void processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
                                             RegScavenger *RS) const;
-
-  uint32_t getCompactUnwindEncoding(MachineFunction &MF) const;
 };
 
 } // End llvm namespace

@@ -226,13 +226,15 @@ private:
   const unsigned *SubRegIndexLaneMasks;
 
   regclass_iterator RegClassBegin, RegClassEnd;   // List of regclasses
+  unsigned CoveringLanes;
 
 protected:
   TargetRegisterInfo(const TargetRegisterInfoDesc *ID,
                      regclass_iterator RegClassBegin,
                      regclass_iterator RegClassEnd,
                      const char *const *SRINames,
-                     const unsigned *SRILaneMasks);
+                     const unsigned *SRILaneMasks,
+                     unsigned CoveringLanes);
   virtual ~TargetRegisterInfo();
 public:
 
@@ -361,6 +363,31 @@ public:
     assert(SubIdx < getNumSubRegIndices() && "This is not a subregister index");
     return SubRegIndexLaneMasks[SubIdx];
   }
+
+  /// The lane masks returned by getSubRegIndexLaneMask() above can only be
+  /// used to determine if sub-registers overlap - they can't be used to
+  /// determine if a set of sub-registers completely cover another
+  /// sub-register.
+  ///
+  /// The X86 general purpose registers have two lanes corresponding to the
+  /// sub_8bit and sub_8bit_hi sub-registers. Both sub_32bit and sub_16bit have
+  /// lane masks '3', but the sub_16bit sub-register doesn't fully cover the
+  /// sub_32bit sub-register.
+  ///
+  /// On the other hand, the ARM NEON lanes fully cover their registers: The
+  /// dsub_0 sub-register is completely covered by the ssub_0 and ssub_1 lanes.
+  /// This is related to the CoveredBySubRegs property on register definitions.
+  ///
+  /// This function returns a bit mask of lanes that completely cover their
+  /// sub-registers. More precisely, given:
+  ///
+  ///   Covering = getCoveringLanes();
+  ///   MaskA = getSubRegIndexLaneMask(SubA);
+  ///   MaskB = getSubRegIndexLaneMask(SubB);
+  ///
+  /// If (MaskA & ~(MaskB & Covering)) == 0, then SubA is completely covered by
+  /// SubB.
+  unsigned getCoveringLanes() const { return CoveringLanes; }
 
   /// regsOverlap - Returns true if the two registers are equal or alias each
   /// other. The registers may be virtual register.
@@ -733,21 +760,6 @@ public:
     llvm_unreachable("isFrameOffsetLegal does not exist on this target");
   }
 
-  /// eliminateCallFramePseudoInstr - This method is called during prolog/epilog
-  /// code insertion to eliminate call frame setup and destroy pseudo
-  /// instructions (but only if the Target is using them).  It is responsible
-  /// for eliminating these instructions, replacing them with concrete
-  /// instructions.  This method need only be implemented if using call frame
-  /// setup/destroy pseudo instructions.
-  ///
-  virtual void
-  eliminateCallFramePseudoInstr(MachineFunction &MF,
-                                MachineBasicBlock &MBB,
-                                MachineBasicBlock::iterator MI) const {
-    llvm_unreachable("Call Frame Pseudo Instructions do not exist on this "
-                     "target!");
-  }
-
 
   /// saveScavengerRegister - Spill the register so it can be used by the
   /// register scavenger. Return true if the register was spilled, false
@@ -889,6 +901,7 @@ static inline raw_ostream &operator<<(raw_ostream &OS, const PrintReg &PR) {
 /// Usage: OS << PrintRegUnit(Unit, TRI) << '\n';
 ///
 class PrintRegUnit {
+protected:
   const TargetRegisterInfo *TRI;
   unsigned Unit;
 public:
@@ -898,6 +911,21 @@ public:
 };
 
 static inline raw_ostream &operator<<(raw_ostream &OS, const PrintRegUnit &PR) {
+  PR.print(OS);
+  return OS;
+}
+
+/// PrintVRegOrUnit - It is often convenient to track virtual registers and
+/// physical register units in the same list.
+class PrintVRegOrUnit : protected PrintRegUnit {
+public:
+  PrintVRegOrUnit(unsigned VRegOrUnit, const TargetRegisterInfo *tri)
+    : PrintRegUnit(VRegOrUnit, tri) {}
+  void print(raw_ostream&) const;
+};
+
+static inline raw_ostream &operator<<(raw_ostream &OS,
+                                      const PrintVRegOrUnit &PR) {
   PR.print(OS);
   return OS;
 }

@@ -34,7 +34,8 @@ MCAsmInfo::MCAsmInfo() {
   HasStaticCtorDtorReferenceInStaticMode = false;
   LinkerRequiresNonEmptyDwarfLines = false;
   MaxInstLength = 4;
-  PCSymbol = "$";
+  MinInstAlignment = 1;
+  DollarIsPC = false;
   SeparatorString = ";";
   CommentColumn = 40;
   CommentString = "#";
@@ -52,6 +53,7 @@ MCAsmInfo::MCAsmInfo() {
   AllowQuotesInName = false;
   AllowNameToStartWithDigit = false;
   AllowPeriodsInName = true;
+  AllowAtInName = false;
   AllowUTF8 = true;
   UseDataRegionDirectives = false;
   ZeroDirective = "\t.zero\t";
@@ -75,8 +77,8 @@ MCAsmInfo::MCAsmInfo() {
   LCOMMDirectiveAlignmentType = LCOMM::NoAlignment;
   HasDotTypeDotSizeDirective = true;
   HasSingleParameterDotFile = true;
+  HasIdentDirective = false;
   HasNoDeadStrip = false;
-  HasSymbolResolver = false;
   WeakRefDirective = 0;
   WeakDefDirective = 0;
   LinkOnceDirective = 0;
@@ -86,18 +88,17 @@ MCAsmInfo::MCAsmInfo() {
   HasLEB128 = false;
   SupportsDebugInformation = false;
   ExceptionsType = ExceptionHandling::None;
-  DwarfUsesInlineInfoSection = false;
-  DwarfSectionOffsetDirective = 0;
   DwarfUsesRelocationsAcrossSections = true;
   DwarfRegNumForCFI = false;
   HasMicrosoftFastStdCallMangling = false;
+  NeedsDwarfSectionOffsetDirective = false;
 }
 
 MCAsmInfo::~MCAsmInfo() {
 }
 
 
-unsigned MCAsmInfo::getULEB128Size(unsigned Value) {
+unsigned MCAsmInfo::getULEB128Size(uint64_t Value) {
   unsigned Size = 0;
   do {
     Value >>= 7;
@@ -106,7 +107,7 @@ unsigned MCAsmInfo::getULEB128Size(unsigned Value) {
   return Size;
 }
 
-unsigned MCAsmInfo::getSLEB128Size(int Value) {
+unsigned MCAsmInfo::getSLEB128Size(int64_t Value) {
   unsigned Size = 0;
   int Sign = Value >> (8 * sizeof(Value) - 1);
   bool IsMore;

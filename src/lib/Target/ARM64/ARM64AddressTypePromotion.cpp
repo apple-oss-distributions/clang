@@ -22,8 +22,8 @@
 //
 // This is legal to do so if the computations are markers with either nsw or nuw
 // markers.
-// Moreover, the current heuristic is simple: it does create new sext
-// operations, i.e., it gives when a sext would have fork (e.g., if
+// Moreover, the current heuristic is simple: it does not create new sext
+// operations, i.e., it gives up when a sext would have forked (e.g., if
 // a = add i32 b, c, two sexts are required to promote the computation).
 //
 // FIXME: This pass may be useful for other targets too.
@@ -78,7 +78,7 @@ namespace {
     virtual const char *getPassName() const {
       return "ARM64 Address Type Promotion";
     }
-    
+
     /// Iterate over the functions and promote the computation of interesting
     // sext instructions.
     bool runOnFunction(Function &F);
@@ -165,7 +165,7 @@ bool ARM64AddressTypePromotion::canGetThrough(const Instruction *Inst) {
   if (isa<TruncInst>(Inst) && isa<SExtInst>(Inst->getOperand(0))) {
     const Instruction *Opnd = cast<Instruction>(Inst->getOperand(0));
     // Check that the truncate just drop sign extended bits.
-    if (Inst->getType()->getIntegerBitWidth() >= 
+    if (Inst->getType()->getIntegerBitWidth() >=
         Opnd->getOperand(0)->getType()->getIntegerBitWidth() &&
         Inst->getOperand(0)->getType()->getIntegerBitWidth() <=
         ConsideredSExtType->getIntegerBitWidth())
@@ -195,7 +195,7 @@ bool ARM64AddressTypePromotion::shouldGetThrough(const Instruction *Inst) {
     return true;
 
   // If both operands are not constant, a new sext will be created here.
-  // Current heuristic is: each step should be profitable. 
+  // Current heuristic is: each step should be profitable.
   // Therefore we don't allow to increase the number of sext even if it may
   // be profitable later on.
   if (isa<BinaryOperator>(Inst) && isa<ConstantInt>(Inst->getOperand(1)))
@@ -252,14 +252,14 @@ ARM64AddressTypePromotion::shouldConsiderSExt(const Instruction *SExt) const {
 bool ARM64AddressTypePromotion::
 propagateSignExtension(Instructions &SExtInsts) {
   DEBUG(dbgs() << "*** Propagate Sign Extension ***\n");
-  
+
   bool LocalChange = false;
   SetOfInstructions ToRemove;
   ValueToInsts ValToSExtendedUses;
   while (!SExtInsts.empty()) {
     // Get through simple chain.
     Instruction *SExt = SExtInsts.pop_back_val();
- 
+
     DEBUG(dbgs() << "Consider:\n" << *SExt << '\n');
 
     // If this SExt has already been merged continue.
@@ -278,7 +278,7 @@ propagateSignExtension(Instructions &SExtInsts) {
         DEBUG(dbgs() << "Cannot get through\n");
         break;
       }
-      
+
       LocalChange = true;
       // If this is a sign extend, it becomes useless.
       if (isa<SExtInst>(Inst) || isa<TruncInst>(Inst)) {
@@ -297,12 +297,12 @@ propagateSignExtension(Instructions &SExtInsts) {
         SExt->moveBefore(Inst);
         continue;
       }
-      
+
       // Get through the Instruction:
       // 1. Update its type.
       // 2. Replace the uses of SExt by Inst.
       // 3. Sign extend each operand that needs to be sign extended.
-      
+
       // Step #1.
       Inst->mutateType(SExt->getType());
       // Step #2.
@@ -337,7 +337,7 @@ propagateSignExtension(Instructions &SExtInsts) {
         // Otherwise we have to explicity sign extend it.
         assert (SExtForOpnd &&
                 "Only one operand should have been sign extended");
-        
+
         SExtForOpnd->setOperand(0, Opnd);
 
         DEBUG(dbgs() << "Move before:\n" << *Inst <<
@@ -375,7 +375,7 @@ propagateSignExtension(Instructions &SExtInsts) {
   for (SetOfInstructions::iterator ToRemoveIt = ToRemove.begin(),
          EndToRemoveIt = ToRemove.end(); ToRemoveIt != EndToRemoveIt;
        ++ToRemoveIt)
-    (*ToRemoveIt)->eraseFromParent(); 
+    (*ToRemoveIt)->eraseFromParent();
   return LocalChange;
 }
 
@@ -437,7 +437,7 @@ void ARM64AddressTypePromotion::analyzeSExtension(Instructions &SExtInsts) {
       Instruction *SExt = II;
 
       DEBUG(dbgs() << "Found:\n" << (*II) <<'\n');
-  
+
       // Cases where we actually perform the optimization:
       // 1. SExt is used in a getelementptr with more than 2 operand =>
       //    likely we can merge some computation if they are done on 64 bits.
@@ -445,7 +445,7 @@ void ARM64AddressTypePromotion::analyzeSExtension(Instructions &SExtInsts) {
       //    code sharing is possible.
 
       bool insert = false;
-      // #1. 
+      // #1.
       for (Value::use_iterator UseIt = SExt->use_begin(),
              EndUseIt = SExt->use_end(); UseIt != EndUseIt; ++UseIt) {
         const Instruction *Inst = dyn_cast<GetElementPtrInst>(*UseIt);
@@ -474,7 +474,7 @@ void ARM64AddressTypePromotion::analyzeSExtension(Instructions &SExtInsts) {
       DenseMap<Value *, Instruction *>::iterator AlreadySeen =
         SeenChains.find(Last);
       if (insert || AlreadySeen != SeenChains.end()) {
-        DEBUG(dbgs() << "Insert\n");     
+        DEBUG(dbgs() << "Insert\n");
         SExtInsts.push_back(II);
         if (AlreadySeen != SeenChains.end() && AlreadySeen->second != NULL) {
           DEBUG(dbgs() << "Insert chain member\n");

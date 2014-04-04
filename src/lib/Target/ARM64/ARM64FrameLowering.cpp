@@ -16,6 +16,7 @@
 #include "ARM64InstrInfo.h"
 #include "ARM64MachineFunctionInfo.h"
 #include "ARM64Subtarget.h"
+#include "ARM64TargetMachine.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
@@ -100,17 +101,51 @@ bool ARM64FrameLowering::hasReservedCallFrame(const MachineFunction &MF) const {
   return !MF.getFrameInfo()->hasVarSizedObjects();
 }
 
+void ARM64FrameLowering::
+eliminateCallFramePseudoInstr(MachineFunction &MF,
+                              MachineBasicBlock &MBB,
+                              MachineBasicBlock::iterator I) const {
+  const TargetFrameLowering *TFI = MF.getTarget().getFrameLowering();
+  const ARM64InstrInfo *TII =
+    static_cast<const ARM64InstrInfo*>(MF.getTarget().getInstrInfo());
+  if (!TFI->hasReservedCallFrame(MF)) {
+    // If we have alloca, convert as follows:
+    // ADJCALLSTACKDOWN -> sub, sp, sp, amount
+    // ADJCALLSTACKUP   -> add, sp, sp, amount
+    MachineInstr *Old = I;
+    DebugLoc DL = Old->getDebugLoc();
+    unsigned Amount = Old->getOperand(0).getImm();
+    if (Amount != 0) {
+      // We need to keep the stack aligned properly.  To do this, we round the
+      // amount of space needed for the outgoing arguments up to the next
+      // alignment boundary.
+      unsigned Align = TFI->getStackAlignment();
+      Amount = (Amount+Align-1)/Align*Align;
+
+      // Replace the pseudo instruction with a new instruction...
+      unsigned Opc = Old->getOpcode();
+      if (Opc == ARM64::ADJCALLSTACKDOWN) {
+        emitFrameOffset(MBB, I, DL, ARM64::SP, ARM64::SP, -Amount, TII);
+      } else {
+        assert(Opc == ARM64::ADJCALLSTACKUP && "expected ADJCALLSTACKUP");
+        emitFrameOffset(MBB, I, DL, ARM64::SP, ARM64::SP, Amount, TII);
+      }
+    }
+  }
+  MBB.erase(I);
+}
+
 void ARM64FrameLowering::emitCalleeSavedFrameMoves(MachineFunction &MF,
                                                    MCSymbol *Label,
                                                    unsigned FramePtr) const {
   MachineFrameInfo *MFI = MF.getFrameInfo();
   MachineModuleInfo &MMI = MF.getMMI();
+  const MCRegisterInfo *MRI = MMI.getContext().getRegisterInfo();
 
   // Add callee saved registers to move list.
   const std::vector<CalleeSavedInfo> &CSI = MFI->getCalleeSavedInfo();
   if (CSI.empty()) return;
 
-  std::vector<MachineMove> &Moves = MMI.getFrameMoves();
   const DataLayout *TD = MF.getTarget().getDataLayout();
   bool HasFP = hasFP(MF);
 
@@ -118,157 +153,54 @@ void ARM64FrameLowering::emitCalleeSavedFrameMoves(MachineFunction &MF,
   int stackGrowth = -TD->getPointerSize(0);
 
   // Calculate offsets.
-  int64_t saveOffset = (HasFP ? 2 : 1) * stackGrowth;
+  int64_t saveAreaOffset = (HasFP ? 2 : 1) * stackGrowth;
+  unsigned TotalSkipped = 0;
   for (std::vector<CalleeSavedInfo>::const_iterator
          I = CSI.begin(), E = CSI.end(); I != E; ++I) {
     unsigned Reg = I->getReg();
     int64_t Offset = MFI->getObjectOffset(I->getFrameIdx()) -
-      getOffsetOfLocalArea() + saveOffset;
+      getOffsetOfLocalArea() + saveAreaOffset;
 
-    // Don't output a new machine move if we're re-saving the frame
-    // pointer. This happens when the PrologEpilogInserter has inserted an extra
-    // "PUSH" of the frame pointer -- the "emitPrologue" method automatically
-    // generates one when frame pointers are used. If we generate a "machine
-    // move" for this extra "PUSH", the linker will lose track of the fact that
-    // the frame pointer should have the value of the first "PUSH" when it's
-    // trying to unwind.
-    //
-    if (HasFP && FramePtr == Reg)
+    // Don't output a new CFI directive if we're re-saving the frame pointer or
+    // link register. This happens when the PrologEpilogInserter has inserted an
+    // extra "STP" of the frame pointer and link register -- the "emitPrologue"
+    // method automatically generates the directives when frame pointers are
+    // used. If we generate CFI directives for the extra "STP"s, the linker will
+    // lose track of the correct values for the frame pointer and link register.
+    if (HasFP && (FramePtr == Reg || Reg == ARM64::LR)) {
+      TotalSkipped += stackGrowth;
       continue;
-
-    MachineLocation CSDst(MachineLocation::VirtualFP, Offset);
-    MachineLocation CSSrc(Reg);
-    Moves.push_back(MachineMove(Label, CSDst, CSSrc));
-  }
-}
-
-// Encode compact unwind stack adjustment for frameless functions.
-// See UNWIND_ARM64_FRAMELESS_STACK_SIZE_MASK in compact_unwind_encoding.h.
-// The stack size always needs to be 16 byte aligned.
-static uint32_t encodeStackAdjustment(uint32_t StackSize) {
-  return (StackSize / 16) << 12;
-}
-
-uint32_t ARM64FrameLowering::
-getCompactUnwindEncoding(MachineFunction &MF) const {
-  MachineBasicBlock &MBB = MF.front(); // Prologue is in entry BB.
-  ARM64FunctionInfo *AFI = MF.getInfo<ARM64FunctionInfo>();
-  uint32_t CompactUnwindEncoding = 0;
-
-  if (!hasFP(MF)) {
-    // Indicate that this is a 'frameless' leaf function.
-    CompactUnwindEncoding |= 0x02000000;
-
-    const uint32_t StackSize = AFI->getLocalStackSize();
-
-    // With compact unwind info we can only represent stack adjustments of
-    // up to 65520 bytes.
-    if (StackSize > 65520)
-      return 0;
-
-    // Add stack adjustment to compact unwind info.
-    CompactUnwindEncoding |= encodeStackAdjustment(StackSize);
-  }
-
-  for (MachineBasicBlock::iterator
-         MBBI = MBB.begin(), MBBE = MBB.end(); MBBI != MBBE; ++MBBI) {
-    MachineInstr &MI = *MBBI;
-    unsigned Opc = MI.getOpcode();
-    if (Opc == ARM64::PROLOG_LABEL) continue;
-    if (!MI.getFlag(MachineInstr::FrameSetup)) break;
-
-    switch (Opc) {
-    default: break;
-    case ARM64::STPXpre: {
-      // X19/X20 pair = 0x00000001,
-      // X21/X22 pair = 0x00000002,
-      // X23/X24 pair = 0x00000004,
-      // X25/X26 pair = 0x00000008,
-      // X27/X28 pair = 0x00000010
-      //
-      // The encodings must be in register number order.
-      unsigned Reg1 = MI.getOperand(1).getReg();
-      unsigned Reg2 = MI.getOperand(0).getReg();
-      if (Reg1 == ARM64::LR && Reg2 == ARM64::FP) {
-        // Indicate that the function has a frame.
-        CompactUnwindEncoding |= 0x04000000;
-      } else if (Reg1 == ARM64::X19 && Reg2 == ARM64::X20 &&
-          (CompactUnwindEncoding & 0x1E) == 0)
-        CompactUnwindEncoding |= 0x00000001;
-      else if (Reg1 == ARM64::X21 && Reg2 == ARM64::X22 &&
-               (CompactUnwindEncoding & 0x1C) == 0)
-        CompactUnwindEncoding |= 0x00000002;
-      else if (Reg1 == ARM64::X23 && Reg2 == ARM64::X24 &&
-               (CompactUnwindEncoding & 0x18) == 0)
-        CompactUnwindEncoding |= 0x00000004;
-      else if (Reg1 == ARM64::X25 && Reg2 == ARM64::X26 &&
-               (CompactUnwindEncoding & 0x10) == 0)
-        CompactUnwindEncoding |= 0x00000008;
-      else if (Reg1 == ARM64::X27 && Reg2 == ARM64::X28)
-        CompactUnwindEncoding |= 0x00000010;
-      else
-        // A pair was pushed which we cannot handle.
-        return 0;
-      break;
     }
-    case ARM64::STPDpre: {
-      // D8/D9 pair   = 0x00000100,
-      // D10/D11 pair = 0x00000200,
-      // D12/D13 pair = 0x00000400,
-      // D14/D15 pair = 0x00000800
-      //
-      // The encodings must be in register number order.
-      unsigned Reg1 = MI.getOperand(1).getReg();
-      unsigned Reg2 = MI.getOperand(0).getReg();
-      if (Reg1 == ARM64::D8 && Reg2 == ARM64::D9 &&
-          (CompactUnwindEncoding & 0xE00) == 0)
-        CompactUnwindEncoding |= 0x00000100;
-      else if (Reg1 == ARM64::D10 && Reg2 == ARM64::D11 &&
-               (CompactUnwindEncoding & 0xC00) == 0)
-        CompactUnwindEncoding |= 0x00000200;
-      else if (Reg1 == ARM64::D12 && Reg2 == ARM64::D13 &&
-               (CompactUnwindEncoding & 0x800) == 0)
-        CompactUnwindEncoding |= 0x00000400;
-      else if (Reg1 == ARM64::D14 && Reg2 == ARM64::D15)
-        CompactUnwindEncoding |= 0x00000800;
-      else
-        // A pair was pushed which we cannot handle.
-        return 0;
-      break;
-    }
-    }
+
+    unsigned DwarfReg = MRI->getDwarfRegNum(Reg, true);
+    MMI.addFrameInst(
+        MCCFIInstruction::createOffset(Label, DwarfReg, Offset - TotalSkipped));
   }
-
-  assert((CompactUnwindEncoding & 0x06000000) != 0 &&
-         "Invalid compact unwind encoding!");
-
-  return CompactUnwindEncoding;
 }
 
 void ARM64FrameLowering::emitPrologue(MachineFunction &MF) const {
-  MachineBasicBlock &MBB = MF.front();
+  MachineBasicBlock &MBB = MF.front(); // Prologue goes in entry BB.
   MachineBasicBlock::iterator MBBI = MBB.begin();
   const MachineFrameInfo *MFI = MF.getFrameInfo();
+  const Function *Fn = MF.getFunction();
+  const ARM64RegisterInfo *RegInfo = TM.getRegisterInfo();
+  const ARM64InstrInfo *TII = TM.getInstrInfo();
+  MachineModuleInfo &MMI = MF.getMMI();
   ARM64FunctionInfo *AFI = MF.getInfo<ARM64FunctionInfo>();
-  const ARM64InstrInfo *TII =
-    static_cast<const ARM64InstrInfo*>(MF.getTarget().getInstrInfo());
-  const ARM64RegisterInfo *RegInfo =
-    static_cast<const ARM64RegisterInfo*>(MF.getTarget().getRegisterInfo());
-  bool needsFrameMoves = (MF.getMMI().hasDebugInfo() ||
-                          !MF.getFunction()->doesNotThrow() ||
-                          MF.getFunction()->needsUnwindTableEntry());
+  bool needsFrameMoves = MMI.hasDebugInfo() ||
+    Fn->needsUnwindTableEntry();
+  bool HasFP = hasFP(MF);
   DebugLoc DL = MBB.findDebugLoc(MBBI);
 
   int NumBytes = (int)MFI->getStackSize();
   if (!AFI->hasStackFrame()) {
+    assert(!HasFP && "unexpected function without stack frame but with FP");
+
     // All of the stack allocation is for locals.
     AFI->setLocalStackSize(NumBytes);
 
-    // Indicate that this is a 'frameless' leaf function.
-    uint32_t CompactUnwindEncoding = 0x02000000;
-
     // Label used to tie together the PROLOG_LABEL and the MachineMoves.
-    MCSymbol *FrameLabel = MF.getMMI().getContext().CreateTempSymbol();
+    MCSymbol *FrameLabel = MMI.getContext().CreateTempSymbol();
 
     // REDZONE: If the stack size is less than 128 bytes, we don't need
     // to actually allocate.
@@ -277,21 +209,11 @@ void ARM64FrameLowering::emitPrologue(MachineFunction &MF) const {
                       MachineInstr::FrameSetup);
 
       // Encode the stack size of the leaf function.
-      std::vector<MachineMove> &Moves = MF.getMMI().getFrameMoves();
-      Moves.push_back(MachineMove(FrameLabel,
-                                  MachineLocation(MachineLocation::VirtualFP),
-                                  MachineLocation(MachineLocation::VirtualFP,
-                                                  -NumBytes)));
-
-      // With compact unwind info we can only represent stack adjustments of
-      // up to 65520 bytes.
-      if (NumBytes > 65520)
-        return;
-
-      // Add stack adjustment to compact unwind info.
-      CompactUnwindEncoding |= encodeStackAdjustment(NumBytes);
-    } else if (NumBytes)
+      MMI.addFrameInst(MCCFIInstruction::createDefCfaOffset(FrameLabel,
+                                                            -NumBytes));
+    } else if (NumBytes) {
       ++NumRedZoneFunctions;
+    }
 
     // Adding a PROLOG_LABEL so that AsmPrinter::emitPrologLabel() can pick it
     // up and perform the actual compact unwind emission.
@@ -299,28 +221,18 @@ void ARM64FrameLowering::emitPrologue(MachineFunction &MF) const {
       .addSym(FrameLabel)
       .setMIFlag(MachineInstr::FrameSetup);
 
-    MF.getMMI().setCompactUnwindEncoding(CompactUnwindEncoding);
     return;
   }
 
-  // If LR is returned for @llvm.returnaddress and it is already livein to
-  // the function, then there is a use of the LR later.
-  // See ARM64TargetLowering::LowerRETURNADDR.
-  bool LRLiveIn = MF.getRegInfo().isLiveIn(ARM64::LR);
-  bool LRKill = !(LRLiveIn && MF.getFrameInfo()->isReturnAddressTaken());
-  if (!LRLiveIn)
-    MBB.addLiveIn(ARM64::LR);
-  MBB.addLiveIn(ARM64::FP);
-
   // Only set up FP if we actually need to.
-  if (hasFP(MF)) {
-    // Save FP and LR with an updating store-pair ("stp fp, lr, [sp, #-16]!").
-    BuildMI(MBB, MBBI, DL, TII->get(ARM64::STPXpre))
-      .addReg(ARM64::FP, RegState::Kill)
-      .addReg(ARM64::LR, getKillRegState(LRKill))
-      .addReg(ARM64::SP)
-      .addImm(-2)                 // [sp, #-16]!
-      .setMIFlag(MachineInstr::FrameSetup);
+  if (HasFP) {
+    assert(MBBI->getOpcode() == ARM64::STPXpre &&
+           MBBI->getOperand(0).getReg() == ARM64::FP &&
+           MBBI->getOperand(1).getReg() == ARM64::LR &&
+           MBBI->getOperand(2).getReg() == ARM64::SP &&
+           MBBI->getOperand(3).getImm() == -2);
+    ++MBBI;
+    NumBytes -= 16;
 
     // Set up the frame pointer.
     TII->copyPhysReg(MBB, MBBI, DL, ARM64::FP, ARM64::SP, false);
@@ -337,9 +249,10 @@ void ARM64FrameLowering::emitPrologue(MachineFunction &MF) const {
     ++MBBI;
     NumBytes -= 16;
   }
+
   assert(NumBytes >= 0 && "Negative stack allocation size!?");
 
-  // All of the remaining stack allocation is for locals.
+  // All of the remaining stack allocations are for locals.
   AFI->setLocalStackSize(NumBytes);
 
   // Allocate space for the rest of the frame.
@@ -350,56 +263,111 @@ void ARM64FrameLowering::emitPrologue(MachineFunction &MF) const {
                       MachineInstr::FrameSetup);
   }
 
-  // If we need a base pointer, set it up here. It's whatever the value
-  // of the stack pointer is at this point. Any variable size objects
-  // will be allocated after this, so we can still use the base pointer
-  // to reference locals.
+  // If we need a base pointer, set it up here. It's whatever the value of the
+  // stack pointer is at this point. Any variable size objects will be allocated
+  // after this, so we can still use the base pointer to reference locals.
+  // 
   // FIXME: Clarify FrameSetup flags here.
   if (RegInfo->hasBasePointer(MF))
     TII->copyPhysReg(MBB, MBBI, DL, ARM64::X19, ARM64::SP, false);
 
-
   if (needsFrameMoves) {
     const DataLayout *TD = MF.getTarget().getDataLayout();
-    int stackGrowth = -TD->getPointerSize(0);
-    std::vector<MachineMove> &Moves = MF.getMMI().getFrameMoves();
+    const int StackGrowth = -TD->getPointerSize(0);
     unsigned FramePtr = RegInfo->getFrameRegister(MF);
-    MCSymbol *FrameLabel = MF.getMMI().getContext().CreateTempSymbol();
+    MCSymbol *FrameLabel = MMI.getContext().CreateTempSymbol();
+
+    // An example of the prologue:
+    //
+    //     .globl __foo
+    //     .align 2
+    //  __foo:
+    // Ltmp0:
+    //     .cfi_startproc
+    //     .cfi_personality 155, ___gxx_personality_v0
+    // Leh_func_begin:
+    //     .cfi_lsda 16, Lexception33
+    //
+    //     stp  fp, lr, [sp, #-16]!
+    //     mov  fp, sp
+    //     stp  x28, x27, [sp, #-16]!
+    //     sub  sp, sp, #1360
+    //
+    // The Stack:
+    //       +-------------------------------------------+
+    // 10000 | ........ | ........ | ........ | ........ |
+    // 10004 | ........ | ........ | ........ | ........ |
+    //       +-------------------------------------------+
+    // 10008 | ........ | ........ | ........ | ........ |
+    // 1000c | ........ | ........ | ........ | ........ |
+    //       +===========================================+
+    // 10010 |                X28 Register               |
+    // 10014 |                X28 Register               |
+    //       +-------------------------------------------+
+    // 10018 |                X27 Register               |
+    // 1001c |                X27 Register               |
+    //       +===========================================+
+    // 10020 |                Frame Pointer              |
+    // 10024 |                Frame Pointer              |
+    //       +-------------------------------------------+
+    // 10028 |                Link Register              |
+    // 1002c |                Link Register              |
+    //       +===========================================+
+    // 10030 | ........ | ........ | ........ | ........ |
+    // 10034 | ........ | ........ | ........ | ........ |
+    //       +-------------------------------------------+
+    // 10038 | ........ | ........ | ........ | ........ |
+    // 1003c | ........ | ........ | ........ | ........ |
+    //       +-------------------------------------------+
+    //     
+    //     [sp] = 10030        ::    >>initial value<<
+    //     sp = 10020          ::  stp fp, lr, [sp, #-16]!
+    //     fp = sp == 10020    ::  mov fp, sp
+    //     [sp] == 10020       ::  stp x28, x27, [sp, #-16]!
+    //     sp == 10010         ::    >>final value<<
+    //
+    // The frame pointer (w29) points to address 10020. If we use an offset of
+    // '16' from 'w29', we get the CFI offsets of -8 for w30, -16 for w29, -24
+    // for w27, and -32 for w28:
+    //
+    //  Ltmp1:
+    //     .cfi_def_cfa w29, 16
+    //  Ltmp2:
+    //     .cfi_offset w30, -8
+    //  Ltmp3:
+    //     .cfi_offset w29, -16
+    //  Ltmp4:
+    //     .cfi_offset w27, -24
+    //  Ltmp5:
+    //     .cfi_offset w28, -32
 
     BuildMI(MBB, MBBI, DL, TII->get(ARM64::PROLOG_LABEL))
       .addSym(FrameLabel)
       .setMIFlag(MachineInstr::FrameSetup);
 
-    if (hasFP(MF)) {
+    if (HasFP) {
       // Define the current CFA rule to use the provided FP.
-      MachineLocation SPDst(MachineLocation::VirtualFP);
-      MachineLocation SPSrc(FramePtr, -2 * stackGrowth);
-      Moves.push_back(MachineMove(FrameLabel, SPDst, SPSrc));
+      unsigned Reg = RegInfo->getDwarfRegNum(FramePtr, true);
+      MMI.addFrameInst(MCCFIInstruction::
+                       createDefCfa(FrameLabel, Reg, 2 * StackGrowth));
 
       // Record the location of the stored LR
-      Moves.push_back(MachineMove(FrameLabel,
-                                  MachineLocation(MachineLocation::VirtualFP,
-                                                  stackGrowth),
-                                  MachineLocation(ARM64::LR)));
+      unsigned LR = RegInfo->getDwarfRegNum(ARM64::LR, true);
+      MMI.addFrameInst(MCCFIInstruction::
+                       createOffset(FrameLabel, LR, StackGrowth));
+
       // Record the location of the stored FP
-      Moves.push_back(MachineMove(FrameLabel,
-                                  MachineLocation(MachineLocation::VirtualFP,
-                                                  2 * stackGrowth),
-                                  MachineLocation(FramePtr)));
+      MMI.addFrameInst(MCCFIInstruction::
+                       createOffset(FrameLabel, Reg, 2 * StackGrowth));
     } else {
       // Encode the stack size of the leaf function.
-      Moves.push_back(MachineMove(FrameLabel,
-                                  MachineLocation(MachineLocation::VirtualFP),
-                                  MachineLocation(MachineLocation::VirtualFP,
-                                                  -MFI->getStackSize())));
+      MMI.addFrameInst(MCCFIInstruction::
+                       createDefCfaOffset(FrameLabel, -MFI->getStackSize()));
     }
 
     // Now emit the moves for whatever callee saved regs we have.
     emitCalleeSavedFrameMoves(MF, FrameLabel, FramePtr);
   }
-
-  // Darwin 10.7 and greater has support for compact unwind encoding.
-  MF.getMMI().setCompactUnwindEncoding(getCompactUnwindEncoding(MF));
 }
 
 static bool isCalleeSavedRegister(unsigned Reg, const uint16_t *CSRegs) {
@@ -428,7 +396,6 @@ void ARM64FrameLowering::emitEpilogue(MachineFunction &MF,
   assert(MBBI->isReturn() &&
          "Can only insert epilog into returning blocks");
   MachineFrameInfo *MFI = MF.getFrameInfo();
-  ARM64FunctionInfo *AFI = MF.getInfo<ARM64FunctionInfo>();
   const ARM64InstrInfo *TII =
     static_cast<const ARM64InstrInfo*>(MF.getTarget().getInstrInfo());
   const ARM64RegisterInfo *RegInfo =
@@ -453,7 +420,7 @@ void ARM64FrameLowering::emitEpilogue(MachineFunction &MF,
   NumBytes -= NumRestores * 16;
   assert(NumBytes >= 0 && "Negative stack allocation size!?");
 
-  if (!AFI->hasStackFrame() || !hasFP(MF)) {
+  if (!hasFP(MF)) {
     // If this was a redzone leaf function, we don't need to restore the
     // stack pointer.
     if (!canUseRedZone(MF))
@@ -466,14 +433,9 @@ void ARM64FrameLowering::emitEpilogue(MachineFunction &MF,
   // non-post-indexed loads for the restores if we aren't actually going to
   // be able to save any instructions.
   if (NumBytes || MFI->hasVarSizedObjects())
-    emitFrameOffset(MBB, LastPopI, DL, ARM64::SP, ARM64::FP, -NumRestores * 16,
+    emitFrameOffset(MBB, LastPopI, DL, ARM64::SP, ARM64::FP,
+                    -(NumRestores - 1)* 16,
                     TII, MachineInstr::NoFlags);
-
-  // Reload FP and LR with a post-inc load-pair ("ldp fp, lr, [sp], #16").
-  BuildMI(MBB, MBBI, DL, TII->get(ARM64::LDPXpost))
-    .addReg(ARM64::FP, getDefRegState(true))
-    .addReg(ARM64::LR, getDefRegState(true))
-    .addReg(ARM64::SP).addImm(2); // [sp], #16
 }
 
 /// getFrameIndexOffset - Returns the displacement from the frame register to
@@ -502,8 +464,8 @@ ARM64FrameLowering::resolveFrameIndexReference(const MachineFunction &MF,
   const ARM64RegisterInfo *RegInfo =
     static_cast<const ARM64RegisterInfo*>(MF.getTarget().getRegisterInfo());
   const ARM64FunctionInfo *AFI = MF.getInfo<ARM64FunctionInfo>();
-  int FPOffset = MFI->getObjectOffset(FI) - getOffsetOfLocalArea();
-  int Offset = FPOffset + MFI->getStackSize();
+  int FPOffset = MFI->getObjectOffset(FI) + 16;
+  int Offset = MFI->getObjectOffset(FI) + MFI->getStackSize();
   bool isFixed = MFI->isFixedObjectIndex(FI);
 
   // Use frame pointer to reference fixed objects. Use it for locals if
@@ -554,6 +516,16 @@ ARM64FrameLowering::resolveFrameIndexReference(const MachineFunction &MF,
   return Offset;
 }
 
+static unsigned getPrologueDeath(MachineFunction &MF, unsigned Reg) {
+  if (Reg != ARM64::LR)
+    return getKillRegState(true);
+
+  // LR maybe referred to later by an @llvm.returnaddress intrinsic.
+  bool LRLiveIn = MF.getRegInfo().isLiveIn(ARM64::LR);
+  bool LRKill = !(LRLiveIn && MF.getFrameInfo()->isReturnAddressTaken());
+  return getKillRegState(LRKill);
+}
+
 bool ARM64FrameLowering::spillCalleeSavedRegisters(MachineBasicBlock &MBB,
                                         MachineBasicBlock::iterator MI,
                                         const std::vector<CalleeSavedInfo> &CSI,
@@ -593,8 +565,8 @@ bool ARM64FrameLowering::spillCalleeSavedRegisters(MachineBasicBlock &MBB,
                  << CSI[i].getFrameIdx() << ", "
                  << CSI[i+1].getFrameIdx() << ")\n");
     BuildMI(MBB, MI, DL, TII.get(StrOpc))
-      .addReg(Reg2, getKillRegState(true))
-      .addReg(Reg1, getKillRegState(true))
+      .addReg(Reg2, getPrologueDeath(MF, Reg2))
+      .addReg(Reg1, getPrologueDeath(MF, Reg1))
       .addReg(ARM64::SP)
       .addImm(-2)                 // [sp, #-16]!
       .setMIFlag(MachineInstr::FrameSetup);
@@ -657,6 +629,12 @@ ARM64FrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
   SmallVector<unsigned, 4> UnspilledCSGPRs;
   SmallVector<unsigned, 4> UnspilledCSFPRs;
 
+  // The frame record needs to be created by saving the appropriate registers
+  if (hasFP(MF)) {
+    MRI->setPhysRegUsed(ARM64::FP);
+    MRI->setPhysRegUsed(ARM64::LR);
+  }
+
   // Spill the BasePtr if it's used. Do this first thing so that the
   // getCalleeSavedRegs() below will get the right answer.
   if (RegInfo->hasBasePointer(MF))
@@ -674,27 +652,27 @@ ARM64FrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
   for (unsigned i = 0; CSRegs[i]; i += 2) {
     assert(CSRegs[i + 1] && "Odd number of callee-saved registers!");
 
-    const unsigned EvenReg = CSRegs[i];
-    const unsigned OddReg  = CSRegs[i + 1];
+    const unsigned OddReg = CSRegs[i];
+    const unsigned EvenReg = CSRegs[i + 1];
     assert(
-      (ARM64::GPR64RegClass.contains(EvenReg)
-       && ARM64::GPR64RegClass.contains(OddReg))
-      ^ (ARM64::FPR64RegClass.contains(EvenReg)
-         && ARM64::FPR64RegClass.contains(OddReg))
+      (ARM64::GPR64RegClass.contains(OddReg)
+       && ARM64::GPR64RegClass.contains(EvenReg))
+      ^ (ARM64::FPR64RegClass.contains(OddReg)
+         && ARM64::FPR64RegClass.contains(EvenReg))
       && "Register class mismatch!");
 
+    const bool OddRegUsed = MRI->isPhysRegUsed(OddReg);
     const bool EvenRegUsed = MRI->isPhysRegUsed(EvenReg);
-    const bool OddRegUsed  = MRI->isPhysRegUsed(OddReg);
 
     // Early exit if none of the registers in the register pair is actually
     // used.
-    if (!EvenRegUsed && !OddRegUsed) {
-      if (ARM64::GPR64RegClass.contains(EvenReg)) {
-        UnspilledCSGPRs.push_back(EvenReg);
+    if (!OddRegUsed && !EvenRegUsed) {
+      if (ARM64::GPR64RegClass.contains(OddReg)) {
         UnspilledCSGPRs.push_back(OddReg);
+        UnspilledCSGPRs.push_back(EvenReg);
       } else {
-        UnspilledCSFPRs.push_back(EvenReg);
         UnspilledCSFPRs.push_back(OddReg);
+        UnspilledCSFPRs.push_back(EvenReg);
       }
       continue;
     }
@@ -702,19 +680,20 @@ ARM64FrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
     unsigned Reg = ARM64::NoRegister;
     // If only one of the registers of the register pair is used, make sure to
     // mark the other one as used as well.
-    if (EvenRegUsed ^ OddRegUsed) {
+    if (OddRegUsed ^ EvenRegUsed) {
       // Find out which register is the additional spill.
-      Reg = EvenRegUsed ? OddReg : EvenReg;
+      Reg = OddRegUsed ? EvenReg : OddReg;
       MRI->setPhysRegUsed(Reg);
     }
 
-    DEBUG(dbgs() << ' ' << PrintReg(EvenReg, RegInfo));
     DEBUG(dbgs() << ' ' << PrintReg(OddReg, RegInfo));
+    DEBUG(dbgs() << ' ' << PrintReg(EvenReg, RegInfo));
 
-    assert((RegInfo->getEncodingValue(EvenReg) + 1
-            == RegInfo->getEncodingValue(OddReg))
-           && "Register pair of non-adjacent registers!");
-    if (ARM64::GPR64RegClass.contains(EvenReg)) {
+    assert(((OddReg == ARM64::LR && EvenReg == ARM64::FP) ||
+            (RegInfo->getEncodingValue(OddReg) + 1 ==
+             RegInfo->getEncodingValue(EvenReg))) &&
+           "Register pair of non-adjacent registers!");
+    if (ARM64::GPR64RegClass.contains(OddReg)) {
       NumGPRSpilled += 2;
       // If it's not a reserved register, we can use it in lieu of an
       // emergency spill slot for the register scavenger.
@@ -751,17 +730,16 @@ ARM64FrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
 
     // If we're adding a register to spill here, we have to add two of them
     // to keep the number of regs to spill even.
+    assert(((UnspilledCSGPRs.size() & 1) == 0) && "Odd number of registers!");
     unsigned Count = 0;
     while (!UnspilledCSGPRs.empty() && Count < 2) {
       unsigned Reg = UnspilledCSGPRs.back();
       UnspilledCSGPRs.pop_back();
-      if (!RegInfo->isReservedReg(MF, Reg)) {
-        DEBUG(dbgs() << "Spilling " << PrintReg(Reg, RegInfo)
-                     << " to get a scratch register.\n");
-        MRI->setPhysRegUsed(Reg);
-        ExtraCSSpill = true;
-        ++Count;
-      }
+      DEBUG(dbgs() << "Spilling " << PrintReg(Reg, RegInfo)
+            << " to get a scratch register.\n");
+      MRI->setPhysRegUsed(Reg);
+      ExtraCSSpill = true;
+      ++Count;
     }
 
     // If we didn't find an extra callee-saved register to spill, create
@@ -769,7 +747,7 @@ ARM64FrameLowering::processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
     if (!ExtraCSSpill) {
       const TargetRegisterClass *RC = &ARM64::GPR64RegClass;
       int FI = MFI->CreateStackObject(RC->getSize(), RC->getAlignment(), false);
-      RS->setScavengingFrameIndex(FI);
+      RS->addScavengingFrameIndex(FI);
       DEBUG(dbgs() << "No available CS registers, allocated fi#" << FI
                    << " as the emergency spill slot.\n");
     }

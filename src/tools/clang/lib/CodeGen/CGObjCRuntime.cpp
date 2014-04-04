@@ -20,6 +20,7 @@
 #include "CodeGenModule.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/CodeGen/CGFunctionInfo.h"
 #include "llvm/Support/CallSite.h"
 
 using namespace clang;
@@ -117,7 +118,7 @@ LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
   // a synthesized ivar can never be a bit-field, so this is safe.
   uint64_t FieldBitOffset = LookupFieldBitOffset(CGF.CGM, OID, 0, Ivar);
   uint64_t BitOffset = FieldBitOffset % CGF.CGM.getContext().getCharWidth();
-  uint64_t AlignmentBits = CGF.CGM.getContext().getTargetInfo().getCharAlign();
+  uint64_t AlignmentBits = CGF.CGM.getTarget().getCharAlign();
   uint64_t BitFieldSize = Ivar->getBitWidthValue(CGF.getContext());
   CharUnits StorageSize =
     CGF.CGM.getContext().toCharUnitsFromBits(

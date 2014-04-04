@@ -16,7 +16,6 @@
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -422,8 +421,8 @@ void LVIValueHandle::deleted() {
     if (I->second == getValPtr())
       ToErase.push_back(*I);
   }
-  
-  for (SmallVector<OverDefinedPairTy, 4>::iterator I = ToErase.begin(),
+
+  for (SmallVectorImpl<OverDefinedPairTy>::iterator I = ToErase.begin(),
        E = ToErase.end(); I != E; ++I)
     Parent->OverDefinedCache.erase(*I);
   
@@ -445,8 +444,8 @@ void LazyValueInfoCache::eraseBlock(BasicBlock *BB) {
     if (I->first == BB)
       ToErase.push_back(*I);
   }
-  
-  for (SmallVector<OverDefinedPairTy, 4>::iterator I = ToErase.begin(),
+
+  for (SmallVectorImpl<OverDefinedPairTy>::iterator I = ToErase.begin(),
        E = ToErase.end(); I != E; ++I)
     OverDefinedCache.erase(*I);
 

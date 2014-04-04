@@ -28,20 +28,21 @@ namespace __tsan {
 const bool kGoMode = true;
 const bool kCppMode = false;
 const char *const kTsanOptionsEnv = "GORACE";
+// Go linker does not support weak symbols.
+#define CPP_WEAK
 #else
 const bool kGoMode = false;
 const bool kCppMode = true;
 const char *const kTsanOptionsEnv = "TSAN_OPTIONS";
+#define CPP_WEAK WEAK
 #endif
 
 const int kTidBits = 13;
 const unsigned kMaxTid = 1 << kTidBits;
 const unsigned kMaxTidInClock = kMaxTid * 2;  // This includes msb 'freed' bit.
-const int kClkBits = 43;
-#ifndef TSAN_GO
-const int kShadowStackSize = 4 * 1024;
-const int kTraceStackSize = 256;
-#endif
+const int kClkBits = 42;
+const uptr kShadowStackSize = 64 * 1024;
+const uptr kTraceStackSize = 256;
 
 #ifdef TSAN_SHADOW_COUNT
 # if TSAN_SHADOW_COUNT == 2 \
@@ -153,7 +154,6 @@ struct MD5Hash {
 MD5Hash md5_hash(const void *data, uptr size);
 
 struct ThreadState;
-struct ThreadContext;
 struct Context;
 struct ReportStack;
 class ReportDesc;

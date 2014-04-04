@@ -15,6 +15,7 @@
 #ifndef LLVM_TARGET_ARM64_ISELLOWERING_H
 #define LLVM_TARGET_ARM64_ISELLOWERING_H
 
+#include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/Target/TargetLowering.h"
 
@@ -29,10 +30,15 @@ enum {
 
   CALL,          // Function call.
 
+  // Almost the same as a normal call node, except that a TLSDesc relocation is
+  // needed so the linker can relax it correctly if possible.
+  TLSDESC_CALL,
+
   ADRP,          // Page address of a TargetGlobalAddress operand.
   ADDlow,        // Add the low 12 bits of a TargetGlobalAddress operand.
 
-  LOADgot,       // Load from Global Offset Table
+  LOADgot,       // Load from automatically generated descriptor (e.g. Global
+                 // Offset Table, TLS record).
 
   RET_FLAG,      // Return with a flag operand. Operand 0 is the chain operand.
 
@@ -41,6 +47,10 @@ enum {
   CSINV,         // Conditional select invert.
   CSNEG,         // Conditional select negate.
   CSINC,         // Conditional select increment.
+
+  // Pointer to the thread's local storage area. Materialised from TPIDR_EL0 on
+  // ELF.
+  THREAD_POINTER,
 
   ADC, SBC,      // adc, sbc instructions
 
@@ -69,7 +79,7 @@ enum {
 
   // Vector arithmetic negation
   NEG,
-  
+
   // Vector shuffles
   ZIP1, ZIP2, UZP1, UZP2, TRN1, TRN2,
   REV16, REV32, REV64,
@@ -100,7 +110,7 @@ enum {
 
   // Custom prefetch handling
   PREFETCH,
-  
+
   // {s|u}int to FP within a FP register.
   SITOF,
   UITOF
@@ -116,6 +126,10 @@ class ARM64TargetLowering : public TargetLowering {
 public:
   explicit ARM64TargetLowering(ARM64TargetMachine &TM);
 
+  /// Selects the correct CCAssignFn for a the given CallingConvention
+  /// value.
+  CCAssignFn *CCAssignFnForCall(bool IsVarArg) const;
+
   /// computeMaskedBitsForTargetNode - Determine which of the bits specified in
   /// Mask are known to be either zero or one and return them in the
   /// KnownZero/KnownOne bitsets.
@@ -123,7 +137,7 @@ public:
                                       APInt &KnownOne, const SelectionDAG &DAG,
                                       unsigned Depth = 0) const;
 
-  virtual MVT getShiftAmountTy(EVT LHSTy) const;
+  virtual MVT getScalarShiftAmountTy(EVT LHSTy) const;
 
   /// allowsUnalignedMemoryAccesses - Returns true if the target allows
   /// unaligned memory accesses. of the specified type.
@@ -164,17 +178,28 @@ public:
   virtual bool isShuffleMaskLegal(const SmallVectorImpl<int> &M, EVT VT) const;
 
   /// getSetCCResultType - Return the ISD::SETCC ValueType
-  virtual EVT getSetCCResultType(EVT VT) const;
+  virtual EVT getSetCCResultType(LLVMContext &Context, EVT VT) const;
 
   SDValue ReconstructShuffle(SDValue Op, SelectionDAG &DAG) const;
 
-  MachineBasicBlock *EmitAtomicCmpSwap(MachineInstr *MI,
-                                       MachineBasicBlock *BB,
-                                       unsigned Size) const;
   MachineBasicBlock *EmitAtomicBinary(MachineInstr *MI,
                                       MachineBasicBlock *BB,
                                       unsigned Size,
                                       unsigned BinOpcode) const;
+  MachineBasicBlock *EmitAtomicCmpSwap(MachineInstr *MI,
+                                       MachineBasicBlock *BB,
+                                       unsigned Size) const;
+  MachineBasicBlock *EmitAtomicBinary128(MachineInstr *MI,
+                                         MachineBasicBlock *BB,
+                                         unsigned BinOpcodeLo,
+                                         unsigned BinOpcodeHi) const;
+  MachineBasicBlock *EmitAtomicCmpSwap128(MachineInstr *MI,
+                                          MachineBasicBlock *BB) const;
+  MachineBasicBlock *EmitAtomicMinMax128(MachineInstr *MI,
+                                         MachineBasicBlock *BB,
+                                         unsigned CondCode) const;
+  MachineBasicBlock *EmitF128CSEL(MachineInstr *MI,
+                                  MachineBasicBlock *BB) const;
 
   virtual MachineBasicBlock *
     EmitInstrWithCustomInserter(MachineInstr *MI,
@@ -191,6 +216,11 @@ public:
   virtual bool isZExtFree(EVT VT1, EVT VT2) const;
   virtual bool isZExtFree(SDValue Val, EVT VT2) const;
 
+  virtual bool hasPairedLoad(Type *LoadedType,
+                             unsigned &RequiredAligment) const;
+  virtual bool hasPairedLoad(EVT LoadedType,
+                             unsigned &RequiredAligment) const;
+
   virtual bool isLegalAddImmediate(int64_t) const;
   virtual bool isLegalICmpImmediate(int64_t) const;
 
@@ -204,11 +234,18 @@ public:
   /// by AM is legal for this target, for a load/store of the specified type.
   virtual bool isLegalAddressingMode(const AddrMode &AM, Type *Ty) const;
 
-  /// isFMAFasterThanMulAndAdd - Return true if an FMA operation is faster than
-  /// a pair of mul and add instructions. fmuladd intrinsics will be expanded to
-  /// FMAs when this method returns true (and FMAs are legal), otherwise fmuladd
-  /// is expanded to mul + add.
-  virtual bool isFMAFasterThanMulAndAdd(EVT) const { return true; }
+  /// \brief Return the cost of the scaling factor used in the addressing
+  /// mode represented by AM for this target, for a load/store
+  /// of the specified type.
+  /// If the AM is supported, the return value must be >= 0.
+  /// If the AM is not supported, it returns a negative value.
+  virtual int getScalingFactorCost(const AddrMode &AM, Type *Ty) const;
+
+  /// isFMAFasterThanFMulAndFAdd - Return true if an FMA operation is faster
+  /// than a pair of fmul and fadd instructions. fmuladd intrinsics will be
+  /// expanded to FMAs when this method returns true, otherwise fmuladd is
+  /// expanded to fmul + fadd.
+  virtual bool isFMAFasterThanFMulAndFAdd(EVT VT) const;
 
 private:
   /// Subtarget - Keep a pointer to the ARM64Subtarget around so that we can
@@ -223,7 +260,7 @@ private:
     LowerFormalArguments(SDValue Chain,
                          CallingConv::ID CallConv, bool isVarArg,
                          const SmallVectorImpl<ISD::InputArg> &Ins,
-                         DebugLoc DL, SelectionDAG &DAG,
+                         SDLoc DL, SelectionDAG &DAG,
                          SmallVectorImpl<SDValue> &InVals) const;
 
   virtual SDValue
@@ -233,8 +270,9 @@ private:
   SDValue LowerCallResult(SDValue Chain, SDValue InFlag,
                           CallingConv::ID CallConv, bool isVarArg,
                           const SmallVectorImpl<ISD::InputArg> &Ins,
-                          DebugLoc DL, SelectionDAG &DAG,
-                          SmallVectorImpl<SDValue> &InVals) const;
+                          SDLoc DL, SelectionDAG &DAG,
+                          SmallVectorImpl<SDValue> &InVals,
+                          bool isThisReturn, SDValue ThisVal) const;
 
   bool isEligibleForTailCallOptimization(SDValue Callee,
                                          CallingConv::ID CalleeCC,
@@ -245,21 +283,33 @@ private:
                                     const SmallVectorImpl<SDValue> &OutVals,
                                     const SmallVectorImpl<ISD::InputArg> &Ins,
                                          SelectionDAG& DAG) const;
+
+  void saveVarArgRegisters(CCState &CCInfo, SelectionDAG &DAG,
+                           SDLoc DL, SDValue &Chain) const;
+
   virtual SDValue
     LowerReturn(SDValue Chain,
                 CallingConv::ID CallConv, bool isVarArg,
                 const SmallVectorImpl<ISD::OutputArg> &Outs,
                 const SmallVectorImpl<SDValue> &OutVals,
-                DebugLoc DL, SelectionDAG &DAG) const;
+                SDLoc DL, SelectionDAG &DAG) const;
 
   SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerDarwinGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerELFGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerELFTLSDescCall(SDValue SymAddr, SDValue DescAddr, SDLoc DL,
+                              SelectionDAG &DAG) const;
   SDValue LowerSETCC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerJumpTable(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerAAPCS_VASTART(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerDarwin_VASTART(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVASTART(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerVACOPY(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVAARG(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
@@ -274,7 +324,13 @@ private:
   SDValue LowerShiftRightParts(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVSETCC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCTPOP(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerF128Call(SDValue Op, SelectionDAG &DAG,
+                        RTLIB::Libcall Call) const;
   SDValue LowerFCOPYSIGN(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_TO_INT(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVectorAND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVectorOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
@@ -288,7 +344,7 @@ private:
     AsmOperandInfo &info, const char *constraint) const;
 
   std::pair<unsigned, const TargetRegisterClass*>
-  getRegForInlineAsmConstraint(const std::string &Constraint, EVT VT) const;
+  getRegForInlineAsmConstraint(const std::string &Constraint, MVT VT) const;
   void LowerAsmOperandForConstraint(SDValue Op, std::string &Constraint,
                                     std::vector<SDValue>&Ops,
                                     SelectionDAG &DAG) const;
@@ -311,6 +367,10 @@ private:
                                   SDValue &Offset,
                                   ISD::MemIndexedMode &AM,
                                   SelectionDAG &DAG) const;
+
+  void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                          SelectionDAG &DAG) const;
+
 };
 
 namespace ARM64 {

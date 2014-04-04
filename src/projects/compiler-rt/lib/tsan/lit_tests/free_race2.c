@@ -1,4 +1,4 @@
-// RUN: %clang_tsan -O1 %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clang_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
 #include <stdlib.h>
 
 void __attribute__((noinline)) foo(int *mem) {
@@ -22,5 +22,5 @@ int main() {
 // CHECK:     #1 main
 // CHECK:   Previous write of size 8 at {{.*}} by main thread:
 // CHECK:     #0 free
-// CHECK:     #1 foo
-// CHECK:     #2 main
+// CHECK:     #{{1|2}} foo
+// CHECK:     #{{2|3}} main

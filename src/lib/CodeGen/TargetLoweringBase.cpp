@@ -14,6 +14,7 @@
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -34,7 +35,7 @@ using namespace llvm;
 
 /// InitLibcallNames - Set default libcall names.
 ///
-static void InitLibcallNames(const char **Names) {
+static void InitLibcallNames(const char **Names, const TargetMachine &TM) {
   Names[RTLIB::SHL_I16] = "__ashlhi3";
   Names[RTLIB::SHL_I32] = "__ashlsi3";
   Names[RTLIB::SHL_I64] = "__ashldi3";
@@ -190,6 +191,11 @@ static void InitLibcallNames(const char **Names) {
   Names[RTLIB::NEARBYINT_F80] = "nearbyintl";
   Names[RTLIB::NEARBYINT_F128] = "nearbyintl";
   Names[RTLIB::NEARBYINT_PPCF128] = "nearbyintl";
+  Names[RTLIB::ROUND_F32] = "roundf";
+  Names[RTLIB::ROUND_F64] = "round";
+  Names[RTLIB::ROUND_F80] = "roundl";
+  Names[RTLIB::ROUND_F128] = "roundl";
+  Names[RTLIB::ROUND_PPCF128] = "roundl";
   Names[RTLIB::FLOOR_F32] = "floorf";
   Names[RTLIB::FLOOR_F64] = "floor";
   Names[RTLIB::FLOOR_F80] = "floorl";
@@ -317,41 +323,84 @@ static void InitLibcallNames(const char **Names) {
   Names[RTLIB::SYNC_VAL_COMPARE_AND_SWAP_2] = "__sync_val_compare_and_swap_2";
   Names[RTLIB::SYNC_VAL_COMPARE_AND_SWAP_4] = "__sync_val_compare_and_swap_4";
   Names[RTLIB::SYNC_VAL_COMPARE_AND_SWAP_8] = "__sync_val_compare_and_swap_8";
+  Names[RTLIB::SYNC_VAL_COMPARE_AND_SWAP_16] = "__sync_val_compare_and_swap_16";
   Names[RTLIB::SYNC_LOCK_TEST_AND_SET_1] = "__sync_lock_test_and_set_1";
   Names[RTLIB::SYNC_LOCK_TEST_AND_SET_2] = "__sync_lock_test_and_set_2";
   Names[RTLIB::SYNC_LOCK_TEST_AND_SET_4] = "__sync_lock_test_and_set_4";
   Names[RTLIB::SYNC_LOCK_TEST_AND_SET_8] = "__sync_lock_test_and_set_8";
+  Names[RTLIB::SYNC_LOCK_TEST_AND_SET_16] = "__sync_lock_test_and_set_16";
   Names[RTLIB::SYNC_FETCH_AND_ADD_1] = "__sync_fetch_and_add_1";
   Names[RTLIB::SYNC_FETCH_AND_ADD_2] = "__sync_fetch_and_add_2";
   Names[RTLIB::SYNC_FETCH_AND_ADD_4] = "__sync_fetch_and_add_4";
   Names[RTLIB::SYNC_FETCH_AND_ADD_8] = "__sync_fetch_and_add_8";
+  Names[RTLIB::SYNC_FETCH_AND_ADD_16] = "__sync_fetch_and_add_16";
   Names[RTLIB::SYNC_FETCH_AND_SUB_1] = "__sync_fetch_and_sub_1";
   Names[RTLIB::SYNC_FETCH_AND_SUB_2] = "__sync_fetch_and_sub_2";
   Names[RTLIB::SYNC_FETCH_AND_SUB_4] = "__sync_fetch_and_sub_4";
   Names[RTLIB::SYNC_FETCH_AND_SUB_8] = "__sync_fetch_and_sub_8";
+  Names[RTLIB::SYNC_FETCH_AND_SUB_16] = "__sync_fetch_and_sub_16";
   Names[RTLIB::SYNC_FETCH_AND_AND_1] = "__sync_fetch_and_and_1";
   Names[RTLIB::SYNC_FETCH_AND_AND_2] = "__sync_fetch_and_and_2";
   Names[RTLIB::SYNC_FETCH_AND_AND_4] = "__sync_fetch_and_and_4";
   Names[RTLIB::SYNC_FETCH_AND_AND_8] = "__sync_fetch_and_and_8";
+  Names[RTLIB::SYNC_FETCH_AND_AND_16] = "__sync_fetch_and_and_16";
   Names[RTLIB::SYNC_FETCH_AND_OR_1] = "__sync_fetch_and_or_1";
   Names[RTLIB::SYNC_FETCH_AND_OR_2] = "__sync_fetch_and_or_2";
   Names[RTLIB::SYNC_FETCH_AND_OR_4] = "__sync_fetch_and_or_4";
   Names[RTLIB::SYNC_FETCH_AND_OR_8] = "__sync_fetch_and_or_8";
+  Names[RTLIB::SYNC_FETCH_AND_OR_16] = "__sync_fetch_and_or_16";
   Names[RTLIB::SYNC_FETCH_AND_XOR_1] = "__sync_fetch_and_xor_1";
   Names[RTLIB::SYNC_FETCH_AND_XOR_2] = "__sync_fetch_and_xor_2";
   Names[RTLIB::SYNC_FETCH_AND_XOR_4] = "__sync_fetch_and_xor_4";
   Names[RTLIB::SYNC_FETCH_AND_XOR_8] = "__sync_fetch_and_xor_8";
+  Names[RTLIB::SYNC_FETCH_AND_XOR_16] = "__sync_fetch_and_xor_16";
   Names[RTLIB::SYNC_FETCH_AND_NAND_1] = "__sync_fetch_and_nand_1";
   Names[RTLIB::SYNC_FETCH_AND_NAND_2] = "__sync_fetch_and_nand_2";
   Names[RTLIB::SYNC_FETCH_AND_NAND_4] = "__sync_fetch_and_nand_4";
   Names[RTLIB::SYNC_FETCH_AND_NAND_8] = "__sync_fetch_and_nand_8";
+  Names[RTLIB::SYNC_FETCH_AND_NAND_16] = "__sync_fetch_and_nand_16";
+  Names[RTLIB::SYNC_FETCH_AND_MAX_1] = "__sync_fetch_and_max_1";
+  Names[RTLIB::SYNC_FETCH_AND_MAX_2] = "__sync_fetch_and_max_2";
+  Names[RTLIB::SYNC_FETCH_AND_MAX_4] = "__sync_fetch_and_max_4";
+  Names[RTLIB::SYNC_FETCH_AND_MAX_8] = "__sync_fetch_and_max_8";
+  Names[RTLIB::SYNC_FETCH_AND_MAX_16] = "__sync_fetch_and_max_16";
+  Names[RTLIB::SYNC_FETCH_AND_UMAX_1] = "__sync_fetch_and_umax_1";
+  Names[RTLIB::SYNC_FETCH_AND_UMAX_2] = "__sync_fetch_and_umax_2";
+  Names[RTLIB::SYNC_FETCH_AND_UMAX_4] = "__sync_fetch_and_umax_4";
+  Names[RTLIB::SYNC_FETCH_AND_UMAX_8] = "__sync_fetch_and_umax_8";
+  Names[RTLIB::SYNC_FETCH_AND_UMAX_16] = "__sync_fetch_and_umax_16";
+  Names[RTLIB::SYNC_FETCH_AND_MIN_1] = "__sync_fetch_and_min_1";
+  Names[RTLIB::SYNC_FETCH_AND_MIN_2] = "__sync_fetch_and_min_2";
+  Names[RTLIB::SYNC_FETCH_AND_MIN_4] = "__sync_fetch_and_min_4";
+  Names[RTLIB::SYNC_FETCH_AND_MIN_8] = "__sync_fetch_and_min_8";
+  Names[RTLIB::SYNC_FETCH_AND_MIN_16] = "__sync_fetch_and_min_16";
+  Names[RTLIB::SYNC_FETCH_AND_UMIN_1] = "__sync_fetch_and_umin_1";
+  Names[RTLIB::SYNC_FETCH_AND_UMIN_2] = "__sync_fetch_and_umin_2";
+  Names[RTLIB::SYNC_FETCH_AND_UMIN_4] = "__sync_fetch_and_umin_4";
+  Names[RTLIB::SYNC_FETCH_AND_UMIN_8] = "__sync_fetch_and_umin_8";
+  Names[RTLIB::SYNC_FETCH_AND_UMIN_16] = "__sync_fetch_and_umin_16";
   
-  // These are generally not available.
-  Names[RTLIB::SINCOS_F32] = 0;
-  Names[RTLIB::SINCOS_F64] = 0;
-  Names[RTLIB::SINCOS_F80] = 0;
-  Names[RTLIB::SINCOS_F128] = 0;
-  Names[RTLIB::SINCOS_PPCF128] = 0;
+  if (Triple(TM.getTargetTriple()).getEnvironment() == Triple::GNU) {
+    Names[RTLIB::SINCOS_F32] = "sincosf";
+    Names[RTLIB::SINCOS_F64] = "sincos";
+    Names[RTLIB::SINCOS_F80] = "sincosl";
+    Names[RTLIB::SINCOS_F128] = "sincosl";
+    Names[RTLIB::SINCOS_PPCF128] = "sincosl";
+  } else {
+    // These are generally not available.
+    Names[RTLIB::SINCOS_F32] = 0;
+    Names[RTLIB::SINCOS_F64] = 0;
+    Names[RTLIB::SINCOS_F80] = 0;
+    Names[RTLIB::SINCOS_F128] = 0;
+    Names[RTLIB::SINCOS_PPCF128] = 0;
+  }
+
+  if (Triple(TM.getTargetTriple()).getOS() != Triple::OpenBSD) {
+    Names[RTLIB::STACKPROTECTOR_CHECK_FAIL] = "__stack_chk_fail";
+  } else {
+    // These are generally not available.
+    Names[RTLIB::STACKPROTECTOR_CHECK_FAIL] = 0;
+  }
 }
 
 /// InitLibcallCallingConvs - Set default libcall CallingConvs.
@@ -616,12 +665,54 @@ static void InitCmpLibcallCCs(ISD::CondCode *CCs) {
 TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm,
                                        const TargetLoweringObjectFile *tlof)
   : TM(tm), TD(TM.getDataLayout()), TLOF(*tlof) {
+  initActions();
+
+  // Perform these initializations only once.
+  IsLittleEndian = TD->isLittleEndian();
+  MaxStoresPerMemset = MaxStoresPerMemcpy = MaxStoresPerMemmove = 8;
+  MaxStoresPerMemsetOptSize = MaxStoresPerMemcpyOptSize
+    = MaxStoresPerMemmoveOptSize = 4;
+  UseUnderscoreSetJmp = false;
+  UseUnderscoreLongJmp = false;
+  SelectIsExpensive = false;
+  IntDivIsCheap = false;
+  Pow2DivIsCheap = false;
+  JumpIsExpensive = false;
+  PredictableSelectIsExpensive = false;
+  StackPointerRegisterToSaveRestore = 0;
+  ExceptionPointerRegister = 0;
+  ExceptionSelectorRegister = 0;
+  BooleanContents = UndefinedBooleanContent;
+  BooleanVectorContents = UndefinedBooleanContent;
+  SchedPreferenceInfo = Sched::ILP;
+  JumpBufSize = 0;
+  JumpBufAlignment = 0;
+  MinFunctionAlignment = 0;
+  PrefFunctionAlignment = 0;
+  PrefLoopAlignment = 0;
+  MinStackArgumentAlignment = 1;
+  InsertFencesForAtomic = false;
+  SupportJumpTables = true;
+  MinimumJumpTableEntries = 4;
+
+  InitLibcallNames(LibcallRoutineNames, TM);
+  InitCmpLibcallCCs(CmpLibcallCCs);
+  InitLibcallCallingConvs(LibcallCallingConvs);
+}
+
+TargetLoweringBase::~TargetLoweringBase() {
+  delete &TLOF;
+}
+
+void TargetLoweringBase::initActions() {
   // All operations default to being supported.
   memset(OpActions, 0, sizeof(OpActions));
   memset(LoadExtActions, 0, sizeof(LoadExtActions));
   memset(TruncStoreActions, 0, sizeof(TruncStoreActions));
   memset(IndexedModeActions, 0, sizeof(IndexedModeActions));
   memset(CondCodeActions, 0, sizeof(CondCodeActions));
+  memset(RegClassForVT, 0,MVT::LAST_VALUETYPE*sizeof(TargetRegisterClass*));
+  memset(TargetDAGCombineArray, 0, array_lengthof(TargetDAGCombineArray));
 
   // Set default actions for various operations.
   for (unsigned VT = 0; VT != (unsigned)MVT::LAST_VALUETYPE; ++VT) {
@@ -635,6 +726,14 @@ TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm,
     // These operations default to expand.
     setOperationAction(ISD::FGETSIGN, (MVT::SimpleValueType)VT, Expand);
     setOperationAction(ISD::CONCAT_VECTORS, (MVT::SimpleValueType)VT, Expand);
+
+    // These library functions default to expand.
+    setOperationAction(ISD::FROUND, (MVT::SimpleValueType)VT, Expand);
+
+    // These operations default to expand for vector types.
+    if (VT >= MVT::FIRST_VECTOR_VALUETYPE &&
+        VT <= MVT::LAST_VECTOR_VALUETYPE)
+      setOperationAction(ISD::FCOPYSIGN, (MVT::SimpleValueType)VT, Expand);
   }
 
   // Most targets ignore the @llvm.prefetch intrinsic.
@@ -702,51 +801,30 @@ TargetLoweringBase::TargetLoweringBase(const TargetMachine &tm,
   // here is to inform DAG Legalizer to replace DEBUGTRAP with TRAP.
   //
   setOperationAction(ISD::DEBUGTRAP, MVT::Other, Expand);
-
-  IsLittleEndian = TD->isLittleEndian();
-  PointerTy = MVT::getIntegerVT(8*TD->getPointerSize(0));
-  memset(RegClassForVT, 0,MVT::LAST_VALUETYPE*sizeof(TargetRegisterClass*));
-  memset(TargetDAGCombineArray, 0, array_lengthof(TargetDAGCombineArray));
-  maxStoresPerMemset = maxStoresPerMemcpy = maxStoresPerMemmove = 8;
-  maxStoresPerMemsetOptSize = maxStoresPerMemcpyOptSize
-    = maxStoresPerMemmoveOptSize = 4;
-  benefitFromCodePlacementOpt = false;
-  UseUnderscoreSetJmp = false;
-  UseUnderscoreLongJmp = false;
-  SelectIsExpensive = false;
-  IntDivIsCheap = false;
-  Pow2DivIsCheap = false;
-  JumpIsExpensive = false;
-  predictableSelectIsExpensive = false;
-  MaskAndBranchFoldingIsLegal = false;
-  StackPointerRegisterToSaveRestore = 0;
-  ExceptionPointerRegister = 0;
-  ExceptionSelectorRegister = 0;
-  BooleanContents = UndefinedBooleanContent;
-  BooleanVectorContents = UndefinedBooleanContent;
-  SchedPreferenceInfo = Sched::ILP;
-  JumpBufSize = 0;
-  JumpBufAlignment = 0;
-  MinFunctionAlignment = 0;
-  PrefFunctionAlignment = 0;
-  PrefLoopAlignment = 0;
-  MinStackArgumentAlignment = 1;
-  ShouldFoldAtomicFences = false;
-  InsertFencesForAtomic = false;
-  SupportJumpTables = true;
-  MinimumJumpTableEntries = 4;
-
-  InitLibcallNames(LibcallRoutineNames);
-  InitCmpLibcallCCs(CmpLibcallCCs);
-  InitLibcallCallingConvs(LibcallCallingConvs);
 }
 
-TargetLoweringBase::~TargetLoweringBase() {
-  delete &TLOF;
+MVT TargetLoweringBase::getPointerTy(uint32_t AS) const {
+  return MVT::getIntegerVT(getPointerSizeInBits(AS));
 }
 
-MVT TargetLoweringBase::getShiftAmountTy(EVT LHSTy) const {
+unsigned TargetLoweringBase::getPointerSizeInBits(uint32_t AS) const {
+  return TD->getPointerSizeInBits(AS);
+}
+
+unsigned TargetLoweringBase::getPointerTypeSizeInBits(Type *Ty) const {
+  assert(Ty->isPointerTy());
+  return getPointerSizeInBits(Ty->getPointerAddressSpace());
+}
+
+MVT TargetLoweringBase::getScalarShiftAmountTy(EVT LHSTy) const {
   return MVT::getIntegerVT(8*TD->getPointerSize(0));
+}
+
+EVT TargetLoweringBase::getShiftAmountTy(EVT LHSTy) const {
+  assert(LHSTy.isInteger() && "Shift amount is not an integer type!");
+  if (LHSTy.isVector())
+    return LHSTy;
+  return getScalarShiftAmountTy(LHSTy);
 }
 
 /// canOpTrap - Returns true if the operation can trap for the value type.
@@ -906,6 +984,15 @@ void TargetLoweringBase::computeRegisterProperties() {
     ValueTypeActions.setTypeAction(MVT::ppcf128, TypeExpandFloat);
   }
 
+  // Decide how to handle f128. If the target does not have native f128 support,
+  // expand it to i128 and we will be generating soft float library calls.
+  if (!isTypeLegal(MVT::f128)) {
+    NumRegistersForVT[MVT::f128] = NumRegistersForVT[MVT::i128];
+    RegisterTypeForVT[MVT::f128] = RegisterTypeForVT[MVT::i128];
+    TransformToType[MVT::f128] = MVT::i128;
+    ValueTypeActions.setTypeAction(MVT::f128, TypeSoftenFloat);
+  }
+
   // Decide how to handle f64. If the target does not have native f64 support,
   // expand it to i64 and we will be generating soft float library calls.
   if (!isTypeLegal(MVT::f64)) {
@@ -1015,7 +1102,7 @@ void TargetLoweringBase::computeRegisterProperties() {
   }
 }
 
-EVT TargetLoweringBase::getSetCCResultType(EVT VT) const {
+EVT TargetLoweringBase::getSetCCResultType(LLVMContext &, EVT VT) const {
   assert(!VT.isVector() && "No default SetCC type for vectors!");
   return getPointerTy(0).SimpleTy;
 }
@@ -1144,7 +1231,7 @@ void llvm::GetReturnInfo(Type* ReturnType, AttributeSet attr,
       Flags.setZExt();
 
     for (unsigned i = 0; i < NumParts; ++i)
-      Outs.push_back(ISD::OutputArg(Flags, PartVT, /*isFixed=*/true, 0, 0));
+      Outs.push_back(ISD::OutputArg(Flags, PartVT, VT, /*isFixed=*/true, 0, 0));
   }
 }
 

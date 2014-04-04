@@ -57,23 +57,7 @@ void CriticalAntiDepBreaker::StartBlock(MachineBasicBlock *BB) {
 
   bool IsReturnBlock = (BBSize != 0 && BB->back().isReturn());
 
-  // Determine the live-out physregs for this block.
-  if (IsReturnBlock) {
-    // In a return block, examine the function live-out regs.
-    for (MachineRegisterInfo::liveout_iterator I = MRI.liveout_begin(),
-         E = MRI.liveout_end(); I != E; ++I) {
-      for (MCRegAliasIterator AI(*I, TRI, true); AI.isValid(); ++AI) {
-        unsigned Reg = *AI;
-        Classes[Reg] = reinterpret_cast<TargetRegisterClass *>(-1);
-        KillIndices[Reg] = BBSize;
-        DefIndices[Reg] = ~0u;
-      }
-    }
-  }
-
-  // In a non-return block, examine the live-in regs of all successors.
-  // Note a return block can have successors if the return instruction is
-  // predicated.
+  // Examine the live-in regs of all successors.
   for (MachineBasicBlock::succ_iterator SI = BB->succ_begin(),
          SE = BB->succ_end(); SI != SE; ++SI)
     for (MachineBasicBlock::livein_iterator I = (*SI)->livein_begin(),
@@ -217,8 +201,8 @@ void CriticalAntiDepBreaker::PrescanInstruction(MachineInstr *MI) {
 
     if (MO.isUse() && Special) {
       if (!KeepRegs.test(Reg)) {
-        KeepRegs.set(Reg);
-        for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs)
+        for (MCSubRegIterator SubRegs(Reg, TRI, /*IncludeSelf=*/true);
+             SubRegs.isValid(); ++SubRegs)
           KeepRegs.set(*SubRegs);
       }
     }
@@ -377,7 +361,7 @@ findSuitableFreeRegister(RegRefIter RegRefBegin,
                          unsigned AntiDepReg,
                          unsigned LastNewReg,
                          const TargetRegisterClass *RC,
-                         SmallVector<unsigned, 2> &Forbid)
+                         SmallVectorImpl<unsigned> &Forbid)
 {
   ArrayRef<MCPhysReg> Order = RegClassInfo.getOrder(RC);
   for (unsigned i = 0; i != Order.size(); ++i) {
@@ -404,7 +388,7 @@ findSuitableFreeRegister(RegRefIter RegRefBegin,
       continue;
     // If NewReg overlaps any of the forbidden registers, we can't use it.
     bool Forbidden = false;
-    for (SmallVector<unsigned, 2>::iterator it = Forbid.begin(),
+    for (SmallVectorImpl<unsigned>::iterator it = Forbid.begin(),
            ite = Forbid.end(); it != ite; ++it)
       if (TRI->regsOverlap(NewReg, *it)) {
         Forbidden = true;

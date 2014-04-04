@@ -107,20 +107,25 @@ void free_remapped_files(struct CXUnsavedFile *unsaved_files,
   free(unsaved_files);
 }
 
-int parse_remapped_files(int argc, const char **argv, int start_arg,
-                         struct CXUnsavedFile **unsaved_files,
-                         int *num_unsaved_files) {
+static int parse_remapped_files_with_opt(const char *opt_name,
+                                         int argc, const char **argv,
+                                         int start_arg,
+                                         struct CXUnsavedFile **unsaved_files,
+                                         int *num_unsaved_files) {
   int i;
   int arg;
-  int prefix_len = strlen("-remap-file=");
+  int prefix_len = strlen(opt_name);
+  int arg_indices[20];
   *unsaved_files = 0;
   *num_unsaved_files = 0;
 
   /* Count the number of remapped files. */
   for (arg = start_arg; arg < argc; ++arg) {
-    if (strncmp(argv[arg], "-remap-file=", prefix_len))
-      break;
+    if (strncmp(argv[arg], opt_name, prefix_len))
+      continue;
 
+    assert(*num_unsaved_files < (int)(sizeof(arg_indices)/sizeof(int)));
+    arg_indices[*num_unsaved_files] = arg;
     ++*num_unsaved_files;
   }
 
@@ -130,17 +135,17 @@ int parse_remapped_files(int argc, const char **argv, int start_arg,
   *unsaved_files
     = (struct CXUnsavedFile *)malloc(sizeof(struct CXUnsavedFile) *
                                      *num_unsaved_files);
-  for (arg = start_arg, i = 0; i != *num_unsaved_files; ++i, ++arg) {
+  for (i = 0; i != *num_unsaved_files; ++i) {
     struct CXUnsavedFile *unsaved = *unsaved_files + i;
-    const char *arg_string = argv[arg] + prefix_len;
+    const char *arg_string = argv[arg_indices[i]] + prefix_len;
     int filename_len;
     char *filename;
     char *contents;
     FILE *to_file;
-    const char *semi = strchr(arg_string, ';');
-    if (!semi) {
+    const char *sep = strchr(arg_string, ',');
+    if (!sep) {
       fprintf(stderr,
-              "error: -remap-file=from;to argument is missing semicolon\n");
+              "error: %sfrom:to argument is missing comma\n", opt_name);
       free_remapped_files(*unsaved_files, i);
       *unsaved_files = 0;
       *num_unsaved_files = 0;
@@ -148,10 +153,10 @@ int parse_remapped_files(int argc, const char **argv, int start_arg,
     }
 
     /* Open the file that we're remapping to. */
-    to_file = fopen(semi + 1, "rb");
+    to_file = fopen(sep + 1, "rb");
     if (!to_file) {
       fprintf(stderr, "error: cannot open file %s that we are remapping to\n",
-              semi + 1);
+              sep + 1);
       free_remapped_files(*unsaved_files, i);
       *unsaved_files = 0;
       *num_unsaved_files = 0;
@@ -167,7 +172,7 @@ int parse_remapped_files(int argc, const char **argv, int start_arg,
     contents = (char *)malloc(unsaved->Length + 1);
     if (fread(contents, 1, unsaved->Length, to_file) != unsaved->Length) {
       fprintf(stderr, "error: unexpected %s reading 'to' file %s\n",
-              (feof(to_file) ? "EOF" : "error"), semi + 1);
+              (feof(to_file) ? "EOF" : "error"), sep + 1);
       fclose(to_file);
       free_remapped_files(*unsaved_files, i);
       free(contents);
@@ -182,13 +187,55 @@ int parse_remapped_files(int argc, const char **argv, int start_arg,
     fclose(to_file);
 
     /* Copy the file name that we're remapping from. */
-    filename_len = semi - arg_string;
+    filename_len = sep - arg_string;
     filename = (char *)malloc(filename_len + 1);
     memcpy(filename, arg_string, filename_len);
     filename[filename_len] = 0;
     unsaved->Filename = filename;
   }
 
+  return 0;
+}
+
+static int parse_remapped_files(int argc, const char **argv, int start_arg,
+                                struct CXUnsavedFile **unsaved_files,
+                                int *num_unsaved_files) {
+  return parse_remapped_files_with_opt("-remap-file=", argc, argv, start_arg,
+      unsaved_files, num_unsaved_files);
+}
+
+static int parse_remapped_files_with_try(int try_idx,
+                                         int argc, const char **argv,
+                                         int start_arg,
+                                         struct CXUnsavedFile **unsaved_files,
+                                         int *num_unsaved_files) {
+  struct CXUnsavedFile *unsaved_files_no_try_idx;
+  int num_unsaved_files_no_try_idx;
+  struct CXUnsavedFile *unsaved_files_try_idx;
+  int num_unsaved_files_try_idx;
+  int ret;
+  char opt_name[32];
+
+  ret = parse_remapped_files(argc, argv, start_arg,
+      &unsaved_files_no_try_idx, &num_unsaved_files_no_try_idx);
+  if (ret)
+    return ret;
+
+  sprintf(opt_name, "-remap-file-%d=", try_idx);
+  ret = parse_remapped_files_with_opt(opt_name, argc, argv, start_arg,
+      &unsaved_files_try_idx, &num_unsaved_files_try_idx);
+  if (ret)
+    return ret;
+
+  *num_unsaved_files = num_unsaved_files_no_try_idx + num_unsaved_files_try_idx;
+  *unsaved_files
+    = (struct CXUnsavedFile *)realloc(unsaved_files_no_try_idx,
+                                      sizeof(struct CXUnsavedFile) *
+                                        *num_unsaved_files);
+  memcpy(*unsaved_files + num_unsaved_files_no_try_idx,
+         unsaved_files_try_idx, sizeof(struct CXUnsavedFile) *
+            num_unsaved_files_try_idx);
+  free(unsaved_files_try_idx);
   return 0;
 }
 
@@ -694,7 +741,8 @@ static void PrintCursor(CXCursor Cursor,
       printf(" (static)");
     if (clang_CXXMethod_isVirtual(Cursor))
       printf(" (virtual)");
-
+    if (clang_CXXMethod_isPureVirtual(Cursor))
+      printf(" (pure)");
     if (clang_Cursor_isVariadic(Cursor))
       printf(" (variadic)");
     if (clang_Cursor_isObjCOptional(Cursor))
@@ -977,6 +1025,23 @@ enum CXChildVisitResult FilteredPrintingVisitor(CXCursor Cursor,
            GetCursorSource(Cursor), line, column);
     PrintCursor(Cursor, &Data->ValidationData);
     PrintCursorExtent(Cursor);
+    if (clang_isDeclaration(Cursor.kind)) {
+      enum CX_CXXAccessSpecifier access = clang_getCXXAccessSpecifier(Cursor);
+      const char *accessStr = 0;
+
+      switch (access) {
+        case CX_CXXInvalidAccessSpecifier: break;
+        case CX_CXXPublic:
+          accessStr = "public"; break;
+        case CX_CXXProtected:
+          accessStr = "protected"; break;
+        case CX_CXXPrivate:
+          accessStr = "private"; break;
+      }
+
+      if (accessStr)
+        printf(" [access=%s]", accessStr);
+    }
     printf("\n");
     return CXChildVisit_Recurse;
   }
@@ -1142,6 +1207,7 @@ static enum CXChildVisitResult PrintType(CXCursor cursor, CXCursor p,
                                          CXClientData d) {
   if (!clang_isInvalid(clang_getCursorKind(cursor))) {
     CXType T = clang_getCursorType(cursor);
+    enum CXRefQualifierKind RQ = clang_Type_getCXXRefQualifier(T);
     PrintCursor(cursor, NULL);
     PrintTypeAndTypeKind(T, " [type=%s] [typekind=%s]");
     if (clang_isConstQualifiedType(T))
@@ -1150,6 +1216,10 @@ static enum CXChildVisitResult PrintType(CXCursor cursor, CXCursor p,
       printf(" volatile");
     if (clang_isRestrictQualifiedType(T))
       printf(" restrict");
+    if (RQ == CXRefQualifier_LValue)
+      printf(" lvalue-ref-qualifier");
+    if (RQ == CXRefQualifier_RValue)
+      printf(" rvalue-ref-qualifier");
     /* Print the canonical type if it is different. */
     {
       CXType CT = clang_getCanonicalType(T);
@@ -1184,6 +1254,61 @@ static enum CXChildVisitResult PrintType(CXCursor cursor, CXCursor p,
 
     printf("\n");
   }
+  return CXChildVisit_Recurse;
+}
+
+static enum CXChildVisitResult PrintTypeSize(CXCursor cursor, CXCursor p,
+                                             CXClientData d) {
+  CXType T;
+  enum CXCursorKind K = clang_getCursorKind(cursor);
+  if (clang_isInvalid(K))
+    return CXChildVisit_Recurse;
+  T = clang_getCursorType(cursor);
+  PrintCursor(cursor, NULL);
+  PrintTypeAndTypeKind(T, " [type=%s] [typekind=%s]");
+  /* Print the type sizeof if applicable. */
+  {
+    long long Size = clang_Type_getSizeOf(T);
+    if (Size >= 0 || Size < -1 ) {
+      printf(" [sizeof=%lld]", Size);
+    }
+  }
+  /* Print the type alignof if applicable. */
+  {
+    long long Align = clang_Type_getAlignOf(T);
+    if (Align >= 0 || Align < -1) {
+      printf(" [alignof=%lld]", Align);
+    }
+  }
+  /* Print the record field offset if applicable. */
+  {
+    const char *FieldName = clang_getCString(clang_getCursorSpelling(cursor));
+    /* recurse to get the root anonymous record parent */
+    CXCursor Parent, Root;
+    if (clang_getCursorKind(cursor) == CXCursor_FieldDecl ) {
+      const char *RootParentName;
+      Root = Parent = p;
+      do {
+        Root = Parent;
+        RootParentName = clang_getCString(clang_getCursorSpelling(Root));
+        Parent = clang_getCursorSemanticParent(Root);
+      } while ( clang_getCursorType(Parent).kind == CXType_Record &&
+                !strcmp(RootParentName, "") );
+      /* if RootParentName is "", record is anonymous. */
+      {
+        long long Offset = clang_Type_getOffsetOf(clang_getCursorType(Root),
+                                                  FieldName);
+        printf(" [offsetof=%lld]", Offset);
+      }
+    }
+  }
+  /* Print if its a bitfield */
+  {
+    int IsBitfield = clang_Cursor_isBitField(cursor);
+    if (IsBitfield)
+      printf(" [BitFieldSize=%d]", clang_getFieldDeclBitWidth(cursor));
+  }
+  printf("\n");
   return CXChildVisit_Recurse;
 }
 
@@ -1274,7 +1399,7 @@ int perform_test_load_tu(const char *file, const char *filter,
   int result;
   Idx = clang_createIndex(/* excludeDeclsFromPCH */
                           !strcmp(filter, "local") ? 1 : 0,
-                          /* displayDiagnosics=*/1);
+                          /* displayDiagnostics=*/1);
 
   if (!CreateTranslationUnit(Idx, file, &TU)) {
     clang_disposeIndex(Idx);
@@ -1337,7 +1462,8 @@ int perform_test_reparse_source(int argc, const char **argv, int trials,
   CXTranslationUnit TU;
   struct CXUnsavedFile *unsaved_files = 0;
   int num_unsaved_files = 0;
-  int result;
+  int compiler_arg_idx = 0;
+  int result, i;
   int trial;
   int remap_after_trial = 0;
   char *endptr = 0;
@@ -1350,12 +1476,21 @@ int perform_test_reparse_source(int argc, const char **argv, int trials,
     clang_disposeIndex(Idx);
     return -1;
   }
+
+  for (i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], "--") == 0)
+      break;
+  }
+  if (i < argc)
+    compiler_arg_idx = i+1;
+  if (num_unsaved_files > compiler_arg_idx)
+    compiler_arg_idx = num_unsaved_files;
   
   /* Load the initial translation unit -- we do this without honoring remapped
    * files, so that we have a way to test results after changing the source. */
   TU = clang_parseTranslationUnit(Idx, 0,
-                                  argv + num_unsaved_files,
-                                  argc - num_unsaved_files,
+                                  argv + compiler_arg_idx,
+                                  argc - compiler_arg_idx,
                                   0, 0, getDefaultParsingOptions());
   if (!TU) {
     fprintf(stderr, "Unable to load translation unit!\n");
@@ -1373,6 +1508,14 @@ int perform_test_reparse_source(int argc, const char **argv, int trials,
   }
 
   for (trial = 0; trial < trials; ++trial) {
+    free_remapped_files(unsaved_files, num_unsaved_files);
+    if (parse_remapped_files_with_try(trial, argc, argv, 0,
+                                      &unsaved_files, &num_unsaved_files)) {
+      clang_disposeTranslationUnit(TU);
+      clang_disposeIndex(Idx);
+      return -1;
+    }
+
     if (clang_reparseTranslationUnit(TU,
                              trial >= remap_after_trial ? num_unsaved_files : 0,
                              trial >= remap_after_trial ? unsaved_files : 0,
@@ -1423,7 +1566,7 @@ static int perform_file_scan(const char *ast_file, const char *source_file,
   unsigned start_line = 1, start_col = 1;
 
   if (!(Idx = clang_createIndex(/* excludeDeclsFromPCH */ 1,
-                                /* displayDiagnosics=*/1))) {
+                                /* displayDiagnostics=*/1))) {
     fprintf(stderr, "Could not create Index\n");
     return 1;
   }
@@ -2843,7 +2986,7 @@ static int index_file(int argc, const char **argv, int full) {
   }
 
   if (!(Idx = clang_createIndex(/* excludeDeclsFromPCH */ 1,
-                                /* displayDiagnosics=*/1))) {
+                                /* displayDiagnostics=*/1))) {
     fprintf(stderr, "Could not create Index\n");
     return 1;
   }
@@ -2887,7 +3030,7 @@ static int index_tu(int argc, const char **argv) {
   }
 
   if (!(Idx = clang_createIndex(/* excludeDeclsFromPCH */ 1,
-                                /* displayDiagnosics=*/1))) {
+                                /* displayDiagnostics=*/1))) {
     fprintf(stderr, "Could not create Index\n");
     return 1;
   }
@@ -2922,7 +3065,7 @@ static int index_compile_db(int argc, const char **argv) {
   }
 
   if (!(Idx = clang_createIndex(/* excludeDeclsFromPCH */ 1,
-                                /* displayDiagnosics=*/1))) {
+                                /* displayDiagnostics=*/1))) {
     fprintf(stderr, "Could not create Index\n");
     return 1;
   }
@@ -3430,7 +3573,7 @@ int write_pch_file(const char *filename, int argc, const char *argv[]) {
   int num_unsaved_files = 0;
   int result = 0;
   
-  Idx = clang_createIndex(/* excludeDeclsFromPCH */1, /* displayDiagnosics=*/1);
+  Idx = clang_createIndex(/* excludeDeclsFromPCH */1, /* displayDiagnostics=*/1);
   
   if (parse_remapped_files(argc, argv, 0, &unsaved_files, &num_unsaved_files)) {
     clang_disposeIndex(Idx);
@@ -3691,6 +3834,7 @@ static void print_usage(void) {
   fprintf(stderr,
     "       c-index-test -test-print-linkage-source {<args>}*\n"
     "       c-index-test -test-print-type {<args>}*\n"
+    "       c-index-test -test-print-type-size {<args>}*\n"
     "       c-index-test -test-print-bitwidth {<args>}*\n"
     "       c-index-test -print-usr [<CursorKind> {<args>}]*\n"
     "       c-index-test -print-usr-file <file>\n"
@@ -3777,6 +3921,9 @@ int cindextest_main(int argc, const char **argv) {
   else if (argc > 2 && strcmp(argv[1], "-test-print-type") == 0)
     return perform_test_load_source(argc - 2, argv + 2, "all",
                                     PrintType, 0);
+  else if (argc > 2 && strcmp(argv[1], "-test-print-type-size") == 0)
+    return perform_test_load_source(argc - 2, argv + 2, "all",
+                                    PrintTypeSize, 0);
   else if (argc > 2 && strcmp(argv[1], "-test-print-bitwidth") == 0)
     return perform_test_load_source(argc - 2, argv + 2, "all",
                                     PrintBitWidth, 0);
