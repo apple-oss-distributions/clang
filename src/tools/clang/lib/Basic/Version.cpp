@@ -102,11 +102,11 @@ std::string getClangFullRepositoryVersion() {
       OS << Revision;
     }
     OS << ')';
-  }  
+  }
   // Support LLVM in a separate repository.
   std::string LLVMRev = getLLVMRevision();
   if (!LLVMRev.empty() && LLVMRev != Revision) {
-    OS << " (";    
+    OS << " (";
     std::string LLVMRepo = getLLVMRepositoryPath();
     if (!LLVMRepo.empty())
       OS << LLVMRepo << ' ';
@@ -116,13 +116,17 @@ std::string getClangFullRepositoryVersion() {
 }
 
 std::string getClangFullVersion() {
+  // Apple Internal: clang is the "Apple LLVM" compiler. rdar://12201399
+  return getClangToolFullVersion("LLVM");
+}
+
+std::string getClangToolFullVersion(StringRef ToolName) {
   std::string buf;
   llvm::raw_string_ostream OS(buf);
 #ifdef CLANG_VENDOR
   OS << CLANG_VENDOR;
 #endif
-  // Apple Internal: clang is the "Apple LLVM" compiler. rdar://12201399
-  OS << "LLVM version " CLANG_VERSION_STRING " "
+  OS << ToolName << " version " CLANG_VERSION_STRING " "
      << getClangFullRepositoryVersion();
 
   // If vendor supplied, include the base LLVM version as well.

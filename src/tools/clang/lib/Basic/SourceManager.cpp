@@ -1583,7 +1583,7 @@ bool SourceManager::isInMainFile(SourceLocation Loc) const {
   return FI.getIncludeLoc().isInvalid();
 }
 
-/// \brief The size of the SLocEnty that \arg FID represents.
+/// \brief The size of the SLocEntry that \p FID represents.
 unsigned SourceManager::getFileIDSize(FileID FID) const {
   bool Invalid = false;
   const SrcMgr::SLocEntry &Entry = getSLocEntry(FID, &Invalid);
@@ -1757,6 +1757,10 @@ FileID SourceManager::translateFile(const FileEntry *SourceFile) const {
 SourceLocation SourceManager::translateLineCol(FileID FID,
                                                unsigned Line,
                                                unsigned Col) const {
+  // Lines are used as a one-based index into a zero-based array. This assert
+  // checks for possible buffer underruns.
+  assert(Line != 0 && "Passed a zero-based line");
+
   if (FID.isInvalid())
     return SourceLocation();
 

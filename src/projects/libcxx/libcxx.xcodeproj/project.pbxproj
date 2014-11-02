@@ -85,6 +85,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		4A9F64D3187F3BA5008CBB55 /* libcxx.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = libcxx.xcconfig; sourceTree = "<group>"; };
 		96D2574414FF3E24005DCB16 /* libc++.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libc++.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D2AAC0630554660B00DB518D /* libc++.1.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = "libc++.1.dylib"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F92E43E71411A4EF001B9B73 /* algorithm.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = algorithm.cpp; sourceTree = "<group>"; };
@@ -234,6 +235,7 @@
 				F92E44171411A508001B9B73 /* include */,
 				F92E43E61411A4EF001B9B73 /* src */,
 				1AB674ADFE9D54B511CA2CBB /* Products */,
+				4A9F64D2187F3BA5008CBB55 /* xcconfigs */,
 			);
 			name = libcxx;
 			sourceTree = "<group>";
@@ -245,6 +247,14 @@
 				96D2574414FF3E24005DCB16 /* libc++.a */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		4A9F64D2187F3BA5008CBB55 /* xcconfigs */ = {
+			isa = PBXGroup;
+			children = (
+				4A9F64D3187F3BA5008CBB55 /* libcxx.xcconfig */,
+			);
+			path = xcconfigs;
 			sourceTree = "<group>";
 		};
 		F92E43E61411A4EF001B9B73 /* src */ = {
@@ -553,8 +563,7 @@
 				EXECUTABLE_PREFIX = "";
 				GCC_INLINES_ARE_PRIVATE_EXTERN = NO;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH = "$(INSTALL_PATH_PREFIX)/usr/lib";
-				LD_DYLIB_INSTALL_NAME = "/usr/lib/libc++.1.dylib";
+				INSTALL_PATH_ACTUAL = /usr/lib;
 				LIBCPPABI_EXTRAS_iphoneos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
@@ -565,6 +574,7 @@
 				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
 				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
 				ORDER_FILE = "$(SRCROOT)/data_order.exp";
+				OTHER_CFLAGS = "-mno-global-merge";
 				OTHER_CPLUSPLUSFLAGS = (
 					"-nostdinc++",
 					"$(OTHER_CFLAGS)",
@@ -590,10 +600,7 @@
 				EXECUTABLE_PREFIX = "";
 				GCC_INLINES_ARE_PRIVATE_EXTERN = NO;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH = "$(INSTALL_PATH_PREFIX)/usr/lib";
-				INSTALL_PATH_PREFIX = "$(INSTALL_PATH_PREFIX_$(PLATFORM_NAME))";
-				INSTALL_PATH_PREFIX_iphonesimulator = "$(SDKROOT)";
-				LD_DYLIB_INSTALL_NAME = "/usr/lib/libc++.1.dylib";
+				INSTALL_PATH_ACTUAL = /usr/lib;
 				LIBCPPABI_EXTRAS_iphoneos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
@@ -604,6 +611,7 @@
 				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
 				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
 				ORDER_FILE = "$(SRCROOT)/data_order.exp";
+				OTHER_CFLAGS = "-mno-global-merge";
 				OTHER_CPLUSPLUSFLAGS = (
 					"-nostdinc++",
 					"$(OTHER_CFLAGS)",
@@ -623,6 +631,7 @@
 		};
 		1DEB914F08733D8E0010E9CD /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4A9F64D3187F3BA5008CBB55 /* libcxx.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				COPY_PHASE_STRIP = NO;
@@ -638,6 +647,7 @@
 		};
 		1DEB915008733D8E0010E9CD /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4A9F64D3187F3BA5008CBB55 /* libcxx.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
@@ -655,7 +665,7 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "c++0x";
 				EXECUTABLE_PREFIX = "";
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH = /usr/local/lib/eOS;
+				INSTALL_PATH_ACTUAL = /usr/local/lib/eOS;
 				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
@@ -678,9 +688,7 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "c++0x";
 				EXECUTABLE_PREFIX = "";
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH = /usr/local/lib/eOS;
-				INSTALL_PATH_PREFIX = "$(INSTALL_PATH_PREFIX_$(PLATFORM_NAME))";
-				INSTALL_PATH_PREFIX_iphonesimulator = "$(SDKROOT)";
+				INSTALL_PATH_ACTUAL = /usr/local/lib/eOS;
 				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
 				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";

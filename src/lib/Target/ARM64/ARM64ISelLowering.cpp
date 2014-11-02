@@ -120,10 +120,10 @@ ARM64TargetLowering::ARM64TargetLowering(ARM64TargetMachine &TM) :
   setOperationAction(ISD::BR_CC, MVT::i64, Custom);
   setOperationAction(ISD::BR_CC, MVT::f32, Custom);
   setOperationAction(ISD::BR_CC, MVT::f64, Custom);
-  setOperationAction(ISD::SELECT, MVT::i32, Expand);
-  setOperationAction(ISD::SELECT, MVT::i64, Expand);
-  setOperationAction(ISD::SELECT, MVT::f32, Expand);
-  setOperationAction(ISD::SELECT, MVT::f64, Expand);
+  setOperationAction(ISD::SELECT, MVT::i32, Custom);
+  setOperationAction(ISD::SELECT, MVT::i64, Custom);
+  setOperationAction(ISD::SELECT, MVT::f32, Custom);
+  setOperationAction(ISD::SELECT, MVT::f64, Custom);
   setOperationAction(ISD::SELECT_CC, MVT::i32, Custom);
   setOperationAction(ISD::SELECT_CC, MVT::i64, Custom);
   setOperationAction(ISD::SELECT_CC, MVT::f32, Custom);
@@ -164,7 +164,7 @@ ARM64TargetLowering::ARM64TargetLowering(ARM64TargetMachine &TM) :
   setOperationAction(ISD::FTRUNC,     MVT::f128, Expand);
   setOperationAction(ISD::SETCC,      MVT::f128, Custom);
   setOperationAction(ISD::BR_CC,      MVT::f128, Custom);
-  setOperationAction(ISD::SELECT,     MVT::f128, Expand);
+  setOperationAction(ISD::SELECT,     MVT::f128, Custom);
   setOperationAction(ISD::SELECT_CC,  MVT::f128, Custom);
   setOperationAction(ISD::FP_EXTEND,  MVT::f128, Custom);
 
@@ -279,6 +279,20 @@ ARM64TargetLowering::ARM64TargetLowering(ARM64TargetMachine &TM) :
   setOperationAction(ISD::UREM, MVT::i32, Expand);
   setOperationAction(ISD::UREM, MVT::i64, Expand);
 
+  // Custom lower Add/Sub/Mul with overflow.
+  setOperationAction(ISD::SADDO, MVT::i32, Custom);
+  setOperationAction(ISD::SADDO, MVT::i64, Custom);
+  setOperationAction(ISD::UADDO, MVT::i32, Custom);
+  setOperationAction(ISD::UADDO, MVT::i64, Custom);
+  setOperationAction(ISD::SSUBO, MVT::i32, Custom);
+  setOperationAction(ISD::SSUBO, MVT::i64, Custom);
+  setOperationAction(ISD::USUBO, MVT::i32, Custom);
+  setOperationAction(ISD::USUBO, MVT::i64, Custom);
+  setOperationAction(ISD::SMULO, MVT::i32, Custom);
+  setOperationAction(ISD::SMULO, MVT::i64, Custom);
+  setOperationAction(ISD::UMULO, MVT::i32, Custom);
+  setOperationAction(ISD::UMULO, MVT::i64, Custom);
+
   setOperationAction(ISD::FSIN, MVT::f32, Expand);
   setOperationAction(ISD::FSIN, MVT::f64, Expand);
   setOperationAction(ISD::FCOS, MVT::f32, Expand);
@@ -378,6 +392,8 @@ ARM64TargetLowering::ARM64TargetLowering(ARM64TargetMachine &TM) :
   setTargetDAGCombine(ISD::BITCAST);
   setTargetDAGCombine(ISD::CONCAT_VECTORS);
   setTargetDAGCombine(ISD::STORE);
+  if (Subtarget->supportsAddressTopByteIgnored())
+    setTargetDAGCombine(ISD::LOAD);
 
   setTargetDAGCombine(ISD::MUL);
 
@@ -395,6 +411,8 @@ ARM64TargetLowering::ARM64TargetLowering(ARM64TargetMachine &TM) :
   setMinFunctionAlignment(2);
 
   RequireStrictAlign = StrictAlign;
+
+  setHasExtractBitsInsn(true);
 }
 
 void ARM64TargetLowering::addTypeForNEON(EVT VT, EVT PromotedBitwiseVT) {
@@ -444,6 +462,10 @@ void ARM64TargetLowering::addTypeForNEON(EVT VT, EVT PromotedBitwiseVT) {
   setOperationAction(ISD::VSELECT, VT.getSimpleVT(), Expand);
   setLoadExtAction(ISD::EXTLOAD, VT.getSimpleVT(), Expand);
 
+  // CNT supports only B element sizes.
+  if (VT != MVT::v8i8 && VT != MVT::v16i8)
+    setOperationAction(ISD::CTPOP, VT.getSimpleVT(), Expand);
+
   setOperationAction(ISD::UDIV, VT.getSimpleVT(), Expand);
   setOperationAction(ISD::SDIV, VT.getSimpleVT(), Expand);
   setOperationAction(ISD::UREM, VT.getSimpleVT(), Expand);
@@ -480,6 +502,14 @@ ARM64TargetLowering::computeMaskedBitsForTargetNode(const SDValue Op,
                                                     unsigned Depth) const {
   switch (Op.getOpcode()) {
   default: break;
+  case ARM64ISD::CSEL: {
+    APInt KnownZero2, KnownOne2;
+    DAG.ComputeMaskedBits(Op->getOperand(0), KnownZero, KnownOne, Depth + 1);
+    DAG.ComputeMaskedBits(Op->getOperand(1), KnownZero2, KnownOne2, Depth + 1);
+    KnownZero &= KnownZero2;
+    KnownOne &= KnownOne2;
+    break;
+  }
   case ISD::INTRINSIC_W_CHAIN:
     break;
   case ISD::INTRINSIC_WO_CHAIN:
@@ -506,8 +536,8 @@ ARM64TargetLowering::computeMaskedBitsForTargetNode(const SDValue Op,
       }
       break;
     }
-    }
     break;
+    }
   }
   }
 }
@@ -535,7 +565,6 @@ ARM64TargetLowering::createFastISel(FunctionLoweringInfo &funcInfo,
 const char *ARM64TargetLowering::getTargetNodeName(unsigned Opcode) const {
   switch (Opcode) {
   default: return 0;
-  case ARM64ISD::Wrapper:   return "ARM64ISD::Wrapper";
   case ARM64ISD::CALL:      return "ARM64ISD::CALL";
   case ARM64ISD::ADRP:      return "ARM64ISD::ADRP";
   case ARM64ISD::ADDlow:    return "ARM64ISD::ADDlow";
@@ -615,6 +644,7 @@ const char *ARM64TargetLowering::getTargetNodeName(unsigned Opcode) const {
   case ARM64ISD::TC_RETURN: return "ARM64ISD::TC_RETURN";
   case ARM64ISD::SITOF:     return "ARM64ISD::SITOF";
   case ARM64ISD::UITOF:     return "ARM64ISD::UITOF";
+  case ARM64ISD::WrapperLarge: return "ARM64ISD::WrapperLarge";
   }
 }
 
@@ -1213,6 +1243,10 @@ ARM64TargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
 
   case ARM64::F128CSEL: return EmitF128CSEL(MI, BB);
 
+  case TargetOpcode::STACKMAP:
+  case TargetOpcode::PATCHPOINT:
+    return emitPatchPoint(MI, BB);
+
   }
   llvm_unreachable("Unexpected instruction for custom inserter!");
 }
@@ -1355,6 +1389,106 @@ static SDValue getARM64Cmp(SDValue LHS, SDValue RHS, ISD::CondCode CC,
   return Cmp;
 }
 
+static std::pair<SDValue, SDValue>
+getARM64XALUOOp(ARM64CC::CondCode &CC, SDValue Op, SelectionDAG &DAG) {
+  assert((Op.getValueType() == MVT::i32 || Op.getValueType() == MVT::i64) &&
+         "Unsupported value type");
+  SDValue Value, Overflow;
+  SDLoc DL(Op);
+  SDValue LHS = Op.getOperand(0);
+  SDValue RHS = Op.getOperand(1);
+  unsigned Opc = 0;
+  switch (Op.getOpcode()) {
+  default: llvm_unreachable("Unknown overflow instruction!");
+  case ISD::SADDO: Opc = ARM64ISD::ADDS; CC = ARM64CC::VS; break;
+  case ISD::UADDO: Opc = ARM64ISD::ADDS; CC = ARM64CC::CS; break;
+  case ISD::SSUBO: Opc = ARM64ISD::SUBS; CC = ARM64CC::VS; break;
+  case ISD::USUBO: Opc = ARM64ISD::SUBS; CC = ARM64CC::CC; break;
+  // Multiply needs a little bit extra work.
+  case ISD::SMULO:
+  case ISD::UMULO: {
+    CC = ARM64CC::NE;
+    bool IsSigned = (Op.getOpcode() == ISD::SMULO) ? true : false;
+    if (Op.getValueType() == MVT::i32) {
+      unsigned ExtendOpc = IsSigned ? ISD::SIGN_EXTEND : ISD::ZERO_EXTEND;
+      // For a 32 bit multiply with overflow check we want the instruction
+      // selector to generate a widening multiply (SMADDL/UMADDL). For that we
+      // need to generate the following pattern:
+      // (i64 add 0, (i64 mul (i64 sext|zext i32 %a), (i64 sext|zext i32 %b))
+      LHS = DAG.getNode(ExtendOpc, DL, MVT::i64, LHS);
+      RHS = DAG.getNode(ExtendOpc, DL, MVT::i64, RHS);
+      SDValue Mul = DAG.getNode(ISD::MUL, DL, MVT::i64, LHS, RHS);
+      SDValue Add = DAG.getNode(ISD::ADD, DL, MVT::i64, Mul,
+                                DAG.getConstant(0, MVT::i64));
+      // On ARM64 the upper 32 bits are always zero extended for a 32 bit
+      // operation. We need to clear out the upper 32 bits, because we used a
+      // widening multiply that wrote all 64 bits. In the end this should be a
+      // noop.
+      Value = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Add);
+      if (IsSigned) {
+        // The signed overflow check requires more than just a simple check for
+        // any bit set in the upper 32 bits of the result. These bits could be
+        // just the sign bits of a negative number. To perform the overflow
+        // check we have to arithmetic shift right the 32nd bit of the result by
+        // 31 bits. Then we compare the result to the upper 32 bits.
+        SDValue UpperBits = DAG.getNode(ISD::SRL, DL, MVT::i64, Add,
+                                        DAG.getConstant(32, MVT::i32));
+        UpperBits = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, UpperBits);
+        SDValue LowerBits = DAG.getNode(ISD::SRA, DL, MVT::i32, Value,
+                                        DAG.getConstant(31, MVT::i32));
+        // It is important that LowerBits is last, otherwise the arithmetic
+        // shift will not be folded into the compare (SUBS).
+        SDVTList VTs = DAG.getVTList(MVT::i32, MVT::i32);
+        Overflow = DAG.getNode(ARM64ISD::SUBS, DL, VTs, UpperBits, LowerBits)
+                      .getValue(1);
+      } else {
+        // The overflow check for unsigned multiply is easy. We only need to
+        // check if any of the upper 32 bits are set. This can be done with a
+        // CMP (shifted register). For that we need to generate the following
+        // pattern:
+        // (i64 ARM64ISD::SUBS i64 0, (i64 srl i64 %Mul, i64 32)
+        SDValue UpperBits = DAG.getNode(ISD::SRL, DL, MVT::i64, Mul,
+                                        DAG.getConstant(32, MVT::i32));
+        SDVTList VTs = DAG.getVTList(MVT::i64, MVT::i32);
+        Overflow = DAG.getNode(ARM64ISD::SUBS, DL, VTs,
+                               DAG.getConstant(0, MVT::i64), UpperBits)
+                      .getValue(1);
+      }
+      break;
+    }
+    assert(Op.getValueType() == MVT::i64 && "Expected an i64 value type");
+    // For the 64 bit multiply
+    Value = DAG.getNode(ISD::MUL, DL, MVT::i64, LHS, RHS);
+    if (IsSigned) {
+      SDValue UpperBits = DAG.getNode(ISD::MULHS, DL, MVT::i64, LHS, RHS);
+      SDValue LowerBits = DAG.getNode(ISD::SRA, DL, MVT::i64, Value,
+                                      DAG.getConstant(63, MVT::i32));
+      // It is important that LowerBits is last, otherwise the arithmetic
+      // shift will not be folded into the compare (SUBS).
+      SDVTList VTs = DAG.getVTList(MVT::i64, MVT::i32);
+      Overflow = DAG.getNode(ARM64ISD::SUBS, DL, VTs, UpperBits, LowerBits)
+                    .getValue(1);
+    } else {
+      SDValue UpperBits = DAG.getNode(ISD::MULHU, DL, MVT::i64, LHS, RHS);
+      SDVTList VTs = DAG.getVTList(MVT::i64, MVT::i32);
+      Overflow = DAG.getNode(ARM64ISD::SUBS, DL, VTs,
+                             DAG.getConstant(0, MVT::i64), UpperBits)
+                    .getValue(1);
+    }
+    break;
+  }
+  } // switch (...)
+
+  if (Opc) {
+    SDVTList VTs = DAG.getVTList(Op->getValueType(0), MVT::i32);
+
+    // Emit the ARM64 operation with overflow check.
+    Value = DAG.getNode(Opc, DL, VTs, LHS, RHS);
+    Overflow = Value.getValue(1);
+  }
+  return std::make_pair(Value, Overflow);
+}
+
 SDValue
 ARM64TargetLowering::LowerF128Call(SDValue Op, SelectionDAG &DAG,
                                      RTLIB::Libcall Call) const {
@@ -1427,7 +1561,7 @@ static SDValue LowerXOR(SDValue Op, SelectionDAG &DAG) {
 
 
 static SDValue LowerADDC_ADDE_SUBC_SUBE(SDValue Op, SelectionDAG &DAG) {
-  EVT VT = Op.getNode()->getValueType(0);
+  EVT VT = Op.getValueType();
 
   // Let legalize expand this if it isn't a legal type yet.
   if (!DAG.getTargetLoweringInfo().isTypeLegal(VT))
@@ -1450,6 +1584,31 @@ static SDValue LowerADDC_ADDE_SUBC_SUBE(SDValue Op, SelectionDAG &DAG) {
                        Op.getOperand(1));
   return DAG.getNode(Opc, SDLoc(Op), VTs, Op.getOperand(0),
                      Op.getOperand(1), Op.getOperand(2));
+}
+
+static SDValue LowerXALUO(SDValue Op, SelectionDAG &DAG) {
+  // Let legalize expand this if it isn't a legal type yet.
+  if (!DAG.getTargetLoweringInfo().isTypeLegal(Op.getValueType()))
+    return SDValue();
+
+  ARM64CC::CondCode CC;
+  // The actual operation that sets the overflow or carry flag.
+  SDValue Value, Overflow;
+  llvm::tie(Value, Overflow) = getARM64XALUOOp(CC, Op, DAG);
+
+  // We use 0 and 1 as false and true values.
+  SDValue TVal = DAG.getConstant(1, MVT::i32);
+  SDValue FVal = DAG.getConstant(0, MVT::i32);
+
+  // We use an inverted condition, because the conditional select is inverted
+  // too. This will allow it to be selected to a single instruction:
+  // CSINC Wd, WZR, WZR, invert(cond).
+  SDValue CCVal = DAG.getConstant(getInvertedCondCode(CC), MVT::i32);
+  Overflow = DAG.getNode(ARM64ISD::CSEL, SDLoc(Op), MVT::i32, FVal, TVal, CCVal,
+                         Overflow);
+
+  SDVTList VTs = DAG.getVTList(Op.getValueType(), MVT::i32);
+  return DAG.getNode(ISD::MERGE_VALUES, SDLoc(Op), VTs, Value, Overflow);
 }
 
 // Prefetch operands are:
@@ -1653,6 +1812,7 @@ SDValue ARM64TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG)const{
   case ISD::GlobalTLSAddress:   return LowerGlobalTLSAddress(Op, DAG);
   case ISD::SETCC:              return LowerSETCC(Op, DAG);
   case ISD::BR_CC:              return LowerBR_CC(Op, DAG);
+  case ISD::SELECT:             return LowerSELECT(Op, DAG);
   case ISD::SELECT_CC:          return LowerSELECT_CC(Op, DAG);
   case ISD::JumpTable:          return LowerJumpTable(Op, DAG);
   case ISD::ConstantPool:       return LowerConstantPool(Op, DAG);
@@ -1664,6 +1824,12 @@ SDValue ARM64TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG)const{
   case ISD::ADDE:
   case ISD::SUBC:
   case ISD::SUBE:               return LowerADDC_ADDE_SUBC_SUBE(Op, DAG);
+  case ISD::SADDO:
+  case ISD::UADDO:
+  case ISD::SSUBO:
+  case ISD::USUBO:
+  case ISD::SMULO:
+  case ISD::UMULO:              return LowerXALUO(Op, DAG);
   case ISD::FADD:               return LowerF128Call(Op, DAG, RTLIB::ADD_F128);
   case ISD::FSUB:               return LowerF128Call(Op, DAG, RTLIB::SUB_F128);
   case ISD::FMUL:               return LowerF128Call(Op, DAG, RTLIB::MUL_F128);
@@ -1711,11 +1877,19 @@ unsigned ARM64TargetLowering::getFunctionAlignment(const Function *F) const {
 
 /// Selects the correct CCAssignFn for a the given CallingConvention
 /// value.
-CCAssignFn *ARM64TargetLowering::CCAssignFnForCall(bool IsVarArg) const {
-  if (!Subtarget->isTargetDarwin())
-    return CC_ARM64_AAPCS;
-
-  return IsVarArg ? CC_ARM64_DarwinPCS_VarArg : CC_ARM64_DarwinPCS;
+CCAssignFn *ARM64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
+                                                   bool IsVarArg) const {
+  switch (CC) {
+  default:
+    llvm_unreachable("Unsupported calling convention.");
+  case CallingConv::WebKit_JS:
+    return CC_ARM64_WebKit_JS;
+  case CallingConv::C:
+  case CallingConv::Fast:
+    if (!Subtarget->isTargetDarwin())
+      return CC_ARM64_AAPCS;
+    return IsVarArg ? CC_ARM64_DarwinPCS_VarArg : CC_ARM64_DarwinPCS;
+  }
 }
 
 SDValue
@@ -1728,14 +1902,6 @@ ARM64TargetLowering::LowerFormalArguments(SDValue Chain,
                                       SmallVectorImpl<SDValue> &InVals) const {
   MachineFunction &MF = DAG.getMachineFunction();
   MachineFrameInfo *MFI = MF.getFrameInfo();
-
-  switch (CallConv) {
-  default:
-    llvm_unreachable("Unsupported calling convention");
-  case CallingConv::C:
-  case CallingConv::Fast:
-    break;
-  }
 
   // Assign locations to all of the incoming arguments.
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -1766,7 +1932,7 @@ ARM64TargetLowering::LowerFormalArguments(SDValue Chain,
     else if (ActualMVT == MVT::i16)
       LocVT = MVT::i16;
 
-    CCAssignFn *AssignFn = CCAssignFnForCall(/*IsVarArg=*/ false);
+    CCAssignFn *AssignFn = CCAssignFnForCall(CallConv, /*IsVarArg=*/ false);
     bool Res = AssignFn(i, ValVT, LocVT, CCValAssign::Full, Ins[i].Flags,
                         CCInfo);
     assert(!Res && "Call operand has unhandled type"); (void)Res;
@@ -1943,12 +2109,13 @@ ARM64TargetLowering::LowerCallResult(SDValue Chain, SDValue InFlag,
                                      SDLoc DL, SelectionDAG &DAG,
                                      SmallVectorImpl<SDValue> &InVals,
                                      bool isThisReturn, SDValue ThisVal) const {
-
+  CCAssignFn *RetCC = CallConv == CallingConv::WebKit_JS ? RetCC_ARM64_WebKit_JS
+                                                         : RetCC_ARM64_AAPCS;
   // Assign locations to each value returned by this call.
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, DAG.getMachineFunction(),
                  getTargetMachine(), RVLocs, *DAG.getContext());
-  CCInfo.AnalyzeCallResult(Ins, RetCC_ARM64_AAPCS);
+  CCInfo.AnalyzeCallResult(Ins, RetCC);
 
   // Copy all of the result registers out of their specified physreg.
   for (unsigned i = 0; i != RVLocs.size(); ++i) {
@@ -2017,7 +2184,7 @@ ARM64TargetLowering::isEligibleForTailCallOptimization(SDValue Callee,
     SmallVector<CCValAssign, 16> ArgLocs;
     CCState CCInfo(CalleeCC, isVarArg, DAG.getMachineFunction(),
                    getTargetMachine(), ArgLocs, *DAG.getContext());
-    CCAssignFn *AssignFn = CCAssignFnForCall(/*IsVarArg=*/ false);
+    CCAssignFn *AssignFn = CCAssignFnForCall(CalleeCC, /*IsVarArg=*/ false);
     CCInfo.AnalyzeCallOperands(Outs, AssignFn);
     if (CCInfo.getNextStackOffset()) {
       // Check if the arguments are already laid out in the right way as
@@ -2093,7 +2260,8 @@ ARM64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     for (unsigned i = 0; i != NumArgs; ++i) {
       MVT ArgVT = Outs[i].VT;
       ISD::ArgFlagsTy ArgFlags = Outs[i].Flags;
-      CCAssignFn *AssignFn = CCAssignFnForCall(/*IsVarArg=*/ !Outs[i].IsFixed);
+      CCAssignFn *AssignFn = CCAssignFnForCall(CallConv,
+                                               /*IsVarArg=*/!Outs[i].IsFixed);
       bool Res = AssignFn(i, ArgVT, ArgVT, CCValAssign::Full, ArgFlags, CCInfo);
       assert(!Res && "Call operand has unhandled type"); (void)Res;
     }
@@ -2119,7 +2287,7 @@ ARM64TargetLowering::LowerCall(CallLoweringInfo &CLI,
       else if (ActualMVT == MVT::i16)
         LocVT = MVT::i16;
 
-      CCAssignFn *AssignFn = CCAssignFnForCall(/*IsVarArg=*/ false);
+      CCAssignFn *AssignFn = CCAssignFnForCall(CallConv, /*IsVarArg=*/ false);
       bool Res = AssignFn(i, ValVT, LocVT, CCValAssign::Full, ArgFlags,
                           CCInfo);
       assert(!Res && "Call operand has unhandled type"); (void)Res;
@@ -2218,12 +2386,24 @@ ARM64TargetLowering::LowerCall(CallLoweringInfo &CLI,
   // If the callee is a GlobalAddress/ExternalSymbol node (quite common, every
   // direct call is) turn it into a TargetGlobalAddress/TargetExternalSymbol
   // node so that legalize doesn't hack it.
-  bool isDirect = false;
-  if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
+  if (getTargetMachine().getCodeModel() == CodeModel::Large &&
+      Subtarget->isTargetMachO()) {
+    if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
+      const GlobalValue *GV = G->getGlobal();
+      Callee = DAG.getTargetGlobalAddress(GV, DL, getPointerTy(), 0,
+                                          ARM64II::MO_GOT);
+      Callee = DAG.getNode(ARM64ISD::LOADgot, DL, getPointerTy(), Callee);
+    } else if (ExternalSymbolSDNode *S = dyn_cast<ExternalSymbolSDNode>(Callee))
+    {
+      const char *Sym = S->getSymbol();
+      Callee = DAG.getTargetExternalSymbol(Sym, getPointerTy(),
+                                           ARM64II::MO_GOT);
+      Callee = DAG.getNode(ARM64ISD::LOADgot, DL, getPointerTy(), Callee);
+    }
+  } else if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
     const GlobalValue *GV = G->getGlobal();
     Callee = DAG.getTargetGlobalAddress(GV, DL, getPointerTy(), 0, 0);
   } else if (ExternalSymbolSDNode *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
-    isDirect = true;
     const char *Sym = S->getSymbol();
     Callee = DAG.getTargetExternalSymbol(Sym, getPointerTy(), 0);
   }
@@ -2281,16 +2461,30 @@ ARM64TargetLowering::LowerCall(CallLoweringInfo &CLI,
                          IsThisReturn ? OutVals[0] : SDValue());
 }
 
+bool
+ARM64TargetLowering::CanLowerReturn(CallingConv::ID CallConv,
+                                    MachineFunction &MF, bool isVarArg,
+                                    const SmallVectorImpl<ISD::OutputArg> &Outs,
+                                    LLVMContext &Context) const {
+  CCAssignFn *RetCC = CallConv == CallingConv::WebKit_JS ? RetCC_ARM64_WebKit_JS
+                                                         : RetCC_ARM64_AAPCS;
+  SmallVector<CCValAssign, 16> RVLocs;
+  CCState CCInfo(CallConv, isVarArg, MF, getTargetMachine(), RVLocs, Context);
+  return CCInfo.CheckReturn(Outs, RetCC);
+}
+
 SDValue
 ARM64TargetLowering::LowerReturn(SDValue Chain,
                                  CallingConv::ID CallConv, bool isVarArg,
                                  const SmallVectorImpl<ISD::OutputArg> &Outs,
                                  const SmallVectorImpl<SDValue> &OutVals,
                                  SDLoc DL, SelectionDAG &DAG) const {
+  CCAssignFn *RetCC = CallConv == CallingConv::WebKit_JS ? RetCC_ARM64_WebKit_JS
+                                                         : RetCC_ARM64_AAPCS;
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, isVarArg, DAG.getMachineFunction(),
                  getTargetMachine(), RVLocs, *DAG.getContext());
-  CCInfo.AnalyzeReturn(Outs, RetCC_ARM64_AAPCS);
+  CCInfo.AnalyzeReturn(Outs, RetCC);
 
   // Copy the result values into the output registers.
   SDValue Flag;
@@ -2333,9 +2527,13 @@ SDValue ARM64TargetLowering::LowerGlobalAddress(SDValue Op,
   EVT PtrVT = getPointerTy();
   SDLoc DL(Op);
   const GlobalValue *GV = cast<GlobalAddressSDNode>(Op)->getGlobal();
-  unsigned char OpFlags = Subtarget->ClassifyGlobalReference(
-      GV, getTargetMachine().getRelocationModel());
+  unsigned char OpFlags =
+    Subtarget->ClassifyGlobalReference(GV, getTargetMachine());
 
+  assert(cast<GlobalAddressSDNode>(Op)->getOffset() == 0 &&
+         "unexpected offset in global node");
+
+  // This also catched the large code model case for Darwin.
   if ((OpFlags & ARM64II::MO_GOT) != 0) {
     SDValue GotAddr = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, OpFlags);
     // FIXME: Once remat is capable of dealing with instructions with register
@@ -2343,13 +2541,25 @@ SDValue ARM64TargetLowering::LowerGlobalAddress(SDValue Op,
     return DAG.getNode(ARM64ISD::LOADgot, DL, PtrVT, GotAddr);
   }
 
-  SDValue Hi = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0,
-                                          OpFlags | ARM64II::MO_PAGE);
-  unsigned char LoFlags = OpFlags | ARM64II::MO_PAGEOFF | ARM64II::MO_NC;
-  SDValue Lo = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, LoFlags);
+  if (getTargetMachine().getCodeModel() == CodeModel::Large) {
+    const unsigned char MO_NC = ARM64II::MO_NC;
+    return DAG.getNode(
+        ARM64ISD::WrapperLarge, DL, PtrVT,
+        DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, ARM64II::MO_G3),
+        DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, ARM64II::MO_G2 | MO_NC),
+        DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, ARM64II::MO_G1 | MO_NC),
+        DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, ARM64II::MO_G0 | MO_NC));
+  } else {
+    // Use ADRP/ADD or ADRP/LDR for everything else: the small model on ELF and
+    // the only correct model on Darwin.
+    SDValue Hi = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0,
+                                            OpFlags | ARM64II::MO_PAGE);
+    unsigned char LoFlags = OpFlags | ARM64II::MO_PAGEOFF | ARM64II::MO_NC;
+    SDValue Lo = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, LoFlags);
 
-  SDValue ADRP = DAG.getNode(ARM64ISD::ADRP, DL, PtrVT, Hi);
-  return DAG.getNode(ARM64ISD::ADDlow, DL, PtrVT, ADRP, Lo);
+    SDValue ADRP = DAG.getNode(ARM64ISD::ADRP, DL, PtrVT, Hi);
+    return DAG.getNode(ARM64ISD::ADDlow, DL, PtrVT, ADRP, Lo);
+  }
 }
 
 /// \brief Convert a TLS address reference into the correct sequence of loads
@@ -2617,6 +2827,32 @@ SDValue ARM64TargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
       RHS = DAG.getConstant(0, LHS.getValueType());
       CC = ISD::SETNE;
     }
+  }
+
+  // Optimize {s|u}{add|sub|mul}.with.overflow feeding into a branch
+  // instruction.
+  unsigned Opc = LHS.getOpcode();
+  if (LHS.getResNo() == 1 &&
+      isa<ConstantSDNode>(RHS) && cast<ConstantSDNode>(RHS)->isOne() &&
+      (Opc == ISD::SADDO || Opc == ISD::UADDO || Opc == ISD::SSUBO ||
+       Opc == ISD::USUBO || Opc == ISD::SMULO || Opc == ISD::UMULO)) {
+    assert((CC == ISD::SETEQ || CC == ISD::SETNE) &&
+           "Unexpected condition code.");
+    // Only lower legal XALUO ops.
+    if (!DAG.getTargetLoweringInfo().isTypeLegal(LHS->getValueType(0)))
+      return SDValue();
+
+    // The actual operation with overflow check.
+    ARM64CC::CondCode OFCC;
+    SDValue Value, Overflow;
+    llvm::tie(Value, Overflow) = getARM64XALUOOp(OFCC, LHS.getValue(0), DAG);
+
+    if (CC == ISD::SETNE)
+      OFCC = getInvertedCondCode(OFCC);
+    SDValue CCVal = DAG.getConstant(OFCC, MVT::i32);
+
+    return DAG.getNode(ARM64ISD::BRCOND, SDLoc(LHS), MVT::Other, Chain, Dest,
+                       CCVal, Overflow);
   }
 
   if (LHS.getValueType().isInteger()) {
@@ -2917,6 +3153,41 @@ static bool selectCCOpsAreFMaxCompatible(SDValue Cmp, SDValue Result) {
          Result->getOperand(0) == Cmp;
 }
 
+SDValue ARM64TargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const {
+  SDValue CC   = Op->getOperand(0);
+  SDValue TVal = Op->getOperand(1);
+  SDValue FVal = Op->getOperand(2);
+  SDLoc DL(Op);
+
+  unsigned Opc = CC.getOpcode();
+  // Optimize {s|u}{add|sub|mul}.with.overflow feeding into a select
+  // instruction.
+  if (CC.getResNo() == 1 &&
+      (Opc == ISD::SADDO || Opc == ISD::UADDO || Opc == ISD::SSUBO ||
+       Opc == ISD::USUBO || Opc == ISD::SMULO || Opc == ISD::UMULO)) {
+    // Only lower legal XALUO ops.
+    if (!DAG.getTargetLoweringInfo().isTypeLegal(CC->getValueType(0)))
+      return SDValue();
+
+    ARM64CC::CondCode OFCC;
+    SDValue Value, Overflow;
+    llvm::tie(Value, Overflow) = getARM64XALUOOp(OFCC, CC.getValue(0), DAG);
+    SDValue CCVal = DAG.getConstant(OFCC, MVT::i32);
+
+    return DAG.getNode(ARM64ISD::CSEL, DL, Op.getValueType(), TVal, FVal,
+                       CCVal, Overflow);
+  }
+
+  if (CC.getOpcode() == ISD::SETCC)
+    return DAG.getSelectCC(DL, CC.getOperand(0), CC.getOperand(1),
+                           TVal, FVal,
+                           cast<CondCodeSDNode>(CC.getOperand(2))->get());
+  else
+    return DAG.getSelectCC(DL, CC,
+                           DAG.getConstant(0, CC.getValueType()),
+                           TVal, FVal, ISD::SETNE);
+}
+
 SDValue ARM64TargetLowering::LowerSELECT_CC(SDValue Op,
                                             SelectionDAG &DAG) const {
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(4))->get();
@@ -3121,16 +3392,39 @@ ARM64TargetLowering::LowerConstantPool(SDValue Op, SelectionDAG &DAG) const {
   EVT PtrVT = getPointerTy();
   SDLoc DL(Op);
 
-  SDValue Hi = DAG.getTargetConstantPool(CP->getConstVal(), PtrVT,
-                                         CP->getAlignment(),
-                                         CP->getOffset(), ARM64II::MO_PAGE);
-  SDValue Lo = DAG.getTargetConstantPool(CP->getConstVal(), PtrVT,
-                                         CP->getAlignment(),
-                                         CP->getOffset(),
-                                         ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
+  if (getTargetMachine().getCodeModel() == CodeModel::Large) {
+    // Use the GOT for the large code model on iOS.
+    if (Subtarget->isTargetMachO()) {
+      SDValue GotAddr =
+        DAG.getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlignment(),
+                                  CP->getOffset(), ARM64II::MO_GOT);
+      return DAG.getNode(ARM64ISD::LOADgot, DL, PtrVT, GotAddr);
+    }
 
-  SDValue ADRP = DAG.getNode(ARM64ISD::ADRP, DL, PtrVT, Hi);
-  return DAG.getNode(ARM64ISD::ADDlow, DL, PtrVT, ADRP, Lo);
+    const unsigned char MO_NC = ARM64II::MO_NC;
+    return DAG.getNode(
+        ARM64ISD::WrapperLarge, DL, PtrVT,
+        DAG.getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlignment(),
+                                  CP->getOffset(), ARM64II::MO_G3),
+        DAG.getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlignment(),
+                                  CP->getOffset(), ARM64II::MO_G2 | MO_NC),
+        DAG.getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlignment(),
+                                  CP->getOffset(), ARM64II::MO_G1 | MO_NC),
+        DAG.getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlignment(),
+                                  CP->getOffset(), ARM64II::MO_G0 | MO_NC));
+  } else {
+    // Use ADRP/ADD or ADRP/LDR for everything else: the small memory model on
+    // ELF, the only valid one on Darwin.
+    SDValue Hi =
+        DAG.getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlignment(),
+                                  CP->getOffset(), ARM64II::MO_PAGE);
+    SDValue Lo = DAG.getTargetConstantPool(
+        CP->getConstVal(), PtrVT, CP->getAlignment(), CP->getOffset(),
+        ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
+
+    SDValue ADRP = DAG.getNode(ARM64ISD::ADRP, DL, PtrVT, Hi);
+    return DAG.getNode(ARM64ISD::ADDlow, DL, PtrVT, ADRP, Lo);
+  }
 }
 
 SDValue ARM64TargetLowering::LowerBlockAddress(SDValue Op,
@@ -3138,11 +3432,22 @@ SDValue ARM64TargetLowering::LowerBlockAddress(SDValue Op,
   const BlockAddress *BA = cast<BlockAddressSDNode>(Op)->getBlockAddress();
   EVT PtrVT = getPointerTy();
   SDLoc DL(Op);
-  SDValue Hi = DAG.getTargetBlockAddress(BA, PtrVT, 0, ARM64II::MO_PAGE);
-  SDValue Lo = DAG.getTargetBlockAddress(BA, PtrVT, 0,
-                                         ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
-  SDValue ADRP = DAG.getNode(ARM64ISD::ADRP, DL, PtrVT, Hi);
-  return DAG.getNode(ARM64ISD::ADDlow, DL, PtrVT, ADRP, Lo);
+  if (getTargetMachine().getCodeModel() == CodeModel::Large &&
+      !Subtarget->isTargetMachO()) {
+    const unsigned char MO_NC = ARM64II::MO_NC;
+    return DAG.getNode(
+        ARM64ISD::WrapperLarge, DL, PtrVT,
+        DAG.getTargetBlockAddress(BA, PtrVT, 0, ARM64II::MO_G3),
+        DAG.getTargetBlockAddress(BA, PtrVT, 0, ARM64II::MO_G2 | MO_NC),
+        DAG.getTargetBlockAddress(BA, PtrVT, 0, ARM64II::MO_G1 | MO_NC),
+        DAG.getTargetBlockAddress(BA, PtrVT, 0, ARM64II::MO_G0 | MO_NC));
+  } else {
+    SDValue Hi = DAG.getTargetBlockAddress(BA, PtrVT, 0, ARM64II::MO_PAGE);
+    SDValue Lo = DAG.getTargetBlockAddress(BA, PtrVT, 0,
+                                          ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
+    SDValue ADRP = DAG.getNode(ARM64ISD::ADRP, DL, PtrVT, Hi);
+    return DAG.getNode(ARM64ISD::ADDlow, DL, PtrVT, ADRP, Lo);
+  }
 }
 
 SDValue
@@ -3240,7 +3545,7 @@ ARM64TargetLowering::LowerVACOPY(SDValue Op, SelectionDAG &DAG) const {
   // pointer.
   unsigned VaListSize = Subtarget->isTargetDarwin() ? 8 : 32;
   const Value *DestSV = cast<SrcValueSDNode>(Op.getOperand(3))->getValue();
-  const Value *SrcSV = cast<SrcValueSDNode>(Op.getOperand(3))->getValue();
+  const Value *SrcSV = cast<SrcValueSDNode>(Op.getOperand(4))->getValue();
 
   return DAG.getMemcpy(Op.getOperand(0), SDLoc(Op),
                        Op.getOperand(1), Op.getOperand(2),
@@ -4923,7 +5228,7 @@ LowerBUILD_VECTOR(SDValue Op, SelectionDAG &DAG) const {
     if (!isa<ConstantFPSDNode>(V) && !isa<ConstantSDNode>(V))
       isConstant = false;
 
-    if (isa<ConstantSDNode>(V)) {
+    if (isa<ConstantSDNode>(V) || isa<ConstantFPSDNode>(V)) {
       ++NumConstantLanes;
       if (!ConstantValue.getNode())
         ConstantValue = V;
@@ -4988,7 +5293,7 @@ LowerBUILD_VECTOR(SDValue Op, SelectionDAG &DAG) const {
     for (unsigned i = 0; i < NumElts; ++i) {
       SDValue V = Op.getOperand(i);
       SDValue LaneIdx = DAG.getConstant(i, MVT::i64);
-      if (!isa<ConstantSDNode>(V)) {
+      if (!isa<ConstantSDNode>(V) && !isa<ConstantFPSDNode>(V)) {
         // Note that type legalization likely mucked about with the VT of the
         // source operand, so we may have to convert it here before inserting.
         Val = DAG.getNode(ISD::INSERT_VECTOR_ELT, dl, VT, Val, V, LaneIdx);
@@ -5745,6 +6050,14 @@ ARM64TargetLowering::isFMAFasterThanFMulAndFAdd(EVT VT) const {
   return false;
 }
 
+const uint16_t *ARM64TargetLowering::getScratchRegisters(CallingConv::ID) const{
+  // LR is a callee-save register, but we must treat it as clobbered by any call
+  // site. Hence we include LR in the scratch registers, which are in turn added
+  // as implicit-defs for stackmaps and patchpoints.
+  static const uint16_t ScratchRegs[] = { ARM64::X16, ARM64::X17, ARM64::LR, 0 };
+  return ScratchRegs;
+}
+
 // Generate SUBS and CSEL for integer abs.
 static SDValue performIntegerAbsCombine(SDNode *N, SelectionDAG &DAG) {
   EVT VT = N->getValueType(0);
@@ -6109,8 +6422,10 @@ SDValue normalizeExtractHigh(SDNode *N, SelectionDAG &DAG) {
     if (DstElts == 1)
       return SDValue(N, 0);
 
+#ifndef NDEBUG
     unsigned SrcBits = SrcVT.getVectorElementType().getSizeInBits();
     assert(SrcElts * SrcBits == 128 && "Not an extract from a wide vector");
+#endif
 
     SDValue Bitcast = DAG.getNode(ISD::BITCAST, SDLoc(N), MVT::v2i64,
                                   N->getOperand(0));
@@ -6391,6 +6706,23 @@ static SDValue tryCombineLongOpWithDup(unsigned IID, SDNode *N,
                      N->getOperand(0), LHS, RHS);
 }
 
+// The CRC32[BH] instructions ignore the high bits of their data operand. Since
+// the intrinsics must be legal and take an i32, this means there's almost
+// certainly going to be a zext in the DAG which we can eliminate.
+static SDValue tryCombineCRC32(unsigned Mask, SDNode *N,
+                               SelectionDAG &DAG) {
+  SDValue AndN = N->getOperand(2);
+  if (AndN.getOpcode() != ISD::AND)
+    return SDValue();
+
+  ConstantSDNode *CMask = dyn_cast<ConstantSDNode>(AndN.getOperand(1));
+  if (!CMask || CMask->getZExtValue() != Mask)
+    return SDValue();
+
+  return DAG.getNode(ISD::INTRINSIC_WO_CHAIN, SDLoc(N), MVT::i32,
+                     N->getOperand(0), N->getOperand(1), AndN.getOperand(0));
+}
+
 static SDValue performIntrinsicCombine(SDNode *N,
                                        TargetLowering::DAGCombinerInfo &DCI,
                                        const ARM64Subtarget *Subtarget) {
@@ -6410,6 +6742,12 @@ static SDValue performIntrinsicCombine(SDNode *N,
   case Intrinsic::arm64_neon_sabdl:
   case Intrinsic::arm64_neon_pmull:
     return tryCombineLongOpWithDup(IID, N, DCI, DAG);
+  case Intrinsic::arm64_crc32b:
+  case Intrinsic::arm64_crc32cb:
+    return tryCombineCRC32(0xff, N, DAG);
+  case Intrinsic::arm64_crc32h:
+  case Intrinsic::arm64_crc32ch:
+    return tryCombineCRC32(0xffff, N, DAG);
   }
   return SDValue();
 }
@@ -6494,12 +6832,80 @@ static SDValue performExtendCombine(SDNode *N,
   return DAG.getNode(ISD::CONCAT_VECTORS, DL, ResVT, Lo, Hi);
 }
 
-static SDValue performSTORECombine(SDNode *N, TargetLowering::DAGCombinerInfo &DCI, SelectionDAG &DAG) {
+/// Replace a splat of a scalar to a vector store by scalar stores of the scalar
+/// value. The load store optimizer pass will merge them to store pair stores.
+/// This has better performance than a splat of the scalar followed by a split
+/// vector store. Even if the stores are not merged it is four stores vs a dup,
+/// followed by an ext.b and two stores.
+static SDValue replaceSplatVectorStore(SelectionDAG &DAG, StoreSDNode *St) {
+  SDValue StVal = St->getValue();
+  EVT VT = StVal.getValueType();
+
+  // Don't replace floating point stores, they possibly won't be transformed to
+  // stp because of the store pair suppress pass.
+  if (VT.isFloatingPoint())
+    return SDValue();
+
+  // Check for insert vector elements.
+  if (StVal.getOpcode() != ISD::INSERT_VECTOR_ELT)
+    return SDValue();
+
+  // We can express a splat as store pair(s) for 2 or 4 elements.
+  unsigned NumVecElts = VT.getVectorNumElements();
+  if (NumVecElts != 4 && NumVecElts != 2)
+    return SDValue();
+  SDValue SplatVal = StVal.getOperand(1);
+  unsigned RemainInsertElts = NumVecElts - 1;
+
+  // Check that this is a splat.
+  while (--RemainInsertElts) {
+    SDValue NextInsertElt = StVal.getOperand(0);
+    if (NextInsertElt.getOpcode() != ISD::INSERT_VECTOR_ELT)
+      return SDValue();
+    if (NextInsertElt.getOperand(1) != SplatVal)
+      return SDValue();
+    StVal = NextInsertElt;
+  }
+  unsigned OrigAlignment = St->getAlignment();
+  unsigned EltOffset = NumVecElts == 4 ? 4 : 8;
+  unsigned Alignment = std::min(OrigAlignment, EltOffset);
+
+  // Create scalar stores. This is at least as good as the code sequence for a
+  // split unaligned store wich is a dup.s, ext.b, and two stores.
+  // Most of the time the three stores should be replaced by store pair
+  // instructions (stp).
+  SDLoc DL(St);
+  SDValue BasePtr = St->getBasePtr();
+  SDValue NewST1 =
+      DAG.getStore(St->getChain(), DL, SplatVal, BasePtr, St->getPointerInfo(),
+                   St->isVolatile(), St->isNonTemporal(), St->getAlignment());
+
+  unsigned Offset = EltOffset;
+  while (--NumVecElts) {
+    SDValue OffsetPtr = DAG.getNode(ISD::ADD, DL, MVT::i64, BasePtr,
+                                    DAG.getConstant(Offset, MVT::i64));
+    NewST1 = DAG.getStore(NewST1.getValue(0), DL, SplatVal, OffsetPtr,
+                          St->getPointerInfo(), St->isVolatile(),
+                          St->isNonTemporal(), Alignment);
+    Offset += EltOffset;
+  }
+  return NewST1;
+}
+
+/// Cyclone has bad performance on unaligned 16B stores when crossing line and
+/// page boundaries. We want to split such stores.
+static SDValue split16BStores(SDNode *N,
+                              TargetLowering::DAGCombinerInfo &DCI,
+                              SelectionDAG &DAG,
+                              const ARM64Subtarget *Subtarget) {
   if (!DCI.isBeforeLegalize())
     return SDValue();
 
   StoreSDNode *S = cast<StoreSDNode>(N);
   if (S->isVolatile())
+    return SDValue();
+
+  if (!Subtarget->isCyclone())
     return SDValue();
 
   // Don't split at Oz.
@@ -6518,9 +6924,20 @@ static SDValue performSTORECombine(SDNode *N, TargetLowering::DAGCombinerInfo &D
     return SDValue();
 
   // Split unaligned 16B stores. They are terrible for performance.
+  // Don't split stores with alignment of 1 or 2. Code that uses clang vector
+  // extensions can use this to mark that it does not want splitting to happen
+  // (by underspecifying alignment to be 1 or 2). Furthermore, the chance of
+  // eliminating alignment hazards is only 1 in 8 for alignment of 2.
   if (VT.getSizeInBits() != 128 || S->getAlignment() >= 16 ||
-      S->getAlignment() == 0)
+      S->getAlignment() <= 2)
     return SDValue();
+
+  // If we get a splat of a scalar convert this vector store to a store of
+  // scalars. They will be merged into store pairs thereby removing two
+  // instructions.
+  SDValue ReplacedSplat = replaceSplatVectorStore(DAG, S);
+  if (ReplacedSplat != SDValue())
+    return ReplacedSplat;
 
   SDLoc DL(S);
   unsigned NumElts = VT.getVectorNumElements()/2;
@@ -6540,6 +6957,92 @@ static SDValue performSTORECombine(SDNode *N, TargetLowering::DAGCombinerInfo &D
   return DAG.getStore(NewST1.getValue(0), DL, SubVector1, OffsetPtr,
                       S->getPointerInfo(), S->isVolatile(),
                       S->isNonTemporal(), S->getAlignment());
+}
+
+/// Simplify \Addr given that the top byte of it is ignored by HW during
+/// address translation.
+static bool performTBISimplification(SDValue Addr,
+                                     TargetLowering::DAGCombinerInfo &DCI,
+                                     SelectionDAG &DAG) {
+  APInt DemandedMask = APInt::getLowBitsSet(64, 56);
+  APInt KnownZero, KnownOne;
+  TargetLowering::TargetLoweringOpt TLO(DAG, DCI.isBeforeLegalize(),
+                                        DCI.isBeforeLegalizeOps());
+  const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+  if (TLI.SimplifyDemandedBits(Addr, DemandedMask, KnownZero, KnownOne, TLO)) {
+    DCI.CommitTargetLoweringOpt(TLO);
+    return true;
+  }
+  return false;
+}
+
+static SDValue performSTORECombine(SDNode *N,
+                                   TargetLowering::DAGCombinerInfo &DCI,
+                                   SelectionDAG &DAG,
+                                   const ARM64Subtarget *Subtarget) {
+  SDValue Split = split16BStores(N, DCI, DAG, Subtarget);
+  if (Split.getNode())
+    return Split;
+
+  if (Subtarget->supportsAddressTopByteIgnored() &&
+      performTBISimplification(N->getOperand(2), DCI, DAG))
+    return SDValue(N, 0);
+
+  return SDValue();
+}
+
+// Optimize compare with zero and branch.
+static SDValue performBRCONDCombine(SDNode *N,
+                                    TargetLowering::DAGCombinerInfo &DCI,
+                                    SelectionDAG &DAG) {
+  SDValue Chain = N->getOperand(0);
+  SDValue Dest = N->getOperand(1);
+  SDValue CCVal = N->getOperand(2);
+  SDValue Cmp = N->getOperand(3);
+
+  assert(isa<ConstantSDNode>(CCVal) && "Expected a ConstantSDNode here!");
+  unsigned CC = cast<ConstantSDNode>(CCVal)->getZExtValue();
+  if (CC != ARM64CC::EQ && CC != ARM64CC::NE)
+    return SDValue();
+
+  unsigned CmpOpc = Cmp.getOpcode();
+  if (CmpOpc != ARM64ISD::ADDS && CmpOpc != ARM64ISD::SUBS)
+    return SDValue();
+
+  // Only attempt folding if there is only one use of the flag and no use of the
+  // value.
+  if (!Cmp->hasNUsesOfValue(0, 0) || !Cmp->hasNUsesOfValue(1, 1))
+    return SDValue();
+
+  SDValue LHS = Cmp.getOperand(0);
+  SDValue RHS = Cmp.getOperand(1);
+
+  assert(LHS.getValueType() == RHS.getValueType() &&
+         "Expected the value type to be the same for both operands!");
+  if (LHS.getValueType() != MVT::i32 && LHS.getValueType() != MVT::i64)
+    return SDValue();
+
+  if (isa<ConstantSDNode>(LHS) && cast<ConstantSDNode>(LHS)->isNullValue())
+    std::swap(LHS, RHS);
+
+  if (!isa<ConstantSDNode>(RHS) || !cast<ConstantSDNode>(RHS)->isNullValue())
+    return SDValue();
+
+  if (LHS.getOpcode() == ISD::SHL || LHS.getOpcode() == ISD::SRA ||
+      LHS.getOpcode() == ISD::SRL)
+    return SDValue();
+
+  // Fold the compare into the branch instruction.
+  SDValue BR;
+  if (CC == ARM64CC::EQ)
+     BR = DAG.getNode(ARM64ISD::CBZ, SDLoc(N), MVT::Other, Chain, LHS, Dest);
+  else
+     BR = DAG.getNode(ARM64ISD::CBNZ, SDLoc(N), MVT::Other, Chain, LHS, Dest);
+
+  // Do not add new nodes to DAG combiner worklist.
+  DCI.CombineTo(N, BR, false);
+
+  return SDValue();
 }
 
 SDValue ARM64TargetLowering::PerformDAGCombine(SDNode *N,
@@ -6569,8 +7072,14 @@ SDValue ARM64TargetLowering::PerformDAGCombine(SDNode *N,
     return performBitcastCombine(N, DCI, DAG);
   case ISD::CONCAT_VECTORS:
     return performConcatVectorsCombine(N, DCI, DAG);
+  case ISD::LOAD:
+    if (performTBISimplification(N->getOperand(1), DCI, DAG))
+      return SDValue(N, 0);
+    break;
   case ISD::STORE:
-    return performSTORECombine(N, DCI, DAG);
+    return performSTORECombine(N, DCI, DAG, Subtarget);
+  case ARM64ISD::BRCOND:
+    return performBRCONDCombine(N, DCI, DAG);
   }
   return SDValue();
 }

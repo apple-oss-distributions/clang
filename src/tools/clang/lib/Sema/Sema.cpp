@@ -13,7 +13,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Sema/SemaInternal.h"
-#include "TargetAttributesSema.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTDiagnostic.h"
 #include "clang/AST/DeclCXX.h"
@@ -70,7 +69,7 @@ void Sema::ActOnTranslationUnitScope(Scope *S) {
 Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
            TranslationUnitKind TUKind,
            CodeCompleteConsumer *CodeCompleter)
-  : TheTargetAttributesSema(0), ExternalSource(0),
+  : ExternalSource(0),
     isMultiplexExternalSource(false), FPFeatures(pp.getLangOpts()),
     LangOpts(pp.getLangOpts()), PP(pp), Context(ctxt), Consumer(consumer),
     Diags(PP.getDiagnostics()), SourceMgr(PP.getSourceManager()),
@@ -118,6 +117,12 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
 
   // Initilization of data sharing attributes stack for OpenMP
   InitDataSharingAttributesStack();
+}
+
+void Sema::addImplicitTypedef(StringRef Name, QualType T) {
+  DeclarationName DN = &Context.Idents.get(Name);
+  if (IdResolver.begin(DN) == IdResolver.end())
+    PushOnScopeChains(Context.buildImplicitTypedef(T, Name), TUScope);
 }
 
 void Sema::Initialize() {
@@ -172,6 +177,27 @@ void Sema::Initialize() {
       PushOnScopeChains(Context.getObjCProtocolDecl(), TUScope);
   }
 
+  // Initialize Microsoft "predefined C++ types".
+  if (PP.getLangOpts().MSVCCompat && PP.getLangOpts().CPlusPlus) {
+    if (IdResolver.begin(&Context.Idents.get("type_info")) == IdResolver.end())
+      PushOnScopeChains(Context.buildImplicitRecord("type_info", TTK_Class),
+                        TUScope);
+
+    addImplicitTypedef("size_t", Context.getSizeType());
+  }
+
+  // Initialize predefined OpenCL types.
+  if (PP.getLangOpts().OpenCL) {
+    addImplicitTypedef("image1d_t", Context.OCLImage1dTy);
+    addImplicitTypedef("image1d_array_t", Context.OCLImage1dArrayTy);
+    addImplicitTypedef("image1d_buffer_t", Context.OCLImage1dBufferTy);
+    addImplicitTypedef("image2d_t", Context.OCLImage2dTy);
+    addImplicitTypedef("image2d_array_t", Context.OCLImage2dArrayTy);
+    addImplicitTypedef("image3d_t", Context.OCLImage3dTy);
+    addImplicitTypedef("sampler_t", Context.OCLSamplerTy);
+    addImplicitTypedef("event_t", Context.OCLEventTy);
+  }
+
   DeclarationName BuiltinVaList = &Context.Idents.get("__builtin_va_list");
   if (IdResolver.begin(BuiltinVaList) == IdResolver.end())
     PushOnScopeChains(Context.getBuiltinVaListDecl(), TUScope);
@@ -184,7 +210,6 @@ Sema::~Sema() {
     delete I->second;
   if (PackContext) FreePackedContext();
   if (VisContext) FreeVisContext();
-  delete TheTargetAttributesSema;
   MSStructPragmaOn = false;
   // Kill all the active scopes.
   for (unsigned I = 1, E = FunctionScopes.size(); I != E; ++I)
@@ -230,7 +255,7 @@ bool Sema::makeUnavailableInSystemHeader(SourceLocation loc,
   // If the function is already unavailable, it's not an error.
   if (fn->hasAttr<UnavailableAttr>()) return true;
 
-  fn->addAttr(new (Context) UnavailableAttr(loc, Context, msg));
+  fn->addAttr(UnavailableAttr::CreateImplicit(Context, msg, loc));
   return true;
 }
 
@@ -1088,14 +1113,30 @@ BlockScopeInfo *Sema::getCurBlock() {
   if (FunctionScopes.empty())
     return 0;
 
-  return dyn_cast<BlockScopeInfo>(FunctionScopes.back());
+  auto CurBSI = dyn_cast<BlockScopeInfo>(FunctionScopes.back());
+  if (CurBSI && CurBSI->TheDecl &&
+      !CurBSI->TheDecl->Encloses(CurContext)) {
+    // We have switched contexts due to template instantiation.
+    assert(!ActiveTemplateInstantiations.empty());
+    return nullptr;
+  }
+
+  return CurBSI;
 }
 
 LambdaScopeInfo *Sema::getCurLambda() {
   if (FunctionScopes.empty())
     return 0;
 
-  return dyn_cast<LambdaScopeInfo>(FunctionScopes.back());
+  auto CurLSI = dyn_cast<LambdaScopeInfo>(FunctionScopes.back());
+  if (CurLSI && CurLSI->Lambda &&
+      !CurLSI->Lambda->Encloses(CurContext)) {
+    // We have switched contexts due to template instantiation.
+    assert(!ActiveTemplateInstantiations.empty());
+    return nullptr;
+  }
+
+  return CurLSI;
 }
 // We have a generic lambda if we parsed auto parameters, or we have 
 // an associated template parameter list.
@@ -1215,7 +1256,7 @@ bool Sema::tryExprAsCall(Expr &E, QualType &ZeroArgCallReturnTy,
             ZeroArgCallReturnTy = QualType();
             Ambiguous = true;
           } else
-            ZeroArgCallReturnTy = OverloadDecl->getResultType();
+            ZeroArgCallReturnTy = OverloadDecl->getReturnType();
         }
       }
     }
@@ -1244,7 +1285,7 @@ bool Sema::tryExprAsCall(Expr &E, QualType &ZeroArgCallReturnTy,
   if (const DeclRefExpr *DeclRef = dyn_cast<DeclRefExpr>(E.IgnoreParens())) {
     if (const FunctionDecl *Fun = dyn_cast<FunctionDecl>(DeclRef->getDecl())) {
       if (Fun->getMinRequiredArguments() == 0)
-        ZeroArgCallReturnTy = Fun->getResultType();
+        ZeroArgCallReturnTy = Fun->getReturnType();
       return true;
     }
   }
@@ -1261,8 +1302,8 @@ bool Sema::tryExprAsCall(Expr &E, QualType &ZeroArgCallReturnTy,
 
   if (const FunctionProtoType *FPT =
       dyn_cast_or_null<FunctionProtoType>(FunTy)) {
-    if (FPT->getNumArgs() == 0)
-      ZeroArgCallReturnTy = FunTy->getResultType();
+    if (FPT->getNumParams() == 0)
+      ZeroArgCallReturnTy = FunTy->getReturnType();
     return true;
   }
   return false;
@@ -1313,7 +1354,7 @@ static void notePlausibleOverloads(Sema &S, SourceLocation Loc,
   for (OverloadExpr::decls_iterator It = Overloads.begin(),
          DeclsEnd = Overloads.end(); It != DeclsEnd; ++It) {
     const FunctionDecl *OverloadDecl = cast<FunctionDecl>(*It);
-    QualType OverloadResultTy = OverloadDecl->getResultType();
+    QualType OverloadResultTy = OverloadDecl->getReturnType();
     if (IsPlausibleResult(OverloadResultTy))
       PlausibleOverloads.addDecl(It.getDecl());
   }

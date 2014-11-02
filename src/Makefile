@@ -114,9 +114,13 @@ cross-compile-build-tools:
 	  unset CXXFLAGS ; \
 	  unset SDKROOT ; \
 	  unset UNIVERSAL_SDK_PATH ; \
+	  configure_opts= ; \
+	  if test "$(ENABLE_LIBCPP)" -ne 0 ; then \
+	    configure_opts="$$configure_opts --enable-libcpp"; \
+	  fi; \
 	  $(PROJ_SRC_DIR)/configure --build=$(BUILD_TRIPLE) \
 		--host=$(BUILD_TRIPLE) --target=$(BUILD_TRIPLE) \
-	        --disable-polly ; \
+	        --disable-polly $$configure_opts; \
 	  cd .. ; \
 	fi; \
 	($(MAKE) -C BuildTools \
@@ -126,6 +130,7 @@ cross-compile-build-tools:
 	  SDKROOT= \
 	  TARGET_NATIVE_ARCH="$(TARGET_NATIVE_ARCH)" \
 	  TARGETS_TO_BUILD="$(TARGETS_TO_BUILD)" \
+	  TARGET_LIBS="$(LIBS)" \
 	  ENABLE_OPTIMIZED=$(ENABLE_OPTIMIZED) \
 	  ENABLE_PROFILING=$(ENABLE_PROFILING) \
 	  ENABLE_COVERAGE=$(ENABLE_COVERAGE) \

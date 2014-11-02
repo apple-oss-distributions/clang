@@ -24,11 +24,19 @@
 
 using namespace llvm;
 
+// If CPU and OS supports TBI, use this flag to enable it.  The Swift driver
+// currently passes this to the language front-end to enable TBI.  To disable
+// TBI, pass -target-feature -tbi to the Swift driver.
+static cl::opt<bool>
+UseAddressTopByteIgnored("aarch64-use-tbi", cl::desc("Assume that top byte of "
+                         "an address is ignored"), cl::init(false), cl::Hidden);
+
 ARM64Subtarget::ARM64Subtarget(const std::string &TT, const std::string &CPU,
                                const std::string &FS)
   : ARM64GenSubtargetInfo(TT, CPU, FS),
     HasZeroCycleRegMove(false),
     HasZeroCycleZeroing(false),
+    HasAddressTopByteIgnored(false),
     CPUString(CPU),
     TargetTriple(TT) {
   // Determine default and user-specified characteristics
@@ -44,7 +52,8 @@ ARM64Subtarget::ARM64Subtarget(const std::string &TT, const std::string &CPU,
 /// how a global value should be referenced for the current subtarget.
 unsigned char
 ARM64Subtarget::ClassifyGlobalReference(const GlobalValue *GV,
-                                        Reloc::Model RelocM) const {
+                                        const TargetMachine &TM) const {
+
   // Determine whether this is a reference to a definition or a declaration.
   // Materializable GVs (in JIT lazy compilation mode) do not require an extra
   // load from stub.
@@ -54,8 +63,11 @@ ARM64Subtarget::ClassifyGlobalReference(const GlobalValue *GV,
 
   // If symbol visibility is hidden, the extra load is not needed if
   // the symbol is definitely defined in the current translation unit.
-  if (RelocM != Reloc::Static && GV->hasDefaultVisibility() &&
+  if (TM.getRelocationModel() != Reloc::Static && GV->hasDefaultVisibility() &&
       (isDecl || GV->isWeakForLinker()))
+    return ARM64II::MO_GOT;
+
+  if (TM.getCodeModel() == CodeModel::Large && isTargetMachO())
     return ARM64II::MO_GOT;
 
   // FIXME: this will fail on static ELF for weak symbols.
@@ -80,4 +92,17 @@ void ARM64Subtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
   // bi-directional scheduling. 253.perlbmk.
   Policy.OnlyTopDown = false;
   Policy.OnlyBottomUp = false;
+}
+
+bool ARM64Subtarget::supportsAddressTopByteIgnored() const {
+  if (!HasAddressTopByteIgnored || !UseAddressTopByteIgnored)
+    return false;
+
+  if (TargetTriple.isiOS()) {
+    unsigned Major, Minor, Micro;
+    TargetTriple.getiOSVersion(Major, Minor, Micro);
+    return Major >= 8;
+  }
+
+  return false;
 }

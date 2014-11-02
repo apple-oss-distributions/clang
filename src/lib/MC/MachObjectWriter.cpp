@@ -446,7 +446,7 @@ void MachObjectWriter::BindIndirectSymbols(MCAssembler &Asm) {
     }
   }
 
-  // Bind non lazy symbol pointers first.
+  // Bind non-lazy symbol pointers first.
   unsigned IndirectIndex = 0;
   for (MCAssembler::indirect_symbol_iterator it = Asm.indirect_symbol_begin(),
          ie = Asm.indirect_symbol_end(); it != ie; ++it, ++IndirectIndex) {
@@ -927,7 +927,9 @@ void MachObjectWriter::WriteObject(MCAssembler &Asm,
 
   // Write out the loh commands, if there is one.
   if (LOHSize) {
+#ifndef NDEBUG
     unsigned Start = OS.tell();
+#endif
     Asm.getLOHContainer().Emit(*this, Layout);
     // Pad to a multiple of the pointer size.
     WriteBytes("", OffsetToAlignment(LOHRawSize, is64Bit() ? 8 : 4));
@@ -940,7 +942,7 @@ void MachObjectWriter::WriteObject(MCAssembler &Asm,
     for (MCAssembler::const_indirect_symbol_iterator
            it = Asm.indirect_symbol_begin(),
            ie = Asm.indirect_symbol_end(); it != ie; ++it) {
-      // Indirect symbols in the non lazy symbol pointer section have some
+      // Indirect symbols in the non-lazy symbol pointer section have some
       // special handling.
       const MCSectionMachO &Section =
         static_cast<const MCSectionMachO&>(it->SectionData->getSection());

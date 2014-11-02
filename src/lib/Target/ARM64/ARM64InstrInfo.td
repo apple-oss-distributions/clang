@@ -83,9 +83,13 @@ def SDT_ARM64ITOF  : SDTypeProfile<1, 1, [SDTCisFP<0>, SDTCisSameAs<0,1>]>;
 
 def SDT_ARM64TLSDescCall : SDTypeProfile<0, -2, [SDTCisPtrTy<0>,
                                                  SDTCisPtrTy<1>]>;
+def SDT_ARM64WrapperLarge : SDTypeProfile<1, 4,
+                                        [SDTCisVT<0, i64>, SDTCisVT<1, i32>,
+                                         SDTCisSameAs<1, 2>, SDTCisSameAs<1, 3>,
+                                         SDTCisSameAs<1, 4>]>;
+
 
 // Node definitions.
-def ARM64Wrapper       : SDNode<"ARM64ISD::Wrapper", SDTIntUnaryOp>;
 def ARM64adrp          : SDNode<"ARM64ISD::ADRP", SDTIntUnaryOp, []>;
 def ARM64addlow        : SDNode<"ARM64ISD::ADDlow", SDTIntBinOp, []>;
 def ARM64LOADgot       : SDNode<"ARM64ISD::LOADgot", SDTIntUnaryOp>;
@@ -207,6 +211,9 @@ def ARM64tlsdesc_call : SDNode<"ARM64ISD::TLSDESC_CALL", SDT_ARM64TLSDescCall,
                                [SDNPInGlue, SDNPOutGlue, SDNPHasChain,
                                 SDNPVariadic]>;
 
+def ARM64WrapperLarge : SDNode<"ARM64ISD::WrapperLarge", SDT_ARM64WrapperLarge>;
+
+
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
@@ -215,6 +222,8 @@ def ARM64tlsdesc_call : SDNode<"ARM64ISD::TLSDESC_CALL", SDT_ARM64TLSDescCall,
 //
 def HasZCZ    : Predicate<"Subtarget->hasZeroCycleZeroing()">;
 def NoZCZ     : Predicate<"!Subtarget->hasZeroCycleZeroing()">;
+def IsDarwin  : Predicate<"Subtarget->isTargetDarwin()">;
+def IsNotDarwin: Predicate<"!Subtarget->isTargetDarwin()">;
 def ForCodeSize   : Predicate<"ForCodeSize">;
 def NotForCodeSize   : Predicate<"!ForCodeSize">;
 
@@ -284,6 +293,9 @@ def : Pat<(ARM64LOADgot tglobaltlsaddr:$addr),
 def : Pat<(ARM64LOADgot texternalsym:$addr),
           (LOADgot texternalsym:$addr)>;
 
+def : Pat<(ARM64LOADgot tconstpool:$addr),
+          (LOADgot tconstpool:$addr)>;
+
 //===----------------------------------------------------------------------===//
 // System instructions.
 //===----------------------------------------------------------------------===//
@@ -336,21 +348,26 @@ def : InstAlias<"movn $dst, $imm", (MOVNXi GPR64:$dst, imm0_65535:$imm, 0)>;
 def : InstAlias<"movz $dst, $imm", (MOVZWi GPR32:$dst, imm0_65535:$imm, 0)>;
 def : InstAlias<"movz $dst, $imm", (MOVZXi GPR64:$dst, imm0_65535:$imm, 0)>;
 
+def : InstAlias<"movz $Rd, $sym", (MOVZXi GPR64:$Rd, movz_symbol_g3:$sym, 48)>;
 def : InstAlias<"movz $Rd, $sym", (MOVZXi GPR64:$Rd, movz_symbol_g2:$sym, 32)>;
 def : InstAlias<"movz $Rd, $sym", (MOVZXi GPR64:$Rd, movz_symbol_g1:$sym, 16)>;
 def : InstAlias<"movz $Rd, $sym", (MOVZXi GPR64:$Rd, movz_symbol_g0:$sym, 0)>;
 
+def : InstAlias<"movn $Rd, $sym", (MOVNXi GPR64:$Rd, movz_symbol_g3:$sym, 48)>;
 def : InstAlias<"movn $Rd, $sym", (MOVNXi GPR64:$Rd, movz_symbol_g2:$sym, 32)>;
 def : InstAlias<"movn $Rd, $sym", (MOVNXi GPR64:$Rd, movz_symbol_g1:$sym, 16)>;
 def : InstAlias<"movn $Rd, $sym", (MOVNXi GPR64:$Rd, movz_symbol_g0:$sym, 0)>;
 
+def : InstAlias<"movz $Rd, $sym", (MOVZWi GPR32:$Rd, movz_symbol_g3:$sym, 48)>;
 def : InstAlias<"movz $Rd, $sym", (MOVZWi GPR32:$Rd, movz_symbol_g2:$sym, 32)>;
 def : InstAlias<"movz $Rd, $sym", (MOVZWi GPR32:$Rd, movz_symbol_g1:$sym, 16)>;
 def : InstAlias<"movz $Rd, $sym", (MOVZWi GPR32:$Rd, movz_symbol_g0:$sym, 0)>;
 
+def : InstAlias<"movk $Rd, $sym", (MOVKXi GPR64:$Rd, movk_symbol_g2:$sym, 32)>;
 def : InstAlias<"movk $Rd, $sym", (MOVKXi GPR64:$Rd, movk_symbol_g1:$sym, 16)>;
 def : InstAlias<"movk $Rd, $sym", (MOVKXi GPR64:$Rd, movk_symbol_g0:$sym, 0)>;
 
+def : InstAlias<"movk $Rd, $sym", (MOVKWi GPR32:$Rd, movk_symbol_g2:$sym, 32)>;
 def : InstAlias<"movk $Rd, $sym", (MOVKWi GPR32:$Rd, movk_symbol_g1:$sym, 16)>;
 def : InstAlias<"movk $Rd, $sym", (MOVKWi GPR32:$Rd, movk_symbol_g0:$sym, 0)>;
 
@@ -369,6 +386,28 @@ def MOVi64imm
              [(set GPR64:$dst, imm:$src)]>,
       Sched<[WriteImm]>;
 } // isReMaterializable, isCodeGenOnly
+
+def : Pat<(ARM64WrapperLarge tglobaladdr:$g3, tglobaladdr:$g2,
+                             tglobaladdr:$g1, tglobaladdr:$g0),
+          (MOVKXi (MOVKXi (MOVKXi (MOVZXi tglobaladdr:$g3, 48),
+                                  tglobaladdr:$g2, 32),
+                          tglobaladdr:$g1, 16),
+                  tglobaladdr:$g0, 0)>;
+
+def : Pat<(ARM64WrapperLarge tblockaddress:$g3, tblockaddress:$g2,
+                             tblockaddress:$g1, tblockaddress:$g0),
+          (MOVKXi (MOVKXi (MOVKXi (MOVZXi tblockaddress:$g3, 48),
+                                  tblockaddress:$g2, 32),
+                          tblockaddress:$g1, 16),
+                  tblockaddress:$g0, 0)>;
+
+def : Pat<(ARM64WrapperLarge tconstpool:$g3, tconstpool:$g2,
+                             tconstpool:$g1, tconstpool:$g0),
+          (MOVKXi (MOVKXi (MOVKXi (MOVZXi tconstpool:$g3, 48),
+                                  tconstpool:$g2, 32),
+                          tconstpool:$g1, 16),
+                  tconstpool:$g0, 0)>;
+
 
 //===----------------------------------------------------------------------===//
 // Arithmetic instructions.
@@ -453,6 +492,10 @@ def : InstAlias<"negs $dst, $src, $shift",
 // Unsigned/Signed divide
 defm UDIV : Div<0, "udiv", udiv>;
 defm SDIV : Div<1, "sdiv", sdiv>;
+let isCodeGenOnly = 1 in {
+defm UDIV_Int : Div<0, "udiv", int_arm64_udiv>;
+defm SDIV_Int : Div<1, "sdiv", int_arm64_sdiv>;
+}
 
 // Variable shift
 defm ASRV : Shift<0b10, "asrv", sra>;
@@ -515,6 +558,18 @@ def : WideMulAccumAlias<"umnegl", UMSUBLrrr>;
 def SMULHrr : MulHi<0b010, "smulh", mulhs>;
 def UMULHrr : MulHi<0b110, "umulh", mulhu>;
 
+// CRC32
+def CRC32Brr : BaseCRC32<0, 0b00, 0, GPR32, int_arm64_crc32b, "crc32b">;
+def CRC32Hrr : BaseCRC32<0, 0b01, 0, GPR32, int_arm64_crc32h, "crc32h">;
+def CRC32Wrr : BaseCRC32<0, 0b10, 0, GPR32, int_arm64_crc32w, "crc32w">;
+def CRC32Xrr : BaseCRC32<1, 0b11, 0, GPR64, int_arm64_crc32x, "crc32x">;
+
+def CRC32CBrr : BaseCRC32<0, 0b00, 1, GPR32, int_arm64_crc32cb, "crc32cb">;
+def CRC32CHrr : BaseCRC32<0, 0b01, 1, GPR32, int_arm64_crc32ch, "crc32ch">;
+def CRC32CWrr : BaseCRC32<0, 0b10, 1, GPR32, int_arm64_crc32cw, "crc32cw">;
+def CRC32CXrr : BaseCRC32<1, 0b11, 1, GPR64, int_arm64_crc32cx, "crc32cx">;
+
+
 //===----------------------------------------------------------------------===//
 // Logical instructions.
 //===----------------------------------------------------------------------===//
@@ -573,6 +628,7 @@ def : InstAlias<"mvn $Xd, $Xm",
 
 def : Pat<(not GPR32:$Wm), (ORNWrr WZR, GPR32:$Wm)>;
 def : Pat<(not GPR64:$Xm), (ORNXrr XZR, GPR64:$Xm)>;
+
 
 //===----------------------------------------------------------------------===//
 // One operand data processing instructions.
@@ -1808,6 +1864,10 @@ defm FCVTPS : FPToInteger<0b01, 0b000, "fcvtps", int_arm64_neon_fcvtps>;
 defm FCVTPU : FPToInteger<0b01, 0b001, "fcvtpu", int_arm64_neon_fcvtpu>;
 defm FCVTZS : FPToInteger<0b11, 0b000, "fcvtzs", fp_to_sint>;
 defm FCVTZU : FPToInteger<0b11, 0b001, "fcvtzu", fp_to_uint>;
+let isCodeGenOnly = 1 in {
+defm FCVTZS_Int : FPToInteger<0b11, 0b000, "fcvtzs", int_arm64_neon_fcvtzs>;
+defm FCVTZU_Int : FPToInteger<0b11, 0b001, "fcvtzu", int_arm64_neon_fcvtzu>;
+}
 
 //===----------------------------------------------------------------------===//
 // Scaled integer to floating point conversion instructions.
@@ -1856,6 +1916,14 @@ def : Pat<(i64 (bitconvert (f64 FPR64:$Xn))), (COPY_TO_REGCLASS FPR64:$Xn,
 //===----------------------------------------------------------------------===//
 
 defm FCVT : FPConversion<"fcvt">;
+
+def : Pat<(f32_to_f16 FPR32:$Rn),
+          (i32 (COPY_TO_REGCLASS
+                   (f32 (SUBREG_TO_REG (i32 0), (FCVTHSr FPR32:$Rn), hsub)),
+                   GPR32))>;
+
+def FCVTSHpseudo : Pseudo<(outs FPR32:$Rd), (ins FPR32:$Rn),
+                          [(set (f32 FPR32:$Rd), (f16_to_f32 i32:$Rn))]>;
 
 //===----------------------------------------------------------------------===//
 // Floating point single operand instructions.
@@ -2009,6 +2077,12 @@ defm FCVTXN : SIMDFPInexactCvtTwoVector<1, 0, 0b10110, "fcvtxn",
                                         int_arm64_neon_fcvtxn>;
 defm FCVTZS : SIMDTwoVectorFPToInt<0, 1, 0b11011, "fcvtzs", fp_to_sint>;
 defm FCVTZU : SIMDTwoVectorFPToInt<1, 1, 0b11011, "fcvtzu", fp_to_uint>;
+let isCodeGenOnly = 1 in {
+defm FCVTZS_Int : SIMDTwoVectorFPToInt<0, 1, 0b11011, "fcvtzs",
+                                       int_arm64_neon_fcvtzs>;
+defm FCVTZU_Int : SIMDTwoVectorFPToInt<1, 1, 0b11011, "fcvtzu",
+                                       int_arm64_neon_fcvtzu>;
+}
 defm FNEG   : SIMDTwoVectorFP<1, 1, 0b01111, "fneg", fneg>;
 defm FRECPE : SIMDTwoVectorFP<0, 1, 0b11101, "frecpe", int_arm64_neon_frecpe>;
 defm FRINTA : SIMDTwoVectorFP<1, 0, 0b11000, "frinta", int_arm64_neon_frinta>;
@@ -2238,96 +2312,154 @@ defm ORN : SIMDLogicalThreeVector<0, 0b11, "orn",
                                   BinOpFrag<(or node:$LHS, (vnot node:$RHS))> >;
 defm ORR : SIMDLogicalThreeVector<0, 0b10, "orr", or>;
 
-def : InstAlias<"mov.16b $dst, $src",
-                (ORRv16i8 V128:$dst, V128:$src, V128:$src)>;
-def : InstAlias<"mov.8h $dst, $src",
-                (ORRv16i8 V128:$dst, V128:$src, V128:$src)>;
-def : InstAlias<"mov.4s $dst, $src",
-                (ORRv16i8 V128:$dst, V128:$src, V128:$src)>;
-def : InstAlias<"mov.2d $dst, $src",
-                (ORRv16i8 V128:$dst, V128:$src, V128:$src)>;
+// FIXME: the .16b and .8b variantes should be emitted by the
+// AsmWriter. TableGen's AsmWriter-generator doesn't deal with variant syntaxes
+// in aliases yet though.
+def : InstAlias<"mov{\t$dst.16b, $src.16b|.16b\t$dst, $src}",
+                (ORRv16i8 V128:$dst, V128:$src, V128:$src), 0>;
+def : InstAlias<"{mov\t$dst.8h, $src.8h|mov.8h\t$dst, $src}",
+                (ORRv16i8 V128:$dst, V128:$src, V128:$src), 0>;
+def : InstAlias<"{mov\t$dst.4s, $src.4s|mov.4s\t$dst, $src}",
+                (ORRv16i8 V128:$dst, V128:$src, V128:$src), 0>;
+def : InstAlias<"{mov\t$dst.2d, $src.2d|mov.2d\t$dst, $src}",
+                (ORRv16i8 V128:$dst, V128:$src, V128:$src), 0>;
 
-def : InstAlias<"mov.8b $dst, $src",
-                (ORRv8i8 V64:$dst, V64:$src, V64:$src)>;
-def : InstAlias<"mov.4h $dst, $src",
-                (ORRv8i8 V64:$dst, V64:$src, V64:$src)>;
-def : InstAlias<"mov.2s $dst, $src",
-                (ORRv8i8 V64:$dst, V64:$src, V64:$src)>;
-def : InstAlias<"mov.1d $dst, $src",
-                (ORRv8i8 V64:$dst, V64:$src, V64:$src)>;
+def : InstAlias<"{mov\t$dst.8b, $src.8b|mov.8b\t$dst, $src}",
+                (ORRv8i8 V64:$dst, V64:$src, V64:$src), 0>;
+def : InstAlias<"{mov\t$dst.4h, $src.4h|mov.4h\t$dst, $src}",
+                (ORRv8i8 V64:$dst, V64:$src, V64:$src), 0>;
+def : InstAlias<"{mov\t$dst.2s, $src.2s|mov.2s\t$dst, $src}",
+                (ORRv8i8 V64:$dst, V64:$src, V64:$src), 0>;
+def : InstAlias<"{mov\t$dst.1d, $src.1d|mov.1d\t$dst, $src}",
+                (ORRv8i8 V64:$dst, V64:$src, V64:$src), 0>;
 
-def : InstAlias<"cmls.8b $dst, $src1, $src2",
-                (CMHSv8i8 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmls.16b $dst, $src1, $src2",
-                (CMHSv16i8 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmls.4h $dst, $src1, $src2",
-                (CMHSv4i16 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmls.8h $dst, $src1, $src2",
-                (CMHSv8i16 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmls.2s $dst, $src1, $src2",
-                (CMHSv2i32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmls.4s $dst, $src1, $src2",
-                (CMHSv4i32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmls.2d $dst, $src1, $src2",
-                (CMHSv2i64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{cmls\t$dst.8b, $src1.8b, $src2.8b" #
+                "|cmls.8b\t$dst, $src1, $src2}",
+                (CMHSv8i8 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmls\t$dst.16b, $src1.16b, $src2.16b" #
+                "|cmls.16b\t$dst, $src1, $src2}",
+                (CMHSv16i8 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmls\t$dst.4h, $src1.4h, $src2.4h" #
+                "|cmls.4h\t$dst, $src1, $src2}",
+                (CMHSv4i16 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmls\t$dst.8h, $src1.8h, $src2.8h" #
+                "|cmls.8h\t$dst, $src1, $src2}",
+                (CMHSv8i16 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmls\t$dst.2s, $src1.2s, $src2.2s" #
+                "|cmls.2s\t$dst, $src1, $src2}",
+                (CMHSv2i32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmls\t$dst.4s, $src1.4s, $src2.4s" #
+                "|cmls.4s\t$dst, $src1, $src2}",
+                (CMHSv4i32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmls\t$dst.2d, $src1.2d, $src2.2d" #
+                "|cmls.2d\t$dst, $src1, $src2}",
+                (CMHSv2i64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
-def : InstAlias<"cmle.8b $dst, $src1, $src2",
-                (CMGEv8i8 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmle.16b $dst, $src1, $src2",
-                (CMGEv16i8 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmle.4h $dst, $src1, $src2",
-                (CMGEv4i16 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmle.8h $dst, $src1, $src2",
-                (CMGEv8i16 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmle.2s $dst, $src1, $src2",
-                (CMGEv2i32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmle.4s $dst, $src1, $src2",
-                (CMGEv4i32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmle.2d $dst, $src1, $src2",
-                (CMGEv2i64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{cmlo\t$dst.8b, $src1.8b, $src2.8b" #
+                "|cmlo.8b\t$dst, $src1, $src2}",
+                (CMHIv8i8 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmlo\t$dst.16b, $src1.16b, $src2.16b" #
+                "|cmlo.16b\t$dst, $src1, $src2}",
+                (CMHIv16i8 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmlo\t$dst.4h, $src1.4h, $src2.4h" #
+                "|cmlo.4h\t$dst, $src1, $src2}",
+                (CMHIv4i16 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmlo\t$dst.8h, $src1.8h, $src2.8h" #
+                "|cmlo.8h\t$dst, $src1, $src2}",
+                (CMHIv8i16 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmlo\t$dst.2s, $src1.2s, $src2.2s" #
+                "|cmlo.2s\t$dst, $src1, $src2}",
+                (CMHIv2i32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmlo\t$dst.4s, $src1.4s, $src2.4s" #
+                "|cmlo.4s\t$dst, $src1, $src2}",
+                (CMHIv4i32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmlo\t$dst.2d, $src1.2d, $src2.2d" #
+                "|cmlo.2d\t$dst, $src1, $src2}",
+                (CMHIv2i64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
-def : InstAlias<"cmlt.8b $dst, $src1, $src2",
-                (CMGTv8i8 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmlt.16b $dst, $src1, $src2",
-                (CMGTv16i8 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmlt.4h $dst, $src1, $src2",
-                (CMGTv4i16 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmlt.8h $dst, $src1, $src2",
-                (CMGTv8i16 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmlt.2s $dst, $src1, $src2",
-                (CMGTv2i32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"cmlt.4s $dst, $src1, $src2",
-                (CMGTv4i32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"cmlt.2d $dst, $src1, $src2",
-                (CMGTv2i64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{cmle\t$dst.8b, $src1.8b, $src2.8b" #
+                "|cmle.8b\t$dst, $src1, $src2}",
+                (CMGEv8i8 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmle\t$dst.16b, $src1.16b, $src2.16b" #
+                "|cmle.16b\t$dst, $src1, $src2}",
+                (CMGEv16i8 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmle\t$dst.4h, $src1.4h, $src2.4h" #
+                "|cmle.4h\t$dst, $src1, $src2}",
+                (CMGEv4i16 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmle\t$dst.8h, $src1.8h, $src2.8h" #
+                "|cmle.8h\t$dst, $src1, $src2}",
+                (CMGEv8i16 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmle\t$dst.2s, $src1.2s, $src2.2s" #
+                "|cmle.2s\t$dst, $src1, $src2}",
+                (CMGEv2i32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmle\t$dst.4s, $src1.4s, $src2.4s" #
+                "|cmle.4s\t$dst, $src1, $src2}",
+                (CMGEv4i32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmle\t$dst.2d, $src1.2d, $src2.2d" #
+                "|cmle.2d\t$dst, $src1, $src2}",
+                (CMGEv2i64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
-def : InstAlias<"fcmle.2s $dst, $src1, $src2",
-                (FCMGEv2f32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"fcmle.4s $dst, $src1, $src2",
-                (FCMGEv4f32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"fcmle.2d $dst, $src1, $src2",
-                (FCMGEv2f64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{cmlt\t$dst.8b, $src1.8b, $src2.8b" #
+                "|cmlt.8b\t$dst, $src1, $src2}",
+                (CMGTv8i8 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmlt\t$dst.16b, $src1.16b, $src2.16b" #
+                "|cmlt.16b\t$dst, $src1, $src2}",
+                (CMGTv16i8 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmlt\t$dst.4h, $src1.4h, $src2.4h" #
+                "|cmlt.4h\t$dst, $src1, $src2}",
+                (CMGTv4i16 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmlt\t$dst.8h, $src1.8h, $src2.8h" #
+                "|cmlt.8h\t$dst, $src1, $src2}",
+                (CMGTv8i16 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmlt\t$dst.2s, $src1.2s, $src2.2s" #
+                "|cmlt.2s\t$dst, $src1, $src2}",
+                (CMGTv2i32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{cmlt\t$dst.4s, $src1.4s, $src2.4s" #
+                "|cmlt.4s\t$dst, $src1, $src2}",
+                (CMGTv4i32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{cmlt\t$dst.2d, $src1.2d, $src2.2d" #
+                "|cmlt.2d\t$dst, $src1, $src2}",
+                (CMGTv2i64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
-def : InstAlias<"fcmlt.2s $dst, $src1, $src2",
-                (FCMGTv2f32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"fcmlt.4s $dst, $src1, $src2",
-                (FCMGTv4f32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"fcmlt.2d $dst, $src1, $src2",
-                (FCMGTv2f64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{fcmle\t$dst.2s, $src1.2s, $src2.2s" #
+                "|fcmle.2s\t$dst, $src1, $src2}",
+                (FCMGEv2f32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{fcmle\t$dst.4s, $src1.4s, $src2.4s" #
+                "|fcmle.4s\t$dst, $src1, $src2}",
+                (FCMGEv4f32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{fcmle\t$dst.2d, $src1.2d, $src2.2d" #
+                "|fcmle.2d\t$dst, $src1, $src2}",
+                (FCMGEv2f64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
-def : InstAlias<"facle.2s $dst, $src1, $src2",
-                (FACGEv2f32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"facle.4s $dst, $src1, $src2",
-                (FACGEv4f32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"facle.2d $dst, $src1, $src2",
-                (FACGEv2f64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{fcmlt\t$dst.2s, $src1.2s, $src2.2s" #
+                "|fcmlt.2s\t$dst, $src1, $src2}",
+                (FCMGTv2f32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{fcmlt\t$dst.4s, $src1.4s, $src2.4s" #
+                "|fcmlt.4s\t$dst, $src1, $src2}",
+                (FCMGTv4f32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{fcmlt\t$dst.2d, $src1.2d, $src2.2d" #
+                "|fcmlt.2d\t$dst, $src1, $src2}",
+                (FCMGTv2f64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
-def : InstAlias<"faclt.2s $dst, $src1, $src2",
-                (FACGTv2f32 V64:$dst, V64:$src2, V64:$src1)>;
-def : InstAlias<"faclt.4s $dst, $src1, $src2",
-                (FACGTv4f32 V128:$dst, V128:$src2, V128:$src1)>;
-def : InstAlias<"faclt.2d $dst, $src1, $src2",
-                (FACGTv2f64 V128:$dst, V128:$src2, V128:$src1)>;
+def : InstAlias<"{facle\t$dst.2s, $src1.2s, $src2.2s" #
+                "|facle.2s\t$dst, $src1, $src2}",
+                (FACGEv2f32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{facle\t$dst.4s, $src1.4s, $src2.4s" #
+                "|facle.4s\t$dst, $src1, $src2}",
+                (FACGEv4f32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{facle\t$dst.2d, $src1.2d, $src2.2d" #
+                "|facle.2d\t$dst, $src1, $src2}",
+                (FACGEv2f64 V128:$dst, V128:$src2, V128:$src1), 0>;
+
+def : InstAlias<"{faclt\t$dst.2s, $src1.2s, $src2.2s" #
+                "|faclt.2s\t$dst, $src1, $src2}",
+                (FACGTv2f32 V64:$dst, V64:$src2, V64:$src1), 0>;
+def : InstAlias<"{faclt\t$dst.4s, $src1.4s, $src2.4s" #
+                "|faclt.4s\t$dst, $src1, $src2}",
+                (FACGTv4f32 V128:$dst, V128:$src2, V128:$src1), 0>;
+def : InstAlias<"{faclt\t$dst.2d, $src1.2d, $src2.2d" #
+                "|faclt.2d\t$dst, $src1, $src2}",
+                (FACGTv2f64 V128:$dst, V128:$src2, V128:$src1), 0>;
 
 //===----------------------------------------------------------------------===//
 // Advanced SIMD three scalar instructions.
@@ -2654,14 +2786,6 @@ def DUPv8i16gpr : SIMDDupFromMain<1, 0b00010, ".8h", v8i16, V128, GPR32>;
 def DUPv2i32gpr : SIMDDupFromMain<0, 0b00100, ".2s", v2i32, V64, GPR32>;
 def DUPv4i32gpr : SIMDDupFromMain<1, 0b00100, ".4s", v4i32, V128, GPR32>;
 def DUPv2i64gpr : SIMDDupFromMain<1, 0b01000, ".2d", v2i64, V128, GPR64>;
-// Verbose syntax alternates.
-def : InstAlias<"dup $Rd.8b, $Rn", (DUPv8i8gpr V64:$Rd, GPR32:$Rn)>;
-def : InstAlias<"dup $Rd.16b, $Rn", (DUPv16i8gpr V128:$Rd, GPR32:$Rn)>;
-def : InstAlias<"dup $Rd.4h, $Rn", (DUPv4i16gpr V64:$Rd, GPR32:$Rn)>;
-def : InstAlias<"dup $Rd.8h, $Rn", (DUPv8i16gpr V128:$Rd, GPR32:$Rn)>;
-def : InstAlias<"dup $Rd.2s, $Rn", (DUPv2i32gpr V64:$Rd, GPR32:$Rn)>;
-def : InstAlias<"dup $Rd.4s, $Rn", (DUPv4i32gpr V128:$Rd, GPR32:$Rn)>;
-def : InstAlias<"dup $Rd.2d, $Rn", (DUPv2i64gpr V128:$Rd, GPR64:$Rn)>;
 
 def DUPv2i64lane : SIMDDup64FromElement;
 def DUPv2i32lane : SIMDDup32FromElement<0, ".2s", v2i32, V64>;
@@ -2670,14 +2794,6 @@ def DUPv4i16lane : SIMDDup16FromElement<0, ".4h", v4i16, V64>;
 def DUPv8i16lane : SIMDDup16FromElement<1, ".8h", v8i16, V128>;
 def DUPv8i8lane  : SIMDDup8FromElement <0, ".8b", v8i8, V64>;
 def DUPv16i8lane : SIMDDup8FromElement <1, ".16b", v16i8, V128>;
-// Verbose syntax alternates.
-def : InstAlias<"dup $Rd.2d, $Rn.d$idx", (DUPv2i64lane V128:$Rd, V128:$Rn, VectorIndexD:$idx)>;
-def : InstAlias<"dup $Rd.2s, $Rn.s$idx", (DUPv2i32lane V64:$Rd, V128:$Rn, VectorIndexS:$idx)>;
-def : InstAlias<"dup $Rd.4s, $Rn.s$idx", (DUPv4i32lane V128:$Rd, V128:$Rn, VectorIndexS:$idx)>;
-def : InstAlias<"dup $Rd.4h, $Rn.h$idx", (DUPv4i16lane V64:$Rd, V128:$Rn, VectorIndexH:$idx)>;
-def : InstAlias<"dup $Rd.8h, $Rn.h$idx", (DUPv8i16lane V128:$Rd, V128:$Rn, VectorIndexH:$idx)>;
-def : InstAlias<"dup $Rd.8b, $Rn.b$idx", (DUPv8i8lane V64:$Rd, V128:$Rn, VectorIndexB:$idx)>;
-def : InstAlias<"dup $Rd.16b, $Rn.b$idx", (DUPv16i8lane V128:$Rd, V128:$Rn, VectorIndexB:$idx)>;
 
 def : Pat<(v2f32 (ARM64dup (f32 FPR32:$Rn))),
           (v2f32 (DUPv2i32lane
@@ -3107,16 +3223,15 @@ defm ORR : SIMDModifiedImmVectorShiftTied<0, 0b11, 0b01, "orr", ARM64orri>;
 
 
 // AdvSIMD FMOV
-defm FMOVv2f64 : SIMDModifiedImmVectorNoShift<1, 1, 0b1111, V128, fpimm8,
-                                              "fmov", ".2d">;
-defm FMOVv2f32 : SIMDModifiedImmVectorNoShift<0, 0, 0b1111, V64,  fpimm8,
-                                              "fmov", ".2s">;
-defm FMOVv4f32 : SIMDModifiedImmVectorNoShift<1, 0, 0b1111, V128, fpimm8,
-                                              "fmov", ".4s">;
-
-def : Pat<(v2f32 (ARM64fmov imm0_255:$imm8)), (FMOVv2f32ns imm0_255:$imm8)>;
-def : Pat<(v4f32 (ARM64fmov imm0_255:$imm8)), (FMOVv4f32ns imm0_255:$imm8)>;
-def : Pat<(v2f64 (ARM64fmov imm0_255:$imm8)), (FMOVv2f64ns imm0_255:$imm8)>;
+def FMOVv2f64_ns : SIMDModifiedImmVectorNoShift<1, 1, 0b1111, V128, fpimm8,
+                                              "fmov", ".2d",
+                       [(set (v2f64 V128:$Rd), (ARM64fmov imm0_255:$imm8))]>;
+def FMOVv2f32_ns : SIMDModifiedImmVectorNoShift<0, 0, 0b1111, V64,  fpimm8,
+                                              "fmov", ".2s",
+                       [(set (v2f32 V64:$Rd), (ARM64fmov imm0_255:$imm8))]>;
+def FMOVv4f32_ns : SIMDModifiedImmVectorNoShift<1, 0, 0b1111, V128, fpimm8,
+                                              "fmov", ".4s",
+                       [(set (v4f32 V128:$Rd), (ARM64fmov imm0_255:$imm8))]>;
 
 // AdvSIMD MOVI
 
@@ -3140,35 +3255,39 @@ def : Pat<(v4i16 immAllOnesV), (MOVID (i32 255))>;
 def : Pat<(v8i8  immAllOnesV), (MOVID (i32 255))>;
 
 // EDIT byte mask: 2d
-defm MOVIv2d   : SIMDModifiedImmVectorNoShiftCheapCopy<1, 1, 0b1110, V128,
-                                                       simdimmtype10,
-                                                       "movi", ".2d">;
 
 // The movi_edit node has the immediate value already encoded, so we use
-// a plain imm0_255 here.
-def : Pat<(v2i64 (ARM64movi_edit imm0_255:$imm8)),
-          (MOVIv2dns imm0_255:$imm8)>;
+// a plain imm0_255 in the pattern
+let isReMaterializable = 1, isAsCheapAsAMove = 1 in
+def MOVIv2d_ns   : SIMDModifiedImmVectorNoShift<1, 1, 0b1110, V128,
+                                                simdimmtype10,
+                                                "movi", ".2d",
+                   [(set (v2i64 V128:$Rd), (ARM64movi_edit imm0_255:$imm8))]>;
+
 
 // Use movi.2d to materialize 0.0 if the HW does zero-cycle zeroing.
 // Complexity is added to break a tie with a plain MOVI.
 let AddedComplexity = 1 in {
 def : Pat<(f32   fpimm0),
-          (f32 (EXTRACT_SUBREG (v2i64 (MOVIv2dns (i32 0))), ssub))>,
+          (f32 (EXTRACT_SUBREG (v2i64 (MOVIv2d_ns (i32 0))), ssub))>,
       Requires<[HasZCZ]>;
 def : Pat<(f64   fpimm0),
-          (f64 (EXTRACT_SUBREG (v2i64 (MOVIv2dns (i32 0))), dsub))>,
+          (f64 (EXTRACT_SUBREG (v2i64 (MOVIv2d_ns (i32 0))), dsub))>,
       Requires<[HasZCZ]>;
 }
 
-def : Pat<(v2i64 immAllZerosV), (MOVIv2dns (i32 0))>;
-def : Pat<(v4i32 immAllZerosV), (MOVIv2dns (i32 0))>;
-def : Pat<(v8i16 immAllZerosV), (MOVIv2dns (i32 0))>;
-def : Pat<(v16i8 immAllZerosV), (MOVIv2dns (i32 0))>;
+def : Pat<(v2i64 immAllZerosV), (MOVIv2d_ns (i32 0))>;
+def : Pat<(v4i32 immAllZerosV), (MOVIv2d_ns (i32 0))>;
+def : Pat<(v8i16 immAllZerosV), (MOVIv2d_ns (i32 0))>;
+def : Pat<(v16i8 immAllZerosV), (MOVIv2d_ns (i32 0))>;
 
-def : Pat<(v2i64 immAllOnesV), (MOVIv2dns (i32 255))>;
-def : Pat<(v4i32 immAllOnesV), (MOVIv2dns (i32 255))>;
-def : Pat<(v8i16 immAllOnesV), (MOVIv2dns (i32 255))>;
-def : Pat<(v16i8 immAllOnesV), (MOVIv2dns (i32 255))>;
+def : Pat<(v2i64 immAllOnesV), (MOVIv2d_ns (i32 255))>;
+def : Pat<(v4i32 immAllOnesV), (MOVIv2d_ns (i32 255))>;
+def : Pat<(v8i16 immAllOnesV), (MOVIv2d_ns (i32 255))>;
+def : Pat<(v16i8 immAllOnesV), (MOVIv2d_ns (i32 255))>;
+
+def : Pat<(v2f64 (ARM64dup (f64 fpimm0))), (MOVIv2d_ns (i32 0))>;
+def : Pat<(v4f32 (ARM64dup (f32 fpimm0))), (MOVIv2d_ns (i32 0))>;
 
 // EDIT per word & halfword: 2s, 4h, 4s, & 8h
 defm MOVI      : SIMDModifiedImmVectorShift<0, 0b10, 0b00, "movi">;
@@ -3182,21 +3301,20 @@ def : Pat<(v8i16 (ARM64movi_shift imm0_255:$imm8, (i32 imm:$shift))),
           (MOVIv8i16 imm0_255:$imm8, imm:$shift)>;
 
 // EDIT per word: 2s & 4s with MSL shifter
-defm MOVIv2s   : SIMDModifiedImmMoveMSL<0, 0, {1,1,0,?}, V64, "movi", ".2s">;
-defm MOVIv4s   : SIMDModifiedImmMoveMSL<1, 0, {1,1,0,?}, V128, "movi", ".4s">;
-def : Pat<(v2i32 (ARM64movi_msl imm0_255:$imm8, (i32 imm:$shift))),
-          (MOVIv2smsl imm0_255:$imm8, imm:$shift)>;
-def : Pat<(v4i32 (ARM64movi_msl imm0_255:$imm8, (i32 imm:$shift))),
-          (MOVIv4smsl imm0_255:$imm8, imm:$shift)>;
+def MOVIv2s_msl  : SIMDModifiedImmMoveMSL<0, 0, {1,1,0,?}, V64, "movi", ".2s",
+                      [(set (v2i32 V64:$Rd),
+                            (ARM64movi_msl imm0_255:$imm8, (i32 imm:$shift)))]>;
+def MOVIv4s_msl  : SIMDModifiedImmMoveMSL<1, 0, {1,1,0,?}, V128, "movi", ".4s",
+                      [(set (v4i32 V128:$Rd),
+                            (ARM64movi_msl imm0_255:$imm8, (i32 imm:$shift)))]>;
 
 // Per byte: 8b & 16b
-defm MOVIv8b   : SIMDModifiedImmVectorNoShift<0, 0, 0b1110, V64,  imm0_255,
-                                              "movi", ".8b">;
-defm MOVIv16b  : SIMDModifiedImmVectorNoShift<1, 0, 0b1110, V128, imm0_255,
-                                              "movi", ".16b">;
-def : Pat<(v8i8 (ARM64movi imm0_255:$imm8)), (MOVIv8bns imm0_255:$imm8)>;
-def : Pat<(v16i8 (ARM64movi imm0_255:$imm8)), (MOVIv16bns imm0_255:$imm8)>;
-
+def MOVIv8b_ns   : SIMDModifiedImmVectorNoShift<0, 0, 0b1110, V64,  imm0_255,
+                                                 "movi", ".8b",
+                       [(set (v8i8 V64:$Rd), (ARM64movi imm0_255:$imm8))]>;
+def MOVIv16b_ns  : SIMDModifiedImmVectorNoShift<1, 0, 0b1110, V128, imm0_255,
+                                                 "movi", ".16b",
+                       [(set (v16i8 V128:$Rd), (ARM64movi imm0_255:$imm8))]>;
 
 // AdvSIMD MVNI
 
@@ -3212,12 +3330,12 @@ def : Pat<(v8i16 (ARM64mvni_shift imm0_255:$imm8, (i32 imm:$shift))),
           (MVNIv8i16 imm0_255:$imm8, imm:$shift)>;
 
 // EDIT per word: 2s & 4s with MSL shifter
-defm MVNIv2s   : SIMDModifiedImmMoveMSL<0, 1, {1,1,0,?}, V64, "mvni", ".2s">;
-defm MVNIv4s   : SIMDModifiedImmMoveMSL<1, 1, {1,1,0,?}, V128, "mvni", ".4s">;
-def : Pat<(v2i32 (ARM64mvni_msl imm0_255:$imm8, (i32 imm:$shift))),
-          (MVNIv2smsl imm0_255:$imm8, imm:$shift)>;
-def : Pat<(v4i32 (ARM64mvni_msl imm0_255:$imm8, (i32 imm:$shift))),
-          (MVNIv4smsl imm0_255:$imm8, imm:$shift)>;
+def MVNIv2s_msl   : SIMDModifiedImmMoveMSL<0, 1, {1,1,0,?}, V64, "mvni", ".2s",
+                      [(set (v2i32 V64:$Rd),
+                            (ARM64mvni_msl imm0_255:$imm8, (i32 imm:$shift)))]>;
+def MVNIv4s_msl   : SIMDModifiedImmMoveMSL<1, 1, {1,1,0,?}, V128, "mvni", ".4s",
+                      [(set (v4i32 V128:$Rd),
+                            (ARM64mvni_msl imm0_255:$imm8, (i32 imm:$shift)))]>;
 
 //----------------------------------------------------------------------------
 // AdvSIMD indexed element
@@ -3661,8 +3779,6 @@ def : Pat <(f64 (sint_to_fp (i32 (load am_unscaled32:$addr)))),
 // AdvSIMD Load-Store Structure
 //----------------------------------------------------------------------------
 defm LD1 : SIMDLd1Multiple<"ld1">;
-
-def : InstAlias<"ld1 $Vs, $addr", (LD1Onev8b VecListOne8b:$Vs, am_simdnoindex:$addr)>;
 defm LD2 : SIMDLd2Multiple<"ld2">;
 defm LD3 : SIMDLd3Multiple<"ld3">;
 defm LD4 : SIMDLd4Multiple<"ld4">;
@@ -3672,35 +3788,56 @@ defm ST2 : SIMDSt2Multiple<"st2">;
 defm ST3 : SIMDSt3Multiple<"st3">;
 defm ST4 : SIMDSt4Multiple<"st4">;
 
+class Ld1Pat<ValueType ty, Instruction INST>
+  : Pat<(ty (load am_simdnoindex:$vaddr)), (INST am_simdnoindex:$vaddr)>;
+
+def : Ld1Pat<v16i8, LD1Onev16b>;
+def : Ld1Pat<v8i16, LD1Onev8h>;
+def : Ld1Pat<v4i32, LD1Onev4s>;
+def : Ld1Pat<v2i64, LD1Onev2d>;
+def : Ld1Pat<v8i8,  LD1Onev8b>;
+def : Ld1Pat<v4i16, LD1Onev4h>;
+def : Ld1Pat<v2i32, LD1Onev2s>;
+def : Ld1Pat<v1i64, LD1Onev1d>;
+
+class St1Pat<ValueType ty, Instruction INST>
+  : Pat<(store ty:$Vt, am_simdnoindex:$vaddr),
+        (INST ty:$Vt, am_simdnoindex:$vaddr)>;
+
+def : St1Pat<v16i8, ST1Onev16b>;
+def : St1Pat<v8i16, ST1Onev8h>;
+def : St1Pat<v4i32, ST1Onev4s>;
+def : St1Pat<v2i64, ST1Onev2d>;
+def : St1Pat<v8i8,  ST1Onev8b>;
+def : St1Pat<v4i16, ST1Onev4h>;
+def : St1Pat<v2i32, ST1Onev2s>;
+def : St1Pat<v1i64, ST1Onev1d>;
+
 //---
 // Single-element
 //---
 
+defm LD1R          : SIMDLdR<0, 0b110, 0, "ld1r", "One", 1, 2, 4, 8>;
+defm LD2R          : SIMDLdR<1, 0b110, 0, "ld2r", "Two", 2, 4, 8, 16>;
+defm LD3R          : SIMDLdR<0, 0b111, 0, "ld3r", "Three", 3, 6, 12, 24>;
+defm LD4R          : SIMDLdR<1, 0b111, 0, "ld4r", "Four", 4, 8, 16, 32>;
 let mayLoad = 1, neverHasSideEffects = 1 in {
-defm LD1R          : SIMDLdR<0, 0b110, 0, "ld1r", "One", 1, 2, 4, 8,
-                     GPR64pi1, GPR64pi2, GPR64pi4, GPR64pi8>;
-defm LD2R          : SIMDLdR<1, 0b110, 0, "ld2r", "Two", 2, 4, 8, 16,
-                     GPR64pi2, GPR64pi4, GPR64pi8, GPR64pi16>;
-defm LD3R          : SIMDLdR<0, 0b111, 0, "ld3r", "Three", 3, 6, 12, 24,
-                     GPR64pi3, GPR64pi6, GPR64pi12, GPR64pi24>;
-defm LD4R          : SIMDLdR<1, 0b111, 0, "ld4r", "Four", 4, 8, 16, 32,
-                     GPR64pi4, GPR64pi8, GPR64pi16, GPR64pi32>;
-defm LD1 : SIMDLdSingleBTied<0, 0b000,       "ld1", VecListOne128, GPR64pi1>;
-defm LD1 : SIMDLdSingleHTied<0, 0b010, 0,    "ld1", VecListOne128, GPR64pi2>;
-defm LD1 : SIMDLdSingleSTied<0, 0b100, 0b00, "ld1", VecListOne128, GPR64pi4>;
-defm LD1 : SIMDLdSingleDTied<0, 0b100, 0b01, "ld1", VecListOne128, GPR64pi8>;
-defm LD2 : SIMDLdSingleBTied<1, 0b000,       "ld2", VecListTwo128, GPR64pi2>;
-defm LD2 : SIMDLdSingleHTied<1, 0b010, 0,    "ld2", VecListTwo128, GPR64pi4>;
-defm LD2 : SIMDLdSingleSTied<1, 0b100, 0b00, "ld2", VecListTwo128, GPR64pi8>;
-defm LD2 : SIMDLdSingleDTied<1, 0b100, 0b01, "ld2", VecListTwo128, GPR64pi16>;
-defm LD3 : SIMDLdSingleBTied<0, 0b001,       "ld3", VecListThree128, GPR64pi3>;
-defm LD3 : SIMDLdSingleHTied<0, 0b011, 0,    "ld3", VecListThree128, GPR64pi6>;
-defm LD3 : SIMDLdSingleSTied<0, 0b101, 0b00, "ld3", VecListThree128, GPR64pi12>;
-defm LD3 : SIMDLdSingleDTied<0, 0b101, 0b01, "ld3", VecListThree128, GPR64pi24>;
-defm LD4 : SIMDLdSingleBTied<1, 0b001,       "ld4", VecListFour128, GPR64pi4>;
-defm LD4 : SIMDLdSingleHTied<1, 0b011, 0,    "ld4", VecListFour128, GPR64pi8>;
-defm LD4 : SIMDLdSingleSTied<1, 0b101, 0b00, "ld4", VecListFour128, GPR64pi16>;
-defm LD4 : SIMDLdSingleDTied<1, 0b101, 0b01, "ld4", VecListFour128, GPR64pi32>;
+defm LD1 : SIMDLdSingleBTied<0, 0b000,       "ld1", VecListOneb,   GPR64pi1>;
+defm LD1 : SIMDLdSingleHTied<0, 0b010, 0,    "ld1", VecListOneh,   GPR64pi2>;
+defm LD1 : SIMDLdSingleSTied<0, 0b100, 0b00, "ld1", VecListOnes,   GPR64pi4>;
+defm LD1 : SIMDLdSingleDTied<0, 0b100, 0b01, "ld1", VecListOned,   GPR64pi8>;
+defm LD2 : SIMDLdSingleBTied<1, 0b000,       "ld2", VecListTwob,   GPR64pi2>;
+defm LD2 : SIMDLdSingleHTied<1, 0b010, 0,    "ld2", VecListTwoh,   GPR64pi4>;
+defm LD2 : SIMDLdSingleSTied<1, 0b100, 0b00, "ld2", VecListTwos,   GPR64pi8>;
+defm LD2 : SIMDLdSingleDTied<1, 0b100, 0b01, "ld2", VecListTwod,   GPR64pi16>;
+defm LD3 : SIMDLdSingleBTied<0, 0b001,       "ld3", VecListThreeb, GPR64pi3>;
+defm LD3 : SIMDLdSingleHTied<0, 0b011, 0,    "ld3", VecListThreeh, GPR64pi6>;
+defm LD3 : SIMDLdSingleSTied<0, 0b101, 0b00, "ld3", VecListThrees, GPR64pi12>;
+defm LD3 : SIMDLdSingleDTied<0, 0b101, 0b01, "ld3", VecListThreed, GPR64pi24>;
+defm LD4 : SIMDLdSingleBTied<1, 0b001,       "ld4", VecListFourb,  GPR64pi4>;
+defm LD4 : SIMDLdSingleHTied<1, 0b011, 0,    "ld4", VecListFourh,  GPR64pi8>;
+defm LD4 : SIMDLdSingleSTied<1, 0b101, 0b00, "ld4", VecListFours,  GPR64pi16>;
+defm LD4 : SIMDLdSingleDTied<1, 0b101, 0b01, "ld4", VecListFourd,  GPR64pi32>;
 }
 
 def : Pat<(v8i8 (ARM64dup (i32 (extloadi8 am_simdnoindex:$vaddr)))),
@@ -3750,37 +3887,37 @@ defm LD4 : SIMDLdSt4SingleAliases<"ld4">;
 
 // Stores
 let AddedComplexity = 8 in {
-defm ST1 : SIMDStSingleB<0, 0b000,       "st1", VecListOne128,
+defm ST1 : SIMDStSingleB<0, 0b000,       "st1", VecListOneb,
   [(truncstorei8
-      (i32 (vector_extract (v16i8 VecListOne128:$Vt), VectorIndexB:$idx)),
+      (i32 (vector_extract (v16i8 VecListOneb:$Vt), VectorIndexB:$idx)),
       am_simdnoindex:$vaddr)], GPR64pi1>;
-defm ST1 : SIMDStSingleH<0, 0b010, 0,    "st1", VecListOne128,
+defm ST1 : SIMDStSingleH<0, 0b010, 0,    "st1", VecListOneh,
   [(truncstorei16
-      (i32 (vector_extract (v8i16 VecListOne128:$Vt), VectorIndexH:$idx)),
+      (i32 (vector_extract (v8i16 VecListOneh:$Vt), VectorIndexH:$idx)),
       am_simdnoindex:$vaddr)], GPR64pi2>;
-defm ST1 : SIMDStSingleS<0, 0b100, 0b00, "st1", VecListOne128,
+defm ST1 : SIMDStSingleS<0, 0b100, 0b00, "st1", VecListOnes,
   [(store
-      (i32 (vector_extract (v4i32 VecListOne128:$Vt), VectorIndexS:$idx)),
+      (i32 (vector_extract (v4i32 VecListOnes:$Vt), VectorIndexS:$idx)),
       am_simdnoindex:$vaddr)], GPR64pi4>;
-defm ST1 : SIMDStSingleD<0, 0b100, 0b01, "st1", VecListOne128,
+defm ST1 : SIMDStSingleD<0, 0b100, 0b01, "st1", VecListOned,
   [(store
-      (i64 (vector_extract (v2i64 VecListOne128:$Vt), VectorIndexD:$idx)),
+      (i64 (vector_extract (v2i64 VecListOned:$Vt), VectorIndexD:$idx)),
       am_simdnoindex:$vaddr)], GPR64pi8>;
 }
 
 let mayStore = 1, neverHasSideEffects = 1 in {
-defm ST2 : SIMDStSingleB<1, 0b000,       "st2", VecListTwo128, [], GPR64pi2>;
-defm ST2 : SIMDStSingleH<1, 0b010, 0,    "st2", VecListTwo128, [], GPR64pi4>;
-defm ST2 : SIMDStSingleS<1, 0b100, 0b00, "st2", VecListTwo128, [], GPR64pi8>;
-defm ST2 : SIMDStSingleD<1, 0b100, 0b01, "st2", VecListTwo128, [], GPR64pi16>;
-defm ST3 : SIMDStSingleB<0, 0b001,       "st3", VecListThree128, [], GPR64pi3>;
-defm ST3 : SIMDStSingleH<0, 0b011, 0,    "st3", VecListThree128, [], GPR64pi6>;
-defm ST3 : SIMDStSingleS<0, 0b101, 0b00, "st3", VecListThree128, [], GPR64pi12>;
-defm ST3 : SIMDStSingleD<0, 0b101, 0b01, "st3", VecListThree128, [], GPR64pi24>;
-defm ST4 : SIMDStSingleB<1, 0b001,       "st4", VecListFour128, [], GPR64pi4>;
-defm ST4 : SIMDStSingleH<1, 0b011, 0,    "st4", VecListFour128, [], GPR64pi8>;
-defm ST4 : SIMDStSingleS<1, 0b101, 0b00, "st4", VecListFour128, [], GPR64pi16>;
-defm ST4 : SIMDStSingleD<1, 0b101, 0b01, "st4", VecListFour128, [], GPR64pi32>;
+defm ST2 : SIMDStSingleB<1, 0b000,       "st2", VecListTwob,   [], GPR64pi2>;
+defm ST2 : SIMDStSingleH<1, 0b010, 0,    "st2", VecListTwoh,   [], GPR64pi4>;
+defm ST2 : SIMDStSingleS<1, 0b100, 0b00, "st2", VecListTwos,   [], GPR64pi8>;
+defm ST2 : SIMDStSingleD<1, 0b100, 0b01, "st2", VecListTwod,   [], GPR64pi16>;
+defm ST3 : SIMDStSingleB<0, 0b001,       "st3", VecListThreeb, [], GPR64pi3>;
+defm ST3 : SIMDStSingleH<0, 0b011, 0,    "st3", VecListThreeh, [], GPR64pi6>;
+defm ST3 : SIMDStSingleS<0, 0b101, 0b00, "st3", VecListThrees, [], GPR64pi12>;
+defm ST3 : SIMDStSingleD<0, 0b101, 0b01, "st3", VecListThreed, [], GPR64pi24>;
+defm ST4 : SIMDStSingleB<1, 0b001,       "st4", VecListFourb,  [], GPR64pi4>;
+defm ST4 : SIMDStSingleH<1, 0b011, 0,    "st4", VecListFourh,  [], GPR64pi8>;
+defm ST4 : SIMDStSingleS<1, 0b101, 0b00, "st4", VecListFours,  [], GPR64pi16>;
+defm ST4 : SIMDStSingleD<1, 0b101, 0b01, "st4", VecListFourd,  [], GPR64pi32>;
 }
 
 defm ST1 : SIMDLdSt1SingleAliases<"st1">;
@@ -3792,22 +3929,22 @@ defm ST4 : SIMDLdSt4SingleAliases<"st4">;
 // Crypto extensions
 //----------------------------------------------------------------------------
 
-defm AESE   : AESTiedInst<0b0100, "aese",   int_arm64_crypto_aese>;
-defm AESD   : AESTiedInst<0b0101, "aesd",   int_arm64_crypto_aesd>;
-defm AESMC  : AESInst<    0b0110, "aesmc",  int_arm64_crypto_aesmc>;
-defm AESIMC : AESInst<    0b0111, "aesimc", int_arm64_crypto_aesimc>;
+def AESErr   : AESTiedInst<0b0100, "aese",   int_arm64_crypto_aese>;
+def AESDrr   : AESTiedInst<0b0101, "aesd",   int_arm64_crypto_aesd>;
+def AESMCrr  : AESInst<    0b0110, "aesmc",  int_arm64_crypto_aesmc>;
+def AESIMCrr : AESInst<    0b0111, "aesimc", int_arm64_crypto_aesimc>;
 
-defm SHA1C     : SHATiedInstQSV<0b000, "sha1c",     int_arm64_crypto_sha1c>;
-defm SHA1P     : SHATiedInstQSV<0b001, "sha1p",     int_arm64_crypto_sha1p>;
-defm SHA1M     : SHATiedInstQSV<0b010, "sha1m",     int_arm64_crypto_sha1m>;
-defm SHA1SU0   : SHATiedInstVVV<0b011, "sha1su0",   int_arm64_crypto_sha1su0>;
-defm SHA256H   : SHATiedInstQQV<0b100, "sha256h",   int_arm64_crypto_sha256h>;
-defm SHA256H2  : SHATiedInstQQV<0b101, "sha256h2",  int_arm64_crypto_sha256h2>;
-defm SHA256SU1 : SHATiedInstVVV<0b110, "sha256su1", int_arm64_crypto_sha256su1>;
+def SHA1Crrr     : SHATiedInstQSV<0b000, "sha1c",   int_arm64_crypto_sha1c>;
+def SHA1Prrr     : SHATiedInstQSV<0b001, "sha1p",   int_arm64_crypto_sha1p>;
+def SHA1Mrrr     : SHATiedInstQSV<0b010, "sha1m",   int_arm64_crypto_sha1m>;
+def SHA1SU0rrr   : SHATiedInstVVV<0b011, "sha1su0", int_arm64_crypto_sha1su0>;
+def SHA256Hrrr   : SHATiedInstQQV<0b100, "sha256h", int_arm64_crypto_sha256h>;
+def SHA256H2rrr  : SHATiedInstQQV<0b101, "sha256h2",int_arm64_crypto_sha256h2>;
+def SHA256SU1rrr :SHATiedInstVVV<0b110, "sha256su1",int_arm64_crypto_sha256su1>;
 
-def  SHA1Hrr   : SHAInstSS<    0b0000, "sha1h",     int_arm64_crypto_sha1h>;
-defm SHA1SU1   : SHATiedInstVV<0b0001, "sha1su1",   int_arm64_crypto_sha1su1>;
-defm SHA256SU0 : SHATiedInstVV<0b0010, "sha256su0", int_arm64_crypto_sha256su0>;
+def SHA1Hrr     : SHAInstSS<    0b0000, "sha1h",    int_arm64_crypto_sha1h>;
+def SHA1SU1rr   : SHATiedInstVV<0b0001, "sha1su1",  int_arm64_crypto_sha1su1>;
+def SHA256SU0rr : SHATiedInstVV<0b0010, "sha256su0",int_arm64_crypto_sha256su0>;
 
 //----------------------------------------------------------------------------
 // Compiler-pseudos

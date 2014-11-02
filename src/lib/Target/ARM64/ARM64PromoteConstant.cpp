@@ -29,8 +29,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Analysis/Dominators.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InlineAsm.h"
@@ -112,8 +112,8 @@ namespace {
     // This transformation requires dominator info
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
       AU.setPreservesCFG();
-      AU.addRequired<DominatorTree>();
-      AU.addPreserved<DominatorTree>();
+      AU.addRequired<DominatorTreeWrapperPass>();
+      AU.addPreserved<DominatorTreeWrapperPass>();
     }
     
     /// Type to store a list of User
@@ -214,7 +214,7 @@ namespace llvm {
 
 INITIALIZE_PASS_BEGIN(ARM64PromoteConstant, "arm64-promote-const",
                       "ARM64 Promote Constant Pass", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTree)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(ARM64PromoteConstant, "arm64-promote-const",
                     "ARM64 Promote Constant Pass", false, false)
 
@@ -353,7 +353,8 @@ bool ARM64PromoteConstant::isDominated(Instruction *NewPt,
                                        InsertionPoints &InsertPts) {
   
   DominatorTree &DT =
-    getAnalysis<DominatorTree>(*NewPt->getParent()->getParent());
+    getAnalysis<DominatorTreeWrapperPass>(*NewPt->getParent()->getParent()).
+    getDomTree();
   
   // Traverse all the existing insertion point and check if one is dominating
   // NewPt
@@ -381,7 +382,8 @@ bool ARM64PromoteConstant::tryAndMerge(Instruction *NewPt,
                                        Value::use_iterator &UseIt,
                                        InsertionPoints &InsertPts) {
   DominatorTree &DT =
-    getAnalysis<DominatorTree>(*NewPt->getParent()->getParent());
+    getAnalysis<DominatorTreeWrapperPass>(*NewPt->getParent()->getParent()).
+    getDomTree();
   BasicBlock *NewBB = NewPt->getParent();
   
   // Traverse all the existing insertion point and check if one is dominated by
@@ -482,8 +484,10 @@ bool ARM64PromoteConstant::
        ++FctToInstPtsIt) {
     InsertionPoints &InsertPts = FctToInstPtsIt->second;
     // Do more check for debug purposes
-#ifdef DEBUG
-    DominatorTree &DT = getAnalysis<DominatorTree>(*FctToInstPtsIt->first);
+#ifndef NDEBUG
+    DominatorTree &DT =
+      getAnalysis<DominatorTreeWrapperPass>(*FctToInstPtsIt->first).
+      getDomTree();
 #endif
     GlobalVariable *PromotedGV;
     assert(!InsertPts.empty() && "Empty uses does not need a definition");
@@ -521,7 +525,7 @@ bool ARM64PromoteConstant::
       Users &DominatedUsers = IPI->second;
       for (Users::iterator UseIt = DominatedUsers.begin(),
            EndIt = DominatedUsers.end(); UseIt != EndIt; ++UseIt) {
-#ifdef DEBUG
+#ifndef NDEBUG
         assert((DT.dominates(LoadedCst, cast<Instruction>(**UseIt)) ||
                 (isa<PHINode>(**UseIt) &&
                  DT.dominates(LoadedCst, findInsertionPoint(*UseIt)))) &&

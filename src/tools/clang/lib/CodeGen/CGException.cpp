@@ -1240,6 +1240,7 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
 
   // If the catch was not required, bail out now.
   if (!CatchScope.hasEHBranches()) {
+    CatchScope.clearHandlerBlocks();
     EHStack.popCatch();
     return;
   }

@@ -43,6 +43,7 @@ private:
   const AMDGPURegisterInfo RI;
   bool getNextBranchInstr(MachineBasicBlock::iterator &iter,
                           MachineBasicBlock &MBB) const;
+  virtual void anchor();
 protected:
   TargetMachine &TM;
 public:
@@ -77,18 +78,18 @@ public:
                            unsigned DestReg, unsigned SrcReg,
                            bool KillSrc) const = 0;
 
-  void storeRegToStackSlot(MachineBasicBlock &MBB,
-                           MachineBasicBlock::iterator MI,
-                           unsigned SrcReg, bool isKill, int FrameIndex,
-                           const TargetRegisterClass *RC,
-                           const TargetRegisterInfo *TRI) const;
-  void loadRegFromStackSlot(MachineBasicBlock &MBB,
-                            MachineBasicBlock::iterator MI,
-                            unsigned DestReg, int FrameIndex,
-                            const TargetRegisterClass *RC,
-                            const TargetRegisterInfo *TRI) const;
   virtual bool expandPostRAPseudo(MachineBasicBlock::iterator MI) const;
 
+  virtual void storeRegToStackSlot(MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MI,
+                                   unsigned SrcReg, bool isKill, int FrameIndex,
+                                   const TargetRegisterClass *RC,
+                                   const TargetRegisterInfo *TRI) const;
+  virtual void loadRegFromStackSlot(MachineBasicBlock &MBB,
+                                    MachineBasicBlock::iterator MI,
+                                    unsigned DestReg, int FrameIndex,
+                                    const TargetRegisterClass *RC,
+                                    const TargetRegisterInfo *TRI) const;
 
 protected:
   MachineInstr *foldMemoryOperandImpl(MachineFunction &MF,
@@ -99,6 +100,14 @@ protected:
                                       MachineInstr *MI,
                                       const SmallVectorImpl<unsigned> &Ops,
                                       MachineInstr *LoadMI) const;
+  /// \returns the smallest register index that will be accessed by an indirect
+  /// read or write or -1 if indirect addressing is not used by this program.
+  virtual int getIndirectIndexBegin(const MachineFunction &MF) const;
+
+  /// \returns the largest register index that will be accessed by an indirect
+  /// read or write or -1 if indirect addressing is not used by this program.
+  virtual int getIndirectIndexEnd(const MachineFunction &MF) const;
+
 public:
   bool canFoldMemoryOperand(const MachineInstr *MI,
                             const SmallVectorImpl<unsigned> &Ops) const;
@@ -143,14 +152,6 @@ public:
 
   virtual unsigned getIEQOpcode() const = 0;
   virtual bool isMov(unsigned opcode) const = 0;
-
-  /// \returns the smallest register index that will be accessed by an indirect
-  /// read or write or -1 if indirect addressing is not used by this program.
-  virtual int getIndirectIndexBegin(const MachineFunction &MF) const = 0;
-
-  /// \returns the largest register index that will be accessed by an indirect
-  /// read or write or -1 if indirect addressing is not used by this program.
-  virtual int getIndirectIndexEnd(const MachineFunction &MF) const = 0;
 
   /// \brief Calculate the "Indirect Address" for the given \p RegIndex and
   ///        \p Channel

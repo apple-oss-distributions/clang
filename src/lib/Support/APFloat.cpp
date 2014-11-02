@@ -1354,7 +1354,9 @@ APFloat::addOrSubtractSpecials(const APFloat &rhs, bool subtract)
   case PackCategoriesIntoKey(fcZero, fcNaN):
   case PackCategoriesIntoKey(fcNormal, fcNaN):
   case PackCategoriesIntoKey(fcInfinity, fcNaN):
-    sign = false;
+    // We need to be sure to flip the sign here for subtraction because we
+    // don't have a separate negate operation so -NaN becomes 0 - NaN here.
+    sign = rhs.sign ^ subtract;
     category = fcNaN;
     copySignificand(rhs);
     return opOK;
@@ -3816,7 +3818,7 @@ APFloat::opStatus APFloat::next(bool nextDown) {
       // Decrement the significand.
       //
       // We always do this since:
-      //   1. If we are dealing with a non binade decrement, by definition we
+      //   1. If we are dealing with a non-binade decrement, by definition we
       //   just decrement the significand.
       //   2. If we are dealing with a normal -> normal binade decrement, since
       //   we have an explicit integral bit the fact that all bits but the

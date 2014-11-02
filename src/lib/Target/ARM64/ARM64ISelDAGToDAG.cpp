@@ -130,13 +130,18 @@ public:
   }
   bool SelectAddrModeNoIndex(SDValue N, SDValue &Val);
 
-  SDNode *PairDRegs(SDValue V0, SDValue V1);
-  SDNode *TripleDRegs(SDValue V0, SDValue V1, SDValue V2);
-  SDNode *QuadDRegs(SDValue V0, SDValue V1, SDValue V2, SDValue V3);
+  /// Form sequences of consecutive 64/128-bit registers for use in NEON
+  /// instructions making use of a vector-list (e.g. ldN, tbl). Vecs must have
+  /// between 1 and 4 elements. If it contains a single element that is returned
+  /// unchanged; otherwise a REG_SEQUENCE value is returned.
+  SDValue createDTuple(ArrayRef<SDValue> Vecs);
+  SDValue createQTuple(ArrayRef<SDValue> Vecs);
 
-  SDNode *PairQRegs(SDValue V0, SDValue V1);
-  SDNode *TripleQRegs(SDValue V0, SDValue V1, SDValue V2);
-  SDNode *QuadQRegs(SDValue V0, SDValue V1, SDValue V2, SDValue V3);
+  /// Generic helper for the createDTuple/createQTuple
+  /// functions. Those should almost always be called instead.
+  SDValue createTuple(ArrayRef<SDValue> Vecs, unsigned RegClassIDs[],
+                      unsigned SubRegs[]);
+
   SDNode *SelectTable(SDNode *N, unsigned NumVecs, unsigned Opc, bool isExt);
 
   SDNode *SelectIndexedLoad(SDNode *N, bool &Done);
@@ -547,11 +552,19 @@ bool ARM64DAGToDAGISel::SelectAddrModeIndexed(SDValue N, unsigned Size,
   if (N.getOpcode() == ARM64ISD::ADDlow) {
     GlobalAddressSDNode *GAN =
       dyn_cast<GlobalAddressSDNode>(N.getOperand(1).getNode());
-    if (!GAN || GAN->getGlobal()->getAlignment() >= Size) {
-      Base = N.getOperand(0);
-      OffImm = N.getOperand(1);
+    Base = N.getOperand(0);
+    OffImm = N.getOperand(1);
+    if (!GAN)
       return true;
-    }
+
+    const GlobalValue *GV = GAN->getGlobal();
+    unsigned Alignment = GV->getAlignment();
+    const DataLayout *DL = TLI->getDataLayout();
+    if (Alignment == 0 && !Subtarget->isTargetDarwin())
+      Alignment = DL->getABITypeAlignment(GV->getType()->getElementType());
+
+    if (Alignment >= Size)
+      return true;
   }
 
   if (CurDAG->isBaseWithConstantOffset(N)) {
@@ -732,92 +745,54 @@ bool ARM64DAGToDAGISel::SelectAddrModeRO(SDValue N, unsigned Size,
   return true;
 }
 
-/// PairQRegs - Form 2 consecutive Q registers.
-///
-SDNode *ARM64DAGToDAGISel::PairQRegs(SDValue V0, SDValue V1) {
-  SDLoc dl(V0.getNode());
-  SDValue RegClass = CurDAG->getTargetConstant(ARM64::QQRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::qsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::qsub1, MVT::i32);
-  const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1 };
-  return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops);
+SDValue ARM64DAGToDAGISel::createDTuple(ArrayRef<SDValue> Regs) {
+  static unsigned RegClassIDs[] = { ARM64::DDRegClassID,
+                                    ARM64::DDDRegClassID,
+                                    ARM64::DDDDRegClassID };
+  static unsigned SubRegs[] = { ARM64::dsub0, ARM64::dsub1,
+                                ARM64::dsub2, ARM64::dsub3 };
+
+  return createTuple(Regs, RegClassIDs, SubRegs);
 }
 
-/// TripleQRegs - Form 3 consecutive Q registers.
-///
-SDNode *ARM64DAGToDAGISel::TripleQRegs(SDValue V0, SDValue V1,
-                                     SDValue V2) {
-  SDLoc dl(V0.getNode());
-  SDValue RegClass = CurDAG->getTargetConstant(ARM64::QQQRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::qsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::qsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::qsub2, MVT::i32);
-  const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
-                                    V2, SubReg2 };
-  return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops);
+SDValue ARM64DAGToDAGISel::createQTuple(ArrayRef<SDValue> Regs) {
+  static unsigned RegClassIDs[] = { ARM64::QQRegClassID,
+                                    ARM64::QQQRegClassID,
+                                    ARM64::QQQQRegClassID };
+  static unsigned SubRegs[] = { ARM64::qsub0, ARM64::qsub1,
+                                ARM64::qsub2, ARM64::qsub3 };
+
+  return createTuple(Regs, RegClassIDs, SubRegs);
 }
 
-/// QuadQRegs - Form 4 consecutive Q registers.
-///
-SDNode *ARM64DAGToDAGISel::QuadQRegs(SDValue V0, SDValue V1,
-                                   SDValue V2, SDValue V3) {
-  SDLoc dl(V0.getNode());
-  SDValue RegClass = CurDAG->getTargetConstant(ARM64::QQQQRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::qsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::qsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::qsub2, MVT::i32);
-  SDValue SubReg3 = CurDAG->getTargetConstant(ARM64::qsub3, MVT::i32);
-  const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
-                                    V2, SubReg2, V3, SubReg3 };
-  return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops);
-}
+SDValue ARM64DAGToDAGISel::createTuple(ArrayRef<SDValue> Regs,
+                                         unsigned RegClassIDs[],
+                                         unsigned SubRegs[]) {
+  // There's no special register-class for a vector-list of 1 element: it's just
+  // a vector.
+  if (Regs.size() == 1)
+    return Regs[0];
 
-/// PairQRegs - Form 2 consecutive D registers.
-///
-SDNode *ARM64DAGToDAGISel::PairDRegs(SDValue V0, SDValue V1) {
-  SDLoc dl(V0.getNode());
-  SDValue RegClass = CurDAG->getTargetConstant(ARM64::DDRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::dsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::dsub1, MVT::i32);
-  const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1 };
-  return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops);
-}
+  assert(Regs.size() >= 2 && Regs.size() <= 4);
 
-/// TripleQRegs - Form 3 consecutive D registers.
-///
-SDNode *ARM64DAGToDAGISel::TripleDRegs(SDValue V0, SDValue V1,
-                                     SDValue V2) {
-  SDLoc dl(V0.getNode());
-  SDValue RegClass = CurDAG->getTargetConstant(ARM64::DDDRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::dsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::dsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::dsub2, MVT::i32);
-  const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
-                                    V2, SubReg2 };
-  return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, MVT::Untyped, 
-                                Ops);
-}
+  SDLoc DL(Regs[0].getNode());
 
-/// QuadQRegs - Form 4 consecutive D registers.
-///
-SDNode *ARM64DAGToDAGISel::QuadDRegs(SDValue V0, SDValue V1,
-                                   SDValue V2, SDValue V3) {
-  SDLoc dl(V0.getNode());
-  SDValue RegClass = CurDAG->getTargetConstant(ARM64::DDDDRegClassID, MVT::i32);
-  SDValue SubReg0 = CurDAG->getTargetConstant(ARM64::dsub0, MVT::i32);
-  SDValue SubReg1 = CurDAG->getTargetConstant(ARM64::dsub1, MVT::i32);
-  SDValue SubReg2 = CurDAG->getTargetConstant(ARM64::dsub2, MVT::i32);
-  SDValue SubReg3 = CurDAG->getTargetConstant(ARM64::dsub3, MVT::i32);
-  const SDValue Ops[] = { RegClass, V0, SubReg0, V1, SubReg1,
-                                    V2, SubReg2, V3, SubReg3 };
-  return CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl, 
-                                MVT::Untyped, Ops);
-}
+  SmallVector<SDValue, 4> Ops;
 
+  // First operand of REG_SEQUENCE is the desired RegClass.
+  Ops.push_back(
+      CurDAG->getTargetConstant(RegClassIDs[Regs.size() - 2], MVT::i32));
+
+  // Then we get pairs of source & subregister-position for the components.
+  for (unsigned i = 0; i < Regs.size(); ++i) {
+    Ops.push_back(Regs[i]);
+    Ops.push_back(CurDAG->getTargetConstant(SubRegs[i], MVT::i32));
+  }
+
+  SDNode *N =
+      CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, DL, MVT::Untyped, Ops);
+  return SDValue(N, 0);
+}
 
 SDNode *ARM64DAGToDAGISel::SelectTable(SDNode *N, unsigned NumVecs, 
                                        unsigned Opc, bool isExt) {
@@ -827,19 +802,10 @@ SDNode *ARM64DAGToDAGISel::SelectTable(SDNode *N, unsigned NumVecs,
   unsigned ExtOff = isExt;
 
   // Form a REG_SEQUENCE to force register allocation.
-  SDValue RegSeq;
-  SDValue V0 = N->getOperand(1+ExtOff);
-  SDValue V1 = N->getOperand(2+ExtOff);
-  if (NumVecs == 2)
-    RegSeq = SDValue(PairQRegs(V0, V1), 0);
-  else if (NumVecs == 3) {
-    SDValue V2 = N->getOperand(3+ExtOff);
-    RegSeq = SDValue(TripleQRegs(V0, V1, V2), 0);
-  } else {
-    SDValue V2 = N->getOperand(3+ExtOff);
-    SDValue V3 = N->getOperand(4+ExtOff);
-    RegSeq = SDValue(QuadQRegs(V0, V1, V2, V3), 0);
-  }
+  unsigned Vec0Off = ExtOff + 1;
+  SmallVector<SDValue, 4> Regs(N->op_begin() + Vec0Off,
+                               N->op_begin() + Vec0Off + NumVecs);
+  SDValue RegSeq = createQTuple(Regs);
 
   SmallVector<SDValue, 6> Ops;
   if (isExt) Ops.push_back(N->getOperand(1));
@@ -989,30 +955,10 @@ SDNode *ARM64DAGToDAGISel::SelectStore(SDNode *N, unsigned NumVecs,
   EVT VT = N->getOperand(2)->getValueType(0);
 
   // Form a REG_SEQUENCE to force register allocation.
-  SDValue RegSeq;
-  SDValue V0 = N->getOperand(2);
-  SDValue V1 = N->getOperand(3);
-  if (NumVecs == 2)
-    if (VT.getSizeInBits() == 128)
-      RegSeq = SDValue(PairQRegs(V0, V1), 0);
-    else
-      RegSeq = SDValue(PairDRegs(V0, V1), 0);
-  else if (NumVecs == 3) {
-    SDValue V2 = N->getOperand(4);
-    if (VT.getSizeInBits() == 128)
-      RegSeq = SDValue(TripleQRegs(V0, V1, V2), 0);
-    else
-      RegSeq = SDValue(TripleDRegs(V0, V1, V2), 0);
-
-  } else {
-    SDValue V2 = N->getOperand(4);
-    SDValue V3 = N->getOperand(5);
-    if (VT.getSizeInBits() == 128)
-      RegSeq = SDValue(QuadQRegs(V0, V1, V2, V3), 0);
-    else
-      RegSeq = SDValue(QuadDRegs(V0, V1, V2, V3), 0);
-
-  }
+  bool Is128Bit = VT.getSizeInBits() == 128;
+  SmallVector<SDValue, 4> Regs(N->op_begin() + 2,
+                               N->op_begin() + 2 + NumVecs);
+  SDValue RegSeq = Is128Bit ? createQTuple(Regs) : createDTuple(Regs);
 
   SmallVector<SDValue, 6> Ops;
   Ops.push_back(RegSeq);
@@ -1025,17 +971,23 @@ SDNode *ARM64DAGToDAGISel::SelectStore(SDNode *N, unsigned NumVecs,
 
 /// WidenVector - Given a value in the V64 register class, produce the
 /// equivalent value in the V128 register class.
-static SDValue WidenVector(SDValue V64Reg, SelectionDAG &DAG) {
-  EVT VT = V64Reg.getValueType();
-  unsigned NarrowSize = VT.getVectorNumElements();
-  MVT EltTy = VT.getVectorElementType().getSimpleVT();
-  MVT WideTy = MVT::getVectorVT(EltTy, 2*NarrowSize);
-  SDLoc DL(V64Reg);
+class WidenVector {
+  SelectionDAG &DAG;
+public:
+  WidenVector(SelectionDAG &DAG) : DAG(DAG) {}
 
-  SDValue Undef =
-    SDValue(DAG.getMachineNode(TargetOpcode::IMPLICIT_DEF, DL, WideTy), 0);
-  return DAG.getTargetInsertSubreg(ARM64::dsub, DL, WideTy, Undef, V64Reg);
-}
+  SDValue operator()(SDValue V64Reg) {
+    EVT VT = V64Reg.getValueType();
+    unsigned NarrowSize = VT.getVectorNumElements();
+    MVT EltTy = VT.getVectorElementType().getSimpleVT();
+    MVT WideTy = MVT::getVectorVT(EltTy, 2*NarrowSize);
+    SDLoc DL(V64Reg);
+
+    SDValue Undef =
+      SDValue(DAG.getMachineNode(TargetOpcode::IMPLICIT_DEF, DL, WideTy), 0);
+    return DAG.getTargetInsertSubreg(ARM64::dsub, DL, WideTy, Undef, V64Reg);
+  }
+};
 
 /// NarrowVector - Given a value in the V128 register class, produce the
 /// equivalent value in the V64 register class.
@@ -1058,34 +1010,14 @@ SDNode *ARM64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs,
   bool Narrow = VT.getSizeInBits() == 64;
 
   // Form a REG_SEQUENCE to force register allocation.
-  SDValue RegSeq;
-  SDValue V0 = N->getOperand(2);
-  SDValue V1 = N->getOperand(3);
-  if (NumVecs == 2) {
-    if (Narrow)
-      RegSeq = SDValue(PairQRegs(WidenVector(V0, *CurDAG),
-                                 WidenVector(V1, *CurDAG)), 0);
-    else
-      RegSeq = SDValue(PairQRegs(V0, V1), 0);
-  } else if (NumVecs == 3) {
-    SDValue V2 = N->getOperand(4);
-    if (Narrow)
-      RegSeq = SDValue(TripleQRegs(WidenVector(V0, *CurDAG),
-                                   WidenVector(V1, *CurDAG),
-                                   WidenVector(V2, *CurDAG)), 0);
-    else
-      RegSeq = SDValue(TripleQRegs(V0, V1, V2), 0);
-  } else {
-    SDValue V2 = N->getOperand(4);
-    SDValue V3 = N->getOperand(5);
-    if (Narrow)
-      RegSeq = SDValue(QuadQRegs(WidenVector(V0, *CurDAG),
-                                 WidenVector(V1, *CurDAG),
-                                 WidenVector(V2, *CurDAG),
-                                 WidenVector(V3, *CurDAG)), 0);
-    else
-      RegSeq = SDValue(QuadQRegs(V0, V1, V2, V3), 0);
-  }
+  SmallVector<SDValue, 4> Regs(N->op_begin() + 2,
+                               N->op_begin() + 2 + NumVecs);
+
+  if (Narrow)
+    std::transform(Regs.begin(), Regs.end(), Regs.begin(),
+                   WidenVector(*CurDAG));
+
+  SDValue RegSeq = createQTuple(Regs);
 
   std::vector<EVT> ResTys;
   ResTys.push_back(MVT::Untyped);
@@ -1151,34 +1083,15 @@ SDNode *ARM64DAGToDAGISel::SelectStoreLane(SDNode *N, unsigned NumVecs,
   bool Narrow = VT.getSizeInBits() == 64;
 
   // Form a REG_SEQUENCE to force register allocation.
-  SDValue RegSeq;
-  SDValue V0 = N->getOperand(2);
-  SDValue V1 = N->getOperand(3);
-  if (NumVecs == 2) {
-    if (Narrow)
-      RegSeq = SDValue(PairQRegs(WidenVector(V0, *CurDAG),
-                                 WidenVector(V1, *CurDAG)), 0);
-    else
-      RegSeq = SDValue(PairQRegs(V0, V1), 0);
-  } else if (NumVecs == 3) {
-    SDValue V2 = N->getOperand(4);
-    if (Narrow)
-      RegSeq = SDValue(TripleQRegs(WidenVector(V0, *CurDAG),
-                                   WidenVector(V1, *CurDAG),
-                                   WidenVector(V2, *CurDAG)), 0);
-    else
-      RegSeq = SDValue(TripleQRegs(V0, V1, V2), 0);
-  } else {
-    SDValue V2 = N->getOperand(4);
-    SDValue V3 = N->getOperand(5);
-    if (Narrow)
-      RegSeq = SDValue(QuadQRegs(WidenVector(V0, *CurDAG),
-                                 WidenVector(V1, *CurDAG),
-                                 WidenVector(V2, *CurDAG),
-                                 WidenVector(V3, *CurDAG)), 0);
-    else
-      RegSeq = SDValue(QuadQRegs(V0, V1, V2, V3), 0);
-  }
+  SmallVector<SDValue, 4> Regs(N->op_begin() + 2,
+                               N->op_begin() + 2 + NumVecs);
+
+  if (Narrow)
+    std::transform(Regs.begin(), Regs.end(), Regs.begin(),
+                   WidenVector(*CurDAG));
+
+  SDValue RegSeq = createQTuple(Regs);
+
 
   unsigned LaneNo = 
     cast<ConstantSDNode>(N->getOperand(NumVecs+2))->getZExtValue();
@@ -1280,6 +1193,14 @@ isBitfieldExtractOpFromAnd(SelectionDAG *CurDAG, SDNode *N, unsigned &Opc,
     // Make sure to clamp the MSB so that we preserve the semantics of the
     // original operations.
     ClampMSB = true;
+  } else if (VT == MVT::i32 && Op0->getOpcode() == ISD::TRUNCATE &&
+             isOpcWithIntImmediate(Op0->getOperand(0).getNode(), ISD::SRL,
+                                   Srl_imm)) {
+    // If the shift result was truncated, we can still combine them.
+    Opd0 = Op0->getOperand(0).getOperand(0);
+
+    // Use the type of SRL node.
+    VT = Opd0->getValueType(0);
   } else if (isOpcWithIntImmediate(Op0, ISD::SRL, Srl_imm)) {
     Opd0 = Op0->getOperand(0);
   } else if (BiggerPattern) {
@@ -1376,8 +1297,19 @@ isBitfieldExtractOpFromShr(SDNode *N, unsigned &Opc, SDValue &Opd0,
 
   // we're looking for a shift of a shift
   uint64_t Shl_imm = 0;
+  uint64_t Trunc_bits = 0;
   if (isOpcWithIntImmediate(N->getOperand(0).getNode(), ISD::SHL, Shl_imm)) {
     Opd0 = N->getOperand(0).getOperand(0);
+  } else if (VT == MVT::i32 && N->getOpcode() == ISD::SRL &&
+             N->getOperand(0).getNode()->getOpcode() == ISD::TRUNCATE) {
+    // We are looking for a shift of truncate. Truncate from i64 to i32 could
+    // be considered as setting high 32 bits as zero. Our strategy here is to
+    // always generate 64bit UBFM. This consistency will help the CSE pass
+    // later find more redundancy.
+    Opd0 = N->getOperand(0).getOperand(0);
+    Trunc_bits = Opd0->getValueType(0).getSizeInBits() - VT.getSizeInBits();
+    VT = Opd0->getValueType(0);
+    assert(VT == MVT::i64 && "the promoted type should be i64");
   } else if (BiggerPattern) {
     // Let's pretend a 0 shift left has been performed.
     // FIXME: Currently we limit this to the bigger pattern case,
@@ -1395,7 +1327,7 @@ isBitfieldExtractOpFromShr(SDNode *N, unsigned &Opc, SDValue &Opd0,
   assert(Srl_imm > 0 && Srl_imm < VT.getSizeInBits() &&
          "bad amount in shift node!");
   // Note: The width operand is encoded as width-1.
-  unsigned Width = VT.getSizeInBits() - Srl_imm - 1;
+  unsigned Width = VT.getSizeInBits() - Trunc_bits - Srl_imm - 1;
   int sLSB = Srl_imm - Shl_imm;
   if (sLSB < 0)
     return false;
@@ -1455,9 +1387,23 @@ SDNode *ARM64DAGToDAGISel::SelectBitfieldExtractOp(SDNode *N) {
     return NULL;
 
   EVT VT = N->getValueType(0);
-  SDValue Ops[] = { Opd0,
-                    CurDAG->getTargetConstant(LSB, VT),
-                    CurDAG->getTargetConstant(MSB, VT) };
+
+  // If the bit extract operation is 64bit but the original type is 32bit, we
+  // need to add one EXTRACT_SUBREG.
+  if ((Opc == ARM64::SBFMXri || Opc == ARM64::UBFMXri) && VT == MVT::i32) {
+    SDValue Ops64[] = {Opd0, CurDAG->getTargetConstant(LSB, MVT::i64),
+                       CurDAG->getTargetConstant(MSB, MVT::i64)};
+
+    SDNode *BFM = CurDAG->getMachineNode(Opc, SDLoc(N), MVT::i64, Ops64);
+    SDValue SubReg = CurDAG->getTargetConstant(ARM64::sub_32, MVT::i32);
+    MachineSDNode *Node =
+        CurDAG->getMachineNode(TargetOpcode::EXTRACT_SUBREG, SDLoc(N), MVT::i32,
+                               SDValue(BFM, 0), SubReg);
+    return Node;
+  }
+
+  SDValue Ops[] = {Opd0, CurDAG->getTargetConstant(LSB, VT),
+                   CurDAG->getTargetConstant(MSB, VT)};
   return CurDAG->SelectNodeTo(N, Opc, VT, Ops, 3);
 }
 
@@ -1985,7 +1931,7 @@ SDNode *ARM64DAGToDAGISel::Select(SDNode *Node) {
     case 64: SubReg = ARM64::dsub; break;
     case 32: SubReg = ARM64::ssub; break;
     case 16: // FALLTHROUGH
-    case 8:  assert(0 && "unexpected zext-requiring extract element!");
+    case 8:  llvm_unreachable("unexpected zext-requiring extract element!");
     }
     SDValue Extract =
         CurDAG->getTargetExtractSubreg(SubReg, SDLoc(Node), VT,

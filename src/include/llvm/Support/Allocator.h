@@ -45,6 +45,16 @@ public:
 
   void Deallocate(const void *Ptr) { free(const_cast<void*>(Ptr)); }
 
+  /// \brief Deallocate space for a sequence of objects without constructing them.
+  template <typename T>
+  void Deallocate(T *Ptr, size_t Num = 1) {
+    Deallocate(static_cast<const void *>(Ptr), Num * sizeof(T));
+  }
+
+  void Deallocate(const void *Ptr, size_t /*Size*/) {
+    free(const_cast<void*>(Ptr));
+  }
+
   void PrintStats() const {}
 };
 

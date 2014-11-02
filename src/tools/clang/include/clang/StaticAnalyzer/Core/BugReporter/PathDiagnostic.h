@@ -21,13 +21,13 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerUnion.h"
 #include <deque>
-#include <list>
 #include <iterator>
+#include <list>
 #include <string>
 #include <vector>
 
 namespace clang {
-
+class ConditionalOperator;
 class AnalysisDeclContext;
 class BinaryOperator;
 class CompoundStmt;
@@ -210,6 +210,9 @@ public:
   /// Create the location for the operator of the binary expression.
   /// Assumes the statement has a valid location.
   static PathDiagnosticLocation createOperatorLoc(const BinaryOperator *BO,
+                                                  const SourceManager &SM);
+  static PathDiagnosticLocation createConditionalColonLoc(
+                                                  const ConditionalOperator *CO,
                                                   const SourceManager &SM);
 
   /// For member expressions, return the location of the '.' or '->'.
@@ -420,7 +423,7 @@ public:
     return Result;
   }
 
-  LLVM_ATTRIBUTE_USED void dump() const;
+  void dump() const;
 };
 
 class PathDiagnosticSpotPiece : public PathDiagnosticPiece {

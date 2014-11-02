@@ -966,7 +966,6 @@ pow(_A1 __x, _A2 __y) _NOEXCEPT
     return pow((__result_type)__x, (__result_type)__y);
 }
 
-
 // sin
 
 using ::sin;

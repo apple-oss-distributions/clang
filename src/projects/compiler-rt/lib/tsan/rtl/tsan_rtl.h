@@ -28,6 +28,7 @@
 
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_allocator_internal.h"
+#include "sanitizer_common/sanitizer_asm.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libignore.h"
 #include "sanitizer_common/sanitizer_suppressions.h"
@@ -41,6 +42,7 @@
 #include "tsan_report.h"
 #include "tsan_platform.h"
 #include "tsan_mutexset.h"
+#include "tsan_ignoreset.h"
 
 #if SANITIZER_WORDSIZE != 64
 # error "ThreadSanitizer is supported only on 64-bit platforms"
@@ -413,6 +415,11 @@ struct ThreadState {
   // for better performance.
   int ignore_reads_and_writes;
   int ignore_sync;
+  // Go does not support ignores.
+#ifndef TSAN_GO
+  IgnoreSet mop_ignore_set;
+  IgnoreSet sync_ignore_set;
+#endif
   // C/C++ uses fixed size shadow stack embed into Trace.
   // Go uses malloc-allocated shadow stack with dynamic size.
   uptr *shadow_stack;
@@ -426,11 +433,11 @@ struct ThreadState {
   AllocatorCache alloc_cache;
   InternalAllocatorCache internal_alloc_cache;
   Vector<JmpBuf> jmp_bufs;
+  int ignore_interceptors;
 #endif
   u64 stat[StatCnt];
   const int tid;
   const int unique_id;
-  int in_rtl;
   bool in_symbolizer;
   bool in_ignored_lib;
   bool is_alive;
@@ -440,6 +447,7 @@ struct ThreadState {
   const uptr stk_size;
   const uptr tls_addr;
   const uptr tls_size;
+  ThreadContext *tctx;
 
   DeadlockDetector deadlock_detector;
 
@@ -543,14 +551,18 @@ struct Context {
   u64 int_alloc_siz[MBlockTypeCount];
 };
 
-class ScopedInRtl {
- public:
-  ScopedInRtl();
-  ~ScopedInRtl();
- private:
-  ThreadState*thr_;
-  int in_rtl_;
-  int errno_;
+struct ScopedIgnoreInterceptors {
+  ScopedIgnoreInterceptors() {
+#ifndef TSAN_GO
+    cur_thread()->ignore_interceptors++;
+#endif
+  }
+
+  ~ScopedIgnoreInterceptors() {
+#ifndef TSAN_GO
+    cur_thread()->ignore_interceptors--;
+#endif
+  }
 };
 
 class ScopedReport {
@@ -572,6 +584,9 @@ class ScopedReport {
  private:
   Context *ctx_;
   ReportDesc *rep_;
+  // Symbolizer makes lots of intercepted calls. If we try to process them,
+  // at best it will cause deadlocks on internal mutexes.
+  ScopedIgnoreInterceptors ignore_interceptors_;
 
   void AddMutex(u64 id);
 
@@ -627,6 +642,7 @@ ReportStack *SkipTsanInternalFrames(ReportStack *ent);
 #endif
 
 u32 CurrentStackId(ThreadState *thr, uptr pc);
+ReportStack *SymbolizeStackId(u32 stack_id);
 void PrintCurrentStack(ThreadState *thr, uptr pc);
 void PrintCurrentStackSlow();  // uses libunwind
 
@@ -678,10 +694,10 @@ void MemoryResetRange(ThreadState *thr, uptr pc, uptr addr, uptr size);
 void MemoryRangeFreed(ThreadState *thr, uptr pc, uptr addr, uptr size);
 void MemoryRangeImitateWrite(ThreadState *thr, uptr pc, uptr addr, uptr size);
 
-void ThreadIgnoreBegin(ThreadState *thr);
-void ThreadIgnoreEnd(ThreadState *thr);
-void ThreadIgnoreSyncBegin(ThreadState *thr);
-void ThreadIgnoreSyncEnd(ThreadState *thr);
+void ThreadIgnoreBegin(ThreadState *thr, uptr pc);
+void ThreadIgnoreEnd(ThreadState *thr, uptr pc);
+void ThreadIgnoreSyncBegin(ThreadState *thr, uptr pc);
+void ThreadIgnoreSyncEnd(ThreadState *thr, uptr pc);
 
 void FuncEntry(ThreadState *thr, uptr pc);
 void FuncExit(ThreadState *thr);
@@ -705,6 +721,7 @@ int  MutexUnlock(ThreadState *thr, uptr pc, uptr addr, bool all = false);
 void MutexReadLock(ThreadState *thr, uptr pc, uptr addr);
 void MutexReadUnlock(ThreadState *thr, uptr pc, uptr addr);
 void MutexReadOrWriteUnlock(ThreadState *thr, uptr pc, uptr addr);
+void MutexRepair(ThreadState *thr, uptr pc, uptr addr);  // call on EOWNERDEAD
 
 void Acquire(ThreadState *thr, uptr pc, uptr addr);
 void AcquireGlobal(ThreadState *thr, uptr pc);
@@ -727,11 +744,11 @@ void AcquireReleaseImpl(ThreadState *thr, uptr pc, SyncClock *c);
 // so we create a reserve stack frame for it (1024b must be enough).
 #define HACKY_CALL(f) \
   __asm__ __volatile__("sub $1024, %%rsp;" \
-                       "/*.cfi_adjust_cfa_offset 1024;*/" \
+                       CFI_INL_ADJUST_CFA_OFFSET(1024) \
                        ".hidden " #f "_thunk;" \
                        "call " #f "_thunk;" \
                        "add $1024, %%rsp;" \
-                       "/*.cfi_adjust_cfa_offset -1024;*/" \
+                       CFI_INL_ADJUST_CFA_OFFSET(-1024) \
                        ::: "memory", "cc");
 #else
 #define HACKY_CALL(f) f()

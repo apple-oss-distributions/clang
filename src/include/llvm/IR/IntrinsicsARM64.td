@@ -21,6 +21,10 @@ def int_arm64_ldxp : Intrinsic<[llvm_i64_ty, llvm_i64_ty], [llvm_ptr_ty]>;
 def int_arm64_stxp : Intrinsic<[llvm_i32_ty], [llvm_i64_ty, llvm_i64_ty,
     llvm_ptr_ty]>;
 
+def int_arm64_sdiv : Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>,
+                                LLVMMatchType<0>], [IntrNoMem]>;
+def int_arm64_udiv : Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>,
+                                LLVMMatchType<0>], [IntrNoMem]>;
 }
 
 //===----------------------------------------------------------------------===//
@@ -379,10 +383,12 @@ let Properties = [IntrNoMem] in {
   def int_arm64_neon_fcvtau : AdvSIMD_FPToIntRounding_Intrinsic;
   def int_arm64_neon_fcvtms : AdvSIMD_FPToIntRounding_Intrinsic;
   def int_arm64_neon_fcvtmu : AdvSIMD_FPToIntRounding_Intrinsic;
-  def int_arm64_neon_fcvtps : AdvSIMD_FPToIntRounding_Intrinsic;
-  def int_arm64_neon_fcvtpu : AdvSIMD_FPToIntRounding_Intrinsic;
   def int_arm64_neon_fcvtns : AdvSIMD_FPToIntRounding_Intrinsic;
   def int_arm64_neon_fcvtnu : AdvSIMD_FPToIntRounding_Intrinsic;
+  def int_arm64_neon_fcvtps : AdvSIMD_FPToIntRounding_Intrinsic;
+  def int_arm64_neon_fcvtpu : AdvSIMD_FPToIntRounding_Intrinsic;
+  def int_arm64_neon_fcvtzs : AdvSIMD_FPToIntRounding_Intrinsic;
+  def int_arm64_neon_fcvtzu : AdvSIMD_FPToIntRounding_Intrinsic;
 
   // Vector FP Rounding
   def int_arm64_neon_frinta : AdvSIMD_1VectorArg_Intrinsic;
@@ -608,3 +614,26 @@ def int_arm64_crypto_sha256h   : Crypto_SHA_8Hash4Schedule_Intrinsic;
 def int_arm64_crypto_sha256h2  : Crypto_SHA_8Hash4Schedule_Intrinsic;
 def int_arm64_crypto_sha256su0 : Crypto_SHA_8Schedule_Intrinsic;
 def int_arm64_crypto_sha256su1 : Crypto_SHA_12Schedule_Intrinsic;
+
+//===----------------------------------------------------------------------===//
+// CRC32
+
+let TargetPrefix = "arm64" in {
+
+def int_arm64_crc32b  : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32cb : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32h  : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32ch : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32w  : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32cw : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32x  : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i64_ty],
+    [IntrNoMem]>;
+def int_arm64_crc32cx : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i64_ty],
+    [IntrNoMem]>;
+}

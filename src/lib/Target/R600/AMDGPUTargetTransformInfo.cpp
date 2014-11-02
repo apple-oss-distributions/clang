@@ -20,8 +20,8 @@
 #include "AMDGPUTargetMachine.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/CostTable.h"
+#include "llvm/Target/TargetLowering.h"
 using namespace llvm;
 
 // Declare the pass initialization routine locally as target-specific passes
@@ -33,7 +33,7 @@ void initializeAMDGPUTTIPass(PassRegistry &);
 
 namespace {
 
-class AMDGPUTTI : public ImmutablePass, public TargetTransformInfo {
+class AMDGPUTTI LLVM_FINAL : public ImmutablePass, public TargetTransformInfo {
   const AMDGPUTargetMachine *TM;
   const AMDGPUSubtarget *ST;
   const AMDGPUTargetLowering *TLI;
@@ -53,11 +53,11 @@ public:
     initializeAMDGPUTTIPass(*PassRegistry::getPassRegistry());
   }
 
-  virtual void initializePass() { pushTTIStack(this); }
+  virtual void initializePass() LLVM_OVERRIDE { pushTTIStack(this); }
 
   virtual void finalizePass() { popTTIStack(); }
 
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+  virtual void getAnalysisUsage(AnalysisUsage &AU) const LLVM_OVERRIDE {
     TargetTransformInfo::getAnalysisUsage(AU);
   }
 
@@ -65,13 +65,13 @@ public:
   static char ID;
 
   /// Provide necessary pointer adjustments for the two base classes.
-  virtual void *getAdjustedAnalysisPointer(const void *ID) {
+  virtual void *getAdjustedAnalysisPointer(const void *ID) LLVM_OVERRIDE {
     if (ID == &TargetTransformInfo::ID)
       return (TargetTransformInfo *)this;
     return this;
   }
 
-  virtual bool hasBranchDivergence() const;
+  virtual bool hasBranchDivergence() const LLVM_OVERRIDE;
 
   /// @}
 };

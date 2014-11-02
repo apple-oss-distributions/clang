@@ -66,7 +66,7 @@ make(A0 a0)
 {
     static typename aligned_storage<sizeof(T)>::type buf;
     ::new (&buf) T(a0);
-    return *(T*)&buf;
+    return *reinterpret_cast<T*>(&buf);
 }
 
 template <class T, class A0, class A1>
@@ -76,7 +76,7 @@ make(A0 a0, A1 a1)
 {
     static typename aligned_storage<sizeof(T)>::type buf;
     ::new (&buf) T(a0, a1);
-    return *(T*)&buf;
+    return *reinterpret_cast<T*>(&buf);
 }
 
 template <class T, class A0, class A1, class A2>
@@ -86,7 +86,7 @@ make(A0 a0, A1 a1, A2 a2)
 {
     static typename aligned_storage<sizeof(T)>::type buf;
     ::new (&buf) T(a0, a1, a2);
-    return *(T*)&buf;
+    return *reinterpret_cast<T*>(&buf);
 }
 
 template <typename T, size_t N>
@@ -175,7 +175,7 @@ locale::__imp::__imp(size_t refs)
     facets_.clear();
     install(&make<_VSTD::collate<char> >(1u));
     install(&make<_VSTD::collate<wchar_t> >(1u));
-    install(&make<_VSTD::ctype<char> >((ctype_base::mask*)0, false, 1u));
+    install(&make<_VSTD::ctype<char> >(nullptr, false, 1u));
     install(&make<_VSTD::ctype<wchar_t> >(1u));
     install(&make<codecvt<char, char, mbstate_t> >(1u));
     install(&make<codecvt<wchar_t, char, mbstate_t> >(1u));
@@ -459,7 +459,7 @@ locale::__imp::make_classic()
 {
     // only one thread can get in here and it only gets in once
     static aligned_storage<sizeof(locale)>::type buf;
-    locale* c = (locale*)&buf;
+    locale* c = reinterpret_cast<locale*>(&buf);
     c->__locale_ = &make<__imp>(1u);
     return *c;
 }
@@ -477,7 +477,7 @@ locale::__imp::make_global()
     // only one thread can get in here and it only gets in once
     static aligned_storage<sizeof(locale)>::type buf;
     ::new (&buf) locale(locale::classic());
-    return *(locale*)&buf;
+    return *reinterpret_cast<locale*>(&buf);
 }
 
 locale&
@@ -810,7 +810,7 @@ ctype<wchar_t>::do_toupper(char_type c) const
 {
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
     return isascii(c) ? _DefaultRuneLocale.__mapupper[c] : c;
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__)
     return isascii(c) ? ctype<char>::__classic_upper_table()[c] : c;
 #else
     return (isascii(c) && iswlower_l(c, __cloc())) ? c-L'a'+L'A' : c;
@@ -823,7 +823,7 @@ ctype<wchar_t>::do_toupper(char_type* low, const char_type* high) const
     for (; low != high; ++low)
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
         *low = isascii(*low) ? _DefaultRuneLocale.__mapupper[*low] : *low;
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__)
         *low = isascii(*low) ? ctype<char>::__classic_upper_table()[*low]
                              : *low;
 #else
@@ -837,7 +837,7 @@ ctype<wchar_t>::do_tolower(char_type c) const
 {
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
     return isascii(c) ? _DefaultRuneLocale.__maplower[c] : c;
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__)
     return isascii(c) ? ctype<char>::__classic_lower_table()[c] : c;
 #else
     return (isascii(c) && isupper_l(c, __cloc())) ? c-L'A'+'a' : c;
@@ -850,7 +850,7 @@ ctype<wchar_t>::do_tolower(char_type* low, const char_type* high) const
     for (; low != high; ++low)
 #ifdef _LIBCPP_HAS_DEFAULTRUNELOCALE
         *low = isascii(*low) ? _DefaultRuneLocale.__maplower[*low] : *low;
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__)
         *low = isascii(*low) ? ctype<char>::__classic_lower_table()[*low]
                              : *low;
 #else
@@ -919,7 +919,7 @@ ctype<char>::do_toupper(char_type c) const
       static_cast<char>(_DefaultRuneLocale.__mapupper[static_cast<ptrdiff_t>(c)]) : c;
 #elif defined(__NetBSD__)
     return static_cast<char>(__classic_upper_table()[static_cast<unsigned char>(c)]);
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__)
     return isascii(c) ? 
       static_cast<char>(__classic_upper_table()[static_cast<unsigned char>(c)]) : c;
 #else
@@ -936,7 +936,7 @@ ctype<char>::do_toupper(char_type* low, const char_type* high) const
           static_cast<char>(_DefaultRuneLocale.__mapupper[static_cast<ptrdiff_t>(*low)]) : *low;
 #elif defined(__NetBSD__)
         *low = static_cast<char>(__classic_upper_table()[static_cast<unsigned char>(*low)]);
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__)
         *low = isascii(*low) ?
           static_cast<char>(__classic_upper_table()[static_cast<size_t>(*low)]) : *low;
 #else
@@ -953,7 +953,7 @@ ctype<char>::do_tolower(char_type c) const
       static_cast<char>(_DefaultRuneLocale.__maplower[static_cast<ptrdiff_t>(c)]) : c;
 #elif defined(__NetBSD__)
     return static_cast<char>(__classic_lower_table()[static_cast<unsigned char>(c)]);
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN) || defined(__NetBSD__)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__)
     return isascii(c) ?
       static_cast<char>(__classic_lower_table()[static_cast<size_t>(c)]) : c;
 #else
@@ -969,7 +969,7 @@ ctype<char>::do_tolower(char_type* low, const char_type* high) const
         *low = isascii(*low) ? static_cast<char>(_DefaultRuneLocale.__maplower[static_cast<ptrdiff_t>(*low)]) : *low;
 #elif defined(__NetBSD__)
         *low = static_cast<char>(__classic_lower_table()[static_cast<unsigned char>(*low)]);
-#elif defined(__GLIBC__) || defined(EMSCRIPTEN)
+#elif defined(__GLIBC__) || defined(__EMSCRIPTEN__)
         *low = isascii(*low) ? static_cast<char>(__classic_lower_table()[static_cast<size_t>(*low)]) : *low;
 #else
         *low = (isascii(*low) && isupper_l(*low, __cloc())) ? *low-'A'+'a' : *low;
@@ -1010,7 +1010,7 @@ ctype<char>::do_narrow(const char_type* low, const char_type* high, char dfault,
     return low;
 }
 
-#ifdef EMSCRIPTEN
+#ifdef __EMSCRIPTEN__
 extern "C" const unsigned short ** __ctype_b_loc();
 extern "C" const int ** __ctype_tolower_loc();
 extern "C" const int ** __ctype_toupper_loc();
@@ -1031,10 +1031,10 @@ ctype<char>::classic_table()  _NOEXCEPT
     return _ctype+1; // internal ctype mask table defined in msvcrt.dll
 // This is assumed to be safe, which is a nonsense assumption because we're
 // going to end up dereferencing it later...
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
     return *__ctype_b_loc();
 #elif defined(_AIX)
-    return (const unsigned long *)__lc_ctype_ptr->obj->mask;
+    return (const unsigned int *)__lc_ctype_ptr->obj->mask;
 #else
     // Platform not supported: abort so the person doing the port knows what to
     // fix
@@ -1070,7 +1070,7 @@ ctype<char>::__classic_upper_table() _NOEXCEPT
     return _C_toupper_tab_ + 1;
 }
 
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
 const int*
 ctype<char>::__classic_lower_table() _NOEXCEPT
 {
@@ -1082,7 +1082,7 @@ ctype<char>::__classic_upper_table() _NOEXCEPT
 {
     return *__ctype_toupper_loc();
 }
-#endif // __GLIBC__ || EMSCRIPTEN || __NETBSD__
+#endif // __GLIBC__ || __EMSCRIPTEN__ || __NETBSD__
 
 // template <> class ctype_byname<char>
 
@@ -1613,9 +1613,9 @@ int
 codecvt<wchar_t, char, mbstate_t>::do_encoding() const  _NOEXCEPT
 {
 #ifdef _LIBCPP_LOCALE__L_EXTENSIONS
-    if (mbtowc_l((wchar_t*) 0, (const char*) 0, MB_LEN_MAX, __l) == 0)
+    if (mbtowc_l(nullptr, nullptr, MB_LEN_MAX, __l) == 0)
 #else
-    if (__mbtowc_l((wchar_t*) 0, (const char*) 0, MB_LEN_MAX, __l) == 0)
+    if (__mbtowc_l(nullptr, nullptr, MB_LEN_MAX, __l) == 0)
 #endif
     {
         // stateless encoding
@@ -1741,8 +1741,8 @@ utf16_to_utf8(const uint16_t* frm, const uint16_t* frm_end, const uint16_t*& frm
                 return codecvt_base::error;
             if (to_end-to_nxt < 4)
                 return codecvt_base::partial;
-            if ((((((unsigned long)wc1 & 0x03C0) >> 6) + 1) << 16) +
-                (((unsigned long)wc1 & 0x003F) << 10) + (wc2 & 0x03FF) > Maxcode)
+            if (((((wc1 & 0x03C0UL) >> 6) + 1) << 16) +
+                ((wc1 & 0x003FUL) << 10) + (wc2 & 0x03FF) > Maxcode)
                 return codecvt_base::error;
             ++frm_nxt;
             uint8_t z = ((wc1 & 0x03C0) >> 6) + 1;
@@ -1818,8 +1818,8 @@ utf16_to_utf8(const uint32_t* frm, const uint32_t* frm_end, const uint32_t*& frm
                 return codecvt_base::error;
             if (to_end-to_nxt < 4)
                 return codecvt_base::partial;
-            if ((((((unsigned long)wc1 & 0x03C0) >> 6) + 1) << 16) +
-                (((unsigned long)wc1 & 0x003F) << 10) + (wc2 & 0x03FF) > Maxcode)
+            if (((((wc1 & 0x03C0UL) >> 6) + 1) << 16) +
+                ((wc1 & 0x003FUL) << 10) + (wc2 & 0x03FF) > Maxcode)
                 return codecvt_base::error;
             ++frm_nxt;
             uint8_t z = ((wc1 & 0x03C0) >> 6) + 1;
@@ -1942,9 +1942,9 @@ utf8_to_utf16(const uint8_t* frm, const uint8_t* frm_end, const uint8_t*& frm_nx
                 return codecvt_base::error;
             if (to_end-to_nxt < 2)
                 return codecvt_base::partial;
-            if (((((unsigned long)c1 & 7) << 18) +
-                (((unsigned long)c2 & 0x3F) << 12) +
-                (((unsigned long)c3 & 0x3F) << 6) + (c4 & 0x3F)) > Maxcode)
+            if ((((c1 & 7UL) << 18) +
+                ((c2 & 0x3FUL) << 12) +
+                ((c3 & 0x3FUL) << 6) + (c4 & 0x3F)) > Maxcode)
                 return codecvt_base::error;
             *to_nxt = static_cast<uint16_t>(
                     0xD800
@@ -2063,9 +2063,9 @@ utf8_to_utf16(const uint8_t* frm, const uint8_t* frm_end, const uint8_t*& frm_nx
                 return codecvt_base::error;
             if (to_end-to_nxt < 2)
                 return codecvt_base::partial;
-            if (((((unsigned long)c1 & 7) << 18) +
-                (((unsigned long)c2 & 0x3F) << 12) +
-                (((unsigned long)c3 & 0x3F) << 6) + (c4 & 0x3F)) > Maxcode)
+            if ((((c1 & 7UL) << 18) +
+                ((c2 & 0x3FUL) << 12) +
+                ((c3 & 0x3FUL) << 6) + (c4 & 0x3F)) > Maxcode)
                 return codecvt_base::error;
             *to_nxt = static_cast<uint32_t>(
                     0xD800
@@ -2172,9 +2172,9 @@ utf8_to_utf16_length(const uint8_t* frm, const uint8_t* frm_end,
             }
             if ((c3 & 0xC0) != 0x80 || (c4 & 0xC0) != 0x80)
                 break;
-            if (((((unsigned long)c1 & 7) << 18) +
-                (((unsigned long)c2 & 0x3F) << 12) +
-                (((unsigned long)c3 & 0x3F) << 6) + (c4 & 0x3F)) > Maxcode)
+            if ((((c1 & 7UL) << 18) +
+                ((c2 & 0x3FUL) << 12) +
+                ((c3 & 0x3FUL) << 6) + (c4 & 0x3F)) > Maxcode)
                 break;
             ++nchar16_t;
             frm_nxt += 4;

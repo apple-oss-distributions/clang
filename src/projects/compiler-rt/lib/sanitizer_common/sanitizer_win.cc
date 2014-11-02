@@ -110,6 +110,11 @@ void *MmapFixedOrDie(uptr fixed_addr, uptr size) {
   return MmapFixedNoReserve(fixed_addr, size);
 }
 
+void *MmapNoReserveOrDie(uptr size, const char *mem_type) {
+  // FIXME: make this really NoReserve?
+  return MmapOrDie(size, mem_type);
+}
+
 void *Mprotect(uptr fixed_addr, uptr size) {
   return VirtualAlloc((LPVOID)fixed_addr, size,
                       MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
@@ -215,7 +220,7 @@ u64 NanoTime() {
 
 void Abort() {
   abort();
-  _exit(-1);  // abort is not NORETURN on Windows.
+  internal__exit(-1);  // abort is not NORETURN on Windows.
 }
 
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
@@ -305,7 +310,7 @@ uptr internal_sched_yield() {
 }
 
 void internal__exit(int exitcode) {
-  _exit(exitcode);
+  ExitProcess(exitcode);
 }
 
 // ---------------------- BlockingMutex ---------------- {{{1
@@ -377,23 +382,17 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 }
 
 void StackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
-  void *tmp[kStackTraceMax];
-
   // FIXME: CaptureStackBackTrace might be too slow for us.
   // FIXME: Compare with StackWalk64.
   // FIXME: Look at LLVMUnhandledExceptionFilter in Signals.inc
-  uptr cs_ret = CaptureStackBackTrace(2, max_depth, tmp, 0);
-  uptr offset = 0;
-  // Skip the RTL frames by searching for the PC in the stacktrace.
-  // FIXME: this doesn't work well for the malloc/free stacks yet.
-  for (uptr i = 0; i < cs_ret; i++) {
-    if (pc != (uptr)tmp[i])
-      continue;
-    offset = i;
-    break;
-  }
+  size = CaptureStackBackTrace(2, Min(max_depth, kStackTraceMax),
+                               (void**)trace, 0);
+  if (size == 0)
+    return;
 
-  CopyFrom((uptr*)&tmp[offset], cs_ret - offset);
+  // Skip the RTL frames by searching for the PC in the stacktrace.
+  uptr pc_location = LocatePcInTrace(pc);
+  PopStackFrames(pc_location);
 }
 
 void MaybeOpenReportFile() {

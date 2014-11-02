@@ -147,6 +147,8 @@ public:
     Int64,
     Poly8,
     Poly16,
+    Poly64,
+    Poly128,
     Float16,
     Float32,
     Float64
@@ -1289,7 +1291,7 @@ static void GenerateChecksForIntrinsic(const std::string &Name,
 
 /// UseMacro - Examine the prototype string to determine if the intrinsic
 /// should be defined as a preprocessor macro instead of an inline function.
-static bool UseMacro(const std::string &proto) {
+static bool UseMacro(const std::string &proto, StringRef typestr) {
   // If this builtin takes an immediate argument, we need to #define it rather
   // than use a standard declaration, so that SemaChecking can range check
   // the immediate passed by the user.
@@ -1300,6 +1302,12 @@ static bool UseMacro(const std::string &proto) {
   // from the pointer type.
   if (proto.find('p') != std::string::npos ||
       proto.find('c') != std::string::npos)
+    return true;
+
+  // It is not permitted to pass or return an __fp16 by value, so intrinsics
+  // taking a scalar float16_t must be implemented as macros.
+  if (typestr.find('h') != std::string::npos &&
+      proto.find('s') != std::string::npos)
     return true;
 
   return false;
@@ -1315,7 +1323,7 @@ static bool MacroArgUsedDirectly(const std::string &proto, unsigned i) {
 
 // Generate the string "(argtype a, argtype b, ...)"
 static std::string GenArgs(const std::string &proto, StringRef typestr) {
-  bool define = UseMacro(proto);
+  bool define = UseMacro(proto, typestr);
   char arg = 'a';
 
   std::string s;
@@ -1432,7 +1440,7 @@ static std::string GenOpString(OpKind op, const std::string &proto,
                                StringRef typestr) {
   bool quad;
   unsigned nElts = GetNumElements(typestr, quad);
-  bool define = UseMacro(proto);
+  bool define = UseMacro(proto, typestr);
   bool scal = isScalarMod(proto[0]);
 
   std::string ts = TypeString(proto[0], typestr);
@@ -1837,7 +1845,7 @@ static std::string GenBuiltin(const std::string &name,
   // sret-like argument.
   bool sret = (proto[0] >= '2' && proto[0] <= '4');
 
-  bool define = UseMacro(proto);
+  bool define = UseMacro(proto, typestr);
 
   // Check if the prototype has a scalar operand with the type of the vector
   // elements.  If not, bitcasting the args will take care of arg checking.
@@ -1988,7 +1996,7 @@ static std::string GenIntrinsic(const std::string &name,
                                 StringRef outTypeStr, StringRef inTypeStr,
                                 OpKind kind, ClassKind classKind) {
   assert(!proto.empty() && "");
-  bool define = UseMacro(proto) && kind != OpUnavailable;
+  bool define = UseMacro(proto, outTypeStr) && kind != OpUnavailable;
   std::string s;
 
   // static always inline + return type
@@ -2039,8 +2047,9 @@ static std::string GenIntrinsic(const std::string &name,
 void NeonEmitter::run(raw_ostream &OS) {
   if (IsARM64)
    OS << 
-    "/*===---- aarch64_simd.h - ARM64 SIMD intrinsics ------------------------"
-    "---===\n";
+    "/*===---- ARM64 SIMD intrinsics --------------------------------"
+    "---===\n"
+    " *\n";
   else
    OS << 
     "/*===---- arm_neon.h - ARM Neon intrinsics ------------------------------"
@@ -2081,8 +2090,11 @@ void NeonEmitter::run(raw_ostream &OS) {
     " */\n\n";
 
   if (IsARM64) {
-    OS << "#ifndef __AARCH64_SIMD_H\n";
-    OS << "#define __AARCH64_SIMD_H\n\n";
+    OS << "/* DO NOT INCLUDE THIS HEADER DIRECTLY.\n";
+    OS << "   Please use <arm_neon.h> instead. */\n\n";
+
+    OS << "#ifndef __ARM64_NEON_INTERNAL_H\n";
+    OS << "#define __ARM64_NEON_INTERNAL_H\n\n";
 
     OS << "#if defined(__aarch64__) && !defined(__arm64__)\n";
     OS << "#include \"arm_neon.h\"\n";
@@ -2096,7 +2108,7 @@ void NeonEmitter::run(raw_ostream &OS) {
     OS << "#define __ARM_NEON_H\n\n";
 
     OS << "#ifdef __arm64\n";
-    OS << "#include \"aarch64_simd.h\"\n";
+    OS << "#include \"arm64_neon_internal.h\"\n";
     OS << "#else\n\n";
 
     OS << "#ifndef __ARM_NEON__\n";
@@ -2107,7 +2119,7 @@ void NeonEmitter::run(raw_ostream &OS) {
   OS << "#include <stdint.h>\n\n";
 
   // Emit NEON-specific scalar typedefs.
-  OS << "typedef uint16_t float16_t;\n";
+  OS << "typedef __fp16 float16_t;\n";
   OS << "typedef float float32_t;\n";
   if (IsARM64)
     OS << "typedef double float64_t;\n";
@@ -2201,7 +2213,7 @@ void NeonEmitter::run(raw_ostream &OS) {
   OS << "#undef __ai\n\n";
   if (IsARM64) {
     OS << "#endif /* not __arm64 Darwin*/\n\n";
-    OS << "#endif /* __AARCH64_SIMD_H */\n";
+    OS << "#endif /* __ARM64_NEON_INTERNAL_H */\n";
   } else {
     OS << "#endif /* not __arm64 */\n\n";
     OS << "#endif /* __ARM_NEON_H */\n";

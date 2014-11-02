@@ -159,6 +159,10 @@ public:
 
   // Platform defaults information
 
+  /// \brief Returns true if the toolchain is targeting a non-native
+  /// architecture.
+  virtual bool isCrossCompiling() const;
+
   /// HasNativeLTOLinker - Check whether the linker and related tools have
   /// native LLVM support.
   virtual bool HasNativeLLVMSupport() const;
@@ -176,10 +180,6 @@ public:
 
   /// \brief Check if the toolchain should use the integrated assembler.
   bool useIntegratedAs() const;
-
-  /// IsStrictAliasingDefault - Does this tool chain use -fstrict-aliasing by
-  /// default.
-  virtual bool IsStrictAliasingDefault() const { return true; }
 
   /// IsMathErrnoDefault - Does this tool chain use -fmath-errno by default.
   virtual bool IsMathErrnoDefault() const { return true; }

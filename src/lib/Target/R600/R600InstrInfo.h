@@ -55,6 +55,8 @@ namespace llvm {
                            MachineBasicBlock::iterator MI, DebugLoc DL,
                            unsigned DestReg, unsigned SrcReg,
                            bool KillSrc) const;
+  bool isLegalToSplitMBBAt(MachineBasicBlock &MBB,
+                           MachineBasicBlock::iterator MBBI) const;
 
   bool isTrig(const MachineInstr &MI) const;
   bool isPlaceHolderOpcode(unsigned opcode) const;
@@ -65,6 +67,8 @@ namespace llvm {
   bool isALUInstr(unsigned Opcode) const;
   bool hasInstrModifiers(unsigned Opcode) const;
   bool isLDSInstr(unsigned Opcode) const;
+  bool isLDSNoRetInstr(unsigned Opcode) const;
+  bool isLDSRetInstr(unsigned Opcode) const;
 
   /// \returns true if this \p Opcode represents an ALU instruction or an
   /// instruction that will be lowered in ExpandSpecialInstrs Pass.
@@ -193,14 +197,9 @@ namespace llvm {
   virtual int getInstrLatency(const InstrItineraryData *ItinData,
                               SDNode *Node) const { return 1;}
 
-  /// \returns a list of all the registers that may be accesed using indirect
-  /// addressing.
-  std::vector<unsigned> getIndirectReservedRegs(const MachineFunction &MF) const;
-
-  virtual int getIndirectIndexBegin(const MachineFunction &MF) const;
-
-  virtual int getIndirectIndexEnd(const MachineFunction &MF) const;
-
+  /// \brief Reserve the registers that may be accesed using indirect addressing.
+  void reserveIndirectRegisters(BitVector &Reserved,
+                                const MachineFunction &MF) const;
 
   virtual unsigned calculateIndirectAddress(unsigned RegIndex,
                                             unsigned Channel) const;

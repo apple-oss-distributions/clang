@@ -42,21 +42,32 @@ FakeStack *FakeStack::Create(uptr stack_size_log) {
     stack_size_log = kMinStackSizeLog;
   if (stack_size_log > kMaxStackSizeLog)
     stack_size_log = kMaxStackSizeLog;
+  uptr size = RequiredSize(stack_size_log);
   FakeStack *res = reinterpret_cast<FakeStack *>(
-      MmapOrDie(RequiredSize(stack_size_log), "FakeStack"));
+      flags()->uar_noreserve ? MmapNoReserveOrDie(size, "FakeStack")
+                             : MmapOrDie(size, "FakeStack"));
   res->stack_size_log_ = stack_size_log;
-  if (common_flags()->verbosity) {
-    u8 *p = reinterpret_cast<u8 *>(res);
-    Report("T%d: FakeStack created: %p -- %p stack_size_log: %zd \n",
-           GetCurrentTidOrInvalid(), p,
-           p + FakeStack::RequiredSize(stack_size_log), stack_size_log);
-  }
+  u8 *p = reinterpret_cast<u8 *>(res);
+  VReport(1, "T%d: FakeStack created: %p -- %p stack_size_log: %zd; "
+          "mmapped %zdK, noreserve=%d \n",
+          GetCurrentTidOrInvalid(), p,
+          p + FakeStack::RequiredSize(stack_size_log), stack_size_log,
+          size >> 10, flags()->uar_noreserve);
   return res;
 }
 
-void FakeStack::Destroy() {
+void FakeStack::Destroy(int tid) {
   PoisonAll(0);
-  UnmapOrDie(this, RequiredSize(stack_size_log_));
+  if (common_flags()->verbosity >= 2) {
+    InternalScopedString str(kNumberOfSizeClasses * 50);
+    for (uptr class_id = 0; class_id < kNumberOfSizeClasses; class_id++)
+      str.append("%zd: %zd/%zd; ", class_id, hint_position_[class_id],
+                 NumberOfFrames(stack_size_log(), class_id));
+    Report("T%d: FakeStack destroyed: %s\n", tid, str.data());
+  }
+  uptr size = RequiredSize(stack_size_log_);
+  FlushUnneededASanShadowMemory(reinterpret_cast<uptr>(this), size);
+  UnmapOrDie(this, size);
 }
 
 void FakeStack::PoisonAll(u8 magic) {

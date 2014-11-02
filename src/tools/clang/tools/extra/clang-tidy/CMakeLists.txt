@@ -1,19 +1,20 @@
 set(LLVM_LINK_COMPONENTS
-  ${LLVM_TARGETS_TO_BUILD}
-  asmparser
-  bitreader
-  support
-  mc
+  Support
   )
 
 add_clang_library(clangTidy
   ClangTidy.cpp
   ClangTidyModule.cpp
+  ClangTidyDiagnosticConsumer.cpp
   )
 target_link_libraries(clangTidy
-  clangTooling
+  clangAST
+  clangASTMatchers
   clangBasic
-  clangRewriteFrontend
+  clangFrontend
+  clangRewriteCore
+  clangStaticAnalyzerFrontend
+  clangTooling
   )
 
 add_subdirectory(tool)

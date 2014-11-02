@@ -18,6 +18,7 @@
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/Frontend/LayoutOverrideSource.h"
 #include "clang/Frontend/MultiplexConsumer.h"
+#include "clang/Frontend/Utils.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Parse/ParseAST.h"
@@ -158,7 +159,6 @@ ASTConsumer* FrontendAction::CreateWrappedASTConsumer(CompilerInstance &CI,
   return new MultiplexConsumer(Consumers);
 }
 
-
 bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
                                      const FrontendInputFile &Input) {
   assert(!Instance && "Already processing a source file!");
@@ -180,7 +180,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
            "This action does not have AST file support!");
 
     IntrusiveRefCntPtr<DiagnosticsEngine> Diags(&CI.getDiagnostics());
-    std::string Error;
+
     ASTUnit *AST = ASTUnit::LoadFromASTFile(InputFile, Diags,
                                             CI.getFileSystemOpts());
     if (!AST)
@@ -211,6 +211,15 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     return true;
   }
 
+  if (!CI.hasVirtualFileSystem()) {
+    if (IntrusiveRefCntPtr<vfs::FileSystem> VFS =
+          createVFSFromCompilerInvocation(CI.getInvocation(),
+                                          CI.getDiagnostics()))
+      CI.setVirtualFileSystem(VFS);
+    else
+      goto failure;
+  }
+
   // Set up the file and source managers, if needed.
   if (!CI.hasFileManager())
     CI.createFileManager();
@@ -228,6 +237,10 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 
     // Initialize the action.
     if (!BeginSourceFileAction(CI, InputFile))
+      goto failure;
+
+    // Initialize the main file entry.
+    if (!CI.InitializeSourceManager(CurrentInput))
       goto failure;
 
     return true;
@@ -265,7 +278,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   }
 
   // Set up the preprocessor.
-  CI.createPreprocessor();
+  CI.createPreprocessor(getTranslationUnitKind());
 
   // Inform the diagnostic client we are processing a source file.
   CI.getDiagnosticClient().BeginSourceFile(CI.getLangOpts(),
@@ -274,6 +287,11 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 
   // Initialize the action.
   if (!BeginSourceFileAction(CI, InputFile))
+    goto failure;
+
+  // Initialize the main file entry. It is important that this occurs after
+  // BeginSourceFileAction, which may change CurrentInput during module builds.
+  if (!CI.InitializeSourceManager(CurrentInput))
     goto failure;
 
   // Create the AST context and consumer unless this is a preprocessor only
@@ -363,13 +381,6 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 bool FrontendAction::Execute() {
   CompilerInstance &CI = getCompilerInstance();
 
-  // Initialize the main file entry. This needs to be delayed until after PCH
-  // has loaded.
-  if (!isCurrentFileAST()) {
-    if (!CI.InitializeSourceManager(getCurrentInput()))
-      return false;
-  }
-
   if (CI.hasFrontendTimer()) {
     llvm::TimeRegion Timer(CI.getFrontendTimer());
     ExecuteAction();
@@ -402,9 +413,9 @@ void FrontendAction::EndSourceFile() {
   //
   // FIXME: There is more per-file stuff we could just drop here?
   if (CI.getFrontendOpts().DisableFree) {
-    CI.takeASTConsumer();
+    BuryPointer(CI.takeASTConsumer());
     if (!isCurrentFileAST()) {
-      CI.takeSema();
+      BuryPointer(CI.takeSema());
       CI.resetAndLeakASTContext();
     }
   } else {

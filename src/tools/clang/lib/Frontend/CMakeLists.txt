@@ -1,3 +1,8 @@
+set(LLVM_LINK_COMPONENTS
+  Option
+  Support
+  )
+
 add_clang_library(clangFrontend
   ASTConsumers.cpp
   ASTMerge.cpp
@@ -20,6 +25,7 @@ add_clang_library(clangFrontend
   LangStandards.cpp
   LayoutOverrideSource.cpp
   LogDiagnosticPrinter.cpp
+  ModuleDependencyCollector.cpp
   MultiplexConsumer.cpp
   PrintPreprocessedOutput.cpp
   SerializedDiagnosticPrinter.cpp
@@ -27,7 +33,6 @@ add_clang_library(clangFrontend
   TextDiagnosticBuffer.cpp
   TextDiagnosticPrinter.cpp
   VerifyDiagnosticConsumer.cpp
-  Warnings.cpp
   )
 
 add_dependencies(clangFrontend

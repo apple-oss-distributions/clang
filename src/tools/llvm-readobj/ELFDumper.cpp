@@ -13,10 +13,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm-readobj.h"
+#include "ARMEHABIPrinter.h"
 #include "Error.h"
 #include "ObjDumper.h"
 #include "StreamWriter.h"
-
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Support/Compiler.h"
@@ -65,7 +65,7 @@ private:
 
 template <class T> T errorOrDefault(ErrorOr<T> Val, T Default = T()) {
   if (!Val) {
-    error(Val);
+    error(Val.getError());
     return Default;
   }
 
@@ -631,7 +631,7 @@ void ELFDumper<ELFT>::printSymbol(typename ELFO::Elf_Sym_Iter Symbol) {
       FullSymbolName += (IsDefault ? "@@" : "@");
       FullSymbolName += *Version;
     } else
-      error(Version);
+      error(Version.getError());
   }
 
   DictScope D(W, "Symbol");
@@ -683,6 +683,18 @@ static const char *getTypeString(uint64_t Type) {
   LLVM_READOBJ_TYPE_CASE(SYMENT);
   LLVM_READOBJ_TYPE_CASE(SYMTAB);
   LLVM_READOBJ_TYPE_CASE(TEXTREL);
+  LLVM_READOBJ_TYPE_CASE(VERNEED);
+  LLVM_READOBJ_TYPE_CASE(VERNEEDNUM);
+  LLVM_READOBJ_TYPE_CASE(VERSYM);
+  LLVM_READOBJ_TYPE_CASE(MIPS_RLD_VERSION);
+  LLVM_READOBJ_TYPE_CASE(MIPS_FLAGS);
+  LLVM_READOBJ_TYPE_CASE(MIPS_BASE_ADDRESS);
+  LLVM_READOBJ_TYPE_CASE(MIPS_LOCAL_GOTNO);
+  LLVM_READOBJ_TYPE_CASE(MIPS_SYMTABNO);
+  LLVM_READOBJ_TYPE_CASE(MIPS_UNREFEXTNO);
+  LLVM_READOBJ_TYPE_CASE(MIPS_GOTSYM);
+  LLVM_READOBJ_TYPE_CASE(MIPS_RLD_MAP);
+  LLVM_READOBJ_TYPE_CASE(MIPS_PLTGOT);
   default: return "unknown";
   }
 }
@@ -715,8 +727,22 @@ static void printValue(const ELFFile<ELFT> *O, uint64_t Type, uint64_t Value,
   case DT_FINI_ARRAY:
   case DT_PREINIT_ARRAY:
   case DT_DEBUG:
+  case DT_VERNEED:
+  case DT_VERSYM:
   case DT_NULL:
+  case DT_MIPS_FLAGS:
+  case DT_MIPS_BASE_ADDRESS:
+  case DT_MIPS_GOTSYM:
+  case DT_MIPS_RLD_MAP:
+  case DT_MIPS_PLTGOT:
     OS << format("0x%" PRIX64, Value);
+    break;
+  case DT_VERNEEDNUM:
+  case DT_MIPS_RLD_VERSION:
+  case DT_MIPS_LOCAL_GOTNO:
+  case DT_MIPS_SYMTABNO:
+  case DT_MIPS_UNREFEXTNO:
+    OS << Value;
     break;
   case DT_PLTRELSZ:
   case DT_RELASZ:
@@ -746,6 +772,18 @@ static void printValue(const ELFFile<ELFT> *O, uint64_t Type, uint64_t Value,
 template<class ELFT>
 void ELFDumper<ELFT>::printUnwindInfo() {
   W.startLine() << "UnwindInfo not implemented.\n";
+}
+
+namespace {
+template <>
+void ELFDumper<ELFType<support::little, 2, false> >::printUnwindInfo() {
+  const unsigned Machine = Obj->getHeader()->e_machine;
+  if (Machine == EM_ARM) {
+    ARM::EHABI::PrinterContext<ELFType<support::little, 2, false> > Ctx(W, Obj);
+    return Ctx.PrintUnwindInformation();
+  }
+  W.startLine() << "UnwindInfo not implemented.\n";
+}
 }
 
 template<class ELFT>

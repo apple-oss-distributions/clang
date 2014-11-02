@@ -20,15 +20,17 @@ namespace llvm {
   /// x86-64.
   class X86_64MachoTargetObjectFile : public TargetLoweringObjectFileMachO {
   public:
+
     virtual const MCExpr *
-    getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
-                            MachineModuleInfo *MMI, unsigned Encoding,
-                            MCStreamer &Streamer) const;
+    getTTypeGlobalReference(const GlobalValue *GV, unsigned Encoding,
+                            Mangler &Mang, const TargetMachine &TM,
+                            MachineModuleInfo *MMI, MCStreamer &Streamer) const;
 
     // getCFIPersonalitySymbol - The symbol that gets passed to
     // .cfi_personality.
     virtual MCSymbol *
-    getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
+    getCFIPersonalitySymbol(const GlobalValue *GV, Mangler &Mang,
+                            const TargetMachine &TM,
                             MachineModuleInfo *MMI) const;
   };
 
@@ -39,6 +41,14 @@ namespace llvm {
 
     /// \brief Describe a TLS variable address within debug info.
     virtual const MCExpr *getDebugThreadLocalSymbol(const MCSymbol *Sym) const;
+  };
+
+  /// \brief This implementation is used for Windows targets on x86 and x86-64.
+  class X86WindowsTargetObjectFile : public TargetLoweringObjectFileCOFF {
+    virtual const MCExpr*
+    getExecutableRelativeSymbol(const ConstantExpr *CE,
+                                Mangler &Mang,
+                                const TargetMachine &TM) const;
   };
 
 } // end namespace llvm

@@ -101,7 +101,7 @@ public:
   /// by the instruction.
   ///
   unsigned getAlignment() const {
-    return (1u << getSubclassDataFromInstruction()) >> 1;
+    return (1u << (getSubclassDataFromInstruction() & 31)) >> 1;
   }
   void setAlignment(unsigned Align);
 
@@ -109,6 +109,20 @@ public:
   /// function and is a constant size.  If so, the code generator will fold it
   /// into the prolog/epilog code, so it is basically free.
   bool isStaticAlloca() const;
+
+  /// \brief Return true if this alloca is used as an inalloca argument to a
+  /// call.  Such allocas are never considered static even if they are in the
+  /// entry block.
+  bool isUsedWithInAlloca() const {
+    return getSubclassDataFromInstruction() & 32;
+  }
+
+  /// \brief Specify whether this alloca is used to represent a the arguments to
+  /// a call.
+  void setUsedWithInAlloca(bool V) {
+    setInstructionSubclassData((getSubclassDataFromInstruction() & ~32) |
+                               (V ? 32 : 0));
+  }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
@@ -3609,6 +3623,43 @@ public:
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
     return I->getOpcode() == BitCast;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+//===----------------------------------------------------------------------===//
+//                          AddrSpaceCastInst Class
+//===----------------------------------------------------------------------===//
+
+/// \brief This class represents a conversion between pointers from
+/// one address space to another.
+class AddrSpaceCastInst : public CastInst {
+protected:
+  /// \brief Clone an identical AddrSpaceCastInst
+  virtual AddrSpaceCastInst *clone_impl() const;
+
+public:
+  /// \brief Constructor with insert-before-instruction semantics
+  AddrSpaceCastInst(
+    Value *S,                     ///< The value to be casted
+    Type *Ty,                     ///< The type to casted to
+    const Twine &NameStr = "",    ///< A name for the new instruction
+    Instruction *InsertBefore = 0 ///< Where to insert the new instruction
+  );
+
+  /// \brief Constructor with insert-at-end-of-block semantics
+  AddrSpaceCastInst(
+    Value *S,                     ///< The value to be casted
+    Type *Ty,                     ///< The type to casted to
+    const Twine &NameStr,         ///< A name for the new instruction
+    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+  );
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == AddrSpaceCast;
   }
   static inline bool classof(const Value *V) {
     return isa<Instruction>(V) && classof(cast<Instruction>(V));

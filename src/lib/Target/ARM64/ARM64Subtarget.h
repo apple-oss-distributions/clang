@@ -33,6 +33,9 @@ protected:
   // HasZeroCycleZeroing - Has zero-cycle zeroing instructions.
   bool HasZeroCycleZeroing;
 
+  // Has TBI (address top-byte ignored) option.
+  bool HasAddressTopByteIgnored;
+
   /// CPUString - String name of used CPU.
   std::string CPUString;
 
@@ -53,9 +56,17 @@ protected:
 
   bool hasZeroCycleZeroing() const { return HasZeroCycleZeroing; }
 
+  /// CPU has TBI (top byte of addresses is ignored during HW address
+  /// translation) and OS enables it.
+  bool supportsAddressTopByteIgnored() const;
+
   bool isTargetDarwin() const { return TargetTriple.isOSDarwin(); }
 
   bool isTargetELF() const { return TargetTriple.isOSBinFormatELF(); }
+
+  bool isTargetMachO() const { return TargetTriple.isOSBinFormatMachO(); }
+
+  bool isCyclone() const { return CPUString == "cyclone"; }
 
   /// getMaxInlineSizeThreshold - Returns the maximum memset / memcpy size
   /// that still makes it profitable to inline the call.
@@ -70,7 +81,7 @@ protected:
   /// ClassifyGlobalReference - Find the target operand flags that describe
   /// how a global value should be referenced for the current subtarget.
   unsigned char ClassifyGlobalReference(const GlobalValue *GV,
-                                        Reloc::Model RelocM) const;
+                                        const TargetMachine &TM) const;
 
   /// This function returns the name of a function which has an interface
   /// like the non-standard bzero function, if such a function exists on

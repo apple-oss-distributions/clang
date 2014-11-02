@@ -13,19 +13,16 @@
 #define DEBUG_TYPE "arm64-disassembler"
 
 #include "ARM64Disassembler.h"
+#include "ARM64ExternalSymbolizer.h"
 #include "ARM64Subtarget.h"
 #include "MCTargetDesc/ARM64BaseInfo.h"
 #include "MCTargetDesc/ARM64AddressingModes.h"
 #include "llvm/MC/MCInst.h"
-#include "llvm/MC/MCExpr.h"
-#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCFixedLenDisassembler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/Format.h"
-#include "llvm/Support/raw_ostream.h"
 
 // Pull DecodeStatus and its enum values into the global namespace.
 typedef llvm::MCDisassembler::DecodeStatus DecodeStatus;
@@ -141,9 +138,10 @@ using namespace llvm;
 #define Success llvm::MCDisassembler::Success
 #define Fail llvm::MCDisassembler::Fail
 
-static MCDisassembler *createARM64Disassembler(const Target &T, 
-                                               const MCSubtargetInfo &STI) {
-  return new ARM64Disassembler(STI);
+static MCDisassembler *createARM64Disassembler(const Target &T,
+                                               const MCSubtargetInfo &STI,
+                                               MCContext &Ctx) {
+  return new ARM64Disassembler(STI, Ctx);
 }
 
 DecodeStatus ARM64Disassembler::getInstruction(MCInst &MI, uint64_t &Size,
@@ -175,212 +173,22 @@ DecodeStatus ARM64Disassembler::getInstruction(MCInst &MI, uint64_t &Size,
   return Success;
 }
 
-static MCSymbolRefExpr::VariantKind getVariant(uint64_t
-                                               LLVMDisassembler_VariantKind) {
-  switch (LLVMDisassembler_VariantKind) {
-  case LLVMDisassembler_VariantKind_None:
-    return MCSymbolRefExpr::VK_None;
-  case LLVMDisassembler_VariantKind_ARM64_PAGE:
-    return MCSymbolRefExpr::VK_PAGE;
-  case LLVMDisassembler_VariantKind_ARM64_PAGEOFF:
-    return MCSymbolRefExpr::VK_PAGEOFF;
-  case LLVMDisassembler_VariantKind_ARM64_GOTPAGE:
-    return MCSymbolRefExpr::VK_GOTPAGE;
-  case LLVMDisassembler_VariantKind_ARM64_GOTPAGEOFF:
-    return MCSymbolRefExpr::VK_GOTPAGEOFF;
-  case LLVMDisassembler_VariantKind_ARM64_TLVP:
-  case LLVMDisassembler_VariantKind_ARM64_TLVOFF:
-  default:
-    assert("bad LLVMDisassembler_VariantKind");
-    return MCSymbolRefExpr::VK_None;
-  }
-}
-
-/// tryAddingSymbolicOperand - tryAddingSymbolicOperand trys to add a symbolic
-/// operand in place of the immediate Value in the MCInst.  The immediate
-/// Value has not had any PC adjustment made by the caller. If the instruction
-/// is a branch that adds the PC to the immediate Value then isBranch is
-/// Success, else Fail.  If the getOpInfo() function was set as part of the
-/// setupForSymbolicDisassembly() call then that function is called to get any
-/// symbolic information at the Address for this instrution.  If that returns
-/// non-zero then the symbolic information it returns is used to create an
-/// MCExpr and that is added as an operand to the MCInst.  If getOpInfo()
-/// returns zero and isBranch is Success then a symbol look up for
-/// Address + Value is done and if a symbol is found an MCExpr is created with
-/// that, else an MCExpr with Address + Value is created.  If getOpInfo()
-/// returns zero and isBranch is Fail then the the Opcode of the MCInst is
-/// tested and for ADRP an other instructions that help to load of pointers
-/// a symbol look up is done to see it is returns a specific reference type
-/// to add to the comment stream.  This function returns Success if it adds
-/// an operand to the MCInst and Fail otherwise.
-bool ARM64Disassembler::tryAddingSymbolicOperand(uint64_t Address,
-                                                 int Value,
-                                                 bool isBranch,
-                                                 uint64_t InstSize,
-                                                 MCInst &MI,
-                                                 uint32_t insn) const {
-  LLVMOpInfoCallback getOpInfo = getLLVMOpInfoCallback();
-
-  struct LLVMOpInfo1 SymbolicOp;
-  memset(&SymbolicOp, '\0', sizeof(struct LLVMOpInfo1));
-  SymbolicOp.Value = Value;
-  void *DisInfo = getDisInfoBlock();
-  uint64_t ReferenceType;
-  const char *ReferenceName;
-  const char *Name;
-  LLVMSymbolLookupCallback SymbolLookUp = getLLVMSymbolLookupCallback();
-  if (!getOpInfo ||
-      !getOpInfo(DisInfo, Address, 0 /* Offset */, InstSize, 1, &SymbolicOp)) {
-    if (isBranch) {
-      if (SymbolLookUp) {
-        ReferenceType = LLVMDisassembler_ReferenceType_In_Branch;
-        Name = SymbolLookUp(DisInfo, Address + Value, &ReferenceType, Address,
-                            &ReferenceName);
-        if (Name) {
-          SymbolicOp.AddSymbol.Name = Name;
-          SymbolicOp.AddSymbol.Present = Success;
-          SymbolicOp.Value = 0;
-        }
-        else {
-          SymbolicOp.Value = Address + Value;
-        }
-        if(ReferenceType == LLVMDisassembler_ReferenceType_Out_SymbolStub)
-          (*CommentStream) << "symbol stub for: " << ReferenceName;
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_Objc_Message)
-	  (*CommentStream) << "Objc message: " << ReferenceName;
-      }
-      else {
-        return false;
-      }
-    }
-    else if(MI.getOpcode() == ARM64::ADRP) {
-      if (SymbolLookUp) {
-	ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_ADRP;
-	Name = SymbolLookUp(DisInfo, insn, &ReferenceType, Address,
-			    &ReferenceName);
-	(*CommentStream) << format("0x%llx",
-				   0xfffffffffffff000LL & (Address + Value));
-      }
-      else {
-        return false;
-      }
-    }
-    else if(MI.getOpcode() == ARM64::ADDXri ||
-	    MI.getOpcode() == ARM64::LDRXui ||
-	    MI.getOpcode() == ARM64::LDRXl ||
-	    MI.getOpcode() == ARM64::ADR) {
-      if (SymbolLookUp) {
-	if(MI.getOpcode() == ARM64::ADDXri)
-	  ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_ADDXri;
-	else if(MI.getOpcode() == ARM64::LDRXui)
-	  ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_LDRXui;
-        if(MI.getOpcode() == ARM64::LDRXl){
-          ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_LDRXl;
-          Name = SymbolLookUp(DisInfo, Address + Value, &ReferenceType, Address,
-                              &ReferenceName);
-        }
-        else if(MI.getOpcode() == ARM64::ADR){
-          ReferenceType = LLVMDisassembler_ReferenceType_In_ARM64_ADR;
-          Name = SymbolLookUp(DisInfo, Address + Value, &ReferenceType, Address,
-                              &ReferenceName);
-        }
-        else{
-          Name = SymbolLookUp(DisInfo, insn, &ReferenceType, Address,
-                              &ReferenceName);
-        }
-	if(ReferenceType == LLVMDisassembler_ReferenceType_Out_LitPool_SymAddr)
-	  (*CommentStream) << "literal pool symbol address: " << ReferenceName;
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_LitPool_CstrAddr)
-	  (*CommentStream) << "literal pool for: \"" << ReferenceName << "\"";
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_Objc_CFString_Ref)
-	  (*CommentStream) << "Objc cfstring ref: @\"" << ReferenceName << "\"";
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_Objc_Message)
-	  (*CommentStream) << "Objc message: " << ReferenceName;
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_Objc_Message_Ref)
-	  (*CommentStream) << "Objc message ref: " << ReferenceName;
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_Objc_Selector_Ref)
-	  (*CommentStream) << "Objc selector ref: " << ReferenceName;
-	else if(ReferenceType ==
-		LLVMDisassembler_ReferenceType_Out_Objc_Class_Ref)
-	  (*CommentStream) << "Objc class ref: " << ReferenceName;
-      }
-      else {
-        return false;
-      }
-    }
-    else {
-      return false;
-    }
-  }
-
-  MCContext *Ctx = getMCContext();
-  const MCExpr *Add = NULL;
-  if (SymbolicOp.AddSymbol.Present) {
-    if (SymbolicOp.AddSymbol.Name) {
-      StringRef Name(SymbolicOp.AddSymbol.Name);
-      MCSymbol *Sym = Ctx->GetOrCreateSymbol(Name);
-      MCSymbolRefExpr::VariantKind Variant = getVariant(SymbolicOp.VariantKind);
-      if (Variant != MCSymbolRefExpr::VK_None)
-        Add = MCSymbolRefExpr::Create(Sym, Variant, *Ctx);
-      else
-        Add = MCSymbolRefExpr::Create(Sym, *Ctx);
-    } else {
-      Add = MCConstantExpr::Create(SymbolicOp.AddSymbol.Value, *Ctx);
-    }
-  }
-
-  const MCExpr *Sub = NULL;
-  if (SymbolicOp.SubtractSymbol.Present) {
-    if (SymbolicOp.SubtractSymbol.Name) {
-      StringRef Name(SymbolicOp.SubtractSymbol.Name);
-      MCSymbol *Sym = Ctx->GetOrCreateSymbol(Name);
-      Sub = MCSymbolRefExpr::Create(Sym, *Ctx);
-    } else {
-      Sub = MCConstantExpr::Create(SymbolicOp.SubtractSymbol.Value, *Ctx);
-    }
-  }
-
-  const MCExpr *Off = NULL;
-  if (SymbolicOp.Value != 0)
-    Off = MCConstantExpr::Create(SymbolicOp.Value, *Ctx);
-
-  const MCExpr *Expr;
-  if (Sub) {
-    const MCExpr *LHS;
-    if (Add)
-      LHS = MCBinaryExpr::CreateSub(Add, Sub, *Ctx);
-    else
-      LHS = MCUnaryExpr::CreateMinus(Sub, *Ctx);
-    if (Off != 0)
-      Expr = MCBinaryExpr::CreateAdd(LHS, Off, *Ctx);
-    else
-      Expr = LHS;
-  } else if (Add) {
-    if (Off != 0)
-      Expr = MCBinaryExpr::CreateAdd(Add, Off, *Ctx);
-    else
-      Expr = Add;
-  } else {
-    if (Off != 0)
-      Expr = Off;
-    else
-      Expr = MCConstantExpr::Create(0, *Ctx);
-  }
-
-  MI.addOperand(MCOperand::CreateExpr(Expr));
-
-  return true;
+MCSymbolizer *createARM64ExternalSymbolizer(
+                                          StringRef TT,
+                                          LLVMOpInfoCallback GetOpInfo,
+                                          LLVMSymbolLookupCallback SymbolLookUp,
+                                          void *DisInfo, MCContext *Ctx,
+                                          MCRelocationInfo *RelInfo) {
+  OwningPtr<MCRelocationInfo> RelInfoOwningPtr(RelInfo);
+  return new llvm::ARM64ExternalSymbolizer(*Ctx, RelInfoOwningPtr, GetOpInfo,
+                                           SymbolLookUp, DisInfo);
 }
 
 extern "C" void LLVMInitializeARM64Disassembler() {
   TargetRegistry::RegisterMCDisassembler(TheARM64Target,
                                          createARM64Disassembler);
+  TargetRegistry::RegisterMCSymbolizer(TheARM64Target,
+                                       createARM64ExternalSymbolizer);
 }
 
 static const unsigned FPR128DecoderTable[] =
@@ -711,8 +519,8 @@ static DecodeStatus DecodeCondBranchTarget(llvm::MCInst &Inst, unsigned Imm,
   // Sign-extend 19-bit immediate.
   if (ImmVal & (1 << (19 - 1))) ImmVal |= ~((1LL << 19) - 1);
 
-  if (!Dis->tryAddingSymbolicOperand(Addr, ImmVal << 2,
-                                     Inst.getOpcode() != ARM64::LDRXl, 4, Inst))
+  if (!Dis->tryAddingSymbolicOperand(Inst, ImmVal << 2, Addr,
+                                     Inst.getOpcode() != ARM64::LDRXl, 0, 4))
     Inst.addOperand(MCOperand::CreateImm(ImmVal));
   return Success;
 }
@@ -922,7 +730,7 @@ static DecodeStatus DecodeUnsignedLdStInstruction(llvm::MCInst &Inst, uint32_t i
   }
 
   DecodeGPR64spRegisterClass(Inst, Rn, Addr, Decoder);
-  if (!Dis->tryAddingSymbolicOperand(Addr, offset, Fail, 4, Inst, insn))
+  if (!Dis->tryAddingSymbolicOperand(Inst, offset, Addr, Fail, 0, 4))
     Inst.addOperand(MCOperand::CreateImm(offset));
   return Success;
 }
@@ -1288,18 +1096,26 @@ static DecodeStatus DecodeAddSubERegInstruction(llvm::MCInst &Inst, uint32_t ins
     default:
       return Fail;
     case ARM64::ADDWrx:
-    case ARM64::ADDSWrx:
     case ARM64::SUBWrx:
-    case ARM64::SUBSWrx:
       DecodeGPR32spRegisterClass(Inst, Rd, Addr, Decoder);
       DecodeGPR32spRegisterClass(Inst, Rn, Addr, Decoder);
       DecodeGPR32RegisterClass(Inst, Rm, Addr, Decoder);
       break;
+    case ARM64::ADDSWrx:
+    case ARM64::SUBSWrx:
+      DecodeGPR32RegisterClass(Inst, Rd, Addr, Decoder);
+      DecodeGPR32spRegisterClass(Inst, Rn, Addr, Decoder);
+      DecodeGPR32RegisterClass(Inst, Rm, Addr, Decoder);
+      break;
     case ARM64::ADDXrx:
-    case ARM64::ADDSXrx:
     case ARM64::SUBXrx:
-    case ARM64::SUBSXrx:
       DecodeGPR64spRegisterClass(Inst, Rd, Addr, Decoder);
+      DecodeGPR64spRegisterClass(Inst, Rn, Addr, Decoder);
+      DecodeGPR32RegisterClass(Inst, Rm, Addr, Decoder);
+      break;
+    case ARM64::ADDSXrx:
+    case ARM64::SUBSXrx:
+      DecodeGPR64RegisterClass(Inst, Rd, Addr, Decoder);
       DecodeGPR64spRegisterClass(Inst, Rn, Addr, Decoder);
       DecodeGPR32RegisterClass(Inst, Rm, Addr, Decoder);
       break;
@@ -1326,7 +1142,7 @@ static DecodeStatus DecodeLogicalImmInstruction(llvm::MCInst &Inst,
 
   if (Datasize) {
     DecodeGPR64spRegisterClass(Inst, Rd, Addr, Decoder);
-    DecodeGPR64spRegisterClass(Inst, Rn, Addr, Decoder);
+    DecodeGPR64RegisterClass(Inst, Rn, Addr, Decoder);
     imm = fieldFromInstruction(insn, 10, 13);
     if (!ARM64_AM::isValidDecodeLogicalImmediate(imm, 64))
       return Fail;
@@ -1369,10 +1185,10 @@ static DecodeStatus DecodeModImmInstruction(llvm::MCInst &Inst, uint32_t insn,
     case ARM64::MVNIv4i32:
       Inst.addOperand(MCOperand::CreateImm((cmode & 6) << 2));
       break;
-    case ARM64::MOVIv2smsl:
-    case ARM64::MOVIv4smsl:
-    case ARM64::MVNIv2smsl:
-    case ARM64::MVNIv4smsl:
+    case ARM64::MOVIv2s_msl:
+    case ARM64::MOVIv4s_msl:
+    case ARM64::MVNIv2s_msl:
+    case ARM64::MVNIv4s_msl:
       Inst.addOperand(MCOperand::CreateImm(cmode & 1 ? 0x110 : 0x108));
       break;
   }
@@ -1408,7 +1224,7 @@ static DecodeStatus DecodeAdrInstruction(llvm::MCInst &Inst, uint32_t insn,
   if (imm & (1 << (21 - 1))) imm |= ~((1LL << 21) - 1);
 
   DecodeGPR64RegisterClass(Inst, Rd, Addr, Decoder);
-  if (!Dis->tryAddingSymbolicOperand(Addr, imm, Fail, 4, Inst, insn))
+  if (!Dis->tryAddingSymbolicOperand(Inst, imm, Addr, Fail, 0, 4))
     Inst.addOperand(MCOperand::CreateImm(imm));
 
   return Success;
@@ -1444,7 +1260,7 @@ static DecodeStatus DecodeBaseAddSubImm(llvm::MCInst &Inst, uint32_t insn,
     DecodeGPR32spRegisterClass(Inst, Rn, Addr, Decoder);
   }
 
-  if (!Dis->tryAddingSymbolicOperand(Addr, ImmVal, Fail, 4, Inst, insn))
+  if (!Dis->tryAddingSymbolicOperand(Inst, Imm, Addr, Fail, 0, 4))
     Inst.addOperand(MCOperand::CreateImm(ImmVal));
   Inst.addOperand(MCOperand::CreateImm(12*ShifterVal));
   return Success;
@@ -1458,7 +1274,7 @@ static DecodeStatus DecodeUnconditionalBranch(llvm::MCInst &Inst, uint32_t insn,
   // Sign-extend the 26-bit immediate.
   if (imm & (1 << (26 - 1))) imm |= ~((1LL << 26) - 1);
 
-  if (!Dis->tryAddingSymbolicOperand(Addr, imm << 2, Success, 4, Inst))
+  if (!Dis->tryAddingSymbolicOperand(Inst, imm << 2, Addr, true, 0, 4))
     Inst.addOperand(MCOperand::CreateImm(imm));
 
   return Success;
@@ -1489,7 +1305,7 @@ static DecodeStatus DecodeTestAndBranch(llvm::MCInst &Inst, uint32_t insn,
 
   DecodeGPR64RegisterClass(Inst, Rt, Addr, Decoder);
   Inst.addOperand(MCOperand::CreateImm(bit));
-  if (!Dis->tryAddingSymbolicOperand(Addr, dst << 2, Success, 4, Inst))
+  if (!Dis->tryAddingSymbolicOperand(Inst, dst << 2, Addr, true, 0, 4))
     Inst.addOperand(MCOperand::CreateImm(dst));
 
   return Success;

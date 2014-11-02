@@ -11,6 +11,7 @@
 //  modules for the ASTReader.
 //
 //===----------------------------------------------------------------------===//
+#include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/ModuleMap.h"
 #include "clang/Serialization/GlobalModuleIndex.h"
 #include "clang/Serialization/ModuleManager.h"
@@ -86,6 +87,16 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
     NewModule = true;
     ModuleEntry = New;
 
+    New->InputFilesValidationTimestamp = 0;
+    if (New->Kind == MK_Module) {
+      std::string TimestampFilename = New->getTimestampFilename();
+      vfs::Status Status;
+      // A cached stat value would be fine as well.
+      if (!FileMgr.getNoncachedStatValue(TimestampFilename, Status))
+        New->InputFilesValidationTimestamp =
+            Status.getLastModificationTime().toEpochTime();
+    }
+
     // Load the contents of the module
     if (llvm::MemoryBuffer *Buffer = lookupBuffer(FileName)) {
       // The buffer was already provided for us.
@@ -98,8 +109,15 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
         ec = llvm::MemoryBuffer::getSTDIN(New->Buffer);
         if (ec)
           ErrorStr = ec.message();
-      } else
-        New->Buffer.reset(FileMgr.getBufferForFile(FileName, &ErrorStr));
+      } else {
+        // Leave the FileEntry open so if it gets read again by another
+        // ModuleManager it must be the same underlying file.
+        // FIXME: Because FileManager::getFile() doesn't guarantee that it will
+        // give us an open file, this may not be 100% reliable.
+        New->Buffer.reset(FileMgr.getBufferForFile(New->File, &ErrorStr,
+                                                   /*IsVolatile*/false,
+                                                   /*ShouldClose*/false));
+      }
       
       if (!New->Buffer)
         return Missing;
@@ -140,8 +158,10 @@ namespace {
   };
 }
 
-void ModuleManager::removeModules(ModuleIterator first, ModuleIterator last,
-                                  ModuleMap *modMap) {
+void ModuleManager::removeModules(
+    ModuleIterator first, ModuleIterator last,
+    llvm::SmallPtrSetImpl<ModuleFile *> &LoadedSuccessfully,
+    ModuleMap *modMap) {
   if (first == last)
     return;
 
@@ -158,13 +178,19 @@ void ModuleManager::removeModules(ModuleIterator first, ModuleIterator last,
   for (ModuleIterator victim = first; victim != last; ++victim) {
     Modules.erase((*victim)->File);
 
-    FileMgr.invalidateCache((*victim)->File);
     if (modMap) {
-      StringRef ModuleName = llvm::sys::path::stem((*victim)->FileName);
+      StringRef ModuleName = (*victim)->ModuleName;
       if (Module *mod = modMap->findModule(ModuleName)) {
         mod->setASTFile(0);
       }
     }
+
+    // Files that didn't make it through ReadASTCore successfully will be
+    // rebuilt (or there was an error). Invalidate them so that we can load the
+    // new files that will be renamed over the old ones.
+    if (LoadedSuccessfully.count(*victim) == 0)
+      FileMgr.invalidateCache((*victim)->File);
+
     delete *victim;
   }
 
@@ -385,16 +411,19 @@ bool ModuleManager::lookupModuleFile(StringRef FileName,
                                      off_t ExpectedSize,
                                      time_t ExpectedModTime,
                                      const FileEntry *&File) {
-  File = FileMgr.getFile(FileName, /*openFile=*/false, /*cacheFailure=*/false);
+  // Open the file immediately to ensure there is no race between stat'ing and
+  // opening the file.
+  File = FileMgr.getFile(FileName, /*openFile=*/true, /*cacheFailure=*/false);
 
   if (!File && FileName != "-") {
     return false;
   }
 
   if ((ExpectedSize && ExpectedSize != File->getSize()) ||
-      (ExpectedModTime && ExpectedModTime != File->getModificationTime())) {
+      (ExpectedModTime && ExpectedModTime != File->getModificationTime()))
+    // Do not destroy File, as it may be referenced. If we need to rebuild it,
+    // it will be destroyed by removeModules.
     return true;
-  }
 
   return false;
 }
@@ -434,7 +463,7 @@ namespace llvm {
     }
 
     std::string getNodeLabel(ModuleFile *M, const ModuleManager&) {
-      return llvm::sys::path::stem(M->FileName);
+      return M->ModuleName;
     }
   };
 }

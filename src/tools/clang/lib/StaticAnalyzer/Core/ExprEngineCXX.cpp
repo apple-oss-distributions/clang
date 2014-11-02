@@ -132,7 +132,7 @@ void ExprEngine::VisitCXXConstructExpr(const CXXConstructExpr *CE,
       if (Optional<CFGStmt> StmtElem = Next.getAs<CFGStmt>()) {
         if (const DeclStmt *DS = dyn_cast<DeclStmt>(StmtElem->getStmt())) {
           if (const VarDecl *Var = dyn_cast<VarDecl>(DS->getSingleDecl())) {
-            if (Var->getInit()->IgnoreImplicit() == CE) {
+            if (Var->getInit() && Var->getInit()->IgnoreImplicit() == CE) {
               SVal LValue = State->getLValue(Var, LCtx);
               QualType Ty = Var->getType();
               LValue = makeZeroElementRegion(State, LValue, Ty);

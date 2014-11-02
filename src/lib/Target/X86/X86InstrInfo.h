@@ -152,6 +152,8 @@ class X86InstrInfo : public X86GenInstrInfo {
                             MemOp2RegOpTableType &M2RTable,
                             unsigned RegOp, unsigned MemOp, unsigned Flags);
 
+  virtual void anchor();
+
 public:
   explicit X86InstrInfo(X86TargetMachine &tm);
 
@@ -223,6 +225,9 @@ public:
   /// commute them.
   ///
   virtual MachineInstr *commuteInstruction(MachineInstr *MI, bool NewMI) const;
+
+  bool findCommutedOpIndices(MachineInstr *MI, unsigned &SrcOpIdx1,
+                             unsigned &SrcOpIdx2) const override;
 
   // Branch analysis.
   virtual bool isUnpredicatedTerminator(const MachineInstr* MI) const;

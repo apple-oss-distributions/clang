@@ -15,9 +15,9 @@
 #ifndef MipsISELLOWERING_H
 #define MipsISELLOWERING_H
 
+#include "MCTargetDesc/MipsBaseInfo.h"
 #include "Mips.h"
 #include "MipsSubtarget.h"
-#include "MCTargetDesc/MipsBaseInfo.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/Function.h"
@@ -209,6 +209,7 @@ namespace llvm {
   class MipsFunctionInfo;
 
   class MipsTargetLowering : public TargetLowering  {
+    bool isMicroMips;
   public:
     explicit MipsTargetLowering(MipsTargetMachine &TM);
 

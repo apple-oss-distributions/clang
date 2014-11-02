@@ -25,12 +25,8 @@ Flags *flags() {
 
 // Can be overriden in frontend.
 #ifdef TSAN_EXTERNAL_HOOKS
-void OverrideFlags(Flags *f);
 extern "C" const char* __tsan_default_options();
 #else
-void WEAK OverrideFlags(Flags *f) {
-  (void)f;
-}
 extern "C" const char *WEAK __tsan_default_options() {
   return "";
 }
@@ -58,6 +54,7 @@ static void ParseFlags(Flags *f, const char *env) {
   ParseFlag(env, &f->flush_symbolizer_ms, "flush_symbolizer_ms");
   ParseFlag(env, &f->memory_limit_mb, "memory_limit_mb");
   ParseFlag(env, &f->stop_on_start, "stop_on_start");
+  ParseFlag(env, &f->running_on_valgrind, "running_on_valgrind");
   ParseFlag(env, &f->history_size, "history_size");
   ParseFlag(env, &f->io_sync, "io_sync");
 }
@@ -91,21 +88,19 @@ void InitializeFlags(Flags *f, const char *env) {
   f->history_size = kGoMode ? 1 : 2;  // There are a lot of goroutines in Go.
   f->io_sync = 1;
 
-  ParseCommonFlagsFromString("strip_path_prefix=");
-  ParseCommonFlagsFromString("log_path=stderr");
-  ParseCommonFlagsFromString("external_symbolizer_path=");
-  ParseCommonFlagsFromString("allocator_may_return_null=0");
-  ParseCommonFlagsFromString("verbosity=0");
-  *static_cast<CommonFlags*>(f) = *common_flags();
+  SetCommonFlagsDefaults(f);
 
   // Let a frontend override.
-  OverrideFlags(f);
   ParseFlags(f, __tsan_default_options());
-  ParseCommonFlagsFromString(__tsan_default_options());
-
+  ParseCommonFlagsFromString(f, __tsan_default_options());
   // Override from command line.
   ParseFlags(f, env);
+  ParseCommonFlagsFromString(f, env);
 
+  // Copy back to common flags.
+  *common_flags() = *f;
+
+  // Sanity check.
   if (!f->report_bugs) {
     f->report_thread_leaks = false;
     f->report_destroy_locked = false;
@@ -123,10 +118,6 @@ void InitializeFlags(Flags *f, const char *env) {
            " (must be [0..2])\n");
     Die();
   }
-
-  *common_flags() = *f;
-  ParseCommonFlagsFromString(env);
-  *static_cast<CommonFlags*>(f) = *common_flags();
 }
 
 }  // namespace __tsan

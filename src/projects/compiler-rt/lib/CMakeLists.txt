@@ -3,19 +3,28 @@
 
 # Don't build sanitizers in the bootstrap build.
 if(LLVM_USE_SANITIZER STREQUAL "")
-  if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux|Windows")
-    # AddressSanitizer is supported on Linux and Mac OS X.
-    # Windows support is experimental.
+  # AddressSanitizer is supported on Linux and Mac OS X.
+  # 32-bit Windows support is experimental.
+  if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux")
+    set(SUPPORTS_BUILDING_ASAN TRUE)
+  elseif(CMAKE_SYSTEM_NAME MATCHES "Windows"
+         AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(SUPPORTS_BUILDING_ASAN TRUE)
+  else()
+    set(SUPPORTS_BUILDING_ASAN FALSE)
+  endif()
+  if(SUPPORTS_BUILDING_ASAN)
     add_subdirectory(asan)
     add_subdirectory(interception)
     add_subdirectory(sanitizer_common)
-    if(NOT ANDROID AND NOT MSVC)
-      add_subdirectory(lsan)
-      add_subdirectory(profile)
-      add_subdirectory(ubsan)
-    endif()
   endif()
-  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" AND NOT ANDROID)
+  if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux" AND NOT ANDROID)
+    # LSan, UBsan and profile can be built on Mac OS and Linux.
+    add_subdirectory(lsan)
+    add_subdirectory(profile)
+    add_subdirectory(ubsan)
+  endif()
+  if(CMAKE_SYSTEM_NAME MATCHES "Linux" AND NOT ANDROID)
     # ThreadSanitizer and MemorySanitizer are supported on Linux only.
     add_subdirectory(tsan)
     add_subdirectory(msan)
@@ -186,7 +195,7 @@ set(i386_SOURCES
   i386/umoddi3.S
   ${GENERIC_SOURCES})
 
-if (NOT MSVC)
+if (NOT WIN32)
   foreach(arch x86_64 i386)
     if(CAN_TARGET_${arch})
       add_compiler_rt_static_runtime(clang_rt.${arch} ${arch}

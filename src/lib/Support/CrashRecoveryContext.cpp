@@ -330,13 +330,27 @@ const std::string &CrashRecoveryContext::getBacktrace() const {
   return CRC->Backtrace;
 }
 
-//
+// FIXME: Portability.
+static void setThreadBackgroundPriority() {
+#ifdef __APPLE__
+  setpriority(PRIO_DARWIN_THREAD, 0, PRIO_DARWIN_BG);
+#endif
+}
+
+static bool hasThreadBackgroundPriority() {
+#ifdef __APPLE__
+  return getpriority(PRIO_DARWIN_THREAD, 0) == 1;
+#else
+  return false;
+#endif
+}
 
 namespace {
 struct RunSafelyOnThreadInfo {
   void (*UserFn)(void*);
   void *UserData;
   CrashRecoveryContext *CRC;
+  bool UseBackgroundPriority;
   bool Result;
 };
 }
@@ -344,11 +358,16 @@ struct RunSafelyOnThreadInfo {
 static void RunSafelyOnThread_Dispatch(void *UserData) {
   RunSafelyOnThreadInfo *Info =
     reinterpret_cast<RunSafelyOnThreadInfo*>(UserData);
+
+  if (Info->UseBackgroundPriority)
+    setThreadBackgroundPriority();
+
   Info->Result = Info->CRC->RunSafely(Info->UserFn, Info->UserData);
 }
 bool CrashRecoveryContext::RunSafelyOnThread(void (*Fn)(void*), void *UserData,
                                              unsigned RequestedStackSize) {
-  RunSafelyOnThreadInfo Info = { Fn, UserData, this, false };
+  bool UseBackgroundPriority = hasThreadBackgroundPriority();
+  RunSafelyOnThreadInfo Info = { Fn, UserData, this, UseBackgroundPriority, false };
   llvm_execute_on_thread(RunSafelyOnThread_Dispatch, &Info, RequestedStackSize);
   if (CrashRecoveryContextImpl *CRC = (CrashRecoveryContextImpl *)Impl)
     CRC->setSwitchedThread();

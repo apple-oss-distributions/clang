@@ -639,6 +639,17 @@ static void HandlePluralModifier(const Diagnostic &DInfo, unsigned ValNo,
   }
 }
 
+/// \brief Returns the friendly description for a token kind that will appear
+/// without quotes in diagnostic messages. These strings may be translatable in
+/// future.
+static const char *getTokenDescForDiagnostic(tok::TokenKind Kind) {
+  switch (Kind) {
+  case tok::identifier:
+    return "identifier";
+  default:
+    return 0;
+  }
+}
 
 /// FormatDiagnostic - Format this diagnostic into a string, substituting the
 /// formal arguments into the %0 slots.  The result is appended onto the Str
@@ -812,6 +823,28 @@ FormatDiagnostic(const char *DiagStr, const char *DiagEnd,
       }
       break;
     }
+    // ---- TOKEN SPELLINGS ----
+    case DiagnosticsEngine::ak_tokenkind: {
+      tok::TokenKind Kind = static_cast<tok::TokenKind>(getRawArg(ArgNo));
+      assert(ModifierLen == 0 && "No modifiers for token kinds yet");
+
+      llvm::raw_svector_ostream Out(OutStr);
+      if (const char *S = tok::getPunctuatorSpelling(Kind))
+        // Quoted token spelling for punctuators.
+        Out << '\'' << S << '\'';
+      else if (const char *S = tok::getKeywordSpelling(Kind))
+        // Unquoted token spelling for keywords.
+        Out << S;
+      else if (const char *S = getTokenDescForDiagnostic(Kind))
+        // Unquoted translatable token name.
+        Out << S;
+      else if (const char *S = tok::getTokenName(Kind))
+        // Debug name, shouldn't appear in user-facing diagnostics.
+        Out << '<' << S << '>';
+      else
+        Out << "(null)";
+      break;
+    }
     // ---- NAMES and TYPES ----
     case DiagnosticsEngine::ak_identifierinfo: {
       const IdentifierInfo *II = getArgIdentifier(ArgNo);
@@ -832,6 +865,7 @@ FormatDiagnostic(const char *DiagStr, const char *DiagEnd,
     case DiagnosticsEngine::ak_nameddecl:
     case DiagnosticsEngine::ak_nestednamespec:
     case DiagnosticsEngine::ak_declcontext:
+    case DiagnosticsEngine::ak_attr:
       getDiags()->ConvertArgToString(Kind, getRawArg(ArgNo),
                                      Modifier, ModifierLen,
                                      Argument, ArgumentLen,

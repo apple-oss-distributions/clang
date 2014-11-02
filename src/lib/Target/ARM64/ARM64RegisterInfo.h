@@ -38,6 +38,13 @@ public:
   const uint16_t *getCalleeSavedRegs(const MachineFunction *MF = 0) const;
   const uint32_t *getCallPreservedMask(CallingConv::ID) const;
 
+  unsigned getCSRFirstUseCost() const {
+    // The cost will be compared against BlockFrequency where entry has the
+    // value of 1 << 14. A value of 5 will choose to spill or split really
+    // cold path instead of using a callee-saved register.
+    return 5;
+  }
+
   // Calls involved in thread-local variable lookup save more registers than
   // normal calls, so they need a different mask to represent this.
   const uint32_t *getTLSCallPreservedMask() const;
@@ -84,12 +91,6 @@ public:
   unsigned getRegPressureLimit(const TargetRegisterClass *RC,
                                MachineFunction &MF) const;
 };
-
-unsigned getWRegFromXReg(unsigned Reg);
-unsigned getXRegFromWReg(unsigned Reg);
-
-unsigned getBRegFromDReg(unsigned Reg);
-unsigned getDRegFromBReg(unsigned Reg);
 
 } // end namespace llvm
 

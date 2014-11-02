@@ -246,7 +246,7 @@ public:
   }
   Value *VisitObjCMessageExpr(ObjCMessageExpr *E) {
     if (E->getMethodDecl() &&
-        E->getMethodDecl()->getResultType()->isReferenceType())
+        E->getMethodDecl()->getReturnType()->isReferenceType())
       return EmitLoadOfLValue(E);
     return CGF.EmitObjCMessageExpr(E).getScalarVal();
   }
@@ -367,11 +367,8 @@ public:
     CGF.EmitCXXDeleteExpr(E);
     return 0;
   }
-  Value *VisitUnaryTypeTraitExpr(const UnaryTypeTraitExpr *E) {
-    return Builder.getInt1(E->getValue());
-  }
 
-  Value *VisitBinaryTypeTraitExpr(const BinaryTypeTraitExpr *E) {
+  Value *VisitTypeTraitExpr(const TypeTraitExpr *E) {
     return llvm::ConstantInt::get(ConvertType(E->getType()), E->getValue());
   }
 
@@ -1299,7 +1296,18 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
   case CK_AnyPointerToBlockPointerCast:
   case CK_BitCast: {
     Value *Src = Visit(const_cast<Expr*>(E));
-    return Builder.CreateBitCast(Src, ConvertType(DestTy));
+    llvm::Type *SrcTy = Src->getType();
+    llvm::Type *DstTy = ConvertType(DestTy);
+    if (SrcTy->isPtrOrPtrVectorTy() && DstTy->isPtrOrPtrVectorTy() && 
+        SrcTy->getPointerAddressSpace() != DstTy->getPointerAddressSpace()) {
+      llvm::Type *MidTy = CGF.CGM.getDataLayout().getIntPtrType(SrcTy);
+      return Builder.CreateIntToPtr(Builder.CreatePtrToInt(Src, MidTy), DstTy);
+    }
+    return Builder.CreateBitCast(Src, DstTy);
+  }
+  case CK_AddressSpaceConversion: {
+    Value *Src = Visit(const_cast<Expr*>(E));
+    return Builder.CreateAddrSpaceCast(Src, ConvertType(DestTy));
   }
   case CK_AtomicToNonAtomic:
   case CK_NonAtomicToAtomic:
@@ -1360,7 +1368,7 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
 
     // Make sure the array decay ends up being the right type.  This matters if
     // the array type was of an incomplete type.
-    return CGF.Builder.CreateBitCast(V, ConvertType(CE->getType()));
+    return CGF.Builder.CreatePointerCast(V, ConvertType(CE->getType()));
   }
   case CK_FunctionToPointerDecay:
     return EmitLValue(E).getAddress();
@@ -2926,7 +2934,6 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
   CGF.EmitBlock(RHSBlock);
   Cnt.beginRegion(Builder);
   Value *RHSCond = CGF.EvaluateExprAsBool(E->getRHS());
-  Cnt.adjustForControlFlow();
   eval.end(CGF);
 
   // Reaquire the RHS block, as there may be subblocks inserted.
@@ -2939,7 +2946,6 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
     Builder.SetCurrentDebugLocation(llvm::DebugLoc());
   CGF.EmitBlock(ContBlock);
   PN->addIncoming(RHSCond, RHSBlock);
-  Cnt.applyAdjustmentsToRegion();
 
   // ZExt result to int.
   return Builder.CreateZExtOrBitCast(PN, ResTy, "land.ext");
@@ -3009,7 +3015,6 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   CGF.EmitBlock(RHSBlock);
   Cnt.beginRegion(Builder);
   Value *RHSCond = CGF.EvaluateExprAsBool(E->getRHS());
-  Cnt.adjustForControlFlow();
 
   eval.end(CGF);
 
@@ -3020,7 +3025,6 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   // into the phi node for the edge with the value of RHSCond.
   CGF.EmitBlock(ContBlock);
   PN->addIncoming(RHSCond, RHSBlock);
-  Cnt.applyAdjustmentsToRegion();
 
   // ZExt result to int.
   return Builder.CreateZExtOrBitCast(PN, ResTy, "lor.ext");
@@ -3163,21 +3167,17 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
   eval.begin(CGF);
   Value *LHS = Visit(lhsExpr);
   eval.end(CGF);
-  Cnt.adjustForControlFlow();
 
   LHSBlock = Builder.GetInsertBlock();
   Builder.CreateBr(ContBlock);
 
   CGF.EmitBlock(RHSBlock);
-  Cnt.beginElseRegion();
   eval.begin(CGF);
   Value *RHS = Visit(rhsExpr);
   eval.end(CGF);
-  Cnt.adjustForControlFlow();
 
   RHSBlock = Builder.GetInsertBlock();
   CGF.EmitBlock(ContBlock);
-  Cnt.applyAdjustmentsToRegion();
 
   // If the LHS or RHS is a throw expression, it will be legitimately null.
   if (!LHS)

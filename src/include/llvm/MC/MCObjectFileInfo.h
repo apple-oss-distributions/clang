@@ -270,6 +270,8 @@ public:
   const MCSection *getDwarfInfoDWOSection() const {
     return DwarfInfoDWOSection;
   }
+  const MCSection *getDwarfTypesSection(uint64_t Hash) const;
+  const MCSection *getDwarfTypesDWOSection(uint64_t Hash) const;
   const MCSection *getDwarfAbbrevDWOSection() const {
     return DwarfAbbrevDWOSection;
   }
@@ -361,8 +363,12 @@ public:
     return EHFrameSection;
   }
 
-private:
   enum Environment { IsMachO, IsELF, IsCOFF };
+  Environment getObjectFileType() const {
+    return Env;
+  }
+
+private:
   Environment Env;
   Reloc::Model RelocM;
   CodeModel::Model CMModel;

@@ -14,11 +14,11 @@
 
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/Analysis/Passes.h"
-#include "llvm/Analysis/Verifier.h"
-#include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/CodeGen/GCStrategy.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
+#include "llvm/IR/IRPrintingPasses.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/PassManager.h"
 #include "llvm/Support/CommandLine.h"
@@ -29,6 +29,11 @@
 #include "llvm/Transforms/Scalar.h"
 
 using namespace llvm;
+
+namespace llvm {
+extern cl::opt<bool> EnableStackMapLiveness;
+extern cl::opt<bool> EnablePatchPointLiveness;
+}
 
 static cl::opt<bool> DisablePostRA("disable-post-ra", cl::Hidden,
     cl::desc("Disable Post Regalloc"));
@@ -56,7 +61,7 @@ static cl::opt<cl::boolOrDefault>
 OptimizeRegAlloc("optimize-regalloc", cl::Hidden,
     cl::desc("Enable optimized register allocation compilation path."));
 static cl::opt<cl::boolOrDefault>
-EnableMachineSched("enable-misched", cl::Hidden,
+EnableMachineSched("enable-misched",
     cl::desc("Enable the machine instruction scheduling pass."));
 static cl::opt<bool> DisablePostRAMachineLICM("disable-postra-machine-licm",
     cl::Hidden,
@@ -65,6 +70,8 @@ static cl::opt<bool> DisableMachineSink("disable-machine-sink", cl::Hidden,
     cl::desc("Disable Machine Sinking"));
 static cl::opt<bool> DisableLSR("disable-lsr", cl::Hidden,
     cl::desc("Disable Loop Strength Reduction Pass"));
+static cl::opt<bool> DisableConstantHoisting("disable-constant-hoisting",
+    cl::Hidden, cl::desc("Disable ConstantHoisting"));
 static cl::opt<bool> DisableCGP("disable-cgp", cl::Hidden,
     cl::desc("Disable Codegen Prepare"));
 static cl::opt<bool> DisableCopyProp("disable-copyprop", cl::Hidden,
@@ -82,6 +89,14 @@ static cl::opt<std::string>
 PrintMachineInstrs("print-machineinstrs", cl::ValueOptional,
                    cl::desc("Print machine instrs"),
                    cl::value_desc("pass-name"), cl::init("option-unspecified"));
+
+// Temporary option to allow experimenting with MachineScheduler as a post-RA
+// scheduler. Targets can "properly" enable this with
+// substitutePass(&PostRASchedulerID, &MachineSchedulerID); Ideally it wouldn't
+// be part of the standard pass pipeline, and the target would just add a PostRA
+// scheduling pass wherever it wants.
+static cl::opt<bool> MISchedPostRA("misched-postra", cl::Hidden,
+  cl::desc("Run MachineScheduler post regalloc (independent of preRA sched)"));
 
 // Experimental option to run live interval analysis early.
 static cl::opt<bool> EarlyLiveIntervals("early-live-intervals", cl::Hidden,
@@ -369,20 +384,26 @@ void TargetPassConfig::addIRPasses() {
 
   // Before running any passes, run the verifier to determine if the input
   // coming from the front-end and/or optimizer is valid.
-  if (!DisableVerify)
+  if (!DisableVerify) {
     addPass(createVerifierPass());
+    addPass(createDebugInfoVerifierPass());
+  }
 
   // Run loop strength reduction before anything else.
   if (getOptLevel() != CodeGenOpt::None && !DisableLSR) {
     addPass(createLoopStrengthReducePass());
     if (PrintLSR)
-      addPass(createPrintFunctionPass("\n\n*** Code after LSR ***\n", &dbgs()));
+      addPass(createPrintFunctionPass(dbgs(), "\n\n*** Code after LSR ***\n"));
   }
 
   addPass(createGCLoweringPass());
 
   // Make sure that no unreachable blocks are instruction selected.
   addPass(createUnreachableBlockEliminationPass());
+
+  // Prepare expensive constants for SelectionDAG.
+  if (getOptLevel() != CodeGenOpt::None && !DisableConstantHoisting)
+    addPass(createConstantHoistingPass());
 }
 
 /// Turn exception handling constructs into something the code generators can
@@ -422,14 +443,19 @@ void TargetPassConfig::addCodeGenPrepare() {
 /// Add common passes that perform LLVM IR to IR transforms in preparation for
 /// instruction selection.
 void TargetPassConfig::addISelPrepare() {
-  addPass(createStackProtectorPass(TM));
-
   addPreISel();
 
+  // Need to verify DebugInfo *before* creating the stack protector analysis.
+  // It's a function pass, and verifying between it and its users causes a
+  // crash.
+  if (!DisableVerify)
+    addPass(createDebugInfoVerifierPass());
+
+  addPass(createStackProtectorPass(TM));
+
   if (PrintISelInput)
-    addPass(createPrintFunctionPass("\n\n"
-                                    "*** Final LLVM Code input to ISel ***\n",
-                                    &dbgs()));
+    addPass(createPrintFunctionPass(
+        dbgs(), "\n\n*** Final LLVM Code input to ISel ***\n"));
 
   // All passes which modify the LLVM IR are now complete; run the verifier
   // to ensure that the IR is valid.
@@ -520,7 +546,10 @@ void TargetPassConfig::addMachinePasses() {
 
   // Second pass scheduler.
   if (getOptLevel() != CodeGenOpt::None) {
-    addPass(&PostRASchedulerID);
+    if (MISchedPostRA)
+      addPass(&PostMachineSchedulerID);
+    else
+      addPass(&PostRASchedulerID);
     printAndVerify("After PostRAScheduler");
   }
 
@@ -536,6 +565,9 @@ void TargetPassConfig::addMachinePasses() {
 
   if (addPreEmitPass())
     printAndVerify("After PreEmit passes");
+
+  if (EnableStackMapLiveness || EnablePatchPointLiveness)
+    addPass(&StackMapLivenessID);
 }
 
 /// Add passes that optimize machine instructions in SSA form.
@@ -725,7 +757,10 @@ void TargetPassConfig::addMachineLateOptimization() {
     printAndVerify("After BranchFolding");
 
   // Tail duplication.
-  if (addPass(&TailDuplicateID))
+  // Note that duplicating tail just increases code size and degrades
+  // performance for targets that require Structured Control Flow.
+  // In addition it can also make CFG irreducible. Thus we disable it.
+  if (!TM->requiresStructuredCFG() && addPass(&TailDuplicateID))
     printAndVerify("After TailDuplicate");
 
   // Copy propagation.

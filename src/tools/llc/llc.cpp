@@ -14,13 +14,13 @@
 //===----------------------------------------------------------------------===//
 
 
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/Assembly/PrintModulePass.h"
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/LinkAllAsmWriterComponents.h"
 #include "llvm/CodeGen/LinkAllCodegenComponents.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/IRPrintingPasses.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/MC/SubtargetFeature.h"
@@ -209,6 +209,12 @@ static int compileModule(char **argv, LLVMContext &Context) {
   bool SkipModule = MCPU == "help" ||
                     (!MAttrs.empty() && MAttrs.front() == "help");
 
+  // If user asked for the 'native' CPU, autodetect here. If autodection fails,
+  // this will set the CPU to an empty string which tells the target to
+  // pick a basic default.
+  if (MCPU == "native")
+    MCPU = sys::getHostCPUName();
+
   // If user just wants to list available options, skip module loading
   if (!SkipModule) {
     M.reset(ParseIRFile(InputFilename, Err, Context));
@@ -288,9 +294,6 @@ static int compileModule(char **argv, LLVMContext &Context) {
   assert(mod && "Should have exited after outputting help!");
   TargetMachine &Target = *target.get();
 
-  if (DisableDotLoc)
-    Target.setMCUseLoc(false);
-
   if (DisableCFI)
     Target.setMCUseCFI(false);
 
@@ -299,11 +302,6 @@ static int compileModule(char **argv, LLVMContext &Context) {
 
   if (GenerateSoftFloatCalls)
     FloatABIForCalls = FloatABI::Soft;
-
-  // Disable .loc support for older OS X versions.
-  if (TheTriple.isMacOSX() &&
-      TheTriple.isMacOSXVersionLT(10, 6))
-    Target.setMCUseLoc(false);
 
   // Figure out where we are going to send the output.
   OwningPtr<tool_output_file> Out
@@ -318,9 +316,6 @@ static int compileModule(char **argv, LLVMContext &Context) {
   if (DisableSimplifyLibCalls)
     TLI->disableAllFunctions();
   PM.add(TLI);
-
-  // Add intenal analysis passes from the target machine.
-  Target.addAnalysisPasses(PM);
 
   // Add the target data from the target machine, if it exists, or the module.
   if (const DataLayout *TD = Target.getDataLayout())

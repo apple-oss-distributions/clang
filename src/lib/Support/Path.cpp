@@ -239,21 +239,18 @@ const_iterator &const_iterator::operator++() {
 }
 
 const_iterator &const_iterator::operator--() {
-  // If we're at the end and the previous char was a '/', return '.'.
+  // If we're at the end and the previous char was a '/', return '.' unless
+  // we are the root path.
+  size_t root_dir_pos = root_dir_start(Path);
   if (Position == Path.size() &&
-      Path.size() > 1 &&
-      is_separator(Path[Position - 1])
-#ifdef LLVM_ON_WIN32
-      && Path[Position - 2] != ':'
-#endif
-      ) {
+      Path.size() > root_dir_pos + 1 &&
+      is_separator(Path[Position - 1])) {
     --Position;
     Component = ".";
     return *this;
   }
 
   // Skip separators unless it's the root directory.
-  size_t root_dir_pos = root_dir_start(Path);
   size_t end_pos = Position;
 
   while(end_pos > 0 &&
@@ -765,6 +762,40 @@ error_code create_directories(const Twine &path, bool &existed) {
   return create_directory(p, existed);
 }
 
+error_code copy_file(const Twine &From, const Twine &To) {
+  int ReadFD, WriteFD;
+  if (error_code EC = openFileForRead(From, ReadFD))
+    return EC;
+  if (error_code EC = openFileForWrite(To, WriteFD, F_None)) {
+    close(ReadFD);
+    return EC;
+  }
+
+  const size_t BufSize = 4096;
+  char *Buf = new char[BufSize];
+  int BytesRead = 0, BytesWritten = 0;
+  for (;;) {
+    BytesRead = read(ReadFD, Buf, BufSize);
+    if (BytesRead <= 0)
+      break;
+    while (BytesRead) {
+      BytesWritten = write(WriteFD, Buf, BytesRead);
+      if (BytesWritten < 0)
+        break;
+      BytesRead -= BytesWritten;
+    }
+    if (BytesWritten < 0)
+      break;
+  }
+  close(ReadFD);
+  close(WriteFD);
+  delete[] Buf;
+
+  if (BytesRead < 0 || BytesWritten < 0)
+    return error_code(errno, posix_category());
+  return error_code();
+}
+
 bool exists(file_status status) {
   return status_known(status) && status.type() != file_type::file_not_found;
 }
@@ -848,11 +879,18 @@ error_code has_magic(const Twine &path, const Twine &magic, bool &result) {
     return file_magic::unknown;
   switch ((unsigned char)Magic[0]) {
     case 0x00: {
+      // COFF short import library file
+      if (Magic[1] == (char)0x00 && Magic[2] == (char)0xff &&
+          Magic[3] == (char)0xff)
+        return file_magic::coff_import_library;
       // Windows resource file
       const char Expected[] = { 0, 0, 0, 0, '\x20', 0, 0, 0, '\xff' };
       if (Magic.size() >= sizeof(Expected) &&
           memcmp(Magic.data(), Expected, sizeof(Expected)) == 0)
         return file_magic::windows_resource;
+      // 0x0000 = COFF unknown machine type
+      if (Magic[1] == 0)
+        return file_magic::coff_object;
       break;
     }
     case 0xDE:  // 0x0B17C0DE = BC wraper
@@ -974,45 +1012,6 @@ error_code identify_magic(const Twine &path, file_magic &result) {
 
   result = identify_magic(Magic);
   return error_code::success();
-}
-
-namespace {
-error_code remove_all_r(StringRef path, file_type ft, uint32_t &count) {
-  if (ft == file_type::directory_file) {
-    // This code would be a lot better with exceptions ;/.
-    error_code ec;
-    directory_iterator i(path, ec);
-    if (ec) return ec;
-    for (directory_iterator e; i != e; i.increment(ec)) {
-      if (ec) return ec;
-      file_status st;
-      if (error_code ec = i->status(st)) return ec;
-      if (error_code ec = remove_all_r(i->path(), st.type(), count)) return ec;
-    }
-    bool obviously_this_exists;
-    if (error_code ec = remove(path, obviously_this_exists)) return ec;
-    assert(obviously_this_exists);
-    ++count; // Include the directory itself in the items removed.
-  } else {
-    bool obviously_this_exists;
-    if (error_code ec = remove(path, obviously_this_exists)) return ec;
-    assert(obviously_this_exists);
-    ++count;
-  }
-
-  return error_code::success();
-}
-} // end unnamed namespace
-
-error_code remove_all(const Twine &path, uint32_t &num_removed) {
-  SmallString<128> path_storage;
-  StringRef p = path.toStringRef(path_storage);
-
-  file_status fs;
-  if (error_code ec = status(path, fs))
-    return ec;
-  num_removed = 0;
-  return remove_all_r(p, fs.type(), num_removed);
 }
 
 error_code directory_entry::status(file_status &result) const {

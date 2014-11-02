@@ -284,7 +284,14 @@ namespace clang {
       HEADER_SEARCH_OPTIONS = 11,
 
       /// \brief Record code for the preprocessor options table.
-      PREPROCESSOR_OPTIONS = 12
+      PREPROCESSOR_OPTIONS = 12,
+
+      /// \brief Record code for the module name.
+      MODULE_NAME = 13,
+
+      /// \brief Record code for the module map file that was used to build this
+      /// AST file.
+      MODULE_MAP_FILE = 14
     };
 
     /// \brief Record types that occur within the input-files block
@@ -841,7 +848,9 @@ namespace clang {
       /// \brief An AtomicType record.
       TYPE_ATOMIC                = 40,
       /// \brief A DecayedType record.
-      TYPE_DECAYED               = 41
+      TYPE_DECAYED               = 41,
+      /// \brief An AdjustedType record.
+      TYPE_ADJUSTED              = 42
     };
 
     /// \brief The type IDs for special types constructed by semantic
@@ -1300,13 +1309,11 @@ namespace clang {
       EXPR_CXX_UNRESOLVED_MEMBER,        // UnresolvedMemberExpr
       EXPR_CXX_UNRESOLVED_LOOKUP,        // UnresolvedLookupExpr
 
-      EXPR_CXX_UNARY_TYPE_TRAIT,  // UnaryTypeTraitExpr
       EXPR_CXX_EXPRESSION_TRAIT,  // ExpressionTraitExpr
       EXPR_CXX_NOEXCEPT,          // CXXNoexceptExpr
 
       EXPR_OPAQUE_VALUE,          // OpaqueValueExpr
       EXPR_BINARY_CONDITIONAL_OPERATOR,  // BinaryConditionalOperator
-      EXPR_BINARY_TYPE_TRAIT,     // BinaryTypeTraitExpr
       EXPR_TYPE_TRAIT,            // TypeTraitExpr
       EXPR_ARRAY_TYPE_TRAIT,      // ArrayTypeTraitIntExpr
       

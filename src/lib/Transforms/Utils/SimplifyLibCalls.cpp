@@ -27,10 +27,15 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Transforms/Utils/BuildLibCalls.h"
 
 using namespace llvm;
+
+static cl::opt<bool>
+ColdErrorCalls("error-reporting-is-cold",  cl::init(true),
+  cl::Hidden, cl::desc("Treat error-reporting calls as cold"));
 
 /// This class is the abstract base class for the set of optimizations that
 /// corresponds to one library call.
@@ -1047,7 +1052,7 @@ struct MemSetOpt : public LibCallOptimization {
     if (FT->getNumParams() != 3 || FT->getReturnType() != FT->getParamType(0) ||
         !FT->getParamType(0)->isPointerTy() ||
         !FT->getParamType(1)->isIntegerTy() ||
-        FT->getParamType(2) != TD->getIntPtrType(*Context))
+        FT->getParamType(2) != TD->getIntPtrType(FT->getParamType(0)))
       return 0;
 
     // memset(p, v, n) -> llvm.memset(p, v, n, 1)
@@ -1091,6 +1096,49 @@ struct UnaryDoubleFPOpt : public LibCallOptimization {
     // floor((double)floatval) -> (double)floorf(floatval)
     Value *V = Cast->getOperand(0);
     V = EmitUnaryFloatFnCall(V, Callee->getName(), B, Callee->getAttributes());
+    return B.CreateFPExt(V, B.getDoubleTy());
+  }
+};
+
+// Double -> Float Shrinking Optimizations for Binary Functions like 'fmin/fmax'
+struct BinaryDoubleFPOpt : public LibCallOptimization {
+  bool CheckRetType;
+  BinaryDoubleFPOpt(bool CheckReturnType): CheckRetType(CheckReturnType) {}
+  virtual Value *callOptimizer(Function *Callee, CallInst *CI, IRBuilder<> &B) {
+    FunctionType *FT = Callee->getFunctionType();
+    // Just make sure this has 2 arguments of the same FP type, which match the
+    // result type.
+    if (FT->getNumParams() != 2 || FT->getReturnType() != FT->getParamType(0) ||
+        FT->getParamType(0) != FT->getParamType(1) ||
+        !FT->getParamType(0)->isFloatingPointTy())
+      return 0;
+
+    if (CheckRetType) {
+      // Check if all the uses for function like 'fmin/fmax' are converted to
+      // float.
+      for (Value::use_iterator UseI = CI->use_begin(); UseI != CI->use_end();
+          ++UseI) {
+        FPTruncInst *Cast = dyn_cast<FPTruncInst>(*UseI);
+        if (Cast == 0 || !Cast->getType()->isFloatTy())
+          return 0;
+      }
+    }
+
+    // If this is something like 'fmin((double)floatval1, (double)floatval2)',
+    // we convert it to fminf.
+    FPExtInst *Cast1 = dyn_cast<FPExtInst>(CI->getArgOperand(0));
+    FPExtInst *Cast2 = dyn_cast<FPExtInst>(CI->getArgOperand(1));
+    if (Cast1 == 0 || !Cast1->getOperand(0)->getType()->isFloatTy() ||
+        Cast2 == 0 || !Cast2->getOperand(0)->getType()->isFloatTy())
+      return 0;
+
+    // fmin((double)floatval1, (double)floatval2)
+    //                      -> (double)fmin(floatval1, floatval2)
+    Value *V = NULL;
+    Value *V1 = Cast1->getOperand(0);
+    Value *V2 = Cast2->getOperand(0);
+    V = EmitBinaryFloatFnCall(V1, V2, Callee->getName(), B,
+                              Callee->getAttributes());
     return B.CreateFPExt(V, B.getDoubleTy());
   }
 };
@@ -1157,6 +1205,12 @@ struct PowOpt : public UnsafeFPLibCallOptimization {
           hasUnaryFloatFn(TLI, Op1->getType(), LibFunc::exp2, LibFunc::exp2f,
                           LibFunc::exp2l))
         return EmitUnaryFloatFnCall(Op2, "exp2", B, Callee->getAttributes());
+      // pow(10.0, x) -> exp10(x)
+      if (Op1C->isExactlyValue(10.0) &&
+          hasUnaryFloatFn(TLI, Op1->getType(), LibFunc::exp10, LibFunc::exp10f,
+                          LibFunc::exp10l))
+        return EmitUnaryFloatFnCall(Op2, TLI->getName(LibFunc::exp10), B,
+                                    Callee->getAttributes());
     }
 
     ConstantFP *Op2C = dyn_cast<ConstantFP>(Op2);
@@ -1506,6 +1560,54 @@ struct ToAsciiOpt : public LibCallOptimization {
 // Formatting and IO Library Call Optimizations
 //===----------------------------------------------------------------------===//
 
+struct ErrorReportingOpt : public LibCallOptimization {
+  ErrorReportingOpt(int S = -1) : StreamArg(S) {}
+
+  virtual Value *callOptimizer(Function *Callee, CallInst *CI, IRBuilder<> &) {
+    // Error reporting calls should be cold, mark them as such.
+    // This applies even to non-builtin calls: it is only a hint and applies to
+    // functions that the frontend might not understand as builtins.
+
+    // This heuristic was suggested in:
+    // Improving Static Branch Prediction in a Compiler
+    // Brian L. Deitrich, Ben-Chung Cheng, Wen-mei W. Hwu
+    // Proceedings of PACT'98, Oct. 1998, IEEE
+
+    if (!CI->hasFnAttr(Attribute::Cold) && isReportingError(Callee, CI)) {
+      CI->addAttribute(AttributeSet::FunctionIndex, Attribute::Cold);
+    }
+
+    return 0;
+  }
+
+protected:
+  bool isReportingError(Function *Callee, CallInst *CI) {
+    if (!ColdErrorCalls)
+      return false;
+ 
+    if (!Callee || !Callee->isDeclaration())
+      return false;
+
+    if (StreamArg < 0)
+      return true;
+
+    // These functions might be considered cold, but only if their stream
+    // argument is stderr.
+
+    if (StreamArg >= (int) CI->getNumArgOperands())
+      return false;
+    LoadInst *LI = dyn_cast<LoadInst>(CI->getArgOperand(StreamArg));
+    if (!LI)
+      return false;
+    GlobalVariable *GV = dyn_cast<GlobalVariable>(LI->getPointerOperand());
+    if (!GV || !GV->isDeclaration())
+      return false;
+    return GV->getName() == "stderr";
+  }
+
+  int StreamArg;
+};
+
 struct PrintFOpt : public LibCallOptimization {
   Value *optimizeFixedFormatString(Function *Callee, CallInst *CI,
                                    IRBuilder<> &B) {
@@ -1686,6 +1788,9 @@ struct SPrintFOpt : public LibCallOptimization {
 struct FPrintFOpt : public LibCallOptimization {
   Value *optimizeFixedFormatString(Function *Callee, CallInst *CI,
                                    IRBuilder<> &B) {
+    ErrorReportingOpt ER(/* StreamArg = */ 0);
+    (void) ER.callOptimizer(Callee, CI, B);
+
     // All the optimizations depend on the format string.
     StringRef FormatStr;
     if (!getConstantStringInfo(CI->getArgOperand(1), FormatStr))
@@ -1763,6 +1868,9 @@ struct FPrintFOpt : public LibCallOptimization {
 
 struct FWriteOpt : public LibCallOptimization {
   virtual Value *callOptimizer(Function *Callee, CallInst *CI, IRBuilder<> &B) {
+    ErrorReportingOpt ER(/* StreamArg = */ 3);
+    (void) ER.callOptimizer(Callee, CI, B);
+
     // Require a pointer, an integer, an integer, a pointer, returning integer.
     FunctionType *FT = Callee->getFunctionType();
     if (FT->getNumParams() != 4 || !FT->getParamType(0)->isPointerTy() ||
@@ -1796,6 +1904,9 @@ struct FWriteOpt : public LibCallOptimization {
 
 struct FPutsOpt : public LibCallOptimization {
   virtual Value *callOptimizer(Function *Callee, CallInst *CI, IRBuilder<> &B) {
+    ErrorReportingOpt ER(/* StreamArg = */ 1);
+    (void) ER.callOptimizer(Callee, CI, B);
+
     // These optimizations require DataLayout.
     if (!TD) return 0;
 
@@ -1913,6 +2024,7 @@ static MemSetOpt MemSet;
 
 // Math library call optimizations.
 static UnaryDoubleFPOpt UnaryDoubleFP(false);
+static BinaryDoubleFPOpt BinaryDoubleFP(false);
 static UnaryDoubleFPOpt UnsafeUnaryDoubleFP(true);
 static SinCosPiOpt SinCosPi;
 
@@ -1924,6 +2036,9 @@ static IsAsciiOpt IsAscii;
 static ToAsciiOpt ToAscii;
 
 // Formatting and IO library call optimizations.
+static ErrorReportingOpt ErrorReporting;
+static ErrorReportingOpt ErrorReporting0(0);
+static ErrorReportingOpt ErrorReporting1(1);
 static PrintFOpt PrintF;
 static SPrintFOpt SPrintF;
 static FPrintFOpt FPrintF;
@@ -2038,6 +2153,13 @@ LibCallOptimization *LibCallSimplifierImpl::lookupOptimization(CallInst *CI) {
         return &FPuts;
       case LibFunc::puts:
         return &Puts;
+      case LibFunc::perror:
+        return &ErrorReporting;
+      case LibFunc::vfprintf:
+      case LibFunc::fiprintf:
+        return &ErrorReporting0;
+      case LibFunc::fputc:
+        return &ErrorReporting1;
       case LibFunc::ceil:
       case LibFunc::fabs:
       case LibFunc::floor:
@@ -2071,6 +2193,11 @@ LibCallOptimization *LibCallSimplifierImpl::lookupOptimization(CallInst *CI) {
       case LibFunc::tanh:
         if (UnsafeFPShrink && hasFloatVersion(FuncName))
          return &UnsafeUnaryDoubleFP;
+        return 0;
+      case LibFunc::fmin:
+      case LibFunc::fmax:
+        if (hasFloatVersion(FuncName))
+          return &BinaryDoubleFP;
         return 0;
       case LibFunc::memcpy_chk:
         return &MemCpyChk;

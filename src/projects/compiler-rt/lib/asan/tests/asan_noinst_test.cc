@@ -25,34 +25,6 @@
 #include <vector>
 #include <limits>
 
-#if ASAN_FLEXIBLE_MAPPING_AND_OFFSET == 1
-// Manually set correct ASan mapping scale and offset, as they won't be
-// exported from instrumented sources (there are none).
-# define FLEXIBLE_SHADOW_SCALE kDefaultShadowScale
-# if SANITIZER_ANDROID
-#  define FLEXIBLE_SHADOW_OFFSET (0)
-# else
-#  if SANITIZER_WORDSIZE == 32
-#   if defined(__mips__)
-#     define FLEXIBLE_SHADOW_OFFSET kMIPS32_ShadowOffset32
-#   else
-#     define FLEXIBLE_SHADOW_OFFSET kDefaultShadowOffset32
-#   endif
-#  else
-#   if defined(__powerpc64__)
-#    define FLEXIBLE_SHADOW_OFFSET kPPC64_ShadowOffset64
-#   elif SANITIZER_MAC
-#    define FLEXIBLE_SHADOW_OFFSET kDefaultShadowOffset64
-#   else
-#    define FLEXIBLE_SHADOW_OFFSET kDefaultShort64bitShadowOffset
-#   endif
-#  endif
-# endif
-SANITIZER_INTERFACE_ATTRIBUTE uptr __asan_mapping_scale = FLEXIBLE_SHADOW_SCALE;
-SANITIZER_INTERFACE_ATTRIBUTE uptr __asan_mapping_offset =
-    FLEXIBLE_SHADOW_OFFSET;
-#endif  // ASAN_FLEXIBLE_MAPPING_AND_OFFSET
-
 extern "C" {
 // Set specific ASan options for uninstrumented unittest.
 const char* __asan_default_options() {
@@ -106,7 +78,7 @@ static void MallocStress(size_t n) {
       size_t alignment = 1 << (my_rand_r(&seed) % 10 + 1);
       char *ptr = (char*)__asan::asan_memalign(alignment, size,
                                                &stack2, __asan::FROM_MALLOC);
-      EXPECT_EQ(size, __asan::asan_malloc_usable_size(ptr, &stack2));
+      EXPECT_EQ(size, __asan::asan_malloc_usable_size(ptr, 0, 0));
       vec.push_back(ptr);
       ptr[0] = 0;
       ptr[size-1] = 0;

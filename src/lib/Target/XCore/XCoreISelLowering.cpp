@@ -28,6 +28,7 @@
 #include "llvm/CodeGen/SelectionDAGISel.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/IR/CallingConv.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
@@ -59,6 +60,9 @@ getTargetNodeName(unsigned Opcode) const
     case XCoreISD::CRC8              : return "XCoreISD::CRC8";
     case XCoreISD::BR_JT             : return "XCoreISD::BR_JT";
     case XCoreISD::BR_JT32           : return "XCoreISD::BR_JT32";
+    case XCoreISD::FRAME_TO_ARGS_OFFSET : return "XCoreISD::FRAME_TO_ARGS_OFFSET";
+    case XCoreISD::EH_RETURN         : return "XCoreISD::EH_RETURN";
+    case XCoreISD::MEMBARRIER        : return "XCoreISD::MEMBARRIER";
     default                          : return NULL;
   }
 }
@@ -148,6 +152,15 @@ XCoreTargetLowering::XCoreTargetLowering(XCoreTargetMachine &XTM)
   setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
 
+  // Exception handling
+  setOperationAction(ISD::EH_RETURN, MVT::Other, Custom);
+  setExceptionPointerRegister(XCore::R0);
+  setExceptionSelectorRegister(XCore::R1);
+  setOperationAction(ISD::FRAME_TO_ARGS_OFFSET, MVT::i32, Custom);
+
+  // Atomic operations
+  setOperationAction(ISD::ATOMIC_FENCE, MVT::Other, Custom);
+
   // TRAMPOLINE is custom lowered.
   setOperationAction(ISD::INIT_TRAMPOLINE, MVT::Other, Custom);
   setOperationAction(ISD::ADJUST_TRAMPOLINE, MVT::Other, Custom);
@@ -188,6 +201,7 @@ SDValue XCoreTargetLowering::
 LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   switch (Op.getOpcode())
   {
+  case ISD::EH_RETURN:          return LowerEH_RETURN(Op, DAG);
   case ISD::GlobalAddress:      return LowerGlobalAddress(Op, DAG);
   case ISD::BlockAddress:       return LowerBlockAddress(Op, DAG);
   case ISD::ConstantPool:       return LowerConstantPool(Op, DAG);
@@ -203,9 +217,12 @@ LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   case ISD::ADD:
   case ISD::SUB:                return ExpandADDSUB(Op.getNode(), DAG);
   case ISD::FRAMEADDR:          return LowerFRAMEADDR(Op, DAG);
+  case ISD::RETURNADDR:         return LowerRETURNADDR(Op, DAG);
+  case ISD::FRAME_TO_ARGS_OFFSET: return LowerFRAME_TO_ARGS_OFFSET(Op, DAG);
   case ISD::INIT_TRAMPOLINE:    return LowerINIT_TRAMPOLINE(Op, DAG);
   case ISD::ADJUST_TRAMPOLINE:  return LowerADJUST_TRAMPOLINE(Op, DAG);
   case ISD::INTRINSIC_WO_CHAIN: return LowerINTRINSIC_WO_CHAIN(Op, DAG);
+  case ISD::ATOMIC_FENCE:       return LowerATOMIC_FENCE(Op, DAG);
   default:
     llvm_unreachable("unimplemented operand");
   }
@@ -258,23 +275,47 @@ getGlobalAddressWrapper(SDValue GA, const GlobalValue *GV,
   return DAG.getNode(XCoreISD::PCRelativeWrapper, dl, MVT::i32, GA);
 }
 
+static bool IsSmallObject(const GlobalValue *GV, const XCoreTargetLowering &XTL) {
+  if (XTL.getTargetMachine().getCodeModel() == CodeModel::Small)
+    return true;
+
+  Type *ObjType = GV->getType()->getPointerElementType();
+  if (!ObjType->isSized())
+    return false;
+
+  unsigned ObjSize = XTL.getDataLayout()->getTypeAllocSize(ObjType);
+  return ObjSize < CodeModelLargeSize && ObjSize != 0;
+}
+
 SDValue XCoreTargetLowering::
 LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const
 {
-  SDLoc DL(Op);
   const GlobalAddressSDNode *GN = cast<GlobalAddressSDNode>(Op);
   const GlobalValue *GV = GN->getGlobal();
+  SDLoc DL(GN);
   int64_t Offset = GN->getOffset();
-  // We can only fold positive offsets that are a multiple of the word size.
-  int64_t FoldedOffset = std::max(Offset & ~3, (int64_t)0);
-  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, MVT::i32, FoldedOffset);
-  GA = getGlobalAddressWrapper(GA, GV, DAG);
-  // Handle the rest of the offset.
-  if (Offset != FoldedOffset) {
-    SDValue Remaining = DAG.getConstant(Offset - FoldedOffset, MVT::i32);
-    GA = DAG.getNode(ISD::ADD, DL, MVT::i32, GA, Remaining);
+  if (IsSmallObject(GV, *this)) {
+    // We can only fold positive offsets that are a multiple of the word size.
+    int64_t FoldedOffset = std::max(Offset & ~3, (int64_t)0);
+    SDValue GA = DAG.getTargetGlobalAddress(GV, DL, MVT::i32, FoldedOffset);
+    GA = getGlobalAddressWrapper(GA, GV, DAG);
+    // Handle the rest of the offset.
+    if (Offset != FoldedOffset) {
+      SDValue Remaining = DAG.getConstant(Offset - FoldedOffset, MVT::i32);
+      GA = DAG.getNode(ISD::ADD, DL, MVT::i32, GA, Remaining);
+    }
+    return GA;
+  } else {
+    // Ideally we would not fold in offset with an index <= 11.
+    Type *Ty = Type::getInt8PtrTy(*DAG.getContext());
+    Constant *GA = ConstantExpr::getBitCast(const_cast<GlobalValue*>(GV), Ty);
+    Ty = Type::getInt32Ty(*DAG.getContext());
+    Constant *Idx = ConstantInt::get(Ty, Offset);
+    Constant *GAI = ConstantExpr::getGetElementPtr(GA, Idx);
+    SDValue CP = DAG.getConstantPool(GAI, MVT::i32);
+    return DAG.getLoad(getPointerTy(), DL, DAG.getEntryNode(), CP,
+                       MachinePointerInfo(), false, false, false, 0);
   }
-  return GA;
 }
 
 SDValue XCoreTargetLowering::
@@ -298,10 +339,10 @@ LowerConstantPool(SDValue Op, SelectionDAG &DAG) const
   SDValue Res;
   if (CP->isMachineConstantPoolEntry()) {
     Res = DAG.getTargetConstantPool(CP->getMachineCPVal(), PtrVT,
-                                    CP->getAlignment());
+                                    CP->getAlignment(), CP->getOffset());
   } else {
     Res = DAG.getTargetConstantPool(CP->getConstVal(), PtrVT,
-                                    CP->getAlignment());
+                                    CP->getAlignment(), CP->getOffset());
   }
   return DAG.getNode(XCoreISD::CPRelativeWrapper, dl, MVT::i32, Res);
 }
@@ -758,15 +799,85 @@ LowerVASTART(SDValue Op, SelectionDAG &DAG) const
 
 SDValue XCoreTargetLowering::LowerFRAMEADDR(SDValue Op,
                                             SelectionDAG &DAG) const {
-  SDLoc dl(Op);
+  // This nodes represent llvm.frameaddress on the DAG.
+  // It takes one operand, the index of the frame address to return.
+  // An index of zero corresponds to the current function's frame address.
+  // An index of one to the parent's frame address, and so on.
   // Depths > 0 not supported yet!
   if (cast<ConstantSDNode>(Op.getOperand(0))->getZExtValue() > 0)
     return SDValue();
 
   MachineFunction &MF = DAG.getMachineFunction();
   const TargetRegisterInfo *RegInfo = getTargetMachine().getRegisterInfo();
-  return DAG.getCopyFromReg(DAG.getEntryNode(), dl,
+  return DAG.getCopyFromReg(DAG.getEntryNode(), SDLoc(Op),
                             RegInfo->getFrameRegister(MF), MVT::i32);
+}
+
+SDValue XCoreTargetLowering::
+LowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const {
+  // This nodes represent llvm.returnaddress on the DAG.
+  // It takes one operand, the index of the return address to return.
+  // An index of zero corresponds to the current function's return address.
+  // An index of one to the parent's return address, and so on.
+  // Depths > 0 not supported yet!
+  if (cast<ConstantSDNode>(Op.getOperand(0))->getZExtValue() > 0)
+    return SDValue();
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  XCoreFunctionInfo *XFI = MF.getInfo<XCoreFunctionInfo>();
+  int FI = XFI->createLRSpillSlot(MF);
+  SDValue FIN = DAG.getFrameIndex(FI, MVT::i32);
+  return DAG.getLoad(getPointerTy(), SDLoc(Op), DAG.getEntryNode(), FIN,
+                     MachinePointerInfo::getFixedStack(FI), false, false,
+                     false, 0);
+}
+
+SDValue XCoreTargetLowering::
+LowerFRAME_TO_ARGS_OFFSET(SDValue Op, SelectionDAG &DAG) const {
+  // This node represents offset from frame pointer to first on-stack argument.
+  // This is needed for correct stack adjustment during unwind.
+  // However, we don't know the offset until after the frame has be finalised.
+  // This is done during the XCoreFTAOElim pass.
+  return DAG.getNode(XCoreISD::FRAME_TO_ARGS_OFFSET, SDLoc(Op), MVT::i32);
+}
+
+SDValue XCoreTargetLowering::
+LowerEH_RETURN(SDValue Op, SelectionDAG &DAG) const {
+  // OUTCHAIN = EH_RETURN(INCHAIN, OFFSET, HANDLER)
+  // This node represents 'eh_return' gcc dwarf builtin, which is used to
+  // return from exception. The general meaning is: adjust stack by OFFSET and
+  // pass execution to HANDLER.
+  MachineFunction &MF = DAG.getMachineFunction();
+  SDValue Chain     = Op.getOperand(0);
+  SDValue Offset    = Op.getOperand(1);
+  SDValue Handler   = Op.getOperand(2);
+  SDLoc dl(Op);
+
+  // Absolute SP = (FP + FrameToArgs) + Offset
+  const TargetRegisterInfo *RegInfo = getTargetMachine().getRegisterInfo();
+  SDValue Stack = DAG.getCopyFromReg(DAG.getEntryNode(), dl,
+                            RegInfo->getFrameRegister(MF), MVT::i32);
+  SDValue FrameToArgs = DAG.getNode(XCoreISD::FRAME_TO_ARGS_OFFSET, dl,
+                                    MVT::i32);
+  Stack = DAG.getNode(ISD::ADD, dl, MVT::i32, Stack, FrameToArgs);
+  Stack = DAG.getNode(ISD::ADD, dl, MVT::i32, Stack, Offset);
+
+  // R0=ExceptionPointerRegister R1=ExceptionSelectorRegister
+  // which leaves 2 caller saved registers, R2 & R3 for us to use.
+  unsigned StackReg = XCore::R2;
+  unsigned HandlerReg = XCore::R3;
+
+  SDValue OutChains[] = {
+    DAG.getCopyToReg(Chain, dl, StackReg, Stack),
+    DAG.getCopyToReg(Chain, dl, HandlerReg, Handler)
+  };
+
+  Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, OutChains, 2);
+
+  return DAG.getNode(XCoreISD::EH_RETURN, dl, MVT::Other, Chain,
+                     DAG.getRegister(StackReg, MVT::i32),
+                     DAG.getRegister(HandlerReg, MVT::i32));
+
 }
 
 SDValue XCoreTargetLowering::
@@ -845,6 +956,12 @@ LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const {
       return DAG.getMergeValues(Results, 2, DL);
   }
   return SDValue();
+}
+
+SDValue XCoreTargetLowering::
+LowerATOMIC_FENCE(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  return DAG.getNode(XCoreISD::MEMBARRIER, DL, MVT::Other, Op.getOperand(0));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1213,9 +1330,9 @@ XCoreTargetLowering::LowerCCCArguments(SDValue Chain,
        ArgDI != ArgDE; ++ArgDI) {
     if (ArgDI->Flags.isByVal() && ArgDI->Flags.getByValSize()) {
       unsigned Size = ArgDI->Flags.getByValSize();
-      unsigned Align = ArgDI->Flags.getByValAlign();
+      unsigned Align = std::max(StackSlotSize, ArgDI->Flags.getByValAlign());
       // Create a new object on the stack and copy the pointee into it.
-      int FI = MFI->CreateStackObject(Size, Align, false, false);
+      int FI = MFI->CreateStackObject(Size, Align, false);
       SDValue FIN = DAG.getFrameIndex(FI, MVT::i32);
       InVals.push_back(FIN);
       MemOps.push_back(DAG.getMemcpy(Chain, dl, FIN, ArgDI->SDV,

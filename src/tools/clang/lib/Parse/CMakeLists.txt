@@ -1,3 +1,9 @@
+set(LLVM_LINK_COMPONENTS
+  MCParser
+  MC
+  Support
+  )
+
 add_clang_library(clangParse
   ParseAST.cpp
   ParseCXXInlineMethods.cpp
@@ -27,6 +33,7 @@ add_dependencies(clangParse
   ClangDiagnosticCommon
   ClangDiagnosticParse
   ClangStmtNodes
+  ClangAttrArgContext
   )
 
 target_link_libraries(clangParse

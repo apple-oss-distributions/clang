@@ -22,6 +22,7 @@
 #include "llvm/Support/ErrorHandling.h"
 
 namespace llvm {
+  class AsmPrinterHandler;
   class BlockAddress;
   class GCStrategy;
   class Constant;
@@ -110,12 +111,20 @@ namespace llvm {
     /// function.
     MachineLoopInfo *LI;
 
+    struct HandlerInfo {
+      AsmPrinterHandler *Handler;
+      const char *TimerName, *TimerGroupName;
+      HandlerInfo(AsmPrinterHandler *Handler, const char *TimerName,
+                  const char *TimerGroupName)
+          : Handler(Handler), TimerName(TimerName),
+            TimerGroupName(TimerGroupName) {}
+    };
+    /// Handlers - a vector of all debug/EH info emitters we should use.
+    /// This vector maintains ownership of the emitters.
+    SmallVector<HandlerInfo, 1> Handlers;
+
     /// DD - If the target supports dwarf debug info, this pointer is non-null.
     DwarfDebug *DD;
-
-    /// DE - If the target supports dwarf exception info, this pointer is
-    /// non-null.
-    DwarfException *DE;
 
   protected:
     explicit AsmPrinter(TargetMachine &TM, MCStreamer &Streamer);
@@ -144,6 +153,9 @@ namespace llvm {
 
     /// getCurrentSection() - Return the current section we are emitting to.
     const MCSection *getCurrentSection() const;
+
+    void getNameWithPrefix(SmallVectorImpl<char> &Name,
+                           const GlobalValue *GV) const;
 
     MCSymbol *getSymbol(const GlobalValue *GV) const;
 
@@ -199,11 +211,6 @@ namespace llvm {
     CFIMoveType needsCFIMoves();
 
     bool needsSEHMoves();
-
-    /// needsRelocationsForDwarfStringPool - Specifies whether the object format
-    /// expects to use relocations to refer to debug entries. Alternatively we
-    /// emit section offsets in bytes from the start of the string pool.
-    bool needsRelocationsForDwarfStringPool() const;
 
     /// EmitConstantPool - Print to the current output stream assembly
     /// representations of the constants in the constant pool MCP. This is
@@ -307,13 +314,10 @@ namespace llvm {
     /// stem.
     MCSymbol *GetTempSymbol(StringRef Name) const;
 
-
-    /// GetSymbolWithGlobalValueBase - Return the MCSymbol for a symbol with
-    /// global value name as its base, with the specified suffix, and where the
-    /// symbol is forced to have private linkage if ForcePrivate is true.
-    MCSymbol *GetSymbolWithGlobalValueBase(const GlobalValue *GV,
-                                           StringRef Suffix,
-                                           bool ForcePrivate = true) const;
+    /// Return the MCSymbol for a private symbol with global value name as its
+    /// base, with the specified suffix.
+    MCSymbol *getSymbolWithGlobalValueBase(const GlobalValue *GV,
+                                           StringRef Suffix) const;
 
     /// GetExternalSymbolSymbol - Return the MCSymbol for the specified
     /// ExternalSymbol.
@@ -416,6 +420,29 @@ namespace llvm {
     /// getISAEncoding - Get the value for DW_AT_APPLE_isa. Zero if no isa
     /// encoding specified.
     virtual unsigned getISAEncoding() { return 0; }
+
+    /// Emit a dwarf register operation for describing
+    /// - a small value occupying only part of a register or
+    /// - a small register representing only part of a value.
+    void EmitDwarfOpPiece(unsigned SizeInBits,
+                          unsigned OffsetInBits = 0) const;
+
+
+    /// \brief Emit a partial DWARF register operation.
+    /// \param MLoc             the register
+    /// \param PieceSize        size and
+    /// \param PieceOffset      offset of the piece in bits, if this is one
+    ///                         piece of an aggregate value.
+    ///
+    /// If size and offset is zero an operation for the entire
+    /// register is emitted: Some targets do not provide a DWARF
+    /// register number for every register.  If this is the case, this
+    /// function will attempt to emit a DWARF register by emitting a
+    /// piece of a super-register or by piecing together multiple
+    /// subregisters that alias the register.
+    void EmitDwarfRegOpPiece(const MachineLocation &MLoc,
+                             unsigned PieceSize = 0,
+                             unsigned PieceOffset = 0) const;
 
     /// EmitDwarfRegOp - Emit dwarf register operation.
     virtual void EmitDwarfRegOp(const MachineLocation &MLoc,

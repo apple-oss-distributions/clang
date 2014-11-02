@@ -126,6 +126,7 @@ void StatOutput(u64 *stat) {
   name[StatInt_strlen]                   = "  strlen                          ";
   name[StatInt_memset]                   = "  memset                          ";
   name[StatInt_memcpy]                   = "  memcpy                          ";
+  name[StatInt_textdomain]               = "  textdomain                      ";
   name[StatInt_strcmp]                   = "  strcmp                          ";
   name[StatInt_memchr]                   = "  memchr                          ";
   name[StatInt_memrchr]                  = "  memrchr                         ";
@@ -282,6 +283,24 @@ void StatOutput(u64 *stat) {
   name[StatInt___isoc99_scanf]           = "  scanf                           ";
   name[StatInt___isoc99_sscanf]          = "  sscanf                          ";
   name[StatInt___isoc99_fscanf]          = "  fscanf                          ";
+  name[StatInt_vprintf]                  = "  vprintf                         ";
+  name[StatInt_vsprintf]                 = "  vsprintf                        ";
+  name[StatInt_vsnprintf]                = "  vsnprintf                       ";
+  name[StatInt_vasprintf]                = "  vasprintf                       ";
+  name[StatInt_vfprintf]                 = "  vfprintf                        ";
+  name[StatInt_printf]                   = "  printf                          ";
+  name[StatInt_sprintf]                  = "  sprintf                         ";
+  name[StatInt_snprintf]                 = "  snprintf                        ";
+  name[StatInt_asprintf]                 = "  asprintf                        ";
+  name[StatInt_fprintf]                  = "  fprintf                         ";
+  name[StatInt___isoc99_vprintf]         = "  vprintf                         ";
+  name[StatInt___isoc99_vsprintf]        = "  vsprintf                        ";
+  name[StatInt___isoc99_vsnprintf]       = "  vsnprintf                       ";
+  name[StatInt___isoc99_vfprintf]        = "  vfprintf                        ";
+  name[StatInt___isoc99_printf]          = "  printf                          ";
+  name[StatInt___isoc99_sprintf]         = "  sprintf                         ";
+  name[StatInt___isoc99_snprintf]        = "  snprintf                        ";
+  name[StatInt___isoc99_fprintf]         = "  fprintf                         ";
   name[StatInt_on_exit]                  = "  on_exit                         ";
   name[StatInt___cxa_atexit]             = "  __cxa_atexit                    ";
   name[StatInt_localtime]                = "  localtime                       ";
@@ -361,6 +380,7 @@ void StatOutput(u64 *stat) {
   name[StatInt_sched_getaffinity]        = "  sched_getaffinity               ";
   name[StatInt_strerror]                 = "  strerror                        ";
   name[StatInt_strerror_r]               = "  strerror_r                      ";
+  name[StatInt___xpg_strerror_r]         = "  __xpg_strerror_r                ";
   name[StatInt_scandir]                  = "  scandir                         ";
   name[StatInt_scandir64]                = "  scandir64                       ";
   name[StatInt_getgroups]                = "  getgroups                       ";
@@ -415,6 +435,8 @@ void StatOutput(u64 *stat) {
   name[StatInt_lrand48_r]                = "  lrand48_r                       ";
   name[StatInt_getline]                  = "  getline                         ";
   name[StatInt_getdelim]                 = "  getdelim                        ";
+  name[StatInt_iconv]                    = "  iconv                           ";
+  name[StatInt_times]                    = "  times                           ";
 
   name[StatInt_pthread_attr_getdetachstate]  = "  pthread_addr_getdetachstate     ";  // NOLINT
   name[StatInt_pthread_attr_getguardsize]    = "  pthread_addr_getguardsize       ";  // NOLINT

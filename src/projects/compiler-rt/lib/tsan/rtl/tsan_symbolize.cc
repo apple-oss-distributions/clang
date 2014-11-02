@@ -42,18 +42,6 @@ ReportStack *NewReportStackEntry(uptr addr) {
   return ent;
 }
 
-// Strip module path to make output shorter.
-static char *StripModuleName(const char *module) {
-  if (module == 0)
-    return 0;
-  const char *short_module_name = internal_strrchr(module, '/');
-  if (short_module_name)
-    short_module_name += 1;
-  else
-    short_module_name = module;
-  return internal_strdup(short_module_name);
-}
-
 static ReportStack *NewReportStackEntry(const AddressInfo &info) {
   ReportStack *ent = NewReportStackEntry(info.address);
   ent->module = StripModuleName(info.module);
@@ -117,13 +105,13 @@ ReportStack *SymbolizeCode(uptr addr) {
     ent->col = col;
     return ent;
   }
-  if (!Symbolizer::Get()->IsAvailable())
+  if (!Symbolizer::Get()->CanReturnFileLineInfo())
     return SymbolizeCodeAddr2Line(addr);
   static const uptr kMaxAddrFrames = 16;
   InternalScopedBuffer<AddressInfo> addr_frames(kMaxAddrFrames);
   for (uptr i = 0; i < kMaxAddrFrames; i++)
     new(&addr_frames[i]) AddressInfo();
-  uptr addr_frames_num = Symbolizer::Get()->SymbolizeCode(
+  uptr addr_frames_num = Symbolizer::Get()->SymbolizePC(
       addr, addr_frames.data(), kMaxAddrFrames);
   if (addr_frames_num == 0)
     return NewReportStackEntry(addr);
@@ -143,8 +131,6 @@ ReportStack *SymbolizeCode(uptr addr) {
 }
 
 ReportLocation *SymbolizeData(uptr addr) {
-  if (!Symbolizer::Get()->IsAvailable())
-    return 0;
   DataInfo info;
   if (!Symbolizer::Get()->SymbolizeData(addr, &info))
     return 0;
@@ -162,8 +148,6 @@ ReportLocation *SymbolizeData(uptr addr) {
 }
 
 void SymbolizeFlush() {
-  if (!Symbolizer::Get()->IsAvailable())
-    return;
   Symbolizer::Get()->Flush();
 }
 

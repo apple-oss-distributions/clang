@@ -198,8 +198,8 @@ private:
   /// \sa mayInlineTemplateFunctions
   Optional<bool> InlineTemplateFunctions;
 
-  /// \sa mayInlineCXXContainerCtorsAndDtors
-  Optional<bool> InlineCXXContainerCtorsAndDtors;
+  /// \sa mayInlineCXXContainerMethods
+  Optional<bool> InlineCXXContainerMethods;
 
   /// \sa mayInlineCXXSharedPtrDtor
   Optional<bool> InlineCXXSharedPtrDtor;
@@ -290,12 +290,12 @@ public:
   /// accepts the values "true" and "false".
   bool mayInlineTemplateFunctions();
 
-  /// Returns whether or not constructors and destructors of C++ container
-  /// objects may be considered for inlining.
+  /// Returns whether or not methods of C++ container objects may be considered
+  /// for inlining.
   ///
   /// This is controlled by the 'c++-container-inlining' config option, which
   /// accepts the values "true" and "false".
-  bool mayInlineCXXContainerCtorsAndDtors();
+  bool mayInlineCXXContainerMethods();
 
   /// Returns whether or not the destructor of C++ 'shared_ptr' may be
   /// considered for inlining.

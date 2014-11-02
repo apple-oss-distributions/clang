@@ -1005,9 +1005,11 @@ void InitListChecker::CheckScalarType(const InitializedEntity &Entity,
 
   Expr *expr = IList->getInit(Index);
   if (InitListExpr *SubIList = dyn_cast<InitListExpr>(expr)) {
+    // FIXME: This is invalid, and accepting it causes overload resolution
+    // to pick the wrong overload in some corner cases.
     if (!VerifyOnly)
       SemaRef.Diag(SubIList->getLocStart(),
-                   diag::warn_many_braces_around_scalar_init)
+                   diag::ext_many_braces_around_scalar_init)
         << SubIList->getSourceRange();
 
     CheckScalarType(Entity, SubIList, DeclType, Index, StructuredList,
@@ -1538,7 +1540,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
          it != end; ++it) {
       if (!it->isUnnamedBitfield() && !it->hasInClassInitializer()) {
         SemaRef.Diag(IList->getSourceRange().getEnd(),
-                     diag::warn_missing_field_initializers) << it->getName();
+                     diag::warn_missing_field_initializers) << *it;
         break;
       }
     }
@@ -3548,7 +3550,7 @@ static OverloadingResult TryRefInitWithConversionFunction(Sema &S,
 
   // Compute the returned type of the conversion.
   if (isa<CXXConversionDecl>(Function))
-    T2 = Function->getResultType();
+    T2 = Function->getReturnType();
   else
     T2 = cv1T1;
 
@@ -4464,11 +4466,14 @@ void InitializationSequence::InitializeFrom(Sema &S,
   Expr *Initializer = 0;
   if (Args.size() == 1) {
     Initializer = Args[0];
-    if (S.getLangOpts().ObjC1 &&
-        S.CheckObjCBridgeRelatedConversions(Initializer->getLocStart(),
-                                          DestType, Initializer->getType(),
-                                          Initializer))
-      Args[0] = Initializer;
+    if (S.getLangOpts().ObjC1) {
+      if (S.CheckObjCBridgeRelatedConversions(Initializer->getLocStart(),
+                                              DestType, Initializer->getType(),
+                                              Initializer) ||
+          S.ConversionToObjCStringLiteralCheck(DestType, Initializer))
+        Args[0] = Initializer;
+        
+    }
     if (!isa<InitListExpr>(Initializer))
       SourceType = Initializer->getType();
   }
@@ -5883,7 +5888,7 @@ InitializationSequence::Perform(Sema &S,
 
         CastKind = CK_UserDefinedConversion;
 
-        CreatedObject = Conversion->getResultType()->isRecordType();
+        CreatedObject = Conversion->getReturnType()->isRecordType();
       }
 
       bool RequiresCopy = !IsCopy && !isReferenceBinding(Steps.back());
@@ -7007,11 +7012,9 @@ static void DiagnoseNarrowingInInitList(Sema &S,
     // narrowing conversion even if the value is a constant and can be
     // represented exactly as an integer.
     S.Diag(PostInit->getLocStart(),
-           S.getLangOpts().MicrosoftExt || !S.getLangOpts().CPlusPlus11? 
-             diag::warn_init_list_type_narrowing
-           : S.isSFINAEContext()?
-             diag::err_init_list_type_narrowing_sfinae
-           : diag::err_init_list_type_narrowing)
+           (S.getLangOpts().MicrosoftExt || !S.getLangOpts().CPlusPlus11)
+               ? diag::warn_init_list_type_narrowing
+               : diag::ext_init_list_type_narrowing)
       << PostInit->getSourceRange()
       << PreNarrowingType.getLocalUnqualifiedType()
       << EntityType.getLocalUnqualifiedType();
@@ -7020,11 +7023,9 @@ static void DiagnoseNarrowingInInitList(Sema &S,
   case NK_Constant_Narrowing:
     // A constant value was narrowed.
     S.Diag(PostInit->getLocStart(),
-           S.getLangOpts().MicrosoftExt || !S.getLangOpts().CPlusPlus11? 
-             diag::warn_init_list_constant_narrowing
-           : S.isSFINAEContext()?
-             diag::err_init_list_constant_narrowing_sfinae
-           : diag::err_init_list_constant_narrowing)
+           (S.getLangOpts().MicrosoftExt || !S.getLangOpts().CPlusPlus11)
+               ? diag::warn_init_list_constant_narrowing
+               : diag::ext_init_list_constant_narrowing)
       << PostInit->getSourceRange()
       << ConstantValue.getAsString(S.getASTContext(), ConstantType)
       << EntityType.getLocalUnqualifiedType();
@@ -7033,11 +7034,9 @@ static void DiagnoseNarrowingInInitList(Sema &S,
   case NK_Variable_Narrowing:
     // A variable's value may have been narrowed.
     S.Diag(PostInit->getLocStart(),
-           S.getLangOpts().MicrosoftExt || !S.getLangOpts().CPlusPlus11? 
-             diag::warn_init_list_variable_narrowing
-           : S.isSFINAEContext()?
-             diag::err_init_list_variable_narrowing_sfinae
-           : diag::err_init_list_variable_narrowing)
+           (S.getLangOpts().MicrosoftExt || !S.getLangOpts().CPlusPlus11)
+               ? diag::warn_init_list_variable_narrowing
+               : diag::ext_init_list_variable_narrowing)
       << PostInit->getSourceRange()
       << PreNarrowingType.getLocalUnqualifiedType()
       << EntityType.getLocalUnqualifiedType();

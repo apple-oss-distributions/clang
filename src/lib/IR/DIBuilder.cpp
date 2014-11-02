@@ -98,7 +98,7 @@ DICompileUnit DIBuilder::createCompileUnit(unsigned Lang, StringRef Filename,
                                            StringRef Producer, bool isOptimized,
                                            StringRef Flags, unsigned RunTimeVer,
                                            StringRef SplitName) {
-  assert(((Lang <= dwarf::DW_LANG_Python && Lang >= dwarf::DW_LANG_C89) ||
+  assert(((Lang <= dwarf::DW_LANG_Julia && Lang >= dwarf::DW_LANG_C89) ||
           (Lang <= dwarf::DW_LANG_hi_user && Lang >= dwarf::DW_LANG_lo_user)) &&
          "Invalid Language tag");
   assert(!Filename.empty() &&
@@ -172,6 +172,13 @@ DIImportedEntity DIBuilder::createImportedModule(DIScope Context,
                                                  DINameSpace NS, unsigned Line,
                                                  StringRef Name) {
   return ::createImportedModule(VMContext, Context, NS, Line, Name,
+                                AllImportedModules);
+}
+
+DIImportedEntity DIBuilder::createImportedModule(DIScope Context,
+                                                 DIModule M,
+                                                 unsigned Line) {
+  return ::createImportedModule(VMContext, Context, M, Line, StringRef(),
                                 AllImportedModules);
 }
 
@@ -753,11 +760,11 @@ DICompositeType DIBuilder::createEnumerationType(
     NULL,
     UniqueIdentifier.empty() ? NULL : MDString::get(VMContext, UniqueIdentifier)
   };
-  MDNode *Node = MDNode::get(VMContext, Elts);
-  AllEnumTypes.push_back(Node);
+  DICompositeType CTy(MDNode::get(VMContext, Elts));
+  AllEnumTypes.push_back(CTy);
   if (!UniqueIdentifier.empty())
-    retainType(Node);
-  return DICompositeType(Node);
+    retainType(CTy);
+  return CTy;
 }
 
 /// createArrayType - Create debugging information entry for an array.
@@ -1038,7 +1045,22 @@ DIVariable DIBuilder::createComplexVariable(unsigned Tag, DIDescriptor Scope,
   Elts.push_back(Constant::getNullValue(Type::getInt32Ty(VMContext)));
   Elts.push_back(Constant::getNullValue(Type::getInt32Ty(VMContext)));
   Elts.append(Addr.begin(), Addr.end());
+  return DIVariable(MDNode::get(VMContext, Elts));
+}
 
+/// createVariablePiece - Create a descriptor to describe one part
+/// of aggregate variable that is fragmented across multiple Values.
+DIVariable DIBuilder::createVariablePiece(DIVariable Variable,
+                                          unsigned OffsetInBytes,
+                                          unsigned SizeInBytes) {
+  assert(SizeInBytes > 0 && "zero-size piece");
+  SmallVector<Value *, 12> Elts;
+  for (unsigned i = 0; i < Variable->getNumOperands(); ++i)
+    Elts.push_back(Variable->getOperand(i));
+
+  Elts.push_back(ConstantInt::get(Type::getInt32Ty(VMContext), OpPiece));
+  Elts.push_back(ConstantInt::get(Type::getInt32Ty(VMContext), OffsetInBytes));
+  Elts.push_back(ConstantInt::get(Type::getInt32Ty(VMContext), SizeInBytes));
   return DIVariable(MDNode::get(VMContext, Elts));
 }
 
@@ -1163,6 +1185,23 @@ DINameSpace DIBuilder::createNameSpace(DIDescriptor Scope, StringRef Name,
   DINameSpace R(MDNode::get(VMContext, Elts));
   assert(R.Verify() &&
          "createNameSpace should return a verifiable DINameSpace");
+  return R;
+}
+
+/// createModule - This creates new descriptor for a module with the
+/// specified parent scope.
+DIModule DIBuilder::createModule(DIDescriptor Scope, StringRef Name,
+                                 DIFile File, unsigned LineNo) {
+  Value *Elts[] = {
+    GetTagConstant(VMContext, dwarf::DW_TAG_module),
+    File.getFileNode(),
+    getNonCompileUnitScope(Scope),
+    MDString::get(VMContext, Name),
+    ConstantInt::get(Type::getInt32Ty(VMContext), LineNo)
+  };
+  DIModule R(MDNode::get(VMContext, Elts));
+  assert(R.Verify() &&
+         "createModule should return a verifiable DIModule");
   return R;
 }
 

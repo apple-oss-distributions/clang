@@ -826,14 +826,20 @@ FastISel::SelectInstruction(const Instruction *I) {
 
   MachineBasicBlock::iterator SavedInsertPt = FuncInfo.InsertPt;
 
-  // As a special case, don't handle calls to builtin library functions that
-  // may be translated directly to target instructions.
   if (const CallInst *Call = dyn_cast<CallInst>(I)) {
     const Function *F = Call->getCalledFunction();
     LibFunc::Func Func;
+
+    // As a special case, don't handle calls to builtin library functions that
+    // may be translated directly to target instructions.
     if (F && !F->hasLocalLinkage() && F->hasName() &&
         LibInfo->getLibFunc(F->getName(), Func) &&
         LibInfo->hasOptimizedCodeGen(Func))
+      return false;
+
+    // Don't handle Intrinsic::trap if a trap funciton is specified.
+    if (F && F->getIntrinsicID() == Intrinsic::trap &&
+        !TM.Options.getTrapFunctionName().empty())
       return false;
   }
 
@@ -1571,4 +1577,19 @@ bool FastISel::tryToFoldLoad(const LoadInst *LI, const Instruction *FoldInst) {
   return tryToFoldLoadIntoMI(User, RI.getOperandNo(), LI);
 }
 
+bool FastISel::canFoldAddIntoGEP(const User *GEP, const Value *Add) {
+  // Must be an add.
+  if (!isa<AddOperator>(Add))
+    return false;
+  // Type size needs to match.
+  if (TD.getTypeSizeInBits(GEP->getType()) !=
+      TD.getTypeSizeInBits(Add->getType()))
+    return false;
+  // Must be in the same basic block.
+  if (isa<Instruction>(Add) &&
+      FuncInfo.MBBMap[cast<Instruction>(Add)->getParent()] != FuncInfo.MBB)
+    return false;
+  // Must have a constant operand.
+  return isa<ConstantInt>(cast<AddOperator>(Add)->getOperand(1));
+}
 

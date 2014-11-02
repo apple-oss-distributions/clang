@@ -13,6 +13,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInvocation.h"
+#include "clang/Frontend/Utils.h"
 #include "clang/Lex/ModuleLoader.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -74,6 +75,9 @@ class CompilerInstance : public ModuleLoader {
   /// The target being compiled for.
   IntrusiveRefCntPtr<TargetInfo> Target;
 
+  /// The virtual file system.
+  IntrusiveRefCntPtr<vfs::FileSystem> VirtualFileSystem;
+
   /// The file manager.
   IntrusiveRefCntPtr<FileManager> FileMgr;
 
@@ -100,6 +104,14 @@ class CompilerInstance : public ModuleLoader {
 
   /// \brief The ASTReader, if one exists.
   IntrusiveRefCntPtr<ASTReader> ModuleManager;
+
+  /// \brief The module dependency collector for crashdumps
+  std::shared_ptr<ModuleDependencyCollector> ModuleDepCollector;
+
+  /// \brief The dependency file generator.
+  OwningPtr<DependencyFileGenerator> TheDependencyFileGenerator;
+
+  std::vector<std::shared_ptr<DependencyCollector>> DependencyCollectors;
 
   /// \brief The set of top-level modules that has already been loaded,
   /// along with the module map
@@ -313,6 +325,26 @@ public:
   void setTarget(TargetInfo *Value);
 
   /// }
+  /// @name Virtual File System
+  /// {
+
+  bool hasVirtualFileSystem() const { return VirtualFileSystem != 0; }
+
+  vfs::FileSystem &getVirtualFileSystem() const {
+    assert(hasVirtualFileSystem() &&
+           "Compiler instance has no virtual file system");
+    return *VirtualFileSystem;
+  }
+
+  /// \brief Replace the current virtual file system.
+  ///
+  /// \note Most clients should use setFileManager, which will implicitly reset
+  /// the virtual file system to the one contained in the file manager.
+  void setVirtualFileSystem(IntrusiveRefCntPtr<vfs::FileSystem> FS) {
+    VirtualFileSystem = FS;
+  }
+
+  /// }
   /// @name File Manager
   /// {
 
@@ -325,10 +357,11 @@ public:
   }
   
   void resetAndLeakFileManager() {
+    BuryPointer(FileMgr.getPtr());
     FileMgr.resetWithoutRelease();
   }
 
-  /// setFileManager - Replace the current file manager.
+  /// \brief Replace the current file manager and virtual file system.
   void setFileManager(FileManager *Value);
 
   /// }
@@ -344,6 +377,7 @@ public:
   }
   
   void resetAndLeakSourceManager() {
+    BuryPointer(SourceMgr.getPtr());
     SourceMgr.resetWithoutRelease();
   }
 
@@ -363,6 +397,7 @@ public:
   }
 
   void resetAndLeakPreprocessor() {
+    BuryPointer(PP.getPtr());
     PP.resetWithoutRelease();
   }
 
@@ -381,6 +416,7 @@ public:
   }
   
   void resetAndLeakASTContext() {
+    BuryPointer(Context.getPtr());
     Context.resetWithoutRelease();
   }
 
@@ -428,6 +464,10 @@ public:
 
   IntrusiveRefCntPtr<ASTReader> getModuleManager() const;
   void setModuleManager(IntrusiveRefCntPtr<ASTReader> Reader);
+
+  std::shared_ptr<ModuleDependencyCollector> getModuleDepCollector() const;
+  void setModuleDepCollector(
+      std::shared_ptr<ModuleDependencyCollector> Collector);
 
   /// }
   /// @name Code Completion
@@ -530,7 +570,7 @@ public:
 
   /// Create the preprocessor, using the invocation, file, and source managers,
   /// and replace any existing one with it.
-  void createPreprocessor();
+  void createPreprocessor(TranslationUnitKind TUKind);
 
   /// Create the AST context.
   void createASTContext();
@@ -668,6 +708,9 @@ public:
     return ModuleLoader::HadFatalFailure;
   }
 
+  void addDependencyCollector(std::shared_ptr<DependencyCollector> Listener) {
+    DependencyCollectors.push_back(std::move(Listener));
+  }
 };
 
 } // end namespace clang

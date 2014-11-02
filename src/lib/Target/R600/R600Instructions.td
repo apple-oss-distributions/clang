@@ -75,7 +75,6 @@ def ADDRDWord : ComplexPattern<i32, 1, "SelectADDRDWord", [], []>;
 def ADDRVTX_READ : ComplexPattern<i32, 2, "SelectADDRVTX_READ", [], []>;
 def ADDRGA_CONST_OFFSET : ComplexPattern<i32, 1, "SelectGlobalValueConstantOffset", [], []>;
 def ADDRGA_VAR_OFFSET : ComplexPattern<i32, 2, "SelectGlobalValueVariableOffset", [], []>;
-def ADDRIndirect : ComplexPattern<iPTR, 2, "SelectADDRIndirect", [], []>;
 
 
 def R600_Pred : PredicateOperand<i32, (ops R600_Predicate),
@@ -418,7 +417,7 @@ def INTERP_VEC_LOAD :  AMDGPUShaderInst <
   (outs R600_Reg128:$dst),
   (ins i32imm:$src0),
   "INTERP_LOAD $src0 : $dst",
-  []>;
+  [(set R600_Reg128:$dst, (int_R600_interp_const imm:$src0))]>;
 
 def INTERP_XY : R600_2OP <0xD6, "INTERP_XY", []> {
   let bank_swizzle = 5;
@@ -734,6 +733,9 @@ def CEIL : R600_1OP_Helper <0x12, "CEIL", fceil>;
 def RNDNE : R600_1OP_Helper <0x13, "RNDNE", frint>;
 def FLOOR : R600_1OP_Helper <0x14, "FLOOR", ffloor>;
 
+// Add also ftrunc intrinsic pattern
+def : Pat<(ftrunc f32:$src0), (TRUNC $src0)>;
+
 def MOV : R600_1OP <0x19, "MOV", []>;
 
 let isPseudo = 1, isCodeGenOnly = 1, usesCustomInserter = 1 in {
@@ -823,12 +825,12 @@ def CNDE_INT : R600_3OP <
 
 def CNDGE_INT : R600_3OP <
   0x1E, "CNDGE_INT",
-  [(set i32:$dst, (selectcc i32:$src0, 0, i32:$src1, i32:$src2, COND_GE))]
+  [(set i32:$dst, (selectcc i32:$src0, 0, i32:$src1, i32:$src2, COND_SGE))]
 >;
 
 def CNDGT_INT : R600_3OP <
   0x1D, "CNDGT_INT",
-  [(set i32:$dst, (selectcc i32:$src0, 0, i32:$src1, i32:$src2, COND_GT))]
+  [(set i32:$dst, (selectcc i32:$src0, 0, i32:$src1, i32:$src2, COND_SGT))]
 >;
 
 //===----------------------------------------------------------------------===//
@@ -1111,6 +1113,10 @@ class COS_Common <bits<11> inst> : R600_1OP <
   let Itinerary = TransALU;
 }
 
+def CLAMP_R600 :  CLAMP <R600_Reg32>;
+def FABS_R600 : FABS<R600_Reg32>;
+def FNEG_R600 : FNEG<R600_Reg32>;
+
 //===----------------------------------------------------------------------===//
 // Helper patterns for complex intrinsics
 //===----------------------------------------------------------------------===//
@@ -1132,6 +1138,13 @@ class TGSI_LIT_Z_Common <InstR600 mul_lit, InstR600 log_clamped, InstR600 exp_ie
   (int_TGSI_lit_z f32:$src_x, f32:$src_y, f32:$src_w),
   (exp_ieee (mul_lit (log_clamped (MAX $src_y, (f32 ZERO))), $src_w, $src_x))
 >;
+
+// FROUND pattern
+class FROUNDPat<Instruction CNDGE> : Pat <
+  (AMDGPUround f32:$x),
+  (CNDGE (ADD (FNEG_R600 (f32 HALF)), (FRACT $x)), (CEIL $x), (FLOOR $x))
+>;
+
 
 //===----------------------------------------------------------------------===//
 // R600 / R700 Instructions
@@ -1174,6 +1187,7 @@ let Predicates = [isR600] in {
   def TGSI_LIT_Z_r600 : TGSI_LIT_Z_Common<MUL_LIT_r600, LOG_CLAMPED_r600, EXP_IEEE_r600>;
 
   def : Pat<(fsqrt f32:$src), (MUL $src, (RECIPSQRT_CLAMPED_r600 $src))>;
+  def : FROUNDPat <CNDGE_r600>;
 
   def R600_ExportSwz : ExportSwzInst {
     let Word1{20-17} = 0; // BURST_COUNT
@@ -1727,6 +1741,8 @@ def LDS_USHORT_READ_RET : R600_LDS_1A <0x39, "LDS_USHORT_READ_RET",
   // SHA-256 Patterns
   def : SHA256MaPattern <BFI_INT_eg, XOR_INT>;
 
+  def : FROUNDPat <CNDGE_eg>;
+
   def EG_ExportSwz : ExportSwzInst {
     let Word1{19-16} = 0; // BURST_COUNT
     let Word1{20} = 0; // VALID_PIXEL_MODE
@@ -1851,6 +1867,10 @@ def : Pat <
   def CF_END_CM : CF_CLAUSE_EG<32, (ins), "CF_END"> {
     let ADDR = 0;
     let POP_COUNT = 0;
+    let COUNT = 0;
+  }
+
+  def CF_PUSH_CM : CF_CLAUSE_EG<11, (ins i32imm:$ADDR, i32imm:$POP_COUNT), "PUSH @$ADDR POP:$POP_COUNT"> {
     let COUNT = 0;
   }
 
@@ -2091,10 +2111,6 @@ def TXD_SHADOW: InstR600 <
 } // End isPseudo = 1
 } // End usesCustomInserter = 1
 
-def CLAMP_R600 :  CLAMP <R600_Reg32>;
-def FABS_R600 : FABS<R600_Reg32>;
-def FNEG_R600 : FNEG<R600_Reg32>;
-
 //===---------------------------------------------------------------------===//
 // Return instruction
 //===---------------------------------------------------------------------===//
@@ -2314,7 +2330,7 @@ def : CND_INT_f32 <CNDGE_INT, SETGE>;
 
 //CNDGE_INT extra pattern
 def : Pat <
-  (selectcc i32:$src0, -1, i32:$src1, i32:$src2, COND_GT),
+  (selectcc i32:$src0, -1, i32:$src1, i32:$src2, COND_SGT),
   (CNDGE_INT $src0, $src1, $src2)
 >;
 

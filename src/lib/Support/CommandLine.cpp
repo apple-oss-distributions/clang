@@ -60,6 +60,8 @@ TEMPLATE_INSTANTIATION(class opt<char>);
 TEMPLATE_INSTANTIATION(class opt<bool>);
 } } // end namespace llvm::cl
 
+// Pin the vtables to this file.
+void GenericOptionValue::anchor() {}
 void OptionValue<boolOrDefault>::anchor() {}
 void OptionValue<std::string>::anchor() {}
 void Option::anchor() {}
@@ -73,6 +75,7 @@ void parser<double>::anchor() {}
 void parser<float>::anchor() {}
 void parser<std::string>::anchor() {}
 void parser<char>::anchor() {}
+void StringSaver::anchor() {}
 
 //===----------------------------------------------------------------------===//
 
@@ -105,6 +108,13 @@ void Option::addArgument() {
 
   NextRegistered = RegisteredOptionList;
   RegisteredOptionList = this;
+  MarkOptionsChanged();
+}
+
+void Option::removeArgument() {
+  assert(NextRegistered != 0 && "argument never registered");
+  assert(RegisteredOptionList == this && "argument is not the last registered");
+  RegisteredOptionList = NextRegistered;
   MarkOptionsChanged();
 }
 
@@ -631,7 +641,7 @@ static bool ExpandResponseFile(const char *FName, StringSaver &Saver,
 bool cl::ExpandResponseFiles(StringSaver &Saver, TokenizerCallback Tokenizer,
                              SmallVectorImpl<const char *> &Argv) {
   unsigned RspFiles = 0;
-  bool AllExpanded = false;
+  bool AllExpanded = true;
 
   // Don't cache Argv.size() because it can change.
   for (unsigned I = 0; I != Argv.size(); ) {
@@ -1474,7 +1484,7 @@ public:
     MoreHelp->clear();
 
     // Halt the program since help information was printed
-    exit(1);
+    exit(0);
   }
 };
 
@@ -1686,7 +1696,7 @@ public:
     OS << "LLVM (http://llvm.org/):\n"
        << "  " << PACKAGE_NAME << " version " << PACKAGE_VERSION;
 #ifdef LLVM_VERSION_INFO
-    OS << LLVM_VERSION_INFO;
+    OS << " " << LLVM_VERSION_INFO;
 #endif
     OS << "\n  ";
 #ifndef __OPTIMIZE__
@@ -1711,7 +1721,7 @@ public:
 
     if (OverrideVersionPrinter != 0) {
       (*OverrideVersionPrinter)();
-      exit(1);
+      exit(0);
     }
     print();
 
@@ -1725,7 +1735,7 @@ public:
         (*I)();
     }
 
-    exit(1);
+    exit(0);
   }
 };
 } // End anonymous namespace

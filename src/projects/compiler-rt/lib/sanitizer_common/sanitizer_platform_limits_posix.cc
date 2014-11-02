@@ -21,6 +21,7 @@
 
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <errno.h>
 #include <grp.h>
 #include <limits.h>
 #include <net/if.h>
@@ -107,7 +108,6 @@
 #include <link.h>
 #include <sys/vfs.h>
 #include <sys/epoll.h>
-// #include <asm/stat.h>
 #include <linux/capability.h>
 #endif // SANITIZER_LINUX
 
@@ -761,6 +761,13 @@ namespace __sanitizer {
   unsigned IOCTL_TIOCSERSETMULTI = TIOCSERSETMULTI;
   unsigned IOCTL_TIOCSSERIAL = TIOCSSERIAL;
 #endif
+
+// EOWNERDEAD is not present in some older platforms.
+#if defined(EOWNERDEAD)
+  extern const int errno_EOWNERDEAD = EOWNERDEAD;
+#else
+  extern const int errno_EOWNERDEAD = -1;
+#endif
 }  // namespace __sanitizer
 
 COMPILER_CHECK(sizeof(__sanitizer_pthread_attr_t) >= sizeof(pthread_attr_t));
@@ -936,5 +943,7 @@ CHECK_SIZE_AND_OFFSET(shmid_ds, shm_cpid);
 CHECK_SIZE_AND_OFFSET(shmid_ds, shm_lpid);
 CHECK_SIZE_AND_OFFSET(shmid_ds, shm_nattch);
 #endif
+
+CHECK_TYPE_SIZE(clock_t);
 
 #endif  // SANITIZER_LINUX || SANITIZER_MAC

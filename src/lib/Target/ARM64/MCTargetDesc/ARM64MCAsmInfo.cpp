@@ -11,20 +11,34 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ARM64MCAsmInfo.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCStreamer.h"
-#include "ARM64MCAsmInfo.h"
+#include "llvm/Support/CommandLine.h"
 using namespace llvm;
 
+enum AsmWriterVariantTy {
+  Default = -1, Generic = 0, Apple = 1
+};
+
+static cl::opt<AsmWriterVariantTy>
+AsmWriterVariant("arm64-neon-syntax", cl::init(Default),
+  cl::desc("Choose style of NEON code to emit from ARM64 backend:"),
+  cl::values(clEnumValN(Generic, "generic", "Emit generic NEON assembly"),
+             clEnumValN(Apple,   "apple",   "Emit Apple-style NEON assembly"),
+             clEnumValEnd));
+
 ARM64MCAsmInfoDarwin::ARM64MCAsmInfoDarwin() {
+  // We prefer NEON instructions to be printed in the short form.
+  AssemblerDialect = AsmWriterVariant == Default ? 1 : AsmWriterVariant;
+
   PrivateGlobalPrefix = "L";
   SeparatorString = "%%";
   CommentString = ";";
   PointerSize = CalleeSaveStackSlotSize = 8;
 
   AlignmentIsInBytes = false;
-  AllowNameToStartWithDigit = true;
   UsesELFSectionDirectiveForBSS = true;
   SupportsDebugInformation = true;
   UseDataRegionDirectives = true;
@@ -50,6 +64,9 @@ ARM64MCAsmInfoDarwin::getExprForPersonalitySymbol(const MCSymbol *Sym,
 }
 
 ARM64MCAsmInfoELF::ARM64MCAsmInfoELF() {
+  // We prefer NEON instructions to be printed in the short form.
+  AssemblerDialect = AsmWriterVariant == Default ? 0 : AsmWriterVariant;
+
   PointerSize = 8;
 
   // ".comm align is in bytes but .align is pow-2."

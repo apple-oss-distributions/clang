@@ -99,7 +99,7 @@ def CC_ARM64_DarwinPCS : CallingConv<[
            CCIfSplit<CCAssignToRegWithShadow<[X0, X1, X2, X3, X4, X5, X6],
                                              [W0, W1, W2, W3, W4, W5, W6]>>>,
   // i128 is split to two i64s, and its stack alignment is 16 bytes.
-  CCIfType<[i64], CCIfSplit<CCAssignToStackWithShadow<8, 16, X7>>>,
+  CCIfType<[i64], CCIfSplit<CCAssignToStackWithShadow<8, 16, [X7]>>>,
 
   CCIfType<[i64], CCAssignToRegWithShadow<[X0, X1, X2, X3, X4, X5, X6, X7],
                                           [W0, W1, W2, W3, W4, W5, W6, W7]>>,
@@ -134,6 +134,33 @@ def CC_ARM64_DarwinPCS_VarArg : CallingConv<[
   CCIfType<[i64], CCIfSplit<CCAssignToStack<8, 16>>>,
   CCIfType<[i64, f64, v1i64, v2i32, v4i16, v8i8, v1f64, v2f32], CCAssignToStack<8, 8>>,
   CCIfType<[v2i64, v4i32, v8i16, v16i8, v4f32, v2f64],   CCAssignToStack<16, 16>>
+]>;
+
+// The WebKit_JS calling convention only passes the first argument (the callee)
+// in register and the remaining arguments on stack. We allow 32bit stack slots,
+// so that WebKit can write partial values in the stack and define the other
+// 32bit quantity as undef.
+def CC_ARM64_WebKit_JS : CallingConv<[
+  // Handle i1, i8, i16, i32, and i64 passing in register X0 (W0).
+  CCIfType<[i1, i8, i16], CCCustom<"CC_ARM64_WebKit_JS_i1i8i16_Reg">>,
+  CCIfType<[i32], CCAssignToRegWithShadow<[W0], [X0]>>,
+  CCIfType<[i64], CCAssignToRegWithShadow<[X0], [W0]>>,
+
+  // Pass the remaining arguments on the stack instead.
+  CCIfType<[i1, i8, i16], CCAssignToStack<4, 4>>,
+  CCIfType<[i32, f32], CCAssignToStack<4, 4>>,
+  CCIfType<[i64, f64], CCAssignToStack<8, 8>>
+]>;
+
+def RetCC_ARM64_WebKit_JS : CallingConv<[
+  CCIfType<[i32], CCAssignToRegWithShadow<[W0, W1, W2, W3, W4, W5, W6, W7],
+                                          [X0, X1, X2, X3, X4, X5, X6, X7]>>,
+  CCIfType<[i64], CCAssignToRegWithShadow<[X0, X1, X2, X3, X4, X5, X6, X7],
+                                          [W0, W1, W2, W3, W4, W5, W6, W7]>>,
+  CCIfType<[f32], CCAssignToRegWithShadow<[S0, S1, S2, S3, S4, S5, S6, S7],
+                                          [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]>>,
+  CCIfType<[f64], CCAssignToRegWithShadow<[D0, D1, D2, D3, D4, D5, D6, D7],
+                                          [Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7]>>
 ]>;
 
 // FIXME: LR is only callee-saved in the sense that *we* preserve it and are
@@ -173,3 +200,11 @@ def CSR_ARM64_TLS_Darwin
 def CSR_ARM64_TLS_ELF
     : CalleeSavedRegs<(add (sequence "X%u", 1, 28), FP,
                            (sequence "Q%u", 0, 31))>;
+
+def CSR_ARM64_AllRegs
+    : CalleeSavedRegs<(add (sequence "W%u", 0, 30), WSP,
+                           (sequence "X%u", 0, 28), FP, LR, SP,
+                           (sequence "B%u", 0, 31), (sequence "H%u", 0, 31),
+                           (sequence "S%u", 0, 31), (sequence "D%u", 0, 31),
+                           (sequence "Q%u", 0, 31))>;
+

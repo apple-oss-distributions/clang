@@ -587,6 +587,12 @@ The context is either the subprogram or block where the variable is defined.
 Name the source variable name.  Context and line indicate where the variable
 was defined.  Type descriptor defines the declared type of the variable.
 
+The ``OpPiece`` operator is used for (typically larger aggregate)
+variables that are fragmented across several addresses. It takes two
+i32 arguments, an offset and a size to describe which piece of the
+variable is at this address.
+
+
 .. _format_common_intrinsics:
 
 Debugger intrinsic functions
@@ -2306,7 +2312,7 @@ stringWithCString:]``") and the basename is the selector only
 Mach-O Changes
 """"""""""""""
 
-The sections names for the apple hash tables are for non mach-o files.  For
+The sections names for the apple hash tables are for non-mach-o files.  For
 mach-o files, the sections should be contained in the ``__DWARF`` segment with
 names as follows:
 

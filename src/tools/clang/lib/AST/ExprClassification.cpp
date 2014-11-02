@@ -165,8 +165,6 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::FloatingLiteralClass:
   case Expr::CXXNoexceptExprClass:
   case Expr::CXXScalarValueInitExprClass:
-  case Expr::UnaryTypeTraitExprClass:
-  case Expr::BinaryTypeTraitExprClass:
   case Expr::TypeTraitExprClass:
   case Expr::ArrayTypeTraitExprClass:
   case Expr::ExpressionTraitExprClass:
@@ -348,7 +346,7 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::ObjCMessageExprClass:
     if (const ObjCMethodDecl *Method =
           cast<ObjCMessageExpr>(E)->getMethodDecl()) {
-      Cl::Kinds kind = ClassifyUnnamed(Ctx, Method->getResultType());
+      Cl::Kinds kind = ClassifyUnnamed(Ctx, Method->getReturnType());
       return (kind == Cl::CL_PRValue) ? Cl::CL_ObjCMessageRValue : kind;
     }
     return Cl::CL_PRValue;
@@ -591,6 +589,8 @@ static Cl::ModifiableType IsModifiable(ASTContext &Ctx, const Expr *E,
   CanQualType CT = Ctx.getCanonicalType(E->getType());
   // Const stuff is obviously not modifiable.
   if (CT.isConstQualified())
+    return Cl::CM_ConstQualified;
+  if (CT.getQualifiers().getAddressSpace() == LangAS::opencl_constant)
     return Cl::CM_ConstQualified;
 
   // Arrays are not modifiable, only their elements are.

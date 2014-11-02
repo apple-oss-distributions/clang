@@ -32,9 +32,11 @@ struct Flags {
   // Lower value may reduce memory usage but increase the chance of
   // false negatives.
   int  quarantine_size;
-  // Size (in bytes) of redzones around heap objects.
-  // Requirement: redzone >= 32, is a power of two.
+  // Minimal size (in bytes) of redzones around heap objects.
+  // Requirement: redzone >= 16, is a power of two.
   int  redzone;
+  // Maximal size (in bytes) of redzones around heap objects.
+  int  max_redzone;
   // If set, prints some debugging information and does additional checks.
   bool debug;
   // Controls the way to handle globals (0 - don't detect buffer overflow
@@ -52,8 +54,11 @@ struct Flags {
   bool mac_ignore_invalid_free;
   // Enables stack-use-after-return checking at run-time.
   bool detect_stack_use_after_return;
-  // The minimal fake stack size log.
-  int uar_stack_size_log;
+  // The minimal and the maximal fake stack size log.
+  int min_uar_stack_size_log;
+  int max_uar_stack_size_log;
+  // Use mmap with 'norserve' flag to allocate fake stack.
+  bool uar_noreserve;
   // ASan allocator flag. max_malloc_fill_size is the maximal amount of bytes
   // that will be filled with malloc_fill_byte on malloc.
   int max_malloc_fill_size, malloc_fill_byte;
@@ -83,6 +88,9 @@ struct Flags {
   bool print_legend;
   // If set, prints ASan exit stats even after program terminates successfully.
   bool atexit;
+  // If set, coverage information will be dumped at shutdown time if the
+  // appropriate instrumentation was enabled.
+  bool coverage;
   // By default, disable core dumper on 64-bit - it makes little sense
   // to dump 16T+ core.
   bool disable_core;
@@ -107,6 +115,11 @@ struct Flags {
   // If true, assume that dynamic initializers can never access globals from
   // other modules, even if the latter are already initialized.
   bool strict_init_order;
+  // If true, ASan tweaks a bunch of other flags (quarantine, redzone, heap
+  // poisoning) to reduce memory consumption as much as possible, and restores
+  // them to original values when the first instrumented module is loaded into
+  // the process. This is mainly intended to be used on Android.
+  bool start_deactivated;
 };
 
 extern Flags asan_flags_dont_use_directly;

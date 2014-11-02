@@ -41,10 +41,12 @@ static char ctx_placeholder[sizeof(Context)] ALIGNED(64);
 // Can be overriden by a front-end.
 #ifdef TSAN_EXTERNAL_HOOKS
 bool OnFinalize(bool failed);
+void OnInitialize();
 #else
 bool WEAK OnFinalize(bool failed) {
   return failed;
 }
+void WEAK OnInitialize() {}
 #endif
 
 static Context *ctx;
@@ -89,7 +91,7 @@ ThreadState::ThreadState(Context *ctx, int tid, int unique_id, u64 epoch,
   // Do not touch these, rely on zero initialization,
   // they may be accessed before the ctor.
   // , ignore_reads_and_writes()
-  // , in_rtl()
+  // , ignore_interceptors()
 #ifndef TSAN_GO
   , jmp_bufs(MBlockJmpBuf)
 #endif
@@ -114,8 +116,9 @@ static void MemoryProfiler(Context *ctx, fd_t fd, int i) {
 }
 
 static void BackgroundThread(void *arg) {
-  ScopedInRtl in_rtl;
   Context *ctx = CTX();
+  // This is a non-initialized non-user thread, nothing to see here.
+  ScopedIgnoreInterceptors ignore;
   const u64 kMs2Ns = 1000 * 1000;
 
   fd_t mprof_fd = kInvalidFd;
@@ -214,11 +217,12 @@ void Initialize(ThreadState *thr) {
   if (is_initialized)
     return;
   is_initialized = true;
+  // We are not ready to handle interceptors yet.
+  ScopedIgnoreInterceptors ignore;
   SanitizerToolName = "ThreadSanitizer";
   // Install tool-specific callbacks in sanitizer_common.
   SetCheckFailedCallback(TsanCheckFailed);
 
-  ScopedInRtl in_rtl;
 #ifndef TSAN_GO
   InitializeAllocator();
 #endif
@@ -231,21 +235,13 @@ void Initialize(ThreadState *thr) {
   InitializeShadowMemory();
 #endif
   InitializeFlags(&ctx->flags, env);
+  OnInitialize();
   // Setup correct file descriptor for error reports.
   __sanitizer_set_report_path(flags()->log_path);
   InitializeSuppressions();
 #ifndef TSAN_GO
   InitializeLibIgnore();
-  // Initialize external symbolizer before internal threads are started.
-  const char *external_symbolizer = flags()->external_symbolizer_path;
-  bool external_symbolizer_started =
-      Symbolizer::Init(external_symbolizer)->IsExternalAvailable();
-  if (external_symbolizer != 0 && external_symbolizer[0] != '\0' &&
-      !external_symbolizer_started) {
-    Printf("Failed to start external symbolizer: '%s'\n",
-           external_symbolizer);
-    Die();
-  }
+  Symbolizer::Init(common_flags()->external_symbolizer_path);
   Symbolizer::Get()->AddHooks(EnterSymbolizer, ExitSymbolizer);
 #endif
   internal_start_thread(&BackgroundThread, 0);
@@ -258,7 +254,6 @@ void Initialize(ThreadState *thr) {
   int tid = ThreadCreate(thr, 0, 0, true);
   CHECK_EQ(tid, 0);
   ThreadStart(thr, tid, internal_getpid());
-  CHECK_EQ(thr->in_rtl, 1);
   ctx->initialized = true;
 
   if (flags()->stop_on_start) {
@@ -270,7 +265,6 @@ void Initialize(ThreadState *thr) {
 }
 
 int Finalize(ThreadState *thr) {
-  ScopedInRtl in_rtl;
   Context *ctx = __tsan::ctx;
   bool failed = false;
 
@@ -337,7 +331,6 @@ u32 CurrentStackId(ThreadState *thr, uptr pc) {
 
 void TraceSwitch(ThreadState *thr) {
   thr->nomalloc++;
-  ScopedInRtl in_rtl;
   Trace *thr_trace = ThreadTrace(thr->tid);
   Lock l(&thr_trace->mtx);
   unsigned trace = (thr->fast_state.epoch() / kTracePartSize) % TraceParts();
@@ -654,7 +647,6 @@ void MemoryRangeImitateWrite(ThreadState *thr, uptr pc, uptr addr, uptr size) {
 
 ALWAYS_INLINE USED
 void FuncEntry(ThreadState *thr, uptr pc) {
-  DCHECK_EQ(thr->in_rtl, 0);
   StatInc(thr, StatFuncEnter);
   DPrintf2("#%d: FuncEntry %p\n", (int)thr->fast_state.tid(), (void*)pc);
   thr->fast_state.IncrementEpoch();
@@ -684,7 +676,6 @@ void FuncEntry(ThreadState *thr, uptr pc) {
 
 ALWAYS_INLINE USED
 void FuncExit(ThreadState *thr) {
-  DCHECK_EQ(thr->in_rtl, 0);
   StatInc(thr, StatFuncExit);
   DPrintf2("#%d: FuncExit\n", (int)thr->fast_state.tid());
   thr->fast_state.IncrementEpoch();
@@ -697,31 +688,45 @@ void FuncExit(ThreadState *thr) {
   thr->shadow_stack_pos--;
 }
 
-void ThreadIgnoreBegin(ThreadState *thr) {
+void ThreadIgnoreBegin(ThreadState *thr, uptr pc) {
   DPrintf("#%d: ThreadIgnoreBegin\n", thr->tid);
   thr->ignore_reads_and_writes++;
   CHECK_GT(thr->ignore_reads_and_writes, 0);
   thr->fast_state.SetIgnoreBit();
+#ifndef TSAN_GO
+  thr->mop_ignore_set.Add(CurrentStackId(thr, pc));
+#endif
 }
 
-void ThreadIgnoreEnd(ThreadState *thr) {
+void ThreadIgnoreEnd(ThreadState *thr, uptr pc) {
   DPrintf("#%d: ThreadIgnoreEnd\n", thr->tid);
   thr->ignore_reads_and_writes--;
   CHECK_GE(thr->ignore_reads_and_writes, 0);
-  if (thr->ignore_reads_and_writes == 0)
+  if (thr->ignore_reads_and_writes == 0) {
     thr->fast_state.ClearIgnoreBit();
+#ifndef TSAN_GO
+    thr->mop_ignore_set.Reset();
+#endif
+  }
 }
 
-void ThreadIgnoreSyncBegin(ThreadState *thr) {
+void ThreadIgnoreSyncBegin(ThreadState *thr, uptr pc) {
   DPrintf("#%d: ThreadIgnoreSyncBegin\n", thr->tid);
   thr->ignore_sync++;
   CHECK_GT(thr->ignore_sync, 0);
+#ifndef TSAN_GO
+  thr->sync_ignore_set.Add(CurrentStackId(thr, pc));
+#endif
 }
 
-void ThreadIgnoreSyncEnd(ThreadState *thr) {
+void ThreadIgnoreSyncEnd(ThreadState *thr, uptr pc) {
   DPrintf("#%d: ThreadIgnoreSyncEnd\n", thr->tid);
   thr->ignore_sync--;
   CHECK_GE(thr->ignore_sync, 0);
+#ifndef TSAN_GO
+  if (thr->ignore_sync == 0)
+    thr->mop_ignore_set.Reset();
+#endif
 }
 
 bool MD5Hash::operator==(const MD5Hash &other) const {

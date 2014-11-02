@@ -162,11 +162,11 @@ private:
   /// \brief Indicates if the method was a definition but its body was skipped.
   unsigned HasSkippedBody : 1;
 
-  // Result type of this method.
+  // Return type of this method.
   QualType MethodDeclType;
 
-  // Type source information for the result type.
-  TypeSourceInfo *ResultTInfo;
+  // Type source information for the return type.
+  TypeSourceInfo *ReturnTInfo;
 
   /// \brief Array of ParmVarDecls for the formal parameters of this method
   /// and optionally followed by selector locations.
@@ -224,27 +224,22 @@ private:
                            ArrayRef<SourceLocation> SelLocs);
 
   ObjCMethodDecl(SourceLocation beginLoc, SourceLocation endLoc,
-                 Selector SelInfo, QualType T,
-                 TypeSourceInfo *ResultTInfo,
-                 DeclContext *contextDecl,
-                 bool isInstance = true,
-                 bool isVariadic = false,
-                 bool isPropertyAccessor = false,
-                 bool isImplicitlyDeclared = false,
-                 bool isDefined = false,
+                 Selector SelInfo, QualType T, TypeSourceInfo *ReturnTInfo,
+                 DeclContext *contextDecl, bool isInstance = true,
+                 bool isVariadic = false, bool isPropertyAccessor = false,
+                 bool isImplicitlyDeclared = false, bool isDefined = false,
                  ImplementationControl impControl = None,
                  bool HasRelatedResultType = false)
-  : NamedDecl(ObjCMethod, contextDecl, beginLoc, SelInfo),
-    DeclContext(ObjCMethod), Family(InvalidObjCMethodFamily),
-    IsInstance(isInstance), IsVariadic(isVariadic),
-    IsPropertyAccessor(isPropertyAccessor),
-    IsDefined(isDefined), IsRedeclaration(0), HasRedeclaration(0),
-    DeclImplementation(impControl), objcDeclQualifier(OBJC_TQ_None),
-    RelatedResultType(HasRelatedResultType),
-    SelLocsKind(SelLoc_StandardNoSpace), IsOverriding(0), HasSkippedBody(0),
-    MethodDeclType(T), ResultTInfo(ResultTInfo),
-    ParamsAndSelLocs(0), NumParams(0),
-    DeclEndLoc(endLoc), Body(), SelfDecl(0), CmdDecl(0) {
+      : NamedDecl(ObjCMethod, contextDecl, beginLoc, SelInfo),
+        DeclContext(ObjCMethod), Family(InvalidObjCMethodFamily),
+        IsInstance(isInstance), IsVariadic(isVariadic),
+        IsPropertyAccessor(isPropertyAccessor), IsDefined(isDefined),
+        IsRedeclaration(0), HasRedeclaration(0), DeclImplementation(impControl),
+        objcDeclQualifier(OBJC_TQ_None),
+        RelatedResultType(HasRelatedResultType),
+        SelLocsKind(SelLoc_StandardNoSpace), IsOverriding(0), HasSkippedBody(0),
+        MethodDeclType(T), ReturnTInfo(ReturnTInfo), ParamsAndSelLocs(0),
+        NumParams(0), DeclEndLoc(endLoc), Body(), SelfDecl(0), CmdDecl(0) {
     setImplicit(isImplicitlyDeclared);
   }
 
@@ -254,20 +249,14 @@ private:
   virtual ObjCMethodDecl *getNextRedeclaration();
 
 public:
-  static ObjCMethodDecl *Create(ASTContext &C,
-                                SourceLocation beginLoc,
-                                SourceLocation endLoc,
-                                Selector SelInfo,
-                                QualType T,
-                                TypeSourceInfo *ResultTInfo,
-                                DeclContext *contextDecl,
-                                bool isInstance = true,
-                                bool isVariadic = false,
-                                bool isPropertyAccessor = false,
-                                bool isImplicitlyDeclared = false,
-                                bool isDefined = false,
-                                ImplementationControl impControl = None,
-                                bool HasRelatedResultType = false);
+  static ObjCMethodDecl *
+  Create(ASTContext &C, SourceLocation beginLoc, SourceLocation endLoc,
+         Selector SelInfo, QualType T, TypeSourceInfo *ReturnTInfo,
+         DeclContext *contextDecl, bool isInstance = true,
+         bool isVariadic = false, bool isPropertyAccessor = false,
+         bool isImplicitlyDeclared = false, bool isDefined = false,
+         ImplementationControl impControl = None,
+         bool HasRelatedResultType = false);
 
   static ObjCMethodDecl *CreateDeserialized(ASTContext &C, unsigned ID);
   
@@ -314,8 +303,7 @@ public:
     if (hasStandardSelLocs())
       return getStandardSelectorLoc(Index, getSelector(),
                                    getSelLocsKind() == SelLoc_StandardWithSpace,
-                      llvm::makeArrayRef(const_cast<ParmVarDecl**>(getParams()),
-                                         NumParams),
+                                    parameters(),
                                    DeclEndLoc);
     return getStoredSelLocs()[Index];
   }
@@ -338,17 +326,17 @@ public:
 
   Selector getSelector() const { return getDeclName().getObjCSelector(); }
 
-  QualType getResultType() const { return MethodDeclType; }
-  void setResultType(QualType T) { MethodDeclType = T; }
+  QualType getReturnType() const { return MethodDeclType; }
+  void setReturnType(QualType T) { MethodDeclType = T; }
 
   /// \brief Determine the type of an expression that sends a message to this
   /// function.
   QualType getSendResultType() const {
-    return getResultType().getNonLValueExprType(getASTContext());
+    return getReturnType().getNonLValueExprType(getASTContext());
   }
 
-  TypeSourceInfo *getResultTypeSourceInfo() const { return ResultTInfo; }
-  void setResultTypeSourceInfo(TypeSourceInfo *TInfo) { ResultTInfo = TInfo; }
+  TypeSourceInfo *getReturnTypeSourceInfo() const { return ReturnTInfo; }
+  void setReturnTypeSourceInfo(TypeSourceInfo *TInfo) { ReturnTInfo = TInfo; }
 
   // Iterator access to formal parameters.
   unsigned param_size() const { return NumParams; }
@@ -364,6 +352,13 @@ public:
     return param_begin() + getSelector().getNumArgs();
   }
 
+  // ArrayRef access to formal parameters.  This should eventually
+  // replace the iterator interface above.
+  ArrayRef<ParmVarDecl*> parameters() const {
+    return llvm::makeArrayRef(const_cast<ParmVarDecl**>(getParams()),
+                              NumParams);
+  }
+
   /// \brief Sets the method's parameters and selector source locations.
   /// If the method is implicit (not coming from source) \p SelLocs is
   /// ignored.
@@ -375,13 +370,21 @@ public:
   // Iterator access to parameter types.
   typedef std::const_mem_fun_t<QualType, ParmVarDecl> deref_fun;
   typedef llvm::mapped_iterator<param_const_iterator, deref_fun>
-      arg_type_iterator;
+  param_type_iterator;
 
-  arg_type_iterator arg_type_begin() const {
+  param_type_iterator arg_type_begin() const {
     return llvm::map_iterator(param_begin(), deref_fun(&ParmVarDecl::getType));
   }
-  arg_type_iterator arg_type_end() const {
+  param_type_iterator arg_type_end() const {
     return llvm::map_iterator(param_end(), deref_fun(&ParmVarDecl::getType));
+  }
+
+  // FunctionProtoType adapters.
+  param_type_iterator param_type_begin() const {
+    return arg_type_begin();
+  }
+  param_type_iterator param_type_end() const {
+    return arg_type_end();
   }
 
   /// createImplicitParams - Used to lazily create the self and cmd
@@ -679,7 +682,7 @@ class ObjCInterfaceDecl : public ObjCContainerDecl
     bool HasDesignatedInitializers : 1;
 
     enum InheritedDesignatedInitializersState {
-      /// We didn't calculated whether the designated initializers should be
+      /// We didn't calculate whether the designated initializers should be
       /// inherited or not.
       IDI_Unknown = 0,
       /// Designated initializers are inherited for the super class.
@@ -911,6 +914,7 @@ public:
   void mergeClassExtensionProtocolList(ObjCProtocolDecl *const* List,
                                        unsigned Num,
                                        ASTContext &C);
+  StringRef getObjCRuntimeNameAsString() const;
 
   /// Returns the designated initializers for the interface.
   ///
@@ -1206,16 +1210,18 @@ public:
   // Lookup a method. First, we search locally. If a method isn't
   // found, we search referenced protocols and class categories.
   ObjCMethodDecl *lookupMethod(Selector Sel, bool isInstance,
-                               bool shallowCategoryLookup= false,
-                               const ObjCCategoryDecl *C= 0,
-                               bool followSuper = true) const;
-  ObjCMethodDecl *lookupInstanceMethod(Selector Sel,
-                            bool shallowCategoryLookup = false) const {
-    return lookupMethod(Sel, true/*isInstance*/, shallowCategoryLookup);
+                               bool shallowCategoryLookup = false,
+                               bool followSuper = true,
+                               const ObjCCategoryDecl *C = 0) const;
+
+  /// Lookup an instance method for a given selector.
+  ObjCMethodDecl *lookupInstanceMethod(Selector Sel) const {
+    return lookupMethod(Sel, true/*isInstance*/);
   }
-  ObjCMethodDecl *lookupClassMethod(Selector Sel,
-                     bool shallowCategoryLookup = false) const {
-    return lookupMethod(Sel, false/*isInstance*/, shallowCategoryLookup);
+
+  /// Lookup a class method for a given selector.
+  ObjCMethodDecl *lookupClassMethod(Selector Sel) const {
+    return lookupMethod(Sel, false/*isInstance*/);
   }
   ObjCInterfaceDecl *lookupInheritedClass(const IdentifierInfo *ICName);
 
@@ -1233,7 +1239,9 @@ public:
   ObjCMethodDecl *lookupPropertyAccessor(const Selector Sel,
                                          const ObjCCategoryDecl *Cat) const {
     return lookupMethod(Sel, true/*isInstance*/,
-                        false/*shallowCategoryLookup*/, Cat);
+                        false/*shallowCategoryLookup*/,
+                        true /* followsSuper */,
+                        Cat);
   }
                           
   SourceLocation getEndOfDefinitionLoc() const { 
@@ -1562,6 +1570,7 @@ public:
   /// \brief Starts the definition of this Objective-C protocol.
   void startDefinition();
 
+  StringRef getObjCRuntimeNameAsString() const;
   virtual SourceRange getSourceRange() const LLVM_READONLY {
     if (isThisDeclarationADefinition())
       return ObjCContainerDecl::getSourceRange();
@@ -1976,6 +1985,7 @@ public:
   std::string getNameAsString() const {
     return getName();
   }
+  StringRef getObjCRuntimeNameAsString() const;
 
   const ObjCInterfaceDecl *getSuperClass() const { return SuperClass; }
   ObjCInterfaceDecl *getSuperClass() { return SuperClass; }

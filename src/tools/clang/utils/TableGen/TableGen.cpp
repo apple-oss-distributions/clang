@@ -25,6 +25,7 @@ using namespace clang;
 enum ActionType {
   GenClangAttrClasses,
   GenClangAttrIdentifierArgList,
+  GenClangAttrArgContextList,
   GenClangAttrTypeArgList,
   GenClangAttrImpl,
   GenClangAttrList,
@@ -32,6 +33,7 @@ enum ActionType {
   GenClangAttrPCHWrite,
   GenClangAttrSpellingList,
   GenClangAttrSpellingListIndex,
+  GenClangAttrASTVisitor,
   GenClangAttrLateParsedList,
   GenClangAttrTemplateInstantiate,
   GenClangAttrParsedAttrList,
@@ -68,6 +70,10 @@ cl::opt<ActionType> Action(
                    "gen-clang-attr-identifier-arg-list",
                    "Generate a list of attributes that take an "
                    "identifier as their first argument"),
+        clEnumValN(GenClangAttrArgContextList,
+                   "gen-clang-attr-arg-context-list",
+                   "Generate a list of attributes that parse their arguments "
+                   "in an unevaluated context"),
         clEnumValN(GenClangAttrTypeArgList,
                    "gen-clang-attr-type-arg-list",
                    "Generate a list of attributes that take a type as their "
@@ -85,6 +91,9 @@ cl::opt<ActionType> Action(
         clEnumValN(GenClangAttrSpellingListIndex,
                    "gen-clang-attr-spelling-index",
                    "Generate a clang attribute spelling index"),
+        clEnumValN(GenClangAttrASTVisitor,
+                   "gen-clang-attr-ast-visitor",
+                   "Generate a recursive AST visitor for clang attributes"),
         clEnumValN(GenClangAttrLateParsedList,
                    "gen-clang-attr-late-parsed-list",
                    "Generate a clang attribute LateParsed list"),
@@ -139,7 +148,7 @@ cl::opt<ActionType> Action(
         clEnumValN(GenArmNeonTest, "gen-arm-neon-test",
                    "Generate ARM NEON tests for clang"),
         clEnumValN(GenArm64SIMD, "gen-arm64-simd",
-                   "Generate aarch64_simd.h for clang"),
+                   "Generate arm64_neon_internal.h for clang"),
         clEnumValN(GenArm64SIMDSema, "gen-arm64-simd-sema",
                    "Generate ARM64 SIMD sema support for clang"),
         clEnumValN(GenArm64SIMDTest, "gen-arm64-simd-test",
@@ -158,6 +167,9 @@ bool ClangTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
     break;
   case GenClangAttrIdentifierArgList:
     EmitClangAttrIdentifierArgList(Records, OS);
+    break;
+  case GenClangAttrArgContextList:
+    EmitClangAttrArgContextList(Records, OS);
     break;
   case GenClangAttrTypeArgList:
     EmitClangAttrTypeArgList(Records, OS);
@@ -179,6 +191,9 @@ bool ClangTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
     break;
   case GenClangAttrSpellingListIndex:
     EmitClangAttrSpellingListIndex(Records, OS);
+    break;
+  case GenClangAttrASTVisitor:
+    EmitClangAttrASTVisitor(Records, OS);
     break;
   case GenClangAttrLateParsedList:
     EmitClangAttrLateParsedList(Records, OS);
@@ -266,3 +281,12 @@ int main(int argc, char **argv) {
 
   return TableGenMain(argv[0], &ClangTableGenMain);
 }
+
+#ifdef __has_feature
+#if __has_feature(address_sanitizer)
+#include <sanitizer/lsan_interface.h>
+// Disable LeakSanitizer for this binary as it has too many leaks that are not
+// very interesting to fix. See compiler-rt/include/sanitizer/lsan_interface.h .
+int __lsan_is_turned_off() { return 1; }
+#endif  // __has_feature(address_sanitizer)
+#endif  // defined(__has_feature)

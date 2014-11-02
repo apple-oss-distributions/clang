@@ -1,4 +1,4 @@
-//====----- MachineBlockFrequencyInfo.h - MachineBlock Frequency Analysis ----====//
+//====-- MachineBlockFrequencyInfo.h - MBB Frequency Analysis -*- C++ -*--====//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -28,9 +28,9 @@ class BlockFrequencyImpl;
 /// MachineBlockFrequencyInfo pass uses BlockFrequencyImpl implementation to estimate
 /// machine basic block frequencies.
 class MachineBlockFrequencyInfo : public MachineFunctionPass {
-
-  BlockFrequencyImpl<MachineBasicBlock, MachineFunction,
-                     MachineBranchProbabilityInfo> *MBFI;
+  typedef BlockFrequencyImpl<MachineBasicBlock, MachineFunction,
+                             MachineBranchProbabilityInfo> ImplType;
+  std::unique_ptr<ImplType> MBFI;
 
 public:
   static char ID;
@@ -43,12 +43,29 @@ public:
 
   bool runOnMachineFunction(MachineFunction &F);
 
+  void releaseMemory() override;
+
   /// getblockFreq - Return block frequency. Return 0 if we don't have the
   /// information. Please note that initial frequency is equal to 1024. It means
   /// that we should not rely on the value itself, but only on the comparison to
   /// the other block frequencies. We do this to avoid using of floating points.
   ///
   BlockFrequency getBlockFreq(const MachineBasicBlock *MBB) const;
+
+  const MachineFunction *getFunction() const;
+  void view() const;
+
+  // Print the block frequency Freq to OS using the current functions entry
+  // frequency to convert freq into a relative decimal form.
+  raw_ostream &printBlockFreq(raw_ostream &OS, const BlockFrequency Freq) const;
+
+  // Convenience method that attempts to look up the frequency associated with
+  // BB and print it to OS.
+  raw_ostream &printBlockFreq(raw_ostream &OS,
+                              const MachineBasicBlock *MBB) const;
+
+  uint64_t getEntryFreq() const;
+
 };
 
 }

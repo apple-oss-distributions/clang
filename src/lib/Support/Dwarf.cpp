@@ -86,7 +86,7 @@ const char *llvm::dwarf::TagString(unsigned Tag) {
   case DW_TAG_template_alias:            return "DW_TAG_template_alias";
   case DW_TAG_coarray_type:              return "DW_TAG_coarray_type";
   case DW_TAG_generic_subrange:          return "DW_TAG_generic_subrange";
-  case DW_TAG_dynamic_type:              return "DW_TAG_generic_subrange";
+  case DW_TAG_dynamic_type:              return "DW_TAG_dynamic_type";
   case DW_TAG_MIPS_loop:                 return "DW_TAG_MIPS_loop";
   case DW_TAG_type_unit:                 return "DW_TAG_type_unit";
   case DW_TAG_format_label:              return "DW_TAG_format_label";
@@ -598,6 +598,7 @@ const char *llvm::dwarf::LanguageString(unsigned Language) {
   case DW_LANG_C_plus_plus_11:           return "DW_LANG_C_plus_plus_11";
   case DW_LANG_OCaml:                    return "DW_LANG_OCaml";
   case DW_LANG_lo_user:                  return "DW_LANG_lo_user";
+  case DW_LANG_Swift:                    return "DW_LANG_Swift";
   case DW_LANG_hi_user:                  return "DW_LANG_hi_user";
   }
   return 0;

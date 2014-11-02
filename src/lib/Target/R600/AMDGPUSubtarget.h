@@ -50,6 +50,7 @@ private:
   bool FP64;
   bool CaymanISA;
   bool EnableIRStructurizer;
+  bool EnableIfCvt;
 
   InstrItineraryData InstrItins;
 
@@ -66,6 +67,7 @@ public:
   bool hasHWFP64() const;
   bool hasCaymanISA() const;
   bool IsIRStructurizerEnabled() const;
+  bool isIfCvtEnabled() const;
 
   virtual bool enableMachineScheduler() const {
     return getGeneration() <= NORTHERN_ISLANDS;
@@ -73,7 +75,6 @@ public:
 
   // Helper functions to simplify if statements
   bool isTargetELF() const;
-  std::string getDataLayout() const;
   std::string getDeviceName() const;
   virtual size_t getDefaultSize(uint32_t dim) const;
   bool dumpCode() const { return DumpCode; }

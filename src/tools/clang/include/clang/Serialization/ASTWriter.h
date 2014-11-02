@@ -246,10 +246,10 @@ private:
   /// @name FlushStmt Caches
   /// @{
 
-  /// \brief Set of parent Stmts for the currently serializing sub stmt.
+  /// \brief Set of parent Stmts for the currently serializing sub-stmt.
   llvm::DenseSet<Stmt *> ParentStmts;
 
-  /// \brief Offsets of sub stmts already serialized. The offset points
+  /// \brief Offsets of sub-stmts already serialized. The offset points
   /// just after the stmt record.
   llvm::DenseMap<Stmt *, uint64_t> SubStmtEntries;
 
@@ -437,6 +437,8 @@ private:
                                      bool isModule);
   void WriteCXXBaseSpecifiersOffsets();
   void WriteType(QualType T);
+  uint32_t GenerateNameLookupTable(const DeclContext *DC,
+                                   llvm::SmallVectorImpl<char> &LookupTable);
   uint64_t WriteDeclContextLexicalBlock(ASTContext &Context, DeclContext *DC);
   uint64_t WriteDeclContextVisibleBlock(ASTContext &Context, DeclContext *DC);
   void WriteTypeDeclOffsets();

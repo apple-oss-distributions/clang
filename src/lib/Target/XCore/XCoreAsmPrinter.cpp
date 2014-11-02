@@ -14,6 +14,7 @@
 
 #define DEBUG_TYPE "asm-printer"
 #include "XCore.h"
+#include "XCoreTargetStreamer.h"
 #include "InstPrinter/XCoreInstPrinter.h"
 #include "XCoreInstrInfo.h"
 #include "XCoreMCInstLower.h"
@@ -31,16 +32,16 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/MC/MCExpr.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/Mangler.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include <algorithm>
 #include <cctype>
@@ -50,6 +51,8 @@ namespace {
   class XCoreAsmPrinter : public AsmPrinter {
     const XCoreSubtarget &Subtarget;
     XCoreMCInstLower MCInstLowering;
+    XCoreTargetStreamer &getTargetStreamer();
+
   public:
     explicit XCoreAsmPrinter(TargetMachine &TM, MCStreamer &Streamer)
       : AsmPrinter(TM, Streamer), Subtarget(TM.getSubtarget<XCoreSubtarget>()),
@@ -79,6 +82,10 @@ namespace {
   };
 } // end of anonymous namespace
 
+XCoreTargetStreamer &XCoreAsmPrinter::getTargetStreamer() {
+  return static_cast<XCoreTargetStreamer&>(*OutStreamer.getTargetStreamer());
+}
+
 void XCoreAsmPrinter::emitArrayBound(MCSymbol *Sym, const GlobalVariable *GV) {
   assert(((GV->hasExternalLinkage() ||
     GV->hasWeakLinkage()) ||
@@ -106,16 +113,15 @@ void XCoreAsmPrinter::EmitGlobalVariable(const GlobalVariable *GV) {
     return;
 
   const DataLayout *TD = TM.getDataLayout();
-  OutStreamer.SwitchSection(getObjFileLowering().SectionForGlobal(GV, Mang,TM));
+  OutStreamer.SwitchSection(
+      getObjFileLowering().SectionForGlobal(GV, *Mang, TM));
 
-  
   MCSymbol *GVSym = getSymbol(GV);
   const Constant *C = GV->getInitializer();
   unsigned Align = (unsigned)TD->getPreferredTypeAlignmentShift(C->getType());
   
   // Mark the start of the global
-  OutStreamer.EmitRawText("\t.cc_top " + Twine(GVSym->getName()) + ".data," +
-                          GVSym->getName());
+  getTargetStreamer().emitCCTopData(GVSym->getName());
 
   switch (GV->getLinkage()) {
   case GlobalValue::AppendingLinkage:
@@ -135,10 +141,6 @@ void XCoreAsmPrinter::EmitGlobalVariable(const GlobalVariable *GV) {
   case GlobalValue::InternalLinkage:
   case GlobalValue::PrivateLinkage:
     break;
-  case GlobalValue::DLLImportLinkage:
-    llvm_unreachable("DLLImport linkage is not supported by this target!");
-  case GlobalValue::DLLExportLinkage:
-    llvm_unreachable("DLLExport linkage is not supported by this target!");
   default:
     llvm_unreachable("Unknown linkage type!");
   }
@@ -151,8 +153,7 @@ void XCoreAsmPrinter::EmitGlobalVariable(const GlobalVariable *GV) {
   unsigned Size = TD->getTypeAllocSize(C->getType());
   if (MAI->hasDotTypeDotSizeDirective()) {
     OutStreamer.EmitSymbolAttribute(GVSym, MCSA_ELF_TypeObject);
-    OutStreamer.EmitRawText("\t.size " + Twine(GVSym->getName()) + "," +
-                            Twine(Size));
+    OutStreamer.EmitELFSize(GVSym, MCConstantExpr::Create(Size, OutContext));
   }
   OutStreamer.EmitLabel(GVSym);
   
@@ -163,7 +164,7 @@ void XCoreAsmPrinter::EmitGlobalVariable(const GlobalVariable *GV) {
     OutStreamer.EmitZeros(4 - Size);
   
   // Mark the end of the global
-  OutStreamer.EmitRawText("\t.cc_bottom " + Twine(GVSym->getName()) + ".data");
+  getTargetStreamer().emitCCBottonData(GVSym->getName());
 }
 
 void XCoreAsmPrinter::EmitFunctionBodyStart() {
@@ -174,14 +175,12 @@ void XCoreAsmPrinter::EmitFunctionBodyStart() {
 /// the last basic block in the function.
 void XCoreAsmPrinter::EmitFunctionBodyEnd() {
   // Emit function end directives
-  OutStreamer.EmitRawText("\t.cc_bottom " + Twine(CurrentFnSym->getName()) +
-                          ".function");
+  getTargetStreamer().emitCCBottonFunction(CurrentFnSym->getName());
 }
 
 void XCoreAsmPrinter::EmitFunctionEntryLabel() {
   // Mark the start of the function
-  OutStreamer.EmitRawText("\t.cc_top " + Twine(CurrentFnSym->getName()) +
-                          ".function," + CurrentFnSym->getName());
+  getTargetStreamer().emitCCTopFunction(CurrentFnSym->getName());
   OutStreamer.EmitLabel(CurrentFnSym);
 }
 
@@ -204,6 +203,7 @@ printInlineJT(const MachineInstr *MI, int opNum, raw_ostream &O,
 
 void XCoreAsmPrinter::printOperand(const MachineInstr *MI, int opNum,
                                    raw_ostream &O) {
+  const DataLayout *DL = TM.getDataLayout();
   const MachineOperand &MO = MI->getOperand(opNum);
   switch (MO.getType()) {
   case MachineOperand::MO_Register:
@@ -218,15 +218,8 @@ void XCoreAsmPrinter::printOperand(const MachineInstr *MI, int opNum,
   case MachineOperand::MO_GlobalAddress:
     O << *getSymbol(MO.getGlobal());
     break;
-  case MachineOperand::MO_ExternalSymbol:
-    O << MO.getSymbolName();
-    break;
   case MachineOperand::MO_ConstantPoolIndex:
-    O << MAI->getPrivateGlobalPrefix() << "CPI" << getFunctionNumber()
-      << '_' << MO.getIndex();
-    break;
-  case MachineOperand::MO_JumpTableIndex:
-    O << MAI->getPrivateGlobalPrefix() << "JTI" << getFunctionNumber()
+    O << DL->getPrivateGlobalPrefix() << "CPI" << getFunctionNumber()
       << '_' << MO.getIndex();
     break;
   case MachineOperand::MO_BlockAddress:

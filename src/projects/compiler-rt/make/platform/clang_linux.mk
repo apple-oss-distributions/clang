@@ -94,10 +94,8 @@ CFLAGS.profile-i386 := $(CFLAGS) -m32
 CFLAGS.profile-x86_64 := $(CFLAGS) -m64
 CFLAGS.san-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti
 CFLAGS.san-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
-CFLAGS.asan-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti \
-                    -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
-CFLAGS.asan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti \
-                    -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
+CFLAGS.asan-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.asan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
 CFLAGS.tsan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
 CFLAGS.msan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
 CFLAGS.ubsan-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti
@@ -113,8 +111,8 @@ ANDROID_COMMON_FLAGS := -target arm-linux-androideabi \
 	-B$(LLVM_ANDROID_TOOLCHAIN_DIR)
 CFLAGS.asan-arm-android := $(CFLAGS) -fPIC -fno-builtin \
 	$(ANDROID_COMMON_FLAGS) -mllvm -arm-enable-ehabi -fno-rtti
-LDFLAGS.asan-arm-android := $(LDFLAGS) $(ANDROID_COMMON_FLAGS) -ldl \
-	-Wl,-soname=libclang_rt.asan-arm-android.so
+LDFLAGS.asan-arm-android := $(LDFLAGS) $(ANDROID_COMMON_FLAGS) -ldl -lm \
+	-Wl,-soname=libclang_rt.asan-arm-android.so -Wl,-z,defs
 
 # Use our stub SDK as the sysroot to support more portable building. For now we
 # just do this for the core module, because the stub SDK doesn't have

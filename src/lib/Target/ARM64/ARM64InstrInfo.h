@@ -92,6 +92,10 @@ public:
                                          int FrameIx, uint64_t Offset,
                                          const MDNode *MDPtr,
                                          DebugLoc DL) const;
+  void copyPhysRegTuple(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                        DebugLoc DL, unsigned DestReg, unsigned SrcReg,
+                        bool KillSrc, unsigned Opcode,
+                        llvm::ArrayRef<unsigned> Indices) const;
   virtual void copyPhysReg(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator I, DebugLoc DL,
                            unsigned DestReg, unsigned SrcReg,

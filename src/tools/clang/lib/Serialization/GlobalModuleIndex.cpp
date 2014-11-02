@@ -14,6 +14,7 @@
 #include "ASTReaderInternals.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/OnDiskHashTable.h"
+#include "clang/Lex/HeaderSearch.h"
 #include "clang/Serialization/ASTBitCodes.h"
 #include "clang/Serialization/GlobalModuleIndex.h"
 #include "clang/Serialization/Module.h"
@@ -202,7 +203,12 @@ GlobalModuleIndex::GlobalModuleIndex(llvm::MemoryBuffer *Buffer,
       assert(Idx == Record.size() && "More module info?");
 
       // Record this module as an unresolved module.
-      UnresolvedModules[llvm::sys::path::stem(Modules[ID].FileName)] = ID;
+      // FIXME: this doesn't work correctly for module names containing path
+      // separators.
+      StringRef ModuleName = llvm::sys::path::stem(Modules[ID].FileName);
+      // Remove the -<hash of ModuleMapPath>
+      ModuleName = ModuleName.rsplit('-').first;
+      UnresolvedModules[ModuleName] = ID;
       break;
     }
 
@@ -306,7 +312,7 @@ bool GlobalModuleIndex::lookupIdentifier(StringRef Name, HitSet &Hits) {
 
 bool GlobalModuleIndex::loadedModuleFile(ModuleFile *File) {
   // Look for the module in the global module index based on the module name.
-  StringRef Name = llvm::sys::path::stem(File->FileName);
+  StringRef Name = File->ModuleName;
   llvm::StringMap<unsigned>::iterator Known = UnresolvedModules.find(Name);
   if (Known == UnresolvedModules.end()) {
     return true;
@@ -807,13 +813,12 @@ GlobalModuleIndex::writeIndex(FileManager &FileMgr, StringRef Path) {
     return EC_IOError;
 
   // Remove the old index file. It isn't relevant any more.
-  bool OldIndexExisted;
-  llvm::sys::fs::remove(IndexPath.str(), OldIndexExisted);
+  llvm::sys::fs::remove(IndexPath.str());
 
   // Rename the newly-written index file to the proper name.
   if (llvm::sys::fs::rename(IndexTmpPath.str(), IndexPath.str())) {
     // Rename failed; just remove the 
-    llvm::sys::fs::remove(IndexTmpPath.str(), OldIndexExisted);
+    llvm::sys::fs::remove(IndexTmpPath.str());
     return EC_IOError;
   }
 

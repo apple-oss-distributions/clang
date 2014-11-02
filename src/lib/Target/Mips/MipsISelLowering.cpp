@@ -20,6 +20,7 @@
 #include "MipsTargetMachine.h"
 #include "MipsTargetObjectFile.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -391,6 +392,8 @@ MipsTargetLowering(MipsTargetMachine &TM)
   setExceptionSelectorRegister(IsN64 ? Mips::A1_64 : Mips::A1);
 
   MaxStoresPerMemcpy = 16;
+
+  isMicroMips = Subtarget->inMicroMipsMode();
 }
 
 const MipsTargetLowering *MipsTargetLowering::create(MipsTargetMachine &TM) {
@@ -534,19 +537,65 @@ static SDValue performSELECTCombine(SDNode *N, SelectionDAG &DAG,
   if (!FalseTy.isInteger())
     return SDValue();
 
-  ConstantSDNode *CN = dyn_cast<ConstantSDNode>(False);
+  ConstantSDNode *FalseC = dyn_cast<ConstantSDNode>(False);
 
-  if (!CN || CN->getZExtValue())
+  // If the RHS (False) is 0, we swap the order of the operands
+  // of ISD::SELECT (obviously also inverting the condition) so that we can
+  // take advantage of conditional moves using the $0 register.
+  // Example:
+  //   return (a != 0) ? x : 0;
+  //     load $reg, x
+  //     movz $reg, $0, a
+  if (!FalseC)
     return SDValue();
 
   const SDLoc DL(N);
-  ISD::CondCode CC = cast<CondCodeSDNode>(SetCC.getOperand(2))->get();
+
+  if (!FalseC->getZExtValue()) {
+    ISD::CondCode CC = cast<CondCodeSDNode>(SetCC.getOperand(2))->get();
+    SDValue True = N->getOperand(1);
+
+    SetCC = DAG.getSetCC(DL, SetCC.getValueType(), SetCC.getOperand(0),
+                         SetCC.getOperand(1), ISD::getSetCCInverse(CC, true));
+
+    return DAG.getNode(ISD::SELECT, DL, FalseTy, SetCC, False, True);
+  }
+
+  // If both operands are integer constants there's a possibility that we
+  // can do some interesting optimizations.
   SDValue True = N->getOperand(1);
+  ConstantSDNode *TrueC = dyn_cast<ConstantSDNode>(True);
 
-  SetCC = DAG.getSetCC(DL, SetCC.getValueType(), SetCC.getOperand(0),
-                       SetCC.getOperand(1), ISD::getSetCCInverse(CC, true));
+  if (!TrueC || !True.getValueType().isInteger())
+    return SDValue();
 
-  return DAG.getNode(ISD::SELECT, DL, FalseTy, SetCC, False, True);
+  // We'll also ignore MVT::i64 operands as this optimizations proves
+  // to be ineffective because of the required sign extensions as the result
+  // of a SETCC operator is always MVT::i32 for non-vector types.
+  if (True.getValueType() == MVT::i64)
+    return SDValue();
+
+  int64_t Diff = TrueC->getSExtValue() - FalseC->getSExtValue();
+
+  // 1)  (a < x) ? y : y-1
+  //  slti $reg1, a, x
+  //  addiu $reg2, $reg1, y-1
+  if (Diff == 1)
+    return DAG.getNode(ISD::ADD, DL, SetCC.getValueType(), SetCC, False);
+
+  // 2)  (a < x) ? y-1 : y
+  //  slti $reg1, a, x
+  //  xor $reg1, $reg1, 1
+  //  addiu $reg2, $reg1, y-1
+  if (Diff == -1) {
+    ISD::CondCode CC = cast<CondCodeSDNode>(SetCC.getOperand(2))->get();
+    SetCC = DAG.getSetCC(DL, SetCC.getValueType(), SetCC.getOperand(0),
+                         SetCC.getOperand(1), ISD::getSetCCInverse(CC, true));
+    return DAG.getNode(ISD::ADD, DL, SetCC.getValueType(), SetCC, True);
+  }
+
+  // Couldn't optimize.
+  return SDValue();
 }
 
 static SDValue performANDCombine(SDNode *N, SelectionDAG &DAG,
@@ -884,8 +933,8 @@ MipsTargetLowering::emitAtomicBinary(MachineInstr *MI, MachineBasicBlock *BB,
   unsigned LL, SC, AND, NOR, ZERO, BEQ;
 
   if (Size == 4) {
-    LL = Mips::LL;
-    SC = Mips::SC;
+    LL = isMicroMips ? Mips::LL_MM : Mips::LL;
+    SC = isMicroMips ? Mips::SC_MM : Mips::SC;
     AND = Mips::AND;
     NOR = Mips::NOR;
     ZERO = Mips::ZERO;
@@ -1127,8 +1176,8 @@ MachineBasicBlock * MipsTargetLowering::emitAtomicCmpSwap(MachineInstr *MI,
   unsigned LL, SC, ZERO, BNE, BEQ;
 
   if (Size == 4) {
-    LL = Mips::LL;
-    SC = Mips::SC;
+    LL = isMicroMips ? Mips::LL_MM : Mips::LL;
+    SC = isMicroMips ? Mips::SC_MM : Mips::SC;
     ZERO = Mips::ZERO;
     BNE = Mips::BNE;
     BEQ = Mips::BEQ;
@@ -1795,6 +1844,9 @@ lowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const {
 
 SDValue MipsTargetLowering::lowerRETURNADDR(SDValue Op,
                                             SelectionDAG &DAG) const {
+  if (verifyReturnAddressArgumentIsConstant(Op, DAG))
+    return SDValue();
+
   // check the depth
   assert((cast<ConstantSDNode>(Op.getOperand(0))->getZExtValue() == 0) &&
          "Return address can be determined only for current frame.");
@@ -2207,7 +2259,7 @@ static bool CC_MipsO32_FP32(unsigned ValNo, MVT ValVT,
 static bool CC_MipsO32_FP64(unsigned ValNo, MVT ValVT,
                             MVT LocVT, CCValAssign::LocInfo LocInfo,
                             ISD::ArgFlagsTy ArgFlags, CCState &State) {
-  static const uint16_t F64Regs[] = { Mips::D12_64, Mips::D12_64 };
+  static const uint16_t F64Regs[] = { Mips::D12_64, Mips::D14_64 };
 
   return CC_MipsO32(ValNo, ValVT, LocVT, LocInfo, ArgFlags, State, F64Regs);
 }
@@ -2284,7 +2336,7 @@ getOpndList(SmallVectorImpl<SDValue> &Ops,
     if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(CLI.Callee)) {
       llvm::StringRef Sym = G->getGlobal()->getName();
       Function *F = G->getGlobal()->getParent()->getFunction(Sym);
-      if (F->hasFnAttribute("__Mips16RetHelper")) {
+      if (F && F->hasFnAttribute("__Mips16RetHelper")) {
         Mask = MipsRegisterInfo::getMips16RetHelperMask();
       }
     }
@@ -2650,9 +2702,11 @@ MipsTargetLowering::LowerFormalArguments(SDValue Chain,
 
       // Create load nodes to retrieve arguments from the stack
       SDValue FIN = DAG.getFrameIndex(FI, getPointerTy());
-      InVals.push_back(DAG.getLoad(ValVT, DL, Chain, FIN,
-                                   MachinePointerInfo::getFixedStack(FI),
-                                   false, false, false, 0));
+      SDValue Load = DAG.getLoad(ValVT, DL, Chain, FIN,
+                                 MachinePointerInfo::getFixedStack(FI),
+                                 false, false, false, 0);
+      InVals.push_back(Load);
+      OutChains.push_back(Load.getValue(1));
     }
   }
 
@@ -2775,7 +2829,7 @@ MipsTargetLowering::LowerReturn(SDValue Chain,
 MipsTargetLowering::ConstraintType MipsTargetLowering::
 getConstraintType(const std::string &Constraint) const
 {
-  // Mips specific constrainy
+  // Mips specific constraints
   // GCC config/mips/constraints.md
   //
   // 'd' : An address register. Equivalent to r
@@ -2826,16 +2880,19 @@ MipsTargetLowering::getSingleConstraintMatchWeight(
     if (type->isIntegerTy())
       weight = CW_Register;
     break;
-  case 'f':
-    if (type->isFloatTy())
+  case 'f': // FPU or MSA register
+    if (Subtarget->hasMSA() && type->isVectorTy() &&
+        cast<VectorType>(type)->getBitWidth() == 128)
+      weight = CW_Register;
+    else if (type->isFloatTy())
       weight = CW_Register;
     break;
   case 'c': // $25 for indirect jumps
   case 'l': // lo register
   case 'x': // hilo register pair
-      if (type->isIntegerTy())
+    if (type->isIntegerTy())
       weight = CW_SpecificReg;
-      break;
+    break;
   case 'I': // signed 16 bit immediate
   case 'J': // integer zero
   case 'K': // unsigned 16 bit immediate
@@ -2898,6 +2955,29 @@ parseRegForInlineAsmConstraint(const StringRef &C, MVT VT) const {
     RC = TRI->getRegClass(Prefix == "hi" ?
                           Mips::HI32RegClassID : Mips::LO32RegClassID);
     return std::make_pair(*(RC->begin()), RC);
+  } else if (Prefix.compare(0, 4, "$msa") == 0) {
+    // Parse $msa(ir|csr|access|save|modify|request|map|unmap)
+
+    // No numeric characters follow the name.
+    if (R.second)
+      return std::make_pair((unsigned)0, (const TargetRegisterClass *)0);
+
+    Reg = StringSwitch<unsigned long long>(Prefix)
+              .Case("$msair", Mips::MSAIR)
+              .Case("$msacsr", Mips::MSACSR)
+              .Case("$msaaccess", Mips::MSAAccess)
+              .Case("$msasave", Mips::MSASave)
+              .Case("$msamodify", Mips::MSAModify)
+              .Case("$msarequest", Mips::MSARequest)
+              .Case("$msamap", Mips::MSAMap)
+              .Case("$msaunmap", Mips::MSAUnmap)
+              .Default(0);
+
+    if (!Reg)
+      return std::make_pair((unsigned)0, (const TargetRegisterClass *)0);
+
+    RC = TRI->getRegClass(Mips::MSACtrlRegClassID);
+    return std::make_pair(Reg, RC);
   }
 
   if (!R.second)
@@ -2915,8 +2995,10 @@ parseRegForInlineAsmConstraint(const StringRef &C, MVT VT) const {
       assert(Reg % 2 == 0);
       Reg >>= 1;
     }
-  } else if (Prefix == "$fcc") { // Parse $fcc0-$fcc7.
+  } else if (Prefix == "$fcc") // Parse $fcc0-$fcc7.
     RC = TRI->getRegClass(Mips::FCCRegClassID);
+  else if (Prefix == "$w") { // Parse $w0-$w31.
+    RC = getRegClassFor((VT == MVT::Other) ? MVT::v16i8 : VT);
   } else { // Parse $0-$31.
     assert(Prefix == "$");
     RC = getRegClassFor((VT == MVT::Other) ? MVT::i32 : VT);
@@ -2948,10 +3030,18 @@ getRegForInlineAsmConstraint(const std::string &Constraint, MVT VT) const
         return std::make_pair(0U, &Mips::GPR64RegClass);
       // This will generate an error message
       return std::make_pair(0u, static_cast<const TargetRegisterClass*>(0));
-    case 'f':
-      if (VT == MVT::f32)
+    case 'f': // FPU or MSA register
+      if (VT == MVT::v16i8)
+        return std::make_pair(0U, &Mips::MSA128BRegClass);
+      else if (VT == MVT::v8i16 || VT == MVT::v8f16)
+        return std::make_pair(0U, &Mips::MSA128HRegClass);
+      else if (VT == MVT::v4i32 || VT == MVT::v4f32)
+        return std::make_pair(0U, &Mips::MSA128WRegClass);
+      else if (VT == MVT::v2i64 || VT == MVT::v2f64)
+        return std::make_pair(0U, &Mips::MSA128DRegClass);
+      else if (VT == MVT::f32)
         return std::make_pair(0U, &Mips::FGR32RegClass);
-      if ((VT == MVT::f64) && (!Subtarget->isSingleFloat())) {
+      else if ((VT == MVT::f64) && (!Subtarget->isSingleFloat())) {
         if (Subtarget->isFP64bit())
           return std::make_pair(0U, &Mips::FGR64RegClass);
         return std::make_pair(0U, &Mips::AFGR64RegClass);
@@ -3177,7 +3267,7 @@ MipsTargetLowering::MipsCC::SpecialCallingConvType
     if (GlobalAddressSDNode *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
       llvm::StringRef Sym = G->getGlobal()->getName();
       Function *F = G->getGlobal()->getParent()->getFunction(Sym);
-      if (F->hasFnAttribute("__Mips16RetHelper")) {
+      if (F && F->hasFnAttribute("__Mips16RetHelper")) {
         SpecialCallingConv = MipsCC::Mips16RetHelperConv;
       }
     }

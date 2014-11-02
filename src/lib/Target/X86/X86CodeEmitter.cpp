@@ -186,10 +186,6 @@ static unsigned determineREX(const MachineInstr &MI) {
     }
 
     switch (Desc.TSFlags & X86II::FormMask) {
-      case X86II::MRMInitReg:
-        if (X86InstrInfo::isX86_64ExtendedReg(MI.getOperand(0)))
-          REX |= (1 << 0) | (1 << 2);
-        break;
       case X86II::MRMSrcReg: {
         if (X86InstrInfo::isX86_64ExtendedReg(MI.getOperand(0)))
           REX |= 1 << 2;
@@ -700,6 +696,12 @@ void Emitter<CodeEmitter>::emitOpcodePrefix(uint64_t TSFlags,
       Need0FPrefix = true;
       break;
     case X86II::REP: break; // already handled.
+    case X86II::PD:   // 66 0F
+    case X86II::T8PD: // 66 0F 38
+    case X86II::TAPD: // 66 0F 3A
+      MCE.emitByte(0x66);
+      Need0FPrefix = true;
+      break;
     case X86II::T8XS: // F3 0F 38
     case X86II::XS:   // F3 0F
       MCE.emitByte(0xF3);
@@ -732,11 +734,13 @@ void Emitter<CodeEmitter>::emitOpcodePrefix(uint64_t TSFlags,
     MCE.emitByte(0x0F);
 
   switch (Desc->TSFlags & X86II::Op0Mask) {
+    case X86II::T8PD:  // 66 0F 38
     case X86II::T8XD:  // F2 0F 38
     case X86II::T8XS:  // F3 0F 38
     case X86II::T8:    // 0F 38
       MCE.emitByte(0x38);
       break;
+    case X86II::TAPD:  // 66 0F 38
     case X86II::TAXD:  // F2 0F 38
     case X86II::TA:    // 0F 3A
       MCE.emitByte(0x3A);
@@ -778,29 +782,19 @@ template<class CodeEmitter>
 void Emitter<CodeEmitter>::emitSegmentOverridePrefix(uint64_t TSFlags,
                                                  int MemOperand,
                                                  const MachineInstr &MI) const {
-  switch (TSFlags & X86II::SegOvrMask) {
-    default: llvm_unreachable("Invalid segment!");
-    case 0:
-      // No segment override, check for explicit one on memory operand.
-      if (MemOperand != -1) {   // If the instruction has a memory operand.
-        switch (MI.getOperand(MemOperand+X86::AddrSegmentReg).getReg()) {
-          default: llvm_unreachable("Unknown segment register!");
-          case 0: break;
-          case X86::CS: MCE.emitByte(0x2E); break;
-          case X86::SS: MCE.emitByte(0x36); break;
-          case X86::DS: MCE.emitByte(0x3E); break;
-          case X86::ES: MCE.emitByte(0x26); break;
-          case X86::FS: MCE.emitByte(0x64); break;
-          case X86::GS: MCE.emitByte(0x65); break;
-        }
-      }
-      break;
-    case X86II::FS:
-      MCE.emitByte(0x64);
-      break;
-    case X86II::GS:
-      MCE.emitByte(0x65);
-      break;
+  if (MemOperand < 0)
+    return; // No memory operand
+
+  // Check for explicit segment override on memory operand.
+  switch (MI.getOperand(MemOperand+X86::AddrSegmentReg).getReg()) {
+  default: llvm_unreachable("Unknown segment register!");
+  case 0: break;
+  case X86::CS: MCE.emitByte(0x2E); break;
+  case X86::SS: MCE.emitByte(0x36); break;
+  case X86::DS: MCE.emitByte(0x3E); break;
+  case X86::ES: MCE.emitByte(0x26); break;
+  case X86::FS: MCE.emitByte(0x64); break;
+  case X86::GS: MCE.emitByte(0x65); break;
   }
 }
 
@@ -840,7 +834,7 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
   unsigned char VEX_W = 0;
 
   // XOP: Use XOP prefix byte 0x8f instead of VEX.
-  bool XOP = false;
+  bool XOP = (TSFlags >> X86II::VEXShift) & X86II::XOP;
 
   // VEX_5M (VEX m-mmmmm field):
   //
@@ -875,15 +869,8 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
   //
   unsigned char VEX_PP = 0;
 
-  // Encode the operand size opcode prefix as needed.
-  if (TSFlags & X86II::OpSize)
-    VEX_PP = 0x01;
-
   if ((TSFlags >> X86II::VEXShift) & X86II::VEX_W)
     VEX_W = 1;
-
-  if ((TSFlags >> X86II::VEXShift) & X86II::XOP)
-    XOP = true;
 
   if ((TSFlags >> X86II::VEXShift) & X86II::VEX_L)
     VEX_L = 1;
@@ -896,6 +883,10 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
     case X86II::TA:  // 0F 3A
       VEX_5M = 0x3;
       break;
+    case X86II::T8PD: // 66 0F 38
+      VEX_PP = 0x1;
+      VEX_5M = 0x2;
+      break;
     case X86II::T8XS: // F3 0F 38
       VEX_PP = 0x2;
       VEX_5M = 0x2;
@@ -904,9 +895,16 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
       VEX_PP = 0x3;
       VEX_5M = 0x2;
       break;
+    case X86II::TAPD: // 66 0F 3A
+      VEX_PP = 0x1;
+      VEX_5M = 0x3;
+      break;
     case X86II::TAXD: // F2 0F 3A
       VEX_PP = 0x3;
       VEX_5M = 0x3;
+      break;
+    case X86II::PD:  // 66 0F
+      VEX_PP = 0x1;
       break;
     case X86II::XS:  // F3 0F
       VEX_PP = 0x2;
@@ -941,17 +939,8 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
   }
 
   switch (TSFlags & X86II::FormMask) {
-    case X86II::MRMInitReg:
-      // Duplicate register.
-      if (X86II::isX86_64ExtendedReg(MI.getOperand(CurOp).getReg()))
-        VEX_R = 0x0;
-
-      if (HasVEX_4V)
-        VEX_4V = getVEXRegisterEncoding(MI, CurOp);
-      if (X86II::isX86_64ExtendedReg(MI.getOperand(CurOp).getReg()))
-        VEX_B = 0x0;
-      if (HasVEX_4VOp3)
-        VEX_4V = getVEXRegisterEncoding(MI, CurOp);
+    default: llvm_unreachable("Unexpected form in emitVEXOpcodePrefix!");
+    case X86II::RawFrm:
       break;
     case X86II::MRMDestMem: {
       // MRMDestMem instructions forms:
@@ -1068,8 +1057,6 @@ void Emitter<CodeEmitter>::emitVEXOpcodePrefix(uint64_t TSFlags,
 
       if (X86II::isX86_64ExtendedReg(MI.getOperand(CurOp).getReg()))
         VEX_B = 0x0;
-      break;
-    default: // RawFrm
       break;
   }
 
@@ -1432,41 +1419,46 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
     break;
   }
 
-  case X86II::MRMInitReg:
+  case X86II::MRM_C1: case X86II::MRM_C2: case X86II::MRM_C3:
+  case X86II::MRM_C4: case X86II::MRM_C8: case X86II::MRM_C9:
+  case X86II::MRM_CA: case X86II::MRM_CB: case X86II::MRM_D0:
+  case X86II::MRM_D1: case X86II::MRM_D4: case X86II::MRM_D5:
+  case X86II::MRM_D6: case X86II::MRM_D8: case X86II::MRM_D9:
+  case X86II::MRM_DA: case X86II::MRM_DB: case X86II::MRM_DC:
+  case X86II::MRM_DD: case X86II::MRM_DE: case X86II::MRM_DF:
+  case X86II::MRM_E8: case X86II::MRM_F0: case X86II::MRM_F8:
     MCE.emitByte(BaseOpcode);
-    // Duplicate register, used by things like MOV8r0 (aka xor reg,reg).
-    emitRegModRMByte(MI.getOperand(CurOp).getReg(),
-                     getX86RegNum(MI.getOperand(CurOp).getReg()));
-    ++CurOp;
-    break;
 
-  case X86II::MRM_C1:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xC1);
-    break;
-  case X86II::MRM_C8:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xC8);
-    break;
-  case X86II::MRM_C9:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xC9);
-    break;
-  case X86II::MRM_CA:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xCA);
-    break;
-  case X86II::MRM_CB:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xCB);
-    break;
-  case X86II::MRM_E8:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xE8);
-    break;
-  case X86II::MRM_F0:
-    MCE.emitByte(BaseOpcode);
-    MCE.emitByte(0xF0);
+    unsigned char MRM;
+    switch (TSFlags & X86II::FormMask) {
+    default: llvm_unreachable("Invalid Form");
+    case X86II::MRM_C1: MRM = 0xC1; break;
+    case X86II::MRM_C2: MRM = 0xC2; break;
+    case X86II::MRM_C3: MRM = 0xC3; break;
+    case X86II::MRM_C4: MRM = 0xC4; break;
+    case X86II::MRM_C8: MRM = 0xC8; break;
+    case X86II::MRM_C9: MRM = 0xC9; break;
+    case X86II::MRM_CA: MRM = 0xCA; break;
+    case X86II::MRM_CB: MRM = 0xCB; break;
+    case X86II::MRM_D0: MRM = 0xD0; break;
+    case X86II::MRM_D1: MRM = 0xD1; break;
+    case X86II::MRM_D4: MRM = 0xD4; break;
+    case X86II::MRM_D5: MRM = 0xD5; break;
+    case X86II::MRM_D6: MRM = 0xD6; break;
+    case X86II::MRM_D8: MRM = 0xD8; break;
+    case X86II::MRM_D9: MRM = 0xD9; break;
+    case X86II::MRM_DA: MRM = 0xDA; break;
+    case X86II::MRM_DB: MRM = 0xDB; break;
+    case X86II::MRM_DC: MRM = 0xDC; break;
+    case X86II::MRM_DD: MRM = 0xDD; break;
+    case X86II::MRM_DE: MRM = 0xDE; break;
+    case X86II::MRM_DF: MRM = 0xDF; break;
+    case X86II::MRM_E8: MRM = 0xE8; break;
+    case X86II::MRM_F0: MRM = 0xF0; break;
+    case X86II::MRM_F8: MRM = 0xF8; break;
+    case X86II::MRM_F9: MRM = 0xF9; break;
+    }
+    MCE.emitByte(MRM);
     break;
   }
 

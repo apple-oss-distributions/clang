@@ -13,11 +13,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm-c/lto.h"
+#include "llvm-c/Core.h"
+#include "llvm-c/Target.h"
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/LTO/LTOCodeGenerator.h"
 #include "llvm/LTO/LTOModule.h"
-#include "llvm-c/Core.h"
-#include "llvm-c/Target.h"
 
 // extra command-line flags needed for LTOCodeGenerator
 static cl::opt<bool>
@@ -31,10 +31,6 @@ DisableInline("disable-inlining", cl::init(false),
 static cl::opt<bool>
 DisableGVNLoadPRE("disable-gvn-loadpre", cl::init(false),
   cl::desc("Do not run the GVN load PRE pass"));
-
-static cl::opt<bool>
-DisableSimplifyLibCalls("disable-simplify-libcalls",
-  cl::desc("Disable simplify-libcalls"));
 
 // Holds most recent error string.
 // *** Not thread safe ***
@@ -160,6 +156,17 @@ lto_module_t lto_module_create_from_memory(const void* mem, size_t length) {
   return LTOModule::makeLTOModule(mem, length, Options, sLastErrorString);
 }
 
+/// Loads an object file from memory with an extra path argument.
+/// Returns NULL on error (check lto_get_error_message() for details).
+lto_module_t lto_module_create_from_memory_with_path(const void* mem,
+                                                     size_t length,
+                                                     const char *path) {
+  lto_initialize();
+  llvm::TargetOptions Options;
+  lto_set_target_options(Options);
+  return LTOModule::makeLTOModule(mem, length, Options, sLastErrorString, path);
+}
+
 /// lto_module_dispose - Frees all memory for a module. Upon return the
 /// lto_module_t is no longer valid.
 void lto_module_dispose(lto_module_t mod) {
@@ -195,6 +202,28 @@ const char* lto_module_get_symbol_name(lto_module_t mod, unsigned int index) {
 lto_symbol_attributes lto_module_get_symbol_attribute(lto_module_t mod,
                                                       unsigned int index) {
   return mod->getSymbolAttributes(index);
+}
+
+/// lto_module_get_num_deplibs - Returns the number of dependent libraries in
+/// the object module.
+unsigned int lto_module_get_num_deplibs(lto_module_t mod) {
+  return mod->getDependentLibraryCount();
+}
+
+/// lto_module_get_deplib - Returns the ith dependent library in the module.
+const char* lto_module_get_deplib(lto_module_t mod, unsigned int index) {
+  return mod->getDependentLibrary(index);
+}
+
+/// lto_module_get_num_linkeropts - Returns the number of linker options in the
+/// object module.
+unsigned int lto_module_get_num_linkeropts(lto_module_t mod) {
+  return mod->getLinkerOptCount();
+}
+
+/// lto_module_get_linkeropt - Returns the ith linker option in the module.
+const char* lto_module_get_linkeropt(lto_module_t mod, unsigned int index) {
+  return mod->getLinkerOpt(index);
 }
 
 /// Set a diagnostic handler.
@@ -261,13 +290,6 @@ void lto_codegen_set_assembler_path(lto_code_gen_t cg, const char *path) {
 void lto_codegen_set_assembler_args(lto_code_gen_t cg, const char **args,
                                     int nargs) {
   // In here only for backwards compatibility. We use MC now.
-}
-
-/// lto_codegen_set_internalize_strategy - Sets the strategy to use during
-/// internalize.
-void lto_codegen_set_internalize_strategy(lto_code_gen_t cg,
-                                          lto_internalize_strategy strategy) {
-  cg->setInternalizeStrategy(strategy);
 }
 
 /// lto_codegen_add_must_preserve_symbol - Adds to a list of all global symbols

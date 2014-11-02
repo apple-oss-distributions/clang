@@ -28,6 +28,11 @@ def FeatureZCRegMove : SubtargetFeature<"zcm", "HasZeroCycleRegMove", "true",
 def FeatureZCZeroing : SubtargetFeature<"zcz", "HasZeroCycleZeroing", "true",
                                         "Has zero-cycle zeroing instructions">;
 
+
+def FeatureAddrTBI : SubtargetFeature<"tbi", "HasAddressTopByteIgnored", "true",
+                                        "Has TBI (address top-byte ignored) option">;
+
+
 //===----------------------------------------------------------------------===//
 // Register File Description
 //===----------------------------------------------------------------------===//
@@ -51,16 +56,39 @@ include "ARM64SchedCyclone.td"
 
 def : ProcessorModel<"arm64-generic", NoSchedModel, []>;
 
-def : ProcessorModel<"cyclone", CycloneModel, [FeatureZCRegMove, FeatureZCZeroing]>;
+def : ProcessorModel<"cyclone", CycloneModel, [FeatureZCRegMove,
+  FeatureZCZeroing, FeatureAddrTBI
+]>;
+
+//===----------------------------------------------------------------------===//
+// Assembly parser
+//===----------------------------------------------------------------------===//
+
+def GenericAsmParserVariant : AsmParserVariant {
+  int Variant = 0;
+  string Name = "generic";
+}
+
+def AppleAsmParserVariant : AsmParserVariant {
+  int Variant = 1;
+  string Name = "apple-neon";
+}
 
 //===----------------------------------------------------------------------===//
 // Assembly printer
 //===----------------------------------------------------------------------===//
 // ARM64 Uses the MC printer for asm output, so make sure the TableGen
 // AsmWriter bits get associated with the correct class.
-def ARM64AsmWriter : AsmWriter {
+def GenericAsmWriter : AsmWriter {
   string AsmWriterClassName  = "InstPrinter";
+  int Variant = 0;
   bit isMCAsmWriter = 1;
+}
+
+def AppleAsmWriter : AsmWriter {
+  let AsmWriterClassName = "AppleInstPrinter";
+  int Variant = 1;
+  int isMCAsmWriter = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -69,5 +97,6 @@ def ARM64AsmWriter : AsmWriter {
 
 def ARM64 : Target {
   let InstructionSet = ARM64InstrInfo;
-  let AssemblyWriters = [ARM64AsmWriter];
+  let AssemblyParserVariants = [GenericAsmParserVariant, AppleAsmParserVariant];
+  let AssemblyWriters = [GenericAsmWriter, AppleAsmWriter];
 }

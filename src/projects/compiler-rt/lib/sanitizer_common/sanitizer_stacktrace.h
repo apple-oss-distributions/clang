@@ -19,10 +19,8 @@ namespace __sanitizer {
 
 static const uptr kStackTraceMax = 256;
 
-#if SANITIZER_LINUX && (defined(__arm__) || \
-    defined(__powerpc__) || defined(__powerpc64__) || \
-    defined(__sparc__) || \
-    defined(__mips__))
+#if SANITIZER_LINUX && (defined(__powerpc__) || defined(__powerpc64__) || \
+                        defined(__sparc__) || defined(__mips__))
 # define SANITIZER_CAN_FAST_UNWIND 0
 #elif SANITIZER_WINDOWS
 # define SANITIZER_CAN_FAST_UNWIND 0
@@ -33,14 +31,18 @@ static const uptr kStackTraceMax = 256;
 struct StackTrace {
   typedef bool (*SymbolizeCallback)(const void *pc, char *out_buffer,
                                      int out_size);
+  uptr top_frame_bp;
   uptr size;
   uptr trace[kStackTraceMax];
 
   // Prints a symbolized stacktrace, followed by an empty line.
-  static void PrintStack(const uptr *addr, uptr size,
-                         SymbolizeCallback symbolize_callback = 0);
+  static void PrintStack(const uptr *addr, uptr size);
+  void Print() const {
+    PrintStack(trace, size);
+  }
 
   void CopyFrom(const uptr *src, uptr src_size) {
+    top_frame_bp = 0;
     size = src_size;
     if (size > kStackTraceMax) size = kStackTraceMax;
     for (uptr i = 0; i < size; i++)
@@ -67,6 +69,7 @@ struct StackTrace {
                        uptr max_depth);
   void SlowUnwindStack(uptr pc, uptr max_depth);
   void PopStackFrames(uptr count);
+  uptr LocatePcInTrace(uptr pc);
 };
 
 }  // namespace __sanitizer

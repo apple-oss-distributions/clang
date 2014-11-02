@@ -299,9 +299,11 @@ TEST(AddressSanitizer, LargeMallocTest) {
 }
 
 TEST(AddressSanitizer, HugeMallocTest) {
-  if (SANITIZER_WORDSIZE != 64) return;
+  if (SANITIZER_WORDSIZE != 64 || ASAN_AVOID_EXPENSIVE_TESTS) return;
   size_t n_megs = 4100;
-  TestLargeMalloc(n_megs << 20);
+  EXPECT_DEATH(Ident((char*)malloc(n_megs << 20))[-1] = 0,
+               "is located 1 bytes to the left|"
+               "AddressSanitizer failed to allocate");
 }
 
 #ifndef __APPLE__
@@ -449,15 +451,16 @@ template<int kSize>
 NOINLINE void SizedStackTest() {
   char a[kSize];
   char  *A = Ident((char*)&a);
+  const char *expected_death = "AddressSanitizer: stack-buffer-";
   for (size_t i = 0; i < kSize; i++)
     A[i] = i;
-  EXPECT_DEATH(A[-1] = 0, "");
-  EXPECT_DEATH(A[-20] = 0, "");
-  EXPECT_DEATH(A[-31] = 0, "");
-  EXPECT_DEATH(A[kSize] = 0, "");
-  EXPECT_DEATH(A[kSize + 1] = 0, "");
-  EXPECT_DEATH(A[kSize + 10] = 0, "");
-  EXPECT_DEATH(A[kSize + 31] = 0, "");
+  EXPECT_DEATH(A[-1] = 0, expected_death);
+  EXPECT_DEATH(A[-5] = 0, expected_death);
+  EXPECT_DEATH(A[kSize] = 0, expected_death);
+  EXPECT_DEATH(A[kSize + 1] = 0, expected_death);
+  EXPECT_DEATH(A[kSize + 5] = 0, expected_death);
+  if (kSize > 16)
+    EXPECT_DEATH(A[kSize + 31] = 0, expected_death);
 }
 
 TEST(AddressSanitizer, SimpleStackTest) {
@@ -669,7 +672,8 @@ TEST(AddressSanitizer, ThreadStackReuseTest) {
   PTHREAD_JOIN(t, 0);
 }
 
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i686__) || defined(__x86_64__)
+#include <emmintrin.h>
 TEST(AddressSanitizer, Store128Test) {
   char *a = Ident((char*)malloc(Ident(12)));
   char *p = a;

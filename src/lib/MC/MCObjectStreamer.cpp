@@ -17,27 +17,22 @@
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectWriter.h"
-#include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCSection.h"
+#include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
 using namespace llvm;
 
-MCObjectStreamer::MCObjectStreamer(MCContext &Context,
-                                   MCTargetStreamer *TargetStreamer,
-                                   MCAsmBackend &TAB, raw_ostream &OS,
-                                   MCCodeEmitter *Emitter_)
-    : MCStreamer(Context, TargetStreamer),
+MCObjectStreamer::MCObjectStreamer(MCContext &Context, MCAsmBackend &TAB,
+                                   raw_ostream &OS, MCCodeEmitter *Emitter_)
+    : MCStreamer(Context),
       Assembler(new MCAssembler(Context, TAB, *Emitter_,
                                 *TAB.createObjectWriter(OS), OS)),
       CurSectionData(0) {}
 
-MCObjectStreamer::MCObjectStreamer(MCContext &Context,
-                                   MCTargetStreamer *TargetStreamer,
-                                   MCAsmBackend &TAB, raw_ostream &OS,
-                                   MCCodeEmitter *Emitter_,
+MCObjectStreamer::MCObjectStreamer(MCContext &Context, MCAsmBackend &TAB,
+                                   raw_ostream &OS, MCCodeEmitter *Emitter_,
                                    MCAssembler *_Assembler)
-    : MCStreamer(Context, TargetStreamer), Assembler(_Assembler),
-      CurSectionData(0) {}
+    : MCStreamer(Context), Assembler(_Assembler), CurSectionData(0) {}
 
 MCObjectStreamer::~MCObjectStreamer() {
   delete &Assembler->getBackend();
@@ -102,7 +97,8 @@ const MCExpr *MCObjectStreamer::AddValueSymbols(const MCExpr *Value) {
   return Value;
 }
 
-void MCObjectStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size) {
+void MCObjectStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size,
+                                     const SMLoc &Loc) {
   MCDataFragment *DF = getOrCreateDataFragment();
 
   MCLineEntry::Make(this, getCurrentSection().first);
@@ -115,7 +111,7 @@ void MCObjectStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size) {
   }
   DF->getFixups().push_back(
       MCFixup::Create(DF->getContents().size(), Value,
-                      MCFixup::getKindForSize(Size, false)));
+                      MCFixup::getKindForSize(Size, false), Loc));
   DF->getContents().resize(DF->getContents().size() + Size, 0);
 }
 

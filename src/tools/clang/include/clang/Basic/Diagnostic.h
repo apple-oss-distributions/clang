@@ -18,10 +18,13 @@
 #include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/SourceLocation.h"
+#if !LLVM_HAS_STRONG_ENUMS
+#include "clang/Basic/TokenKinds.h"
+#endif
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
-#include "llvm/Support/type_traits.h"
+#include "llvm/ADT/iterator_range.h"
 #include <list>
 #include <vector>
 
@@ -35,6 +38,11 @@ namespace clang {
   class Preprocessor;
   class DiagnosticErrorTrap;
   class StoredDiagnostic;
+#if LLVM_HAS_STRONG_ENUMS
+  namespace tok {
+  enum TokenKind : unsigned short;
+  }
+#endif
 
 /// \brief Annotates a diagnostic with some code that should be
 /// inserted, removed, or replaced to fix the problem.
@@ -151,13 +159,15 @@ public:
     ak_c_string,        ///< const char *
     ak_sint,            ///< int
     ak_uint,            ///< unsigned
+    ak_tokenkind,       ///< enum TokenKind : unsigned
     ak_identifierinfo,  ///< IdentifierInfo
     ak_qualtype,        ///< QualType
     ak_declarationname, ///< DeclarationName
     ak_nameddecl,       ///< NamedDecl *
     ak_nestednamespec,  ///< NestedNameSpecifier *
     ak_declcontext,     ///< DeclContext *
-    ak_qualtype_pair    ///< pair<QualType, QualType>
+    ak_qualtype_pair,   ///< pair<QualType, QualType>
+    ak_attr             ///< Attr *
   };
 
   /// \brief Represents on argument value, which is a union discriminated
@@ -350,6 +360,14 @@ public:
 
   /// \brief Retrieve the diagnostic options.
   DiagnosticOptions &getDiagnosticOptions() const { return *DiagOpts; }
+
+  typedef llvm::iterator_range<DiagState::const_iterator> diag_mapping_range;
+
+  /// \brief Get the current set of diagnostic mappings.
+  diag_mapping_range getDiagnosticMappings() const {
+    const DiagState &DS = *GetCurDiagState();
+    return diag_mapping_range(DS.begin(), DS.end());
+  }
 
   DiagnosticConsumer *getClient() { return Client; }
   const DiagnosticConsumer *getClient() const { return Client; }
@@ -591,6 +609,9 @@ public:
   ///
   /// If this is the first request for this diagnostic, it is registered and
   /// created, otherwise the existing ID is returned.
+  ///
+  /// \param Message A fixed diagnostic format string that will be hashed and
+  /// mapped to a unique DiagID.
   unsigned getCustomDiagID(Level L, StringRef Message) {
     return Diags->getCustomDiagID((DiagnosticIDs::Level)L, Message);
   }
@@ -1025,6 +1046,12 @@ inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
 }
 
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
+                                           tok::TokenKind I) {
+  DB.AddTaggedVal(static_cast<unsigned>(I), DiagnosticsEngine::ak_tokenkind);
+  return DB;
+}
+
+inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
                                            const IdentifierInfo *II) {
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(II),
                   DiagnosticsEngine::ak_identifierinfo);
@@ -1350,6 +1377,13 @@ struct TemplateDiffTypes {
 /// Special character that the diagnostic printer will use to toggle the bold
 /// attribute.  The character itself will be not be printed.
 const char ToggleHighlight = 127;
+
+
+/// ProcessWarningOptions - Initialize the diagnostic client and process the
+/// warning options specified on the command line.
+void ProcessWarningOptions(DiagnosticsEngine &Diags,
+                           const DiagnosticOptions &Opts,
+                           bool ReportDiags = true);
 
 }  // end namespace clang
 

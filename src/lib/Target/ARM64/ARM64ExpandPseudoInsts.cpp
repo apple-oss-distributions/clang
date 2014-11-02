@@ -622,6 +622,18 @@ bool ARM64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
     return true;
   }
 
+  case ARM64::FCVTSHpseudo: {
+    MachineOperand Src = MI.getOperand(1);
+    Src.setImplicit();
+    unsigned SrcH = TII->getRegisterInfo().getSubReg(Src.getReg(), ARM64::hsub);
+    auto MIB = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(ARM64::FCVTSHr))
+                   .addOperand(MI.getOperand(0))
+                   .addReg(SrcH, RegState::Undef)
+                   .addOperand(Src);
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
   case ARM64::LOADgot: {
     // Expand into ADRP + LDR.
     unsigned DstReg = MI.getOperand(0).getReg();
@@ -638,11 +650,17 @@ bool ARM64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
       MIB1.addGlobalAddress(MO1.getGlobal(), 0, Flags | ARM64II::MO_PAGE);
       MIB2.addGlobalAddress(MO1.getGlobal(), 0,
                             Flags | ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
-    } else {
-      assert(MO1.isSymbol() && "Only expect globals or externalsymbols");
+    } else if (MO1.isSymbol()) {
       MIB1.addExternalSymbol(MO1.getSymbolName(), Flags | ARM64II::MO_PAGE);
       MIB2.addExternalSymbol(MO1.getSymbolName(),
                              Flags | ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
+    } else {
+      assert(MO1.isCPI() &&
+             "Only expect globals, externalsymbols, or constant pools");
+      MIB1.addConstantPoolIndex(MO1.getIndex(), MO1.getOffset(),
+                                Flags | ARM64II::MO_PAGE);
+      MIB2.addConstantPoolIndex(MO1.getIndex(), MO1.getOffset(),
+                                Flags | ARM64II::MO_PAGEOFF | ARM64II::MO_NC);
     }
 
     transferImpOps(MI, MIB1, MIB2);

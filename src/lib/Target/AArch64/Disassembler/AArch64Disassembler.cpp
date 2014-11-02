@@ -19,15 +19,15 @@
 #include "AArch64RegisterInfo.h"
 #include "AArch64Subtarget.h"
 #include "Utils/AArch64BaseInfo.h"
-#include "llvm/MC/MCInst.h"
-#include "llvm/MC/MCInstrDesc.h"
-#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCFixedLenDisassembler.h"
+#include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -38,12 +38,11 @@ typedef MCDisassembler::DecodeStatus DecodeStatus;
 namespace {
 /// AArch64 disassembler for all AArch64 platforms.
 class AArch64Disassembler : public MCDisassembler {
-  OwningPtr<const MCRegisterInfo> RegInfo;
 public:
   /// Initializes the disassembler.
   ///
-  AArch64Disassembler(const MCSubtargetInfo &STI, const MCRegisterInfo *Info)
-    : MCDisassembler(STI), RegInfo(Info) {
+  AArch64Disassembler(const MCSubtargetInfo &STI, MCContext &Ctx)
+    : MCDisassembler(STI, Ctx) {
   }
 
   ~AArch64Disassembler() {}
@@ -55,8 +54,6 @@ public:
                               uint64_t address,
                               raw_ostream &vStream,
                               raw_ostream &cStream) const;
-
-  const MCRegisterInfo *getRegInfo() const { return RegInfo.get(); }
 };
 
 }
@@ -81,6 +78,8 @@ static DecodeStatus DecodeFPR16RegisterClass(llvm::MCInst &Inst, unsigned RegNo,
 static DecodeStatus DecodeFPR32RegisterClass(llvm::MCInst &Inst, unsigned RegNo,
                                          uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeFPR64RegisterClass(llvm::MCInst &Inst, unsigned RegNo,
+                                         uint64_t Address, const void *Decoder);
+static DecodeStatus DecodeFPR64LoRegisterClass(llvm::MCInst &Inst, unsigned RegNo,
                                          uint64_t Address, const void *Decoder);
 static DecodeStatus DecodeFPR128RegisterClass(llvm::MCInst &Inst,
                                               unsigned RegNo, uint64_t Address,
@@ -232,6 +231,14 @@ static DecodeStatus DecodeVLDSTPostInstruction(MCInst &Inst, unsigned Val,
                                                uint64_t Address,
                                                const void *Decoder);
 
+static DecodeStatus DecodeVLDSTLanePostInstruction(MCInst &Inst, unsigned Insn,
+                                                   uint64_t Address,
+                                                   const void *Decoder);
+
+static DecodeStatus DecodeSHLLInstruction(MCInst &Inst, unsigned Insn,
+                                          uint64_t Address,
+                                          const void *Decoder);
+
 static bool Check(DecodeStatus &Out, DecodeStatus In);
 
 #include "AArch64GenDisassemblerTables.inc"
@@ -288,7 +295,8 @@ DecodeStatus AArch64Disassembler::getInstruction(MCInst &MI, uint64_t &Size,
 
 static unsigned getReg(const void *D, unsigned RC, unsigned RegNo) {
   const AArch64Disassembler *Dis = static_cast<const AArch64Disassembler*>(D);
-  return Dis->getRegInfo()->getRegClass(RC).getRegister(RegNo);
+  const MCRegisterInfo *RegInfo = Dis->getContext().getRegisterInfo();
+  return RegInfo->getRegClass(RC).getRegister(RegNo);
 }
 
 static DecodeStatus DecodeGPR64RegisterClass(llvm::MCInst &Inst, unsigned RegNo,
@@ -379,6 +387,14 @@ DecodeFPR64RegisterClass(llvm::MCInst &Inst, unsigned RegNo,
   return MCDisassembler::Success;
 }
 
+static DecodeStatus
+DecodeFPR64LoRegisterClass(llvm::MCInst &Inst, unsigned RegNo,
+                            uint64_t Address, const void *Decoder) {
+  if (RegNo > 15)
+    return MCDisassembler::Fail;
+
+  return DecodeFPR64RegisterClass(Inst, RegNo, Address, Decoder);
+}
 
 static DecodeStatus
 DecodeFPR128RegisterClass(llvm::MCInst &Inst, unsigned RegNo,
@@ -404,7 +420,7 @@ static DecodeStatus DecodeGPR64noxzrRegisterClass(llvm::MCInst &Inst,
                                                   unsigned RegNo,
                                                   uint64_t Address,
                                                   const void *Decoder) {
-  if (RegNo >= 30)
+  if (RegNo > 30)
     return MCDisassembler::Fail;
 
   uint16_t Register = getReg(Decoder, AArch64::GPR64noxzrRegClassID, RegNo);
@@ -974,8 +990,9 @@ static DecodeStatus DecodeSingleIndexedInstruction(llvm::MCInst &Inst,
 }
 
 static MCDisassembler *createAArch64Disassembler(const Target &T,
-                                                 const MCSubtargetInfo &STI) {
-  return new AArch64Disassembler(STI, T.createMCRegInfo(""));
+                                                 const MCSubtargetInfo &STI,
+                                                 MCContext &Ctx) {
+  return new AArch64Disassembler(STI, Ctx);
 }
 
 extern "C" void LLVMInitializeAArch64Disassembler() {
@@ -1092,3 +1109,463 @@ static DecodeStatus DecodeVLDSTPostInstruction(MCInst &Inst, unsigned Insn,
 
   return MCDisassembler::Success;
 }
+
+// Decode post-index vector load/store lane instructions.
+// This is necessary as we need to decode Rm: if Rm == 0b11111, the last
+// operand is an immediate equal the the length of the changed bytes,
+// or Rm is decoded to a GPR64noxzr register.
+static DecodeStatus DecodeVLDSTLanePostInstruction(MCInst &Inst, unsigned Insn,
+                                                   uint64_t Address,
+                                                   const void *Decoder) {
+  bool Is64bitVec = false;
+  bool IsLoadDup = false;
+  bool IsLoad = false;
+  // The total number of bytes transferred.
+  // TransferBytes = NumVecs * OneLaneBytes
+  unsigned TransferBytes = 0;
+  unsigned NumVecs = 0;
+  unsigned Opc = Inst.getOpcode();
+  switch (Opc) {
+  case AArch64::LD1R_WB_8B_fixed: case AArch64::LD1R_WB_8B_register:
+  case AArch64::LD1R_WB_4H_fixed: case AArch64::LD1R_WB_4H_register:
+  case AArch64::LD1R_WB_2S_fixed: case AArch64::LD1R_WB_2S_register:
+  case AArch64::LD1R_WB_1D_fixed: case AArch64::LD1R_WB_1D_register: {
+    switch (Opc) {
+    case AArch64::LD1R_WB_8B_fixed: case AArch64::LD1R_WB_8B_register:
+      TransferBytes = 1; break;
+    case AArch64::LD1R_WB_4H_fixed: case AArch64::LD1R_WB_4H_register:
+      TransferBytes = 2; break;
+    case AArch64::LD1R_WB_2S_fixed: case AArch64::LD1R_WB_2S_register:
+      TransferBytes = 4; break;
+    case AArch64::LD1R_WB_1D_fixed: case AArch64::LD1R_WB_1D_register:
+      TransferBytes = 8; break;
+    }
+    Is64bitVec = true;
+    IsLoadDup = true;
+    NumVecs = 1;
+    break;
+  }
+
+  case AArch64::LD1R_WB_16B_fixed: case AArch64::LD1R_WB_16B_register:
+  case AArch64::LD1R_WB_8H_fixed: case AArch64::LD1R_WB_8H_register:
+  case AArch64::LD1R_WB_4S_fixed: case AArch64::LD1R_WB_4S_register:
+  case AArch64::LD1R_WB_2D_fixed: case AArch64::LD1R_WB_2D_register: {
+    switch (Opc) {
+    case AArch64::LD1R_WB_16B_fixed: case AArch64::LD1R_WB_16B_register:
+      TransferBytes = 1; break;
+    case AArch64::LD1R_WB_8H_fixed: case AArch64::LD1R_WB_8H_register:
+      TransferBytes = 2; break;
+    case AArch64::LD1R_WB_4S_fixed: case AArch64::LD1R_WB_4S_register:
+      TransferBytes = 4; break;
+    case AArch64::LD1R_WB_2D_fixed: case AArch64::LD1R_WB_2D_register:
+      TransferBytes = 8; break;
+    }
+    IsLoadDup = true;
+    NumVecs = 1;
+    break;
+  }
+
+  case AArch64::LD2R_WB_8B_fixed: case AArch64::LD2R_WB_8B_register:
+  case AArch64::LD2R_WB_4H_fixed: case AArch64::LD2R_WB_4H_register:
+  case AArch64::LD2R_WB_2S_fixed: case AArch64::LD2R_WB_2S_register:
+  case AArch64::LD2R_WB_1D_fixed: case AArch64::LD2R_WB_1D_register: {
+    switch (Opc) {
+    case AArch64::LD2R_WB_8B_fixed: case AArch64::LD2R_WB_8B_register:
+      TransferBytes = 2; break;
+    case AArch64::LD2R_WB_4H_fixed: case AArch64::LD2R_WB_4H_register:
+      TransferBytes = 4; break;
+    case AArch64::LD2R_WB_2S_fixed: case AArch64::LD2R_WB_2S_register:
+      TransferBytes = 8; break;
+    case AArch64::LD2R_WB_1D_fixed: case AArch64::LD2R_WB_1D_register:
+      TransferBytes = 16; break;
+    }
+    Is64bitVec = true;
+    IsLoadDup = true;
+    NumVecs = 2;
+    break;
+  }
+
+  case AArch64::LD2R_WB_16B_fixed: case AArch64::LD2R_WB_16B_register:
+  case AArch64::LD2R_WB_8H_fixed: case AArch64::LD2R_WB_8H_register:
+  case AArch64::LD2R_WB_4S_fixed: case AArch64::LD2R_WB_4S_register:
+  case AArch64::LD2R_WB_2D_fixed: case AArch64::LD2R_WB_2D_register: {
+    switch (Opc) {
+    case AArch64::LD2R_WB_16B_fixed: case AArch64::LD2R_WB_16B_register:
+      TransferBytes = 2; break;
+    case AArch64::LD2R_WB_8H_fixed: case AArch64::LD2R_WB_8H_register:
+      TransferBytes = 4; break;
+    case AArch64::LD2R_WB_4S_fixed: case AArch64::LD2R_WB_4S_register:
+      TransferBytes = 8; break;
+    case AArch64::LD2R_WB_2D_fixed: case AArch64::LD2R_WB_2D_register:
+      TransferBytes = 16; break;
+    }
+    IsLoadDup = true;
+    NumVecs = 2;
+    break;
+  }
+
+  case AArch64::LD3R_WB_8B_fixed: case AArch64::LD3R_WB_8B_register:
+  case AArch64::LD3R_WB_4H_fixed: case AArch64::LD3R_WB_4H_register:
+  case AArch64::LD3R_WB_2S_fixed: case AArch64::LD3R_WB_2S_register:
+  case AArch64::LD3R_WB_1D_fixed: case AArch64::LD3R_WB_1D_register: {
+    switch (Opc) {
+    case AArch64::LD3R_WB_8B_fixed: case AArch64::LD3R_WB_8B_register:
+      TransferBytes = 3; break;
+    case AArch64::LD3R_WB_4H_fixed: case AArch64::LD3R_WB_4H_register:
+      TransferBytes = 6; break;
+    case AArch64::LD3R_WB_2S_fixed: case AArch64::LD3R_WB_2S_register:
+      TransferBytes = 12; break;
+    case AArch64::LD3R_WB_1D_fixed: case AArch64::LD3R_WB_1D_register:
+      TransferBytes = 24; break;
+    }
+    Is64bitVec = true;
+    IsLoadDup = true;
+    NumVecs = 3;
+    break;
+  }
+
+  case AArch64::LD3R_WB_16B_fixed: case AArch64::LD3R_WB_16B_register:
+  case AArch64::LD3R_WB_4S_fixed: case AArch64::LD3R_WB_8H_register:
+  case AArch64::LD3R_WB_8H_fixed: case AArch64::LD3R_WB_4S_register:
+  case AArch64::LD3R_WB_2D_fixed: case AArch64::LD3R_WB_2D_register: {
+    switch (Opc) {
+    case AArch64::LD3R_WB_16B_fixed: case AArch64::LD3R_WB_16B_register:
+      TransferBytes = 3; break;
+    case AArch64::LD3R_WB_8H_fixed: case AArch64::LD3R_WB_8H_register:
+      TransferBytes = 6; break;
+    case AArch64::LD3R_WB_4S_fixed: case AArch64::LD3R_WB_4S_register:
+      TransferBytes = 12; break;
+    case AArch64::LD3R_WB_2D_fixed: case AArch64::LD3R_WB_2D_register:
+      TransferBytes = 24; break;
+    }
+    IsLoadDup = true;
+    NumVecs = 3;
+    break;
+  }
+
+  case AArch64::LD4R_WB_8B_fixed: case AArch64::LD4R_WB_8B_register:
+  case AArch64::LD4R_WB_4H_fixed: case AArch64::LD4R_WB_4H_register:
+  case AArch64::LD4R_WB_2S_fixed: case AArch64::LD4R_WB_2S_register:
+  case AArch64::LD4R_WB_1D_fixed: case AArch64::LD4R_WB_1D_register: {
+    switch (Opc) {
+    case AArch64::LD4R_WB_8B_fixed: case AArch64::LD4R_WB_8B_register:
+      TransferBytes = 4; break;
+    case AArch64::LD4R_WB_4H_fixed: case AArch64::LD4R_WB_4H_register:
+      TransferBytes = 8; break;
+    case AArch64::LD4R_WB_2S_fixed: case AArch64::LD4R_WB_2S_register:
+      TransferBytes = 16; break;
+    case AArch64::LD4R_WB_1D_fixed: case AArch64::LD4R_WB_1D_register:
+      TransferBytes = 32; break;
+    }
+    Is64bitVec = true;
+    IsLoadDup = true;
+    NumVecs = 4;
+    break;
+  }
+
+  case AArch64::LD4R_WB_16B_fixed: case AArch64::LD4R_WB_16B_register:
+  case AArch64::LD4R_WB_4S_fixed: case AArch64::LD4R_WB_8H_register:
+  case AArch64::LD4R_WB_8H_fixed: case AArch64::LD4R_WB_4S_register:
+  case AArch64::LD4R_WB_2D_fixed: case AArch64::LD4R_WB_2D_register: {
+    switch (Opc) {
+    case AArch64::LD4R_WB_16B_fixed: case AArch64::LD4R_WB_16B_register:
+      TransferBytes = 4; break;
+    case AArch64::LD4R_WB_8H_fixed: case AArch64::LD4R_WB_8H_register:
+      TransferBytes = 8; break;
+    case AArch64::LD4R_WB_4S_fixed: case AArch64::LD4R_WB_4S_register:
+      TransferBytes = 16; break;
+    case AArch64::LD4R_WB_2D_fixed: case AArch64::LD4R_WB_2D_register:
+      TransferBytes = 32; break;
+    }
+    IsLoadDup = true;
+    NumVecs = 4;
+    break;
+  }
+
+  case AArch64::LD1LN_WB_B_fixed: case AArch64::LD1LN_WB_B_register:
+  case AArch64::LD1LN_WB_H_fixed: case AArch64::LD1LN_WB_H_register:
+  case AArch64::LD1LN_WB_S_fixed: case AArch64::LD1LN_WB_S_register:
+  case AArch64::LD1LN_WB_D_fixed: case AArch64::LD1LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::LD1LN_WB_B_fixed: case AArch64::LD1LN_WB_B_register:
+      TransferBytes = 1; break;
+    case AArch64::LD1LN_WB_H_fixed: case AArch64::LD1LN_WB_H_register:
+      TransferBytes = 2; break;
+    case AArch64::LD1LN_WB_S_fixed: case AArch64::LD1LN_WB_S_register:
+      TransferBytes = 4; break;
+    case AArch64::LD1LN_WB_D_fixed: case AArch64::LD1LN_WB_D_register:
+      TransferBytes = 8; break;
+    }
+    IsLoad = true;
+    NumVecs = 1;
+    break;
+  }
+
+  case AArch64::LD2LN_WB_B_fixed: case AArch64::LD2LN_WB_B_register:
+  case AArch64::LD2LN_WB_H_fixed: case AArch64::LD2LN_WB_H_register:
+  case AArch64::LD2LN_WB_S_fixed: case AArch64::LD2LN_WB_S_register:
+  case AArch64::LD2LN_WB_D_fixed: case AArch64::LD2LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::LD2LN_WB_B_fixed: case AArch64::LD2LN_WB_B_register:
+      TransferBytes = 2; break;
+    case AArch64::LD2LN_WB_H_fixed: case AArch64::LD2LN_WB_H_register:
+      TransferBytes = 4; break;
+    case AArch64::LD2LN_WB_S_fixed: case AArch64::LD2LN_WB_S_register:
+      TransferBytes = 8; break;
+    case AArch64::LD2LN_WB_D_fixed: case AArch64::LD2LN_WB_D_register:
+      TransferBytes = 16; break;
+    }
+    IsLoad = true;
+    NumVecs = 2;
+    break;
+  }
+
+  case AArch64::LD3LN_WB_B_fixed: case AArch64::LD3LN_WB_B_register:
+  case AArch64::LD3LN_WB_H_fixed: case AArch64::LD3LN_WB_H_register:
+  case AArch64::LD3LN_WB_S_fixed: case AArch64::LD3LN_WB_S_register:
+  case AArch64::LD3LN_WB_D_fixed: case AArch64::LD3LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::LD3LN_WB_B_fixed: case AArch64::LD3LN_WB_B_register:
+      TransferBytes = 3; break;
+    case AArch64::LD3LN_WB_H_fixed: case AArch64::LD3LN_WB_H_register:
+      TransferBytes = 6; break;
+    case AArch64::LD3LN_WB_S_fixed: case AArch64::LD3LN_WB_S_register:
+      TransferBytes = 12; break;
+    case AArch64::LD3LN_WB_D_fixed: case AArch64::LD3LN_WB_D_register:
+      TransferBytes = 24; break;
+    }
+    IsLoad = true;
+    NumVecs = 3;
+    break;
+  }
+
+  case AArch64::LD4LN_WB_B_fixed: case AArch64::LD4LN_WB_B_register:
+  case AArch64::LD4LN_WB_H_fixed: case AArch64::LD4LN_WB_H_register:
+  case AArch64::LD4LN_WB_S_fixed: case AArch64::LD4LN_WB_S_register:
+  case AArch64::LD4LN_WB_D_fixed: case AArch64::LD4LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::LD4LN_WB_B_fixed: case AArch64::LD4LN_WB_B_register:
+      TransferBytes = 4; break;
+    case AArch64::LD4LN_WB_H_fixed: case AArch64::LD4LN_WB_H_register:
+      TransferBytes = 8; break;
+    case AArch64::LD4LN_WB_S_fixed: case AArch64::LD4LN_WB_S_register:
+      TransferBytes = 16; break;
+    case AArch64::LD4LN_WB_D_fixed: case AArch64::LD4LN_WB_D_register:
+      TransferBytes = 32; break;
+    }
+    IsLoad = true;
+    NumVecs = 4;
+    break;
+  }
+
+  case AArch64::ST1LN_WB_B_fixed: case AArch64::ST1LN_WB_B_register:
+  case AArch64::ST1LN_WB_H_fixed: case AArch64::ST1LN_WB_H_register:
+  case AArch64::ST1LN_WB_S_fixed: case AArch64::ST1LN_WB_S_register:
+  case AArch64::ST1LN_WB_D_fixed: case AArch64::ST1LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::ST1LN_WB_B_fixed: case AArch64::ST1LN_WB_B_register:
+      TransferBytes = 1; break;
+    case AArch64::ST1LN_WB_H_fixed: case AArch64::ST1LN_WB_H_register:
+      TransferBytes = 2; break;
+    case AArch64::ST1LN_WB_S_fixed: case AArch64::ST1LN_WB_S_register:
+      TransferBytes = 4; break;
+    case AArch64::ST1LN_WB_D_fixed: case AArch64::ST1LN_WB_D_register:
+      TransferBytes = 8; break;
+    }
+    NumVecs = 1;
+    break;
+  }
+
+  case AArch64::ST2LN_WB_B_fixed: case AArch64::ST2LN_WB_B_register:
+  case AArch64::ST2LN_WB_H_fixed: case AArch64::ST2LN_WB_H_register:
+  case AArch64::ST2LN_WB_S_fixed: case AArch64::ST2LN_WB_S_register:
+  case AArch64::ST2LN_WB_D_fixed: case AArch64::ST2LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::ST2LN_WB_B_fixed: case AArch64::ST2LN_WB_B_register:
+      TransferBytes = 2; break;
+    case AArch64::ST2LN_WB_H_fixed: case AArch64::ST2LN_WB_H_register:
+      TransferBytes = 4; break;
+    case AArch64::ST2LN_WB_S_fixed: case AArch64::ST2LN_WB_S_register:
+      TransferBytes = 8; break;
+    case AArch64::ST2LN_WB_D_fixed: case AArch64::ST2LN_WB_D_register:
+      TransferBytes = 16; break;
+    }
+    NumVecs = 2;
+    break;
+  }
+
+  case AArch64::ST3LN_WB_B_fixed: case AArch64::ST3LN_WB_B_register:
+  case AArch64::ST3LN_WB_H_fixed: case AArch64::ST3LN_WB_H_register:
+  case AArch64::ST3LN_WB_S_fixed: case AArch64::ST3LN_WB_S_register:
+  case AArch64::ST3LN_WB_D_fixed: case AArch64::ST3LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::ST3LN_WB_B_fixed: case AArch64::ST3LN_WB_B_register:
+      TransferBytes = 3; break;
+    case AArch64::ST3LN_WB_H_fixed: case AArch64::ST3LN_WB_H_register:
+      TransferBytes = 6; break;
+    case AArch64::ST3LN_WB_S_fixed: case AArch64::ST3LN_WB_S_register:
+      TransferBytes = 12; break;
+    case AArch64::ST3LN_WB_D_fixed: case AArch64::ST3LN_WB_D_register:
+      TransferBytes = 24; break;
+    }
+    NumVecs = 3;
+    break;
+  }
+
+  case AArch64::ST4LN_WB_B_fixed: case AArch64::ST4LN_WB_B_register:
+  case AArch64::ST4LN_WB_H_fixed: case AArch64::ST4LN_WB_H_register:
+  case AArch64::ST4LN_WB_S_fixed: case AArch64::ST4LN_WB_S_register:
+  case AArch64::ST4LN_WB_D_fixed: case AArch64::ST4LN_WB_D_register: {
+    switch (Opc) {
+    case AArch64::ST4LN_WB_B_fixed: case AArch64::ST4LN_WB_B_register:
+      TransferBytes = 4; break;
+    case AArch64::ST4LN_WB_H_fixed: case AArch64::ST4LN_WB_H_register:
+      TransferBytes = 8; break;
+    case AArch64::ST4LN_WB_S_fixed: case AArch64::ST4LN_WB_S_register:
+      TransferBytes = 16; break;
+    case AArch64::ST4LN_WB_D_fixed: case AArch64::ST4LN_WB_D_register:
+      TransferBytes = 32; break;
+    }
+    NumVecs = 4;
+    break;
+  }
+
+  default:
+    return MCDisassembler::Fail;
+  } // End of switch (Opc)
+
+  unsigned Rt = fieldFromInstruction(Insn, 0, 5);
+  unsigned Rn = fieldFromInstruction(Insn, 5, 5);
+  unsigned Rm = fieldFromInstruction(Insn, 16, 5);
+
+  // Decode post-index of load duplicate lane
+  if (IsLoadDup) {
+    switch (NumVecs) {
+    case 1:
+      Is64bitVec ? DecodeFPR64RegisterClass(Inst, Rt, Address, Decoder)
+                 : DecodeFPR128RegisterClass(Inst, Rt, Address, Decoder);
+      break;
+    case 2:
+      Is64bitVec ? DecodeDPairRegisterClass(Inst, Rt, Address, Decoder)
+                 : DecodeQPairRegisterClass(Inst, Rt, Address, Decoder);
+      break;
+    case 3:
+      Is64bitVec ? DecodeDTripleRegisterClass(Inst, Rt, Address, Decoder)
+                 : DecodeQTripleRegisterClass(Inst, Rt, Address, Decoder);
+      break;
+    case 4:
+      Is64bitVec ? DecodeDQuadRegisterClass(Inst, Rt, Address, Decoder)
+                 : DecodeQQuadRegisterClass(Inst, Rt, Address, Decoder);
+    }
+
+    // Decode write back register, which is equal to Rn.
+    DecodeGPR64xspRegisterClass(Inst, Rn, Address, Decoder);
+    DecodeGPR64xspRegisterClass(Inst, Rn, Address, Decoder);
+
+    if (Rm == 31) // If Rm is 0x11111, add the number of transferred bytes
+      Inst.addOperand(MCOperand::CreateImm(TransferBytes));
+    else // Decode Rm
+      DecodeGPR64noxzrRegisterClass(Inst, Rm, Address, Decoder);
+
+    return MCDisassembler::Success;
+  }
+
+  // Decode post-index of load/store lane
+  // Loads have a vector list as output.
+  if (IsLoad) {
+    switch (NumVecs) {
+    case 1:
+      DecodeFPR128RegisterClass(Inst, Rt, Address, Decoder);
+      break;
+    case 2:
+      DecodeQPairRegisterClass(Inst, Rt, Address, Decoder);
+      break;
+    case 3:
+      DecodeQTripleRegisterClass(Inst, Rt, Address, Decoder);
+      break;
+    case 4:
+      DecodeQQuadRegisterClass(Inst, Rt, Address, Decoder);
+    }
+  }
+
+  // Decode write back register, which is equal to Rn.
+  DecodeGPR64xspRegisterClass(Inst, Rn, Address, Decoder);
+  DecodeGPR64xspRegisterClass(Inst, Rn, Address, Decoder);
+
+  if (Rm == 31) // If Rm is 0x11111, add the number of transferred bytes
+    Inst.addOperand(MCOperand::CreateImm(TransferBytes));
+  else // Decode Rm
+    DecodeGPR64noxzrRegisterClass(Inst, Rm, Address, Decoder);
+
+  // Decode the source vector list.
+  switch (NumVecs) {
+  case 1:
+    DecodeFPR128RegisterClass(Inst, Rt, Address, Decoder);
+    break;
+  case 2:
+    DecodeQPairRegisterClass(Inst, Rt, Address, Decoder);
+    break;
+  case 3:
+    DecodeQTripleRegisterClass(Inst, Rt, Address, Decoder);
+    break;
+  case 4:
+    DecodeQQuadRegisterClass(Inst, Rt, Address, Decoder);
+  }
+
+  // Decode lane
+  unsigned Q = fieldFromInstruction(Insn, 30, 1);
+  unsigned S = fieldFromInstruction(Insn, 10, 3);
+  unsigned lane = 0;
+  // Calculate the number of lanes by number of vectors and transfered bytes.
+  // NumLanes = 16 bytes / bytes of each lane
+  unsigned NumLanes = 16 / (TransferBytes / NumVecs);
+  switch (NumLanes) {
+  case 16: // A vector has 16 lanes, each lane is 1 bytes.
+    lane = (Q << 3) | S;
+    break;
+  case 8:
+    lane = (Q << 2) | (S >> 1);
+    break;
+  case 4:
+    lane = (Q << 1) | (S >> 2);
+    break;
+  case 2:
+    lane = Q;
+    break;
+  }
+  Inst.addOperand(MCOperand::CreateImm(lane));
+
+  return MCDisassembler::Success;
+}
+
+static DecodeStatus DecodeSHLLInstruction(MCInst &Inst, unsigned Insn,
+                                          uint64_t Address,
+                                          const void *Decoder) {
+  unsigned Rd = fieldFromInstruction(Insn, 0, 5);
+  unsigned Rn = fieldFromInstruction(Insn, 5, 5);
+  unsigned size = fieldFromInstruction(Insn, 22, 2);
+  unsigned Q = fieldFromInstruction(Insn, 30, 1);
+
+  DecodeFPR128RegisterClass(Inst, Rd, Address, Decoder);
+
+  if(Q)
+    DecodeFPR128RegisterClass(Inst, Rn, Address, Decoder);
+  else
+    DecodeFPR64RegisterClass(Inst, Rn, Address, Decoder);
+
+  switch (size) {
+  case 0:
+    Inst.addOperand(MCOperand::CreateImm(8));
+    break;
+  case 1:
+    Inst.addOperand(MCOperand::CreateImm(16));
+    break;
+  case 2:
+    Inst.addOperand(MCOperand::CreateImm(32));
+    break;
+  default :
+    return MCDisassembler::Fail;
+  }
+  return MCDisassembler::Success;
+}
+

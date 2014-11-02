@@ -16,8 +16,8 @@
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
-#include "gtest/gtest.h"
 #include "llvm/ADT/STLExtras.h"
+#include "gtest/gtest.h"
 #include <string>
 
 namespace clang {
@@ -60,12 +60,7 @@ TEST(runToolOnCode, FindsNoTopLevelDeclOnEmptyCode) {
   bool FoundTopLevelDecl = false;
   EXPECT_TRUE(runToolOnCode(
       new TestAction(new FindTopLevelDeclConsumer(&FoundTopLevelDecl)), ""));
-#if !defined(_MSC_VER)
   EXPECT_FALSE(FoundTopLevelDecl);
-#else
-  // FIXME: LangOpts.MicrosoftExt appends "class type_info;"
-  EXPECT_TRUE(FoundTopLevelDecl);
-#endif
 }
 
 namespace {
@@ -300,7 +295,6 @@ TEST(ClangToolTest, BuildASTs) {
 
   llvm::DeleteContainerPointers(ASTs);
 }
-#endif
 
 struct TestDiagnosticConsumer : public DiagnosticConsumer {
   TestDiagnosticConsumer() : NumDiagnosticsSeen(0) {}
@@ -320,6 +314,19 @@ TEST(ClangToolTest, InjectDiagnosticConsumer) {
   Tool.run(newFrontendActionFactory<SyntaxOnlyAction>());
   EXPECT_EQ(1u, Consumer.NumDiagnosticsSeen);
 }
+
+TEST(ClangToolTest, InjectDiagnosticConsumerInBuildASTs) {
+  FixedCompilationDatabase Compilations("/", std::vector<std::string>());
+  ClangTool Tool(Compilations, std::vector<std::string>(1, "/a.cc"));
+  Tool.mapVirtualFile("/a.cc", "int x = undeclared;");
+  TestDiagnosticConsumer Consumer;
+  Tool.setDiagnosticConsumer(&Consumer);
+  std::vector<ASTUnit*> ASTs;
+  Tool.buildASTs(ASTs);
+  EXPECT_EQ(1u, ASTs.size());
+  EXPECT_EQ(1u, Consumer.NumDiagnosticsSeen);
+}
+#endif
 
 } // end namespace tooling
 } // end namespace clang

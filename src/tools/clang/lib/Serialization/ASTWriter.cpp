@@ -17,6 +17,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclContextInternals.h"
 #include "clang/AST/DeclFriend.h"
+#include "clang/AST/DeclLookups.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
@@ -113,6 +114,12 @@ void ASTTypeWriter::VisitDecayedType(const DecayedType *T) {
   Code = TYPE_DECAYED;
 }
 
+void ASTTypeWriter::VisitAdjustedType(const AdjustedType *T) {
+  Writer.AddTypeRef(T->getOriginalType(), Record);
+  Writer.AddTypeRef(T->getAdjustedType(), Record);
+  Code = TYPE_ADJUSTED;
+}
+
 void ASTTypeWriter::VisitBlockPointerType(const BlockPointerType *T) {
   Writer.AddTypeRef(T->getPointeeType(), Record);
   Code = TYPE_BLOCK_POINTER;
@@ -173,7 +180,7 @@ void ASTTypeWriter::VisitExtVectorType(const ExtVectorType *T) {
 }
 
 void ASTTypeWriter::VisitFunctionType(const FunctionType *T) {
-  Writer.AddTypeRef(T->getResultType(), Record);
+  Writer.AddTypeRef(T->getReturnType(), Record);
   FunctionType::ExtInfo C = T->getExtInfo();
   Record.push_back(C.getNoReturn());
   Record.push_back(C.getHasRegParm());
@@ -190,9 +197,9 @@ void ASTTypeWriter::VisitFunctionNoProtoType(const FunctionNoProtoType *T) {
 
 void ASTTypeWriter::VisitFunctionProtoType(const FunctionProtoType *T) {
   VisitFunctionType(T);
-  Record.push_back(T->getNumArgs());
-  for (unsigned I = 0, N = T->getNumArgs(); I != N; ++I)
-    Writer.AddTypeRef(T->getArgType(I), Record);
+  Record.push_back(T->getNumParams());
+  for (unsigned I = 0, N = T->getNumParams(); I != N; ++I)
+    Writer.AddTypeRef(T->getParamType(I), Record);
   Record.push_back(T->isVariadic());
   Record.push_back(T->hasTrailingReturn());
   Record.push_back(T->getTypeQuals());
@@ -455,6 +462,9 @@ void TypeLocWriter::VisitPointerTypeLoc(PointerTypeLoc TL) {
 void TypeLocWriter::VisitDecayedTypeLoc(DecayedTypeLoc TL) {
   // nothing to do
 }
+void TypeLocWriter::VisitAdjustedTypeLoc(AdjustedTypeLoc TL) {
+  // nothing to do
+}
 void TypeLocWriter::VisitBlockPointerTypeLoc(BlockPointerTypeLoc TL) {
   Writer.AddSourceLocation(TL.getCaretLoc(), Record);
 }
@@ -503,8 +513,8 @@ void TypeLocWriter::VisitFunctionTypeLoc(FunctionTypeLoc TL) {
   Writer.AddSourceLocation(TL.getLParenLoc(), Record);
   Writer.AddSourceLocation(TL.getRParenLoc(), Record);
   Writer.AddSourceLocation(TL.getLocalRangeEnd(), Record);
-  for (unsigned i = 0, e = TL.getNumArgs(); i != e; ++i)
-    Writer.AddDeclRef(TL.getArg(i), Record);
+  for (unsigned i = 0, e = TL.getNumParams(); i != e; ++i)
+    Writer.AddDeclRef(TL.getParam(i), Record);
 }
 void TypeLocWriter::VisitFunctionProtoTypeLoc(FunctionProtoTypeLoc TL) {
   VisitFunctionTypeLoc(TL);
@@ -764,10 +774,8 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(EXPR_CXX_UNRESOLVED_CONSTRUCT);
   RECORD(EXPR_CXX_UNRESOLVED_MEMBER);
   RECORD(EXPR_CXX_UNRESOLVED_LOOKUP);
-  RECORD(EXPR_CXX_UNARY_TYPE_TRAIT);
   RECORD(EXPR_CXX_NOEXCEPT);
   RECORD(EXPR_OPAQUE_VALUE);
-  RECORD(EXPR_BINARY_TYPE_TRAIT);
   RECORD(EXPR_PACK_EXPANSION);
   RECORD(EXPR_SIZEOF_PACK);
   RECORD(EXPR_SUBST_NON_TYPE_TEMPLATE_PARM_PACK);
@@ -785,6 +793,8 @@ void ASTWriter::WriteBlockInfoBlock() {
   // Control Block.
   BLOCK(CONTROL_BLOCK);
   RECORD(METADATA);
+  RECORD(MODULE_NAME);
+  RECORD(MODULE_MAP_FILE);
   RECORD(IMPORTS);
   RECORD(LANGUAGE_OPTIONS);
   RECORD(TARGET_OPTIONS);
@@ -1037,10 +1047,35 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
   Stream.EmitRecordWithBlob(MetadataAbbrevCode, Record,
                             getClangFullRepositoryVersion());
 
+  // Module name
+  if (WritingModule) {
+    BitCodeAbbrev *Abbrev = new BitCodeAbbrev();
+    Abbrev->Add(BitCodeAbbrevOp(MODULE_NAME));
+    Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Name
+    unsigned AbbrevCode = Stream.EmitAbbrev(Abbrev);
+    RecordData Record;
+    Record.push_back(MODULE_NAME);
+    Stream.EmitRecordWithBlob(AbbrevCode, Record, WritingModule->Name);
+  }
+
+  // Module map file
+  if (WritingModule) {
+    BitCodeAbbrev *Abbrev = new BitCodeAbbrev();
+    Abbrev->Add(BitCodeAbbrevOp(MODULE_MAP_FILE));
+    Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Filename
+    unsigned AbbrevCode = Stream.EmitAbbrev(Abbrev);
+
+    assert(WritingModule->ModuleMap && "missing module map");
+    SmallString<128> ModuleMap(WritingModule->ModuleMap->getName());
+    llvm::sys::fs::make_absolute(ModuleMap);
+    RecordData Record;
+    Record.push_back(MODULE_MAP_FILE);
+    Stream.EmitRecordWithBlob(AbbrevCode, Record, ModuleMap.str());
+  }
+
   // Imports
   if (Chain) {
     serialization::ModuleManager &Mgr = Chain->getModuleManager();
-    SmallVector<char, 128> ModulePaths;
     Record.clear();
 
     for (ModuleManager::ModuleIterator M = Mgr.begin(), MEnd = Mgr.end();
@@ -1053,7 +1088,6 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
       AddSourceLocation((*M)->ImportLoc, Record);
       Record.push_back((*M)->File->getSize());
       Record.push_back((*M)->File->getModificationTime());
-      // FIXME: This writes the absolute path for AST files we depend on.
       const std::string &FileName = (*M)->FileName;
       Record.push_back(FileName.size());
       Record.append(FileName.begin(), FileName.end());
@@ -1097,8 +1131,6 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
   AddString(TargetOpts.Triple, Record);
   AddString(TargetOpts.CPU, Record);
   AddString(TargetOpts.ABI, Record);
-  AddString(TargetOpts.CXXABI, Record);
-  AddString(TargetOpts.LinkerVersion, Record);
   Record.push_back(TargetOpts.FeaturesAsWritten.size());
   for (unsigned I = 0, N = TargetOpts.FeaturesAsWritten.size(); I != N; ++I) {
     AddString(TargetOpts.FeaturesAsWritten[I], Record);
@@ -1156,6 +1188,7 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
 
   AddString(HSOpts.ResourceDir, Record);
   AddString(HSOpts.ModuleCachePath, Record);
+  AddString(HSOpts.ModuleUserBuildPath, Record);
   Record.push_back(HSOpts.DisableModuleHash);
   Record.push_back(HSOpts.UseBuiltinIncludes);
   Record.push_back(HSOpts.UseStandardSystemIncludes);
@@ -1294,33 +1327,6 @@ void ASTWriter::WriteInputFiles(SourceManager &SourceMgr,
       SortedFiles.push_front(Entry);
   }
 
-  // If we have an isysroot for a Darwin SDK, include its SDKSettings.plist in
-  // the set of (non-system) input files. This is simple heuristic for
-  // detecting whether the system headers may have changed, because it is too
-  // expensive to stat() all of the system headers.
-  FileManager &FileMgr = SourceMgr.getFileManager();
-  if (!HSOpts.Sysroot.empty() && !Chain) {
-    llvm::SmallString<128> SDKSettingsFileName(HSOpts.Sysroot);
-    llvm::sys::path::append(SDKSettingsFileName, "SDKSettings.plist");
-    if (const FileEntry *SDKSettingsFile = FileMgr.getFile(SDKSettingsFileName)) {
-      InputFileEntry Entry = { SDKSettingsFile, false, false };
-      SortedFiles.push_front(Entry);
-    }
-  }
-
-  // Add the compiler's own module.map in the set of (non-system) input files.
-  // This is a simple heuristic for detecting whether the compiler's headers
-  // have changed, because we don't want to stat() all of them.
-  if (Modules && !Chain) {
-    SmallString<128> P = StringRef(HSOpts.ResourceDir);
-    llvm::sys::path::append(P, "include");
-    llvm::sys::path::append(P, "module.map");
-    if (const FileEntry *ModuleMapFile = FileMgr.getFile(P)) {
-      InputFileEntry Entry = { ModuleMapFile, false, false };
-      SortedFiles.push_front(Entry);
-    }
-  }
-
   unsigned UserFilesNum = 0;
   // Write out all of the input files.
   std::vector<uint32_t> InputFileOffsets;
@@ -1357,7 +1363,7 @@ void ASTWriter::WriteInputFiles(SourceManager &SourceMgr,
     
     // Ask the file manager to fixup the relative path for us. This will 
     // honor the working directory.
-    FileMgr.FixupRelativePath(FilePath);
+    SourceMgr.getFileManager().FixupRelativePath(FilePath);
     
     // FIXME: This call to make_absolute shouldn't be necessary, the
     // call to FixupRelativePath should always return an absolute path.
@@ -1568,10 +1574,10 @@ void ASTWriter::WriteHeaderSearch(const HeaderSearch &HS, StringRef isysroot) {
 
     // Use HeaderSearch's getFileInfo to make sure we get the HeaderFileInfo
     // from the external source if it was not provided already.
-    const HeaderFileInfo &HFI = HS.getFileInfo(File);
-    if (HFI.External && Chain)
-      continue;
-    if (HFI.isModuleHeader && !HFI.isCompilingModuleHeader)
+    HeaderFileInfo HFI;
+    if (!HS.tryGetFileInfo(File, HFI) ||
+        (HFI.External && Chain) ||
+        (HFI.isModuleHeader && !HFI.isCompilingModuleHeader))
       continue;
 
     // Turn the file name into an absolute path, if it isn't already.
@@ -2012,6 +2018,7 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
     AddSourceLocation(MI->getDefinitionLoc(), Record);
     AddSourceLocation(MI->getDefinitionEndLoc(), Record);
     Record.push_back(MI->isUsed());
+    Record.push_back(MI->isUsedForHeaderGuard());
     unsigned Code;
     if (MI->isObjectLike()) {
       Code = PP_MACRO_OBJECT_LIKE;
@@ -3377,6 +3384,96 @@ public:
 };
 } // end anonymous namespace
 
+uint32_t
+ASTWriter::GenerateNameLookupTable(const DeclContext *DC,
+                                   llvm::SmallVectorImpl<char> &LookupTable) {
+  assert(!DC->LookupPtr.getInt() && "must call buildLookups first");
+  assert(DC == DC->getPrimaryContext() && "only primary DC has lookup table");
+
+  OnDiskChainedHashTableGenerator<ASTDeclContextNameLookupTrait> Generator;
+  ASTDeclContextNameLookupTrait Trait(*this);
+
+  // Create the on-disk hash table representation.
+  DeclarationName ConstructorName;
+  DeclarationName ConversionName;
+  SmallVector<NamedDecl *, 8> ConstructorDecls;
+  SmallVector<NamedDecl *, 4> ConversionDecls;
+
+  auto AddLookupResult = [&](DeclarationName Name,
+                             DeclContext::lookup_result Result) {
+    if (Result.empty())
+      return;
+
+    // Different DeclarationName values of certain kinds are mapped to
+    // identical serialized keys, because we don't want to use type
+    // identifiers in the keys (since type ids are local to the module).
+    switch (Name.getNameKind()) {
+    case DeclarationName::CXXConstructorName:
+      // There may be different CXXConstructorName DeclarationName values
+      // in a DeclContext because a UsingDecl that inherits constructors
+      // has the DeclarationName of the inherited constructors.
+      if (!ConstructorName)
+        ConstructorName = Name;
+      ConstructorDecls.append(Result.begin(), Result.end());
+      return;
+    case DeclarationName::CXXConversionFunctionName:
+      if (!ConversionName)
+        ConversionName = Name;
+      ConversionDecls.append(Result.begin(), Result.end());
+      return;
+    default:
+      break;
+    }
+
+    Generator.insert(Name, Result, Trait);
+  };
+
+  SmallVector<DeclarationName, 16> ExternalNames;
+  for (auto &Lookup : *DC->getLookupPtr()) {
+    if (Lookup.second.hasExternalDecls() ||
+        DC->NeedToReconcileExternalVisibleStorage) {
+      // We don't know for sure what declarations are found by this name,
+      // because the external source might have a different set from the set
+      // that are in the lookup map, and we can't update it now without
+      // risking invalidating our lookup iterator. So add it to a queue to
+      // deal with later.
+      ExternalNames.push_back(Lookup.first);
+      continue;
+    }
+
+    AddLookupResult(Lookup.first, Lookup.second.getLookupResult());
+  }
+
+  // Add the names we needed to defer. Note, this shouldn't add any new decls
+  // to the list we need to serialize: any new declarations we find here should
+  // be imported from an external source.
+  // FIXME: What if the external source isn't an ASTReader?
+  for (const auto &Name : ExternalNames)
+    // FIXME: const_cast since OnDiskHashTable wants a non-const lookup result.
+    AddLookupResult(Name, const_cast<DeclContext*>(DC)->lookup(Name));
+
+  // Add the constructors.
+  if (!ConstructorDecls.empty()) {
+    Generator.insert(ConstructorName,
+                     DeclContext::lookup_result(ConstructorDecls.begin(),
+                                                ConstructorDecls.end()),
+                     Trait);
+  }
+  // Add the conversion functions.
+  if (!ConversionDecls.empty()) {
+    Generator.insert(ConversionName,
+                     DeclContext::lookup_result(ConversionDecls.begin(),
+                                                ConversionDecls.end()),
+                     Trait);
+  }
+
+  // Create the on-disk hash table in a buffer.
+  llvm::raw_svector_ostream Out(LookupTable);
+  // Make sure that no bucket is at offset 0
+  clang::io::Emit32(Out, 0);
+  return Generator.Emit(Out, Trait);
+}
+
 /// \brief Write the block containing all of the declaration IDs
 /// visible from the given DeclContext.
 ///
@@ -3407,50 +3504,9 @@ uint64_t ASTWriter::WriteDeclContextVisibleBlock(ASTContext &Context,
   if (!Map || Map->empty())
     return 0;
 
-  OnDiskChainedHashTableGenerator<ASTDeclContextNameLookupTrait> Generator;
-  ASTDeclContextNameLookupTrait Trait(*this);
-
-  // Create the on-disk hash table representation.
-  DeclarationName ConversionName;
-  SmallVector<NamedDecl *, 4> ConversionDecls;
-  for (StoredDeclsMap::iterator D = Map->begin(), DEnd = Map->end();
-       D != DEnd; ++D) {
-    DeclarationName Name = D->first;
-    DeclContext::lookup_result Result = D->second.getLookupResult();
-    if (!Result.empty()) {
-      if (Name.getNameKind() == DeclarationName::CXXConversionFunctionName) {
-        // Hash all conversion function names to the same name. The actual
-        // type information in conversion function name is not used in the
-        // key (since such type information is not stable across different
-        // modules), so the intended effect is to coalesce all of the conversion
-        // functions under a single key.
-        if (!ConversionName)
-          ConversionName = Name;
-        ConversionDecls.append(Result.begin(), Result.end());
-        continue;
-      }
-      
-      Generator.insert(Name, Result, Trait);
-    }
-  }
-
-  // Add the conversion functions
-  if (!ConversionDecls.empty()) {
-    Generator.insert(ConversionName, 
-                     DeclContext::lookup_result(ConversionDecls.begin(),
-                                                ConversionDecls.end()),
-                     Trait);
-  }
-  
   // Create the on-disk hash table in a buffer.
   SmallString<4096> LookupTable;
-  uint32_t BucketOffset;
-  {
-    llvm::raw_svector_ostream Out(LookupTable);
-    // Make sure that no bucket is at offset 0
-    clang::io::Emit32(Out, 0);
-    BucketOffset = Generator.Emit(Out, Trait);
-  }
+  uint32_t BucketOffset = GenerateNameLookupTable(DC, LookupTable);
 
   // Write the lookup table
   RecordData Record;
@@ -3471,33 +3527,13 @@ uint64_t ASTWriter::WriteDeclContextVisibleBlock(ASTContext &Context,
 /// (in C++), for namespaces, and for classes with forward-declared unscoped
 /// enumeration members (in C++11).
 void ASTWriter::WriteDeclContextVisibleUpdate(const DeclContext *DC) {
-  StoredDeclsMap *Map = static_cast<StoredDeclsMap*>(DC->getLookupPtr());
+  StoredDeclsMap *Map = DC->getLookupPtr();
   if (!Map || Map->empty())
     return;
 
-  OnDiskChainedHashTableGenerator<ASTDeclContextNameLookupTrait> Generator;
-  ASTDeclContextNameLookupTrait Trait(*this);
-
-  // Create the hash table.
-  for (StoredDeclsMap::iterator D = Map->begin(), DEnd = Map->end();
-       D != DEnd; ++D) {
-    DeclarationName Name = D->first;
-    DeclContext::lookup_result Result = D->second.getLookupResult();
-    // For any name that appears in this table, the results are complete, i.e.
-    // they overwrite results from previous PCHs. Merging is always a mess.
-    if (!Result.empty())
-      Generator.insert(Name, Result, Trait);
-  }
-
   // Create the on-disk hash table in a buffer.
   SmallString<4096> LookupTable;
-  uint32_t BucketOffset;
-  {
-    llvm::raw_svector_ostream Out(LookupTable);
-    // Make sure that no bucket is at offset 0
-    clang::io::Emit32(Out, 0);
-    BucketOffset = Generator.Emit(Out, Trait);
-  }
+  uint32_t BucketOffset = GenerateNameLookupTable(DC, LookupTable);
 
   // Write the lookup table
   RecordData Record;
@@ -4157,6 +4193,8 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
         StringRef FileName = (*M)->FileName;
         io::Emit16(Out, FileName.size());
         Out.write(FileName.data(), FileName.size());
+        // These values should be unique within a chain, since they will be read
+        // as keys into ContinuousRangeMaps.
         io::Emit32(Out, (*M)->SLocEntryBaseOffset);
         io::Emit32(Out, (*M)->BaseIdentifierID);
         io::Emit32(Out, (*M)->BaseMacroID);
@@ -5084,6 +5122,7 @@ void ASTWriter::AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Rec
   Record.push_back(Data.HasProtectedFields);
   Record.push_back(Data.HasPublicFields);
   Record.push_back(Data.HasMutableFields);
+  Record.push_back(Data.HasVariantMembers);
   Record.push_back(Data.HasOnlyCMembers);
   Record.push_back(Data.HasInClassInitializer);
   Record.push_back(Data.HasUninitializedReferenceMember);

@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -30,7 +31,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/FormattedStream.h"
-#include "llvm/Target/Mangler.h"
 #include "llvm/Target/TargetFrameLowering.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Target/TargetRegisterInfo.h"
@@ -48,25 +48,25 @@ ARMException::ARMException(AsmPrinter *A)
 ARMException::~ARMException() {}
 
 ARMTargetStreamer &ARMException::getTargetStreamer() {
-  MCTargetStreamer &TS = Asm->OutStreamer.getTargetStreamer();
+  MCTargetStreamer &TS = *Asm->OutStreamer.getTargetStreamer();
   return static_cast<ARMTargetStreamer &>(TS);
 }
 
-void ARMException::EndModule() {
+void ARMException::endModule() {
 }
 
-/// BeginFunction - Gather pre-function exception information. Assumes it's
+/// beginFunction - Gather pre-function exception information. Assumes it's
 /// being emitted immediately after the function entry point.
-void ARMException::BeginFunction(const MachineFunction *MF) {
+void ARMException::beginFunction(const MachineFunction *MF) {
   getTargetStreamer().emitFnStart();
   if (Asm->MF->getFunction()->needsUnwindTableEntry())
     Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("eh_func_begin",
                                                   Asm->getFunctionNumber()));
 }
 
-/// EndFunction - Gather and emit post-function exception information.
+/// endFunction - Gather and emit post-function exception information.
 ///
-void ARMException::EndFunction() {
+void ARMException::endFunction(const MachineFunction *) {
   ARMTargetStreamer &ATS = getTargetStreamer();
   if (!Asm->MF->getFunction()->needsUnwindTableEntry())
     ATS.emitCantUnwind();

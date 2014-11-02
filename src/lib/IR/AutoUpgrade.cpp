@@ -25,6 +25,8 @@
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cstring>
+#include <sstream>
+#include <cstdio>
 using namespace llvm;
 
 // Upgrade the declarations of the SSE4.1 functions whose arguments have
@@ -450,10 +452,73 @@ void llvm::UpgradeInstWithTBAATag(Instruction *I) {
   }
 }
 
+Instruction *llvm::UpgradeBitCastInst(unsigned Opc, Value *V, Type *DestTy,
+                                      Instruction *&Temp) {
+  if (Opc != Instruction::BitCast)
+    return 0;
+
+  Temp = 0;
+  Type *SrcTy = V->getType();
+  if (SrcTy->isPtrOrPtrVectorTy() && DestTy->isPtrOrPtrVectorTy() &&
+      SrcTy->getPointerAddressSpace() != DestTy->getPointerAddressSpace()) {
+    LLVMContext &Context = V->getContext();
+
+    // We have no information about target data layout, so we assume that
+    // the maximum pointer size is 64bit.
+    Type *MidTy = Type::getInt64Ty(Context);
+    Temp = CastInst::Create(Instruction::PtrToInt, V, MidTy);
+
+    return CastInst::Create(Instruction::IntToPtr, Temp, DestTy);
+  }
+
+  return 0;
+}
+
+Value *llvm::UpgradeBitCastExpr(unsigned Opc, Constant *C, Type *DestTy) {
+  if (Opc != Instruction::BitCast)
+    return 0;
+
+  Type *SrcTy = C->getType();
+  if (SrcTy->isPtrOrPtrVectorTy() && DestTy->isPtrOrPtrVectorTy() &&
+      SrcTy->getPointerAddressSpace() != DestTy->getPointerAddressSpace()) {
+    LLVMContext &Context = C->getContext();
+
+    // We have no information about target data layout, so we assume that
+    // the maximum pointer size is 64bit.
+    Type *MidTy = Type::getInt64Ty(Context);
+
+    return ConstantExpr::getIntToPtr(ConstantExpr::getPtrToInt(C, MidTy),
+                                     DestTy);
+  }
+
+  return 0;
+}
+
 /// Check the debug info version number, if it is out-dated, drop the debug
 /// info. Return true if module is modified.
 bool llvm::UpgradeDebugInfo(Module &M) {
   unsigned Version = getDebugMetadataVersionFromModule(M);
+
+  // ** BEGIN APPLE INTERNAL **
+  //
+  // By setting this environment variable via lit, we can
+  // automatically bump the version number without having to upgrade
+  // each test case every time.
+  const char *OffsetStr = getenv("LLVM_DEBUG_METADATA_VERSION_OFFSET");
+  unsigned Offset = 0;
+  if (OffsetStr) {
+    std::istringstream IS(OffsetStr);
+    IS>>Offset;
+    if (!IS.eof()) {
+      fprintf(stderr, "Could not parse the environment variable"
+              " LLVM_DEBUG_METADATA_VERSION_OFFSET=\"%s\" as a 32-bit integer.\n",
+              OffsetStr);
+      exit(1);
+    }
+  }
+  Version += Offset;
+  // ** END APPLE INTERNAL **
+
   if (Version == DEBUG_METADATA_VERSION)
     return false;
 

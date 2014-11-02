@@ -50,7 +50,6 @@ private:
 
   unsigned IsVerboseAsm : 1;
   unsigned ShowInst : 1;
-  unsigned UseLoc : 1;
   unsigned UseCFI : 1;
   unsigned UseDwarfDirectory : 1;
 
@@ -66,14 +65,14 @@ private:
   virtual void EmitCFIEndProcImpl(MCDwarfFrameInfo &Frame);
 
 public:
-  MCAsmStreamer(MCContext &Context, MCTargetStreamer *TargetStreamer,
-                formatted_raw_ostream &os, bool isVerboseAsm, bool useLoc,
-                bool useCFI, bool useDwarfDirectory, MCInstPrinter *printer,
-                MCCodeEmitter *emitter, MCAsmBackend *asmbackend, bool showInst)
-      : MCStreamer(Context, TargetStreamer), OS(os), MAI(Context.getAsmInfo()),
+  MCAsmStreamer(MCContext &Context, formatted_raw_ostream &os,
+                bool isVerboseAsm, bool useCFI, bool useDwarfDirectory,
+                MCInstPrinter *printer, MCCodeEmitter *emitter,
+                MCAsmBackend *asmbackend, bool showInst)
+      : MCStreamer(Context), OS(os), MAI(Context.getAsmInfo()),
         InstPrinter(printer), Emitter(emitter), AsmBackend(asmbackend),
         CommentStream(CommentToEmit), IsVerboseAsm(isVerboseAsm),
-        ShowInst(showInst), UseLoc(useLoc), UseCFI(useCFI),
+        ShowInst(showInst), UseCFI(useCFI),
         UseDwarfDirectory(useDwarfDirectory) {
     if (InstPrinter && IsVerboseAsm)
       InstPrinter->setCommentStream(CommentStream);
@@ -115,6 +114,8 @@ public:
     return CommentStream;
   }
 
+  void emitRawComment(const Twine &T, bool TabPrefix = true) LLVM_OVERRIDE;
+
   /// AddBlankLine - Emit a blank line to a .s file to pretty it up.
   virtual void AddBlankLine() {
     EmitEOL();
@@ -126,15 +127,13 @@ public:
   virtual void ChangeSection(const MCSection *Section,
                              const MCExpr *Subsection);
 
-  virtual void InitSections() {
-    InitToTextSection();
-  }
-
-  virtual void InitToTextSection() {
-    SwitchSection(getContext().getObjectFileInfo()->getTextSection());
-  }
-
   virtual void EmitLOHDirective(MCLOHType Kind, const MCLOHArgs &Args);
+
+  virtual void InitSections(bool Force) {
+    if (Force)
+      SwitchSection(getContext().getObjectFileInfo()->getTextSection());
+  }
+
   virtual void EmitLabel(MCSymbol *Symbol);
   virtual void EmitDebugLabel(MCSymbol *Symbol);
 
@@ -161,6 +160,7 @@ public:
   virtual void EmitCOFFSymbolStorageClass(int StorageClass);
   virtual void EmitCOFFSymbolType(int Type);
   virtual void EndCOFFSymbolDef();
+  virtual void EmitCOFFSectionIndex(MCSymbol const *Symbol);
   virtual void EmitCOFFSecRel32(MCSymbol const *Symbol);
   virtual void EmitELFSize(MCSymbol *Symbol, const MCExpr *Value);
   virtual void EmitCommonSymbol(MCSymbol *Symbol, uint64_t Size,
@@ -182,7 +182,8 @@ public:
 
   virtual void EmitBytes(StringRef Data);
 
-  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size);
+  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                             const SMLoc &Loc = SMLoc());
   virtual void EmitIntValue(uint64_t Value, unsigned Size);
 
   virtual void EmitULEB128Value(const MCExpr *Value);
@@ -311,6 +312,13 @@ static inline int64_t truncateToSize(int64_t Value, unsigned Bytes) {
   return Value & ((uint64_t) (int64_t) -1 >> (64 - Bytes * 8));
 }
 
+void MCAsmStreamer::emitRawComment(const Twine &T, bool TabPrefix) {
+  if (TabPrefix)
+    OS << '\t';
+  OS << MAI->getCommentString() << T;
+  EmitEOL();
+}
+
 void MCAsmStreamer::ChangeSection(const MCSection *Section,
                                   const MCExpr *Subsection) {
   assert(Section && "Cannot switch to a null section!");
@@ -341,10 +349,14 @@ void MCAsmStreamer::EmitLabel(MCSymbol *Symbol) {
 }
 
 void MCAsmStreamer::EmitLOHDirective(MCLOHType Kind, const MCLOHArgs &Args) {
-  int NbArgs = MCLOHIdToNbArgs(Kind);
   StringRef str = MCLOHIdToName(Kind);
+
+#ifndef NDEBUG
+  int NbArgs = MCLOHIdToNbArgs(Kind);
   assert(NbArgs != -1 && ((size_t)NbArgs) == Args.size() && "Malformed LOH!");
   assert(str != "" && "Invalid LOH name");
+#endif
+
   OS << "\t" << MCLOHDirectiveName() << " " << str << "\t";
   bool IsFirst = true;
   for (MCLOHArgs::const_iterator It = Args.begin(), EndIt = Args.end();
@@ -476,6 +488,7 @@ bool MCAsmStreamer::EmitSymbolAttribute(MCSymbol *Symbol,
   case MCSA_Local:          OS << "\t.local\t";           break;
   case MCSA_NoDeadStrip:    OS << "\t.no_dead_strip\t";   break;
   case MCSA_SymbolResolver: OS << "\t.symbol_resolver\t"; break;
+  case MCSA_AltEntry:       OS << "\t.alt_entry\t";       break;
   case MCSA_PrivateExtern:
     OS << "\t.private_extern\t";
     FlagMap[Symbol] |= EHPrivateExtern;
@@ -523,8 +536,13 @@ void MCAsmStreamer::EndCOFFSymbolDef() {
   EmitEOL();
 }
 
+void MCAsmStreamer::EmitCOFFSectionIndex(MCSymbol const *Symbol) {
+  OS << "\t.secidx\t" << *Symbol;
+  EmitEOL();
+}
+
 void MCAsmStreamer::EmitCOFFSecRel32(MCSymbol const *Symbol) {
-  OS << "\t.secrel32\t" << *Symbol << '\n';
+  OS << "\t.secrel32\t" << *Symbol;
   EmitEOL();
 }
 
@@ -678,7 +696,8 @@ void MCAsmStreamer::EmitIntValue(uint64_t Value, unsigned Size) {
   EmitValue(MCConstantExpr::Create(Value, getContext()), Size);
 }
 
-void MCAsmStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size) {
+void MCAsmStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size,
+                                  const SMLoc &Loc) {
   assert(getCurrentSection().first &&
          "Cannot emit contents before setting section!");
   const char *Directive = 0;
@@ -843,17 +862,16 @@ bool MCAsmStreamer::EmitDwarfFileDirective(unsigned FileNo, StringRef Directory,
     return EmitDwarfFileDirective(FileNo, "", FullPathName, CUID);
   }
 
-  if (UseLoc) {
-    OS << "\t.file\t" << FileNo << ' ';
-    if (!Directory.empty()) {
-      PrintQuotedString(Directory, OS);
-      OS << ' ';
-    }
-    PrintQuotedString(Filename, OS);
-    EmitEOL();
-    // All .file will belong to a single CUID.
-    CUID = 0;
+  OS << "\t.file\t" << FileNo << ' ';
+  if (!Directory.empty()) {
+    PrintQuotedString(Directory, OS);
+    OS << ' ';
   }
+  PrintQuotedString(Filename, OS);
+  EmitEOL();
+  // All .file will belong to a single CUID.
+  CUID = 0;
+
   return this->MCStreamer::EmitDwarfFileDirective(FileNo, Directory, Filename,
                                                   CUID);
 }
@@ -865,9 +883,6 @@ void MCAsmStreamer::EmitDwarfLocDirective(unsigned FileNo, unsigned Line,
                                           StringRef FileName) {
   this->MCStreamer::EmitDwarfLocDirective(FileNo, Line, Column, Flags,
                                           Isa, Discriminator, FileName);
-  if (!UseLoc)
-    return;
-
   OS << "\t.loc\t" << FileNo << " " << Line << " " << Column;
   if (Flags & DWARF2_FLAG_BASIC_BLOCK)
     OS << " basic_block";
@@ -1372,27 +1387,20 @@ void MCAsmStreamer::EmitRawTextImpl(StringRef String) {
 }
 
 void MCAsmStreamer::FinishImpl() {
-  // FIXME: This header is duplicated with MCObjectStreamer
-  // Dump out the dwarf file & directory tables and line tables.
-  const MCSymbol *LineSectionSymbol = NULL;
-  if (getContext().hasDwarfFiles() && !UseLoc)
-    LineSectionSymbol = MCDwarfFileTable::Emit(this);
-
   // If we are generating dwarf for assembly source files dump out the sections.
   if (getContext().getGenDwarfForAssembly())
-    MCGenDwarfInfo::Emit(this, LineSectionSymbol);
+    MCGenDwarfInfo::Emit(this, NULL);
 
   if (!UseCFI)
     EmitFrames(AsmBackend.get(), false);
 }
 
 MCStreamer *llvm::createAsmStreamer(MCContext &Context,
-                                    MCTargetStreamer *TargetStreamer,
                                     formatted_raw_ostream &OS,
-                                    bool isVerboseAsm, bool useLoc, bool useCFI,
+                                    bool isVerboseAsm, bool useCFI,
                                     bool useDwarfDirectory, MCInstPrinter *IP,
                                     MCCodeEmitter *CE, MCAsmBackend *MAB,
                                     bool ShowInst) {
-  return new MCAsmStreamer(Context, TargetStreamer, OS, isVerboseAsm, useLoc,
-                           useCFI, useDwarfDirectory, IP, CE, MAB, ShowInst);
+  return new MCAsmStreamer(Context, OS, isVerboseAsm, useCFI, useDwarfDirectory,
+                           IP, CE, MAB, ShowInst);
 }

@@ -53,7 +53,7 @@ static llvm::Constant *buildCopyHelper(CodeGenModule &CGM,
   return CodeGenFunction(CGM).GenerateCopyHelperFunction(blockInfo);
 }
 
-/// Build the helper function to dipose of a block.
+/// Build the helper function to dispose of a block.
 static llvm::Constant *buildDisposeHelper(CodeGenModule &CGM,
                                           const CGBlockInfo &blockInfo) {
   return CodeGenFunction(CGM).GenerateDestroyHelperFunction(blockInfo);
@@ -1123,10 +1123,9 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
 
   // Create the function declaration.
   const FunctionProtoType *fnType = blockInfo.getBlockExpr()->getFunctionType();
-  const CGFunctionInfo &fnInfo =
-    CGM.getTypes().arrangeFunctionDeclaration(fnType->getResultType(), args,
-                                              fnType->getExtInfo(),
-                                              fnType->isVariadic());
+  const CGFunctionInfo &fnInfo = CGM.getTypes().arrangeFreeFunctionDeclaration(
+      fnType->getReturnType(), args, fnType->getExtInfo(),
+      fnType->isVariadic());
   if (CGM.ReturnSlotInterferesWithArgs(fnInfo))
     blockInfo.UsesStret = true;
 
@@ -1140,7 +1139,8 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
   CGM.SetInternalFunctionAttributes(blockDecl, fn, fnInfo);
 
   // Begin generating the function.
-  StartFunction(blockDecl, fnType->getResultType(), fn, fnInfo, args,
+  StartFunction(blockDecl, fnType->getReturnType(), fn, fnInfo, args,
+                blockDecl->getLocation(),
                 blockInfo.getBlockExpr()->getBody()->getLocStart());
 
   // Okay.  Undo some of what StartFunction did.
@@ -1201,8 +1201,14 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
 
   if (IsLambdaConversionToBlock)
     EmitLambdaBlockInvokeBody();
-  else
+  else {
+    PGO.assignRegionCounters(blockDecl, fn);
+    RegionCounter Cnt = getPGORegionCounter(blockDecl->getBody());
+    Cnt.beginRegion(Builder);
     EmitStmt(blockDecl->getBody());
+    PGO.emitInstrumentationData();
+    PGO.destroyRegionCounters();
+  }
 
   // Remember where we were...
   llvm::BasicBlock *resume = Builder.GetInsertBlock();
@@ -1285,10 +1291,8 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
   ImplicitParamDecl srcDecl(0, SourceLocation(), 0, C.VoidPtrTy);
   args.push_back(&srcDecl);
 
-  const CGFunctionInfo &FI =
-    CGM.getTypes().arrangeFunctionDeclaration(C.VoidTy, args,
-                                              FunctionType::ExtInfo(),
-                                              /*variadic*/ false);
+  const CGFunctionInfo &FI = CGM.getTypes().arrangeFreeFunctionDeclaration(
+      C.VoidTy, args, FunctionType::ExtInfo(), /*variadic=*/false);
 
   // FIXME: it would be nice if these were mergeable with things with
   // identical semantics.
@@ -1310,7 +1314,7 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
                                           false);
   // Create a scope with an artificial location for the body of this function.
   ArtificialLocation AL(*this, Builder);
-  StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
+  StartFunction(FD, C.VoidTy, Fn, FI, args);
   AL.Emit();
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
@@ -1460,10 +1464,8 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
   ImplicitParamDecl srcDecl(0, SourceLocation(), 0, C.VoidPtrTy);
   args.push_back(&srcDecl);
 
-  const CGFunctionInfo &FI =
-    CGM.getTypes().arrangeFunctionDeclaration(C.VoidTy, args,
-                                              FunctionType::ExtInfo(),
-                                              /*variadic*/ false);
+  const CGFunctionInfo &FI = CGM.getTypes().arrangeFreeFunctionDeclaration(
+      C.VoidTy, args, FunctionType::ExtInfo(), /*variadic=*/false);
 
   // FIXME: We'd like to put these into a mergable by content, with
   // internal linkage.
@@ -1483,7 +1485,7 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
                                           false, false);
   // Create a scope with an artificial location for the body of this function.
   ArtificialLocation AL(*this, Builder);
-  StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
+  StartFunction(FD, C.VoidTy, Fn, FI, args);
   AL.Emit();
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
@@ -1751,10 +1753,8 @@ generateByrefCopyHelper(CodeGenFunction &CGF,
   ImplicitParamDecl src(0, SourceLocation(), 0, Context.VoidPtrTy);
   args.push_back(&src);
 
-  const CGFunctionInfo &FI =
-    CGF.CGM.getTypes().arrangeFunctionDeclaration(R, args,
-                                                  FunctionType::ExtInfo(),
-                                                  /*variadic*/ false);
+  const CGFunctionInfo &FI = CGF.CGM.getTypes().arrangeFreeFunctionDeclaration(
+      R, args, FunctionType::ExtInfo(), /*variadic=*/false);
 
   CodeGenTypes &Types = CGF.CGM.getTypes();
   llvm::FunctionType *LTy = Types.GetFunctionType(FI);
@@ -1775,7 +1775,7 @@ generateByrefCopyHelper(CodeGenFunction &CGF,
                                           SC_Static,
                                           false, false);
 
-  CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
+  CGF.StartFunction(FD, R, Fn, FI, args);
 
   if (byrefInfo.needsCopy()) {
     llvm::Type *byrefPtrType = byrefType.getPointerTo(0);
@@ -1822,10 +1822,8 @@ generateByrefDisposeHelper(CodeGenFunction &CGF,
   ImplicitParamDecl src(0, SourceLocation(), 0, Context.VoidPtrTy);
   args.push_back(&src);
 
-  const CGFunctionInfo &FI =
-    CGF.CGM.getTypes().arrangeFunctionDeclaration(R, args,
-                                                  FunctionType::ExtInfo(),
-                                                  /*variadic*/ false);
+  const CGFunctionInfo &FI = CGF.CGM.getTypes().arrangeFreeFunctionDeclaration(
+      R, args, FunctionType::ExtInfo(), /*variadic=*/false);
 
   CodeGenTypes &Types = CGF.CGM.getTypes();
   llvm::FunctionType *LTy = Types.GetFunctionType(FI);
@@ -1846,7 +1844,7 @@ generateByrefDisposeHelper(CodeGenFunction &CGF,
                                           SourceLocation(), II, R, 0,
                                           SC_Static,
                                           false, false);
-  CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
+  CGF.StartFunction(FD, R, Fn, FI, args);
 
   if (byrefInfo.needsDispose()) {
     llvm::Value *V = CGF.GetAddrOfLocalVar(&src);

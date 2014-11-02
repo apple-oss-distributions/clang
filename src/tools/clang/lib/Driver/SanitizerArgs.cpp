@@ -7,7 +7,6 @@
 //
 //===----------------------------------------------------------------------===//
 #include "clang/Driver/SanitizerArgs.h"
-
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
@@ -123,7 +122,7 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
     D.Diag(diag::err_drv_argument_not_allowed_with)
       << lastArgumentForKind(D, Args, NeedsLeakDetection)
       << lastArgumentForKind(D, Args, NeedsMsanRt);
-  // FIXME: Currenly -fsanitize=leak is silently ignored in the presence of
+  // FIXME: Currently -fsanitize=leak is silently ignored in the presence of
   // -fsanitize=address. Perhaps it should print an error, or perhaps
   // -f(-no)sanitize=leak should change whether leak detection is enabled by
   // default in ASan?
@@ -169,22 +168,9 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
       Args.hasFlag(options::OPT_fsanitize_memory_track_origins,
                    options::OPT_fno_sanitize_memory_track_origins,
                    /* Default */false);
-
-  // Parse -f(no-)sanitize-address-zero-base-shadow options.
-  if (NeedsAsan) {
-    bool IsAndroid = (TC.getTriple().getEnvironment() == llvm::Triple::Android);
-    bool ZeroBaseShadowDefault = IsAndroid;
+  if (NeedsAsan)
     AsanZeroBaseShadow =
-        Args.hasFlag(options::OPT_fsanitize_address_zero_base_shadow,
-                     options::OPT_fno_sanitize_address_zero_base_shadow,
-                     ZeroBaseShadowDefault);
-    // Zero-base shadow is a requirement on Android.
-    if (IsAndroid && !AsanZeroBaseShadow) {
-      D.Diag(diag::err_drv_argument_not_allowed_with)
-          << "-fno-sanitize-address-zero-base-shadow"
-          << lastArgumentForKind(D, Args, Address);
-    }
-  }
+        (TC.getTriple().getEnvironment() == llvm::Triple::Android);
 }
 
 void SanitizerArgs::addArgs(const llvm::opt::ArgList &Args,
@@ -206,10 +192,6 @@ void SanitizerArgs::addArgs(const llvm::opt::ArgList &Args,
 
   if (MsanTrackOrigins)
     CmdArgs.push_back(Args.MakeArgString("-fsanitize-memory-track-origins"));
-
-  if (AsanZeroBaseShadow)
-    CmdArgs.push_back(
-        Args.MakeArgString("-fsanitize-address-zero-base-shadow"));
 
   // Workaround for PR16386.
   if (needsMsanRt())
@@ -237,7 +219,7 @@ static bool allowedOpt(const char *Value) {
     .Cases("float-divide-by-zero", "integer-divide-by-zero", true)
     .Cases("null", "object-size", "return", "shift", true)
     .Cases("signed-integer-overflow", "unreachable", "vla-bound", true)
-    .Cases("vptr", "bool", "enum", "undefined", true)
+    .Cases("bool", "enum", "undefined-trap", true)
     .Default(false);
 }
 
@@ -290,14 +272,21 @@ unsigned SanitizerArgs::filterUnsupportedKinds(const ToolChain &TC,
 }
 
 unsigned SanitizerArgs::parse(const Driver &D, const llvm::opt::Arg *A,
-                              bool DiagnoseErrors) {
+                              bool DiagnoseErrors,
+                              bool HasSanitizeUndefinedTrapOnError) {
   unsigned Kind = 0;
   for (unsigned I = 0, N = A->getNumValues(); I != N; ++I) {
     if (unsigned K = parse(A->getValue(I))) {
       Kind |= K;
-        if (DiagnoseErrors && !allowedOpt(A->getValue(I)))
+      if (DiagnoseErrors) {
+        if (!allowedOpt(A->getValue(I)))
           D.Diag(diag::err_drv_unsupported_option_argument)
             << A->getOption().getName() << A->getValue(I);
+        else if (!HasSanitizeUndefinedTrapOnError)
+          D.Diag(diag::err_drv_required_option)
+            << "-fsanitize-undefined-trap-on-error"
+            << std::string("-fsanitize=") + A->getValue(I);
+      }
     } else if (DiagnoseErrors)
       D.Diag(diag::err_drv_unsupported_option_argument)
         << A->getOption().getName() << A->getValue(I);
@@ -332,9 +321,15 @@ bool SanitizerArgs::parse(const Driver &D, const llvm::opt::ArgList &Args,
     Add = LocalBounds;
     DeprecatedReplacement = "-fsanitize=local-bounds";
   } else if (A->getOption().matches(options::OPT_fsanitize_EQ)) {
-    Add = parse(D, A, DiagnoseErrors);
+    bool HasSanitizeUndefinedTrapOnError =
+      Args.hasFlag(options::OPT_fsanitize_undefined_trap_on_error,
+                   options::OPT_fno_sanitize_undefined_trap_on_error, false);
+    Add = parse(D, A, DiagnoseErrors, HasSanitizeUndefinedTrapOnError);
   } else if (A->getOption().matches(options::OPT_fno_sanitize_EQ)) {
-    Remove = parse(D, A, DiagnoseErrors);
+    // If we're removing an option, then we don't require the
+    // -fsanitize-undefined-trap-on-error flag.
+    Remove = parse(D, A, DiagnoseErrors,
+                   /*HasSanitizeUndefinedTrapOnError=*/true);
   } else {
     // Flag is not relevant to sanitizers.
     return false;

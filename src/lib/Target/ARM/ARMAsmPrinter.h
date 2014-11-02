@@ -103,7 +103,7 @@ public:
 
   virtual unsigned getISAEncoding() LLVM_OVERRIDE {
     // ARM/Darwin adds ISA to the DWARF info for each function.
-    if (!Subtarget->isTargetDarwin())
+    if (!Subtarget->isTargetMachO())
       return 0;
     return Subtarget->isThumb() ?
       ARM::DW_ISA_ARM_thumb : ARM::DW_ISA_ARM_arm;
@@ -115,7 +115,7 @@ private:
 
   MCSymbol *GetARMSJLJEHLabel() const;
 
-  MCSymbol *GetARMGVSymbol(const GlobalValue *GV);
+  MCSymbol *GetARMGVSymbol(const GlobalValue *GV, unsigned char TargetFlags);
 
 public:
   /// EmitMachineConstantPoolValue - Print a machine constantpool value to

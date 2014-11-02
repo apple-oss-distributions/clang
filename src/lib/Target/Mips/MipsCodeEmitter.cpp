@@ -24,8 +24,8 @@
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
-#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/Passes.h"
@@ -112,8 +112,10 @@ private:
   unsigned getBranchTargetOpValue(const MachineInstr &MI, unsigned OpNo) const;
   unsigned getMemEncoding(const MachineInstr &MI, unsigned OpNo) const;
   unsigned getMemEncodingMMImm12(const MachineInstr &MI, unsigned OpNo) const;
+  unsigned getMSAMemEncoding(const MachineInstr &MI, unsigned OpNo) const;
   unsigned getSizeExtEncoding(const MachineInstr &MI, unsigned OpNo) const;
   unsigned getSizeInsEncoding(const MachineInstr &MI, unsigned OpNo) const;
+  unsigned getLSAImmEncoding(const MachineInstr &MI, unsigned OpNo) const;
 
   void emitGlobalAddressUnaligned(const GlobalValue *GV, unsigned Reloc,
                                   int Offset) const;
@@ -223,6 +225,12 @@ unsigned MipsCodeEmitter::getMemEncodingMMImm12(const MachineInstr &MI,
   return 0;
 }
 
+unsigned MipsCodeEmitter::getMSAMemEncoding(const MachineInstr &MI,
+                                            unsigned OpNo) const {
+  llvm_unreachable("Unimplemented function.");
+  return 0;
+}
+
 unsigned MipsCodeEmitter::getSizeExtEncoding(const MachineInstr &MI,
                                              unsigned OpNo) const {
   // size is encoded as size-1.
@@ -234,6 +242,12 @@ unsigned MipsCodeEmitter::getSizeInsEncoding(const MachineInstr &MI,
   // size is encoded as pos+size-1.
   return getMachineOpValue(MI, MI.getOperand(OpNo-1)) +
          getMachineOpValue(MI, MI.getOperand(OpNo)) - 1;
+}
+
+unsigned MipsCodeEmitter::getLSAImmEncoding(const MachineInstr &MI,
+                                            unsigned OpNo) const {
+  llvm_unreachable("Unimplemented function.");
+  return 0;
 }
 
 /// getMachineOpValue - Return binary encoding of operand. If the machine

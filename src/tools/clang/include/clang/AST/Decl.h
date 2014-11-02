@@ -110,7 +110,7 @@ class NamedDecl : public Decl {
   DeclarationName Name;
 
 private:
-  NamedDecl *getUnderlyingDeclImpl();
+  NamedDecl *getUnderlyingDeclImpl() LLVM_READONLY;
 
 protected:
   NamedDecl(Kind DK, DeclContext *DC, SourceLocation L, DeclarationName N)
@@ -161,9 +161,8 @@ public:
   void printQualifiedName(raw_ostream &OS) const;
   void printQualifiedName(raw_ostream &OS, const PrintingPolicy &Policy) const;
 
-  // FIXME: Remove string versions.
+  // FIXME: Remove string version.
   std::string getQualifiedNameAsString() const;
-  std::string getQualifiedNameAsString(const PrintingPolicy &Policy) const;
 
   /// getNameForDiagnostic - Appends a human-readable name for this
   /// declaration into the given stream.
@@ -343,8 +342,6 @@ public:
 class NamespaceDecl : public NamedDecl, public DeclContext, 
                       public Redeclarable<NamespaceDecl> 
 {
-  virtual void anchor();
-
   /// LocStart - The starting location of the source range, pointing
   /// to either the namespace or the inline keyword.
   SourceLocation LocStart;
@@ -360,18 +357,12 @@ class NamespaceDecl : public NamedDecl, public DeclContext,
   NamespaceDecl(DeclContext *DC, bool Inline, SourceLocation StartLoc,
                 SourceLocation IdLoc, IdentifierInfo *Id,
                 NamespaceDecl *PrevDecl);
-  
+
   typedef Redeclarable<NamespaceDecl> redeclarable_base;
-  virtual NamespaceDecl *getNextRedeclaration() {
-    return RedeclLink.getNext();
-  }
-  virtual NamespaceDecl *getPreviousDeclImpl() {
-    return getPreviousDecl();
-  }
-  virtual NamespaceDecl *getMostRecentDeclImpl() {
-    return getMostRecentDecl();
-  }
-  
+  virtual NamespaceDecl *getNextRedeclaration();
+  virtual NamespaceDecl *getPreviousDeclImpl();
+  virtual NamespaceDecl *getMostRecentDeclImpl();
+
 public:
   static NamespaceDecl *Create(ASTContext &C, DeclContext *DC,
                                bool Inline, SourceLocation StartLoc,
@@ -1870,6 +1861,12 @@ public:
     setParams(getASTContext(), NewParamInfo);
   }
 
+  // ArrayRef iterface to parameters.
+  // FIXME: Should one day replace iterator interface.
+  ArrayRef<ParmVarDecl*> parameters() const {
+    return llvm::makeArrayRef(ParamInfo, getNumParams());
+  }
+
   const ArrayRef<NamedDecl *> &getDeclsInPrototypeScope() const {
     return DeclsInPrototypeScope;
   }
@@ -1881,8 +1878,8 @@ public:
   /// arguments (in C++).
   unsigned getMinRequiredArguments() const;
 
-  QualType getResultType() const {
-    return getType()->getAs<FunctionType>()->getResultType();
+  QualType getReturnType() const {
+    return getType()->getAs<FunctionType>()->getReturnType();
   }
 
   /// \brief Determine the type of an expression that calls this function.
@@ -2898,26 +2895,31 @@ public:
   void setPromotionType(QualType T) { PromotionType = T; }
 
   /// getIntegerType - Return the integer type this enum decl corresponds to.
-  /// This returns a null qualtype for an enum forward definition.
+  /// This returns a null QualType for an enum forward definition with no fixed
+  /// underlying type.
   QualType getIntegerType() const {
     if (!IntegerType)
       return QualType();
-    if (const Type* T = IntegerType.dyn_cast<const Type*>())
+    if (const Type *T = IntegerType.dyn_cast<const Type*>())
       return QualType(T, 0);
-    return IntegerType.get<TypeSourceInfo*>()->getType();
+    return IntegerType.get<TypeSourceInfo*>()->getType().getUnqualifiedType();
   }
 
   /// \brief Set the underlying integer type.
   void setIntegerType(QualType T) { IntegerType = T.getTypePtrOrNull(); }
 
   /// \brief Set the underlying integer type source info.
-  void setIntegerTypeSourceInfo(TypeSourceInfo* TInfo) { IntegerType = TInfo; }
+  void setIntegerTypeSourceInfo(TypeSourceInfo *TInfo) { IntegerType = TInfo; }
 
   /// \brief Return the type source info for the underlying integer type,
   /// if no type source info exists, return 0.
-  TypeSourceInfo* getIntegerTypeSourceInfo() const {
+  TypeSourceInfo *getIntegerTypeSourceInfo() const {
     return IntegerType.dyn_cast<TypeSourceInfo*>();
   }
+
+  /// \brief Retrieve the source range that covers the underlying type if
+  /// specified.
+  SourceRange getIntegerTypeRange() const LLVM_READONLY;
 
   /// \brief Returns the width in bits required to store all the
   /// non-negative enumerators of this enum.
@@ -3271,6 +3273,12 @@ public:
   unsigned param_size() const { return getNumParams(); }
   typedef ParmVarDecl **param_iterator;
   typedef ParmVarDecl * const *param_const_iterator;
+
+  // ArrayRef access to formal parameters.
+  // FIXME: Should eventual replace iterator access.
+  ArrayRef<ParmVarDecl*> parameters() const {
+    return llvm::makeArrayRef(ParamInfo, param_size());
+  }
 
   bool param_empty() const { return NumParams == 0; }
   param_iterator param_begin()  { return ParamInfo; }

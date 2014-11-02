@@ -204,7 +204,7 @@ if(APPLE)
   set(DARWIN_iossim_LINKFLAGS
     -Wl,-ios_simulator_version_min,7.0.0
     -mios-simulator-version-min=7.0
-    -Wl,-syslibroot,${IOSSIM_SDK_DIR})
+    -isysroot ${IOSSIM_SDK_DIR})
 endif()
 
 # Architectures supported by Sanitizer runtimes. Specific sanitizers may
@@ -212,8 +212,6 @@ endif()
 filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
   x86_64 i386 powerpc64)
 
-# Add the public header's directory to the includes for all of compiler-rt.
-include_directories(include)
 add_subdirectory(include)
 
 set(SANITIZER_COMMON_LIT_TEST_DEPS

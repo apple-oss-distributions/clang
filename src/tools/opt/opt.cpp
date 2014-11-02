@@ -12,20 +12,22 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/IR/LLVMContext.h"
+#include "NewPMDriver.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/RegionPass.h"
-#include "llvm/Analysis/Verifier.h"
-#include "llvm/Assembly/PrintModulePass.h"
-#include "llvm/Bitcode/ReaderWriter.h"
+#include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/DebugInfo.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/IRPrintingPasses.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/LinkAllIR.h"
 #include "llvm/LinkAllPasses.h"
@@ -48,12 +50,22 @@
 #include <algorithm>
 #include <memory>
 using namespace llvm;
+using namespace opt_tool;
 
 // The OptimizationList is automatically populated with registered Passes by the
 // PassNameParser.
 //
 static cl::list<const PassInfo*, bool, PassNameParser>
 PassList(cl::desc("Optimizations available:"));
+
+// This flag specifies a textual description of the optimization pass pipeline
+// to run over the module. This flag switches opt to use the new pass manager
+// infrastructure, completely disabling all of the flags specific to the old
+// pass management.
+static cl::opt<std::string> PassPipeline(
+    "passes",
+    cl::desc("A textual description of the pass pipeline for optimizing"),
+    cl::Hidden);
 
 // Other command line options...
 //
@@ -139,6 +151,16 @@ static cl::opt<bool>
 DisableLoopUnrolling("disable-loop-unrolling",
                      cl::desc("Disable loop unrolling in all relevant passes"),
                      cl::init(false));
+static cl::opt<bool>
+DisableLoopVectorization("disable-loop-vectorization",
+                     cl::desc("Disable the loop vectorization pass"),
+                     cl::init(false));
+
+static cl::opt<bool>
+DisableSLPVectorization("disable-slp-vectorization",
+                        cl::desc("Disable the slp vectorization pass"),
+                        cl::init(false));
+
 
 static cl::opt<bool>
 DisableSimplifyLibCalls("disable-simplify-libcalls",
@@ -427,7 +449,10 @@ static inline void addPass(PassManagerBase &PM, Pass *P) {
   PM.add(P);
 
   // If we are verifying all of the intermediate steps, add the verifier...
-  if (VerifyEach) PM.add(createVerifierPass());
+  if (VerifyEach) {
+    PM.add(createVerifierPass());
+    PM.add(createDebugInfoVerifierPass());
+  }
 }
 
 /// AddOptimizationPasses - This routine adds optimization passes
@@ -437,7 +462,8 @@ static inline void addPass(PassManagerBase &PM, Pass *P) {
 /// OptLevel - Optimization Level
 static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
                                   unsigned OptLevel, unsigned SizeLevel) {
-  FPM.add(createVerifierPass());                  // Verify that input is correct
+  FPM.add(createVerifierPass());          // Verify that input is correct
+  MPM.add(createDebugInfoVerifierPass()); // Verify that debug info is correct
 
   PassManagerBuilder Builder;
   Builder.OptLevel = OptLevel;
@@ -461,8 +487,16 @@ static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
   Builder.DisableUnrollLoops = (DisableLoopUnrolling.getNumOccurrences() > 0) ?
                                DisableLoopUnrolling : OptLevel == 0;
 
-  Builder.LoopVectorize = OptLevel > 1 && SizeLevel < 2;
-  Builder.SLPVectorize = true;
+  // This is final, unless there is a #pragma vectorize enable
+  if (DisableLoopVectorization)
+    Builder.LoopVectorize = false;
+  // If option wasn't forced via cmd line (-vectorize-loops, -loop-vectorize)
+  else if (!Builder.LoopVectorize)
+    Builder.LoopVectorize = OptLevel > 1 && SizeLevel < 2;
+
+  // When #pragma vectorize is on for SLP, do the same as above
+  Builder.SLPVectorize =
+      DisableSLPVectorization ? false : OptLevel > 1 && SizeLevel < 2;
 
   Builder.populateFunctionPassManager(FPM);
   Builder.populateModulePassManager(MPM);
@@ -474,6 +508,9 @@ static void AddStandardCompilePasses(PassManagerBase &PM) {
   // If the -strip-debug command line option was specified, do it.
   if (StripDebug)
     addPass(PM, createStripSymbolsPass(true));
+
+  // Verify debug info only after it's (possibly) stripped.
+  PM.add(createDebugInfoVerifierPass());
 
   if (DisableOptimizations) return;
 
@@ -491,6 +528,9 @@ static void AddStandardLinkPasses(PassManagerBase &PM) {
   // If the -strip-debug command line option was specified, do it.
   if (StripDebug)
     addPass(PM, createStripSymbolsPass(true));
+
+  // Verify debug info only after it's (possibly) stripped.
+  PM.add(createDebugInfoVerifierPass());
 
   if (DisableOptimizations) return;
 
@@ -591,6 +631,9 @@ int main(int argc, char **argv) {
   initializeInstCombine(Registry);
   initializeInstrumentation(Registry);
   initializeTarget(Registry);
+  // For codegen passes, only passes that do IR to IR transformation are
+  // supported. For now, just add CodeGenPrepare.
+  initializeCodeGenPreparePass(Registry);
 
   cl::ParseCommandLineOptions(argc, argv,
     "llvm .bc -> .bc modular optimizer and analysis printer\n");
@@ -641,6 +684,26 @@ int main(int argc, char **argv) {
   if (!Force && !NoOutput && !AnalyzeOnly && !OutputAssembly)
     if (CheckBitcodeOutputToConsole(Out->os(), !Quiet))
       NoOutput = true;
+
+  if (PassPipeline.getNumOccurrences() > 0) {
+    OutputKind OK = OK_NoOutput;
+    if (!NoOutput)
+      OK = OutputAssembly ? OK_OutputAssembly : OK_OutputBitcode;
+
+    VerifierKind VK = VK_VerifyInAndOut;
+    if (NoVerify)
+      VK = VK_NoVerifier;
+    else if (VerifyEach)
+      VK = VK_VerifyEachPass;
+
+    // The user has asked to use the new pass manager and provided a pipeline
+    // string. Hand off the rest of the functionality to the new code for that
+    // layer.
+    return runPassPipeline(argv[0], Context, *M.get(), Out.get(), PassPipeline,
+                           OK, VK)
+               ? 0
+               : 1;
+  }
 
   // Create a PassManager to hold and optimize the collection of passes we are
   // about to build.
@@ -752,7 +815,9 @@ int main(int argc, char **argv) {
 
     const PassInfo *PassInf = PassList[i];
     Pass *P = 0;
-    if (PassInf->getNormalCtor())
+    if (PassInf->getTargetMachineCtor())
+      P = PassInf->getTargetMachineCtor()(TM.get());
+    else if (PassInf->getNormalCtor())
       P = PassInf->getNormalCtor()();
     else
       errs() << argv[0] << ": cannot create pass: "
@@ -786,7 +851,7 @@ int main(int argc, char **argv) {
     }
 
     if (PrintEachXForm)
-      Passes.add(createPrintModulePass(&errs()));
+      Passes.add(createPrintModulePass(errs()));
   }
 
   // If -std-compile-opts was specified at the end of the pass list, add them.
@@ -823,13 +888,15 @@ int main(int argc, char **argv) {
   }
 
   // Check that the module is well formed on completion of optimization
-  if (!NoVerify && !VerifyEach)
+  if (!NoVerify && !VerifyEach) {
     Passes.add(createVerifierPass());
+    Passes.add(createDebugInfoVerifierPass());
+  }
 
   // Write bitcode or assembly to the output as the last step...
   if (!NoOutput && !AnalyzeOnly) {
     if (OutputAssembly)
-      Passes.add(createPrintModulePass(&Out->os()));
+      Passes.add(createPrintModulePass(Out->os()));
     else
       Passes.add(createBitcodeWriterPass(Out->os()));
   }

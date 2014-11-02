@@ -15,6 +15,9 @@
 
 using namespace llvm;
 
+// Pin the vtable to this file.
+void HexagonMCAsmInfo::anchor() {}
+
 HexagonMCAsmInfo::HexagonMCAsmInfo(StringRef TT) {
   Data16bitsDirective = "\t.half\t";
   Data32bitsDirective = "\t.word\t";
@@ -23,7 +26,6 @@ HexagonMCAsmInfo::HexagonMCAsmInfo(StringRef TT) {
   CommentString = "//";
   HasLEB128 = true;
 
-  PrivateGlobalPrefix = ".L";
   LCOMMDirectiveAlignmentType = LCOMM::ByteAlignment;
   InlineAsmStart = "# InlineAsm Start";
   InlineAsmEnd = "# InlineAsm End";

@@ -49,22 +49,23 @@ public:
 
   virtual const MCSection *
   getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
-                           Mangler *Mang, const TargetMachine &TM) const;
+                           Mangler &Mang, const TargetMachine &TM) const;
 
   virtual const MCSection *
   SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
-                         Mangler *Mang, const TargetMachine &TM) const;
+                         Mangler &Mang, const TargetMachine &TM) const;
 
   /// getTTypeGlobalReference - Return an MCExpr to use for a reference to the
   /// specified type info global variable from exception handling information.
   virtual const MCExpr *
-  getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
-                          MachineModuleInfo *MMI, unsigned Encoding,
-                          MCStreamer &Streamer) const;
+  getTTypeGlobalReference(const GlobalValue *GV, unsigned Encoding,
+                          Mangler &Mang, const TargetMachine &TM,
+                          MachineModuleInfo *MMI, MCStreamer &Streamer) const;
 
   // getCFIPersonalitySymbol - The symbol that gets passed to .cfi_personality.
   virtual MCSymbol *
-  getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
+  getCFIPersonalitySymbol(const GlobalValue *GV, Mangler &Mang,
+                          const TargetMachine &TM,
                           MachineModuleInfo *MMI) const;
 
   void InitializeELF(bool UseInitArray_);
@@ -80,19 +81,26 @@ class TargetLoweringObjectFileMachO : public TargetLoweringObjectFile {
 public:
   virtual ~TargetLoweringObjectFileMachO() {}
 
+  /// getDepLibFromLinkerOpt - Extract the dependent library name from a linker
+  /// option string. Returns StringRef() if the option does not specify a library.
+  virtual StringRef getDepLibFromLinkerOpt(StringRef LinkerOption) const;
+
   /// emitModuleFlags - Emit the module flags that specify the garbage
   /// collection information.
   virtual void emitModuleFlags(MCStreamer &Streamer,
                                ArrayRef<Module::ModuleFlagEntry> ModuleFlags,
-                               Mangler *Mang, const TargetMachine &TM) const;
+                               Mangler &Mang, const TargetMachine &TM) const;
+
+  bool isSectionAtomizableBySymbols(const MCSection &Section) const
+      LLVM_OVERRIDE;
 
   virtual const MCSection *
   SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
-                         Mangler *Mang, const TargetMachine &TM) const;
+                         Mangler &Mang, const TargetMachine &TM) const;
 
   virtual const MCSection *
   getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
-                           Mangler *Mang, const TargetMachine &TM) const;
+                           Mangler &Mang, const TargetMachine &TM) const;
 
   virtual const MCSection *getSectionForConstant(SectionKind Kind) const;
 
@@ -100,18 +108,20 @@ public:
   /// decide not to emit the UsedDirective for some symbols in llvm.used.
   /// FIXME: REMOVE this (rdar://7071300)
   virtual bool shouldEmitUsedDirectiveFor(const GlobalValue *GV,
-                                          Mangler *) const;
+                                          Mangler &Mang,
+                                          const TargetMachine &TM) const;
 
   /// getTTypeGlobalReference - The mach-o version of this method
   /// defaults to returning a stub reference.
   virtual const MCExpr *
-  getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
-                          MachineModuleInfo *MMI, unsigned Encoding,
-                          MCStreamer &Streamer) const;
+  getTTypeGlobalReference(const GlobalValue *GV, unsigned Encoding,
+                          Mangler &Mang, const TargetMachine &TM,
+                          MachineModuleInfo *MMI, MCStreamer &Streamer) const;
 
   // getCFIPersonalitySymbol - The symbol that gets passed to .cfi_personality.
   virtual MCSymbol *
-  getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
+  getCFIPersonalitySymbol(const GlobalValue *GV, Mangler &Mang,
+                          const TargetMachine &TM,
                           MachineModuleInfo *MMI) const;
 };
 
@@ -123,17 +133,21 @@ public:
 
   virtual const MCSection *
   getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
-                           Mangler *Mang, const TargetMachine &TM) const;
+                           Mangler &Mang, const TargetMachine &TM) const;
 
   virtual const MCSection *
   SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
-                         Mangler *Mang, const TargetMachine &TM) const;
+                         Mangler &Mang, const TargetMachine &TM) const;
+
+  /// getDepLibFromLinkerOpt - Extract the dependent library name from a linker
+  /// option string. Returns StringRef() if the option does not specify a library.
+  virtual StringRef getDepLibFromLinkerOpt(StringRef LinkerOption) const;
 
   /// emitModuleFlags - Emit Obj-C garbage collection and linker options.  Only
   /// linker option emission is implemented for COFF.
   virtual void emitModuleFlags(MCStreamer &Streamer,
                                ArrayRef<Module::ModuleFlagEntry> ModuleFlags,
-                               Mangler *Mang, const TargetMachine &TM) const;
+                               Mangler &Mang, const TargetMachine &TM) const;
 };
 
 } // end namespace llvm

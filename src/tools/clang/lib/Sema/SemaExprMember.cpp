@@ -292,7 +292,7 @@ CheckExtVectorComponent(Sema &S, QualType baseType, ExprValueKind &VK,
 
   // This flag determines whether or not CompName has an 's' char prefix,
   // indicating that it is a string of hex values to be used as vector indices.
-  bool HexSwizzle = *compStr == 's' || *compStr == 'S';
+  bool HexSwizzle = (*compStr == 's' || *compStr == 'S') && compStr[1];
 
   bool HasRepeated = false;
   bool HasIndex[16] = {};
@@ -1628,8 +1628,7 @@ ExprResult Sema::ActOnMemberAccessExpr(Scope *S, Expr *Base,
   bool IsArrow = (OpKind == tok::arrow);
 
   NamedDecl *FirstQualifierInScope
-    = (!SS.isSet() ? 0 : FindFirstQualifierInScope(S,
-                       static_cast<NestedNameSpecifier*>(SS.getScopeRep())));
+    = (!SS.isSet() ? 0 : FindFirstQualifierInScope(S, SS.getScopeRep()));
 
   // This is a postfix expression, so get rid of ParenListExprs.
   ExprResult Result = MaybeConvertParenListExprToParenExpr(S, Base);
@@ -1753,14 +1752,7 @@ Sema::BuildImplicitMemberExpr(const CXXScopeSpec &SS,
   assert(!R.empty() && !R.isAmbiguous());
   
   SourceLocation loc = R.getNameLoc();
-  
-  // We may have found a field within an anonymous union or struct
-  // (C++ [class.union]).
-  // FIXME: template-ids inside anonymous structs?
-  if (IndirectFieldDecl *FD = R.getAsSingle<IndirectFieldDecl>())
-    return BuildAnonymousStructUnionMemberReference(SS, R.getNameLoc(), FD,
-                                                    R.begin().getPair());
-  
+
   // If this is known to be an instance access, go ahead and build an
   // implicit 'this' expression now.
   // 'this' expression now.

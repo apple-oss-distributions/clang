@@ -43,7 +43,7 @@ public:
 } // end anonymous namespace
 
 void NonNullParamChecker::checkPreCall(const CallEvent &Call,
-                                      CheckerContext &C) const {
+                                       CheckerContext &C) const {
   const Decl *FD = Call.getDecl();
   if (!FD)
     return;
@@ -66,6 +66,12 @@ void NonNullParamChecker::checkPreCall(const CallEvent &Call,
     }
 
     bool haveAttrNonNull = Att && Att->isNonNull(idx);
+    if (!haveAttrNonNull) {
+      // Check if the parameter is also marked 'nonnull'.
+      ArrayRef<ParmVarDecl*> parms = Call.parameters();
+      if (idx < parms.size())
+        haveAttrNonNull = parms[idx]->hasAttr<NonNullAttr>();
+    }
 
     if (!haveRefTypeParam && !haveAttrNonNull)
       continue;
@@ -98,7 +104,9 @@ void NonNullParamChecker::checkPreCall(const CallEvent &Call,
         V = *CSV_I;
         DV = V.getAs<DefinedSVal>();
         assert(++CSV_I == CSV->end());
-        if (!DV)
+        // FIXME: Handle (some_union){ some_other_union_val }, which turns into
+        // a LazyCompoundVal inside a CompoundVal.
+        if (!V.getAs<Loc>())
           continue;
         // Retrieve the corresponding expression.
         if (const CompoundLiteralExpr *CE = dyn_cast<CompoundLiteralExpr>(ArgE))

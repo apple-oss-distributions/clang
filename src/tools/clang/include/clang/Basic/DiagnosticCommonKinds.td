@@ -30,7 +30,7 @@ def note_type_being_defined : Note<
   "definition of %0 is not complete until the closing '}'">;
 /// note_matching - this is used as a continuation of a previous diagnostic,
 /// e.g. to specify the '(' when we expected a ')'.
-def note_matching : Note<"to match this '%0'">;
+def note_matching : Note<"to match this %0">;
 
 def note_using : Note<"using">;
 def note_possibility : Note<"one possibility">;
@@ -40,7 +40,6 @@ def note_also_found : Note<"also found">;
 
 let CategoryName = "Lexical or Preprocessor Issue" in {
 
-def err_expected_colon : Error<"expected ':'">;
 def err_expected_colon_after_setter_name : Error<
   "method name referenced in property setter attribute "
   "must end with ':'">;
@@ -59,6 +58,10 @@ def err_invalid_numeric_udl : Error<
 // Parse && Sema
 
 let CategoryName = "Parse Issue" in {
+
+def err_expected : Error<"expected %0">;
+def err_expected_either : Error<"expected %0 or %1">;
+def err_expected_after : Error<"expected %1 after %0">;
 
 def err_param_redefinition : Error<"redefinition of parameter %0">;
 def warn_method_param_redefinition : Warning<"redefinition of method parameter %0">;
@@ -114,7 +117,6 @@ def err_target_unknown_triple : Error<
   "unknown target triple '%0', please use -triple or -arch">;
 def err_target_unknown_cpu : Error<"unknown target CPU '%0'">;
 def err_target_unknown_abi : Error<"unknown target ABI '%0'">;
-def err_target_unknown_cxxabi : Error<"unknown C++ ABI '%0'">;
 def err_target_unknown_fpmath : Error<"unknown FP unit '%0'">;
 def err_target_unsupported_fpmath : Error<
     "the '%0' unit is not supported with this instruction set">;

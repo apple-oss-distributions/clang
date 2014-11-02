@@ -29,11 +29,13 @@ namespace llvm {
   class MCSymbol;
   class MCSymbolRefExpr;
   class MCStreamer;
+  class ConstantExpr;
   class GlobalValue;
   class TargetMachine;
   
 class TargetLoweringObjectFile : public MCObjectFileInfo {
   MCContext *Ctx;
+  const DataLayout *DL;
 
   TargetLoweringObjectFile(
     const TargetLoweringObjectFile&) LLVM_DELETED_FUNCTION;
@@ -42,7 +44,7 @@ class TargetLoweringObjectFile : public MCObjectFileInfo {
 public:
   MCContext &getContext() const { return *Ctx; }
 
-  TargetLoweringObjectFile() : MCObjectFileInfo(), Ctx(0) {}
+  TargetLoweringObjectFile() : MCObjectFileInfo(), Ctx(0), DL(0) {}
   
   virtual ~TargetLoweringObjectFile();
   
@@ -55,17 +57,23 @@ public:
                                     const TargetMachine &TM,
                                     const MCSymbol *Sym) const;
 
-  /// emitModuleFlags - Emit the module flags that the platform cares about.
-  virtual void emitModuleFlags(MCStreamer &,
-                               ArrayRef<Module::ModuleFlagEntry>,
-                               Mangler *, const TargetMachine &) const {
+  /// getDepLibFromLinkerOpt - Extract the dependent library name from a linker
+  /// option string. Returns StringRef() if the option does not specify a library.
+  virtual StringRef getDepLibFromLinkerOpt(StringRef LinkerOption) const {
+    return StringRef();
   }
+
+  /// emitModuleFlags - Emit the module flags that the platform cares about.
+  virtual void emitModuleFlags(MCStreamer &Streamer,
+                               ArrayRef<Module::ModuleFlagEntry> Flags,
+                               Mangler &Mang, const TargetMachine &TM) const {}
 
   /// shouldEmitUsedDirectiveFor - This hook allows targets to selectively
   /// decide not to emit the UsedDirective for some symbols in llvm.used.
   /// FIXME: REMOVE this (rdar://7071300)
   virtual bool shouldEmitUsedDirectiveFor(const GlobalValue *GV,
-                                          Mangler *) const {
+                                          Mangler &Mang,
+                                          const TargetMachine &TM) const {
     return GV != 0;
   }
   
@@ -82,14 +90,14 @@ public:
   /// the specified global variable or function definition.  This should not
   /// be passed external (or available externally) globals.
   const MCSection *SectionForGlobal(const GlobalValue *GV,
-                                    SectionKind Kind, Mangler *Mang,
+                                    SectionKind Kind, Mangler &Mang,
                                     const TargetMachine &TM) const;
   
   /// SectionForGlobal - This method computes the appropriate section to emit
   /// the specified global variable or function definition.  This should not
   /// be passed external (or available externally) globals.
   const MCSection *SectionForGlobal(const GlobalValue *GV,
-                                    Mangler *Mang,
+                                    Mangler &Mang,
                                     const TargetMachine &TM) const {
     return SectionForGlobal(GV, getKindForGlobal(GV, TM), Mang, TM);
   }
@@ -99,13 +107,13 @@ public:
   /// implementation of this method can assume that GV->hasSection() is true.
   virtual const MCSection *
   getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind, 
-                           Mangler *Mang, const TargetMachine &TM) const = 0;
+                           Mangler &Mang, const TargetMachine &TM) const = 0;
   
   /// getSpecialCasedSectionGlobals - Allow the target to completely override
   /// section assignment of a global.
-  virtual const MCSection *
-  getSpecialCasedSectionGlobals(const GlobalValue *GV, Mangler *Mang,
-                                SectionKind Kind) const {
+  virtual const MCSection *getSpecialCasedSectionGlobals(const GlobalValue *GV,
+                                                         SectionKind Kind,
+                                                         Mangler &Mang) const {
     return 0;
   }
   
@@ -113,17 +121,20 @@ public:
   /// to the specified global variable from exception handling information.
   ///
   virtual const MCExpr *
-  getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
-                          MachineModuleInfo *MMI, unsigned Encoding,
-                          MCStreamer &Streamer) const;
+  getTTypeGlobalReference(const GlobalValue *GV, unsigned Encoding,
+                          Mangler &Mang, const TargetMachine &TM,
+                          MachineModuleInfo *MMI, MCStreamer &Streamer) const;
 
-  /// Return the MCSymbol for the specified global value.  This symbol is the
-  /// main label that is the address of the global
-  MCSymbol *getSymbol(Mangler &M, const GlobalValue *GV) const;
+  /// Return the MCSymbol for a private symbol with global value name as its
+  /// base, with the specified suffix.
+  MCSymbol *getSymbolWithGlobalValueBase(const GlobalValue *GV,
+                                         StringRef Suffix, Mangler &Mang,
+                                         const TargetMachine &TM) const;
 
   // getCFIPersonalitySymbol - The symbol that gets passed to .cfi_personality.
   virtual MCSymbol *
-  getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
+  getCFIPersonalitySymbol(const GlobalValue *GV, Mangler &Mang,
+                          const TargetMachine &TM,
                           MachineModuleInfo *MMI) const;
 
   /// 
@@ -146,10 +157,22 @@ public:
   /// emitting the address in debug info.
   virtual const MCExpr *getDebugThreadLocalSymbol(const MCSymbol *Sym) const;
 
+  virtual const MCExpr *
+  getExecutableRelativeSymbol(const ConstantExpr *CE, Mangler &Mang,
+                              const TargetMachine &TM) const {
+    return 0;
+  }
+
+  /// \brief True if the section is atomized using the symbols in it.
+  /// This is false if the section is not atomized at all (most ELF sections) or
+  /// if it is atomized based on its contents (MachO' __TEXT,__cstring for
+  /// example).
+  virtual bool isSectionAtomizableBySymbols(const MCSection &Section) const;
+
 protected:
   virtual const MCSection *
   SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
-                         Mangler *Mang, const TargetMachine &TM) const;
+                         Mangler &Mang, const TargetMachine &TM) const;
 };
 
 } // end namespace llvm

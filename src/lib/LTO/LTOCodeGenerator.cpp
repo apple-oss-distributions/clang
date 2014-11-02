@@ -13,10 +13,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/LTO/LTOCodeGenerator.h"
-#include "llvm/LTO/LTOModule.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/Passes.h"
-#include "llvm/Analysis/Verifier.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/CodeGen/RuntimeLibcalls.h"
 #include "llvm/Config/config.h"
@@ -26,8 +24,11 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/InitializePasses.h"
+#include "llvm/LTO/LTOModule.h"
 #include "llvm/Linker.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -48,7 +49,6 @@
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/Mangler.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/ObjCARC.h"
@@ -65,8 +65,7 @@ const char* LTOCodeGenerator::getVersionString() {
 LTOCodeGenerator::LTOCodeGenerator()
     : Context(getGlobalContext()), Linker(new Module("ld-temp.o", Context)),
       TargetMach(NULL), EmitDwarfDebugInfo(false), ScopeRestrictionsDone(false),
-      CodeModel(LTO_CODEGEN_PIC_MODEL_DYNAMIC),
-      InternalizeStrategy(LTO_INTERNALIZE_FULL), NativeObjectFile(NULL),
+      CodeModel(LTO_CODEGEN_PIC_MODEL_DYNAMIC), NativeObjectFile(NULL),
       DiagHandler(NULL), DiagContext(NULL) {
   initializeLTOPasses();
 }
@@ -87,8 +86,7 @@ LTOCodeGenerator::~LTOCodeGenerator() {
 
 // Initialize LTO passes. Please keep this funciton in sync with
 // PassManagerBuilder::populateLTOPassManager(), and make sure all LTO
-// passes are initialized. 
-//
+// passes are initialized.
 void LTOCodeGenerator::initializeLTOPasses() {
   PassRegistry &R = *PassRegistry::getPassRegistry();
 
@@ -170,18 +168,6 @@ void LTOCodeGenerator::setCodePICModel(lto_codegen_model model) {
   llvm_unreachable("Unknown PIC model!");
 }
 
-void
-LTOCodeGenerator::setInternalizeStrategy(lto_internalize_strategy Strategy) {
-  switch (Strategy) {
-  case LTO_INTERNALIZE_FULL:
-  case LTO_INTERNALIZE_NONE:
-  case LTO_INTERNALIZE_HIDDEN:
-    InternalizeStrategy = Strategy;
-    return;
-  }
-  llvm_unreachable("Unknown internalize strategy!");
-}
-
 bool LTOCodeGenerator::writeMergedModules(const char *path,
                                           std::string &errMsg) {
   if (!determineTarget(errMsg))
@@ -214,7 +200,7 @@ bool LTOCodeGenerator::writeMergedModules(const char *path,
   return true;
 }
 
-bool LTOCodeGenerator::compile_to_file(const char** name, 
+bool LTOCodeGenerator::compile_to_file(const char** name,
                                        bool disableOpt,
                                        bool disableInline,
                                        bool disableGVNLoadPRE,
@@ -338,11 +324,17 @@ applyRestriction(GlobalValue &GV,
                  std::vector<const char*> &MustPreserveList,
                  SmallPtrSet<GlobalValue*, 8> &AsmUsed,
                  Mangler &Mangler) {
-  SmallString<64> Buffer;
-  Mangler.getNameWithPrefix(Buffer, &GV, false);
-
+  // There are no restrictions to apply to declarations.
   if (GV.isDeclaration())
     return;
+
+  // There is nothing more restrictive than private linkage.
+  if (GV.hasPrivateLinkage())
+    return;
+
+  SmallString<64> Buffer;
+  TargetMach->getNameWithPrefix(Buffer, &GV, Mangler);
+
   if (MustPreserveSymbols.count(Buffer))
     MustPreserveList.push_back(GV.getName().data());
   if (AsmUndefinedRefs.count(Buffer))
@@ -397,16 +389,17 @@ static void accumulateAndSortLibcalls(std::vector<StringRef> &Libcalls,
 }
 
 void LTOCodeGenerator::applyScopeRestrictions() {
-  if (ScopeRestrictionsDone || !shouldInternalize())
+  if (ScopeRestrictionsDone)
     return;
   Module *mergedModule = Linker.getModule();
 
   // Start off with a verification pass.
   PassManager passes;
   passes.add(createVerifierPass());
+  passes.add(createDebugInfoVerifierPass());
 
   // mark which symbols can not be internalized
-  Mangler Mangler(TargetMach);
+  Mangler Mangler(TargetMach->getDataLayout());
   std::vector<const char*> MustPreserveList;
   SmallPtrSet<GlobalValue*, 8> AsmUsed;
   std::vector<StringRef> Libcalls;
@@ -449,8 +442,7 @@ void LTOCodeGenerator::applyScopeRestrictions() {
     LLVMCompilerUsed->setSection("llvm.metadata");
   }
 
-  passes.add(
-      createInternalizePass(MustPreserveList, shouldOnlyInternalizeHidden()));
+  passes.add(createInternalizePass(MustPreserveList));
 
   // apply scope restrictions
   passes.run(*mergedModule);
@@ -477,9 +469,14 @@ bool LTOCodeGenerator::generateObjectFile(raw_ostream &out,
 
   // Start off with a verification pass.
   passes.add(createVerifierPass());
+  passes.add(createDebugInfoVerifierPass());
 
   // Add an appropriate DataLayout instance for this module...
   passes.add(new DataLayout(*TargetMach->getDataLayout()));
+
+  // Add appropriate TargetLibraryInfo for this module.
+  passes.add(new TargetLibraryInfo(Triple(TargetMach->getTargetTriple())));
+
   TargetMach->addAnalysisPasses(passes);
 
   // Enabling internalize here would use its AllButMain variant. It
@@ -493,11 +490,11 @@ bool LTOCodeGenerator::generateObjectFile(raw_ostream &out,
 
   // Make sure everything is still good.
   passes.add(createVerifierPass());
+  passes.add(createDebugInfoVerifierPass());
 
   PassManager codeGenPasses;
 
   codeGenPasses.add(new DataLayout(*TargetMach->getDataLayout()));
-  TargetMach->addAnalysisPasses(codeGenPasses);
 
   formatted_raw_ostream Out(out);
 

@@ -23,19 +23,20 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/Analysis/Verifier.h"
-#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -442,7 +443,7 @@ private:
 
   /// \returns whether the VectorizableTree is fully vectoriable and will
   /// be beneficial even the tree height is tiny.
-  bool isFullyVectorizableTinyTree(); 
+  bool isFullyVectorizableTinyTree();
 
   struct TreeEntry {
     TreeEntry() : Scalars(), VectorizedValue(0), LastScalarIndex(0),
@@ -932,7 +933,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth) {
       for (unsigned i = 0, e = VL.size() - 1; i < e; ++i)
         if (!isConsecutiveAccess(VL[i], VL[i + 1])) {
           newTreeEntry(VL, false);
-          DEBUG(dbgs() << "SLP: Non consecutive store.\n");
+          DEBUG(dbgs() << "SLP: Non-consecutive store.\n");
           return;
         }
 
@@ -1045,12 +1046,26 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
         TargetTransformInfo::OperandValueKind Op2VK =
             TargetTransformInfo::OK_UniformConstantValue;
 
-        // Check whether all second operands are constant.
-        for (unsigned i = 0; i < VL.size(); ++i)
-          if (!isa<ConstantInt>(cast<Instruction>(VL[i])->getOperand(1))) {
+        // If all operands are exactly the same ConstantInt then set the
+        // operand kind to OK_UniformConstantValue.
+        // If instead not all operands are constants, then set the operand kind
+        // to OK_AnyValue. If all operands are constants but not the same,
+        // then set the operand kind to OK_NonUniformConstantValue.
+        ConstantInt *CInt = NULL;
+        for (unsigned i = 0; i < VL.size(); ++i) {
+          const Instruction *I = cast<Instruction>(VL[i]);
+          if (!isa<ConstantInt>(I->getOperand(1))) {
             Op2VK = TargetTransformInfo::OK_AnyValue;
             break;
           }
+          if (i == 0) {
+            CInt = cast<ConstantInt>(I->getOperand(1));
+            continue;
+          }
+          if (Op2VK == TargetTransformInfo::OK_UniformConstantValue &&
+              CInt != cast<ConstantInt>(I->getOperand(1)))
+            Op2VK = TargetTransformInfo::OK_NonUniformConstantValue;
+        }
 
         ScalarCost =
             VecTy->getNumElements() *
@@ -1086,11 +1101,15 @@ bool BoUpSLP::isFullyVectorizableTinyTree() {
   if (VectorizableTree.size() != 2)
     return false;
 
-  // Gathering cost would be too much for tiny trees.
-  if (VectorizableTree[0].NeedToGather || VectorizableTree[1].NeedToGather) 
-    return false; 
+  // Handle splat stores.
+  if (!VectorizableTree[0].NeedToGather && isSplat(VectorizableTree[1].Scalars))
+    return true;
 
-  return true; 
+  // Gathering cost would be too much for tiny trees.
+  if (VectorizableTree[0].NeedToGather || VectorizableTree[1].NeedToGather)
+    return false;
+
+  return true;
 }
 
 int BoUpSLP::getTreeCost() {
@@ -1115,19 +1134,18 @@ int BoUpSLP::getTreeCost() {
     Cost += C;
   }
 
-  SmallSet<Value *, 16> ExtractCostCalculated; 
+  SmallSet<Value *, 16> ExtractCostCalculated;
   int ExtractCost = 0;
   for (UserList::iterator I = ExternalUses.begin(), E = ExternalUses.end();
        I != E; ++I) {
-    // We only add extract cost once for the same scalar. 
+    // We only add extract cost once for the same scalar.
     if (!ExtractCostCalculated.insert(I->Scalar))
-      continue; 
+      continue;
 
     VectorType *VecTy = VectorType::get(I->Scalar->getType(), BundleWidth);
     ExtractCost += TTI->getVectorInstrCost(Instruction::ExtractElement, VecTy,
                                            I->Lane);
   }
-
 
   DEBUG(dbgs() << "SLP: Total Cost " << Cost + ExtractCost<< ".\n");
   return  Cost + ExtractCost;
@@ -1534,6 +1552,8 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
                                             VecTy->getPointerTo(AS));
       unsigned Alignment = LI->getAlignment();
       LI = Builder.CreateLoad(VecPtr);
+      if (!Alignment)
+        Alignment = DL->getABITypeAlignment(LI->getPointerOperand()->getType());
       LI->setAlignment(Alignment);
       E->VectorizedValue = LI;
       return propagateMetadata(LI, E->Scalars);
@@ -1553,6 +1573,8 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *VecPtr = Builder.CreateBitCast(SI->getPointerOperand(),
                                             VecTy->getPointerTo(AS));
       StoreInst *S = Builder.CreateStore(VecValue, VecPtr);
+      if (!Alignment)
+        Alignment = DL->getABITypeAlignment(SI->getPointerOperand()->getType());
       S->setAlignment(Alignment);
       E->VectorizedValue = S;
       return propagateMetadata(S, E->Scalars);
@@ -1778,7 +1800,7 @@ struct SLPVectorizer : public FunctionPass {
     TTI = &getAnalysis<TargetTransformInfo>();
     AA = &getAnalysis<AliasAnalysis>();
     LI = &getAnalysis<LoopInfo>();
-    DT = &getAnalysis<DominatorTree>();
+    DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
     StoreRefs.clear();
     bool Changed = false;
@@ -1833,9 +1855,9 @@ struct SLPVectorizer : public FunctionPass {
     AU.addRequired<AliasAnalysis>();
     AU.addRequired<TargetTransformInfo>();
     AU.addRequired<LoopInfo>();
-    AU.addRequired<DominatorTree>();
+    AU.addRequired<DominatorTreeWrapperPass>();
     AU.addPreserved<LoopInfo>();
-    AU.addPreserved<DominatorTree>();
+    AU.addPreserved<DominatorTreeWrapperPass>();
     AU.setPreservesCFG();
   }
 

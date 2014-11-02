@@ -28,6 +28,7 @@ private:
   void ExtractVectorElements(SDValue Op, SelectionDAG &DAG,
                              SmallVectorImpl<SDValue> &Args,
                              unsigned Start, unsigned Count) const;
+  SDValue LowerFrameIndex(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerEXTRACT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
@@ -76,6 +77,7 @@ public:
   virtual bool isFAbsFree(EVT VT) const;
   virtual bool isFNegFree(EVT VT) const;
   virtual MVT getVectorIdxTy() const;
+  virtual bool isLoadBitCastBeneficial(EVT, EVT) const LLVM_OVERRIDE;
   virtual SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                               bool isVarArg,
                               const SmallVectorImpl<ISD::OutputArg> &Outs,

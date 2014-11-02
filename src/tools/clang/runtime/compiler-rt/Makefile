@@ -66,7 +66,7 @@ COMPILERRT_SRC_ROOT := $(LLVM_SRC_ROOT)/projects/compiler-rt
 #  3. Come up with an alternate mechanism to define all the toolchain
 #     information that compiler-rt would need to build libraries for all the
 #     requested targets. This might be a simple short term solution, but is
-#     likely to be unwieldly and irritating to maintain in the long term.
+#     likely to be unwieldy and irritating to maintain in the long term.
 ifneq ($(LLVM_CROSS_COMPILING),1)
 ifneq ($(CLANG_NO_RUNTIME),1)
 ifeq ($(shell test -d $(COMPILERRT_SRC_ROOT) && echo OK),OK)
@@ -78,12 +78,19 @@ ifeq ($(shell test -d $(COMPILERRT_SRC_ROOT) && echo OK),OK)
 # support.
 RuntimeDirs :=
 ifeq ($(OS),Darwin)
-RuntimeDirs += darwin
+RuntimeDirs += darwin macho_embedded
 RuntimeLibrary.darwin.Configs := \
 	eprintf.a 10.4.a osx.a ios.a cc_kext.a cc_kext_ios5.a \
 	profile_osx.a profile_ios.a
 #	Apple Internal: Disable building asan libraries. <rdar://12423266>
 #	asan_osx_dynamic.dylib ubsan_osx.a
+
+RuntimeLibrary.macho_embedded.Configs := \
+	hard_static.a hard_pic.a
+ifneq (,$(findstring ARM,$(TARGETS_TO_BUILD)))
+RuntimeLibrary.macho_embedded.Configs += \
+	soft_static.a soft_pic.a
+endif
 
 # Support building compiler-rt with relocatable SDKs.
 #
@@ -93,6 +100,11 @@ RuntimeLibrary.darwin.Configs := \
 ACTIVE_SDK_PATH := $(shell xcrun --show-sdk-path 2> /dev/null)
 ifneq ($(ACTIVE_SDK_PATH),)
 COMPILERRT_MAKE_FLAGS := SDKROOT=$(ACTIVE_SDK_PATH)
+endif
+IOSSIM_SDK_PATH := $(shell xcrun --show-sdk-path -sdk iphonesimulator 2> /dev/null)
+ifneq ($(IOSSIM_SDK_PATH),)
+#	Apple Internal: Disable building asan libraries. <rdar://12423266>
+# RuntimeLibrary.darwin.Configs += asan_iossim_dynamic.dylib
 endif
 
 endif

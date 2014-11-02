@@ -23,11 +23,13 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/DebugInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCInstBuilder.h"
 #include "llvm/MC/MCLinkerOptimizationHint.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/Debug.h"
@@ -38,10 +40,12 @@ namespace {
 
 class ARM64AsmPrinter : public AsmPrinter {
   ARM64MCInstLower MCInstLowering;
+  StackMaps SM;
+
 public:
   ARM64AsmPrinter(TargetMachine &TM, MCStreamer &Streamer)
     : AsmPrinter(TM, Streamer), MCInstLowering(OutContext, *Mang, *this),
-      ARM64FI(NULL), LOHLabelCounter(0) {}
+      SM(*this), ARM64FI(NULL), LOHLabelCounter(0) {}
 
   virtual const char *getPassName() const {
     return "ARM64 Assembly Printer";
@@ -113,6 +117,7 @@ void ARM64AsmPrinter::EmitEndOfAsmFile(Module &M) {
   // linker can safely perform dead code stripping.  Since LLVM never
   // generates code that does this, it is always safe to set.
   OutStreamer.EmitAssemblerFlag(MCAF_SubsectionsViaSymbols);
+  SM.serializeToStackMapSection();
 }
 
 MachineLocation ARM64AsmPrinter::
@@ -159,13 +164,13 @@ MCSymbol *ARM64AsmPrinter::GetCPISymbol(unsigned CPID) const {
   // Darwin uses a linker-private symbol name for constant-pools (to
   // avoid addends on the relocation?), ELF has no such concept and
   // uses a normal private symbol.
-  if (MAI->getLinkerPrivateGlobalPrefix()[0])
+  if (getDataLayout().getLinkerPrivateGlobalPrefix()[0])
     return OutContext.GetOrCreateSymbol
-      (Twine(MAI->getLinkerPrivateGlobalPrefix()) + "CPI" +
+      (Twine(getDataLayout().getLinkerPrivateGlobalPrefix()) + "CPI" +
        Twine(getFunctionNumber()) + "_" + Twine(CPID));
 
   return OutContext.GetOrCreateSymbol
-    (Twine(MAI->getPrivateGlobalPrefix()) + "CPI" +
+    (Twine(getDataLayout().getPrivateGlobalPrefix()) + "CPI" +
      Twine(getFunctionNumber()) + "_" + Twine(CPID));
 }
 
@@ -218,7 +223,7 @@ bool ARM64AsmPrinter::printAsmRegInClass(const MachineOperand &MO,
   const ARM64RegisterInfo *RI =
     static_cast<const ARM64RegisterInfo*>(TM.getRegisterInfo());
   unsigned Reg = MO.getReg();
-  unsigned RegToPrint = RC->getRegister(RI->getEncodingValue(MO.getReg()));
+  unsigned RegToPrint = RC->getRegister(RI->getEncodingValue(Reg));
   assert(RI->regsOverlap(RegToPrint, Reg));
   O << ARM64InstPrinter::getRegisterName(RegToPrint, isVector ? ARM64::vreg :
                                          ARM64::NoRegAltName);
@@ -315,6 +320,63 @@ void ARM64AsmPrinter::PrintDebugValueComment(const MachineInstr *MI,
   OS << ']';
   OS << "+";
   printOperand(MI, NOps-2, OS);
+}
+
+static void LowerSTACKMAP(MCStreamer &OutStreamer,
+                          StackMaps &SM,
+                          const MachineInstr &MI)
+{
+  unsigned NumNOPBytes = MI.getOperand(1).getImm();
+
+  SM.recordStackMap(MI);
+  // Emit padding.
+  assert(NumNOPBytes % 4 == 0 && "Invalid number of NOP bytes requested!");
+  for (unsigned i = 0; i < NumNOPBytes; i += 4)
+    OutStreamer.EmitInstruction(MCInstBuilder(ARM64::HINT).addImm(0));
+}
+
+// Lower a patchpoint of the form:
+// [<def>], <id>, <numBytes>, <target>, <numArgs>
+static void LowerPATCHPOINT(MCStreamer &OutStreamer,
+                            StackMaps &SM,
+                            const MachineInstr &MI) {
+  SM.recordPatchPoint(MI);
+
+  PatchPointOpers Opers(&MI);
+
+  int64_t CallTarget = Opers.getMetaOper(PatchPointOpers::TargetPos).getImm();
+  unsigned EncodedBytes = 0;
+  if (CallTarget) {
+    assert((CallTarget & 0xFFFFFFFFFFFF) == CallTarget &&
+           "High 16 bits of call target should be zero.");
+    unsigned ScratchReg = MI.getOperand(Opers.getNextScratchIdx()).getReg();
+    EncodedBytes = 16;
+    // Materialize the jump address:
+    OutStreamer.EmitInstruction(MCInstBuilder(ARM64::MOVZWi)
+                                  .addReg(ScratchReg)
+                                  .addImm((CallTarget >> 32) & 0xFFFF)
+                                  .addImm(32));
+    OutStreamer.EmitInstruction(MCInstBuilder(ARM64::MOVKWi)
+                                .addReg(ScratchReg)
+                                .addReg(ScratchReg)
+                                .addImm((CallTarget >> 16) & 0xFFFF)
+                                .addImm(16));
+    OutStreamer.EmitInstruction(MCInstBuilder(ARM64::MOVKWi)
+                                .addReg(ScratchReg)
+                                .addReg(ScratchReg)
+                                .addImm(CallTarget & 0xFFFF)
+                                .addImm(0));
+    OutStreamer.EmitInstruction(MCInstBuilder(ARM64::BLR)
+                                  .addReg(ScratchReg));
+  }
+  // Emit padding.
+  unsigned NumBytes = Opers.getMetaOper(PatchPointOpers::NBytesPos).getImm();
+  assert(NumBytes >= EncodedBytes &&
+         "Patchpoint can't request size less than the length of a call.");
+  assert((NumBytes - EncodedBytes) % 4 == 0 &&
+         "Invalid number of NOP bytes requested!");
+  for (unsigned i = EncodedBytes; i < NumBytes; i += 4)
+    OutStreamer.EmitInstruction(MCInstBuilder(ARM64::HINT).addImm(0));
 }
 
 // Simple pseudo-instructions have their lowering (with expansion to real
@@ -474,6 +536,12 @@ void ARM64AsmPrinter::EmitInstruction(const MachineInstr *MI) {
 
     return;
   }
+
+  case TargetOpcode::STACKMAP:
+    return LowerSTACKMAP(OutStreamer, SM, *MI);
+
+  case TargetOpcode::PATCHPOINT:
+    return LowerPATCHPOINT(OutStreamer, SM, *MI);
   }
 
   // Finally, do the automated lowerings for everything else.

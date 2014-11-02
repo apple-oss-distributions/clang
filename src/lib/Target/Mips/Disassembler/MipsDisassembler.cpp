@@ -14,6 +14,7 @@
 #include "Mips.h"
 #include "MipsRegisterInfo.h"
 #include "MipsSubtarget.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler.h"
 #include "llvm/MC/MCFixedLenDisassembler.h"
 #include "llvm/MC/MCInst.h"
@@ -33,19 +34,16 @@ class MipsDisassemblerBase : public MCDisassembler {
 public:
   /// Constructor     - Initializes the disassembler.
   ///
-  MipsDisassemblerBase(const MCSubtargetInfo &STI, const MCRegisterInfo *Info,
+  MipsDisassemblerBase(const MCSubtargetInfo &STI, MCContext &Ctx,
                        bool bigEndian) :
-    MCDisassembler(STI), RegInfo(Info),
+    MCDisassembler(STI, Ctx),
     IsN64(STI.getFeatureBits() & Mips::FeatureN64), isBigEndian(bigEndian) {}
 
   virtual ~MipsDisassemblerBase() {}
 
-  const MCRegisterInfo *getRegInfo() const { return RegInfo.get(); }
-
   bool isN64() const { return IsN64; }
 
 private:
-  OwningPtr<const MCRegisterInfo> RegInfo;
   bool IsN64;
 protected:
   bool isBigEndian;
@@ -57,9 +55,9 @@ class MipsDisassembler : public MipsDisassemblerBase {
 public:
   /// Constructor     - Initializes the disassembler.
   ///
-  MipsDisassembler(const MCSubtargetInfo &STI, const MCRegisterInfo *Info,
+  MipsDisassembler(const MCSubtargetInfo &STI, MCContext &Ctx,
                    bool bigEndian) :
-    MipsDisassemblerBase(STI, Info, bigEndian) {
+    MipsDisassemblerBase(STI, Ctx, bigEndian) {
       IsMicroMips = STI.getFeatureBits() & Mips::FeatureMicroMips;
     }
 
@@ -78,9 +76,9 @@ class Mips64Disassembler : public MipsDisassemblerBase {
 public:
   /// Constructor     - Initializes the disassembler.
   ///
-  Mips64Disassembler(const MCSubtargetInfo &STI, const MCRegisterInfo *Info,
+  Mips64Disassembler(const MCSubtargetInfo &STI, MCContext &Ctx,
                      bool bigEndian) :
-    MipsDisassemblerBase(STI, Info, bigEndian) {}
+    MipsDisassemblerBase(STI, Ctx, bigEndian) {}
 
   /// getInstruction - See MCDisassembler.
   virtual DecodeStatus getInstruction(MCInst &instr,
@@ -246,6 +244,13 @@ static DecodeStatus DecodeSimm16(MCInst &Inst,
                                  uint64_t Address,
                                  const void *Decoder);
 
+// Decode the immediate field of an LSA instruction which
+// is off by one.
+static DecodeStatus DecodeLSAImm(MCInst &Inst,
+                                 unsigned Insn,
+                                 uint64_t Address,
+                                 const void *Decoder);
+
 static DecodeStatus DecodeInsSize(MCInst &Inst,
                                   unsigned Insn,
                                   uint64_t Address,
@@ -263,26 +268,30 @@ extern Target TheMipselTarget, TheMipsTarget, TheMips64Target,
 
 static MCDisassembler *createMipsDisassembler(
                        const Target &T,
-                       const MCSubtargetInfo &STI) {
-  return new MipsDisassembler(STI, T.createMCRegInfo(""), true);
+                       const MCSubtargetInfo &STI,
+                       MCContext &Ctx) {
+  return new MipsDisassembler(STI, Ctx, true);
 }
 
 static MCDisassembler *createMipselDisassembler(
                        const Target &T,
-                       const MCSubtargetInfo &STI) {
-  return new MipsDisassembler(STI, T.createMCRegInfo(""), false);
+                       const MCSubtargetInfo &STI,
+                       MCContext &Ctx) {
+  return new MipsDisassembler(STI, Ctx, false);
 }
 
 static MCDisassembler *createMips64Disassembler(
                        const Target &T,
-                       const MCSubtargetInfo &STI) {
-  return new Mips64Disassembler(STI, T.createMCRegInfo(""), true);
+                       const MCSubtargetInfo &STI,
+                       MCContext &Ctx) {
+  return new Mips64Disassembler(STI, Ctx, true);
 }
 
 static MCDisassembler *createMips64elDisassembler(
                        const Target &T,
-                       const MCSubtargetInfo &STI) {
-  return new Mips64Disassembler(STI, T.createMCRegInfo(""), false);
+                       const MCSubtargetInfo &STI,
+                       MCContext &Ctx) {
+  return new Mips64Disassembler(STI, Ctx, false);
 }
 
 extern "C" void LLVMInitializeMipsDisassembler() {
@@ -414,7 +423,8 @@ Mips64Disassembler::getInstruction(MCInst &instr,
 
 static unsigned getReg(const void *D, unsigned RC, unsigned RegNo) {
   const MipsDisassemblerBase *Dis = static_cast<const MipsDisassemblerBase*>(D);
-  return *(Dis->getRegInfo()->getRegClass(RC).begin() + RegNo);
+  const MCRegisterInfo *RegInfo = Dis->getContext().getRegisterInfo();
+  return *(RegInfo->getRegClass(RC).begin() + RegNo);
 }
 
 static DecodeStatus DecodeCPU16RegsRegisterClass(MCInst &Inst,
@@ -558,7 +568,37 @@ static DecodeStatus DecodeMSA128Mem(MCInst &Inst, unsigned Insn,
 
   Inst.addOperand(MCOperand::CreateReg(Reg));
   Inst.addOperand(MCOperand::CreateReg(Base));
-  Inst.addOperand(MCOperand::CreateImm(Offset));
+
+  // The immediate field of an LD/ST instruction is scaled which means it must
+  // be multiplied (when decoding) by the size (in bytes) of the instructions'
+  // data format.
+  // .b - 1 byte
+  // .h - 2 bytes
+  // .w - 4 bytes
+  // .d - 8 bytes
+  switch(Inst.getOpcode())
+  {
+  default:
+    assert (0 && "Unexpected instruction");
+    return MCDisassembler::Fail;
+    break;
+  case Mips::LD_B:
+  case Mips::ST_B:
+    Inst.addOperand(MCOperand::CreateImm(Offset));
+    break;
+  case Mips::LD_H:
+  case Mips::ST_H:
+    Inst.addOperand(MCOperand::CreateImm(Offset << 1));
+    break;
+  case Mips::LD_W:
+  case Mips::ST_W:
+    Inst.addOperand(MCOperand::CreateImm(Offset << 2));
+    break;
+  case Mips::LD_D:
+  case Mips::ST_D:
+    Inst.addOperand(MCOperand::CreateImm(Offset << 3));
+    break;
+  }
 
   return MCDisassembler::Success;
 }
@@ -782,6 +822,15 @@ static DecodeStatus DecodeSimm16(MCInst &Inst,
                                  uint64_t Address,
                                  const void *Decoder) {
   Inst.addOperand(MCOperand::CreateImm(SignExtend32<16>(Insn)));
+  return MCDisassembler::Success;
+}
+
+static DecodeStatus DecodeLSAImm(MCInst &Inst,
+                                 unsigned Insn,
+                                 uint64_t Address,
+                                 const void *Decoder) {
+  // We add one to the immediate field as it was encoded as 'imm - 1'.
+  Inst.addOperand(MCOperand::CreateImm(Insn + 1));
   return MCDisassembler::Success;
 }
 

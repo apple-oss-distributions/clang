@@ -115,6 +115,13 @@ public:
   /// \brief The file name of the module file.
   std::string FileName;
 
+  /// \brief The name of the module.
+  std::string ModuleName;
+
+  std::string getTimestampFilename() const {
+    return FileName + ".timestamp";
+  }
+
   /// \brief The original source file name that was used to build the
   /// primary AST file, which may have been modified for
   /// relocatable-pch support.
@@ -131,6 +138,8 @@ public:
   /// \brief The directory that the PCH was originally created in. Used to
   /// allow resolving headers even after headers+PCH was moved to a new path.
   std::string OriginalDir;
+
+  std::string ModuleMapPath;
 
   /// \brief Whether this precompiled header is a relocatable PCH file.
   bool RelocatablePCH;
@@ -184,6 +193,12 @@ public:
 
   /// \brief The input files that have been loaded from this AST file.
   std::vector<InputFile> InputFilesLoaded;
+
+  /// \brief If non-zero, specifies the time when we last validated input
+  /// files.  Zero means we never validated them.
+  ///
+  /// The time is specified in seconds since the start of the Epoch.
+  uint64_t InputFilesValidationTimestamp;
 
   // === Source Locations ===
 

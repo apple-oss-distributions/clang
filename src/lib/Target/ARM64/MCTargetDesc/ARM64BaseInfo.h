@@ -22,6 +22,165 @@
 
 namespace llvm {
 
+inline static unsigned getWRegFromXReg(unsigned Reg) {
+  switch (Reg) {
+  case ARM64::X0: return ARM64::W0;
+  case ARM64::X1: return ARM64::W1;
+  case ARM64::X2: return ARM64::W2;
+  case ARM64::X3: return ARM64::W3;
+  case ARM64::X4: return ARM64::W4;
+  case ARM64::X5: return ARM64::W5;
+  case ARM64::X6: return ARM64::W6;
+  case ARM64::X7: return ARM64::W7;
+  case ARM64::X8: return ARM64::W8;
+  case ARM64::X9: return ARM64::W9;
+  case ARM64::X10: return ARM64::W10;
+  case ARM64::X11: return ARM64::W11;
+  case ARM64::X12: return ARM64::W12;
+  case ARM64::X13: return ARM64::W13;
+  case ARM64::X14: return ARM64::W14;
+  case ARM64::X15: return ARM64::W15;
+  case ARM64::X16: return ARM64::W16;
+  case ARM64::X17: return ARM64::W17;
+  case ARM64::X18: return ARM64::W18;
+  case ARM64::X19: return ARM64::W19;
+  case ARM64::X20: return ARM64::W20;
+  case ARM64::X21: return ARM64::W21;
+  case ARM64::X22: return ARM64::W22;
+  case ARM64::X23: return ARM64::W23;
+  case ARM64::X24: return ARM64::W24;
+  case ARM64::X25: return ARM64::W25;
+  case ARM64::X26: return ARM64::W26;
+  case ARM64::X27: return ARM64::W27;
+  case ARM64::X28: return ARM64::W28;
+  case ARM64::FP: return ARM64::W29;
+  case ARM64::LR: return ARM64::W30;
+  case ARM64::SP: return ARM64::WSP;
+  case ARM64::XZR: return ARM64::WZR;
+  }
+  // For anything else, return it unchanged.
+  return Reg;
+}
+
+inline static unsigned getXRegFromWReg(unsigned Reg) {
+  switch (Reg) {
+  case ARM64::W0: return ARM64::X0;
+  case ARM64::W1: return ARM64::X1;
+  case ARM64::W2: return ARM64::X2;
+  case ARM64::W3: return ARM64::X3;
+  case ARM64::W4: return ARM64::X4;
+  case ARM64::W5: return ARM64::X5;
+  case ARM64::W6: return ARM64::X6;
+  case ARM64::W7: return ARM64::X7;
+  case ARM64::W8: return ARM64::X8;
+  case ARM64::W9: return ARM64::X9;
+  case ARM64::W10: return ARM64::X10;
+  case ARM64::W11: return ARM64::X11;
+  case ARM64::W12: return ARM64::X12;
+  case ARM64::W13: return ARM64::X13;
+  case ARM64::W14: return ARM64::X14;
+  case ARM64::W15: return ARM64::X15;
+  case ARM64::W16: return ARM64::X16;
+  case ARM64::W17: return ARM64::X17;
+  case ARM64::W18: return ARM64::X18;
+  case ARM64::W19: return ARM64::X19;
+  case ARM64::W20: return ARM64::X20;
+  case ARM64::W21: return ARM64::X21;
+  case ARM64::W22: return ARM64::X22;
+  case ARM64::W23: return ARM64::X23;
+  case ARM64::W24: return ARM64::X24;
+  case ARM64::W25: return ARM64::X25;
+  case ARM64::W26: return ARM64::X26;
+  case ARM64::W27: return ARM64::X27;
+  case ARM64::W28: return ARM64::X28;
+  case ARM64::W29: return ARM64::FP;
+  case ARM64::W30: return ARM64::LR;
+  case ARM64::WSP: return ARM64::SP;
+  case ARM64::WZR: return ARM64::XZR;
+  }
+  // For anything else, return it unchanged.
+  return Reg;
+}
+
+static inline unsigned getBRegFromDReg(unsigned Reg) {
+  switch (Reg) {
+  case ARM64::D0:  return ARM64::B0;
+  case ARM64::D1:  return ARM64::B1;
+  case ARM64::D2:  return ARM64::B2;
+  case ARM64::D3:  return ARM64::B3;
+  case ARM64::D4:  return ARM64::B4;
+  case ARM64::D5:  return ARM64::B5;
+  case ARM64::D6:  return ARM64::B6;
+  case ARM64::D7:  return ARM64::B7;
+  case ARM64::D8:  return ARM64::B8;
+  case ARM64::D9:  return ARM64::B9;
+  case ARM64::D10: return ARM64::B10;
+  case ARM64::D11: return ARM64::B11;
+  case ARM64::D12: return ARM64::B12;
+  case ARM64::D13: return ARM64::B13;
+  case ARM64::D14: return ARM64::B14;
+  case ARM64::D15: return ARM64::B15;
+  case ARM64::D16: return ARM64::B16;
+  case ARM64::D17: return ARM64::B17;
+  case ARM64::D18: return ARM64::B18;
+  case ARM64::D19: return ARM64::B19;
+  case ARM64::D20: return ARM64::B20;
+  case ARM64::D21: return ARM64::B21;
+  case ARM64::D22: return ARM64::B22;
+  case ARM64::D23: return ARM64::B23;
+  case ARM64::D24: return ARM64::B24;
+  case ARM64::D25: return ARM64::B25;
+  case ARM64::D26: return ARM64::B26;
+  case ARM64::D27: return ARM64::B27;
+  case ARM64::D28: return ARM64::B28;
+  case ARM64::D29: return ARM64::B29;
+  case ARM64::D30: return ARM64::B30;
+  case ARM64::D31: return ARM64::B31;
+  }
+  // For anything else, return it unchanged.
+  return Reg;
+}
+
+
+static inline unsigned getDRegFromBReg(unsigned Reg) {
+  switch (Reg) {
+  case ARM64::B0:  return ARM64::D0;
+  case ARM64::B1:  return ARM64::D1;
+  case ARM64::B2:  return ARM64::D2;
+  case ARM64::B3:  return ARM64::D3;
+  case ARM64::B4:  return ARM64::D4;
+  case ARM64::B5:  return ARM64::D5;
+  case ARM64::B6:  return ARM64::D6;
+  case ARM64::B7:  return ARM64::D7;
+  case ARM64::B8:  return ARM64::D8;
+  case ARM64::B9:  return ARM64::D9;
+  case ARM64::B10: return ARM64::D10;
+  case ARM64::B11: return ARM64::D11;
+  case ARM64::B12: return ARM64::D12;
+  case ARM64::B13: return ARM64::D13;
+  case ARM64::B14: return ARM64::D14;
+  case ARM64::B15: return ARM64::D15;
+  case ARM64::B16: return ARM64::D16;
+  case ARM64::B17: return ARM64::D17;
+  case ARM64::B18: return ARM64::D18;
+  case ARM64::B19: return ARM64::D19;
+  case ARM64::B20: return ARM64::D20;
+  case ARM64::B21: return ARM64::D21;
+  case ARM64::B22: return ARM64::D22;
+  case ARM64::B23: return ARM64::D23;
+  case ARM64::B24: return ARM64::D24;
+  case ARM64::B25: return ARM64::D25;
+  case ARM64::B26: return ARM64::D26;
+  case ARM64::B27: return ARM64::D27;
+  case ARM64::B28: return ARM64::D28;
+  case ARM64::B29: return ARM64::D29;
+  case ARM64::B30: return ARM64::D30;
+  case ARM64::B31: return ARM64::D31;
+  }
+  // For anything else, return it unchanged.
+  return Reg;
+}
+
 namespace ARM64CC {
 
 // The CondCodes constants map directly to the 4-bit encoding of the condition

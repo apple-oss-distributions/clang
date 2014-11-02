@@ -20,11 +20,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm-readobj.h"
-
 #include "Error.h"
 #include "ObjDumper.h"
 #include "StreamWriter.h"
-
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Casting.h"
@@ -38,7 +36,6 @@
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/system_error.h"
-
 #include <string>
 
 
@@ -128,6 +125,10 @@ namespace opts {
   // -expand-relocs
   cl::opt<bool> ExpandRelocs("expand-relocs",
     cl::desc("Expand each shown relocation to multiple lines"));
+
+  // -codeview-linetables
+  cl::opt<bool> CodeViewLineTables("codeview-linetables",
+    cl::desc("Display CodeView line table information"));
 } // namespace opts
 
 static int ReturnValue = EXIT_SUCCESS;
@@ -231,8 +232,8 @@ static void dumpObject(const ObjectFile *Obj) {
 
 /// @brief Dumps each object file in \a Arc;
 static void dumpArchive(const Archive *Arc) {
-  for (Archive::child_iterator ArcI = Arc->begin_children(),
-                               ArcE = Arc->end_children();
+  for (Archive::child_iterator ArcI = Arc->child_begin(),
+                               ArcE = Arc->child_end();
                                ArcI != ArcE; ++ArcI) {
     OwningPtr<Binary> child;
     if (error_code EC = ArcI->getAsBinary(child)) {
@@ -259,11 +260,12 @@ static void dumpInput(StringRef File) {
   }
 
   // Attempt to open the binary.
-  OwningPtr<Binary> Binary;
-  if (error_code EC = createBinary(File, Binary)) {
+  ErrorOr<Binary *> BinaryOrErr = createBinary(File);
+  if (error_code EC = BinaryOrErr.getError()) {
     reportError(File, EC);
     return;
   }
+  OwningPtr<Binary> Binary(BinaryOrErr.get());
 
   if (Archive *Arc = dyn_cast<Archive>(Binary.get()))
     dumpArchive(Arc);

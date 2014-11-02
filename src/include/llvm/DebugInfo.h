@@ -17,12 +17,12 @@
 #ifndef LLVM_DEBUGINFO_H
 #define LLVM_DEBUGINFO_H
 
-#include "llvm/Support/Casting.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Dwarf.h"
 
 namespace llvm {
@@ -134,6 +134,7 @@ public:
   bool isFile() const;
   bool isCompileUnit() const;
   bool isNameSpace() const;
+  bool isModule() const;
   bool isLexicalBlockFile() const;
   bool isLexicalBlock() const;
   bool isSubrange() const;
@@ -283,7 +284,7 @@ protected:
   void printInternal(raw_ostream &OS) const;
 
 public:
-  DIType(const MDNode *N = 0) : DIScope(N) {}
+  explicit DIType(const MDNode *N = 0) : DIScope(N) {}
 
   /// Verify - Verify that a type descriptor is well formed.
   bool Verify() const;
@@ -385,7 +386,6 @@ public:
 
   DIArray getTypeArray() const { return getFieldAs<DIArray>(10); }
   void setTypeArray(DIArray Elements, DIArray TParams = DIArray());
-  void addMember(DIDescriptor D);
   unsigned getRunTimeLang() const { return getUnsignedField(11); }
   DITypeRef getContainingType() const { return getFieldAs<DITypeRef>(12); }
   void setContainingType(DICompositeType ContainingType);
@@ -554,6 +554,26 @@ public:
   bool Verify() const;
 };
 
+/// DIModule - A wrapper for modules.
+class DIModule : public DIScope {
+  friend class DIDescriptor;
+  void printInternal(raw_ostream &OS) const;
+
+public:
+  explicit DIModule(const MDNode *N = nullptr) : DIScope(N) {}
+  DIScope getContext() const { return getFieldAs<DIScope>(2); }
+  StringRef getName() const { return getStringField(3); }
+  unsigned getLineNumber() const { return getUnsignedField(4); }
+  bool Verify() const;
+};
+
+/// DIUnspecifiedParameter - This is a wrapper for unspecified parameters.
+class DIUnspecifiedParameter : public DIDescriptor {
+public:
+  explicit DIUnspecifiedParameter(const MDNode *N = 0) : DIDescriptor(N) {}
+  bool Verify() const;
+};
+
 /// DITemplateTypeParameter - This is a wrapper for template type parameter.
 class DITemplateTypeParameter : public DIDescriptor {
 public:
@@ -677,6 +697,17 @@ public:
   /// information for an inlined function arguments.
   bool isInlinedFnArgument(const Function *CurFn);
 
+  /// isVariablePiece - Return whether this is a piece of an aggregate
+  /// variable.
+  bool isVariablePiece() const;
+  /// getPieceOffset - Return the offset of this piece in bytes.
+  uint64_t getPieceOffset() const;
+  /// getPieceSize - Return the size of this piece in bytes.
+  uint64_t getPieceSize() const;
+
+  /// Return the size reported by the variable's type.
+  unsigned getSizeInBits(const DITypeIdentifierMap &Map);
+
   void printExtendedName(raw_ostream &OS) const;
 };
 
@@ -770,6 +801,9 @@ DIVariable createInlinedVariable(MDNode *DV, MDNode *InlinedScope,
 
 /// cleanseInlinedVariable - Remove inlined scope from the variable.
 DIVariable cleanseInlinedVariable(MDNode *DV, LLVMContext &VMContext);
+
+/// getEntireVariable - Remove OpPiece exprs from the variable.
+DIVariable getEntireVariable(DIVariable DV);
 
 /// Construct DITypeIdentifierMap by going through retained types of each CU.
 DITypeIdentifierMap generateDITypeIdentifierMap(const NamedMDNode *CU_Nodes);

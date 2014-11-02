@@ -68,9 +68,16 @@ public:
 
 class X86AsmBackend : public MCAsmBackend {
   StringRef CPU;
+  bool HasNopl;
 public:
   X86AsmBackend(const Target &T, StringRef _CPU)
-    : MCAsmBackend(), CPU(_CPU) {}
+    : MCAsmBackend(), CPU(_CPU) {
+    HasNopl = CPU != "generic" && CPU != "i386" && CPU != "i486" &&
+              CPU != "i586" && CPU != "pentium" && CPU != "pentium-mmx" &&
+              CPU != "i686" && CPU != "k6" && CPU != "k6-2" && CPU != "k6-3" &&
+              CPU != "geode" && CPU != "winchip-c6" && CPU != "winchip2" &&
+              CPU != "c3" && CPU != "c3-2";
+  }
 
   unsigned getNumFixupKinds() const {
     return X86::NumTargetFixupKinds;
@@ -210,9 +217,9 @@ static unsigned getRelaxedOpcodeArith(unsigned Op) {
   case X86::CMP64mi8: return X86::CMP64mi32;
 
     // PUSH
-  case X86::PUSHi8: return X86::PUSHi32;
-  case X86::PUSHi16: return X86::PUSHi32;
-  case X86::PUSH64i8: return X86::PUSH64i32;
+  case X86::PUSH32i8:  return X86::PUSHi32;
+  case X86::PUSH16i8:  return X86::PUSHi16;
+  case X86::PUSH64i8:  return X86::PUSH64i32;
   case X86::PUSH64i16: return X86::PUSH64i32;
   }
 }
@@ -307,10 +314,10 @@ bool X86AsmBackend::writeNopData(uint64_t Count, MCObjectWriter *OW) const {
     {0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
   };
 
-  // This CPU doesnt support long nops. If needed add more.
+  // This CPU doesn't support long nops. If needed add more.
   // FIXME: Can we get this from the subtarget somehow?
-  if (CPU == "generic" || CPU == "i386" || CPU == "i486" || CPU == "i586" ||
-      CPU == "pentium" || CPU == "pentium-mmx" || CPU == "geode") {
+  // FIXME: We could generated something better than plain 0x90.
+  if (!HasNopl) {
     for (uint64_t i = 0; i < Count; ++i)
       OW->Write8(0x90);
     return true;
@@ -796,7 +803,7 @@ MCAsmBackend *llvm::createX86_32AsmBackend(const Target &T,
                                            StringRef CPU) {
   Triple TheTriple(TT);
 
-  if (TheTriple.isOSDarwin() || TheTriple.getEnvironment() == Triple::MachO)
+  if (TheTriple.isOSBinFormatMachO())
     return new DarwinX86_32AsmBackend(T, MRI, CPU,
                                       TheTriple.isMacOSX() &&
                                       !TheTriple.isMacOSXVersionLT(10, 7));
@@ -814,7 +821,7 @@ MCAsmBackend *llvm::createX86_64AsmBackend(const Target &T,
                                            StringRef CPU) {
   Triple TheTriple(TT);
 
-  if (TheTriple.isOSDarwin() || TheTriple.getEnvironment() == Triple::MachO) {
+  if (TheTriple.isOSBinFormatMachO()) {
     MachO::CPUSubTypeX86 CS =
         StringSwitch<MachO::CPUSubTypeX86>(TheTriple.getArchName())
             .Case("x86_64h", MachO::CPU_SUBTYPE_X86_64_H)

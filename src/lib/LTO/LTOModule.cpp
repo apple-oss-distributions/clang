@@ -18,33 +18,41 @@
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
+#include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetAsmParser.h"
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Host.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/system_error.h"
+#include "llvm/Target/TargetLowering.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 using namespace llvm;
 
 LTOModule::LTOModule(llvm::Module *m, llvm::TargetMachine *t)
   : _module(m), _target(t),
-    _context(_target->getMCAsmInfo(), _target->getRegisterInfo(), NULL),
-    _mangler(t) {}
+    _context(_target->getMCAsmInfo(), _target->getRegisterInfo(), &ObjFileInfo),
+    _mangler(t->getDataLayout()) {
+  ObjFileInfo.InitMCObjectFileInfo(t->getTargetTriple(),
+                                   t->getRelocationModel(), t->getCodeModel(),
+                                   _context);
+}
 
 /// isBitcodeFile - Returns 'true' if the file (or memory contents) is LLVM
 /// bitcode.
@@ -120,8 +128,8 @@ LTOModule *LTOModule::makeLTOModule(int fd, const char *path,
 
 LTOModule *LTOModule::makeLTOModule(const void *mem, size_t length,
                                     TargetOptions options,
-                                    std::string &errMsg) {
-  OwningPtr<MemoryBuffer> buffer(makeBuffer(mem, length));
+                                    std::string &errMsg, StringRef path) {
+  OwningPtr<MemoryBuffer> buffer(makeBuffer(mem, length, path));
   if (!buffer)
     return NULL;
   return makeLTOModule(buffer.take(), options, errMsg);
@@ -131,12 +139,14 @@ LTOModule *LTOModule::makeLTOModule(MemoryBuffer *buffer,
                                     TargetOptions options,
                                     std::string &errMsg) {
   // parse bitcode buffer
-  OwningPtr<Module> m(getLazyBitcodeModule(buffer, getGlobalContext(),
-                                           &errMsg));
-  if (!m) {
+  ErrorOr<Module *> ModuleOrErr =
+      getLazyBitcodeModule(buffer, getGlobalContext());
+  if (error_code EC = ModuleOrErr.getError()) {
+    errMsg = EC.message();
     delete buffer;
     return NULL;
   }
+  OwningPtr<Module> m(ModuleOrErr.get());
 
   std::string TripleStr = m->getTargetTriple();
   if (TripleStr.empty())
@@ -165,21 +175,34 @@ LTOModule *LTOModule::makeLTOModule(MemoryBuffer *buffer,
 
   TargetMachine *target = march->createTargetMachine(TripleStr, CPU, FeatureStr,
                                                      options);
-  m->MaterializeAllPermanently();
+  m->materializeAllPermanently();
 
   LTOModule *Ret = new LTOModule(m.take(), target);
+
+  // We need a MCContext set up in order to get mangled names of private
+  // symbols. It is a bit odd that we need to report uses and definitions
+  // of private symbols, but it does look like ld64 expects to be informed
+  // of at least the ones with an 'l' prefix.
+  MCContext &Context = Ret->_context;
+  const TargetLoweringObjectFile &TLOF =
+      target->getTargetLowering()->getObjFileLowering();
+  const_cast<TargetLoweringObjectFile &>(TLOF).Initialize(Context, *target);
+
   if (Ret->parseSymbols(errMsg)) {
     delete Ret;
     return NULL;
   }
 
+  Ret->parseMetadata();
+
   return Ret;
 }
 
-/// makeBuffer - Create a MemoryBuffer from a memory range.
-MemoryBuffer *LTOModule::makeBuffer(const void *mem, size_t length) {
+/// Create a MemoryBuffer from a memory range with an optional name.
+MemoryBuffer *LTOModule::makeBuffer(const void *mem, size_t length,
+                                    StringRef name) {
   const char *startPtr = (const char*)mem;
-  return MemoryBuffer::getMemBuffer(StringRef(startPtr, length), "", false);
+  return MemoryBuffer::getMemBuffer(StringRef(startPtr, length), name, false);
 }
 
 /// objcClassNameFromExpression - Get string that the data pointer points to.
@@ -339,6 +362,7 @@ void LTOModule::addDefinedFunctionSymbol(const Function *f) {
 }
 
 static bool canBeHidden(const GlobalValue *GV) {
+  // FIXME: this is duplicated with another static function in AsmPrinter.cpp
   GlobalValue::LinkageTypes L = GV->getLinkage();
 
   if (L != GlobalValue::LinkOnceODRLinkage)
@@ -346,6 +370,13 @@ static bool canBeHidden(const GlobalValue *GV) {
 
   if (GV->hasUnnamedAddr())
     return true;
+
+  // If it is a non constant variable, it needs to be uniqued across shared
+  // objects.
+  if (const GlobalVariable *Var = dyn_cast<GlobalVariable>(GV)) {
+    if (!Var->isConstant())
+      return false;
+  }
 
   GlobalStatus GS;
   if (GlobalStatus::analyzeGlobal(GV, GS))
@@ -362,7 +393,7 @@ void LTOModule::addDefinedSymbol(const GlobalValue *def, bool isFunction) {
 
   // string is owned by _defines
   SmallString<64> Buffer;
-  _mangler.getNameWithPrefix(Buffer, def, false);
+  _target->getNameWithPrefix(Buffer, def, _mangler);
 
   // set alignment part log2() can have rounding errors
   uint32_t align = def->getAlignment();
@@ -498,7 +529,7 @@ LTOModule::addPotentialUndefinedSymbol(const GlobalValue *decl, bool isFunc) {
     return;
 
   SmallString<64> name;
-  _mangler.getNameWithPrefix(name, decl, false);
+  _target->getNameWithPrefix(name, decl, _mangler);
 
   StringMap<NameAndAttributes>::value_type &entry =
     _undefines.GetOrCreateValue(name);
@@ -523,6 +554,7 @@ LTOModule::addPotentialUndefinedSymbol(const GlobalValue *decl, bool isFunc) {
 }
 
 namespace {
+
   class RecordStreamer : public MCStreamer {
   public:
     enum State { NeverSeen, Global, Defined, DefinedGlobal, Used };
@@ -612,7 +644,7 @@ namespace {
       return Symbols.end();
     }
 
-    RecordStreamer(MCContext &Context) : MCStreamer(Context, 0) {}
+    RecordStreamer(MCContext &Context) : MCStreamer(Context) {}
 
     virtual void EmitInstruction(const MCInst &Inst) {
       // Scan for values.
@@ -652,8 +684,6 @@ namespace {
     // Noop calls.
     virtual void ChangeSection(const MCSection *Section,
                                const MCExpr *Subsection) {}
-    virtual void InitToTextSection() {}
-    virtual void InitSections() {}
     virtual void EmitAssemblerFlag(MCAssemblerFlag Flag) {}
     virtual void EmitThumbFunc(MCSymbol *Func) {}
     virtual void EmitSymbolDesc(MCSymbol *Symbol, unsigned DescValue) {}
@@ -668,7 +698,8 @@ namespace {
     virtual void EmitTBSSSymbol(const MCSection *Section, MCSymbol *Symbol,
                                 uint64_t Size, unsigned ByteAlignment) {}
     virtual void EmitBytes(StringRef Data) {}
-    virtual void EmitValueImpl(const MCExpr *Value, unsigned Size) {}
+    virtual void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                               const SMLoc &Loc) {}
     virtual void EmitULEB128Value(const MCExpr *Value) {}
     virtual void EmitSLEB128Value(const MCExpr *Value) {}
     virtual void EmitValueToAlignment(unsigned ByteAlignment, int64_t Value,
@@ -793,4 +824,28 @@ bool LTOModule::parseSymbols(std::string &errMsg) {
   }
 
   return false;
+}
+
+/// parseMetadata - Parse metadata from the module
+void LTOModule::parseMetadata() {
+  // Linker Options
+  if (Value *Val = _module->getModuleFlag("Linker Options")) {
+    MDNode *LinkerOptions = cast<MDNode>(Val);
+    for (unsigned i = 0, e = LinkerOptions->getNumOperands(); i != e; ++i) {
+      MDNode *MDOptions = cast<MDNode>(LinkerOptions->getOperand(i));
+      for (unsigned ii = 0, ie = MDOptions->getNumOperands(); ii != ie; ++ii) {
+        MDString *MDOption = cast<MDString>(MDOptions->getOperand(ii));
+        StringRef Op = _linkeropt_strings.
+            GetOrCreateValue(MDOption->getString()).getKey();
+        StringRef DepLibName = _target->getTargetLowering()->
+            getObjFileLowering().getDepLibFromLinkerOpt(Op);
+        if (!DepLibName.empty())
+          _deplibs.push_back(DepLibName.data());
+        else if (!Op.empty())
+          _linkeropts.push_back(Op.data());
+      }
+    }
+  }
+
+  // Add other interesting metadata here.
 }

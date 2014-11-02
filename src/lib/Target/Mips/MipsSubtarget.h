@@ -18,7 +18,6 @@
 #include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
-
 #include <string>
 
 #define GET_SUBTARGETINFO_HEADER
@@ -217,7 +216,7 @@ public:
 //
 static bool useConstantIslands();
 
-  unsigned stackAlignment() const { return isFP64bit() ? 16 : 8; }
+  unsigned stackAlignment() const { return hasMips64() ? 16 : 8; }
 
   // Grab MipsRegInfo object
   const MipsReginfo &getMReginfo() const { return MRI; }

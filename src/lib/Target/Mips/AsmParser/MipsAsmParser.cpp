@@ -10,6 +10,7 @@
 #include "MCTargetDesc/MipsMCTargetDesc.h"
 #include "MipsRegisterInfo.h"
 #include "MipsTargetStreamer.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -20,8 +21,8 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetAsmParser.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TargetRegistry.h"
-#include "llvm/ADT/APInt.h"
 
 using namespace llvm;
 
@@ -56,7 +57,7 @@ namespace {
 class MipsAsmParser : public MCTargetAsmParser {
 
   MipsTargetStreamer &getTargetStreamer() {
-    MCTargetStreamer &TS = Parser.getStreamer().getTargetStreamer();
+    MCTargetStreamer &TS = *Parser.getStreamer().getTargetStreamer();
     return static_cast<MipsTargetStreamer &>(TS);
   }
 
@@ -157,7 +158,10 @@ class MipsAsmParser : public MCTargetAsmParser {
   MipsAsmParser::OperandMatchResultTy
   parseInvNum(SmallVectorImpl<MCParsedAsmOperand *> &Operands);
 
-  bool searchSymbolAlias(SmallVectorImpl<MCParsedAsmOperand *> &Operands,
+  MipsAsmParser::OperandMatchResultTy
+  parseLSAImm(SmallVectorImpl<MCParsedAsmOperand *> &Operands);
+
+  bool searchSymbolAlias(SmallVectorImpl<MCParsedAsmOperand*> &Operands,
                          unsigned RegKind);
 
   bool ParseOperand(SmallVectorImpl<MCParsedAsmOperand *> &,
@@ -190,8 +194,8 @@ class MipsAsmParser : public MCTargetAsmParser {
 
   bool isEvaluated(const MCExpr *Expr);
   bool parseDirectiveSet();
-  bool parseDirectiveMipsHackStocg();
   bool parseDirectiveMipsHackELFFlags();
+  bool parseDirectiveOption();
 
   bool parseSetAtDirective();
   bool parseSetNoAtDirective();
@@ -216,6 +220,10 @@ class MipsAsmParser : public MCTargetAsmParser {
   }
 
   bool isN64() const { return STI.getFeatureBits() & Mips::FeatureN64; }
+
+  bool isMicroMips() const {
+    return STI.getFeatureBits() & Mips::FeatureMicroMips;
+  }
 
   int matchRegisterName(StringRef Symbol, bool is64BitReg);
 
@@ -299,7 +307,8 @@ private:
     k_PostIndexRegister,
     k_Register,
     k_PtrReg,
-    k_Token
+    k_Token,
+    k_LSAImm
   } Kind;
 
   MipsOperand(KindTy K) : MCParsedAsmOperand(), Kind(K) {}
@@ -374,6 +383,7 @@ public:
   bool isMem() const { return Kind == k_Memory; }
   bool isPtrReg() const { return Kind == k_PtrReg; }
   bool isInvNum() const { return Kind == k_Immediate; }
+  bool isLSAImm() const { return Kind == k_LSAImm; }
 
   StringRef getToken() const {
     assert(Kind == k_Token && "Invalid access!");
@@ -396,7 +406,7 @@ public:
   }
 
   const MCExpr *getImm() const {
-    assert((Kind == k_Immediate) && "Invalid access!");
+    assert((Kind == k_Immediate || Kind == k_LSAImm) && "Invalid access!");
     return Imm.Val;
   }
 
@@ -443,8 +453,16 @@ public:
     return Op;
   }
 
-  static MipsOperand *CreateMem(unsigned Base, const MCExpr *Off, SMLoc S,
-                                SMLoc E) {
+  static MipsOperand *CreateLSAImm(const MCExpr *Val, SMLoc S, SMLoc E) {
+    MipsOperand *Op = new MipsOperand(k_LSAImm);
+    Op->Imm.Val = Val;
+    Op->StartLoc = S;
+    Op->EndLoc = E;
+    return Op;
+  }
+
+  static MipsOperand *CreateMem(unsigned Base, const MCExpr *Off,
+                                SMLoc S, SMLoc E) {
     MipsOperand *Op = new MipsOperand(k_Memory);
     Op->Mem.Base = Base;
     Op->Mem.Off = Off;
@@ -550,6 +568,45 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
                                        SmallVectorImpl<MCInst> &Instructions) {
   const MCInstrDesc &MCID = getInstDesc(Inst.getOpcode());
   Inst.setLoc(IDLoc);
+
+  if (MCID.isBranch() || MCID.isCall()) {
+    const unsigned Opcode = Inst.getOpcode();
+    MCOperand Offset;
+
+    switch (Opcode) {
+    default:
+      break;
+    case Mips::BEQ:
+    case Mips::BNE:
+      assert (MCID.getNumOperands() == 3 && "unexpected number of operands");
+      Offset = Inst.getOperand(2);
+      if (!Offset.isImm())
+        break; // We'll deal with this situation later on when applying fixups.
+      if (!isIntN(isMicroMips() ? 17 : 18, Offset.getImm()))
+        return Error(IDLoc, "branch target out of range");
+      if (OffsetToAlignment (Offset.getImm(), 1LL << (isMicroMips() ? 1 : 2)))
+        return Error(IDLoc, "branch to misaligned address");
+      break;
+    case Mips::BGEZ:
+    case Mips::BGTZ:
+    case Mips::BLEZ:
+    case Mips::BLTZ:
+    case Mips::BGEZAL:
+    case Mips::BLTZAL:
+    case Mips::BC1F:
+    case Mips::BC1T:
+      assert (MCID.getNumOperands() == 2 && "unexpected number of operands");
+      Offset = Inst.getOperand(1);
+      if (!Offset.isImm())
+        break; // We'll deal with this situation later on when applying fixups.
+      if (!isIntN(isMicroMips() ? 17 : 18, Offset.getImm()))
+        return Error(IDLoc, "branch target out of range");
+      if (OffsetToAlignment (Offset.getImm(), 1LL << (isMicroMips() ? 1 : 2)))
+        return Error(IDLoc, "branch to misaligned address");
+      break;
+    }
+  }
+
   if (MCID.hasDelaySlot() && Options.isReorder()) {
     // If this instruction has a delay slot and .set reorder is active,
     // emit a NOP after it.
@@ -1159,9 +1216,7 @@ MipsAsmParser::ParseOperand(SmallVectorImpl<MCParsedAsmOperand *> &Operands,
       return true;
 
     SMLoc E = SMLoc::getFromPointer(Parser.getTok().getLoc().getPointer() - 1);
-
     MCSymbol *Sym = getContext().GetOrCreateSymbol("$" + Identifier);
-
     // Otherwise create a symbol reference.
     const MCExpr *Res =
         MCSymbolRefExpr::Create(Sym, MCSymbolRefExpr::VK_None, getContext());
@@ -1170,6 +1225,25 @@ MipsAsmParser::ParseOperand(SmallVectorImpl<MCParsedAsmOperand *> &Operands,
     return false;
   }
   case AsmToken::Identifier:
+    // For instruction aliases like "bc1f $Label" dedicated parser will
+    // eat the '$' sign before failing. So in order to look for appropriate
+    // label we must check first if we have already consumed '$'.
+    if (hasConsumedDollar) {
+      hasConsumedDollar = false;
+      SMLoc S = Parser.getTok().getLoc();
+      StringRef Identifier;
+      if (Parser.parseIdentifier(Identifier))
+        return true;
+      SMLoc E =
+          SMLoc::getFromPointer(Parser.getTok().getLoc().getPointer() - 1);
+      MCSymbol *Sym = getContext().GetOrCreateSymbol("$" + Identifier);
+      // Create a symbol reference.
+      const MCExpr *Res =
+          MCSymbolRefExpr::Create(Sym, MCSymbolRefExpr::VK_None, getContext());
+
+      Operands.push_back(MipsOperand::CreateImm(Res, S, E));
+      return false;
+    }
     // Look for the existing symbol, we should check if
     // we need to assigne the propper RegisterKind.
     if (searchSymbolAlias(Operands, MipsOperand::Kind_None))
@@ -2041,6 +2115,45 @@ MipsAsmParser::parseInvNum(SmallVectorImpl<MCParsedAsmOperand *> &Operands) {
   return MatchOperand_Success;
 }
 
+MipsAsmParser::OperandMatchResultTy
+MipsAsmParser::parseLSAImm(SmallVectorImpl<MCParsedAsmOperand *> &Operands) {
+  switch (getLexer().getKind()) {
+  default:
+    return MatchOperand_NoMatch;
+  case AsmToken::LParen:
+  case AsmToken::Plus:
+  case AsmToken::Minus:
+  case AsmToken::Integer:
+    break;
+  }
+
+  const MCExpr *Expr;
+  SMLoc S = Parser.getTok().getLoc();
+
+  if (getParser().parseExpression(Expr))
+    return MatchOperand_ParseFail;
+
+  int64_t Val;
+  if (!Expr->EvaluateAsAbsolute(Val)) {
+    Error(S, "expected immediate value");
+    return MatchOperand_ParseFail;
+  }
+
+  // The LSA instruction allows a 2-bit unsigned immediate. For this reason
+  // and because the CPU always adds one to the immediate field, the allowed
+  // range becomes 1..4. We'll only check the range here and will deal
+  // with the addition/subtraction when actually decoding/encoding
+  // the instruction.
+  if (Val < 1 || Val > 4) {
+    Error(S, "immediate not in range (1..4)");
+    return MatchOperand_ParseFail;
+  }
+
+  Operands.push_back(MipsOperand::CreateLSAImm(Expr, S,
+                                               Parser.getTok().getLoc()));
+  return MatchOperand_Success;
+}
+
 MCSymbolRefExpr::VariantKind MipsAsmParser::getVariantKind(StringRef Symbol) {
 
   MCSymbolRefExpr::VariantKind VK =
@@ -2239,22 +2352,7 @@ bool MipsAsmParser::parseSetAssignment() {
     return reportParseError("unexpected token in .set directive");
   Lex(); // Eat comma
 
-  if (getLexer().is(AsmToken::Dollar)) {
-    MCSymbol *Symbol;
-    SMLoc DollarLoc = getLexer().getLoc();
-    // Consume the dollar sign, and check for a following identifier.
-    Parser.Lex();
-    // We have a '$' followed by something, make sure they are adjacent.
-    if (DollarLoc.getPointer() + 1 != getTok().getLoc().getPointer())
-      return true;
-    StringRef Res =
-        StringRef(DollarLoc.getPointer(),
-                  getTok().getEndLoc().getPointer() - DollarLoc.getPointer());
-    Symbol = getContext().GetOrCreateSymbol(Res);
-    Parser.Lex();
-    Value =
-        MCSymbolRefExpr::Create(Symbol, MCSymbolRefExpr::VK_None, getContext());
-  } else if (Parser.parseExpression(Value))
+ if (Parser.parseExpression(Value))
     return reportParseError("expected valid expression after comma");
 
   // Check if the Name already exists as a symbol.
@@ -2289,7 +2387,11 @@ bool MipsAsmParser::parseDirectiveSet() {
     Parser.eatToEndOfStatement();
     return false;
   } else if (Tok.getString() == "nomicromips") {
-    // Ignore this directive for now.
+    getTargetStreamer().emitDirectiveSetNoMicroMips();
+    Parser.eatToEndOfStatement();
+    return false;
+  } else if (Tok.getString() == "micromips") {
+    getTargetStreamer().emitDirectiveSetMicroMips();
     Parser.eatToEndOfStatement();
     return false;
   } else {
@@ -2301,29 +2403,12 @@ bool MipsAsmParser::parseDirectiveSet() {
   return true;
 }
 
-bool MipsAsmParser::parseDirectiveMipsHackStocg() {
-  MCAsmParser &Parser = getParser();
-  StringRef Name;
-  if (Parser.parseIdentifier(Name))
-    reportParseError("expected identifier");
-
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(Name);
-  if (getLexer().isNot(AsmToken::Comma))
-    return TokError("unexpected token");
-  Lex();
-
-  int64_t Flags = 0;
-  if (Parser.parseAbsoluteExpression(Flags))
-    return TokError("unexpected token");
-
-  getTargetStreamer().emitMipsHackSTOCG(Sym, Flags);
-  return false;
-}
-
 bool MipsAsmParser::parseDirectiveMipsHackELFFlags() {
   int64_t Flags = 0;
-  if (Parser.parseAbsoluteExpression(Flags))
-    return TokError("unexpected token");
+  if (Parser.parseAbsoluteExpression(Flags)) {
+    TokError("unexpected token");
+    return false;
+  }
 
   getTargetStreamer().emitMipsHackELFFlags(Flags);
   return false;
@@ -2362,18 +2447,44 @@ bool MipsAsmParser::parseDirectiveGpWord() {
   // method to evaluate the expression.
   if (getParser().parseExpression(Value))
     return true;
-
   getParser().getStreamer().EmitGPRel32Value(Value);
-  Parser.Lex(); // Eat last token.
 
-  if (getLexer().is(AsmToken::EndOfStatement))
+  if (getLexer().isNot(AsmToken::EndOfStatement))
     return Error(getLexer().getLoc(), "unexpected token in directive");
+  Parser.Lex(); // Eat EndOfStatement token.
+  return false;
+}
 
+bool MipsAsmParser::parseDirectiveOption() {
+  // Get the option token.
+  AsmToken Tok = Parser.getTok();
+  // At the moment only identifiers are supported.
+  if (Tok.isNot(AsmToken::Identifier)) {
+    Error(Parser.getTok().getLoc(), "unexpected token in .option directive");
+    Parser.eatToEndOfStatement();
+    return false;
+  }
+
+  StringRef Option = Tok.getIdentifier();
+
+  if (Option == "pic0") {
+    getTargetStreamer().emitDirectiveOptionPic0();
+    Parser.Lex();
+    if (Parser.getTok().isNot(AsmToken::EndOfStatement)) {
+      Error(Parser.getTok().getLoc(),
+            "unexpected token in .option pic0 directive");
+      Parser.eatToEndOfStatement();
+    }
+    return false;
+  }
+
+  // Unknown option.
+  Warning(Parser.getTok().getLoc(), "unknown option in .option directive");
+  Parser.eatToEndOfStatement();
   return false;
 }
 
 bool MipsAsmParser::ParseDirective(AsmToken DirectiveID) {
-
   StringRef IDVal = DirectiveID.getString();
 
   if (IDVal == ".ent") {
@@ -2421,11 +2532,21 @@ bool MipsAsmParser::ParseDirective(AsmToken DirectiveID) {
     return false;
   }
 
-  if (IDVal == ".mips_hack_stocg")
-    return parseDirectiveMipsHackStocg();
-
   if (IDVal == ".mips_hack_elf_flags")
     return parseDirectiveMipsHackELFFlags();
+
+  if (IDVal == ".option")
+    return parseDirectiveOption();
+
+  if (IDVal == ".abicalls") {
+    getTargetStreamer().emitDirectiveAbiCalls();
+    if (Parser.getTok().isNot(AsmToken::EndOfStatement)) {
+      Error(Parser.getTok().getLoc(), "unexpected token in directive");
+      // Clear line
+      Parser.eatToEndOfStatement();
+    }
+    return false;
+  }
 
   return true;
 }

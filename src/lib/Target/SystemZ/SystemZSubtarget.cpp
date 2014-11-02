@@ -8,9 +8,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "SystemZSubtarget.h"
+#include "MCTargetDesc/SystemZMCTargetDesc.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/Support/Host.h"
-#include "MCTargetDesc/SystemZMCTargetDesc.h"
 
 #define GET_SUBTARGETINFO_TARGET_DESC
 #define GET_SUBTARGETINFO_CTOR
@@ -18,11 +18,15 @@
 
 using namespace llvm;
 
+// Pin the vtabel to this file.
+void SystemZSubtarget::anchor() {}
+
 SystemZSubtarget::SystemZSubtarget(const std::string &TT,
                                    const std::string &CPU,
                                    const std::string &FS)
   : SystemZGenSubtargetInfo(TT, CPU, FS), HasDistinctOps(false),
     HasLoadStoreOnCond(false), HasHighWord(false), HasFPExtension(false),
+    HasFastSerialization(false), HasInterlockedAccess1(false),
     TargetTriple(TT) {
   std::string CPUName = CPU;
   if (CPUName.empty())

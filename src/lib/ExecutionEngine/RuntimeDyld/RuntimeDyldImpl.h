@@ -77,6 +77,11 @@ public:
 /// linker.
 class RelocationEntry {
 public:
+  struct SectionPair {
+      uint32_t SectionA;
+      uint32_t SectionB;
+  };
+
   /// SectionID - the section this relocation points to.
   unsigned SectionID;
 
@@ -92,7 +97,10 @@ public:
 
   /// SymOffset - Section offset of the relocation entry's symbol (used for GOT
   /// lookup).
-  uint64_t SymOffset;
+  union {
+    uint64_t SymOffset;
+    SectionPair Sections;
+  };
 
   /// True if this is a PCRel relocation (MachO specific).
   bool IsPCRel;
@@ -113,6 +121,16 @@ public:
                   bool IsPCRel, unsigned Size)
     : SectionID(id), Offset(offset), RelType(type), Addend(addend),
       SymOffset(0), IsPCRel(IsPCRel), Size(Size) {}
+
+  RelocationEntry(unsigned id, uint64_t offset, uint32_t type, int64_t addend,
+                  unsigned SectionA, uint64_t SectionAOffset, unsigned SectionB,
+                  uint64_t SectionBOffset, bool IsPCRel, unsigned Size)
+      : SectionID(id), Offset(offset), RelType(type),
+        Addend(SectionAOffset - SectionBOffset + addend), IsPCRel(IsPCRel),
+        Size(Size) {
+    Sections.SectionA = SectionA;
+    Sections.SectionB = SectionB;
+  }
 };
 
 class RelocationValueRef {
@@ -149,7 +167,7 @@ protected:
   SectionList Sections;
 
   typedef unsigned SID; // Type for SectionIDs
-  #define RTDYLD_INVALID_SECTION_ID ((SID)(-1)) 
+  #define RTDYLD_INVALID_SECTION_ID ((SID)(-1))
 
   // Keep a map of sections from object file to the SectionID which
   // references it.
@@ -186,6 +204,10 @@ protected:
 
   Triple::ArchType Arch;
   bool IsTargetLittleEndian;
+
+  // True if all sections should be passed to the memory manager, false if only
+  // sections containing relocations should be. Defaults to 'false'.
+  bool ProcessAllSections;
 
   // This mutex prevents simultaneously loading objects from two different
   // threads.  This keeps us from having to protect individual data structures
@@ -296,27 +318,46 @@ protected:
 
   /// \brief Parses the object file relocation and stores it to Relocations
   ///        or SymbolRelocations (this depends on the object file type).
-  virtual void processRelocationRef(unsigned SectionID,
-                                    RelocationRef RelI,
-                                    ObjectImage &Obj,
-                                    ObjSectionToIDMap &ObjSectionToID,
-                                    const SymbolTableMap &Symbols,
-                                    StubMap &Stubs) = 0;
+  virtual relocation_iterator
+  processRelocationRef(unsigned SectionID, const section_iterator &SI,
+                       relocation_iterator RelI, ObjectImage &Obj,
+                       ObjSectionToIDMap &ObjSectionToID,
+                       const SymbolTableMap &Symbols, StubMap &Stubs) = 0;
 
   /// \brief Resolve relocations to external symbols.
   void resolveExternalSymbols();
 
   /// \brief Update GOT entries for external symbols.
-  // The base class does nothing.  ELF overrides this.
+  // The base class does nothing.  ELF and MachO overrides this.
   virtual void updateGOTEntries(StringRef Name, uint64_t Addr) {}
 
   virtual ObjectImage *createObjectImage(ObjectBuffer *InputBuffer);
+  virtual ObjectImage *createObjectImageFromFile(object::ObjectFile *InputObject);
+
+  // \brief Compute an upper bound of the memory that is required to load all sections
+  void computeTotalAllocSize(ObjectImage &Obj, 
+                             uint64_t& CodeSize, 
+                             uint64_t& DataSizeRO, 
+                             uint64_t& DataSizeRW); 
+  
+  // \brief Compute the stub buffer size required for a section
+  unsigned computeSectionStubBufSize(ObjectImage &Obj, const SectionRef &Section); 
+
+  // This is the implementation for the two public overloads
+  ObjectImage *loadObject(ObjectImage *InputObject);
+
 public:
-  RuntimeDyldImpl(RTDyldMemoryManager *mm) : MemMgr(mm), HasError(false) {}
+  RuntimeDyldImpl(RTDyldMemoryManager *mm)
+    : MemMgr(mm), ProcessAllSections(false), HasError(false) {}
 
   virtual ~RuntimeDyldImpl();
 
+  void setProcessAllSections(bool ProcessAllSections) {
+    this->ProcessAllSections = ProcessAllSections;
+  }
+
   ObjectImage *loadObject(ObjectBuffer *InputBuffer);
+  ObjectImage *loadObject(object::ObjectFile *InputObject);
 
   void *getSymbolAddress(StringRef Name) {
     // FIXME: Just look up as a function for now. Overly simple of course.
@@ -354,15 +395,15 @@ public:
   StringRef getErrorString() { return ErrorStr; }
 
   virtual bool isCompatibleFormat(const ObjectBuffer *Buffer) const = 0;
+  virtual bool isCompatibleFile(const ObjectFile *Obj) const = 0;
 
   virtual void registerEHFrames();
 
   virtual void deregisterEHFrames();
 
-  virtual void finalizeLoad(ObjSectionToIDMap &SectionMap) {}
+  virtual void finalizeLoad(ObjectImage &ObjImg, ObjSectionToIDMap &SectionMap) {}
 };
 
 } // end namespace llvm
-
 
 #endif

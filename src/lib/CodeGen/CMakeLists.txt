@@ -7,6 +7,7 @@ add_llvm_library(LLVMCodeGen
   CalcSpillWeights.cpp
   CallingConvLower.cpp
   CodeGen.cpp
+  CodeGenPrepare.cpp
   CriticalAntiDepBreaker.cpp
   DFAPacketizer.cpp
   DeadMachineInstructionElim.cpp
@@ -35,7 +36,7 @@ add_llvm_library(LLVMCodeGen
   LiveRangeCalc.cpp
   LiveRangeEdit.cpp
   LiveRegMatrix.cpp
-  LiveRegUnits.cpp
+  LivePhysRegs.cpp
   LiveStackAnalysis.cpp
   LiveVariables.cpp
   LocalStackSlotAllocation.cpp
@@ -97,6 +98,7 @@ add_llvm_library(LLVMCodeGen
   StackColoring.cpp
   StackProtector.cpp
   StackSlotColoring.cpp
+  StackMapLivenessAnalysis.cpp
   StackMaps.cpp
   TailDuplication.cpp
   TargetFrameLoweringImpl.cpp

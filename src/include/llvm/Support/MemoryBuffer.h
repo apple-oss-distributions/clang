@@ -14,11 +14,11 @@
 #ifndef LLVM_SUPPORT_MEMORYBUFFER_H
 #define LLVM_SUPPORT_MEMORYBUFFER_H
 
+#include "llvm-c/Core.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/DataTypes.h"
-#include "llvm-c/Core.h"
 
 namespace llvm {
 
@@ -68,21 +68,41 @@ public:
   /// it has the specified size.
   static error_code getFile(Twine Filename, OwningPtr<MemoryBuffer> &result,
                             int64_t FileSize = -1,
-                            bool RequiresNullTerminator = true);
+                            bool RequiresNullTerminator = true,
+                            bool IsVolatile = false);
+  static error_code getFile(Twine Filename, std::unique_ptr<MemoryBuffer> &result,
+                            int64_t FileSize = -1,
+                            bool RequiresNullTerminator = true,
+                            bool IsVolatile = false);
 
   /// Given an already-open file descriptor, map some slice of it into a
   /// MemoryBuffer. The slice is specified by an \p Offset and \p MapSize.
   /// Since this is in the middle of a file, the buffer is not null terminated.
+  ///
+  /// \param IsVolatile true indicates that the file may be changing often.
   static error_code getOpenFileSlice(int FD, const char *Filename,
                                      OwningPtr<MemoryBuffer> &Result,
-                                     uint64_t MapSize, int64_t Offset);
+                                     uint64_t MapSize, int64_t Offset,
+                                     bool IsVolatile = false);
+  static error_code getOpenFileSlice(int FD, const char *Filename,
+                                     std::unique_ptr<MemoryBuffer> &Result,
+                                     uint64_t MapSize, int64_t Offset,
+                                     bool IsVolatile = false);
 
   /// Given an already-open file descriptor, read the file and return a
   /// MemoryBuffer.
+  ///
+  /// \param IsVolatile true indicates that the file may be changing often.
   static error_code getOpenFile(int FD, const char *Filename,
                                 OwningPtr<MemoryBuffer> &Result,
                                 uint64_t FileSize,
-                                bool RequiresNullTerminator = true);
+                                bool RequiresNullTerminator = true,
+                                bool IsVolatile = false);
+  static error_code getOpenFile(int FD, const char *Filename,
+                                std::unique_ptr<MemoryBuffer> &Result,
+                                uint64_t FileSize,
+                                bool RequiresNullTerminator = true,
+                                bool IsVolatile = false);
 
   /// getMemBuffer - Open the specified memory range as a MemoryBuffer.  Note
   /// that InputData must be null terminated if RequiresNullTerminator is true.
@@ -112,6 +132,7 @@ public:
   /// getSTDIN - Read all of stdin into a file buffer, and return it.
   /// If an error occurs, this returns null and sets ec.
   static error_code getSTDIN(OwningPtr<MemoryBuffer> &result);
+  static error_code getSTDIN(std::unique_ptr<MemoryBuffer> &result);
 
 
   /// getFileOrSTDIN - Open the specified file as a MemoryBuffer, or open stdin
@@ -119,6 +140,9 @@ public:
   /// ec.
   static error_code getFileOrSTDIN(StringRef Filename,
                                    OwningPtr<MemoryBuffer> &result,
+                                   int64_t FileSize = -1);
+  static error_code getFileOrSTDIN(StringRef Filename,
+                                   std::unique_ptr<MemoryBuffer> &result,
                                    int64_t FileSize = -1);
 
   //===--------------------------------------------------------------------===//

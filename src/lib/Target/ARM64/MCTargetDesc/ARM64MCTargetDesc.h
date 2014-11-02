@@ -44,6 +44,7 @@ MCObjectWriter *createARM64ELFObjectWriter(raw_ostream &OS,
 MCObjectWriter *createARM64MachObjectWriter(raw_ostream &OS,
                                             uint32_t CPUType,
                                             uint32_t CPUSubtype);
+
 } // End llvm namespace
 
 // Defines symbolic names for ARM64 registers.  This defines a mapping from

@@ -4,6 +4,7 @@
 set(SANITIZER_SOURCES
   sanitizer_allocator.cc
   sanitizer_common.cc
+  sanitizer_coverage.cc
   sanitizer_flags.cc
   sanitizer_libc.cc
   sanitizer_libignore.cc
@@ -13,10 +14,13 @@ set(SANITIZER_SOURCES
   sanitizer_platform_limits_posix.cc
   sanitizer_posix.cc
   sanitizer_printf.cc
+  sanitizer_procmaps_linux.cc
+  sanitizer_procmaps_mac.cc
   sanitizer_stackdepot.cc
   sanitizer_stacktrace.cc
   sanitizer_suppressions.cc
   sanitizer_symbolizer.cc
+  sanitizer_symbolizer_libbacktrace.cc
   sanitizer_symbolizer_win.cc
   sanitizer_thread_registry.cc
   sanitizer_win.cc)
@@ -36,13 +40,13 @@ set(SANITIZER_LIBCDEP_SOURCES
 set(SANITIZER_HEADERS
   sanitizer_allocator.h
   sanitizer_allocator_internal.h
+  sanitizer_atomic.h
   sanitizer_atomic_clang.h
   sanitizer_atomic_msvc.h
-  sanitizer_atomic.h
   sanitizer_common.h
   sanitizer_common_interceptors.inc
   sanitizer_common_interceptors_ioctl.inc
-  sanitizer_common_interceptors_scanf.inc
+  sanitizer_common_interceptors_format.inc
   sanitizer_common_syscalls.inc
   sanitizer_flags.h
   sanitizer_internal_defs.h
@@ -53,13 +57,20 @@ set(SANITIZER_HEADERS
   sanitizer_list.h
   sanitizer_mutex.h
   sanitizer_placement_new.h
+  sanitizer_platform.h
   sanitizer_platform_interceptors.h
+  sanitizer_platform_limits_posix.h
   sanitizer_procmaps.h
   sanitizer_quarantine.h
   sanitizer_report_decorator.h
   sanitizer_stackdepot.h
   sanitizer_stacktrace.h
+  sanitizer_stoptheworld.h
+  sanitizer_suppressions.h
   sanitizer_symbolizer.h
+  sanitizer_symbolizer_libbacktrace.h
+  sanitizer_syscall_generic.inc
+  sanitizer_syscall_linux_x86_64.inc
   sanitizer_thread_registry.h)
 
 if (NOT MSVC)

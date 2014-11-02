@@ -137,7 +137,7 @@ char FunctionAttrs::ID = 0;
 INITIALIZE_PASS_BEGIN(FunctionAttrs, "functionattrs",
                 "Deduce function attributes", false, false)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
-INITIALIZE_PASS_DEPENDENCY(CallGraph)
+INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfo)
 INITIALIZE_PASS_END(FunctionAttrs, "functionattrs",
                 "Deduce function attributes", false, false)
@@ -437,6 +437,7 @@ determinePointerReadAttrs(Argument *A,
     case Instruction::GetElementPtr:
     case Instruction::PHI:
     case Instruction::Select:
+    case Instruction::AddrSpaceCast:
       // The original value is not read/written via this if the new value isn't.
       for (Instruction::use_iterator UI = I->use_begin(), UE = I->use_end();
            UI != UE; ++UI) {
@@ -723,6 +724,7 @@ bool FunctionAttrs::IsFunctionMallocLike(Function *F,
         // Extend the analysis by looking upwards.
         case Instruction::BitCast:
         case Instruction::GetElementPtr:
+        case Instruction::AddrSpaceCast:
           FlowsToReturn.insert(RVI->getOperand(0));
           continue;
         case Instruction::Select: {

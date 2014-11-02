@@ -28,6 +28,8 @@ R600RegisterInfo::R600RegisterInfo(AMDGPUTargetMachine &tm)
 BitVector R600RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
 
+  const R600InstrInfo *TII = static_cast<const R600InstrInfo*>(TM.getInstrInfo());
+
   Reserved.set(AMDGPU::ZERO);
   Reserved.set(AMDGPU::HALF);
   Reserved.set(AMDGPU::ONE);
@@ -48,14 +50,8 @@ BitVector R600RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
     Reserved.set(*I);
   }
 
-  const R600InstrInfo *RII =
-    static_cast<const R600InstrInfo*>(TM.getInstrInfo());
-  std::vector<unsigned> IndirectRegs = RII->getIndirectReservedRegs(MF);
-  for (std::vector<unsigned>::iterator I = IndirectRegs.begin(),
-                                       E = IndirectRegs.end();
-                                       I != E; ++I) {
-    Reserved.set(*I);
-  }
+  TII->reserveIndirectRegisters(Reserved, MF);
+
   return Reserved;
 }
 
@@ -73,6 +69,10 @@ unsigned R600RegisterInfo::getHWRegChan(unsigned reg) const {
   return this->getEncodingValue(reg) >> HW_CHAN_SHIFT;
 }
 
+unsigned R600RegisterInfo::getHWRegIndex(unsigned Reg) const {
+  return GET_REG_INDEX(getEncodingValue(Reg));
+}
+
 const TargetRegisterClass * R600RegisterInfo::getCFGStructurizerRegClass(
                                                                    MVT VT) const {
   switch(VT.SimpleTy) {
@@ -84,4 +84,17 @@ const TargetRegisterClass * R600RegisterInfo::getCFGStructurizerRegClass(
 const RegClassWeight &R600RegisterInfo::getRegClassWeight(
   const TargetRegisterClass *RC) const {
   return RCW;
+}
+
+bool R600RegisterInfo::isPhysRegLiveAcrossClauses(unsigned Reg) const {
+  assert(!TargetRegisterInfo::isVirtualRegister(Reg));
+
+  switch (Reg) {
+  case AMDGPU::OQAP:
+  case AMDGPU::OQBP:
+  case AMDGPU::AR_X:
+    return false;
+  default:
+    return true;
+  }
 }

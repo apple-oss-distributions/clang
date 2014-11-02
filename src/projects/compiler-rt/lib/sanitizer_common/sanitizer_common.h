@@ -49,6 +49,7 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 void *MmapOrDie(uptr size, const char *mem_type);
 void UnmapOrDie(void *addr, uptr size);
 void *MmapFixedNoReserve(uptr fixed_addr, uptr size);
+void *MmapNoReserveOrDie(uptr size, const char *mem_type);
 void *MmapFixedOrDie(uptr fixed_addr, uptr size);
 void *Mprotect(uptr fixed_addr, uptr size);
 // Map aligned chunk of address space; size and alignment are powers of two.
@@ -83,6 +84,23 @@ class InternalScopedBuffer {
   void operator=(const InternalScopedBuffer&);
 };
 
+class InternalScopedString : public InternalScopedBuffer<char> {
+ public:
+  explicit InternalScopedString(uptr max_length)
+      : InternalScopedBuffer<char>(max_length), length_(0) {
+    (*this)[0] = '\0';
+  }
+  uptr length() { return length_; }
+  void clear() {
+    (*this)[0] = '\0';
+    length_ = 0;
+  }
+  void append(const char *format, ...);
+
+ private:
+  uptr length_;
+};
+
 // Simple low-level (mmap-based) allocator for internal use. Doesn't have
 // constructor, so all instances of LowLevelAllocator should be
 // linker initialized.
@@ -107,6 +125,15 @@ bool PrintsToTtyCached();
 void Printf(const char *format, ...);
 void Report(const char *format, ...);
 void SetPrintfAndReportCallback(void (*callback)(const char *));
+#define VReport(level, ...)                                              \
+  do {                                                                   \
+    if ((uptr)common_flags()->verbosity >= (level)) Report(__VA_ARGS__); \
+  } while (0)
+#define VPrintf(level, ...)                                              \
+  do {                                                                   \
+    if ((uptr)common_flags()->verbosity >= (level)) Printf(__VA_ARGS__); \
+  } while (0)
+
 // Can be used to prevent mixing error reports from different sanitizers.
 extern StaticSpinMutex CommonSanitizerReportMutex;
 void MaybeOpenReportFile();
@@ -114,6 +141,8 @@ extern fd_t report_fd;
 extern bool log_to_file;
 extern char report_path_prefix[4096];
 extern uptr report_fd_pid;
+extern uptr stoptheworld_tracer_pid;
+extern uptr stoptheworld_tracer_ppid;
 
 uptr OpenFile(const char *filename, bool write);
 // Opens the file 'file_name" and reads up to 'max_len' bytes.
@@ -130,9 +159,10 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size);
 // Error report formatting.
 const char *StripPathPrefix(const char *filepath,
                             const char *strip_file_prefix);
-void PrintSourceLocation(const char *file, int line, int column);
-void PrintModuleAndOffset(const char *module, uptr offset);
-
+void PrintSourceLocation(InternalScopedString *buffer, const char *file,
+                         int line, int column);
+void PrintModuleAndOffset(InternalScopedString *buffer,
+                          const char *module, uptr offset);
 
 // OS
 void DisableCoreDumper();
@@ -157,6 +187,9 @@ void SleepForMillis(int millis);
 u64 NanoTime();
 int Atexit(void (*function)(void));
 void SortArray(uptr *array, uptr size);
+// Strip the directories from the module name, return a new string allocated
+// with internal_strdup.
+char *StripModuleName(const char *module);
 
 // Exit
 void NORETURN Abort();
@@ -281,12 +314,6 @@ INLINE int ToLower(int c) {
   return (c >= 'A' && c <= 'Z') ? (c + 'a' - 'A') : c;
 }
 
-#if SANITIZER_WORDSIZE == 64
-# define FIRST_32_SECOND_64(a, b) (b)
-#else
-# define FIRST_32_SECOND_64(a, b) (a)
-#endif
-
 // A low-level vector based on mmap. May incur a significant memory overhead for
 // small vectors.
 // WARNING: The current implementation supports only POD types.
@@ -294,8 +321,7 @@ template<typename T>
 class InternalMmapVector {
  public:
   explicit InternalMmapVector(uptr initial_capacity) {
-    CHECK_GT(initial_capacity, 0);
-    capacity_ = initial_capacity;
+    capacity_ = Max(initial_capacity, (uptr)1);
     size_ = 0;
     data_ = (T *)MmapOrDie(capacity_ * sizeof(T), "InternalMmapVector");
   }
@@ -335,6 +361,8 @@ class InternalMmapVector {
   uptr capacity() const {
     return capacity_;
   }
+
+  void clear() { size_ = 0; }
 
  private:
   void Resize(uptr new_capacity) {
@@ -450,6 +478,23 @@ const uptr kPthreadDestructorIterations = 0;
 
 // Callback type for iterating over a set of memory ranges.
 typedef void (*RangeIteratorCallback)(uptr begin, uptr end, void *arg);
+
+#if SANITIZER_LINUX && !defined(SANITIZER_GO)
+extern uptr indirect_call_wrapper;
+void SetIndirectCallWrapper(uptr wrapper);
+
+template <typename F>
+F IndirectExternCall(F f) {
+  typedef F (*WrapF)(F);
+  return indirect_call_wrapper ? ((WrapF)indirect_call_wrapper)(f) : f;
+}
+#else
+inline void SetIndirectCallWrapper(uptr wrapper) {}
+template <typename F>
+F IndirectExternCall(F f) {
+  return f;
+}
+#endif
 }  // namespace __sanitizer
 
 inline void *operator new(__sanitizer::operator_new_size_type size,

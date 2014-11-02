@@ -15,14 +15,13 @@
 #define DEBUG_TYPE "iv-users"
 #include "llvm/Analysis/IVUsers.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Analysis/Dominators.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/Assembly/Writer.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Debug.h"
@@ -34,7 +33,7 @@ char IVUsers::ID = 0;
 INITIALIZE_PASS_BEGIN(IVUsers, "iv-users",
                       "Induction Variable Users", false, true)
 INITIALIZE_PASS_DEPENDENCY(LoopInfo)
-INITIALIZE_PASS_DEPENDENCY(DominatorTree)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_PASS_END(IVUsers, "iv-users",
                       "Induction Variable Users", false, true)
@@ -187,15 +186,34 @@ bool IVUsers::AddUsersImpl(Instruction *I,
 
     if (AddUserToIVUsers) {
       // Okay, we found a user that we cannot reduce.
-      IVUses.push_back(new IVStrideUse(this, User, I));
-      IVStrideUse &NewUse = IVUses.back();
+      IVStrideUse &NewUse = AddUser(User, I);
       // Autodetect the post-inc loop set, populating NewUse.PostIncLoops.
       // The regular return value here is discarded; instead of recording
       // it, we just recompute it when we need it.
+      const SCEV *OriginalISE = ISE;
       ISE = TransformForPostIncUse(NormalizeAutodetect,
                                    ISE, User, I,
                                    NewUse.PostIncLoops,
                                    *SE, *DT);
+
+      // PostIncNormalization effectively simplifies the expression under
+      // pre-increment assumptions. Those assumptions (no wrapping) might not
+      // hold for the post-inc value. Catch such cases by making sure the
+      // transformation is invertible.
+      if (OriginalISE != ISE) {
+        const SCEV *DenormalizedISE =
+          TransformForPostIncUse(Denormalize, ISE, User, I,
+              NewUse.PostIncLoops, *SE, *DT);
+
+        // If we normalized the expression, but denormalization doesn't give the
+        // original one, discard this user.
+        if (OriginalISE != DenormalizedISE) {
+          DEBUG(dbgs() << "   DISCARDING (NORMALIZATION ISN'T INVERTIBLE): "
+                       << *ISE << '\n');
+          IVUses.pop_back();
+          return false;
+        }
+      }
       DEBUG(if (SE->getSCEV(I) != ISE)
               dbgs() << "   NORMALIZED TO: " << *ISE << '\n');
     }
@@ -224,7 +242,7 @@ IVUsers::IVUsers()
 
 void IVUsers::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<LoopInfo>();
-  AU.addRequired<DominatorTree>();
+  AU.addRequired<DominatorTreeWrapperPass>();
   AU.addRequired<ScalarEvolution>();
   AU.setPreservesAll();
 }
@@ -233,7 +251,7 @@ bool IVUsers::runOnLoop(Loop *l, LPPassManager &LPM) {
 
   L = l;
   LI = &getAnalysis<LoopInfo>();
-  DT = &getAnalysis<DominatorTree>();
+  DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   SE = &getAnalysis<ScalarEvolution>();
   TD = getAnalysisIfAvailable<DataLayout>();
 
@@ -248,7 +266,7 @@ bool IVUsers::runOnLoop(Loop *l, LPPassManager &LPM) {
 
 void IVUsers::print(raw_ostream &OS, const Module *M) const {
   OS << "IV Users for loop ";
-  WriteAsOperand(OS, L->getHeader(), false);
+  L->getHeader()->printAsOperand(OS, false);
   if (SE->hasLoopInvariantBackedgeTakenCount(L)) {
     OS << " with backedge-taken count "
        << *SE->getBackedgeTakenCount(L);
@@ -258,13 +276,13 @@ void IVUsers::print(raw_ostream &OS, const Module *M) const {
   for (ilist<IVStrideUse>::const_iterator UI = IVUses.begin(),
        E = IVUses.end(); UI != E; ++UI) {
     OS << "  ";
-    WriteAsOperand(OS, UI->getOperandValToReplace(), false);
+    UI->getOperandValToReplace()->printAsOperand(OS, false);
     OS << " = " << *getReplacementExpr(*UI);
     for (PostIncLoopSet::const_iterator
          I = UI->PostIncLoops.begin(),
          E = UI->PostIncLoops.end(); I != E; ++I) {
       OS << " (post-inc with loop ";
-      WriteAsOperand(OS, (*I)->getHeader(), false);
+      (*I)->getHeader()->printAsOperand(OS, false);
       OS << ")";
     }
     OS << " in  ";

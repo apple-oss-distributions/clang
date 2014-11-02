@@ -262,8 +262,14 @@ namespace llvm {
 
     const MCSectionCOFF *getCOFFSection(StringRef Section,
                                         unsigned Characteristics,
-                                        SectionKind Kind, int Selection = 0,
+                                        SectionKind Kind,
+                                        StringRef COMDATSymName,
+                                        int Selection,
                                         const MCSectionCOFF *Assoc = 0);
+
+    const MCSectionCOFF *getCOFFSection(StringRef Section,
+                                        unsigned Characteristics,
+                                        SectionKind Kind);
 
     const MCSectionCOFF *getCOFFSection(StringRef Section);
 
@@ -276,6 +282,7 @@ namespace llvm {
     /// This can be overridden by clients which want to control the reported
     /// compilation directory and have it be something other than the current
     /// working directory.
+    /// Returns an empty string if the current directory cannot be determined.
     StringRef getCompilationDir() const { return CompilationDir; }
 
     /// \brief Set the compilation directory for DW_AT_comp_dir

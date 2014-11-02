@@ -77,6 +77,12 @@ static const char *PragmaIntroducerKindStrings[] = { "PIK_HashPragma",
 static const char *PragmaMessageKindStrings[] = { "PMK_Message", "PMK_Warning",
                                                   "PMK_Error" };
 
+// ConditionValueKind strings.
+const char *
+ConditionValueKindStrings[] = {
+  "CVK_NotEvaluated", "CVK_False", "CVK_True"
+};
+
 // Mapping strings.
 static const char *MappingStrings[] = { "0",           "MAP_IGNORE",
                                         "MAP_WARNING", "MAP_ERROR",
@@ -166,7 +172,7 @@ void PPCallbacksTracker::Ident(clang::SourceLocation Loc,
                                const std::string &Str) {
   beginCallback("Ident");
   appendArgument("Loc", Loc);
-  appendQuotedArgument("Str", Str);
+  appendArgument("Str", Str);
 }
 
 // Callback invoked when start reading any pragma directive.
@@ -276,6 +282,7 @@ void PPCallbacksTracker::PragmaWarning(clang::SourceLocation Loc,
       SS << ", ";
     SS << Ids[i];
   }
+  SS << "]";
   appendArgument("Ids", SS.str());
 }
 
@@ -344,22 +351,22 @@ void PPCallbacksTracker::SourceRangeSkipped(clang::SourceRange Range) {
 // Hook called whenever an #if is seen.
 void PPCallbacksTracker::If(clang::SourceLocation Loc,
                             clang::SourceRange ConditionRange,
-                            bool ConditionValue) {
+                            ConditionValueKind ConditionValue) {
   beginCallback("If");
   appendArgument("Loc", Loc);
   appendArgument("ConditionRange", ConditionRange);
-  appendArgument("ConditionValue", ConditionValue);
+  appendArgument("ConditionValue", ConditionValue, ConditionValueKindStrings);
 }
 
 // Hook called whenever an #elif is seen.
 void PPCallbacksTracker::Elif(clang::SourceLocation Loc,
                               clang::SourceRange ConditionRange,
-                              bool ConditionValue,
+                              ConditionValueKind ConditionValue,
                               clang::SourceLocation IfLoc) {
   beginCallback("Elif");
   appendArgument("Loc", Loc);
   appendArgument("ConditionRange", ConditionRange);
-  appendArgument("ConditionValue", ConditionValue);
+  appendArgument("ConditionValue", ConditionValue, ConditionValueKindStrings);
   appendArgument("IfLoc", IfLoc);
 }
 
@@ -527,7 +534,7 @@ void PPCallbacksTracker::appendArgument(const char *Name,
       SS << ", ";
     SS << "{"
        << "Name: " << Value[I].first->getName() << ", "
-       << "Loc:" << getSourceLocationString(PP, Value[I].second) << "}";
+       << "Loc: " << getSourceLocationString(PP, Value[I].second) << "}";
   }
   SS << "]";
   appendArgument(Name, SS.str());

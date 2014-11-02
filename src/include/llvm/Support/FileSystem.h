@@ -238,6 +238,7 @@ struct file_magic {
     macho_dsym_companion,     ///< Mach-O dSYM companion file
     macho_universal_binary,   ///< Mach-O universal binary
     coff_object,              ///< COFF object file
+    coff_import_library,      ///< COFF import library
     pecoff_executable,        ///< PECOFF executable file
     windows_resource          ///< Windows compiled resource file (.rc)
   };
@@ -301,13 +302,18 @@ inline error_code create_directory(const Twine &Path) {
   return create_directory(Path, Existed);
 }
 
-/// @brief Create a hard link from \a from to \a to.
+/// @brief Create a link from \a from to \a to.
+///
+/// The link may be a soft or a hard link, depending on the platform. The caller
+/// may not assume which one. Currently on windows it creates a hard link since
+/// soft links require extra privileges. On unix, it creates a soft link since
+/// hard links don't work on SMB file systems.
 ///
 /// @param to The path to hard link to.
 /// @param from The path to hard link from. This is created.
-/// @returns errc::success if exists(to) && exists(from) && equivalent(to, from)
-///          , otherwise a platform specific error_code.
-error_code create_hard_link(const Twine &to, const Twine &from);
+/// @returns errc::success if the link was created, otherwise a platform
+/// specific error_code.
+error_code create_link(const Twine &to, const Twine &from);
 
 /// @brief Create a symbolic link from \a from to \a to.
 ///
@@ -340,27 +346,17 @@ inline error_code remove(const Twine &Path) {
   return remove(Path, Existed);
 }
 
-/// @brief Recursively remove all files below \a path, then \a path. Files are
-///        removed as if by POSIX remove().
-///
-/// @param path Input path.
-/// @param num_removed Number of files removed.
-/// @returns errc::success if path has been removed and num_removed has been
-///          successfully set, otherwise a platform specific error_code.
-error_code remove_all(const Twine &path, uint32_t &num_removed);
-
-/// @brief Convenience function for clients that don't need to know how many
-///        files were removed.
-inline error_code remove_all(const Twine &Path) {
-  uint32_t Removed;
-  return remove_all(Path, Removed);
-}
-
 /// @brief Rename \a from to \a to. Files are renamed as if by POSIX rename().
 ///
 /// @param from The path to rename from.
 /// @param to The path to rename to. This is created.
 error_code rename(const Twine &from, const Twine &to);
+
+/// @brief Copy the contents of \a From to \a To.
+///
+/// @param From The path to copy from.
+/// @param To The path to copy to. This is created.
+error_code copy_file(const Twine &From, const Twine &To);
 
 /// @brief Resize path to size. File is resized as if by POSIX truncate().
 ///
@@ -544,6 +540,11 @@ inline error_code file_size(const Twine &Path, uint64_t &Result) {
   return error_code::success();
 }
 
+/// @brief Set the file modification and access time.
+///
+/// @returns errc::success if the file times were successfully set, otherwise a
+///          platform specific error_code or errc::not_supported on platforms
+///          where the functionality isn't available.
 error_code setLastModificationAndAccessTime(int FD, TimeValue Time);
 
 /// @brief Is status available?
@@ -764,7 +765,7 @@ public:
 /// @param result Set to the start address of the mapped buffer.
 /// @returns errc::success if result has been successfully set, otherwise a
 ///          platform specific error_code.
-error_code map_file_pages(const Twine &path, off_t file_offset, size_t size,  
+error_code map_file_pages(const Twine &path, off_t file_offset, size_t size,
                           bool map_writable, void *&result);
 
 

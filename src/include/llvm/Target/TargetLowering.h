@@ -48,8 +48,10 @@ namespace llvm {
   class MachineFunction;
   class MachineInstr;
   class MachineJumpTableInfo;
+  class Mangler;
   class MCContext;
   class MCExpr;
+  class MCSymbol;
   template<typename T> class SmallVectorImpl;
   class DataLayout;
   class TargetRegisterClass;
@@ -173,6 +175,14 @@ public:
     return true;
   }
 
+  /// Return true if multiple condition registers are available.
+  bool hasMultipleConditionRegisters() const {
+    return HasMultipleConditionRegisters;
+  }
+
+  /// Return true if the target has BitExtract instructions.
+  bool hasExtractBitsInsn() const { return HasExtractBitsInsn; }
+
   /// Return true if a vector of the given type should be split
   /// (TypeSplitVector) instead of promoted (TypePromoteInteger) during type
   /// legalization.
@@ -202,6 +212,17 @@ public:
   /// unlikely to be predicted right.
   bool isPredictableSelectExpensive() const {
     return PredictableSelectIsExpensive;
+  }
+
+  /// isLoadBitCastBeneficial() - Return true if the following transform
+  /// is beneficial.
+  /// fold (conv (load x)) -> (load (conv*)x)
+  /// On architectures that don't natively support some vector loads efficiently,
+  /// casting the load to a smaller vector of larger types and loading
+  /// is more efficient, however, this can be undone by optimizations in
+  /// dag combiner.
+  virtual bool isLoadBitCastBeneficial(EVT /* Load */, EVT /* Bitcast */) const {
+    return true;
   }
 
   /// \brief Return if the target supports combining a
@@ -608,8 +629,9 @@ public:
     return getValueType(Ty, AllowUnknown).getSimpleVT();
   }
 
-  /// Return the desired alignment for ByVal aggregate function arguments in the
-  /// caller parameter area.  This is the actual alignment, not its logarithm.
+  /// Return the desired alignment for ByVal or InAlloca aggregate function
+  /// arguments in the caller parameter area.  This is the actual alignment, not
+  /// its logarithm.
   virtual unsigned getByValTypeAlignment(Type *Ty) const;
 
   /// Return the type of registers that this ValueType will eventually require.
@@ -842,6 +864,11 @@ public:
     return 0;
   }
 
+  /// Returns true if a cast between SrcAS and DestAS is a noop.
+  virtual bool isNoopAddrSpaceCast(unsigned SrcAS, unsigned DestAS) const {
+    return false;
+  }
+
   //===--------------------------------------------------------------------===//
   /// \name Helpers for TargetTransformInfo implementations
   /// @{
@@ -879,13 +906,13 @@ protected:
   }
 
   /// Indicate whether this target prefers to use _setjmp to implement
-  /// llvm.setjmp or the non _ version.  Defaults to false.
+  /// llvm.setjmp or the version without _.  Defaults to false.
   void setUseUnderscoreSetJmp(bool Val) {
     UseUnderscoreSetJmp = Val;
   }
 
   /// Indicate whether this target prefers to use _longjmp to implement
-  /// llvm.longjmp or the non _ version.  Defaults to false.
+  /// llvm.longjmp or the version without _.  Defaults to false.
   void setUseUnderscoreLongJmp(bool Val) {
     UseUnderscoreLongJmp = Val;
   }
@@ -923,6 +950,23 @@ protected:
   /// the select operations if possible.
   void setSelectIsExpensive(bool isExpensive = true) {
     SelectIsExpensive = isExpensive;
+  }
+
+  /// Tells the code generator that the target has multiple (allocatable)
+  /// condition registers that can be used to store the results of comparisons
+  /// for use by selects and conditional branches. With multiple condition
+  /// registers, the code generator will not aggressively sink comparisons into
+  /// the blocks of their users.
+  void setHasMultipleConditionRegisters(bool hasManyRegs = true) {
+    HasMultipleConditionRegisters = hasManyRegs;
+  }
+
+  /// Tells the code generator that the target has BitExtract instructions.
+  /// The code generator will aggressively sink "shift"s into the blocks of
+  /// their users if the users will generate "and" instructions which can be
+  /// combined with "shift" to BitExtract instructions.
+  void setHasExtractBitsInsn(bool hasExtractInsn = true) {
+    HasExtractBitsInsn = hasExtractInsn;
   }
 
   /// Tells the code generator not to expand sequence of operations into a
@@ -1165,6 +1209,14 @@ public:
     return true;
   }
 
+  /// Return true if it's significantly cheaper to shift a vector by a uniform
+  /// scalar than by an amount which will vary across each lane. On x86, for
+  /// example, there is a "psllw" instruction for the former case, but no simple
+  /// instruction for a general "a << b" operation on vectors.
+  virtual bool isVectorShiftByScalarCheap(Type *Ty) const {
+    return false;
+  }
+
   /// Return true if it's free to truncate a value of type Ty1 to type
   /// Ty2. e.g. On x86 it's free to truncate a i32 value in register EAX to i16
   /// by referencing its sub-register AX.
@@ -1319,6 +1371,19 @@ private:
   /// Tells the code generator not to expand operations into sequences that use
   /// the select operations if possible.
   bool SelectIsExpensive;
+
+  /// Tells the code generator that the target has multiple (allocatable)
+  /// condition registers that can be used to store the results of comparisons
+  /// for use by selects and conditional branches. With multiple condition
+  /// registers, the code generator will not aggressively sink comparisons into
+  /// the blocks of their users.
+  bool HasMultipleConditionRegisters;
+
+  /// Tells the code generator that the target has BitExtract instructions.
+  /// The code generator will aggressively sink "shift"s into the blocks of
+  /// their users if the users will generate "and" instructions which can be
+  /// combined with "shift" to BitExtract instructions.
+  bool HasExtractBitsInsn;
 
   /// Tells the code generator not to expand integer divides by constants into a
   /// sequence of muls, adds, and shifts.  This is a hack until a real cost
@@ -1688,6 +1753,10 @@ protected:
   /// Return true if the value types that can be represented by the specified
   /// register class are all legal.
   bool isLegalRC(const TargetRegisterClass *RC) const;
+
+  /// Replace/modify any TargetFrameIndex operands with a targte-dependent
+  /// sequence of memory operands that is recognized by PrologEpilogInserter.
+  MachineBasicBlock *emitPatchPoint(MachineInstr *MI, MachineBasicBlock *MBB) const;
 };
 
 /// This class defines information used to lower LLVM code to legal SelectionDAG
@@ -1934,12 +2003,13 @@ public:
     bool isSRet     : 1;
     bool isNest     : 1;
     bool isByVal    : 1;
+    bool isInAlloca : 1;
     bool isReturned : 1;
     uint16_t Alignment;
 
     ArgListEntry() : isSExt(false), isZExt(false), isInReg(false),
-      isSRet(false), isNest(false), isByVal(false), isReturned(false),
-      Alignment(0) { }
+      isSRet(false), isNest(false), isByVal(false), isInAlloca(false),
+      isReturned(false), Alignment(0) { }
 
     void setAttributes(ImmutableCallSite *CS, unsigned AttrIdx);
   };
@@ -2075,6 +2145,24 @@ public:
     return VT.bitsLT(MinVT) ? MinVT : VT;
   }
 
+  /// Returns a 0 terminated array of registers that can be safely used as
+  /// scratch registers.
+  virtual const uint16_t *getScratchRegisters(CallingConv::ID CC) const {
+    return NULL;
+  }
+
+  /// This callback is used to prepare for a volatile or atomic load.
+  /// It takes a chain node as input and returns the chain for the load itself.
+  ///
+  /// Having a callback like this is necessary for targets like SystemZ,
+  /// which allows a CPU to reuse the result of a previous load indefinitely,
+  /// even if a cache-coherent store is performed by another CPU.  The default
+  /// implementation does nothing.
+  virtual SDValue prepareVolatileOrAtomicLoad(SDValue Chain, SDLoc DL,
+                                              SelectionDAG &DAG) const {
+    return Chain;
+  }
+
   /// This callback is invoked by the type legalizer to legalize nodes with an
   /// illegal operand type but legal result types.  It replaces the
   /// LowerOperation callback in the type Legalizer.  The reason we can not do
@@ -2123,6 +2211,10 @@ public:
                                    const TargetLibraryInfo *) const {
     return 0;
   }
+
+
+  bool verifyReturnAddressArgumentIsConstant(SDValue Op,
+                                             SelectionDAG &DAG) const;
 
   //===--------------------------------------------------------------------===//
   // Inline Asm Support hooks

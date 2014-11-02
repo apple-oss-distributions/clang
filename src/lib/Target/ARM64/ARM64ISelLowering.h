@@ -17,6 +17,7 @@
 
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/Target/TargetLowering.h"
 
 namespace llvm {
@@ -26,7 +27,7 @@ namespace ARM64ISD {
 enum {
   FIRST_NUMBER = ISD::BUILTIN_OP_END,
 
-  Wrapper,       // Wrapper node for addresses from the GOT.
+  WrapperLarge,  // 4-instruction MOVZ/MOVK sequence for 64-bit addresses.
 
   CALL,          // Function call.
 
@@ -128,7 +129,7 @@ public:
 
   /// Selects the correct CCAssignFn for a the given CallingConvention
   /// value.
-  CCAssignFn *CCAssignFnForCall(bool IsVarArg) const;
+  CCAssignFn *CCAssignFnForCall(CallingConv::ID CC, bool IsVarArg) const;
 
   /// computeMaskedBitsForTargetNode - Determine which of the bits specified in
   /// Mask are known to be either zero or one and return them in the
@@ -247,6 +248,8 @@ public:
   /// expanded to fmul + fadd.
   virtual bool isFMAFasterThanFMulAndFAdd(EVT VT) const;
 
+  virtual const uint16_t *getScratchRegisters(CallingConv::ID CC) const;
+
 private:
   /// Subtarget - Keep a pointer to the ARM64Subtarget around so that we can
   /// make the right decision when generating code for different targets.
@@ -287,6 +290,11 @@ private:
   void saveVarArgRegisters(CCState &CCInfo, SelectionDAG &DAG,
                            SDLoc DL, SDValue &Chain) const;
 
+  virtual bool CanLowerReturn(CallingConv::ID CallConv,
+                              MachineFunction &MF, bool isVarArg,
+                              const SmallVectorImpl<ISD::OutputArg> &Outs,
+                              LLVMContext &Context) const;
+
   virtual SDValue
     LowerReturn(SDValue Chain,
                 CallingConv::ID CallConv, bool isVarArg,
@@ -302,6 +310,7 @@ private:
                               SelectionDAG &DAG) const;
   SDValue LowerSETCC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSELECT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerJumpTable(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerConstantPool(SDValue Op, SelectionDAG &DAG) const;

@@ -40,12 +40,10 @@ class MCObjectStreamer : public MCStreamer {
   virtual void EmitCFIEndProcImpl(MCDwarfFrameInfo &Frame);
 
 protected:
-  MCObjectStreamer(MCContext &Context, MCTargetStreamer *TargetStreamer,
-                   MCAsmBackend &TAB, raw_ostream &_OS,
+  MCObjectStreamer(MCContext &Context, MCAsmBackend &TAB, raw_ostream &_OS,
                    MCCodeEmitter *_Emitter);
-  MCObjectStreamer(MCContext &Context, MCTargetStreamer *TargetStreamer,
-                   MCAsmBackend &TAB, raw_ostream &_OS, MCCodeEmitter *_Emitter,
-                   MCAssembler *_Assembler);
+  MCObjectStreamer(MCContext &Context, MCAsmBackend &TAB, raw_ostream &_OS,
+                   MCCodeEmitter *_Emitter, MCAssembler *_Assembler);
   ~MCObjectStreamer();
 
 public:
@@ -79,7 +77,8 @@ public:
   virtual void EmitLabel(MCSymbol *Symbol);
   virtual void EmitDebugLabel(MCSymbol *Symbol);
   virtual void EmitAssignment(MCSymbol *Symbol, const MCExpr *Value);
-  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size);
+  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                             const SMLoc &Loc = SMLoc());
   virtual void EmitULEB128Value(const MCExpr *Value);
   virtual void EmitSLEB128Value(const MCExpr *Value);
   virtual void EmitWeakReference(MCSymbol *Alias, const MCSymbol *Symbol);

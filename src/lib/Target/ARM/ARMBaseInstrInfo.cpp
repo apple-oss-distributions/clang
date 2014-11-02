@@ -37,7 +37,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 
-#define GET_INSTRINFO_CTOR
+#define GET_INSTRINFO_CTOR_DTOR
 #include "ARMGenInstrInfo.inc"
 
 using namespace llvm;
@@ -525,7 +525,7 @@ bool ARMBaseInstrInfo::isPredicable(MachineInstr *MI) const {
     MI->getParent()->getParent()->getInfo<ARMFunctionInfo>();
 
   if (AFI->isThumb2Function()) {
-    if (getSubtarget().hasV8Ops())
+    if (getSubtarget().restrictIT())
       return isV8EligibleForIT(MI);
   } else { // non-Thumb
     if ((MI->getDesc().TSFlags & ARMII::DomainMask) == ARMII::DomainNEON)
@@ -1325,10 +1325,11 @@ bool ARMBaseInstrInfo::produceSameValue(const MachineInstr *MI0,
       Opcode == ARM::t2LDRpci_pic ||
       Opcode == ARM::tLDRpci ||
       Opcode == ARM::tLDRpci_pic ||
-      Opcode == ARM::MOV_ga_dyn ||
+      Opcode == ARM::LDRLIT_ga_pcrel ||
+      Opcode == ARM::LDRLIT_ga_pcrel_ldr ||
+      Opcode == ARM::tLDRLIT_ga_pcrel ||
       Opcode == ARM::MOV_ga_pcrel ||
       Opcode == ARM::MOV_ga_pcrel_ldr ||
-      Opcode == ARM::t2MOV_ga_dyn ||
       Opcode == ARM::t2MOV_ga_pcrel) {
     if (MI1->getOpcode() != Opcode)
       return false;
@@ -1340,10 +1341,11 @@ bool ARMBaseInstrInfo::produceSameValue(const MachineInstr *MI0,
     if (MO0.getOffset() != MO1.getOffset())
       return false;
 
-    if (Opcode == ARM::MOV_ga_dyn ||
+    if (Opcode == ARM::LDRLIT_ga_pcrel ||
+        Opcode == ARM::LDRLIT_ga_pcrel_ldr ||
+        Opcode == ARM::tLDRLIT_ga_pcrel ||
         Opcode == ARM::MOV_ga_pcrel ||
         Opcode == ARM::MOV_ga_pcrel_ldr ||
-        Opcode == ARM::t2MOV_ga_dyn ||
         Opcode == ARM::t2MOV_ga_pcrel)
       // Ignore the PC labels.
       return MO0.getGlobal() == MO1.getGlobal();
@@ -1857,12 +1859,12 @@ void llvm::emitARMRegPlusImmediate(MachineBasicBlock &MBB,
   }
 }
 
-bool llvm::tryFoldSPUpdateIntoPushPop(MachineFunction &MF,
-                                      MachineInstr *MI,
+bool llvm::tryFoldSPUpdateIntoPushPop(const ARMSubtarget &Subtarget,
+                                      MachineFunction &MF, MachineInstr *MI,
                                       unsigned NumBytes) {
   // This optimisation potentially adds lots of load and store
   // micro-operations, it's only really a great benefit to code-size.
-  if (!MF.getFunction()->hasFnAttribute(Attribute::MinSize))
+  if (!Subtarget.isMinSize())
     return false;
 
   // If only one register is pushed/popped, LLVM can use an LDR/STR
@@ -3685,6 +3687,7 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
     case ARM::VLD3d16Pseudo:
     case ARM::VLD3d32Pseudo:
     case ARM::VLD1d64TPseudo:
+    case ARM::VLD1d64TPseudoWB_fixed:
     case ARM::VLD3d8Pseudo_UPD:
     case ARM::VLD3d16Pseudo_UPD:
     case ARM::VLD3d32Pseudo_UPD:
@@ -3701,6 +3704,7 @@ ARMBaseInstrInfo::getOperandLatency(const InstrItineraryData *ItinData,
     case ARM::VLD4d16Pseudo:
     case ARM::VLD4d32Pseudo:
     case ARM::VLD1d64QPseudo:
+    case ARM::VLD1d64QPseudoWB_fixed:
     case ARM::VLD4d8Pseudo_UPD:
     case ARM::VLD4d16Pseudo_UPD:
     case ARM::VLD4d32Pseudo_UPD:

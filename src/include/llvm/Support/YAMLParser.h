@@ -43,9 +43,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/SMLoc.h"
-
-#include <map>
 #include <limits>
+#include <map>
 #include <utility>
 
 namespace llvm {
@@ -105,6 +104,7 @@ private:
 
 /// @brief Abstract base class for all Nodes.
 class Node {
+   virtual void anchor();
 public:
   enum NodeKind {
     NK_Null,
@@ -175,6 +175,7 @@ private:
 /// Example:
 ///   !!null null
 class NullNode : public Node {
+  virtual void anchor();
 public:
   NullNode(OwningPtr<Document> &D)
       : Node(NK_Null, D, StringRef(), StringRef()) {}
@@ -190,6 +191,7 @@ public:
 /// Example:
 ///   Adena
 class ScalarNode : public Node {
+  virtual void anchor();
 public:
   ScalarNode(OwningPtr<Document> &D, StringRef Anchor, StringRef Tag,
              StringRef Val)
@@ -231,6 +233,7 @@ private:
 /// Example:
 ///   Section: .text
 class KeyValueNode : public Node {
+  virtual void anchor();
 public:
   KeyValueNode(OwningPtr<Document> &D)
     : Node(NK_KeyValue, D, StringRef(), StringRef())
@@ -342,6 +345,7 @@ void skip(CollectionType &C) {
 ///   Name: _main
 ///   Scope: Global
 class MappingNode : public Node {
+  virtual void anchor();
 public:
   enum MappingType {
     MT_Block,
@@ -391,6 +395,7 @@ private:
 ///   - Hello
 ///   - World
 class SequenceNode : public Node {
+  virtual void anchor();
 public:
   enum SequenceType {
     ST_Block,
@@ -446,6 +451,7 @@ private:
 /// Example:
 ///   *AnchorName
 class AliasNode : public Node {
+  virtual void anchor();
 public:
   AliasNode(OwningPtr<Document> &D, StringRef Val)
     : Node(NK_Alias, D, StringRef(), StringRef()), Name(Val) {}

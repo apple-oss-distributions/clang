@@ -53,6 +53,7 @@ void GlobalValue::copyAttributesFrom(const GlobalValue *Src) {
   setSection(Src->getSection());
   setVisibility(Src->getVisibility());
   setUnnamedAddr(Src->hasUnnamedAddr());
+  setDLLStorageClass(Src->getDLLStorageClass());
 }
 
 void GlobalValue::setAlignment(unsigned Align) {
@@ -237,7 +238,8 @@ GlobalValue *GlobalAlias::getAliasedGlobal() {
     return GV;
 
   ConstantExpr *CE = cast<ConstantExpr>(C);
-  assert((CE->getOpcode() == Instruction::BitCast || 
+  assert((CE->getOpcode() == Instruction::BitCast ||
+          CE->getOpcode() == Instruction::AddrSpaceCast ||
           CE->getOpcode() == Instruction::GetElementPtr) &&
          "Unsupported aliasee");
   

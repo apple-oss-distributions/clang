@@ -133,7 +133,8 @@ namespace {
     bool foldImmediate(MachineInstr *MI, MachineBasicBlock *MBB,
                        SmallSet<unsigned, 4> &ImmDefRegs,
                        DenseMap<unsigned, MachineInstr*> &ImmDefMIs);
-    bool isLoadFoldable(MachineInstr *MI, unsigned &FoldAsLoadDefReg);
+    bool isLoadFoldable(MachineInstr *MI,
+                        SmallSet<unsigned, 16> &FoldAsLoadDefCandidates);
   };
 }
 
@@ -496,8 +497,9 @@ bool PeepholeOptimizer::optimizeCopyOrBitcast(MachineInstr *MI) {
 /// isLoadFoldable - Check whether MI is a candidate for folding into a later
 /// instruction. We only fold loads to virtual registers and the virtual
 /// register defined has a single use.
-bool PeepholeOptimizer::isLoadFoldable(MachineInstr *MI,
-                                       unsigned &FoldAsLoadDefReg) {
+bool PeepholeOptimizer::isLoadFoldable(
+                              MachineInstr *MI,
+                              SmallSet<unsigned, 16> &FoldAsLoadDefCandidates) {
   if (!MI->canFoldAsLoad() || !MI->mayLoad())
     return false;
   const MCInstrDesc &MCID = MI->getDesc();
@@ -505,13 +507,13 @@ bool PeepholeOptimizer::isLoadFoldable(MachineInstr *MI,
     return false;
 
   unsigned Reg = MI->getOperand(0).getReg();
-  // To reduce compilation time, we check MRI->hasOneUse when inserting
+  // To reduce compilation time, we check MRI->hasOneNonDBGUse when inserting
   // loads. It should be checked when processing uses of the load, since
   // uses can be removed during peephole.
   if (!MI->getOperand(0).getSubReg() &&
       TargetRegisterInfo::isVirtualRegister(Reg) &&
-      MRI->hasOneUse(Reg)) {
-    FoldAsLoadDefReg = Reg;
+      MRI->hasOneNonDBGUse(Reg)) {
+    FoldAsLoadDefCandidates.insert(Reg);
     return true;
   }
   return false;
@@ -574,18 +576,14 @@ bool PeepholeOptimizer::runOnMachineFunction(MachineFunction &MF) {
 
   bool Changed = false;
 
-  SmallPtrSet<MachineInstr*, 8> LocalMIs;
-  SmallSet<unsigned, 4> ImmDefRegs;
-  DenseMap<unsigned, MachineInstr*> ImmDefMIs;
-  unsigned FoldAsLoadDefReg;
   for (MachineFunction::iterator I = MF.begin(), E = MF.end(); I != E; ++I) {
     MachineBasicBlock *MBB = &*I;
 
     bool SeenMoveImm = false;
-    LocalMIs.clear();
-    ImmDefRegs.clear();
-    ImmDefMIs.clear();
-    FoldAsLoadDefReg = 0;
+    SmallPtrSet<MachineInstr*, 8> LocalMIs;
+    SmallSet<unsigned, 4> ImmDefRegs;
+    DenseMap<unsigned, MachineInstr*> ImmDefMIs;
+    SmallSet<unsigned, 16> FoldAsLoadDefCandidates;
 
     for (MachineBasicBlock::iterator
            MII = I->begin(), MIE = I->end(); MII != MIE; ) {
@@ -594,16 +592,20 @@ bool PeepholeOptimizer::runOnMachineFunction(MachineFunction &MF) {
       ++MII;
       LocalMIs.insert(MI);
 
+      // Skip debug values. They should not affect this peephole optimization.
+      if (MI->isDebugValue())
+          continue;
+
       // If there exists an instruction which belongs to the following
       // categories, we will discard the load candidate.
       if (MI->isLabel() || MI->isPHI() || MI->isImplicitDef() ||
-          MI->isKill() || MI->isInlineAsm() || MI->isDebugValue() ||
+          MI->isKill() || MI->isInlineAsm() ||
           MI->hasUnmodeledSideEffects()) {
-        FoldAsLoadDefReg = 0;
+        FoldAsLoadDefCandidates.clear();
         continue;
       }
       if (MI->mayStore() || MI->isCall())
-        FoldAsLoadDefReg = 0;
+        FoldAsLoadDefCandidates.clear();
 
       if (((MI->isBitcast() || MI->isCopy()) && optimizeCopyOrBitcast(MI)) ||
           (MI->isCompare() && optimizeCmpInstr(MI, MBB)) ||
@@ -630,26 +632,43 @@ bool PeepholeOptimizer::runOnMachineFunction(MachineFunction &MF) {
       // Check whether MI is a load candidate for folding into a later
       // instruction. If MI is not a candidate, check whether we can fold an
       // earlier load into MI.
-      if (!isLoadFoldable(MI, FoldAsLoadDefReg) && FoldAsLoadDefReg) {
-        // We need to fold load after optimizeCmpInstr, since optimizeCmpInstr
-        // can enable folding by converting SUB to CMP.
-        MachineInstr *DefMI = 0;
-        MachineInstr *FoldMI = TII->optimizeLoadInstr(MI, MRI,
-                                                      FoldAsLoadDefReg, DefMI);
-        if (FoldMI) {
-          // Update LocalMIs since we replaced MI with FoldMI and deleted DefMI.
-          DEBUG(dbgs() << "Replacing: " << *MI);
-          DEBUG(dbgs() << "     With: " << *FoldMI);
-          LocalMIs.erase(MI);
-          LocalMIs.erase(DefMI);
-          LocalMIs.insert(FoldMI);
-          MI->eraseFromParent();
-          DefMI->eraseFromParent();
-          ++NumLoadFold;
-
-          // MI is replaced with FoldMI.
-          Changed = true;
-          continue;
+      if (!isLoadFoldable(MI, FoldAsLoadDefCandidates) &&
+          !FoldAsLoadDefCandidates.empty()) {
+        const MCInstrDesc &MIDesc = MI->getDesc();
+        for (unsigned i = MIDesc.getNumDefs(); i != MIDesc.getNumOperands();
+             ++i) {
+          const MachineOperand &MOp = MI->getOperand(i);
+          if (!MOp.isReg())
+            continue;
+          unsigned FoldAsLoadDefReg = MOp.getReg();
+          if (FoldAsLoadDefCandidates.count(FoldAsLoadDefReg)) {
+            // We need to fold load after optimizeCmpInstr, since
+            // optimizeCmpInstr can enable folding by converting SUB to CMP.
+            // Save FoldAsLoadDefReg because optimizeLoadInstr() resets it and
+            // we need it for markUsesInDebugValueAsUndef().
+            unsigned FoldedReg = FoldAsLoadDefReg;
+            MachineInstr *DefMI = 0;
+            MachineInstr *FoldMI = TII->optimizeLoadInstr(MI, MRI,
+                                                          FoldAsLoadDefReg,
+                                                          DefMI);
+            if (FoldMI) {
+              // Update LocalMIs since we replaced MI with FoldMI and deleted
+              // DefMI.
+              DEBUG(dbgs() << "Replacing: " << *MI);
+              DEBUG(dbgs() << "     With: " << *FoldMI);
+              LocalMIs.erase(MI);
+              LocalMIs.erase(DefMI);
+              LocalMIs.insert(FoldMI);
+              MI->eraseFromParent();
+              DefMI->eraseFromParent();
+              MRI->markUsesInDebugValueAsUndef(FoldedReg);
+              FoldAsLoadDefCandidates.erase(FoldedReg);
+              ++NumLoadFold;
+              // MI is replaced with FoldMI.
+              Changed = true;
+              break;
+            }
+          }
         }
       }
     }

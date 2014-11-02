@@ -155,7 +155,7 @@ JIT::JIT(Module *M, TargetMachine &tm, TargetJITInfo &tji,
 
   // Turn the machine code intermediate representation into bytes in memory that
   // may be executed.
-  if (TM.addPassesToEmitMachineCode(PM, *JCE)) {
+  if (TM.addPassesToEmitMachineCode(PM, *JCE, !getVerifyModules())) {
     report_fatal_error("Target does not support machine code emission!");
   }
 
@@ -187,7 +187,7 @@ void JIT::addModule(Module *M) {
 
     // Turn the machine code intermediate representation into bytes in memory
     // that may be executed.
-    if (TM.addPassesToEmitMachineCode(PM, *JCE)) {
+    if (TM.addPassesToEmitMachineCode(PM, *JCE, !getVerifyModules())) {
       report_fatal_error("Target does not support machine code emission!");
     }
 
@@ -218,7 +218,7 @@ bool JIT::removeModule(Module *M) {
 
     // Turn the machine code intermediate representation into bytes in memory
     // that may be executed.
-    if (TM.addPassesToEmitMachineCode(PM, *JCE)) {
+    if (TM.addPassesToEmitMachineCode(PM, *JCE, !getVerifyModules())) {
       report_fatal_error("Target does not support machine code emission!");
     }
 

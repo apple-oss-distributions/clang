@@ -5,20 +5,10 @@ module _Builtin_intrinsics [system] {
   }
 
   explicit module arm {
-    requires arm
-
     explicit module neon {
       requires neon
       header "arm_neon.h"
-      export *
-    }
-  }
-
-  explicit module arm64 {
-    requires arm64
-
-    explicit module simd {
-      header "aarch64_simd.h"
+      exclude header "arm64_neon_internal.h"
       export *
     }
   }

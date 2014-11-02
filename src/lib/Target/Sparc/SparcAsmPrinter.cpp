@@ -14,23 +14,32 @@
 
 #define DEBUG_TYPE "asm-printer"
 #include "Sparc.h"
+#include "InstPrinter/SparcInstPrinter.h"
+#include "MCTargetDesc/SparcBaseInfo.h"
+#include "MCTargetDesc/SparcMCExpr.h"
 #include "SparcInstrInfo.h"
 #include "SparcTargetMachine.h"
-#include "MCTargetDesc/SparcBaseInfo.h"
+#include "SparcTargetStreamer.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/Mangler.h"
 using namespace llvm;
 
 namespace {
   class SparcAsmPrinter : public AsmPrinter {
+    SparcTargetStreamer &getTargetStreamer() {
+      return static_cast<SparcTargetStreamer &>(
+          *OutStreamer.getTargetStreamer());
+    }
   public:
     explicit SparcAsmPrinter(TargetMachine &TM, MCStreamer &Streamer)
       : AsmPrinter(TM, Streamer) {}
@@ -45,14 +54,11 @@ namespace {
     void printCCOperand(const MachineInstr *MI, int opNum, raw_ostream &OS);
 
     virtual void EmitFunctionBodyStart();
-    virtual void EmitInstruction(const MachineInstr *MI) {
-      SmallString<128> Str;
-      raw_svector_ostream OS(Str);
-      printInstruction(MI, OS);
-      OutStreamer.EmitRawText(OS.str());
+    virtual void EmitInstruction(const MachineInstr *MI);
+
+    static const char *getRegisterName(unsigned RegNo) {
+      return SparcInstPrinter::getRegisterName(RegNo);
     }
-    void printInstruction(const MachineInstr *MI, raw_ostream &OS);// autogen'd.
-    static const char *getRegisterName(unsigned RegNo);
 
     bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
                          unsigned AsmVariant, const char *ExtraCode,
@@ -60,25 +66,139 @@ namespace {
     bool PrintAsmMemoryOperand(const MachineInstr *MI, unsigned OpNo,
                                unsigned AsmVariant, const char *ExtraCode,
                                raw_ostream &O);
-
-    bool printGetPCX(const MachineInstr *MI, unsigned OpNo, raw_ostream &OS);
-
-    virtual bool isBlockOnlyReachableByFallthrough(const MachineBasicBlock *MBB)
-                       const;
-    void EmitGlobalRegisterDecl(unsigned reg) {
-      SmallString<128> Str;
-      raw_svector_ostream OS(Str);
-      OS << "\t.register "
-         << "%" << StringRef(getRegisterName(reg)).lower()
-         << ", "
-         << ((reg == SP::G6 || reg == SP::G7)? "#ignore" : "#scratch");
-      OutStreamer.EmitRawText(OS.str());
-    }
-
   };
 } // end of anonymous namespace
 
-#include "SparcGenAsmWriter.inc"
+static MCOperand createPCXCallOP(MCSymbol *Label,
+                                 MCContext &OutContext)
+{
+  const MCSymbolRefExpr *MCSym = MCSymbolRefExpr::Create(Label,
+                                                         OutContext);
+  const SparcMCExpr *expr = SparcMCExpr::Create(SparcMCExpr::VK_Sparc_None,
+                                                MCSym, OutContext);
+  return MCOperand::CreateExpr(expr);
+}
+
+static MCOperand createPCXRelExprOp(SparcMCExpr::VariantKind Kind,
+                                    MCSymbol *GOTLabel, MCSymbol *StartLabel,
+                                    MCSymbol *CurLabel,
+                                    MCContext &OutContext)
+{
+  const MCSymbolRefExpr *GOT = MCSymbolRefExpr::Create(GOTLabel, OutContext);
+  const MCSymbolRefExpr *Start = MCSymbolRefExpr::Create(StartLabel,
+                                                         OutContext);
+  const MCSymbolRefExpr *Cur = MCSymbolRefExpr::Create(CurLabel,
+                                                       OutContext);
+
+  const MCBinaryExpr *Sub = MCBinaryExpr::CreateSub(Cur, Start, OutContext);
+  const MCBinaryExpr *Add = MCBinaryExpr::CreateAdd(GOT, Sub, OutContext);
+  const SparcMCExpr *expr = SparcMCExpr::Create(Kind,
+                                                Add, OutContext);
+  return MCOperand::CreateExpr(expr);
+}
+
+static void EmitCall(MCStreamer &OutStreamer,
+                     MCOperand &Callee)
+{
+  MCInst CallInst;
+  CallInst.setOpcode(SP::CALL);
+  CallInst.addOperand(Callee);
+  OutStreamer.EmitInstruction(CallInst);
+}
+
+static void EmitSETHI(MCStreamer &OutStreamer,
+                      MCOperand &Imm, MCOperand &RD)
+{
+  MCInst SETHIInst;
+  SETHIInst.setOpcode(SP::SETHIi);
+  SETHIInst.addOperand(RD);
+  SETHIInst.addOperand(Imm);
+  OutStreamer.EmitInstruction(SETHIInst);
+}
+
+static void EmitOR(MCStreamer &OutStreamer, MCOperand &RS1,
+                   MCOperand &Imm, MCOperand &RD)
+{
+  MCInst ORInst;
+  ORInst.setOpcode(SP::ORri);
+  ORInst.addOperand(RD);
+  ORInst.addOperand(RS1);
+  ORInst.addOperand(Imm);
+  OutStreamer.EmitInstruction(ORInst);
+}
+
+static void EmitADD(MCStreamer &OutStreamer,
+                    MCOperand &RS1, MCOperand &RS2, MCOperand &RD)
+{
+  MCInst ADDInst;
+  ADDInst.setOpcode(SP::ADDrr);
+  ADDInst.addOperand(RD);
+  ADDInst.addOperand(RS1);
+  ADDInst.addOperand(RS2);
+  OutStreamer.EmitInstruction(ADDInst);
+}
+
+static void LowerGETPCXAndEmitMCInsts(const MachineInstr *MI,
+                                      MCStreamer &OutStreamer,
+                                      MCContext &OutContext)
+{
+  const MachineOperand &MO = MI->getOperand(0);
+  MCSymbol *StartLabel = OutContext.CreateTempSymbol();
+  MCSymbol *EndLabel   = OutContext.CreateTempSymbol();
+  MCSymbol *SethiLabel = OutContext.CreateTempSymbol();
+  MCSymbol *GOTLabel   =
+    OutContext.GetOrCreateSymbol(Twine("_GLOBAL_OFFSET_TABLE_"));
+
+  assert(MO.getReg() != SP::O7 &&
+         "%o7 is assigned as destination for getpcx!");
+
+  MCOperand MCRegOP = MCOperand::CreateReg(MO.getReg());
+  MCOperand RegO7   = MCOperand::CreateReg(SP::O7);
+
+  // <StartLabel>:
+  //   call <EndLabel>
+  // <SethiLabel>:
+  //     sethi %hi(_GLOBAL_OFFSET_TABLE_+(<SethiLabel>-<StartLabel>)), <MO>
+  // <EndLabel>:
+  //   or  <MO>, %lo(_GLOBAL_OFFSET_TABLE_+(<EndLabel>-<StartLabel>))), <MO>
+  //   add <MO>, %o7, <MO>
+
+  OutStreamer.EmitLabel(StartLabel);
+  MCOperand Callee =  createPCXCallOP(EndLabel, OutContext);
+  EmitCall(OutStreamer, Callee);
+  OutStreamer.EmitLabel(SethiLabel);
+  MCOperand hiImm = createPCXRelExprOp(SparcMCExpr::VK_Sparc_HI,
+                                       GOTLabel, StartLabel, SethiLabel,
+                                       OutContext);
+  EmitSETHI(OutStreamer, hiImm, MCRegOP);
+  OutStreamer.EmitLabel(EndLabel);
+  MCOperand loImm = createPCXRelExprOp(SparcMCExpr::VK_Sparc_LO,
+                                       GOTLabel, StartLabel, EndLabel,
+                                       OutContext);
+  EmitOR(OutStreamer, MCRegOP, loImm, MCRegOP);
+  EmitADD(OutStreamer, MCRegOP, RegO7, MCRegOP);
+}
+
+void SparcAsmPrinter::EmitInstruction(const MachineInstr *MI)
+{
+
+  switch (MI->getOpcode()) {
+  default: break;
+  case TargetOpcode::DBG_VALUE:
+    // FIXME: Debug Value.
+    return;
+  case SP::GETPCX:
+    LowerGETPCXAndEmitMCInsts(MI, OutStreamer, OutContext);
+    return;
+  }
+  MachineBasicBlock::const_instr_iterator I = MI;
+  MachineBasicBlock::const_instr_iterator E = MI->getParent()->instr_end();
+  do {
+    MCInst TmpInst;
+    LowerSparcMachineInstrToMCInst(I, TmpInst, *this);
+    OutStreamer.EmitInstruction(TmpInst);
+  } while ((++I != E) && I->isInsideBundle()); // Delay slot check.
+}
 
 void SparcAsmPrinter::EmitFunctionBodyStart() {
   if (!TM.getSubtarget<SparcSubtarget>().is64Bit())
@@ -88,14 +208,19 @@ void SparcAsmPrinter::EmitFunctionBodyStart() {
   const unsigned globalRegs[] = { SP::G2, SP::G3, SP::G6, SP::G7, 0 };
   for (unsigned i = 0; globalRegs[i] != 0; ++i) {
     unsigned reg = globalRegs[i];
-    if (!MRI.isPhysRegUsed(reg))
+    if (MRI.use_empty(reg))
       continue;
-    EmitGlobalRegisterDecl(reg);
+
+    if  (reg == SP::G6 || reg == SP::G7)
+      getTargetStreamer().emitSparcRegisterIgnore(reg);
+    else
+      getTargetStreamer().emitSparcRegisterScratch(reg);
   }
 }
 
 void SparcAsmPrinter::printOperand(const MachineInstr *MI, int opNum,
                                    raw_ostream &O) {
+  const DataLayout *DL = TM.getDataLayout();
   const MachineOperand &MO = MI->getOperand (opNum);
   unsigned TF = MO.getTargetFlags();
 #ifndef NDEBUG
@@ -104,7 +229,7 @@ void SparcAsmPrinter::printOperand(const MachineInstr *MI, int opNum,
     if (MI->getOpcode() == SP::CALL)
       assert(TF == SPII::MO_NO_FLAG &&
              "Cannot handle target flags on call address");
-    else if (MI->getOpcode() == SP::SETHIi)
+    else if (MI->getOpcode() == SP::SETHIi || MI->getOpcode() == SP::SETHIXi)
       assert((TF == SPII::MO_HI || TF == SPII::MO_H44 || TF == SPII::MO_HH
               || TF == SPII::MO_TLS_GD_HI22
               || TF == SPII::MO_TLS_LDM_HI22
@@ -127,7 +252,7 @@ void SparcAsmPrinter::printOperand(const MachineInstr *MI, int opNum,
     else if (MI->getOpcode() == SP::TLS_LDXrr)
       assert(TF == SPII::MO_TLS_IE_LDX &&
              "Cannot handle target flags on ldx for TLS");
-    else if (MI->getOpcode() == SP::XORri)
+    else if (MI->getOpcode() == SP::XORri || MI->getOpcode() == SP::XORXri)
       assert((TF == SPII::MO_TLS_LDO_LOX10 || TF == SPII::MO_TLS_LE_LOX10) &&
              "Cannot handle target flags on xor for TLS");
     else
@@ -195,7 +320,7 @@ void SparcAsmPrinter::printOperand(const MachineInstr *MI, int opNum,
     O << MO.getSymbolName();
     break;
   case MachineOperand::MO_ConstantPoolIndex:
-    O << MAI->getPrivateGlobalPrefix() << "CPI" << getFunctionNumber() << "_"
+    O << DL->getPrivateGlobalPrefix() << "CPI" << getFunctionNumber() << "_"
       << MO.getIndex();
     break;
   default:
@@ -224,46 +349,6 @@ void SparcAsmPrinter::printMemOperand(const MachineInstr *MI, int opNum,
 
   O << "+";
   printOperand(MI, opNum+1, O);
-}
-
-bool SparcAsmPrinter::printGetPCX(const MachineInstr *MI, unsigned opNum,
-                                  raw_ostream &O) {
-  std::string operand = "";
-  const MachineOperand &MO = MI->getOperand(opNum);
-  switch (MO.getType()) {
-  default: llvm_unreachable("Operand is not a register");
-  case MachineOperand::MO_Register:
-    assert(TargetRegisterInfo::isPhysicalRegister(MO.getReg()) &&
-           "Operand is not a physical register ");
-    assert(MO.getReg() != SP::O7 &&
-           "%o7 is assigned as destination for getpcx!");
-    operand = "%" + StringRef(getRegisterName(MO.getReg())).lower();
-    break;
-  }
-
-  unsigned mfNum = MI->getParent()->getParent()->getFunctionNumber();
-  unsigned bbNum = MI->getParent()->getNumber();
-
-  O << '\n' << ".LLGETPCH" << mfNum << '_' << bbNum << ":\n";
-  O << "\tcall\t.LLGETPC" << mfNum << '_' << bbNum << '\n' ;
-
-  O << "\t  sethi\t"
-    << "%hi(_GLOBAL_OFFSET_TABLE_+(.-.LLGETPCH" << mfNum << '_' << bbNum
-    << ")), "  << operand << '\n' ;
-
-  O << ".LLGETPC" << mfNum << '_' << bbNum << ":\n" ;
-  O << "\tor\t" << operand
-    << ", %lo(_GLOBAL_OFFSET_TABLE_+(.-.LLGETPCH" << mfNum << '_' << bbNum
-    << ")), " << operand << '\n';
-  O << "\tadd\t" << operand << ", %o7, " << operand << '\n';
-
-  return true;
-}
-
-void SparcAsmPrinter::printCCOperand(const MachineInstr *MI, int opNum,
-                                     raw_ostream &O) {
-  int CC = (int)MI->getOperand(opNum).getImm();
-  O << SPARCCondCodeToString((SPCC::CondCodes)CC);
 }
 
 /// PrintAsmOperand - Print out an operand for an inline asm expression.
@@ -301,37 +386,6 @@ bool SparcAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
   O << ']';
 
   return false;
-}
-
-/// isBlockOnlyReachableByFallthough - Return true if the basic block has
-/// exactly one predecessor and the control transfer mechanism between
-/// the predecessor and this block is a fall-through.
-///
-/// This overrides AsmPrinter's implementation to handle delay slots.
-bool SparcAsmPrinter::
-isBlockOnlyReachableByFallthrough(const MachineBasicBlock *MBB) const {
-  // If this is a landing pad, it isn't a fall through.  If it has no preds,
-  // then nothing falls through to it.
-  if (MBB->isLandingPad() || MBB->pred_empty())
-    return false;
-
-  // If there isn't exactly one predecessor, it can't be a fall through.
-  MachineBasicBlock::const_pred_iterator PI = MBB->pred_begin(), PI2 = PI;
-  ++PI2;
-  if (PI2 != MBB->pred_end())
-    return false;
-
-  // The predecessor has to be immediately before this block.
-  const MachineBasicBlock *Pred = *PI;
-
-  if (!Pred->isLayoutSuccessor(MBB))
-    return false;
-
-  // Check if the last terminator is an unconditional branch.
-  MachineBasicBlock::const_iterator I = Pred->end();
-  while (I != Pred->begin() && !(--I)->isTerminator())
-    ; // Noop
-  return I == Pred->end() || !I->isBarrier();
 }
 
 // Force static initialization.

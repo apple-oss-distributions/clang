@@ -57,7 +57,7 @@ class ARM64ELFStreamer : public MCELFStreamer {
 public:
   ARM64ELFStreamer(MCContext &Context, MCAsmBackend &TAB,
                  raw_ostream &OS, MCCodeEmitter *Emitter)
-    : MCELFStreamer(Context, 0, TAB, OS, Emitter),
+    : MCELFStreamer(Context, TAB, OS, Emitter),
       MappingSymbolCounter(0), LastEMS(EMS_None) {
   }
 
@@ -93,7 +93,8 @@ public:
   /// This is one of the functions used to emit data into an ELF section, so the
   /// ARM64 streamer overrides it to add the appropriate mapping symbol ($d)
   /// if necessary.
-  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size) {
+  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                             const SMLoc &Loc) {
     EmitDataMappingSymbol();
     MCELFStreamer::EmitValueImpl(Value, Size);
   }

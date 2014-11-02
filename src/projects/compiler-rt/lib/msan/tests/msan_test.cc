@@ -1061,6 +1061,26 @@ TEST(MemorySanitizer, gethostbyname_r) {
   EXPECT_NOT_POISONED(err);
 }
 
+TEST(MemorySanitizer, gethostbyname_r_bad_host_name) {
+  char buf[2000];
+  struct hostent he;
+  struct hostent *result;
+  int err;
+  int res = gethostbyname_r("bad-host-name", &he, buf, sizeof(buf), &result, &err);
+  ASSERT_EQ((struct hostent *)0, result);
+  EXPECT_NOT_POISONED(err);
+}
+
+TEST(MemorySanitizer, gethostbyname_r_erange) {
+  char buf[5];
+  struct hostent he;
+  struct hostent *result;
+  int err;
+  int res = gethostbyname_r("localhost", &he, buf, sizeof(buf), &result, &err);
+  ASSERT_EQ(ERANGE, res);
+  EXPECT_NOT_POISONED(err);
+}
+
 TEST(MemorySanitizer, gethostbyname2_r) {
   char buf[2000];
   struct hostent he;
@@ -1470,6 +1490,45 @@ TEST(MemorySanitizer, stpcpy) {  // NOLINT
   EXPECT_NOT_POISONED(y[2]);
 }
 
+TEST(MemorySanitizer, strcat) {  // NOLINT
+  char a[10];
+  char b[] = "def";
+  strcpy(a, "abc");
+  __msan_poison(b + 1, 1);
+  strcat(a, b);
+  EXPECT_NOT_POISONED(a[3]);
+  EXPECT_POISONED(a[4]);
+  EXPECT_NOT_POISONED(a[5]);
+  EXPECT_NOT_POISONED(a[6]);
+  EXPECT_POISONED(a[7]);
+}
+
+TEST(MemorySanitizer, strncat) {  // NOLINT
+  char a[10];
+  char b[] = "def";
+  strcpy(a, "abc");
+  __msan_poison(b + 1, 1);
+  strncat(a, b, 5);
+  EXPECT_NOT_POISONED(a[3]);
+  EXPECT_POISONED(a[4]);
+  EXPECT_NOT_POISONED(a[5]);
+  EXPECT_NOT_POISONED(a[6]);
+  EXPECT_POISONED(a[7]);
+}
+
+TEST(MemorySanitizer, strncat_overflow) {  // NOLINT
+  char a[10];
+  char b[] = "def";
+  strcpy(a, "abc");
+  __msan_poison(b + 1, 1);
+  strncat(a, b, 2);
+  EXPECT_NOT_POISONED(a[3]);
+  EXPECT_POISONED(a[4]);
+  EXPECT_NOT_POISONED(a[5]);
+  EXPECT_POISONED(a[6]);
+  EXPECT_POISONED(a[7]);
+}
+
 TEST(MemorySanitizer, strtol) {
   char *e;
   assert(1 == strtol("1", &e, 10));
@@ -1494,13 +1553,15 @@ TEST(MemorySanitizer, strtoull) {
   EXPECT_NOT_POISONED((S8) e);
 }
 
-TEST(MemorySanitizer, strtoimax) {
+// https://code.google.com/p/memory-sanitizer/issues/detail?id=36
+TEST(MemorySanitizer, DISABLED_strtoimax) {
   char *e;
   assert(1 == strtoimax("1", &e, 10));
   EXPECT_NOT_POISONED((S8) e);
 }
 
-TEST(MemorySanitizer, strtoumax) {
+// https://code.google.com/p/memory-sanitizer/issues/detail?id=36
+TEST(MemorySanitizer, DISABLED_strtoumax) {
   char *e;
   assert(1 == strtoumax("1", &e, 10));
   EXPECT_NOT_POISONED((S8) e);
@@ -3085,79 +3146,91 @@ TEST(MemorySanitizer, VolatileBitfield) {
 
 TEST(MemorySanitizer, UnalignedLoad) {
   char x[32];
+  U4 origin = __LINE__;
+  __msan_set_origin(&x, sizeof(x), origin);
+
   memset(x + 8, 0, 16);
-  EXPECT_POISONED(__sanitizer_unaligned_load16(x+6));
-  EXPECT_POISONED(__sanitizer_unaligned_load16(x+7));
+  EXPECT_POISONED_O(__sanitizer_unaligned_load16(x+6), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load16(x+7), origin);
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load16(x+8));
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load16(x+9));
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load16(x+22));
-  EXPECT_POISONED(__sanitizer_unaligned_load16(x+23));
-  EXPECT_POISONED(__sanitizer_unaligned_load16(x+24));
+  EXPECT_POISONED_O(__sanitizer_unaligned_load16(x+23), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load16(x+24), origin);
 
-  EXPECT_POISONED(__sanitizer_unaligned_load32(x+4));
-  EXPECT_POISONED(__sanitizer_unaligned_load32(x+7));
+  EXPECT_POISONED_O(__sanitizer_unaligned_load32(x+4), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load32(x+7), origin);
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load32(x+8));
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load32(x+9));
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load32(x+20));
-  EXPECT_POISONED(__sanitizer_unaligned_load32(x+21));
-  EXPECT_POISONED(__sanitizer_unaligned_load32(x+24));
+  EXPECT_POISONED_O(__sanitizer_unaligned_load32(x+21), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load32(x+24), origin);
 
-  EXPECT_POISONED(__sanitizer_unaligned_load64(x));
-  EXPECT_POISONED(__sanitizer_unaligned_load64(x+1));
-  EXPECT_POISONED(__sanitizer_unaligned_load64(x+7));
+  EXPECT_POISONED_O(__sanitizer_unaligned_load64(x), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load64(x+1), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load64(x+7), origin);
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load64(x+8));
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load64(x+9));
   EXPECT_NOT_POISONED(__sanitizer_unaligned_load64(x+16));
-  EXPECT_POISONED(__sanitizer_unaligned_load64(x+17));
-  EXPECT_POISONED(__sanitizer_unaligned_load64(x+21));
-  EXPECT_POISONED(__sanitizer_unaligned_load64(x+24));
+  EXPECT_POISONED_O(__sanitizer_unaligned_load64(x+17), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load64(x+21), origin);
+  EXPECT_POISONED_O(__sanitizer_unaligned_load64(x+24), origin);
 }
 
 TEST(MemorySanitizer, UnalignedStore16) {
   char x[5];
-  U2 y = 0;
-  __msan_poison(&y, 1);
-  __sanitizer_unaligned_store16(x + 1, y);
-  EXPECT_POISONED(x[0]);
-  EXPECT_POISONED(x[1]);
+  U2 y2 = 0;
+  U4 origin = __LINE__;
+  __msan_poison(&y2, 1);
+  __msan_set_origin(&y2, 1, origin);
+
+  __sanitizer_unaligned_store16(x + 1, y2);
+  EXPECT_POISONED_O(x[0], origin);
+  EXPECT_POISONED_O(x[1], origin);
   EXPECT_NOT_POISONED(x[2]);
-  EXPECT_POISONED(x[3]);
-  EXPECT_POISONED(x[4]);
+  EXPECT_POISONED_O(x[3], origin);
+  EXPECT_POISONED_O(x[4], origin);
 }
 
 TEST(MemorySanitizer, UnalignedStore32) {
   char x[8];
   U4 y4 = 0;
+  U4 origin = __LINE__;
   __msan_poison(&y4, 2);
+  __msan_set_origin(&y4, 2, origin);
+
   __sanitizer_unaligned_store32(x+3, y4);
-  EXPECT_POISONED(x[0]);
-  EXPECT_POISONED(x[1]);
-  EXPECT_POISONED(x[2]);
-  EXPECT_POISONED(x[3]);
-  EXPECT_POISONED(x[4]);
+  EXPECT_POISONED_O(x[0], origin);
+  EXPECT_POISONED_O(x[1], origin);
+  EXPECT_POISONED_O(x[2], origin);
+  EXPECT_POISONED_O(x[3], origin);
+  EXPECT_POISONED_O(x[4], origin);
   EXPECT_NOT_POISONED(x[5]);
   EXPECT_NOT_POISONED(x[6]);
-  EXPECT_POISONED(x[7]);
+  EXPECT_POISONED_O(x[7], origin);
 }
 
 TEST(MemorySanitizer, UnalignedStore64) {
   char x[16];
-  U8 y = 0;
-  __msan_poison(&y, 3);
-  __msan_poison(((char *)&y) + sizeof(y) - 2, 1);
-  __sanitizer_unaligned_store64(x+3, y);
-  EXPECT_POISONED(x[0]);
-  EXPECT_POISONED(x[1]);
-  EXPECT_POISONED(x[2]);
-  EXPECT_POISONED(x[3]);
-  EXPECT_POISONED(x[4]);
-  EXPECT_POISONED(x[5]);
+  U8 y8 = 0;
+  U4 origin = __LINE__;
+  __msan_poison(&y8, 3);
+  __msan_poison(((char *)&y8) + sizeof(y8) - 2, 1);
+  __msan_set_origin(&y8, 8, origin);
+
+  __sanitizer_unaligned_store64(x+3, y8);
+  EXPECT_POISONED_O(x[0], origin);
+  EXPECT_POISONED_O(x[1], origin);
+  EXPECT_POISONED_O(x[2], origin);
+  EXPECT_POISONED_O(x[3], origin);
+  EXPECT_POISONED_O(x[4], origin);
+  EXPECT_POISONED_O(x[5], origin);
   EXPECT_NOT_POISONED(x[6]);
   EXPECT_NOT_POISONED(x[7]);
   EXPECT_NOT_POISONED(x[8]);
-  EXPECT_POISONED(x[9]);
+  EXPECT_POISONED_O(x[9], origin);
   EXPECT_NOT_POISONED(x[10]);
-  EXPECT_POISONED(x[11]);
+  EXPECT_POISONED_O(x[11], origin);
 }
 
 TEST(MemorySanitizerDr, StoreInDSOTest) {
@@ -3558,4 +3631,27 @@ TEST(MemorySanitizer, MlockTest) {
   EXPECT_EQ(0, mlock((void*)0x12345, 0x5678));
   EXPECT_EQ(0, munlockall());
   EXPECT_EQ(0, munlock((void*)0x987, 0x654));
+}
+
+// Test that LargeAllocator unpoisons memory before releasing it to the OS.
+TEST(MemorySanitizer, LargeAllocatorUnpoisonsOnFree) {
+  void *p = malloc(1024 * 1024);
+  free(p);
+
+  typedef void *(*mmap_fn)(void *, size_t, int, int, int, off_t);
+  mmap_fn real_mmap = (mmap_fn)dlsym(RTLD_NEXT, "mmap");
+
+  // Allocate the page that was released to the OS in free() with the real mmap,
+  // bypassing the interceptor.
+  char *q = (char *)real_mmap(p, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+  ASSERT_NE((char *)0, q);
+
+  ASSERT_TRUE(q <= p);
+  ASSERT_TRUE(q + 4096 > p);
+
+  EXPECT_NOT_POISONED(q[0]);
+  EXPECT_NOT_POISONED(q[10]);
+  EXPECT_NOT_POISONED(q[100]);
+
+  munmap(q, 4096);
 }

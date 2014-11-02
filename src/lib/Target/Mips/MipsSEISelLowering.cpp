@@ -594,9 +594,11 @@ static SDValue performORCombine(SDNode *N, SelectionDAG &DAG,
       Cond = Op0Op0;
       IfSet = Op0Op1;
 
-      if (isVSplat(Op1Op0, InvMask, IsLittleEndian) && Mask == ~InvMask)
+      if (isVSplat(Op1Op0, InvMask, IsLittleEndian) &&
+          Mask.getBitWidth() == InvMask.getBitWidth() && Mask == ~InvMask)
         IfClr = Op1Op1;
-      else if (isVSplat(Op1Op1, InvMask, IsLittleEndian) && Mask == ~InvMask)
+      else if (isVSplat(Op1Op1, InvMask, IsLittleEndian) &&
+               Mask.getBitWidth() == InvMask.getBitWidth() && Mask == ~InvMask)
         IfClr = Op1Op0;
 
       IsConstantMask = true;
@@ -609,9 +611,11 @@ static SDValue performORCombine(SDNode *N, SelectionDAG &DAG,
       Cond = Op0Op1;
       IfSet = Op0Op0;
 
-      if (isVSplat(Op1Op0, InvMask, IsLittleEndian) && Mask == ~InvMask)
+      if (isVSplat(Op1Op0, InvMask, IsLittleEndian) &&
+          Mask.getBitWidth() == InvMask.getBitWidth() && Mask == ~InvMask)
         IfClr = Op1Op1;
-      else if (isVSplat(Op1Op1, InvMask, IsLittleEndian) && Mask == ~InvMask)
+      else if (isVSplat(Op1Op1, InvMask, IsLittleEndian) &&
+               Mask.getBitWidth() == InvMask.getBitWidth() && Mask == ~InvMask)
         IfClr = Op1Op0;
 
       IsConstantMask = true;
@@ -750,6 +754,9 @@ static SDValue performDSPShiftCombine(unsigned Opc, SDNode *N, EVT Ty,
   bool HasAnyUndefs;
   unsigned EltSize = Ty.getVectorElementType().getSizeInBits();
   BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(N->getOperand(1));
+
+  if (!Subtarget->hasDSP())
+    return SDValue();
 
   if (!BV ||
       !BV->isConstantSplat(SplatValue, SplatUndef, SplatBitSize, HasAnyUndefs,
@@ -1070,14 +1077,7 @@ getOpndList(SmallVectorImpl<SDValue> &Ops,
             std::deque< std::pair<unsigned, SDValue> > &RegsToPass,
             bool IsPICCall, bool GlobalOrExternal, bool InternalLinkage,
             CallLoweringInfo &CLI, SDValue Callee, SDValue Chain) const {
-  // T9 should contain the address of the callee function if
-  // -reloction-model=pic or it is an indirect call.
-  if (IsPICCall || !GlobalOrExternal) {
-    unsigned T9Reg = IsN64 ? Mips::T9_64 : Mips::T9;
-    RegsToPass.push_front(std::make_pair(T9Reg, Callee));
-  } else
-    Ops.push_back(Callee);
-
+  Ops.push_back(Callee);
   MipsTargetLowering::getOpndList(Ops, RegsToPass, IsPICCall, GlobalOrExternal,
                                   InternalLinkage, CLI, Callee, Chain);
 }
@@ -1254,38 +1254,136 @@ static SDValue lowerMSACopyIntr(SDValue Op, SelectionDAG &DAG, unsigned Opc) {
   return Result;
 }
 
-static SDValue
-lowerMSASplatImm(SDLoc DL, EVT ResTy, SDValue ImmOp, SelectionDAG &DAG) {
-  EVT ViaVecTy = ResTy;
-  SmallVector<SDValue, 16> Ops;
-  SDValue ImmHiOp;
+static SDValue lowerMSASplatZExt(SDValue Op, unsigned OpNr, SelectionDAG &DAG) {
+  EVT ResVecTy = Op->getValueType(0);
+  EVT ViaVecTy = ResVecTy;
+  SDLoc DL(Op);
 
-  if (ViaVecTy == MVT::v2i64) {
-    ImmHiOp = DAG.getNode(ISD::SRA, DL, MVT::i32, ImmOp,
-                          DAG.getConstant(31, MVT::i32));
-    for (unsigned i = 0; i < ViaVecTy.getVectorNumElements(); ++i) {
-      Ops.push_back(ImmHiOp);
-      Ops.push_back(ImmOp);
-    }
+  // When ResVecTy == MVT::v2i64, LaneA is the upper 32 bits of the lane and
+  // LaneB is the lower 32-bits. Otherwise LaneA and LaneB are alternating
+  // lanes.
+  SDValue LaneA;
+  SDValue LaneB = Op->getOperand(2);
+
+  if (ResVecTy == MVT::v2i64) {
+    LaneA = DAG.getConstant(0, MVT::i32);
     ViaVecTy = MVT::v4i32;
-  } else {
-    for (unsigned i = 0; i < ResTy.getVectorNumElements(); ++i)
-      Ops.push_back(ImmOp);
-  }
+  } else
+    LaneA = LaneB;
 
-  SDValue Result = DAG.getNode(ISD::BUILD_VECTOR, DL, ViaVecTy, &Ops[0],
-                               Ops.size());
+  SDValue Ops[16] = { LaneA, LaneB, LaneA, LaneB, LaneA, LaneB, LaneA, LaneB,
+                      LaneA, LaneB, LaneA, LaneB, LaneA, LaneB, LaneA, LaneB };
 
-  if (ResTy != ViaVecTy)
-    Result = DAG.getNode(ISD::BITCAST, DL, ResTy, Result);
+  SDValue Result = DAG.getNode(ISD::BUILD_VECTOR, DL, ViaVecTy, Ops,
+                               ViaVecTy.getVectorNumElements());
+
+  if (ViaVecTy != ResVecTy)
+    Result = DAG.getNode(ISD::BITCAST, DL, ResVecTy, Result);
 
   return Result;
 }
 
-static SDValue
-lowerMSASplatImm(SDValue Op, unsigned ImmOp, SelectionDAG &DAG) {
-  return lowerMSASplatImm(SDLoc(Op), Op->getValueType(0),
-                          Op->getOperand(ImmOp), DAG);
+static SDValue lowerMSASplatImm(SDValue Op, unsigned ImmOp, SelectionDAG &DAG) {
+  return DAG.getConstant(Op->getConstantOperandVal(ImmOp), Op->getValueType(0));
+}
+
+static SDValue getBuildVectorSplat(EVT VecTy, SDValue SplatValue,
+                                   bool BigEndian, SelectionDAG &DAG) {
+  EVT ViaVecTy = VecTy;
+  SDValue SplatValueA = SplatValue;
+  SDValue SplatValueB = SplatValue;
+  SDLoc DL(SplatValue);
+
+  if (VecTy == MVT::v2i64) {
+    // v2i64 BUILD_VECTOR must be performed via v4i32 so split into i32's.
+    ViaVecTy = MVT::v4i32;
+
+    SplatValueA = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, SplatValue);
+    SplatValueB = DAG.getNode(ISD::SRL, DL, MVT::i64, SplatValue,
+                              DAG.getConstant(32, MVT::i32));
+    SplatValueB = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, SplatValueB);
+  }
+
+  // We currently hold the parts in little endian order. Swap them if
+  // necessary.
+  if (BigEndian)
+    std::swap(SplatValueA, SplatValueB);
+
+  SDValue Ops[16] = { SplatValueA, SplatValueB, SplatValueA, SplatValueB,
+                      SplatValueA, SplatValueB, SplatValueA, SplatValueB,
+                      SplatValueA, SplatValueB, SplatValueA, SplatValueB,
+                      SplatValueA, SplatValueB, SplatValueA, SplatValueB };
+
+  SDValue Result = DAG.getNode(ISD::BUILD_VECTOR, DL, ViaVecTy, Ops,
+                               ViaVecTy.getVectorNumElements());
+
+  if (VecTy != ViaVecTy)
+    Result = DAG.getNode(ISD::BITCAST, DL, VecTy, Result);
+
+  return Result;
+}
+
+static SDValue lowerMSABinaryBitImmIntr(SDValue Op, SelectionDAG &DAG,
+                                        unsigned Opc, SDValue Imm,
+                                        bool BigEndian) {
+  EVT VecTy = Op->getValueType(0);
+  SDValue Exp2Imm;
+  SDLoc DL(Op);
+
+  // The DAG Combiner can't constant fold bitcasted vectors yet so we must do it
+  // here for now.
+  if (VecTy == MVT::v2i64) {
+    if (ConstantSDNode *CImm = dyn_cast<ConstantSDNode>(Imm)) {
+      APInt BitImm = APInt(64, 1) << CImm->getAPIntValue();
+
+      SDValue BitImmHiOp = DAG.getConstant(BitImm.lshr(32).trunc(32), MVT::i32);
+      SDValue BitImmLoOp = DAG.getConstant(BitImm.trunc(32), MVT::i32);
+
+      if (BigEndian)
+        std::swap(BitImmLoOp, BitImmHiOp);
+
+      Exp2Imm =
+          DAG.getNode(ISD::BITCAST, DL, MVT::v2i64,
+                      DAG.getNode(ISD::BUILD_VECTOR, DL, MVT::v4i32, BitImmLoOp,
+                                  BitImmHiOp, BitImmLoOp, BitImmHiOp));
+    }
+  }
+
+  if (Exp2Imm.getNode() == NULL) {
+    // We couldnt constant fold, do a vector shift instead
+
+    // Extend i32 to i64 if necessary. Sign or zero extend doesn't matter since
+    // only values 0-63 are valid.
+    if (VecTy == MVT::v2i64)
+      Imm = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, Imm);
+
+    Exp2Imm = getBuildVectorSplat(VecTy, Imm, BigEndian, DAG);
+
+    Exp2Imm =
+        DAG.getNode(ISD::SHL, DL, VecTy, DAG.getConstant(1, VecTy), Exp2Imm);
+  }
+
+  return DAG.getNode(Opc, DL, VecTy, Op->getOperand(1), Exp2Imm);
+}
+
+static SDValue lowerMSABitClear(SDValue Op, SelectionDAG &DAG) {
+  EVT ResTy = Op->getValueType(0);
+  SDLoc DL(Op);
+  SDValue One = DAG.getConstant(1, ResTy);
+  SDValue Bit = DAG.getNode(ISD::SHL, DL, ResTy, One, Op->getOperand(2));
+
+  return DAG.getNode(ISD::AND, DL, ResTy, Op->getOperand(1),
+                     DAG.getNOT(DL, Bit, ResTy));
+}
+
+static SDValue lowerMSABitClearImm(SDValue Op, SelectionDAG &DAG) {
+  SDLoc DL(Op);
+  EVT ResTy = Op->getValueType(0);
+  APInt BitImm = APInt(ResTy.getVectorElementType().getSizeInBits(), 1)
+                 << cast<ConstantSDNode>(Op->getOperand(2))->getAPIntValue();
+  SDValue BitMask = DAG.getConstant(~BitImm, ResTy);
+
+  return DAG.getNode(ISD::AND, DL, ResTy, Op->getOperand(1), BitMask);
 }
 
 SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
@@ -1345,6 +1443,16 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
   case Intrinsic::mips_andi_b:
     return DAG.getNode(ISD::AND, DL, Op->getValueType(0), Op->getOperand(1),
                        lowerMSASplatImm(Op, 2, DAG));
+  case Intrinsic::mips_bclr_b:
+  case Intrinsic::mips_bclr_h:
+  case Intrinsic::mips_bclr_w:
+  case Intrinsic::mips_bclr_d:
+    return lowerMSABitClear(Op, DAG);
+  case Intrinsic::mips_bclri_b:
+  case Intrinsic::mips_bclri_h:
+  case Intrinsic::mips_bclri_w:
+  case Intrinsic::mips_bclri_d:
+    return lowerMSABitClearImm(Op, DAG);
   case Intrinsic::mips_binsli_b:
   case Intrinsic::mips_binsli_h:
   case Intrinsic::mips_binsli_w:
@@ -1383,6 +1491,23 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getNode(ISD::VSELECT, DL, Op->getValueType(0),
                        lowerMSASplatImm(Op, 3, DAG), Op->getOperand(1),
                        Op->getOperand(2));
+  case Intrinsic::mips_bneg_b:
+  case Intrinsic::mips_bneg_h:
+  case Intrinsic::mips_bneg_w:
+  case Intrinsic::mips_bneg_d: {
+    EVT VecTy = Op->getValueType(0);
+    SDValue One = DAG.getConstant(1, VecTy);
+
+    return DAG.getNode(ISD::XOR, DL, VecTy, Op->getOperand(1),
+                       DAG.getNode(ISD::SHL, DL, VecTy, One,
+                                   Op->getOperand(2)));
+  }
+  case Intrinsic::mips_bnegi_b:
+  case Intrinsic::mips_bnegi_h:
+  case Intrinsic::mips_bnegi_w:
+  case Intrinsic::mips_bnegi_d:
+    return lowerMSABinaryBitImmIntr(Op, DAG, ISD::XOR, Op->getOperand(2),
+                                    !Subtarget->isLittle());
   case Intrinsic::mips_bnz_b:
   case Intrinsic::mips_bnz_h:
   case Intrinsic::mips_bnz_w:
@@ -1400,6 +1525,23 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getNode(ISD::VSELECT, DL, Op->getValueType(0),
                        Op->getOperand(1), Op->getOperand(2),
                        lowerMSASplatImm(Op, 3, DAG));
+  case Intrinsic::mips_bset_b:
+  case Intrinsic::mips_bset_h:
+  case Intrinsic::mips_bset_w:
+  case Intrinsic::mips_bset_d: {
+    EVT VecTy = Op->getValueType(0);
+    SDValue One = DAG.getConstant(1, VecTy);
+
+    return DAG.getNode(ISD::OR, DL, VecTy, Op->getOperand(1),
+                       DAG.getNode(ISD::SHL, DL, VecTy, One,
+                                   Op->getOperand(2)));
+  }
+  case Intrinsic::mips_bseti_b:
+  case Intrinsic::mips_bseti_h:
+  case Intrinsic::mips_bseti_w:
+  case Intrinsic::mips_bseti_d:
+    return lowerMSABinaryBitImmIntr(Op, DAG, ISD::OR, Op->getOperand(2),
+                                    !Subtarget->isLittle());
   case Intrinsic::mips_bz_b:
   case Intrinsic::mips_bz_h:
   case Intrinsic::mips_bz_w:
@@ -1809,7 +1951,7 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
     // EXTRACT_VECTOR_ELT can't extract i64's on MIPS32.
     // Instead we lower to MipsISD::VSHF and match from there.
     return DAG.getNode(MipsISD::VSHF, DL, Op->getValueType(0),
-                       lowerMSASplatImm(Op, 2, DAG), Op->getOperand(1),
+                       lowerMSASplatZExt(Op, 2, DAG), Op->getOperand(1),
                        Op->getOperand(1));
   case Intrinsic::mips_splati_b:
   case Intrinsic::mips_splati_h:
@@ -2061,7 +2203,10 @@ SDValue MipsSETargetLowering::lowerBUILD_VECTOR(SDValue Op,
       return SDValue();
 
     // If the value fits into a simm10 then we can use ldi.[bhwd]
-    if (SplatValue.isSignedIntN(10))
+    // However, if it isn't an integer type we will have to bitcast from an
+    // integer type first. Also, if there are any undefs, we must lower them
+    // to defined values first.
+    if (ResTy.isInteger() && !HasAnyUndefs && SplatValue.isSignedIntN(10))
       return Op;
 
     EVT ViaVecTy;
@@ -2083,15 +2228,10 @@ SDValue MipsSETargetLowering::lowerBUILD_VECTOR(SDValue Op,
       return SDValue();
     }
 
-    SmallVector<SDValue, 16> Ops;
-    SDValue Constant = DAG.getConstant(SplatValue.sextOrSelf(32), MVT::i32);
+    // SelectionDAG::getConstant will promote SplatValue appropriately.
+    SDValue Result = DAG.getConstant(SplatValue, ViaVecTy);
 
-    for (unsigned i = 0; i < ViaVecTy.getVectorNumElements(); ++i)
-      Ops.push_back(Constant);
-
-    SDValue Result = DAG.getNode(ISD::BUILD_VECTOR, SDLoc(Node), ViaVecTy,
-                                 &Ops[0], Ops.size());
-
+    // Bitcast to the type we originally wanted
     if (ViaVecTy != ResTy)
       Result = DAG.getNode(ISD::BITCAST, SDLoc(Node), ResTy, Result);
 

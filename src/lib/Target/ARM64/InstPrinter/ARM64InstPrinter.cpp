@@ -15,6 +15,7 @@
 #include "ARM64InstPrinter.h"
 #include "MCTargetDesc/ARM64AddressingModes.h"
 #include "MCTargetDesc/ARM64BaseInfo.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCRegisterInfo.h"
@@ -23,7 +24,11 @@
 using namespace llvm;
 
 #define GET_INSTRUCTION_NAME
+#define PRINT_ALIAS_INSTR
 #include "ARM64GenAsmWriter.inc"
+#define GET_INSTRUCTION_NAME
+#define PRINT_ALIAS_INSTR
+#include "ARM64GenAsmWriter1.inc"
 
 ARM64InstPrinter::ARM64InstPrinter(const MCAsmInfo &MAI,
                                    const MCInstrInfo &MII,
@@ -34,46 +39,12 @@ ARM64InstPrinter::ARM64InstPrinter(const MCAsmInfo &MAI,
   setAvailableFeatures(STI.getFeatureBits());
 }
 
-// FIXME: Code duplicated from ARM64RegisterInfo.cpp
-static unsigned getWRegFromXReg(unsigned Reg) {
-  switch (Reg) {
-  case ARM64::X0: return ARM64::W0;
-  case ARM64::X1: return ARM64::W1;
-  case ARM64::X2: return ARM64::W2;
-  case ARM64::X3: return ARM64::W3;
-  case ARM64::X4: return ARM64::W4;
-  case ARM64::X5: return ARM64::W5;
-  case ARM64::X6: return ARM64::W6;
-  case ARM64::X7: return ARM64::W7;
-  case ARM64::X8: return ARM64::W8;
-  case ARM64::X9: return ARM64::W9;
-  case ARM64::X10: return ARM64::W10;
-  case ARM64::X11: return ARM64::W11;
-  case ARM64::X12: return ARM64::W12;
-  case ARM64::X13: return ARM64::W13;
-  case ARM64::X14: return ARM64::W14;
-  case ARM64::X15: return ARM64::W15;
-  case ARM64::X16: return ARM64::W16;
-  case ARM64::X17: return ARM64::W17;
-  case ARM64::X18: return ARM64::W18;
-  case ARM64::X19: return ARM64::W19;
-  case ARM64::X20: return ARM64::W20;
-  case ARM64::X21: return ARM64::W21;
-  case ARM64::X22: return ARM64::W22;
-  case ARM64::X23: return ARM64::W23;
-  case ARM64::X24: return ARM64::W24;
-  case ARM64::X25: return ARM64::W25;
-  case ARM64::X26: return ARM64::W26;
-  case ARM64::X27: return ARM64::W27;
-  case ARM64::X28: return ARM64::W28;
-  case ARM64::FP: return ARM64::W29;
-  case ARM64::LR: return ARM64::W30;
-  case ARM64::SP: return ARM64::WSP;
-  case ARM64::XZR: return ARM64::WZR;
-  }
-  // For anything else, return it unchanged.
-  return Reg;
-}
+ARM64AppleInstPrinter::ARM64AppleInstPrinter(const MCAsmInfo &MAI,
+                                             const MCInstrInfo &MII,
+                                             const MCRegisterInfo &MRI,
+                                             const MCSubtargetInfo &STI) :
+  ARM64InstPrinter(MAI, MII, MRI, STI) {}
+
 
 void ARM64InstPrinter::printRegName(raw_ostream &OS, unsigned RegNo) const {
   // This is for .cfi directives.
@@ -85,42 +56,6 @@ void ARM64InstPrinter::printInst(const MCInst *MI, raw_ostream &O,
   // Check for special encodings and print the cannonical alias instead.
 
   unsigned Opcode = MI->getOpcode();
-
-  // Move to/from SP is encoded as add of #0.
-  //   "add <Wd|WSP>, <Wn|WSP>, #0" is "mov <Wd|WSP>, <Wn|WSP>"
-  //   "add <Xd|SP>, <Xd|SP>, #0" is "mov <Xd|SP>, <Xn|SP>"
-  if (Opcode == ARM64::ADDXri || Opcode == ARM64::ADDWri) {
-    const MCOperand &Op0 = MI->getOperand(0);
-    const MCOperand &Op1 = MI->getOperand(1);
-    if (MI->getOperand(2).isImm() &&
-        MI->getOperand(2).getImm() == 0 &&
-        MI->getOperand(3).getImm() == 0 &&
-        (Op0.getReg() == ARM64::SP || Op0.getReg() == ARM64::WSP ||
-         Op1.getReg() == ARM64::SP || Op1.getReg() == ARM64::WSP)) {
-      O << '\t' << "mov" << '\t'
-        << getRegisterName(Op0.getReg()) << ", "
-        << getRegisterName(Op1.getReg());
-      printAnnotation(O, Annot);
-      return;
-    }
-  }
-
-  // Register copy is encoded as ORR.
-  //   "orr Wd, WZR, Wn" is "mov Wd, Wn"
-  //   "orr Xd, XZR, Xn" is "mov Xd, Xn"
-  if (Opcode == ARM64::ORRXrs || Opcode == ARM64::ORRWrs) {
-    const MCOperand &Op0 = MI->getOperand(0);
-    const MCOperand &Op1 = MI->getOperand(1);
-    const MCOperand &Op2 = MI->getOperand(2);
-    if ((Op1.getReg() == ARM64::WZR || Op1.getReg() == ARM64::XZR) &&
-        MI->getOperand(3).getImm() == 0) {
-      O << '\t' << "mov" << '\t'
-        << getRegisterName(Op0.getReg()) << ", "
-        << getRegisterName(Op2.getReg());
-      printAnnotation(O, Annot);
-      return;
-    }
-  }
 
   if (Opcode == ARM64::SYS || Opcode == ARM64::SYSxt)
     if (printSysAlias(MI, O)) {
@@ -166,13 +101,13 @@ void ARM64InstPrinter::printInst(const MCInst *MI, raw_ostream &O,
       }
 
       if (AsmMnemonic) {
-        O << '\t' << AsmMnemonic << '\t'
-          << getRegisterName(Op0.getReg())
-          << ", " << getRegisterName(Op1.getReg());
+        O << '\t' << AsmMnemonic << '\t' << getRegisterName(Op0.getReg())
+          << ", " << getRegisterName(getWRegFromXReg(Op1.getReg()));
         printAnnotation(O, Annot);
         return;
       }
     }
+
     // All immediate shifts are aliases, implemented using the Bitfield
     // instruction. In all cases the immediate shift amount shift must be in
     // the range 0 to (reg.size -1).
@@ -236,17 +171,6 @@ void ARM64InstPrinter::printInst(const MCInst *MI, raw_ostream &O,
     return;
   }
 
-  // HINT #[0-5] should print as nop, yield, wfe, wfi, sev, and sevl,
-  // respectively.
-  if (Opcode == ARM64::HINT && MI->getOperand(0).getImm() < 6) {
-    static const char *Mnemonic[] = {
-      "nop", "yield", "wfe", "wfi", "sev", "sevl"
-    };
-    O << '\t' << Mnemonic[MI->getOperand(0).getImm()];
-    printAnnotation(O, Annot);
-    return;
-  }
-
   // ANDS WZR, Wn, #imm ==> TST Wn, #imm
   // ANDS XZR, Xn, #imm ==> TST Xn, #imm
   if (Opcode == ARM64::ANDSWri && MI->getOperand(0).getReg() == ARM64::WZR) {
@@ -285,7 +209,9 @@ void ARM64InstPrinter::printInst(const MCInst *MI, raw_ostream &O,
     return;
   }
   // SUBS XZR, Xn, Wm, uxtb #imm ==> CMP Xn, uxtb #imm
-  if (Opcode == ARM64::SUBSXrx && MI->getOperand(0).getReg() == ARM64::XZR) {
+  // SUBS WZR, Wn, Xm, uxtb #imm ==> CMP Wn, uxtb #imm
+  if ((Opcode == ARM64::SUBSXrx && MI->getOperand(0).getReg() == ARM64::XZR) ||
+      (Opcode == ARM64::SUBSWrx && MI->getOperand(0).getReg() == ARM64::WZR)) {
     O << "\tcmp\t" << getRegisterName(MI->getOperand(1).getReg()) << ", ";
     printExtendedRegister(MI, 2, O);
     return;
@@ -328,18 +254,458 @@ void ARM64InstPrinter::printInst(const MCInst *MI, raw_ostream &O,
     return;
   }
 
-  // ORN Wd, WZR, Wm{, lshift #imm} ==> MVN Wd, Wm{, lshift #imm}
-  // ORN Xd, XZR, Xm{, lshift #imm} ==> MVN Xd, Xm{, lshift #imm}
-  if ((Opcode == ARM64::ORNWrs && MI->getOperand(1).getReg() == ARM64::WZR) ||
-      (Opcode == ARM64::ORNXrs && MI->getOperand(1).getReg() == ARM64::XZR)) {
-    O << "\tmvn\t" << getRegisterName(MI->getOperand(0).getReg()) << ", ";
-    printShiftedRegister(MI, 2, O);
+  if (!printAliasInstr(MI, O))
+    printInstruction(MI, O);
+
+  printAnnotation(O, Annot);
+}
+
+static bool isTblTbxInstruction(unsigned Opcode, StringRef &Layout,
+                                bool &IsTbx) {
+  switch (Opcode) {
+  case ARM64::TBXv8i8One:
+  case ARM64::TBXv8i8Two:
+  case ARM64::TBXv8i8Three:
+  case ARM64::TBXv8i8Four:
+    IsTbx = true;
+    Layout = ".8b";
+    return true;
+  case ARM64::TBLv8i8One:
+  case ARM64::TBLv8i8Two:
+  case ARM64::TBLv8i8Three:
+  case ARM64::TBLv8i8Four:
+    IsTbx = false;
+    Layout = ".8b";
+    return true;
+  case ARM64::TBXv16i8One:
+  case ARM64::TBXv16i8Two:
+  case ARM64::TBXv16i8Three:
+  case ARM64::TBXv16i8Four:
+    IsTbx = true;
+    Layout = ".16b";
+    return true;
+  case ARM64::TBLv16i8One:
+  case ARM64::TBLv16i8Two:
+  case ARM64::TBLv16i8Three:
+  case ARM64::TBLv16i8Four:
+    IsTbx = false;
+    Layout = ".16b";
+    return true;
+  default:
+    return false;
+  }
+}
+
+struct LdStNInstrDesc {
+  unsigned Opcode;
+  const char *Mnemonic;
+  const char *Layout;
+  int LaneOperand;
+  int NaturalOffset;
+};
+
+static LdStNInstrDesc LdStNInstInfo[] = {
+  { ARM64::LD1i8,             "ld1",  ".b",     2, 0  },
+  { ARM64::LD1i16,            "ld1",  ".h",     2, 0  },
+  { ARM64::LD1i32,            "ld1",  ".s",     2, 0  },
+  { ARM64::LD1i64,            "ld1",  ".d",     2, 0  },
+  { ARM64::LD1i8_POST,        "ld1",  ".b",     2, 1  },
+  { ARM64::LD1i16_POST,       "ld1",  ".h",     2, 2  },
+  { ARM64::LD1i32_POST,       "ld1",  ".s",     2, 4  },
+  { ARM64::LD1i64_POST,       "ld1",  ".d",     2, 8  },
+  { ARM64::LD1Rv16b,          "ld1r", ".16b",   0, 0  },
+  { ARM64::LD1Rv8h,           "ld1r", ".8h",    0, 0  },
+  { ARM64::LD1Rv4s,           "ld1r", ".4s",    0, 0  },
+  { ARM64::LD1Rv2d,           "ld1r", ".2d",    0, 0  },
+  { ARM64::LD1Rv8b,           "ld1r", ".8b",    0, 0  },
+  { ARM64::LD1Rv4h,           "ld1r", ".4h",    0, 0  },
+  { ARM64::LD1Rv2s,           "ld1r", ".2s",    0, 0  },
+  { ARM64::LD1Rv1d,           "ld1r", ".1d",    0, 0  },
+  { ARM64::LD1Rv16b_POST,     "ld1r", ".16b",   0, 1  },
+  { ARM64::LD1Rv8h_POST,      "ld1r", ".8h",    0, 2  },
+  { ARM64::LD1Rv4s_POST,      "ld1r", ".4s",    0, 4  },
+  { ARM64::LD1Rv2d_POST,      "ld1r", ".2d",    0, 8  },
+  { ARM64::LD1Rv8b_POST,      "ld1r", ".8b",    0, 1  },
+  { ARM64::LD1Rv4h_POST,      "ld1r", ".4h",    0, 2  },
+  { ARM64::LD1Rv2s_POST,      "ld1r", ".2s",    0, 4  },
+  { ARM64::LD1Rv1d_POST,      "ld1r", ".1d",    0, 8  },
+  { ARM64::LD1Onev16b,        "ld1",  ".16b",   0, 0  },
+  { ARM64::LD1Onev8h,         "ld1",  ".8h",    0, 0  },
+  { ARM64::LD1Onev4s,         "ld1",  ".4s",    0, 0  },
+  { ARM64::LD1Onev2d,         "ld1",  ".2d",    0, 0  },
+  { ARM64::LD1Onev8b,         "ld1",  ".8b",    0, 0  },
+  { ARM64::LD1Onev4h,         "ld1",  ".4h",    0, 0  },
+  { ARM64::LD1Onev2s,         "ld1",  ".2s",    0, 0  },
+  { ARM64::LD1Onev1d,         "ld1",  ".1d",    0, 0  },
+  { ARM64::LD1Onev16b_POST,   "ld1",  ".16b",   0, 16 },
+  { ARM64::LD1Onev8h_POST,    "ld1",  ".8h",    0, 16 },
+  { ARM64::LD1Onev4s_POST,    "ld1",  ".4s",    0, 16 },
+  { ARM64::LD1Onev2d_POST,    "ld1",  ".2d",    0, 16 },
+  { ARM64::LD1Onev8b_POST,    "ld1",  ".8b",    0, 8  },
+  { ARM64::LD1Onev4h_POST,    "ld1",  ".4h",    0, 8  },
+  { ARM64::LD1Onev2s_POST,    "ld1",  ".2s",    0, 8  },
+  { ARM64::LD1Onev1d_POST,    "ld1",  ".1d",    0, 8  },
+  { ARM64::LD1Twov16b,        "ld1",  ".16b",   0, 0  },
+  { ARM64::LD1Twov8h,         "ld1",  ".8h",    0, 0  },
+  { ARM64::LD1Twov4s,         "ld1",  ".4s",    0, 0  },
+  { ARM64::LD1Twov2d,         "ld1",  ".2d",    0, 0  },
+  { ARM64::LD1Twov8b,         "ld1",  ".8b",    0, 0  },
+  { ARM64::LD1Twov4h,         "ld1",  ".4h",    0, 0  },
+  { ARM64::LD1Twov2s,         "ld1",  ".2s",    0, 0  },
+  { ARM64::LD1Twov1d,         "ld1",  ".1d",    0, 0  },
+  { ARM64::LD1Twov16b_POST,   "ld1",  ".16b",   0, 32 },
+  { ARM64::LD1Twov8h_POST,    "ld1",  ".8h",    0, 32 },
+  { ARM64::LD1Twov4s_POST,    "ld1",  ".4s",    0, 32 },
+  { ARM64::LD1Twov2d_POST,    "ld1",  ".2d",    0, 32 },
+  { ARM64::LD1Twov8b_POST,    "ld1",  ".8b",    0, 16 },
+  { ARM64::LD1Twov4h_POST,    "ld1",  ".4h",    0, 16 },
+  { ARM64::LD1Twov2s_POST,    "ld1",  ".2s",    0, 16 },
+  { ARM64::LD1Twov1d_POST,    "ld1",  ".1d",    0, 16 },
+  { ARM64::LD1Threev16b,      "ld1",  ".16b",   0, 0  },
+  { ARM64::LD1Threev8h,       "ld1",  ".8h",    0, 0  },
+  { ARM64::LD1Threev4s,       "ld1",  ".4s",    0, 0  },
+  { ARM64::LD1Threev2d,       "ld1",  ".2d",    0, 0  },
+  { ARM64::LD1Threev8b,       "ld1",  ".8b",    0, 0  },
+  { ARM64::LD1Threev4h,       "ld1",  ".4h",    0, 0  },
+  { ARM64::LD1Threev2s,       "ld1",  ".2s",    0, 0  },
+  { ARM64::LD1Threev1d,       "ld1",  ".1d",    0, 0  },
+  { ARM64::LD1Threev16b_POST, "ld1",  ".16b",   0, 48 },
+  { ARM64::LD1Threev8h_POST,  "ld1",  ".8h",    0, 48 },
+  { ARM64::LD1Threev4s_POST,  "ld1",  ".4s",    0, 48 },
+  { ARM64::LD1Threev2d_POST,  "ld1",  ".2d",    0, 48 },
+  { ARM64::LD1Threev8b_POST,  "ld1",  ".8b",    0, 24 },
+  { ARM64::LD1Threev4h_POST,  "ld1",  ".4h",    0, 24 },
+  { ARM64::LD1Threev2s_POST,  "ld1",  ".2s",    0, 24 },
+  { ARM64::LD1Threev1d_POST,  "ld1",  ".1d",    0, 24 },
+  { ARM64::LD1Fourv16b,       "ld1",  ".16b",   0, 0  },
+  { ARM64::LD1Fourv8h,        "ld1",  ".8h",    0, 0  },
+  { ARM64::LD1Fourv4s,        "ld1",  ".4s",    0, 0  },
+  { ARM64::LD1Fourv2d,        "ld1",  ".2d",    0, 0  },
+  { ARM64::LD1Fourv8b,        "ld1",  ".8b",    0, 0  },
+  { ARM64::LD1Fourv4h,        "ld1",  ".4h",    0, 0  },
+  { ARM64::LD1Fourv2s,        "ld1",  ".2s",    0, 0  },
+  { ARM64::LD1Fourv1d,        "ld1",  ".1d",    0, 0  },
+  { ARM64::LD1Fourv16b_POST,  "ld1",  ".16b",   0, 64 },
+  { ARM64::LD1Fourv8h_POST,   "ld1",  ".8h",    0, 64 },
+  { ARM64::LD1Fourv4s_POST,   "ld1",  ".4s",    0, 64 },
+  { ARM64::LD1Fourv2d_POST,   "ld1",  ".2d",    0, 64 },
+  { ARM64::LD1Fourv8b_POST,   "ld1",  ".8b",    0, 32 },
+  { ARM64::LD1Fourv4h_POST,   "ld1",  ".4h",    0, 32 },
+  { ARM64::LD1Fourv2s_POST,   "ld1",  ".2s",    0, 32 },
+  { ARM64::LD1Fourv1d_POST,   "ld1",  ".1d",    0, 32 },
+  { ARM64::LD2i8,             "ld2",  ".b",     2, 0  },
+  { ARM64::LD2i16,            "ld2",  ".h",     2, 0  },
+  { ARM64::LD2i32,            "ld2",  ".s",     2, 0  },
+  { ARM64::LD2i64,            "ld2",  ".d",     2, 0  },
+  { ARM64::LD2i8_POST,        "ld2",  ".b",     2, 2  },
+  { ARM64::LD2i16_POST,       "ld2",  ".h",     2, 4  },
+  { ARM64::LD2i32_POST,       "ld2",  ".s",     2, 8  },
+  { ARM64::LD2i64_POST,       "ld2",  ".d",     2, 16  },
+  { ARM64::LD2Rv16b,          "ld2r", ".16b",   0, 0  },
+  { ARM64::LD2Rv8h,           "ld2r", ".8h",    0, 0  },
+  { ARM64::LD2Rv4s,           "ld2r", ".4s",    0, 0  },
+  { ARM64::LD2Rv2d,           "ld2r", ".2d",    0, 0  },
+  { ARM64::LD2Rv8b,           "ld2r", ".8b",    0, 0  },
+  { ARM64::LD2Rv4h,           "ld2r", ".4h",    0, 0  },
+  { ARM64::LD2Rv2s,           "ld2r", ".2s",    0, 0  },
+  { ARM64::LD2Rv1d,           "ld2r", ".1d",    0, 0  },
+  { ARM64::LD2Rv16b_POST,     "ld2r", ".16b",   0, 2  },
+  { ARM64::LD2Rv8h_POST,      "ld2r", ".8h",    0, 4  },
+  { ARM64::LD2Rv4s_POST,      "ld2r", ".4s",    0, 8  },
+  { ARM64::LD2Rv2d_POST,      "ld2r", ".2d",    0, 16 },
+  { ARM64::LD2Rv8b_POST,      "ld2r", ".8b",    0, 2  },
+  { ARM64::LD2Rv4h_POST,      "ld2r", ".4h",    0, 4  },
+  { ARM64::LD2Rv2s_POST,      "ld2r", ".2s",    0, 8  },
+  { ARM64::LD2Rv1d_POST,      "ld2r", ".1d",    0, 16 },
+  { ARM64::LD2Twov16b,        "ld2",  ".16b",   0, 0  },
+  { ARM64::LD2Twov8h,         "ld2",  ".8h",    0, 0  },
+  { ARM64::LD2Twov4s,         "ld2",  ".4s",    0, 0  },
+  { ARM64::LD2Twov2d,         "ld2",  ".2d",    0, 0  },
+  { ARM64::LD2Twov8b,         "ld2",  ".8b",    0, 0  },
+  { ARM64::LD2Twov4h,         "ld2",  ".4h",    0, 0  },
+  { ARM64::LD2Twov2s,         "ld2",  ".2s",    0, 0  },
+  { ARM64::LD2Twov16b_POST,   "ld2",  ".16b",   0, 32 },
+  { ARM64::LD2Twov8h_POST,    "ld2",  ".8h",    0, 32 },
+  { ARM64::LD2Twov4s_POST,    "ld2",  ".4s",    0, 32 },
+  { ARM64::LD2Twov2d_POST,    "ld2",  ".2d",    0, 32 },
+  { ARM64::LD2Twov8b_POST,    "ld2",  ".8b",    0, 16 },
+  { ARM64::LD2Twov4h_POST,    "ld2",  ".4h",    0, 16 },
+  { ARM64::LD2Twov2s_POST,    "ld2",  ".2s",    0, 16 },
+  { ARM64::LD3i8,             "ld3",  ".b",     2, 0  },
+  { ARM64::LD3i16,            "ld3",  ".h",     2, 0  },
+  { ARM64::LD3i32,            "ld3",  ".s",     2, 0  },
+  { ARM64::LD3i64,            "ld3",  ".d",     2, 0  },
+  { ARM64::LD3i8_POST,        "ld3",  ".b",     2, 3  },
+  { ARM64::LD3i16_POST,       "ld3",  ".h",     2, 6  },
+  { ARM64::LD3i32_POST,       "ld3",  ".s",     2, 12  },
+  { ARM64::LD3i64_POST,       "ld3",  ".d",     2, 24  },
+  { ARM64::LD3Rv16b,          "ld3r", ".16b",   0, 0  },
+  { ARM64::LD3Rv8h,           "ld3r", ".8h",    0, 0  },
+  { ARM64::LD3Rv4s,           "ld3r", ".4s",    0, 0  },
+  { ARM64::LD3Rv2d,           "ld3r", ".2d",    0, 0  },
+  { ARM64::LD3Rv8b,           "ld3r", ".8b",    0, 0  },
+  { ARM64::LD3Rv4h,           "ld3r", ".4h",    0, 0  },
+  { ARM64::LD3Rv2s,           "ld3r", ".2s",    0, 0  },
+  { ARM64::LD3Rv1d,           "ld3r", ".1d",    0, 0  },
+  { ARM64::LD3Rv16b_POST,     "ld3r", ".16b",   0, 3  },
+  { ARM64::LD3Rv8h_POST,      "ld3r", ".8h",    0, 6  },
+  { ARM64::LD3Rv4s_POST,      "ld3r", ".4s",    0, 12 },
+  { ARM64::LD3Rv2d_POST,      "ld3r", ".2d",    0, 24 },
+  { ARM64::LD3Rv8b_POST,      "ld3r", ".8b",    0, 3  },
+  { ARM64::LD3Rv4h_POST,      "ld3r", ".4h",    0, 6  },
+  { ARM64::LD3Rv2s_POST,      "ld3r", ".2s",    0, 12 },
+  { ARM64::LD3Rv1d_POST,      "ld3r", ".1d",    0, 24 },
+  { ARM64::LD3Threev16b,      "ld3",  ".16b",   0, 0  },
+  { ARM64::LD3Threev8h,       "ld3",  ".8h",    0, 0  },
+  { ARM64::LD3Threev4s,       "ld3",  ".4s",    0, 0  },
+  { ARM64::LD3Threev2d,       "ld3",  ".2d",    0, 0  },
+  { ARM64::LD3Threev8b,       "ld3",  ".8b",    0, 0  },
+  { ARM64::LD3Threev4h,       "ld3",  ".4h",    0, 0  },
+  { ARM64::LD3Threev2s,       "ld3",  ".2s",    0, 0  },
+  { ARM64::LD3Threev16b_POST, "ld3",  ".16b",   0, 48 },
+  { ARM64::LD3Threev8h_POST,  "ld3",  ".8h",    0, 48 },
+  { ARM64::LD3Threev4s_POST,  "ld3",  ".4s",    0, 48 },
+  { ARM64::LD3Threev2d_POST,  "ld3",  ".2d",    0, 48 },
+  { ARM64::LD3Threev8b_POST,  "ld3",  ".8b",    0, 24 },
+  { ARM64::LD3Threev4h_POST,  "ld3",  ".4h",    0, 24 },
+  { ARM64::LD3Threev2s_POST,  "ld3",  ".2s",    0, 24 },
+  { ARM64::LD4i8,             "ld4",  ".b",     2, 0  },
+  { ARM64::LD4i16,            "ld4",  ".h",     2, 0  },
+  { ARM64::LD4i32,            "ld4",  ".s",     2, 0  },
+  { ARM64::LD4i64,            "ld4",  ".d",     2, 0  },
+  { ARM64::LD4i8_POST,        "ld4",  ".b",     2, 4  },
+  { ARM64::LD4i16_POST,       "ld4",  ".h",     2, 8  },
+  { ARM64::LD4i32_POST,       "ld4",  ".s",     2, 16 },
+  { ARM64::LD4i64_POST,       "ld4",  ".d",     2, 32 },
+  { ARM64::LD4Rv16b,          "ld4r", ".16b",   0, 0  },
+  { ARM64::LD4Rv8h,           "ld4r", ".8h",    0, 0  },
+  { ARM64::LD4Rv4s,           "ld4r", ".4s",    0, 0  },
+  { ARM64::LD4Rv2d,           "ld4r", ".2d",    0, 0  },
+  { ARM64::LD4Rv8b,           "ld4r", ".8b",    0, 0  },
+  { ARM64::LD4Rv4h,           "ld4r", ".4h",    0, 0  },
+  { ARM64::LD4Rv2s,           "ld4r", ".2s",    0, 0  },
+  { ARM64::LD4Rv1d,           "ld4r", ".1d",    0, 0  },
+  { ARM64::LD4Rv16b_POST,     "ld4r", ".16b",   0, 4  },
+  { ARM64::LD4Rv8h_POST,      "ld4r", ".8h",    0, 8  },
+  { ARM64::LD4Rv4s_POST,      "ld4r", ".4s",    0, 16 },
+  { ARM64::LD4Rv2d_POST,      "ld4r", ".2d",    0, 32 },
+  { ARM64::LD4Rv8b_POST,      "ld4r", ".8b",    0, 4  },
+  { ARM64::LD4Rv4h_POST,      "ld4r", ".4h",    0, 8  },
+  { ARM64::LD4Rv2s_POST,      "ld4r", ".2s",    0, 16 },
+  { ARM64::LD4Rv1d_POST,      "ld4r", ".1d",    0, 32 },
+  { ARM64::LD4Fourv16b,       "ld4",  ".16b",   0, 0  },
+  { ARM64::LD4Fourv8h,        "ld4",  ".8h",    0, 0  },
+  { ARM64::LD4Fourv4s,        "ld4",  ".4s",    0, 0  },
+  { ARM64::LD4Fourv2d,        "ld4",  ".2d",    0, 0  },
+  { ARM64::LD4Fourv8b,        "ld4",  ".8b",    0, 0  },
+  { ARM64::LD4Fourv4h,        "ld4",  ".4h",    0, 0  },
+  { ARM64::LD4Fourv2s,        "ld4",  ".2s",    0, 0  },
+  { ARM64::LD4Fourv16b_POST,  "ld4",  ".16b",   0, 64 },
+  { ARM64::LD4Fourv8h_POST,   "ld4",  ".8h",    0, 64 },
+  { ARM64::LD4Fourv4s_POST,   "ld4",  ".4s",    0, 64 },
+  { ARM64::LD4Fourv2d_POST,   "ld4",  ".2d",    0, 64 },
+  { ARM64::LD4Fourv8b_POST,   "ld4",  ".8b",    0, 32 },
+  { ARM64::LD4Fourv4h_POST,   "ld4",  ".4h",    0, 32 },
+  { ARM64::LD4Fourv2s_POST,   "ld4",  ".2s",    0, 32 },
+  { ARM64::ST1i8,             "st1",  ".b",     1, 0  },
+  { ARM64::ST1i16,            "st1",  ".h",     1, 0  },
+  { ARM64::ST1i32,            "st1",  ".s",     1, 0  },
+  { ARM64::ST1i64,            "st1",  ".d",     1, 0  },
+  { ARM64::ST1i8_POST,        "st1",  ".b",     1, 1  },
+  { ARM64::ST1i16_POST,       "st1",  ".h",     1, 2  },
+  { ARM64::ST1i32_POST,       "st1",  ".s",     1, 4  },
+  { ARM64::ST1i64_POST,       "st1",  ".d",     1, 8  },
+  { ARM64::ST1Onev16b,        "st1",  ".16b",   0, 0  },
+  { ARM64::ST1Onev8h,         "st1",  ".8h",    0, 0  },
+  { ARM64::ST1Onev4s,         "st1",  ".4s",    0, 0  },
+  { ARM64::ST1Onev2d,         "st1",  ".2d",    0, 0  },
+  { ARM64::ST1Onev8b,         "st1",  ".8b",    0, 0  },
+  { ARM64::ST1Onev4h,         "st1",  ".4h",    0, 0  },
+  { ARM64::ST1Onev2s,         "st1",  ".2s",    0, 0  },
+  { ARM64::ST1Onev1d,         "st1",  ".1d",    0, 0  },
+  { ARM64::ST1Onev16b_POST,   "st1",  ".16b",   0, 16 },
+  { ARM64::ST1Onev8h_POST,    "st1",  ".8h",    0, 16 },
+  { ARM64::ST1Onev4s_POST,    "st1",  ".4s",    0, 16 },
+  { ARM64::ST1Onev2d_POST,    "st1",  ".2d",    0, 16 },
+  { ARM64::ST1Onev8b_POST,    "st1",  ".8b",    0, 8  },
+  { ARM64::ST1Onev4h_POST,    "st1",  ".4h",    0, 8  },
+  { ARM64::ST1Onev2s_POST,    "st1",  ".2s",    0, 8  },
+  { ARM64::ST1Onev1d_POST,    "st1",  ".1d",    0, 8  },
+  { ARM64::ST1Twov16b,        "st1",  ".16b",   0, 0  },
+  { ARM64::ST1Twov8h,         "st1",  ".8h",    0, 0  },
+  { ARM64::ST1Twov4s,         "st1",  ".4s",    0, 0  },
+  { ARM64::ST1Twov2d,         "st1",  ".2d",    0, 0  },
+  { ARM64::ST1Twov8b,         "st1",  ".8b",    0, 0  },
+  { ARM64::ST1Twov4h,         "st1",  ".4h",    0, 0  },
+  { ARM64::ST1Twov2s,         "st1",  ".2s",    0, 0  },
+  { ARM64::ST1Twov1d,         "st1",  ".1d",    0, 0  },
+  { ARM64::ST1Twov16b_POST,   "st1",  ".16b",   0, 32 },
+  { ARM64::ST1Twov8h_POST,    "st1",  ".8h",    0, 32 },
+  { ARM64::ST1Twov4s_POST,    "st1",  ".4s",    0, 32 },
+  { ARM64::ST1Twov2d_POST,    "st1",  ".2d",    0, 32 },
+  { ARM64::ST1Twov8b_POST,    "st1",  ".8b",    0, 16 },
+  { ARM64::ST1Twov4h_POST,    "st1",  ".4h",    0, 16 },
+  { ARM64::ST1Twov2s_POST,    "st1",  ".2s",    0, 16 },
+  { ARM64::ST1Twov1d_POST,    "st1",  ".1d",    0, 16 },
+  { ARM64::ST1Threev16b,      "st1",  ".16b",   0, 0  },
+  { ARM64::ST1Threev8h,       "st1",  ".8h",    0, 0  },
+  { ARM64::ST1Threev4s,       "st1",  ".4s",    0, 0  },
+  { ARM64::ST1Threev2d,       "st1",  ".2d",    0, 0  },
+  { ARM64::ST1Threev8b,       "st1",  ".8b",    0, 0  },
+  { ARM64::ST1Threev4h,       "st1",  ".4h",    0, 0  },
+  { ARM64::ST1Threev2s,       "st1",  ".2s",    0, 0  },
+  { ARM64::ST1Threev1d,       "st1",  ".1d",    0, 0  },
+  { ARM64::ST1Threev16b_POST, "st1",  ".16b",   0, 48 },
+  { ARM64::ST1Threev8h_POST,  "st1",  ".8h",    0, 48 },
+  { ARM64::ST1Threev4s_POST,  "st1",  ".4s",    0, 48 },
+  { ARM64::ST1Threev2d_POST,  "st1",  ".2d",    0, 48 },
+  { ARM64::ST1Threev8b_POST,  "st1",  ".8b",    0, 24 },
+  { ARM64::ST1Threev4h_POST,  "st1",  ".4h",    0, 24 },
+  { ARM64::ST1Threev2s_POST,  "st1",  ".2s",    0, 24 },
+  { ARM64::ST1Threev1d_POST,  "st1",  ".1d",    0, 24 },
+  { ARM64::ST1Fourv16b,       "st1",  ".16b",   0, 0  },
+  { ARM64::ST1Fourv8h,        "st1",  ".8h",    0, 0  },
+  { ARM64::ST1Fourv4s,        "st1",  ".4s",    0, 0  },
+  { ARM64::ST1Fourv2d,        "st1",  ".2d",    0, 0  },
+  { ARM64::ST1Fourv8b,        "st1",  ".8b",    0, 0  },
+  { ARM64::ST1Fourv4h,        "st1",  ".4h",    0, 0  },
+  { ARM64::ST1Fourv2s,        "st1",  ".2s",    0, 0  },
+  { ARM64::ST1Fourv1d,        "st1",  ".1d",    0, 0  },
+  { ARM64::ST1Fourv16b_POST,  "st1",  ".16b",   0, 64 },
+  { ARM64::ST1Fourv8h_POST,   "st1",  ".8h",    0, 64 },
+  { ARM64::ST1Fourv4s_POST,   "st1",  ".4s",    0, 64 },
+  { ARM64::ST1Fourv2d_POST,   "st1",  ".2d",    0, 64 },
+  { ARM64::ST1Fourv8b_POST,   "st1",  ".8b",    0, 32 },
+  { ARM64::ST1Fourv4h_POST,   "st1",  ".4h",    0, 32 },
+  { ARM64::ST1Fourv2s_POST,   "st1",  ".2s",    0, 32 },
+  { ARM64::ST1Fourv1d_POST,   "st1",  ".1d",    0, 32 },
+  { ARM64::ST2i8,             "st2",  ".b",     1, 0  },
+  { ARM64::ST2i16,            "st2",  ".h",     1, 0  },
+  { ARM64::ST2i32,            "st2",  ".s",     1, 0  },
+  { ARM64::ST2i64,            "st2",  ".d",     1, 0  },
+  { ARM64::ST2i8_POST,        "st2",  ".b",     1, 2  },
+  { ARM64::ST2i16_POST,       "st2",  ".h",     1, 4  },
+  { ARM64::ST2i32_POST,       "st2",  ".s",     1, 8  },
+  { ARM64::ST2i64_POST,       "st2",  ".d",     1, 16 },
+  { ARM64::ST2Twov16b,        "st2",  ".16b",   0, 0  },
+  { ARM64::ST2Twov8h,         "st2",  ".8h",    0, 0  },
+  { ARM64::ST2Twov4s,         "st2",  ".4s",    0, 0  },
+  { ARM64::ST2Twov2d,         "st2",  ".2d",    0, 0  },
+  { ARM64::ST2Twov8b,         "st2",  ".8b",    0, 0  },
+  { ARM64::ST2Twov4h,         "st2",  ".4h",    0, 0  },
+  { ARM64::ST2Twov2s,         "st2",  ".2s",    0, 0  },
+  { ARM64::ST2Twov16b_POST,   "st2",  ".16b",   0, 32 },
+  { ARM64::ST2Twov8h_POST,    "st2",  ".8h",    0, 32 },
+  { ARM64::ST2Twov4s_POST,    "st2",  ".4s",    0, 32 },
+  { ARM64::ST2Twov2d_POST,    "st2",  ".2d",    0, 32 },
+  { ARM64::ST2Twov8b_POST,    "st2",  ".8b",    0, 16 },
+  { ARM64::ST2Twov4h_POST,    "st2",  ".4h",    0, 16 },
+  { ARM64::ST2Twov2s_POST,    "st2",  ".2s",    0, 16 },
+  { ARM64::ST3i8,             "st3",  ".b",     1, 0  },
+  { ARM64::ST3i16,            "st3",  ".h",     1, 0  },
+  { ARM64::ST3i32,            "st3",  ".s",     1, 0  },
+  { ARM64::ST3i64,            "st3",  ".d",     1, 0  },
+  { ARM64::ST3i8_POST,        "st3",  ".b",     1, 3  },
+  { ARM64::ST3i16_POST,       "st3",  ".h",     1, 6  },
+  { ARM64::ST3i32_POST,       "st3",  ".s",     1, 12 },
+  { ARM64::ST3i64_POST,       "st3",  ".d",     1, 24 },
+  { ARM64::ST3Threev16b,      "st3",  ".16b",   0, 0  },
+  { ARM64::ST3Threev8h,       "st3",  ".8h",    0, 0  },
+  { ARM64::ST3Threev4s,       "st3",  ".4s",    0, 0  },
+  { ARM64::ST3Threev2d,       "st3",  ".2d",    0, 0  },
+  { ARM64::ST3Threev8b,       "st3",  ".8b",    0, 0  },
+  { ARM64::ST3Threev4h,       "st3",  ".4h",    0, 0  },
+  { ARM64::ST3Threev2s,       "st3",  ".2s",    0, 0  },
+  { ARM64::ST3Threev16b_POST, "st3",  ".16b",   0, 48 },
+  { ARM64::ST3Threev8h_POST,  "st3",  ".8h",    0, 48 },
+  { ARM64::ST3Threev4s_POST,  "st3",  ".4s",    0, 48 },
+  { ARM64::ST3Threev2d_POST,  "st3",  ".2d",    0, 48 },
+  { ARM64::ST3Threev8b_POST,  "st3",  ".8b",    0, 24 },
+  { ARM64::ST3Threev4h_POST,  "st3",  ".4h",    0, 24 },
+  { ARM64::ST3Threev2s_POST,  "st3",  ".2s",    0, 24 },
+  { ARM64::ST4i8,             "st4",  ".b",     1, 0  },
+  { ARM64::ST4i16,            "st4",  ".h",     1, 0  },
+  { ARM64::ST4i32,            "st4",  ".s",     1, 0  },
+  { ARM64::ST4i64,            "st4",  ".d",     1, 0  },
+  { ARM64::ST4i8_POST,        "st4",  ".b",     1, 4  },
+  { ARM64::ST4i16_POST,       "st4",  ".h",     1, 8  },
+  { ARM64::ST4i32_POST,       "st4",  ".s",     1, 16 },
+  { ARM64::ST4i64_POST,       "st4",  ".d",     1, 32 },
+  { ARM64::ST4Fourv16b,       "st4",  ".16b",   0, 0  },
+  { ARM64::ST4Fourv8h,        "st4",  ".8h",    0, 0  },
+  { ARM64::ST4Fourv4s,        "st4",  ".4s",    0, 0  },
+  { ARM64::ST4Fourv2d,        "st4",  ".2d",    0, 0  },
+  { ARM64::ST4Fourv8b,        "st4",  ".8b",    0, 0  },
+  { ARM64::ST4Fourv4h,        "st4",  ".4h",    0, 0  },
+  { ARM64::ST4Fourv2s,        "st4",  ".2s",    0, 0  },
+  { ARM64::ST4Fourv16b_POST,  "st4",  ".16b",   0, 64 },
+  { ARM64::ST4Fourv8h_POST,   "st4",  ".8h",    0, 64 },
+  { ARM64::ST4Fourv4s_POST,   "st4",  ".4s",    0, 64 },
+  { ARM64::ST4Fourv2d_POST,   "st4",  ".2d",    0, 64 },
+  { ARM64::ST4Fourv8b_POST,   "st4",  ".8b",    0, 32 },
+  { ARM64::ST4Fourv4h_POST,   "st4",  ".4h",    0, 32 },
+  { ARM64::ST4Fourv2s_POST,   "st4",  ".2s",    0, 32 },
+};
+
+static LdStNInstrDesc *getLdStNInstrDesc(unsigned Opcode) {
+  unsigned Idx;
+  for (Idx = 0; Idx != array_lengthof(LdStNInstInfo); ++Idx)
+    if (LdStNInstInfo[Idx].Opcode == Opcode)
+      return &LdStNInstInfo[Idx];
+
+  return 0;
+}
+
+void ARM64AppleInstPrinter::printInst(const MCInst *MI, raw_ostream &O,
+                                      StringRef Annot) {
+  unsigned Opcode = MI->getOpcode();
+  StringRef Layout, Mnemonic;
+
+  bool IsTbx;
+  if (isTblTbxInstruction(MI->getOpcode(), Layout, IsTbx)) {
+    O << "\t" << (IsTbx ? "tbx" : "tbl") << Layout << '\t'
+      << getRegisterName(MI->getOperand(0).getReg(), ARM64::vreg) << ", ";
+
+    unsigned ListOpNum = IsTbx ? 2 : 1;
+    printVectorList(MI, ListOpNum, O, "");
+
+    O << ", "
+      << getRegisterName(MI->getOperand(ListOpNum + 1).getReg(), ARM64::vreg);
+    printAnnotation(O, Annot);
     return;
   }
 
+  if (LdStNInstrDesc *LdStDesc = getLdStNInstrDesc(Opcode)) {
+    O << "\t" << LdStDesc->Mnemonic << LdStDesc->Layout << '\t';
 
-  printInstruction(MI, O);
-  printAnnotation(O, Annot);
+    // Now onto the operands: first a vector list with possible lane
+    // specifier. E.g. { v0 }[2]
+    printVectorList(MI, 0, O, "");
+
+    if (LdStDesc->LaneOperand != 0)
+      O << '[' << MI->getOperand(LdStDesc->LaneOperand).getImm() << ']';
+
+    // Next the address: [xN]
+    unsigned AddrOpNum = LdStDesc->LaneOperand + 1;
+    unsigned AddrReg = MI->getOperand(AddrOpNum).getReg();
+    O << ", [" << getRegisterName(AddrReg) << ']';
+
+    // Finally, there might be a post-indexed offset.
+    if (LdStDesc->NaturalOffset != 0) {
+      unsigned Reg = MI->getOperand(AddrOpNum + 1).getReg();
+      if (Reg != ARM64::XZR)
+        O << ", " << getRegisterName(Reg);
+      else {
+        assert(LdStDesc->NaturalOffset && "no offset on post-inc instruction?");
+        O << ", #" << LdStDesc->NaturalOffset;
+      }
+    }
+
+    printAnnotation(O, Annot);
+    return;
+  }
+
+  ARM64InstPrinter::printInst(MI, O, Annot);
 }
 
 bool ARM64InstPrinter::printSysAlias(const MCInst *MI, raw_ostream &O) {
@@ -796,11 +1162,15 @@ void ARM64InstPrinter::printMemoryPostIndexed(const MCInst *MI, unsigned OpNum,
 
 void ARM64InstPrinter::printMemoryRegOffset(const MCInst *MI, unsigned OpNum,
                                             raw_ostream &O, int LegalShiftAmt) {
-  O << '[' << getRegisterName(MI->getOperand(OpNum).getReg()) << ", "
-           << getRegisterName(MI->getOperand(OpNum+1).getReg());
-
-  unsigned Val = MI->getOperand(OpNum+2).getImm();
+  unsigned Val = MI->getOperand(OpNum + 2).getImm();
   ARM64_AM::ExtendType ExtType = ARM64_AM::getMemExtendType(Val);
+
+  O << '[' << getRegisterName(MI->getOperand(OpNum).getReg()) << ", ";
+  if (ExtType == ARM64_AM::UXTW || ExtType == ARM64_AM::SXTW)
+    O << getRegisterName(getWRegFromXReg(MI->getOperand(OpNum + 1).getReg()));
+  else
+    O << getRegisterName(MI->getOperand(OpNum + 1).getReg());
+
   bool DoShift = ARM64_AM::getMemDoShift(Val);
 
   if (ExtType == ARM64_AM::UXTX) {
@@ -893,30 +1263,63 @@ static unsigned getNextVectorRegister(unsigned Reg, unsigned Stride = 1) {
   return Reg;
 }
 
-template<unsigned NumRegs, unsigned RegSize>
-void ARM64InstPrinter::printImplicitlyTypedVectorList(const MCInst *MI,
-                                                      unsigned OpNum,
-                                                      raw_ostream &O) {
+void ARM64InstPrinter::printVectorList(const MCInst *MI, unsigned OpNum,
+                                       raw_ostream &O, StringRef LayoutSuffix) {
   unsigned Reg = MI->getOperand(OpNum).getReg();
 
-  // Get the first register in the tupple if needed
-  if (NumRegs > 1)
-    Reg = MRI.getSubReg(Reg, RegSize == 64 ? ARM64::dsub0 : ARM64::qsub0);
+  O << "{ ";
 
-  // Convert it to a Q-register if needed.
-  if (RegSize == 64) {
+  // Work out how many registers there are in the list (if there is an actual
+  // list).
+  unsigned NumRegs = 1;
+  if (MRI.getRegClass(ARM64::DDRegClassID).contains(Reg) ||
+      MRI.getRegClass(ARM64::QQRegClassID).contains(Reg))
+    NumRegs = 2;
+  else if (MRI.getRegClass(ARM64::DDDRegClassID).contains(Reg) ||
+           MRI.getRegClass(ARM64::QQQRegClassID).contains(Reg))
+    NumRegs = 3;
+  else if (MRI.getRegClass(ARM64::DDDDRegClassID).contains(Reg) ||
+           MRI.getRegClass(ARM64::QQQQRegClassID).contains(Reg))
+    NumRegs = 4;
+
+  // Now forget about the list and find out what the first register is.
+  if (unsigned FirstReg = MRI.getSubReg(Reg, ARM64::dsub0))
+    Reg = FirstReg;
+  else if (unsigned FirstReg = MRI.getSubReg(Reg, ARM64::qsub0))
+    Reg = FirstReg;
+
+  // If it's a D-reg, we need to promote it to the equivalent Q-reg before
+  // printing (otherwise getRegisterName fails).
+  if (MRI.getRegClass(ARM64::FPR64RegClassID).contains(Reg)) {
     const MCRegisterClass &FPR128RC = MRI.getRegClass(ARM64::FPR128RegClassID);
     Reg = MRI.getMatchingSuperReg(Reg, ARM64::dsub, &FPR128RC);
   }
 
-  O << "{ ";
-
   for (unsigned i = 0; i < NumRegs; ++i, Reg = getNextVectorRegister(Reg)) {
-    O << getRegisterName(Reg, ARM64::vreg);
+    O << getRegisterName(Reg, ARM64::vreg) << LayoutSuffix;
     if (i + 1 != NumRegs) O << ", ";
   }
 
   O << " }";
+}
+
+void ARM64InstPrinter::printImplicitlyTypedVectorList(const MCInst *MI,
+                                                      unsigned OpNum,
+                                                      raw_ostream &O) {
+  printVectorList(MI, OpNum, O, "");
+}
+
+template<unsigned NumLanes, char LaneKind>
+void ARM64InstPrinter::printTypedVectorList(const MCInst *MI, unsigned OpNum,
+                                            raw_ostream &O) {
+  Twine Suffix;
+  if (NumLanes)
+    Suffix = Twine('.') + Twine(NumLanes) + Twine(LaneKind);
+  else
+    Suffix = Twine('.') + Twine(LaneKind);
+
+  SmallString<8> Buf;
+  printVectorList(MI, OpNum, O, Suffix.toStringRef(Buf));
 }
 
 void ARM64InstPrinter::printVectorIndex(const MCInst *MI, unsigned OpNum,

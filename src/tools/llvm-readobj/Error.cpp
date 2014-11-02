@@ -17,7 +17,7 @@
 using namespace llvm;
 
 namespace {
-class _readobj_error_category : public _do_message {
+class _readobj_error_category : public error_category {
 public:
   virtual const char* name() const;
   virtual std::string message(int ev) const;

@@ -15,6 +15,7 @@
 #include "ParsePragma.h"
 #include "RAIIObjectsForParser.h"
 #include "clang/AST/ASTConsumer.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Sema/DeclSpec.h"
@@ -152,14 +153,8 @@ static bool IsCommonTypo(tok::TokenKind ExpectedTok, const Token &Tok) {
   }
 }
 
-/// ExpectAndConsume - The parser expects that 'ExpectedTok' is next in the
-/// input.  If so, it is consumed and false is returned.
-///
-/// If the input is malformed, this emits the specified diagnostic.  Next, if
-/// SkipToTok is specified, it calls SkipUntil(SkipToTok).  Finally, true is
-/// returned.
 bool Parser::ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned DiagID,
-                              const char *Msg, tok::TokenKind SkipToTok) {
+                              const char *Msg) {
   if (Tok.is(ExpectedTok) || Tok.is(tok::code_completion)) {
     ConsumeAnyToken();
     return false;
@@ -168,35 +163,46 @@ bool Parser::ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned DiagID,
   // Detect common single-character typos and resume.
   if (IsCommonTypo(ExpectedTok, Tok)) {
     SourceLocation Loc = Tok.getLocation();
-    Diag(Loc, DiagID)
-      << Msg
-      << FixItHint::CreateReplacement(SourceRange(Loc),
-                                      getTokenSimpleSpelling(ExpectedTok));
+    DiagnosticBuilder DB = Diag(Loc, DiagID);
+    DB << FixItHint::CreateReplacement(SourceRange(Loc),
+                                       getPunctuatorSpelling(ExpectedTok));
+    if (DiagID == diag::err_expected)
+      DB << ExpectedTok;
+    else if (DiagID == diag::err_expected_after)
+      DB << Msg << ExpectedTok;
+    else
+      DB << Msg;
     ConsumeAnyToken();
 
     // Pretend there wasn't a problem.
     return false;
   }
 
-  const char *Spelling = 0;
   SourceLocation EndLoc = PP.getLocForEndOfToken(PrevTokLocation);
-  if (EndLoc.isValid() &&
-      (Spelling = tok::getTokenSimpleSpelling(ExpectedTok))) {
-    // Show what code to insert to fix this problem.
-    Diag(EndLoc, DiagID)
-      << Msg
-      << FixItHint::CreateInsertion(EndLoc, Spelling);
-  } else
-    Diag(Tok, DiagID) << Msg;
+  const char *Spelling = 0;
+  if (EndLoc.isValid())
+    Spelling = tok::getPunctuatorSpelling(ExpectedTok);
 
-  if (SkipToTok != tok::unknown)
-    SkipUntil(SkipToTok);
+  DiagnosticBuilder DB =
+      Spelling
+          ? Diag(EndLoc, DiagID) << FixItHint::CreateInsertion(EndLoc, Spelling)
+          : Diag(Tok, DiagID);
+  if (DiagID == diag::err_expected)
+    DB << ExpectedTok;
+  else if (DiagID == diag::err_expected_after)
+    DB << Msg << ExpectedTok;
+  else
+    DB << Msg;
+
   return true;
 }
 
 bool Parser::ExpectAndConsumeSemi(unsigned DiagID) {
-  if (Tok.is(tok::semi) || Tok.is(tok::code_completion)) {
-    ConsumeToken();
+  if (TryConsumeToken(tok::semi))
+    return false;
+
+  if (Tok.is(tok::code_completion)) {
+    handleUnexpectedCodeCompletionToken();
     return false;
   }
   
@@ -241,7 +247,8 @@ void Parser::ConsumeExtraSemi(ExtraSemiKind Kind, unsigned TST) {
 
   if (Kind != AfterMemberFunctionDefinition || HadMultipleSemis)
     Diag(StartLoc, diag::ext_extra_semi)
-        << Kind << DeclSpec::getSpecifierName((DeclSpec::TST)TST)
+        << Kind << DeclSpec::getSpecifierName((DeclSpec::TST)TST,
+                                    Actions.getASTContext().getPrintingPolicy())
         << FixItHint::CreateRemoval(SourceRange(StartLoc, EndLoc));
   else
     // A single semicolon is valid after a member function definition.
@@ -253,16 +260,19 @@ void Parser::ConsumeExtraSemi(ExtraSemiKind Kind, unsigned TST) {
 // Error recovery.
 //===----------------------------------------------------------------------===//
 
+static bool HasFlagsSet(Parser::SkipUntilFlags L, Parser::SkipUntilFlags R) {
+  return (static_cast<unsigned>(L) & static_cast<unsigned>(R)) != 0;
+}
+
 /// SkipUntil - Read tokens until we get to the specified token, then consume
-/// it (unless DontConsume is true).  Because we cannot guarantee that the
+/// it (unless no flag StopBeforeMatch).  Because we cannot guarantee that the
 /// token will ever occur, this skips to the next token, or to some likely
 /// good stopping point.  If StopAtSemi is true, skipping will stop at a ';'
 /// character.
 ///
 /// If SkipUntil finds the specified token, it returns true, otherwise it
 /// returns false.
-bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi,
-                       bool DontConsume, bool StopAtCodeCompletion) {
+bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, SkipUntilFlags Flags) {
   // We always want this function to skip at least one token if the first token
   // isn't T and if not at EOF.
   bool isFirstTokenSkipped = true;
@@ -270,7 +280,7 @@ bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi,
     // If we found one of the tokens, stop and return true.
     for (unsigned i = 0, NumToks = Toks.size(); i != NumToks; ++i) {
       if (Tok.is(Toks[i])) {
-        if (DontConsume) {
+        if (HasFlagsSet(Flags, StopBeforeMatch)) {
           // Noop, don't consume the token.
         } else {
           ConsumeAnyToken();
@@ -282,9 +292,10 @@ bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi,
     // Important special case: The caller has given up and just wants us to
     // skip the rest of the file. Do this without recursing, since we can
     // get here precisely because the caller detected too much recursion.
-    if (Toks.size() == 1 && Toks[0] == tok::eof && !StopAtSemi &&
-        !StopAtCodeCompletion) {
-      while (Tok.getKind() != tok::eof)
+    if (Toks.size() == 1 && Toks[0] == tok::eof &&
+        !HasFlagsSet(Flags, StopAtSemi) &&
+        !HasFlagsSet(Flags, StopAtCodeCompletion)) {
+      while (Tok.isNot(tok::eof))
         ConsumeAnyToken();
       return true;
     }
@@ -293,26 +304,45 @@ bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi,
     case tok::eof:
       // Ran out of tokens.
       return false;
-        
+
+    case tok::annot_pragma_openmp_end:
+      // Stop before an OpenMP pragma boundary.
+    case tok::annot_module_begin:
+    case tok::annot_module_end:
+    case tok::annot_module_include:
+      // Stop before we change submodules. They generally indicate a "good"
+      // place to pick up parsing again (except in the special case where
+      // we're trying to skip to EOF).
+      return false;
+
     case tok::code_completion:
-      if (!StopAtCodeCompletion)
-        ConsumeToken();
+      if (!HasFlagsSet(Flags, StopAtCodeCompletion))
+        handleUnexpectedCodeCompletionToken();
       return false;
         
     case tok::l_paren:
       // Recursively skip properly-nested parens.
       ConsumeParen();
-      SkipUntil(tok::r_paren, false, false, StopAtCodeCompletion);
+      if (HasFlagsSet(Flags, StopAtCodeCompletion))
+        SkipUntil(tok::r_paren, StopAtCodeCompletion);
+      else
+        SkipUntil(tok::r_paren);
       break;
     case tok::l_square:
       // Recursively skip properly-nested square brackets.
       ConsumeBracket();
-      SkipUntil(tok::r_square, false, false, StopAtCodeCompletion);
+      if (HasFlagsSet(Flags, StopAtCodeCompletion))
+        SkipUntil(tok::r_square, StopAtCodeCompletion);
+      else
+        SkipUntil(tok::r_square);
       break;
     case tok::l_brace:
       // Recursively skip properly-nested braces.
       ConsumeBrace();
-      SkipUntil(tok::r_brace, false, false, StopAtCodeCompletion);
+      if (HasFlagsSet(Flags, StopAtCodeCompletion))
+        SkipUntil(tok::r_brace, StopAtCodeCompletion);
+      else
+        SkipUntil(tok::r_brace);
       break;
 
     // Okay, we found a ']' or '}' or ')', which we think should be balanced.
@@ -345,7 +375,7 @@ bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi,
       break;
         
     case tok::semi:
-      if (StopAtSemi)
+      if (HasFlagsSet(Flags, StopAtSemi))
         return false;
       // FALL THROUGH.
     default:
@@ -561,24 +591,41 @@ namespace {
 bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result) {
   DestroyTemplateIdAnnotationsRAIIObj CleanupRAII(TemplateIds);
 
-  // Skip over the EOF token, flagging end of previous input for incremental 
+  // Skip over the EOF token, flagging end of previous input for incremental
   // processing
   if (PP.isIncrementalProcessingEnabled() && Tok.is(tok::eof))
     ConsumeToken();
 
-  while (Tok.is(tok::annot_pragma_unused))
-    HandlePragmaUnused();
-
   Result = DeclGroupPtrTy();
-  if (Tok.is(tok::eof)) {
+  switch (Tok.getKind()) {
+  case tok::annot_pragma_unused:
+    HandlePragmaUnused();
+    return false;
+
+  case tok::annot_module_include:
+    Actions.ActOnModuleInclude(Tok.getLocation(),
+                               reinterpret_cast<Module *>(
+                                   Tok.getAnnotationValue()));
+    ConsumeToken();
+    return false;
+
+  case tok::annot_module_begin:
+  case tok::annot_module_end:
+    // FIXME: Update visibility based on the submodule we're in.
+    ConsumeToken();
+    return false;
+
+  case tok::eof:
     // Late template parsing can begin.
     if (getLangOpts().DelayedTemplateParsing)
       Actions.SetLateTemplateParser(LateTemplateParserCallback, this);
     if (!PP.isIncrementalProcessingEnabled())
       Actions.ActOnEndOfTranslationUnit();
     //else don't tell Sema that we ended parsing: more input might come.
-
     return true;
+
+  default:
+    break;
   }
 
   ParsedAttributesWithRange attrs(AttrFactory);
@@ -682,7 +729,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     SourceLocation EndLoc;
     ExprResult Result(ParseSimpleAsm(&EndLoc));
 
-    ExpectAndConsume(tok::semi, diag::err_expected_semi_after,
+    ExpectAndConsume(tok::semi, diag::err_expected_after,
                      "top-level asm block");
 
     if (Result.isInvalid())
@@ -885,7 +932,8 @@ Parser::ParseDeclOrFunctionDefInternal(ParsedAttributesWithRange &attrs,
 
     const char *PrevSpec = 0;
     unsigned DiagID;
-    if (DS.SetTypeSpecType(DeclSpec::TST_unspecified, AtLoc, PrevSpec, DiagID))
+    if (DS.SetTypeSpecType(DeclSpec::TST_unspecified, AtLoc, PrevSpec, DiagID,
+                           Actions.getASTContext().getPrintingPolicy()))
       Diag(AtLoc, DiagID) << PrevSpec;
 
     if (Tok.isObjCAtKeyword(tok::objc_protocol))
@@ -972,9 +1020,11 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
   if (getLangOpts().ImplicitInt && D.getDeclSpec().isEmpty()) {
     const char *PrevSpec;
     unsigned DiagID;
+    const PrintingPolicy &Policy = Actions.getASTContext().getPrintingPolicy();
     D.getMutableDeclSpec().SetTypeSpecType(DeclSpec::TST_int,
                                            D.getIdentifierLoc(),
-                                           PrevSpec, DiagID);
+                                           PrevSpec, DiagID,
+                                           Policy);
     D.SetRangeBegin(D.getDeclSpec().getSourceRange().getBegin());
   }
 
@@ -993,7 +1043,7 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
     Diag(Tok, diag::err_expected_fn_body);
 
     // Skip over garbage, until we get to '{'.  Don't eat the '{'.
-    SkipUntil(tok::l_brace, true, true);
+    SkipUntil(tok::l_brace, StopAtSemi | StopBeforeMatch);
 
     // If we didn't find the '{', bail out.
     if (Tok.isNot(tok::l_brace))
@@ -1005,10 +1055,10 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
   if (Tok.isNot(tok::equal)) {
     AttributeList *DtorAttrs = D.getAttributes();
     while (DtorAttrs) {
-      if (!IsThreadSafetyAttribute(DtorAttrs->getName()->getName()) &&
+      if (!DtorAttrs->canAppearOnFunctionDefinition() &&
           !DtorAttrs->isCXX11Attribute()) {
         Diag(DtorAttrs->getLoc(), diag::warn_attribute_on_function_definition)
-          << DtorAttrs->getName()->getName();
+          << DtorAttrs->getName();
       }
       DtorAttrs = DtorAttrs->getNext();
     }
@@ -1035,12 +1085,7 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
     LexTemplateFunctionForLateParsing(Toks);
 
     if (DP) {
-      FunctionDecl *FnD = 0;
-      if (FunctionTemplateDecl *FunTmpl = dyn_cast<FunctionTemplateDecl>(DP))
-        FnD = FunTmpl->getTemplatedDecl();
-      else
-        FnD = cast<FunctionDecl>(DP);
-
+      FunctionDecl *FnD = DP->getAsFunction();
       Actions.CheckForFunctionRedefinition(FnD);
       Actions.MarkAsLateParsedTemplate(FnD, DP, Toks);
     }
@@ -1084,28 +1129,22 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
   // safe because we're always the sole owner.
   D.getMutableDeclSpec().abort();
 
-  if (Tok.is(tok::equal)) {
+  if (TryConsumeToken(tok::equal)) {
     assert(getLangOpts().CPlusPlus && "Only C++ function definitions have '='");
-    ConsumeToken();
-
     Actions.ActOnFinishFunctionBody(Res, 0, false);
  
     bool Delete = false;
     SourceLocation KWLoc;
-    if (Tok.is(tok::kw_delete)) {
-      Diag(Tok, getLangOpts().CPlusPlus11 ?
-           diag::warn_cxx98_compat_deleted_function :
-           diag::ext_deleted_function);
-
-      KWLoc = ConsumeToken();
+    if (TryConsumeToken(tok::kw_delete, KWLoc)) {
+      Diag(KWLoc, getLangOpts().CPlusPlus11
+                      ? diag::warn_cxx98_compat_deleted_function
+                      : diag::ext_deleted_function);
       Actions.SetDeclDeleted(Res, KWLoc);
       Delete = true;
-    } else if (Tok.is(tok::kw_default)) {
-      Diag(Tok, getLangOpts().CPlusPlus11 ?
-           diag::warn_cxx98_compat_defaulted_function :
-           diag::ext_defaulted_function);
-
-      KWLoc = ConsumeToken();
+    } else if (TryConsumeToken(tok::kw_default, KWLoc)) {
+      Diag(KWLoc, getLangOpts().CPlusPlus11
+                      ? diag::warn_cxx98_compat_defaulted_function
+                      : diag::ext_defaulted_function);
       Actions.SetDeclDefaulted(Res, KWLoc);
     } else {
       llvm_unreachable("function definition after = not 'delete' or 'default'");
@@ -1115,9 +1154,9 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
       Diag(KWLoc, diag::err_default_delete_in_multiple_declaration)
         << Delete;
       SkipUntil(tok::semi);
-    } else {
-      ExpectAndConsume(tok::semi, diag::err_expected_semi_after,
-                       Delete ? "delete" : "default", tok::semi);
+    } else if (ExpectAndConsume(tok::semi, diag::err_expected_after,
+                                Delete ? "delete" : "default")) {
+      SkipUntil(tok::semi);
     }
 
     return Res;
@@ -1171,9 +1210,8 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
     // NOTE: GCC just makes this an ext-warn.  It's not clear what it does with
     // the declarations though.  It's trivial to ignore them, really hard to do
     // anything else with them.
-    if (Tok.is(tok::semi)) {
+    if (TryConsumeToken(tok::semi)) {
       Diag(DSStart, diag::err_declaration_does_not_declare_param);
-      ConsumeToken();
       continue;
     }
 
@@ -1247,12 +1285,14 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
       ParseDeclarator(ParmDeclarator);
     }
 
-    if (ExpectAndConsumeSemi(diag::err_expected_semi_declaration)) {
-      // Skip to end of block or statement
-      SkipUntil(tok::semi, true);
-      if (Tok.is(tok::semi))
-        ConsumeToken();
-    }
+    // Consume ';' and continue parsing.
+    if (!ExpectAndConsumeSemi(diag::err_expected_semi_declaration))
+      continue;
+
+    // Otherwise recover by skipping to next semi or mandatory function body.
+    if (SkipUntil(tok::l_brace, StopAtSemi | StopBeforeMatch))
+      break;
+    TryConsumeToken(tok::semi);
   }
 
   // The actions module must verify that all arguments were declared.
@@ -1321,7 +1361,7 @@ Parser::ExprResult Parser::ParseSimpleAsm(SourceLocation *EndLoc) {
     T.consumeClose();
     if (EndLoc)
       *EndLoc = T.getCloseLocation();
-  } else if (SkipUntil(tok::r_paren, true, true)) {
+  } else if (SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch)) {
     if (EndLoc)
       *EndLoc = Tok.getLocation();
     ConsumeParen();
@@ -1405,8 +1445,8 @@ Parser::TryAnnotateName(bool IsAddressOfOperand,
 
   // Look up and classify the identifier. We don't perform any typo-correction
   // after a scope specifier, because in general we can't recover from typos
-  // there (eg, after correcting 'A::tempalte B<X>::C', we would need to jump
-  // back into scope specifier parsing).
+  // there (eg, after correcting 'A::tempalte B<X>::C' [sic], we would need to
+  // jump back into scope specifier parsing).
   Sema::NameClassification Classification
     = Actions.ClassifyName(getCurScope(), SS, Name, NameLoc, Next,
                            IsAddressOfOperand, SS.isEmpty() ? CCC : 0);
@@ -1478,6 +1518,35 @@ Parser::TryAnnotateName(bool IsAddressOfOperand,
   return ANK_Unresolved;
 }
 
+bool Parser::TryKeywordIdentFallback(bool DisableKeyword) {
+  assert(!Tok.is(tok::identifier) && !Tok.isAnnotation());
+  Diag(Tok, diag::ext_keyword_as_ident)
+    << PP.getSpelling(Tok)
+    << DisableKeyword;
+  if (DisableKeyword) {
+    IdentifierInfo *II = Tok.getIdentifierInfo();
+    ContextualKeywords[II] = Tok.getKind();
+    II->RevertTokenIDToIdentifier();
+  }
+  Tok.setKind(tok::identifier);
+  return true;
+}
+
+bool Parser::TryIdentKeywordUpgrade() {
+  assert(Tok.is(tok::identifier));
+  const IdentifierInfo *II = Tok.getIdentifierInfo();
+  assert(II->hasRevertedTokenIDToIdentifier());
+  // If we find that this is in fact the name of a type trait,
+  // update the token kind in place and parse again to treat it as
+  // the appropriate kind of type trait.
+  llvm::SmallDenseMap<const IdentifierInfo *, tok::TokenKind>::iterator Known =
+      ContextualKeywords.find(II);
+  if (Known == ContextualKeywords.end())
+    return false;
+  Tok.setKind(Known->second);
+  return true;
+}
+
 /// TryAnnotateTypeOrScopeToken - If the current token position is on a
 /// typename (possibly qualified in C++) or a C++ scope specifier not followed
 /// by a typename, TryAnnotateTypeOrScopeToken will replace one or more tokens
@@ -1513,7 +1582,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
     // We will consume the typedef token here and put it back after we have
     // parsed the first identifier, transforming it into something more like:
     //   typename T_::D typedef D;
-    if (getLangOpts().MicrosoftMode && NextToken().is(tok::kw_typedef)) {
+    if (getLangOpts().MSVCCompat && NextToken().is(tok::kw_typedef)) {
       Token TypedefToken;
       PP.Lex(TypedefToken);
       bool Result = TryAnnotateTypeOrScopeToken(EnteringContext, NeedType);
@@ -1565,7 +1634,8 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
                                      Tok.getLocation());
     } else if (Tok.is(tok::annot_template_id)) {
       TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
-      if (TemplateId->Kind == TNK_Function_template) {
+      if (TemplateId->Kind != TNK_Type_template &&
+          TemplateId->Kind != TNK_Dependent_template_name) {
         Diag(Tok, diag::err_typename_refers_to_non_type_template)
           << Tok.getAnnotationRange();
         return true;
@@ -1689,8 +1759,7 @@ bool Parser::TryAnnotateTypeOrScopeTokenAfterScopeSpec(bool EnteringContext,
       // annotation token to a type annotation token now.
       AnnotateTemplateIdTokenAsType();
       return false;
-    } else if (TemplateId->Kind == TNK_Var_template)
-      return false;
+    }
   }
 
   if (SS.isEmpty())
@@ -1744,8 +1813,8 @@ bool Parser::isTokenEqualOrEqualTypo() {
   case tok::pipeequal:           // |=
   case tok::equalequal:          // ==
     Diag(Tok, diag::err_invalid_token_after_declarator_suggest_equal)
-      << getTokenSimpleSpelling(Kind)
-      << FixItHint::CreateReplacement(SourceRange(Tok.getLocation()), "=");
+        << Kind
+        << FixItHint::CreateReplacement(SourceRange(Tok.getLocation()), "=");
   case tok::equal:
     return true;
   }
@@ -1874,7 +1943,7 @@ void Parser::ParseMicrosoftIfExistsExternalDeclaration() {
   
   BalancedDelimiterTracker Braces(*this, tok::l_brace);
   if (Braces.consumeOpen()) {
-    Diag(Tok, diag::err_expected_lbrace);
+    Diag(Tok, diag::err_expected) << tok::l_brace;
     return;
   }
 
@@ -1892,14 +1961,15 @@ void Parser::ParseMicrosoftIfExistsExternalDeclaration() {
   }
 
   // Parse the declarations.
-  while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
+  // FIXME: Support module import within __if_exists?
+  while (Tok.isNot(tok::r_brace) && !isEofOrEom()) {
     ParsedAttributesWithRange attrs(AttrFactory);
     MaybeParseCXX11Attributes(attrs);
     MaybeParseMicrosoftAttributes(attrs);
     DeclGroupPtrTy Result = ParseExternalDeclaration(attrs);
     if (Result && !getCurScope()->getParent())
       Actions.getASTConsumer().HandleTopLevelDecl(Result.get());
-  }     
+  }
   Braces.consumeClose();
 }
 
@@ -1955,17 +2025,20 @@ bool BalancedDelimiterTracker::diagnoseOverflow() {
   P.Diag(P.Tok, diag::err_bracket_depth_exceeded)
     << P.getLangOpts().BracketDepth;
   P.Diag(P.Tok, diag::note_bracket_depth);
-  P.SkipUntil(tok::eof, false);
-  return true;  
+  P.cutOffParsing();
+  return true;
 }
 
 bool BalancedDelimiterTracker::expectAndConsume(unsigned DiagID,
-                                            const char *Msg,
-                                            tok::TokenKind SkipToToc ) {
+                                                const char *Msg,
+                                                tok::TokenKind SkipToTok) {
   LOpen = P.Tok.getLocation();
-  if (P.ExpectAndConsume(Kind, DiagID, Msg, SkipToToc))
+  if (P.ExpectAndConsume(Kind, DiagID, Msg)) {
+    if (SkipToTok != tok::unknown)
+      P.SkipUntil(SkipToTok, Parser::StopAtSemi);
     return true;
-  
+  }
+
   if (getDepth() < MaxDepth)
     return false;
     
@@ -1974,29 +2047,22 @@ bool BalancedDelimiterTracker::expectAndConsume(unsigned DiagID,
 
 bool BalancedDelimiterTracker::diagnoseMissingClose() {
   assert(!P.Tok.is(Close) && "Should have consumed closing delimiter");
-  
-  const char *LHSName = "unknown";
-  diag::kind DID;
-  switch (Close) {
-  default: llvm_unreachable("Unexpected balanced token");
-  case tok::r_paren : LHSName = "("; DID = diag::err_expected_rparen; break;
-  case tok::r_brace : LHSName = "{"; DID = diag::err_expected_rbrace; break;
-  case tok::r_square: LHSName = "["; DID = diag::err_expected_rsquare; break;
-  }
-  P.Diag(P.Tok, DID);
-  P.Diag(LOpen, diag::note_matching) << LHSName;
+
+  P.Diag(P.Tok, diag::err_expected) << Close;
+  P.Diag(LOpen, diag::note_matching) << Kind;
 
   // If we're not already at some kind of closing bracket, skip to our closing
   // token.
   if (P.Tok.isNot(tok::r_paren) && P.Tok.isNot(tok::r_brace) &&
       P.Tok.isNot(tok::r_square) &&
-      P.SkipUntil(Close, FinalToken, /*StopAtSemi*/true, /*DontConsume*/true) &&
+      P.SkipUntil(Close, FinalToken,
+                  Parser::StopAtSemi | Parser::StopBeforeMatch) &&
       P.Tok.is(Close))
     LClose = P.ConsumeAnyToken();
   return true;
 }
 
 void BalancedDelimiterTracker::skipToEnd() {
-  P.SkipUntil(Close, false, true);
+  P.SkipUntil(Close, Parser::StopBeforeMatch);
   consumeClose();
 }

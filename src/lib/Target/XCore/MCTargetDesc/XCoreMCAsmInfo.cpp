@@ -20,8 +20,7 @@ XCoreMCAsmInfo::XCoreMCAsmInfo(StringRef TT) {
   Data64bitsDirective = 0;
   ZeroDirective = "\t.space\t";
   CommentString = "#";
-    
-  PrivateGlobalPrefix = ".L";
+
   AscizDirective = ".asciiz";
 
   HiddenVisibilityAttr = MCSA_Invalid;
@@ -30,5 +29,7 @@ XCoreMCAsmInfo::XCoreMCAsmInfo(StringRef TT) {
 
   // Debug
   HasLEB128 = true;
+  ExceptionsType = ExceptionHandling::DwarfCFI;
+  DwarfRegNumForCFI = true;
 }
 

@@ -638,7 +638,7 @@ public:
                    bool HasNUW = false, bool HasNSW = false) {
     if (Constant *LC = dyn_cast<Constant>(LHS))
       if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateSub(LC, RC), Name);
+        return Insert(Folder.CreateSub(LC, RC, HasNUW, HasNSW), Name);
     return CreateInsertNUWNSWBinOp(Instruction::Sub, LHS, RHS, Name,
                                    HasNUW, HasNSW);
   }
@@ -660,7 +660,7 @@ public:
                    bool HasNUW = false, bool HasNSW = false) {
     if (Constant *LC = dyn_cast<Constant>(LHS))
       if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateMul(LC, RC), Name);
+        return Insert(Folder.CreateMul(LC, RC, HasNUW, HasNSW), Name);
     return CreateInsertNUWNSWBinOp(Instruction::Mul, LHS, RHS, Name,
                                    HasNUW, HasNSW);
   }
@@ -832,11 +832,15 @@ public:
   }
 
   Value *CreateBinOp(Instruction::BinaryOps Opc,
-                     Value *LHS, Value *RHS, const Twine &Name = "") {
+                     Value *LHS, Value *RHS, const Twine &Name = "",
+                     MDNode *FPMathTag = 0) {
     if (Constant *LC = dyn_cast<Constant>(LHS))
       if (Constant *RC = dyn_cast<Constant>(RHS))
         return Insert(Folder.CreateBinOp(Opc, LC, RC), Name);
-    return Insert(BinaryOperator::Create(Opc, LHS, RHS), Name);
+    llvm::Instruction *BinOp = BinaryOperator::Create(Opc, LHS, RHS);
+    if (isa<FPMathOperator>(BinOp))
+      BinOp = AddFPMathAttributes(BinOp, FPMathTag, FMF);
+    return Insert(BinOp, Name);
   }
 
   Value *CreateNeg(Value *V, const Twine &Name = "",
@@ -915,8 +919,9 @@ public:
     return SI;
   }
   FenceInst *CreateFence(AtomicOrdering Ordering,
-                         SynchronizationScope SynchScope = CrossThread) {
-    return Insert(new FenceInst(Context, Ordering, SynchScope));
+                         SynchronizationScope SynchScope = CrossThread,
+                         const Twine &Name = "") {
+    return Insert(new FenceInst(Context, Ordering, SynchScope), Name);
   }
   AtomicCmpXchgInst *CreateAtomicCmpXchg(Value *Ptr, Value *Cmp, Value *New,
                                          AtomicOrdering Ordering,
@@ -1132,6 +1137,10 @@ public:
   Value *CreateBitCast(Value *V, Type *DestTy,
                        const Twine &Name = "") {
     return CreateCast(Instruction::BitCast, V, DestTy, Name);
+  }
+  Value *CreateAddrSpaceCast(Value *V, Type *DestTy,
+                             const Twine &Name = "") {
+    return CreateCast(Instruction::AddrSpaceCast, V, DestTy, Name);
   }
   Value *CreateZExtOrBitCast(Value *V, Type *DestTy,
                              const Twine &Name = "") {

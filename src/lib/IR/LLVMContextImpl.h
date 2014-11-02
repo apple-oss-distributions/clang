@@ -242,6 +242,9 @@ public:
   LLVMContext::DiagnosticHandlerTy DiagnosticHandler;
   void *DiagnosticContext;
 
+  LLVMContext::YieldCallbackTy YieldCallback;
+  void *YieldOpaqueHandle;
+
   typedef DenseMap<DenseMapAPIntKeyInfo::KeyTy, ConstantInt *,
                    DenseMapAPIntKeyInfo> IntMapTy;
   IntMapTy IntConstants;
@@ -281,8 +284,8 @@ public:
   
   StringMap<ConstantDataSequential*> CDSConstants;
 
-  
-  DenseMap<std::pair<Function*, BasicBlock*> , BlockAddress*> BlockAddresses;
+  DenseMap<std::pair<const Function *, const BasicBlock *>, BlockAddress *>
+    BlockAddresses;
   ConstantUniqueMap<ExprMapKeyType, const ExprMapKeyType&, Type, ConstantExpr>
     ExprConstants;
 

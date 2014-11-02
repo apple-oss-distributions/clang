@@ -44,12 +44,6 @@
 # define ASAN_HAS_EXCEPTIONS 1
 #endif
 
-// If set, asan uses the values of SHADOW_SCALE and SHADOW_OFFSET
-// provided by the instrumented objects. Otherwise constants are used.
-#ifndef ASAN_FLEXIBLE_MAPPING_AND_OFFSET
-# define ASAN_FLEXIBLE_MAPPING_AND_OFFSET 0
-#endif
-
 // If set, values like allocator chunk size, as well as defaults for some flags
 // will be changed towards less memory overhead.
 #ifndef ASAN_LOW_MEMORY
@@ -72,6 +66,8 @@ namespace __asan {
 
 class AsanThread;
 using __sanitizer::StackTrace;
+
+void AsanInitFromRtl();
 
 // asan_rtl.cc
 void NORETURN ShowStatsAndAbort();
@@ -136,6 +132,7 @@ const int kAsanStackPartialRedzoneMagic = 0xf4;
 const int kAsanStackAfterReturnMagic = 0xf5;
 const int kAsanInitializationOrderMagic = 0xf6;
 const int kAsanUserPoisonedMemoryMagic = 0xf7;
+const int kAsanContiguousContainerOOBMagic = 0xfc;
 const int kAsanStackUseAfterScopeMagic = 0xf8;
 const int kAsanGlobalRedzoneMagic = 0xf9;
 const int kAsanInternalHeapMagic = 0xfe;

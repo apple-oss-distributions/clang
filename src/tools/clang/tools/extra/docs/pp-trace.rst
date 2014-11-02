@@ -42,7 +42,7 @@ Command Line Options
 
 .. option:: -ignore <callback-name-list>
 
-  This option specifies a comma-seperated list of names of callbacks
+  This option specifies a comma-separated list of names of callbacks
   that shouldn't be traced.  It can be used to eliminate unwanted
   trace output.  The callback names are the name of the actual
   callback function names in the PPCallbacks class:
@@ -271,9 +271,9 @@ Imported         ((module name)|(null))                               const Modu
 Example:::
 
   - Callback: moduleImport
-    ImportLoc: "D:/Clang/llvm/tools/clang/tools/extra/test/pp-trace/pp-trace-modules.cpp:3:1"
-    Path: "Inputs.Level1A"
-    Imported: Level1A
+    ImportLoc: "d:/Clang/llvm/tools/clang/tools/extra/test/pp-trace/pp-trace-modules.cpp:4:2"
+    Path: [{Name: Level1B, Loc: "d:/Clang/llvmnewmod/tools/clang/tools/extra/test/pp-trace/pp-trace-modules.cpp:4:9"}, {Name: Level2B, Loc: "d:/Clang/llvmnewmod/tools/clang/tools/extra/test/pp-trace/pp-trace-modules.cpp:4:17"}]
+    Imported: Level2B
 
 `EndOfMainFile <http://clang.llvm.org/doxygen/classclang_1_1PPCallbacks.html#a63e170d069e99bc1c9c7ea0f3bed8bcc>`_ Callback
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

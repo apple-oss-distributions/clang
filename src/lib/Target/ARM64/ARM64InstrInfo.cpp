@@ -23,7 +23,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/TargetRegistry.h"
 
-#define GET_INSTRINFO_CTOR
+#define GET_INSTRINFO_CTOR_DTOR
 #include "ARM64GenInstrInfo.inc"
 
 using namespace llvm;
@@ -548,14 +548,23 @@ analyzeCompare(const MachineInstr *MI, unsigned &SrcReg, unsigned &SrcReg2,
     return true;
   case ARM64::SUBSWri:
   case ARM64::ADDSWri:
-  case ARM64::ANDSWri:
   case ARM64::SUBSXri:
   case ARM64::ADDSXri:
-  case ARM64::ANDSXri:
     SrcReg = MI->getOperand(1).getReg();
     SrcReg2 = 0;
     CmpMask = ~0;
     CmpValue = MI->getOperand(2).getImm();
+    return true;
+  case ARM64::ANDSWri:
+  case ARM64::ANDSXri:
+    // ANDS does not use the same encoding scheme as the others xxxS
+    // instructions.
+    SrcReg = MI->getOperand(1).getReg();
+    SrcReg2 = 0;
+    CmpMask = ~0;
+    CmpValue = ARM64_AM::decodeLogicalImmediate(
+        MI->getOperand(2).getImm(),
+        MI->getOpcode() == ARM64::ANDSWri ? 32 : 64);
     return true;
   }
 
@@ -638,6 +647,7 @@ optimizeCompareInstr(MachineInstr *CmpInstr, unsigned SrcReg, unsigned SrcReg2,
     CmpInstr->setDesc(MCID);
     CmpInstr->RemoveOperand(Cmp_CPSR);
     bool succeeded = UpdateOperandRegClass(CmpInstr);
+    (void)succeeded;
     assert(succeeded && "Some operands reg class are incompatible!");
     return true;
   }
@@ -782,6 +792,7 @@ optimizeCompareInstr(MachineInstr *CmpInstr, unsigned SrcReg, unsigned SrcReg2,
   MI->setDesc(get(NewOpc));
   CmpInstr->eraseFromParent();
   bool succeeded = UpdateOperandRegClass(MI);
+  (void)succeeded;
   assert(succeeded && "Some operands reg class are incompatible!");
   MI->addRegisterDefined(ARM64::CPSR, TRI);
   return true;
@@ -1058,6 +1069,39 @@ MachineInstrBuilder &AddSubReg(const MachineInstrBuilder &MIB,
   return MIB.addReg(Reg, State, SubIdx);
 }
 
+static bool forwardCopyWillClobberTuple(unsigned DestReg, unsigned SrcReg,
+                                        unsigned NumRegs) {
+  // We really want the positive remainder mod 32 here, that happens to be
+  // easily obtainable with a mask.
+  return ((DestReg - SrcReg) & 0x1f) < NumRegs;
+}
+
+void ARM64InstrInfo::copyPhysRegTuple(MachineBasicBlock &MBB,
+                                      MachineBasicBlock::iterator I,
+                                      DebugLoc DL, unsigned DestReg,
+                                      unsigned SrcReg, bool KillSrc,
+                                      unsigned Opcode,
+                                      llvm::ArrayRef<unsigned> Indices) const {
+  const TargetRegisterInfo *TRI = &getRegisterInfo();
+  uint16_t DestEncoding = TRI->getEncodingValue(DestReg);
+  uint16_t SrcEncoding = TRI->getEncodingValue(SrcReg);
+  unsigned NumRegs = Indices.size();
+
+  int SubReg = 0, End = NumRegs, Incr = 1;
+  if (forwardCopyWillClobberTuple(DestEncoding, SrcEncoding, NumRegs)) {
+    SubReg = NumRegs - 1;
+    End = -1;
+    Incr = -1;
+  }
+
+  for (; SubReg != End; SubReg += Incr) {
+    const MachineInstrBuilder &MIB = BuildMI(MBB, I, DL, get(Opcode));
+    AddSubReg(MIB, DestReg, Indices[SubReg], RegState::Define, TRI);
+    AddSubReg(MIB, SrcReg, Indices[SubReg], 0, TRI);
+    AddSubReg(MIB, SrcReg, Indices[SubReg], getKillRegState(KillSrc), TRI);
+  }
+}
+
 void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator I, DebugLoc DL,
                                  unsigned DestReg, unsigned SrcReg,
@@ -1139,132 +1183,58 @@ void ARM64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   // Copy a DDDD register quad by copying the individual sub-registers.
   if (ARM64::DDDDRegClass.contains(DestReg) &&
       ARM64::DDDDRegClass.contains(SrcReg)) {
-    const TargetRegisterInfo *TRI = &getRegisterInfo();
-    const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::dsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::dsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::dsub0, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::dsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::dsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::dsub1, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB2, DestReg, ARM64::dsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::dsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::dsub2, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB3 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB3, DestReg, ARM64::dsub3, RegState::Define, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::dsub3, 0, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::dsub3, getKillRegState(KillSrc), TRI);
-
+    static const unsigned Indices[] = { ARM64::dsub0, ARM64::dsub1,
+                                        ARM64::dsub2, ARM64::dsub3 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, ARM64::ORRv8i8,
+                     Indices);
     return;
   }
 
   // Copy a DDD register triple by copying the individual sub-registers.
   if (ARM64::DDDRegClass.contains(DestReg) &&
       ARM64::DDDRegClass.contains(SrcReg)) {
-    const TargetRegisterInfo *TRI = &getRegisterInfo();
-    const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::dsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::dsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::dsub0, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::dsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::dsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::dsub1, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB2, DestReg, ARM64::dsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::dsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::dsub2, getKillRegState(KillSrc), TRI);
-
+    static const unsigned Indices[] = { ARM64::dsub0, ARM64::dsub1,
+                                        ARM64::dsub2 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, ARM64::ORRv8i8,
+                     Indices);
     return;
   }
 
   // Copy a DD register pair by copying the individual sub-registers.
   if (ARM64::DDRegClass.contains(DestReg) &&
       ARM64::DDRegClass.contains(SrcReg)) {
-    const TargetRegisterInfo *TRI = &getRegisterInfo();
-    const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::dsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::dsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::dsub0, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::dsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::dsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::dsub1, getKillRegState(KillSrc), TRI);
-
+    static const unsigned Indices[] = { ARM64::dsub0, ARM64::dsub1 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, ARM64::ORRv8i8,
+                     Indices);
     return;
   }
 
   // Copy a QQQQ register quad by copying the individual sub-registers.
   if (ARM64::QQQQRegClass.contains(DestReg) &&
       ARM64::QQQQRegClass.contains(SrcReg)) {
-    const TargetRegisterInfo *TRI = &getRegisterInfo();
-    const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB0, DestReg, ARM64::qsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::qsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::qsub0, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB1, DestReg, ARM64::qsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::qsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::qsub1, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB2, DestReg, ARM64::qsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::qsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::qsub2, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB3 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB3, DestReg, ARM64::qsub3, RegState::Define, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::qsub3, 0, TRI);
-    AddSubReg(MIB3, SrcReg, ARM64::qsub3, getKillRegState(KillSrc), TRI);
-
+    static const unsigned Indices[] = { ARM64::qsub0, ARM64::qsub1,
+                                        ARM64::qsub2, ARM64::qsub3 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, ARM64::ORRv16i8,
+                     Indices);
     return;
   }
 
   // Copy a QQQ register triple by copying the individual sub-registers.
   if (ARM64::QQQRegClass.contains(DestReg) &&
       ARM64::QQQRegClass.contains(SrcReg)) {
-    const TargetRegisterInfo *TRI = &getRegisterInfo();
-    const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB0, DestReg, ARM64::qsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::qsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::qsub0, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB1, DestReg, ARM64::qsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::qsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::qsub1, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB2 = BuildMI(MBB, I, DL, get(ARM64::ORRv8i8));
-    AddSubReg(MIB2, DestReg, ARM64::qsub2, RegState::Define, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::qsub2, 0, TRI);
-    AddSubReg(MIB2, SrcReg, ARM64::qsub2, getKillRegState(KillSrc), TRI);
-
+    static const unsigned Indices[] = { ARM64::qsub0, ARM64::qsub1,
+                                        ARM64::qsub2 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, ARM64::ORRv16i8,
+                     Indices);
     return;
   }
 
   // Copy a QQ register pair by copying the individual sub-registers.
   if (ARM64::QQRegClass.contains(DestReg) &&
       ARM64::QQRegClass.contains(SrcReg)) {
-    const TargetRegisterInfo *TRI = &getRegisterInfo();
-    const MachineInstrBuilder &MIB0 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB0, DestReg, ARM64::qsub0, RegState::Define, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::qsub0, 0, TRI);
-    AddSubReg(MIB0, SrcReg, ARM64::qsub0, getKillRegState(KillSrc), TRI);
-
-    const MachineInstrBuilder &MIB1 = BuildMI(MBB, I, DL, get(ARM64::ORRv16i8));
-    AddSubReg(MIB1, DestReg, ARM64::qsub1, RegState::Define, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::qsub1, 0, TRI);
-    AddSubReg(MIB1, SrcReg, ARM64::qsub1, getKillRegState(KillSrc), TRI);
-
+    static const unsigned Indices[] = { ARM64::qsub0, ARM64::qsub1 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, ARM64::ORRv16i8,
+                     Indices);
     return;
   }
 

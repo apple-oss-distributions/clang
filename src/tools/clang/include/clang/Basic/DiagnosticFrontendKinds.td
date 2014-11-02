@@ -80,6 +80,8 @@ def err_verify_missing_end : Error<
     "cannot find end ('}}') of expected %0">;
 def err_verify_invalid_content : Error<
     "invalid expected %0: %1">;
+def err_verify_missing_regex : Error<
+    "cannot find start of regex ('{{') in %0">;
 def err_verify_inconsistent_diags : Error<
     "'%0' diagnostics %select{expected|seen}1 but not %select{seen|expected}1: "
     "%2">;
@@ -141,6 +143,10 @@ def warn_missing_submodule : Warning<"missing submodule '%0'">,
   InGroup<IncompleteUmbrella>;
 def err_module_unavailable : Error<
   "module '%0' %select{is incompatible with|requires}1 feature '%2'">;
+def err_module_header_missing : Error<
+  "%select{|umbrella }0header '%1' not found">;
+def err_module_cannot_create_includes : Error<
+  "cannot create includes file for module %0: %1">;
 def warn_module_config_macro_undef : Warning<
   "%select{definition|#undef}0 of configuration macro '%1' has no effect on "
   "the import of '%2'; pass '%select{-D%1=...|-U%1}0' on the command line "
@@ -148,4 +154,11 @@ def warn_module_config_macro_undef : Warning<
   InGroup<ConfigMacros>;
 def note_module_def_undef_here : Note<
   "macro was %select{defined|#undef'd}0 here">;
+def warn_module_build : Warning<"building module '%0' as '%1'">,
+  InGroup<DiagGroup<"module-build">>, DefaultIgnore;
+
+def err_missing_vfs_overlay_file : Error<
+  "virtual filesystem overlay file '%0' not found">, DefaultFatal;
+def err_invalid_vfs_overlay : Error<
+  "invalid virtual filesystem overlay file '%0'">, DefaultFatal;
 }

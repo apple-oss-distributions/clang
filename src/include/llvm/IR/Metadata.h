@@ -29,7 +29,16 @@ template<typename ValueSubClass, typename ItemParentClass>
 
 
 enum LLVMConstants LLVM_ENUM_INT_TYPE(uint32_t) {
-  DEBUG_METADATA_VERSION = 1  // Current debug info version number.
+  /// Current debug info version number.
+  DEBUG_METADATA_VERSION = 1
+#ifdef LLVM_DEBUG_METADATA_VERSION_OFFSET
+  // **APPLE INTERNAL**
+  //
+  // Apple Clang tends to be out of sync with public releases. We use
+  // a version number derived from the LLVM version to ensure that they
+  // aren't even in the same range to prevent hard-to diagnose issues.
+    + LLVM_DEBUG_METADATA_VERSION_OFFSET
+#endif
 };
 
 //===----------------------------------------------------------------------===//

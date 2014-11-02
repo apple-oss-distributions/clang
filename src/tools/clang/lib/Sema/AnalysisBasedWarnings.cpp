@@ -65,16 +65,157 @@ namespace {
   public:
     UnreachableCodeHandler(Sema &s) : S(s) {}
 
-    void HandleUnreachable(SourceLocation L, SourceRange R1, SourceRange R2) {
-      S.Diag(L, diag::warn_unreachable) << R1 << R2;
+    void HandleUnreachable(reachable_code::UnreachableKind UK,
+                           SourceLocation L,
+                           SourceRange SilenceableCondVal,
+                           SourceRange R1,
+                           SourceRange R2) override {
+      unsigned diag = diag::warn_unreachable;
+      switch (UK) {
+        case reachable_code::UK_Break:
+          diag = diag::warn_unreachable_break;
+          break;
+        case reachable_code::UK_Return:
+          diag = diag::warn_unreachable_return;
+          break;
+        case reachable_code::UK_Loop_Increment:
+          diag = diag::warn_unreachable_loop_increment;
+          break;
+        case reachable_code::UK_Other:
+          break;
+      }
+
+      S.Diag(L, diag) << R1 << R2;
+      
+      SourceLocation Open = SilenceableCondVal.getBegin();
+      if (Open.isValid()) {
+        SourceLocation Close = SilenceableCondVal.getEnd();        
+        Close = S.PP.getLocForEndOfToken(Close);
+        if (Close.isValid()) {
+          S.Diag(Open, diag::note_unreachable_silence)
+            << FixItHint::CreateInsertion(Open, "/* DISABLES CODE */ (")
+            << FixItHint::CreateInsertion(Close, ")");
+        }
+      }
     }
   };
 }
 
 /// CheckUnreachable - Check for unreachable code.
 static void CheckUnreachable(Sema &S, AnalysisDeclContext &AC) {
+  // As a heuristic prune all diagnostics not in the main file.  Currently
+  // the majority of warnings in headers are false positives.  These
+  // are largely caused by configuration state, e.g. preprocessor
+  // defined code, etc.
+  //
+  // Note that this is also a performance optimization.  Analyzing
+  // headers many times can be expensive.
+  if (!S.getSourceManager().isInMainFile(AC.getDecl()->getLocStart()))
+    return;
+
   UnreachableCodeHandler UC(S);
-  reachable_code::FindUnreachableCode(AC, UC);
+  reachable_code::FindUnreachableCode(AC, S.getPreprocessor(), UC);
+}
+
+//===----------------------------------------------------------------------===//
+// Check for infinite self-recursion in functions
+//===----------------------------------------------------------------------===//
+
+// All blocks are in one of three states.  States are ordered so that blocks
+// can only move to higher states.
+enum RecursiveState {
+  FoundNoPath,
+  FoundPath,
+  FoundPathWithNoRecursiveCall
+};
+
+static void checkForFunctionCall(Sema &S, const FunctionDecl *FD,
+                                 CFGBlock &Block, unsigned ExitID,
+                                 llvm::SmallVectorImpl<RecursiveState> &States,
+                                 RecursiveState State) {
+  unsigned ID = Block.getBlockID();
+
+  // A block's state can only move to a higher state.
+  if (States[ID] >= State)
+    return;
+
+  States[ID] = State;
+
+  // Found a path to the exit node without a recursive call.
+  if (ID == ExitID && State == FoundPathWithNoRecursiveCall)
+    return;
+
+  if (State == FoundPathWithNoRecursiveCall) {
+    // If the current state is FoundPathWithNoRecursiveCall, the successors
+    // will be either FoundPathWithNoRecursiveCall or FoundPath.  To determine
+    // which, process all the Stmt's in this block to find any recursive calls.
+    for (CFGBlock::iterator I = Block.begin(), E = Block.end(); I != E; ++I) {
+      if (I->getKind() != CFGElement::Statement)
+        continue;
+
+      const CallExpr *CE = dyn_cast<CallExpr>(I->getAs<CFGStmt>()->getStmt());
+      if (CE && CE->getCalleeDecl() &&
+          CE->getCalleeDecl()->getCanonicalDecl() == FD) {
+
+        // Skip function calls which are qualified with a templated class.
+        if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(
+                CE->getCallee()->IgnoreParenImpCasts())) {
+          if (NestedNameSpecifier *NNS = DRE->getQualifier()) {
+            if (NNS->getKind() == NestedNameSpecifier::TypeSpec &&
+                isa<TemplateSpecializationType>(NNS->getAsType())) {
+               continue;
+            }
+          }
+        }
+
+        if (const CXXMemberCallExpr *MCE = dyn_cast<CXXMemberCallExpr>(CE)) {
+          if (isa<CXXThisExpr>(MCE->getImplicitObjectArgument()) ||
+              !MCE->getMethodDecl()->isVirtual()) {
+            State = FoundPath;
+            break;
+          }
+        } else {
+          State = FoundPath;
+          break;
+        }
+      }
+    }
+  }
+
+  for (CFGBlock::succ_iterator I = Block.succ_begin(), E = Block.succ_end();
+       I != E; ++I)
+    if (*I)
+      checkForFunctionCall(S, FD, **I, ExitID, States, State);
+}
+
+static void checkRecursiveFunction(Sema &S, const FunctionDecl *FD,
+                                   const Stmt *Body,
+                                   AnalysisDeclContext &AC) {
+  FD = FD->getCanonicalDecl();
+
+  // Only run on non-templated functions and non-templated members of
+  // templated classes.
+  if (FD->getTemplatedKind() != FunctionDecl::TK_NonTemplate &&
+      FD->getTemplatedKind() != FunctionDecl::TK_MemberSpecialization)
+    return;
+
+  CFG *cfg = AC.getCFG();
+  if (cfg == 0) return;
+
+  // If the exit block is unreachable, skip processing the function.
+  if (cfg->getExit().pred_empty())
+    return;
+
+  // Mark all nodes as FoundNoPath, then begin processing the entry block.
+  llvm::SmallVector<RecursiveState, 16> states(cfg->getNumBlockIDs(),
+                                               FoundNoPath);
+  checkForFunctionCall(S, FD, cfg->getEntry(), cfg->getExit().getBlockID(),
+                       states, FoundPathWithNoRecursiveCall);
+
+  // Check that the exit block is reachable.  This prevents triggering the
+  // warning on functions that do not terminate.
+  if (states[cfg->getExit().getBlockID()] == FoundPath)
+    S.Diag(Body->getLocStart(), diag::warn_infinite_recursive_function);
 }
 
 //===----------------------------------------------------------------------===//
@@ -272,8 +413,7 @@ struct CheckFallThroughDiagnostics {
       diag::err_noreturn_block_has_return_expr;
     D.diag_AlwaysFallThrough_ReturnsNonVoid =
       diag::err_falloff_nonvoid_block;
-    D.diag_NeverFallThroughOrReturn =
-      diag::warn_suggest_noreturn_block;
+    D.diag_NeverFallThroughOrReturn = 0;
     D.funMode = Block;
     return D;
   }
@@ -308,10 +448,7 @@ struct CheckFallThroughDiagnostics {
     }
 
     // For blocks / lambdas.
-    return ReturnsVoid && !HasNoReturn
-            && ((funMode == Lambda) ||
-                D.getDiagnosticLevel(diag::warn_suggest_noreturn_block, FuncLoc)
-                  == DiagnosticsEngine::Ignored);
+    return ReturnsVoid && !HasNoReturn;
   }
 };
 
@@ -330,18 +467,18 @@ static void CheckFallThroughForBody(Sema &S, const Decl *D, const Stmt *Body,
   bool HasNoReturn = false;
 
   if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
-    ReturnsVoid = FD->getResultType()->isVoidType();
+    ReturnsVoid = FD->getReturnType()->isVoidType();
     HasNoReturn = FD->isNoReturn();
   }
   else if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D)) {
-    ReturnsVoid = MD->getResultType()->isVoidType();
+    ReturnsVoid = MD->getReturnType()->isVoidType();
     HasNoReturn = MD->hasAttr<NoReturnAttr>();
   }
   else if (isa<BlockDecl>(D)) {
     QualType BlockTy = blkExpr->getType();
     if (const FunctionType *FT =
           BlockTy->getPointeeType()->getAs<FunctionType>()) {
-      if (FT->getResultType()->isVoidType())
+      if (FT->getReturnType()->isVoidType())
         ReturnsVoid = true;
       if (FT->getNoReturnAttr())
         HasNoReturn = true;
@@ -776,6 +913,7 @@ namespace {
       while (!BlockQueue.empty()) {
         const CFGBlock *P = BlockQueue.front();
         BlockQueue.pop_front();
+        if (!P) continue;
 
         const Stmt *Term = P->getTerminator();
         if (Term && isa<SwitchStmt>(Term))
@@ -1554,6 +1692,11 @@ clang::sema::AnalysisBasedWarnings::Policy::Policy() {
   enableConsumedAnalysis = 0;
 }
 
+static unsigned isEnabled(DiagnosticsEngine &D, unsigned diag) {
+  return (unsigned) D.getDiagnosticLevel(diag, SourceLocation()) !=
+                    DiagnosticsEngine::Ignored;
+}
+
 clang::sema::AnalysisBasedWarnings::AnalysisBasedWarnings(Sema &s)
   : S(s),
     NumFunctionsAnalyzed(0),
@@ -1565,16 +1708,21 @@ clang::sema::AnalysisBasedWarnings::AnalysisBasedWarnings(Sema &s)
     MaxUninitAnalysisVariablesPerFunction(0),
     NumUninitAnalysisBlockVisits(0),
     MaxUninitAnalysisBlockVisitsPerFunction(0) {
+
+  using namespace diag;
   DiagnosticsEngine &D = S.getDiagnostics();
-  DefaultPolicy.enableCheckUnreachable = (unsigned)
-    (D.getDiagnosticLevel(diag::warn_unreachable, SourceLocation()) !=
-        DiagnosticsEngine::Ignored);
-  DefaultPolicy.enableThreadSafetyAnalysis = (unsigned)
-    (D.getDiagnosticLevel(diag::warn_double_lock, SourceLocation()) !=
-     DiagnosticsEngine::Ignored);
-  DefaultPolicy.enableConsumedAnalysis = (unsigned)
-    (D.getDiagnosticLevel(diag::warn_use_in_invalid_state, SourceLocation()) !=
-     DiagnosticsEngine::Ignored);
+
+  DefaultPolicy.enableCheckUnreachable =
+    isEnabled(D, warn_unreachable) ||
+    isEnabled(D, warn_unreachable_break) ||
+    isEnabled(D, warn_unreachable_return) ||
+    isEnabled(D, warn_unreachable_loop_increment);
+
+  DefaultPolicy.enableThreadSafetyAnalysis =
+    isEnabled(D, warn_double_lock);
+
+  DefaultPolicy.enableConsumedAnalysis =
+    isEnabled(D, warn_use_in_invalid_state);
 }
 
 static void flushDiagnostics(Sema &S, sema::FunctionScopeInfo *fscope) {
@@ -1629,6 +1777,7 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   AC.getCFGBuildOptions().AddInitializers = true;
   AC.getCFGBuildOptions().AddImplicitDtors = true;
   AC.getCFGBuildOptions().AddTemporaryDtors = true;
+  AC.getCFGBuildOptions().AddCXXNewAllocator = false;
 
   // Force that certain expressions appear as CFGElements in the CFG.  This
   // is used to speed up various analyses.
@@ -1788,6 +1937,16 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
       Diags.getDiagnosticLevel(diag::warn_arc_repeated_use_of_weak,
                                D->getLocStart()) != DiagnosticsEngine::Ignored)
     diagnoseRepeatedUseOfWeak(S, fscope, D, AC.getParentMap());
+
+
+  // Check for infinite self-recursion in functions
+  if (Diags.getDiagnosticLevel(diag::warn_infinite_recursive_function,
+                               D->getLocStart())
+      != DiagnosticsEngine::Ignored) {
+    if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+      checkRecursiveFunction(S, FD, Body, AC);
+    }
+  }
 
   // Collect statistics about the CFG if it was built.
   if (S.CollectStats && AC.isCFGBuilt()) {

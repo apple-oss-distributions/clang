@@ -1,17 +1,14 @@
-// Test for ScopedDisabler.
 // RUN: LSAN_BASE="use_registers=0:use_stacks=0"
 // RUN: %clangxx_lsan %s -o %t
-// RUN: LSAN_OPTIONS=$LSAN_BASE not %t 2>&1 | FileCheck %s
+
+// RUN: echo "leak:*LSanTestLeakingFunc*" > %t.supp1
+// RUN: LSAN_OPTIONS=$LSAN_BASE:suppressions=%t.supp1 not %t 2>&1 | FileCheck %s
+
+// RUN: echo "leak:%t" > %t.supp2
+// RUN: LSAN_OPTIONS=$LSAN_BASE:suppressions="%t.supp2":symbolize=false %t
 
 #include <stdio.h>
 #include <stdlib.h>
-
-#include "sanitizer/lsan_interface.h"
-
-extern "C"
-const char *__lsan_default_suppressions() {
-  return "leak:*LSanTestLeakingFunc*";
-}
 
 void LSanTestLeakingFunc() {
   void *p = malloc(666);

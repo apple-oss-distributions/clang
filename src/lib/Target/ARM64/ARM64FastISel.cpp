@@ -133,7 +133,7 @@ private:
 
   // Call handling routines.
   private:
-  CCAssignFn *CCAssignFnForCall() const;
+  CCAssignFn *CCAssignFnForCall(CallingConv::ID CC) const;
   bool ProcessCallArgs(SmallVectorImpl<Value*> &Args,
                        SmallVectorImpl<unsigned> &ArgRegs,
                        SmallVectorImpl<MVT> &ArgVTs,
@@ -167,9 +167,11 @@ public:
 
 #include "ARM64GenCallingConv.inc"
 
-CCAssignFn *ARM64FastISel::CCAssignFnForCall() const {
-    return Subtarget->isTargetDarwin() ? CC_ARM64_DarwinPCS : CC_ARM64_AAPCS;
-  }
+CCAssignFn *ARM64FastISel::CCAssignFnForCall(CallingConv::ID CC) const {
+  if (CC == CallingConv::WebKit_JS)
+    return CC_ARM64_WebKit_JS;
+  return Subtarget->isTargetDarwin() ? CC_ARM64_DarwinPCS : CC_ARM64_AAPCS;
+}
 
 
 unsigned ARM64FastISel::TargetMaterializeAlloca(const AllocaInst *AI) {
@@ -247,8 +249,7 @@ unsigned ARM64FastISel::ARM64MaterializeGV(const GlobalValue *GV) {
       return 0;
 
 
-  unsigned char OpFlags
-      = Subtarget->ClassifyGlobalReference(GV, TM.getRelocationModel());
+  unsigned char OpFlags = Subtarget->ClassifyGlobalReference(GV, TM);
 
   EVT DestEVT = TLI.getValueType(GV->getType(), true);
   if (!DestEVT.isSimple()) return 0;
@@ -358,13 +359,8 @@ bool ARM64FastISel::ComputeAddress(const Value *Obj, Address &Addr) {
               TmpOffset += CI->getSExtValue() * S;
               break;
             }
-            if (isa<AddOperator>(Op) &&
-                (!isa<Instruction>(Op) ||
-                 FuncInfo.MBBMap[cast<Instruction>(Op)->getParent()]
-                 == FuncInfo.MBB) &&
-                isa<ConstantInt>(cast<AddOperator>(Op)->getOperand(1))) {
-              // An add (in the same block) with a constant operand. Fold the
-              // constant.
+            if (canFoldAddIntoGEP(U, Op)) {
+              // A compatible add with a constant operand. Fold the constant.
               ConstantInt *CI =
               cast<ConstantInt>(cast<AddOperator>(Op)->getOperand(1));
               TmpOffset += CI->getSExtValue() * S;
@@ -1052,7 +1048,7 @@ bool ARM64FastISel::SelectFPTrunc(const Instruction *I) {
 // FPToUI and FPToSI
 bool ARM64FastISel::SelectFPToInt(const Instruction *I, bool Signed) {
   MVT DestVT;
-  if (!isTypeLegal(I->getType(), DestVT))
+  if (!isTypeLegal(I->getType(), DestVT) || DestVT.isVector())
     return false;
 
   unsigned SrcReg = getRegForValue(I->getOperand(0));
@@ -1081,7 +1077,7 @@ bool ARM64FastISel::SelectFPToInt(const Instruction *I, bool Signed) {
 
 bool ARM64FastISel::SelectIntToFP(const Instruction *I, bool Signed) {
   MVT DestVT;
-  if (!isTypeLegal(I->getType(), DestVT))
+  if (!isTypeLegal(I->getType(), DestVT) || DestVT.isVector())
     return false;
 
   unsigned SrcReg = getRegForValue(I->getOperand(0));
@@ -1124,7 +1120,7 @@ bool ARM64FastISel::ProcessCallArgs(SmallVectorImpl<Value*> &Args,
                                     unsigned &NumBytes) {
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CC, false, *FuncInfo.MF, TM, ArgLocs, *Context);
-  CCInfo.AnalyzeCallOperands(ArgVTs, ArgFlags, CCAssignFnForCall());
+  CCInfo.AnalyzeCallOperands(ArgVTs, ArgFlags, CCAssignFnForCall(CC));
 
   // Get a count of how many bytes are to be pushed on the stack.
   NumBytes = CCInfo.getNextStackOffset();
@@ -1200,7 +1196,7 @@ bool ARM64FastISel::FinishCall(MVT RetVT, SmallVectorImpl<unsigned> &UsedRegs,
   if (RetVT != MVT::isVoid) {
     SmallVector<CCValAssign, 16> RVLocs;
     CCState CCInfo(CC, false, *FuncInfo.MF, TM, RVLocs, *Context);
-    CCInfo.AnalyzeCallResult(RetVT, CCAssignFnForCall());
+    CCInfo.AnalyzeCallResult(RetVT, CCAssignFnForCall(CC));
 
     // Only handle a single return value.
     if (RVLocs.size() != 1)
@@ -1228,6 +1224,9 @@ bool ARM64FastISel::SelectCall(const Instruction *I,
 
   // Don't handle inline asm or intrinsics.
   if (isa<InlineAsm>(Callee)) return false;
+
+  // Allow SelectionDAG isel to handle tail calls.
+  if (CI->isTailCall()) return false;
 
   // Only handle global variable Callees.
   const GlobalValue *GV = dyn_cast<GlobalValue>(Callee);
@@ -1380,10 +1379,12 @@ bool ARM64FastISel::TryEmitSmallMemCpy(Address Dest, Address Src,
     bool RV;
     unsigned ResultReg;
     RV = EmitLoad(VT, ResultReg, Src);
-    assert (RV == true && "Should be able to handle this load.");
+    if (!RV)
+      return false;
+
     RV = EmitStore(VT, ResultReg, Dest);
-    assert (RV == true && "Should be able to handle this store.");
-    (void)RV;
+    if (!RV)
+      return false;
 
     int64_t Size = VT.getSizeInBits()/8;
     Len -= Size;
@@ -1484,7 +1485,9 @@ bool ARM64FastISel::SelectRet(const Instruction *I) {
     SmallVector<CCValAssign, 16> ValLocs;
     CCState CCInfo(CC, F.isVarArg(), *FuncInfo.MF, TM, ValLocs,
                    I->getContext());
-    CCInfo.AnalyzeReturn(Outs, RetCC_ARM64_AAPCS);
+    CCAssignFn *RetCC = CC == CallingConv::WebKit_JS ? RetCC_ARM64_WebKit_JS
+                                                     : RetCC_ARM64_AAPCS;
+    CCInfo.AnalyzeReturn(Outs, RetCC);
 
     // Only handle a single return value for now.
     if (ValLocs.size() != 1)

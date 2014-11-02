@@ -12,8 +12,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCELFStreamer.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
@@ -21,6 +22,7 @@
 #include "llvm/MC/MCELFSymbolFlags.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCObjectStreamer.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionELF.h"
@@ -33,50 +35,22 @@
 
 using namespace llvm;
 
-
-inline void MCELFStreamer::SetSection(StringRef Section, unsigned Type,
-                                      unsigned Flags, SectionKind Kind) {
-  SwitchSection(getContext().getELFSection(Section, Type, Flags, Kind));
-}
-
-inline void MCELFStreamer::SetSectionData() {
-  SetSection(".data",
-             ELF::SHT_PROGBITS,
-             ELF::SHF_WRITE | ELF::SHF_ALLOC,
-             SectionKind::getDataRel());
-  EmitCodeAlignment(4, 0);
-}
-
-inline void MCELFStreamer::SetSectionText() {
-  SetSection(".text",
-             ELF::SHT_PROGBITS,
-             ELF::SHF_EXECINSTR | ELF::SHF_ALLOC,
-             SectionKind::getText());
-  EmitCodeAlignment(4, 0);
-}
-
-inline void MCELFStreamer::SetSectionBss() {
-  SetSection(".bss",
-             ELF::SHT_NOBITS,
-             ELF::SHF_WRITE | ELF::SHF_ALLOC,
-             SectionKind::getBSS());
-  EmitCodeAlignment(4, 0);
-}
-
 MCELFStreamer::~MCELFStreamer() {
 }
 
-void MCELFStreamer::InitToTextSection() {
-  SetSectionText();
-}
-
-void MCELFStreamer::InitSections() {
+void MCELFStreamer::InitSections(bool Force) {
   // This emulates the same behavior of GNU as. This makes it easier
   // to compare the output as the major sections are in the same order.
-  SetSectionText();
-  SetSectionData();
-  SetSectionBss();
-  SetSectionText();
+  SwitchSection(getContext().getObjectFileInfo()->getTextSection());
+  EmitCodeAlignment(4, 0);
+
+  SwitchSection(getContext().getObjectFileInfo()->getDataSection());
+  EmitCodeAlignment(4, 0);
+
+  SwitchSection(getContext().getObjectFileInfo()->getBSSSection());
+  EmitCodeAlignment(4, 0);
+
+  SwitchSection(getContext().getObjectFileInfo()->getTextSection());
 }
 
 void MCELFStreamer::EmitLabel(MCSymbol *Symbol) {
@@ -96,6 +70,9 @@ void MCELFStreamer::EmitDebugLabel(MCSymbol *Symbol) {
 }
 
 void MCELFStreamer::EmitAssemblerFlag(MCAssemblerFlag Flag) {
+  // Let the target do whatever target specific stuff it needs to do.
+  getAssembler().getBackend().handleAssemblerFlag(Flag);
+  // Do any generic stuff we need to do.
   switch (Flag) {
   case MCAF_SyntaxUnified: return; // no-op here.
   case MCAF_Code16: return; // Change parsing mode; no-op here.
@@ -250,6 +227,9 @@ bool MCELFStreamer::EmitSymbolAttribute(MCSymbol *Symbol,
   case MCSA_Internal:
     MCELF::SetVisibility(SD, ELF::STV_INTERNAL);
     break;
+
+  case MCSA_AltEntry:
+    llvm_unreachable("ELF doesn't support this attribute");
   }
 
   return true;
@@ -299,11 +279,12 @@ void MCELFStreamer::EmitLocalCommonSymbol(MCSymbol *Symbol, uint64_t Size,
   EmitCommonSymbol(Symbol, Size, ByteAlignment);
 }
 
-void MCELFStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size) {
+void MCELFStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size,
+                                  const SMLoc &Loc) {
   if (getCurrentSectionData()->isBundleLocked())
     report_fatal_error("Emitting values inside a locked bundle is forbidden");
   fixSymbolsInTLSFixups(Value);
-  MCObjectStreamer::EmitValueImpl(Value, Size);
+  MCObjectStreamer::EmitValueImpl(Value, Size, Loc);
 }
 
 void MCELFStreamer::EmitValueToAlignment(unsigned ByteAlignment,
@@ -367,9 +348,6 @@ void MCELFStreamer::fixSymbolsInTLSFixups(const MCExpr *expr) {
     case MCSymbolRefExpr::VK_TLSLDM:
     case MCSymbolRefExpr::VK_TPOFF:
     case MCSymbolRefExpr::VK_DTPOFF:
-    case MCSymbolRefExpr::VK_ARM_TLSGD:
-    case MCSymbolRefExpr::VK_ARM_TPOFF:
-    case MCSymbolRefExpr::VK_ARM_GOTTPOFF:
     case MCSymbolRefExpr::VK_Mips_TLSGD:
     case MCSymbolRefExpr::VK_Mips_GOTTPREL:
     case MCSymbolRefExpr::VK_Mips_TPREL_HI:
@@ -569,12 +547,10 @@ void MCELFStreamer::FinishImpl() {
   this->MCObjectStreamer::FinishImpl();
 }
 
-MCStreamer *llvm::createELFStreamer(MCContext &Context,
-                                    MCTargetStreamer *Streamer,
-                                    MCAsmBackend &MAB, raw_ostream &OS,
-                                    MCCodeEmitter *CE, bool RelaxAll,
-                                    bool NoExecStack) {
-  MCELFStreamer *S = new MCELFStreamer(Context, Streamer, MAB, OS, CE);
+MCStreamer *llvm::createELFStreamer(MCContext &Context, MCAsmBackend &MAB,
+                                    raw_ostream &OS, MCCodeEmitter *CE,
+                                    bool RelaxAll, bool NoExecStack) {
+  MCELFStreamer *S = new MCELFStreamer(Context, MAB, OS, CE);
   if (RelaxAll)
     S->getAssembler().setRelaxAll(true);
   if (NoExecStack)

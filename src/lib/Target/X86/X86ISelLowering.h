@@ -94,6 +94,9 @@ namespace llvm {
       /// operand, usually produced by a CMP instruction.
       SETCC,
 
+      /// X86 Select
+      SELECT,
+
       // Same as SETCC except it's materialized with a sbb and the value is all
       // one's or all zero's.
       SETCC_CARRY,  // R = carry_bit ? ~0 : 0
@@ -101,7 +104,7 @@ namespace llvm {
       /// X86 FP SETCC, implemented with CMP{cc}SS/CMP{cc}SD.
       /// Operands are two FP values to compare; result is a mask of
       /// 0s or 1s.  Generally DTRT for C/C++ with NaNs.
-      FSETCCss, FSETCCsd,
+      FSETCC,
 
       /// X86 MOVMSK{pd|ps}, extracts sign bits of two or four FP values,
       /// result in an integer GPR.  Needs masking for scalar result.
@@ -295,7 +298,6 @@ namespace llvm {
       BLSI,   // BLSI - Extract lowest set isolated bit
       BLSMSK, // BLSMSK - Get mask up to lowest set bit
       BLSR,   // BLSR - Reset lowest set bit
-      BZHI,   // BZHI - Zero high bits
       BEXTR,  // BEXTR - Bit field extract
 
       UMUL, // LOW, HI, FLAGS = umul LHS, RHS
@@ -314,7 +316,6 @@ namespace llvm {
 
       // OR/AND test for masks
       KORTEST,
-      KTEST,
 
       // Several flavors of instructions with vector shuffle behaviors.
       PALIGNR,
@@ -678,6 +679,9 @@ namespace llvm {
     /// the immediate into a register.
     virtual bool isLegalAddImmediate(int64_t Imm) const;
 
+
+    virtual bool isVectorShiftByScalarCheap(Type *Ty) const;
+
     /// isTruncateFree - Return true if it's free to truncate a value of
     /// type Ty1 to type Ty2. e.g. On x86 it's free to truncate a i32 value in
     /// register EAX to i16 by referencing its sub-register AX.
@@ -775,6 +779,8 @@ namespace llvm {
     SDValue BuildFILD(SDValue Op, EVT SrcVT, SDValue Chain, SDValue StackSlot,
                       SelectionDAG &DAG) const;
 
+    virtual bool isNoopAddrSpaceCast(unsigned SrcAS, unsigned DestAS) const LLVM_OVERRIDE;
+
     /// \brief Reset the operation actions based on target options.
     virtual void resetOperationActions();
 
@@ -863,7 +869,6 @@ namespace llvm {
     SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerExternalSymbol(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerShiftParts(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerSINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerUINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerUINT_TO_FP_i64(SDValue Op, SelectionDAG &DAG) const;
@@ -872,9 +877,6 @@ namespace llvm {
     SDValue LowerTRUNCATE(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerFP_TO_SINT(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerFP_TO_UINT(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerFABS(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerFNEG(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerFCOPYSIGN(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerToBT(SDValue And, ISD::CondCode CC,
                       SDLoc dl, SelectionDAG &DAG) const;
     SDValue LowerSETCC(SDValue Op, SelectionDAG &DAG) const;
@@ -925,6 +927,8 @@ namespace llvm {
                    const SmallVectorImpl<ISD::OutputArg> &Outs,
                    LLVMContext &Context) const;
 
+    virtual const uint16_t *getScratchRegisters(CallingConv::ID CC) const;
+
     /// Utility function to emit atomic-load-arith operations (and, or, xor,
     /// nand, max, min, umax, umin). It takes the corresponding instruction to
     /// expand, the associated machine basic block, and the associated X86
@@ -969,13 +973,17 @@ namespace llvm {
     MachineBasicBlock *emitEHSjLjLongJmp(MachineInstr *MI,
                                          MachineBasicBlock *MBB) const;
 
+    MachineBasicBlock *emitFMA3Instr(MachineInstr *MI,
+                                     MachineBasicBlock *MBB) const;
+
     /// Emit nodes that will be selected as "test Op0,Op0", or something
     /// equivalent, for use with the given x86 condition code.
-    SDValue EmitTest(SDValue Op0, unsigned X86CC, SelectionDAG &DAG) const;
+    SDValue EmitTest(SDLoc dl, SDValue Op0, unsigned X86CC,
+                     SelectionDAG &DAG) const;
 
     /// Emit nodes that will be selected as "cmp Op0,Op1", or something
     /// equivalent, for use with the given x86 condition code.
-    SDValue EmitCmp(SDValue Op0, SDValue Op1, unsigned X86CC,
+    SDValue EmitCmp(SDLoc dl, SDValue Op0, SDValue Op1, unsigned X86CC,
                     SelectionDAG &DAG) const;
 
     /// Convert a comparison if required by the subtarget.

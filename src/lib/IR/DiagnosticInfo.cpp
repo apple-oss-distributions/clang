@@ -20,7 +20,6 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/Atomic.h"
-
 #include <string>
 
 using namespace llvm;
@@ -55,5 +54,5 @@ void DiagnosticInfoStackSize::print(DiagnosticPrinter &DP) const {
 
 void DiagnosticInfoDebugMetadataVersion::print(DiagnosticPrinter &DP) const {
   DP << "ignoring debug info with an invalid version (" << getMetadataVersion()
-     << ")";
+     << ") in " << getModule();
 }

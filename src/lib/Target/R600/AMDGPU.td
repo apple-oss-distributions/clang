@@ -21,12 +21,17 @@ def FeatureDumpCode : SubtargetFeature <"DumpCode",
         "true",
         "Dump MachineInstrs in the CodeEmitter">;
 
-def FeatureIRStructurizer : SubtargetFeature <"EnableIRStructurizer",
+def FeatureIRStructurizer : SubtargetFeature <"disable-irstructurizer",
         "EnableIRStructurizer",
-        "true",
-        "Enable IR Structurizer">;
+        "false",
+        "Disable IR Structurizer">;
 
 // Target features
+
+def FeatureIfCvt : SubtargetFeature <"disable-ifcvt",
+        "EnableIfCvt",
+        "false",
+        "Disable the if conversion pass">;
 
 def FeatureFP64     : SubtargetFeature<"fp64",
         "FP64",
@@ -95,19 +100,9 @@ def AMDGPUInstrInfo : InstrInfo {
   let guessInstructionProperties = 1;
 }
 
-//===----------------------------------------------------------------------===//
-// Declare the target which we are implementing
-//===----------------------------------------------------------------------===//
-def AMDGPUAsmWriter : AsmWriter {
-    string AsmWriterClassName = "InstPrinter";
-    int Variant = 0;
-    bit isMCAsmWriter = 1;
-}
-
 def AMDGPU : Target {
   // Pull in Instruction Info:
   let InstructionSet = AMDGPUInstrInfo;
-  let AssemblyWriters = [AMDGPUAsmWriter];
 }
 
 // Include AMDGPU TD files

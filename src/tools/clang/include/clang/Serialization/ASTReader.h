@@ -46,9 +46,9 @@
 #include <deque>
 #include <map>
 #include <string>
+#include <sys/stat.h>
 #include <utility>
 #include <vector>
-#include <sys/stat.h>
 
 namespace llvm {
   class MemoryBuffer;
@@ -108,6 +108,9 @@ public:
     return FullVersion != getClangFullRepositoryVersion();
   }
 
+  virtual void ReadModuleName(StringRef ModuleName) {}
+  virtual void ReadModuleMapFile(StringRef ModuleMapPath) {}
+
   /// \brief Receives the language options.
   ///
   /// \returns true to indicate the options are invalid or false otherwise.
@@ -129,8 +132,9 @@ public:
   ///
   /// \returns true to indicate the diagnostic options are invalid, or false
   /// otherwise.
-  virtual bool ReadDiagnosticOptions(const DiagnosticOptions &DiagOpts,
-                                     bool Complain) {
+  virtual bool
+  ReadDiagnosticOptions(IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts,
+                        bool Complain) {
     return false;
   }
 
@@ -170,15 +174,61 @@ public:
   virtual void ReadCounter(const serialization::ModuleFile &M,
                            unsigned Value) {}
 
+  /// This is called for each AST file loaded.
+  virtual void visitModuleFile(StringRef Filename) {}
+
   /// \brief Returns true if this \c ASTReaderListener wants to receive the
   /// input files of the AST file via \c visitInputFile, false otherwise.
   virtual bool needsInputFileVisitation() { return false; }
-
-  /// \brief if \c needsInputFileVisitation returns true, this is called for each
-  /// input file of the AST file.
+  /// \brief Returns true if this \c ASTReaderListener wants to receive the
+  /// system input files of the AST file via \c visitInputFile, false otherwise.
+  virtual bool needsSystemInputFileVisitation() { return false; }
+  /// \brief if \c needsInputFileVisitation returns true, this is called for
+  /// each non-system input file of the AST File. If
+  /// \c needsSystemInputFileVisitation is true, then it is called for all
+  /// system input files as well.
   ///
   /// \returns true to continue receiving the next input file, false to stop.
-  virtual bool visitInputFile(StringRef Filename, bool isSystem) { return true;}
+  virtual bool visitInputFile(StringRef Filename, bool isSystem,
+                              bool isOverridden) {
+    return true;
+  }
+};
+
+/// \brief Simple wrapper class for chaining listeners.
+class ChainedASTReaderListener : public ASTReaderListener {
+  OwningPtr<ASTReaderListener> First;
+  OwningPtr<ASTReaderListener> Second;
+public:
+  /// Takes ownership of \p First and \p Second.
+  ChainedASTReaderListener(ASTReaderListener *First, ASTReaderListener *Second)
+      : First(First), Second(Second) { }
+
+  virtual bool ReadFullVersionInformation(StringRef FullVersion);
+  void ReadModuleName(StringRef ModuleName) override;
+  void ReadModuleMapFile(StringRef ModuleMapPath) override;
+  virtual bool ReadLanguageOptions(const LangOptions &LangOpts,
+                                   bool Complain);
+  virtual bool ReadTargetOptions(const TargetOptions &TargetOpts,
+                                 bool Complain);
+  virtual bool ReadDiagnosticOptions(IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts,
+                                     bool Complain);
+  virtual bool ReadFileSystemOptions(const FileSystemOptions &FSOpts,
+                                     bool Complain);
+
+  virtual bool ReadHeaderSearchOptions(const HeaderSearchOptions &HSOpts,
+                                       bool Complain);
+  virtual bool ReadPreprocessorOptions(const PreprocessorOptions &PPOpts,
+                                       bool Complain,
+                                       std::string &SuggestedPredefines);
+
+  virtual void ReadCounter(const serialization::ModuleFile &M,
+                           unsigned Value);
+  virtual bool needsInputFileVisitation();
+  virtual bool needsSystemInputFileVisitation();
+  void visitModuleFile(StringRef Filename) override;
+  virtual bool visitInputFile(StringRef Filename, bool isSystem,
+                              bool isOverridden);
 };
 
 /// \brief ASTReaderListener implementation to validate the information of
@@ -195,6 +245,8 @@ public:
                                    bool Complain);
   virtual bool ReadTargetOptions(const TargetOptions &TargetOpts,
                                  bool Complain);
+  bool ReadDiagnosticOptions(IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts,
+                             bool Complain) override;
   virtual bool ReadPreprocessorOptions(const PreprocessorOptions &PPOpts,
                                        bool Complain,
                                        std::string &SuggestedPredefines);
@@ -504,7 +556,7 @@ private:
       assert(getKind() == MacroVisibility && "Hidden name is not a macro!");
       return std::make_pair(Id, MD);
     }
-};
+  };
 
   /// \brief A set of hidden declarations.
   typedef SmallVector<HiddenName, 2> HiddenNames;
@@ -732,6 +784,13 @@ private:
 
   /// \brief Whether to accept an AST file with compiler errors.
   bool AllowASTWithCompilerErrors;
+
+  /// \brief Whether to accept an AST file that has a different configuration
+  /// from the current compiler instance.
+  bool AllowConfigurationMismatch;
+
+  /// \brief Whether validate system input files.
+  bool ValidateSystemInputs;
 
   /// \brief Whether we are allowed to use the global module index.
   bool UseGlobalIndex;
@@ -970,6 +1029,18 @@ private:
   /// \brief Reads a statement from the specified cursor.
   Stmt *ReadStmtFromStream(ModuleFile &F);
 
+  struct InputFileInfo {
+    std::string Filename;
+    off_t StoredSize;
+    time_t StoredTime;
+    bool Overridden;
+  };
+
+  /// \brief Reads the stored information about an input file.
+  InputFileInfo readInputFileInfo(ModuleFile &F, unsigned ID);
+  /// \brief A convenience method to read the filename from an input file.
+  std::string getInputFileName(ModuleFile &F, unsigned ID);
+
   /// \brief Retrieve the file entry and 'overridden' bit for an input
   /// file in the given module file.
   serialization::InputFile getInputFile(ModuleFile &F, unsigned ID,
@@ -999,13 +1070,15 @@ private:
                             unsigned ClientLoadCapabilities);
   ASTReadResult ReadControlBlock(ModuleFile &F,
                                  SmallVectorImpl<ImportedModule> &Loaded,
+                                 const ModuleFile *ImportedBy,
                                  unsigned ClientLoadCapabilities);
-  bool ReadASTBlock(ModuleFile &F);
+  ASTReadResult ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities);
   bool ParseLineTable(ModuleFile &F, SmallVectorImpl<uint64_t> &Record);
   bool ReadSourceManagerBlock(ModuleFile &F);
   llvm::BitstreamCursor &SLocCursorForID(int ID);
   SourceLocation getImportLocation(ModuleFile *F);
-  bool ReadSubmoduleBlock(ModuleFile &F);
+  ASTReadResult ReadSubmoduleBlock(ModuleFile &F,
+                                   unsigned ClientLoadCapabilities);
   static bool ParseLanguageOptions(const RecordData &Record, bool Complain,
                                    ASTReaderListener &Listener);
   static bool ParseTargetOptions(const RecordData &Record, bool Complain,
@@ -1174,11 +1247,20 @@ public:
   /// AST file the was created out of an AST with compiler errors,
   /// otherwise it will reject it.
   ///
+  /// \param AllowConfigurationMismatch If true, the AST reader will not check
+  /// for configuration differences between the AST file and the invocation.
+  ///
+  /// \param ValidateSystemInputs If true, the AST reader will validate
+  /// system input files in addition to user input files. This is only
+  /// meaningful if \p DisableValidation is false.
+  ///
   /// \param UseGlobalIndex If true, the AST reader will try to load and use
   /// the global module index.
   ASTReader(Preprocessor &PP, ASTContext &Context, StringRef isysroot = "",
             bool DisableValidation = false,
             bool AllowASTWithCompilerErrors = false,
+            bool AllowConfigurationMismatch = false,
+            bool ValidateSystemInputs = false,
             bool UseGlobalIndex = true);
 
   ~ASTReader();
@@ -1248,6 +1330,15 @@ public:
   /// \brief Set the AST callbacks listener.
   void setListener(ASTReaderListener *listener) {
     Listener.reset(listener);
+  }
+
+  /// \brief Add an AST callbak listener.
+  ///
+  /// Takes ownership of \p L.
+  void addListener(ASTReaderListener *L) {
+    if (Listener)
+      L = new ChainedASTReaderListener(L, Listener.take());
+    Listener.reset(L);
   }
 
   /// \brief Set the AST deserialization listener.
@@ -1832,7 +1923,7 @@ public:
            "Should be called only during statement reading!");
     // Subexpressions are stored from last to first, so the next Stmt we need
     // is at the back of the stack.
-    assert(!StmtStack.empty() && "Read too many sub statements!");
+    assert(!StmtStack.empty() && "Read too many sub-statements!");
     return StmtStack.pop_back_val();
   }
 

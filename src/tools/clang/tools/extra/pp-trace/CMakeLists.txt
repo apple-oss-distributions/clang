@@ -1,8 +1,5 @@
 set(LLVM_LINK_COMPONENTS
-  ${LLVM_TARGETS_TO_BUILD}
-  asmparser
-  support
-  mc
+  Support
   )
 
 add_clang_executable(pp-trace
@@ -11,8 +8,9 @@ add_clang_executable(pp-trace
   )
 
 target_link_libraries(pp-trace
+  clangAST
+  clangBasic
+  clangFrontend
   clangLex
-  clangParse
-  clangSema
   clangTooling
   )

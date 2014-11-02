@@ -29,6 +29,7 @@ my $Compiler;
 my $Clang;
 my $DefaultCCompiler;
 my $DefaultCXXCompiler;
+my $IsCXX;
 
 if (`uname -a` =~ m/Darwin/) { 
   $DefaultCCompiler = 'clang';
@@ -44,6 +45,8 @@ if ($FindBin::Script =~ /c\+\+-analyzer/) {
   
   $Clang = $ENV{'CLANG_CXX'};
   if (!defined $Clang) { $Clang = 'clang++'; }
+
+  $IsCXX = 1
 }
 else {
   $Compiler = $ENV{'CCC_CC'};
@@ -51,6 +54,8 @@ else {
 
   $Clang = $ENV{'CLANG'};
   if (!defined $Clang) { $Clang = 'clang'; }
+
+  $IsCXX = 0
 }
 
 ##===----------------------------------------------------------------------===##
@@ -377,18 +382,19 @@ my %IgnoredOptionMap = (
 );
 
 my %LangMap = (
-  'c'   => 'c',
+  'c'   => $IsCXX ? 'c++' : 'c',
   'cp'  => 'c++',
   'cpp' => 'c++',
   'cxx' => 'c++',
   'txx' => 'c++',
   'cc'  => 'c++',
   'C'   => 'c++',
-  'ii'  => 'c++',
-  'i'   => 'c-cpp-output',
+  'ii'  => 'c++-cpp-output',
+  'i'   => $IsCXX ? 'c++-cpp-output' : 'c-cpp-output',
   'm'   => 'objective-c',
   'mi'  => 'objective-c-cpp-output',
-  'mm'  => 'objective-c++'
+  'mm'  => 'objective-c++',
+  'mii' => 'objective-c++-cpp-output',
 );
 
 my %UniqueOptions = (
@@ -443,6 +449,9 @@ my $InternalStats = $ENV{'CCC_ANALYZER_INTERNAL_STATS'};
 # Get the output format.
 my $OutputFormat = $ENV{'CCC_ANALYZER_OUTPUT_FORMAT'};
 if (!defined $OutputFormat) { $OutputFormat = "html"; }
+
+# Get the config options.
+my $ConfigOptions = $ENV{'CCC_ANALYZER_CONFIG'};
 
 # Determine the level of verbosity.
 my $Verbose = 0;
@@ -677,11 +686,14 @@ if ($Action eq 'compile' or $Action eq 'link') {
         my ($h, $f) = tempfile("report-XXXXXX", SUFFIX => ".plist",
                                DIR => $HtmlDir);
         $ResultFile = $f;
-        # If the HtmlDir is not set, we sould clean up the plist files.
+        # If the HtmlDir is not set, we should clean up the plist files.
         if (!defined $HtmlDir || -z $HtmlDir) {
           $CleanupFile = $f;
         }
       }
+    }
+    if (defined $ConfigOptions) {
+      push @AnalyzeArgs, split '\s+', $ConfigOptions;
     }
 
     push @CmdArgs, @CompileOpts;

@@ -672,6 +672,22 @@ public:
     // Do nothing.
   }
 
+  /// Allow the target to reverse allocation order of local live ranges. This
+  /// will generally allocate shorter local live ranges first. For targets with
+  /// many registers, this could reduce regalloc compile time by a large
+  /// factor. It should still achieve optimal coloring; however, it can change
+  /// register eviction decisions. It is disabled by default for two reasons:
+  /// (1) Top-down allocation is simpler and easier to debug for targets that
+  /// don't benefit from reversing the order.
+  /// (2) Bottom-up allocation could result in poor evicition decisions on some
+  /// targets affecting the performance of compiled code.
+  virtual bool reverseLocalAssignment() const { return false; }
+
+  /// Allow the target to override the cost of using a callee-saved register for
+  /// the first time. Default value of 0 means we will use a callee-saved
+  /// register if it is available.
+  virtual unsigned getCSRFirstUseCost() const { return 0; }
+
   /// requiresRegisterScavenging - returns true if the target requires (and can
   /// make use of) the register scavenger.
   virtual bool requiresRegisterScavenging(const MachineFunction &MF) const {

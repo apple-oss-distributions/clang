@@ -21,3 +21,6 @@ if(CLANG_ENABLE_REWRITER)
   add_subdirectory(Format)
   add_subdirectory(Sema)
 endif()
+if(NOT WIN32) # FIXME:Investigating.
+  add_subdirectory(libclang)
+endif()

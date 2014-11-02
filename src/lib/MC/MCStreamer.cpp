@@ -14,6 +14,7 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -22,15 +23,19 @@
 #include <cstdlib>
 using namespace llvm;
 
+// Pin the vtables to this file.
 MCTargetStreamer::~MCTargetStreamer() {}
 
-MCStreamer::MCStreamer(MCContext &Ctx, MCTargetStreamer *TargetStreamer)
-    : Context(Ctx), TargetStreamer(TargetStreamer), EmitEHFrame(true),
-      EmitDebugFrame(false), CurrentW64UnwindInfo(0), LastSymbol(0),
-      AutoInitSections(false) {
+MCTargetStreamer::MCTargetStreamer(MCStreamer &S) : Streamer(S) {
+  S.setTargetStreamer(this);
+}
+
+void MCTargetStreamer::emitLabel(MCSymbol *Symbol) {}
+
+MCStreamer::MCStreamer(MCContext &Ctx)
+    : Context(Ctx), EmitEHFrame(true), EmitDebugFrame(false),
+      CurrentW64UnwindInfo(0), LastSymbol(0) {
   SectionStack.push_back(std::pair<MCSectionSubPair, MCSectionSubPair>());
-  if (TargetStreamer)
-    TargetStreamer->setStreamer(this);
 }
 
 MCStreamer::~MCStreamer() {
@@ -77,6 +82,8 @@ raw_ostream &MCStreamer::GetCommentOS() {
   // By default, discard comments.
   return nulls();
 }
+
+void MCStreamer::emitRawComment(const Twine &T, bool TabPrefix) {}
 
 void MCStreamer::generateCompactUnwindEncodings(MCAsmBackend *MAB) {
   for (std::vector<MCDwarfFrameInfo>::iterator I = FrameInfos.begin(),
@@ -136,8 +143,9 @@ void MCStreamer::EmitAbsValue(const MCExpr *Value, unsigned Size) {
 }
 
 
-void MCStreamer::EmitValue(const MCExpr *Value, unsigned Size) {
-  EmitValueImpl(Value, Size);
+void MCStreamer::EmitValue(const MCExpr *Value, unsigned Size,
+                           const SMLoc &Loc) {
+  EmitValueImpl(Value, Size, Loc);
 }
 
 void MCStreamer::EmitSymbolValue(const MCSymbol *Sym, unsigned Size) {
@@ -196,6 +204,10 @@ void MCStreamer::EmitEHSymAttributes(const MCSymbol *Symbol,
                                      MCSymbol *EHSymbol) {
 }
 
+void MCStreamer::InitSections(bool Force) {
+  SwitchSection(getContext().getObjectFileInfo()->getTextSection());
+}
+
 void MCStreamer::AssignSection(MCSymbol *Symbol, const MCSection *Section) {
   if (Section)
     Symbol->setSection(*Section);
@@ -212,6 +224,10 @@ void MCStreamer::EmitLabel(MCSymbol *Symbol) {
   assert(getCurrentSection().first && "Cannot emit before setting section!");
   AssignSection(Symbol, getCurrentSection().first);
   LastSymbol = Symbol;
+
+  MCTargetStreamer *TS = getTargetStreamer();
+  if (TS)
+    TS->emitLabel(Symbol);
 }
 
 void MCStreamer::EmitDebugLabel(MCSymbol *Symbol) {
@@ -248,6 +264,10 @@ void MCStreamer::EmitCFIStartProcImpl(MCDwarfFrameInfo &Frame) {
 }
 
 void MCStreamer::RecordProcStart(MCDwarfFrameInfo &Frame) {
+  // Report an error if we haven't seen a symbol yet where we'd bind
+  // .cfi_startproc.
+  if (!LastSymbol)
+    report_fatal_error("No symbol to start a frame");
   Frame.Function = LastSymbol;
   // If the function is externally visible, we need to create a local
   // symbol to avoid relocations.
@@ -562,6 +582,10 @@ void MCStreamer::EmitWin64EHEndProlog() {
   MCWin64EHUnwindInfo *CurFrame = CurrentW64UnwindInfo;
   CurFrame->PrologEnd = getContext().CreateTempSymbol();
   EmitLabel(CurFrame->PrologEnd);
+}
+
+void MCStreamer::EmitCOFFSectionIndex(MCSymbol const *Symbol) {
+  llvm_unreachable("This file format doesn't support this directive");
 }
 
 void MCStreamer::EmitCOFFSecRel32(MCSymbol const *Symbol) {

@@ -37,9 +37,9 @@ namespace GCOV {
 
 /// GCOVOptions - A struct for passing gcov options between functions.
 struct GCOVOptions {
-  GCOVOptions(bool A, bool B, bool C, bool F, bool P, bool U)
+  GCOVOptions(bool A, bool B, bool C, bool F, bool P, bool U, bool L, bool N)
       : AllBlocks(A), BranchInfo(B), BranchCount(C), FuncCoverage(F),
-        PreservePaths(P), UncondBranch(U) {}
+        PreservePaths(P), UncondBranch(U), LongFileNames(L), NoOutput(N) {}
 
   bool AllBlocks;
   bool BranchInfo;
@@ -47,6 +47,8 @@ struct GCOVOptions {
   bool FuncCoverage;
   bool PreservePaths;
   bool UncondBranch;
+  bool LongFileNames;
+  bool NoOutput;
 };
 
 /// GCOVBuffer - A wrapper around MemoryBuffer to provide GCOV specific
@@ -204,8 +206,11 @@ public:
   }
 
   bool readString(StringRef &Str) {
-    uint32_t Len;
-    if (!readInt(Len)) return false;
+    uint32_t Len = 0;
+    // Keep reading until we find a non-zero length. This emulates gcov's
+    // behaviour, which appears to do the same.
+    while (Len == 0)
+      if (!readInt(Len)) return false;
     Len *= 4;
     if (Buffer->getBuffer().size() < Cursor+Len) {
       errs() << "Unexpected end of memory buffer: " << Cursor+Len << ".\n";
@@ -352,8 +357,10 @@ class FileInfo {
   typedef DenseMap<uint32_t, BlockVector> BlockLines;
 
   struct LineData {
+    LineData() : LastLine(0) {}
     BlockLines Blocks;
     FunctionLines Functions;
+    uint32_t LastLine;
   };
 
   struct GCOVCoverage {
@@ -375,23 +382,30 @@ public:
     Options(Options), LineInfo(), RunCount(0), ProgramCount(0) {}
 
   void addBlockLine(StringRef Filename, uint32_t Line, const GCOVBlock *Block) {
+    if (Line > LineInfo[Filename].LastLine)
+      LineInfo[Filename].LastLine = Line;
     LineInfo[Filename].Blocks[Line-1].push_back(Block);
   }
   void addFunctionLine(StringRef Filename, uint32_t Line,
                        const GCOVFunction *Function) {
+    if (Line > LineInfo[Filename].LastLine)
+      LineInfo[Filename].LastLine = Line;
     LineInfo[Filename].Functions[Line-1].push_back(Function);
   }
   void setRunCount(uint32_t Runs) { RunCount = Runs; }
   void setProgramCount(uint32_t Programs) { ProgramCount = Programs; }
-  void print(StringRef GCNOFile, StringRef GCDAFile);
+  void print(StringRef MainFilename, StringRef GCNOFile, StringRef GCDAFile);
+
 private:
-  void printFunctionSummary(raw_fd_ostream &OS,
+  std::string getCoveragePath(StringRef Filename, StringRef MainFilename);
+  std::unique_ptr<raw_ostream> openCoveragePath(StringRef CoveragePath);
+  void printFunctionSummary(raw_ostream &OS,
                             const FunctionVector &Funcs) const;
-  void printBlockInfo(raw_fd_ostream &OS, const GCOVBlock &Block,
+  void printBlockInfo(raw_ostream &OS, const GCOVBlock &Block,
                       uint32_t LineIndex, uint32_t &BlockNo) const;
-  void printBranchInfo(raw_fd_ostream &OS, const GCOVBlock &Block,
+  void printBranchInfo(raw_ostream &OS, const GCOVBlock &Block,
                        GCOVCoverage &Coverage, uint32_t &EdgeNo);
-  void printUncondBranchInfo(raw_fd_ostream &OS, uint32_t &EdgeNo,
+  void printUncondBranchInfo(raw_ostream &OS, uint32_t &EdgeNo,
                              uint64_t Count) const;
 
   void printCoverage(const GCOVCoverage &Coverage) const;

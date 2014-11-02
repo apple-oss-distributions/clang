@@ -48,17 +48,40 @@ namespace __sanitizer {
 #endif // !SANITIZER_ANDROID
 
 #if SANITIZER_LINUX
-  extern unsigned struct___old_kernel_stat_sz;
-  extern unsigned struct_kernel_stat_sz;
-  extern unsigned struct_kernel_stat64_sz;
-  extern unsigned struct_io_event_sz;
+
+#if defined(__x86_64__)
+  const unsigned struct___old_kernel_stat_sz = 32;
+  const unsigned struct_kernel_stat_sz = 144;
+  const unsigned struct_kernel_stat64_sz = 0;
+#elif defined(__i386__)
+  const unsigned struct___old_kernel_stat_sz = 32;
+  const unsigned struct_kernel_stat_sz = 64;
+  const unsigned struct_kernel_stat64_sz = 96;
+#elif defined(__arm__)
+  const unsigned struct___old_kernel_stat_sz = 32;
+  const unsigned struct_kernel_stat_sz = 64;
+  const unsigned struct_kernel_stat64_sz = 104;
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+  const unsigned struct___old_kernel_stat_sz = 32;
+  const unsigned struct_kernel_stat_sz = 72;
+  const unsigned struct_kernel_stat64_sz = 104;
+#elif defined(__powerpc64__)
+  const unsigned struct___old_kernel_stat_sz = 0;
+  const unsigned struct_kernel_stat_sz = 144;
+  const unsigned struct_kernel_stat64_sz = 104;
+#endif
+  struct __sanitizer_perf_event_attr {
+    unsigned type;
+    unsigned size;
+    // More fields that vary with the kernel version.
+  };
+
   extern unsigned struct_utimbuf_sz;
   extern unsigned struct_new_utsname_sz;
   extern unsigned struct_old_utsname_sz;
   extern unsigned struct_oldold_utsname_sz;
   extern unsigned struct_msqid_ds_sz;
   extern unsigned struct_mq_attr_sz;
-  extern unsigned struct_perf_event_attr_sz;
   extern unsigned struct_timex_sz;
   extern unsigned struct_ustat_sz;
 
@@ -85,8 +108,17 @@ namespace __sanitizer {
     u64   aio_reserved3;
   };
 
-  extern unsigned iocb_cmd_pread;
-  extern unsigned iocb_cmd_pwrite;
+  struct __sanitizer_io_event {
+    u64 data;
+    u64 obj;
+    u64 res;
+    u64 res2;
+  };
+
+  const unsigned iocb_cmd_pread = 0;
+  const unsigned iocb_cmd_pwrite = 1;
+  const unsigned iocb_cmd_preadv = 7;
+  const unsigned iocb_cmd_pwritev = 8;
 
   struct __sanitizer___sysctl_args {
     int *name;
@@ -110,17 +142,38 @@ namespace __sanitizer {
     int gid;
     int cuid;
     int cgid;
+#ifdef __powerpc__
+    unsigned mode;
+    unsigned __seq;
+    u64 __unused1;
+    u64 __unused2;
+#else
     unsigned short mode;
     unsigned short __pad1;
     unsigned short __seq;
     unsigned short __pad2;
-    uptr __unused1;
-    uptr __unused2;
+#if defined(__x86_64__) && !defined(_LP64)
+    u64 __unused1;
+    u64 __unused2;
+#else
+    unsigned long __unused1;
+    unsigned long __unused2;
+#endif
+#endif
   };
 
   struct __sanitizer_shmid_ds {
     __sanitizer_ipc_perm shm_perm;
+  #ifndef __powerpc__
     uptr shm_segsz;
+  #elif !defined(__powerpc64__)
+    uptr __unused0;
+  #endif
+  #if defined(__x86_64__) && !defined(_LP64)
+    u64 shm_atime;
+    u64 shm_dtime;
+    u64 shm_ctime;
+  #else
     uptr shm_atime;
   #ifndef _LP64
     uptr __unused1;
@@ -133,11 +186,21 @@ namespace __sanitizer {
   #ifndef _LP64
     uptr __unused3;
   #endif
+  #endif
+  #ifdef __powerpc__
+    uptr shm_segsz;
+  #endif
     int shm_cpid;
     int shm_lpid;
+  #if defined(__x86_64__) && !defined(_LP64)
+    u64 shm_nattch;
+    u64 __unused4;
+    u64 __unused5;
+  #else
     uptr shm_nattch;
     uptr __unused4;
     uptr __unused5;
+  #endif
   };
   #endif  // SANITIZER_LINUX && !SANITIZER_ANDROID
 
@@ -245,18 +308,34 @@ namespace __sanitizer {
   };
 #endif
 
+#if defined(__x86_64__) && !defined(_LP64)
+  typedef long long __sanitizer_clock_t;
+#else
+  typedef long __sanitizer_clock_t;
+#endif
+
 #if SANITIZER_LINUX
-#if defined(_LP64) || defined(__x86_64__)
+#if defined(_LP64) || defined(__x86_64__) || defined(__powerpc__)
   typedef unsigned __sanitizer___kernel_uid_t;
   typedef unsigned __sanitizer___kernel_gid_t;
-  typedef long long __sanitizer___kernel_off_t;
 #else
   typedef unsigned short __sanitizer___kernel_uid_t;
   typedef unsigned short __sanitizer___kernel_gid_t;
+#endif
+#if defined(__x86_64__) && !defined(_LP64)
+  typedef long long __sanitizer___kernel_off_t;
+#else
   typedef long __sanitizer___kernel_off_t;
 #endif
+
+#if defined(__powerpc__)
+  typedef unsigned int __sanitizer___kernel_old_uid_t;
+  typedef unsigned int __sanitizer___kernel_old_gid_t;
+#else
   typedef unsigned short __sanitizer___kernel_old_uid_t;
   typedef unsigned short __sanitizer___kernel_old_gid_t;
+#endif
+
   typedef long long __sanitizer___kernel_loff_t;
   typedef struct {
     unsigned long fds_bits[1024 / (8 * sizeof(long))];
@@ -921,6 +1000,7 @@ namespace __sanitizer {
   extern unsigned IOCTL_TIOCSSERIAL;
 #endif
 
+  extern const int errno_EOWNERDEAD;
 }  // namespace __sanitizer
 
 #define CHECK_TYPE_SIZE(TYPE) \
@@ -941,4 +1021,3 @@ namespace __sanitizer {
                  offsetof(struct CLASS, MEMBER))
 
 #endif
-

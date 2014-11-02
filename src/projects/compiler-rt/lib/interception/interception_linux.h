@@ -28,16 +28,16 @@ bool GetRealFunctionAddress(const char *func_name, uptr *func_addr,
 void *GetFuncAddrVer(const char *func_name, const char *ver);
 }  // namespace __interception
 
-#define INTERCEPT_FUNCTION_LINUX(func) \
-    ::__interception::GetRealFunctionAddress( \
-          #func, (::__interception::uptr*)&REAL(func), \
-          (::__interception::uptr)&(func), \
-          (::__interception::uptr)&WRAP(func))
+#define INTERCEPT_FUNCTION_LINUX(func)                                     \
+  ::__interception::GetRealFunctionAddress(                                \
+      #func, (::__interception::uptr *)&__interception::PTR_TO_REAL(func), \
+      (::__interception::uptr) & (func),                                   \
+      (::__interception::uptr) & WRAP(func))
 
 #if !defined(__ANDROID__)  // android does not have dlvsym
 # define INTERCEPT_FUNCTION_VER_LINUX(func, symver) \
      ::__interception::real_##func = (func##_f)(unsigned long) \
-         ::__interception::GetFuncAddrVer(#func, #symver)
+         ::__interception::GetFuncAddrVer(#func, symver)
 #else
 # define INTERCEPT_FUNCTION_VER_LINUX(func, symver) \
      INTERCEPT_FUNCTION_LINUX(func)

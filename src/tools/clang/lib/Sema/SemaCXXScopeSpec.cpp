@@ -484,7 +484,7 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
   
   // FIXME: Deal with ambiguities cleanly.
 
-  if (Found.empty() && !ErrorRecoveryLookup && !getLangOpts().MicrosoftMode) {
+  if (Found.empty() && !ErrorRecoveryLookup && !getLangOpts().MSVCCompat) {
     // We haven't found anything, and we're not recovering from a
     // different kind of error, so look for typos.
     DeclarationName Name = Found.getLookupName();
@@ -497,6 +497,8 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
         bool DroppedSpecifier =
             Corrected.WillReplaceSpecifier() &&
             Name.getAsString() == Corrected.getAsString(getLangOpts());
+        if (DroppedSpecifier)
+          SS.clear();
         diagnoseTypo(Corrected, PDiag(diag::err_no_member_suggest)
                                   << Name << LookupCtx << DroppedSpecifier
                                   << SS.getRange());
@@ -644,7 +646,7 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
   // public:
   //   void foo() { D::foo2(); }
   // };
-  if (getLangOpts().MicrosoftMode) {
+  if (getLangOpts().MSVCCompat) {
     DeclContext *DC = LookupCtx ? LookupCtx : CurContext;
     if (DC->isDependentContext() && DC->isFunctionOrMethod()) {
       SS.Extend(Context, &Identifier, IdentifierLoc, CCLoc);
@@ -747,7 +749,8 @@ bool Sema::ActOnCXXNestedNameSpecifier(Scope *S,
   TemplateArgumentListInfo TemplateArgs(LAngleLoc, RAngleLoc);
   translateTemplateArguments(TemplateArgsIn, TemplateArgs);
 
-  if (DependentTemplateName *DTN = Template.get().getAsDependentTemplateName()){
+  DependentTemplateName *DTN = Template.get().getAsDependentTemplateName();
+  if (DTN && DTN->isIdentifier()) {
     // Handle a dependent template specialization for which we cannot resolve
     // the template name.
     assert(DTN->getQualifier() == SS.getScopeRep());
@@ -773,20 +776,20 @@ bool Sema::ActOnCXXNestedNameSpecifier(Scope *S,
               CCLoc);
     return false;
   }
-  
-  
-  if (Template.get().getAsOverloadedTemplate() ||
-      isa<FunctionTemplateDecl>(Template.get().getAsTemplateDecl())) {
+
+  TemplateDecl *TD = Template.get().getAsTemplateDecl();
+  if (Template.get().getAsOverloadedTemplate() || DTN ||
+      isa<FunctionTemplateDecl>(TD) || isa<VarTemplateDecl>(TD)) {
     SourceRange R(TemplateNameLoc, RAngleLoc);
     if (SS.getRange().isValid())
       R.setBegin(SS.getRange().getBegin());
-      
+
     Diag(CCLoc, diag::err_non_type_template_in_nested_name_specifier)
-      << Template.get() << R;
+      << (TD && isa<VarTemplateDecl>(TD)) << Template.get() << R;
     NoteAllFoundTemplates(Template.get());
     return true;
   }
-                                
+
   // We were able to resolve the template name to an actual template. 
   // Build an appropriate nested-name-specifier.
   QualType T = CheckTemplateIdType(Template.get(), TemplateNameLoc, 

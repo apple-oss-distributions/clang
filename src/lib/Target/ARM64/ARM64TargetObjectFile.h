@@ -25,12 +25,14 @@ namespace llvm {
   class ARM64_MachoTargetObjectFile : public TargetLoweringObjectFileMachO {
   public:
     const MCExpr *
-    getTTypeGlobalReference(const GlobalValue *GV, Mangler *Mang,
-                            MachineModuleInfo *MMI, unsigned Encoding,
-                            MCStreamer &Streamer) const;
+    getTTypeGlobalReference(const GlobalValue *GV, unsigned Encoding,
+                            Mangler &Mang, const TargetMachine &TM,
+                            MachineModuleInfo *MMI,
+                            MCStreamer &Streamer) const LLVM_OVERRIDE;
 
-    MCSymbol *getCFIPersonalitySymbol(const GlobalValue *GV, Mangler *Mang,
-                                      MachineModuleInfo *MMI) const;
+    MCSymbol *getCFIPersonalitySymbol(const GlobalValue *GV, Mangler &Mang,
+                                      const TargetMachine &TM,
+                                      MachineModuleInfo *MMI) const LLVM_OVERRIDE;
   };
 
 } // end namespace llvm

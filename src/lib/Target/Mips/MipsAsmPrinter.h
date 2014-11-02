@@ -50,7 +50,6 @@ private:
   /// pool entries so we can properly mark them as data regions.
   bool InConstantPool;
 
-  bool UsingConstantPools;
 
 public:
 
@@ -62,8 +61,6 @@ public:
     : AsmPrinter(TM, Streamer), MCP(0), InConstantPool(false),
       MCInstLowering(*this) {
     Subtarget = &TM.getSubtarget<MipsSubtarget>();
-    UsingConstantPools =
-      (Subtarget->inMips16Mode() && Subtarget->useConstantIslands());
   }
 
   virtual const char *getPassName() const {
@@ -73,6 +70,8 @@ public:
   virtual bool runOnMachineFunction(MachineFunction &MF);
 
   virtual void EmitConstantPool() LLVM_OVERRIDE {
+    bool UsingConstantPools =
+      (Subtarget->inMips16Mode() && Subtarget->useConstantIslands());
     if (!UsingConstantPools)
       AsmPrinter::EmitConstantPool();
     // we emit constant pools customly!
@@ -96,6 +95,7 @@ public:
                              raw_ostream &O);
   void printOperand(const MachineInstr *MI, int opNum, raw_ostream &O);
   void printUnsignedImm(const MachineInstr *MI, int opNum, raw_ostream &O);
+  void printUnsignedImm8(const MachineInstr *MI, int opNum, raw_ostream &O);
   void printMemOperand(const MachineInstr *MI, int opNum, raw_ostream &O);
   void printMemOperandEA(const MachineInstr *MI, int opNum, raw_ostream &O);
   void printFCCOperand(const MachineInstr *MI, int opNum, raw_ostream &O,

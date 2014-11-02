@@ -19,9 +19,9 @@
 #ifndef LLVM_SUPPORT_TARGETREGISTRY_H
 #define LLVM_SUPPORT_TARGETREGISTRY_H
 
+#include "llvm-c/Disassembler.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/CodeGen.h"
-#include "llvm-c/Disassembler.h"
 #include <cassert>
 #include <string>
 
@@ -46,15 +46,12 @@ namespace llvm {
   class MCRelocationInfo;
   class MCTargetAsmParser;
   class TargetMachine;
-  class MCTargetStreamer;
   class TargetOptions;
   class raw_ostream;
   class formatted_raw_ostream;
 
-  MCStreamer *createAsmStreamer(MCContext &Ctx,
-                                MCTargetStreamer *TargetStreamer,
-                                formatted_raw_ostream &OS, bool isVerboseAsm,
-                                bool useLoc, bool useCFI,
+  MCStreamer *createAsmStreamer(MCContext &Ctx, formatted_raw_ostream &OS,
+                                bool isVerboseAsm, bool useCFI,
                                 bool useDwarfDirectory,
                                 MCInstPrinter *InstPrint, MCCodeEmitter *CE,
                                 MCAsmBackend *TAB, bool ShowInst);
@@ -79,7 +76,7 @@ namespace llvm {
   public:
     friend struct TargetRegistry;
 
-    typedef unsigned (*TripleMatchQualityFnTy)(const std::string &TT);
+    typedef bool (*ArchMatchFnTy)(Triple::ArchType Arch);
 
     typedef MCAsmInfo *(*MCAsmInfoCtorFnTy)(const MCRegisterInfo &MRI,
                                             StringRef TT);
@@ -111,7 +108,8 @@ namespace llvm {
                                                     MCAsmParser &P,
                                                     const MCInstrInfo &MII);
     typedef MCDisassembler *(*MCDisassemblerCtorTy)(const Target &T,
-                                                    const MCSubtargetInfo &STI);
+                                                    const MCSubtargetInfo &STI,
+                                                    MCContext &Ctx);
     typedef MCInstPrinter *(*MCInstPrinterCtorTy)(const Target &T,
                                                   unsigned SyntaxVariant,
                                                   const MCAsmInfo &MAI,
@@ -128,12 +126,12 @@ namespace llvm {
                                                   MCAsmBackend &TAB,
                                                   raw_ostream &_OS,
                                                   MCCodeEmitter *_Emitter,
+                                                  const MCSubtargetInfo &STI,
                                                   bool RelaxAll,
                                                   bool NoExecStack);
     typedef MCStreamer *(*AsmStreamerCtorTy)(MCContext &Ctx,
                                              formatted_raw_ostream &OS,
                                              bool isVerboseAsm,
-                                             bool useLoc,
                                              bool useCFI,
                                              bool useDwarfDirectory,
                                              MCInstPrinter *InstPrint,
@@ -154,9 +152,8 @@ namespace llvm {
     /// TargetRegistry.
     Target *Next;
 
-    /// TripleMatchQualityFn - The target function for rating the match quality
-    /// of a triple.
-    TripleMatchQualityFnTy TripleMatchQualityFn;
+    /// The target function for checking if an architecture is supported.
+    ArchMatchFnTy ArchMatchFn;
 
     /// Name - The target name.
     const char *Name;
@@ -381,10 +378,11 @@ namespace llvm {
       return AsmPrinterCtorFn(TM, Streamer);
     }
 
-    MCDisassembler *createMCDisassembler(const MCSubtargetInfo &STI) const {
+    MCDisassembler *createMCDisassembler(const MCSubtargetInfo &STI,
+                                         MCContext &Ctx) const {
       if (!MCDisassemblerCtorFn)
         return 0;
-      return MCDisassemblerCtorFn(*this, STI);
+      return MCDisassemblerCtorFn(*this, STI, Ctx);
     }
 
     MCInstPrinter *createMCInstPrinter(unsigned SyntaxVariant,
@@ -421,11 +419,12 @@ namespace llvm {
                                        MCAsmBackend &TAB,
                                        raw_ostream &_OS,
                                        MCCodeEmitter *_Emitter,
+                                       const MCSubtargetInfo &STI,
                                        bool RelaxAll,
                                        bool NoExecStack) const {
       if (!MCObjectStreamerCtorFn)
         return 0;
-      return MCObjectStreamerCtorFn(*this, TT, Ctx, TAB, _OS, _Emitter,
+      return MCObjectStreamerCtorFn(*this, TT, Ctx, TAB, _OS, _Emitter, STI,
                                     RelaxAll, NoExecStack);
     }
 
@@ -433,7 +432,6 @@ namespace llvm {
     MCStreamer *createAsmStreamer(MCContext &Ctx,
                                   formatted_raw_ostream &OS,
                                   bool isVerboseAsm,
-                                  bool useLoc,
                                   bool useCFI,
                                   bool useDwarfDirectory,
                                   MCInstPrinter *InstPrint,
@@ -441,10 +439,10 @@ namespace llvm {
                                   MCAsmBackend *TAB,
                                   bool ShowInst) const {
       if (AsmStreamerCtorFn)
-        return AsmStreamerCtorFn(Ctx, OS, isVerboseAsm, useLoc, useCFI,
+        return AsmStreamerCtorFn(Ctx, OS, isVerboseAsm, useCFI,
                                  useDwarfDirectory, InstPrint, CE, TAB,
                                  ShowInst);
-      return llvm::createAsmStreamer(Ctx, 0, OS, isVerboseAsm, useLoc, useCFI,
+      return llvm::createAsmStreamer(Ctx, OS, isVerboseAsm, useCFI,
                                      useDwarfDirectory, InstPrint, CE, TAB,
                                      ShowInst);
     }
@@ -578,14 +576,13 @@ namespace llvm {
     /// @param Name - The target name. This should be a static string.
     /// @param ShortDesc - A short target description. This should be a static
     /// string.
-    /// @param TQualityFn - The triple match quality computation function for
-    /// this target.
+    /// @param ArchMatchFn - The arch match checking function for this target.
     /// @param HasJIT - Whether the target supports JIT code
     /// generation.
     static void RegisterTarget(Target &T,
                                const char *Name,
                                const char *ShortDesc,
-                               Target::TripleMatchQualityFnTy TQualityFn,
+                               Target::ArchMatchFnTy ArchMatchFn,
                                bool HasJIT = false);
 
     /// RegisterMCAsmInfo - Register a MCAsmInfo implementation for the
@@ -831,15 +828,11 @@ namespace llvm {
            bool HasJIT = false>
   struct RegisterTarget {
     RegisterTarget(Target &T, const char *Name, const char *Desc) {
-      TargetRegistry::RegisterTarget(T, Name, Desc,
-                                     &getTripleMatchQuality,
-                                     HasJIT);
+      TargetRegistry::RegisterTarget(T, Name, Desc, &getArchMatch, HasJIT);
     }
 
-    static unsigned getTripleMatchQuality(const std::string &TT) {
-      if (Triple(TT).getArch() == TargetArchType)
-        return 20;
-      return 0;
+    static bool getArchMatch(Triple::ArchType Arch) {
+      return Arch == TargetArchType;
     }
   };
 

@@ -25,7 +25,7 @@ namespace driver {
   class Driver;
 
 namespace toolchains {
-  class Darwin;
+  class MachO;
 }
 
 namespace tools {
@@ -141,18 +141,6 @@ namespace gcc {
                                      llvm::opt::ArgStringList &CmdArgs) const;
   };
 
-  class LLVM_LIBRARY_VISIBILITY Precompile : public Common  {
-  public:
-    Precompile(const ToolChain &TC) : Common("gcc::Precompile",
-                                             "gcc precompile", TC) {}
-
-    virtual bool hasGoodDiagnostics() const { return true; }
-    virtual bool hasIntegratedCPP() const { return true; }
-
-    virtual void RenderExtraToolArgs(const JobAction &JA,
-                                     llvm::opt::ArgStringList &CmdArgs) const;
-  };
-
   class LLVM_LIBRARY_VISIBILITY Compile : public Common  {
   public:
     Compile(const ToolChain &TC) : Common("gcc::Compile",
@@ -160,17 +148,6 @@ namespace gcc {
 
     virtual bool hasGoodDiagnostics() const { return true; }
     virtual bool hasIntegratedCPP() const { return true; }
-
-    virtual void RenderExtraToolArgs(const JobAction &JA,
-                                     llvm::opt::ArgStringList &CmdArgs) const;
-  };
-
-  class LLVM_LIBRARY_VISIBILITY Assemble : public Common  {
-  public:
-    Assemble(const ToolChain &TC) : Common("gcc::Assemble",
-                                           "assembler (via gcc)", TC) {}
-
-    virtual bool hasIntegratedCPP() const { return false; }
 
     virtual void RenderExtraToolArgs(const JobAction &JA,
                                      llvm::opt::ArgStringList &CmdArgs) const;
@@ -226,29 +203,37 @@ namespace hexagon {
   };
 } // end namespace hexagon.
 
+namespace arm {
+  StringRef getARMTargetCPU(const llvm::opt::ArgList &Args,
+                            const llvm::Triple &Triple);
+  const char* getARMCPUForMArch(const llvm::opt::ArgList &Args,
+                                const llvm::Triple &Triple);
+  const char* getLLVMArchSuffixForARM(StringRef CPU);
+}
 
 namespace darwin {
-  llvm::Triple::ArchType getArchTypeForDarwinArchName(StringRef Str);
+  llvm::Triple::ArchType getArchTypeForMachOArchName(StringRef Str);
+  void setTripleTypeForMachOArchName(llvm::Triple &T, StringRef Str);
 
-  class LLVM_LIBRARY_VISIBILITY DarwinTool : public Tool {
+  class LLVM_LIBRARY_VISIBILITY MachOTool : public Tool {
     virtual void anchor();
   protected:
-    void AddDarwinArch(const llvm::opt::ArgList &Args,
+    void AddMachOArch(const llvm::opt::ArgList &Args,
                        llvm::opt::ArgStringList &CmdArgs) const;
 
-    const toolchains::Darwin &getDarwinToolChain() const {
-      return reinterpret_cast<const toolchains::Darwin&>(getToolChain());
+    const toolchains::MachO &getMachOToolChain() const {
+      return reinterpret_cast<const toolchains::MachO&>(getToolChain());
     }
 
   public:
-    DarwinTool(const char *Name, const char *ShortName,
+    MachOTool(const char *Name, const char *ShortName,
                const ToolChain &TC) : Tool(Name, ShortName, TC) {}
   };
 
-  class LLVM_LIBRARY_VISIBILITY Assemble : public DarwinTool  {
+  class LLVM_LIBRARY_VISIBILITY Assemble : public MachOTool  {
   public:
-    Assemble(const ToolChain &TC) : DarwinTool("darwin::Assemble",
-                                               "assembler", TC) {}
+    Assemble(const ToolChain &TC) : MachOTool("darwin::Assemble",
+                                              "assembler", TC) {}
 
     virtual bool hasIntegratedCPP() const { return false; }
 
@@ -259,14 +244,14 @@ namespace darwin {
                               const char *LinkingOutput) const;
   };
 
-  class LLVM_LIBRARY_VISIBILITY Link : public DarwinTool  {
+  class LLVM_LIBRARY_VISIBILITY Link : public MachOTool  {
     bool NeedsTempPath(const InputInfoList &Inputs) const;
     void AddLinkArgs(Compilation &C, const llvm::opt::ArgList &Args,
                      llvm::opt::ArgStringList &CmdArgs,
                      const InputInfoList &Inputs) const;
 
   public:
-    Link(const ToolChain &TC) : DarwinTool("darwin::Link", "linker", TC) {}
+    Link(const ToolChain &TC) : MachOTool("darwin::Link", "linker", TC) {}
 
     virtual bool hasIntegratedCPP() const { return false; }
     virtual bool isLinkJob() const { return true; }
@@ -278,9 +263,9 @@ namespace darwin {
                               const char *LinkingOutput) const;
   };
 
-  class LLVM_LIBRARY_VISIBILITY Lipo : public DarwinTool  {
+  class LLVM_LIBRARY_VISIBILITY Lipo : public MachOTool  {
   public:
-    Lipo(const ToolChain &TC) : DarwinTool("darwin::Lipo", "lipo", TC) {}
+    Lipo(const ToolChain &TC) : MachOTool("darwin::Lipo", "lipo", TC) {}
 
     virtual bool hasIntegratedCPP() const { return false; }
 
@@ -291,10 +276,10 @@ namespace darwin {
                               const char *LinkingOutput) const;
   };
 
-  class LLVM_LIBRARY_VISIBILITY Dsymutil : public DarwinTool  {
+  class LLVM_LIBRARY_VISIBILITY Dsymutil : public MachOTool  {
   public:
-    Dsymutil(const ToolChain &TC) : DarwinTool("darwin::Dsymutil",
-                                               "dsymutil", TC) {}
+    Dsymutil(const ToolChain &TC) : MachOTool("darwin::Dsymutil",
+                                              "dsymutil", TC) {}
 
     virtual bool hasIntegratedCPP() const { return false; }
     virtual bool isDsymutilJob() const { return true; }
@@ -306,10 +291,10 @@ namespace darwin {
                               const char *LinkingOutput) const;
   };
 
-  class LLVM_LIBRARY_VISIBILITY VerifyDebug : public DarwinTool  {
+  class LLVM_LIBRARY_VISIBILITY VerifyDebug : public MachOTool  {
   public:
-    VerifyDebug(const ToolChain &TC) : DarwinTool("darwin::VerifyDebug",
-                                                  "dwarfdump", TC) {}
+    VerifyDebug(const ToolChain &TC) : MachOTool("darwin::VerifyDebug",
+                                                 "dwarfdump", TC) {}
 
     virtual bool hasIntegratedCPP() const { return false; }
 
@@ -631,6 +616,10 @@ namespace visualstudio {
   };
 } // end namespace visualstudio
 
+namespace arm {
+  StringRef getARMFloatABI(const Driver &D, const llvm::opt::ArgList &Args,
+                         const llvm::Triple &Triple);
+}
 namespace XCore {
   // For XCore, we do not need to instantiate tools for PreProcess, PreCompile and Compile.
   // We simply use "clang -cc1" for those actions.

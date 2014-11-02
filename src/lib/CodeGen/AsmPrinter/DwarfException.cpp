@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
@@ -30,7 +31,6 @@
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormattedStream.h"
-#include "llvm/Target/Mangler.h"
 #include "llvm/Target/TargetFrameLowering.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetOptions.h"
@@ -55,19 +55,6 @@ unsigned DwarfException::SharedTypeIds(const LandingPadInfo *L,
       return Count;
 
   return Count;
-}
-
-/// PadLT - Order landing pads lexicographically by type id.
-bool DwarfException::PadLT(const LandingPadInfo *L, const LandingPadInfo *R) {
-  const std::vector<int> &LIds = L->TypeIds, &RIds = R->TypeIds;
-  unsigned LSize = LIds.size(), RSize = RIds.size();
-  unsigned MinSize = LSize < RSize ? LSize : RSize;
-
-  for (unsigned i = 0; i != MinSize; ++i)
-    if (LIds[i] != RIds[i])
-      return LIds[i] < RIds[i];
-
-  return LSize < RSize;
 }
 
 /// ComputeActionsTable - Compute the actions table and gather the first action
@@ -357,7 +344,10 @@ void DwarfException::EmitExceptionTable() {
   for (unsigned i = 0, N = PadInfos.size(); i != N; ++i)
     LandingPads.push_back(&PadInfos[i]);
 
-  std::sort(LandingPads.begin(), LandingPads.end(), PadLT);
+  // Order landing pads lexicographically by type id.
+  std::sort(LandingPads.begin(), LandingPads.end(),
+            [](const LandingPadInfo *L,
+               const LandingPadInfo *R) { return L->TypeIds < R->TypeIds; });
 
   // Compute the actions table and gather the first action index for each
   // landing pad site.
@@ -717,20 +707,19 @@ void DwarfException::EmitTypeInfos(unsigned TTypeEncoding) {
   }
 }
 
-/// EndModule - Emit all exception information that should come after the
+/// endModule - Emit all exception information that should come after the
 /// content.
-void DwarfException::EndModule() {
+void DwarfException::endModule() {
   llvm_unreachable("Should be implemented");
 }
 
-/// BeginFunction - Gather pre-function exception information. Assumes it's
+/// beginFunction - Gather pre-function exception information. Assumes it's
 /// being emitted immediately after the function entry point.
-void DwarfException::BeginFunction(const MachineFunction *MF) {
+void DwarfException::beginFunction(const MachineFunction *MF) {
   llvm_unreachable("Should be implemented");
 }
 
-/// EndFunction - Gather and emit post-function exception information.
-///
-void DwarfException::EndFunction() {
+/// endFunction - Gather and emit post-function exception information.
+void DwarfException::endFunction(const MachineFunction *) {
   llvm_unreachable("Should be implemented");
 }

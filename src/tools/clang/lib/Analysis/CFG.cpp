@@ -363,6 +363,7 @@ private:
                                       AddStmtChoice asc);
   CFGBlock *VisitCXXCatchStmt(CXXCatchStmt *S);
   CFGBlock *VisitCXXConstructExpr(CXXConstructExpr *C, AddStmtChoice asc);
+  CFGBlock *VisitCXXNewExpr(CXXNewExpr *DE, AddStmtChoice asc);
   CFGBlock *VisitCXXDeleteExpr(CXXDeleteExpr *DE, AddStmtChoice asc);
   CFGBlock *VisitCXXForRangeStmt(CXXForRangeStmt *S);
   CFGBlock *VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *E,
@@ -459,6 +460,9 @@ private:
   void appendInitializer(CFGBlock *B, CXXCtorInitializer *I) {
     B->appendInitializer(I, cfg->getBumpVectorContext());
   }
+  void appendNewAllocator(CFGBlock *B, CXXNewExpr *NE) {
+    B->appendNewAllocator(NE, cfg->getBumpVectorContext());
+  }
   void appendBaseDtor(CFGBlock *B, const CXXBaseSpecifier *BS) {
     B->appendBaseDtor(BS, cfg->getBumpVectorContext());
   }
@@ -479,8 +483,16 @@ private:
   void prependAutomaticObjDtorsWithTerminator(CFGBlock *Blk,
       LocalScope::const_iterator B, LocalScope::const_iterator E);
 
-  void addSuccessor(CFGBlock *B, CFGBlock *S) {
-    B->addSuccessor(S, cfg->getBumpVectorContext());
+  void addSuccessor(CFGBlock *B, CFGBlock *S, bool IsReachable = true) {
+    B->addSuccessor(CFGBlock::AdjacentBlock(S, IsReachable),
+                    cfg->getBumpVectorContext());
+  }
+
+  /// Add a reachable successor to a block, with the alternate variant that is
+  /// unreachable.
+  void addSuccessor(CFGBlock *B, CFGBlock *ReachableBlock, CFGBlock *AltBlock) {
+    B->addSuccessor(CFGBlock::AdjacentBlock(ReachableBlock, AltBlock),
+                    cfg->getBumpVectorContext());
   }
 
   /// Try and evaluate an expression to an integer constant.
@@ -730,7 +742,7 @@ CFGBlock *CFGBuilder::createBlock(bool add_successor) {
 CFGBlock *CFGBuilder::createNoReturnBlock() {
   CFGBlock *B = createBlock(false);
   B->setHasNoReturnElement();
-  addSuccessor(B, &cfg->getExit());
+  addSuccessor(B, &cfg->getExit(), Succ);
   return B;
 }
 
@@ -1122,6 +1134,9 @@ CFGBlock *CFGBuilder::Visit(Stmt * S, AddStmtChoice asc) {
     case Stmt::CXXConstructExprClass:
       return VisitCXXConstructExpr(cast<CXXConstructExpr>(S), asc);
 
+    case Stmt::CXXNewExprClass:
+      return VisitCXXNewExpr(cast<CXXNewExpr>(S), asc);
+
     case Stmt::CXXDeleteExprClass:
       return VisitCXXDeleteExpr(cast<CXXDeleteExpr>(S), asc);
 
@@ -1311,8 +1326,8 @@ CFGBuilder::VisitLogicalOperator(BinaryOperator *B,
     else {
       RHSBlock->setTerminator(Term);
       TryResult KnownVal = tryEvaluateBool(RHS);
-      addSuccessor(RHSBlock, KnownVal.isFalse() ? NULL : TrueBlock);
-      addSuccessor(RHSBlock, KnownVal.isTrue() ? NULL : FalseBlock);
+      addSuccessor(RHSBlock, TrueBlock, !KnownVal.isFalse());
+      addSuccessor(RHSBlock, FalseBlock, !KnownVal.isTrue());
     }
 
     Block = RHSBlock;
@@ -1355,12 +1370,12 @@ CFGBuilder::VisitLogicalOperator(BinaryOperator *B,
 
   // Now link the LHSBlock with RHSBlock.
   if (B->getOpcode() == BO_LOr) {
-    addSuccessor(LHSBlock, KnownVal.isFalse() ? NULL : TrueBlock);
-    addSuccessor(LHSBlock, KnownVal.isTrue() ? NULL : RHSBlock);
+    addSuccessor(LHSBlock, TrueBlock, !KnownVal.isFalse());
+    addSuccessor(LHSBlock, RHSBlock, !KnownVal.isTrue());
   } else {
     assert(B->getOpcode() == BO_LAnd);
-    addSuccessor(LHSBlock, KnownVal.isFalse() ? NULL : RHSBlock);
-    addSuccessor(LHSBlock, KnownVal.isTrue() ? NULL : FalseBlock);
+    addSuccessor(LHSBlock, RHSBlock, !KnownVal.isFalse());
+    addSuccessor(LHSBlock, FalseBlock, !KnownVal.isTrue());
   }
 
   return std::make_pair(EntryLHSBlock, ExitBlock);
@@ -1619,8 +1634,8 @@ CFGBlock *CFGBuilder::VisitConditionalOperator(AbstractConditionalOperator *C,
 
   // See if this is a known constant.
   const TryResult& KnownVal = tryEvaluateBool(C->getCond());
-  addSuccessor(Block, KnownVal.isFalse() ? NULL : LHSBlock);
-  addSuccessor(Block, KnownVal.isTrue() ? NULL : RHSBlock);
+  addSuccessor(Block, LHSBlock, !KnownVal.isFalse());
+  addSuccessor(Block, RHSBlock, !KnownVal.isTrue());
   Block->setTerminator(C);
   Expr *condExpr = C->getCond();
 
@@ -1865,9 +1880,10 @@ CFGBlock *CFGBuilder::VisitIfStmt(IfStmt *I) {
   // See if this is a known constant.
   const TryResult &KnownVal = tryEvaluateBool(I->getCond());
 
-  // Now add the successors.
-  addSuccessor(Block, KnownVal.isFalse() ? NULL : ThenBlock);
-  addSuccessor(Block, KnownVal.isTrue()? NULL : ElseBlock);
+  // Add the successors.  If we know that specific branches are
+  // unreachable, inform addSuccessor() of that knowledge.
+  addSuccessor(Block, ThenBlock, /* isReachable = */ !KnownVal.isFalse());
+  addSuccessor(Block, ElseBlock, /* isReachable = */ !KnownVal.isTrue());
 
   // Add the condition as the last statement in the new block.  This may create
   // new blocks as the condition may contain control-flow.  Any newly created
@@ -2395,8 +2411,7 @@ CFGBlock *CFGBuilder::VisitWhileStmt(WhileStmt *W) {
     if (BinaryOperator *Cond = dyn_cast<BinaryOperator>(C->IgnoreParens()))
       if (Cond->isLogicalOp()) {
         llvm::tie(EntryConditionBlock, ExitConditionBlock) =
-          VisitLogicalOperator(Cond, W, BodyBlock,
-                               LoopSuccessor);
+            VisitLogicalOperator(Cond, W, BodyBlock, LoopSuccessor);
         break;
       }
 
@@ -2726,8 +2741,8 @@ CFGBlock *CFGBuilder::VisitSwitchStmt(SwitchStmt *Terminator) {
   SwitchAlwaysHasSuccessor |= switchExclusivelyCovered;
   SwitchAlwaysHasSuccessor |= Terminator->isAllEnumCasesCovered() &&
                               Terminator->getSwitchCaseList();
-  addSuccessor(SwitchTerminatedBlock,
-               SwitchAlwaysHasSuccessor ? 0 : DefaultCaseBlock);
+  addSuccessor(SwitchTerminatedBlock, DefaultCaseBlock,
+               !SwitchAlwaysHasSuccessor);
 
   // Add the terminator and condition in the switch block.
   SwitchTerminatedBlock->setTerminator(Terminator);
@@ -2828,10 +2843,9 @@ CFGBlock *CFGBuilder::VisitCaseStmt(CaseStmt *CS) {
   // Add this block to the list of successors for the block with the switch
   // statement.
   assert(SwitchTerminatedBlock);
-  addSuccessor(SwitchTerminatedBlock,
+  addSuccessor(SwitchTerminatedBlock, CaseBlock,
                shouldAddCase(switchExclusivelyCovered, switchCond,
-                             CS, *Context)
-               ? CaseBlock : 0);
+                             CS, *Context));
 
   // We set Block to NULL to allow lazy creation of a new block (if necessary)
   Block = NULL;
@@ -3124,6 +3138,23 @@ CFGBlock *CFGBuilder::VisitCXXConstructExpr(CXXConstructExpr *C,
   return VisitChildren(C);
 }
 
+CFGBlock *CFGBuilder::VisitCXXNewExpr(CXXNewExpr *NE,
+                                      AddStmtChoice asc) {
+
+  autoCreateBlock();
+  appendStmt(Block, NE);
+
+  if (NE->getInitializer())
+    Block = Visit(NE->getInitializer());
+  if (BuildOpts.AddCXXNewAllocator)
+    appendNewAllocator(Block, NE);
+  if (NE->isArray())
+    Block = Visit(NE->getArraySize());
+  for (CXXNewExpr::arg_iterator I = NE->placement_arg_begin(),
+       E = NE->placement_arg_end(); I != E; ++I)
+    Block = Visit(*I);
+  return Block;
+}
 
 CFGBlock *CFGBuilder::VisitCXXDeleteExpr(CXXDeleteExpr *DE,
                                          AddStmtChoice asc) {
@@ -3320,10 +3351,12 @@ CFGBlock *CFGBuilder::VisitCXXBindTemporaryExprForTemporaryDtors(
     // a new block for the destructor which does not have as a successor
     // anything built thus far. Control won't flow out of this block.
     const CXXDestructorDecl *Dtor = E->getTemporary()->getDestructor();
-    if (Dtor->isNoReturn())
+    if (Dtor->isNoReturn()) {
+      Succ = B;
       Block = createNoReturnBlock();
-    else
+    } else {
       autoCreateBlock();
+    }
 
     appendTemporaryDtor(Block, E);
     B = Block;
@@ -3372,12 +3405,13 @@ CFGBlock *CFGBuilder::VisitConditionalOperatorForTemporaryDtors(
 
   Block = createBlock(false);
   Block->setTerminator(CFGTerminator(E, true));
+  assert(Block->getTerminator().isTemporaryDtorsBranch());
 
   // See if this is a known constant.
   const TryResult &KnownVal = tryEvaluateBool(E->getCond());
 
   if (LHSBlock) {
-    addSuccessor(Block, KnownVal.isFalse() ? NULL : LHSBlock);
+    addSuccessor(Block, LHSBlock, !KnownVal.isFalse());
   } else if (KnownVal.isFalse()) {
     addSuccessor(Block, NULL);
   } else {
@@ -3387,7 +3421,8 @@ CFGBlock *CFGBuilder::VisitConditionalOperatorForTemporaryDtors(
 
   if (!RHSBlock)
     RHSBlock = ConfluenceBlock;
-  addSuccessor(Block, KnownVal.isTrue() ? NULL : RHSBlock);
+
+  addSuccessor(Block, RHSBlock, !KnownVal.isTrue());
 
   return Block;
 }
@@ -3426,6 +3461,7 @@ CFGImplicitDtor::getDestructorDecl(ASTContext &astContext) const {
   switch (getKind()) {
     case CFGElement::Statement:
     case CFGElement::Initializer:
+    case CFGElement::NewAllocator:
       llvm_unreachable("getDestructorDecl should only be used with "
                        "ImplicitDtors");
     case CFGElement::AutomaticObjectDtor: {
@@ -3470,13 +3506,37 @@ bool CFGImplicitDtor::isNoReturn(ASTContext &astContext) const {
 }
 
 //===----------------------------------------------------------------------===//
-// Filtered walking of the CFG.
+// CFGBlock operations.
 //===----------------------------------------------------------------------===//
+
+CFGBlock::AdjacentBlock::AdjacentBlock(CFGBlock *B, bool IsReachable)
+  : ReachableBlock(IsReachable ? B : 0),
+    UnreachableBlock(!IsReachable ? B : 0,
+                     B && IsReachable ? AB_Normal : AB_Unreachable) {}
+
+CFGBlock::AdjacentBlock::AdjacentBlock(CFGBlock *B, CFGBlock *AlternateBlock)
+  : ReachableBlock(B),
+    UnreachableBlock(B == AlternateBlock ? 0 : AlternateBlock,
+                     B == AlternateBlock ? AB_Alternate : AB_Normal) {}
+
+void CFGBlock::addSuccessor(AdjacentBlock Succ,
+                            BumpVectorContext &C) {
+  if (CFGBlock *B = Succ.getReachableBlock())
+    B->Preds.push_back(AdjacentBlock(this, Succ.isReachable()), C);
+
+  if (CFGBlock *UnreachableB = Succ.getPossiblyUnreachableBlock())
+    UnreachableB->Preds.push_back(AdjacentBlock(this, false), C);
+
+  Succs.push_back(Succ, C);
+}
 
 bool CFGBlock::FilterEdge(const CFGBlock::FilterOptions &F,
         const CFGBlock *From, const CFGBlock *To) {
 
-  if (To && F.IgnoreDefaultsWithCoveredEnums) {
+  if (F.IgnoreNullPredecessors && !From)
+    return true;
+
+  if (To && From && F.IgnoreDefaultsWithCoveredEnums) {
     // If the 'To' has no label or is labeled but the label isn't a
     // CaseStmt then filter this edge.
     if (const SwitchStmt *S =
@@ -3615,7 +3675,9 @@ class CFGBlockTerminatorPrint
 public:
   CFGBlockTerminatorPrint(raw_ostream &os, StmtPrinterHelper* helper,
                           const PrintingPolicy &Policy)
-    : OS(os), Helper(helper), Policy(Policy) {}
+    : OS(os), Helper(helper), Policy(Policy) {
+    this->Policy.IncludeNewlines = false;
+  }
 
   void VisitIfStmt(IfStmt *I) {
     OS << "if ";
@@ -3705,38 +3767,42 @@ public:
   void VisitExpr(Expr *E) {
     E->printPretty(OS, Helper, Policy);
   }
+
+public:
+  void print(CFGTerminator T) {
+    if (T.isTemporaryDtorsBranch())
+      OS << "(Temp Dtor) ";
+    Visit(T.getStmt());
+  }
 };
 } // end anonymous namespace
 
-static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
+static void print_elem(raw_ostream &OS, StmtPrinterHelper &Helper,
                        const CFGElement &E) {
   if (Optional<CFGStmt> CS = E.getAs<CFGStmt>()) {
     const Stmt *S = CS->getStmt();
     
-    if (Helper) {
+    // special printing for statement-expressions.
+    if (const StmtExpr *SE = dyn_cast<StmtExpr>(S)) {
+      const CompoundStmt *Sub = SE->getSubStmt();
 
-      // special printing for statement-expressions.
-      if (const StmtExpr *SE = dyn_cast<StmtExpr>(S)) {
-        const CompoundStmt *Sub = SE->getSubStmt();
-
-        if (Sub->children()) {
-          OS << "({ ... ; ";
-          Helper->handledStmt(*SE->getSubStmt()->body_rbegin(),OS);
-          OS << " })\n";
-          return;
-        }
-      }
-      // special printing for comma expressions.
-      if (const BinaryOperator* B = dyn_cast<BinaryOperator>(S)) {
-        if (B->getOpcode() == BO_Comma) {
-          OS << "... , ";
-          Helper->handledStmt(B->getRHS(),OS);
-          OS << '\n';
-          return;
-        }
+      if (Sub->children()) {
+        OS << "({ ... ; ";
+        Helper.handledStmt(*SE->getSubStmt()->body_rbegin(),OS);
+        OS << " })\n";
+        return;
       }
     }
-    S->printPretty(OS, Helper, PrintingPolicy(Helper->getLangOpts()));
+    // special printing for comma expressions.
+    if (const BinaryOperator* B = dyn_cast<BinaryOperator>(S)) {
+      if (B->getOpcode() == BO_Comma) {
+        OS << "... , ";
+        Helper.handledStmt(B->getRHS(),OS);
+        OS << '\n';
+        return;
+      }
+    }
+    S->printPretty(OS, &Helper, PrintingPolicy(Helper.getLangOpts()));
 
     if (isa<CXXOperatorCallExpr>(S)) {
       OS << " (OperatorCall)";
@@ -3768,7 +3834,7 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
 
     OS << "(";
     if (Expr *IE = I->getInit())
-      IE->printPretty(OS, Helper, PrintingPolicy(Helper->getLangOpts()));
+      IE->printPretty(OS, &Helper, PrintingPolicy(Helper.getLangOpts()));
     OS << ")";
 
     if (I->isBaseInitializer())
@@ -3780,7 +3846,7 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
   } else if (Optional<CFGAutomaticObjDtor> DE =
                  E.getAs<CFGAutomaticObjDtor>()) {
     const VarDecl *VD = DE->getVarDecl();
-    Helper->handleDecl(VD, OS);
+    Helper.handleDecl(VD, OS);
 
     const Type* T = VD->getType().getTypePtr();
     if (const ReferenceType* RT = T->getAs<ReferenceType>())
@@ -3790,13 +3856,18 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
     OS << ".~" << T->getAsCXXRecordDecl()->getName().str() << "()";
     OS << " (Implicit destructor)\n";
 
+  } else if (Optional<CFGNewAllocator> NE = E.getAs<CFGNewAllocator>()) {
+    OS << "CFGNewAllocator(";
+    if (const CXXNewExpr *AllocExpr = NE->getAllocatorExpr())
+      AllocExpr->getType().print(OS, PrintingPolicy(Helper.getLangOpts()));
+    OS << ")\n";
   } else if (Optional<CFGDeleteDtor> DE = E.getAs<CFGDeleteDtor>()) {
     const CXXRecordDecl *RD = DE->getCXXRecordDecl();
     if (!RD)
       return;
     CXXDeleteExpr *DelExpr =
         const_cast<CXXDeleteExpr*>(DE->getDeleteExpr());
-    Helper->handledStmt(cast<Stmt>(DelExpr->getArgument()), OS);
+    Helper.handledStmt(cast<Stmt>(DelExpr->getArgument()), OS);
     OS << "->~" << RD->getName().str() << "()";
     OS << " (Implicit destructor)\n";
   } else if (Optional<CFGBaseDtor> BE = E.getAs<CFGBaseDtor>()) {
@@ -3814,18 +3885,17 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper* Helper,
   } else if (Optional<CFGTemporaryDtor> TE = E.getAs<CFGTemporaryDtor>()) {
     const CXXBindTemporaryExpr *BT = TE->getBindTemporaryExpr();
     OS << "~";
-    BT->getType().print(OS, PrintingPolicy(Helper->getLangOpts()));
+    BT->getType().print(OS, PrintingPolicy(Helper.getLangOpts()));
     OS << "() (Temporary object destructor)\n";
   }
 }
 
 static void print_block(raw_ostream &OS, const CFG* cfg,
                         const CFGBlock &B,
-                        StmtPrinterHelper* Helper, bool print_edges,
+                        StmtPrinterHelper &Helper, bool print_edges,
                         bool ShowColors) {
 
-  if (Helper)
-    Helper->setBlockID(B.getBlockID());
+  Helper.setBlockID(B.getBlockID());
 
   // Print the header.
   if (ShowColors)
@@ -3855,19 +3925,19 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
       OS << L->getName();
     else if (CaseStmt *C = dyn_cast<CaseStmt>(Label)) {
       OS << "case ";
-      C->getLHS()->printPretty(OS, Helper,
-                               PrintingPolicy(Helper->getLangOpts()));
+      C->getLHS()->printPretty(OS, &Helper,
+                               PrintingPolicy(Helper.getLangOpts()));
       if (C->getRHS()) {
         OS << " ... ";
-        C->getRHS()->printPretty(OS, Helper,
-                                 PrintingPolicy(Helper->getLangOpts()));
+        C->getRHS()->printPretty(OS, &Helper,
+                                 PrintingPolicy(Helper.getLangOpts()));
       }
     } else if (isa<DefaultStmt>(Label))
       OS << "default";
     else if (CXXCatchStmt *CS = dyn_cast<CXXCatchStmt>(Label)) {
       OS << "catch (";
       if (CS->getExceptionDecl())
-        CS->getExceptionDecl()->print(OS, PrintingPolicy(Helper->getLangOpts()),
+        CS->getExceptionDecl()->print(OS, PrintingPolicy(Helper.getLangOpts()),
                                       0);
       else
         OS << "...";
@@ -3891,8 +3961,7 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
 
     OS << llvm::format("%3d", j) << ": ";
 
-    if (Helper)
-      Helper->setStmtID(j);
+    Helper.setStmtID(j);
 
     print_elem(OS, Helper, *I);
   }
@@ -3904,11 +3973,11 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
 
     OS << "   T: ";
 
-    if (Helper) Helper->setBlockID(-1);
+    Helper.setBlockID(-1);
 
-    PrintingPolicy PP(Helper ? Helper->getLangOpts() : LangOptions());
-    CFGBlockTerminatorPrint TPrinter(OS, Helper, PP);
-    TPrinter.Visit(const_cast<Stmt*>(B.getTerminator().getStmt()));
+    PrintingPolicy PP(Helper.getLangOpts());
+    CFGBlockTerminatorPrint TPrinter(OS, &Helper, PP);
+    TPrinter.print(B.getTerminator());
     OS << '\n';
     
     if (ShowColors)
@@ -3936,7 +4005,16 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
         if (i % 10 == 8)
           OS << "\n     ";
 
-        OS << " B" << (*I)->getBlockID();
+        CFGBlock *B = *I;
+        bool Reachable = true;
+        if (!B) {
+          Reachable = false;
+          B = I->getPossiblyUnreachableBlock();
+        }
+
+        OS << " B" << B->getBlockID();
+        if (!Reachable)
+          OS << "(Unreachable)";
       }
       
       if (ShowColors)
@@ -3965,12 +4043,24 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
         if (i % 10 == 8)
           OS << "\n    ";
 
-        if (*I)
-          OS << " B" << (*I)->getBlockID();
-        else
-          OS  << " NULL";
+        CFGBlock *B = *I;
+
+        bool Reachable = true;
+        if (!B) {
+          Reachable = false;
+          B = I->getPossiblyUnreachableBlock();
+        }
+
+        if (B) {
+          OS << " B" << B->getBlockID();
+          if (!Reachable)
+            OS << "(Unreachable)";
+        }
+        else {
+          OS << " NULL";
+        }
       }
-      
+
       if (ShowColors)
         OS.resetColor();
       OS << '\n';
@@ -3989,7 +4079,7 @@ void CFG::print(raw_ostream &OS, const LangOptions &LO, bool ShowColors) const {
   StmtPrinterHelper Helper(this, LO);
 
   // Print the entry block.
-  print_block(OS, this, getEntry(), &Helper, true, ShowColors);
+  print_block(OS, this, getEntry(), Helper, true, ShowColors);
 
   // Iterate through the CFGBlocks and print them one by one.
   for (const_iterator I = Blocks.begin(), E = Blocks.end() ; I != E ; ++I) {
@@ -3997,11 +4087,11 @@ void CFG::print(raw_ostream &OS, const LangOptions &LO, bool ShowColors) const {
     if (&(**I) == &getEntry() || &(**I) == &getExit())
       continue;
 
-    print_block(OS, this, **I, &Helper, true, ShowColors);
+    print_block(OS, this, **I, Helper, true, ShowColors);
   }
 
   // Print the exit block.
-  print_block(OS, this, getExit(), &Helper, true, ShowColors);
+  print_block(OS, this, getExit(), Helper, true, ShowColors);
   OS << '\n';
   OS.flush();
 }
@@ -4012,12 +4102,16 @@ void CFGBlock::dump(const CFG* cfg, const LangOptions &LO,
   print(llvm::errs(), cfg, LO, ShowColors);
 }
 
+void CFGBlock::dump() const {
+  dump(getParent(), LangOptions(), false);
+}
+
 /// print - A simple pretty printer of a CFGBlock that outputs to an ostream.
 ///   Generally this will only be called from CFG::print.
 void CFGBlock::print(raw_ostream &OS, const CFG* cfg,
                      const LangOptions &LO, bool ShowColors) const {
   StmtPrinterHelper Helper(cfg, LO);
-  print_block(OS, cfg, *this, &Helper, true, ShowColors);
+  print_block(OS, cfg, *this, Helper, true, ShowColors);
   OS << '\n';
 }
 
@@ -4025,10 +4119,10 @@ void CFGBlock::print(raw_ostream &OS, const CFG* cfg,
 void CFGBlock::printTerminator(raw_ostream &OS,
                                const LangOptions &LO) const {
   CFGBlockTerminatorPrint TPrinter(OS, NULL, PrintingPolicy(LO));
-  TPrinter.Visit(const_cast<Stmt*>(getTerminator().getStmt()));
+  TPrinter.print(getTerminator());
 }
 
-Stmt *CFGBlock::getTerminatorCondition() {
+Stmt *CFGBlock::getTerminatorCondition(bool StripParens) {
   Stmt *Terminator = this->Terminator;
   if (!Terminator)
     return NULL;
@@ -4087,6 +4181,9 @@ Stmt *CFGBlock::getTerminatorCondition() {
       return Terminator;
   }
 
+  if (!StripParens)
+    return E;
+
   return E ? E->IgnoreParens() : NULL;
 }
 
@@ -4119,7 +4216,7 @@ struct DOTGraphTraits<const CFG*> : public DefaultDOTGraphTraits {
 #ifndef NDEBUG
     std::string OutSStr;
     llvm::raw_string_ostream Out(OutSStr);
-    print_block(Out,Graph, *Node, GraphHelper, false, false);
+    print_block(Out,Graph, *Node, *GraphHelper, false, false);
     std::string& OutStr = Out.str();
 
     if (OutStr[0] == '\n') OutStr.erase(OutStr.begin());

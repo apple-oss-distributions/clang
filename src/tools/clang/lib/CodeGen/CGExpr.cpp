@@ -85,6 +85,7 @@ llvm::AllocaInst *CodeGenFunction::CreateMemTemp(QualType Ty,
 /// EvaluateExprAsBool - Perform the usual unary conversions on the specified
 /// expression and compare the result against zero, returning an Int1Ty value.
 llvm::Value *CodeGenFunction::EvaluateExprAsBool(const Expr *E) {
+  PGO.setCurrentStmt(E);
   if (const MemberPointerType *MPT = E->getType()->getAs<MemberPointerType>()) {
     llvm::Value *MemPtr = EmitScalarExpr(E);
     return CGM.getCXXABI().EmitMemberPointerIsNotNull(*this, MemPtr, MPT);
@@ -1553,6 +1554,12 @@ void CodeGenFunction::EmitStoreThroughExtVectorComponentLValue(RValue Src,
       for (unsigned i = 0; i != NumDstElts; ++i)
         Mask.push_back(Builder.getInt32(i));
 
+      // When the vector size is odd and .odd or .hi is used, the last element
+      // of the Elts constant array will be one past the size of the vector.
+      // Ignore the last element here, if it is greater than the mask size.
+      if (getAccessedFieldNo(NumSrcElts - 1, Elts) == Mask.size())
+        NumSrcElts--;
+
       // modify when what gets shuffled in
       for (unsigned i = 0; i != NumSrcElts; ++i)
         Mask[getAccessedFieldNo(i, Elts)] = Builder.getInt32(i+NumDstElts);
@@ -1712,7 +1719,7 @@ static LValue EmitFunctionDeclLValue(CodeGenFunction &CGF,
       // isn't the same as the type of a use.  Correct for this with a
       // bitcast.
       QualType NoProtoType =
-          CGF.getContext().getFunctionNoProtoType(Proto->getResultType());
+          CGF.getContext().getFunctionNoProtoType(Proto->getReturnType());
       NoProtoType = CGF.getContext().getPointerType(NoProtoType);
       V = CGF.Builder.CreateBitCast(V, CGF.ConvertType(NoProtoType));
     }
@@ -2674,7 +2681,6 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
   eval.begin(*this);
   LValue lhs = EmitLValue(expr->getTrueExpr());
   eval.end(*this);
-  Cnt.adjustForControlFlow();
 
   if (!lhs.isSimple())
     return EmitUnsupportedLValue(expr, "conditional operator");
@@ -2684,17 +2690,14 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
 
   // Any temporaries created here are conditional.
   EmitBlock(rhsBlock);
-  Cnt.beginElseRegion();
   eval.begin(*this);
   LValue rhs = EmitLValue(expr->getFalseExpr());
   eval.end(*this);
-  Cnt.adjustForControlFlow();
   if (!rhs.isSimple())
     return EmitUnsupportedLValue(expr, "conditional operator");
   rhsBlock = Builder.GetInsertBlock();
 
   EmitBlock(contBlock);
-  Cnt.applyAdjustmentsToRegion();
 
   llvm::PHINode *phi = Builder.CreatePHI(lhs.getAddress()->getType(), 2,
                                          "cond-lvalue");
@@ -2748,6 +2751,7 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_ARCReclaimReturnedObject:
   case CK_ARCExtendBlockObject:
   case CK_CopyAndAutoreleaseBlockObject:
+  case CK_AddressSpaceConversion:
     return EmitUnsupportedLValue(E, "unexpected cast lvalue");
 
   case CK_Dependent:
@@ -3065,7 +3069,7 @@ LValue CodeGenFunction::EmitObjCMessageExprLValue(const ObjCMessageExpr *E) {
   if (!RV.isScalar())
     return MakeAddrLValue(RV.getAggregateAddr(), E->getType());
 
-  assert(E->getMethodDecl()->getResultType()->isReferenceType() &&
+  assert(E->getMethodDecl()->getReturnType()->isReferenceType() &&
          "Can't have a scalar return unless the return type is a "
          "reference type!");
 

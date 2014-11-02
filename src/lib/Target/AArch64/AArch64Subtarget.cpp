@@ -14,16 +14,19 @@
 #include "AArch64Subtarget.h"
 #include "AArch64RegisterInfo.h"
 #include "MCTargetDesc/AArch64MCTargetDesc.h"
-#include "llvm/IR/GlobalValue.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 
 #define GET_SUBTARGETINFO_TARGET_DESC
 #define GET_SUBTARGETINFO_CTOR
 #include "AArch64GenSubtargetInfo.inc"
 
 using namespace llvm;
+
+// Pin the vtable to this file.
+void AArch64Subtarget::anchor() {}
 
 AArch64Subtarget::AArch64Subtarget(StringRef TT, StringRef CPU, StringRef FS)
     : AArch64GenSubtargetInfo(TT, CPU, FS), HasFPARMv8(false), HasNEON(false),

@@ -48,6 +48,11 @@ class RTDyldMemoryManager;
 class Triple;
 class Type;
 
+namespace object {
+  class Archive;
+  class ObjectFile;
+}
+
 /// \brief Helper class for helping synchronize access to the global address map
 /// table.
 class ExecutionEngineState {
@@ -117,6 +122,9 @@ class ExecutionEngine {
   /// Whether the JIT should perform lookups of external symbols (e.g.,
   /// using dlsym).
   bool SymbolSearchingDisabled;
+
+  /// Whether the JIT should verify IR modules during compilation.
+  bool VerifyModules;
 
   friend class EngineBuilder;  // To allow access to JITCtor and InterpCtor.
 
@@ -204,6 +212,33 @@ public:
     Modules.push_back(M);
   }
 
+  /// addObjectFile - Add an ObjectFile to the execution engine.
+  ///
+  /// This method is only supported by MCJIT.  MCJIT will immediately load the
+  /// object into memory and adds its symbols to the list used to resolve
+  /// external symbols while preparing other objects for execution.
+  ///
+  /// Objects added using this function will not be made executable until
+  /// needed by another object.
+  ///
+  /// MCJIT will take ownership of the ObjectFile.
+  virtual void addObjectFile(object::ObjectFile *O) {
+    llvm_unreachable(
+      "ExecutionEngine subclass doesn't implement addObjectFile.");
+  }
+
+  /// addArchive - Add an Archive to the execution engine.
+  ///
+  /// This method is only supported by MCJIT.  MCJIT will use the archive to
+  /// resolve external symbols in objects it is loading.  If a symbol is found
+  /// in the Archive the contained object file will be extracted (in memory)
+  /// and loaded for possible execution.
+  ///
+  /// MCJIT will take ownership of the Archive.
+  virtual void addArchive(object::Archive *A) {
+    llvm_unreachable("ExecutionEngine subclass doesn't implement addArchive.");
+  }
+
   //===--------------------------------------------------------------------===//
 
   const DataLayout *getDataLayout() const { return TD; }
@@ -232,7 +267,7 @@ public:
   ///
   /// This function is deprecated for the MCJIT execution engine.
   ///
-  /// FIXME: the JIT and MCJIT interfaces should be disentangled or united 
+  /// FIXME: the JIT and MCJIT interfaces should be disentangled or united
   /// again, if possible.
   ///
   virtual void *getPointerToNamedFunction(const std::string &Name,
@@ -430,6 +465,24 @@ public:
     llvm_unreachable("No support for an object cache");
   }
 
+  /// setProcessAllSections (MCJIT Only): By default, only sections that are
+  /// "required for execution" are passed to the RTDyldMemoryManager, and other
+  /// sections are discarded. Passing 'true' to this method will cause
+  /// RuntimeDyld to pass all sections to its RTDyldMemoryManager regardless
+  /// of whether they are "required to execute" in the usual sense.
+  ///
+  /// Rationale: Some MCJIT clients want to be able to inspect metadata
+  /// sections (e.g. Dwarf, Stack-maps) to enable functionality or analyze
+  /// performance. Passing these sections to the memory manager allows the
+  /// client to make policy about the relevant sections, rather than having
+  /// MCJIT do it.
+  virtual void setProcessAllSections(bool ProcessAllSections) {
+    llvm_unreachable("No support for ProcessAllSections option");
+  }
+
+  /// Return the target machine (if available).
+  virtual TargetMachine *getTargetMachine() { return NULL; }
+
   /// DisableLazyCompilation - When lazy compilation is off (the default), the
   /// JIT will eagerly compile every function reachable from the argument to
   /// getPointerToFunction.  If lazy compilation is turned on, the JIT will only
@@ -473,6 +526,17 @@ public:
   }
   bool isSymbolSearchingDisabled() const {
     return SymbolSearchingDisabled;
+  }
+
+  /// Enable/Disable IR module verification.
+  ///
+  /// Note: Module verification is enabled by default in Debug builds, and
+  /// disabled by default in Release. Use this method to override the default.
+  void setVerifyModules(bool Verify) {
+    VerifyModules = Verify;
+  }
+  bool getVerifyModules() const {
+    return VerifyModules;
   }
 
   /// InstallLazyFunctionCreator - If an unknown function is needed, the
@@ -522,6 +586,7 @@ private:
   std::string MCPU;
   SmallVector<std::string, 4> MAttrs;
   bool UseMCJIT;
+  bool VerifyModules;
 
   /// InitEngine - Does the common initialization of default options.
   void InitEngine() {
@@ -535,6 +600,14 @@ private:
     RelocModel = Reloc::Default;
     CMModel = CodeModel::JITDefault;
     UseMCJIT = false;
+
+  // IR module verification is enabled by default in debug builds, and disabled
+  // by default in release builds.
+#ifndef NDEBUG
+  VerifyModules = true;
+#else
+  VerifyModules = false;
+#endif
   }
 
 public:
@@ -550,7 +623,7 @@ public:
     WhichEngine = w;
     return *this;
   }
-  
+
   /// setMCJITMemoryManager - Sets the MCJIT memory manager to use. This allows
   /// clients to customize their memory allocation policies for the MCJIT. This
   /// is only appropriate for the MCJIT; setting this and configuring the builder
@@ -641,6 +714,13 @@ public:
   /// (experimental).
   EngineBuilder &setUseMCJIT(bool Value) {
     UseMCJIT = Value;
+    return *this;
+  }
+
+  /// setVerifyModules - Set whether the JIT implementation should verify
+  /// IR modules during compilation.
+  EngineBuilder &setVerifyModules(bool Verify) {
+    VerifyModules = Verify;
     return *this;
   }
 

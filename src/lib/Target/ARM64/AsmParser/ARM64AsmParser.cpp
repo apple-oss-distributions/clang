@@ -42,6 +42,7 @@ public:
   typedef SmallVectorImpl<MCParsedAsmOperand*> OperandVector;
 private:
   StringRef Mnemonic;           //< Instruction mnemonic.
+  MCSubtargetInfo &STI;
   MCAsmParser &Parser;
 
   MCAsmParser &getParser() const { return Parser; }
@@ -104,7 +105,7 @@ public:
   };
   ARM64AsmParser(MCSubtargetInfo &_STI, MCAsmParser &_Parser,
                  const MCInstrInfo &MII)
-    : MCTargetAsmParser(), Parser(_Parser) {
+    : MCTargetAsmParser(), STI(_STI), Parser(_Parser) {
     MCAsmParserExtension::Initialize(_Parser);
   }
 
@@ -561,36 +562,52 @@ public:
     return false;
   }
 
+  bool isMovZSymbolG3() const {
+    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_ABS_G3 };
+    return isMovWSymbol(Variants);
+  }
+
   bool isMovZSymbolG2() const {
-    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_TPREL_G2,
+    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_ABS_G2,
+                                                   ARM64MCExpr::VK_TPREL_G2,
                                                    ARM64MCExpr::VK_DTPREL_G2 };
     return isMovWSymbol(Variants);
   }
 
   bool isMovZSymbolG1() const {
-    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_GOTTPREL_G1,
+    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_ABS_G1,
+                                                   ARM64MCExpr::VK_GOTTPREL_G1,
                                                    ARM64MCExpr::VK_TPREL_G1,
                                                    ARM64MCExpr::VK_DTPREL_G1, };
     return isMovWSymbol(Variants);
   }
 
   bool isMovZSymbolG0() const {
-    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_TPREL_G0,
+    static ARM64MCExpr::VariantKind Variants[] = { ARM64MCExpr::VK_ABS_G0,
+                                                   ARM64MCExpr::VK_TPREL_G0,
                                                    ARM64MCExpr::VK_DTPREL_G0 };
+    return isMovWSymbol(Variants);
+  }
+
+  bool isMovKSymbolG2() const {
+    static ARM64MCExpr::VariantKind Variants[] = {
+      ARM64MCExpr::VK_ABS_G2_NC
+    };
     return isMovWSymbol(Variants);
   }
 
   bool isMovKSymbolG1() const {
     static ARM64MCExpr::VariantKind Variants[] = {
-      ARM64MCExpr::VK_TPREL_G1_NC, ARM64MCExpr::VK_DTPREL_G1_NC
+      ARM64MCExpr::VK_ABS_G1_NC, ARM64MCExpr::VK_TPREL_G1_NC,
+      ARM64MCExpr::VK_DTPREL_G1_NC
     };
     return isMovWSymbol(Variants);
   }
 
   bool isMovKSymbolG0() const {
     static ARM64MCExpr::VariantKind Variants[] = {
-      ARM64MCExpr::VK_GOTTPREL_G0_NC, ARM64MCExpr::VK_TPREL_G0_NC,
-      ARM64MCExpr::VK_DTPREL_G0_NC
+      ARM64MCExpr::VK_ABS_G0_NC, ARM64MCExpr::VK_GOTTPREL_G0_NC,
+      ARM64MCExpr::VK_TPREL_G0_NC, ARM64MCExpr::VK_DTPREL_G0_NC
     };
     return isMovWSymbol(Variants);
   }
@@ -3197,6 +3214,13 @@ parseSymbolicImmVal(const MCExpr *&ImmVal) {
     std::string LowerCase = Parser.getTok().getIdentifier().lower();
     RefKind = StringSwitch<ARM64MCExpr::VariantKind>(LowerCase)
       .Case("lo12", ARM64MCExpr::VK_LO12)
+      .Case("abs_g3", ARM64MCExpr::VK_ABS_G3)
+      .Case("abs_g2", ARM64MCExpr::VK_ABS_G2)
+      .Case("abs_g2_nc", ARM64MCExpr::VK_ABS_G2_NC)
+      .Case("abs_g1", ARM64MCExpr::VK_ABS_G1)
+      .Case("abs_g1_nc", ARM64MCExpr::VK_ABS_G1_NC)
+      .Case("abs_g0", ARM64MCExpr::VK_ABS_G0)
+      .Case("abs_g0_nc", ARM64MCExpr::VK_ABS_G0_NC)
       .Case("dtprel_g2", ARM64MCExpr::VK_DTPREL_G2)
       .Case("dtprel_g1", ARM64MCExpr::VK_DTPREL_G1)
       .Case("dtprel_g1_nc", ARM64MCExpr::VK_DTPREL_G1_NC)
@@ -3442,9 +3466,11 @@ bool ARM64AsmParser::ParseInstruction(ParseInstructionInfo &Info,
     Next = Name.find('.', Start + 1);
     Head = Name.slice(Start + 1, Next);
 
+    SMLoc SuffixLoc = SMLoc::getFromPointer(NameLoc.getPointer() +
+                                            (Head.data() - Name.data()));
     unsigned CC = parseCondCodeString(Head);
     if (CC == ~0U)
-      return TokError("invalid condition code");
+      return Error(SuffixLoc, "invalid condition code");
     const MCExpr *CCExpr = MCConstantExpr::Create(CC, getContext());
     Operands.push_back(ARM64Operand::CreateImm(CCExpr, NameLoc, NameLoc,
                                                getContext()));
@@ -3975,47 +4001,6 @@ static bool isGPR64Reg(unsigned Reg) {
   }
 }
 
-// FIXME: Code duplicated from ARM64RegisterInfo.cpp
-static unsigned getXRegFromWReg(unsigned Reg) {
-  switch (Reg) {
-  case ARM64::W0: return ARM64::X0;
-  case ARM64::W1: return ARM64::X1;
-  case ARM64::W2: return ARM64::X2;
-  case ARM64::W3: return ARM64::X3;
-  case ARM64::W4: return ARM64::X4;
-  case ARM64::W5: return ARM64::X5;
-  case ARM64::W6: return ARM64::X6;
-  case ARM64::W7: return ARM64::X7;
-  case ARM64::W8: return ARM64::X8;
-  case ARM64::W9: return ARM64::X9;
-  case ARM64::W10: return ARM64::X10;
-  case ARM64::W11: return ARM64::X11;
-  case ARM64::W12: return ARM64::X12;
-  case ARM64::W13: return ARM64::X13;
-  case ARM64::W14: return ARM64::X14;
-  case ARM64::W15: return ARM64::X15;
-  case ARM64::W16: return ARM64::X16;
-  case ARM64::W17: return ARM64::X17;
-  case ARM64::W18: return ARM64::X18;
-  case ARM64::W19: return ARM64::X19;
-  case ARM64::W20: return ARM64::X20;
-  case ARM64::W21: return ARM64::X21;
-  case ARM64::W22: return ARM64::X22;
-  case ARM64::W23: return ARM64::X23;
-  case ARM64::W24: return ARM64::X24;
-  case ARM64::W25: return ARM64::X25;
-  case ARM64::W26: return ARM64::X26;
-  case ARM64::W27: return ARM64::X27;
-  case ARM64::W28: return ARM64::X28;
-  case ARM64::W29: return ARM64::FP;
-  case ARM64::W30: return ARM64::LR;
-  case ARM64::WSP: return ARM64::SP;
-  case ARM64::WZR: return ARM64::XZR;
-  }
-  // For anything else, return it unchanged.
-  return Reg;
-}
-
 bool ARM64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
   switch (ErrCode) {
   case Match_MissingFeature:
@@ -4030,7 +4015,7 @@ bool ARM64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
   case Match_InvalidMemoryIndexed32SImm7:
     return Error(Loc, "index must be a multiple of 4 in range [-256,252].");
   case Match_InvalidMemoryIndexed64SImm7:
-    return Error(Loc, "index must be a multiple of 8 in range [-512,508].");
+    return Error(Loc, "index must be a multiple of 8 in range [-512,504].");
   case Match_InvalidMemoryIndexed128SImm7:
     return Error(Loc, "index must be a multiple of 16 in range [-1024,1008].");
   case Match_InvalidMemoryIndexed8:
@@ -4110,6 +4095,14 @@ MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode, OperandVector &Operands,
           dyn_cast<MCConstantExpr>(Op2->getImm())) {
         uint64_t Val = CE->getValue();
         uint64_t NVal = ~Val;
+
+        // If this is a 32-bit register and the value has none of the upper
+        // set, clear the complemented upper 32-bits so the logic below works
+        // for 32-bit registers too.
+	ARM64Operand *Op1 = static_cast<ARM64Operand*>(Operands[1]);
+	if(Op1->isReg() && isGPR32Register(Op1->getReg()) &&
+           (Val & 0xFFFFFFFFULL) == Val)
+          NVal &= 0x00000000FFFFFFFFULL;
 
         // MOVK Rd, imm << 0
         if ((Val & 0xFFFF) == Val)
@@ -4216,9 +4209,11 @@ MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode, OperandVector &Operands,
     // FIXME: Horrible hack to handle the optional LSL shift for vector
     //        instructions.
     } else if (NumOperands == 4 && (Tok == "bic" || Tok == "orr")) {
+      ARM64Operand *Op1 = static_cast<ARM64Operand*>(Operands[1]);
       ARM64Operand *Op2 = static_cast<ARM64Operand*>(Operands[2]);
       ARM64Operand *Op3 = static_cast<ARM64Operand*>(Operands[3]);
-      if (Op2->isVectorReg() && Op3->isImm())
+      if ((Op1->isToken() && Op2->isVectorReg() && Op3->isImm()) ||
+          (Op1->isVectorReg() && Op2->isToken() && Op3->isImm()))
         Operands.push_back(ARM64Operand::CreateShifter(ARM64_AM::LSL, 0,
                                                        IDLoc, IDLoc,
                                                        getContext()));
@@ -4226,11 +4221,14 @@ MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode, OperandVector &Operands,
       ARM64Operand *Op1 = static_cast<ARM64Operand*>(Operands[1]);
       ARM64Operand *Op2 = static_cast<ARM64Operand*>(Operands[2]);
       ARM64Operand *Op3 = static_cast<ARM64Operand*>(Operands[3]);
-      if (Op1->isToken() && Op2->isVectorReg() && Op3->isImm()) {
-        StringRef Suffix = Op1->getToken();
+      if ((Op1->isToken() && Op2->isVectorReg() && Op3->isImm()) ||
+          (Op1->isVectorReg() && Op2->isToken() && Op3->isImm())) {
+        StringRef Suffix = Op1->isToken() ? Op1->getToken() : Op2->getToken();
+        // Canonicalize on lower-case for ease of comparison.
+        std::string CanonicalSuffix = Suffix.lower();
         if (Tok != "movi" ||
-            (Suffix != ".1d" && Suffix != ".2d" &&
-             Suffix != ".8b" && Suffix != ".16b"))
+            (CanonicalSuffix != ".1d" && CanonicalSuffix != ".2d" &&
+             CanonicalSuffix != ".8b" && CanonicalSuffix != ".16b"))
           Operands.push_back(ARM64Operand::CreateShifter(ARM64_AM::LSL, 0,
                                                          IDLoc, IDLoc,
                                                          getContext()));
@@ -4444,8 +4442,16 @@ MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode, OperandVector &Operands,
   }
 
   MCInst Inst;
-  unsigned MatchResult = MatchInstructionImpl(Operands, Inst, ErrorInfo,
-					      MatchingInlineAsm);
+  // First try to match against the secondary set of tables containing the
+  // short-form NEON instructions (e.g. "fadd.2s v0, v1, v2").
+  unsigned MatchResult =
+    MatchInstructionImpl(Operands, Inst, ErrorInfo, MatchingInlineAsm, 1);
+
+  // If that fails, try against the alternate table containing long-form NEON:
+  // "fadd v0.2s, v1.2s, v2.2s"
+  if (MatchResult != Match_Success)
+    MatchResult =
+        MatchInstructionImpl(Operands, Inst, ErrorInfo, MatchingInlineAsm, 0);
 
   switch (MatchResult) {
   case Match_Success: {

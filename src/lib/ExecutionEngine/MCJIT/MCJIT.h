@@ -45,6 +45,15 @@ public:
     return ClientMM->allocateDataSection(Size, Alignment,
                                          SectionID, SectionName, IsReadOnly);
   }
+  
+  virtual void reserveAllocationSpace(
+    uintptr_t CodeSize, uintptr_t DataSizeRO, uintptr_t DataSizeRW) {
+    return ClientMM->reserveAllocationSpace(CodeSize, DataSizeRO, DataSizeRW);
+  }
+  
+  virtual bool needsToReserveAllocationSpace() {
+    return ClientMM->needsToReserveAllocationSpace();
+  }
 
   virtual void notifyObjectLoaded(ExecutionEngine *EE,
                                   const ObjectImage *Obj) {
@@ -206,8 +215,10 @@ class MCJIT : public ExecutionEngine {
 
   OwningModuleContainer OwnedModules;
 
-  typedef DenseMap<Module *, ObjectImage *> LoadedObjectMap;
-  LoadedObjectMap  LoadedObjects;
+  SmallVector<object::Archive*, 2> Archives;
+
+  typedef SmallVector<ObjectImage *, 2> LoadedObjectList;
+  LoadedObjectList  LoadedObjects;
 
   // An optional ObjectCache to be notified of compiled objects and used to
   // perform lookup of pre-compiled code to avoid re-compilation.
@@ -227,6 +238,8 @@ public:
   /// @name ExecutionEngine interface implementation
   /// @{
   virtual void addModule(Module *M);
+  virtual void addObjectFile(object::ObjectFile *O);
+  virtual void addArchive(object::Archive *O);
   virtual bool removeModule(Module *M);
 
   /// FindFunctionNamed - Search all of the active modules to find the one that
@@ -236,6 +249,10 @@ public:
 
   /// Sets the object manager that MCJIT should use to avoid compilation.
   virtual void setObjectCache(ObjectCache *manager);
+
+  void setProcessAllSections(bool ProcessAllSections) override {
+    Dyld.setProcessAllSections(ProcessAllSections);
+  }
 
   virtual void generateCodeForModule(Module *M);
 
@@ -297,6 +314,8 @@ public:
   virtual uint64_t getGlobalValueAddress(const std::string &Name);
   virtual uint64_t getFunctionAddress(const std::string &Name);
 
+  virtual TargetMachine *getTargetMachine() { return TM; }
+
   /// @}
   /// @name (Private) Registration Interfaces
   /// @{
@@ -322,7 +341,7 @@ protected:
   /// emitObject -- Generate a JITed object in memory from the specified module
   /// Currently, MCJIT only supports a single module and the module passed to
   /// this function call is expected to be the contained module.  The module
-  /// is passed as a parameter here to prepare for multiple module support in 
+  /// is passed as a parameter here to prepare for multiple module support in
   /// the future.
   ObjectBufferStream* emitObject(Module *M);
 

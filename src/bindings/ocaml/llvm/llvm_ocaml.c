@@ -33,6 +33,7 @@ static value llvm_ioerror_exn;
 CAMLprim value llvm_register_core_exns(value IoError) {
   llvm_ioerror_exn = Field(IoError, 0);
   register_global_root(&llvm_ioerror_exn);
+
   return Val_unit;
 }
 
@@ -48,6 +49,30 @@ static void llvm_raise(value Prototype, char *Message) {
 #ifdef CAMLnoreturn
   CAMLnoreturn; /* Silences warnings, but is missing in some versions. */
 #endif
+}
+
+static value llvm_fatal_error_handler;
+
+static void llvm_fatal_error_trampoline(const char *Reason) {
+  callback(llvm_fatal_error_handler, copy_string(Reason));
+}
+
+CAMLprim value llvm_install_fatal_error_handler(value Handler) {
+  LLVMInstallFatalErrorHandler(llvm_fatal_error_trampoline);
+  llvm_fatal_error_handler = Handler;
+  caml_register_global_root(&llvm_fatal_error_handler);
+  return Val_unit;
+}
+
+CAMLprim value llvm_reset_fatal_error_handler(value Unit) {
+  caml_remove_global_root(&llvm_fatal_error_handler);
+  LLVMResetFatalErrorHandler();
+  return Val_unit;
+}
+
+CAMLprim value llvm_enable_pretty_stacktrace(value Unit) {
+  LLVMEnablePrettyStackTrace();
+  return Val_unit;
 }
 
 static value alloc_variant(int tag, void *Value) {
@@ -528,14 +553,14 @@ CAMLprim value llvm_dump_value(LLVMValueRef Val) {
 }
 
 /* llvalue -> string */
-CAMLprim value llvm_string_of_llvalue(LLVMTypeRef M) {
-  char* TypeCStr;
-  TypeCStr = LLVMPrintValueToString(M);
+CAMLprim value llvm_string_of_llvalue(LLVMValueRef M) {
+  char* ValueCStr;
+  ValueCStr = LLVMPrintValueToString(M);
 
-  value TypeStr = caml_copy_string(TypeCStr);
-  LLVMDisposeMessage(TypeCStr);
+  value ValueStr = caml_copy_string(ValueCStr);
+  LLVMDisposeMessage(ValueCStr);
 
-  return TypeStr;
+  return ValueStr;
 }
 
 /* llvalue -> llvalue -> unit */

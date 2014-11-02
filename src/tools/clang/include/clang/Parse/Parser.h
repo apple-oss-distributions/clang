@@ -73,7 +73,7 @@ class Parser : public CodeCompletionHandler {
   SourceLocation PrevTokLocation;
 
   unsigned short ParenCount, BracketCount, BraceCount;
-  
+
   /// Actions - These are the callbacks we invoke as we parse various constructs
   /// in the file.
   Sema &Actions;
@@ -136,9 +136,10 @@ class Parser : public CodeCompletionHandler {
   mutable IdentifierInfo *Ident_final;
   mutable IdentifierInfo *Ident_override;
 
-  // C++ type trait keywords that have can be reverted to identifiers and
-  // still used as type traits.
-  llvm::SmallDenseMap<IdentifierInfo *, tok::TokenKind> RevertableTypeTraits;
+  // Some token kinds such as C++ type traits can be reverted to identifiers and
+  // still get used as keywords depending on context.
+  llvm::SmallDenseMap<const IdentifierInfo *, tok::TokenKind>
+  ContextualKeywords;
 
   OwningPtr<PragmaHandler> AlignHandler;
   OwningPtr<PragmaHandler> GCCVisibilityHandler;
@@ -192,6 +193,10 @@ class Parser : public CodeCompletionHandler {
     void operator++() {
       ++Depth;
       ++AddedLevels;
+    }
+    void addDepth(unsigned D) {
+      Depth += D;
+      AddedLevels += D;
     }
     unsigned getDepth() const { return Depth; }
   };
@@ -268,20 +273,32 @@ public:
   bool ParseTopLevelDecl(DeclGroupPtrTy &Result);
 
   /// ConsumeToken - Consume the current 'peek token' and lex the next one.
-  /// This does not work with all kinds of tokens: strings and specific other
-  /// tokens must be consumed with custom methods below.  This returns the
-  /// location of the consumed token.
-  SourceLocation ConsumeToken(bool ConsumeCodeCompletionTok = false) {
-    assert(!isTokenStringLiteral() && !isTokenParen() && !isTokenBracket() &&
-           !isTokenBrace() &&
+  /// This does not work with special tokens: string literals, code completion
+  /// and balanced tokens must be handled using the specific consume methods.
+  /// Returns the location of the consumed token.
+  SourceLocation ConsumeToken() {
+    assert(!isTokenSpecial() &&
            "Should consume special tokens with Consume*Token");
-
-    if (!ConsumeCodeCompletionTok && Tok.is(tok::code_completion))
-      return handleUnexpectedCodeCompletionToken();
-
     PrevTokLocation = Tok.getLocation();
     PP.Lex(Tok);
     return PrevTokLocation;
+  }
+
+  bool TryConsumeToken(tok::TokenKind Expected) {
+    if (Tok.isNot(Expected))
+      return false;
+    assert(!isTokenSpecial() &&
+           "Should consume special tokens with Consume*Token");
+    PrevTokLocation = Tok.getLocation();
+    PP.Lex(Tok);
+    return true;
+  }
+
+  bool TryConsumeToken(tok::TokenKind Expected, SourceLocation &Loc) {
+    if (!TryConsumeToken(Expected))
+      return false;
+    Loc = PrevTokLocation;
+    return true;
   }
 
 private:
@@ -301,11 +318,14 @@ private:
   bool isTokenBrace() const {
     return Tok.getKind() == tok::l_brace || Tok.getKind() == tok::r_brace;
   }
-
   /// isTokenStringLiteral - True if this token is a string-literal.
-  ///
   bool isTokenStringLiteral() const {
     return tok::isStringLiteral(Tok.getKind());
+  }
+  /// isTokenSpecial - True if this token requires special consumption methods.
+  bool isTokenSpecial() const {
+    return isTokenStringLiteral() || isTokenParen() || isTokenBracket() ||
+           isTokenBrace() || Tok.is(tok::code_completion);
   }
 
   /// \brief Returns true if the current token is '=' or is a type of '='.
@@ -318,14 +338,16 @@ private:
   SourceLocation ConsumeAnyToken(bool ConsumeCodeCompletionTok = false) {
     if (isTokenParen())
       return ConsumeParen();
-    else if (isTokenBracket())
+    if (isTokenBracket())
       return ConsumeBracket();
-    else if (isTokenBrace())
+    if (isTokenBrace())
       return ConsumeBrace();
-    else if (isTokenStringLiteral())
+    if (isTokenStringLiteral())
       return ConsumeStringToken();
-    else
-      return ConsumeToken(ConsumeCodeCompletionTok);
+    if (Tok.is(tok::code_completion))
+      return ConsumeCodeCompletionTok ? ConsumeCodeCompletionToken()
+                                      : handleUnexpectedCodeCompletionToken();
+    return ConsumeToken();
   }
 
   /// ConsumeParen - This consume method keeps the paren count up-to-date.
@@ -406,6 +428,14 @@ private:
       PP.setCodeCompletionReached();
     // Cut off parsing by acting as if we reached the end-of-file.
     Tok.setKind(tok::eof);
+  }
+
+  /// \brief Determine if we're at the end of the file or at a transition
+  /// between modules.
+  bool isEofOrEom() {
+    tok::TokenKind Kind = Tok.getKind();
+    return Kind == tok::eof || Kind == tok::annot_module_begin ||
+           Kind == tok::annot_module_end || Kind == tok::annot_module_include;
   }
 
   /// \brief Handle the annotation token produced for #pragma unused(...)
@@ -555,6 +585,19 @@ private:
                                 const char *&PrevSpec, unsigned &DiagID,
                                 bool &isInvalid);
 
+  /// TryKeywordIdentFallback - For compatibility with system headers using
+  /// keywords as identifiers, attempt to convert the current token to an
+  /// identifier and optionally disable the keyword for the remainder of the
+  /// translation unit. This returns false if the token was not replaced,
+  /// otherwise emits a diagnostic and returns true.
+  bool TryKeywordIdentFallback(bool DisableKeyword);
+
+  /// TryIdentKeywordUpgrade - Convert the current identifier token back to
+  /// its original kind and return true if it was disabled by
+  /// TryKeywordIdentFallback(), otherwise return false. Use this to
+  /// contextually enable keywords.
+  bool TryIdentKeywordUpgrade();
+
   /// \brief Get the TemplateIdAnnotation from the token.
   TemplateIdAnnotation *takeTemplateIdAnnotation(const Token &tok);
 
@@ -634,12 +677,14 @@ private:
   /// ExpectAndConsume - The parser expects that 'ExpectedTok' is next in the
   /// input.  If so, it is consumed and false is returned.
   ///
-  /// If the input is malformed, this emits the specified diagnostic.  Next, if
-  /// SkipToTok is specified, it calls SkipUntil(SkipToTok).  Finally, true is
+  /// If a trivial punctuator misspelling is encountered, a FixIt error
+  /// diagnostic is issued and false is returned after recovery.
+  ///
+  /// If the input is malformed, this emits the specified diagnostic and true is
   /// returned.
-  bool ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned Diag,
-                        const char *DiagMsg = "",
-                        tok::TokenKind SkipToTok = tok::unknown);
+  bool ExpectAndConsume(tok::TokenKind ExpectedTok,
+                        unsigned Diag = diag::err_expected,
+                        const char *DiagMsg = "");
 
   /// \brief The parser expects a semicolon and, if present, will consume it.
   ///
@@ -736,32 +781,45 @@ private:
   void CheckNestedObjCContexts(SourceLocation AtLoc);
 
 public:
+
+  /// \brief Control flags for SkipUntil functions.
+  enum SkipUntilFlags {
+    StopAtSemi = 1 << 0,  ///< Stop skipping at semicolon
+    /// \brief Stop skipping at specified token, but don't skip the token itself
+    StopBeforeMatch = 1 << 1,
+    StopAtCodeCompletion = 1 << 2 ///< Stop at code completion
+  };
+
+  friend LLVM_CONSTEXPR SkipUntilFlags operator|(SkipUntilFlags L,
+                                                 SkipUntilFlags R) {
+    return static_cast<SkipUntilFlags>(static_cast<unsigned>(L) |
+                                       static_cast<unsigned>(R));
+  }
+
   /// SkipUntil - Read tokens until we get to the specified token, then consume
-  /// it (unless DontConsume is true).  Because we cannot guarantee that the
-  /// token will ever occur, this skips to the next token, or to some likely
-  /// good stopping point.  If StopAtSemi is true, skipping will stop at a ';'
-  /// character.
+  /// it (unless StopBeforeMatch is specified).  Because we cannot guarantee
+  /// that the token will ever occur, this skips to the next token, or to some
+  /// likely good stopping point.  If Flags has StopAtSemi flag, skipping will
+  /// stop at a ';' character.
   ///
   /// If SkipUntil finds the specified token, it returns true, otherwise it
   /// returns false.
-  bool SkipUntil(tok::TokenKind T, bool StopAtSemi = true,
-                 bool DontConsume = false, bool StopAtCodeCompletion = false) {
-    return SkipUntil(llvm::makeArrayRef(T), StopAtSemi, DontConsume,
-                     StopAtCodeCompletion);
+  bool SkipUntil(tok::TokenKind T,
+                 SkipUntilFlags Flags = static_cast<SkipUntilFlags>(0)) {
+    return SkipUntil(llvm::makeArrayRef(T), Flags);
   }
-  bool SkipUntil(tok::TokenKind T1, tok::TokenKind T2, bool StopAtSemi = true,
-                 bool DontConsume = false, bool StopAtCodeCompletion = false) {
+  bool SkipUntil(tok::TokenKind T1, tok::TokenKind T2,
+                 SkipUntilFlags Flags = static_cast<SkipUntilFlags>(0)) {
     tok::TokenKind TokArray[] = {T1, T2};
-    return SkipUntil(TokArray, StopAtSemi, DontConsume,StopAtCodeCompletion);
+    return SkipUntil(TokArray, Flags);
   }
   bool SkipUntil(tok::TokenKind T1, tok::TokenKind T2, tok::TokenKind T3,
-                 bool StopAtSemi = true, bool DontConsume = false,
-                 bool StopAtCodeCompletion = false) {
+                 SkipUntilFlags Flags = static_cast<SkipUntilFlags>(0)) {
     tok::TokenKind TokArray[] = {T1, T2, T3};
-    return SkipUntil(TokArray, StopAtSemi, DontConsume,StopAtCodeCompletion);
+    return SkipUntil(TokArray, Flags);
   }
-  bool SkipUntil(ArrayRef<tok::TokenKind> Toks, bool StopAtSemi = true,
-                 bool DontConsume = false, bool StopAtCodeCompletion = false);
+  bool SkipUntil(ArrayRef<tok::TokenKind> Toks,
+                 SkipUntilFlags Flags = static_cast<SkipUntilFlags>(0));
 
   /// SkipMalformedDecl - Read tokens until we get to some likely good stopping
   /// point for skipping past a simple-declaration.
@@ -1584,8 +1642,26 @@ private:
     DSC_class,  // class context, enables 'friend'
     DSC_type_specifier, // C++ type-specifier-seq or C specifier-qualifier-list
     DSC_trailing, // C++11 trailing-type-specifier in a trailing return type
+    DSC_alias_declaration, // C++11 type-specifier-seq in an alias-declaration
     DSC_top_level // top-level/namespace declaration context
   };
+
+  /// Is this a context in which we are parsing just a type-specifier (or
+  /// trailing-type-specifier)?
+  static bool isTypeSpecifier(DeclSpecContext DSC) {
+    switch (DSC) {
+    case DSC_normal:
+    case DSC_class:
+    case DSC_top_level:
+      return false;
+
+    case DSC_type_specifier:
+    case DSC_trailing:
+    case DSC_alias_declaration:
+      return true;
+    }
+    llvm_unreachable("Missing DeclSpecContext case");
+  }
 
   /// Information on a C++0x for-range-initializer found while parsing a
   /// declaration which turns out to be a for-range-declaration.
@@ -1712,6 +1788,7 @@ private:
   /// disambiguation will occur.
   enum TentativeCXXTypeIdContext {
     TypeIdInParens,
+    TypeIdUnambiguous,
     TypeIdAsTemplateArgument
   };
 
@@ -1728,6 +1805,16 @@ private:
   bool isTypeIdInParens() {
     bool isAmbiguous;
     return isTypeIdInParens(isAmbiguous);
+  }
+
+  /// \brief Checks if the current tokens form type-id or expression.
+  /// It is similar to isTypeIdInParens but does not suppose that type-id
+  /// is in parenthesis.
+  bool isTypeIdUnambiguously() {
+    bool IsAmbiguous;
+    if (getLangOpts().CPlusPlus)
+      return isCXXTypeId(TypeIdUnambiguous, IsAmbiguous);
+    return isTypeSpecifierQualifier();
   }
 
   /// isCXXDeclarationStatement - C++-specialized function that disambiguates
@@ -1892,7 +1979,7 @@ private:
     if (Tok.is(tok::kw___attribute)) {
       ParsedAttributes attrs(AttrFactory);
       SourceLocation endLoc;
-      ParseGNUAttributes(attrs, &endLoc, LateAttrs);
+      ParseGNUAttributes(attrs, &endLoc, LateAttrs, &D);
       D.takeAttributes(attrs, endLoc);
     }
   }
@@ -1904,14 +1991,16 @@ private:
   }
   void ParseGNUAttributes(ParsedAttributes &attrs,
                           SourceLocation *endLoc = 0,
-                          LateParsedAttrList *LateAttrs = 0);
+                          LateParsedAttrList *LateAttrs = 0,
+                          Declarator *D = 0);
   void ParseGNUAttributeArgs(IdentifierInfo *AttrName,
                              SourceLocation AttrNameLoc,
                              ParsedAttributes &Attrs,
                              SourceLocation *EndLoc,
                              IdentifierInfo *ScopeName,
                              SourceLocation ScopeLoc,
-                             AttributeList::Syntax Syntax);
+                             AttributeList::Syntax Syntax,
+                             Declarator *D);
   IdentifierLoc *ParseIdentifierLoc();
 
   void MaybeParseCXX11Attributes(Declarator &D) {
@@ -1964,7 +2053,7 @@ private:
   void ParseMicrosoftInheritanceClassAttributes(ParsedAttributes &attrs);
   void ParseBorlandTypeAttributes(ParsedAttributes &attrs);
   void ParseOpenCLAttributes(ParsedAttributes &attrs);
-  void ParseOpenCLQualifiers(DeclSpec &DS);
+  void ParseOpenCLQualifiers(ParsedAttributes &Attrs);
 
   VersionTuple ParseVersionTuple(SourceRange &Range);
   void ParseAvailabilityAttribute(IdentifierInfo &Availability,
@@ -1976,12 +2065,6 @@ private:
                                        SourceLocation ObjCBridgeRelatedLoc,
                                        ParsedAttributes &attrs,
                                        SourceLocation *endLoc);
-
-  bool IsThreadSafetyAttribute(StringRef AttrName);
-  void ParseThreadSafetyAttribute(IdentifierInfo &AttrName,
-                                  SourceLocation AttrNameLoc,
-                                  ParsedAttributes &Attrs,
-                                  SourceLocation *EndLoc);
 
   void ParseTypeTagForDatatypeAttribute(IdentifierInfo &AttrName,
                                         SourceLocation AttrNameLoc,
@@ -2056,7 +2139,8 @@ private:
 
   void ParseTypeQualifierListOpt(DeclSpec &DS, bool GNUAttributesAllowed = true,
                                  bool CXX11AttributesAllowed = true,
-                                 bool AtomicAllowed = true);
+                                 bool AtomicAllowed = true,
+                                 bool IdentifierRequired = false);
   void ParseDirectDeclarator(Declarator &D);
   void ParseParenDeclarator(Declarator &D);
   void ParseFunctionDeclarator(Declarator &D,
@@ -2279,9 +2363,7 @@ private:
   DeclGroupPtrTy ParseModuleImport(SourceLocation AtLoc);
 
   //===--------------------------------------------------------------------===//
-  // GNU G++: Type Traits [Type-Traits.html in the GCC manual]
-  ExprResult ParseUnaryTypeTrait();
-  ExprResult ParseBinaryTypeTrait();
+  // C++11/G++: Type Traits [Type-Traits.html in the GCC manual]
   ExprResult ParseTypeTrait();
   
   //===--------------------------------------------------------------------===//

@@ -52,15 +52,12 @@ ARM64TargetMachine::ARM64TargetMachine(const Target &T, StringRef TT,
                                        const TargetOptions &Options,
                                        Reloc::Model RM, CodeModel::Model CM,
                                        CodeGenOpt::Level OL)
-  : LLVMTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
-    Subtarget(TT, CPU, FS),
-    DL(std::string("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
-                   "i64:64:64-f32:32:32-f64:64:64-f128:128:128-v64:64:64-"
-                   "v128:128:128-a0:0:64-n32:64-S128")),
-    InstrInfo(Subtarget),
-    TLInfo(*this),
-    FrameLowering(*this, Subtarget),
-    TSInfo(*this) {
+    : LLVMTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
+      Subtarget(TT, CPU, FS), DL(Subtarget.isTargetMachO()
+                                     ? "e-m:o-i64:64-i128:128-n32:64-S128"
+                                     : "e-m:e-i64:64-i128:128-n32:64-S128"),
+      InstrInfo(Subtarget), TLInfo(*this), FrameLowering(*this, Subtarget),
+      TSInfo(*this) {
   initAsmInfo();
 }
 

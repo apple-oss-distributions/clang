@@ -13,14 +13,10 @@
 #include "AMDGPU.h"
 #include "AMDGPUInstrInfo.h"
 #include "R600InstrInfo.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/DepthFirstIterator.h"
-#include "llvm/Analysis/DominatorInternals.h"
-#include "llvm/Analysis/Dominators.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionAnalysis.h"
@@ -30,6 +26,9 @@
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachinePostDominators.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetMachine.h"
 
@@ -53,6 +52,10 @@ STATISTIC(numLoopcontPatternMatch,  "CFGStructurizer number of loop-continue "
     "pattern matched");
 STATISTIC(numClonedBlock,           "CFGStructurizer cloned blocks");
 STATISTIC(numClonedInstr,           "CFGStructurizer cloned instructions");
+
+namespace llvm {
+  void initializeAMDGPUCFGStructurizerPass(PassRegistry&);
+}
 
 //===----------------------------------------------------------------------===//
 //
@@ -131,13 +134,13 @@ public:
 
   static char ID;
 
-  AMDGPUCFGStructurizer(TargetMachine &tm) :
-      MachineFunctionPass(ID), TM(tm),
-      TII(static_cast<const R600InstrInfo *>(tm.getInstrInfo())),
-      TRI(&TII->getRegisterInfo()) { }
+  AMDGPUCFGStructurizer() :
+      MachineFunctionPass(ID), TII(NULL), TRI(NULL) {
+    initializeAMDGPUCFGStructurizerPass(*PassRegistry::getPassRegistry());
+  }
 
    const char *getPassName() const {
-    return "AMD IL Control Flow Graph structurizer Pass";
+    return "AMDGPU Control Flow Graph structurizer Pass";
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const {
@@ -157,6 +160,8 @@ public:
   bool prepare();
 
   bool runOnMachineFunction(MachineFunction &MF) {
+    TII = static_cast<const R600InstrInfo *>(MF.getTarget().getInstrInfo());
+    TRI = &TII->getRegisterInfo();
     DEBUG(MF.dump(););
     OrderedBlks.clear();
     FuncRep = &MF;
@@ -173,7 +178,6 @@ public:
   }
 
 protected:
-  TargetMachine &TM;
   MachineDominatorTree *MDT;
   MachinePostDominatorTree *PDT;
   MachineLoopInfo *MLI;
@@ -1005,13 +1009,14 @@ int AMDGPUCFGStructurizer::ifPatternMatch(MachineBasicBlock *MBB) {
     return 0;
 
   assert(isCondBranch(BranchMI));
+  int NumMatch = 0;
 
   MachineBasicBlock *TrueMBB = getTrueBranch(BranchMI);
-  serialPatternMatch(TrueMBB);
-  ifPatternMatch(TrueMBB);
+  NumMatch += serialPatternMatch(TrueMBB);
+  NumMatch += ifPatternMatch(TrueMBB);
   MachineBasicBlock *FalseMBB = getFalseBranch(MBB, BranchMI);
-  serialPatternMatch(FalseMBB);
-  ifPatternMatch(FalseMBB);
+  NumMatch += serialPatternMatch(FalseMBB);
+  NumMatch += ifPatternMatch(FalseMBB);
   MachineBasicBlock *LandBlk;
   int Cloned = 0;
 
@@ -1040,7 +1045,7 @@ int AMDGPUCFGStructurizer::ifPatternMatch(MachineBasicBlock *MBB) {
     && isSameloopDetachedContbreak(FalseMBB, TrueMBB)) {
     LandBlk = *TrueMBB->succ_begin();
   } else {
-    return handleJumpintoIf(MBB, TrueMBB, FalseMBB);
+    return NumMatch + handleJumpintoIf(MBB, TrueMBB, FalseMBB);
   }
 
   // improveSimpleJumpinfoIf can handle the case where landBlk == NULL but the
@@ -1068,7 +1073,7 @@ int AMDGPUCFGStructurizer::ifPatternMatch(MachineBasicBlock *MBB) {
 
   numClonedBlock += Cloned;
 
-  return 1 + Cloned;
+  return 1 + Cloned + NumMatch;
 }
 
 int AMDGPUCFGStructurizer::loopendPatternMatch() {
@@ -1898,6 +1903,14 @@ char AMDGPUCFGStructurizer::ID = 0;
 } // end anonymous namespace
 
 
-FunctionPass *llvm::createAMDGPUCFGStructurizerPass(TargetMachine &tm) {
-  return new AMDGPUCFGStructurizer(tm);
+INITIALIZE_PASS_BEGIN(AMDGPUCFGStructurizer, "amdgpustructurizer",
+                      "AMDGPU CFG Structurizer", false, false)
+INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
+INITIALIZE_PASS_DEPENDENCY(MachinePostDominatorTree)
+INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
+INITIALIZE_PASS_END(AMDGPUCFGStructurizer, "amdgpustructurizer",
+                      "AMDGPU CFG Structurizer", false, false)
+
+FunctionPass *llvm::createAMDGPUCFGStructurizerPass() {
+  return new AMDGPUCFGStructurizer();
 }

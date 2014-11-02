@@ -247,6 +247,7 @@ ARM64LoadStoreOpt::mergePairedInsns(MachineBasicBlock::iterator I,
     .addOperand(Rt2MI->getOperand(0))
     .addOperand(BaseRegOp)
     .addImm(OffsetImm);
+  (void)MIB;
 
   // FIXME: Do we need/want to copy the mem operands from the source
   //        instructions? Probably. What uses them after this?
@@ -475,6 +476,7 @@ ARM64LoadStoreOpt::mergePreIdxUpdateInsn(MachineBasicBlock::iterator I,
     .addOperand(I->getOperand(0))
     .addOperand(I->getOperand(1))
     .addImm(Value);
+  (void)MIB;
 
   DEBUG(dbgs() << "Creating pre-indexed load/store.");
   DEBUG(dbgs() << "    Replacing instructions:\n    ");
@@ -517,6 +519,7 @@ ARM64LoadStoreOpt::mergePostIdxUpdateInsn(MachineBasicBlock::iterator I,
     .addOperand(I->getOperand(0))
     .addOperand(I->getOperand(1))
     .addImm(Value);
+  (void)MIB;
 
   DEBUG(dbgs() << "Creating post-indexed load/store.");
   DEBUG(dbgs() << "    Replacing instructions:\n    ");

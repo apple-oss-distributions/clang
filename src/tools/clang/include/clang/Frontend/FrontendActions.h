@@ -17,6 +17,7 @@
 namespace clang {
 
 class Module;
+class FileEntry;
   
 //===----------------------------------------------------------------------===//
 // Custom Consumer Actions
@@ -93,6 +94,7 @@ public:
 
 class GenerateModuleAction : public ASTFrontendAction {
   clang::Module *Module;
+  const FileEntry *ModuleMapForUniquing;
   bool IsSystem;
   
 protected:
@@ -106,8 +108,10 @@ protected:
   virtual bool hasASTFileSupport() const { return false; }
   
 public:
-  explicit GenerateModuleAction(bool IsSystem = false)
-    : ASTFrontendAction(), IsSystem(IsSystem) { }
+  GenerateModuleAction(const FileEntry *ModuleMap = nullptr,
+                       bool IsSystem = false)
+    : ASTFrontendAction(), ModuleMapForUniquing(ModuleMap), IsSystem(IsSystem)
+  { }
 
   virtual bool BeginSourceFileAction(CompilerInstance &CI, StringRef Filename);
   
@@ -115,11 +119,11 @@ public:
   /// create the PCHGenerator instance returned by CreateASTConsumer.
   ///
   /// \returns true if an error occurred, false otherwise.
-  static bool ComputeASTConsumerArguments(CompilerInstance &CI,
-                                          StringRef InFile,
-                                          std::string &Sysroot,
-                                          std::string &OutputFile,
-                                          raw_ostream *&OS);
+  bool ComputeASTConsumerArguments(CompilerInstance &CI,
+                                   StringRef InFile,
+                                   std::string &Sysroot,
+                                   std::string &OutputFile,
+                                   raw_ostream *&OS);
 };
 
 class SyntaxOnlyAction : public ASTFrontendAction {
@@ -143,6 +147,17 @@ public:
   virtual bool hasPCHSupport() const { return false; }
   virtual bool hasASTFileSupport() const { return true; }
   virtual bool hasIRSupport() const { return false; }
+  virtual bool hasCodeCompletionSupport() const { return false; }
+};
+
+class VerifyPCHAction : public ASTFrontendAction {
+protected:
+  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
+                                         StringRef InFile);
+
+  virtual void ExecuteAction();
+
+public:
   virtual bool hasCodeCompletionSupport() const { return false; }
 };
 

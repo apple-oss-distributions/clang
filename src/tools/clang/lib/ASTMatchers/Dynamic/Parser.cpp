@@ -12,13 +12,13 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#include <string>
-#include <vector>
-
 #include "clang/ASTMatchers/Dynamic/Parser.h"
 #include "clang/ASTMatchers/Dynamic/Registry.h"
 #include "clang/Basic/CharInfo.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/Twine.h"
+#include <string>
+#include <vector>
 
 namespace clang {
 namespace ast_matchers {
@@ -242,6 +242,9 @@ bool Parser::parseMatcherExpressionImpl(VariantValue *Value) {
     return false;
   }
 
+  llvm::Optional<MatcherCtor> Ctor =
+      S->lookupMatcherCtor(NameToken.Text, NameToken.Range, Error);
+
   std::vector<ParserValue> Args;
   TokenInfo EndToken;
   while (Tokenizer->nextTokenKind() != TokenInfo::TK_Eof) {
@@ -306,13 +309,16 @@ bool Parser::parseMatcherExpressionImpl(VariantValue *Value) {
     BindID = IDToken.Value.getString();
   }
 
+  if (!Ctor)
+    return false;
+
   // Merge the start and end infos.
   Diagnostics::Context Ctx(Diagnostics::Context::ConstructMatcher, Error,
                            NameToken.Text, NameToken.Range);
   SourceRange MatcherRange = NameToken.Range;
   MatcherRange.End = EndToken.Range.End;
   VariantMatcher Result = S->actOnMatcherExpression(
-      NameToken.Text, MatcherRange, BindID, Args, Error);
+      *Ctor, MatcherRange, BindID, Args, Error);
   if (Result.isNull()) return false;
 
   *Value = Result;
@@ -358,16 +364,21 @@ Parser::Parser(CodeTokenizer *Tokenizer, Sema *S,
 class RegistrySema : public Parser::Sema {
 public:
   virtual ~RegistrySema() {}
-  VariantMatcher actOnMatcherExpression(StringRef MatcherName,
+  llvm::Optional<MatcherCtor> lookupMatcherCtor(StringRef MatcherName,
+                                                const SourceRange &NameRange,
+                                                Diagnostics *Error) {
+    return Registry::lookupMatcherCtor(MatcherName, NameRange, Error);
+  }
+  VariantMatcher actOnMatcherExpression(MatcherCtor Ctor,
                                         const SourceRange &NameRange,
                                         StringRef BindID,
                                         ArrayRef<ParserValue> Args,
                                         Diagnostics *Error) {
     if (BindID.empty()) {
-      return Registry::constructMatcher(MatcherName, NameRange, Args, Error);
+      return Registry::constructMatcher(Ctor, NameRange, Args, Error);
     } else {
-      return Registry::constructBoundMatcher(MatcherName, NameRange, BindID,
-                                             Args, Error);
+      return Registry::constructBoundMatcher(Ctor, NameRange, BindID, Args,
+                                             Error);
     }
   }
 };

@@ -18,9 +18,10 @@
 #include "X86.h"
 #include "X86TargetMachine.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/CostTable.h"
+#include "llvm/Target/TargetLowering.h"
 using namespace llvm;
 
 // Declare the pass initialization routine locally as target-specific passes
@@ -32,7 +33,7 @@ void initializeX86TTIPass(PassRegistry &);
 
 namespace {
 
-class X86TTI : public ImmutablePass, public TargetTransformInfo {
+class X86TTI LLVM_FINAL : public ImmutablePass, public TargetTransformInfo {
   const X86Subtarget *ST;
   const X86TargetLowering *TLI;
 
@@ -46,12 +47,12 @@ public:
   }
 
   X86TTI(const X86TargetMachine *TM)
-      : ImmutablePass(ID), ST(TM->getSubtargetImpl()),
-        TLI(TM->getTargetLowering()) {
+    : ImmutablePass(ID), ST(TM->getSubtargetImpl()),
+      TLI(TM->getTargetLowering()) {
     initializeX86TTIPass(*PassRegistry::getPassRegistry());
   }
 
-  virtual void initializePass() {
+  virtual void initializePass() LLVM_OVERRIDE {
     pushTTIStack(this);
   }
 
@@ -59,7 +60,7 @@ public:
     popTTIStack();
   }
 
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+  virtual void getAnalysisUsage(AnalysisUsage &AU) const LLVM_OVERRIDE {
     TargetTransformInfo::getAnalysisUsage(AU);
   }
 
@@ -67,7 +68,7 @@ public:
   static char ID;
 
   /// Provide necessary pointer adjustments for the two base classes.
-  virtual void *getAdjustedAnalysisPointer(const void *ID) {
+  virtual void *getAdjustedAnalysisPointer(const void *ID) LLVM_OVERRIDE {
     if (ID == &TargetTransformInfo::ID)
       return (TargetTransformInfo*)this;
     return this;
@@ -75,35 +76,44 @@ public:
 
   /// \name Scalar TTI Implementations
   /// @{
-  virtual PopcntSupportKind getPopcntSupport(unsigned TyWidth) const;
+  virtual PopcntSupportKind
+  getPopcntSupport(unsigned TyWidth) const LLVM_OVERRIDE;
 
   /// @}
 
   /// \name Vector TTI Implementations
   /// @{
 
-  virtual unsigned getNumberOfRegisters(bool Vector) const;
-  virtual unsigned getRegisterBitWidth(bool Vector) const;
-  virtual unsigned getMaximumUnrollFactor() const;
-  virtual unsigned getArithmeticInstrCost(unsigned Opcode, Type *Ty,
-                                          OperandValueKind,
-                                          OperandValueKind) const;
-  virtual unsigned getShuffleCost(ShuffleKind Kind, Type *Tp,
-                                  int Index, Type *SubTp) const;
-  virtual unsigned getCastInstrCost(unsigned Opcode, Type *Dst,
-                                    Type *Src) const;
-  virtual unsigned getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
-                                      Type *CondTy) const;
-  virtual unsigned getVectorInstrCost(unsigned Opcode, Type *Val,
-                                      unsigned Index) const;
-  virtual unsigned getMemoryOpCost(unsigned Opcode, Type *Src,
-                                   unsigned Alignment,
-                                   unsigned AddressSpace) const;
+  unsigned getNumberOfRegisters(bool Vector) const override;
+  unsigned getRegisterBitWidth(bool Vector) const override;
+  unsigned getMaximumUnrollFactor() const override;
+  unsigned getArithmeticInstrCost(unsigned Opcode, Type *Ty, OperandValueKind,
+                                  OperandValueKind) const override;
+  unsigned getShuffleCost(ShuffleKind Kind, Type *Tp,
+                          int Index, Type *SubTp) const override;
+  unsigned getCastInstrCost(unsigned Opcode, Type *Dst,
+                            Type *Src) const override;
+  unsigned getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
+                              Type *CondTy) const override;
+  unsigned getVectorInstrCost(unsigned Opcode, Type *Val,
+                              unsigned Index) const override;
+  unsigned getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
+                           unsigned AddressSpace) const override;
 
-  virtual unsigned getAddressComputationCost(Type *PtrTy, bool IsComplex) const;
-  
-  virtual unsigned getReductionCost(unsigned Opcode, Type *Ty,
-                                    bool IsPairwiseForm) const;
+  unsigned getAddressComputationCost(Type *PtrTy,
+                                     bool IsComplex) const override;
+
+  unsigned getReductionCost(unsigned Opcode, Type *Ty,
+                            bool IsPairwiseForm) const override;
+
+  unsigned getIntImmCost(int64_t) const;
+
+  unsigned getIntImmCost(const APInt &Imm, Type *Ty) const override;
+
+  unsigned getIntImmCost(unsigned Opcode, unsigned Idx, const APInt &Imm,
+                         Type *Ty) const override;
+  unsigned getIntImmCost(Intrinsic::ID IID, unsigned Idx, const APInt &Imm,
+                         Type *Ty) const override;
 
   /// @}
 };
@@ -214,6 +224,13 @@ unsigned X86TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
 
   // Look for AVX2 lowering tricks.
   if (ST->hasAVX2()) {
+    if (ISD == ISD::SHL && LT.second == MVT::v16i16 &&
+        (Op2Info == TargetTransformInfo::OK_UniformConstantValue ||
+         Op2Info == TargetTransformInfo::OK_NonUniformConstantValue))
+      // On AVX2, a packed v16i16 shift left by a constant build_vector
+      // is lowered into a vector multiply (vpmullw).
+      return LT.first;
+
     int Idx = CostTableLookup(AVX2CostTable, ISD, LT.second);
     if (Idx != -1)
       return LT.first * AVX2CostTable[Idx].Cost;
@@ -246,6 +263,20 @@ unsigned X86TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
       return LT.first * SSE2UniformConstCostTable[Idx].Cost;
   }
 
+  if (ISD == ISD::SHL &&
+      Op2Info == TargetTransformInfo::OK_NonUniformConstantValue) {
+    EVT VT = LT.second;
+    if ((VT == MVT::v8i16 && ST->hasSSE2()) ||
+        (VT == MVT::v4i32 && ST->hasSSE41()))
+      // Vector shift left by non uniform constant can be lowered
+      // into vector multiply (pmullw/pmulld).
+      return LT.first;
+    if (VT == MVT::v4i32 && ST->hasSSE2())
+      // A vector shift left by non uniform constant is converted
+      // into a vector multiply; the new multiply is eventually
+      // lowered into a sequence of shuffles and 2 x pmuludq.
+      ISD = ISD::MUL;
+  }
 
   static const CostTblEntry<MVT::SimpleValueType> SSE2CostTable[] = {
     // We don't correctly identify costs of casts because they are marked as
@@ -260,6 +291,7 @@ unsigned X86TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
     { ISD::SHL,  MVT::v8i16,  8*10 }, // Scalarized.
     { ISD::SHL,  MVT::v4i32,  2*5 }, // We optimized this using mul.
     { ISD::SHL,  MVT::v2i64,  2*10 }, // Scalarized.
+    { ISD::SHL,  MVT::v4i64,  4*10 }, // Scalarized. 
 
     { ISD::SRL,  MVT::v16i8,  16*10 }, // Scalarized.
     { ISD::SRL,  MVT::v8i16,  8*10 }, // Scalarized.
@@ -297,6 +329,7 @@ unsigned X86TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
     // We don't have to scalarize unsupported ops. We can issue two half-sized
     // operations and we only need to extract the upper YMM half.
     // Two ops + 1 extract + 1 insert = 4.
+    { ISD::MUL,     MVT::v16i16,   4 },
     { ISD::MUL,     MVT::v8i32,    4 },
     { ISD::SUB,     MVT::v8i32,    4 },
     { ISD::ADD,     MVT::v8i32,    4 },
@@ -312,7 +345,15 @@ unsigned X86TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
 
   // Look for AVX1 lowering tricks.
   if (ST->hasAVX() && !ST->hasAVX2()) {
-    int Idx = CostTableLookup(AVX1CostTable, ISD, LT.second);
+    EVT VT = LT.second;
+
+    // v16i16 and v8i32 shifts by non-uniform constants are lowered into a
+    // sequence of extract + two vector multiply + insert.
+    if (ISD == ISD::SHL && (VT == MVT::v8i32 || VT == MVT::v16i16) &&
+        Op2Info == TargetTransformInfo::OK_NonUniformConstantValue)
+      ISD = ISD::MUL;
+
+    int Idx = CostTableLookup(AVX1CostTable, ISD, VT);
     if (Idx != -1)
       return LT.first * AVX1CostTable[Idx].Cost;
   }
@@ -332,7 +373,7 @@ unsigned X86TTI::getArithmeticInstrCost(unsigned Opcode, Type *Ty,
   // 2x pmuludq, 2x shuffle.
   if (ISD == ISD::MUL && LT.second == MVT::v4i32 && ST->hasSSE2() &&
       !ST->hasSSE41())
-    return 6;
+    return LT.first * 6;
 
   // Fallback to the default implementation.
   return TargetTransformInfo::getArithmeticInstrCost(Opcode, Ty, Op1Info,
@@ -400,16 +441,58 @@ unsigned X86TTI::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) const {
     return TargetTransformInfo::getCastInstrCost(Opcode, Dst, Src);
 
   static const TypeConversionCostTblEntry<MVT::SimpleValueType>
+  AVX2ConversionTbl[] = {
+    { ISD::SIGN_EXTEND, MVT::v16i16, MVT::v16i8,  1 },
+    { ISD::ZERO_EXTEND, MVT::v16i16, MVT::v16i8,  1 },
+    { ISD::SIGN_EXTEND, MVT::v8i32,  MVT::v8i1,   3 },
+    { ISD::ZERO_EXTEND, MVT::v8i32,  MVT::v8i1,   3 },
+    { ISD::SIGN_EXTEND, MVT::v8i32,  MVT::v8i8,   3 },
+    { ISD::ZERO_EXTEND, MVT::v8i32,  MVT::v8i8,   3 },
+    { ISD::SIGN_EXTEND, MVT::v8i32,  MVT::v8i16,  1 },
+    { ISD::ZERO_EXTEND, MVT::v8i32,  MVT::v8i16,  1 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i1,   3 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i1,   3 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i8,   3 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i8,   3 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i16,  3 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i16,  3 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i32,  1 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i32,  1 },
+
+    { ISD::TRUNCATE,    MVT::v4i8,   MVT::v4i64,  2 },
+    { ISD::TRUNCATE,    MVT::v4i16,  MVT::v4i64,  2 },
+    { ISD::TRUNCATE,    MVT::v4i32,  MVT::v4i64,  2 },
+    { ISD::TRUNCATE,    MVT::v8i8,   MVT::v8i32,  2 },
+    { ISD::TRUNCATE,    MVT::v8i16,  MVT::v8i32,  2 },
+    { ISD::TRUNCATE,    MVT::v8i32,  MVT::v8i64,  4 },
+  };
+
+  static const TypeConversionCostTblEntry<MVT::SimpleValueType>
   AVXConversionTbl[] = {
-    { ISD::SIGN_EXTEND, MVT::v16i16, MVT::v16i8, 1 },
-    { ISD::ZERO_EXTEND, MVT::v16i16, MVT::v16i8, 1 },
-    { ISD::SIGN_EXTEND, MVT::v8i32, MVT::v8i16, 1 },
-    { ISD::ZERO_EXTEND, MVT::v8i32, MVT::v8i16, 1 },
-    { ISD::SIGN_EXTEND, MVT::v4i64, MVT::v4i32, 1 },
-    { ISD::ZERO_EXTEND, MVT::v4i64, MVT::v4i32, 1 },
-    { ISD::TRUNCATE,    MVT::v4i32, MVT::v4i64, 1 },
-    { ISD::TRUNCATE,    MVT::v8i16, MVT::v8i32, 1 },
-    { ISD::TRUNCATE,    MVT::v16i8, MVT::v16i16, 2 },
+    { ISD::SIGN_EXTEND, MVT::v16i16, MVT::v16i8, 4 },
+    { ISD::ZERO_EXTEND, MVT::v16i16, MVT::v16i8, 4 },
+    { ISD::SIGN_EXTEND, MVT::v8i32,  MVT::v8i1,  7 },
+    { ISD::ZERO_EXTEND, MVT::v8i32,  MVT::v8i1,  4 },
+    { ISD::SIGN_EXTEND, MVT::v8i32,  MVT::v8i8,  7 },
+    { ISD::ZERO_EXTEND, MVT::v8i32,  MVT::v8i8,  4 },
+    { ISD::SIGN_EXTEND, MVT::v8i32,  MVT::v8i16, 4 },
+    { ISD::ZERO_EXTEND, MVT::v8i32,  MVT::v8i16, 4 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i1,  6 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i1,  4 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i8,  6 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i8,  4 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i16, 6 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i16, 3 },
+    { ISD::SIGN_EXTEND, MVT::v4i64,  MVT::v4i32, 4 },
+    { ISD::ZERO_EXTEND, MVT::v4i64,  MVT::v4i32, 4 },
+
+    { ISD::TRUNCATE,    MVT::v4i8,  MVT::v4i64,  4 },
+    { ISD::TRUNCATE,    MVT::v4i16, MVT::v4i64,  4 },
+    { ISD::TRUNCATE,    MVT::v4i32, MVT::v4i64,  4 },
+    { ISD::TRUNCATE,    MVT::v8i8,  MVT::v8i32,  4 },
+    { ISD::TRUNCATE,    MVT::v8i16, MVT::v8i32,  5 },
+    { ISD::TRUNCATE,    MVT::v16i8, MVT::v16i16, 4 },
+    { ISD::TRUNCATE,    MVT::v8i32, MVT::v8i64,  9 },
 
     { ISD::SINT_TO_FP,  MVT::v8f32, MVT::v8i1,  8 },
     { ISD::SINT_TO_FP,  MVT::v8f32, MVT::v8i8,  8 },
@@ -436,16 +519,31 @@ unsigned X86TTI::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) const {
     { ISD::UINT_TO_FP,  MVT::v4f64, MVT::v4i8,  2 },
     { ISD::UINT_TO_FP,  MVT::v4f64, MVT::v4i16, 2 },
     { ISD::UINT_TO_FP,  MVT::v4f64, MVT::v4i32, 6 },
+    // The generic code to compute the scalar overhead is currently broken.
+    // Workaround this limitation by estimating the scalarization overhead
+    // here. We have roughly 10 instructions per scalar element.
+    // Multiply that by the vector width.
+    // FIXME: remove that when PR19268 is fixed.
+    { ISD::UINT_TO_FP,  MVT::v2f64, MVT::v2i64, 2*10 },
+    { ISD::UINT_TO_FP,  MVT::v4f64, MVT::v4i64, 4*10 },
 
-    { ISD::FP_TO_SINT,  MVT::v8i8,  MVT::v8f32, 1 },
+    { ISD::FP_TO_SINT,  MVT::v8i8,  MVT::v8f32, 7 },
     { ISD::FP_TO_SINT,  MVT::v4i8,  MVT::v4f32, 1 },
-    { ISD::ZERO_EXTEND, MVT::v8i32, MVT::v8i1,  6 },
-    { ISD::SIGN_EXTEND, MVT::v8i32, MVT::v8i1,  9 },
-    { ISD::SIGN_EXTEND, MVT::v4i64, MVT::v4i1,  8 },
-    { ISD::SIGN_EXTEND, MVT::v4i64, MVT::v4i8,  6 },
-    { ISD::SIGN_EXTEND, MVT::v4i64, MVT::v4i16, 6 },
-    { ISD::TRUNCATE,    MVT::v8i32, MVT::v8i64, 3 },
+    // This node is expanded into scalarized operations but BasicTTI is overly
+    // optimistic estimating its cost.  It computes 3 per element (one
+    // vector-extract, one scalar conversion and one vector-insert).  The
+    // problem is that the inserts form a read-modify-write chain so latency
+    // should be factored in too.  Inflating the cost per element by 1.
+    { ISD::FP_TO_UINT,  MVT::v8i32, MVT::v8f32, 8*4 },
+    { ISD::FP_TO_UINT,  MVT::v4i32, MVT::v4f64, 4*4 },
   };
+
+  if (ST->hasAVX2()) {
+    int Idx = ConvertCostTableLookup(AVX2ConversionTbl, ISD,
+                                     DstTy.getSimpleVT(), SrcTy.getSimpleVT());
+    if (Idx != -1)
+      return AVX2ConversionTbl[Idx].Cost;
+  }
 
   if (ST->hasAVX()) {
     int Idx = ConvertCostTableLookup(AVXConversionTbl, ISD, DstTy.getSimpleVT(),
@@ -555,7 +653,7 @@ unsigned X86TTI::getScalarizationOverhead(Type *Ty, bool Insert,
 
 unsigned X86TTI::getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                                  unsigned AddressSpace) const {
-  // Handle non power of two vectors such as <3 x float>
+  // Handle non-power-of-two vectors such as <3 x float>
   if (VectorType *VTy = dyn_cast<VectorType>(Src)) {
     unsigned NumElem = VTy->getVectorNumElements();
 
@@ -570,7 +668,7 @@ unsigned X86TTI::getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
       // Cost = 128 bit store + unpack + 64 bit store.
       return 3;
 
-    // Assume that all other non power-of-two numbers are scalarized.
+    // Assume that all other non-power-of-two numbers are scalarized.
     if (!isPowerOf2_32(NumElem)) {
       unsigned Cost = TargetTransformInfo::getMemoryOpCost(Opcode,
                                                            VTy->getScalarType(),
@@ -692,3 +790,149 @@ unsigned X86TTI::getReductionCost(unsigned Opcode, Type *ValTy,
   return TargetTransformInfo::getReductionCost(Opcode, ValTy, IsPairwise);
 }
 
+/// \brief Calculate the cost of materializing a 64-bit value. This helper
+/// method might only calculate a fraction of a larger immediate. Therefore it
+/// is valid to return a cost of ZERO.
+unsigned X86TTI::getIntImmCost(int64_t Val) const {
+  if (Val == 0)
+    return TCC_Free;
+
+  if (isInt<32>(Val))
+    return TCC_Basic;
+
+  return 2 * TCC_Basic;
+}
+
+unsigned X86TTI::getIntImmCost(const APInt &Imm, Type *Ty) const {
+  assert(Ty->isIntegerTy());
+
+  unsigned BitSize = Ty->getPrimitiveSizeInBits();
+  if (BitSize == 0)
+    return ~0U;
+
+  // Never hoist constants larger than 128bit, because this might lead to
+  // incorrect code generation or assertions in codegen.
+  // Fixme: Create a cost model for types larger than i128 once the codegen
+  // issues have been fixed.
+  if (BitSize > 128)
+    return TCC_Free;
+
+  if (Imm == 0)
+    return TCC_Free;
+
+  // Sign-extend all constants to a multiple of 64-bit.
+  APInt ImmVal = Imm;
+  if (BitSize & 0x3f)
+    ImmVal = Imm.sext((BitSize + 63) & ~0x3fU);
+
+  // Split the constant into 64-bit chunks and calculate the cost for each
+  // chunk.
+  unsigned Cost = 0;
+  for (unsigned ShiftVal = 0; ShiftVal < BitSize; ShiftVal += 64) {
+    APInt Tmp = ImmVal.ashr(ShiftVal).sextOrTrunc(64);
+    int64_t Val = Tmp.getSExtValue();
+    Cost += getIntImmCost(Val);
+  }
+  // We need at least one instruction to materialze the constant.
+  return std::max(1U, Cost);
+}
+
+unsigned X86TTI::getIntImmCost(unsigned Opcode, unsigned Idx, const APInt &Imm,
+                               Type *Ty) const {
+  assert(Ty->isIntegerTy());
+
+  unsigned BitSize = Ty->getPrimitiveSizeInBits();
+  // There is no cost model for constants with a bit size of 0. Return TCC_Free
+  // here, so that constant hoisting will ignore this constant.
+  if (BitSize == 0)
+    return TCC_Free;
+
+  unsigned ImmIdx = ~0U;
+  switch (Opcode) {
+  default: return TCC_Free;
+  case Instruction::GetElementPtr:
+    // Always hoist the base address of a GetElementPtr. This prevents the
+    // creation of new constants for every base constant that gets constant
+    // folded with the offset.
+    if (Idx == 0)
+      return 2 * TCC_Basic;
+    return TCC_Free;
+  case Instruction::Store:
+    ImmIdx = 0;
+    break;
+  case Instruction::Add:
+  case Instruction::Sub:
+  case Instruction::Mul:
+  case Instruction::UDiv:
+  case Instruction::SDiv:
+  case Instruction::URem:
+  case Instruction::SRem:
+  case Instruction::And:
+  case Instruction::Or:
+  case Instruction::Xor:
+  case Instruction::ICmp:
+    ImmIdx = 1;
+    break;
+  // Always return TCC_Free for the shift value of a shift instruction.
+  case Instruction::Shl:
+  case Instruction::LShr:
+  case Instruction::AShr:
+    if (Idx == 1)
+      return TCC_Free;
+    break;
+  case Instruction::Trunc:
+  case Instruction::ZExt:
+  case Instruction::SExt:
+  case Instruction::IntToPtr:
+  case Instruction::PtrToInt:
+  case Instruction::BitCast:
+  case Instruction::PHI:
+  case Instruction::Call:
+  case Instruction::Select:
+  case Instruction::Ret:
+  case Instruction::Load:
+    break;
+  }
+
+  if (Idx == ImmIdx) {
+    unsigned NumConstants = (BitSize + 63) / 64;
+    unsigned Cost = X86TTI::getIntImmCost(Imm, Ty);
+    return (Cost <= NumConstants * TCC_Basic) ? TCC_Free : Cost;
+  }
+
+  return X86TTI::getIntImmCost(Imm, Ty);
+}
+
+unsigned X86TTI::getIntImmCost(Intrinsic::ID IID, unsigned Idx,
+                               const APInt &Imm, Type *Ty) const {
+  assert(Ty->isIntegerTy());
+
+  unsigned BitSize = Ty->getPrimitiveSizeInBits();
+  // There is no cost model for constants with a bit size of 0. Return TCC_Free
+  // here, so that constant hoisting will ignore this constant.
+  if (BitSize == 0)
+    return TCC_Free;
+
+  switch (IID) {
+  default: return TCC_Free;
+  case Intrinsic::sadd_with_overflow:
+  case Intrinsic::uadd_with_overflow:
+  case Intrinsic::ssub_with_overflow:
+  case Intrinsic::usub_with_overflow:
+  case Intrinsic::smul_with_overflow:
+  case Intrinsic::umul_with_overflow:
+    if ((Idx == 1) && Imm.getBitWidth() <= 64 && isInt<32>(Imm.getSExtValue()))
+      return TCC_Free;
+    break;
+  case Intrinsic::experimental_stackmap:
+    if ((Idx < 2) || (Imm.getBitWidth() <= 64 && isInt<64>(Imm.getSExtValue())))
+      return TCC_Free;
+    break;
+  case Intrinsic::experimental_patchpoint_void:
+  case Intrinsic::experimental_patchpoint_i64:
+    if ((Idx < 4) || (Imm.getBitWidth() <= 64 && isInt<64>(Imm.getSExtValue())))
+      return TCC_Free;
+    break;
+  }
+  return X86TTI::getIntImmCost(Imm, Ty);
+}

@@ -13,8 +13,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "CXXABI.h"
-#include "clang/AST/Attr.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/MangleNumberingContext.h"
 #include "clang/AST/RecordLayout.h"
@@ -92,26 +92,43 @@ static bool usesMultipleInheritanceModel(const CXXRecordDecl *RD) {
   return false;
 }
 
-static MSInheritanceModel MSInheritanceAttrToModel(attr::Kind Kind) {
-  switch (Kind) {
-  default: llvm_unreachable("expected MS inheritance attribute");
-  case attr::SingleInheritance:      return MSIM_Single;
-  case attr::MultipleInheritance:    return MSIM_Multiple;
-  case attr::VirtualInheritance:     return MSIM_Virtual;
-  case attr::UnspecifiedInheritance: return MSIM_Unspecified;
-  }
+static MSInheritanceAttr::Spelling
+MSInheritanceAttrToModel(const MSInheritanceAttr *Attr) {
+  if (Attr->IsSingle())
+    return MSInheritanceAttr::Keyword_single_inheritance;
+  else if (Attr->IsMultiple())
+    return MSInheritanceAttr::Keyword_multiple_inheritance;
+  else if (Attr->IsVirtual())
+    return MSInheritanceAttr::Keyword_virtual_inheritance;
+  
+  assert(Attr->IsUnspecified() && "Expected unspecified inheritance attr");
+  return MSInheritanceAttr::Keyword_unspecified_inheritance;
 }
 
-MSInheritanceModel CXXRecordDecl::getMSInheritanceModel() const {
-  if (Attr *IA = this->getAttr<MSInheritanceAttr>())
-    return MSInheritanceAttrToModel(IA->getKind());
-  // If there was no explicit attribute, the record must be defined already, and
-  // we can figure out the inheritance model from its other properties.
-  if (this->getNumVBases() > 0)
-    return MSIM_Virtual;
-  if (usesMultipleInheritanceModel(this))
-    return this->isPolymorphic() ? MSIM_MultiplePolymorphic : MSIM_Multiple;
-  return this->isPolymorphic() ? MSIM_SinglePolymorphic : MSIM_Single;
+static MSInheritanceAttr::Spelling
+calculateInheritanceModel(const CXXRecordDecl *RD) {
+  if (!RD->hasDefinition())
+    return MSInheritanceAttr::Keyword_unspecified_inheritance;
+  if (RD->getNumVBases() > 0)
+    return MSInheritanceAttr::Keyword_virtual_inheritance;
+  if (usesMultipleInheritanceModel(RD))
+    return MSInheritanceAttr::Keyword_multiple_inheritance;
+  return MSInheritanceAttr::Keyword_single_inheritance;
+}
+
+MSInheritanceAttr::Spelling
+CXXRecordDecl::getMSInheritanceModel() const {
+  MSInheritanceAttr *IA = getAttr<MSInheritanceAttr>();
+  assert(IA && "Expected MSInheritanceAttr on the CXXRecordDecl!");
+  return MSInheritanceAttrToModel(IA);
+}
+
+void CXXRecordDecl::setMSInheritanceModel() {
+  if (hasAttr<MSInheritanceAttr>())
+    return;
+
+  addAttr(MSInheritanceAttr::CreateImplicit(
+      getASTContext(), calculateInheritanceModel(this), getSourceRange()));
 }
 
 // Returns the number of pointer and integer slots used to represent a member
@@ -144,9 +161,9 @@ MSInheritanceModel CXXRecordDecl::getMSInheritanceModel() const {
 //   };
 static std::pair<unsigned, unsigned>
 getMSMemberPointerSlots(const MemberPointerType *MPT) {
-  const CXXRecordDecl *RD = MPT->getClass()->getAsCXXRecordDecl();
-  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
-  unsigned Ptrs;
+  const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
+  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
+  unsigned Ptrs = 0;
   unsigned Ints = 0;
   if (MPT->isMemberFunctionPointer()) {
     // Member function pointers are a struct of a function pointer followed by a
@@ -154,26 +171,29 @@ getMSMemberPointerSlots(const MemberPointerType *MPT) {
     // function pointer is a real function if it is non-virtual and a vftable
     // slot thunk if it is virtual.  The ints select the object base passed for
     // the 'this' pointer.
-    Ptrs = 1;  // First slot is always a function pointer.
+    Ptrs = 1; // First slot is always a function pointer.
     switch (Inheritance) {
-    case MSIM_Unspecified: ++Ints;  // VBTableOffset
-    case MSIM_Virtual:     ++Ints;  // VirtualBaseAdjustmentOffset
-    case MSIM_MultiplePolymorphic:
-    case MSIM_Multiple:    ++Ints;  // NonVirtualBaseAdjustment
-    case MSIM_SinglePolymorphic:
-    case MSIM_Single:      break;   // Nothing
+    case MSInheritanceAttr::Keyword_unspecified_inheritance:
+      ++Ints; // VBTableOffset
+    case MSInheritanceAttr::Keyword_virtual_inheritance:
+      ++Ints; // VirtualBaseAdjustmentOffset
+    case MSInheritanceAttr::Keyword_multiple_inheritance:
+      ++Ints; // NonVirtualBaseAdjustment
+    case MSInheritanceAttr::Keyword_single_inheritance:
+      break;  // Nothing
     }
   } else {
     // Data pointers are an aggregate of ints.  The first int is an offset
     // followed by vbtable-related offsets.
-    Ptrs = 0;
+    Ints = 1; // We always have a field offset.
     switch (Inheritance) {
-    case MSIM_Unspecified: ++Ints;  // VBTableOffset
-    case MSIM_Virtual:     ++Ints;  // VirtualBaseAdjustmentOffset
-    case MSIM_MultiplePolymorphic:
-    case MSIM_Multiple:             // Nothing
-    case MSIM_SinglePolymorphic:
-    case MSIM_Single:      ++Ints;  // Field offset
+    case MSInheritanceAttr::Keyword_unspecified_inheritance:
+      ++Ints; // VBTableOffset
+    case MSInheritanceAttr::Keyword_virtual_inheritance:
+      ++Ints; // VirtualBaseAdjustmentOffset
+    case MSInheritanceAttr::Keyword_multiple_inheritance:
+    case MSInheritanceAttr::Keyword_single_inheritance:
+      break;  // Nothing
     }
   }
   return std::make_pair(Ptrs, Ints);
@@ -191,8 +211,20 @@ std::pair<uint64_t, unsigned> MicrosoftCXXABI::getMemberPointerWidthAndAlign(
   unsigned PtrSize = Target.getPointerWidth(0);
   unsigned IntSize = Target.getIntWidth();
   uint64_t Width = Ptrs * PtrSize + Ints * IntSize;
-  unsigned Align = Ptrs > 0 ? Target.getPointerAlign(0) : Target.getIntAlign();
-  Width = llvm::RoundUpToAlignment(Width, Align);
+  unsigned Align;
+
+  // When MSVC does x86_32 record layout, it aligns aggregate member pointers to
+  // 8 bytes.  However, __alignof usually returns 4 for data memptrs and 8 for
+  // function memptrs.
+  if (Ptrs + Ints > 1 && Target.getTriple().getArch() == llvm::Triple::x86)
+    Align = 8 * 8;
+  else if (Ptrs)
+    Align = Target.getPointerAlign(0);
+  else
+    Align = Target.getIntAlign();
+
+  if (Target.getTriple().getArch() == llvm::Triple::x86_64)
+    Width = llvm::RoundUpToAlignment(Width, Align);
   return std::make_pair(Width, Align);
 }
 

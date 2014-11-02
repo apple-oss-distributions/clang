@@ -15,13 +15,13 @@
 // sanitizer_common/sanitizer_common_interceptors.h
 //===----------------------------------------------------------------------===//
 
-#include "interception/interception.h"
 #include "msan.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_interception.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_linux.h"
@@ -284,11 +284,10 @@ INTERCEPTOR(char *, strcat, char *dest, const char *src) {  // NOLINT
 INTERCEPTOR(char *, strncat, char *dest, const char *src, SIZE_T n) {  // NOLINT
   ENSURE_MSAN_INITED();
   SIZE_T dest_size = REAL(strlen)(dest);
-  SIZE_T copy_size = REAL(strlen)(src);
-  if (copy_size < n)
-    copy_size++;  // trailing \0
+  SIZE_T copy_size = REAL(strnlen)(src, n);
   char *res = REAL(strncat)(dest, src, n);  // NOLINT
   __msan_copy_poison(dest + dest_size, src, copy_size);
+  __msan_unpoison(dest + dest_size + copy_size, 1); // \0
   return res;
 }
 
@@ -948,7 +947,7 @@ static int msan_dl_iterate_phdr_cb(__sanitizer_dl_phdr_info *info, SIZE_T size,
   }
   dl_iterate_phdr_data *cbdata = (dl_iterate_phdr_data *)data;
   UnpoisonParam(3);
-  return cbdata->callback(info, size, cbdata->data);
+  return IndirectExternCall(cbdata->callback)(info, size, cbdata->data);
 }
 
 INTERCEPTOR(int, dl_iterate_phdr, dl_iterate_phdr_cb callback, void *data) {
@@ -985,7 +984,7 @@ static void SignalHandler(int signo) {
   typedef void (*signal_cb)(int x);
   signal_cb cb =
       (signal_cb)atomic_load(&sigactions[signo], memory_order_relaxed);
-  cb(signo);
+  IndirectExternCall(cb)(signo);
 }
 
 static void SignalAction(int signo, void *si, void *uc) {
@@ -997,7 +996,7 @@ static void SignalAction(int signo, void *si, void *uc) {
   typedef void (*sigaction_cb)(int, void *, void *);
   sigaction_cb cb =
       (sigaction_cb)atomic_load(&sigactions[signo], memory_order_relaxed);
-  cb(signo, si, uc);
+  IndirectExternCall(cb)(signo, si, uc);
 }
 
 INTERCEPTOR(int, sigaction, int signo, const __sanitizer_sigaction *act,
@@ -1070,6 +1069,11 @@ static void thread_finalize(void *v) {
     return;
   }
   MsanAllocatorThreadFinish();
+  __msan_unpoison((void *)msan_stack_bounds.stack_addr,
+                  msan_stack_bounds.stack_size);
+  if (msan_stack_bounds.tls_size)
+    __msan_unpoison((void *)msan_stack_bounds.tls_addr,
+                    msan_stack_bounds.tls_size);
 }
 
 struct ThreadParam {
@@ -1088,7 +1092,12 @@ static void *MsanThreadStartFunc(void *arg) {
     Die();
   }
   atomic_store(&p->done, 1, memory_order_release);
-  return callback(param);
+
+  GetThreadStackAndTls(/* main */ false, &msan_stack_bounds.stack_addr,
+                       &msan_stack_bounds.stack_size,
+                       &msan_stack_bounds.tls_addr,
+                       &msan_stack_bounds.tls_size);
+  return IndirectExternCall(callback)(param);
 }
 
 INTERCEPTOR(int, pthread_create, void *th, void *attr, void *(*callback)(void*),
@@ -1158,7 +1167,7 @@ struct MSanAtExitRecord {
 void MSanAtExitWrapper(void *arg) {
   UnpoisonParam(1);
   MSanAtExitRecord *r = (MSanAtExitRecord *)arg;
-  r->func(r->arg);
+  IndirectExternCall(r->func)(r->arg);
   InternalFree(r);
 }
 
@@ -1195,8 +1204,8 @@ static void MlockIsUnsupported() {
   static atomic_uint8_t printed;
   if (atomic_exchange(&printed, 1, memory_order_relaxed))
     return;
-  if (common_flags()->verbosity > 0)
-    Printf("INFO: MemorySanitizer ignores mlock/mlockall/munlock/munlockall\n");
+  VPrintf(1,
+          "INFO: MemorySanitizer ignores mlock/mlockall/munlock/munlockall\n");
 }
 
 INTERCEPTOR(int, mlock, const void *addr, uptr len) {
@@ -1234,7 +1243,7 @@ int OnExit() {
 
 extern "C" int *__errno_location(void);
 
-// A version of CHECK_UNPOISED using a saved scope value. Used in common
+// A version of CHECK_UNPOISONED using a saved scope value. Used in common
 // interceptors.
 #define CHECK_UNPOISONED_CTX(ctx, x, n)                         \
   do {                                                          \
@@ -1242,6 +1251,13 @@ extern "C" int *__errno_location(void);
       CHECK_UNPOISONED_0(x, n);                                 \
   } while (0)
 
+#define MSAN_INTERCEPT_FUNC(name)                                       \
+  do {                                                                  \
+    if ((!INTERCEPT_FUNCTION(name) || !REAL(name)))                     \
+      VReport(1, "MemorySanitizer: failed to intercept '" #name "'\n"); \
+  } while (0)
+
+#define COMMON_INTERCEPT_FUNCTION(name) MSAN_INTERCEPT_FUNC(name)
 #define COMMON_INTERCEPTOR_UNPOISON_PARAM(ctx, count)  \
   UnpoisonParam(count)
 #define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
@@ -1275,6 +1291,8 @@ extern "C" int *__errno_location(void);
   } while (false)  // FIXME
 #define COMMON_INTERCEPTOR_BLOCK_REAL(name) REAL(name)
 #define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
+// FIXME: update Msan to use common printf interceptors
+#define SANITIZER_INTERCEPT_PRINTF 0
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 #define COMMON_SYSCALL_PRE_READ_RANGE(p, s) CHECK_UNPOISONED(p, s)

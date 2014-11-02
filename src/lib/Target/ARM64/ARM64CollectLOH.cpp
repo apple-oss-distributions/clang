@@ -57,6 +57,8 @@
 #include "MCTargetDesc/ARM64AddressingModes.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineDominators.h"
@@ -150,23 +152,23 @@ namespace {
   };
 
   /// A set of MachineInstruction.
-  typedef std::set<const MachineInstr *> SetOfMachineInstr;
+  typedef SetVector<const MachineInstr *> SetOfMachineInstr;
   /// Map a basic block to a set of instructions per register.
   /// This is used to represent the exposed uses of a basic block
   /// per register.
-  typedef std::map<const MachineBasicBlock *, SetOfMachineInstr *>
+  typedef MapVector<const MachineBasicBlock *, SetOfMachineInstr *>
   BlockToSetOfInstrsPerColor;
   /// Map a basic block to an instruction per register.
   /// This is used to represent the live-out definitions of a basic block
   /// per register.
-  typedef std::map<const MachineBasicBlock *, const MachineInstr **>
+  typedef MapVector<const MachineBasicBlock *, const MachineInstr **>
   BlockToInstrPerColor;
   /// Map an instruction to a set of instructions. Used to represent the
   /// mapping def to reachable uses or use to definitions.
-  typedef std::map<const MachineInstr *, SetOfMachineInstr > InstrToInstrs;
+  typedef MapVector<const MachineInstr *, SetOfMachineInstr > InstrToInstrs;
   /// Map a basic block to a BitVector.
   /// This is used to record the kill registers per basic block.
-  typedef std::map<const MachineBasicBlock *, BitVector > BlockToRegSet;
+  typedef MapVector<const MachineBasicBlock *, BitVector > BlockToRegSet;
 
   /// Map a register to a dense id.
   typedef DenseMap<unsigned, unsigned> MapRegToId;
@@ -459,7 +461,7 @@ reachingDef(MachineFunction *MF, InstrToInstrs *ColorOpToReachedUses,
   finitReachingDef(In, Out, Gen, ReachableUses);
 }
 
-#ifdef DEBUG
+#ifndef NDEBUG
 /// print the result of the reaching definition algorithm.
 static void
 printReachingDef(const InstrToInstrs *ColorOpToReachedUses,
@@ -485,7 +487,7 @@ printReachingDef(const InstrToInstrs *ColorOpToReachedUses,
     }
   }
 }
-#endif // DEBUG
+#endif // NDEBUG
 
 /// Answer the following question: Can Def be one of the definition
 /// involved in a part of a LOH?
@@ -595,7 +597,10 @@ reachedUsesToDefs(InstrToInstrs &UseToReachingDefs,
          NotCandidateItEnd = NotCandidate.end();
        NotCandidateIt != NotCandidateItEnd; ++NotCandidateIt) {
     DEBUG(dbgs() << "Too many reaching defs: " << **NotCandidateIt << "\n");
-    UseToReachingDefs.erase(*NotCandidateIt);
+    // It would have been better if we could just remove the entry
+    // from the map.  Because of that, we have to filter the garbage
+    // (second.empty) in the subsequence analysis.
+    UseToReachingDefs[*NotCandidateIt].clear();
   }
 }
 
@@ -608,6 +613,8 @@ computeADRP(const InstrToInstrs &UseToDefs, ARM64FunctionInfo &ARM64FI,
   for (InstrToInstrs::const_iterator UseIt = UseToDefs.begin(),
          EndUseIt = UseToDefs.end(); UseIt != EndUseIt; ++UseIt) {
     unsigned Size = UseIt->second.size();
+    if (Size == 0)
+      continue;
     if (Size == 1) {
       const MachineInstr *L2 = *UseIt->second.begin();
       const MachineInstr *L1 = UseIt->first;
@@ -700,7 +707,9 @@ isCandidate(const MachineInstr *Instr, const InstrToInstrs &UseToDefs,
     if (!MDT->dominates(Def, Instr))
       return false;
     // Move one node up in the simple chain.
-    if (UseToDefs.find(Def) == UseToDefs.end())
+    if (UseToDefs.find(Def) == UseToDefs.end()
+        // The map may contain garbage we have to ignore.
+        || UseToDefs.find(Def)->second.empty())
       return false;
     Instr = Def;
     Def = *UseToDefs.find(Def)->second.begin();
@@ -729,7 +738,8 @@ registerADRCandidate(const MachineInstr *Use, const InstrToInstrs &UseToDefs,
        !(Use->getOperand(2).getTargetFlags() & ARM64II::MO_GOT)))
     return false;
   InstrToInstrs::const_iterator It = UseToDefs.find(Use);
-  if (It == UseToDefs.end())
+  // The map may contain garbage that we need to ignore.
+  if (It == UseToDefs.end() || It->second.empty())
     return false;
   const MachineInstr *Def = *It->second.begin();
   if (Def->getOpcode() != ARM64::ADRP)
@@ -743,9 +753,9 @@ registerADRCandidate(const MachineInstr *Use, const InstrToInstrs &UseToDefs,
     return false;
   }
   ++NumADRSimpleCandidate;
-  assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Def).second) &&
+  assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Def)) &&
          "ADRP already involved in LOH.");
-  assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Use).second) &&
+  assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Use)) &&
          "ADD already involved in LOH.");
   DEBUG(dbgs() << "Record AdrpAdd\n" << *Def << '\n' << *Use << '\n');
 
@@ -784,6 +794,9 @@ computeOthers(const InstrToInstrs &UseToDefs,
   SetOfMachineInstr PotentialADROpportunities;
   for (InstrToInstrs::const_iterator UseIt = UseToDefs.begin(),
          EndUseIt = UseToDefs.end(); UseIt != EndUseIt; ++UseIt) {
+    // If no definition is available, this is a non candidate.
+    if (UseIt->second.empty())
+      continue;
     // Keep only instructions that are load or store and at the end of
     // a ADRP -> ADD/LDR/Nothing chain.
     // We already filtered out the no-chain cases.
@@ -835,7 +848,7 @@ computeOthers(const InstrToInstrs &UseToDefs,
 	SetOfMachineInstr::const_iterator UseIt = Users->begin();
 	SetOfMachineInstr::const_iterator EndUseIt = Users->end();
 	for (; UseIt != EndUseIt; ++UseIt) {
-	  if (PotentialCandidates.find(*UseIt) == EndCandidateIt) {
+	  if (!PotentialCandidates.count(*UseIt)) {
 	    ++NumTooCplxLvl2;
 	    break;
 	  }
@@ -865,14 +878,14 @@ computeOthers(const InstrToInstrs &UseToDefs,
 	DefsOfPotentialCandidates = PotentialCandidates;
 	for (SetOfMachineInstr::const_iterator It = PotentialCandidates.begin(),
 	       EndIt = PotentialCandidates.end(); It != EndIt; ++It)
-	  DefsOfPotentialCandidates.insert(*UseToDefs.find(Candidate)->
-                                           second.begin());
+          if (!UseToDefs.find(Candidate)->second.empty()) 
+            DefsOfPotentialCandidates.insert(*UseToDefs.find(Candidate)->
+                                             second.begin());
       }
       SetOfMachineInstr::const_iterator UseIt = Users->begin();
       SetOfMachineInstr::const_iterator EndUseIt = Users->end();
       for (; UseIt != EndUseIt; ++UseIt) {
-	if (DefsOfPotentialCandidates.find(*UseIt) ==
-	    DefsOfPotentialCandidates.end()) {
+	if (!DefsOfPotentialCandidates.count(*UseIt)) {
 	  ++NumTooCplxLvl1;
 	  break;
 	}
@@ -904,9 +917,9 @@ computeOthers(const InstrToInstrs &UseToDefs,
         Kind = MCLOH_AdrpLdr;
         Args.push_back(L1);
         Args.push_back(Candidate);
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L1).second) &&
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L1)) &&
                "L1 already involved in LOH.");
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Candidate).second) &&
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Candidate)) &&
                "Candidate already involved in LOH.");
         ++NumADRPToLDR;
       } else {
@@ -918,12 +931,12 @@ computeOthers(const InstrToInstrs &UseToDefs,
         Args.push_back(L2);
         Args.push_back(Candidate);
 
-        PotentialADROpportunities.erase(L2);
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L1).second) &&
+        PotentialADROpportunities.remove(L2);
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L1)) &&
                "L1 already involved in LOH.");
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L2).second) &&
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L2)) &&
                "L2 already involved in LOH.");
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Candidate).second) &&
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Candidate)) &&
                "Candidate already involved in LOH.");
 #ifdef DEBUG
 	// get the immediate of the load
@@ -952,12 +965,12 @@ computeOthers(const InstrToInstrs &UseToDefs,
         Args.push_back(L2);
         Args.push_back(Candidate);
 
-        PotentialADROpportunities.erase(L2);
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L1).second) &&
+        PotentialADROpportunities.remove(L2);
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L1)) &&
                "L1 already involved in LOH.");
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L2).second) &&
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(L2)) &&
                "L2 already involved in LOH.");
-        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Candidate).second) &&
+        assert((!InvolvedInLOHs || InvolvedInLOHs->insert(Candidate)) &&
                "Candidate already involved in LOH.");
 #ifdef DEBUG
         // get the immediate of the store
@@ -997,7 +1010,9 @@ static void collectInvolvedReg(MachineFunction &MF, MapRegToId &RegToId,
     unsigned NbReg = TRI->getNumRegs();
     for (; CurRegId < NbReg; ++CurRegId) {
       RegToId[CurRegId] = CurRegId;
-      DEBUG(IdToReg[CurRegId] = CurRegId);
+      DEBUG(IdToReg.push_back(CurRegId));
+      DEBUG(assert(IdToReg[CurRegId] == CurRegId &&
+                   "Reg index mismatches"));
     }
     return;
   }

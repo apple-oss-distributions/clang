@@ -285,14 +285,6 @@ public:
   static const TST TST_auto = clang::TST_auto;
   static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
   static const TST TST_atomic = clang::TST_atomic;
-  static const TST TST_image1d_t = clang::TST_image1d_t;
-  static const TST TST_image1d_array_t = clang::TST_image1d_array_t;
-  static const TST TST_image1d_buffer_t = clang::TST_image1d_buffer_t;
-  static const TST TST_image2d_t = clang::TST_image2d_t;
-  static const TST TST_image2d_array_t = clang::TST_image2d_array_t;
-  static const TST TST_image3d_t = clang::TST_image3d_t;
-  static const TST TST_sampler_t = clang::TST_sampler_t;
-  static const TST TST_event_t = clang::TST_event_t;
   static const TST TST_error = clang::TST_error;
 
   // type-qualifiers
@@ -337,6 +329,7 @@ private:
 
   // function-specifier
   unsigned FS_inline_specified : 1;
+  unsigned FS_forceinline_specified: 1;
   unsigned FS_virtual_specified : 1;
   unsigned FS_explicit_specified : 1;
   unsigned FS_noreturn_specified : 1;
@@ -381,6 +374,7 @@ private:
   SourceRange TypeofParensRange;
   SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc, TQ_atomicLoc;
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc, FS_noreturnLoc;
+  SourceLocation FS_forceinlineLoc;
   SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc;
 
   WrittenBuiltinSpecs writtenBS;
@@ -419,6 +413,7 @@ public:
       TypeSpecOwned(false),
       TypeQualifiers(TQ_unspecified),
       FS_inline_specified(false),
+      FS_forceinline_specified(false),
       FS_virtual_specified(false),
       FS_explicit_specified(false),
       FS_noreturn_specified(false),
@@ -513,7 +508,8 @@ public:
   bool hasTagDefinition() const;
 
   /// \brief Turn a type-specifier-type into a string like "_Bool" or "union".
-  static const char *getSpecifierName(DeclSpec::TST T);
+  static const char *getSpecifierName(DeclSpec::TST T,
+                                      const PrintingPolicy &Policy);
   static const char *getSpecifierName(DeclSpec::TQ Q);
   static const char *getSpecifierName(DeclSpec::TSS S);
   static const char *getSpecifierName(DeclSpec::TSC C);
@@ -540,8 +536,12 @@ public:
   }
 
   // function-specifier
-  bool isInlineSpecified() const { return FS_inline_specified; }
-  SourceLocation getInlineSpecLoc() const { return FS_inlineLoc; }
+  bool isInlineSpecified() const {
+    return FS_inline_specified | FS_forceinline_specified;
+  }
+  SourceLocation getInlineSpecLoc() const {
+    return FS_inline_specified ? FS_inlineLoc : FS_forceinlineLoc;
+  }
 
   bool isVirtualSpecified() const { return FS_virtual_specified; }
   SourceLocation getVirtualSpecLoc() const { return FS_virtualLoc; }
@@ -555,6 +555,8 @@ public:
   void ClearFunctionSpecs() {
     FS_inline_specified = false;
     FS_inlineLoc = SourceLocation();
+    FS_forceinline_specified = false;
+    FS_forceinlineLoc = SourceLocation();
     FS_virtual_specified = false;
     FS_virtualLoc = SourceLocation();
     FS_explicit_specified = false;
@@ -595,36 +597,45 @@ public:
   /// TODO: use a more general approach that still allows these
   /// diagnostics to be ignored when desired.
   bool SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
-                           const char *&PrevSpec, unsigned &DiagID);
+                           const char *&PrevSpec, unsigned &DiagID,
+                           const PrintingPolicy &Policy);
   bool SetStorageClassSpecThread(TSCS TSC, SourceLocation Loc,
                                  const char *&PrevSpec, unsigned &DiagID);
   bool SetTypeSpecWidth(TSW W, SourceLocation Loc, const char *&PrevSpec,
-                        unsigned &DiagID);
+                        unsigned &DiagID, const PrintingPolicy &Policy);
   bool SetTypeSpecComplex(TSC C, SourceLocation Loc, const char *&PrevSpec,
                           unsigned &DiagID);
   bool SetTypeSpecSign(TSS S, SourceLocation Loc, const char *&PrevSpec,
                        unsigned &DiagID);
   bool SetTypeSpecType(TST T, SourceLocation Loc, const char *&PrevSpec,
-                       unsigned &DiagID);
+                       unsigned &DiagID, const PrintingPolicy &Policy);
   bool SetTypeSpecType(TST T, SourceLocation Loc, const char *&PrevSpec,
-                       unsigned &DiagID, ParsedType Rep);
+                       unsigned &DiagID, ParsedType Rep,
+                       const PrintingPolicy &Policy);
   bool SetTypeSpecType(TST T, SourceLocation Loc, const char *&PrevSpec,
-                       unsigned &DiagID, Decl *Rep, bool Owned);
+                       unsigned &DiagID, Decl *Rep, bool Owned,
+                       const PrintingPolicy &Policy);
   bool SetTypeSpecType(TST T, SourceLocation TagKwLoc,
                        SourceLocation TagNameLoc, const char *&PrevSpec,
-                       unsigned &DiagID, ParsedType Rep);
+                       unsigned &DiagID, ParsedType Rep,
+                       const PrintingPolicy &Policy);
   bool SetTypeSpecType(TST T, SourceLocation TagKwLoc,
                        SourceLocation TagNameLoc, const char *&PrevSpec,
-                       unsigned &DiagID, Decl *Rep, bool Owned);
+                       unsigned &DiagID, Decl *Rep, bool Owned,
+                       const PrintingPolicy &Policy);
 
   bool SetTypeSpecType(TST T, SourceLocation Loc, const char *&PrevSpec,
-                       unsigned &DiagID, Expr *Rep);
+                       unsigned &DiagID, Expr *Rep,
+                       const PrintingPolicy &policy);
   bool SetTypeAltiVecVector(bool isAltiVecVector, SourceLocation Loc,
-                       const char *&PrevSpec, unsigned &DiagID);
+                       const char *&PrevSpec, unsigned &DiagID,
+                       const PrintingPolicy &Policy);
   bool SetTypeAltiVecPixel(bool isAltiVecPixel, SourceLocation Loc,
-                       const char *&PrevSpec, unsigned &DiagID);
+                       const char *&PrevSpec, unsigned &DiagID,
+                       const PrintingPolicy &Policy);
   bool SetTypeAltiVecBool(bool isAltiVecBool, SourceLocation Loc,
-                       const char *&PrevSpec, unsigned &DiagID);
+                       const char *&PrevSpec, unsigned &DiagID,
+                       const PrintingPolicy &Policy);
   bool SetTypeSpecError();
   void UpdateDeclRep(Decl *Rep) {
     assert(isDeclRep((TST) TypeSpecType));
@@ -642,10 +653,16 @@ public:
   bool SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
                    unsigned &DiagID, const LangOptions &Lang);
 
-  bool setFunctionSpecInline(SourceLocation Loc);
-  bool setFunctionSpecVirtual(SourceLocation Loc);
-  bool setFunctionSpecExplicit(SourceLocation Loc);
-  bool setFunctionSpecNoreturn(SourceLocation Loc);
+  bool setFunctionSpecInline(SourceLocation Loc, const char *&PrevSpec,
+                             unsigned &DiagID);
+  bool setFunctionSpecForceInline(SourceLocation Loc, const char *&PrevSpec,
+                                  unsigned &DiagID);
+  bool setFunctionSpecVirtual(SourceLocation Loc, const char *&PrevSpec,
+                              unsigned &DiagID);
+  bool setFunctionSpecExplicit(SourceLocation Loc, const char *&PrevSpec,
+                               unsigned &DiagID);
+  bool setFunctionSpecNoreturn(SourceLocation Loc, const char *&PrevSpec,
+                               unsigned &DiagID);
 
   bool SetFriendSpec(SourceLocation Loc, const char *&PrevSpec,
                      unsigned &DiagID);
@@ -728,7 +745,8 @@ public:
   /// Finish - This does final analysis of the declspec, issuing diagnostics for
   /// things like "_Imaginary" (lacking an FP type).  After calling this method,
   /// DeclSpec is guaranteed self-consistent, even if an error occurred.
-  void Finish(DiagnosticsEngine &D, Preprocessor &PP);
+  void Finish(DiagnosticsEngine &D, Preprocessor &PP,
+              const PrintingPolicy &Policy);
 
   const WrittenBuiltinSpecs& getWrittenBuiltinSpecs() const {
     return writtenBS;

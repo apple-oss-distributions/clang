@@ -44,28 +44,7 @@ public:
     DwarfMacroInfoSection = 0;
   }
 
-  ~NVPTXTargetObjectFile() {
-    delete TextSection;
-    delete DataSection;
-    delete BSSSection;
-    delete ReadOnlySection;
-
-    delete StaticCtorSection;
-    delete StaticDtorSection;
-    delete LSDASection;
-    delete EHFrameSection;
-    delete DwarfAbbrevSection;
-    delete DwarfInfoSection;
-    delete DwarfLineSection;
-    delete DwarfFrameSection;
-    delete DwarfPubTypesSection;
-    delete DwarfDebugInlineSection;
-    delete DwarfStrSection;
-    delete DwarfLocSection;
-    delete DwarfARangesSection;
-    delete DwarfRangesSection;
-    delete DwarfMacroInfoSection;
-  }
+  virtual ~NVPTXTargetObjectFile();
 
   virtual void Initialize(MCContext &ctx, const TargetMachine &TM) {
     TargetLoweringObjectFile::Initialize(ctx, TM);
@@ -114,7 +93,7 @@ public:
 
   virtual const MCSection *
   getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
-                           Mangler *Mang, const TargetMachine &TM) const {
+                           Mangler &Mang, const TargetMachine &TM) const {
     return DataSection;
   }
 

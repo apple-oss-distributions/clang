@@ -1,8 +1,31 @@
-set(LLVM_LINK_COMPONENTS ${LLVM_TARGETS_TO_BUILD} bitreader asmparser bitwriter irreader instrumentation scalaropts objcarcopts ipo vectorize)
+set(LLVM_LINK_COMPONENTS
+  ${LLVM_TARGETS_TO_BUILD}
+  Analysis
+  BitWriter
+  CodeGen
+  Core
+  IPA
+  IPO
+  IRReader
+  InstCombine
+  Instrumentation
+  MC
+  ObjCARCOpts
+  ScalarOpts
+  Support
+  Target
+  TransformUtils
+  Vectorize
+  )
+
+# Support plugins.
+set(LLVM_NO_DEAD_STRIP 1)
 
 add_llvm_tool(opt
   AnalysisWrappers.cpp
   GraphPrinters.cpp
+  NewPMDriver.cpp
+  Passes.cpp
   PrintSCC.cpp
   opt.cpp
   )

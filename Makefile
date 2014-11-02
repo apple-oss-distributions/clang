@@ -23,7 +23,7 @@ Clang_Final_Extra_Options :=
 # Build all LLVM tools; not just clang?
 Clang_Build_All        := 0
 # Set the Clang version.
-Clang_Version          := 5.1
+Clang_Version          := 6.0
 # Enable bootstrap.
 Clang_Enable_Bootstrap := 1
 # Enable automatic order file generation, when using buildit.
@@ -34,6 +34,7 @@ Clang_Autogenerate_Order_File := 0
 else
 Clang_Autogenerate_Order_File := 0
 endif
+Clang_Autogenerate_Profile := 0
 # Enable building clang tools.
 Clang_Build_No_Tools   := YES
 # Enable lto for stage-2 builds.
@@ -42,6 +43,7 @@ Clang_Enable_LTO := 1
 else
 Clang_Enable_LTO := 0
 endif
+Clang_Enable_PGO := 1
 # Add an extra search path to use a custom libLTO. Currently only
 # affects stage-2 builds.
 Clang_libLTO_SearchPath := 
@@ -49,5 +51,3 @@ Clang_libLTO_SearchPath :=
 ##
 # Include build logic.
 include ClangBNI.mk
-
-

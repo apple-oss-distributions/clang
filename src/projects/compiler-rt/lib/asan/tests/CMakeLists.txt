@@ -15,13 +15,6 @@ include(CompilerRTCompile)
 include_directories(..)
 include_directories(../..)
 
-# Use zero-based shadow on Android.
-if(ANDROID)
-  set(ASAN_TESTS_USE_ZERO_BASE_SHADOW TRUE)
-else()
-  set(ASAN_TESTS_USE_ZERO_BASE_SHADOW FALSE)
-endif()
-
 set(ASAN_UNITTEST_HEADERS
   asan_mac_test.h
   asan_test_config.h
@@ -50,11 +43,9 @@ list(APPEND ASAN_UNITTEST_COMMON_CFLAGS
   -DASAN_UAR=0)
 if(ANDROID)
   list(APPEND ASAN_UNITTEST_COMMON_CFLAGS
-    -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=0
     -DASAN_NEEDS_SEGV=0)
 else()
   list(APPEND ASAN_UNITTEST_COMMON_CFLAGS
-    -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
     -DASAN_NEEDS_SEGV=1)
 endif()
 
@@ -68,10 +59,6 @@ set(ASAN_UNITTEST_INSTRUMENTED_CFLAGS
   -mllvm -asan-mapping-scale=0        # default will be used
   -mllvm -asan-mapping-offset-log=-1  # default will be used
 )
-if(ASAN_TESTS_USE_ZERO_BASE_SHADOW)
-  list(APPEND ASAN_UNITTEST_INSTRUMENTED_CFLAGS
-    -fsanitize-address-zero-base-shadow)
-endif()
 
 # Unit tests require libstdc++.
 set(ASAN_UNITTEST_COMMON_LINKFLAGS -lstdc++)
@@ -79,7 +66,7 @@ set(ASAN_UNITTEST_COMMON_LINKFLAGS -lstdc++)
 if(APPLE)
   list(APPEND ASAN_UNITTEST_COMMON_LINKFLAGS -framework Foundation)
 endif()
-if(ASAN_TESTS_USE_ZERO_BASE_SHADOW)
+if(ANDROID)
   list(APPEND ASAN_UNITTEST_COMMON_LINKFLAGS -pie)
 endif()
 
@@ -106,7 +93,7 @@ macro(asan_compile obj_list source arch)
   get_target_flags_for_arch(${arch} TARGET_CFLAGS)
   clang_compile(${output_obj} ${source}
                 CFLAGS ${ARGN} ${TARGET_CFLAGS}
-                DEPS gtest ${ASAN_RUNTIME_LIBRARIES}
+                DEPS gtest asan_runtime_libraries
                            ${ASAN_UNITTEST_HEADERS}
                            ${ASAN_BLACKLIST_FILE})
   list(APPEND ${obj_list} ${output_obj})
@@ -117,7 +104,7 @@ endmacro()
 macro(add_asan_test test_suite test_name arch)
   parse_arguments(TEST "OBJECTS;LINKFLAGS" "WITH_TEST_RUNTIME" ${ARGN})
   get_target_flags_for_arch(${arch} TARGET_LINK_FLAGS)
-  set(TEST_DEPS ${ASAN_RUNTIME_LIBRARIES} ${TEST_OBJECTS})
+  set(TEST_DEPS asan_runtime_libraries ${TEST_OBJECTS})
   if(TEST_WITH_TEST_RUNTIME)
     list(APPEND TEST_DEPS ${ASAN_TEST_RUNTIME})
     list(APPEND TEST_OBJECTS lib${ASAN_TEST_RUNTIME}.a)

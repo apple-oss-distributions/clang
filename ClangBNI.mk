@@ -61,7 +61,7 @@ help:
 # Install to $DT_TOOLCHAIN_DIR if it is set, otherwise $DEVELOPER_DIR.
 DEVELOPER_DIR ?= /Developer
 DT_TOOLCHAIN_DIR ?= $(DEVELOPER_DIR)
-Default_Install_Root := $(DT_TOOLCHAIN_DIR)
+Default_Install_Root := /$(DT_VARIANT)$(DT_TOOLCHAIN_DIR)
 # Don't install root links or license.
 Post_Install_RootLinks := 0
 Post_Install_OpenSourceLicense := 0
@@ -76,7 +76,9 @@ Extra_Make_Variables :=
 # Don't install any archive files.
 Extra_Make_Variables += NO_INSTALL_ARCHIVES=1
 # LLVM level install target is 'install-clang.
-LLVM_Install_Target := OPTIONAL_DIRS=tools/llvm-cov install-clang
+LLVM_Install_Target := \
+	OPTIONAL_DIRS="tools/llvm-cov tools/llvm-profdata" \
+	install-clang
 
 ##
 # Per Project/Target Configuration
@@ -164,11 +166,20 @@ else
 $(error "invalid setting for clang autogenerate order file: '$(Clang_Autogenerate_Order_File)'")
 endif
 
+# Select whether to regenerate profile data.
+ifeq ($(Clang_Autogenerate_Profile), 1)
+$(OBJROOT)/clang.profdata: generate-clang-profdata
+else ifeq ($(Clang_Autogenerate_Profile), 0)
+else
+$(error "invalid setting for clang autogenerate profile: '$(Clang_Autogenerate_Profile)'")
+endif
+
 # Select whether to build everything (for testing purposes).
+Clang_Only_Build_Target := ONLY_TOOLS="clang lto llvm-cov llvm-profdata" all
 ifeq ($(Clang_Build_All), 1)
 Clang_Build_Target := all
 else ifeq ($(Clang_Build_All), 0)
-Clang_Build_Target := ONLY_TOOLS="clang lto llvm-cov" all
+Clang_Build_Target := $(Clang_Only_Build_Target)
 else
 $(error "invalid setting for clang build all mode: '$(Clang_Build_All)'")
 endif
@@ -255,6 +266,16 @@ else
 $(error "invalid setting for Clang_Enable_LTO: '$(Clang_Enable_LTO)'")
 endif
 
+# Enable PGO if requested. Ignore this for no-bootstrap builds, since the
+# system compiler may not support PGO or handle the latest profile format.
+ifeq ($(Clang_Enable_PGO),1)
+ifeq ($(Clang_Enable_Bootstrap), 1)
+Final_Extra_Options += -fprofile-instr-use=$(OBJROOT)/clang.profdata
+configure-clang_stage2: $(OBJROOT)/clang.profdata
+configure-cross: $(OBJROOT)/clang.profdata
+endif
+endif
+
 # Set configure flags.
 Common_Configure_Flags = \
 		  --enable-targets=$(LLVM_Backends) \
@@ -275,20 +296,26 @@ Stage1_Configure_Flags = $(Common_Configure_Flags) \
 Configure_Flags = $(Common_Configure_Flags) \
                   --with-internal-prefix="$(Install_Prefix)/local" \
                   --with-extra-options="$(Final_Extra_Options)"
+Instrumented_Configure_Flags = $(Common_Configure_Flags) \
+    --with-extra-options="$(Extra_Options) -fprofile-instr-generate" \
+    --with-extra-ld-options="$(Clang_Linker_Options) -fprofile-instr-generate"
 
 CC := $(shell xcrun -find clang)
 CXX := $(shell xcrun -find clang++)
 
 # Set stage1 compiler.
-Stage1_CC := $(CC)
-Stage1_CXX := $(CXX)
+System_CC := $(CC)
+System_CXX := $(CXX)
 
 # Set stage1 GCC_EXEC_PATH path and proper dsymutil tool
 Exec_Path := $(shell dirname `xcrun -find ld`)
 DSYMUTIL := $(shell xcrun -find dsymutil)
 
 # Set up any additional Clang install targets.
-Extra_Clang_Install_Targets := install-lto-h install-clang-diagnostic
+Extra_Clang_Install_Targets := install-lto-h
+ifeq ($(DT_VARIANT),)
+Extra_Clang_Install_Targets += install-clang-diagnostic
+endif
 
 # Install /usr/... symlinks?
 ifeq ($(Post_Install_RootLinks),1)
@@ -330,8 +357,6 @@ endif
 # Set install and build targets.
 Install_Target = $(Clang_Make_Variables) $(LLVM_Install_Target)
 Build_Target = $(Clang_Make_Variables) $(Clang_Build_Target)
-Install_Target_Stage1 = $(Clang_Make_Variables) install-clang
-Build_Target_Stage1 = $(Clang_Make_Variables) clang-only
 
 ##
 # Additional Tool Paths
@@ -361,6 +386,11 @@ ifneq ($(Clang_libLTO_SearchPath),)
 	Library_SearchPaths += ":$(Clang_libLTO_SearchPath)"
 endif
 
+Stage1_InstallDir = $(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)
+Stage1_CC = $(Stage1_InstallDir)/bin/clang
+Stage1_CXX = $(Stage1_InstallDir)/bin/clang++
+Stage1_Profdata = $(Stage1_InstallDir)/bin/llvm-profdata
+
 OSV		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceVersions
 OSL		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceLicenses
 
@@ -382,7 +412,7 @@ SYSCTL := $(shell if [ `sysctl -n hw.activecpu` -ge 8 -a `sysctl -n hw.memsize` 
 SYSCTL_FINAL := $(SYSCTL)
 ifeq ($(Clang_Enable_LTO),1)
 ifeq ($(Clang_Build_All),1)
-SYSCTL_FINAL := 1
+SYSCTL_FINAL := 4
 endif
 endif
 
@@ -433,11 +463,12 @@ installhdrs:
 
 .PHONY: install-clang
 .PHONY: install-clang_final build-clang build-clang_final build-clang_stage1
-.PHONY: build-clang_final_ordered
+.PHONY: build-clang_instrumented build-clang_final_ordered
 .PHONY: configure-clang_final configure-clang_singlestage configure-clang_stage2
-.PHONY: configure-clang_stage1
+.PHONY: configure-clang_stage1 configure-clang_instrumented
 .PHONY: install-clang-rootlinks install-clang-opensourcelicense
 .PHONY: install-clang-enableobjcgc
+.PHONY: generate-clang-profdata
 
 install-clang: install-clang_final $(Extra_Clang_Install_Targets)
 
@@ -461,6 +492,10 @@ install-clang_final: build-clang
 	$(_v) ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1
 	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1
 	$(_v) ln -sf llvm-cov $(DSTROOT)/$(Install_Prefix)/bin/gcov
+	# REMINDER: The llvm-cov.1 file here needs to be regenerated manually
+	# whenever the llvm-cov documentation changes!!
+	$(INSTALL_FILE) $(SRCROOT)/llvm-cov.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/llvm-cov.1
+	$(_v) ln -sf llvm-cov.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/gcov.1
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
 	@echo "Copying executables into SYMROOT..."
 	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
@@ -519,6 +554,23 @@ build-clang_final_ordered: build-clang_final
 	          DYLD_LIBRARY_PATH="$(Library_SearchPaths)" ; \
 	done
 
+$(OBJROOT)/clang.profdata: $(SRCROOT)/clang.profdata.bz2
+	bzcat "$(SRCROOT)/clang.profdata.bz2" > $@
+
+generate-clang-profdata: build-clang_instrumented $(Stage1_Profdata)
+	$(_v) set -ex && \
+	echo "Generating Profile Data" && \
+        $(SRCROOT)/order-files/gen-clang-order-data \
+	  --profdata --no-sudo \
+	  --cc "$(OBJROOT)/instrumented-install-$(Stage1_Compiler_Arch)/bin/clang" \
+	  --inputs "$(SRCROOT)/order-files/inputs" \
+	  --temps "$(OBJROOT)/profdata/temps" \
+	  --outputs "$(OBJROOT)/profdata/data"
+	$(Stage1_Profdata) merge -o "$(OBJROOT)/tmp.profdata" \
+	  "$(OBJROOT)"/profdata/*.profraw
+	bzip2 < "$(OBJROOT)/tmp.profdata" > "$(SRCROOT)/clang.profdata.bz2"
+	rm -f "$(OBJROOT)/tmp.profdata"
+
 build-clang_stage1: configure-clang_stage1
 	$(_v) set -ex; \
 	$(_v) for arch in $(Stage1_Compiler_Arch) ; do \
@@ -529,22 +581,31 @@ build-clang_stage1: configure-clang_stage1
 	    order_file=$(SRCROOT)/static-order-files/$$arch/clang.order; \
 	  fi; \
 	  $(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) \
-	    $(Build_Target_Stage1) CLANG_ORDER_FILE=$${order_file}; \
+	    $(Clang_Make_Variables) $(Clang_Only_Build_Target) \
+	    CLANG_ORDER_FILE=$${order_file}; \
 	  $(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) \
-	    $(Install_Target_Stage1); \
+	    $(Install_Target); \
 	done
+
+build-clang_instrumented: configure-clang_instrumented
+	$(_v) set -ex; \
+	$(_v) echo "Building (Instrumented) for $$arch..."; \
+	$(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/instrumented-$(Stage1_Compiler_Arch) \
+	  $(Clang_Make_Variables) $(Clang_Only_Build_Target); \
+	$(_v) time $(MAKE) -j$(SYSCTL) -C $(OBJROOT)/instrumented-$(Stage1_Compiler_Arch) \
+	  $(Install_Target)
 
 configure-clang_final: $(Final_Configure_Target)
 
-configure-clang_stage2: build-clang_stage1
+configure-clang_stage2: $(Stage1_CC)
 	$(_v) $(MKDIR) $(OBJROOT)
 	$(_v) for arch in $(RC_ARCHS) ; do \
 		echo "Configuring (Final) for $$arch..." && \
 		$(MKDIR) $(OBJROOT)/$$arch && \
 		cd $(OBJROOT)/$$arch && \
 		time $(Configure) --prefix="$(Install_Prefix)" $(Configure_Flags) \
-		  CC="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/bin/clang -B$(Exec_Path) -arch $$arch" \
-		  CXX="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)/bin/clang++ -B$(Exec_Path) -arch $$arch" || exit 1 ; \
+		  CC="$(Stage1_CC) -B$(Exec_Path) -arch $$arch" \
+		  CXX="$(Stage1_CXX) -B$(Exec_Path) -arch $$arch" || exit 1 ; \
 	done
 
 configure-clang_singlestage:
@@ -554,8 +615,8 @@ configure-clang_singlestage:
 		$(MKDIR) $(OBJROOT)/$$arch && \
 		cd $(OBJROOT)/$$arch && \
 		time $(Configure) --prefix="$(Install_Prefix)" $(Configure_Flags) \
-		  CC="$(Stage1_CC) -arch $$arch" \
-		  CXX="$(Stage1_CXX) -arch $$arch" || exit 1 ; \
+		  CC="$(System_CC) -arch $$arch" \
+		  CXX="$(System_CXX) -arch $$arch" || exit 1 ; \
 	done
 
 configure-clang_stage1: 
@@ -564,8 +625,22 @@ configure-clang_stage1:
 	$(_v) $(MKDIR) $(OBJROOT)/stage1-$(Stage1_Compiler_Arch)
 	$(_v) cd $(OBJROOT)/stage1-$(Stage1_Compiler_Arch) && \
 	      time $(Configure) --prefix="$(OBJROOT)/stage1-install-$(Stage1_Compiler_Arch)" $(Stage1_Configure_Flags) \
-	        CC="$(Stage1_CC) -arch $(Stage1_Compiler_Arch)" \
-		CXX="$(Stage1_CXX) -arch $(Stage1_Compiler_Arch)" || exit 1
+	        CC="$(System_CC) -arch $(Stage1_Compiler_Arch)" \
+		CXX="$(System_CXX) -arch $(Stage1_Compiler_Arch)" || exit 1
+
+$(Stage1_CC): build-clang_stage1
+$(Stage1_CXX): build-clang_stage1
+$(Stage1_Profdata): build-clang_stage1
+
+configure-clang_instrumented: $(Stage1_CC) $(Stage1_CXX)
+	$(_v) $(MKDIR) $(OBJROOT)
+	$(_v) echo "Configuring (Instrumented) for $(Stage1_Compiler_Arch)..."
+	$(_v) $(MKDIR) $(OBJROOT)/instrumented-$(Stage1_Compiler_Arch) && \
+	$(_v) cd $(OBJROOT)/instrumented-$(Stage1_Compiler_Arch) && \
+	      time $(Configure) --prefix="$(OBJROOT)/instrumented-install-$(Stage1_Compiler_Arch)" \
+	        $(Instrumented_Configure_Flags) \
+		CC="$(Stage1_CC) -B$(Exec_Path) -arch $(Stage1_Compiler_Arch)" \
+		CXX="$(Stage1_CXX) -B$(Exec_Path) -arch $(Stage1_Compiler_Arch)" || exit 1
 
 install-clang-rootlinks: install-clang_final
 	$(MKDIR) -p $(DSTROOT)/usr/bin
@@ -657,6 +732,7 @@ configure-cross: setup-tools-cross
 			--target=arm-apple-darwin10 \
 			--build=i686-apple-darwin10 \
 			--program-prefix="" \
+			--enable-libcpp \
 		  || exit 1 ; \
 	done
 

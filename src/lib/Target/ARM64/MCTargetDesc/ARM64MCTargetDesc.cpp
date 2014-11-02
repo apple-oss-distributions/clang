@@ -44,6 +44,12 @@ static MCInstrInfo *createARM64MCInstrInfo() {
 static MCSubtargetInfo *createARM64MCSubtargetInfo(StringRef TT, StringRef CPU,
                                                    StringRef FS) {
   MCSubtargetInfo *X = new MCSubtargetInfo();
+
+  // FIXME: Make this darwin-only.
+  if (CPU.empty())
+    // We default to Cyclone for now, on Darwin.
+    CPU = "cyclone";
+
   InitARM64MCSubtargetInfo(X, TT, CPU, FS);
   return X;
 }
@@ -78,35 +84,31 @@ MCCodeGenInfo *createARM64MCCodeGenInfo(StringRef TT, Reloc::Model RM,
                                         CodeModel::Model CM,
                                         CodeGenOpt::Level OL) {
   Triple TheTriple(TT);
-  MCCodeGenInfo *X = new MCCodeGenInfo();
-
-  if (TheTriple.isOSDarwin()) {
-    // ARM64 Darwin is always PIC.
-    X->InitMCCodeGenInfo(Reloc::PIC_, CM, OL);
-    return X;
-  }
-
-  assert(TheTriple.isOSBinFormatELF() && "Only expect Darwin and ELF targets");
-
-  if (RM == Reloc::Default || RM == Reloc::DynamicNoPIC) {
-    // On ELF platforms the default static relocation model has a smart enough
-    // linker to cope with referencing external symbols defined in a shared
-    // library. Hence DynamicNoPIC doesn't need to be promoted to PIC.
-    RM = Reloc::Static;
-  }
+  assert((TheTriple.isOSBinFormatELF() || TheTriple.isOSBinFormatMachO()) &&
+         "Only expect Darwin and ELF targets");
 
   if (CM == CodeModel::Default)
     CM = CodeModel::Small;
-  else if (CM == CodeModel::JITDefault) {
-    // The default MCJIT memory managers make no guarantees about where they can
-    // find an executable page; JITed code needs to be able to refer to globals
-    // no matter how far away they are.
+  // The default MCJIT memory managers make no guarantees about where they can
+  // find an executable page; JITed code needs to be able to refer to globals
+  // no matter how far away they are.
+  else if (CM == CodeModel::JITDefault)
     CM = CodeModel::Large;
-  }
+  else if (CM != CodeModel::Small && CM != CodeModel::Large)
+    report_fatal_error("Only small and large code models are allowed on ARM64");
 
+  // ARM64 Darwin is always PIC.
+  if (TheTriple.isOSDarwin())
+    RM = Reloc::PIC_;
+  // On ELF platforms the default static relocation model has a smart enough
+  // linker to cope with referencing external symbols defined in a shared
+  // library. Hence DynamicNoPIC doesn't need to be promoted to PIC.
+  else if (RM == Reloc::Default || RM == Reloc::DynamicNoPIC)
+    RM = Reloc::Static;
+
+  MCCodeGenInfo *X = new MCCodeGenInfo();
   X->InitMCCodeGenInfo(RM, CM, OL);
   return X;
-
 }
 
 static MCInstPrinter *createARM64MCInstPrinter(const Target &T,
@@ -117,6 +119,9 @@ static MCInstPrinter *createARM64MCInstPrinter(const Target &T,
                                                const MCSubtargetInfo &STI) {
   if (SyntaxVariant == 0)
     return new ARM64InstPrinter(MAI, MII, MRI, STI);
+  if (SyntaxVariant == 1)
+    return new ARM64AppleInstPrinter(MAI, MII, MRI, STI);
+
   return 0;
 }
 
@@ -124,6 +129,7 @@ static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
                                     MCContext &Ctx, MCAsmBackend &TAB,
                                     raw_ostream &OS,
                                     MCCodeEmitter *Emitter,
+                                    const MCSubtargetInfo &STI,
                                     bool RelaxAll, bool NoExecStack) {
   Triple TheTriple(TT);
 

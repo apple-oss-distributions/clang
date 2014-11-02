@@ -11,6 +11,7 @@
 //
 // Main file of the ASan run-time library.
 //===----------------------------------------------------------------------===//
+#include "asan_activation.h"
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
 #include "asan_interface_internal.h"
@@ -51,6 +52,8 @@ static void AsanDie() {
       UnmapOrDie((void*)kLowShadowBeg, kHighShadowEnd - kLowShadowBeg);
     }
   }
+  if (flags()->coverage)
+    __sanitizer_cov_dump();
   if (death_callback)
     death_callback();
   if (flags()->abort_on_error)
@@ -60,8 +63,8 @@ static void AsanDie() {
 
 static void AsanCheckFailed(const char *file, int line, const char *cond,
                             u64 v1, u64 v2) {
-  Report("AddressSanitizer CHECK failed: %s:%d \"%s\" (0x%zx, 0x%zx)\n",
-             file, line, cond, (uptr)v1, (uptr)v2);
+  Report("AddressSanitizer CHECK failed: %s:%d \"%s\" (0x%zx, 0x%zx)\n", file,
+         line, cond, (uptr)v1, (uptr)v2);
   // FIXME: check for infinite recursion without a thread-local counter here.
   PRINT_CURRENT_STACK();
   Die();
@@ -88,13 +91,18 @@ static const char *MaybeUseAsanDefaultOptionsCompileDefiniton() {
 }
 
 static void ParseFlagsFromString(Flags *f, const char *str) {
-  ParseCommonFlagsFromString(str);
-  CHECK((uptr)common_flags()->malloc_context_size <= kStackTraceMax);
+  CommonFlags *cf = common_flags();
+  ParseCommonFlagsFromString(cf, str);
+  CHECK((uptr)cf->malloc_context_size <= kStackTraceMax);
 
   ParseFlag(str, &f->quarantine_size, "quarantine_size");
   ParseFlag(str, &f->redzone, "redzone");
+  ParseFlag(str, &f->max_redzone, "max_redzone");
   CHECK_GE(f->redzone, 16);
+  CHECK_GE(f->max_redzone, f->redzone);
+  CHECK_LE(f->max_redzone, 2048);
   CHECK(IsPowerOfTwo(f->redzone));
+  CHECK(IsPowerOfTwo(f->max_redzone));
 
   ParseFlag(str, &f->debug, "debug");
   ParseFlag(str, &f->report_globals, "report_globals");
@@ -105,7 +113,9 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->mac_ignore_invalid_free, "mac_ignore_invalid_free");
   ParseFlag(str, &f->detect_stack_use_after_return,
             "detect_stack_use_after_return");
-  ParseFlag(str, &f->uar_stack_size_log, "uar_stack_size_log");
+  ParseFlag(str, &f->min_uar_stack_size_log, "min_uar_stack_size_log");
+  ParseFlag(str, &f->max_uar_stack_size_log, "max_uar_stack_size_log");
+  ParseFlag(str, &f->uar_noreserve, "uar_noreserve");
   ParseFlag(str, &f->max_malloc_fill_size, "max_malloc_fill_size");
   ParseFlag(str, &f->malloc_fill_byte, "malloc_fill_byte");
   ParseFlag(str, &f->exitcode, "exitcode");
@@ -120,6 +130,7 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->print_stats, "print_stats");
   ParseFlag(str, &f->print_legend, "print_legend");
   ParseFlag(str, &f->atexit, "atexit");
+  ParseFlag(str, &f->coverage, "coverage");
   ParseFlag(str, &f->disable_core, "disable_core");
   ParseFlag(str, &f->allow_reexec, "allow_reexec");
   ParseFlag(str, &f->print_full_thread_history, "print_full_thread_history");
@@ -128,24 +139,19 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->alloc_dealloc_mismatch, "alloc_dealloc_mismatch");
   ParseFlag(str, &f->strict_memcmp, "strict_memcmp");
   ParseFlag(str, &f->strict_init_order, "strict_init_order");
+  ParseFlag(str, &f->start_deactivated, "start_deactivated");
 }
 
 void InitializeFlags(Flags *f, const char *env) {
   CommonFlags *cf = common_flags();
+  SetCommonFlagsDefaults(cf);
   cf->external_symbolizer_path = GetEnv("ASAN_SYMBOLIZER_PATH");
-  cf->symbolize = true;
   cf->malloc_context_size = kDefaultMallocContextSize;
-  cf->fast_unwind_on_fatal = false;
-  cf->fast_unwind_on_malloc = true;
-  cf->strip_path_prefix = "";
-  cf->handle_ioctl = false;
-  cf->log_path = 0;
-  cf->detect_leaks = false;
-  cf->leak_check_at_exit = true;
 
   internal_memset(f, 0, sizeof(*f));
   f->quarantine_size = (ASAN_LOW_MEMORY) ? 1UL << 26 : 1UL << 28;
   f->redzone = 16;
+  f->max_redzone = 2048;
   f->debug = false;
   f->report_globals = 1;
   f->check_initialization_order = false;
@@ -153,7 +159,9 @@ void InitializeFlags(Flags *f, const char *env) {
   f->replace_intrin = true;
   f->mac_ignore_invalid_free = false;
   f->detect_stack_use_after_return = false;  // Also needs the compiler flag.
-  f->uar_stack_size_log = 0;
+  f->min_uar_stack_size_log = 16;  // We can't do smaller anyway.
+  f->max_uar_stack_size_log = 20;  // 1Mb per size class, i.e. ~11Mb per thread.
+  f->uar_noreserve = false;
   f->max_malloc_fill_size = 0x1000;  // By default, fill only the first 4K.
   f->malloc_fill_byte = 0xbe;
   f->exitcode = ASAN_DEFAULT_FAILURE_EXITCODE;
@@ -168,6 +176,7 @@ void InitializeFlags(Flags *f, const char *env) {
   f->print_stats = false;
   f->print_legend = true;
   f->atexit = false;
+  f->coverage = false;
   f->disable_core = (SANITIZER_WORDSIZE == 64);
   f->allow_reexec = true;
   f->print_full_thread_history = true;
@@ -178,16 +187,15 @@ void InitializeFlags(Flags *f, const char *env) {
   f->alloc_dealloc_mismatch = (SANITIZER_MAC == 0) && (SANITIZER_WINDOWS == 0);
   f->strict_memcmp = true;
   f->strict_init_order = false;
+  f->start_deactivated = false;
 
   // Override from compile definition.
   ParseFlagsFromString(f, MaybeUseAsanDefaultOptionsCompileDefiniton());
 
   // Override from user-specified string.
   ParseFlagsFromString(f, MaybeCallAsanDefaultOptions());
-  if (common_flags()->verbosity) {
-    Report("Using the defaults from __asan_default_options: %s\n",
-           MaybeCallAsanDefaultOptions());
-  }
+  VReport(1, "Using the defaults from __asan_default_options: %s\n",
+          MaybeCallAsanDefaultOptions());
 
   // Override from command line.
   ParseFlagsFromString(f, env);
@@ -376,7 +384,8 @@ static void PrintAddressSpaceLayout() {
            (void*)MEM_TO_SHADOW(kMidShadowEnd));
   }
   Printf("\n");
-  Printf("red_zone=%zu\n", (uptr)flags()->redzone);
+  Printf("redzone=%zu\n", (uptr)flags()->redzone);
+  Printf("max_redzone=%zu\n", (uptr)flags()->max_redzone);
   Printf("quarantine_size=%zuM\n", (uptr)flags()->quarantine_size >> 20);
   Printf("malloc_context_size=%zu\n",
          (uptr)common_flags()->malloc_context_size);
@@ -391,55 +400,7 @@ static void PrintAddressSpaceLayout() {
           kHighShadowBeg > kMidMemEnd);
 }
 
-}  // namespace __asan
-
-// ---------------------- Interface ---------------- {{{1
-using namespace __asan;  // NOLINT
-
-#if !SANITIZER_SUPPORTS_WEAK_HOOKS
-extern "C" {
-SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
-const char* __asan_default_options() { return ""; }
-}  // extern "C"
-#endif
-
-int NOINLINE __asan_set_error_exit_code(int exit_code) {
-  int old = flags()->exitcode;
-  flags()->exitcode = exit_code;
-  return old;
-}
-
-void NOINLINE __asan_handle_no_return() {
-  int local_stack;
-  AsanThread *curr_thread = GetCurrentThread();
-  CHECK(curr_thread);
-  uptr PageSize = GetPageSizeCached();
-  uptr top = curr_thread->stack_top();
-  uptr bottom = ((uptr)&local_stack - PageSize) & ~(PageSize-1);
-  static const uptr kMaxExpectedCleanupSize = 64 << 20;  // 64M
-  if (top - bottom > kMaxExpectedCleanupSize) {
-    static bool reported_warning = false;
-    if (reported_warning)
-      return;
-    reported_warning = true;
-    Report("WARNING: ASan is ignoring requested __asan_handle_no_return: "
-           "stack top: %p; bottom %p; size: %p (%zd)\n"
-           "False positive error reports may follow\n"
-           "For details see "
-           "http://code.google.com/p/address-sanitizer/issues/detail?id=189\n",
-           top, bottom, top - bottom, top - bottom);
-    return;
-  }
-  PoisonShadow(bottom, top - bottom, 0);
-  if (curr_thread->has_fake_stack())
-    curr_thread->fake_stack()->HandleNoReturn();
-}
-
-void NOINLINE __asan_set_death_callback(void (*callback)(void)) {
-  death_callback = callback;
-}
-
-void __asan_init() {
+static void AsanInitInternal() {
   if (asan_inited) return;
   SanitizerToolName = "AddressSanitizer";
   CHECK(!asan_init_is_running && "ASan init calls itself!");
@@ -461,10 +422,14 @@ void __asan_init() {
   __sanitizer_set_report_path(common_flags()->log_path);
   __asan_option_detect_stack_use_after_return =
       flags()->detect_stack_use_after_return;
+  CHECK_LE(flags()->min_uar_stack_size_log, flags()->max_uar_stack_size_log);
 
-  if (common_flags()->verbosity && options) {
-    Report("Parsed ASAN_OPTIONS: %s\n", options);
+  if (options) {
+    VReport(1, "Parsed ASAN_OPTIONS: %s\n", options);
   }
+
+  if (flags()->start_deactivated)
+    AsanStartDeactivated();
 
   // Re-exec ourselves if we need to set additional env or command line args.
   MaybeReexec();
@@ -533,12 +498,7 @@ void __asan_init() {
   // fork() on Mac locks the allocator.
   InitializeAllocator();
 
-  // Start symbolizer process if necessary.
-  if (common_flags()->symbolize) {
-    Symbolizer::Init(common_flags()->external_symbolizer_path);
-  } else {
-    Symbolizer::Disable();
-  }
+  Symbolizer::Init(common_flags()->external_symbolizer_path);
 
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited
   // should be set to 1 prior to initializing the threads.
@@ -547,6 +507,9 @@ void __asan_init() {
 
   if (flags()->atexit)
     Atexit(asan_atexit);
+
+  if (flags()->coverage)
+    Atexit(__sanitizer_cov_dump);
 
   // interceptors
   InitTlsSize();
@@ -568,7 +531,66 @@ void __asan_init() {
   }
 #endif  // CAN_SANITIZE_LEAKS
 
-  if (common_flags()->verbosity) {
-    Report("AddressSanitizer Init done\n");
+  VReport(1, "AddressSanitizer Init done\n");
+}
+
+// Initialize as requested from some part of ASan runtime library (interceptors,
+// allocator, etc).
+void AsanInitFromRtl() {
+  AsanInitInternal();
+}
+
+}  // namespace __asan
+
+// ---------------------- Interface ---------------- {{{1
+using namespace __asan;  // NOLINT
+
+#if !SANITIZER_SUPPORTS_WEAK_HOOKS
+extern "C" {
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+const char* __asan_default_options() { return ""; }
+}  // extern "C"
+#endif
+
+int NOINLINE __asan_set_error_exit_code(int exit_code) {
+  int old = flags()->exitcode;
+  flags()->exitcode = exit_code;
+  return old;
+}
+
+void NOINLINE __asan_handle_no_return() {
+  int local_stack;
+  AsanThread *curr_thread = GetCurrentThread();
+  CHECK(curr_thread);
+  uptr PageSize = GetPageSizeCached();
+  uptr top = curr_thread->stack_top();
+  uptr bottom = ((uptr)&local_stack - PageSize) & ~(PageSize-1);
+  static const uptr kMaxExpectedCleanupSize = 64 << 20;  // 64M
+  if (top - bottom > kMaxExpectedCleanupSize) {
+    static bool reported_warning = false;
+    if (reported_warning)
+      return;
+    reported_warning = true;
+    Report("WARNING: ASan is ignoring requested __asan_handle_no_return: "
+           "stack top: %p; bottom %p; size: %p (%zd)\n"
+           "False positive error reports may follow\n"
+           "For details see "
+           "http://code.google.com/p/address-sanitizer/issues/detail?id=189\n",
+           top, bottom, top - bottom, top - bottom);
+    return;
   }
+  PoisonShadow(bottom, top - bottom, 0);
+  if (curr_thread->has_fake_stack())
+    curr_thread->fake_stack()->HandleNoReturn();
+}
+
+void NOINLINE __asan_set_death_callback(void (*callback)(void)) {
+  death_callback = callback;
+}
+
+// Initialize as requested from instrumented application code.
+// We use this call as a trigger to wake up ASan from deactivated state.
+void __asan_init() {
+  AsanActivate();
+  AsanInitInternal();
 }

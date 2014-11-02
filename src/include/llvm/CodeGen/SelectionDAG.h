@@ -237,6 +237,13 @@ public:
     virtual void NodeUpdated(SDNode *N);
   };
 
+  /// NewNodesMustHaveLegalTypes - When true, additional steps are taken to
+  /// ensure that getConstant() and similar functions return DAG nodes that
+  /// have legal types. This is important after type legalization since
+  /// any illegally typed nodes generated after this point will not experience
+  /// type legalization.
+  bool NewNodesMustHaveLegalTypes;
+
 private:
   /// DAGUpdateListener is a friend so it can manipulate the listener stack.
   friend struct DAGUpdateListener;
@@ -394,18 +401,22 @@ public:
   //===--------------------------------------------------------------------===//
   // Node creation methods.
   //
-  SDValue getConstant(uint64_t Val, EVT VT, bool isTarget = false);
-  SDValue getConstant(const APInt &Val, EVT VT, bool isTarget = false);
-  SDValue getConstant(const ConstantInt &Val, EVT VT, bool isTarget = false);
+  SDValue getConstant(uint64_t Val, EVT VT, bool isTarget = false,
+                      bool isOpaque = false);
+  SDValue getConstant(const APInt &Val, EVT VT, bool isTarget = false,
+                      bool isOpaque = false);
+  SDValue getConstant(const ConstantInt &Val, EVT VT, bool isTarget = false,
+                      bool isOpaque = false);
   SDValue getIntPtrConstant(uint64_t Val, bool isTarget = false);
-  SDValue getTargetConstant(uint64_t Val, EVT VT) {
-    return getConstant(Val, VT, true);
+  SDValue getTargetConstant(uint64_t Val, EVT VT, bool isOpaque = false) {
+    return getConstant(Val, VT, true, isOpaque);
   }
-  SDValue getTargetConstant(const APInt &Val, EVT VT) {
-    return getConstant(Val, VT, true);
+  SDValue getTargetConstant(const APInt &Val, EVT VT, bool isOpaque = false) {
+    return getConstant(Val, VT, true, isOpaque);
   }
-  SDValue getTargetConstant(const ConstantInt &Val, EVT VT) {
-    return getConstant(Val, VT, true);
+  SDValue getTargetConstant(const ConstantInt &Val, EVT VT,
+                            bool isOpaque = false) {
+    return getConstant(Val, VT, true, isOpaque);
   }
   // The forms below that take a double should only be used for simple
   // constants that can be exactly represented in VT.  No checks are made.
@@ -801,6 +812,10 @@ public:
 
   /// getMDNode - Return an MDNodeSDNode which holds an MDNode.
   SDValue getMDNode(const MDNode *MD);
+
+  /// getAddrSpaceCast - Return an AddrSpaceCastSDNode.
+  SDValue getAddrSpaceCast(SDLoc dl, EVT VT, SDValue Ptr,
+                           unsigned SrcAS, unsigned DestAS);
 
   /// getShiftAmountOperand - Return the specified value casted to
   /// the target's desired shift amount type.

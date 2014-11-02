@@ -203,10 +203,6 @@ def DeadStoresChecker : Checker<"DeadStores">,
 
 let ParentPackage = DeadCodeAlpha in {
 
-def IdempotentOperationChecker : Checker<"IdempotentOperations">,
-  HelpText<"Warn about idempotent operations">,
-  DescFile<"IdempotentOperationChecker.cpp">;
-
 def UnreachableCodeChecker : Checker<"UnreachableCode">,
   HelpText<"Check unreachable code">,
   DescFile<"UnreachableCodeChecker.cpp">;
@@ -416,6 +412,10 @@ def ObjCNonNilReturnValueChecker : Checker<"NonNilReturnValue">,
   HelpText<"Model the APIs that are guaranteed to return a non-nil value">,
   DescFile<"BasicObjCFoundationChecks.cpp">;
 
+def ObjCSuperCallChecker : Checker<"MissingSuperCall">,
+  HelpText<"Warn about Objective-C methods that lack a necessary call to super">,
+  DescFile<"ObjCMissingSuperCallChecker.cpp">;
+
 def NSErrorChecker : Checker<"NSError">,
   HelpText<"Check usage of NSError** parameters">,
   DescFile<"NSErrorChecker.cpp">;
@@ -447,10 +447,6 @@ def DirectIvarAssignment : Checker<"DirectIvarAssignment">,
 def DirectIvarAssignmentForAnnotatedFunctions : Checker<"DirectIvarAssignmentForAnnotatedFunctions">,
   HelpText<"Check for direct assignments to instance variables in the methods annotated with objc_no_direct_instance_variable_assignment">,
   DescFile<"DirectIvarAssignment.cpp">;
-
-def ObjCSuperCallChecker : Checker<"MissingSuperCall">,
-  HelpText<"Warn about Objective-C methods that lack a necessary call to super">,
-  DescFile<"ObjCMissingSuperCallChecker.cpp">;
 
 } // end "alpha.osx.cocoa"
 

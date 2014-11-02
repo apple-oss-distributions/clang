@@ -93,8 +93,15 @@ int main(int argc, char *argv[]) {
   iocb[1].aio_lio_opcode = IOCB_CMD_PREAD;
   iocb[1].aio_buf = (__u64)(&buf[kFortyTwo]);
   iocb[1].aio_nbytes = kFortyTwo;
-  __sanitizer_syscall_post_io_submit(1, 0, 2, &iocbp);
-  assert(__msan_test_shadow(buf, sizeof(buf)) == kFortyTwo);
-  
+  __sanitizer_syscall_pre_io_submit(0, 2, &iocbp);
+  assert(__msan_test_shadow(buf, sizeof(buf)) == 2 * kFortyTwo);
+
+  __msan_poison(buf, sizeof(buf));
+  char *p = buf;
+  __msan_poison(&p, sizeof(p));
+  __sanitizer_syscall_post_io_setup(0, 1, &p);
+  assert(__msan_test_shadow(&p, sizeof(p)) == -1);
+  assert(__msan_test_shadow(buf, sizeof(buf)) >= 32);
+
   return 0;
 }

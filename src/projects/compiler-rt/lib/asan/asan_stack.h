@@ -19,13 +19,6 @@
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 
-namespace __asan {
-
-void PrintStack(StackTrace *stack);
-void PrintStack(const uptr *trace, uptr size);
-
-}  // namespace __asan
-
 // Get the stack trace with the given pc and bp.
 // The pc will be in the position 0 of the resulting stack trace.
 // The bp may refer to the current frame or to the caller's frame.
@@ -34,17 +27,22 @@ void PrintStack(const uptr *trace, uptr size);
   StackTrace stack;                                         \
   stack.Unwind(max_s, pc, bp, 0, 0, fast)
 #else
-#define GET_STACK_TRACE_WITH_PC_AND_BP(max_s, pc, bp, fast)                \
-  StackTrace stack;                                                        \
-  {                                                                        \
-    AsanThread *t;                                                         \
-    stack.size = 0;                                                        \
-    if (asan_inited && (t = GetCurrentThread()) && !t->isUnwinding()) {    \
-      uptr stack_top = t->stack_top();                                     \
-      uptr stack_bottom = t->stack_bottom();                               \
-      ScopedUnwinding unwind_scope(t);                                     \
-      stack.Unwind(max_s, pc, bp, stack_top, stack_bottom, fast);          \
-    }                                                                      \
+#define GET_STACK_TRACE_WITH_PC_AND_BP(max_s, pc, bp, fast)                    \
+  StackTrace stack;                                                            \
+  {                                                                            \
+    AsanThread *t;                                                             \
+    stack.size = 0;                                                            \
+    if (asan_inited) {                                                         \
+      if ((t = GetCurrentThread()) && !t->isUnwinding()) {                     \
+        uptr stack_top = t->stack_top();                                       \
+        uptr stack_bottom = t->stack_bottom();                                 \
+        ScopedUnwinding unwind_scope(t);                                       \
+        stack.Unwind(max_s, pc, bp, stack_top, stack_bottom, fast);            \
+      } else if (t == 0 && !fast) {                                            \
+        /* If GetCurrentThread() has failed, try to do slow unwind anyways. */ \
+        stack.Unwind(max_s, pc, bp, 0, 0, false);                              \
+      }                                                                        \
+    }                                                                          \
   }
 #endif  // SANITIZER_WINDOWS
 
@@ -72,11 +70,10 @@ void PrintStack(const uptr *trace, uptr size);
 
 #define GET_STACK_TRACE_FREE GET_STACK_TRACE_MALLOC
 
-#define PRINT_CURRENT_STACK()                    \
-  {                                              \
-    GET_STACK_TRACE(kStackTraceMax,              \
-      common_flags()->fast_unwind_on_fatal);     \
-    PrintStack(&stack);                          \
+#define PRINT_CURRENT_STACK()   \
+  {                             \
+    GET_STACK_TRACE_FATAL_HERE; \
+    stack.Print();              \
   }
 
 #endif  // ASAN_STACK_H

@@ -19,7 +19,7 @@
 #include "asan_interceptors.h"
 #include "asan_internal.h"
 #include "asan_stack.h"
-#include "interception/interception.h"
+#include "sanitizer_common/sanitizer_interception.h"
 
 #include <stddef.h>
 
@@ -98,8 +98,9 @@ void* _recalloc(void* p, size_t n, size_t elem_size) {
 
 SANITIZER_INTERFACE_ATTRIBUTE
 size_t _msize(void *ptr) {
-  GET_STACK_TRACE_MALLOC;
-  return asan_malloc_usable_size(ptr, &stack);
+  GET_CURRENT_PC_BP_SP;
+  (void)sp;
+  return asan_malloc_usable_size(ptr, pc, bp);
 }
 
 int _CrtDbgReport(int, const char*, int,

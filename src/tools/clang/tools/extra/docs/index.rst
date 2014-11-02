@@ -17,6 +17,7 @@ Contents
 
    clang-modernize
    modularize
+   module-map-checker
    pp-trace
 
 
@@ -43,4 +44,3 @@ Indices and tables
 
 * :ref:`genindex`
 * :ref:`search`
-

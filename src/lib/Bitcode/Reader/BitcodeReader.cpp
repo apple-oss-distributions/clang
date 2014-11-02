@@ -80,8 +80,8 @@ static GlobalValue::LinkageTypes GetDecodedLinkage(unsigned Val) {
   case 2:  return GlobalValue::AppendingLinkage;
   case 3:  return GlobalValue::InternalLinkage;
   case 4:  return GlobalValue::LinkOnceAnyLinkage;
-  case 5:  return GlobalValue::DLLImportLinkage;
-  case 6:  return GlobalValue::DLLExportLinkage;
+  case 5:  return GlobalValue::ExternalLinkage; // Obsolete DLLImportLinkage
+  case 6:  return GlobalValue::ExternalLinkage; // Obsolete DLLExportLinkage
   case 7:  return GlobalValue::ExternalWeakLinkage;
   case 8:  return GlobalValue::CommonLinkage;
   case 9:  return GlobalValue::PrivateLinkage;
@@ -99,6 +99,16 @@ static GlobalValue::VisibilityTypes GetDecodedVisibility(unsigned Val) {
   case 0: return GlobalValue::DefaultVisibility;
   case 1: return GlobalValue::HiddenVisibility;
   case 2: return GlobalValue::ProtectedVisibility;
+  }
+}
+
+static GlobalValue::DLLStorageClassTypes
+GetDecodedDLLStorageClass(unsigned Val) {
+  switch (Val) {
+  default: // Map unknown values to default.
+  case 0: return GlobalValue::DefaultStorageClass;
+  case 1: return GlobalValue::DLLImportStorageClass;
+  case 2: return GlobalValue::DLLExportStorageClass;
   }
 }
 
@@ -128,6 +138,7 @@ static int GetDecodedCastOpcode(unsigned Val) {
   case bitc::CAST_PTRTOINT: return Instruction::PtrToInt;
   case bitc::CAST_INTTOPTR: return Instruction::IntToPtr;
   case bitc::CAST_BITCAST : return Instruction::BitCast;
+  case bitc::CAST_ADDRSPACECAST: return Instruction::AddrSpaceCast;
   }
 }
 static int GetDecodedBinaryOpcode(unsigned Val, Type *Ty) {
@@ -189,6 +200,13 @@ static SynchronizationScope GetDecodedSynchScope(unsigned Val) {
   case bitc::SYNCHSCOPE_SINGLETHREAD: return SingleThread;
   default: // Map unknown scopes to cross-thread.
   case bitc::SYNCHSCOPE_CROSSTHREAD: return CrossThread;
+  }
+}
+
+static void UpgradeDLLImportExportLinkage(llvm::GlobalValue *GV, unsigned Val) {
+  switch (Val) {
+  case 5: GV->setDLLStorageClass(GlobalValue::DLLImportStorageClass); break;
+  case 6: GV->setDLLStorageClass(GlobalValue::DLLExportStorageClass); break;
   }
 }
 
@@ -508,123 +526,96 @@ error_code BitcodeReader::ParseAttributeBlock() {
   }
 }
 
+// Returns Attribute::None on unrecognized codes.
+static Attribute::AttrKind GetAttrFromCode(uint64_t Code) {
+  switch (Code) {
+  default:
+    return Attribute::None;
+  case bitc::ATTR_KIND_ALIGNMENT:
+    return Attribute::Alignment;
+  case bitc::ATTR_KIND_ALWAYS_INLINE:
+    return Attribute::AlwaysInline;
+  case bitc::ATTR_KIND_BUILTIN:
+    return Attribute::Builtin;
+  case bitc::ATTR_KIND_BY_VAL:
+    return Attribute::ByVal;
+  case bitc::ATTR_KIND_IN_ALLOCA:
+    return Attribute::InAlloca;
+  case bitc::ATTR_KIND_COLD:
+    return Attribute::Cold;
+  case bitc::ATTR_KIND_INLINE_HINT:
+    return Attribute::InlineHint;
+  case bitc::ATTR_KIND_IN_REG:
+    return Attribute::InReg;
+  case bitc::ATTR_KIND_MIN_SIZE:
+    return Attribute::MinSize;
+  case bitc::ATTR_KIND_NAKED:
+    return Attribute::Naked;
+  case bitc::ATTR_KIND_NEST:
+    return Attribute::Nest;
+  case bitc::ATTR_KIND_NO_ALIAS:
+    return Attribute::NoAlias;
+  case bitc::ATTR_KIND_NO_BUILTIN:
+    return Attribute::NoBuiltin;
+  case bitc::ATTR_KIND_NO_CAPTURE:
+    return Attribute::NoCapture;
+  case bitc::ATTR_KIND_NO_DUPLICATE:
+    return Attribute::NoDuplicate;
+  case bitc::ATTR_KIND_NO_IMPLICIT_FLOAT:
+    return Attribute::NoImplicitFloat;
+  case bitc::ATTR_KIND_NO_INLINE:
+    return Attribute::NoInline;
+  case bitc::ATTR_KIND_NON_LAZY_BIND:
+    return Attribute::NonLazyBind;
+  case bitc::ATTR_KIND_NO_RED_ZONE:
+    return Attribute::NoRedZone;
+  case bitc::ATTR_KIND_NO_RETURN:
+    return Attribute::NoReturn;
+  case bitc::ATTR_KIND_NO_UNWIND:
+    return Attribute::NoUnwind;
+  case bitc::ATTR_KIND_OPTIMIZE_FOR_SIZE:
+    return Attribute::OptimizeForSize;
+  case bitc::ATTR_KIND_OPTIMIZE_NONE:
+    return Attribute::OptimizeNone;
+  case bitc::ATTR_KIND_READ_NONE:
+    return Attribute::ReadNone;
+  case bitc::ATTR_KIND_READ_ONLY:
+    return Attribute::ReadOnly;
+  case bitc::ATTR_KIND_RETURNED:
+    return Attribute::Returned;
+  case bitc::ATTR_KIND_RETURNS_TWICE:
+    return Attribute::ReturnsTwice;
+  case bitc::ATTR_KIND_S_EXT:
+    return Attribute::SExt;
+  case bitc::ATTR_KIND_STACK_ALIGNMENT:
+    return Attribute::StackAlignment;
+  case bitc::ATTR_KIND_STACK_PROTECT:
+    return Attribute::StackProtect;
+  case bitc::ATTR_KIND_STACK_PROTECT_REQ:
+    return Attribute::StackProtectReq;
+  case bitc::ATTR_KIND_STACK_PROTECT_STRONG:
+    return Attribute::StackProtectStrong;
+  case bitc::ATTR_KIND_STRUCT_RET:
+    return Attribute::StructRet;
+  case bitc::ATTR_KIND_SANITIZE_ADDRESS:
+    return Attribute::SanitizeAddress;
+  case bitc::ATTR_KIND_SANITIZE_THREAD:
+    return Attribute::SanitizeThread;
+  case bitc::ATTR_KIND_SANITIZE_MEMORY:
+    return Attribute::SanitizeMemory;
+  case bitc::ATTR_KIND_UW_TABLE:
+    return Attribute::UWTable;
+  case bitc::ATTR_KIND_Z_EXT:
+    return Attribute::ZExt;
+  }
+}
+
 error_code BitcodeReader::ParseAttrKind(uint64_t Code,
                                         Attribute::AttrKind *Kind) {
-  switch (Code) {
-  case bitc::ATTR_KIND_ALIGNMENT:
-    *Kind = Attribute::Alignment;
-    return error_code::success();
-  case bitc::ATTR_KIND_ALWAYS_INLINE:
-    *Kind = Attribute::AlwaysInline;
-    return error_code::success();
-  case bitc::ATTR_KIND_BUILTIN:
-    *Kind = Attribute::Builtin;
-    return error_code::success();
-  case bitc::ATTR_KIND_BY_VAL:
-    *Kind = Attribute::ByVal;
-    return error_code::success();
-  case bitc::ATTR_KIND_COLD:
-    *Kind = Attribute::Cold;
-    return error_code::success();
-  case bitc::ATTR_KIND_INLINE_HINT:
-    *Kind = Attribute::InlineHint;
-    return error_code::success();
-  case bitc::ATTR_KIND_IN_REG:
-    *Kind = Attribute::InReg;
-    return error_code::success();
-  case bitc::ATTR_KIND_MIN_SIZE:
-    *Kind = Attribute::MinSize;
-    return error_code::success();
-  case bitc::ATTR_KIND_NAKED:
-    *Kind = Attribute::Naked;
-    return error_code::success();
-  case bitc::ATTR_KIND_NEST:
-    *Kind = Attribute::Nest;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_ALIAS:
-    *Kind = Attribute::NoAlias;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_BUILTIN:
-    *Kind = Attribute::NoBuiltin;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_CAPTURE:
-    *Kind = Attribute::NoCapture;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_DUPLICATE:
-    *Kind = Attribute::NoDuplicate;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_IMPLICIT_FLOAT:
-    *Kind = Attribute::NoImplicitFloat;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_INLINE:
-    *Kind = Attribute::NoInline;
-    return error_code::success();
-  case bitc::ATTR_KIND_NON_LAZY_BIND:
-    *Kind = Attribute::NonLazyBind;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_RED_ZONE:
-    *Kind = Attribute::NoRedZone;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_RETURN:
-    *Kind = Attribute::NoReturn;
-    return error_code::success();
-  case bitc::ATTR_KIND_NO_UNWIND:
-    *Kind = Attribute::NoUnwind;
-    return error_code::success();
-  case bitc::ATTR_KIND_OPTIMIZE_FOR_SIZE:
-    *Kind = Attribute::OptimizeForSize;
-    return error_code::success();
-  case bitc::ATTR_KIND_OPTIMIZE_NONE:
-    *Kind = Attribute::OptimizeNone;
-    return error_code::success();
-  case bitc::ATTR_KIND_READ_NONE:
-    *Kind = Attribute::ReadNone;
-    return error_code::success();
-  case bitc::ATTR_KIND_READ_ONLY:
-    *Kind = Attribute::ReadOnly;
-    return error_code::success();
-  case bitc::ATTR_KIND_RETURNED:
-    *Kind = Attribute::Returned;
-    return error_code::success();
-  case bitc::ATTR_KIND_RETURNS_TWICE:
-    *Kind = Attribute::ReturnsTwice;
-    return error_code::success();
-  case bitc::ATTR_KIND_S_EXT:
-    *Kind = Attribute::SExt;
-    return error_code::success();
-  case bitc::ATTR_KIND_STACK_ALIGNMENT:
-    *Kind = Attribute::StackAlignment;
-    return error_code::success();
-  case bitc::ATTR_KIND_STACK_PROTECT:
-    *Kind = Attribute::StackProtect;
-    return error_code::success();
-  case bitc::ATTR_KIND_STACK_PROTECT_REQ:
-    *Kind = Attribute::StackProtectReq;
-    return error_code::success();
-  case bitc::ATTR_KIND_STACK_PROTECT_STRONG:
-    *Kind = Attribute::StackProtectStrong;
-    return error_code::success();
-  case bitc::ATTR_KIND_STRUCT_RET:
-    *Kind = Attribute::StructRet;
-    return error_code::success();
-  case bitc::ATTR_KIND_SANITIZE_ADDRESS:
-    *Kind = Attribute::SanitizeAddress;
-    return error_code::success();
-  case bitc::ATTR_KIND_SANITIZE_THREAD:
-    *Kind = Attribute::SanitizeThread;
-    return error_code::success();
-  case bitc::ATTR_KIND_SANITIZE_MEMORY:
-    *Kind = Attribute::SanitizeMemory;
-    return error_code::success();
-  case bitc::ATTR_KIND_UW_TABLE:
-    *Kind = Attribute::UWTable;
-    return error_code::success();
-  case bitc::ATTR_KIND_Z_EXT:
-    *Kind = Attribute::ZExt;
-    return error_code::success();
-  default:
+  *Kind = GetAttrFromCode(Code);
+  if (*Kind == Attribute::None)
     return Error(InvalidValue);
-  }
+  return error_code::success();
 }
 
 error_code BitcodeReader::ParseAttributeGroupBlock() {
@@ -1385,7 +1376,8 @@ error_code BitcodeReader::ParseConstants() {
         if (!OpTy)
           return Error(InvalidRecord);
         Constant *Op = ValueList.getConstantFwdRef(Record[2], OpTy);
-        V = ConstantExpr::getCast(Opc, Op, CurTy);
+        V = UpgradeBitCastExpr(Opc, Op, CurTy);
+        if (!V) V = ConstantExpr::getCast(Opc, Op, CurTy);
       }
       break;
     }
@@ -1822,7 +1814,7 @@ error_code BitcodeReader::ParseModule(bool Resume) {
     }
     // GLOBALVAR: [pointer type, isconst, initid,
     //             linkage, alignment, section, visibility, threadlocal,
-    //             unnamed_addr]
+    //             unnamed_addr, dllstorageclass]
     case bitc::MODULE_CODE_GLOBALVAR: {
       if (Record.size() < 6)
         return Error(InvalidRecord);
@@ -1868,6 +1860,11 @@ error_code BitcodeReader::ParseModule(bool Resume) {
       NewGV->setVisibility(Visibility);
       NewGV->setUnnamedAddr(UnnamedAddr);
 
+      if (Record.size() > 10)
+        NewGV->setDLLStorageClass(GetDecodedDLLStorageClass(Record[10]));
+      else
+        UpgradeDLLImportExportLinkage(NewGV, Record[3]);
+
       ValueList.push_back(NewGV);
 
       // Remember which value to use for the global initializer.
@@ -1876,7 +1873,8 @@ error_code BitcodeReader::ParseModule(bool Resume) {
       break;
     }
     // FUNCTION:  [type, callingconv, isproto, linkage, paramattr,
-    //             alignment, section, visibility, gc, unnamed_addr]
+    //             alignment, section, visibility, gc, unnamed_addr,
+    //             dllstorageclass]
     case bitc::MODULE_CODE_FUNCTION: {
       if (Record.size() < 8)
         return Error(InvalidRecord);
@@ -1916,6 +1914,12 @@ error_code BitcodeReader::ParseModule(bool Resume) {
       Func->setUnnamedAddr(UnnamedAddr);
       if (Record.size() > 10 && Record[10] != 0)
         FunctionPrefixes.push_back(std::make_pair(Func, Record[10]-1));
+
+      if (Record.size() > 11)
+        Func->setDLLStorageClass(GetDecodedDLLStorageClass(Record[11]));
+      else
+        UpgradeDLLImportExportLinkage(Func, Record[3]);
+
       ValueList.push_back(Func);
 
       // If this is a function with a body, remember the prototype we are
@@ -1927,7 +1931,7 @@ error_code BitcodeReader::ParseModule(bool Resume) {
       break;
     }
     // ALIAS: [alias type, aliasee val#, linkage]
-    // ALIAS: [alias type, aliasee val#, linkage, visibility]
+    // ALIAS: [alias type, aliasee val#, linkage, visibility, dllstorageclass]
     case bitc::MODULE_CODE_ALIAS: {
       if (Record.size() < 3)
         return Error(InvalidRecord);
@@ -1942,6 +1946,10 @@ error_code BitcodeReader::ParseModule(bool Resume) {
       // Old bitcode files didn't have visibility field.
       if (Record.size() > 3)
         NewGA->setVisibility(GetDecodedVisibility(Record[3]));
+      if (Record.size() > 4)
+        NewGA->setDLLStorageClass(GetDecodedDLLStorageClass(Record[4]));
+      else
+        UpgradeDLLImportExportLinkage(NewGA, Record[2]);
       ValueList.push_back(NewGA);
       AliasInits.push_back(std::make_pair(NewGA, Record[1]));
       break;
@@ -2325,7 +2333,15 @@ error_code BitcodeReader::ParseFunctionBody(Function *F) {
       int Opc = GetDecodedCastOpcode(Record[OpNum+1]);
       if (Opc == -1 || ResTy == 0)
         return Error(InvalidRecord);
-      I = CastInst::Create((Instruction::CastOps)Opc, Op, ResTy);
+      Instruction *Temp = 0;
+      if ((I = UpgradeBitCastInst(Opc, Op, ResTy, Temp))) {
+        if (Temp) {
+          InstructionList.push_back(Temp);
+          CurBB->getInstList().push_back(Temp);
+        }
+      } else {
+        I = CastInst::Create((Instruction::CastOps)Opc, Op, ResTy);
+      }
       InstructionList.push_back(I);
       break;
     }
@@ -3229,7 +3245,7 @@ error_code BitcodeReader::InitLazyStream() {
 }
 
 namespace {
-class BitcodeErrorCategoryType : public _do_message {
+class BitcodeErrorCategoryType : public error_category {
   const char *name() const LLVM_OVERRIDE {
     return "llvm.bitcode";
   }
@@ -3291,18 +3307,14 @@ const error_category &BitcodeReader::BitcodeErrorCategory() {
 
 /// getLazyBitcodeModule - lazy function-at-a-time loading from a file.
 ///
-Module *llvm::getLazyBitcodeModule(MemoryBuffer *Buffer,
-                                   LLVMContext& Context,
-                                   std::string *ErrMsg) {
+ErrorOr<Module *> llvm::getLazyBitcodeModule(MemoryBuffer *Buffer,
+                                             LLVMContext &Context) {
   Module *M = new Module(Buffer->getBufferIdentifier(), Context);
   BitcodeReader *R = new BitcodeReader(Buffer, Context);
   M->setMaterializer(R);
   if (error_code EC = R->ParseBitcodeInto(M)) {
-    if (ErrMsg)
-      *ErrMsg = EC.message();
-
     delete M;  // Also deletes R.
-    return 0;
+    return EC;
   }
   // Have the BitcodeReader dtor delete 'Buffer'.
   R->setBufferOwned(true);
@@ -3330,21 +3342,21 @@ Module *llvm::getStreamedBitcodeModule(const std::string &name,
   return M;
 }
 
-/// ParseBitcodeFile - Read the specified bitcode file, returning the module.
-/// If an error occurs, return null and fill in *ErrMsg if non-null.
-Module *llvm::ParseBitcodeFile(MemoryBuffer *Buffer, LLVMContext& Context,
-                               std::string *ErrMsg){
-  Module *M = getLazyBitcodeModule(Buffer, Context, ErrMsg);
-  if (!M) return 0;
+ErrorOr<Module *> llvm::parseBitcodeFile(MemoryBuffer *Buffer,
+                                         LLVMContext &Context) {
+  ErrorOr<Module *> ModuleOrErr = getLazyBitcodeModule(Buffer, Context);
+  if (!ModuleOrErr)
+    return ModuleOrErr;
+  Module *M = ModuleOrErr.get();
 
   // Don't let the BitcodeReader dtor delete 'Buffer', regardless of whether
   // there was an error.
   static_cast<BitcodeReader*>(M->getMaterializer())->setBufferOwned(false);
 
   // Read in the entire module, and destroy the BitcodeReader.
-  if (M->MaterializeAllPermanently(ErrMsg)) {
+  if (error_code EC = M->materializeAllPermanently()) {
     delete M;
-    return 0;
+    return EC;
   }
 
   // TODO: Restore the use-lists to the in-memory state when the bitcode was

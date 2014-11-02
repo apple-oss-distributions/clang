@@ -13,9 +13,7 @@
 
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
-#include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
-#include "sanitizer_symbolizer.h"
 
 namespace __sanitizer {
 
@@ -29,80 +27,6 @@ uptr StackTrace::GetPreviousInstructionPc(uptr pc) {
 #else
   return pc - 1;
 #endif
-}
-
-static void PrintStackFramePrefix(uptr frame_num, uptr pc) {
-  Printf("    #%zu 0x%zx", frame_num, pc);
-}
-
-void StackTrace::PrintStack(const uptr *addr, uptr size,
-                            SymbolizeCallback symbolize_callback) {
-  if (addr == 0) {
-    Printf("<empty stack>\n\n");
-    return;
-  }
-  MemoryMappingLayout proc_maps(/*cache_enabled*/true);
-  InternalScopedBuffer<char> buff(GetPageSizeCached() * 2);
-  InternalScopedBuffer<AddressInfo> addr_frames(64);
-  uptr frame_num = 0;
-  for (uptr i = 0; i < size && addr[i]; i++) {
-    // PCs in stack traces are actually the return addresses, that is,
-    // addresses of the next instructions after the call.
-    uptr pc = GetPreviousInstructionPc(addr[i]);
-    uptr addr_frames_num = 0;  // The number of stack frames for current
-                               // instruction address.
-    if (symbolize_callback) {
-      if (symbolize_callback((void*)pc, buff.data(), buff.size())) {
-        addr_frames_num = 1;
-        PrintStackFramePrefix(frame_num, pc);
-        // We can't know anything about the string returned by external
-        // symbolizer, but if it starts with filename, try to strip path prefix
-        // from it.
-        Printf(" %s\n",
-               StripPathPrefix(buff.data(), common_flags()->strip_path_prefix));
-        frame_num++;
-      }
-    }
-    if (common_flags()->symbolize && addr_frames_num == 0) {
-      // Use our own (online) symbolizer, if necessary.
-      if (Symbolizer *sym = Symbolizer::GetOrNull())
-        addr_frames_num =
-            sym->SymbolizeCode(pc, addr_frames.data(), addr_frames.size());
-      for (uptr j = 0; j < addr_frames_num; j++) {
-        AddressInfo &info = addr_frames[j];
-        PrintStackFramePrefix(frame_num, pc);
-        if (info.function) {
-          Printf(" in %s", info.function);
-        }
-        if (info.file) {
-          Printf(" ");
-          PrintSourceLocation(info.file, info.line, info.column);
-        } else if (info.module) {
-          Printf(" ");
-          PrintModuleAndOffset(info.module, info.module_offset);
-        }
-        Printf("\n");
-        info.Clear();
-        frame_num++;
-      }
-    }
-    if (addr_frames_num == 0) {
-      // If online symbolization failed, try to output at least module and
-      // offset for instruction.
-      PrintStackFramePrefix(frame_num, pc);
-      uptr offset;
-      if (proc_maps.GetObjectNameAndOffset(pc, &offset,
-                                           buff.data(), buff.size(),
-                                           /* protection */0)) {
-        Printf(" ");
-        PrintModuleAndOffset(buff.data(), offset);
-      }
-      Printf("\n");
-      frame_num++;
-    }
-  }
-  // Always print a trailing empty line after stack trace.
-  Printf("\n");
 }
 
 uptr StackTrace::GetCurrentPc() {
@@ -136,12 +60,27 @@ void StackTrace::FastUnwindStack(uptr pc, uptr bp,
   }
 }
 
+static bool MatchPc(uptr cur_pc, uptr trace_pc, uptr threshold) {
+  return cur_pc - trace_pc <= threshold || trace_pc - cur_pc <= threshold;
+}
+
 void StackTrace::PopStackFrames(uptr count) {
-  CHECK(count < size);
+  CHECK_LT(count, size);
   size -= count;
   for (uptr i = 0; i < size; ++i) {
     trace[i] = trace[i + count];
   }
+}
+
+uptr StackTrace::LocatePcInTrace(uptr pc) {
+  // Use threshold to find PC in stack trace, as PC we want to unwind from may
+  // slightly differ from return address in the actual unwinded stack trace.
+  const int kPcThreshold = 192;
+  for (uptr i = 0; i < size; ++i) {
+    if (MatchPc(pc, trace[i], kPcThreshold))
+      return i;
+  }
+  return 0;
 }
 
 }  // namespace __sanitizer

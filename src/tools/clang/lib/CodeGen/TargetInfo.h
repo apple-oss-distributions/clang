@@ -17,8 +17,8 @@
 
 #include "clang/AST/Type.h"
 #include "clang/Basic/LLVM.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace llvm {
   class Constant;
@@ -182,7 +182,7 @@ namespace clang {
     /// However, some platforms make the conventions identical except
     /// for passing additional out-of-band information to a variadic
     /// function: for example, x86-64 passes the number of SSE
-    /// arguments in %al.  On these platforms, it is desireable to
+    /// arguments in %al.  On these platforms, it is desirable to
     /// call unprototyped functions using the variadic convention so
     /// that unprototyped calls to varargs functions still succeed.
     ///

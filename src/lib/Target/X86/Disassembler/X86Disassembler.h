@@ -86,6 +86,7 @@
 #undef INSTRUCTION_IDS
 
 #include "llvm/MC/MCDisassembler.h"
+#include <memory>
 
 namespace llvm {
 
@@ -101,15 +102,12 @@ namespace X86Disassembler {
 ///   All each platform class should have to do is subclass the constructor, and
 ///   provide a different disassemblerMode value.
 class X86GenericDisassembler : public MCDisassembler {
-  const MCInstrInfo *MII;
+  std::unique_ptr<const MCInstrInfo> MII;
 public:
   /// Constructor     - Initializes the disassembler.
   ///
-  /// @param mode     - The X86 architecture mode to decode for.
-  X86GenericDisassembler(const MCSubtargetInfo &STI, DisassemblerMode mode,
-                         const MCInstrInfo *MII);
-private:
-  ~X86GenericDisassembler();
+  X86GenericDisassembler(const MCSubtargetInfo &STI, MCContext &Ctx,
+                         std::unique_ptr<const MCInstrInfo> MII);
 public:
 
   /// getInstruction - See MCDisassembler.

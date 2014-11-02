@@ -9,10 +9,9 @@
 #ifndef CLANG_LIB_DRIVER_SANITIZERARGS_H_
 #define CLANG_LIB_DRIVER_SANITIZERARGS_H_
 
-#include <string>
-
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
+#include <string>
 
 namespace clang {
 namespace driver {
@@ -88,7 +87,8 @@ class SanitizerArgs {
   /// Parse a -fsanitize= or -fno-sanitize= argument's values, diagnosing any
   /// invalid components.
   static unsigned parse(const Driver &D, const llvm::opt::Arg *A,
-                        bool DiagnoseErrors);
+                        bool DiagnoseErrors,
+                        bool HasSanitizeUndefinedTrapOnError);
 
   /// Parse a single flag of the form -f[no]sanitize=, or
   /// -f*-sanitizer. Sets the masks defining required change of Kind value.

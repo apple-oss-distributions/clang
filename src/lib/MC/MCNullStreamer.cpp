@@ -19,16 +19,10 @@ namespace {
 
   class MCNullStreamer : public MCStreamer {
   public:
-    MCNullStreamer(MCContext &Context) : MCStreamer(Context, 0) {}
+    MCNullStreamer(MCContext &Context) : MCStreamer(Context) {}
 
     /// @name MCStreamer Interface
     /// @{
-
-    virtual void InitToTextSection() {
-    }
-
-    virtual void InitSections() {
-    }
 
     virtual void ChangeSection(const MCSection *Section,
                                const MCExpr *Subsection) {
@@ -75,7 +69,8 @@ namespace {
                                 uint64_t Size, unsigned ByteAlignment) {}
     virtual void EmitBytes(StringRef Data) {}
 
-    virtual void EmitValueImpl(const MCExpr *Value, unsigned Size) {}
+    virtual void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                               const SMLoc &Loc = SMLoc()) {}
     virtual void EmitULEB128Value(const MCExpr *Value) {}
     virtual void EmitSLEB128Value(const MCExpr *Value) {}
     virtual void EmitGPRel32Value(const MCExpr *Value) {}

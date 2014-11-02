@@ -20,6 +20,7 @@
 #define GET_REGINFO_HEADER
 #include "NVPTXGenRegisterInfo.inc"
 #include "llvm/Target/TargetRegisterInfo.h"
+#define _POSIX_C_SOURCE
 #include <sstream>
 
 namespace llvm {

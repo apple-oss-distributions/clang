@@ -33,8 +33,24 @@
 #include <link.h>
 #endif
 
+#ifndef SANITIZER_GO
+// This function is defined elsewhere if we intercepted pthread_attr_getstack.
+extern "C" SANITIZER_WEAK_ATTRIBUTE int
+__sanitizer_pthread_attr_getstack(void *attr, void **addr, size_t *size);
+
+static int my_pthread_attr_getstack(void *attr, void **addr, size_t *size) {
+#
+  if (__sanitizer_pthread_attr_getstack)
+    return __sanitizer_pthread_attr_getstack((pthread_attr_t *)attr, addr,
+                                             size);
+
+  return pthread_attr_getstack((pthread_attr_t *)attr, addr, size);
+}
+#endif  // #ifndef SANITIZER_GO
+
 namespace __sanitizer {
 
+#ifndef SANITIZER_GO
 void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
                                 uptr *stack_bottom) {
   static const uptr kMaxThreadStackSize = 1 << 30;  // 1Gb
@@ -74,13 +90,14 @@ void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
   CHECK_EQ(pthread_getattr_np(pthread_self(), &attr), 0);
   uptr stacksize = 0;
   void *stackaddr = 0;
-  pthread_attr_getstack(&attr, &stackaddr, (size_t*)&stacksize);
+  my_pthread_attr_getstack(&attr, &stackaddr, (size_t*)&stacksize);
   pthread_attr_destroy(&attr);
 
   CHECK_LE(stacksize, kMaxThreadStackSize);  // Sanity check.
   *stack_top = (uptr)stackaddr + stacksize;
   *stack_bottom = (uptr)stackaddr;
 }
+#endif  // #ifndef SANITIZER_GO
 
 // Does not compile for Go because dlsym() requires -ldl
 #ifndef SANITIZER_GO
@@ -92,7 +109,7 @@ bool SetEnv(const char *name, const char *value) {
   setenv_ft setenv_f;
   CHECK_EQ(sizeof(setenv_f), sizeof(f));
   internal_memcpy(&setenv_f, &f, sizeof(f));
-  return setenv_f(name, value, 1) == 0;
+  return IndirectExternCall(setenv_f)(name, value, 1) == 0;
 }
 #endif
 
@@ -154,10 +171,6 @@ _Unwind_Reason_Code Unwind_Trace(struct _Unwind_Context *ctx, void *param) {
   return UNWIND_CONTINUE;
 }
 
-static bool MatchPc(uptr cur_pc, uptr trace_pc) {
-  return cur_pc - trace_pc <= 64 || trace_pc - cur_pc <= 64;
-}
-
 void StackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
   size = 0;
   if (max_depth == 0)
@@ -165,13 +178,10 @@ void StackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
   UnwindTraceArg arg = {this, Min(max_depth + 1, kStackTraceMax)};
   _Unwind_Backtrace(Unwind_Trace, &arg);
   // We need to pop a few frames so that pc is on top.
+  uptr to_pop = LocatePcInTrace(pc);
   // trace[0] belongs to the current function so we always pop it.
-  int to_pop = 1;
-  /**/ if (size > 1 && MatchPc(pc, trace[1])) to_pop = 1;
-  else if (size > 2 && MatchPc(pc, trace[2])) to_pop = 2;
-  else if (size > 3 && MatchPc(pc, trace[3])) to_pop = 3;
-  else if (size > 4 && MatchPc(pc, trace[4])) to_pop = 4;
-  else if (size > 5 && MatchPc(pc, trace[5])) to_pop = 5;
+  if (to_pop == 0)
+    to_pop = 1;
   PopStackFrames(to_pop);
   trace[0] = pc;
 }
@@ -197,7 +207,7 @@ void InitTlsSize() {
   CHECK_NE(get_tls, 0);
   size_t tls_size = 0;
   size_t tls_align = 0;
-  get_tls(&tls_size, &tls_align);
+  IndirectExternCall(get_tls)(&tls_size, &tls_align);
   g_tls_size = tls_size;
 #endif
 }
@@ -273,11 +283,12 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 #endif  // SANITIZER_GO
 }
 
+#ifndef SANITIZER_GO
 void AdjustStackSizeLinux(void *attr_) {
   pthread_attr_t *attr = (pthread_attr_t *)attr_;
   uptr stackaddr = 0;
   size_t stacksize = 0;
-  pthread_attr_getstack(attr, (void**)&stackaddr, &stacksize);
+  my_pthread_attr_getstack(attr, (void**)&stackaddr, &stacksize);
   // GLibC will return (0 - stacksize) as the stack address in the case when
   // stacksize is set, but stackaddr is not.
   bool stack_set = (stackaddr != 0) && (stackaddr + stacksize != 0);
@@ -285,9 +296,9 @@ void AdjustStackSizeLinux(void *attr_) {
   const uptr minstacksize = GetTlsSize() + 128*1024;
   if (stacksize < minstacksize) {
     if (!stack_set) {
-      if (common_flags()->verbosity && stacksize != 0)
-        Printf("Sanitizer: increasing stacksize %zu->%zu\n", stacksize,
-               minstacksize);
+      if (stacksize != 0)
+        VPrintf(1, "Sanitizer: increasing stacksize %zu->%zu\n", stacksize,
+                minstacksize);
       pthread_attr_setstacksize(attr, minstacksize);
     } else {
       Printf("Sanitizer: pre-allocated stack size is insufficient: "
@@ -296,11 +307,13 @@ void AdjustStackSizeLinux(void *attr_) {
     }
   }
 }
+#endif  // SANITIZER_GO
 
 #if SANITIZER_ANDROID
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
                       string_predicate_t filter) {
-  return 0;
+  MemoryMappingLayout memory_mapping(false);
+  return memory_mapping.DumpListOfModules(modules, max_modules, filter);
 }
 #else  // SANITIZER_ANDROID
 typedef ElfW(Phdr) Elf_Phdr;
@@ -353,6 +366,16 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
   return data.current_n;
 }
 #endif  // SANITIZER_ANDROID
+
+#ifndef SANITIZER_GO
+uptr indirect_call_wrapper;
+
+void SetIndirectCallWrapper(uptr wrapper) {
+  CHECK(!indirect_call_wrapper);
+  CHECK(wrapper);
+  indirect_call_wrapper = wrapper;
+}
+#endif
 
 }  // namespace __sanitizer
 

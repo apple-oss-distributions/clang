@@ -49,6 +49,8 @@ def BuiltinMacroRedefined : DiagGroup<"builtin-macro-redefined">;
 def BuiltinRequiresHeader : DiagGroup<"builtin-requires-header">;
 def C99Compat : DiagGroup<"c99-compat">;
 def CXXCompat: DiagGroup<"c++-compat">;
+def ExternCCompat : DiagGroup<"extern-c-compat">;
+def KeywordCompat : DiagGroup<"keyword-compat">;
 def GNUCaseRange : DiagGroup<"gnu-case-range">;
 def CastAlign : DiagGroup<"cast-align">;
 def : DiagGroup<"cast-qual">;
@@ -65,11 +67,16 @@ def GNUStringLiteralOperatorTemplate :
 def DeleteNonVirtualDtor : DiagGroup<"delete-non-virtual-dtor">;
 def AbstractFinalClass : DiagGroup<"abstract-final-class">;
 
+def CXX11CompatDeprecatedWritableStr :
+  DiagGroup<"c++11-compat-deprecated-writable-strings">;
+
 def DeprecatedDeclarations : DiagGroup<"deprecated-declarations">;
+def UnavailableDeclarations : DiagGroup<"unavailable-declarations">;
 def DeprecatedImplementations :DiagGroup<"deprecated-implementations">;
 def DeprecatedIncrementBool : DiagGroup<"deprecated-increment-bool">;
 def DeprecatedRegister : DiagGroup<"deprecated-register">;
-def DeprecatedWritableStr : DiagGroup<"deprecated-writable-strings">;
+def DeprecatedWritableStr : DiagGroup<"deprecated-writable-strings",
+                                      [CXX11CompatDeprecatedWritableStr]>;
 // FIXME: Why are DeprecatedImplementations and DeprecatedWritableStr
 // not in this group?
 def Deprecated : DiagGroup<"deprecated", [DeprecatedDeclarations,
@@ -142,6 +149,7 @@ def ReservedUserDefinedLiteral :
 def CXX11Compat : DiagGroup<"c++11-compat",
                             [CXX11Narrowing,
                              CXX11CompatReservedUserDefinedLiteral,
+                             CXX11CompatDeprecatedWritableStr,
                              CXXPre1yCompat]>;
 def : DiagGroup<"c++0x-compat", [CXX11Compat]>;
 def CXX11CompatPedantic : DiagGroup<"c++11-compat-pedantic",
@@ -161,9 +169,11 @@ def OverloadedShiftOpParentheses: DiagGroup<"overloaded-shift-op-parentheses">;
 def DanglingElse: DiagGroup<"dangling-else">;
 def DanglingField : DiagGroup<"dangling-field">;
 def DistributedObjectModifiers : DiagGroup<"distributed-object-modifiers">;
+def InfiniteRecursion : DiagGroup<"infinite-recursion">;
 def GNUImaginaryConstant : DiagGroup<"gnu-imaginary-constant">;
 def IgnoredQualifiers : DiagGroup<"ignored-qualifiers">;
 def : DiagGroup<"import">;
+def IncompatibleMSStruct : DiagGroup<"incompatible-ms-struct">;
 def IncompatiblePointerTypesDiscardsQualifiers 
   : DiagGroup<"incompatible-pointer-types-discards-qualifiers">;
 def IncompatiblePointerTypes
@@ -171,6 +181,10 @@ def IncompatiblePointerTypes
     [IncompatiblePointerTypesDiscardsQualifiers]>;
 def IncompleteUmbrella : DiagGroup<"incomplete-umbrella">;
 def IncompleteModule : DiagGroup<"incomplete-module", [IncompleteUmbrella]>;
+def NonModularIncludeInFrameworkModule
+  : DiagGroup<"non-modular-include-in-framework-module">;
+def NonModularIncludeInModule : DiagGroup<"non-modular-include-in-module",
+                                          [NonModularIncludeInFrameworkModule]>;
 def InvalidNoreturn : DiagGroup<"invalid-noreturn">;
 def InvalidSourceEncoding : DiagGroup<"invalid-source-encoding">;
 def KNRPromotedParameter : DiagGroup<"knr-promoted-parameter">;
@@ -210,13 +224,14 @@ def NonPODVarargs : DiagGroup<"non-pod-varargs">;
 def : DiagGroup<"nonportable-cfstrings">;
 def NonVirtualDtor : DiagGroup<"non-virtual-dtor">;
 def OveralignedType : DiagGroup<"over-aligned">;
-def : DiagGroup<"old-style-cast">;
+def OldStyleCast : DiagGroup<"old-style-cast">;
 def : DiagGroup<"old-style-definition">;
 def OutOfLineDeclaration : DiagGroup<"out-of-line-declaration">;
 def : DiagGroup<"overflow">;
 def ForwardClassReceiver : DiagGroup<"receiver-forward-class">;
 def MethodAccess : DiagGroup<"objc-method-access">;
 def ObjCReceiver : DiagGroup<"receiver-expr">;
+def OperatorNewReturnsNull : DiagGroup<"new-returns-null">;
 def OverlengthStrings : DiagGroup<"overlength-strings">;
 def OverloadedVirtual : DiagGroup<"overloaded-virtual">;
 def PrivateExtern : DiagGroup<"private-extern">;
@@ -337,9 +352,9 @@ def UnnamedTypeTemplateArgs : DiagGroup<"unnamed-type-template-args",
 def UnsupportedFriend : DiagGroup<"unsupported-friend">;
 def UnusedArgument : DiagGroup<"unused-argument">;
 def UnusedSanitizeArgument : DiagGroup<"unused-sanitize-argument">;
-def UnusedCommandLineArgumentHardErrorInFuture : DiagGroup<"unused-command-line-argument-hard-error-in-future">;
 def UnusedCommandLineArgument : DiagGroup<"unused-command-line-argument",
-                                          [UnusedSanitizeArgument, UnusedCommandLineArgumentHardErrorInFuture]>;
+                                          [UnusedSanitizeArgument]>;
+def InvalidCommandLineArgument : DiagGroup<"invalid-command-line-argument">;
 def UnusedComparison : DiagGroup<"unused-comparison">;
 def UnusedExceptionParameter : DiagGroup<"unused-exception-parameter">;
 def UnneededInternalDecl : DiagGroup<"unneeded-internal-declaration">;
@@ -378,9 +393,11 @@ def ARCRepeatedUseOfWeak : DiagGroup<"arc-repeated-use-of-weak",
                                      [ARCRepeatedUseOfWeakMaybe]>;
 def ObjCBridge : DiagGroup<"bridge-cast">;
 
+def DeallocInCategory:DiagGroup<"dealloc-in-category">;
 def SelectorTypeMismatch : DiagGroup<"selector-type-mismatch">;
 def Selector : DiagGroup<"selector", [SelectorTypeMismatch]>;
 def Protocol : DiagGroup<"protocol">;
+def PropertyAttr : DiagGroup<"property-attribute-mismatch">;
 def SuperSubClassMismatch : DiagGroup<"super-class-method-mismatch">;
 def OverridingMethodMismatch : DiagGroup<"overriding-method-mismatch">;
 def VariadicMacros : DiagGroup<"variadic-macros">;
@@ -400,6 +417,22 @@ def GCCWriteStrings : DiagGroup<"write-strings" , [DeprecatedWritableStr]>;
 def CharSubscript : DiagGroup<"char-subscripts">;
 def LargeByValueCopy : DiagGroup<"large-by-value-copy">;
 def DuplicateArgDecl : DiagGroup<"duplicate-method-arg">;
+
+// Unreachable code warning groups.
+//
+//  The goal is make -Wunreachable-code on by default, in -Wall, or at
+//  least actively used, with more noisy versions of the warning covered
+//  under separate flags.
+//
+def UnreachableCodeLoopIncrement : DiagGroup<"unreachable-code-loop-increment">;
+def UnreachableCode : DiagGroup<"unreachable-code",
+                                [UnreachableCodeLoopIncrement]>;
+def UnreachableCodeBreak : DiagGroup<"unreachable-code-break">;
+def UnreachableCodeReturn : DiagGroup<"unreachable-code-return">;
+def UnreachableCodeAggressive : DiagGroup<"unreachable-code-aggressive",
+                                    [UnreachableCode,
+                                     UnreachableCodeBreak,
+                                     UnreachableCodeReturn]>;
 
 // Aggregation warning settings.
 
@@ -498,7 +531,8 @@ def Most : DiagGroup<"most", [
     ObjCDesignatedInit,
     OverloadedVirtual,
     PrivateExtern,
-    SelTypeCast
+    SelTypeCast,
+    ExternCCompat
  ]>;
 
 // Thread Safety warnings 
@@ -601,8 +635,6 @@ def ObjCLiteralComparison : DiagGroup<"objc-literal-compare", [
     ObjCStringComparison
   ]>;
 
-def ObjCLiteralMissingAtSign : DiagGroup<"objc-literal-missing-atsign">;
-
 // Inline ASM warnings.
 def ASMOperandWidths : DiagGroup<"asm-operand-widths">;
 def ASM : DiagGroup<"asm", [
@@ -611,3 +643,6 @@ def ASM : DiagGroup<"asm", [
 
 // OpenMP warnings.
 def SourceUsesOpenMP : DiagGroup<"source-uses-openmp">;
+
+// Instrumentation based profiling warnings.
+def ProfileInstrOutOfDate : DiagGroup<"profile-instr-out-of-date">;

@@ -82,7 +82,7 @@ namespace llvm {
 
     /// LinkerRequiresNonEmptyDwarfLines - True if the linker has a bug and
     /// requires that the debug_line section be of a minimum size. In practice
-    /// such a linker requires a non empty line sequence if a file is present.
+    /// such a linker requires a non-empty line sequence if a file is present.
     bool LinkerRequiresNonEmptyDwarfLines; // Default to false.
 
     /// MaxInstLength - This is the maximum possible length of an instruction,
@@ -101,10 +101,6 @@ namespace llvm {
     /// instructions from each other when on the same line.
     const char *SeparatorString;             // Defaults to ';'
 
-    /// CommentColumn - This indicates the comment num (zero-based) at
-    /// which asm comments should be printed.
-    unsigned CommentColumn;                  // Defaults to 40
-
     /// CommentString - This indicates the comment character used by the
     /// assembler.
     const char *CommentString;               // Defaults to "#"
@@ -115,19 +111,17 @@ namespace llvm {
     /// LabelSuffix - This is appended to emitted labels.
     const char *DebugLabelSuffix;                 // Defaults to ":"
 
-    /// GlobalPrefix - If this is set to a non-empty string, it is prepended
-    /// onto all global symbols.  This is often used for "_" or ".".
-    const char *GlobalPrefix;                // Defaults to ""
+    /// This prefix is used for globals like constant pool entries that are
+    /// completely private to the .s file and should not have names in the .o
+    /// file.
+    const char *PrivateGlobalPrefix;         // Defaults to "L"
 
-    /// PrivateGlobalPrefix - This prefix is used for globals like constant
-    /// pool entries that are completely private to the .s file and should not
-    /// have names in the .o file.  This is often "." or "L".
-    const char *PrivateGlobalPrefix;         // Defaults to "."
-
-    /// LinkerPrivateGlobalPrefix - This prefix is used for symbols that should
-    /// be passed through the assembler but be removed by the linker.  This
-    /// is "l" on Darwin, currently used for some ObjC metadata.
-    const char *LinkerPrivateGlobalPrefix;   // Defaults to ""
+    /// This prefix is used for symbols that should be passed through the
+    /// assembler but be removed by the linker.  This is 'l' on Darwin,
+    /// currently used for some ObjC metadata.
+    /// The default of "" meast that for this system a plain private symbol
+    /// should be used.
+    const char *LinkerPrivateGlobalPrefix;    // Defaults to "".
 
     /// InlineAsmStart/End - If these are nonempty, they contain a directive to
     /// emit before and after an inline assembly statement.
@@ -144,25 +138,9 @@ namespace llvm {
     /// AssemblerDialect - Which dialect of an assembler variant to use.
     unsigned AssemblerDialect;               // Defaults to 0
 
-    /// AllowQuotesInName - This is true if the assembler allows for complex
-    /// symbol names to be surrounded in quotes.  This defaults to false.
-    bool AllowQuotesInName;
-
-    /// AllowNameToStartWithDigit - This is true if the assembler allows symbol
-    /// names to start with a digit (e.g., "0x0021").  This defaults to false.
-    bool AllowNameToStartWithDigit;
-
-    /// AllowPeriodsInName - This is true if the assembler allows periods in
-    /// symbol names.  This defaults to true.
-    bool AllowPeriodsInName;
-
     /// \brief This is true if the assembler allows @ characters in symbol
     /// names. Defaults to false.
     bool AllowAtInName;
-
-    /// AllowUTF8 - This is true if the assembler accepts UTF-8 input.
-    // FIXME: Make this a more general encoding setting?
-    bool AllowUTF8;
 
     /// UseDataRegionDirectives - This is true if data region markers should
     /// be printed as ".data_region/.end_data_region" directives. If false,
@@ -213,11 +191,6 @@ namespace llvm {
     /// '.section' directive before the '.bss' one. It's used for PPC/Linux
     /// which doesn't support the '.bss' directive only.
     bool UsesELFSectionDirectiveForBSS;      // Defaults to false.
-
-    /// HasMicrosoftFastStdCallMangling - True if this target uses microsoft
-    /// style mangling for functions with X86_StdCall/X86_FastCall calling
-    /// convention.
-    bool HasMicrosoftFastStdCallMangling;    // Defaults to false.
 
     bool NeedsDwarfSectionOffsetDirective;
 
@@ -278,17 +251,24 @@ namespace llvm {
     /// directive.
     bool HasNoDeadStrip;                     // Defaults to false.
 
+    /// HasAltEntry - True if this target supports the MachO .alt_entry
+    /// directive.
+    bool HasAltEntry;                        // Defaults to false.
+
     /// WeakRefDirective - This directive, if non-null, is used to declare a
     /// global as being a weak undefined symbol.
     const char *WeakRefDirective;            // Defaults to NULL.
 
-    /// WeakDefDirective - This directive, if non-null, is used to declare a
-    /// global as being a weak defined symbol.
-    const char *WeakDefDirective;            // Defaults to NULL.
+    /// True if we have a directive to declare a global as being a weak
+    /// defined symbol.
+    bool HasWeakDefDirective;                // Defaults to false.
 
-    /// LinkOnceDirective - This directive, if non-null is used to declare a
-    /// global as being a weak defined symbol.  This is used on cygwin/mingw.
-    const char *LinkOnceDirective;           // Defaults to NULL.
+    /// True if we have a directive to declare a global as being a weak
+    /// defined symbol that can be hidden (unexported).
+    bool HasWeakDefCanBeHiddenDirective;     // Defaults to false.
+
+    /// True if we have a .linkonce directive.  This is used on cygwin/mingw.
+    bool HasLinkOnceDirective;               // Defaults to false.
 
     /// HiddenVisibilityAttr - This attribute, if not MCSA_Invalid, is used to
     /// declare a symbol as having hidden visibility.
@@ -319,9 +299,17 @@ namespace llvm {
     /// uses relocations for references to other .debug_* sections.
     bool DwarfUsesRelocationsAcrossSections;
 
+    /// DwarfFDESymbolsUseAbsDiff - true if DWARF FDE symbol reference
+    /// relocations should be replaced by an absolute difference.
+    bool DwarfFDESymbolsUseAbsDiff;
+
     /// DwarfRegNumForCFI - True if dwarf register numbers are printed
     /// instead of symbolic register names in .cfi_* directives.
     bool DwarfRegNumForCFI;  // Defaults to false;
+
+    /// UseParensForSymbolVariant - True if target uses parens to indicate the
+    /// symbol variant instead of @. For example, foo(plt) instead of foo@plt.
+    bool UseParensForSymbolVariant; // Defaults to false;
 
     //===--- Prologue State ----------------------------------------------===//
 
@@ -400,10 +388,6 @@ namespace llvm {
       return UsesELFSectionDirectiveForBSS;
     }
 
-    bool hasMicrosoftFastStdCallMangling() const {
-      return HasMicrosoftFastStdCallMangling;
-    }
-
     bool needsDwarfSectionOffsetDirective() const {
       return NeedsDwarfSectionOffsetDirective;
     }
@@ -430,9 +414,13 @@ namespace llvm {
     const char *getSeparatorString() const {
       return SeparatorString;
     }
+
+    /// This indicates the column (zero-based) at which asm comments should be
+    /// printed.
     unsigned getCommentColumn() const {
-      return CommentColumn;
+      return 40;
     }
+
     const char *getCommentString() const {
       return CommentString;
     }
@@ -443,15 +431,16 @@ namespace llvm {
     const char *getDebugLabelSuffix() const {
       return DebugLabelSuffix;
     }
-
-    const char *getGlobalPrefix() const {
-      return GlobalPrefix;
-    }
     const char *getPrivateGlobalPrefix() const {
       return PrivateGlobalPrefix;
     }
+    bool hasLinkerPrivateGlobalPrefix() const {
+      return LinkerPrivateGlobalPrefix[0] != '\0';
+    }
     const char *getLinkerPrivateGlobalPrefix() const {
-      return LinkerPrivateGlobalPrefix;
+      if (hasLinkerPrivateGlobalPrefix())
+        return LinkerPrivateGlobalPrefix;
+      return getPrivateGlobalPrefix();
     }
     const char *getInlineAsmStart() const {
       return InlineAsmStart;
@@ -471,20 +460,8 @@ namespace llvm {
     unsigned getAssemblerDialect() const {
       return AssemblerDialect;
     }
-    bool doesAllowQuotesInName() const {
-      return AllowQuotesInName;
-    }
-    bool doesAllowNameToStartWithDigit() const {
-      return AllowNameToStartWithDigit;
-    }
-    bool doesAllowPeriodsInName() const {
-      return AllowPeriodsInName;
-    }
     bool doesAllowAtInName() const {
       return AllowAtInName;
-    }
-    bool doesAllowUTF8() const {
-      return AllowUTF8;
     }
     bool doesSupportDataRegionDirectives() const {
       return UseDataRegionDirectives;
@@ -524,9 +501,13 @@ namespace llvm {
     bool hasSingleParameterDotFile() const { return HasSingleParameterDotFile; }
     bool hasIdentDirective() const { return HasIdentDirective; }
     bool hasNoDeadStrip() const { return HasNoDeadStrip; }
+    bool hasAltEntry() const { return HasAltEntry; }
     const char *getWeakRefDirective() const { return WeakRefDirective; }
-    const char *getWeakDefDirective() const { return WeakDefDirective; }
-    const char *getLinkOnceDirective() const { return LinkOnceDirective; }
+    bool hasWeakDefDirective() const { return HasWeakDefDirective; }
+    bool hasWeakDefCanBeHiddenDirective() const {
+      return HasWeakDefCanBeHiddenDirective;
+    }
+    bool hasLinkOnceDirective() const { return HasLinkOnceDirective; }
 
     MCSymbolAttr getHiddenVisibilityAttr() const { return HiddenVisibilityAttr;}
     MCSymbolAttr getHiddenDeclarationVisibilityAttr() const {
@@ -556,8 +537,14 @@ namespace llvm {
     bool doesDwarfUseRelocationsAcrossSections() const {
       return DwarfUsesRelocationsAcrossSections;
     }
+    bool doDwarfFDESymbolsUseAbsDiff() const {
+      return DwarfFDESymbolsUseAbsDiff;
+    }
     bool useDwarfRegNumForCFI() const {
       return DwarfRegNumForCFI;
+    }
+    bool useParensForSymbolVariant() const {
+      return UseParensForSymbolVariant;
     }
 
     void addInitialFrameState(const MCCFIInstruction &Inst) {

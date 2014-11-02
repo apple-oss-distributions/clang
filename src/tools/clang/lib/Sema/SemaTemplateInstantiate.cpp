@@ -76,8 +76,18 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
       // If this variable template specialization was instantiated from a
       // specialized member that is a variable template, we're done.
       assert(Spec->getSpecializedTemplate() && "No variable template?");
-      if (Spec->getSpecializedTemplate()->isMemberSpecialization())
-        return Result;
+      llvm::PointerUnion<VarTemplateDecl*,
+                         VarTemplatePartialSpecializationDecl*> Specialized
+                             = Spec->getSpecializedTemplateOrPartial();
+      if (VarTemplatePartialSpecializationDecl *Partial =
+              Specialized.dyn_cast<VarTemplatePartialSpecializationDecl *>()) {
+        if (Partial->isMemberSpecialization())
+          return Result;
+      } else {
+        VarTemplateDecl *Tmpl = Specialized.get<VarTemplateDecl *>();
+        if (Tmpl->isMemberSpecialization())
+          return Result;
+      }
     }
 
     // If we have a template template parameter with translation unit context,
@@ -1628,8 +1638,8 @@ static bool NeedsInstantiationAsFunctionType(TypeSourceInfo *T) {
     return false;
 
   FunctionProtoTypeLoc FP = TL.castAs<FunctionProtoTypeLoc>();
-  for (unsigned I = 0, E = FP.getNumArgs(); I != E; ++I) {
-    ParmVarDecl *P = FP.getArg(I);
+  for (unsigned I = 0, E = FP.getNumParams(); I != E; ++I) {
+    ParmVarDecl *P = FP.getParam(I);
 
     // This must be synthesized from a typedef.
     if (!P) continue;
@@ -2124,16 +2134,14 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
       FieldDecl *NewField = FieldsWithMemberInitializers[I].second;
       Expr *OldInit = OldField->getInClassInitializer();
 
+      ActOnStartCXXInClassMemberInitializer();
       ExprResult NewInit = SubstInitializer(OldInit, TemplateArgs,
                                             /*CXXDirectInit=*/false);
-      if (NewInit.isInvalid())
-        NewField->setInvalidDecl();
-      else {
-        Expr *Init = NewInit.take();
-        assert(Init && "no-argument initializer in class");
-        assert(!isa<ParenListExpr>(Init) && "call-style init in class");
-        ActOnCXXInClassMemberInitializer(NewField, Init->getLocStart(), Init);
-      }
+      Expr *Init = NewInit.take();
+      assert((!Init || !isa<ParenListExpr>(Init)) &&
+             "call-style init in class");
+      ActOnFinishCXXInClassMemberInitializer(NewField, Init->getLocStart(),
+                                             Init);
     }
   }
   // Instantiate late parsed attributes, and attach them to their decls.
@@ -2354,8 +2362,7 @@ bool Sema::InstantiateClassTemplateSpecialization(
   // If we're dealing with a member template where the template parameters
   // have been instantiated, this provides the original template parameters
   // from which the member template's parameters were instantiated.
-  SmallVector<const NamedDecl *, 4> InstantiatedTemplateParameters;
-  
+
   if (Matched.size() >= 1) {
     SmallVectorImpl<MatchResult>::iterator Best = Matched.begin();
     if (Matched.size() == 1) {

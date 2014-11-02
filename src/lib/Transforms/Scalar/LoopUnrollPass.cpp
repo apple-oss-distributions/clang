@@ -19,6 +19,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -105,7 +106,7 @@ namespace {
       // If loop unroll does not preserve dom info then LCSSA pass on next
       // loop will receive invalid dom info.
       // For now, recreate dom info, if loop is unrolled.
-      AU.addPreserved<DominatorTree>();
+      AU.addPreserved<DominatorTreeWrapperPass>();
     }
   };
 }
@@ -213,7 +214,7 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
                                             notDuplicatable, TTI);
     DEBUG(dbgs() << "  Loop Size = " << LoopSize << "\n");
     if (notDuplicatable) {
-      DEBUG(dbgs() << "  Not unrolling loop which contains non duplicatable"
+      DEBUG(dbgs() << "  Not unrolling loop which contains non-duplicatable"
             << " instructions.\n");
       return false;
     }

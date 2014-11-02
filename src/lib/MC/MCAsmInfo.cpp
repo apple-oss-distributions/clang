@@ -37,12 +37,10 @@ MCAsmInfo::MCAsmInfo() {
   MinInstAlignment = 1;
   DollarIsPC = false;
   SeparatorString = ";";
-  CommentColumn = 40;
   CommentString = "#";
   LabelSuffix = ":";
   DebugLabelSuffix = ":";
-  GlobalPrefix = "";
-  PrivateGlobalPrefix = ".";
+  PrivateGlobalPrefix = "L";
   LinkerPrivateGlobalPrefix = "";
   InlineAsmStart = "APP";
   InlineAsmEnd = "NO_APP";
@@ -50,11 +48,7 @@ MCAsmInfo::MCAsmInfo() {
   Code32Directive = ".code32";
   Code64Directive = ".code64";
   AssemblerDialect = 0;
-  AllowQuotesInName = false;
-  AllowNameToStartWithDigit = false;
-  AllowPeriodsInName = true;
   AllowAtInName = false;
-  AllowUTF8 = true;
   UseDataRegionDirectives = false;
   ZeroDirective = "\t.zero\t";
   AsciiDirective = "\t.ascii\t";
@@ -79,9 +73,11 @@ MCAsmInfo::MCAsmInfo() {
   HasSingleParameterDotFile = true;
   HasIdentDirective = false;
   HasNoDeadStrip = false;
+  HasAltEntry = false;
   WeakRefDirective = 0;
-  WeakDefDirective = 0;
-  LinkOnceDirective = 0;
+  HasWeakDefDirective = false;
+  HasWeakDefCanBeHiddenDirective = false;
+  HasLinkOnceDirective = false;
   HiddenVisibilityAttr = MCSA_Hidden;
   HiddenDeclarationVisibilityAttr = MCSA_Hidden;
   ProtectedVisibilityAttr = MCSA_Protected;
@@ -89,9 +85,10 @@ MCAsmInfo::MCAsmInfo() {
   SupportsDebugInformation = false;
   ExceptionsType = ExceptionHandling::None;
   DwarfUsesRelocationsAcrossSections = true;
+  DwarfFDESymbolsUseAbsDiff = false;
   DwarfRegNumForCFI = false;
-  HasMicrosoftFastStdCallMangling = false;
   NeedsDwarfSectionOffsetDirective = false;
+  UseParensForSymbolVariant = false;
 }
 
 MCAsmInfo::~MCAsmInfo() {

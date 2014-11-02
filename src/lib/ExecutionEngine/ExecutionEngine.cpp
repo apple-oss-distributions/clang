@@ -14,10 +14,11 @@
 
 #define DEBUG_TYPE "jit"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/ExecutionEngine/JITMemoryManager.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
+#include "llvm/ExecutionEngine/JITMemoryManager.h"
+#include "llvm/ExecutionEngine/ObjectCache.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -38,6 +39,11 @@ using namespace llvm;
 
 STATISTIC(NumInitBytes, "Number of bytes of global vars initialized");
 STATISTIC(NumGlobals  , "Number of global vars initialized");
+
+// Pin the vtable to this file.
+void ObjectCache::anchor() {}
+void ObjectBuffer::anchor() {}
+void ObjectBufferStream::anchor() {}
 
 ExecutionEngine *(*ExecutionEngine::JITCtor)(
   Module *M,
@@ -60,6 +66,15 @@ ExecutionEngine::ExecutionEngine(Module *M)
   CompilingLazily         = false;
   GVCompilationDisabled   = false;
   SymbolSearchingDisabled = false;
+
+  // IR module verification is enabled by default in debug builds, and disabled
+  // by default in release builds.
+#ifndef NDEBUG
+  VerifyModules = true;
+#else
+  VerifyModules = false;
+#endif
+
   Modules.push_back(M);
   assert(M && "Module is null?");
 }
@@ -477,16 +492,17 @@ ExecutionEngine *EngineBuilder::create(TargetMachine *TM) {
              << " a different -march switch.\n";
     }
 
-    if (UseMCJIT && ExecutionEngine::MCJITCtor) {
-      ExecutionEngine *EE =
-        ExecutionEngine::MCJITCtor(M, ErrorStr, MCJMM ? MCJMM : JMM,
-                                   AllocateGVsWithCode, TheTM.take());
-      if (EE) return EE;
-    } else if (ExecutionEngine::JITCtor) {
-      ExecutionEngine *EE =
-        ExecutionEngine::JITCtor(M, ErrorStr, JMM,
-                                 AllocateGVsWithCode, TheTM.take());
-      if (EE) return EE;
+    ExecutionEngine *EE = nullptr;
+    if (UseMCJIT && ExecutionEngine::MCJITCtor)
+      EE = ExecutionEngine::MCJITCtor(M, ErrorStr, MCJMM ? MCJMM : JMM,
+                                      AllocateGVsWithCode, TheTM.take());
+    else if (ExecutionEngine::JITCtor)
+      EE = ExecutionEngine::JITCtor(M, ErrorStr, JMM,
+                                    AllocateGVsWithCode, TheTM.take());
+
+    if (EE) {
+      EE->setVerifyModules(VerifyModules);
+      return EE;
     }
   }
 
@@ -1205,9 +1221,7 @@ void ExecutionEngine::emitGlobals() {
         }
 
         // If the existing global is strong, never replace it.
-        if (GVEntry->hasExternalLinkage() ||
-            GVEntry->hasDLLImportLinkage() ||
-            GVEntry->hasDLLExportLinkage())
+        if (GVEntry->hasExternalLinkage())
           continue;
 
         // Otherwise, we know it's linkonce/weak, replace it if this is a strong
@@ -1289,6 +1303,10 @@ void ExecutionEngine::EmitGlobalVariable(const GlobalVariable *GV) {
   if (GA == 0) {
     // If it's not already specified, allocate memory for the global.
     GA = getMemoryForGV(GV);
+
+    // If we failed to allocate memory for this global, return.
+    if (GA == 0) return;
+
     addGlobalMapping(GV, GA);
   }
 

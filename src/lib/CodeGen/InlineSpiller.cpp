@@ -21,8 +21,9 @@
 #include "llvm/CodeGen/LiveIntervalAnalysis.h"
 #include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveStackAnalysis.h"
-#include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
+#include "llvm/CodeGen/MachineBranchProbabilityInfo.h"
+#include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -438,7 +439,20 @@ void InlineSpiller::propagateSiblingValue(SibValueMap::iterator SVIIter,
           // Also hoist spills to blocks with smaller loop depth, but make sure
           // that the new value dominates.  Non-phi dependents are always
           // dominated, phis need checking.
+
+          const BranchProbability MarginProb(4, 5); // 80%
+          // Hoist a spill to outer loop if there are multiple dependents (it
+          // can be beneficial if more than one dependents are hoisted) or
+          // if DepSV (the hoisting source) is hotter than SV (the hoisting
+          // destination) (we add a 80% margin to bias a little towards
+          // loop depth).
+          bool HoistCondition =
+            (MBFI.getBlockFreq(DepSV.SpillMBB) >=
+             (MBFI.getBlockFreq(SV.SpillMBB) * MarginProb)) ||
+            Deps->size() > 1;
+
           if ((Loops.getLoopDepth(DepSV.SpillMBB) > SpillDepth) &&
+              HoistCondition &&
               (!DepSVI->first->isPHIDef() ||
                MDT.dominates(SV.SpillMBB, DepSV.SpillMBB))) {
             Changed = true;
@@ -1057,6 +1071,9 @@ foldMemoryOperand(ArrayRef<std::pair<MachineInstr*, unsigned> > Ops,
   bool WasCopy = MI->isCopy();
   unsigned ImpReg = 0;
 
+  bool SpillSubRegs = (MI->getOpcode() == TargetOpcode::PATCHPOINT ||
+                       MI->getOpcode() == TargetOpcode::STACKMAP);
+
   // TargetInstrInfo::foldMemoryOperand only expects explicit, non-tied
   // operands.
   SmallVector<unsigned, 8> FoldOps;
@@ -1068,7 +1085,7 @@ foldMemoryOperand(ArrayRef<std::pair<MachineInstr*, unsigned> > Ops,
       continue;
     }
     // FIXME: Teach targets to deal with subregs.
-    if (MO.getSubReg())
+    if (!SpillSubRegs && MO.getSubReg())
       return false;
     // We cannot fold a load instruction into a def.
     if (LoadMI && MO.isDef())
@@ -1095,12 +1112,11 @@ foldMemoryOperand(ArrayRef<std::pair<MachineInstr*, unsigned> > Ops,
         MRI.isReserved(Reg)) {
       continue;
     }
+    // Skip non-Defs, including undef uses and internal reads.
+    if (MO->isUse())
+      continue;
     MIBundleOperands::PhysRegInfo RI =
       MIBundleOperands(FoldMI).analyzePhysReg(Reg, &TRI);
-    if (MO->readsReg()) {
-      assert(RI.Reads && "Cannot fold physreg reader");
-      continue;
-    }
     if (RI.Defines)
       continue;
     // FoldMI does not define this physreg. Remove the LI segment.

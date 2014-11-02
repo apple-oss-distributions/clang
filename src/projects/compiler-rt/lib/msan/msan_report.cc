@@ -36,8 +36,7 @@ class Decorator: private __sanitizer::AnsiColorDecorator {
 
 static void DescribeOrigin(u32 origin) {
   Decorator d;
-  if (common_flags()->verbosity)
-    Printf("  raw origin id: %d\n", origin);
+  VPrintf(1, "  raw origin id: %d\n", origin);
   uptr pc;
   if (const char *so = GetOriginDescrIfStack(origin, &pc)) {
     char* s = internal_strdup(so);
@@ -75,7 +74,7 @@ void ReportUMR(StackTrace *stack, u32 origin) {
   Printf("%s", d.Warning());
   Report(" WARNING: MemorySanitizer: use-of-uninitialized-value\n");
   Printf("%s", d.End());
-  StackTrace::PrintStack(stack->trace, stack->size);
+  stack->Print();
   if (origin) {
     DescribeOrigin(origin);
   }
@@ -86,7 +85,7 @@ void ReportExpectedUMRNotFound(StackTrace *stack) {
   SpinMutexLock l(&CommonSanitizerReportMutex);
 
   Printf(" WARNING: Expected use of uninitialized value not found\n");
-  StackTrace::PrintStack(stack->trace, stack->size);
+  stack->Print();
 }
 
 void ReportAtExitStatistics() {

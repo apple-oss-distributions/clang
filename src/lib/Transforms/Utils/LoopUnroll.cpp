@@ -24,6 +24,7 @@
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -90,7 +91,8 @@ static BasicBlock *FoldBlockIntoPredecessor(BasicBlock *BB, LoopInfo* LI,
   // Move all definitions in the successor to the predecessor...
   OnlyPred->getInstList().splice(OnlyPred->end(), BB->getInstList());
 
-  std::string OldName = BB->getName();
+  // OldName will be valid until erased.
+  StringRef OldName = BB->getName();
 
   // Erase basic block from the function...
 
@@ -102,11 +104,12 @@ static BasicBlock *FoldBlockIntoPredecessor(BasicBlock *BB, LoopInfo* LI,
     }
   }
   LI->removeBlock(BB);
-  BB->eraseFromParent();
 
   // Inherit predecessor's name if it exists...
   if (!OldName.empty() && !OnlyPred->hasName())
     OnlyPred->setName(OldName);
+
+  BB->eraseFromParent();
 
   return OnlyPred;
 }
@@ -410,8 +413,9 @@ bool llvm::UnrollLoop(Loop *L, unsigned Count, unsigned TripCount,
   if (LPM) {
     // FIXME: Reconstruct dom info, because it is not preserved properly.
     // Incrementally updating domtree after loop unrolling would be easy.
-    if (DominatorTree *DT = LPM->getAnalysisIfAvailable<DominatorTree>())
-      DT->runOnFunction(*L->getHeader()->getParent());
+    if (DominatorTreeWrapperPass *DTWP =
+            LPM->getAnalysisIfAvailable<DominatorTreeWrapperPass>())
+      DTWP->getDomTree().recalculate(*L->getHeader()->getParent());
 
     // Simplify any new induction variables in the partially unrolled loop.
     ScalarEvolution *SE = LPM->getAnalysisIfAvailable<ScalarEvolution>();

@@ -73,7 +73,7 @@ LLVMDisasmContextRef LLVMCreateDisasmCPU(const char *Triple, const char *CPU,
     return 0;
 
   // Set up disassembler.
-  MCDisassembler *DisAsm = TheTarget->createMCDisassembler(*STI);
+  MCDisassembler *DisAsm = TheTarget->createMCDisassembler(*STI, *Ctx);
   if (!DisAsm)
     return 0;
 
@@ -86,8 +86,6 @@ LLVMDisasmContextRef LLVMCreateDisasmCPU(const char *Triple, const char *CPU,
     TheTarget->createMCSymbolizer(Triple, GetOpInfo, SymbolLookUp, DisInfo,
                                   Ctx, RelInfo.take()));
   DisAsm->setSymbolizer(Symbolizer);
-  DisAsm->setupForSymbolicDisassembly(GetOpInfo, SymbolLookUp, DisInfo,
-                                      Ctx, RelInfo);
   // Set up the instruction printer.
   int AsmPrinterVariant = MAI->getAssemblerDialect();
   MCInstPrinter *IP = TheTarget->createMCInstPrinter(AsmPrinterVariant,
@@ -298,6 +296,7 @@ size_t LLVMDisasmInstruction(LLVMDisasmContextRef DCR, uint8_t *Bytes,
       emitLatency(DC, Inst);
 
     emitComments(DC, FormattedOS);
+    OS.flush();
 
     assert(OutStringSize != 0 && "Output buffer cannot be zero size");
     size_t OutputSize = std::min(OutStringSize-1, InsnStr.size());

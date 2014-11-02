@@ -104,7 +104,7 @@ public:
            Data == X.Data;
   }
 
-  LLVM_ATTRIBUTE_USED void dump() const;
+  void dump() const;
 };
 } // end anonymous namespace
 
@@ -133,9 +133,7 @@ namespace llvm {
   };
 } // end llvm namespace
 
-void BindingKey::dump() const {
-  llvm::errs() << *this;
-}
+LLVM_DUMP_METHOD void BindingKey::dump() const { llvm::errs() << *this; }
 
 //===----------------------------------------------------------------------===//
 // Actual Store type.
@@ -224,9 +222,7 @@ public:
    }
   }
 
-  LLVM_ATTRIBUTE_USED void dump() const {
-    dump(llvm::errs(), "\n");
-  }
+  LLVM_DUMP_METHOD void dump() const { dump(llvm::errs(), "\n"); }
 };
 } // end anonymous namespace
 
@@ -1016,7 +1012,7 @@ void invalidateRegionsWorker::VisitCluster(const MemRegion *baseR,
          BI != BE; ++BI) {
       const VarRegion *VR = BI.getCapturedRegion();
       const VarDecl *VD = VR->getDecl();
-      if (VD->getAttr<BlocksAttr>() || !VD->hasLocalStorage()) {
+      if (VD->hasAttr<BlocksAttr>() || !VD->hasLocalStorage()) {
         AddToWorkList(VR);
       }
       else if (Loc::isLocType(VR->getValueType())) {

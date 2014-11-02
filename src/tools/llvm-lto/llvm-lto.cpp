@@ -20,8 +20,8 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -36,10 +36,6 @@ DisableInline("disable-inlining", cl::init(false),
 static cl::opt<bool>
 DisableGVNLoadPRE("disable-gvn-loadpre", cl::init(false),
   cl::desc("Do not run the GVN load PRE pass"));
-
-static cl::opt<bool>
-DisableSimplifyLibCalls("disable-simplify-libcalls",
-  cl::desc("Disable simplify-libcalls"));
 
 static cl::list<std::string>
 InputFilenames(cl::Positional, cl::OneOrMore,

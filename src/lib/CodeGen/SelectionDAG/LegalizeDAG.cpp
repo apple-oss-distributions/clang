@@ -96,7 +96,7 @@ private:
                                      ArrayRef<int> Mask) const;
 
   bool LegalizeSetCCCondCode(EVT VT, SDValue &LHS, SDValue &RHS, SDValue &CC,
-                             SDLoc dl);
+                             bool &NeedInvert, SDLoc dl);
 
   SDValue ExpandLibCall(RTLIB::Libcall LC, SDNode *Node, bool isSigned);
   SDValue ExpandLibCall(RTLIB::Libcall LC, EVT RetVT, const SDValue *Ops,
@@ -807,7 +807,7 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
                             DAG.getConstant(IncrementSize, Ptr.getValueType()));
           Hi = DAG.getNode(ISD::SRL, dl, Value.getValueType(), Value,
                            DAG.getConstant(RoundWidth,
-                                    TLI.getShiftAmountTy(Value.getValueType())));
+                                   TLI.getShiftAmountTy(Value.getValueType())));
           Hi = DAG.getTruncStore(Chain, dl, Hi, Ptr,
                              ST->getPointerInfo().getWithOffset(IncrementSize),
                                  ExtraVT, isVolatile, isNonTemporal,
@@ -818,7 +818,7 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
           // Store the top RoundWidth bits.
           Hi = DAG.getNode(ISD::SRL, dl, Value.getValueType(), Value,
                            DAG.getConstant(ExtraWidth,
-                                    TLI.getShiftAmountTy(Value.getValueType())));
+                                   TLI.getShiftAmountTy(Value.getValueType())));
           Hi = DAG.getTruncStore(Chain, dl, Hi, Ptr, ST->getPointerInfo(),
                                  RoundVT, isVolatile, isNonTemporal, Alignment,
                                  TBAAInfo);
@@ -826,7 +826,7 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
           // Store the remaining ExtraWidth bits.
           IncrementSize = RoundWidth / 8;
           Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
-                             DAG.getConstant(IncrementSize, Ptr.getValueType()));
+                            DAG.getConstant(IncrementSize, Ptr.getValueType()));
           Lo = DAG.getTruncStore(Chain, dl, Value, Ptr,
                               ST->getPointerInfo().getWithOffset(IncrementSize),
                                  ExtraVT, isVolatile, isNonTemporal,
@@ -1017,7 +1017,7 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
       // Move the top bits to the right place.
       Hi = DAG.getNode(ISD::SHL, dl, Hi.getValueType(), Hi,
                        DAG.getConstant(RoundWidth,
-                                       TLI.getShiftAmountTy(Hi.getValueType())));
+                                      TLI.getShiftAmountTy(Hi.getValueType())));
 
       // Join the hi and lo parts.
       Value = DAG.getNode(ISD::OR, dl, Node->getValueType(0), Lo, Hi);
@@ -1047,7 +1047,7 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
       // Move the top bits to the right place.
       Hi = DAG.getNode(ISD::SHL, dl, Hi.getValueType(), Hi,
                        DAG.getConstant(ExtraWidth,
-                                       TLI.getShiftAmountTy(Hi.getValueType())));
+                                      TLI.getShiftAmountTy(Hi.getValueType())));
 
       // Join the hi and lo parts.
       Value = DAG.getNode(ISD::OR, dl, Node->getValueType(0), Lo, Hi);
@@ -1072,8 +1072,8 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
                  Chain = Res.getValue(1);
                }
              } else {
-               // If this is an unaligned load and the target doesn't support it,
-               // expand it.
+               // If this is an unaligned load and the target doesn't support
+               // it, expand it.
                if (!TLI.allowsUnalignedMemoryAccesses(LD->getMemoryVT())) {
                  Type *Ty =
                    LD->getMemoryVT().getTypeForEVT(*DAG.getContext());
@@ -1088,7 +1088,8 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
              break;
     }
     case TargetLowering::Expand:
-             if (!TLI.isLoadExtLegal(ISD::EXTLOAD, SrcVT) && TLI.isTypeLegal(SrcVT)) {
+             if (!TLI.isLoadExtLegal(ISD::EXTLOAD, SrcVT) &&
+                                     TLI.isTypeLegal(SrcVT)) {
                SDValue Load = DAG.getLoad(SrcVT, dl, Chain, Ptr,
                                           LD->getMemOperand());
                unsigned ExtendOp;
@@ -1109,15 +1110,16 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
              assert(!SrcVT.isVector() &&
                     "Vector Loads are handled in LegalizeVectorOps");
 
-             // FIXME: This does not work for vectors on most targets.  Sign- and
-             // zero-extend operations are currently folded into extending loads,
-             // whether they are legal or not, and then we end up here without any
-             // support for legalizing them.
+             // FIXME: This does not work for vectors on most targets.  Sign-
+             // and zero-extend operations are currently folded into extending
+             // loads, whether they are legal or not, and then we end up here
+             // without any support for legalizing them.
              assert(ExtType != ISD::EXTLOAD &&
                     "EXTLOAD should always be supported!");
-             // Turn the unsupported load into an EXTLOAD followed by an explicit
-             // zero/sign extend inreg.
-             SDValue Result = DAG.getExtLoad(ISD::EXTLOAD, dl, Node->getValueType(0),
+             // Turn the unsupported load into an EXTLOAD followed by an
+             // explicit zero/sign extend inreg.
+             SDValue Result = DAG.getExtLoad(ISD::EXTLOAD, dl,
+                                             Node->getValueType(0),
                                              Chain, Ptr, SrcVT,
                                              LD->getMemOperand());
              SDValue ValRes;
@@ -1126,7 +1128,8 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
                                     Result.getValueType(),
                                     Result, DAG.getValueType(SrcVT));
              else
-               ValRes = DAG.getZeroExtendInReg(Result, dl, SrcVT.getScalarType());
+               ValRes = DAG.getZeroExtendInReg(Result, dl,
+                                               SrcVT.getScalarType());
              Value = ValRes;
              Chain = Result.getValue(1);
              break;
@@ -1394,11 +1397,7 @@ SDValue SelectionDAGLegalize::ExpandExtractFromVectorThroughStack(SDValue Op) {
   Idx = DAG.getNode(ISD::MUL, dl, Idx.getValueType(), Idx,
                     DAG.getConstant(EltSize, Idx.getValueType()));
 
-  if (Idx.getValueType().bitsGT(TLI.getPointerTy()))
-    Idx = DAG.getNode(ISD::TRUNCATE, dl, TLI.getPointerTy(), Idx);
-  else
-    Idx = DAG.getNode(ISD::ZERO_EXTEND, dl, TLI.getPointerTy(), Idx);
-
+  Idx = DAG.getZExtOrTrunc(Idx, dl, TLI.getPointerTy());
   StackPtr = DAG.getNode(ISD::ADD, dl, Idx.getValueType(), Idx, StackPtr);
 
   if (Op.getValueType().isVector())
@@ -1436,11 +1435,7 @@ SDValue SelectionDAGLegalize::ExpandInsertToVectorThroughStack(SDValue Op) {
 
   Idx = DAG.getNode(ISD::MUL, dl, Idx.getValueType(), Idx,
                     DAG.getConstant(EltSize, Idx.getValueType()));
-
-  if (Idx.getValueType().bitsGT(TLI.getPointerTy()))
-    Idx = DAG.getNode(ISD::TRUNCATE, dl, TLI.getPointerTy(), Idx);
-  else
-    Idx = DAG.getNode(ISD::ZERO_EXTEND, dl, TLI.getPointerTy(), Idx);
+  Idx = DAG.getZExtOrTrunc(Idx, dl, TLI.getPointerTy());
 
   SDValue SubStackPtr = DAG.getNode(ISD::ADD, dl, Idx.getValueType(), Idx,
                                     StackPtr);
@@ -1538,9 +1533,8 @@ SDValue SelectionDAGLegalize::ExpandFCOPYSIGN(SDNode* Node) {
       // the pointer so that the loaded integer will contain the sign bit.
       unsigned Strides = (FloatVT.getSizeInBits()-1)/LoadTy.getSizeInBits();
       unsigned ByteOffset = (Strides * LoadTy.getSizeInBits()) / 8;
-      LoadPtr = DAG.getNode(ISD::ADD, dl, LoadPtr.getValueType(),
-                            LoadPtr,
-                            DAG.getConstant(ByteOffset, LoadPtr.getValueType()));
+      LoadPtr = DAG.getNode(ISD::ADD, dl, LoadPtr.getValueType(), LoadPtr,
+                           DAG.getConstant(ByteOffset, LoadPtr.getValueType()));
       // Load a legal integer containing the sign bit.
       SignBit = DAG.getLoad(LoadTy, dl, Ch, LoadPtr, MachinePointerInfo(),
                             false, false, false, 0);
@@ -1563,8 +1557,8 @@ SDValue SelectionDAGLegalize::ExpandFCOPYSIGN(SDNode* Node) {
   // Select between the nabs and abs value based on the sign bit of
   // the input.
   return DAG.getSelect(dl, AbsVal.getValueType(), SignBit,
-                       DAG.getNode(ISD::FNEG, dl, AbsVal.getValueType(), AbsVal),
-                       AbsVal);
+                      DAG.getNode(ISD::FNEG, dl, AbsVal.getValueType(), AbsVal),
+                      AbsVal);
 }
 
 void SelectionDAGLegalize::ExpandDYNAMIC_STACKALLOC(SDNode* Node,
@@ -1605,18 +1599,30 @@ void SelectionDAGLegalize::ExpandDYNAMIC_STACKALLOC(SDNode* Node,
 
 /// LegalizeSetCCCondCode - Legalize a SETCC with given LHS and RHS and
 /// condition code CC on the current target.
+///
 /// If the SETCC has been legalized using AND / OR, then the legalized node
-/// will be stored in LHS.  RHS and CC will be set to SDValue().
+/// will be stored in LHS. RHS and CC will be set to SDValue(). NeedInvert
+/// will be set to false.
+///
 /// If the SETCC has been legalized by using getSetCCSwappedOperands(),
-/// then the values of LHS and RHS will be swapped and CC will be set to the
-/// new condition.
+/// then the values of LHS and RHS will be swapped, CC will be set to the
+/// new condition, and NeedInvert will be set to false.
+///
+/// If the SETCC has been legalized using the inverse condcode, then LHS and
+/// RHS will be unchanged, CC will set to the inverted condcode, and NeedInvert
+/// will be set to true. The caller must invert the result of the SETCC with
+/// SelectionDAG::getNOT() or take equivalent action to swap the effect of a
+/// true/false result.
+///
 /// \returns true if the SetCC has been legalized, false if it hasn't.
 bool SelectionDAGLegalize::LegalizeSetCCCondCode(EVT VT,
                                                  SDValue &LHS, SDValue &RHS,
                                                  SDValue &CC,
+                                                 bool &NeedInvert,
                                                  SDLoc dl) {
   MVT OpVT = LHS.getSimpleValueType();
   ISD::CondCode CCCode = cast<CondCodeSDNode>(CC)->get();
+  NeedInvert = false;
   switch (TLI.getCondCodeAction(CCCode, OpVT)) {
   default: llvm_unreachable("Unknown condition code action!");
   case TargetLowering::Legal:
@@ -1669,10 +1675,20 @@ bool SelectionDAGLegalize::LegalizeSetCCCondCode(EVT VT,
     case ISD::SETGT:
     case ISD::SETGE:
     case ISD::SETLT:
-    case ISD::SETNE:
-    case ISD::SETEQ:
       // We only support using the inverted operation, which is computed above
       // and not a different manner of supporting expanding these cases.
+      llvm_unreachable("Don't know how to expand this condition!");
+    case ISD::SETNE:
+    case ISD::SETEQ:
+      // Try inverting the result of the inverse condition.
+      InvCC = CCCode == ISD::SETEQ ? ISD::SETNE : ISD::SETEQ;
+      if (TLI.isCondCodeLegal(InvCC, OpVT)) {
+        CC = DAG.getCondCode(InvCC);
+        NeedInvert = true;
+        return true;
+      }
+      // If inverting the condition didn't work then we have no means to expand
+      // the condition.
       llvm_unreachable("Don't know how to expand this condition!");
     }
 
@@ -2791,6 +2807,7 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
   SmallVector<SDValue, 8> Results;
   SDLoc dl(Node);
   SDValue Tmp1, Tmp2, Tmp3, Tmp4;
+  bool NeedInvert;
   switch (Node->getOpcode()) {
   case ISD::CTPOP:
   case ISD::CTLZ:
@@ -3084,7 +3101,8 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
       EVT NewEltVT = TLI.getTypeToTransformTo(*DAG.getContext(), EltVT);
 
       // BUILD_VECTOR operands are allowed to be wider than the element type.
-      // But if NewEltVT is smaller that EltVT the BUILD_VECTOR does not accept it
+      // But if NewEltVT is smaller that EltVT the BUILD_VECTOR does not accept
+      // it.
       if (NewEltVT.bitsLT(EltVT)) {
 
         // Convert shuffle node.
@@ -3092,8 +3110,9 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
         // cast operands to v8i32 and re-build the mask.
 
         // Calculate new VT, the size of the new VT should be equal to original.
-        EVT NewVT = EVT::getVectorVT(*DAG.getContext(), NewEltVT,
-                                      VT.getSizeInBits()/NewEltVT.getSizeInBits());
+        EVT NewVT =
+            EVT::getVectorVT(*DAG.getContext(), NewEltVT,
+                             VT.getSizeInBits() / NewEltVT.getSizeInBits());
         assert(NewVT.bitsEq(VT));
 
         // cast operands to new VT
@@ -3101,7 +3120,8 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
         Op1 = DAG.getNode(ISD::BITCAST, dl, NewVT, Op1);
 
         // Convert the shuffle mask
-        unsigned int factor = NewVT.getVectorNumElements()/VT.getVectorNumElements();
+        unsigned int factor =
+                         NewVT.getVectorNumElements()/VT.getVectorNumElements();
 
         // EltVT gets smaller
         assert(factor > 0);
@@ -3681,14 +3701,19 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     Tmp2 = Node->getOperand(1);
     Tmp3 = Node->getOperand(2);
     bool Legalized = LegalizeSetCCCondCode(Node->getValueType(0), Tmp1, Tmp2,
-                                           Tmp3, dl);
+                                           Tmp3, NeedInvert, dl);
 
     if (Legalized) {
-      // If we exapanded the SETCC by swapping LHS and RHS, create a new SETCC
-      // node.
+      // If we expanded the SETCC by swapping LHS and RHS, or by inverting the
+      // condition code, create a new SETCC node.
       if (Tmp3.getNode())
         Tmp1 = DAG.getNode(ISD::SETCC, dl, Node->getValueType(0),
                            Tmp1, Tmp2, Tmp3);
+
+      // If we expanded the SETCC by inverting the condition code, then wrap
+      // the existing SETCC in a NOT to restore the intended condition.
+      if (NeedInvert)
+        Tmp1 = DAG.getNOT(dl, Tmp1, Tmp1->getValueType(0));
 
       Results.push_back(Tmp1);
       break;
@@ -3744,19 +3769,26 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
 
     if (!Legalized) {
       Legalized = LegalizeSetCCCondCode(
-          getSetCCResultType(Tmp1.getValueType()), Tmp1, Tmp2, CC, dl);
+          getSetCCResultType(Tmp1.getValueType()), Tmp1, Tmp2, CC, NeedInvert,
+          dl);
 
       assert(Legalized && "Can't legalize SELECT_CC with legal condition!");
-      // If we exapanded the SETCC by swapping LHS and RHS, create a new
-      // SELECT_CC node.
+
+      // If we expanded the SETCC by inverting the condition code, then swap
+      // the True/False operands to match.
+      if (NeedInvert)
+        std::swap(Tmp3, Tmp4);
+
+      // If we expanded the SETCC by swapping LHS and RHS, or by inverting the
+      // condition code, create a new SELECT_CC node.
       if (CC.getNode()) {
         Tmp1 = DAG.getNode(ISD::SELECT_CC, dl, Node->getValueType(0),
                            Tmp1, Tmp2, Tmp3, Tmp4, CC);
       } else {
         Tmp2 = DAG.getConstant(0, Tmp1.getValueType());
         CC = DAG.getCondCode(ISD::SETNE);
-        Tmp1 = DAG.getNode(ISD::SELECT_CC, dl, Node->getValueType(0), Tmp1, Tmp2,
-                           Tmp3, Tmp4, CC);
+        Tmp1 = DAG.getNode(ISD::SELECT_CC, dl, Node->getValueType(0), Tmp1,
+                           Tmp2, Tmp3, Tmp4, CC);
       }
     }
     Results.push_back(Tmp1);
@@ -3769,11 +3801,16 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     Tmp4 = Node->getOperand(1);              // CC
 
     bool Legalized = LegalizeSetCCCondCode(getSetCCResultType(
-        Tmp2.getValueType()), Tmp2, Tmp3, Tmp4, dl);
+        Tmp2.getValueType()), Tmp2, Tmp3, Tmp4, NeedInvert, dl);
     (void)Legalized;
     assert(Legalized && "Can't legalize BR_CC with legal condition!");
 
-    // If we exapanded the SETCC by swapping LHS and RHS, create a new BR_CC
+    // If we expanded the SETCC by inverting the condition code, then wrap
+    // the existing SETCC in a NOT to restore the intended condition.
+    if (NeedInvert)
+      Tmp4 = DAG.getNOT(dl, Tmp4, Tmp4->getValueType(0));
+
+    // If we expanded the SETCC by swapping LHS and RHS, create a new BR_CC
     // node.
     if (Tmp4.getNode()) {
       Tmp1 = DAG.getNode(ISD::BR_CC, dl, Node->getValueType(0), Tmp1,
@@ -3781,8 +3818,8 @@ void SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     } else {
       Tmp3 = DAG.getConstant(0, Tmp2.getValueType());
       Tmp4 = DAG.getCondCode(ISD::SETNE);
-      Tmp1 = DAG.getNode(ISD::BR_CC, dl, Node->getValueType(0), Tmp1, Tmp4, Tmp2,
-                         Tmp3, Node->getOperand(4));
+      Tmp1 = DAG.getNode(ISD::BR_CC, dl, Node->getValueType(0), Tmp1, Tmp4,
+                         Tmp2, Tmp3, Node->getOperand(4));
     }
     Results.push_back(Tmp1);
     break;

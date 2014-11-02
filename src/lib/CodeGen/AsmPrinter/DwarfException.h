@@ -14,6 +14,7 @@
 #ifndef LLVM_CODEGEN_ASMPRINTER_DWARFEXCEPTION_H
 #define LLVM_CODEGEN_ASMPRINTER_DWARFEXCEPTION_H
 
+#include "AsmPrinterHandler.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include <vector>
@@ -35,7 +36,7 @@ class AsmPrinter;
 //===----------------------------------------------------------------------===//
 /// DwarfException - Emits Dwarf exception handling directives.
 ///
-class DwarfException {
+class DwarfException : public AsmPrinterHandler {
 protected:
   /// Asm - Target of Dwarf emission.
   AsmPrinter *Asm;
@@ -46,9 +47,6 @@ protected:
   /// SharedTypeIds - How many leading type ids two landing pads have in common.
   static unsigned SharedTypeIds(const LandingPadInfo *L,
                                 const LandingPadInfo *R);
-
-  /// PadLT - Order landing pads lexicographically by type id.
-  static bool PadLT(const LandingPadInfo *L, const LandingPadInfo *R);
 
   /// PadRange - Structure holding a try-range and the associated landing pad.
   struct PadRange {
@@ -130,16 +128,21 @@ public:
   DwarfException(AsmPrinter *A);
   virtual ~DwarfException();
 
-  /// EndModule - Emit all exception information that should come after the
+  /// endModule - Emit all exception information that should come after the
   /// content.
-  virtual void EndModule();
+  virtual void endModule();
 
-  /// BeginFunction - Gather pre-function exception information.  Assumes being
+  /// beginFunction - Gather pre-function exception information.  Assumes being
   /// emitted immediately after the function entry point.
-  virtual void BeginFunction(const MachineFunction *MF);
+  virtual void beginFunction(const MachineFunction *MF);
 
-  /// EndFunction - Gather and emit post-function exception information.
-  virtual void EndFunction();
+  /// endFunction - Gather and emit post-function exception information.
+  virtual void endFunction(const MachineFunction *);
+
+  // We don't need these.
+  virtual void setSymbolSize(const MCSymbol *Sym, uint64_t Size) {}
+  virtual void beginInstruction(const MachineInstr *MI) {}
+  virtual void endInstruction() {}
 };
 
 class DwarfCFIException : public DwarfException {
@@ -164,16 +167,16 @@ public:
   DwarfCFIException(AsmPrinter *A);
   virtual ~DwarfCFIException();
 
-  /// EndModule - Emit all exception information that should come after the
+  /// endModule - Emit all exception information that should come after the
   /// content.
-  virtual void EndModule();
+  virtual void endModule();
 
-  /// BeginFunction - Gather pre-function exception information.  Assumes being
+  /// beginFunction - Gather pre-function exception information.  Assumes being
   /// emitted immediately after the function entry point.
-  virtual void BeginFunction(const MachineFunction *MF);
+  virtual void beginFunction(const MachineFunction *MF);
 
-  /// EndFunction - Gather and emit post-function exception information.
-  virtual void EndFunction();
+  /// endFunction - Gather and emit post-function exception information.
+  virtual void endFunction(const MachineFunction *);
 };
 
 class ARMException : public DwarfException {
@@ -187,16 +190,16 @@ public:
   ARMException(AsmPrinter *A);
   virtual ~ARMException();
 
-  /// EndModule - Emit all exception information that should come after the
+  /// endModule - Emit all exception information that should come after the
   /// content.
-  virtual void EndModule();
+  virtual void endModule();
 
-  /// BeginFunction - Gather pre-function exception information.  Assumes being
+  /// beginFunction - Gather pre-function exception information.  Assumes being
   /// emitted immediately after the function entry point.
-  virtual void BeginFunction(const MachineFunction *MF);
+  virtual void beginFunction(const MachineFunction *MF);
 
-  /// EndFunction - Gather and emit post-function exception information.
-  virtual void EndFunction();
+  /// endFunction - Gather and emit post-function exception information.
+  virtual void endFunction(const MachineFunction *);
 };
 
 class Win64Exception : public DwarfException {
@@ -219,16 +222,16 @@ public:
   Win64Exception(AsmPrinter *A);
   virtual ~Win64Exception();
 
-  /// EndModule - Emit all exception information that should come after the
+  /// endModule - Emit all exception information that should come after the
   /// content.
-  virtual void EndModule();
+  virtual void endModule();
 
-  /// BeginFunction - Gather pre-function exception information.  Assumes being
+  /// beginFunction - Gather pre-function exception information.  Assumes being
   /// emitted immediately after the function entry point.
-  virtual void BeginFunction(const MachineFunction *MF);
+  virtual void beginFunction(const MachineFunction *MF);
 
-  /// EndFunction - Gather and emit post-function exception information.
-  virtual void EndFunction();
+  /// endFunction - Gather and emit post-function exception information.
+  virtual void endFunction(const MachineFunction *);
 };
 
 } // End of namespace llvm

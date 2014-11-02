@@ -827,10 +827,7 @@ bool CallAnalyzer::visitIndirectBrInst(IndirectBrInst &IBI) {
   // original function which is extremely undefined behavior.
   // FIXME: This logic isn't really right; we can safely inline functions with
   // indirectbr's as long as no other function or global references the
-  // blockaddress of a block within the current function.  And as a QOI issue,
-  // if someone is using a blockaddress without an indirectbr, and that
-  // reference somehow ends up in another function or global, we probably don't
-  // want to inline this function.
+  // blockaddress of a block within the current function.
   HasIndirectBr = true;
   return false;
 }
@@ -1098,6 +1095,15 @@ bool CallAnalyzer::analyzeCall(CallSite CS) {
     if (BB->empty())
       continue;
 
+    // Disallow inlining a blockaddress. A blockaddress only has defined
+    // behavior for an indirect branch in the same function, and we do not
+    // currently support inlining indirect branches. But, the inliner may not
+    // see an indirect branch that ends up being dead code at a particular call
+    // site. If the blockaddress escapes the function, e.g., via a global
+    // variable, inlining may lead to an invalid cross-function reference.
+    if (BB->hasAddressTaken())
+      return false;
+
     // Analyze the cost of this block. If we blow through the threshold, this
     // returns false, and we can bail on out.
     if (!analyzeBlock(BB)) {
@@ -1154,7 +1160,7 @@ bool CallAnalyzer::analyzeCall(CallSite CS) {
     }
   }
 
-  // If this is a noduplicate call, we can still inline as long as 
+  // If this is a noduplicate call, we can still inline as long as
   // inlining this would cause the removal of the caller (so the instruction
   // is not actually duplicated, just moved).
   if (!OnlyOneCallAndLocalLinkage && ContainsNoDuplicateCall)
@@ -1245,6 +1251,10 @@ InlineCost InlineCostAnalysis::getInlineCost(CallSite CS, Function *Callee,
   if (!functionsHaveCompatibleAttributes(CS.getCaller(), Callee))
     return llvm::InlineCost::getNever();
 
+  // Don't inline this call if the caller has the optnone attribute.
+  if (CS.getCaller()->hasFnAttribute(Attribute::OptimizeNone))
+    return llvm::InlineCost::getNever();
+
   // Don't inline functions which can be redefined at link-time to mean
   // something else.  Don't inline functions marked noinline or call sites
   // marked noinline.
@@ -1274,8 +1284,9 @@ bool InlineCostAnalysis::isInlineViable(Function &F) {
     F.getAttributes().hasAttribute(AttributeSet::FunctionIndex,
                                    Attribute::ReturnsTwice);
   for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI) {
-    // Disallow inlining of functions which contain an indirect branch.
-    if (isa<IndirectBrInst>(BI->getTerminator()))
+    // Disallow inlining of functions which contain indirect branches or
+    // blockaddresses.
+    if (isa<IndirectBrInst>(BI->getTerminator()) || BI->hasAddressTaken())
       return false;
 
     for (BasicBlock::iterator II = BI->begin(), IE = BI->end(); II != IE;

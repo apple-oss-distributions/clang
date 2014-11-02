@@ -26,9 +26,9 @@ using namespace llvm::opt;
 
 Compilation::Compilation(const Driver &D, const ToolChain &_DefaultToolChain,
                          InputArgList *_Args, DerivedArgList *_TranslatedArgs)
-  : TheDriver(D), DefaultToolChain(_DefaultToolChain), Args(_Args),
-    TranslatedArgs(_TranslatedArgs), Redirects(0) {
-}
+    : TheDriver(D), DefaultToolChain(_DefaultToolChain), Args(_Args),
+      TranslatedArgs(_TranslatedArgs), Redirects(0),
+      ForDiagnostics(false) {}
 
 Compilation::~Compilation() {
   delete TranslatedArgs;
@@ -70,8 +70,6 @@ const DerivedArgList &Compilation::getArgsForToolChain(const ToolChain *TC,
 }
 
 bool Compilation::CleanupFile(const char *File, bool IssueErrors) const {
-  std::string P(File);
-
   // FIXME: Why are we trying to remove files that we have not created? For
   // example we should only try to remove a temporary assembly file if
   // "clang -cc1" succeed in writing it. Was this a workaround for when
@@ -212,6 +210,8 @@ void Compilation::ExecuteJob(const Job &J,
 }
 
 void Compilation::initCompilationForDiagnostics() {
+  ForDiagnostics = true;
+
   // Free actions and jobs.
   DeleteContainerPointers(Actions);
   Jobs.clear();

@@ -633,6 +633,9 @@ public:
       return llvm::ConstantStruct::get(STy, Elts);
     }
 
+    case CK_AddressSpaceConversion:
+      return llvm::ConstantExpr::getAddrSpaceCast(C, destType);
+
     case CK_LValueToRValue:
     case CK_AtomicToNonAtomic:
     case CK_NonAtomicToAtomic:
@@ -833,7 +836,10 @@ public:
     // as an inline array.
     std::string Str;
     CGM.getContext().getObjCEncodingForType(E->getEncodedType(), Str);
-    const ConstantArrayType *CAT = cast<ConstantArrayType>(E->getType());
+    QualType T = E->getType();
+    if (T->getTypeClass() == Type::TypeOfExpr)
+      T = cast<TypeOfExprType>(T)->getUnderlyingExpr()->getType();
+    const ConstantArrayType *CAT = cast<ConstantArrayType>(T);
 
     // Resize the string to the right size, adding zeros at the end, or
     // truncating as needed.
@@ -917,7 +923,7 @@ public:
     }
     case Expr::CallExprClass: {
       CallExpr* CE = cast<CallExpr>(E);
-      unsigned builtin = CE->isBuiltinCall();
+      unsigned builtin = CE->getBuiltinCallee();
       if (builtin !=
             Builtin::BI__builtin___CFStringMakeConstantString &&
           builtin !=
@@ -1062,13 +1068,13 @@ llvm::Constant *CodeGenModule::EmitConstantValue(const APValue &Value,
       if (!Offset->isNullValue()) {
         llvm::Constant *Casted = llvm::ConstantExpr::getBitCast(C, Int8PtrTy);
         Casted = llvm::ConstantExpr::getGetElementPtr(Casted, Offset);
-        C = llvm::ConstantExpr::getBitCast(Casted, C->getType());
+        C = llvm::ConstantExpr::getPointerCast(Casted, C->getType());
       }
 
       // Convert to the appropriate type; this could be an lvalue for
       // an integer.
       if (isa<llvm::PointerType>(DestTy))
-        return llvm::ConstantExpr::getBitCast(C, DestTy);
+        return llvm::ConstantExpr::getPointerCast(C, DestTy);
 
       return llvm::ConstantExpr::getPtrToInt(C, DestTy);
     } else {

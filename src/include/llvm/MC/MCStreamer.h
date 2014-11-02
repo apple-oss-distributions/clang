@@ -34,6 +34,7 @@ class MCInstPrinter;
 class MCSection;
 class MCStreamer;
 class MCSymbol;
+class MCSubtargetInfo;
 class StringRef;
 class Twine;
 class raw_ostream;
@@ -67,33 +68,57 @@ typedef std::pair<const MCSection *, const MCExpr *> MCSectionSubPair;
 /// be treated differently. Callers should always talk to a FooTargetStreamer.
 class MCTargetStreamer {
 protected:
-  MCStreamer *Streamer;
+  MCStreamer &Streamer;
 
 public:
+  MCTargetStreamer(MCStreamer &S);
   virtual ~MCTargetStreamer();
-  void setStreamer(MCStreamer *S) { Streamer = S; }
+
+  // Allow a target to add behavior to the EmitLabel of MCStreamer.
+  virtual void emitLabel(MCSymbol *Symbol);
+
+  /// Let the target do anything it needs to do after emitting inlineasm.
+  /// This callback can be used restore the original mode in case the
+  /// inlineasm contains directives to switch modes.
+  /// \p StartInfo - the original subtarget info before inline asm
+  /// \p EndInfo   - the final subtarget info after parsing the inline asm,
+  //                 or NULL if the value is unknown.
+  virtual void emitInlineAsmEnd(const MCSubtargetInfo &StartInfo,
+                                MCSubtargetInfo *EndInfo) {}
 };
 
 // FIXME: declared here because it is used from
 // lib/CodeGen/AsmPrinter/ARMException.cpp.
 class ARMTargetStreamer : public MCTargetStreamer {
+  virtual void anchor();
 public:
+  ARMTargetStreamer(MCStreamer &S);
+
   virtual void emitFnStart() = 0;
   virtual void emitFnEnd() = 0;
   virtual void emitCantUnwind() = 0;
   virtual void emitPersonality(const MCSymbol *Personality) = 0;
+  virtual void emitPersonalityIndex(unsigned Index) = 0;
   virtual void emitHandlerData() = 0;
   virtual void emitSetFP(unsigned FpReg, unsigned SpReg,
                          int64_t Offset = 0) = 0;
   virtual void emitPad(int64_t Offset) = 0;
   virtual void emitRegSave(const SmallVectorImpl<unsigned> &RegList,
                            bool isVector) = 0;
+  virtual void emitUnwindRaw(int64_t StackOffset,
+                             const SmallVectorImpl<uint8_t> &Opcodes) = 0;
 
   virtual void switchVendor(StringRef Vendor) = 0;
   virtual void emitAttribute(unsigned Attribute, unsigned Value) = 0;
   virtual void emitTextAttribute(unsigned Attribute, StringRef String) = 0;
+  virtual void emitIntTextAttribute(unsigned Attribute, unsigned IntValue,
+                                    StringRef StringValue = "") = 0;
   virtual void emitFPU(unsigned FPU) = 0;
+  virtual void emitArch(unsigned Arch) = 0;
   virtual void finishAttributeSection() = 0;
+  virtual void emitInst(uint32_t Inst, char Suffix = '\0') = 0;
+  virtual void emitInlineAsmEnd(const MCSubtargetInfo &StartInfo,
+                                MCSubtargetInfo *EndInfo);
 };
 
 /// MCStreamer - Streaming machine code generation interface.  This interface
@@ -135,10 +160,8 @@ class MCStreamer {
   /// values saved by PushSection.
   SmallVector<std::pair<MCSectionSubPair, MCSectionSubPair>, 4> SectionStack;
 
-  bool AutoInitSections;
-
 protected:
-  MCStreamer(MCContext &Ctx, MCTargetStreamer *TargetStreamer);
+  MCStreamer(MCContext &Ctx);
 
   const MCExpr *BuildSymbolDiff(MCContext &Context, const MCSymbol *A,
                                 const MCSymbol *B);
@@ -161,15 +184,18 @@ protected:
 public:
   virtual ~MCStreamer();
 
+  void setTargetStreamer(MCTargetStreamer *TS) {
+    TargetStreamer.reset(TS);
+  }
+
   /// State management
   ///
   virtual void reset();
 
   MCContext &getContext() const { return Context; }
 
-  MCTargetStreamer &getTargetStreamer() {
-    assert(TargetStreamer);
-    return *TargetStreamer;
+  MCTargetStreamer *getTargetStreamer() {
+    return TargetStreamer.get();
   }
 
   unsigned getNumFrameInfos() { return FrameInfos.size(); }
@@ -210,6 +236,12 @@ public:
   /// Unlike AddComment, you are required to terminate comments with \n if you
   /// use this method.
   virtual raw_ostream &GetCommentOS();
+
+  /// Print T and prefix it with the comment string (normally #) and optionally
+  /// a tab. This prints the comment immediately, not at the end of the
+  /// current line. It is basically a safe version of EmitRawText: since it
+  /// only prints comments, the object streamer ignores it instead of asserting.
+  virtual void emitRawComment(const Twine &T, bool TabPrefix = true);
 
   /// AddBlankLine - Emit a blank line to a .s file to pretty it up.
   virtual void AddBlankLine() {}
@@ -303,22 +335,11 @@ public:
       SectionStack.back().first = MCSectionSubPair(Section, Subsection);
   }
 
-  /// Initialize the streamer.
-  void InitStreamer() {
-    if (AutoInitSections)
-      InitSections();
-  }
-
-  /// Tell this MCStreamer to call InitSections upon initialization.
-  void setAutoInitSections(bool AutoInitSections) {
-    this->AutoInitSections = AutoInitSections;
-  }
-
-  /// InitSections - Create the default sections and set the initial one.
-  virtual void InitSections() = 0;
-
-  /// InitToTextSection - Create a text section and switch the streamer to it.
-  virtual void InitToTextSection() = 0;
+  /// Create the default sections and set the initial one.
+  ///
+  /// @param Force - If false, a text streamer implementation can be a nop.
+  /// Used by CodeGen to avoid starting every file with '.text'.
+  virtual void InitSections(bool Force = true);
 
   /// AssignSection - Sets the symbol's section.
   ///
@@ -334,6 +355,8 @@ public:
   /// @param Symbol - The symbol to emit. A given symbol should only be
   /// emitted as a label once, and symbols emitted as a label should never be
   /// used in an assignment.
+  // FIXME: These emission are non-const because we mutate the symbol to
+  // add the section we're emitting it to later.
   virtual void EmitLabel(MCSymbol *Symbol);
 
   virtual void EmitDebugLabel(MCSymbol *Symbol);
@@ -407,9 +430,14 @@ public:
   /// EndCOFFSymbolDef - Marks the end of the symbol definition.
   virtual void EndCOFFSymbolDef() = 0;
 
+  /// EmitCOFFSectionIndex - Emits a COFF section index.
+  ///
+  /// @param Symbol - Symbol the section number relocation should point to.
+  virtual void EmitCOFFSectionIndex(MCSymbol const *Symbol);
+
   /// EmitCOFFSecRel32 - Emits a COFF section relative relocation.
   ///
-  /// @param Symbol - Symbol the section relative realocation should point to.
+  /// @param Symbol - Symbol the section relative relocation should point to.
   virtual void EmitCOFFSecRel32(MCSymbol const *Symbol);
 
   /// EmitELFSize - Emit an ELF .size directive.
@@ -479,9 +507,12 @@ public:
   /// @param Value - The value to emit.
   /// @param Size - The size of the integer (in bytes) to emit. This must
   /// match a native machine width.
-  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size) = 0;
+  /// @param Loc - The location of the expression for error reporting.
+  virtual void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                             const SMLoc &Loc = SMLoc()) = 0;
 
-  void EmitValue(const MCExpr *Value, unsigned Size);
+  void EmitValue(const MCExpr *Value, unsigned Size,
+                 const SMLoc &Loc = SMLoc());
 
   /// EmitIntValue - Special case of EmitValue that avoids the client having
   /// to pass in a MCExpr for constant integers.
@@ -672,6 +703,16 @@ public:
   /// indicated by the hasRawTextSupport() predicate.  By default this aborts.
   void EmitRawText(const Twine &String);
 
+  /// EmitInlineAsmEnd - Used to perform any cleanup needed after emitting
+  /// inline assembly. Provides the start and end subtarget info values.
+  /// The end subtarget info may be NULL if it is not know, for example, when
+  /// emitting the inline assembly as raw text.
+  virtual void EmitInlineAsmEnd(const MCSubtargetInfo &StartInfo,
+                                MCSubtargetInfo *EndInfo) {
+    if (TargetStreamer)
+      TargetStreamer->emitInlineAsmEnd(StartInfo, EndInfo);
+  }
+
   /// Flush - Causes any cached state to be written out.
   virtual void Flush() {}
 
@@ -702,12 +743,11 @@ MCStreamer *createNullStreamer(MCContext &Ctx);
 ///
 /// \param ShowInst - Whether to show the MCInst representation inline with
 /// the assembly.
-MCStreamer *createAsmStreamer(MCContext &Ctx, MCTargetStreamer *TargetStreamer,
-                              formatted_raw_ostream &OS, bool isVerboseAsm,
-                              bool useLoc, bool useCFI, bool useDwarfDirectory,
-                              MCInstPrinter *InstPrint = 0,
-                              MCCodeEmitter *CE = 0, MCAsmBackend *TAB = 0,
-                              bool ShowInst = false);
+MCStreamer *createAsmStreamer(MCContext &Ctx, formatted_raw_ostream &OS,
+                              bool isVerboseAsm, bool useCFI,
+                              bool useDwarfDirectory, MCInstPrinter *InstPrint,
+                              MCCodeEmitter *CE, MCAsmBackend *TAB,
+                              bool ShowInst);
 
 /// createMachOStreamer - Create a machine code streamer which will generate
 /// Mach-O format object files.
@@ -728,9 +768,8 @@ MCStreamer *createWinCOFFStreamer(MCContext &Ctx, MCAsmBackend &TAB,
 
 /// createELFStreamer - Create a machine code streamer which will generate
 /// ELF format object files.
-MCStreamer *createELFStreamer(MCContext &Ctx, MCTargetStreamer *TargetStreamer,
-                              MCAsmBackend &TAB, raw_ostream &OS,
-                              MCCodeEmitter *CE, bool RelaxAll,
+MCStreamer *createELFStreamer(MCContext &Ctx, MCAsmBackend &TAB,
+                              raw_ostream &OS, MCCodeEmitter *CE, bool RelaxAll,
                               bool NoExecStack);
 
 /// createPureStreamer - Create a machine code streamer which will generate

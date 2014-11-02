@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "X86.h"
+#include "X86CallingConv.h"
 #include "X86ISelLowering.h"
 #include "X86InstrBuilder.h"
 #include "X86RegisterInfo.h"
@@ -560,13 +561,8 @@ redo_gep:
           Disp += CI->getSExtValue() * S;
           break;
         }
-        if (isa<AddOperator>(Op) &&
-            (!isa<Instruction>(Op) ||
-             FuncInfo.MBBMap[cast<Instruction>(Op)->getParent()]
-               == FuncInfo.MBB) &&
-            isa<ConstantInt>(cast<AddOperator>(Op)->getOperand(1))) {
-          // An add (in the same block) with a constant operand. Fold the
-          // constant.
+        if (canFoldAddIntoGEP(U, Op)) {
+          // A compatible add with a constant operand. Fold the constant.
           ConstantInt *CI =
             cast<ConstantInt>(cast<AddOperator>(Op)->getOperand(1));
           Disp += CI->getSExtValue() * S;
@@ -701,7 +697,7 @@ bool X86FastISel::X86SelectCallAddress(const Value *V, X86AddressMode &AM) {
       return false;
 
     // Can't handle DLLImport.
-    if (GV->hasDLLImportLinkage())
+    if (GV->hasDLLImportStorageClass())
       return false;
 
     // Can't handle TLS.
@@ -892,7 +888,7 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
 
   // Now emit the RET.
   MachineInstrBuilder MIB =
-    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(X86::RET));
+    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DL, TII.get(Subtarget->is64Bit() ? X86::RETQ : X86::RETL));
   for (unsigned i = 0, e = RetRegs.size(); i != e; ++i)
     MIB.addReg(RetRegs[i], RegState::Implicit);
   return true;
@@ -1705,6 +1701,8 @@ bool X86FastISel::X86VisitIntrinsicCall(const IntrinsicInst &I) {
     const Value *Op1 = I.getArgOperand(0); // The guard's value.
     const AllocaInst *Slot = cast<AllocaInst>(I.getArgOperand(1));
 
+    MFI.setStackProtectorIndex(FuncInfo.StaticAllocaMap[Slot]);
+
     // Grab the frame index.
     X86AddressMode AM;
     if (!X86SelectAddress(Slot, AM)) return false;
@@ -1872,7 +1870,7 @@ static unsigned computeBytesPoppedByCallee(const X86Subtarget &Subtarget,
                                            const ImmutableCallSite &CS) {
   if (Subtarget.is64Bit())
     return 0;
-  if (Subtarget.isTargetWindows())
+  if (Subtarget.getTargetTriple().isOSMSVCRT())
     return 0;
   CallingConv::ID CC = CS.getCallingConv();
   if (CC == CallingConv::Fast || CC == CallingConv::GHC)
@@ -1910,6 +1908,10 @@ bool X86FastISel::DoSelectCall(const Instruction *I, const char *MemIntName) {
   // Don't know how to handle Win64 varargs yet.  Nothing special needed for
   // x86-32.  Special handling for x86-64 is implemented.
   if (isVarArg && isWin64)
+    return false;
+
+  // Don't know about inalloca yet.
+  if (CS.hasInAllocaArgument())
     return false;
 
   // Fast-isel doesn't know about callee-pop yet.
@@ -2485,6 +2487,7 @@ unsigned X86FastISel::TargetMaterializeAlloca(const AllocaInst *C) {
   // X86SelectAddrss, and TargetMaterializeAlloca.
   if (!FuncInfo.StaticAllocaMap.count(C))
     return 0;
+  assert(C->isStaticAlloca() && "dynamic alloca in the static alloca map?");
 
   X86AddressMode AM;
   if (!X86SelectAddress(C, AM))

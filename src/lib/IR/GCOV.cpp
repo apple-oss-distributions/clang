@@ -180,9 +180,11 @@ bool GCOVFunction::readGCNO(GCOVBuffer &Buff, GCOV::GCOVVersion Version) {
   // read line table.
   while (Buff.readLineTag()) {
     uint32_t LineTableLength;
+    // Read the length of this line table.
     if (!Buff.readInt(LineTableLength)) return false;
     uint32_t EndPos = Buff.getCursor() + LineTableLength*4;
     uint32_t BlockNo;
+    // Read the block number this table is associated with.
     if (!Buff.readInt(BlockNo)) return false;
     if (BlockNo >= BlockCount) {
       errs() << "Unexpected block number: " << BlockNo << " (in " << Name
@@ -190,24 +192,34 @@ bool GCOVFunction::readGCNO(GCOVBuffer &Buff, GCOV::GCOVVersion Version) {
       return false;
     }
     GCOVBlock *Block = Blocks[BlockNo];
-    if (!Buff.readInt(Dummy)) return false; // flag
-    while (Buff.getCursor() != (EndPos - 4)) {
+    // Read the word that pads the beginning of the line table. This may be a
+    // flag of some sort, but seems to always be zero.
+    if (!Buff.readInt(Dummy)) return false;
+
+    // Line information starts here and continues up until the last word.
+    if (Buff.getCursor() != (EndPos - sizeof(uint32_t))) {
       StringRef F;
+      // Read the source file name.
       if (!Buff.readString(F)) return false;
       if (Filename != F) {
         errs() << "Multiple sources for a single basic block: " << Filename
                << " != " << F << " (in " << Name << ").\n";
         return false;
       }
-      if (Buff.getCursor() == (EndPos - 4)) break;
-      while (true) {
+      // Read lines up to, but not including, the null terminator.
+      while (Buff.getCursor() < (EndPos - 2 * sizeof(uint32_t))) {
         uint32_t Line;
         if (!Buff.readInt(Line)) return false;
-        if (!Line) break;
+        // Line 0 means this instruction was injected by the compiler. Skip it.
+        if (!Line) continue;
         Block->addLine(Line);
       }
+      // Read the null terminator.
+      if (!Buff.readInt(Dummy)) return false;
     }
-    if (!Buff.readInt(Dummy)) return false; // flag
+    // The last word is either a flag or padding, it isn't clear which. Skip
+    // over it.
+    if (!Buff.readInt(Dummy)) return false;
   }
   return true;
 }
@@ -309,6 +321,11 @@ void GCOVFunction::dump() const {
 /// collectLineCounts - Collect line counts. This must be used after
 /// reading .gcno and .gcda files.
 void GCOVFunction::collectLineCounts(FileInfo &FI) {
+  // If the line number is zero, this is a function that doesn't actually appear
+  // in the source file, so there isn't anything we can do with it.
+  if (LineNumber == 0)
+    return;
+
   for (SmallVectorImpl<GCOVBlock *>::iterator I = Blocks.begin(),
          E = Blocks.end(); I != E; ++I)
     (*I)->collectLineCounts(FI);
@@ -431,11 +448,35 @@ static raw_ostream &operator<<(raw_ostream &OS, const formatBranchInfo &FBI) {
   return OS;
 }
 
+namespace {
+class LineConsumer {
+  std::unique_ptr<MemoryBuffer> Buffer;
+  StringRef Remaining;
+public:
+  LineConsumer(StringRef Filename) {
+    if (error_code EC = MemoryBuffer::getFileOrSTDIN(Filename, Buffer)) {
+      errs() << Filename << ": " << EC.message() << "\n";
+      Remaining = "";
+    } else
+      Remaining = Buffer->getBuffer();
+  }
+  bool empty() { return Remaining.empty(); }
+  void printNext(raw_ostream &OS, uint32_t LineNum) {
+    StringRef Line;
+    if (empty())
+      Line = "/*EOF*/";
+    else
+      std::tie(Line, Remaining) = Remaining.split("\n");
+    OS << format("%5u:", LineNum) << Line << "\n";
+  }
+};
+}
+
 /// Convert a path to a gcov filename. If PreservePaths is true, this
 /// translates "/" to "#", ".." to "^", and drops ".", to match gcov.
 static std::string mangleCoveragePath(StringRef Filename, bool PreservePaths) {
   if (!PreservePaths)
-    return (sys::path::filename(Filename) + ".gcov").str();
+    return sys::path::filename(Filename).str();
 
   // This behaviour is defined by gcov in terms of text replacements, so it's
   // not likely to do anything useful on filesystems with different textual
@@ -463,28 +504,52 @@ static std::string mangleCoveragePath(StringRef Filename, bool PreservePaths) {
 
   if (S < I)
     Result.append(S, I);
-  Result.append(".gcov");
   return Result.str();
 }
 
+std::string FileInfo::getCoveragePath(StringRef Filename,
+                                      StringRef MainFilename) {
+  if (Options.NoOutput)
+    // This is probably a bug in gcov, but when -n is specified, paths aren't
+    // mangled at all, and the -l and -p options are ignored. Here, we do the
+    // same.
+    return Filename;
+
+  std::string CoveragePath;
+  if (Options.LongFileNames && !Filename.equals(MainFilename))
+    CoveragePath =
+        mangleCoveragePath(MainFilename, Options.PreservePaths) + "##";
+  CoveragePath +=
+      mangleCoveragePath(Filename, Options.PreservePaths) + ".gcov";
+  return CoveragePath;
+}
+
+std::unique_ptr<raw_ostream>
+FileInfo::openCoveragePath(StringRef CoveragePath) {
+  if (Options.NoOutput)
+    return std::unique_ptr<raw_null_ostream>(new raw_null_ostream());
+
+  std::string ErrorInfo;
+  auto OS = std::unique_ptr<raw_fd_ostream>(
+      new raw_fd_ostream(CoveragePath.str().c_str(), ErrorInfo));
+  if (!ErrorInfo.empty()) {
+    errs() << ErrorInfo << "\n";
+    return std::unique_ptr<raw_null_ostream>(new raw_null_ostream());
+  }
+  return std::move(OS);
+}
+
 /// print -  Print source files with collected line count information.
-void FileInfo::print(StringRef GCNOFile, StringRef GCDAFile) {
+void FileInfo::print(StringRef MainFilename, StringRef GCNOFile,
+                     StringRef GCDAFile) {
   for (StringMap<LineData>::const_iterator I = LineInfo.begin(),
          E = LineInfo.end(); I != E; ++I) {
     StringRef Filename = I->first();
-    OwningPtr<MemoryBuffer> Buff;
-    if (error_code ec = MemoryBuffer::getFileOrSTDIN(Filename, Buff)) {
-      errs() << Filename << ": " << ec.message() << "\n";
-      return;
-    }
-    StringRef AllLines = Buff->getBuffer();
+    auto AllLines = LineConsumer(Filename);
 
-    std::string CoveragePath = mangleCoveragePath(Filename,
-                                                  Options.PreservePaths);
-    std::string ErrorInfo;
-    raw_fd_ostream OS(CoveragePath.c_str(), ErrorInfo);
-    if (!ErrorInfo.empty())
-      errs() << ErrorInfo << "\n";
+    std::string CoveragePath = getCoveragePath(Filename, MainFilename);
+    std::unique_ptr<raw_ostream> S = openCoveragePath(CoveragePath);
+    raw_ostream &OS = *S;
 
     OS << "        -:    0:Source:" << Filename << "\n";
     OS << "        -:    0:Graph:" << GCNOFile << "\n";
@@ -494,7 +559,8 @@ void FileInfo::print(StringRef GCNOFile, StringRef GCDAFile) {
 
     const LineData &Line = I->second;
     GCOVCoverage FileCoverage(Filename);
-    for (uint32_t LineIndex = 0; !AllLines.empty(); ++LineIndex) {
+    for (uint32_t LineIndex = 0;
+         LineIndex < Line.LastLine || !AllLines.empty(); ++LineIndex) {
       if (Options.BranchInfo) {
         FunctionLines::const_iterator FuncsIt = Line.Functions.find(LineIndex);
         if (FuncsIt != Line.Functions.end())
@@ -505,9 +571,7 @@ void FileInfo::print(StringRef GCNOFile, StringRef GCDAFile) {
       if (BlocksIt == Line.Blocks.end()) {
         // No basic blocks are on this line. Not an executable line of code.
         OS << "        -:";
-        std::pair<StringRef, StringRef> P = AllLines.split('\n');
-        OS << format("%5u:", LineIndex+1) << P.first << "\n";
-        AllLines = P.second;
+        AllLines.printNext(OS, LineIndex + 1);
       } else {
         const BlockVector &Blocks = BlocksIt->second;
 
@@ -569,9 +633,7 @@ void FileInfo::print(StringRef GCNOFile, StringRef GCDAFile) {
         }
         ++FileCoverage.LogicalLines;
 
-        std::pair<StringRef, StringRef> P = AllLines.split('\n');
-        OS << format("%5u:", LineIndex+1) << P.first << "\n";
-        AllLines = P.second;
+        AllLines.printNext(OS, LineIndex + 1);
 
         uint32_t BlockNo = 0;
         uint32_t EdgeNo = 0;
@@ -601,10 +663,11 @@ void FileInfo::print(StringRef GCNOFile, StringRef GCDAFile) {
   if (Options.FuncCoverage)
     printFuncCoverage();
   printFileCoverage();
+  return;
 }
 
 /// printFunctionSummary - Print function and block summary.
-void FileInfo::printFunctionSummary(raw_fd_ostream &OS,
+void FileInfo::printFunctionSummary(raw_ostream &OS,
                                     const FunctionVector &Funcs) const {
   for (FunctionVector::const_iterator I = Funcs.begin(), E = Funcs.end();
          I != E; ++I) {
@@ -626,7 +689,7 @@ void FileInfo::printFunctionSummary(raw_fd_ostream &OS,
 }
 
 /// printBlockInfo - Output counts for each block.
-void FileInfo::printBlockInfo(raw_fd_ostream &OS, const GCOVBlock &Block,
+void FileInfo::printBlockInfo(raw_ostream &OS, const GCOVBlock &Block,
                               uint32_t LineIndex, uint32_t &BlockNo) const {
   if (Block.getCount() == 0)
     OS << "    $$$$$:";
@@ -636,7 +699,7 @@ void FileInfo::printBlockInfo(raw_fd_ostream &OS, const GCOVBlock &Block,
 }
 
 /// printBranchInfo - Print conditional branch probabilities.
-void FileInfo::printBranchInfo(raw_fd_ostream &OS, const GCOVBlock &Block,
+void FileInfo::printBranchInfo(raw_ostream &OS, const GCOVBlock &Block,
                                GCOVCoverage &Coverage, uint32_t &EdgeNo) {
   SmallVector<uint64_t, 16> BranchCounts;
   uint64_t TotalCounts = 0;
@@ -666,7 +729,7 @@ void FileInfo::printBranchInfo(raw_fd_ostream &OS, const GCOVBlock &Block,
 }
 
 /// printUncondBranchInfo - Print unconditional branch probabilities.
-void FileInfo::printUncondBranchInfo(raw_fd_ostream &OS, uint32_t &EdgeNo,
+void FileInfo::printUncondBranchInfo(raw_ostream &OS, uint32_t &EdgeNo,
                                      uint64_t Count) const {
   OS << format("unconditional %2u ", EdgeNo++)
      << formatBranchInfo(Options, Count, Count) << "\n";
@@ -712,6 +775,8 @@ void FileInfo::printFileCoverage() const {
     const GCOVCoverage &Coverage = I->second;
     outs() << "File '" << Coverage.Name << "'\n";
     printCoverage(Coverage);
-    outs() << Coverage.Name << ":creating '" << Filename << "'\n\n";
+    if (!Options.NoOutput)
+      outs() << Coverage.Name << ":creating '" << Filename << "'\n";
+    outs() << "\n";
   }
 }

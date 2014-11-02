@@ -85,13 +85,14 @@ namespace lltok {
 
     kw_cc, kw_ccc, kw_fastcc, kw_coldcc,
     kw_intel_ocl_bicc,
-    kw_x86_stdcallcc, kw_x86_fastcallcc, kw_x86_thiscallcc,
+    kw_x86_stdcallcc, kw_x86_fastcallcc, kw_x86_thiscallcc, kw_x86_cdeclmethodcc,
     kw_arm_apcscc, kw_arm_aapcscc, kw_arm_aapcs_vfpcc,
     kw_msp430_intrcc,
     kw_ptx_kernel, kw_ptx_device,
     kw_spir_kernel, kw_spir_func,
     kw_x86_64_sysvcc, kw_x86_64_win64cc,
-    kw_webkit_jscc,
+    kw_webkit_jscc, kw_anyregcc,
+    kw_preserve_mostcc, kw_preserve_allcc,
 
     // Attributes:
     kw_attributes,
@@ -99,6 +100,7 @@ namespace lltok {
     kw_sanitize_address,
     kw_builtin,
     kw_byval,
+    kw_inalloca,
     kw_cold,
     kw_inlinehint,
     kw_inreg,
@@ -150,6 +152,7 @@ namespace lltok {
     kw_phi, kw_call,
     kw_trunc, kw_zext, kw_sext, kw_fptrunc, kw_fpext, kw_uitofp, kw_sitofp,
     kw_fptoui, kw_fptosi, kw_inttoptr, kw_ptrtoint, kw_bitcast,
+    kw_addrspacecast,
     kw_select, kw_va_arg,
 
     kw_landingpad, kw_personality, kw_cleanup, kw_catch, kw_filter,

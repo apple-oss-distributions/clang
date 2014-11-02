@@ -46,7 +46,8 @@ public:
   int getFrameIndexReference(const MachineFunction &MF, int FI,
                              unsigned &FrameReg) const;
   int resolveFrameIndexReference(const MachineFunction &MF, int FI,
-                                 unsigned &FrameReg) const;
+                                 unsigned &FrameReg,
+                                 bool PreferFP = false) const;
   bool spillCalleeSavedRegisters(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator MI,
                                  const std::vector<CalleeSavedInfo> &CSI,

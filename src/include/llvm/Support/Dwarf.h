@@ -632,6 +632,10 @@ enum SourceLanguage {
   DW_LANG_C_plus_plus_03 = 0x0019,
   DW_LANG_C_plus_plus_11 = 0x001a,
   DW_LANG_OCaml = 0x001b,
+  DW_LANG_Rust = 0x001c,
+  DW_LANG_C11 = 0x001d,
+  DW_LANG_Swift = 0x001e,
+  DW_LANG_Julia = 0x001f,
 
   DW_LANG_lo_user = 0x8000,
   DW_LANG_Mips_Assembler = 0x8001,

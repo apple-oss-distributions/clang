@@ -142,6 +142,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Modularize.h"
+#include "PreprocessorTracker.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -167,8 +169,6 @@
 #include <iterator>
 #include <string>
 #include <vector>
-#include "Modularize.h"
-#include "PreprocessorTracker.h"
 
 using namespace clang;
 using namespace clang::driver;
@@ -715,7 +715,7 @@ int main(int Argc, const char **Argv) {
   }
 
   // If we are in assistant mode, output the module map and quit.
-  if (ModuleMapPath[0]) {
+  if (ModuleMapPath.length() != 0) {
     if (!createModuleMap(ModuleMapPath, Headers, Dependencies, HeaderPrefix,
                          RootModule))
       return 1; // Failed.
@@ -753,7 +753,7 @@ int main(int Argc, const char **Argv) {
   // Check for the same entity being defined in multiple places.
   for (EntityMap::iterator E = Entities.begin(), EEnd = Entities.end();
        E != EEnd; ++E) {
-    // If only one occurance, exit early.
+    // If only one occurrence, exit early.
     if (E->second.size() == 1)
       continue;
     // Clear entity locations.
@@ -771,7 +771,7 @@ int main(int Argc, const char **Argv) {
     for (EntryBinArray::iterator DI = EntryBins.begin(), DE = EntryBins.end();
          DI != DE; ++DI, ++KindIndex) {
       int ECount = DI->size();
-      // If only 1 occurance, skip;
+      // If only 1 occurrence of this entity, skip it, as we only report duplicates.
       if (ECount <= 1)
         continue;
       LocationArray::iterator FI = DI->begin();

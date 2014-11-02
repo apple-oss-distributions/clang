@@ -15,6 +15,7 @@
 
 #include "AMDGPUISelLowering.h"
 #include "AMDGPU.h"
+#include "AMDGPUFrameLowering.h"
 #include "AMDGPURegisterInfo.h"
 #include "AMDGPUSubtarget.h"
 #include "AMDILIntrinsicInfo.h"
@@ -31,8 +32,9 @@ using namespace llvm;
 static bool allocateStack(unsigned ValNo, MVT ValVT, MVT LocVT,
                       CCValAssign::LocInfo LocInfo,
                       ISD::ArgFlagsTy ArgFlags, CCState &State) {
-  unsigned Offset = State.AllocateStack(ValVT.getSizeInBits() / 8, ArgFlags.getOrigAlign());
-    State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
+  unsigned Offset = State.AllocateStack(ValVT.getStoreSize(),
+                                        ArgFlags.getOrigAlign());
+  State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
 
   return true;
 }
@@ -57,6 +59,8 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(TargetMachine &TM) :
   setOperationAction(ISD::FABS,   MVT::f32, Legal);
   setOperationAction(ISD::FFLOOR, MVT::f32, Legal);
   setOperationAction(ISD::FRINT,  MVT::f32, Legal);
+  setOperationAction(ISD::FROUND, MVT::f32, Legal);
+  setOperationAction(ISD::FTRUNC, MVT::f32, Legal);
 
   // The hardware supports ROTR, but not ROTL
   setOperationAction(ISD::ROTL, MVT::i32, Expand);
@@ -177,9 +181,11 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(TargetMachine &TM) :
 
   for (unsigned int x = 0; x < NumFloatTypes; ++x) {
     MVT::SimpleValueType VT = FloatTypes[x];
+    setOperationAction(ISD::FABS, VT, Expand);
     setOperationAction(ISD::FADD, VT, Expand);
     setOperationAction(ISD::FDIV, VT, Expand);
     setOperationAction(ISD::FFLOOR, VT, Expand);
+    setOperationAction(ISD::FTRUNC, VT, Expand);
     setOperationAction(ISD::FMUL, VT, Expand);
     setOperationAction(ISD::FRINT, VT, Expand);
     setOperationAction(ISD::FSQRT, VT, Expand);
@@ -195,6 +201,18 @@ MVT AMDGPUTargetLowering::getVectorIdxTy() const {
   return MVT::i32;
 }
 
+bool AMDGPUTargetLowering::isLoadBitCastBeneficial(EVT LoadTy,
+                                                   EVT CastTy) const {
+  if (LoadTy.getSizeInBits() != CastTy.getSizeInBits())
+    return true;
+
+  unsigned LScalarSize = LoadTy.getScalarType().getSizeInBits();
+  unsigned CastScalarSize = CastTy.getScalarType().getSizeInBits();
+
+  return ((LScalarSize <= CastScalarSize) ||
+          (CastScalarSize >= 32) ||
+          (LScalarSize < 32));
+}
 
 //===---------------------------------------------------------------------===//
 // Target Properties
@@ -239,8 +257,8 @@ SDValue AMDGPUTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG)
   switch (Op.getOpcode()) {
   default:
     Op.getNode()->dump();
-    assert(0 && "Custom lowering code for this"
-        "instruction is not implemented yet!");
+    llvm_unreachable("Custom lowering code for this"
+                     "instruction is not implemented yet!");
     break;
   // AMDIL DAG lowering
   case ISD::SDIV: return LowerSDIV(Op, DAG);
@@ -250,8 +268,8 @@ SDValue AMDGPUTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG)
   // AMDGPU DAG lowering
   case ISD::CONCAT_VECTORS: return LowerCONCAT_VECTORS(Op, DAG);
   case ISD::EXTRACT_SUBVECTOR: return LowerEXTRACT_SUBVECTOR(Op, DAG);
+  case ISD::FrameIndex: return LowerFrameIndex(Op, DAG);
   case ISD::INTRINSIC_WO_CHAIN: return LowerINTRINSIC_WO_CHAIN(Op, DAG);
-  case ISD::STORE: return LowerSTORE(Op, DAG);
   case ISD::UDIVREM: return LowerUDIVREM(Op, DAG);
   case ISD::UINT_TO_FP: return LowerUINT_TO_FP(Op, DAG);
   }
@@ -326,6 +344,21 @@ SDValue AMDGPUTargetLowering::LowerEXTRACT_SUBVECTOR(SDValue Op,
                      &Args[0], Args.size());
 }
 
+SDValue AMDGPUTargetLowering::LowerFrameIndex(SDValue Op,
+                                              SelectionDAG &DAG) const {
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  const AMDGPUFrameLowering *TFL =
+   static_cast<const AMDGPUFrameLowering*>(getTargetMachine().getFrameLowering());
+
+  FrameIndexSDNode *FIN = dyn_cast<FrameIndexSDNode>(Op);
+  assert(FIN);
+
+  unsigned FrameIndex = FIN->getIndex();
+  unsigned Offset = TFL->getFrameIndexOffset(MF, FrameIndex);
+  return DAG.getConstant(Offset * 4 * TFL->getStackWidth(MF),
+                         Op.getValueType());
+}
 
 SDValue AMDGPUTargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
     SelectionDAG &DAG) const {
@@ -425,7 +458,7 @@ SDValue AMDGPUTargetLowering::LowerMinMax(SDValue Op,
   case ISD::SETTRUE2:
   case ISD::SETUO:
   case ISD::SETO:
-    assert(0 && "Operation should already be optimised !");
+    llvm_unreachable("Operation should already be optimised!");
   case ISD::SETULE:
   case ISD::SETULT:
   case ISD::SETOLE:
@@ -449,7 +482,7 @@ SDValue AMDGPUTargetLowering::LowerMinMax(SDValue Op,
       return DAG.getNode(AMDGPUISD::FMIN, DL, VT, LHS, RHS);
   }
   case ISD::SETCC_INVALID:
-    assert(0 && "Invalid setcc condcode !");
+    llvm_unreachable("Invalid setcc condcode!");
   }
   return Op;
 }
@@ -563,7 +596,8 @@ SDValue AMDGPUTargetLowering::LowerSTORE(SDValue Op, SelectionDAG &DAG) const {
   }
 
   StoreSDNode *Store = cast<StoreSDNode>(Op);
-  if (Store->getAddressSpace() == AMDGPUAS::LOCAL_ADDRESS &&
+  if ((Store->getAddressSpace() == AMDGPUAS::LOCAL_ADDRESS ||
+       Store->getAddressSpace() == AMDGPUAS::PRIVATE_ADDRESS) &&
       Store->getValue().getValueType().isVector()) {
     return SplitVectorStore(Op, DAG);
   }

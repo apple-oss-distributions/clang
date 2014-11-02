@@ -475,6 +475,7 @@ ComplexPairTy ComplexExprEmitter::EmitCast(CastExpr::CastKind CK, Expr *Op,
   case CK_CopyAndAutoreleaseBlockObject:
   case CK_BuiltinFnToFnPtr:
   case CK_ZeroToOCLEvent:
+  case CK_AddressSpaceConversion:
     llvm_unreachable("invalid cast kind for complex value");
 
   case CK_FloatingRealToComplex:
@@ -759,20 +760,16 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
   CGF.EmitBlock(LHSBlock);
   Cnt.beginRegion(Builder);
   ComplexPairTy LHS = Visit(E->getTrueExpr());
-  Cnt.adjustForControlFlow();
   LHSBlock = Builder.GetInsertBlock();
   CGF.EmitBranch(ContBlock);
   eval.end(CGF);
 
   eval.begin(CGF);
   CGF.EmitBlock(RHSBlock);
-  Cnt.beginElseRegion();
   ComplexPairTy RHS = Visit(E->getFalseExpr());
-  Cnt.adjustForControlFlow();
   RHSBlock = Builder.GetInsertBlock();
   CGF.EmitBlock(ContBlock);
   eval.end(CGF);
-  Cnt.applyAdjustmentsToRegion();
 
   // Create a PHI node for the real part.
   llvm::PHINode *RealPN = Builder.CreatePHI(LHS.first->getType(), 2, "cond.r");

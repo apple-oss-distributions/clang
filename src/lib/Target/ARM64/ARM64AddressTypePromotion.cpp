@@ -34,8 +34,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Analysis/Dominators.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -93,8 +93,8 @@ namespace {
     // This transformation requires dominator info.
     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
       AU.setPreservesCFG();
-      AU.addRequired<DominatorTree>();
-      AU.addPreserved<DominatorTree>();
+      AU.addRequired<DominatorTreeWrapperPass>();
+      AU.addPreserved<DominatorTreeWrapperPass>();
       FunctionPass::getAnalysisUsage(AU);
     }
 
@@ -144,7 +144,7 @@ char ARM64AddressTypePromotion::ID = 0;
 
 INITIALIZE_PASS_BEGIN(ARM64AddressTypePromotion, "arm64-type-promotion",
                       "ARM64 Type Promotion Pass", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTree)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(ARM64AddressTypePromotion, "arm64-type-promotion",
                     "ARM64 Type Promotion Pass", false, false)
 
@@ -381,7 +381,7 @@ propagateSignExtension(Instructions &SExtInsts) {
 
 void ARM64AddressTypePromotion::mergeSExts(ValueToInsts &ValToSExtendedUses,
                                            SetOfInstructions &ToRemove) {
-  DominatorTree &DT = getAnalysis<DominatorTree>();
+  DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
   for (ValueToInsts::iterator It = ValToSExtendedUses.begin(),
          EndIt = ValToSExtendedUses.end(); It != EndIt; ++It) {

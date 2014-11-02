@@ -36,8 +36,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/ValueHandle.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -297,8 +297,9 @@ static bool CleanupConstantGlobalUsers(Value *V, Constant *Init,
         if (Init)
           SubInit = ConstantFoldLoadThroughGEPConstantExpr(Init, CE);
         Changed |= CleanupConstantGlobalUsers(CE, SubInit, TD, TLI);
-      } else if (CE->getOpcode() == Instruction::BitCast &&
-                 CE->getType()->isPointerTy()) {
+      } else if ((CE->getOpcode() == Instruction::BitCast &&
+                  CE->getType()->isPointerTy()) ||
+                 CE->getOpcode() == Instruction::AddrSpaceCast) {
         // Pointer cast, delete any stores and memsets to the global.
         Changed |= CleanupConstantGlobalUsers(CE, 0, TD, TLI);
       }
@@ -1746,7 +1747,7 @@ bool GlobalOpt::ProcessInternalGlobal(GlobalVariable *GV,
   // and this function is main (which we know is not recursive), we replace
   // the global with a local alloca in this function.
   //
-  // NOTE: It doesn't make sense to promote non single-value types since we
+  // NOTE: It doesn't make sense to promote non-single-value types since we
   // are just replacing static memory to stack memory.
   //
   // If the global is in different address space, don't bring it to stack.
@@ -2580,7 +2581,7 @@ bool Evaluator::EvaluateBlock(BasicBlock::iterator CurInst,
           // We don't insert an entry into Values, as it doesn't have a
           // meaningful return value.
           if (!II->use_empty()) {
-            DEBUG(dbgs() << "Found unused invariant_start. Cant evaluate.\n");
+            DEBUG(dbgs() << "Found unused invariant_start. Can't evaluate.\n");
             return false;
           }
           ConstantInt *Size = cast<ConstantInt>(II->getArgOperand(0));
@@ -2845,10 +2846,6 @@ bool GlobalOpt::OptimizeGlobalCtorsList(GlobalVariable *&GCL) {
   return true;
 }
 
-static int compareNames(Constant *const *A, Constant *const *B) {
-  return (*A)->getName().compare((*B)->getName());
-}
-
 static void setUsedInitializer(GlobalVariable &V,
                                SmallPtrSet<GlobalValue *, 8> Init) {
   if (Init.empty()) {
@@ -2856,16 +2853,21 @@ static void setUsedInitializer(GlobalVariable &V,
     return;
   }
 
-  SmallVector<llvm::Constant *, 8> UsedArray;
-  PointerType *Int8PtrTy = Type::getInt8PtrTy(V.getContext());
+  // Type of pointer to the array of pointers.
+  PointerType *Int8PtrTy = Type::getInt8PtrTy(V.getContext(), 0);
 
+  SmallVector<llvm::Constant *, 8> UsedArray;
   for (SmallPtrSet<GlobalValue *, 8>::iterator I = Init.begin(), E = Init.end();
        I != E; ++I) {
-    Constant *Cast = llvm::ConstantExpr::getBitCast(*I, Int8PtrTy);
+    Constant *Cast
+      = ConstantExpr::getPointerBitCastOrAddrSpaceCast(*I, Int8PtrTy);
     UsedArray.push_back(Cast);
   }
   // Sort to get deterministic order.
-  array_pod_sort(UsedArray.begin(), UsedArray.end(), compareNames);
+  array_pod_sort(UsedArray.begin(), UsedArray.end(),
+                 [](Constant *const *A, Constant *const *B) {
+    return (*A)->getName().compare((*B)->getName());
+  });
   ArrayType *ATy = ArrayType::get(Int8PtrTy, UsedArray.size());
 
   Module *M = V.getParent();
@@ -2999,7 +3001,14 @@ bool GlobalOpt::OptimizeGlobalAliases(Module &M) {
       continue;
 
     Constant *Aliasee = J->getAliasee();
-    GlobalValue *Target = cast<GlobalValue>(Aliasee->stripPointerCasts());
+    GlobalValue *Target = dyn_cast<GlobalValue>(Aliasee->stripPointerCasts());
+
+    // Skip this alias if the aliasee is not a GlobalValue (e.g., GEP).
+    // FIXME: Even if the aliasee is not a GlobalValue, we still should be able
+    // to replace the alias with the aliasee.
+    if (!Target)
+      continue;
+
     Target->removeDeadConstantUsers();
 
     // Make all users of the alias use the aliasee instead.

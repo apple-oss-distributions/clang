@@ -42,12 +42,7 @@ struct AsanMapUnmapCallback {
     PoisonShadow(p, size, 0);
     // We are about to unmap a chunk of user memory.
     // Mark the corresponding shadow memory as not needed.
-    // Since asan's mapping is compacting, the shadow chunk may be
-    // not page-aligned, so we only flush the page-aligned portion.
-    uptr page_size = GetPageSizeCached();
-    uptr shadow_beg = RoundUpTo(MemToShadow(p), page_size);
-    uptr shadow_end = RoundDownTo(MemToShadow(p + size), page_size);
-    FlushUnneededShadowMemory(shadow_beg, shadow_end - shadow_beg);
+    FlushUnneededASanShadowMemory(p, size);
     // Statistics.
     AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.munmaps++;
@@ -55,27 +50,31 @@ struct AsanMapUnmapCallback {
   }
 };
 
-#if SANITIZER_WORDSIZE == 64
-#if defined(__powerpc64__)
+#if SANITIZER_CAN_USE_ALLOCATOR64
+# if defined(__powerpc64__)
 const uptr kAllocatorSpace =  0xa0000000000ULL;
 const uptr kAllocatorSize  =  0x20000000000ULL;  // 2T.
-#else
+# else
 const uptr kAllocatorSpace = 0x600000000000ULL;
 const uptr kAllocatorSize  =  0x40000000000ULL;  // 4T.
-#endif
+# endif
 typedef DefaultSizeClassMap SizeClassMap;
 typedef SizeClassAllocator64<kAllocatorSpace, kAllocatorSize, 0 /*metadata*/,
     SizeClassMap, AsanMapUnmapCallback> PrimaryAllocator;
-#elif SANITIZER_WORDSIZE == 32
-static const u64 kAddressSpaceSize = 1ULL << 32;
-typedef CompactSizeClassMap SizeClassMap;
+#else  // Fallback to SizeClassAllocator32.
 static const uptr kRegionSizeLog = 20;
-static const uptr kFlatByteMapSize = kAddressSpaceSize >> kRegionSizeLog;
-typedef SizeClassAllocator32<0, kAddressSpaceSize, 16,
+static const uptr kNumRegions = SANITIZER_MMAP_RANGE_SIZE >> kRegionSizeLog;
+# if SANITIZER_WORDSIZE == 32
+typedef FlatByteMap<kNumRegions> ByteMap;
+# elif SANITIZER_WORDSIZE == 64
+typedef TwoLevelByteMap<(kNumRegions >> 12), 1 << 12> ByteMap;
+# endif
+typedef CompactSizeClassMap SizeClassMap;
+typedef SizeClassAllocator32<0, SANITIZER_MMAP_RANGE_SIZE, 16,
   SizeClassMap, kRegionSizeLog,
-  FlatByteMap<kFlatByteMapSize>,
+  ByteMap,
   AsanMapUnmapCallback> PrimaryAllocator;
-#endif
+#endif  // SANITIZER_CAN_USE_ALLOCATOR64
 
 typedef SizeClassAllocatorLocalCache<PrimaryAllocator> AllocatorCache;
 typedef LargeMmapAllocator<AsanMapUnmapCallback> SecondaryAllocator;
@@ -134,7 +133,8 @@ static uptr ComputeRZLog(uptr user_requested_size) {
     user_requested_size <= (1 << 14) - 256  ? 4 :
     user_requested_size <= (1 << 15) - 512  ? 5 :
     user_requested_size <= (1 << 16) - 1024 ? 6 : 7;
-  return Max(rz_log, RZSize2Log(flags()->redzone));
+  return Min(Max(rz_log, RZSize2Log(flags()->redzone)),
+             RZSize2Log(flags()->max_redzone));
 }
 
 // The memory chunk allocated from the underlying allocator looks like this:
@@ -312,7 +312,7 @@ void InitializeAllocator() {
 static void *Allocate(uptr size, uptr alignment, StackTrace *stack,
                       AllocType alloc_type, bool can_fill) {
   if (!asan_inited)
-    __asan_init();
+    AsanInitFromRtl();
   Flags &fl = *flags();
   CHECK(stack);
   const uptr min_alignment = SHADOW_GRANULARITY;
@@ -357,6 +357,16 @@ static void *Allocate(uptr size, uptr alignment, StackTrace *stack,
     AllocatorCache *cache = &fallback_allocator_cache;
     allocated = allocator.Allocate(cache, needed_size, 8, false);
   }
+
+  if (*(u8 *)MEM_TO_SHADOW((uptr)allocated) == 0 && flags()->poison_heap) {
+    // Heap poisoning is enabled, but the allocator provides an unpoisoned
+    // chunk. This is possible if flags()->poison_heap was disabled for some
+    // time, for example, due to flags()->start_disabled.
+    // Anyway, poison the block before using it for anything else.
+    uptr allocated_size = allocator.GetActuallyAllocatedSize(allocated);
+    PoisonShadow((uptr)allocated, allocated_size, kAsanHeapLeftRedzoneMagic);
+  }
+
   uptr alloc_beg = reinterpret_cast<uptr>(allocated);
   uptr alloc_end = alloc_beg + needed_size;
   uptr beg_plus_redzone = alloc_beg + rz_size;
@@ -664,12 +674,13 @@ int asan_posix_memalign(void **memptr, uptr alignment, uptr size,
   return 0;
 }
 
-uptr asan_malloc_usable_size(void *ptr, StackTrace *stack) {
-  CHECK(stack);
+uptr asan_malloc_usable_size(void *ptr, uptr pc, uptr bp) {
   if (ptr == 0) return 0;
   uptr usable_size = AllocationSize(reinterpret_cast<uptr>(ptr));
-  if (flags()->check_malloc_usable_size && (usable_size == 0))
-    ReportMallocUsableSizeNotOwned((uptr)ptr, stack);
+  if (flags()->check_malloc_usable_size && (usable_size == 0)) {
+    GET_STACK_TRACE_FATAL(pc, bp);
+    ReportMallocUsableSizeNotOwned((uptr)ptr, &stack);
+  }
   return usable_size;
 }
 
@@ -709,8 +720,12 @@ uptr PointsIntoChunk(void* p) {
   __asan::AsanChunk *m = __asan::GetAsanChunkByAddrFastLocked(addr);
   if (!m) return 0;
   uptr chunk = m->Beg();
-  if ((m->chunk_state == __asan::CHUNK_ALLOCATED) &&
-      m->AddrIsInside(addr, /*locked_version=*/true))
+  if (m->chunk_state != __asan::CHUNK_ALLOCATED)
+    return 0;
+  if (m->AddrIsInside(addr, /*locked_version=*/true))
+    return chunk;
+  if (IsSpecialCaseOfOperatorNew0(chunk, m->UsedSize(/*locked_version*/ true),
+                                  addr))
     return chunk;
   return 0;
 }
