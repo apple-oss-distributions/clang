@@ -506,6 +506,11 @@ void AnalysisConsumer::HandleTranslationUnit(ASTContext &C) {
   if (Diags.hasErrorOccurred() || Diags.hasFatalErrorOccurred())
     return;
 
+  // Don't analyze if the user explicitly asked for no checks to be performed
+  // on this file.
+  if (Opts->DisableAllChecks)
+    return;
+
   {
     if (TUTotalTimer) TUTotalTimer->startTimer();
 
