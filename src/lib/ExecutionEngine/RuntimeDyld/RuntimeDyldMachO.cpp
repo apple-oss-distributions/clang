@@ -106,7 +106,7 @@ void RuntimeDyldMachO::finalizeLoad(ObjectImage &ObjImg,
     else if (Name == "__jump_table")
       populateJumpTable(cast<MachOObjectFile>(*ObjImg.getObjectFile()),
                         Section, i.second);
-    else if (Name == "__pointers")
+    else if (Name == "__pointers" || Name == "__nl_symbol_ptr")
       populatePointersSection(cast<MachOObjectFile>(*ObjImg.getObjectFile()),
                               Section, i.second);
   }
@@ -227,7 +227,9 @@ void RuntimeDyldMachO::resolveRelocation(const SectionEntry &Section,
                          IsPCRel,
                          MachoType,
                          Size,
-                         Addend);
+                         Addend,
+                         SectionAID,
+                         SectionBID);
     break;
   case Triple::arm64:
     resolveARM64Relocation(LocalAddress,
@@ -331,7 +333,9 @@ bool RuntimeDyldMachO::resolveARMRelocation(uint8_t *LocalAddress,
                                             bool IsPCRel,
                                             unsigned Type,
                                             unsigned Size,
-                                            int64_t Addend) {
+                                            int64_t Addend,
+                                            unsigned SectionAID,
+                                            unsigned SectionBID) {
   // If the relocation is PC-relative, the value to be encoded is the
   // pointer difference.
   if (IsPCRel) {
@@ -348,6 +352,7 @@ bool RuntimeDyldMachO::resolveARMRelocation(uint8_t *LocalAddress,
   case MachO::ARM_RELOC_VANILLA: {
     // Mask in the target value a byte at a time (we don't have an alignment
     // guarantee for the target address, so this is safest).
+    Value += Addend;
     uint8_t *p = (uint8_t*)LocalAddress;
     for (unsigned i = 0; i < Size; ++i) {
       *p++ = (uint8_t)Value;
@@ -371,10 +376,26 @@ bool RuntimeDyldMachO::resolveARMRelocation(uint8_t *LocalAddress,
     *p = (*p & ~0xffffff) | Value;
     break;
   }
+  case MachO::ARM_RELOC_HALF_SECTDIFF: {
+    uint64_t SectionABase = Sections[SectionAID].LoadAddress;
+    uint64_t SectionBBase = Sections[SectionBID].LoadAddress;
+    assert((Value == SectionABase || Value == SectionBBase) &&
+           "Unexpected HALFSECTDIFF relocation value.");
+    Value = SectionABase - SectionBBase + Addend;
+    if (Log2_32(Size) & 0x1) // :upper16:
+      Value = (Value >> 16);
+    Value &= 0xffff;
+
+    uint32_t Insn;
+    memcpy(&Insn, LocalAddress, 4);
+    Insn = (Insn & 0xfff0f000) | ((Value & 0xf000) << 4) | (Value & 0x0fff);
+    memcpy(LocalAddress, &Insn, 4);
+    break;
+  }
+
   case MachO::ARM_THUMB_RELOC_BR22:
   case MachO::ARM_THUMB_32BIT_BRANCH:
   case MachO::ARM_RELOC_HALF:
-  case MachO::ARM_RELOC_HALF_SECTDIFF:
   case MachO::ARM_RELOC_PAIR:
   case MachO::ARM_RELOC_SECTDIFF:
   case MachO::ARM_RELOC_LOCAL_SECTDIFF:
@@ -667,6 +688,82 @@ relocation_iterator RuntimeDyldMachO::processSECTDIFFRelocation(
 }
 
 relocation_iterator
+RuntimeDyldMachO::processHALFSECTDIFFRelocation(
+                                            unsigned SectionID,
+                                            relocation_iterator RelI,
+                                            ObjectImage &Obj,
+                                            ObjSectionToIDMap &ObjSectionToID) {
+  const MachOObjectFile *MachO =
+    static_cast<const MachOObjectFile *>(Obj.getObjectFile());
+  MachO::any_relocation_info RE =
+    MachO->getRelocation(RelI->getRawDataRefImpl());
+
+
+  // For a half-diff relocation the length bits actually record whether this
+  // is a movw/movt, and whether this is arm or thumb.
+  // Bit 0 indicates movw (b0 == 0) or movt (b0 == 1).
+  // Bit 1 indicates arm (b1 == 0) or thumb (b1 == 1).
+  unsigned HalfDiffKindBits = MachO->getAnyRelocationLength(RE);
+  if (HalfDiffKindBits & 0x2)
+    llvm_unreachable("Thumb not yet supported.");
+
+  SectionEntry &Section = Sections[SectionID];
+  uint32_t RelocType = MachO->getAnyRelocationType(RE);
+  bool IsPCRel = MachO->getAnyRelocationPCRel(RE);
+  uint64_t Offset;
+  RelI->getOffset(Offset);
+  uint8_t *LocalAddress = Section.Address + Offset;
+  int64_t Immediate = 0;
+  memcpy(&Immediate, LocalAddress, 4); // Copy the whole instruction out.
+  Immediate = ((Immediate >> 4) & 0xf000) | (Immediate & 0xfff);
+
+  ++RelI;
+  MachO::any_relocation_info RE2 =
+    MachO->getRelocation(RelI->getRawDataRefImpl());
+  uint32_t AddrA = MachO->getScatteredRelocationValue(RE);
+  section_iterator SAI = getSectionByAddress(*MachO, AddrA);
+  assert(SAI != MachO->section_end() && "Can't find section for address A");
+  uint64_t SectionABase;
+  SAI->getAddress(SectionABase);
+  uint64_t SectionAOffset = AddrA - SectionABase;
+  SectionRef SectionA = *SAI;
+  bool IsCode;
+  SectionA.isText(IsCode);
+  uint32_t SectionAID =
+    findOrEmitSection(Obj, SectionA, IsCode, ObjSectionToID);
+
+  uint32_t AddrB = MachO->getScatteredRelocationValue(RE2);
+  section_iterator SBI = getSectionByAddress(*MachO, AddrB);
+  assert(SBI != MachO->section_end() && "Can't find section for address B");
+  uint64_t SectionBBase;
+  SBI->getAddress(SectionBBase);
+  uint64_t SectionBOffset = AddrB - SectionBBase;
+  SectionRef SectionB = *SBI;
+  uint32_t SectionBID =
+    findOrEmitSection(Obj, SectionB, IsCode, ObjSectionToID);
+
+  uint32_t OtherHalf = MachO->getAnyRelocationAddress(RE2) & 0xffff;
+  unsigned Shift = (HalfDiffKindBits & 0x1) ? 16 : 0;
+  uint32_t FullImmVal = (Immediate << Shift) | (OtherHalf << (16 - Shift));
+  int64_t Addend = FullImmVal - (AddrA - AddrB);
+
+  DEBUG(dbgs() << "Found SECTDIFF: AddrA: " << AddrA << ", AddrB: " << AddrB
+        << ", Addend: " << Addend << ", SectionA ID: " << SectionAID
+        << ", SectionAOffset: " << SectionAOffset
+        << ", SectionB ID: " << SectionBID
+        << ", SectionBOffset: " << SectionBOffset << "\n");
+  RelocationEntry R(SectionID, Offset, RelocType, Addend, SectionAID,
+                    SectionAOffset, SectionBID, SectionBOffset, IsPCRel,
+                    HalfDiffKindBits);
+
+  addRelocationForSection(R, SectionAID);
+  addRelocationForSection(R, SectionBID);
+
+  return ++RelI;
+}
+
+
+relocation_iterator
 RuntimeDyldMachO::processRelocationRef(unsigned SectionID,
                                        const section_iterator &SI,
                                        relocation_iterator RelI,
@@ -724,7 +821,10 @@ RuntimeDyldMachO::processRelocationRef(unsigned SectionID,
         (RelocType == MachO::GENERIC_RELOC_SECTDIFF ||
          RelocType == MachO::GENERIC_RELOC_LOCAL_SECTDIFF))
       return processSECTDIFFRelocation(SectionID, RelI, Obj, ObjSectionToID);
-
+    else if (Arch == Triple::arm &&
+             (RelocType == MachO::ARM_RELOC_HALF_SECTDIFF))
+      return processHALFSECTDIFFRelocation(SectionID, RelI, Obj,
+                                           ObjSectionToID);
     return ++RelI;
   }
 
@@ -789,14 +889,16 @@ RuntimeDyldMachO::processRelocationRef(unsigned SectionID,
     Sec.getAddress(Addr);
     RelocVal.Addend = Addend - Addr;
     if (IsPCRel) {
-      RelocVal.Addend += Offset + NumBytes;
-
       if (Arch == Triple::x86) {
         // On i386 we need to account for the base address of the section.
         uint64_t SectionBaseAddr = 0;
         SI->getAddress(SectionBaseAddr);
-        RelocVal.Addend += SectionBaseAddr;
-      }
+        RelocVal.Addend += SectionBaseAddr + Offset + NumBytes;
+      } else if (Arch == Triple::arm &&
+                 (RelocType & 0xf) == MachO::ARM_RELOC_BR24) {
+        RelocVal.Addend += Offset + 8;
+      } else
+        RelocVal.Addend += Offset + NumBytes;
     }
   }
 

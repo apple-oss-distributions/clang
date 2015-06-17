@@ -848,11 +848,12 @@ namespace {
 }
 
 /// \brief Compile a module file for the given module, using the options 
-/// provided by the importing compiler instance.
-static void compileModuleImpl(CompilerInstance &ImportingInstance,
-                          SourceLocation ImportLoc,
-                          Module *Module,
-                          StringRef ModuleFileName) {
+/// provided by the importing compiler instance. Returns true if the module
+/// was built without errors.
+static bool compileModuleImpl(CompilerInstance &ImportingInstance,
+                              SourceLocation ImportLoc,
+                              Module *Module,
+                              StringRef ModuleFileName) {
   ModuleMap &ModMap 
     = ImportingInstance.getPreprocessor().getHeaderSearchInfo().getModuleMap();
     
@@ -973,13 +974,21 @@ static void compileModuleImpl(CompilerInstance &ImportingInstance,
   if (ImportingInstance.getFrontendOpts().GenerateGlobalModuleIndex) {
     ImportingInstance.setBuildGlobalModuleIndex(true);
   }
+
+  return !Instance.getDiagnostics().hasErrorOccurred();
 }
 
 static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
                                  SourceLocation ImportLoc,
-                                 SourceLocation ModuleNameLoc,
-                                 Module *Module,
+                                 SourceLocation ModuleNameLoc, Module *Module,
                                  StringRef ModuleFileName) {
+  DiagnosticsEngine &Diags = ImportingInstance.getDiagnostics();
+
+  auto diagnoseBuildFailure = [&] {
+    Diags.Report(ModuleNameLoc, diag::err_module_not_built)
+        << Module->Name << SourceRange(ImportLoc, ModuleNameLoc);
+  };
+
   // FIXME: have LockFileManager return an error_code so that we can
   // avoid the mkdir when the directory already exists.
   StringRef Dir = llvm::sys::path::parent_path(ModuleFileName);
@@ -990,13 +999,17 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
     llvm::LockFileManager Locked(ModuleFileName);
     switch (Locked) {
     case llvm::LockFileManager::LFS_Error:
+      Diags.Report(ModuleNameLoc, diag::err_module_lock_failure)
+          << Module->Name;
       return false;
 
     case llvm::LockFileManager::LFS_Owned:
       // We're responsible for building the module ourselves.
-      // FIXME: if there are errors, don't attempt to load the module.
-      compileModuleImpl(ImportingInstance, ModuleNameLoc, Module,
-                        ModuleFileName);
+      if (!compileModuleImpl(ImportingInstance, ModuleNameLoc, Module,
+                             ModuleFileName)) {
+        diagnoseBuildFailure();
+        return false;
+      }
       break;
 
     case llvm::LockFileManager::LFS_Shared:
@@ -1021,9 +1034,11 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
       // consistent with this ImportingInstance.  Try again...
       continue;
     } else if (ReadResult == ASTReader::Missing) {
-      ImportingInstance.getDiagnostics().Report(ModuleNameLoc,
-                                                diag::err_module_not_built)
-          << Module->Name << SourceRange(ImportLoc, ModuleNameLoc);
+      diagnoseBuildFailure();
+    } else if (ReadResult != ASTReader::Success &&
+               !Diags.hasErrorOccurred()) {
+      // The ASTReader didn't diagnose the error, so conservatively report it.
+      diagnoseBuildFailure();
     }
     return ReadResult == ASTReader::Success;
   }
@@ -1341,6 +1356,8 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
       // Try to compile and then load the module.
       if (!compileAndLoadModule(*this, ImportLoc, ModuleNameLoc, Module,
                                 ModuleFileName)) {
+        assert(getDiagnostics().hasErrorOccurred() &&
+               "undiagnosed error in compileAndLoadModule");
         if (getPreprocessorOpts().FailedModules)
           getPreprocessorOpts().FailedModules->addFailed(ModuleName);
         KnownModules[Path[0].first] = 0;

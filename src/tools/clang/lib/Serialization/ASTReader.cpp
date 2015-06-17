@@ -2147,6 +2147,11 @@ ASTReader::ReadControlBlock(ModuleFile &F,
       break;
     }
 
+    case SIGNATURE:
+      assert((!F.Signature || F.Signature == Record[0]) && "signature changed");
+      F.Signature = Record[0];
+      break;
+
     case IMPORTS: {
       // Load each of the imported PCH files. 
       unsigned Idx = 0, N = Record.size();
@@ -2160,6 +2165,7 @@ ASTReader::ReadControlBlock(ModuleFile &F,
             SourceLocation::getFromRawEncoding(Record[Idx++]);
         off_t StoredSize = (off_t)Record[Idx++];
         time_t StoredModTime = (time_t)Record[Idx++];
+        ASTFileSignature StoredSignature = Record[Idx++];
         unsigned Length = Record[Idx++];
         SmallString<128> ImportedFile(Record.begin() + Idx,
                                       Record.begin() + Idx + Length);
@@ -2167,7 +2173,7 @@ ASTReader::ReadControlBlock(ModuleFile &F,
 
         // Load the AST file.
         switch(ReadASTCore(ImportedFile, ImportedKind, ImportLoc, &F, Loaded,
-                           StoredSize, StoredModTime,
+                           StoredSize, StoredModTime, StoredSignature,
                            ClientLoadCapabilities)) {
         case Failure: return Failure;
           // If we have to ignore the dependency, we'll have to ignore this too.
@@ -2447,9 +2453,9 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         F.TypeRemap.insertOrReplace(
           std::make_pair(LocalBaseTypeIndex, 
                          F.BaseTypeIndex - LocalBaseTypeIndex));
+
+        TypesLoaded.resize(TypesLoaded.size() + F.LocalNumTypes);
       }
-      // Increase size by >= 1 so we get a unique base index in the next module.
-      TypesLoaded.resize(TypesLoaded.size() + std::max(F.LocalNumTypes, 1U));
       break;
     }
         
@@ -2477,10 +2483,9 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         // Introduce the global -> local mapping for declarations within this
         // module.
         F.GlobalToLocalDeclIDs[&F] = LocalBaseDeclID;
-      }
 
-      // Increase size by >= 1 so we get a unique base index in the next module.
-      DeclsLoaded.resize(DeclsLoaded.size() + std::max(F.LocalNumDecls, 1U));
+        DeclsLoaded.resize(DeclsLoaded.size() + F.LocalNumDecls);
+      }
       break;
     }
         
@@ -2545,11 +2550,10 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         F.IdentifierRemap.insertOrReplace(
           std::make_pair(LocalBaseIdentifierID,
                          F.BaseIdentifierID - LocalBaseIdentifierID));
-      }
 
-      // Increase size by >= 1 so we get a unique base index in the next module.
-      IdentifiersLoaded.resize(IdentifiersLoaded.size() +
-                               std::max(F.LocalNumIdentifiers, 1U));
+        IdentifiersLoaded.resize(IdentifiersLoaded.size()
+                                 + F.LocalNumIdentifiers);
+      }
       break;
     }
 
@@ -2639,10 +2643,9 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         F.SelectorRemap.insertOrReplace(
           std::make_pair(LocalBaseSelectorID,
                          F.BaseSelectorID - LocalBaseSelectorID));
+
+        SelectorsLoaded.resize(SelectorsLoaded.size() + F.LocalNumSelectors);
       }
-      // Increase size by >= 1 so we get a unique base index in the next module.
-      SelectorsLoaded.resize(SelectorsLoaded.size() +
-                             std::max(F.LocalNumSelectors, 1U));
       break;
     }
         
@@ -2682,10 +2685,8 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
       F.SLocEntryOffsets = (const uint32_t *)Blob.data();
       F.LocalNumSLocEntries = Record[0];
       unsigned SLocSpaceSize = Record[1];
-
-      // Increase size by >= 1 so we get a unique base index in the next module.
       std::tie(F.SLocEntryBaseID, F.SLocEntryBaseOffset) =
-          SourceMgr.AllocateLoadedSLocEntries(std::max(F.LocalNumSLocEntries, 1U),
+          SourceMgr.AllocateLoadedSLocEntries(F.LocalNumSLocEntries,
                                               SLocSpaceSize);
       // Make our entry in the range map. BaseID is negative and growing, so
       // we invert it. Because we invert it, though, we need the other end of
@@ -2718,19 +2719,16 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
       const unsigned char *DataEnd = Data + Blob.size();
       
       // Continuous range maps we may be updating in our module.
-      ContinuousRangeMap<uint32_t, int, 2>::Builder SLocRemap(F.SLocRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder 
-        IdentifierRemap(F.IdentifierRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder
-        MacroRemap(F.MacroRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder
-        PreprocessedEntityRemap(F.PreprocessedEntityRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder 
-        SubmoduleRemap(F.SubmoduleRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder 
-        SelectorRemap(F.SelectorRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder DeclRemap(F.DeclRemap);
-      ContinuousRangeMap<uint32_t, int, 2>::Builder TypeRemap(F.TypeRemap);
+      typedef ContinuousRangeMap<uint32_t, int, 2>::Builder
+          RemapBuilder;
+      RemapBuilder SLocRemap(F.SLocRemap);
+      RemapBuilder IdentifierRemap(F.IdentifierRemap);
+      RemapBuilder MacroRemap(F.MacroRemap);
+      RemapBuilder PreprocessedEntityRemap(F.PreprocessedEntityRemap);
+      RemapBuilder SubmoduleRemap(F.SubmoduleRemap);
+      RemapBuilder SelectorRemap(F.SelectorRemap);
+      RemapBuilder DeclRemap(F.DeclRemap);
+      RemapBuilder TypeRemap(F.TypeRemap);
 
       while(Data < DataEnd) {
         uint16_t Len = io::ReadUnalignedLE16(Data);
@@ -2750,27 +2748,25 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         uint32_t SelectorIDOffset = io::ReadUnalignedLE32(Data);
         uint32_t DeclIDOffset = io::ReadUnalignedLE32(Data);
         uint32_t TypeIndexOffset = io::ReadUnalignedLE32(Data);
+
+        uint32_t None = std::numeric_limits<uint32_t>::max();
+
+        auto mapOffset = [&](uint32_t Offset, uint32_t BaseOffset,
+                             RemapBuilder &Remap) {
+          if (Offset != None)
+            Remap.insert(std::make_pair(Offset,
+                                        static_cast<int>(BaseOffset - Offset)));
+        };
         
-        // Source location offset is mapped to OM->SLocEntryBaseOffset.
-        SLocRemap.insert(std::make_pair(SLocOffset,
-          static_cast<int>(OM->SLocEntryBaseOffset - SLocOffset)));
-        IdentifierRemap.insert(
-          std::make_pair(IdentifierIDOffset, 
-                         OM->BaseIdentifierID - IdentifierIDOffset));
-        MacroRemap.insert(std::make_pair(MacroIDOffset,
-                                         OM->BaseMacroID - MacroIDOffset));
-        PreprocessedEntityRemap.insert(
-          std::make_pair(PreprocessedEntityIDOffset, 
-            OM->BasePreprocessedEntityID - PreprocessedEntityIDOffset));
-        SubmoduleRemap.insert(std::make_pair(SubmoduleIDOffset, 
-                                      OM->BaseSubmoduleID - SubmoduleIDOffset));
-        SelectorRemap.insert(std::make_pair(SelectorIDOffset, 
-                               OM->BaseSelectorID - SelectorIDOffset));
-        DeclRemap.insert(std::make_pair(DeclIDOffset, 
-                                        OM->BaseDeclID - DeclIDOffset));
-        
-        TypeRemap.insert(std::make_pair(TypeIndexOffset, 
-                                    OM->BaseTypeIndex - TypeIndexOffset));
+        mapOffset(SLocOffset, OM->SLocEntryBaseOffset, SLocRemap);
+        mapOffset(IdentifierIDOffset, OM->BaseIdentifierID, IdentifierRemap);
+        mapOffset(MacroIDOffset, OM->BaseMacroID, MacroRemap);
+        mapOffset(PreprocessedEntityIDOffset, OM->BasePreprocessedEntityID,
+                  PreprocessedEntityRemap);
+        mapOffset(SubmoduleIDOffset, OM->BaseSubmoduleID, SubmoduleRemap);
+        mapOffset(SelectorIDOffset, OM->BaseSelectorID, SelectorRemap);
+        mapOffset(DeclIDOffset, OM->BaseDeclID, DeclRemap);
+        mapOffset(TypeIndexOffset, OM->BaseTypeIndex, TypeRemap);
 
         // Global -> local mappings.
         F.GlobalToLocalDeclIDs[OM] = DeclIDOffset;
@@ -2863,11 +2859,9 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         PP.createPreprocessingRecord();
       if (!PP.getPreprocessingRecord()->getExternalSource())
         PP.getPreprocessingRecord()->SetExternalSource(*this);
-
-      // Increase size by >= 1 so we get a unique base index in the next module.
       StartingID 
         = PP.getPreprocessingRecord()
-            ->allocateLoadedEntities(std::max(F.NumPreprocessedEntities, 1U));
+            ->allocateLoadedEntities(F.NumPreprocessedEntities);
       F.BasePreprocessedEntityID = StartingID;
 
       if (F.NumPreprocessedEntities > 0) {
@@ -3063,9 +3057,9 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         F.MacroRemap.insertOrReplace(
           std::make_pair(LocalBaseMacroID,
                          F.BaseMacroID - LocalBaseMacroID));
+
+        MacrosLoaded.resize(MacrosLoaded.size() + F.LocalNumMacros);
       }
-      // Increase size by >= 1 so we get a unique base index in the next module.
-      MacrosLoaded.resize(MacrosLoaded.size() + std::max(F.LocalNumMacros, 1U));
       break;
     }
 
@@ -3243,8 +3237,8 @@ ASTReader::ASTReadResult ASTReader::ReadAST(const std::string &FileName,
   unsigned NumModules = ModuleMgr.size();
   SmallVector<ImportedModule, 4> Loaded;
   switch(ASTReadResult ReadResult = ReadASTCore(FileName, Type, ImportLoc,
-                                                /*ImportedBy=*/0, Loaded,
-                                                0, 0,
+                                                /*ImportedBy=*/nullptr, Loaded,
+                                                0, 0, 0,
                                                 ClientLoadCapabilities)) {
   case Failure:
   case Missing:
@@ -3411,6 +3405,8 @@ ASTReader::ASTReadResult ASTReader::ReadAST(const std::string &FileName,
   return Success;
 }
 
+static ASTFileSignature readASTFileSignature(llvm::BitstreamReader &StreamFile);
+
 ASTReader::ASTReadResult
 ASTReader::ReadASTCore(StringRef FileName,
                        ModuleKind Type,
@@ -3418,12 +3414,14 @@ ASTReader::ReadASTCore(StringRef FileName,
                        ModuleFile *ImportedBy,
                        SmallVectorImpl<ImportedModule> &Loaded,
                        off_t ExpectedSize, time_t ExpectedModTime,
+                       ASTFileSignature ExpectedSignature,
                        unsigned ClientLoadCapabilities) {
   ModuleFile *M;
   std::string ErrorStr;
   ModuleManager::AddModuleResult AddResult
     = ModuleMgr.addModule(FileName, Type, ImportLoc, ImportedBy,
                           CurrentGeneration, ExpectedSize, ExpectedModTime,
+                          ExpectedSignature, readASTFileSignature,
                           M, ErrorStr);
 
   switch (AddResult) {
@@ -3721,6 +3719,34 @@ static bool SkipCursorToBlock(BitstreamCursor &Cursor, unsigned BlockID) {
       if (Cursor.SkipBlock())
         return true;
     }
+  }
+}
+
+static ASTFileSignature readASTFileSignature(llvm::BitstreamReader &StreamFile){
+  BitstreamCursor Stream(StreamFile);
+  if (Stream.Read(8) != 'C' ||
+      Stream.Read(8) != 'P' ||
+      Stream.Read(8) != 'C' ||
+      Stream.Read(8) != 'H') {
+    return 0;
+  }
+
+  // Scan for the CONTROL_BLOCK_ID block.
+  if (SkipCursorToBlock(Stream, CONTROL_BLOCK_ID))
+    return 0;
+
+  // Scan for SIGNATURE inside the control block.
+  ASTReader::RecordData Record;
+  while (1) {
+    llvm::BitstreamEntry Entry = Stream.advanceSkippingSubblocks();
+    if (Entry.Kind == llvm::BitstreamEntry::EndBlock ||
+        Entry.Kind != llvm::BitstreamEntry::Record)
+      return 0;
+
+    Record.clear();
+    StringRef Blob;
+    if (SIGNATURE == Stream.readRecord(Entry.ID, Record, &Blob))
+      return Record[0];
   }
 }
 
@@ -4215,11 +4241,9 @@ ASTReader::ReadSubmoduleBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
         F.SubmoduleRemap.insertOrReplace(
           std::make_pair(LocalBaseSubmoduleID,
                          F.BaseSubmoduleID - LocalBaseSubmoduleID));
-      }
 
-      // Increase size by >= 1 so we get a unique base index in the next module.
-      SubmodulesLoaded.resize(SubmodulesLoaded.size() +
-                              std::max(F.LocalNumSubmodules, 1U));
+        SubmodulesLoaded.resize(SubmodulesLoaded.size() + F.LocalNumSubmodules);
+      }
       break;
     }
         

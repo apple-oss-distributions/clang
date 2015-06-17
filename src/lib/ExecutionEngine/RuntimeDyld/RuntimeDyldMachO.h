@@ -118,7 +118,9 @@ class RuntimeDyldMachO : public RuntimeDyldImpl {
                             bool IsPCRel,
                             unsigned Type,
                             unsigned Size,
-                            int64_t Addend);
+                            int64_t Addend,
+                            unsigned SectionAID,
+                            unsigned SectionBID);
 
   bool resolveARM64Relocation(uint8_t *LocalAddress,
                               uint64_t FinalAddress,
@@ -169,6 +171,13 @@ class RuntimeDyldMachO : public RuntimeDyldImpl {
                                              unsigned SectionID,
                                              relocation_iterator RelI,
                                              ObjectImage &ObjImg,
+                                             ObjSectionToIDMap &ObjSectionToID);
+
+
+  relocation_iterator processHALFSECTDIFFRelocation(
+                                             unsigned SectionID,
+                                             relocation_iterator RelI,
+                                             ObjectImage &Obj,
                                              ObjSectionToIDMap &ObjSectionToID);
 
   // Global Offset Table for Large Code Model

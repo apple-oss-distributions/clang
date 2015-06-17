@@ -49,6 +49,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include <algorithm>
 #include <cstdio>
 #include <string.h>
@@ -793,6 +794,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   // Control Block.
   BLOCK(CONTROL_BLOCK);
   RECORD(METADATA);
+  RECORD(SIGNATURE);
   RECORD(MODULE_NAME);
   RECORD(MODULE_MAP_FILE);
   RECORD(IMPORTS);
@@ -1018,6 +1020,14 @@ adjustFilenameForRelocatablePCH(const char *Filename, StringRef isysroot) {
   return Filename + Pos;
 }
 
+static ASTFileSignature getSignature() {
+  while (1) {
+    if (ASTFileSignature S = llvm::sys::Process::GetRandomNumber())
+      return S;
+    // Rely on GetRandomNumber to eventually return non-zero...
+  }
+}
+
 /// \brief Write the control block.
 void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
                                   StringRef isysroot,
@@ -1046,6 +1056,11 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
   Record.push_back(ASTHasCompilerErrors);
   Stream.EmitRecordWithBlob(MetadataAbbrevCode, Record,
                             getClangFullRepositoryVersion());
+
+  // Signature
+  Record.clear();
+  Record.push_back(getSignature());
+  Stream.EmitRecord(SIGNATURE, Record);
 
   // Module name
   if (WritingModule) {
@@ -1088,6 +1103,7 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
       AddSourceLocation((*M)->ImportLoc, Record);
       Record.push_back((*M)->File->getSize());
       Record.push_back((*M)->File->getModificationTime());
+      Record.push_back((*M)->Signature);
       const std::string &FileName = (*M)->FileName;
       Record.push_back(FileName.size());
       Record.append(FileName.begin(), FileName.end());
@@ -4193,16 +4209,30 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
         StringRef FileName = (*M)->FileName;
         io::Emit16(Out, FileName.size());
         Out.write(FileName.data(), FileName.size());
+
+        // Note: if a base ID was uint max, it would not be possible to load
+        // another module after it or have more than one entity inside it.
+        uint32_t None = std::numeric_limits<uint32_t>::max();
+
+        auto writeBaseIDOrNone = [&](uint32_t BaseID, bool ShouldWrite) {
+          assert(BaseID < std::numeric_limits<uint32_t>::max() && "base id too high");
+          if (ShouldWrite)
+            io::Emit32(Out, BaseID);
+          else
+            io::Emit32(Out, None);
+        };
+
         // These values should be unique within a chain, since they will be read
         // as keys into ContinuousRangeMaps.
-        io::Emit32(Out, (*M)->SLocEntryBaseOffset);
-        io::Emit32(Out, (*M)->BaseIdentifierID);
-        io::Emit32(Out, (*M)->BaseMacroID);
-        io::Emit32(Out, (*M)->BasePreprocessedEntityID);
-        io::Emit32(Out, (*M)->BaseSubmoduleID);
-        io::Emit32(Out, (*M)->BaseSelectorID);
-        io::Emit32(Out, (*M)->BaseDeclID);
-        io::Emit32(Out, (*M)->BaseTypeIndex);
+        writeBaseIDOrNone((*M)->SLocEntryBaseOffset, (*M)->LocalNumSLocEntries);
+        writeBaseIDOrNone((*M)->BaseIdentifierID, (*M)->LocalNumIdentifiers);
+        writeBaseIDOrNone((*M)->BaseMacroID, (*M)->LocalNumMacros);
+        writeBaseIDOrNone((*M)->BasePreprocessedEntityID,
+                          (*M)->NumPreprocessedEntities);
+        writeBaseIDOrNone((*M)->BaseSubmoduleID, (*M)->LocalNumSubmodules);
+        writeBaseIDOrNone((*M)->BaseSelectorID, (*M)->LocalNumSelectors);
+        writeBaseIDOrNone((*M)->BaseDeclID, (*M)->LocalNumDecls);
+        writeBaseIDOrNone((*M)->BaseTypeIndex, (*M)->LocalNumTypes);
       }
     }
     Record.clear();
