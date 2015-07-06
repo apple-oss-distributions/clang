@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "asan_activation.h"
+#include "asan_allocator.h"
 #include "asan_flags.h"
 #include "asan_internal.h"
 #include "sanitizer_common/sanitizer_flags.h"
@@ -56,6 +57,10 @@ void AsanActivate() {
   flags()->poison_heap = asan_deactivated_flags.poison_heap;
   common_flags()->malloc_context_size =
       asan_deactivated_flags.malloc_context_size;
+
+  ParseExtraActivationFlags();
+
+  ReInitializeAllocator();
 
   asan_is_deactivated = false;
   VReport(

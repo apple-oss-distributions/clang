@@ -39,6 +39,7 @@ class Decl;
 class DependencyOutputOptions;
 class DiagnosticsEngine;
 class DiagnosticOptions;
+class ExternalSemaSource;
 class FileManager;
 class HeaderSearch;
 class HeaderSearchOptions;
@@ -62,7 +63,6 @@ void ApplyHeaderSearchOptions(HeaderSearch &HS,
 /// environment ready to process a single file.
 void InitializePreprocessor(Preprocessor &PP,
                             const PreprocessorOptions &PPOpts,
-                            const HeaderSearchOptions &HSOpts,
                             const FrontendOptions &FEOpts);
 
 /// DoPrintPreprocessedInput - Implement -E mode.
@@ -163,6 +163,12 @@ void AttachHeaderIncludeGen(Preprocessor &PP, bool ShowAllHeaders = false,
 /// a seekable stream.
 void CacheTokens(Preprocessor &PP, llvm::raw_fd_ostream* OS);
 
+/// The ChainedIncludesSource class converts headers to chained PCHs in
+/// memory, mainly for testing.
+IntrusiveRefCntPtr<ExternalSemaSource>
+createChainedIncludesSource(CompilerInstance &CI,
+                            IntrusiveRefCntPtr<ExternalSemaSource> &Reader);
+
 /// createInvocationFromCommandLine - Construct a compiler invocation object for
 /// a command line argument vector.
 ///
@@ -177,7 +183,7 @@ createInvocationFromCommandLine(ArrayRef<const char *> Args,
 /// is non-null, emits an error if the argument is given, but non-integral.
 int getLastArgIntValue(const llvm::opt::ArgList &Args,
                        llvm::opt::OptSpecifier Id, int Default,
-                       DiagnosticsEngine *Diags = 0);
+                       DiagnosticsEngine *Diags = nullptr);
 
 inline int getLastArgIntValue(const llvm::opt::ArgList &Args,
                               llvm::opt::OptSpecifier Id, int Default,
@@ -187,7 +193,7 @@ inline int getLastArgIntValue(const llvm::opt::ArgList &Args,
 
 uint64_t getLastArgUInt64Value(const llvm::opt::ArgList &Args,
                                llvm::opt::OptSpecifier Id, uint64_t Default,
-                               DiagnosticsEngine *Diags = 0);
+                               DiagnosticsEngine *Diags = nullptr);
 
 inline uint64_t getLastArgUInt64Value(const llvm::opt::ArgList &Args,
                                       llvm::opt::OptSpecifier Id,

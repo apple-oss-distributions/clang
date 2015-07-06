@@ -29,7 +29,8 @@ Sema::Sema(llvm::BumpPtrAllocator &Allocator, const SourceManager &SourceMgr,
            DiagnosticsEngine &Diags, CommandTraits &Traits,
            const Preprocessor *PP) :
     Allocator(Allocator), SourceMgr(SourceMgr), Diags(Diags), Traits(Traits),
-    PP(PP), ThisDeclInfo(NULL), BriefCommand(NULL), HeaderfileCommand(NULL) {
+    PP(PP), ThisDeclInfo(nullptr), BriefCommand(nullptr),
+    HeaderfileCommand(nullptr) {
 }
 
 void Sema::setDecl(const Decl *D) {
@@ -68,8 +69,12 @@ void Sema::actOnBlockCommandFinish(BlockCommandComment *Command,
   Command->setParagraph(Paragraph);
   checkBlockCommandEmptyParagraph(Command);
   checkBlockCommandDuplicate(Command);
-  checkReturnsCommand(Command);
-  checkDeprecatedCommand(Command);
+  if (ThisDeclInfo) {
+    // These checks only make sense if the comment is attached to a
+    // declaration.
+    checkReturnsCommand(Command);
+    checkDeprecatedCommand(Command);
+  }
 }
 
 ParamCommandComment *Sema::actOnParamCommandStart(
@@ -578,6 +583,9 @@ void Sema::checkBlockCommandEmptyParagraph(BlockCommandComment *Command) {
 void Sema::checkReturnsCommand(const BlockCommandComment *Command) {
   if (!Traits.getCommandInfo(Command->getCommandID())->IsReturnsCommand)
     return;
+
+  assert(ThisDeclInfo && "should not call this check on a bare comment");
+
   if (isFunctionDecl()) {
     if (ThisDeclInfo->ReturnType->isVoidType()) {
       unsigned DiagKind;
@@ -616,7 +624,7 @@ void Sema::checkReturnsCommand(const BlockCommandComment *Command) {
 
 void Sema::checkBlockCommandDuplicate(const BlockCommandComment *Command) {
   const CommandInfo *Info = Traits.getCommandInfo(Command->getCommandID());
-  const BlockCommandComment *PrevCommand = NULL;
+  const BlockCommandComment *PrevCommand = nullptr;
   if (Info->IsBriefCommand) {
     if (!BriefCommand) {
       BriefCommand = Command;
@@ -655,6 +663,8 @@ void Sema::checkBlockCommandDuplicate(const BlockCommandComment *Command) {
 void Sema::checkDeprecatedCommand(const BlockCommandComment *Command) {
   if (!Traits.getCommandInfo(Command->getCommandID())->IsDeprecatedCommand)
     return;
+
+  assert(ThisDeclInfo && "should not call this check on a bare comment");
 
   const Decl *D = ThisDeclInfo->CommentDecl;
   if (!D)
@@ -714,7 +724,7 @@ void Sema::resolveParamCommandIndexes(const FullComment *FC) {
   SmallVector<ParamCommandComment *, 8> ParamVarDocs;
 
   ArrayRef<const ParmVarDecl *> ParamVars = getParamVars();
-  ParamVarDocs.resize(ParamVars.size(), NULL);
+  ParamVarDocs.resize(ParamVars.size(), nullptr);
 
   // First pass over all \\param commands: resolve all parameter names.
   for (Comment::child_iterator I = FC->child_begin(), E = FC->child_end();
@@ -803,11 +813,14 @@ bool Sema::isAnyFunctionDecl() {
 }
 
 bool Sema::isFunctionOrMethodVariadic() {
-  if (!isAnyFunctionDecl() && !isObjCMethodDecl())
+  if (!isAnyFunctionDecl() && !isObjCMethodDecl() && !isFunctionTemplateDecl())
     return false;
   if (const FunctionDecl *FD =
         dyn_cast<FunctionDecl>(ThisDeclInfo->CurrentDecl))
     return FD->isVariadic();
+  if (const FunctionTemplateDecl *FTD =
+        dyn_cast<FunctionTemplateDecl>(ThisDeclInfo->CurrentDecl))
+    return FTD->getTemplatedDecl()->isVariadic();
   if (const ObjCMethodDecl *MD =
         dyn_cast<ObjCMethodDecl>(ThisDeclInfo->CurrentDecl))
     return MD->isVariadic();
@@ -950,7 +963,7 @@ class SimpleTypoCorrector {
 public:
   SimpleTypoCorrector(StringRef Typo) :
       Typo(Typo), MaxEditDistance((Typo.size() + 2) / 3),
-      BestDecl(NULL), BestEditDistance(MaxEditDistance + 1),
+      BestDecl(nullptr), BestEditDistance(MaxEditDistance + 1),
       BestIndex(0), NextIndex(0)
   { }
 
@@ -958,7 +971,7 @@ public:
 
   const NamedDecl *getBestDecl() const {
     if (BestEditDistance > MaxEditDistance)
-      return NULL;
+      return nullptr;
 
     return BestDecl;
   }

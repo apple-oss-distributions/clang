@@ -19,21 +19,22 @@
 
 TEST(libclang, clang_parseTranslationUnit2_InvalidArgs) {
   EXPECT_EQ(CXError_InvalidArguments,
-            clang_parseTranslationUnit2(0, 0, 0, 0, 0, 0, 0, 0));
+            clang_parseTranslationUnit2(nullptr, nullptr, nullptr, 0, nullptr,
+                                        0, 0, nullptr));
 }
 
 TEST(libclang, clang_createTranslationUnit_InvalidArgs) {
-  EXPECT_EQ(0, clang_createTranslationUnit(0, 0));
+  EXPECT_EQ(nullptr, clang_createTranslationUnit(nullptr, nullptr));
 }
 
 TEST(libclang, clang_createTranslationUnit2_InvalidArgs) {
   EXPECT_EQ(CXError_InvalidArguments,
-            clang_createTranslationUnit2(0, 0, 0));
+            clang_createTranslationUnit2(nullptr, nullptr, nullptr));
 
   CXTranslationUnit TU = reinterpret_cast<CXTranslationUnit>(1);
   EXPECT_EQ(CXError_InvalidArguments,
-            clang_createTranslationUnit2(0, 0, &TU));
-  EXPECT_EQ(0, TU);
+            clang_createTranslationUnit2(nullptr, nullptr, &TU));
+  EXPECT_EQ(nullptr, TU);
 }
 
 namespace {
@@ -56,14 +57,14 @@ struct TestVFO {
   }
 
   ~TestVFO() {
-    if (!Contents)
-      return;
-    char *BufPtr;
-    unsigned BufSize;
-    clang_VirtualFileOverlay_writeToBuffer(VFO, 0, &BufPtr, &BufSize);
-    std::string BufStr(BufPtr, BufSize);
-    EXPECT_STREQ(Contents, BufStr.c_str());
-    free(BufPtr);
+    if (Contents) {
+      char *BufPtr;
+      unsigned BufSize;
+      clang_VirtualFileOverlay_writeToBuffer(VFO, 0, &BufPtr, &BufSize);
+      std::string BufStr(BufPtr, BufSize);
+      EXPECT_STREQ(Contents, BufStr.c_str());
+      free(BufPtr);
+    }
     clang_VirtualFileOverlay_dispose(VFO);
   }
 };
@@ -114,7 +115,7 @@ TEST(libclang, VirtualFileOverlay_Unicode) {
 }
 
 TEST(libclang, VirtualFileOverlay_InvalidArgs) {
-  TestVFO T(NULL);
+  TestVFO T(nullptr);
   T.mapError("/path/./virtual/../foo.h", "/real/foo.h",
              CXError_InvalidArguments);
 }
@@ -382,15 +383,15 @@ public:
     OS << Contents;
   }
   void DisplayDiagnostics() {
-    uint NumDiagnostics = clang_getNumDiagnostics(ClangTU);
-    for (uint i = 0; i < NumDiagnostics; ++i) {
+    unsigned NumDiagnostics = clang_getNumDiagnostics(ClangTU);
+    for (unsigned i = 0; i < NumDiagnostics; ++i) {
       auto Diag = clang_getDiagnostic(ClangTU, i);
       DEBUG(llvm::dbgs() << clang_getCString(clang_formatDiagnostic(
           Diag, clang_defaultDiagnosticDisplayOptions())) << "\n");
       clang_disposeDiagnostic(Diag);
     }
   }
-  bool ReparseTU(uint num_unsaved_files, CXUnsavedFile* unsaved_files) {
+  bool ReparseTU(unsigned num_unsaved_files, CXUnsavedFile* unsaved_files) {
     if (clang_reparseTranslationUnit(ClangTU, num_unsaved_files, unsaved_files,
                                      clang_defaultReparseOptions(ClangTU))) {
       DEBUG(llvm::dbgs() << "Reparse failed\n");
@@ -443,7 +444,9 @@ TEST_F(LibclangReparseTest, ReparseWithModule) {
   WriteFile(HeaderName, std::string(HeaderTop) + HeaderBottom);
   WriteFile(ModName, ModFile);
 
-  const char *Args[] = { "-fmodules", "-I", TestDir.c_str() };
+  std::string ModulesCache = std::string("-fmodules-cache-path=") + TestDir;
+  const char *Args[] = { "-fmodules", ModulesCache.c_str(),
+                         "-I", TestDir.c_str() };
   int NumArgs = sizeof(Args) / sizeof(Args[0]);
   ClangTU = clang_parseTranslationUnit(Index, MName.c_str(), Args, NumArgs,
                                        nullptr, 0, TUFlags);

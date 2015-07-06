@@ -10,6 +10,7 @@
 // Tests for *scanf interceptors implementation in sanitizer_common.
 //
 //===----------------------------------------------------------------------===//
+#include <algorithm>
 #include <vector>
 
 #include "interception/interception.h"
@@ -40,6 +41,7 @@ static const unsigned L = sizeof(long);
 static const unsigned LL = sizeof(long long);
 static const unsigned S = sizeof(short);
 static const unsigned C = sizeof(char);
+static const unsigned LC = sizeof(wchar_t);
 static const unsigned D = sizeof(double);
 static const unsigned LD = sizeof(long double);
 static const unsigned F = sizeof(float);
@@ -111,8 +113,10 @@ TEST(SanitizerCommonInterceptors, Scanf) {
   testScanf("ab%u%dc", 2, I, I);
   testScanf("%ld", 1, L);
   testScanf("%llu", 1, LL);
+  testScanf("%qd", 1, LL);
   testScanf("a %hd%hhx", 2, S, C);
   testScanf("%c", 1, C);
+  testScanf("%lc", 1, LC);
 
   testScanf("%%", 0);
   testScanf("a%%", 0);
@@ -128,6 +132,8 @@ TEST(SanitizerCommonInterceptors, Scanf) {
 
   testScanf("%10s", 1, 11);
   testScanf("%10c", 1, 10);
+  testScanf("%10ls", 1, 11 * LC);
+  testScanf("%10lc", 1, 10 * LC);
   testScanf("%%10s", 0);
   testScanf("%*10s", 0);
   testScanf("%*d", 0);
@@ -238,8 +244,16 @@ TEST(SanitizerCommonInterceptors, Printf) {
 
   // Precision
   testPrintf("%10.10n", 1, I);
+  testPrintf("%.3s", 1, 3);
+  testPrintf("%.20s", 1, test_buf_size);
 
   // Dynamic precision
   testPrintf("%.*n", 1, I);
   testPrintf("%10.*n", 1, I);
+
+  // Dynamic precision for strings is not implemented yet.
+  testPrintf("%.*s", 1, 0);
+
+  // Checks for wide-character strings are not implemented yet.
+  testPrintf("%ls", 1, 0);
 }

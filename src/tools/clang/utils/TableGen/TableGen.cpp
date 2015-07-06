@@ -24,17 +24,14 @@ using namespace clang;
 
 enum ActionType {
   GenClangAttrClasses,
-  GenClangAttrIdentifierArgList,
-  GenClangAttrArgContextList,
-  GenClangAttrTypeArgList,
+  GenClangAttrParserStringSwitches,
   GenClangAttrImpl,
   GenClangAttrList,
   GenClangAttrPCHRead,
   GenClangAttrPCHWrite,
-  GenClangAttrSpellingList,
+  GenClangAttrHasAttributeImpl,
   GenClangAttrSpellingListIndex,
   GenClangAttrASTVisitor,
-  GenClangAttrLateParsedList,
   GenClangAttrTemplateInstantiate,
   GenClangAttrParsedAttrList,
   GenClangAttrParsedAttrImpl,
@@ -55,9 +52,7 @@ enum ActionType {
   GenArmNeon,
   GenArmNeonSema,
   GenArmNeonTest,
-  GenArm64SIMD,
-  GenArm64SIMDSema,
-  GenArm64SIMDTest
+  GenAttrDocs
 };
 
 namespace {
@@ -66,18 +61,9 @@ cl::opt<ActionType> Action(
     cl::values(
         clEnumValN(GenClangAttrClasses, "gen-clang-attr-classes",
                    "Generate clang attribute clases"),
-        clEnumValN(GenClangAttrIdentifierArgList,
-                   "gen-clang-attr-identifier-arg-list",
-                   "Generate a list of attributes that take an "
-                   "identifier as their first argument"),
-        clEnumValN(GenClangAttrArgContextList,
-                   "gen-clang-attr-arg-context-list",
-                   "Generate a list of attributes that parse their arguments "
-                   "in an unevaluated context"),
-        clEnumValN(GenClangAttrTypeArgList,
-                   "gen-clang-attr-type-arg-list",
-                   "Generate a list of attributes that take a type as their "
-                   "first argument"),
+        clEnumValN(GenClangAttrParserStringSwitches,
+                   "gen-clang-attr-parser-string-switches",
+                   "Generate all parser-related attribute string switches"),
         clEnumValN(GenClangAttrImpl, "gen-clang-attr-impl",
                    "Generate clang attribute implementations"),
         clEnumValN(GenClangAttrList, "gen-clang-attr-list",
@@ -86,7 +72,8 @@ cl::opt<ActionType> Action(
                    "Generate clang PCH attribute reader"),
         clEnumValN(GenClangAttrPCHWrite, "gen-clang-attr-pch-write",
                    "Generate clang PCH attribute writer"),
-        clEnumValN(GenClangAttrSpellingList, "gen-clang-attr-spelling-list",
+        clEnumValN(GenClangAttrHasAttributeImpl,
+                   "gen-clang-attr-has-attribute-impl",
                    "Generate a clang attribute spelling list"),
         clEnumValN(GenClangAttrSpellingListIndex,
                    "gen-clang-attr-spelling-index",
@@ -94,9 +81,6 @@ cl::opt<ActionType> Action(
         clEnumValN(GenClangAttrASTVisitor,
                    "gen-clang-attr-ast-visitor",
                    "Generate a recursive AST visitor for clang attributes"),
-        clEnumValN(GenClangAttrLateParsedList,
-                   "gen-clang-attr-late-parsed-list",
-                   "Generate a clang attribute LateParsed list"),
         clEnumValN(GenClangAttrTemplateInstantiate,
                    "gen-clang-attr-template-instantiate",
                    "Generate a clang template instantiate code"),
@@ -147,12 +131,8 @@ cl::opt<ActionType> Action(
                    "Generate ARM NEON sema support for clang"),
         clEnumValN(GenArmNeonTest, "gen-arm-neon-test",
                    "Generate ARM NEON tests for clang"),
-        clEnumValN(GenArm64SIMD, "gen-arm64-simd",
-                   "Generate arm64_neon_internal.h for clang"),
-        clEnumValN(GenArm64SIMDSema, "gen-arm64-simd-sema",
-                   "Generate ARM64 SIMD sema support for clang"),
-        clEnumValN(GenArm64SIMDTest, "gen-arm64-simd-test",
-                   "Generate ARM64 SIMD tests for clang"),
+        clEnumValN(GenAttrDocs, "gen-attr-docs",
+                   "Generate attribute documentation"),
         clEnumValEnd));
 
 cl::opt<std::string>
@@ -165,14 +145,8 @@ bool ClangTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
   case GenClangAttrClasses:
     EmitClangAttrClass(Records, OS);
     break;
-  case GenClangAttrIdentifierArgList:
-    EmitClangAttrIdentifierArgList(Records, OS);
-    break;
-  case GenClangAttrArgContextList:
-    EmitClangAttrArgContextList(Records, OS);
-    break;
-  case GenClangAttrTypeArgList:
-    EmitClangAttrTypeArgList(Records, OS);
+  case GenClangAttrParserStringSwitches:
+    EmitClangAttrParserStringSwitches(Records, OS);
     break;
   case GenClangAttrImpl:
     EmitClangAttrImpl(Records, OS);
@@ -186,17 +160,14 @@ bool ClangTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
   case GenClangAttrPCHWrite:
     EmitClangAttrPCHWrite(Records, OS);
     break;
-  case GenClangAttrSpellingList:
-    EmitClangAttrSpellingList(Records, OS);
+  case GenClangAttrHasAttributeImpl:
+    EmitClangAttrHasAttrImpl(Records, OS);
     break;
   case GenClangAttrSpellingListIndex:
     EmitClangAttrSpellingListIndex(Records, OS);
     break;
   case GenClangAttrASTVisitor:
     EmitClangAttrASTVisitor(Records, OS);
-    break;
-  case GenClangAttrLateParsedList:
-    EmitClangAttrLateParsedList(Records, OS);
     break;
   case GenClangAttrTemplateInstantiate:
     EmitClangAttrTemplateInstantiate(Records, OS);
@@ -259,14 +230,8 @@ bool ClangTableGenMain(raw_ostream &OS, RecordKeeper &Records) {
   case GenArmNeonTest:
     EmitNeonTest(Records, OS);
     break;
-  case GenArm64SIMD:
-    EmitARM64Neon(Records, OS, true);
-    break;
-  case GenArm64SIMDSema:
-    EmitARM64NeonSema(Records, OS, true);
-    break;
-  case GenArm64SIMDTest:
-    EmitARM64NeonTest(Records, OS, true);
+  case GenAttrDocs:
+    EmitClangAttrDocs(Records, OS);
     break;
   }
 

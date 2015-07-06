@@ -3,13 +3,13 @@ add_llvm_library(LLVMSupport
   APInt.cpp
   APSInt.cpp
   ARMBuildAttrs.cpp
+  ARMWinEH.cpp
   Allocator.cpp
   BlockFrequency.cpp
   BranchProbability.cpp
   circular_raw_ostream.cpp
   CommandLine.cpp
   Compression.cpp
-  ConstantRange.cpp
   ConvertUTF.c
   ConvertUTFWrapper.cpp
   CrashRecoveryContext.cpp
@@ -31,6 +31,7 @@ add_llvm_library(LLVMSupport
   IntrusiveRefCntPtr.cpp
   IsInf.cpp
   IsNAN.cpp
+  LEB128.cpp
   LineIterator.cpp
   Locale.cpp
   LockFileManager.cpp
@@ -40,10 +41,13 @@ add_llvm_library(LLVMSupport
   MD5.cpp
   PluginLoader.cpp
   PrettyStackTrace.cpp
+  RandomNumberGenerator.cpp
   Regex.cpp
+  ScaledNumber.cpp
   SmallPtrSet.cpp
   SmallVector.cpp
   SourceMgr.cpp
+  SpecialCaseList.cpp
   Statistic.cpp
   StreamableMemoryObject.cpp
   StringExtras.cpp
@@ -69,11 +73,9 @@ add_llvm_library(LLVMSupport
 
 # System
   Atomic.cpp
-  Disassembler.cpp
   DynamicLibrary.cpp
   Errno.cpp
   Host.cpp
-  IncludeFile.cpp
   Memory.cpp
   Mutex.cpp
   Path.cpp
@@ -82,7 +84,6 @@ add_llvm_library(LLVMSupport
   RWMutex.cpp
   SearchForAddressOfSpecialSymbol.cpp
   Signals.cpp
-  system_error.cpp
   TargetRegistry.cpp
   ThreadLocal.cpp
   Threading.cpp
@@ -99,7 +100,6 @@ add_llvm_library(LLVMSupport
   Unix/Program.inc
   Unix/RWMutex.inc
   Unix/Signals.inc
-  Unix/system_error.inc
   Unix/ThreadLocal.inc
   Unix/TimeValue.inc
   Unix/Watchdog.inc
@@ -112,7 +112,6 @@ add_llvm_library(LLVMSupport
   Windows/Program.inc
   Windows/RWMutex.inc
   Windows/Signals.inc
-  Windows/system_error.inc
   Windows/ThreadLocal.inc
   Windows/TimeValue.inc
   Windows/Watchdog.inc
@@ -141,5 +140,13 @@ if( NOT MSVC )
     endif()
   endif( MINGW )
 endif( NOT MSVC )
-target_link_libraries(LLVMSupport ${system_libs})
+
+
+if(POLICY CMP0022 AND BUILD_SHARED_LIBS)
+  # FIXME: Should this be really PUBLIC?
+  target_link_libraries(LLVMSupport PUBLIC ${system_libs})
+else()
+  target_link_libraries(LLVMSupport ${cmake_2_8_12_INTERFACE} ${system_libs})
+endif()
+
 set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${system_libs}")

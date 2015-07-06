@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_FRONTEND_LOG_DIAGNOSTIC_PRINTER_H_
-#define LLVM_CLANG_FRONTEND_LOG_DIAGNOSTIC_PRINTER_H_
+#ifndef LLVM_CLANG_FRONTEND_LOGDIAGNOSTICPRINTER_H
+#define LLVM_CLANG_FRONTEND_LOGDIAGNOSTICPRINTER_H
 
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceLocation.h"
@@ -35,11 +35,17 @@ class LogDiagnosticPrinter : public DiagnosticConsumer {
   
     /// The ID of the diagnostic.
     unsigned DiagnosticID;
+
+    /// The Option Flag for the diagnostic
+    std::string WarningOption;
   
     /// The level of the diagnostic.
     DiagnosticsEngine::Level DiagnosticLevel;
   };
-  
+
+  void EmitDiagEntry(llvm::raw_ostream &OS,
+                     const LogDiagnosticPrinter::DiagEntry &DE);
+
   raw_ostream &OS;
   const LangOptions *LangOpts;
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts;
@@ -62,14 +68,14 @@ public:
     DwarfDebugFlags = Value;
   }
 
-  void BeginSourceFile(const LangOptions &LO, const Preprocessor *PP) {
+  void BeginSourceFile(const LangOptions &LO, const Preprocessor *PP) override {
     LangOpts = &LO;
   }
 
-  void EndSourceFile();
+  void EndSourceFile() override;
 
-  virtual void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
-                                const Diagnostic &Info);
+  void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
+                        const Diagnostic &Info) override;
 };
 
 } // end namespace clang

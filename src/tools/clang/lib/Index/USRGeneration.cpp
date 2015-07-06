@@ -109,7 +109,7 @@ public:
   bool ShouldGenerateLocation(const NamedDecl *D);
 
   bool isLocal(const NamedDecl *D) {
-    return D->getParentFunctionOrMethod() != 0;
+    return D->getParentFunctionOrMethod() != nullptr;
   }
 
   /// Generate the string component containing the location of the
@@ -129,16 +129,6 @@ public:
   /// Generate a USR for an Objective-C class category.
   void GenObjCCategory(StringRef cls, StringRef cat) {
     generateUSRForObjCCategory(cls, cat, Out);
-  }
-  /// Generate a USR fragment for an Objective-C instance variable.  The
-  /// complete USR can be created by concatenating the USR for the
-  /// encompassing class with this USR fragment.
-  void GenObjCIvar(StringRef ivar) {
-    generateUSRForObjCIvar(ivar, Out);
-  }
-  /// Generate a USR fragment for an Objective-C method.
-  void GenObjCMethod(StringRef sel, bool isInstanceMethod) {
-    generateUSRForObjCMethod(sel, isInstanceMethod, Out);
   }
   /// Generate a USR fragment for an Objective-C property.
   void GenObjCProperty(StringRef prop) {
@@ -230,12 +220,9 @@ void USRGenerator::VisitFunctionDecl(const FunctionDecl *D) {
   }
 
   // Mangle in type information for the arguments.
-  for (FunctionDecl::param_const_iterator I = D->param_begin(),
-                                          E = D->param_end();
-       I != E; ++I) {
+  for (auto PD : D->params()) {
     Out << '#';
-    if (ParmVarDecl *PD = *I)
-      VisitType(PD->getType());
+    VisitType(PD->getType());
   }
   if (D->isVariadic())
     Out << '.';
@@ -647,11 +634,8 @@ void USRGenerator::VisitType(QualType T) {
     if (const FunctionProtoType *FT = T->getAs<FunctionProtoType>()) {
       Out << 'F';
       VisitType(FT->getReturnType());
-      for (FunctionProtoType::param_type_iterator I = FT->param_type_begin(),
-                                                  E = FT->param_type_end();
-           I != E; ++I) {
-        VisitType(*I);
-      }
+      for (const auto &I : FT->param_types())
+        VisitType(I);
       if (FT->isVariadic())
         Out << '.';
       return;
@@ -763,9 +747,8 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
       
   case TemplateArgument::Pack:
     Out << 'p' << Arg.pack_size();
-    for (TemplateArgument::pack_iterator P = Arg.pack_begin(), PEnd = Arg.pack_end();
-         P != PEnd; ++P)
-      VisitTemplateArgument(*P);
+    for (const auto &P : Arg.pack_elements())
+      VisitTemplateArgument(P);
     break;
       
   case TemplateArgument::Type:
@@ -840,7 +823,7 @@ bool clang::index::generateUSRForMacro(const MacroDefinition *MD,
   if (ShouldGenerateLocation)
     printLoc(Out, Loc, SM, /*IncludeOffset=*/true);
   Out << "@macro@";
-  Out << MD->getName()->getNameStart();
+  Out << MD->getName()->getName();
   return false;
 }
 

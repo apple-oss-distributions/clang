@@ -10,7 +10,6 @@
 #define LLVM_MC_MCDISASSEMBLER_H
 
 #include "llvm-c/Disassembler.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/MC/MCRelocationInfo.h"
 #include "llvm/MC/MCSymbolizer.h"
 #include "llvm/Support/DataTypes.h"
@@ -89,7 +88,7 @@ private:
 protected:
   // Subtarget information, for instruction decoding predicates if required.
   const MCSubtargetInfo &STI;
-  OwningPtr<MCSymbolizer> Symbolizer;
+  std::unique_ptr<MCSymbolizer> Symbolizer;
 
 public:
   // Helpers around MCSymbolizer
@@ -102,7 +101,7 @@ public:
 
   /// Set \p Symzer as the current symbolizer.
   /// This takes ownership of \p Symzer, and deletes the previously set one.
-  void setSymbolizer(OwningPtr<MCSymbolizer> &Symzer);
+  void setSymbolizer(std::unique_ptr<MCSymbolizer> Symzer);
 
   MCContext& getContext() const { return Ctx; }
 

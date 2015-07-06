@@ -24,28 +24,15 @@ add_clang_library(clangARCMigrate
   TransformActions.cpp
   Transforms.cpp
   XCTMT.cpp
-  )
 
-add_dependencies(clangARCMigrate
-  ClangAttrClasses
-  ClangAttrList
-  ClangAttrParsedAttrList
-  ClangCommentNodes
-  ClangDeclNodes
-  ClangDiagnosticCommon
-  ClangDiagnosticGroups
-  ClangDiagnosticSema
-  ClangStmtNodes
-  )
-
-target_link_libraries(clangARCMigrate
+  LINK_LIBS
   clangAST
   clangAnalysis
   clangBasic
   clangEdit
   clangFrontend
   clangLex
-  clangRewriteCore
+  clangRewrite
   clangSema
   clangSerialization
   clangStaticAnalyzerCheckers

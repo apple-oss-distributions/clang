@@ -602,7 +602,7 @@ TEST(APIntTest, arrayAccess) {
   // Single word check.
   uint64_t E1 = 0x2CA7F46BF6569915ULL;
   APInt A1(64, E1);
-  for (unsigned i = 0, e = 64; i < e; ++i) {    
+  for (unsigned i = 0, e = 64; i < e; ++i) {
     EXPECT_EQ(bool(E1 & (1ULL << i)),
               A1[i]);
   }
@@ -632,7 +632,7 @@ TEST(APIntTest, LargeAPIntConstruction) {
 }
 
 TEST(APIntTest, nearestLogBase2) {
-  // Single word check.  
+  // Single word check.
 
   // Test round up.
   uint64_t I1 = 0x1800001;
@@ -676,6 +676,23 @@ TEST(APIntTest, nearestLogBase2) {
   // that the bit width is larger than UINT32_MAX-1.
   APInt A9(UINT32_MAX, 0);
   EXPECT_EQ(A9.nearestLogBase2(), UINT32_MAX);
+}
+
+TEST(APIntTest, SelfMoveAssignment) {
+  APInt X(32, 0xdeadbeef);
+  X = std::move(X);
+  EXPECT_EQ(32u, X.getBitWidth());
+  EXPECT_EQ(0xdeadbeefULL, X.getLimitedValue());
+
+  uint64_t Bits[] = {0xdeadbeefdeadbeefULL, 0xdeadbeefdeadbeefULL};
+  APInt Y(128, Bits);
+  Y = std::move(Y);
+  EXPECT_EQ(128u, Y.getBitWidth());
+  EXPECT_EQ(~0ULL, Y.getLimitedValue());
+  const uint64_t *Raw = Y.getRawData();
+  EXPECT_EQ(2u, Y.getNumWords());
+  EXPECT_EQ(0xdeadbeefdeadbeefULL, Raw[0]);
+  EXPECT_EQ(0xdeadbeefdeadbeefULL, Raw[1]);
 }
 
 }

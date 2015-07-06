@@ -474,6 +474,59 @@ TEST(APFloatTest, FMA) {
     f1.fusedMultiplyAdd(f2, f3, APFloat::rmNearestTiesToEven);
     EXPECT_EQ(12.0f, f1.convertToFloat());
   }
+
+  // Test for correct zero sign when answer is exactly zero.
+  // fma(1.0, -1.0, 1.0) -> +ve 0.
+  {
+    APFloat f1(1.0);
+    APFloat f2(-1.0);
+    APFloat f3(1.0);
+    f1.fusedMultiplyAdd(f2, f3, APFloat::rmNearestTiesToEven);
+    EXPECT_TRUE(!f1.isNegative() && f1.isZero());
+  }
+
+  // Test for correct zero sign when answer is exactly zero and rounding towards
+  // negative.
+  // fma(1.0, -1.0, 1.0) -> +ve 0.
+  {
+    APFloat f1(1.0);
+    APFloat f2(-1.0);
+    APFloat f3(1.0);
+    f1.fusedMultiplyAdd(f2, f3, APFloat::rmTowardNegative);
+    EXPECT_TRUE(f1.isNegative() && f1.isZero());
+  }
+
+  // Test for correct (in this case -ve) sign when adding like signed zeros.
+  // Test fma(0.0, -0.0, -0.0) -> -ve 0.
+  {
+    APFloat f1(0.0);
+    APFloat f2(-0.0);
+    APFloat f3(-0.0);
+    f1.fusedMultiplyAdd(f2, f3, APFloat::rmNearestTiesToEven);
+    EXPECT_TRUE(f1.isNegative() && f1.isZero());
+  }
+
+  // Test -ve sign preservation when small negative results underflow.
+  {
+    APFloat f1(APFloat::IEEEdouble,  "-0x1p-1074");
+    APFloat f2(APFloat::IEEEdouble, "+0x1p-1074");
+    APFloat f3(0.0);
+    f1.fusedMultiplyAdd(f2, f3, APFloat::rmNearestTiesToEven);
+    EXPECT_TRUE(f1.isNegative() && f1.isZero());
+  }
+
+  // Test x87 extended precision case from http://llvm.org/PR20728.
+  {
+    APFloat M1(APFloat::x87DoubleExtended, 1.0);
+    APFloat M2(APFloat::x87DoubleExtended, 1.0);
+    APFloat A(APFloat::x87DoubleExtended, 3.0);
+
+    bool losesInfo = false;
+    M1.fusedMultiplyAdd(M1, A, APFloat::rmNearestTiesToEven);
+    M1.convert(APFloat::IEEEsingle, APFloat::rmNearestTiesToEven, &losesInfo);
+    EXPECT_FALSE(losesInfo);
+    EXPECT_EQ(4.0f, M1.convertToFloat());
+  }
 }
 
 TEST(APFloatTest, Denormal) {
@@ -1173,11 +1226,11 @@ TEST(APFloatTest, exactInverse) {
   EXPECT_TRUE(inv.bitwiseIsEqual(APFloat(8.5070592e+37f)));
 
   // Large float, inverse is a denormal.
-  EXPECT_FALSE(APFloat(1.7014118e38f).getExactInverse(0));
+  EXPECT_FALSE(APFloat(1.7014118e38f).getExactInverse(nullptr));
   // Zero
-  EXPECT_FALSE(APFloat(0.0).getExactInverse(0));
+  EXPECT_FALSE(APFloat(0.0).getExactInverse(nullptr));
   // Denormalized float
-  EXPECT_FALSE(APFloat(1.40129846e-45f).getExactInverse(0));
+  EXPECT_FALSE(APFloat(1.40129846e-45f).getExactInverse(nullptr));
 }
 
 TEST(APFloatTest, roundToIntegral) {

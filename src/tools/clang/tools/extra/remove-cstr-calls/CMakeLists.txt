@@ -7,6 +7,7 @@ add_clang_executable(remove-cstr-calls
   )
 
 target_link_libraries(remove-cstr-calls
+  clangAPINotes
   clangAST
   clangASTMatchers
   clangBasic

@@ -108,28 +108,28 @@ public:
   DefaultVLIWScheduler(MachineFunction &MF, MachineLoopInfo &MLI,
                    MachineDominatorTree &MDT, bool IsPostRA);
   // Schedule - Actual scheduling work.
-  void schedule();
+  void schedule() override;
 };
 }
 
 DefaultVLIWScheduler::DefaultVLIWScheduler(
   MachineFunction &MF, MachineLoopInfo &MLI, MachineDominatorTree &MDT,
   bool IsPostRA) :
-  ScheduleDAGInstrs(MF, MLI, MDT, IsPostRA) {
+  ScheduleDAGInstrs(MF, &MLI, &MDT, IsPostRA) {
   CanHandleTerminators = true;
 }
 
 void DefaultVLIWScheduler::schedule() {
   // Build the scheduling graph.
-  buildSchedGraph(0);
+  buildSchedGraph(nullptr);
 }
 
 // VLIWPacketizerList Ctor
 VLIWPacketizerList::VLIWPacketizerList(
   MachineFunction &MF, MachineLoopInfo &MLI, MachineDominatorTree &MDT,
   bool IsPostRA) : TM(MF.getTarget()), MF(MF)  {
-  TII = TM.getInstrInfo();
-  ResourceTracker = TII->CreateTargetScheduleState(&TM, 0);
+  TII = TM.getSubtargetImpl()->getInstrInfo();
+  ResourceTracker = TII->CreateTargetScheduleState(&TM, nullptr);
   VLIWScheduler = new DefaultVLIWScheduler(MF, MLI, MDT, IsPostRA);
 }
 

@@ -9,7 +9,7 @@
 
 CLANG_LEVEL := ../..
 
-BUILT_SOURCES = arm_neon.h.inc arm64_neon_internal.h.inc
+BUILT_SOURCES = arm_neon.h.inc
 TABLEGEN_INC_FILES_COMMON = 1
 
 include $(CLANG_LEVEL)/Makefile
@@ -24,27 +24,26 @@ HEADERS := $(notdir $(wildcard $(PROJ_SRC_DIR)/*.h))
 OBJHEADERS := $(addprefix $(HeaderDir)/, $(HEADERS))
 
 
-$(OBJHEADERS): $(HeaderDir)/%.h: $(PROJ_SRC_DIR)/%.h $(HeaderDir)/.dir $(HeaderDir)/arm_neon.h $(HeaderDir)/arm64_neon_internal.h
+$(OBJHEADERS): $(HeaderDir)/%.h: $(PROJ_SRC_DIR)/%.h $(HeaderDir)/.dir $(HeaderDir)/arm_neon.h
 	$(Verb) cp $< $@
 	$(Echo) Copying $(notdir $<) to build dir
 
-$(HeaderDir)/arm_neon.h $(HeaderDir)/arm64_neon_internal.h: $(HeaderDir)/%: %.inc $(HeaderDir)/.dir
+$(HeaderDir)/arm_neon.h: $(BUILT_SOURCES) $(HeaderDir)/.dir
 	$(Verb) cp $< $@
 	$(Echo) Copying $(notdir $<) to build dir
 
-$(HeaderDir)/module.map: $(PROJ_SRC_DIR)/module.map $(HeaderDir)/.dir
+$(HeaderDir)/module.modulemap: $(PROJ_SRC_DIR)/module.modulemap $(HeaderDir)/.dir
 	$(Verb) cp $< $@
 	$(Echo) Copying $(notdir $<) to build dir
 
 
 # Hook into the standard Makefile rules.
-all-local:: $(OBJHEADERS) $(HeaderDir)/module.map
+all-local:: $(OBJHEADERS) $(HeaderDir)/module.modulemap
 
 PROJ_headers := $(DESTDIR)$(PROJ_prefix)/lib/clang/$(CLANG_VERSION)/include
 
 INSTHEADERS := $(addprefix $(PROJ_headers)/, $(HEADERS))
 INSTHEADERS += $(PROJ_headers)/arm_neon.h
-INSTHEADERS += $(PROJ_headers)/arm64_neon_internal.h
 
 $(PROJ_headers):
 	$(Verb) $(MKDIR) $@
@@ -53,19 +52,13 @@ $(INSTHEADERS): $(PROJ_headers)/%.h: $(HeaderDir)/%.h | $(PROJ_headers)
 	$(Verb) $(DataInstall) $< $(PROJ_headers)
 	$(Echo) Installing compiler include file: $(notdir $<)
 
-$(PROJ_headers)/module.map: $(HeaderDir)/module.map | $(PROJ_headers)
+$(PROJ_headers)/module.modulemap: $(HeaderDir)/module.modulemap | $(PROJ_headers)
 	$(Verb) $(DataInstall) $< $(PROJ_headers)
 	$(Echo) Installing compiler module map file: $(notdir $<)
 
 
-install-local:: $(INSTHEADERS) $(PROJ_headers)/module.map
+install-local:: $(INSTHEADERS) $(PROJ_headers)/module.modulemap
 
 $(ObjDir)/arm_neon.h.inc.tmp : $(CLANG_LEVEL)/include/clang/Basic/arm_neon.td $(CLANG_TBLGEN) $(ObjDir)/.dir
 	$(Echo) "Building Clang arm_neon.h.inc with tblgen"
-	$(Verb) $(ClangTableGen) -gen-arm-neon -o $(call SYSPATH, $@) \
-	  -I $(PROJ_SRC_DIR)/../../include $<
-
-$(ObjDir)/arm64_neon_internal.h.inc.tmp : $(CLANG_LEVEL)/include/clang/Basic/arm64_simd.td $(TBLGEN) $(ObjDir)/.dir
-	$(Echo) "Building Clang arm64_neon_internal.h.inc with tblgen"
-	$(Verb) $(ClangTableGen) -gen-arm64-simd -o $(call SYSPATH, $@) \
-	  -I $(PROJ_SRC_DIR)/../../include $<
+	$(Verb) $(ClangTableGen) -gen-arm-neon -o $(call SYSPATH, $@) $<

@@ -25,18 +25,21 @@
 using namespace clang;
 
 Module::Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent,
-               const FileEntry *File, bool IsFramework, bool IsExplicit)
-  : Name(Name), DefinitionLoc(DefinitionLoc), Parent(Parent), ModuleMap(File),
-    Umbrella(), ASTFile(0), IsMissingRequirement(false), IsAvailable(true),
-    IsFromModuleFile(false), IsFramework(IsFramework), IsExplicit(IsExplicit),
-    IsSystem(false), IsInferred(false), InferSubmodules(false),
-    InferExplicitSubmodules(false), InferExportWildcard(false),
-    ConfigMacrosExhaustive(false), NameVisibility(Hidden) {
+               bool IsFramework, bool IsExplicit)
+    : Name(Name), DefinitionLoc(DefinitionLoc), Parent(Parent),
+      Umbrella(), ASTFile(nullptr), IsMissingRequirement(false),
+      IsAvailable(true), IsFromModuleFile(false), IsFramework(IsFramework),
+      IsExplicit(IsExplicit), IsSystem(false), IsExternC(false),
+      IsInferred(false), InferSubmodules(false), InferExplicitSubmodules(false),
+      InferExportWildcard(false), ConfigMacrosExhaustive(false),
+      NameVisibility(Hidden) {
   if (Parent) {
     if (!Parent->isAvailable())
       IsAvailable = false;
     if (Parent->IsSystem)
       IsSystem = true;
+    if (Parent->IsExternC)
+      IsExternC = true;
     IsMissingRequirement = Parent->IsMissingRequirement;
     
     Parent->SubModuleIndex[Name] = Parent->SubModules.size();
@@ -55,16 +58,21 @@ Module::~Module() {
 /// language options has the given feature.
 static bool hasFeature(StringRef Feature, const LangOptions &LangOpts,
                        const TargetInfo &Target) {
-  return llvm::StringSwitch<bool>(Feature)
-           .Case("altivec", LangOpts.AltiVec)
-           .Case("blocks", LangOpts.Blocks)
-           .Case("cplusplus", LangOpts.CPlusPlus)
-           .Case("cplusplus11", LangOpts.CPlusPlus11)
-           .Case("objc", LangOpts.ObjC1)
-           .Case("objc_arc", LangOpts.ObjCAutoRefCount)
-           .Case("opencl", LangOpts.OpenCL)
-           .Case("tls", Target.isTLSSupported())
-           .Default(Target.hasFeature(Feature));
+  bool HasFeature = llvm::StringSwitch<bool>(Feature)
+                        .Case("altivec", LangOpts.AltiVec)
+                        .Case("blocks", LangOpts.Blocks)
+                        .Case("cplusplus", LangOpts.CPlusPlus)
+                        .Case("cplusplus11", LangOpts.CPlusPlus11)
+                        .Case("objc", LangOpts.ObjC1)
+                        .Case("objc_arc", LangOpts.ObjCAutoRefCount)
+                        .Case("opencl", LangOpts.OpenCL)
+                        .Case("tls", Target.isTLSSupported())
+                        .Default(Target.hasFeature(Feature));
+  if (!HasFeature)
+    HasFeature = std::find(LangOpts.ModuleFeatures.begin(),
+                           LangOpts.ModuleFeatures.end(),
+                           Feature) != LangOpts.ModuleFeatures.end();
+  return HasFeature;
 }
 
 bool
@@ -90,7 +98,7 @@ Module::isAvailable(const LangOptions &LangOpts, const TargetInfo &Target,
   llvm_unreachable("could not find a reason why module is unavailable");
 }
 
-bool Module::isSubModuleOf(Module *Other) const {
+bool Module::isSubModuleOf(const Module *Other) const {
   const Module *This = this;
   do {
     if (This == Other)
@@ -189,8 +197,8 @@ void Module::markUnavailable(bool MissingRequirement) {
 Module *Module::findSubmodule(StringRef Name) const {
   llvm::StringMap<unsigned>::const_iterator Pos = SubModuleIndex.find(Name);
   if (Pos == SubModuleIndex.end())
-    return 0;
-  
+    return nullptr;
+
   return SubModules[Pos->getValue()];
 }
 
@@ -290,9 +298,12 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
     OS << "explicit ";
   OS << "module " << Name;
 
-  if (IsSystem) {
+  if (IsSystem || IsExternC) {
     OS.indent(Indent + 2);
-    OS << " [system]";
+    if (IsSystem)
+      OS << " [system]";
+    if (IsExternC)
+      OS << " [extern_c]";
   }
 
   OS << " {\n";
@@ -358,7 +369,11 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
   
   for (submodule_const_iterator MI = submodule_begin(), MIEnd = submodule_end();
        MI != MIEnd; ++MI)
-    if (!(*MI)->IsInferred)
+    // Print inferred subframework modules so that we don't need to re-infer
+    // them (requires expensive directory iteration + stat calls) when we build
+    // the module. Regular inferred submodules are OK, as we need to look at all
+    // those header files anyway.
+    if (!(*MI)->IsInferred || (*MI)->IsFramework)
       (*MI)->print(OS, Indent + 2);
   
   for (unsigned I = 0, N = Exports.size(); I != N; ++I) {

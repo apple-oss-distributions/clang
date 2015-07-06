@@ -19,13 +19,14 @@
 #ifndef SANITIZER_SYMBOLIZER_H
 #define SANITIZER_SYMBOLIZER_H
 
-#include "sanitizer_allocator_internal.h"
-#include "sanitizer_internal_defs.h"
-#include "sanitizer_libc.h"
+#include "sanitizer_common.h"
+#include "sanitizer_mutex.h"
 
 namespace __sanitizer {
 
 struct AddressInfo {
+  // Owns all the string members. Storage for them is
+  // (de)allocated using sanitizer internal allocator.
   uptr address;
 
   char *module;
@@ -39,58 +40,49 @@ struct AddressInfo {
   int line;
   int column;
 
-  AddressInfo() {
-    internal_memset(this, 0, sizeof(AddressInfo));
-    function_offset = kUnknown;
-  }
-
+  AddressInfo();
   // Deletes all strings and resets all fields.
-  void Clear() {
-    InternalFree(module);
-    InternalFree(function);
-    InternalFree(file);
-    internal_memset(this, 0, sizeof(AddressInfo));
-    function_offset = kUnknown;
-  }
-
+  void Clear();
   void FillAddressAndModuleInfo(uptr addr, const char *mod_name,
-                                uptr mod_offset) {
-    address = addr;
-    module = internal_strdup(mod_name);
-    module_offset = mod_offset;
-  }
+                                uptr mod_offset);
 };
 
+// Linked list of symbolized frames (each frame is described by AddressInfo).
+struct SymbolizedStack {
+  SymbolizedStack *next;
+  AddressInfo info;
+  static SymbolizedStack *New(uptr addr);
+  // Deletes current, and all subsequent frames in the linked list.
+  // The object cannot be accessed after the call to this function.
+  void ClearAll();
+
+ private:
+  SymbolizedStack();
+};
+
+// For now, DataInfo is used to describe global variable.
 struct DataInfo {
-  uptr address;
+  // Owns all the string members. Storage for them is
+  // (de)allocated using sanitizer internal allocator.
   char *module;
   uptr module_offset;
   char *name;
   uptr start;
   uptr size;
+
+  DataInfo();
+  void Clear();
 };
 
 class Symbolizer {
  public:
-  /// Returns platform-specific implementation of Symbolizer. The symbolizer
-  /// must be initialized (with init or disable) before calling this function.
-  static Symbolizer *Get();
-  /// Returns platform-specific implementation of Symbolizer, or null if not
-  /// initialized.
-  static Symbolizer *GetOrNull();
-  /// Returns platform-specific implementation of Symbolizer.  Will
-  /// automatically initialize symbolizer as if by calling Init(0) if needed.
+  /// Initialize and return platform-specific implementation of symbolizer
+  /// (if it wasn't already initialized).
   static Symbolizer *GetOrInit();
-  /// Initialize and return the symbolizer, given an optional path to an
-  /// external symbolizer.  The path argument is only required for legacy
-  /// reasons as this function will check $PATH for an external symbolizer.  Not
-  /// thread safe.
-  static Symbolizer *Init(const char* path_to_external = 0);
-  // Fills at most "max_frames" elements of "frames" with descriptions
-  // for a given address (in all inlined functions). Returns the number
-  // of descriptions actually filled.
-  virtual uptr SymbolizePC(uptr address, AddressInfo *frames, uptr max_frames) {
-    return 0;
+  // Returns a list of symbolized frames for a given address (containing
+  // all inlined functions, if necessary).
+  virtual SymbolizedStack *SymbolizePC(uptr address) {
+    return SymbolizedStack::New(address);
   }
   virtual bool SymbolizeData(uptr address, DataInfo *info) {
     return false;
@@ -122,10 +114,7 @@ class Symbolizer {
 
  private:
   /// Platform-specific function for creating a Symbolizer object.
-  static Symbolizer *PlatformInit(const char *path_to_external);
-  /// Create a symbolizer and store it to symbolizer_ without checking if one
-  /// already exists.  Not thread safe.
-  static Symbolizer *CreateAndStore(const char *path_to_external);
+  static Symbolizer *PlatformInit();
   /// Initialize the symbolizer in a disabled state.  Not thread safe.
   static Symbolizer *Disable();
 
@@ -146,6 +135,21 @@ class Symbolizer {
    private:
     const Symbolizer *sym_;
   };
+};
+
+class ExternalSymbolizerInterface {
+ public:
+  // Can't declare pure virtual functions in sanitizer runtimes:
+  // __cxa_pure_virtual might be unavailable.
+  virtual char *SendCommand(uptr addr, bool is_data, const char *module_name,
+                            uptr module_offset) {
+    UNIMPLEMENTED();
+  }
+
+  virtual void ParseSymbolizedStackFrames(const char *str,
+                                          SymbolizedStack *res) {
+    UNIMPLEMENTED();
+  }
 };
 
 }  // namespace __sanitizer

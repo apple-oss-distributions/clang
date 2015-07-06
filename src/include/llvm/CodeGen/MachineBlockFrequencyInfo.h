@@ -1,4 +1,4 @@
-//====-- MachineBlockFrequencyInfo.h - MBB Frequency Analysis -*- C++ -*--====//
+//===- MachineBlockFrequencyInfo.h - MBB Frequency Analysis -*- C++ -*-----===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -22,14 +22,12 @@ namespace llvm {
 
 class MachineBasicBlock;
 class MachineBranchProbabilityInfo;
-template<class BlockT, class FunctionT, class BranchProbInfoT>
-class BlockFrequencyImpl;
+template <class BlockT> class BlockFrequencyInfoImpl;
 
-/// MachineBlockFrequencyInfo pass uses BlockFrequencyImpl implementation to estimate
-/// machine basic block frequencies.
+/// MachineBlockFrequencyInfo pass uses BlockFrequencyInfoImpl implementation
+/// to estimate machine basic block frequencies.
 class MachineBlockFrequencyInfo : public MachineFunctionPass {
-  typedef BlockFrequencyImpl<MachineBasicBlock, MachineFunction,
-                             MachineBranchProbabilityInfo> ImplType;
+  typedef BlockFrequencyInfoImpl<MachineBasicBlock> ImplType;
   std::unique_ptr<ImplType> MBFI;
 
 public:
@@ -39,9 +37,9 @@ public:
 
   ~MachineBlockFrequencyInfo();
 
-  void getAnalysisUsage(AnalysisUsage &AU) const;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
 
-  bool runOnMachineFunction(MachineFunction &F);
+  bool runOnMachineFunction(MachineFunction &F) override;
 
   void releaseMemory() override;
 

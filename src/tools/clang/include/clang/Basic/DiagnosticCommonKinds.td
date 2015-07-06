@@ -81,6 +81,10 @@ def err_deleted_non_function : Error<
   "only functions can have deleted definitions">;
 def err_module_not_found : Error<"module '%0' not found">, DefaultFatal;
 def err_module_not_built : Error<"could not build module '%0'">, DefaultFatal;
+def err_module_lock_failure : Error<
+  "could not acquire lock file for module '%0'">, DefaultFatal;
+def err_module_lock_timeout : Error<
+  "timed out waiting to acquire lock file for module '%0'">, DefaultFatal;
 def err_module_cycle : Error<"cyclic dependency in module '%0': %1">, 
   DefaultFatal;
 def note_pragma_entered_here : Note<"#pragma entered here">;  
@@ -89,6 +93,26 @@ def note_decl_hiding_tag_type : Note<
 def err_attribute_not_type_attr : Error<
   "%0 attribute cannot be applied to types">;
 def err_enum_template : Error<"enumeration cannot be a template">;
+
+}
+
+let CategoryName = "Nullability Issue" in {
+
+def warn_nullability_duplicate : Warning<
+  "duplicate nullability specifier "
+  "'%select{%select{__|}1nonnull|%select{__|}1nullable|"
+  "%select{__|}1null_unspecified}0'">,
+  InGroup<Nullability>;
+
+def err_nullability_conflicting : Error<
+  "nullability specifier "
+  "'%select{%select{__|}1nonnull|%select{__|}1nullable|"
+  "%select{__|}1null_unspecified}0' "
+  "conflicts with existing specifier '%select{%select{__|}3nonnull|"
+  "%select{__|}3nullable|%select{__|}3null_unspecified}2'">;
+
+def note_nullability_here : Note<
+  "'%select{__nonnull|__nullable|__null_unspecified}0' specified here">;
 
 }
 
@@ -102,10 +126,13 @@ def ext_cxx11_longlong : Extension<
 def warn_cxx98_compat_longlong : Warning<
   "'long long' is incompatible with C++98">,
   InGroup<CXX98CompatPedantic>, DefaultIgnore;
-def err_integer_too_large : Error<
-  "integer constant is larger than the largest unsigned integer type">;
-def warn_integer_too_large_for_signed : Warning<
-  "integer constant is larger than the largest signed integer type">;
+def err_integer_literal_too_large : Error<
+  "integer literal is too large to be represented in any %select{signed |}0"
+  "integer type">;
+def ext_integer_literal_too_large_for_signed : ExtWarn<
+  "integer literal is too large to be represented in a signed integer type, "
+  "interpreting as unsigned">,
+  InGroup<DiagGroup<"implicitly-unsigned-literal">>;
 
 // Sema && AST
 def note_invalid_subexpr_in_const_expr : Note<
@@ -120,6 +147,8 @@ def err_target_unknown_abi : Error<"unknown target ABI '%0'">;
 def err_target_unknown_fpmath : Error<"unknown FP unit '%0'">;
 def err_target_unsupported_fpmath : Error<
     "the '%0' unit is not supported with this instruction set">;
+def err_target_unsupported_unaligned : Error<
+  "the %0 sub-architecture does not support unaligned accesses">;
 
 // Source manager
 def err_cannot_open_file : Error<"cannot open file '%0': %1">, DefaultFatal;
@@ -134,5 +163,21 @@ def err_unable_to_make_temp : Error<
   
 // Modules
 def err_module_file_conflict : Error<"module '%0' found in both '%1' and '%2'">;
+
+// TransformActions
+// TODO: Use a custom category name to distinguish rewriter errors.
+def err_mt_message : Error<"[rewriter] %0">, SuppressInSystemHeader;
+def warn_mt_message : Warning<"[rewriter] %0">;
+def note_mt_message : Note<"[rewriter] %0">;
+
+// ARCMigrate
+def warn_arcmt_nsalloc_realloc : Warning<"[rewriter] call returns pointer to GC managed memory; it will become unmanaged in ARC">;
+def err_arcmt_nsinvocation_ownership : Error<"NSInvocation's %0 is not safe to be used with an object with ownership other than __unsafe_unretained">;
+
+// API notes
+def err_apinotes_message : Error<"%0">;
+def warn_apinotes_message : Warning<"%0">;
+def note_apinotes_message : Note<"%0">;
+
 
 }

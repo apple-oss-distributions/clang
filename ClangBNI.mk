@@ -12,9 +12,6 @@
 #   Clang_Build_All := {0, 1}
 #     Enable the building of all LLVM tools, for use in testing.
 #
-#   Clang_Driver_Mode := {Production, Development}
-#     Enable/disable the "production" driver mode.
-#
 #   Clang_Extra_Options := ...
 #     Additional options to pass to make.
 #
@@ -204,20 +201,11 @@ else
 Clang_Make_Variables += CLANG_REPOSITORY_STRING=$(Clang_Tag)
 endif
 
-ifeq ($(Clang_Driver_Mode), Production)
-Clang_Make_Variables += CLANG_IS_PRODUCTION=1
-
 # Set LLVM_VERSION_INFO make variable. We do this here because setting it in the
 # CC options for configure ends up breaking tests that can't be bothered to
 # quote things properly, and that is too hard to fix.
 Clang_Make_Variables += \
   LLVM_VERSION_INFO="from Apple Clang $(Clang_Version) (build $(RC_ProjectSourceVersion))"
-
-else ifeq ($(Clang_Driver_Mode), Development)
-# ... this is the default ...
-else
-$(error "invalid setting for clang driver mode: '$(Clang_Driver_Mode)'")
-endif
 
 # Set destination information.
 ifneq ($(INSTALL_LOCATION),)
@@ -271,6 +259,7 @@ endif
 ifeq ($(Clang_Enable_PGO),1)
 ifeq ($(Clang_Enable_Bootstrap), 1)
 Final_Extra_Options += -fprofile-instr-use=$(OBJROOT)/clang.profdata
+Final_Extra_Options += -Wno-profile-instr-unprofiled
 configure-clang_stage2: $(OBJROOT)/clang.profdata
 configure-cross: $(OBJROOT)/clang.profdata
 endif
@@ -288,8 +277,10 @@ Common_Configure_Flags = \
 		  --disable-bindings \
 		  --disable-doxygen \
 		  --disable-zlib \
+		  --disable-libedit \
 		  --enable-backtraces=no \
 		  --enable-libcpp \
+		  --enable-clang-plugin-support=no \
 		  --with-bug-report-url="http://developer.apple.com/bugreporter/"
 Stage1_Configure_Flags = $(Common_Configure_Flags) \
                   --with-extra-options="$(Extra_Options)"
@@ -303,7 +294,7 @@ Instrumented_Configure_Flags = $(Common_Configure_Flags) \
 CC := $(shell xcrun -find clang)
 CXX := $(shell xcrun -find clang++)
 
-# Set stage1 compiler.
+# Set the compiler to be used for building stage1.
 System_CC := $(CC)
 System_CXX := $(CXX)
 
@@ -312,7 +303,7 @@ Exec_Path := $(shell dirname `xcrun -find ld`)
 DSYMUTIL := $(shell xcrun -find dsymutil)
 
 # Set up any additional Clang install targets.
-Extra_Clang_Install_Targets := install-lto-h
+Extra_Clang_Install_Targets := install-minimal-llvm-c
 ifeq ($(DT_VARIANT),)
 Extra_Clang_Install_Targets += install-clang-diagnostic
 endif
@@ -412,7 +403,7 @@ SYSCTL := $(shell if [ `sysctl -n hw.activecpu` -ge 8 -a `sysctl -n hw.memsize` 
 SYSCTL_FINAL := $(SYSCTL)
 ifeq ($(Clang_Enable_LTO),1)
 ifeq ($(Clang_Build_All),1)
-SYSCTL_FINAL := 4
+SYSCTL_FINAL := 2
 endif
 endif
 
@@ -672,8 +663,10 @@ install-clang-links:
 	ln -sf ../../../../../usr/bin/clang $(DSTROOT)/$(Install_Prefix)/bin/clang
 	ln -sf ../../../../../usr/bin/clang++ $(DSTROOT)/$(Install_Prefix)/bin/clang++
 
-install-lto-h:
+install-minimal-llvm-c:
 	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
+	$(INSTALL_FILE) $(Sources)/include/llvm-c/ProfileData.h $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
+	$(INSTALL_FILE) $(Sources)/include/llvm-c/Support.h $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
 	$(INSTALL_FILE) $(Sources)/include/llvm-c/lto.h $(DSTROOT)/$(Install_Prefix)/local/include/llvm-c
 
 # We install a copy of the clang-parse-diagnostics-file utility into

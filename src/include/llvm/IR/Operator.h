@@ -18,9 +18,9 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Type.h"
-#include "llvm/Support/GetElementPtrTypeIterator.h"
 
 namespace llvm {
 
@@ -357,6 +357,8 @@ class LShrOperator
 };
 
 
+class ZExtOperator : public ConcreteOperator<Operator, Instruction::ZExt> {};
+
 
 class GEPOperator
   : public ConcreteOperator<Operator, Instruction::GetElementPtr> {
@@ -402,7 +404,7 @@ public:
   /// getPointerAddressSpace - Method to return the address space of the
   /// pointer operand.
   unsigned getPointerAddressSpace() const {
-    return cast<PointerType>(getPointerOperandType())->getAddressSpace();
+    return getPointerOperandType()->getPointerAddressSpace();
   }
 
   unsigned getNumIndices() const {  // Note: always non-negative

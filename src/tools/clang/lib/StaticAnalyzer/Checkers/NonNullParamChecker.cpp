@@ -29,8 +29,9 @@ using namespace ento;
 namespace {
 class NonNullParamChecker
   : public Checker< check::PreCall > {
-  mutable OwningPtr<BugType> BTAttrNonNull;
-  mutable OwningPtr<BugType> BTNullRefArg;
+  mutable std::unique_ptr<BugType> BTAttrNonNull;
+  mutable std::unique_ptr<BugType> BTNullRefArg;
+
 public:
 
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const;
@@ -48,6 +49,8 @@ void NonNullParamChecker::checkPreCall(const CallEvent &Call,
   if (!FD)
     return;
 
+  // FIXME: This is wrong; there can be multiple attributes with different sets
+  // of non-null parameter indices.
   const NonNullAttr *Att = FD->getAttr<NonNullAttr>();
 
   ProgramStateRef state = C.getState();
@@ -122,14 +125,14 @@ void NonNullParamChecker::checkPreCall(const CallEvent &Call,
 
     ConstraintManager &CM = C.getConstraintManager();
     ProgramStateRef stateNotNull, stateNull;
-    llvm::tie(stateNotNull, stateNull) = CM.assumeDual(state, *DV);
+    std::tie(stateNotNull, stateNull) = CM.assumeDual(state, *DV);
 
     if (stateNull && !stateNotNull) {
       // Generate an error node.  Check for a null node in case
       // we cache out.
       if (ExplodedNode *errorNode = C.generateSink(stateNull)) {
 
-        BugReport *R = 0;
+        BugReport *R = nullptr;
         if (haveAttrNonNull)
           R = genReportNullAttrNonNull(errorNode, ArgE);
         else if (haveRefTypeParam)
@@ -164,8 +167,7 @@ BugReport *NonNullParamChecker::genReportNullAttrNonNull(
   // the BugReport is passed to 'EmitWarning'.
   if (!BTAttrNonNull)
     BTAttrNonNull.reset(new BugType(
-                            "Argument with 'nonnull' attribute passed null",
-                            "API"));
+        this, "Argument with 'nonnull' attribute passed null", "API"));
 
   BugReport *R = new BugReport(*BTAttrNonNull,
                   "Null pointer passed as an argument to a 'nonnull' parameter",
@@ -179,14 +181,14 @@ BugReport *NonNullParamChecker::genReportNullAttrNonNull(
 BugReport *NonNullParamChecker::genReportReferenceToNullPointer(
   const ExplodedNode *ErrorNode, const Expr *ArgE) const {
   if (!BTNullRefArg)
-    BTNullRefArg.reset(new BuiltinBug("Dereference of null pointer"));
+    BTNullRefArg.reset(new BuiltinBug(this, "Dereference of null pointer"));
 
   BugReport *R = new BugReport(*BTNullRefArg,
                                "Forming reference to null pointer",
                                ErrorNode);
   if (ArgE) {
     const Expr *ArgEDeref = bugreporter::getDerefExpr(ArgE);
-    if (ArgEDeref == 0)
+    if (!ArgEDeref)
       ArgEDeref = ArgE;
     bugreporter::trackNullOrUndefValue(ErrorNode,
                                        ArgEDeref,

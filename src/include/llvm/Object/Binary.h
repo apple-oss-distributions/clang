@@ -17,10 +17,11 @@
 #include "llvm/Object/Error.h"
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 
 namespace llvm {
 
-class MemoryBuffer;
+class LLVMContext;
 class StringRef;
 
 namespace object {
@@ -31,16 +32,17 @@ private:
   Binary(const Binary &other) LLVM_DELETED_FUNCTION;
 
   unsigned int TypeID;
-  bool BufferOwned;
 
 protected:
-  MemoryBuffer *Data;
+  MemoryBufferRef Data;
 
-  Binary(unsigned int Type, MemoryBuffer *Source, bool BufferOwned = true);
+  Binary(unsigned int Type, MemoryBufferRef Source);
 
   enum {
     ID_Archive,
     ID_MachOUniversalBinary,
+    ID_IR, // LLVM IR
+
     // Object and children.
     ID_StartObjects,
     ID_COFF,
@@ -77,6 +79,7 @@ public:
 
   StringRef getData() const;
   StringRef getFileName() const;
+  MemoryBufferRef getMemoryBufferRef() const;
 
   // Cast methods.
   unsigned int getType() const { return TypeID; }
@@ -84,6 +87,10 @@ public:
   // Convenience methods
   bool isObject() const {
     return TypeID > ID_StartObjects && TypeID < ID_EndObjects;
+  }
+
+  bool isSymbolic() const {
+    return isIR() || isObject();
   }
 
   bool isArchive() const {
@@ -106,6 +113,10 @@ public:
     return TypeID == ID_COFF;
   }
 
+  bool isIR() const {
+    return TypeID == ID_IR;
+  }
+
   bool isLittleEndian() const {
     return !(TypeID == ID_ELF32B || TypeID == ID_ELF64B ||
              TypeID == ID_MachO32B || TypeID == ID_MachO64B);
@@ -114,14 +125,52 @@ public:
 
 /// @brief Create a Binary from Source, autodetecting the file type.
 ///
-/// @param Source The data to create the Binary from. Ownership is transferred
-///        to the Binary if successful. If an error is returned,
-///        Source is destroyed by createBinary before returning.
-ErrorOr<Binary *> createBinary(MemoryBuffer *Source,
-                               sys::fs::file_magic Type =
-                                   sys::fs::file_magic::unknown);
+/// @param Source The data to create the Binary from.
+ErrorOr<std::unique_ptr<Binary>> createBinary(MemoryBufferRef Source,
+                                              LLVMContext *Context = nullptr);
 
-ErrorOr<Binary *> createBinary(StringRef Path);
+template <typename T> class OwningBinary {
+  std::unique_ptr<T> Bin;
+  std::unique_ptr<MemoryBuffer> Buf;
+
+public:
+  OwningBinary();
+  OwningBinary(std::unique_ptr<T> Bin, std::unique_ptr<MemoryBuffer> Buf);
+  OwningBinary(OwningBinary<T>&& Other);
+  OwningBinary<T> &operator=(OwningBinary<T> &&Other);
+
+  std::unique_ptr<T> &getBinary();
+  std::unique_ptr<MemoryBuffer> &getBuffer();
+};
+
+template <typename T>
+OwningBinary<T>::OwningBinary(std::unique_ptr<T> Bin,
+                              std::unique_ptr<MemoryBuffer> Buf)
+    : Bin(std::move(Bin)), Buf(std::move(Buf)) {}
+
+template <typename T> OwningBinary<T>::OwningBinary() {}
+
+template <typename T>
+OwningBinary<T>::OwningBinary(OwningBinary &&Other)
+    : Bin(std::move(Other.Bin)), Buf(std::move(Other.Buf)) {}
+
+template <typename T>
+OwningBinary<T> &OwningBinary<T>::operator=(OwningBinary &&Other) {
+  Bin = std::move(Other.Bin);
+  Buf = std::move(Other.Buf);
+  return *this;
+}
+
+template <typename T> std::unique_ptr<T> &OwningBinary<T>::getBinary() {
+  return Bin;
+}
+
+template <typename T>
+std::unique_ptr<MemoryBuffer> &OwningBinary<T>::getBuffer() {
+  return Buf;
+}
+
+ErrorOr<OwningBinary<Binary>> createBinary(StringRef Path);
 }
 }
 

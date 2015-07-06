@@ -13,6 +13,7 @@
 
 #include "clang/Parse/Parser.h"
 #include "RAIIObjectsForParser.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Sema/DeclSpec.h"
@@ -51,11 +52,12 @@ Parser::DeclGroupPtrTy Parser::ParseObjCAtDirectives() {
     cutOffParsing();
     return DeclGroupPtrTy();
   }
-    
-  Decl *SingleDecl = 0;
+
+  Decl *SingleDecl = nullptr;
   switch (Tok.getObjCKeywordID()) {
   case tok::objc_class:
     return ParseObjCAtClassDeclaration(AtLoc);
+  case tok::objc_partial_interface:
   case tok::objc_interface: {
     ParsedAttributes attrs(AttrFactory);
     SingleDecl = ParseObjCAtInterfaceDeclaration(AtLoc, attrs);
@@ -79,15 +81,15 @@ Parser::DeclGroupPtrTy Parser::ParseObjCAtDirectives() {
     SingleDecl = ParseObjCPropertyDynamic(AtLoc);
     break;
   case tok::objc_import:
-    if (getLangOpts().Modules)
+    if (getLangOpts().Modules || getLangOpts().DebuggerSupport)
       return ParseModuleImport(AtLoc);
     Diag(AtLoc, diag::err_atimport);
     SkipUntil(tok::semi);
-    return Actions.ConvertDeclToDeclGroup(0);
+    return Actions.ConvertDeclToDeclGroup(nullptr);
   default:
     Diag(AtLoc, diag::err_unexpected_at);
     SkipUntil(tok::semi);
-    SingleDecl = 0;
+    SingleDecl = nullptr;
     break;
   }
   return Actions.ConvertDeclToDeclGroup(SingleDecl);
@@ -109,7 +111,7 @@ Parser::ParseObjCAtClassDeclaration(SourceLocation atLoc) {
     if (Tok.isNot(tok::identifier)) {
       Diag(Tok, diag::err_expected) << tok::identifier;
       SkipUntil(tok::semi);
-      return Actions.ConvertDeclToDeclGroup(0);
+      return Actions.ConvertDeclToDeclGroup(nullptr);
     }
     ClassNames.push_back(Tok.getIdentifierInfo());
     ClassLocs.push_back(Tok.getLocation());
@@ -121,7 +123,7 @@ Parser::ParseObjCAtClassDeclaration(SourceLocation atLoc) {
 
   // Consume the ';'.
   if (ExpectAndConsume(tok::semi, diag::err_expected_after, "@class"))
-    return Actions.ConvertDeclToDeclGroup(0);
+    return Actions.ConvertDeclToDeclGroup(nullptr);
 
   return Actions.ActOnForwardClassDeclaration(atLoc, ClassNames.data(),
                                               ClassLocs.data(),
@@ -176,44 +178,58 @@ void Parser::CheckNestedObjCContexts(SourceLocation AtLoc)
 ///     __attribute__((objc_exception)) - used by NSException on 64-bit
 ///     __attribute__((objc_root_class))
 ///     __attribute__((objc_subclassing_restricted))
+///     __attribute__((objc_complete_definition))
+///
+///   objc_partial_interface:
+///     objc-partial-interface
+///
+///   objc-partial-interface:
+///     '@' 'partial_interface' identifier objc-superclass[opt]
 ///
 Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
                                               ParsedAttributes &attrs) {
-  assert(Tok.isObjCAtKeyword(tok::objc_interface) &&
-         "ParseObjCAtInterfaceDeclaration(): Expected @interface");
+  assert((Tok.isObjCAtKeyword(tok::objc_interface) ||
+          Tok.isObjCAtKeyword(tok::objc_partial_interface)) &&
+         "ParseObjCAtInterfaceDeclaration(): Expected "
+         "@interface or @partial_interface");
+  bool IsPartialInterfaceDecl =
+    Tok.isObjCAtKeyword(tok::objc_interface) ? false : true;
+  
   CheckNestedObjCContexts(AtLoc);
   ConsumeToken(); // the "interface" identifier
 
   // Code completion after '@interface'.
+  // FIXME Code completion after '@partial_interface'.
   if (Tok.is(tok::code_completion)) {
     Actions.CodeCompleteObjCInterfaceDecl(getCurScope());
     cutOffParsing();
-    return 0;
+    return nullptr;
   }
 
-  MaybeSkipAttributes(tok::objc_interface);
+  MaybeSkipAttributes(!IsPartialInterfaceDecl ? tok::objc_interface : tok::objc_partial_interface);
 
   if (Tok.isNot(tok::identifier)) {
     Diag(Tok, diag::err_expected)
         << tok::identifier; // missing class or category name.
-    return 0;
+    return nullptr;
   }
 
   // We have a class or category name - consume it.
   IdentifierInfo *nameId = Tok.getIdentifierInfo();
   SourceLocation nameLoc = ConsumeToken();
-  if (Tok.is(tok::l_paren) && 
+  if (!IsPartialInterfaceDecl &&
+      Tok.is(tok::l_paren) &&
       !isKnownToBeTypeSpecifier(GetLookAheadToken(1))) { // we have a category.
     
     BalancedDelimiterTracker T(*this, tok::l_paren);
     T.consumeOpen();
 
     SourceLocation categoryLoc;
-    IdentifierInfo *categoryId = 0;
+    IdentifierInfo *categoryId = nullptr;
     if (Tok.is(tok::code_completion)) {
       Actions.CodeCompleteObjCInterfaceCategory(getCurScope(), nameId, nameLoc);
       cutOffParsing();
-      return 0;
+      return nullptr;
     }
     
     // For ObjC2, the category name is optional (not an error).
@@ -224,13 +240,13 @@ Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
     else if (!getLangOpts().ObjC2) {
       Diag(Tok, diag::err_expected)
           << tok::identifier; // missing category name.
-      return 0;
+      return nullptr;
     }
    
     T.consumeClose();
     if (T.getCloseLocation().isInvalid())
-      return 0;
-    
+      return nullptr;
+
     if (!attrs.empty()) { // categories don't support attributes.
       Diag(nameLoc, diag::err_objc_no_attributes_on_category);
       attrs.clear();
@@ -243,7 +259,7 @@ Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
     if (Tok.is(tok::less) &&
         ParseObjCProtocolReferences(ProtocolRefs, ProtocolLocs, true,
                                     LAngleLoc, EndProtoLoc))
-      return 0;
+      return nullptr;
 
     Decl *CategoryType =
     Actions.ActOnStartCategoryInterface(AtLoc,
@@ -261,7 +277,7 @@ Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
     return CategoryType;
   }
   // Parse a class interface.
-  IdentifierInfo *superClassId = 0;
+  IdentifierInfo *superClassId = nullptr;
   SourceLocation superClassLoc;
 
   if (Tok.is(tok::colon)) { // a super class is specified.
@@ -271,17 +287,30 @@ Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
     if (Tok.is(tok::code_completion)) {
       Actions.CodeCompleteObjCSuperclass(getCurScope(), nameId, nameLoc);
       cutOffParsing();
-      return 0;
+      return nullptr;
     }
 
     if (Tok.isNot(tok::identifier)) {
       Diag(Tok, diag::err_expected)
           << tok::identifier; // missing super class name.
-      return 0;
+      return nullptr;
     }
     superClassId = Tok.getIdentifierInfo();
     superClassLoc = ConsumeToken();
   }
+  if (IsPartialInterfaceDecl) {
+    if (Tok.isNot(tok::semi)) {
+      Diag(Tok, diag::err_expected)
+        << tok::semi; // missing semicolon
+      SkipUntil(tok::semi);
+      return 0;
+    }
+    ConsumeToken();
+    Decl *ClsType = Actions.ActOnPartialInterface(AtLoc, nameId, nameLoc,
+                                                  superClassId, superClassLoc);
+    return ClsType;
+  }
+  
   // Next, we need to check for any protocol references.
   SmallVector<Decl *, 8> ProtocolRefs;
   SmallVector<SourceLocation, 8> ProtocolLocs;
@@ -289,7 +318,7 @@ Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
   if (Tok.is(tok::less) &&
       ParseObjCProtocolReferences(ProtocolRefs, ProtocolLocs, true,
                                   LAngleLoc, EndProtoLoc))
-    return 0;
+    return nullptr;
 
   if (Tok.isNot(tok::less))
     Actions.ActOnTypedefedProtocols(ProtocolRefs, superClassId, superClassLoc);
@@ -308,6 +337,37 @@ Decl *Parser::ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
   return ClsType;
 }
 
+/// Add an attribute for a context-sensitive type nullability to the given
+/// declarator.
+static void addContextSensitiveTypeNullability(Parser &P,
+                                               Declarator &D,
+                                               NullabilityKind nullability,
+                                               SourceLocation nullabilityLoc,
+                                               bool &addedToDeclSpec) {
+  // Create the attribute.
+  auto getNullabilityAttr = [&]() -> AttributeList * {
+    return D.getAttributePool().create(
+             P.getNullabilityKeyword(nullability),
+             SourceRange(nullabilityLoc),
+             nullptr, SourceLocation(),
+             nullptr, 0,
+             AttributeList::AS_ContextSensitiveKeyword);
+  };
+
+  if (D.getNumTypeObjects() > 0) {
+    // Add the attribute to the declarator chunk nearest the declarator.
+    auto nullabilityAttr = getNullabilityAttr();
+    DeclaratorChunk &chunk = D.getTypeObject(0);
+    nullabilityAttr->setNext(chunk.getAttrListRef());
+    chunk.getAttrListRef() = nullabilityAttr;
+  } else if (!addedToDeclSpec) {
+    // Otherwise, just put it on the declaration specifiers (if one
+    // isn't there already).
+    D.getMutableDeclSpec().addAttributes(getNullabilityAttr());
+    addedToDeclSpec = true;
+  }
+}
+
 /// The Objective-C property callback.  This should be defined where
 /// it's used, but instead it's been lifted to here to support VS2005.
 struct Parser::ObjCPropertyCallback : FieldCallback {
@@ -320,18 +380,19 @@ public:
   SourceLocation AtLoc;
   SourceLocation LParenLoc;
   tok::ObjCKeywordKind MethodImplKind;
-        
+  bool AddedToDeclSpec;
+      
   ObjCPropertyCallback(Parser &P, 
                        SmallVectorImpl<Decl *> &Props,
                        ObjCDeclSpec &OCDS, SourceLocation AtLoc,
                        SourceLocation LParenLoc,
                        tok::ObjCKeywordKind MethodImplKind) :
     P(P), Props(Props), OCDS(OCDS), AtLoc(AtLoc), LParenLoc(LParenLoc),
-    MethodImplKind(MethodImplKind) {
+    MethodImplKind(MethodImplKind), AddedToDeclSpec(false) {
   }
 
-  void invoke(ParsingFieldDeclarator &FD) {
-    if (FD.D.getIdentifier() == 0) {
+  void invoke(ParsingFieldDeclarator &FD) override {
+    if (FD.D.getIdentifier() == nullptr) {
       P.Diag(AtLoc, diag::err_objc_property_requires_field_name)
         << FD.D.getSourceRange();
       return;
@@ -341,6 +402,13 @@ public:
         << FD.D.getSourceRange();
       return;
     }
+
+    // Map a nullability property attribute to a context-sensitive keyword
+    // attribute.
+    if (OCDS.getPropertyAttributes() & ObjCDeclSpec::DQ_PR_nullability)
+      addContextSensitiveTypeNullability(P, FD.D, OCDS.getNullability(),
+                                         OCDS.getNullabilityLoc(),
+                                         AddedToDeclSpec);
 
     // Install the property declarator into interfaceDecl.
     IdentifierInfo *SelName =
@@ -371,8 +439,7 @@ public:
   }
 };
 
-void Parser::ObjCPropertyCallback::anchor() {
-}
+void Parser::ObjCPropertyCallback::anchor() { }
 
 ///   objc-interface-decl-list:
 ///     empty
@@ -545,6 +612,24 @@ void Parser::ParseObjCInterfaceDeclList(tok::ObjCKeywordKind contextKey,
   Actions.ActOnAtEnd(getCurScope(), AtEnd, allMethods, allTUVariables);
 }
 
+/// Diagnose redundant or conflicting nullability information.
+static void diagnoseRedundantPropertyNullability(Parser &P,
+                                                 ObjCDeclSpec &DS,
+                                                 NullabilityKind nullability,
+                                                 SourceLocation nullabilityLoc){
+  if (DS.getNullability() == nullability) {
+    P.Diag(nullabilityLoc, diag::warn_nullability_duplicate)
+      << static_cast<unsigned>(nullability) << true
+      << SourceRange(DS.getNullabilityLoc());
+    return;
+  }
+
+  P.Diag(nullabilityLoc, diag::err_nullability_conflicting)
+    << static_cast<unsigned>(nullability) << true
+    << static_cast<unsigned>(DS.getNullability()) << true
+    << SourceRange(DS.getNullabilityLoc());
+}
+
 ///   Parse property attribute declarations.
 ///
 ///   property-attr-decl: '(' property-attrlist ')'
@@ -564,6 +649,10 @@ void Parser::ParseObjCInterfaceDeclList(tok::ObjCKeywordKind contextKey,
 ///     strong
 ///     weak
 ///     unsafe_unretained
+///     nonnull
+///     nullable
+///     null_unspecified
+///     null_resettable
 ///
 void Parser::ParseObjCPropertyAttribute(ObjCDeclSpec &DS) {
   assert(Tok.getKind() == tok::l_paren);
@@ -578,7 +667,7 @@ void Parser::ParseObjCPropertyAttribute(ObjCDeclSpec &DS) {
     const IdentifierInfo *II = Tok.getIdentifierInfo();
 
     // If this is not an identifier at all, bail out early.
-    if (II == 0) {
+    if (!II) {
       T.consumeClose();
       return;
     }
@@ -649,6 +738,37 @@ void Parser::ParseObjCPropertyAttribute(ObjCDeclSpec &DS) {
         DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_getter);
         DS.setGetterName(SelIdent);
       }
+    } else if (II->isStr("nonnull")) {
+      if (DS.getPropertyAttributes() & ObjCDeclSpec::DQ_PR_nullability)
+        diagnoseRedundantPropertyNullability(*this, DS,
+                                             NullabilityKind::NonNull,
+                                             Tok.getLocation());
+      DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_nullability);
+      DS.setNullability(Tok.getLocation(), NullabilityKind::NonNull);
+    } else if (II->isStr("nullable")) {
+      if (DS.getPropertyAttributes() & ObjCDeclSpec::DQ_PR_nullability)
+        diagnoseRedundantPropertyNullability(*this, DS,
+                                             NullabilityKind::Nullable,
+                                             Tok.getLocation());
+      DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_nullability);
+      DS.setNullability(Tok.getLocation(), NullabilityKind::Nullable);
+    } else if (II->isStr("null_unspecified")) {
+      if (DS.getPropertyAttributes() & ObjCDeclSpec::DQ_PR_nullability)
+        diagnoseRedundantPropertyNullability(*this, DS,
+                                             NullabilityKind::Unspecified,
+                                             Tok.getLocation());
+      DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_nullability);
+      DS.setNullability(Tok.getLocation(), NullabilityKind::Unspecified);
+    } else if (II->isStr("null_resettable")) {
+      if (DS.getPropertyAttributes() & ObjCDeclSpec::DQ_PR_nullability)
+        diagnoseRedundantPropertyNullability(*this, DS,
+                                             NullabilityKind::Unspecified,
+                                             Tok.getLocation());
+      DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_nullability);
+      DS.setNullability(Tok.getLocation(), NullabilityKind::Unspecified);
+
+      // Also set the null_resettable bit.
+      DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_null_resettable);
     } else {
       Diag(AttrName, diag::err_objc_expected_property_attr) << II;
       SkipUntil(tok::r_paren, StopAtSemi);
@@ -699,7 +819,7 @@ IdentifierInfo *Parser::ParseObjCSelectorPiece(SourceLocation &SelectorLoc) {
 
   switch (Tok.getKind()) {
   default:
-    return 0;
+    return nullptr;
   case tok::ampamp:
   case tok::ampequal:
   case tok::amp:
@@ -718,7 +838,7 @@ IdentifierInfo *Parser::ParseObjCSelectorPiece(SourceLocation &SelectorLoc) {
       SelectorLoc = ConsumeToken();
       return II;
     }
-    return 0; 
+    return nullptr;
   }
       
   case tok::identifier:
@@ -814,6 +934,17 @@ bool Parser::isTokIdentifier_in() const {
 ///     objc-type-qualifier
 ///     objc-type-qualifiers objc-type-qualifier
 ///
+///   objc-type-qualifier:
+///     'in'
+///     'out'
+///     'inout'
+///     'oneway'
+///     'bycopy'
+///     'byref'
+///     'nonnull'
+///     'nullable'
+///     'null_unspecified'
+///
 void Parser::ParseObjCTypeQualifierList(ObjCDeclSpec &DS,
                                         Declarator::TheContext Context) {
   assert(Context == Declarator::ObjCParameterContext ||
@@ -831,10 +962,13 @@ void Parser::ParseObjCTypeQualifierList(ObjCDeclSpec &DS,
 
     const IdentifierInfo *II = Tok.getIdentifierInfo();
     for (unsigned i = 0; i != objc_NumQuals; ++i) {
-      if (II != ObjCTypeQuals[i])
+      if (II != ObjCTypeQuals[i] ||
+          NextToken().is(tok::less) ||
+          NextToken().is(tok::coloncolon))
         continue;
 
       ObjCDeclSpec::ObjCDeclQualifier Qual;
+      NullabilityKind Nullability;
       switch (i) {
       default: llvm_unreachable("Unknown decl qualifier");
       case objc_in:     Qual = ObjCDeclSpec::DQ_In; break;
@@ -843,10 +977,30 @@ void Parser::ParseObjCTypeQualifierList(ObjCDeclSpec &DS,
       case objc_oneway: Qual = ObjCDeclSpec::DQ_Oneway; break;
       case objc_bycopy: Qual = ObjCDeclSpec::DQ_Bycopy; break;
       case objc_byref:  Qual = ObjCDeclSpec::DQ_Byref; break;
+
+      case objc_nonnull: 
+        Qual = ObjCDeclSpec::DQ_CSNullability;
+        Nullability = NullabilityKind::NonNull;
+        break;
+
+      case objc_nullable: 
+        Qual = ObjCDeclSpec::DQ_CSNullability;
+        Nullability = NullabilityKind::Nullable;
+        break;
+
+      case objc_null_unspecified:
+        Qual = ObjCDeclSpec::DQ_CSNullability;
+        Nullability = NullabilityKind::Unspecified;
+        break;
       }
+
+      // FIXME: Diagnose redundant specifiers.
       DS.setObjCDeclQualifier(Qual);
+      if (Qual == ObjCDeclSpec::DQ_CSNullability)
+        DS.setNullability(Tok.getLocation(), Nullability);
+
       ConsumeToken();
-      II = 0;
+      II = nullptr;
       break;
     }
 
@@ -867,7 +1021,7 @@ static void takeDeclAttributes(ParsedAttributes &attrs,
       // Clear out the next pointer.  We're really completely
       // destroying the internal invariants of the declarator here,
       // but it doesn't matter because we're done with it.
-      cur->setNext(0);
+      cur->setNext(nullptr);
       attrs.add(cur);
     }
   }
@@ -898,7 +1052,8 @@ ParsedType Parser::ParseObjCTypeName(ObjCDeclSpec &DS,
                                      ParsedAttributes *paramAttrs) {
   assert(context == Declarator::ObjCParameterContext ||
          context == Declarator::ObjCResultContext);
-  assert((paramAttrs != 0) == (context == Declarator::ObjCParameterContext));
+  assert((paramAttrs != nullptr) ==
+         (context == Declarator::ObjCParameterContext));
 
   assert(Tok.is(tok::l_paren) && "expected (");
 
@@ -923,6 +1078,14 @@ ParsedType Parser::ParseObjCTypeName(ObjCDeclSpec &DS,
 
     // If that's not invalid, extract a type.
     if (!declarator.isInvalidType()) {
+      // Map a nullability specifier to a context-sensitive keyword attribute.
+      bool addedToDeclSpec = false;
+      if (DS.getObjCDeclQualifier() & ObjCDeclSpec::DQ_CSNullability)
+        addContextSensitiveTypeNullability(*this, declarator,
+                                           DS.getNullability(),
+                                           DS.getNullabilityLoc(),
+                                           addedToDeclSpec);
+
       TypeResult type = Actions.ActOnTypeName(getCurScope(), declarator);
       if (!type.isInvalid())
         Ty = type.get();
@@ -938,8 +1101,32 @@ ParsedType Parser::ParseObjCTypeName(ObjCDeclSpec &DS,
       Ident_instancetype = PP.getIdentifierInfo("instancetype");
     
     if (Tok.getIdentifierInfo() == Ident_instancetype) {
-      Ty = Actions.ActOnObjCInstanceType(Tok.getLocation());
-      ConsumeToken();
+      SourceLocation loc = ConsumeToken();
+      Ty = Actions.ActOnObjCInstanceType(loc);
+
+      // Synthesize an abstract declarator so we can use Sema::ActOnTypeName.
+      const char *prevSpec;
+      unsigned diagID;
+      DeclSpec declSpec(AttrFactory);
+      declSpec.setObjCQualifiers(&DS);
+      declSpec.SetTypeSpecType(DeclSpec::TST_typename, loc, prevSpec, diagID,
+                               Ty,
+                               Actions.getASTContext().getPrintingPolicy());
+      declSpec.SetRangeEnd(loc);
+      Declarator declarator(declSpec, context);
+
+      // Map a nullability specifier to a context-sensitive keyword attribute.
+      if (DS.getObjCDeclQualifier() & ObjCDeclSpec::DQ_CSNullability) {
+        bool addedToDeclSpec = false;
+        addContextSensitiveTypeNullability(*this, declarator,
+                                           DS.getNullability(),
+                                           DS.getNullabilityLoc(),
+                                           addedToDeclSpec);
+      }
+
+      TypeResult type = Actions.ActOnTypeName(getCurScope(), declarator);
+      if (!type.isInvalid())
+        Ty = type.get();
     }
   }
 
@@ -995,14 +1182,15 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
     Actions.CodeCompleteObjCMethodDecl(getCurScope(), mType == tok::minus, 
                                        /*ReturnType=*/ ParsedType());
     cutOffParsing();
-    return 0;
+    return nullptr;
   }
 
   // Parse the return type if present.
   ParsedType ReturnType;
   ObjCDeclSpec DSRet;
   if (Tok.is(tok::l_paren))
-    ReturnType = ParseObjCTypeName(DSRet, Declarator::ObjCResultContext, 0);
+    ReturnType = ParseObjCTypeName(DSRet, Declarator::ObjCResultContext,
+                                   nullptr);
 
   // If attributes exist before the method, parse them.
   ParsedAttributes methodAttrs(AttrFactory);
@@ -1013,7 +1201,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
     Actions.CodeCompleteObjCMethodDecl(getCurScope(), mType == tok::minus, 
                                        ReturnType);
     cutOffParsing();
-    return 0;
+    return nullptr;
   }
 
   // Now parse the selector.
@@ -1026,7 +1214,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
       << SourceRange(mLoc, Tok.getLocation());
     // Skip until we get a ; or @.
     SkipUntil(tok::at, StopAtSemi | StopBeforeMatch);
-    return 0;
+    return nullptr;
   }
 
   SmallVector<DeclaratorChunk::ParamInfo, 8> CParamInfo;
@@ -1039,7 +1227,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
     Decl *Result
          = Actions.ActOnMethodDeclaration(getCurScope(), mLoc, Tok.getLocation(),
                                           mType, DSRet, ReturnType, 
-                                          selLoc, Sel, 0, 
+                                          selLoc, Sel, nullptr,
                                           CParamInfo.data(), CParamInfo.size(),
                                           methodAttrs.getList(), MethodImplKind,
                                           false, MethodDefinition);
@@ -1070,7 +1258,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
 
     // If attributes exist before the argument name, parse them.
     // Regardless, collect all the attributes we've parsed so far.
-    ArgInfo.ArgAttrs = 0;
+    ArgInfo.ArgAttrs = nullptr;
     if (getLangOpts().ObjC2) {
       MaybeParseGNUAttributes(paramAttrs);
       ArgInfo.ArgAttrs = paramAttrs.getList();
@@ -1084,7 +1272,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
                                                  /*AtParameterName=*/true,
                                                  ReturnType, KeyIdents);
       cutOffParsing();
-      return 0;
+      return nullptr;
     }
     
     if (Tok.isNot(tok::identifier)) {
@@ -1111,7 +1299,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
                                                  /*AtParameterName=*/false,
                                                  ReturnType, KeyIdents);
       cutOffParsing();
-      return 0;
+      return nullptr;
     }
     
     // Check for another keyword selector.
@@ -1153,7 +1341,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
     CParamInfo.push_back(DeclaratorChunk::ParamInfo(ParmII,
                                                     ParmDecl.getIdentifierLoc(), 
                                                     Param,
-                                                   0));
+                                                    nullptr));
   }
 
   // FIXME: Add support for optional parameter list...
@@ -1162,8 +1350,8 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
     MaybeParseGNUAttributes(methodAttrs);
   
   if (KeyIdents.size() == 0)
-    return 0;
-  
+    return nullptr;
+
   Selector Sel = PP.getSelectorTable().getSelector(KeyIdents.size(),
                                                    &KeyIdents[0]);
   Decl *Result
@@ -1256,7 +1444,7 @@ void Parser::HelperActionsForIvarDeclarations(Decl *interfaceDecl, SourceLocatio
   // for code rewriting tools that need to be aware of the empty list.
   Actions.ActOnFields(getCurScope(), atLoc, interfaceDecl,
                       AllIvarDecls,
-                      T.getOpenLocation(), T.getCloseLocation(), 0);
+                      T.getOpenLocation(), T.getCloseLocation(), nullptr);
 }
 
 ///   objc-class-instance-variables:
@@ -1349,9 +1537,10 @@ void Parser::ParseObjCClassInstanceVariables(Decl *interfaceDecl,
         P(P), IDecl(IDecl), visibility(V), AllIvarDecls(AllIvarDecls) {
       }
 
-      void invoke(ParsingFieldDeclarator &FD) {
+      void invoke(ParsingFieldDeclarator &FD) override {
         P.Actions.ActOnObjCContainerStartDefinition(IDecl);
         // Install the declarator into the interface decl.
+        FD.D.setObjCIvar(true);
         Decl *Field
           = P.Actions.ActOnIvar(P.getCurScope(),
                                 FD.D.getDeclSpec().getSourceRange().getBegin(),
@@ -1511,13 +1700,13 @@ Parser::ParseObjCAtImplementationDeclaration(SourceLocation AtLoc) {
   // We have a class or category name - consume it.
   IdentifierInfo *nameId = Tok.getIdentifierInfo();
   SourceLocation nameLoc = ConsumeToken(); // consume class or category name
-  Decl *ObjCImpDecl = 0;
+  Decl *ObjCImpDecl = nullptr;
 
   if (Tok.is(tok::l_paren)) {
     // we have a category implementation.
     ConsumeParen();
     SourceLocation categoryLoc, rparenLoc;
-    IdentifierInfo *categoryId = 0;
+    IdentifierInfo *categoryId = nullptr;
 
     if (Tok.is(tok::code_completion)) {
       Actions.CodeCompleteObjCImplementationCategory(getCurScope(), nameId, nameLoc);
@@ -1552,7 +1741,7 @@ Parser::ParseObjCAtImplementationDeclaration(SourceLocation AtLoc) {
   } else {
     // We have a class implementation
     SourceLocation superClassLoc;
-    IdentifierInfo *superClassId = 0;
+    IdentifierInfo *superClassId = nullptr;
     if (TryConsumeToken(tok::colon)) {
       // We have a super class
       if (Tok.isNot(tok::identifier)) {
@@ -1620,7 +1809,7 @@ Parser::ObjCImplParsingDataRAII::~ObjCImplParsingDataRAII() {
           << Sema::OCK_Implementation;
     }
   }
-  P.CurParsedObjCImpl = 0;
+  P.CurParsedObjCImpl = nullptr;
   assert(LateParsedObjCMethods.empty());
 }
 
@@ -1657,13 +1846,13 @@ Decl *Parser::ParseObjCAtAliasDeclaration(SourceLocation atLoc) {
   ConsumeToken(); // consume compatibility_alias
   if (Tok.isNot(tok::identifier)) {
     Diag(Tok, diag::err_expected) << tok::identifier;
-    return 0;
+    return nullptr;
   }
   IdentifierInfo *aliasId = Tok.getIdentifierInfo();
   SourceLocation aliasLoc = ConsumeToken(); // consume alias-name
   if (Tok.isNot(tok::identifier)) {
     Diag(Tok, diag::err_expected) << tok::identifier;
-    return 0;
+    return nullptr;
   }
   IdentifierInfo *classId = Tok.getIdentifierInfo();
   SourceLocation classLoc = ConsumeToken(); // consume class-name;
@@ -1692,16 +1881,16 @@ Decl *Parser::ParseObjCPropertySynthesize(SourceLocation atLoc) {
     if (Tok.is(tok::code_completion)) {
       Actions.CodeCompleteObjCPropertyDefinition(getCurScope());
       cutOffParsing();
-      return 0;
+      return nullptr;
     }
     
     if (Tok.isNot(tok::identifier)) {
       Diag(Tok, diag::err_synthesized_property_name);
       SkipUntil(tok::semi);
-      return 0;
+      return nullptr;
     }
-    
-    IdentifierInfo *propertyIvar = 0;
+
+    IdentifierInfo *propertyIvar = nullptr;
     IdentifierInfo *propertyId = Tok.getIdentifierInfo();
     SourceLocation propertyLoc = ConsumeToken(); // consume property name
     SourceLocation propertyIvarLoc;
@@ -1710,7 +1899,7 @@ Decl *Parser::ParseObjCPropertySynthesize(SourceLocation atLoc) {
       if (Tok.is(tok::code_completion)) {
         Actions.CodeCompleteObjCPropertySynthesizeIvar(getCurScope(), propertyId);
         cutOffParsing();
-        return 0;
+        return nullptr;
       }
       
       if (Tok.isNot(tok::identifier)) {
@@ -1727,7 +1916,7 @@ Decl *Parser::ParseObjCPropertySynthesize(SourceLocation atLoc) {
     ConsumeToken(); // consume ','
   }
   ExpectAndConsume(tok::semi, diag::err_expected_after, "@synthesize");
-  return 0;
+  return nullptr;
 }
 
 ///   property-dynamic:
@@ -1745,26 +1934,26 @@ Decl *Parser::ParseObjCPropertyDynamic(SourceLocation atLoc) {
     if (Tok.is(tok::code_completion)) {
       Actions.CodeCompleteObjCPropertyDefinition(getCurScope());
       cutOffParsing();
-      return 0;
+      return nullptr;
     }
     
     if (Tok.isNot(tok::identifier)) {
       Diag(Tok, diag::err_expected) << tok::identifier;
       SkipUntil(tok::semi);
-      return 0;
+      return nullptr;
     }
     
     IdentifierInfo *propertyId = Tok.getIdentifierInfo();
     SourceLocation propertyLoc = ConsumeToken(); // consume property name
     Actions.ActOnPropertyImplDecl(getCurScope(), atLoc, propertyLoc, false,
-                                  propertyId, 0, SourceLocation());
+                                  propertyId, nullptr, SourceLocation());
 
     if (Tok.isNot(tok::comma))
       break;
     ConsumeToken(); // consume ','
   }
   ExpectAndConsume(tok::semi, diag::err_expected_after, "@dynamic");
-  return 0;
+  return nullptr;
 }
 
 ///  objc-throw-statement:
@@ -1782,7 +1971,7 @@ StmtResult Parser::ParseObjCThrowStmt(SourceLocation atLoc) {
   }
   // consume ';'
   ExpectAndConsume(tok::semi, diag::err_expected_after, "@throw");
-  return Actions.ActOnObjCAtThrowStmt(atLoc, Res.take(), getCurScope());
+  return Actions.ActOnObjCAtThrowStmt(atLoc, Res.get(), getCurScope());
 }
 
 /// objc-synchronized-statement:
@@ -1819,7 +2008,7 @@ Parser::ParseObjCSynchronizedStmt(SourceLocation atLoc) {
 
   // Check the @synchronized operand now.
   if (!operand.isInvalid())
-    operand = Actions.ActOnObjCAtSynchronizedOperand(atLoc, operand.take());
+    operand = Actions.ActOnObjCAtSynchronizedOperand(atLoc, operand.get());
 
   // Parse the compound statement within a new scope.
   ParseScope bodyScope(this, Scope::DeclScope);
@@ -1875,7 +2064,7 @@ StmtResult Parser::ParseObjCTryStmt(SourceLocation atLoc) {
 
     SourceLocation AtCatchFinallyLoc = ConsumeToken();
     if (Tok.isObjCAtKeyword(tok::objc_catch)) {
-      Decl *FirstPart = 0;
+      Decl *FirstPart = nullptr;
       ConsumeToken(); // consume catch
       if (Tok.is(tok::l_paren)) {
         ConsumeParen();
@@ -1910,9 +2099,9 @@ StmtResult Parser::ParseObjCTryStmt(SourceLocation atLoc) {
         StmtResult Catch = Actions.ActOnObjCAtCatchStmt(AtCatchFinallyLoc,
                                                               RParenLoc, 
                                                               FirstPart, 
-                                                              CatchBody.take());
+                                                              CatchBody.get());
         if (!Catch.isInvalid())
-          CatchStmts.push_back(Catch.release());
+          CatchStmts.push_back(Catch.get());
         
       } else {
         Diag(AtCatchFinallyLoc, diag::err_expected_lparen_after)
@@ -1933,7 +2122,7 @@ StmtResult Parser::ParseObjCTryStmt(SourceLocation atLoc) {
       if (FinallyBody.isInvalid())
         FinallyBody = Actions.ActOnNullStmt(Tok.getLocation());
       FinallyStmt = Actions.ActOnObjCAtFinallyStmt(AtCatchFinallyLoc,
-                                                   FinallyBody.take());
+                                                   FinallyBody.get());
       catch_or_finally_seen = true;
       break;
     }
@@ -1943,9 +2132,9 @@ StmtResult Parser::ParseObjCTryStmt(SourceLocation atLoc) {
     return StmtError();
   }
   
-  return Actions.ActOnObjCAtTryStmt(atLoc, TryBody.take(), 
+  return Actions.ActOnObjCAtTryStmt(atLoc, TryBody.get(), 
                                     CatchStmts,
-                                    FinallyStmt.take());
+                                    FinallyStmt.get());
 }
 
 /// objc-autoreleasepool-statement:
@@ -1968,7 +2157,7 @@ Parser::ParseObjCAutoreleasePoolStmt(SourceLocation atLoc) {
   if (AutoreleasePoolBody.isInvalid())
     AutoreleasePoolBody = Actions.ActOnNullStmt(Tok.getLocation());
   return Actions.ActOnObjCAutoreleasePoolStmt(atLoc, 
-                                                AutoreleasePoolBody.take());
+                                                AutoreleasePoolBody.get());
 }
 
 /// StashAwayMethodOrFunctionBodyTokens -  Consume the tokens and store them 
@@ -2034,13 +2223,13 @@ Decl *Parser::ParseObjCMethodDefinition() {
 
     // If we didn't find the '{', bail out.
     if (Tok.isNot(tok::l_brace))
-      return 0;
+      return nullptr;
   }
 
   if (!MDecl) {
     ConsumeBrace();
     SkipUntil(tok::r_brace);
-    return 0;
+    return nullptr;
   }
 
   // Allow the rest of sema to find private method decl implementations.
@@ -2070,7 +2259,13 @@ StmtResult Parser::ParseObjCAtStatement(SourceLocation AtLoc) {
 
   if (Tok.isObjCAtKeyword(tok::objc_autoreleasepool))
     return ParseObjCAutoreleasePoolStmt(AtLoc);
-  
+
+  if (Tok.isObjCAtKeyword(tok::objc_import) &&
+      getLangOpts().DebuggerSupport) {
+    SkipUntil(tok::semi);
+    return Actions.ActOnNullStmt(Tok.getLocation());
+  }
+
   ExprResult Res(ParseExpressionWithLeadingAt(AtLoc));
   if (Res.isInvalid()) {
     // If the expression is invalid, skip ahead to the next semicolon. Not
@@ -2098,7 +2293,7 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
     SourceLocation OpLoc = ConsumeToken();
 
     if (!Tok.is(tok::numeric_constant)) {
-      const char *Symbol = 0;
+      const char *Symbol = nullptr;
       switch (Kind) {
       case tok::minus: Symbol = "-"; break;
       case tok::plus: Symbol = "+"; break;
@@ -2115,12 +2310,12 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
     }
     ConsumeToken(); // Consume the literal token.
 
-    Lit = Actions.ActOnUnaryOp(getCurScope(), OpLoc, Kind, Lit.take());
+    Lit = Actions.ActOnUnaryOp(getCurScope(), OpLoc, Kind, Lit.get());
     if (Lit.isInvalid())
       return Lit;
 
     return ParsePostfixExpressionSuffix(
-             Actions.BuildObjCNumericLiteral(AtLoc, Lit.take()));
+             Actions.BuildObjCNumericLiteral(AtLoc, Lit.get()));
   }
 
   case tok::string_literal:    // primary-expression: string-literal
@@ -2153,7 +2348,7 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
     return ParsePostfixExpressionSuffix(ParseObjCBoxedExpr(AtLoc));
           
   default:
-    if (Tok.getIdentifierInfo() == 0)
+    if (Tok.getIdentifierInfo() == nullptr)
       return ExprError(Diag(AtLoc, diag::err_unexpected_at));
 
     switch (Tok.getIdentifierInfo()->getObjCKeywordID()) {
@@ -2164,13 +2359,13 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
     case tok::objc_selector:
       return ParsePostfixExpressionSuffix(ParseObjCSelectorExpression(AtLoc));
       default: {
-        const char *str = 0;
+        const char *str = nullptr;
         if (GetLookAheadToken(1).is(tok::l_brace)) {
           char ch = Tok.getIdentifierInfo()->getNameStart()[0];
           str =  
             ch == 't' ? "try" 
                       : (ch == 'f' ? "finally" 
-                                   : (ch == 'a' ? "autoreleasepool" : 0));
+                                   : (ch == 'a' ? "autoreleasepool" : nullptr));
         }
         if (str) {
           SourceLocation kwLoc = Tok.getLocation();
@@ -2221,7 +2416,7 @@ bool Parser::ParseObjCXXMessageReceiver(bool &IsExpr, void *&TypeOrExpr) {
       return true;
 
     IsExpr = true;
-    TypeOrExpr = Receiver.take();
+    TypeOrExpr = Receiver.get();
     return false;
   }
 
@@ -2247,14 +2442,14 @@ bool Parser::ParseObjCXXMessageReceiver(bool &IsExpr, void *&TypeOrExpr) {
     // instance method.
     ExprResult Receiver = ParseCXXTypeConstructExpression(DS);
     if (!Receiver.isInvalid())
-      Receiver = ParsePostfixExpressionSuffix(Receiver.take());
+      Receiver = ParsePostfixExpressionSuffix(Receiver.get());
     if (!Receiver.isInvalid())
-      Receiver = ParseRHSOfBinaryExpression(Receiver.take(), prec::Comma);
+      Receiver = ParseRHSOfBinaryExpression(Receiver.get(), prec::Comma);
     if (Receiver.isInvalid())
       return true;
 
     IsExpr = true;
-    TypeOrExpr = Receiver.take();
+    TypeOrExpr = Receiver.get();
     return false;
   }
   
@@ -2343,11 +2538,11 @@ ExprResult Parser::ParseObjCMessageExpression() {
     if (Tok.is(tok::identifier) && Tok.getIdentifierInfo() == Ident_super &&
         NextToken().isNot(tok::period) && getCurScope()->isInObjcMethodScope())
       return ParseObjCMessageExpressionBody(LBracLoc, ConsumeToken(),
-                                            ParsedType(), 0);
+                                            ParsedType(), nullptr);
 
     // Parse the receiver, which is either a type or an expression.
     bool IsExpr;
-    void *TypeOrExpr = NULL;
+    void *TypeOrExpr = nullptr;
     if (ParseObjCXXMessageReceiver(IsExpr, TypeOrExpr)) {
       SkipUntil(tok::r_square, StopAtSemi);
       return ExprError();
@@ -2360,7 +2555,7 @@ ExprResult Parser::ParseObjCMessageExpression() {
 
     return ParseObjCMessageExpressionBody(LBracLoc, SourceLocation(), 
                               ParsedType::getFromOpaquePtr(TypeOrExpr),
-                                          0);
+                                          nullptr);
   }
   
   if (Tok.is(tok::identifier)) {
@@ -2373,7 +2568,7 @@ ExprResult Parser::ParseObjCMessageExpression() {
                                        ReceiverType)) {
     case Sema::ObjCSuperMessage:
       return ParseObjCMessageExpressionBody(LBracLoc, ConsumeToken(),
-                                            ParsedType(), 0);
+                                            ParsedType(), nullptr);
 
     case Sema::ObjCClassMessage:
       if (!ReceiverType) {
@@ -2384,8 +2579,8 @@ ExprResult Parser::ParseObjCMessageExpression() {
       ConsumeToken(); // the type name
 
       return ParseObjCMessageExpressionBody(LBracLoc, SourceLocation(), 
-                                            ReceiverType, 0);
-        
+                                            ReceiverType, nullptr);
+
     case Sema::ObjCInstanceMessage:
       // Fall through to parse an expression.
       break;
@@ -2400,7 +2595,7 @@ ExprResult Parser::ParseObjCMessageExpression() {
   }
 
   return ParseObjCMessageExpressionBody(LBracLoc, SourceLocation(),
-                                        ParsedType(), Res.take());
+                                        ParsedType(), Res.get());
 }
 
 /// \brief Parse the remainder of an Objective-C message following the
@@ -2521,7 +2716,7 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
       }
 
       // We have a valid expression.
-      KeyExprs.push_back(Res.release());
+      KeyExprs.push_back(Res.get());
 
       // Code completion after each argument.
       if (Tok.is(tok::code_completion)) {
@@ -2565,7 +2760,7 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
       }
 
       // We have a valid expression.
-      KeyExprs.push_back(Res.release());
+      KeyExprs.push_back(Res.get());
     }
   } else if (!selIdent) {
     Diag(Tok, diag::err_expected) << tok::identifier; // missing selector name.
@@ -2616,7 +2811,7 @@ ExprResult Parser::ParseObjCStringLiteral(SourceLocation AtLoc) {
   SmallVector<SourceLocation, 4> AtLocs;
   ExprVector AtStrings;
   AtLocs.push_back(AtLoc);
-  AtStrings.push_back(Res.release());
+  AtStrings.push_back(Res.get());
 
   while (Tok.is(tok::at)) {
     AtLocs.push_back(ConsumeToken()); // eat the @.
@@ -2629,7 +2824,7 @@ ExprResult Parser::ParseObjCStringLiteral(SourceLocation AtLoc) {
     if (Lit.isInvalid())
       return Lit;
 
-    AtStrings.push_back(Lit.release());
+    AtStrings.push_back(Lit.get());
   }
 
   return Actions.ParseObjCStringLiteral(&AtLocs[0], AtStrings.data(),
@@ -2656,7 +2851,7 @@ ExprResult Parser::ParseObjCCharacterLiteral(SourceLocation AtLoc) {
     return Lit;
   }
   ConsumeToken(); // Consume the literal token.
-  return Actions.BuildObjCNumericLiteral(AtLoc, Lit.take());
+  return Actions.BuildObjCNumericLiteral(AtLoc, Lit.get());
 }
 
 /// ParseObjCNumericLiteral -
@@ -2670,7 +2865,7 @@ ExprResult Parser::ParseObjCNumericLiteral(SourceLocation AtLoc) {
     return Lit;
   }
   ConsumeToken(); // Consume the literal token.
-  return Actions.BuildObjCNumericLiteral(AtLoc, Lit.take());
+  return Actions.BuildObjCNumericLiteral(AtLoc, Lit.get());
 }
 
 /// ParseObjCBoxedExpr -
@@ -2693,9 +2888,9 @@ Parser::ParseObjCBoxedExpr(SourceLocation AtLoc) {
   // Wrap the sub-expression in a parenthesized expression, to distinguish
   // a boxed expression from a literal.
   SourceLocation LPLoc = T.getOpenLocation(), RPLoc = T.getCloseLocation();
-  ValueExpr = Actions.ActOnParenExpr(LPLoc, RPLoc, ValueExpr.take());
+  ValueExpr = Actions.ActOnParenExpr(LPLoc, RPLoc, ValueExpr.get());
   return Actions.BuildObjCBoxedExpr(SourceRange(AtLoc, RPLoc),
-                                    ValueExpr.take());
+                                    ValueExpr.get());
 }
 
 ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
@@ -2719,7 +2914,7 @@ ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
     if (Res.isInvalid())
       return true;
 
-    ElementExprs.push_back(Res.release());
+    ElementExprs.push_back(Res.get());
 
     if (Tok.is(tok::comma))
       ConsumeToken(); // Eat the ','.
@@ -2838,7 +3033,7 @@ Parser::ParseObjCProtocolExpression(SourceLocation AtLoc) {
 }
 
 ///     objc-selector-expression
-///       @selector '(' objc-keyword-selector ')'
+///       @selector '(' '('[opt] objc-keyword-selector ')'[opt] ')'
 ExprResult Parser::ParseObjCSelectorExpression(SourceLocation AtLoc) {
   SourceLocation SelectorLoc = ConsumeToken();
 
@@ -2850,7 +3045,10 @@ ExprResult Parser::ParseObjCSelectorExpression(SourceLocation AtLoc) {
   
   BalancedDelimiterTracker T(*this, tok::l_paren);
   T.consumeOpen();
-
+  bool HasOptionalParen = Tok.is(tok::l_paren);
+  if (HasOptionalParen)
+    ConsumeParen();
+  
   if (Tok.is(tok::code_completion)) {
     Actions.CodeCompleteObjCSelector(getCurScope(), KeyIdents);
     cutOffParsing();
@@ -2863,12 +3061,13 @@ ExprResult Parser::ParseObjCSelectorExpression(SourceLocation AtLoc) {
     return ExprError(Diag(Tok, diag::err_expected) << tok::identifier);
 
   KeyIdents.push_back(SelIdent);
+  
   unsigned nColons = 0;
   if (Tok.isNot(tok::r_paren)) {
     while (1) {
       if (TryConsumeToken(tok::coloncolon)) { // Handle :: in C++.
         ++nColons;
-        KeyIdents.push_back(0);
+        KeyIdents.push_back(nullptr);
       } else if (ExpectAndConsume(tok::colon)) // Otherwise expect ':'.
         return ExprError();
       ++nColons;
@@ -2890,11 +3089,14 @@ ExprResult Parser::ParseObjCSelectorExpression(SourceLocation AtLoc) {
         break;
     }
   }
+  if (HasOptionalParen && Tok.is(tok::r_paren))
+    ConsumeParen(); // ')'
   T.consumeClose();
   Selector Sel = PP.getSelectorTable().getSelector(nColons, &KeyIdents[0]);
   return Actions.ParseObjCSelectorExpression(Sel, AtLoc, SelectorLoc,
                                              T.getOpenLocation(),
-                                             T.getCloseLocation());
+                                             T.getCloseLocation(),
+                                             !HasOptionalParen);
  }
 
 void Parser::ParseLexedObjCMethodDefs(LexedMethod &LM, bool parseMethod) {
@@ -2934,11 +3136,11 @@ void Parser::ParseLexedObjCMethodDefs(LexedMethod &LM, bool parseMethod) {
   else
     Actions.ActOnStartOfFunctionDef(getCurScope(), MCDecl);
   if (Tok.is(tok::kw_try))
-    MCDecl = ParseFunctionTryBlock(MCDecl, BodyScope);
+    ParseFunctionTryBlock(MCDecl, BodyScope);
   else {
     if (Tok.is(tok::colon))
       ParseConstructorInitializer(MCDecl);
-    MCDecl = ParseFunctionStatementBody(MCDecl, BodyScope);
+    ParseFunctionStatementBody(MCDecl, BodyScope);
   }
   
   if (Tok.getLocation() != OrigLoc) {

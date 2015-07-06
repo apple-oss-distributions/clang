@@ -8,8 +8,6 @@
 Clang_Use_Assertions   := 0
 # Select default optimized mode, valid values are '0' and '1'.
 Clang_Use_Optimized    := 1
-# Select clang driver mode, valid values are 'Production' and 'Development'.
-Clang_Driver_Mode      := Production
 # Select optimization flags to use.
 Clang_Optimize_Option  := -O2 -fno-stack-protector
 # Select linker options to use.
@@ -23,7 +21,7 @@ Clang_Final_Extra_Options :=
 # Build all LLVM tools; not just clang?
 Clang_Build_All        := 0
 # Set the Clang version.
-Clang_Version          := 6.0
+Clang_Version          := 6.1.0
 # Enable bootstrap.
 Clang_Enable_Bootstrap := 1
 # Enable automatic order file generation, when using buildit.

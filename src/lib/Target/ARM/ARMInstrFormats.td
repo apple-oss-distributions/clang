@@ -203,6 +203,16 @@ def msr_mask : Operand<i32> {
   let ParserMatchClass = MSRMaskOperand;
 }
 
+def BankedRegOperand : AsmOperandClass {
+  let Name = "BankedReg";
+  let ParserMethod = "parseBankedRegOperand";
+}
+def banked_reg : Operand<i32> {
+  let PrintMethod = "printBankedRegOperand";
+  let DecoderMethod = "DecodeBankedReg";
+  let ParserMatchClass = BankedRegOperand;
+}
+
 // Shift Right Immediate - A shift right immediate is encoded differently from
 // other shift immediates. The imm6 field is encoded like so:
 //
@@ -212,25 +222,25 @@ def msr_mask : Operand<i32> {
 //     32       imm6<5> = '1', 32 - <imm> is encoded in imm6<4:0>
 //     64       64 - <imm> is encoded in imm6<5:0>
 def shr_imm8_asm_operand : ImmAsmOperand { let Name = "ShrImm8"; }
-def shr_imm8  : Operand<i32> {
+def shr_imm8  : Operand<i32>, ImmLeaf<i32, [{ return Imm > 0 && Imm <= 8; }]> {
   let EncoderMethod = "getShiftRight8Imm";
   let DecoderMethod = "DecodeShiftRight8Imm";
   let ParserMatchClass = shr_imm8_asm_operand;
 }
 def shr_imm16_asm_operand : ImmAsmOperand { let Name = "ShrImm16"; }
-def shr_imm16 : Operand<i32> {
+def shr_imm16 : Operand<i32>, ImmLeaf<i32, [{ return Imm > 0 && Imm <= 16; }]> {
   let EncoderMethod = "getShiftRight16Imm";
   let DecoderMethod = "DecodeShiftRight16Imm";
   let ParserMatchClass = shr_imm16_asm_operand;
 }
 def shr_imm32_asm_operand : ImmAsmOperand { let Name = "ShrImm32"; }
-def shr_imm32 : Operand<i32> {
+def shr_imm32 : Operand<i32>, ImmLeaf<i32, [{ return Imm > 0 && Imm <= 32; }]> {
   let EncoderMethod = "getShiftRight32Imm";
   let DecoderMethod = "DecodeShiftRight32Imm";
   let ParserMatchClass = shr_imm32_asm_operand;
 }
 def shr_imm64_asm_operand : ImmAsmOperand { let Name = "ShrImm64"; }
-def shr_imm64 : Operand<i32> {
+def shr_imm64 : Operand<i32>, ImmLeaf<i32, [{ return Imm > 0 && Imm <= 64; }]> {
   let EncoderMethod = "getShiftRight64Imm";
   let DecoderMethod = "DecodeShiftRight64Imm";
   let ParserMatchClass = shr_imm64_asm_operand;
@@ -476,6 +486,10 @@ class AsI<dag oops, dag iops, Format f, InstrItinClass itin,
 class AXI<dag oops, dag iops, Format f, InstrItinClass itin,
           string asm, list<dag> pattern>
   : XI<oops, iops, AddrModeNone, 4, IndexModeNone, f, itin,
+       asm, "", pattern>;
+class AXIM<dag oops, dag iops, AddrMode am, Format f, InstrItinClass itin,
+          string asm, list<dag> pattern>
+  : XI<oops, iops, am, 4, IndexModeNone, f, itin,
        asm, "", pattern>;
 class AInoP<dag oops, dag iops, Format f, InstrItinClass itin,
             string opc, string asm, list<dag> pattern>
@@ -1418,37 +1432,6 @@ class VFPXI<dag oops, dag iops, AddrMode am, int sz,
   list<Predicate> Predicates = [HasVFP2];
 }
 
-// ARMv8 A32 VFP Scalar Floating-point with cond
-class VFPV8A32cond<dag oops, dag iops, AddrMode am, int sz,
-               IndexMode im, Format f, InstrItinClass itin,
-               string opc, string asm, string cstr, list<dag> pattern>
-  : InstARM<am, sz, im, f, VFPDomain, cstr, itin> {
-  bits<4> p;
-  let Inst{31-28} = p;
-  let OutOperandList = oops;
-  let InOperandList = !con(iops, (ins pred:$p));
-  let AsmString = !strconcat(opc, "${p}", asm);
-  let Pattern = pattern;
-  let PostEncoderMethod = "VFPThumb2PostEncoder";
-  let DecoderNamespace = "VFP";
-  list<Predicate> Predicates = [HasV8];
-}
-
-// ARMv8 A32 VFP Scalar Floating-point with cond
-class VFPV8A32const<dag oops, dag iops, AddrMode am, int sz,
-               IndexMode im, Format f, InstrItinClass itin,
-               string opc, string asm, string cstr, list<dag> pattern>
-  : InstARM<am, sz, im, f, VFPDomain, cstr, itin> {
-  let Inst{31-28} = 0b1111;
-  let InOperandList = iops;
-  let OutOperandList = oops;
-  let AsmString = !strconcat(opc, asm);
-  let Pattern = pattern;
-  let PostEncoderMethod = "VFPThumb2PostEncoder";
-  let DecoderNamespace = "VFP";
-  list<Predicate> Predicates = [HasV8];
-}
-
 class VFPAI<dag oops, dag iops, Format f, InstrItinClass itin,
             string opc, string asm, list<dag> pattern>
   : VFPI<oops, iops, AddrModeNone, 4, IndexModeNone, f, itin,
@@ -1692,37 +1675,10 @@ class ADbInp<bits<5> opcod1, bits<2> opcod2, bit opcod3, dag oops, dag iops,
   let Predicates = [HasVFP2, HasDPVFP];
 }
 
-// ARMv8 A32, Double precision, binary, cond
-class ADbIv8A32cond<bits<5> opcod1, bits<2> opcod2, bit op6, bit op4, dag oops,
-                dag iops, InstrItinClass itin, string opc, string asm,
-                list<dag> pattern>
-  : VFPV8A32cond<oops, iops, AddrModeNone, 4, IndexModeNone, VFPBinaryFrm, itin,
-             opc, asm, "", pattern> {
-
-  // Instruction operands.
-  bits<5> Dd;
-  bits<5> Dn;
-  bits<5> Dm;
-  // Encode instruction operands.
-  let Inst{3-0}   = Dm{3-0};
-  let Inst{5}     = Dm{4};
-  let Inst{19-16} = Dn{3-0};
-  let Inst{7}     = Dn{4};
-  let Inst{15-12} = Dd{3-0};
-  let Inst{22}    = Dd{4};
-
-  let Inst{27-23} = opcod1;
-  let Inst{21-20} = opcod2;
-  let Inst{11-9}  = 0b101;
-  let Inst{8}     = 1;          // Double precision
-  let Inst{6}     = op6;
-  let Inst{4}     = op4;
-}
-
 // Single precision, unary, predicated
 class ASuI<bits<5> opcod1, bits<2> opcod2, bits<4> opcod3, bits<2> opcod4,
            bit opcod5, dag oops, dag iops, InstrItinClass itin, string opc,
-           string asm, list<dag> pattern, bit isDouble = 0b0>
+           string asm, list<dag> pattern>
   : VFPAI<oops, iops, VFPUnaryFrm, itin, opc, asm, pattern> {
   // Instruction operands.
   bits<5> Sd;
@@ -1738,7 +1694,7 @@ class ASuI<bits<5> opcod1, bits<2> opcod2, bits<4> opcod3, bits<2> opcod4,
   let Inst{21-20} = opcod2;
   let Inst{19-16} = opcod3;
   let Inst{11-9}  = 0b101;
-  let Inst{8}     = isDouble;
+  let Inst{8}     = 0;          // Single precision
   let Inst{7-6}   = opcod4;
   let Inst{4}     = opcod5;
 }
@@ -2083,7 +2039,7 @@ class N2V<bits<2> op24_23, bits<2> op21_20, bits<2> op19_18, bits<2> op17_16,
 // Same as N2V but not predicated.
 class N2Vnp<bits<2> op19_18, bits<2> op17_16, bits<3> op10_8, bit op7, bit op6,
             dag oops, dag iops, InstrItinClass itin, string OpcodeStr,
-            string Dt, ValueType ResTy, ValueType OpTy, list<dag> pattern>
+            string Dt, list<dag> pattern>
    : NeonInp<oops, iops, AddrModeNone, IndexModeNone, N2RegFrm, itin,
              OpcodeStr, Dt, "$Vd, $Vm", "", pattern> {
   bits<5> Vd;
@@ -2192,8 +2148,7 @@ class N3V<bit op24, bit op23, bits<2> op21_20, bits<4> op11_8, bit op6, bit op4,
 
 class N3Vnp<bits<5> op27_23, bits<2> op21_20, bits<4> op11_8, bit op6,
                 bit op4, dag oops, dag iops,Format f, InstrItinClass itin,
-                string OpcodeStr, string Dt, ValueType ResTy, ValueType OpTy,
-                SDPatternOperator IntOp, bit Commutable, list<dag> pattern>
+                string OpcodeStr, string Dt, list<dag> pattern>
   : NeonInp<oops, iops, AddrModeNone, IndexModeNone, f, itin, OpcodeStr,
             Dt, "$Vd, $Vn, $Vm", "", pattern> {
   bits<5> Vd;

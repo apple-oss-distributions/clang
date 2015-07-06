@@ -16,6 +16,7 @@ add_clang_library(clangSema
   Sema.cpp
   SemaAccess.cpp
   SemaAttr.cpp
+  SemaAPINotes.cpp
   SemaCXXScopeSpec.cpp
   SemaCast.cpp
   SemaChecking.cpp
@@ -48,32 +49,12 @@ add_clang_library(clangSema
   SemaTemplateVariadic.cpp
   SemaType.cpp
   TypeLocBuilder.cpp
-  )
 
-add_dependencies(clangSema
-  ClangARMNeon
-  ClangARM64SIMD 
-  ClangAttrClasses
-  ClangAttrList
-  ClangAttrParsedAttrList
-  ClangAttrParsedAttrKinds
-  ClangAttrParsedAttrImpl
-  ClangAttrSpellingListIndex
-  ClangAttrTemplateInstantiate
-  ClangCommentNodes
-  ClangDeclNodes
-  ClangDiagnosticAST
-  ClangDiagnosticComment
-  ClangDiagnosticCommon
-  ClangDiagnosticParse
-  ClangDiagnosticSema
-  ClangStmtNodes
-  )
-
-target_link_libraries(clangSema
+  LINK_LIBS
   clangAST
   clangAnalysis
   clangBasic
   clangEdit
   clangLex
+  clangAPINotes
   )

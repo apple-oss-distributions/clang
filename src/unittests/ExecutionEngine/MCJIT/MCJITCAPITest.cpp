@@ -35,9 +35,6 @@ static uint8_t *roundTripAllocateCodeSection(void *object, uintptr_t size,
                                              unsigned sectionID,
                                              const char *sectionName) {
   didCallAllocateCodeSection = true;
-  // FIXME: this should go through AllocateDataSection, and does on trunk.
-  if (!strcmp(sectionName, "__compact_unwind"))
-    didAllocateCompactUnwindSection = true;
   return static_cast<SectionMemoryManager*>(object)->allocateCodeSection(
     size, alignment, sectionID, sectionName);
 }
@@ -142,17 +139,17 @@ protected:
 
     // The operating systems below are known to be sufficiently incompatible
     // that they will fail the MCJIT C API tests.
-    UnsupportedOSs.push_back(Triple::Cygwin);
+    UnsupportedEnvironments.push_back(Triple::Cygnus);
   }
   
   virtual void SetUp() {
     didCallAllocateCodeSection = false;
     didAllocateCompactUnwindSection = false;
     didCallYield = false;
-    Module = 0;
-    Function = 0;
-    Engine = 0;
-    Error = 0;
+    Module = nullptr;
+    Function = nullptr;
+    Engine = nullptr;
+    Error = nullptr;
   }
   
   virtual void TearDown() {
@@ -167,8 +164,8 @@ protected:
     
     LLVMSetTarget(Module, HostTriple.c_str());
     
-    Function = LLVMAddFunction(
-      Module, "simple_function", LLVMFunctionType(LLVMInt32Type(), 0, 0, 0));
+    Function = LLVMAddFunction(Module, "simple_function",
+                               LLVMFunctionType(LLVMInt32Type(), nullptr,0, 0));
     LLVMSetFunctionCallConv(Function, LLVMCCallConv);
     
     LLVMBasicBlockRef entry = LLVMAppendBasicBlock(Function, "entry");
@@ -193,8 +190,8 @@ protected:
       LLVMFunctionType(LLVMVoidType(), stackmapParamTypes, 2, 1));
     LLVMSetLinkage(stackmap, LLVMExternalLinkage);
     
-    Function = LLVMAddFunction(
-      Module, "simple_function", LLVMFunctionType(LLVMInt32Type(), 0, 0, 0));
+    Function = LLVMAddFunction(Module, "simple_function",
+                              LLVMFunctionType(LLVMInt32Type(), nullptr, 0, 0));
     
     LLVMBasicBlockRef entry = LLVMAppendBasicBlock(Function, "entry");
     LLVMBuilderRef builder = LLVMCreateBuilder();
@@ -212,7 +209,6 @@ protected:
     LLVMDisposeBuilder(builder);
   }
   
-
   void buildModuleWithCodeAndData() {
     Module = LLVMModuleCreateWithName("simple_module");
     
@@ -223,8 +219,8 @@ protected:
     LLVMSetInitializer(GlobalVar, LLVMConstInt(LLVMInt32Type(), 42, 0));
     
     {
-        Function = LLVMAddFunction(
-          Module, "getGlobal", LLVMFunctionType(LLVMInt32Type(), 0, 0, 0));
+        Function = LLVMAddFunction(Module, "getGlobal",
+                              LLVMFunctionType(LLVMInt32Type(), nullptr, 0, 0));
         LLVMSetFunctionCallConv(Function, LLVMCCallConv);
         
         LLVMBasicBlockRef Entry = LLVMAppendBasicBlock(Function, "entry");
@@ -372,7 +368,7 @@ TEST_F(MCJITCAPITest, custom_memory_manager) {
 
 TEST_F(MCJITCAPITest, stackmap_creates_compact_unwind_on_darwin) {
   SKIP_UNSUPPORTED_PLATFORM;
-
+  
   // This test is also not supported on non-x86 platforms.
   if (Triple(HostTriple).getArch() != Triple::x86_64)
     return;
@@ -382,7 +378,7 @@ TEST_F(MCJITCAPITest, stackmap_creates_compact_unwind_on_darwin) {
   useRoundTripSectionMemoryManager();
   buildMCJITEngine();
   buildAndRunOptPasses();
-
+  
   union {
     void *raw;
     int (*usable)();
@@ -416,7 +412,7 @@ TEST_F(MCJITCAPITest, reserve_allocation_space) {
   Options.MCJMM = wrap(MM);
   buildMCJITEngine();
   buildAndRunPasses();
-
+  
   union {
     void *raw;
     int (*usable)();
@@ -445,7 +441,7 @@ TEST_F(MCJITCAPITest, yield) {
   buildMCJITOptions();
   buildMCJITEngine();
   LLVMContextRef C = LLVMGetGlobalContext();
-  LLVMContextSetYieldCallback(C, yield, NULL);
+  LLVMContextSetYieldCallback(C, yield, nullptr);
   buildAndRunPasses();
 
   union {

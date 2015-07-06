@@ -26,7 +26,7 @@ namespace {
 class ModuleDependencyListener : public ASTReaderListener {
   ModuleDependencyCollector &Collector;
 
-  llvm::error_code copyToRoot(StringRef Src);
+  std::error_code copyToRoot(StringRef Src);
 public:
   ModuleDependencyListener(ModuleDependencyCollector &Collector)
       : Collector(Collector) {}
@@ -38,7 +38,7 @@ public:
 }
 
 void ModuleDependencyCollector::attachToASTReader(ASTReader &R) {
-  R.addListener(new ModuleDependencyListener(*this));
+  R.addListener(llvm::make_unique<ModuleDependencyListener>(*this));
 }
 
 void ModuleDependencyCollector::writeFileMap() {
@@ -49,7 +49,7 @@ void ModuleDependencyCollector::writeFileMap() {
   llvm::sys::path::append(Dest, "vfs.yaml");
 
   std::string ErrorInfo;
-  llvm::raw_fd_ostream OS(Dest.c_str(), ErrorInfo);
+  llvm::raw_fd_ostream OS(Dest.c_str(), ErrorInfo, llvm::sys::fs::F_Text);
   if (!ErrorInfo.empty()) {
     setHasErrors();
     return;
@@ -57,54 +57,27 @@ void ModuleDependencyCollector::writeFileMap() {
   VFSWriter.write(OS);
 }
 
-/// Remove traversal (ie, . or ..) from the given absolute path.
-static void removePathTraversal(SmallVectorImpl<char> &Path) {
-  using namespace llvm::sys;
-  SmallVector<StringRef, 16> ComponentStack;
-  StringRef P(Path.data(), Path.size());
-
-  // Skip the root path, then look for traversal in the components.
-  StringRef Rel = path::relative_path(P);
-  for (auto I = path::begin(Rel), E = path::end(Rel); I != E; ++I) {
-    StringRef C = *I;
-    if (C == ".")
-      continue;
-    if (C == "..") {
-      assert(ComponentStack.size() && "Path traverses out of parent");
-      ComponentStack.pop_back();
-    } else
-      ComponentStack.push_back(C);
-  }
-
-  // The stack is now the path without any directory traversal.
-  SmallString<256> Buffer = path::root_path(P);
-  for (StringRef C : ComponentStack)
-    path::append(Buffer, C);
-
-  // Put the result in Path.
-  Path.swap(Buffer);
-}
-
-llvm::error_code ModuleDependencyListener::copyToRoot(StringRef Src) {
+std::error_code ModuleDependencyListener::copyToRoot(StringRef Src) {
   using namespace llvm::sys;
 
   // We need an absolute path to append to the root.
   SmallString<256> AbsoluteSrc = Src;
   fs::make_absolute(AbsoluteSrc);
-  removePathTraversal(AbsoluteSrc);
+  FileManager::removeDotPaths(AbsoluteSrc);
 
   // Build the destination path.
   SmallString<256> Dest = Collector.getDest();
   path::append(Dest, path::relative_path(AbsoluteSrc));
 
   // Copy the file into place.
-  if (llvm::error_code EC = fs::create_directories(path::parent_path(Dest)))
+  if (std::error_code EC = fs::create_directories(path::parent_path(Dest),
+                                                   /*IgnoreExisting=*/true))
     return EC;
-  if (llvm::error_code EC = fs::copy_file(AbsoluteSrc.str(), Dest.str()))
+  if (std::error_code EC = fs::copy_file(AbsoluteSrc.str(), Dest.str()))
     return EC;
   // Use the absolute path under the root for the file mapping.
   Collector.addFileMapping(AbsoluteSrc.str(), Dest.str());
-  return llvm::error_code();
+  return std::error_code();
 }
 
 bool ModuleDependencyListener::visitInputFile(StringRef Filename, bool IsSystem,

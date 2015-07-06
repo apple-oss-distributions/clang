@@ -34,6 +34,7 @@ add_dependencies(clang-modernize
   )
 
 target_link_libraries(clang-modernize
+  clangAPINotes
   clangAST
   clangASTMatchers
   clangBasic

@@ -7,7 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Driver/Driver.h"
+#include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Job.h"
+#include "clang/Driver/Tool.h"
+#include "clang/Driver/ToolChain.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -59,16 +63,11 @@ static int skipArgs(const char *Flag) {
   // These flags are treated as a single argument (e.g., -F<Dir>).
   StringRef FlagRef(Flag);
   if (FlagRef.startswith("-F") || FlagRef.startswith("-I") ||
-      FlagRef.startswith("-fmodules-cache-path="))
+      FlagRef.startswith("-fmodules-cache-path=") ||
+      FlagRef.startswith("-fapinotes-cache-path="))
     return 1;
 
   return 0;
-}
-
-static bool quoteNextArg(const char *flag) {
-  return llvm::StringSwitch<bool>(flag)
-    .Case("-D", true)
-    .Default(false);
 }
 
 static void PrintArg(raw_ostream &OS, const char *Arg, bool Quote) {
@@ -90,27 +89,46 @@ static void PrintArg(raw_ostream &OS, const char *Arg, bool Quote) {
 }
 
 void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
-                    bool CrashReport) const {
-  OS << " \"" << Executable << '"';
+                    CrashReportInfo *CrashInfo) const {
+  // Always quote the exe.
+  OS << ' ';
+  PrintArg(OS, Executable, /*Quote=*/true);
+
+  StringRef MainFilename;
+  // We'll need the argument to -main-file-name to find the input file name.
+  if (CrashInfo)
+    for (size_t I = 0, E = Arguments.size(); I + 1 < E; ++I)
+      if (StringRef(Arguments[I]).equals("-main-file-name"))
+        MainFilename = Arguments[I + 1];
 
   for (size_t i = 0, e = Arguments.size(); i < e; ++i) {
     const char *const Arg = Arguments[i];
 
-    if (CrashReport) {
+    if (CrashInfo) {
       if (int Skip = skipArgs(Arg)) {
         i += Skip - 1;
+        continue;
+      } else if (llvm::sys::path::filename(Arg) == MainFilename &&
+                 (i == 0 || StringRef(Arguments[i - 1]) != "-main-file-name")) {
+        // Replace the input file name with the crashinfo's file name.
+        OS << ' ';
+        StringRef ShortName = llvm::sys::path::filename(CrashInfo->Filename);
+        PrintArg(OS, ShortName.str().c_str(), Quote);
         continue;
       }
     }
 
     OS << ' ';
     PrintArg(OS, Arg, Quote);
-
-    if (CrashReport && quoteNextArg(Arg) && i + 1 < e) {
-      OS << ' ';
-      PrintArg(OS, Arguments[++i], true);
-    }
   }
+
+  if (CrashInfo && !CrashInfo->VFSPath.empty()) {
+    OS << ' ';
+    PrintArg(OS, "-ivfsoverlay", Quote);
+    OS << ' ';
+    PrintArg(OS, CrashInfo->VFSPath.str().c_str(), Quote);
+  }
+
   OS << Terminator;
 }
 
@@ -120,9 +138,9 @@ int Command::Execute(const StringRef **Redirects, std::string *ErrMsg,
   Argv.push_back(Executable);
   for (size_t i = 0, e = Arguments.size(); i != e; ++i)
     Argv.push_back(Arguments[i]);
-  Argv.push_back(0);
+  Argv.push_back(nullptr);
 
-  return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ 0,
+  return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ nullptr,
                                    Redirects, /*secondsToWait*/ 0,
                                    /*memoryLimit*/ 0, ErrMsg, ExecutionFailed);
 }
@@ -135,10 +153,10 @@ FallbackCommand::FallbackCommand(const Action &Source_, const Tool &Creator_,
 }
 
 void FallbackCommand::Print(raw_ostream &OS, const char *Terminator,
-                            bool Quote, bool CrashReport) const {
-  Command::Print(OS, "", Quote, CrashReport);
+                            bool Quote, CrashReportInfo *CrashInfo) const {
+  Command::Print(OS, "", Quote, CrashInfo);
   OS << " ||";
-  Fallback->Print(OS, Terminator, Quote, CrashReport);
+  Fallback->Print(OS, Terminator, Quote, CrashInfo);
 }
 
 static bool ShouldFallback(int ExitCode) {
@@ -160,6 +178,9 @@ int FallbackCommand::Execute(const StringRef **Redirects, std::string *ErrMsg,
   if (ExecutionFailed)
     *ExecutionFailed = false;
 
+  const Driver &D = getCreator().getToolChain().getDriver();
+  D.Diag(diag::warn_drv_invoking_fallback) << Fallback->getExecutable();
+
   int SecondaryStatus = Fallback->Execute(Redirects, ErrMsg, ExecutionFailed);
   return SecondaryStatus;
 }
@@ -172,9 +193,9 @@ JobList::~JobList() {
 }
 
 void JobList::Print(raw_ostream &OS, const char *Terminator, bool Quote,
-                    bool CrashReport) const {
+                    CrashReportInfo *CrashInfo) const {
   for (const_iterator it = begin(), ie = end(); it != ie; ++it)
-    (*it)->Print(OS, Terminator, Quote, CrashReport);
+    (*it)->Print(OS, Terminator, Quote, CrashInfo);
 }
 
 void JobList::clear() {

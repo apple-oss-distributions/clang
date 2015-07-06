@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LIB_ASMPARSER_LLLEXER_H
-#define LIB_ASMPARSER_LLLEXER_H
+#ifndef LLVM_LIB_ASMPARSER_LLLEXER_H
+#define LLVM_LIB_ASMPARSER_LLLEXER_H
 
 #include "LLToken.h"
 #include "llvm/ADT/APFloat.h"
@@ -63,6 +63,10 @@ namespace llvm {
 
     bool Error(LocTy L, const Twine &Msg) const;
     bool Error(const Twine &Msg) const { return Error(getLoc(), Msg); }
+
+    void Warning(LocTy WarningLoc, const Twine &Msg) const;
+    void Warning(const Twine &Msg) const { return Warning(getLoc(), Msg); }
+
     std::string getFilename() const;
 
   private:
@@ -77,6 +81,7 @@ namespace llvm {
     lltok::Kind LexDigitOrNegative();
     lltok::Kind LexPositive();
     lltok::Kind LexAt();
+    lltok::Kind LexDollar();
     lltok::Kind LexExclaim();
     lltok::Kind LexPercent();
     lltok::Kind LexQuote();

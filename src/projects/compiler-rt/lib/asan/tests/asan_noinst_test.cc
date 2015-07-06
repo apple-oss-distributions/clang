@@ -16,6 +16,7 @@
 #include "asan_internal.h"
 #include "asan_mapping.h"
 #include "asan_test_utils.h"
+#include <sanitizer/allocator_interface.h>
 
 #include <assert.h>
 #include <stdio.h>
@@ -25,12 +26,10 @@
 #include <vector>
 #include <limits>
 
-extern "C" {
-// Set specific ASan options for uninstrumented unittest.
-const char* __asan_default_options() {
-  return "allow_reexec=0";
-}
-}  // extern "C"
+// ATTENTION!
+// Please don't call intercepted functions (including malloc() and friends)
+// in this test. The static runtime library is linked explicitly (without
+// -fsanitize=address), thus the interceptors do not work correctly on OS X.
 
 // Make sure __asan_init is called before any test case is run.
 struct AsanInitCaller {
@@ -44,19 +43,19 @@ TEST(AddressSanitizer, InternalSimpleDeathTest) {
 
 static void MallocStress(size_t n) {
   u32 seed = my_rand();
-  StackTrace stack1;
-  stack1.trace[0] = 0xa123;
-  stack1.trace[1] = 0xa456;
+  BufferedStackTrace stack1;
+  stack1.trace_buffer[0] = 0xa123;
+  stack1.trace_buffer[1] = 0xa456;
   stack1.size = 2;
 
-  StackTrace stack2;
-  stack2.trace[0] = 0xb123;
-  stack2.trace[1] = 0xb456;
+  BufferedStackTrace stack2;
+  stack2.trace_buffer[0] = 0xb123;
+  stack2.trace_buffer[1] = 0xb456;
   stack2.size = 2;
 
-  StackTrace stack3;
-  stack3.trace[0] = 0xc123;
-  stack3.trace[1] = 0xc456;
+  BufferedStackTrace stack3;
+  stack3.trace_buffer[0] = 0xc123;
+  stack3.trace_buffer[1] = 0xc456;
   stack3.size = 2;
 
   std::vector<void *> vec;
@@ -132,8 +131,8 @@ TEST(AddressSanitizer, DISABLED_InternalPrintShadow) {
 }
 
 TEST(AddressSanitizer, QuarantineTest) {
-  StackTrace stack;
-  stack.trace[0] = 0x890;
+  BufferedStackTrace stack;
+  stack.trace_buffer[0] = 0x890;
   stack.size = 1;
 
   const int size = 1024;
@@ -153,8 +152,8 @@ TEST(AddressSanitizer, QuarantineTest) {
 void *ThreadedQuarantineTestWorker(void *unused) {
   (void)unused;
   u32 seed = my_rand();
-  StackTrace stack;
-  stack.trace[0] = 0x890;
+  BufferedStackTrace stack;
+  stack.trace_buffer[0] = 0x890;
   stack.size = 1;
 
   for (size_t i = 0; i < 1000; i++) {
@@ -168,20 +167,20 @@ void *ThreadedQuarantineTestWorker(void *unused) {
 // destroyed.
 TEST(AddressSanitizer, ThreadedQuarantineTest) {
   const int n_threads = 3000;
-  size_t mmaped1 = __asan_get_heap_size();
+  size_t mmaped1 = __sanitizer_get_heap_size();
   for (int i = 0; i < n_threads; i++) {
     pthread_t t;
     PTHREAD_CREATE(&t, NULL, ThreadedQuarantineTestWorker, 0);
     PTHREAD_JOIN(t, 0);
-    size_t mmaped2 = __asan_get_heap_size();
+    size_t mmaped2 = __sanitizer_get_heap_size();
     EXPECT_LT(mmaped2 - mmaped1, 320U * (1 << 20));
   }
 }
 
 void *ThreadedOneSizeMallocStress(void *unused) {
   (void)unused;
-  StackTrace stack;
-  stack.trace[0] = 0x890;
+  BufferedStackTrace stack;
+  stack.trace_buffer[0] = 0x890;
   stack.size = 1;
   const size_t kNumMallocs = 1000;
   for (int iter = 0; iter < 1000; iter++) {
@@ -216,4 +215,46 @@ TEST(AddressSanitizer, ShadowRegionIsPoisonedTest) {
   EXPECT_EQ(ptr, __asan_region_is_poisoned(ptr, 100));
   ptr = kHighShadowBeg + 200;
   EXPECT_EQ(ptr, __asan_region_is_poisoned(ptr, 100));
+}
+
+// Test __asan_load1 & friends.
+TEST(AddressSanitizer, LoadStoreCallbacks) {
+  typedef void (*CB)(uptr p);
+  CB cb[2][5] = {
+      {
+        __asan_load1, __asan_load2, __asan_load4, __asan_load8, __asan_load16,
+      }, {
+        __asan_store1, __asan_store2, __asan_store4, __asan_store8,
+        __asan_store16,
+      }
+  };
+
+  uptr buggy_ptr;
+
+  __asan_test_only_reported_buggy_pointer = &buggy_ptr;
+  BufferedStackTrace stack;
+  stack.trace_buffer[0] = 0x890;
+  stack.size = 1;
+
+  for (uptr len = 16; len <= 32; len++) {
+    char *ptr = (char*) __asan::asan_malloc(len, &stack);
+    uptr p = reinterpret_cast<uptr>(ptr);
+    for (uptr is_write = 0; is_write <= 1; is_write++) {
+      for (uptr size_log = 0; size_log <= 4; size_log++) {
+        uptr size = 1 << size_log;
+        CB call = cb[is_write][size_log];
+        // Iterate only size-aligned offsets.
+        for (uptr offset = 0; offset <= len; offset += size) {
+          buggy_ptr = 0;
+          call(p + offset);
+          if (offset + size <= len)
+            EXPECT_EQ(buggy_ptr, 0U);
+          else
+            EXPECT_EQ(buggy_ptr, p + offset);
+        }
+      }
+    }
+    __asan::asan_free(ptr, &stack, __asan::FROM_MALLOC);
+  }
+  __asan_test_only_reported_buggy_pointer = 0;
 }

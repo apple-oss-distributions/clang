@@ -7,10 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_SA_CHECKERS_SELECTOREXTRAS
-#define LLVM_CLANG_SA_CHECKERS_SELECTOREXTRAS
+#ifndef LLVM_CLANG_LIB_STATICANALYZER_CHECKERS_SELECTOREXTRAS_H
+#define LLVM_CLANG_LIB_STATICANALYZER_CHECKERS_SELECTOREXTRAS_H
 
 #include "clang/AST/ASTContext.h"
+#include <cstdarg>
 
 namespace clang {
 namespace ento {

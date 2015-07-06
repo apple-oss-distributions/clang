@@ -75,6 +75,9 @@ def FeatureCrypto : SubtargetFeature<"crypto", "HasCrypto", "true",
                           [FeatureNEON]>;
 def FeatureCRC : SubtargetFeature<"crc", "HasCRC", "true",
                           "Enable support for CRC instructions">;
+
+// Cyclone has preferred instructions for zeroing VFP registers, which can
+// execute in 0 cycles.
 def FeatureZCZeroing : SubtargetFeature<"zcz", "HasZeroCycleZeroing", "true",
                                         "Has zero-cycle zeroing instructions">;
 
@@ -143,10 +146,6 @@ def FeatureRClass : SubtargetFeature<"rclass", "ARMProcClass", "RClass",
 def FeatureAClass : SubtargetFeature<"aclass", "ARMProcClass", "AClass",
                                      "Is application profile ('A' series)">;
 
-// VFP Scalar FP extension.
-def FeatureVFPScalarFP : SubtargetFeature<"VFPScalarFP", "HasVFPScalarFP", 
-                                          "true", "Supports v8 VFP Scalar FP">;
-
 // Special TRAP encoding for NaCl, which looks like a TRAP in Thumb too.
 // See ARMInstrInfo.td for details.
 def FeatureNaClTrap : SubtargetFeature<"nacl-trap", "UseNaClTrap", "true",
@@ -173,13 +172,10 @@ def HasV6T2Ops  : SubtargetFeature<"v6t2", "HasV6T2Ops", "true",
 def HasV7Ops    : SubtargetFeature<"v7", "HasV7Ops", "true",
                                    "Support ARM v7 instructions",
                                    [HasV6T2Ops, FeaturePerfMon]>;
-// FIXME: ARMv8 for A32 has more than VFPScalarFP.  It also has: 1) Partial
-// deprecation of IT.  2) Load-Acquire/Store-Release  3) Advanced SIMD FP
-// 4) Crypto 5) System Instructions
 def HasV8Ops    : SubtargetFeature<"v8", "HasV8Ops", "true",
                                    "Support ARM v8 instructions",
                                    [HasV7Ops, FeatureVirtualization,
-                                   FeatureMP, FeatureVFPScalarFP]>;
+                                    FeatureMP]>;
 
 //===----------------------------------------------------------------------===//
 // ARM Processors supported.
@@ -346,8 +342,6 @@ def : ProcessorModel<"cortex-a5",   CortexA8Model,
                                     [ProcA5, HasV7Ops, FeatureNEON, FeatureDB,
                                      FeatureVFP4, FeatureDSPThumb2,
                                      FeatureHasRAS, FeatureAClass]>;
-// FIXME: Cortex-A7 definition is similar to A8, but it has VFP4 and div
-// instructions.
 def : ProcessorModel<"cortex-a7",   CortexA8Model,
                                     [ProcA7, HasV7Ops, FeatureNEON, FeatureDB,
                                      FeatureDSPThumb2, FeatureHasRAS,
@@ -374,6 +368,13 @@ def : ProcessorModel<"cortex-a12", CortexA9Model,
 // FIXME: A15 has currently the same ProcessorModel as A9.
 def : ProcessorModel<"cortex-a15",   CortexA9Model,
                                     [ProcA15, HasV7Ops, FeatureNEON, FeatureDB,
+                                     FeatureDSPThumb2, FeatureHasRAS,
+                                     FeatureAClass]>;
+
+// FIXME: krait has currently the same Schedule model as A9
+def : ProcessorModel<"krait",       CortexA9Model,
+                                    [ProcKrait, HasV7Ops,
+                                     FeatureNEON, FeatureDB,
                                      FeatureDSPThumb2, FeatureHasRAS,
                                      FeatureAClass]>;
 
@@ -411,20 +412,13 @@ def : ProcNoItin<"cortex-a57",      [ProcA57, HasV8Ops, FeatureAClass,
                                     FeatureDB, FeatureFPARMv8,
                                     FeatureNEON, FeatureDSPThumb2]>;
 
-// Cyclone Processors.
+// Cyclone is very similar to swift
 def : ProcessorModel<"cyclone",     SwiftModel,
                                     [ProcSwift, HasV8Ops, HasV7Ops,
                                      FeatureCrypto, FeatureFPARMv8,
                                      FeatureDB,FeatureDSPThumb2,
                                      FeatureHasRAS, FeatureAvoidRegSoReg,
                                      FeatureZCZeroing]>;
-
-// FIXME: krait has currently the same Schedule model as A9
-def : ProcessorModel<"krait",       CortexA9Model,
-                                    [ProcKrait, HasV7Ops,
-                                     FeatureNEON, FeatureDB,
-                                     FeatureDSPThumb2, FeatureHasRAS,
-                                     FeatureAClass]>;
 
 //===----------------------------------------------------------------------===//
 // Register File Description

@@ -16,6 +16,7 @@
 
 #include "llvm/Support/PointerLikeTypeTraits.h"
 #include "llvm/Support/type_traits.h"
+#include <tuple>
 
 namespace llvm {
 
@@ -129,6 +130,20 @@ template<> struct DenseMapInfo<long long> {
   }
 };
 
+/// Simplistic combination of 32-bit hash values into 32-bit hash values.
+static inline unsigned combineHashValue(unsigned a, unsigned b) {
+  uint64_t key = (uint64_t)a << 32 | (uint64_t)b;
+  key += ~(key << 32);
+  key ^= (key >> 22);
+  key += ~(key << 13);
+  key ^= (key >> 8);
+  key += (key << 3);
+  key ^= (key >> 15);
+  key += ~(key << 27);
+  key ^= (key >> 31);
+  return (unsigned)key;
+}
+
 // Provide DenseMapInfo for all pairs whose members have info.
 template<typename T, typename U>
 struct DenseMapInfo<std::pair<T, U> > {
@@ -145,23 +160,194 @@ struct DenseMapInfo<std::pair<T, U> > {
                           SecondInfo::getTombstoneKey());
   }
   static unsigned getHashValue(const Pair& PairVal) {
-    uint64_t key = (uint64_t)FirstInfo::getHashValue(PairVal.first) << 32
-          | (uint64_t)SecondInfo::getHashValue(PairVal.second);
-    key += ~(key << 32);
-    key ^= (key >> 22);
-    key += ~(key << 13);
-    key ^= (key >> 8);
-    key += (key << 3);
-    key ^= (key >> 15);
-    key += ~(key << 27);
-    key ^= (key >> 31);
-    return (unsigned)key;
+    return combineHashValue(FirstInfo::getHashValue(PairVal.first),
+                            SecondInfo::getHashValue(PairVal.second));
   }
   static bool isEqual(const Pair &LHS, const Pair &RHS) {
     return FirstInfo::isEqual(LHS.first, RHS.first) &&
            SecondInfo::isEqual(LHS.second, RHS.second);
   }
 };
+
+#if LLVM_HAS_VARIADIC_TEMPLATES
+template<typename ...Ts>
+struct DenseMapInfo<std::tuple<Ts...> > {
+  typedef std::tuple<Ts...> Tuple;
+
+  /// Helper class
+  template<unsigned N> struct UnsignedC { };
+
+  static inline Tuple getEmptyKey() {
+    return Tuple(DenseMapInfo<Ts>::getEmptyKey()...);
+  }
+
+  static inline Tuple getTombstoneKey() {
+    return Tuple(DenseMapInfo<Ts>::getTombstoneKey()...);
+  }
+
+  template<unsigned I>
+  static unsigned getHashValueImpl(const Tuple& values, std::false_type) {
+    typedef typename std::tuple_element<I, Tuple>::type EltType;
+    std::integral_constant<bool, I+1 == sizeof...(Ts)> atEnd;
+    return combineHashValue(
+             DenseMapInfo<EltType>::getHashValue(std::get<I>(values)),
+             getHashValueImpl<I+1>(values, atEnd));
+  }
+
+  template<unsigned I>
+  static unsigned getHashValueImpl(const Tuple& values, std::true_type) {
+    return 0;
+  }
+
+  static unsigned getHashValue(const std::tuple<Ts...>& values) {
+    std::integral_constant<bool, 0 == sizeof...(Ts)> atEnd;
+    return getHashValueImpl<0>(values, atEnd);
+  }
+
+  template<unsigned I>
+  static bool isEqualImpl(const Tuple &lhs, const Tuple &rhs, std::false_type) {
+    typedef typename std::tuple_element<I, Tuple>::type EltType;
+    std::integral_constant<bool, I+1 == sizeof...(Ts)> atEnd;
+    return DenseMapInfo<EltType>::isEqual(std::get<I>(lhs), std::get<I>(rhs))
+           && isEqualImpl<I+1>(lhs, rhs, atEnd);
+  }
+
+  template<unsigned I>
+  static bool isEqualImpl(const Tuple &lhs, const Tuple &rhs, std::true_type) {
+    return true;
+  }
+
+  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
+    std::integral_constant<bool, 0 == sizeof...(Ts)> atEnd;
+    return isEqualImpl<0>(lhs, rhs, atEnd);
+  }
+};
+#else
+template<typename T1>
+struct DenseMapInfo<std::tuple<T1> > {
+  typedef std::tuple<T1> Tuple;
+
+  /// Helper class
+  static inline Tuple getEmptyKey() {
+    return Tuple(DenseMapInfo<T1>::getEmptyKey());
+  }
+
+  static inline Tuple getTombstoneKey() {
+    return Tuple(DenseMapInfo<T1>::getTombstoneKey());
+  }
+
+  static unsigned getHashValue(const Tuple& values) {
+    return DenseMapInfo<T1>::getHashValue(std::get<0>(values));
+  }
+
+  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
+    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs));
+  }
+};
+
+template<typename T1, typename T2>
+struct DenseMapInfo<std::tuple<T1, T2> > {
+  typedef std::tuple<T1, T2> Tuple;
+
+  /// Helper class
+  static inline Tuple getEmptyKey() {
+    return Tuple(DenseMapInfo<T1>::getEmptyKey(),
+                 DenseMapInfo<T2>::getEmptyKey());
+  }
+
+  static inline Tuple getTombstoneKey() {
+    return Tuple(DenseMapInfo<T1>::getTombstoneKey(),
+                 DenseMapInfo<T2>::getTombstoneKey());
+  }
+
+  static unsigned getHashValue(const Tuple& values) {
+    return combineHashValue(
+             DenseMapInfo<T1>::getHashValue(std::get<0>(values)),
+             DenseMapInfo<T2>::getHashValue(std::get<1>(values)));
+  }
+
+  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
+    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs)) &&
+           DenseMapInfo<T2>::isEqual(std::get<1>(lhs), std::get<1>(rhs));
+  }
+};
+
+template<typename T1, typename T2, typename T3>
+struct DenseMapInfo<std::tuple<T1, T2, T3> > {
+  typedef std::tuple<T1, T2, T3> Tuple;
+
+  /// Helper class
+  static inline Tuple getEmptyKey() {
+    return Tuple(DenseMapInfo<T1>::getEmptyKey(),
+                 DenseMapInfo<T2>::getEmptyKey(),
+                 DenseMapInfo<T3>::getEmptyKey());
+  }
+
+  static inline Tuple getTombstoneKey() {
+    return Tuple(DenseMapInfo<T1>::getTombstoneKey(),
+                 DenseMapInfo<T2>::getTombstoneKey(),
+                 DenseMapInfo<T3>::getTombstoneKey());
+  }
+
+  static unsigned getHashValue(const Tuple& values) {
+    unsigned result = DenseMapInfo<T1>::getHashValue(std::get<0>(values));
+    result = combineHashValue(
+               result,
+               DenseMapInfo<T2>::getHashValue(std::get<1>(values)));
+    result = combineHashValue(
+               result,
+               DenseMapInfo<T3>::getHashValue(std::get<2>(values)));
+    return result;
+  }
+
+  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
+    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs)) &&
+           DenseMapInfo<T2>::isEqual(std::get<1>(lhs), std::get<1>(rhs)) &&
+           DenseMapInfo<T3>::isEqual(std::get<2>(lhs), std::get<2>(rhs));
+  }
+};
+
+template<typename T1, typename T2, typename T3, typename T4>
+struct DenseMapInfo<std::tuple<T1, T2, T3, T4> > {
+  typedef std::tuple<T1, T2, T3, T4> Tuple;
+
+  /// Helper class
+  static inline Tuple getEmptyKey() {
+    return Tuple(DenseMapInfo<T1>::getEmptyKey(),
+                 DenseMapInfo<T2>::getEmptyKey(),
+                 DenseMapInfo<T3>::getEmptyKey(),
+                 DenseMapInfo<T4>::getEmptyKey());
+  }
+
+  static inline Tuple getTombstoneKey() {
+    return Tuple(DenseMapInfo<T1>::getTombstoneKey(),
+                 DenseMapInfo<T2>::getTombstoneKey(),
+                 DenseMapInfo<T3>::getTombstoneKey(),
+                 DenseMapInfo<T4>::getTombstoneKey());
+  }
+
+  static unsigned getHashValue(const Tuple& values) {
+    unsigned result = DenseMapInfo<T1>::getHashValue(std::get<0>(values));
+    result = combineHashValue(
+               result,
+               DenseMapInfo<T2>::getHashValue(std::get<1>(values)));
+    result = combineHashValue(
+               result,
+               DenseMapInfo<T3>::getHashValue(std::get<2>(values)));
+    result = combineHashValue(
+               result,
+               DenseMapInfo<T4>::getHashValue(std::get<3>(values)));
+    return result;
+  }
+
+  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
+    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs)) &&
+           DenseMapInfo<T2>::isEqual(std::get<1>(lhs), std::get<1>(rhs)) &&
+           DenseMapInfo<T3>::isEqual(std::get<2>(lhs), std::get<2>(rhs)) &&
+           DenseMapInfo<T4>::isEqual(std::get<3>(lhs), std::get<3>(rhs));
+  }
+};
+#endif
 
 } // end namespace llvm
 

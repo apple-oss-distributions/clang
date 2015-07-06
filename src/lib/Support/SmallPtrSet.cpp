@@ -43,7 +43,7 @@ bool SmallPtrSetImplBase::insert_imp(const void * Ptr) {
         return false;
     
     // Nope, there isn't.  If we stay small, just 'pushback' now.
-    if (NumElements < CurArraySize-1) {
+    if (NumElements < CurArraySize) {
       SmallArray[NumElements++] = Ptr;
       return true;
     }
@@ -103,7 +103,7 @@ const void * const *SmallPtrSetImplBase::FindBucketFor(const void *Ptr) const {
   unsigned ArraySize = CurArraySize;
   unsigned ProbeAmt = 1;
   const void *const *Array = CurArray;
-  const void *const *Tombstone = 0;
+  const void *const *Tombstone = nullptr;
   while (1) {
     // Found Ptr's bucket?
     if (Array[Bucket] == Ptr)
@@ -186,7 +186,6 @@ SmallPtrSetImplBase::SmallPtrSetImplBase(const void **SmallStorage,
   NumTombstones = that.NumTombstones;
 }
 
-#if LLVM_HAS_RVALUE_REFERENCES
 SmallPtrSetImplBase::SmallPtrSetImplBase(const void **SmallStorage,
                                          unsigned SmallSize,
                                          SmallPtrSetImplBase &&that) {
@@ -201,12 +200,11 @@ SmallPtrSetImplBase::SmallPtrSetImplBase(const void **SmallStorage,
   if (that.isSmall()) {
     CurArray = SmallArray;
     memcpy(CurArray, that.CurArray, sizeof(void *) * CurArraySize);
-    return;
+  } else {
+    // Otherwise, we steal the large memory allocation and no copy is needed.
+    CurArray = that.CurArray;
+    that.CurArray = that.SmallArray;
   }
-
-  // Otherwise, we steal the large memory allocation and no copy is needed.
-  CurArray = that.CurArray;
-  that.CurArray = that.SmallArray;
 
   // Make the "that" object small and empty.
   that.CurArraySize = SmallSize;
@@ -214,7 +212,6 @@ SmallPtrSetImplBase::SmallPtrSetImplBase(const void **SmallStorage,
   that.NumElements = 0;
   that.NumTombstones = 0;
 }
-#endif
 
 /// CopyFrom - implement operator= from a smallptrset that has the same pointer
 /// type, but may have a different small size.
@@ -254,7 +251,6 @@ void SmallPtrSetImplBase::CopyFrom(const SmallPtrSetImplBase &RHS) {
   NumTombstones = RHS.NumTombstones;
 }
 
-#if LLVM_HAS_RVALUE_REFERENCES
 void SmallPtrSetImplBase::MoveFrom(unsigned SmallSize,
                                    SmallPtrSetImplBase &&RHS) {
   assert(&RHS != this && "Self-move should be handled by the caller.");
@@ -282,7 +278,6 @@ void SmallPtrSetImplBase::MoveFrom(unsigned SmallSize,
   RHS.NumElements = 0;
   RHS.NumTombstones = 0;
 }
-#endif
 
 void SmallPtrSetImplBase::swap(SmallPtrSetImplBase &RHS) {
   if (this == &RHS) return;

@@ -8,7 +8,6 @@ add_tablegen(clang-tblgen CLANG
   ClangCommentHTMLTagsEmitter.cpp
   ClangDiagnosticsEmitter.cpp
   ClangSACheckersEmitter.cpp
-  ARM64NeonEmitter.cpp
   NeonEmitter.cpp
   TableGen.cpp
   )

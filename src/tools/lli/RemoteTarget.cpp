@@ -13,7 +13,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "RemoteTarget.h"
-#include "RemoteTargetExternal.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/Memory.h"
@@ -21,28 +20,6 @@
 #include <string>
 
 using namespace llvm;
-
-// Static methods
-RemoteTarget *RemoteTarget::createRemoteTarget() {
-  return new RemoteTarget;
-}
-
-RemoteTarget *RemoteTarget::createExternalRemoteTarget(std::string &ChildName) {
-#ifdef LLVM_ON_UNIX
-  return new RemoteTargetExternal(ChildName);
-#else
-  return 0;
-#endif
-}
-
-bool RemoteTarget::hostSupportsExternalRemoteTarget() {
-#ifdef LLVM_ON_UNIX
-  return true;
-#else
-  return false;
-#endif
-}
-
 
 ////////////////////////////////////////////////////////////////////////////////
 // Simulated remote execution
@@ -53,15 +30,16 @@ bool RemoteTarget::hostSupportsExternalRemoteTarget() {
 
 bool RemoteTarget::allocateSpace(size_t Size, unsigned Alignment,
                                  uint64_t &Address) {
-  sys::MemoryBlock *Prev = Allocations.size() ? &Allocations.back() : NULL;
+  sys::MemoryBlock *Prev = Allocations.size() ? &Allocations.back() : nullptr;
   sys::MemoryBlock Mem = sys::Memory::AllocateRWX(Size, Prev, &ErrorMsg);
-  if (Mem.base() == NULL)
+  if (Mem.base() == nullptr)
     return false;
   if ((uintptr_t)Mem.base() % Alignment) {
     ErrorMsg = "unable to allocate sufficiently aligned memory";
     return false;
   }
   Address = reinterpret_cast<uint64_t>(Mem.base());
+  Allocations.push_back(Mem);
   return true;
 }
 

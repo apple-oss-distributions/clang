@@ -1,6 +1,7 @@
 set( LLVM_LINK_COMPONENTS
   ${LLVM_TARGETS_TO_BUILD}
   Analysis
+  CodeGen
   Core
   IPA
   IPO
@@ -10,52 +11,41 @@ set( LLVM_LINK_COMPONENTS
   MCParser
   ObjCARCOpts
   Option
-  ProfileData
   ScalarOpts
   Support
   TransformUtils
   Vectorize
   )
 
-# Support plugins.
-set(LLVM_NO_DEAD_STRIP 1)
+option(CLANG_PLUGIN_SUPPORT "Build clang with plugin support" ON)
+
+# Support plugins. This must be before add_clang_executable as it reads
+# LLVM_NO_DEAD_STRIP.
+if(CLANG_PLUGIN_SUPPORT)
+  set(LLVM_NO_DEAD_STRIP 1)
+endif()
 
 add_clang_executable(clang
   driver.cpp
   cc1_main.cpp
   cc1as_main.cpp
+  apinotes_main.cpp
   )
 
 target_link_libraries(clang
   clangBasic
+  clangAPINotes
   clangDriver
   clangFrontend
   clangFrontendTool
   )
 
-if(CLANG_ENABLE_STATIC_ANALYZER)
-  target_link_libraries(clang
-    clangStaticAnalyzerFrontend
-    clangStaticAnalyzerCheckers
-    clangStaticAnalyzerCore
-    )
-endif()
-
-if(CLANG_ENABLE_ARCMT)
-  target_link_libraries(clang
-    clangARCMigrate
-    )
-endif()
-
-if(CLANG_ENABLE_REWRITER)
-  target_link_libraries(clang
-    clangRewriteCore
-    clangRewriteFrontend
-    )
-endif()
-
 set_target_properties(clang PROPERTIES VERSION ${CLANG_EXECUTABLE_VERSION})
-set_target_properties(clang PROPERTIES ENABLE_EXPORTS 1)
+
+# Support plugins.
+if(CLANG_PLUGIN_SUPPORT)
+  set_target_properties(clang PROPERTIES ENABLE_EXPORTS 1)
+endif()
 
 add_dependencies(clang clang-headers)
 
@@ -123,3 +113,11 @@ if(CLANG_ORDER_FILE)
   target_link_libraries(clang "-Wl,-order_file,${CLANG_ORDER_FILE}")
 endif()
 
+if(WITH_POLLY AND LINK_POLLY_INTO_TOOLS)
+  target_link_libraries(clang Polly)
+  if(POLLY_LINK_LIBS)
+    foreach(lib ${POLLY_LINK_LIBS})
+      target_link_libraries(clang ${lib})
+    endforeach(lib)
+  endif(POLLY_LINK_LIBS)
+endif(WITH_POLLY AND LINK_POLLY_INTO_TOOLS)

@@ -20,6 +20,7 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
+#include "sanitizer_common/sanitizer_tls_get_addr.h"
 #include "lsan/lsan_common.h"
 
 namespace __asan {
@@ -78,7 +79,7 @@ AsanThread *AsanThread::Create(thread_callback_t start_routine,
                                void *arg) {
   uptr PageSize = GetPageSizeCached();
   uptr size = RoundUpTo(sizeof(AsanThread), PageSize);
-  AsanThread *thread = (AsanThread*)MmapOrDie(size, __FUNCTION__);
+  AsanThread *thread = (AsanThread*)MmapOrDie(size, __func__);
   thread->start_routine_ = start_routine;
   thread->arg_ = arg;
 
@@ -97,7 +98,7 @@ void AsanThread::Destroy() {
   VReport(1, "T%d exited\n", tid);
 
   malloc_storage().CommitBack();
-  if (flags()->use_sigaltstack) UnsetAlternateSignalStack();
+  if (common_flags()->use_sigaltstack) UnsetAlternateSignalStack();
   asanThreadRegistry().FinishThread(tid);
   FlushToDeadThreadStats(&stats_);
   // We also clear the shadow on thread destruction because
@@ -107,6 +108,7 @@ void AsanThread::Destroy() {
   DeleteFakeStack(tid);
   uptr size = RoundUpTo(sizeof(AsanThread), GetPageSizeCached());
   UnmapOrDie(this, size);
+  DTLS_Destroy();
 }
 
 // We want to create the FakeStack lazyly on the first use, but not eralier
@@ -121,7 +123,7 @@ FakeStack *AsanThread::AsyncSignalSafeLazyInitFakeStack() {
   // 1   -- being initialized
   // ptr -- initialized
   // This CAS checks if the state was 0 and if so changes it to state 1,
-  // if that was successfull, it initilizes the pointer.
+  // if that was successful, it initializes the pointer.
   if (atomic_compare_exchange_strong(
       reinterpret_cast<atomic_uintptr_t *>(&fake_stack_), &old_val, 1UL,
       memory_order_relaxed)) {
@@ -139,7 +141,10 @@ FakeStack *AsanThread::AsyncSignalSafeLazyInitFakeStack() {
 }
 
 void AsanThread::Init() {
+  fake_stack_ = 0;  // Will be initialized lazily if needed.
+  CHECK_EQ(this->stack_size(), 0U);
   SetThreadStackAndTls();
+  CHECK_GT(this->stack_size(), 0U);
   CHECK(AddrIsInMem(stack_bottom_));
   CHECK(AddrIsInMem(stack_top_ - 1));
   ClearShadowForThreadStackAndTLS();
@@ -147,14 +152,13 @@ void AsanThread::Init() {
   VReport(1, "T%d: stack [%p,%p) size 0x%zx; local=%p\n", tid(),
           (void *)stack_bottom_, (void *)stack_top_, stack_top_ - stack_bottom_,
           &local);
-  fake_stack_ = 0;  // Will be initialized lazily if needed.
   AsanPlatformThreadInit();
 }
 
 thread_return_t AsanThread::ThreadStart(uptr os_id) {
   Init();
   asanThreadRegistry().StartThread(tid(), os_id, 0);
-  if (flags()->use_sigaltstack) SetAlternateSignalStack();
+  if (common_flags()->use_sigaltstack) SetAlternateSignalStack();
 
   if (!start_routine_) {
     // start_routine_ == 0 if we're on the main thread or on one of the
@@ -194,17 +198,18 @@ void AsanThread::ClearShadowForThreadStackAndTLS() {
     PoisonShadow(tls_begin_, tls_end_ - tls_begin_, 0);
 }
 
-const char *AsanThread::GetFrameNameByAddr(uptr addr, uptr *offset,
-                                           uptr *frame_pc) {
+bool AsanThread::GetStackFrameAccessByAddr(uptr addr,
+                                           StackFrameAccess *access) {
   uptr bottom = 0;
   if (AddrIsInStack(addr)) {
     bottom = stack_bottom();
   } else if (has_fake_stack()) {
     bottom = fake_stack()->AddrIsInFakeStack(addr);
     CHECK(bottom);
-    *offset = addr - bottom;
-    *frame_pc = ((uptr*)bottom)[2];
-    return  (const char *)((uptr*)bottom)[1];
+    access->offset = addr - bottom;
+    access->frame_pc = ((uptr*)bottom)[2];
+    access->frame_descr = (const char *)((uptr*)bottom)[1];
+    return true;
   }
   uptr aligned_addr = addr & ~(SANITIZER_WORDSIZE/8 - 1);  // align addr.
   u8 *shadow_ptr = (u8*)MemToShadow(aligned_addr);
@@ -221,15 +226,15 @@ const char *AsanThread::GetFrameNameByAddr(uptr addr, uptr *offset,
   }
 
   if (shadow_ptr < shadow_bottom) {
-    *offset = 0;
-    return "UNKNOWN";
+    return false;
   }
 
   uptr* ptr = (uptr*)SHADOW_TO_MEM((uptr)(shadow_ptr + 1));
   CHECK(ptr[0] == kCurrentStackFrameMagic);
-  *offset = addr - (uptr)ptr;
-  *frame_pc = ptr[2];
-  return (const char*)ptr[1];
+  access->offset = addr - (uptr)ptr;
+  access->frame_pc = ptr[2];
+  access->frame_descr = (const char*)ptr[1];
+  return true;
 }
 
 static bool ThreadStackContainsAddress(ThreadContextBase *tctx_base,

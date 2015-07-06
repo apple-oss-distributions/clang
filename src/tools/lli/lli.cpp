@@ -13,10 +13,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "lli"
 #include "llvm/IR/LLVMContext.h"
 #include "RemoteMemoryManager.h"
 #include "RemoteTarget.h"
+#include "RemoteTargetExternal.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/CodeGen/LinkAllCodegenComponents.h"
@@ -63,6 +63,8 @@
 
 using namespace llvm;
 
+#define DEBUG_TYPE "lli"
+
 namespace {
   cl::opt<std::string>
   InputFile(cl::desc("<input bitcode>"), cl::Positional, cl::init("-"));
@@ -94,12 +96,11 @@ namespace {
   // execution. The child process will be executed and will communicate with
   // lli via stdin/stdout pipes.
   cl::opt<std::string>
-  MCJITRemoteProcess("mcjit-remote-process",
-            cl::desc("Specify the filename of the process to launch "
-                     "for remote MCJIT execution.  If none is specified,"
-                     "\n\tremote execution will be simulated in-process."),
-            cl::value_desc("filename"),
-            cl::init(""));
+  ChildExecPath("mcjit-remote-process",
+                cl::desc("Specify the filename of the process to launch "
+                         "for remote MCJIT execution.  If none is specified,"
+                         "\n\tremote execution will be simulated in-process."),
+                cl::value_desc("filename"), cl::init(""));
 
   // Determine optimization level.
   cl::opt<char>
@@ -262,7 +263,7 @@ public:
   }
   virtual ~LLIObjectCache() {}
 
-  virtual void notifyObjectCompiled(const Module *M, const MemoryBuffer *Obj) {
+  void notifyObjectCompiled(const Module *M, MemoryBufferRef Obj) override {
     const std::string ModuleID = M->getModuleIdentifier();
     std::string CacheName;
     if (!getCacheFilename(ModuleID, CacheName))
@@ -273,27 +274,28 @@ public:
       sys::path::remove_filename(dir);
       sys::fs::create_directories(Twine(dir));
     }
-    raw_fd_ostream outfile(CacheName.c_str(), errStr, sys::fs::F_Binary);
-    outfile.write(Obj->getBufferStart(), Obj->getBufferSize());
+    raw_fd_ostream outfile(CacheName.c_str(), errStr, sys::fs::F_None);
+    outfile.write(Obj.getBufferStart(), Obj.getBufferSize());
     outfile.close();
   }
 
-  virtual MemoryBuffer* getObject(const Module* M) {
+  std::unique_ptr<MemoryBuffer> getObject(const Module* M) override {
     const std::string ModuleID = M->getModuleIdentifier();
     std::string CacheName;
     if (!getCacheFilename(ModuleID, CacheName))
-      return NULL;
+      return nullptr;
     // Load the object from the cache filename
-    OwningPtr<MemoryBuffer> IRObjectBuffer;
-    MemoryBuffer::getFile(CacheName.c_str(), IRObjectBuffer, -1, false);
+    ErrorOr<std::unique_ptr<MemoryBuffer>> IRObjectBuffer =
+        MemoryBuffer::getFile(CacheName.c_str(), -1, false);
     // If the file isn't there, that's OK.
     if (!IRObjectBuffer)
-      return NULL;
+      return nullptr;
     // MCJIT will want to write into this buffer, and we don't want that
     // because the file has probably just been mmapped.  Instead we make
     // a copy.  The filed-based buffer will be released when it goes
     // out of scope.
-    return MemoryBuffer::getMemBufferCopy(IRObjectBuffer->getBuffer());
+    return std::unique_ptr<MemoryBuffer>(
+        MemoryBuffer::getMemBufferCopy(IRObjectBuffer.get()->getBuffer()));
   }
 
 private:
@@ -319,8 +321,8 @@ private:
   }
 };
 
-static ExecutionEngine *EE = 0;
-static LLIObjectCache *CacheManager = 0;
+static ExecutionEngine *EE = nullptr;
+static LLIObjectCache *CacheManager = nullptr;
 
 static void do_shutdown() {
   // Cygwin-1.5 invokes DLL's dtors before atexit handler.
@@ -414,7 +416,7 @@ int main(int argc, char **argv, char * const *envp) {
 
   // If not jitting lazily, load the whole bitcode file eagerly too.
   if (NoLazyCompilation) {
-    if (error_code EC = Mod->materializeAllPermanently()) {
+    if (std::error_code EC = Mod->materializeAllPermanently()) {
       errs() << argv[0] << ": bitcode didn't read correctly.\n";
       errs() << "Reason: " << EC.message() << "\n";
       exit(1);
@@ -449,7 +451,7 @@ int main(int argc, char **argv, char * const *envp) {
     Mod->setTargetTriple(Triple::normalize(TargetTriple));
 
   // Enable MCJIT if desired.
-  RTDyldMemoryManager *RTDyldMM = 0;
+  RTDyldMemoryManager *RTDyldMM = nullptr;
   if (UseMCJIT && !ForceInterpreter) {
     builder.setUseMCJIT(true);
     if (RemoteMCJIT)
@@ -462,7 +464,7 @@ int main(int argc, char **argv, char * const *envp) {
       errs() << "error: Remote process execution requires -use-mcjit\n";
       exit(1);
     }
-    builder.setJITMemoryManager(ForceInterpreter ? 0 :
+    builder.setJITMemoryManager(ForceInterpreter ? nullptr :
                                 JITMemoryManager::CreateDefaultMemManager());
   }
 
@@ -526,30 +528,39 @@ int main(int argc, char **argv, char * const *envp) {
     EE->addModule(XMod);
   }
 
+  std::vector<std::unique_ptr<MemoryBuffer>> Buffers;
   for (unsigned i = 0, e = ExtraObjects.size(); i != e; ++i) {
-    ErrorOr<object::ObjectFile *> Obj =
+    ErrorOr<object::OwningBinary<object::ObjectFile>> Obj =
         object::ObjectFile::createObjectFile(ExtraObjects[i]);
     if (!Obj) {
       Err.print(argv[0], errs());
       return 1;
     }
-    EE->addObjectFile(Obj.get());
+    object::OwningBinary<object::ObjectFile> &O = Obj.get();
+    EE->addObjectFile(std::move(O.getBinary()));
+    Buffers.push_back(std::move(O.getBuffer()));
   }
 
   for (unsigned i = 0, e = ExtraArchives.size(); i != e; ++i) {
-    OwningPtr<MemoryBuffer> ArBuf;
-    error_code ec;
-    ec = MemoryBuffer::getFileOrSTDIN(ExtraArchives[i], ArBuf);
-    if (ec) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> ArBufOrErr =
+        MemoryBuffer::getFileOrSTDIN(ExtraArchives[i]);
+    if (!ArBufOrErr) {
       Err.print(argv[0], errs());
       return 1;
     }
-    object::Archive *Ar = new object::Archive(ArBuf.take(), ec);
-    if (ec || !Ar) {
-      Err.print(argv[0], errs());
+    std::unique_ptr<MemoryBuffer> &ArBuf = ArBufOrErr.get();
+
+    ErrorOr<std::unique_ptr<object::Archive>> ArOrErr =
+        object::Archive::create(ArBuf->getMemBufferRef());
+    if (std::error_code EC = ArOrErr.getError()) {
+      errs() << EC.message();
       return 1;
     }
-    EE->addArchive(Ar);
+    std::unique_ptr<object::Archive> &Ar = ArOrErr.get();
+
+    object::OwningBinary<object::Archive> OB(std::move(Ar), std::move(ArBuf));
+
+    EE->addArchive(std::move(OB));
   }
 
   // If the target is Cygwin/MingW and we are generating remote code, we
@@ -662,23 +673,25 @@ int main(int argc, char **argv, char * const *envp) {
     // address space, assign the section addresses to resolve any relocations,
     // and send it to the target.
 
-    OwningPtr<RemoteTarget> Target;
-    if (!MCJITRemoteProcess.empty()) { // Remote execution on a child process
-      if (!RemoteTarget::hostSupportsExternalRemoteTarget()) {
-        errs() << "Warning: host does not support external remote targets.\n"
-               << "  Defaulting to simulated remote execution\n";
-        Target.reset(RemoteTarget::createRemoteTarget());
-      } else {
-        std::string ChildEXE = sys::FindProgramByName(MCJITRemoteProcess);
-        if (ChildEXE == "") {
-          errs() << "Unable to find child target: '\''" << MCJITRemoteProcess << "\'\n";
-          return -1;
-        }
-        Target.reset(RemoteTarget::createExternalRemoteTarget(ChildEXE));
+    std::unique_ptr<RemoteTarget> Target;
+    if (!ChildExecPath.empty()) { // Remote execution on a child process
+#ifndef LLVM_ON_UNIX
+      // FIXME: Remove this pointless fallback mode which causes tests to "pass"
+      // on platforms where they should XFAIL.
+      errs() << "Warning: host does not support external remote targets.\n"
+             << "  Defaulting to simulated remote execution\n";
+      Target.reset(new RemoteTarget);
+#else
+      if (!sys::fs::can_execute(ChildExecPath)) {
+        errs() << "Unable to find usable child executable: '" << ChildExecPath
+               << "'\n";
+        return -1;
       }
+      Target.reset(new RemoteTargetExternal(ChildExecPath));
+#endif
     } else {
       // No child process name provided, use simulated remote execution.
-      Target.reset(RemoteTarget::createRemoteTarget());
+      Target.reset(new RemoteTarget);
     }
 
     // Give the memory manager a pointer to our remote target interface object.

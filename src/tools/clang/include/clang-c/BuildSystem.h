@@ -1,4 +1,4 @@
-/*==-- clang-c/BuildSysetm.h - Utilities for use by build systems -*- C -*-===*\
+/*==-- clang-c/BuildSystem.h - Utilities for use by build systems -*- C -*-===*\
 |*                                                                            *|
 |*                     The LLVM Compiler Infrastructure                       *|
 |*                                                                            *|
@@ -11,8 +11,8 @@
 |*                                                                            *|
 \*===----------------------------------------------------------------------===*/
 
-#ifndef CLANG_C_BUILD_SYSTEM_H
-#define CLANG_C_BUILD_SYSTEM_H
+#ifndef LLVM_CLANG_C_BUILDSYSTEM_H
+#define LLVM_CLANG_C_BUILDSYSTEM_H
 
 #include "clang-c/Platform.h"
 #include "clang-c/CXErrorCode.h"

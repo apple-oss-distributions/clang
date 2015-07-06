@@ -124,7 +124,7 @@ void DependencyCollector::attachToPreprocessor(Preprocessor &PP) {
   PP.addPPCallbacks(new DepCollectorPPCallbacks(*this, PP.getSourceManager()));
 }
 void DependencyCollector::attachToASTReader(ASTReader &R) {
-  R.addListener(new DepCollectorASTListener(*this));
+  R.addListener(llvm::make_unique<DepCollectorASTListener>(*this));
 }
 
 namespace {
@@ -154,20 +154,16 @@ public:
       SeenMissingHeader(false),
       IncludeModuleFiles(Opts.IncludeModuleFiles) {}
 
-  virtual void FileChanged(SourceLocation Loc, FileChangeReason Reason,
-                           SrcMgr::CharacteristicKind FileType,
-                           FileID PrevFID);
-  virtual void InclusionDirective(SourceLocation HashLoc,
-                                  const Token &IncludeTok,
-                                  StringRef FileName,
-                                  bool IsAngled,
-                                  CharSourceRange FilenameRange,
-                                  const FileEntry *File,
-                                  StringRef SearchPath,
-                                  StringRef RelativePath,
-                                  const Module *Imported);
+  void FileChanged(SourceLocation Loc, FileChangeReason Reason,
+                   SrcMgr::CharacteristicKind FileType,
+                   FileID PrevFID) override;
+  void InclusionDirective(SourceLocation HashLoc, const Token &IncludeTok,
+                          StringRef FileName, bool IsAngled,
+                          CharSourceRange FilenameRange, const FileEntry *File,
+                          StringRef SearchPath, StringRef RelativePath,
+                          const Module *Imported) override;
 
-  virtual void EndOfMainFile() {
+  void EndOfMainFile() override {
     OutputDependencyFile();
   }
 
@@ -181,8 +177,8 @@ class DFGASTReaderListener : public ASTReaderListener {
 public:
   DFGASTReaderListener(DFGImpl &Parent)
   : Parent(Parent) { }
-  virtual bool needsInputFileVisitation() { return true; }
-  virtual bool needsSystemInputFileVisitation() {
+  bool needsInputFileVisitation() override { return true; }
+  bool needsSystemInputFileVisitation() override {
     return Parent.includeSystemHeaders();
   }
   void visitModuleFile(StringRef Filename) override;
@@ -199,7 +195,7 @@ DependencyFileGenerator *DependencyFileGenerator::CreateAndAttachToPreprocessor(
 
   if (Opts.Targets.empty()) {
     PP.getDiagnostics().Report(diag::err_fe_dependency_file_requires_MT);
-    return NULL;
+    return nullptr;
   }
 
   // Disable the "file not found" diagnostic if the -MG option was given.
@@ -214,7 +210,7 @@ DependencyFileGenerator *DependencyFileGenerator::CreateAndAttachToPreprocessor(
 void DependencyFileGenerator::AttachToASTReader(ASTReader &R) {
   DFGImpl *I = reinterpret_cast<DFGImpl *>(Impl);
   assert(I && "missing implementation");
-  R.addListener(new DFGASTReaderListener(*I));
+  R.addListener(llvm::make_unique<DFGASTReaderListener>(*I));
 }
 
 /// FileMatchesDepCriteria - Determine whether the given Filename should be
@@ -244,7 +240,7 @@ void DFGImpl::FileChanged(SourceLocation Loc,
 
   const FileEntry *FE =
     SM.getFileEntryForID(SM.getFileID(SM.getExpansionLoc(Loc)));
-  if (FE == 0) return;
+  if (!FE) return;
 
   StringRef Filename = FE->getName();
   if (!FileMatchesDepCriteria(Filename.data(), FileType))
@@ -302,7 +298,7 @@ void DFGImpl::OutputDependencyFile() {
   }
 
   std::string Err;
-  llvm::raw_fd_ostream OS(OutputFile.c_str(), Err);
+  llvm::raw_fd_ostream OS(OutputFile.c_str(), Err, llvm::sys::fs::F_Text);
   if (!Err.empty()) {
     PP->getDiagnostics().Report(diag::err_fe_error_opening)
       << OutputFile << Err;

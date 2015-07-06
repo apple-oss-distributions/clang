@@ -16,6 +16,8 @@
 #include "NewPMDriver.h"
 #include "Passes.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/CGSCCPassManager.h"
+#include "llvm/Analysis/LazyCallGraph.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LLVMContext.h"
@@ -32,8 +34,31 @@ using namespace opt_tool;
 bool llvm::runPassPipeline(StringRef Arg0, LLVMContext &Context, Module &M,
                            tool_output_file *Out, StringRef PassPipeline,
                            OutputKind OK, VerifierKind VK) {
-  ModulePassManager MPM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
+  ModuleAnalysisManager MAM;
 
+#define MODULE_ANALYSIS(NAME, CREATE_PASS) \
+  MAM.registerPass(CREATE_PASS);
+#include "PassRegistry.def"
+
+#define CGSCC_ANALYSIS(NAME, CREATE_PASS) \
+  CGAM.registerPass(CREATE_PASS);
+#include "PassRegistry.def"
+
+#define FUNCTION_ANALYSIS(NAME, CREATE_PASS) \
+  FAM.registerPass(CREATE_PASS);
+#include "PassRegistry.def"
+
+  // Cross register the analysis managers through their proxies.
+  MAM.registerPass(FunctionAnalysisManagerModuleProxy(FAM));
+  MAM.registerPass(CGSCCAnalysisManagerModuleProxy(CGAM));
+  CGAM.registerPass(FunctionAnalysisManagerCGSCCProxy(FAM));
+  CGAM.registerPass(ModuleAnalysisManagerCGSCCProxy(MAM));
+  FAM.registerPass(CGSCCAnalysisManagerFunctionProxy(CGAM));
+  FAM.registerPass(ModuleAnalysisManagerFunctionProxy(MAM));
+
+  ModulePassManager MPM;
   if (VK > VK_NoVerifier)
     MPM.addPass(VerifierPass());
 
@@ -61,7 +86,7 @@ bool llvm::runPassPipeline(StringRef Arg0, LLVMContext &Context, Module &M,
   cl::PrintOptionValues();
 
   // Now that we have all of the passes ready, run them.
-  MPM.run(&M);
+  MPM.run(&M, &MAM);
 
   // Declare success.
   if (OK != OK_NoOutput)

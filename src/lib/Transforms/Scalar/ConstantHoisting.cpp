@@ -33,7 +33,6 @@
 // %0 = load i64* inttoptr (i64 big_constant to i64*)
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "consthoist"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -44,8 +43,11 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
+#include <tuple>
 
 using namespace llvm;
+
+#define DEBUG_TYPE "consthoist"
 
 STATISTIC(NumConstantsHoisted, "Number of constants hoisted");
 STATISTIC(NumConstantsRebased, "Number of constants rebased");
@@ -117,15 +119,16 @@ class ConstantHoisting : public FunctionPass {
   SmallVector<ConstantInfo, 8> ConstantVec;
 public:
   static char ID; // Pass identification, replacement for typeid
-  ConstantHoisting() : FunctionPass(ID), TTI(0), DT(0), Entry(0) {
+  ConstantHoisting() : FunctionPass(ID), TTI(nullptr), DT(nullptr),
+                       Entry(nullptr) {
     initializeConstantHoistingPass(*PassRegistry::getPassRegistry());
   }
 
   bool runOnFunction(Function &Fn) override;
 
-  const char *getPassName() const { return "Constant Hoisting"; }
+  const char *getPassName() const override { return "Constant Hoisting"; }
 
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetTransformInfo>();
@@ -496,8 +499,8 @@ void ConstantHoisting::emitBaseConstants(Instruction *Base, Constant *Offset,
       ClonedCastInst->insertAfter(CastInst);
       // Use the same debug location as the original cast instruction.
       ClonedCastInst->setDebugLoc(CastInst->getDebugLoc());
-      DEBUG(dbgs() << "Clone instruction: " << *ClonedCastInst << '\n'
-                   << "To               : " << *CastInst << '\n');
+      DEBUG(dbgs() << "Clone instruction: " << *CastInst << '\n'
+                   << "To               : " << *ClonedCastInst << '\n');
     }
 
     DEBUG(dbgs() << "Update: " << *ConstUser.Inst << '\n');
@@ -552,9 +555,9 @@ bool ConstantHoisting::emitBaseConstants() {
 
     // Use the same debug location as the last user of the constant.
     assert(!Base->use_empty() && "The use list is empty!?");
-    assert(isa<Instruction>(Base->use_back()) &&
+    assert(isa<Instruction>(Base->user_back()) &&
            "All uses should be instructions.");
-    Base->setDebugLoc(cast<Instruction>(Base->use_back())->getDebugLoc());
+    Base->setDebugLoc(cast<Instruction>(Base->user_back())->getDebugLoc());
 
     // Correct for base constant, which we counted above too.
     NumConstantsRebased--;

@@ -13,24 +13,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/GCOV.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/system_error.h"
 #include <algorithm>
+#include <system_error>
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
 // GCOVFile implementation.
-
-/// ~GCOVFile - Delete GCOVFile and its content.
-GCOVFile::~GCOVFile() {
-  DeleteContainerPointers(Functions);
-}
 
 /// readGCNO - Read GCNO buffer.
 bool GCOVFile::readGCNO(GCOVBuffer &Buffer) {
@@ -40,10 +34,10 @@ bool GCOVFile::readGCNO(GCOVBuffer &Buffer) {
   if (!Buffer.readInt(Checksum)) return false;
   while (true) {
     if (!Buffer.readFunctionTag()) break;
-    GCOVFunction *GFun = new GCOVFunction(*this);
+    auto GFun = make_unique<GCOVFunction>(*this);
     if (!GFun->readGCNO(Buffer, Version))
       return false;
-    Functions.push_back(GFun);
+    Functions.push_back(std::move(GFun));
   }
 
   GCNOInitialized = true;
@@ -98,29 +92,21 @@ bool GCOVFile::readGCDA(GCOVBuffer &Buffer) {
 
 /// dump - Dump GCOVFile content to dbgs() for debugging purposes.
 void GCOVFile::dump() const {
-  for (SmallVectorImpl<GCOVFunction *>::const_iterator I = Functions.begin(),
-         E = Functions.end(); I != E; ++I)
-    (*I)->dump();
+  for (const auto &FPtr : Functions)
+    FPtr->dump();
 }
 
 /// collectLineCounts - Collect line counts. This must be used after
 /// reading .gcno and .gcda files.
 void GCOVFile::collectLineCounts(FileInfo &FI) {
-  for (SmallVectorImpl<GCOVFunction *>::iterator I = Functions.begin(),
-         E = Functions.end(); I != E; ++I)
-    (*I)->collectLineCounts(FI);
+  for (const auto &FPtr : Functions)
+    FPtr->collectLineCounts(FI);
   FI.setRunCount(RunCount);
   FI.setProgramCount(ProgramCount);
 }
 
 //===----------------------------------------------------------------------===//
 // GCOVFunction implementation.
-
-/// ~GCOVFunction - Delete GCOVFunction and its content.
-GCOVFunction::~GCOVFunction() {
-  DeleteContainerPointers(Blocks);
-  DeleteContainerPointers(Edges);
-}
 
 /// readGCNO - Read a function from the GCNO buffer. Return false if an error
 /// occurs.
@@ -151,7 +137,7 @@ bool GCOVFunction::readGCNO(GCOVBuffer &Buff, GCOV::GCOVVersion Version) {
   if (!Buff.readInt(BlockCount)) return false;
   for (uint32_t i = 0, e = BlockCount; i != e; ++i) {
     if (!Buff.readInt(Dummy)) return false; // Block flags;
-    Blocks.push_back(new GCOVBlock(*this, i));
+    Blocks.push_back(make_unique<GCOVBlock>(*this, i));
   }
 
   // read edges.
@@ -169,8 +155,8 @@ bool GCOVFunction::readGCNO(GCOVBuffer &Buff, GCOV::GCOVVersion Version) {
     for (uint32_t i = 0, e = EdgeCount; i != e; ++i) {
       uint32_t Dst;
       if (!Buff.readInt(Dst)) return false;
-      GCOVEdge *Edge = new GCOVEdge(Blocks[BlockNo], Blocks[Dst]);
-      Edges.push_back(Edge);
+      Edges.push_back(make_unique<GCOVEdge>(*Blocks[BlockNo], *Blocks[Dst]));
+      GCOVEdge *Edge = Edges.back().get();
       Blocks[BlockNo]->addDstEdge(Edge);
       Blocks[Dst]->addSrcEdge(Edge);
       if (!Buff.readInt(Dummy)) return false; // Edge flag
@@ -191,7 +177,7 @@ bool GCOVFunction::readGCNO(GCOVBuffer &Buff, GCOV::GCOVVersion Version) {
              << ").\n";
       return false;
     }
-    GCOVBlock *Block = Blocks[BlockNo];
+    GCOVBlock &Block = *Blocks[BlockNo];
     // Read the word that pads the beginning of the line table. This may be a
     // flag of some sort, but seems to always be zero.
     if (!Buff.readInt(Dummy)) return false;
@@ -212,7 +198,7 @@ bool GCOVFunction::readGCNO(GCOVBuffer &Buff, GCOV::GCOVVersion Version) {
         if (!Buff.readInt(Line)) return false;
         // Line 0 means this instruction was injected by the compiler. Skip it.
         if (!Line) continue;
-        Block->addLine(Line);
+        Block.addLine(Line);
       }
       // Read the null terminator.
       if (!Buff.readInt(Dummy)) return false;
@@ -312,10 +298,10 @@ uint64_t GCOVFunction::getExitCount() const {
 
 /// dump - Dump GCOVFunction content to dbgs() for debugging purposes.
 void GCOVFunction::dump() const {
-  dbgs() <<  "===== " << Name << " @ " << Filename << ":" << LineNumber << "\n";
-  for (SmallVectorImpl<GCOVBlock *>::const_iterator I = Blocks.begin(),
-         E = Blocks.end(); I != E; ++I)
-    (*I)->dump();
+  dbgs() << "===== " << Name << " (" << Ident << ") @ " << Filename << ":"
+         << LineNumber << "\n";
+  for (const auto &Block : Blocks)
+    Block->dump();
 }
 
 /// collectLineCounts - Collect line counts. This must be used after
@@ -326,9 +312,8 @@ void GCOVFunction::collectLineCounts(FileInfo &FI) {
   if (LineNumber == 0)
     return;
 
-  for (SmallVectorImpl<GCOVBlock *>::iterator I = Blocks.begin(),
-         E = Blocks.end(); I != E; ++I)
-    (*I)->collectLineCounts(FI);
+  for (const auto &Block : Blocks)
+    Block->collectLineCounts(FI);
   FI.addFunctionLine(Filename, LineNumber, this);
 }
 
@@ -348,8 +333,8 @@ void GCOVBlock::addCount(size_t DstEdgeNo, uint64_t N) {
   assert(DstEdgeNo < DstEdges.size()); // up to caller to ensure EdgeNo is valid
   DstEdges[DstEdgeNo]->Count = N;
   Counter += N;
-  if (!DstEdges[DstEdgeNo]->Dst->getNumDstEdges())
-    DstEdges[DstEdgeNo]->Dst->Counter += N;
+  if (!DstEdges[DstEdgeNo]->Dst.getNumDstEdges())
+    DstEdges[DstEdgeNo]->Dst.Counter += N;
 }
 
 /// sortDstEdges - Sort destination edges by block number, nop if already
@@ -376,7 +361,7 @@ void GCOVBlock::dump() const {
     dbgs() << "\tSource Edges : ";
     for (EdgeIterator I = SrcEdges.begin(), E = SrcEdges.end(); I != E; ++I) {
       const GCOVEdge *Edge = *I;
-      dbgs() << Edge->Src->Number << " (" << Edge->Count << "), ";
+      dbgs() << Edge->Src.Number << " (" << Edge->Count << "), ";
     }
     dbgs() << "\n";
   }
@@ -384,7 +369,7 @@ void GCOVBlock::dump() const {
     dbgs() << "\tDestination Edges : ";
     for (EdgeIterator I = DstEdges.begin(), E = DstEdges.end(); I != E; ++I) {
       const GCOVEdge *Edge = *I;
-      dbgs() << Edge->Dst->Number << " (" << Edge->Count << "), ";
+      dbgs() << Edge->Dst.Number << " (" << Edge->Count << "), ";
     }
     dbgs() << "\n";
   }
@@ -454,11 +439,15 @@ class LineConsumer {
   StringRef Remaining;
 public:
   LineConsumer(StringRef Filename) {
-    if (error_code EC = MemoryBuffer::getFileOrSTDIN(Filename, Buffer)) {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
+        MemoryBuffer::getFileOrSTDIN(Filename);
+    if (std::error_code EC = BufferOrErr.getError()) {
       errs() << Filename << ": " << EC.message() << "\n";
       Remaining = "";
-    } else
+    } else {
+      Buffer = std::move(BufferOrErr.get());
       Remaining = Buffer->getBuffer();
+    }
   }
   bool empty() { return Remaining.empty(); }
   void printNext(raw_ostream &OS, uint32_t LineNum) {
@@ -527,14 +516,14 @@ std::string FileInfo::getCoveragePath(StringRef Filename,
 std::unique_ptr<raw_ostream>
 FileInfo::openCoveragePath(StringRef CoveragePath) {
   if (Options.NoOutput)
-    return std::unique_ptr<raw_null_ostream>(new raw_null_ostream());
+    return llvm::make_unique<raw_null_ostream>();
 
   std::string ErrorInfo;
-  auto OS = std::unique_ptr<raw_fd_ostream>(
-      new raw_fd_ostream(CoveragePath.str().c_str(), ErrorInfo));
+  auto OS = llvm::make_unique<raw_fd_ostream>(CoveragePath.str().c_str(),
+                                              ErrorInfo, sys::fs::F_Text);
   if (!ErrorInfo.empty()) {
     errs() << ErrorInfo << "\n";
-    return std::unique_ptr<raw_null_ostream>(new raw_null_ostream());
+    return llvm::make_unique<raw_null_ostream>();
   }
   return std::move(OS);
 }
@@ -676,8 +665,8 @@ void FileInfo::printFunctionSummary(raw_ostream &OS,
     uint32_t BlocksExec = 0;
     for (GCOVFunction::BlockIterator I = Func->block_begin(),
            E = Func->block_end(); I != E; ++I) {
-      const GCOVBlock *Block = *I;
-      if (Block->getNumDstEdges() && Block->getCount())
+      const GCOVBlock &Block = **I;
+      if (Block.getNumDstEdges() && Block.getCount())
           ++BlocksExec;
     }
 

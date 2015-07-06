@@ -18,8 +18,8 @@ TOOL_NO_EXPORTS = 1
 include $(CLANG_LEVEL)/../../Makefile.config
 LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader support mc option
 USEDLIBS = clangTooling.a clangFrontend.a clangSerialization.a clangDriver.a \
-					 clangRewriteFrontend.a clangRewriteCore.a \
+					 clangRewriteFrontend.a clangRewrite.a \
 					 clangParse.a clangSema.a clangAnalysis.a \
-					 clangAST.a clangASTMatchers.a clangEdit.a clangLex.a clangBasic.a
+					 clangAST.a clangASTMatchers.a clangEdit.a clangLex.a clangAPINotes.a clangBasic.a
 
 include $(CLANG_LEVEL)/Makefile

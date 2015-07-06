@@ -12,15 +12,13 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_FILESYSTEMSTATCACHE_H
-#define LLVM_CLANG_FILESYSTEMSTATCACHE_H
+#ifndef LLVM_CLANG_BASIC_FILESYSTEMSTATCACHE_H
+#define LLVM_CLANG_BASIC_FILESYSTEMSTATCACHE_H
 
 #include "clang/Basic/LLVM.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/FileSystem.h"
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <memory>
 
 namespace clang {
 
@@ -50,8 +48,8 @@ struct FileData {
 class FileSystemStatCache {
   virtual void anchor();
 protected:
-  OwningPtr<FileSystemStatCache> NextStatCache;
-  
+  std::unique_ptr<FileSystemStatCache> NextStatCache;
+
 public:
   virtual ~FileSystemStatCache() {}
   
@@ -71,13 +69,13 @@ public:
   /// implementation can optionally fill in \p F with a valid \p File object and
   /// the client guarantees that it will close it.
   static bool get(const char *Path, FileData &Data, bool isFile,
-                  vfs::File **F, FileSystemStatCache *Cache,
+                  std::unique_ptr<vfs::File> *F, FileSystemStatCache *Cache,
                   vfs::FileSystem &FS);
 
   /// \brief Sets the next stat call cache in the chain of stat caches.
   /// Takes ownership of the given stat cache.
-  void setNextStatCache(FileSystemStatCache *Cache) {
-    NextStatCache.reset(Cache);
+  void setNextStatCache(std::unique_ptr<FileSystemStatCache> Cache) {
+    NextStatCache = std::move(Cache);
   }
   
   /// \brief Retrieve the next stat call cache in the chain.
@@ -86,20 +84,26 @@ public:
   /// \brief Retrieve the next stat call cache in the chain, transferring
   /// ownership of this cache (and, transitively, all of the remaining caches)
   /// to the caller.
-  FileSystemStatCache *takeNextStatCache() { return NextStatCache.take(); }
-  
+  std::unique_ptr<FileSystemStatCache> takeNextStatCache() {
+    return std::move(NextStatCache);
+  }
+
 protected:
+  // FIXME: The pointer here is a non-owning/optional reference to the
+  // unique_ptr. Optional<unique_ptr<vfs::File>&> might be nicer, but
+  // Optional needs some work to support references so this isn't possible yet.
   virtual LookupResult getStat(const char *Path, FileData &Data, bool isFile,
-                               vfs::File **F, vfs::FileSystem &FS) = 0;
+                               std::unique_ptr<vfs::File> *F,
+                               vfs::FileSystem &FS) = 0;
 
   LookupResult statChained(const char *Path, FileData &Data, bool isFile,
-                           vfs::File **F, vfs::FileSystem &FS) {
+                           std::unique_ptr<vfs::File> *F, vfs::FileSystem &FS) {
     if (FileSystemStatCache *Next = getNextStatCache())
       return Next->getStat(Path, Data, isFile, F, FS);
 
     // If we hit the end of the list of stat caches to try, just compute and
     // return it without a cache.
-    return get(Path, Data, isFile, F, 0, FS) ? CacheMissing : CacheExists;
+    return get(Path, Data, isFile, F, nullptr, FS) ? CacheMissing : CacheExists;
   }
 };
 
@@ -117,8 +121,9 @@ public:
   iterator begin() const { return StatCalls.begin(); }
   iterator end() const { return StatCalls.end(); }
 
-  virtual LookupResult getStat(const char *Path, FileData &Data, bool isFile,
-                               vfs::File **F, vfs::FileSystem &FS);
+  LookupResult getStat(const char *Path, FileData &Data, bool isFile,
+                       std::unique_ptr<vfs::File> *F,
+                       vfs::FileSystem &FS) override;
 };
 
 } // end namespace clang

@@ -104,7 +104,7 @@ FakeFrame *FakeStack::Allocate(uptr stack_size_log, uptr class_id,
   return 0; // We are out of fake stack.
 }
 
-uptr FakeStack::AddrIsInFakeStack(uptr ptr) {
+uptr FakeStack::AddrIsInFakeStack(uptr ptr, uptr *frame_beg, uptr *frame_end) {
   uptr stack_size_log = this->stack_size_log();
   uptr beg = reinterpret_cast<uptr>(GetFrame(stack_size_log, 0, 0));
   uptr end = reinterpret_cast<uptr>(this) + RequiredSize(stack_size_log);
@@ -114,7 +114,10 @@ uptr FakeStack::AddrIsInFakeStack(uptr ptr) {
   CHECK_LE(base, ptr);
   CHECK_LT(ptr, base + (1UL << stack_size_log));
   uptr pos = (ptr - base) >> (kMinStackFrameSizeLog + class_id);
-  return base + pos * BytesInSizeClass(class_id);
+  uptr res = base + pos * BytesInSizeClass(class_id);
+  *frame_end = res + BytesInSizeClass(class_id);
+  *frame_beg = res + sizeof(FakeFrame);
+  return res;
 }
 
 void FakeStack::HandleNoReturn() {
@@ -187,20 +190,19 @@ static FakeStack *GetFakeStackFast() {
   return GetFakeStack();
 }
 
-ALWAYS_INLINE uptr OnMalloc(uptr class_id, uptr size, uptr real_stack) {
+ALWAYS_INLINE uptr OnMalloc(uptr class_id, uptr size) {
   FakeStack *fs = GetFakeStackFast();
-  if (!fs) return real_stack;
+  if (!fs) return 0;
+  uptr local_stack;
+  uptr real_stack = reinterpret_cast<uptr>(&local_stack);
   FakeFrame *ff = fs->Allocate(fs->stack_size_log(), class_id, real_stack);
-  if (!ff)
-    return real_stack;  // Out of fake stack, return the real one.
+  if (!ff) return 0;  // Out of fake stack.
   uptr ptr = reinterpret_cast<uptr>(ff);
   SetShadow(ptr, size, class_id, 0);
   return ptr;
 }
 
-ALWAYS_INLINE void OnFree(uptr ptr, uptr class_id, uptr size, uptr real_stack) {
-  if (ptr == real_stack)
-    return;
+ALWAYS_INLINE void OnFree(uptr ptr, uptr class_id, uptr size) {
   FakeStack::Deallocate(ptr, class_id);
   SetShadow(ptr, size, class_id, kMagic8);
 }
@@ -208,14 +210,15 @@ ALWAYS_INLINE void OnFree(uptr ptr, uptr class_id, uptr size, uptr real_stack) {
 }  // namespace __asan
 
 // ---------------------- Interface ---------------- {{{1
+using namespace __asan;
 #define DEFINE_STACK_MALLOC_FREE_WITH_CLASS_ID(class_id)                       \
   extern "C" SANITIZER_INTERFACE_ATTRIBUTE uptr                                \
-  __asan_stack_malloc_##class_id(uptr size, uptr real_stack) {                 \
-    return __asan::OnMalloc(class_id, size, real_stack);                       \
+      __asan_stack_malloc_##class_id(uptr size) {                              \
+    return OnMalloc(class_id, size);                                           \
   }                                                                            \
   extern "C" SANITIZER_INTERFACE_ATTRIBUTE void __asan_stack_free_##class_id(  \
-      uptr ptr, uptr size, uptr real_stack) {                                  \
-    __asan::OnFree(ptr, class_id, size, real_stack);                           \
+      uptr ptr, uptr size) {                                                   \
+    OnFree(ptr, class_id, size);                                               \
   }
 
 DEFINE_STACK_MALLOC_FREE_WITH_CLASS_ID(0)
@@ -229,3 +232,23 @@ DEFINE_STACK_MALLOC_FREE_WITH_CLASS_ID(7)
 DEFINE_STACK_MALLOC_FREE_WITH_CLASS_ID(8)
 DEFINE_STACK_MALLOC_FREE_WITH_CLASS_ID(9)
 DEFINE_STACK_MALLOC_FREE_WITH_CLASS_ID(10)
+extern "C" {
+SANITIZER_INTERFACE_ATTRIBUTE
+void *__asan_get_current_fake_stack() { return GetFakeStackFast(); }
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void *__asan_addr_is_in_fake_stack(void *fake_stack, void *addr, void **beg,
+                                   void **end) {
+  FakeStack *fs = reinterpret_cast<FakeStack*>(fake_stack);
+  if (!fs) return 0;
+  uptr frame_beg, frame_end;
+  FakeFrame *frame = reinterpret_cast<FakeFrame *>(fs->AddrIsInFakeStack(
+      reinterpret_cast<uptr>(addr), &frame_beg, &frame_end));
+  if (!frame) return 0;
+  if (frame->magic != kCurrentStackFrameMagic)
+    return 0;
+  if (beg) *beg = reinterpret_cast<void*>(frame_beg);
+  if (end) *end = reinterpret_cast<void*>(frame_end);
+  return reinterpret_cast<void*>(frame->real_stack);
+}
+}  // extern "C"

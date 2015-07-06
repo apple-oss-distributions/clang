@@ -26,9 +26,12 @@ namespace object {
 }
 
 class RuntimeDyldImpl;
+class RuntimeDyldCheckerImpl;
 class ObjectImage;
 
 class RuntimeDyld {
+  friend class RuntimeDyldCheckerImpl;
+
   RuntimeDyld(const RuntimeDyld &) LLVM_DELETED_FUNCTION;
   void operator=(const RuntimeDyld &) LLVM_DELETED_FUNCTION;
 
@@ -37,6 +40,7 @@ class RuntimeDyld {
   RuntimeDyldImpl *Dyld;
   RTDyldMemoryManager *MM;
   bool ProcessAllSections;
+  RuntimeDyldCheckerImpl *Checker;
 protected:
   // Change the address associated with a section when resolving relocations.
   // Any relocations already associated with the symbol will be re-resolved.
@@ -55,16 +59,16 @@ public:
   /// Ownership of the input object is transferred to the ObjectImage
   /// instance returned from this function if successful. In the case of load
   /// failure, the input object will be deleted.
-  ObjectImage *loadObject(object::ObjectFile *InputObject);
+  ObjectImage *loadObject(std::unique_ptr<object::ObjectFile> InputObject);
 
   /// Get the address of our local copy of the symbol. This may or may not
   /// be the address used for relocation (clients can copy the data around
   /// and resolve relocatons based on where they put it).
-  void *getSymbolAddress(StringRef Name);
+  void *getSymbolAddress(StringRef Name) const;
 
   /// Get the address of the target copy of the symbol. This is the address
   /// used for relocation.
-  uint64_t getSymbolLoadAddress(StringRef Name);
+  uint64_t getSymbolLoadAddress(StringRef Name) const;
 
   /// Resolve the relocations for all symbols we currently know about.
   void resolveRelocations();

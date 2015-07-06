@@ -149,8 +149,8 @@ CXXScopeSpec::getWithLocInContext(ASTContext &Context) const {
 DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
                                              bool isAmbiguous,
                                              SourceLocation LParenLoc,
-                                             ParamInfo *ArgInfo,
-                                             unsigned NumArgs,
+                                             ParamInfo *Params,
+                                             unsigned NumParams,
                                              SourceLocation EllipsisLoc,
                                              SourceLocation RParenLoc,
                                              unsigned TypeQuals,
@@ -178,17 +178,17 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
   I.Kind                        = Function;
   I.Loc                         = LocalRangeBegin;
   I.EndLoc                      = LocalRangeEnd;
-  I.Fun.AttrList                = 0;
+  I.Fun.AttrList                = nullptr;
   I.Fun.hasPrototype            = hasProto;
   I.Fun.isVariadic              = EllipsisLoc.isValid();
   I.Fun.isAmbiguous             = isAmbiguous;
   I.Fun.LParenLoc               = LParenLoc.getRawEncoding();
   I.Fun.EllipsisLoc             = EllipsisLoc.getRawEncoding();
   I.Fun.RParenLoc               = RParenLoc.getRawEncoding();
-  I.Fun.DeleteArgInfo           = false;
+  I.Fun.DeleteParams            = false;
   I.Fun.TypeQuals               = TypeQuals;
-  I.Fun.NumArgs                 = NumArgs;
-  I.Fun.ArgInfo                 = 0;
+  I.Fun.NumParams               = NumParams;
+  I.Fun.Params                  = nullptr;
   I.Fun.RefQualifierIsLValueRef = RefQualifierIsLvalueRef;
   I.Fun.RefQualifierLoc         = RefQualifierLoc.getRawEncoding();
   I.Fun.ConstQualifierLoc       = ConstQualifierLoc.getRawEncoding();
@@ -197,28 +197,28 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
   I.Fun.ExceptionSpecType       = ESpecType;
   I.Fun.ExceptionSpecLoc        = ESpecLoc.getRawEncoding();
   I.Fun.NumExceptions           = 0;
-  I.Fun.Exceptions              = 0;
-  I.Fun.NoexceptExpr            = 0;
+  I.Fun.Exceptions              = nullptr;
+  I.Fun.NoexceptExpr            = nullptr;
   I.Fun.HasTrailingReturnType   = TrailingReturnType.isUsable() ||
                                   TrailingReturnType.isInvalid();
   I.Fun.TrailingReturnType      = TrailingReturnType.get();
 
-  // new[] an argument array if needed.
-  if (NumArgs) {
+  // new[] a parameter array if needed.
+  if (NumParams) {
     // If the 'InlineParams' in Declarator is unused and big enough, put our
     // parameter list there (in an effort to avoid new/delete traffic).  If it
     // is already used (consider a function returning a function pointer) or too
-    // small (function taking too many arguments), go to the heap.
+    // small (function with too many parameters), go to the heap.
     if (!TheDeclarator.InlineParamsUsed &&
-        NumArgs <= llvm::array_lengthof(TheDeclarator.InlineParams)) {
-      I.Fun.ArgInfo = TheDeclarator.InlineParams;
-      I.Fun.DeleteArgInfo = false;
+        NumParams <= llvm::array_lengthof(TheDeclarator.InlineParams)) {
+      I.Fun.Params = TheDeclarator.InlineParams;
+      I.Fun.DeleteParams = false;
       TheDeclarator.InlineParamsUsed = true;
     } else {
-      I.Fun.ArgInfo = new DeclaratorChunk::ParamInfo[NumArgs];
-      I.Fun.DeleteArgInfo = true;
+      I.Fun.Params = new DeclaratorChunk::ParamInfo[NumParams];
+      I.Fun.DeleteParams = true;
     }
-    memcpy(I.Fun.ArgInfo, ArgInfo, sizeof(ArgInfo[0])*NumArgs);
+    memcpy(I.Fun.Params, Params, sizeof(Params[0]) * NumParams);
   }
 
   // Check what exception specification information we should actually store.
@@ -553,12 +553,6 @@ bool DeclSpec::SetTypeSpecWidth(TSW W, SourceLocation Loc,
   else if (W != TSW_longlong || TypeSpecWidth != TSW_long)
     return BadSpecifier(W, (TSW)TypeSpecWidth, PrevSpec, DiagID);
   TypeSpecWidth = W;
-  if (TypeAltiVecVector && !TypeAltiVecBool &&
-      ((TypeSpecWidth == TSW_long) || (TypeSpecWidth == TSW_longlong))) {
-    PrevSpec = DeclSpec::getSpecifierName((TST) TypeSpecType, Policy);
-    DiagID = diag::warn_vector_long_decl_spec_combination;
-    return true;
-  }
   return false;
 }
 
@@ -657,7 +651,7 @@ bool DeclSpec::SetTypeSpecType(TST T, SourceLocation TagKwLoc,
   DeclRep = Rep;
   TSTLoc = TagKwLoc;
   TSTNameLoc = TagNameLoc;
-  TypeSpecOwned = Owned && Rep != 0;
+  TypeSpecOwned = Owned && Rep != nullptr;
   return false;
 }
 
@@ -978,6 +972,9 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP, const PrintingPoli
       if ((TypeSpecType == TST_char) || (TypeSpecType == TST_int) ||
           (TypeSpecWidth != TSW_unspecified))
         TypeSpecSign = TSS_unsigned;
+    } else if (TypeSpecWidth == TSW_long) {
+      Diag(D, TSWLoc, diag::warn_vector_long_decl_spec_combination)
+        << getSpecifierName((TST)TypeSpecType, Policy);
     }
 
     if (TypeAltiVecPixel) {
@@ -1125,14 +1122,41 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP, const PrintingPoli
       ThreadHint = FixItHint::CreateRemoval(SCLoc);
     }
 
-    Diag(D, SCLoc, diag::err_friend_storage_spec)
+    Diag(D, SCLoc, diag::err_friend_decl_spec)
       << SpecName << StorageHint << ThreadHint;
 
     ClearStorageClassSpecs();
   }
 
+  // C++11 [dcl.fct.spec]p5:
+  //   The virtual specifier shall be used only in the initial
+  //   declaration of a non-static class member function;
+  // C++11 [dcl.fct.spec]p6:
+  //   The explicit specifier shall be used only in the declaration of
+  //   a constructor or conversion function within its class
+  //   definition;
+  if (isFriendSpecified() && (isVirtualSpecified() || isExplicitSpecified())) {
+    StringRef Keyword;
+    SourceLocation SCLoc;
+
+    if (isVirtualSpecified()) {
+      Keyword = "virtual";
+      SCLoc = getVirtualSpecLoc();
+    } else {
+      Keyword = "explicit";
+      SCLoc = getExplicitSpecLoc();
+    }
+
+    FixItHint Hint = FixItHint::CreateRemoval(SCLoc);
+    Diag(D, SCLoc, diag::err_friend_decl_spec)
+      << Keyword << Hint;
+
+    FS_virtual_specified = FS_explicit_specified = false;
+    FS_virtualLoc = FS_explicitLoc = SourceLocation();
+  }
+
   assert(!TypeSpecOwned || isDeclRep((TST) TypeSpecType));
- 
+
   // Okay, now we can infer the real type.
 
   // TODO: return "auto function" and other bad things based on the real type.
@@ -1142,7 +1166,7 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP, const PrintingPoli
 
 bool DeclSpec::isMissingDeclaratorOk() {
   TST tst = getTypeSpecType();
-  return isDeclRep(tst) && getRepAsDecl() != 0 &&
+  return isDeclRep(tst) && getRepAsDecl() != nullptr &&
     StorageClassSpec != DeclSpec::SCS_typedef;
 }
 

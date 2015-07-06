@@ -7,12 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "format-test"
-
 #include "FormatTestUtils.h"
 #include "clang/Format/Format.h"
 #include "llvm/Support/Debug.h"
 #include "gtest/gtest.h"
+
+#define DEBUG_TYPE "format-test"
 
 namespace clang {
 namespace format {
@@ -32,7 +32,9 @@ protected:
   }
 
   static std::string format(llvm::StringRef Code) {
-    return format(Code, 0, Code.size(), getGoogleProtoStyle());
+    FormatStyle Style = getGoogleStyle(FormatStyle::LK_Proto);
+    Style.ColumnLimit = 60; // To make writing tests easier.
+    return format(Code, 0, Code.size(), Style);
   }
 
   static void verifyFormat(llvm::StringRef Code) {
@@ -45,8 +47,19 @@ TEST_F(FormatTestProto, FormatsMessages) {
                "  required int32 field1 = 1;\n"
                "}");
   verifyFormat("message SomeMessage {\n"
+               "  required .absolute.Reference field1 = 1;\n"
+               "}");
+  verifyFormat("message SomeMessage {\n"
                "  required int32 field1 = 1;\n"
                "  optional string field2 = 2 [default = \"2\"]\n"
+               "}");
+
+  verifyFormat("message SomeMessage {\n"
+               "  optional really.really.long.qualified.type.aaa.aaaaaaa\n"
+               "      fiiiiiiiiiiiiiiiiiiiiiiiiield = 1;\n"
+               "  optional\n"
+               "      really.really.long.qualified.type.aaa.aaaaaaa.aaaaaaaa\n"
+               "          another_fiiiiiiiiiiiiiiiiiiiiield = 2;\n"
                "}");
 }
 
@@ -64,13 +77,61 @@ TEST_F(FormatTestProto, UnderstandsReturns) {
 
 TEST_F(FormatTestProto, MessageFieldAttributes) {
   verifyFormat("optional string test = 1 [default = \"test\"];");
+  verifyFormat("optional bool a = 1 [default = true, deprecated = true];");
+  verifyFormat("optional LongMessageType long_proto_field = 1\n"
+               "    [default = REALLY_REALLY_LONG_CONSTANT_VALUE,\n"
+               "     deprecated = true];");
   verifyFormat("optional LongMessageType long_proto_field = 1\n"
                "    [default = REALLY_REALLY_LONG_CONSTANT_VALUE];");
+  verifyFormat("repeated double value = 1\n"
+               "    [(aaaaaaa.aaaaaaaaa) = {aaaaaaaaaaaaaaaaa: AAAAAAAA}];");
+  verifyFormat("repeated double value = 1\n"
+               "    [(aaaaaaa.aaaaaaaaa) = {aaaaaaaaaaaaaaaa: AAAAAAAAAA,\n"
+               "                            bbbbbbbbbbbbbbbb: BBBBBBBBBB}];");
+  verifyFormat("repeated double value = 1\n"
+               "    [(aaaaaaa.aaaaaaaaa) = {aaaaaaaaaaaaaaaa: AAAAAAAAAA\n"
+               "                            bbbbbbbbbbbbbbbb: BBBBBBBBBB}];");
+  verifyFormat("repeated double value = 1\n"
+               "    [(aaaaaaa.aaaaaaaaa) = {aaaaaaaaaaaaaaaa: AAAAAAAAAA,\n"
+               "                            bbbbbbb: BBBB,\n"
+               "                            bbbb: BBB}];");
 }
 
 TEST_F(FormatTestProto, FormatsOptions) {
-  verifyFormat("option java_package = \"my.test.package\";");
-  verifyFormat("option (my_custom_option) = \"abc\";");
+  verifyFormat("option (MyProto.options) = {\n"
+               "  field_a: OK\n"
+               "  field_b: \"OK\"\n"
+               "  field_c: \"OK\"\n"
+               "  msg_field: {field_d: 123}\n"
+               "};");
+
+  verifyFormat("option (MyProto.options) = {\n"
+               "  field_a: OK\n"
+               "  field_b: \"OK\"\n"
+               "  field_c: \"OK\"\n"
+               "  msg_field: {field_d: 123\n"
+               "              field_e: OK}\n"
+               "};");
+
+  verifyFormat("option (MyProto.options) = {\n"
+               "  field_a: OK  // Comment\n"
+               "  field_b: \"OK\"\n"
+               "  field_c: \"OK\"\n"
+               "  msg_field: {field_d: 123}\n"
+               "};");
+
+  verifyFormat("option (MyProto.options) = {\n"
+               "  field_c: \"OK\"\n"
+               "  msg_field{field_d: 123}\n"
+               "};");
+}
+
+TEST_F(FormatTestProto, FormatsService) {
+  verifyFormat("service SearchService {\n"
+               "  rpc Search(SearchRequest) returns (SearchResponse) {\n"
+               "    option foo = true;\n"
+               "  }\n"
+               "};");
 }
 
 } // end namespace tooling

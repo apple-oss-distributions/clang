@@ -7,8 +7,9 @@ add_clang_library(modernizeCore
   IncludeExcludeInfo.cpp
   PerfSupport.cpp
   IncludeDirectives.cpp
-  )
-target_link_libraries(modernizeCore
+
+  LINK_LIBS
+  clangAPINotes
   clangAST
   clangASTMatchers
   clangBasic

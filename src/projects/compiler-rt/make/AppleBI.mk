@@ -119,10 +119,11 @@ install-iOS-Simulator: $(SYMROOT)/libcompiler_rt_sim.dylib \
                        $(SYMROOT)/libcompiler_rt-dyld.a
 	mkdir -p $(DSTROOT)/$(SDKROOT)/usr/lib/system
 	$(call GetCNAVar,STRIP,Platform.darwin_bni,Release,) -S $(SYMROOT)/libcompiler_rt_sim.dylib \
-	    -o $(DSTROOT)/$(SDKROOT)/usr/lib/system/libcompiler_rt_sim.dylib
+	    -o $(DSTROOT)/$(SDKROOT)/usr/lib/system/libcompiler_rt.dylib
 	mkdir -p $(DSTROOT)/$(SDKROOT)/usr/local/lib/dyld
 	cp $(SYMROOT)/libcompiler_rt-dyld.a  \
 				    $(DSTROOT)/$(SDKROOT)/usr/local/lib/dyld/libcompiler_rt.a
+	cd $(DSTROOT)/$(SDKROOT)/usr/lib/system/ && ln -s libcompiler_rt.dylib libcompiler_rt_sim.dylib
   
 # Rule to make fat dylib
 $(SYMROOT)/libcompiler_rt_sim.dylib: $(foreach arch,$(RC_ARCHS), \
@@ -135,7 +136,7 @@ $(OBJROOT)/libcompiler_rt_sim-%.dylib : $(OBJROOT)/darwin_bni/Release/%/libcompi
 	echo "const char vers[] = \"@(#) $(RC_ProjectName)-$(RC_ProjectSourceVersion)\"; " > $(OBJROOT)/version.c
 	$(call GetCNAVar,CC,Platform.darwin_bni,Release,$*) \
 	   $(OBJROOT)/version.c -arch $* -dynamiclib \
-	   -install_name /usr/lib/system/libcompiler_rt_sim.dylib \
+	   -install_name /usr/lib/system/libcompiler_rt.dylib \
 	   -compatibility_version 1 -current_version $(RC_ProjectSourceVersion) \
      -Wl,-unexported_symbol,___enable_execute_stack \
 	   -nostdlib \

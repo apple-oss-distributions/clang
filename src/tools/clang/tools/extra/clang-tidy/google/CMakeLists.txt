@@ -1,11 +1,22 @@
 set(LLVM_LINK_COMPONENTS support)
 
 add_clang_library(clangTidyGoogleModule
+  AvoidCStyleCastsCheck.cpp
+  ExplicitConstructorCheck.cpp
+  ExplicitMakePairCheck.cpp
   GoogleTidyModule.cpp
-  )
-target_link_libraries(clangTidyGoogleModule
+  MemsetZeroLengthCheck.cpp
+  NamedParameterCheck.cpp
+  OverloadedUnaryAndCheck.cpp
+  StringReferenceMemberCheck.cpp
+  UnnamedNamespaceInHeaderCheck.cpp
+  UsingNamespaceDirectiveCheck.cpp
+
+  LINK_LIBS
+  clangAPINotes
   clangAST
   clangASTMatchers
   clangBasic
+  clangLex
   clangTidy
   )

@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CLANG_CODEGEN_CGCALL_H
-#define CLANG_CODEGEN_CGCALL_H
+#ifndef LLVM_CLANG_LIB_CODEGEN_CGCALL_H
+#define LLVM_CLANG_LIB_CODEGEN_CGCALL_H
 
 #include "CGValue.h"
 #include "EHScopeStack.h"
@@ -56,7 +56,7 @@ namespace CodeGen {
   class CallArgList :
     public SmallVector<CallArg, 16> {
   public:
-    CallArgList() : StackBase(0), StackBaseMem(0) {}
+    CallArgList() : StackBase(nullptr), StackBaseMem(nullptr) {}
 
     struct Writeback {
       /// The original argument.  Note that the argument l-value
@@ -99,9 +99,12 @@ namespace CodeGen {
 
     bool hasWritebacks() const { return !Writebacks.empty(); }
 
-    typedef SmallVectorImpl<Writeback>::const_iterator writeback_iterator;
-    writeback_iterator writeback_begin() const { return Writebacks.begin(); }
-    writeback_iterator writeback_end() const { return Writebacks.end(); }
+    typedef llvm::iterator_range<SmallVectorImpl<Writeback>::const_iterator>
+      writeback_const_range;
+
+    writeback_const_range writebacks() const {
+      return writeback_const_range(Writebacks.begin(), Writebacks.end());
+    }
 
     void addArgCleanupDeactivation(EHScopeStack::stable_iterator Cleanup,
                                    llvm::Instruction *IsActiveIP) {

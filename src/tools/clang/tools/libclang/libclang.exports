@@ -2,12 +2,14 @@ clang_CXCursorSet_contains
 clang_CXCursorSet_insert
 clang_CXIndex_getGlobalOptions
 clang_CXIndex_setGlobalOptions
+clang_CXXMethod_isConst
 clang_CXXMethod_isPureVirtual
 clang_CXXMethod_isStatic
 clang_CXXMethod_isVirtual
 clang_Cursor_getArgument
 clang_Cursor_getBriefCommentText
 clang_Cursor_getCommentRange
+clang_Cursor_getMangling
 clang_Cursor_getParsedComment
 clang_Cursor_getRawCommentText
 clang_Cursor_getNumArguments
@@ -23,6 +25,7 @@ clang_Cursor_isNull
 clang_Cursor_isObjCOptional
 clang_Cursor_isVariadic
 clang_Cursor_getModule
+clang_File_isEqual
 clang_Module_getASTFile
 clang_Module_getParent
 clang_Module_getName
@@ -65,6 +68,8 @@ clang_Type_getAlignOf
 clang_Type_getClassType
 clang_Type_getSizeOf
 clang_Type_getOffsetOf
+clang_Type_getNumTemplateArguments
+clang_Type_getTemplateArgumentAsType
 clang_Type_getCXXRefQualifier
 clang_VerbatimBlockLineComment_getText
 clang_VerbatimLineComment_getText

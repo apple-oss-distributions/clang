@@ -24,10 +24,10 @@
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
 #include "asan_internal.h"
-#include "asan_mac.h"
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
+#include "sanitizer_common/sanitizer_mac.h"
 
 // Similar code is used in Google Perftools,
 // http://code.google.com/p/google-perftools.
@@ -159,7 +159,7 @@ size_t mz_size(malloc_zone_t* zone, const void* ptr) {
 }
 
 void *mz_malloc(malloc_zone_t *zone, size_t size) {
-  if (!asan_inited) {
+  if (UNLIKELY(!asan_inited)) {
     CHECK(system_malloc_zone);
     return malloc_zone_malloc(system_malloc_zone, size);
   }
@@ -168,7 +168,7 @@ void *mz_malloc(malloc_zone_t *zone, size_t size) {
 }
 
 void *mz_calloc(malloc_zone_t *zone, size_t nmemb, size_t size) {
-  if (!asan_inited) {
+  if (UNLIKELY(!asan_inited)) {
     // Hack: dlsym calls calloc before REAL(calloc) is retrieved from dlsym.
     const size_t kCallocPoolSize = 1024;
     static uptr calloc_memory_for_dlsym[kCallocPoolSize];
@@ -184,7 +184,7 @@ void *mz_calloc(malloc_zone_t *zone, size_t nmemb, size_t size) {
 }
 
 void *mz_valloc(malloc_zone_t *zone, size_t size) {
-  if (!asan_inited) {
+  if (UNLIKELY(!asan_inited)) {
     CHECK(system_malloc_zone);
     return malloc_zone_valloc(system_malloc_zone, size);
   }
@@ -242,7 +242,7 @@ void mz_destroy(malloc_zone_t* zone) {
 #if defined(MAC_OS_X_VERSION_10_6) && \
     MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6
 void *mz_memalign(malloc_zone_t *zone, size_t align, size_t size) {
-  if (!asan_inited) {
+  if (UNLIKELY(!asan_inited)) {
     CHECK(system_malloc_zone);
     return malloc_zone_memalign(system_malloc_zone, align, size);
   }

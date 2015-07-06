@@ -31,6 +31,7 @@
 #include "clang/Lex/Token.h"
 #include "clang/Sema/AttributeList.h"
 #include "clang/Sema/Ownership.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -178,9 +179,9 @@ public:
   bool isNotEmpty() const { return !isEmpty(); }
 
   /// An error occurred during parsing of the scope specifier.
-  bool isInvalid() const { return isNotEmpty() && getScopeRep() == 0; }
+  bool isInvalid() const { return isNotEmpty() && getScopeRep() == nullptr; }
   /// A scope specifier is present, and it refers to a real scope.
-  bool isValid() const { return isNotEmpty() && getScopeRep() != 0; }
+  bool isValid() const { return isNotEmpty() && getScopeRep() != nullptr; }
 
   /// \brief Indicate that this nested-name-specifier is invalid.
   void SetInvalid(SourceRange R) { 
@@ -193,7 +194,7 @@ public:
   
   /// Deprecated.  Some call sites intend isNotEmpty() while others intend
   /// isValid().
-  bool isSet() const { return getScopeRep() != 0; }
+  bool isSet() const { return getScopeRep() != nullptr; }
 
   void clear() {
     Range = SourceRange();
@@ -420,11 +421,11 @@ public:
       Friend_specified(false),
       Constexpr_specified(false),
       Attrs(attrFactory),
-      ProtocolQualifiers(0),
+      ProtocolQualifiers(nullptr),
       NumProtocolQualifiers(0),
-      ProtocolLocs(0),
+      ProtocolLocs(nullptr),
       writtenBS(),
-      ObjCQualifiers(0) {
+      ObjCQualifiers(nullptr) {
   }
   ~DeclSpec() {
     delete [] ProtocolQualifiers;
@@ -709,21 +710,11 @@ public:
   void addAttributes(AttributeList *AL) {
     Attrs.addAll(AL);
   }
-  void setAttributes(AttributeList *AL) {
-    Attrs.set(AL);
-  }
 
   bool hasAttributes() const { return !Attrs.empty(); }
 
   ParsedAttributes &getAttributes() { return Attrs; }
   const ParsedAttributes &getAttributes() const { return Attrs; }
-
-  /// \brief Return the current attribute list and remove them from
-  /// the DeclSpec so that it doesn't own them.
-  ParsedAttributes takeAttributes() {
-    // The non-const "copy" constructor clears the operand automatically.
-    return Attrs;
-  }
 
   void takeAttributesFrom(ParsedAttributes &attrs) {
     Attrs.takeAllFrom(attrs);
@@ -778,7 +769,8 @@ public:
     DQ_Out = 0x4,
     DQ_Bycopy = 0x8,
     DQ_Byref = 0x10,
-    DQ_Oneway = 0x20
+    DQ_Oneway = 0x20,
+    DQ_CSNullability = 0x40
   };
 
   /// PropertyAttributeKind - list of property attributes.
@@ -795,16 +787,21 @@ public:
     DQ_PR_atomic = 0x100,
     DQ_PR_weak =   0x200,
     DQ_PR_strong = 0x400,
-    DQ_PR_unsafe_unretained = 0x800
+    DQ_PR_unsafe_unretained = 0x800,
+    DQ_PR_nullability = 0x1000,
+    DQ_PR_null_resettable = 0x2000
   };
-
 
   ObjCDeclSpec()
     : objcDeclQualifier(DQ_None), PropertyAttributes(DQ_PR_noattr),
-      GetterName(0), SetterName(0) { }
+      Nullability(0), GetterName(nullptr), SetterName(nullptr) { }
+
   ObjCDeclQualifier getObjCDeclQualifier() const { return objcDeclQualifier; }
   void setObjCDeclQualifier(ObjCDeclQualifier DQVal) {
     objcDeclQualifier = (ObjCDeclQualifier) (objcDeclQualifier | DQVal);
+  }
+  void clearObjCDeclQualifier(ObjCDeclQualifier DQVal) {
+    objcDeclQualifier = (ObjCDeclQualifier) (objcDeclQualifier & ~DQVal);
   }
 
   ObjCPropertyAttributeKind getPropertyAttributes() const {
@@ -813,6 +810,28 @@ public:
   void setPropertyAttributes(ObjCPropertyAttributeKind PRVal) {
     PropertyAttributes =
       (ObjCPropertyAttributeKind)(PropertyAttributes | PRVal);
+  }
+
+  NullabilityKind getNullability() const {
+    assert(((getObjCDeclQualifier() & DQ_CSNullability) ||
+            (getPropertyAttributes() & DQ_PR_nullability)) &&
+           "Objective-C declspec doesn't have nullability");
+    return static_cast<NullabilityKind>(Nullability);
+  }
+
+  SourceLocation getNullabilityLoc() const {
+    assert(((getObjCDeclQualifier() & DQ_CSNullability) ||
+            (getPropertyAttributes() & DQ_PR_nullability)) &&
+           "Objective-C declspec doesn't have nullability");
+    return NullabilityLoc;
+  }
+
+  void setNullability(SourceLocation loc, NullabilityKind kind) {
+    assert(((getObjCDeclQualifier() & DQ_CSNullability) ||
+            (getPropertyAttributes() & DQ_PR_nullability)) &&
+           "Set the nullability declspec or property attribute first");
+    Nullability = static_cast<unsigned>(kind);
+    NullabilityLoc = loc;
   }
 
   const IdentifierInfo *getGetterName() const { return GetterName; }
@@ -824,15 +843,20 @@ public:
   void setSetterName(IdentifierInfo *name) { SetterName = name; }
 
 private:
-  // FIXME: These two are unrelated and mutially exclusive. So perhaps
-  // we can put them in a union to reflect their mutual exclusiveness
+  // FIXME: These two are unrelated and mutually exclusive. So perhaps
+  // we can put them in a union to reflect their mutual exclusivity
   // (space saving is negligible).
-  ObjCDeclQualifier objcDeclQualifier : 6;
+  ObjCDeclQualifier objcDeclQualifier : 7;
 
   // NOTE: VC++ treats enums as signed, avoid using ObjCPropertyAttributeKind
-  unsigned PropertyAttributes : 12;
-  IdentifierInfo *GetterName;    // getter name of NULL if no getter
-  IdentifierInfo *SetterName;    // setter name of NULL if no setter
+  unsigned PropertyAttributes : 14;
+
+  unsigned Nullability : 2;
+
+  SourceLocation NullabilityLoc;
+
+  IdentifierInfo *GetterName;    // getter name or NULL if no getter
+  IdentifierInfo *SetterName;    // setter name or NULL if no setter
 };
 
 /// \brief Represents a C++ unqualified-id that has been parsed. 
@@ -915,13 +939,13 @@ public:
   /// \brief The location of the last token that describes this unqualified-id.
   SourceLocation EndLocation;
   
-  UnqualifiedId() : Kind(IK_Identifier), Identifier(0) { }
+  UnqualifiedId() : Kind(IK_Identifier), Identifier(nullptr) { }
 
   /// \brief Clear out this unqualified-id, setting it to default (invalid) 
   /// state.
   void clear() {
     Kind = IK_Identifier;
-    Identifier = 0;
+    Identifier = nullptr;
     StartLocation = SourceLocation();
     EndLocation = SourceLocation();
   }
@@ -1115,7 +1139,8 @@ struct DeclaratorChunk {
   };
 
   /// ParamInfo - An array of paraminfo objects is allocated whenever a function
-  /// declarator is parsed.  There are two interesting styles of arguments here:
+  /// declarator is parsed.  There are two interesting styles of parameters
+  /// here:
   /// K&R-style identifier lists and parameter type lists.  K&R-style identifier
   /// lists will have information about the identifier, but no type information.
   /// Parameter type lists will have type info (if the actions module provides
@@ -1135,7 +1160,7 @@ struct DeclaratorChunk {
     ParamInfo() {}
     ParamInfo(IdentifierInfo *ident, SourceLocation iloc,
               Decl *param,
-              CachedTokens *DefArgTokens = 0)
+              CachedTokens *DefArgTokens = nullptr)
       : Ident(ident), IdentLoc(iloc), Param(param),
         DefaultArgTokens(DefArgTokens) {}
   };
@@ -1147,7 +1172,7 @@ struct DeclaratorChunk {
 
   struct FunctionTypeInfo : TypeInfoCommon {
     /// hasPrototype - This is true if the function had at least one typed
-    /// argument.  If the function is () or (a,b,c), then it has no prototype,
+    /// parameter.  If the function is () or (a,b,c), then it has no prototype,
     /// and is treated as a K&R-style function.
     unsigned hasPrototype : 1;
 
@@ -1170,8 +1195,8 @@ struct DeclaratorChunk {
     /// ExceptionSpecType - An ExceptionSpecificationType value.
     unsigned ExceptionSpecType : 3;
 
-    /// DeleteArgInfo - If this is true, we need to delete[] ArgInfo.
-    unsigned DeleteArgInfo : 1;
+    /// DeleteParams - If this is true, we need to delete[] Params.
+    unsigned DeleteParams : 1;
 
     /// HasTrailingReturnType - If this is true, a trailing return type was
     /// specified.
@@ -1186,9 +1211,9 @@ struct DeclaratorChunk {
     /// The location of the right parenthesis in the source.
     unsigned RParenLoc;
 
-    /// NumArgs - This is the number of formal arguments provided for the
+    /// NumParams - This is the number of formal parameters specified by the
     /// declarator.
-    unsigned NumArgs;
+    unsigned NumParams;
 
     /// NumExceptions - This is the number of types in the dynamic-exception-
     /// decl, if the function has one.
@@ -1216,10 +1241,10 @@ struct DeclaratorChunk {
     /// \brief The location of the keyword introducing the spec, if any.
     unsigned ExceptionSpecLoc;
 
-    /// ArgInfo - This is a pointer to a new[]'d array of ParamInfo objects that
-    /// describe the arguments for this function declarator.  This is null if
-    /// there are no arguments specified.
-    ParamInfo *ArgInfo;
+    /// Params - This is a pointer to a new[]'d array of ParamInfo objects that
+    /// describe the parameters specified by this function declarator.  null if
+    /// there are no parameters specified.
+    ParamInfo *Params;
 
     union {
       /// \brief Pointer to a new[]'d array of TypeAndRange objects that
@@ -1236,30 +1261,32 @@ struct DeclaratorChunk {
     /// type specified.
     UnionParsedType TrailingReturnType;
 
-    /// \brief Reset the argument list to having zero arguments.
+    /// \brief Reset the parameter list to having zero parameters.
     ///
     /// This is used in various places for error recovery.
-    void freeArgs() {
-      if (DeleteArgInfo) {
-        delete[] ArgInfo;
-        DeleteArgInfo = false;
+    void freeParams() {
+      for (unsigned I = 0; I < NumParams; ++I) {
+        delete Params[I].DefaultArgTokens;
+        Params[I].DefaultArgTokens = nullptr;
       }
-      NumArgs = 0;
+      if (DeleteParams) {
+        delete[] Params;
+        DeleteParams = false;
+      }
+      NumParams = 0;
     }
 
     void destroy() {
-      if (DeleteArgInfo)
-        delete[] ArgInfo;
+      if (DeleteParams)
+        delete[] Params;
       if (getExceptionSpecType() == EST_Dynamic)
         delete[] Exceptions;
     }
 
     /// isKNRPrototype - Return true if this is a K&R style identifier list,
     /// like "void foo(a,b,c)".  In a function definition, this will be followed
-    /// by the argument type definitions.
-    bool isKNRPrototype() const {
-      return !hasPrototype && NumArgs != 0;
-    }
+    /// by the parameter type definitions.
+    bool isKNRPrototype() const { return !hasPrototype && NumParams != 0; }
 
     SourceLocation getLParenLoc() const {
       return SourceLocation::getFromRawEncoding(LParenLoc);
@@ -1391,7 +1418,7 @@ struct DeclaratorChunk {
     I.Ptr.ConstQualLoc    = ConstQualLoc.getRawEncoding();
     I.Ptr.VolatileQualLoc = VolatileQualLoc.getRawEncoding();
     I.Ptr.RestrictQualLoc = RestrictQualLoc.getRawEncoding();
-    I.Ptr.AttrList        = 0;
+    I.Ptr.AttrList        = nullptr;
     return I;
   }
 
@@ -1403,7 +1430,7 @@ struct DeclaratorChunk {
     I.Loc             = Loc;
     I.Ref.HasRestrict = (TypeQuals & DeclSpec::TQ_restrict) != 0;
     I.Ref.LValueRef   = lvalue;
-    I.Ref.AttrList    = 0;
+    I.Ref.AttrList    = nullptr;
     return I;
   }
 
@@ -1415,7 +1442,7 @@ struct DeclaratorChunk {
     I.Kind          = Array;
     I.Loc           = LBLoc;
     I.EndLoc        = RBLoc;
-    I.Arr.AttrList  = 0;
+    I.Arr.AttrList  = nullptr;
     I.Arr.TypeQuals = TypeQuals;
     I.Arr.hasStatic = isStatic;
     I.Arr.isStar    = isStar;
@@ -1425,10 +1452,10 @@ struct DeclaratorChunk {
 
   /// DeclaratorChunk::getFunction - Return a DeclaratorChunk for a function.
   /// "TheDeclarator" is the declarator that this will be added to.
-  static DeclaratorChunk getFunction(bool hasProto,
-                                     bool isAmbiguous,
+  static DeclaratorChunk getFunction(bool HasProto,
+                                     bool IsAmbiguous,
                                      SourceLocation LParenLoc,
-                                     ParamInfo *ArgInfo, unsigned NumArgs,
+                                     ParamInfo *Params, unsigned NumParams,
                                      SourceLocation EllipsisLoc,
                                      SourceLocation RParenLoc,
                                      unsigned TypeQuals,
@@ -1456,7 +1483,7 @@ struct DeclaratorChunk {
     I.Kind          = BlockPointer;
     I.Loc           = Loc;
     I.Cls.TypeQuals = TypeQuals;
-    I.Cls.AttrList  = 0;
+    I.Cls.AttrList  = nullptr;
     return I;
   }
 
@@ -1467,7 +1494,7 @@ struct DeclaratorChunk {
     I.Kind          = MemberPointer;
     I.Loc           = Loc;
     I.Mem.TypeQuals = TypeQuals;
-    I.Mem.AttrList  = 0;
+    I.Mem.AttrList  = nullptr;
     new (I.Mem.ScopeMem.Mem) CXXScopeSpec(SS);
     return I;
   }
@@ -1479,7 +1506,7 @@ struct DeclaratorChunk {
     I.Kind          = Paren;
     I.Loc           = LParenLoc;
     I.EndLoc        = RParenLoc;
-    I.Common.AttrList = 0;
+    I.Common.AttrList = nullptr;
     return I;
   }
 
@@ -1579,7 +1606,10 @@ private:
   bool InlineParamsUsed;
 
   /// \brief true if the declaration is preceded by \c __extension__.
-  bool Extension : 1;
+  unsigned Extension : 1;
+
+  /// Indicates whether this is an Objective-C instance variable.
+  unsigned ObjCIvar : 1;
 
   /// \brief If this is the second or subsequent declarator in this declaration,
   /// the location of the comma before this declarator.
@@ -1597,8 +1627,8 @@ public:
       InvalidType(DS.getTypeSpecType() == DeclSpec::TST_error),
       GroupingParens(false), FunctionDefinition(FDK_Declaration), 
       Redeclaration(false),
-      Attrs(ds.getAttributePool().getFactory()), AsmLabel(0),
-      InlineParamsUsed(false), Extension(false) {
+      Attrs(ds.getAttributePool().getFactory()), AsmLabel(nullptr),
+      InlineParamsUsed(false), Extension(false), ObjCIvar(false) {
   }
 
   ~Declarator() {
@@ -1674,8 +1704,9 @@ public:
       DeclTypeInfo[i].destroy();
     DeclTypeInfo.clear();
     Attrs.clear();
-    AsmLabel = 0;
+    AsmLabel = nullptr;
     InlineParamsUsed = false;
+    ObjCIvar = false;
     CommaLoc = SourceLocation();
     EllipsisLoc = SourceLocation();
   }
@@ -1847,7 +1878,7 @@ public:
     if (Name.getKind() == UnqualifiedId::IK_Identifier)
       return Name.Identifier;
     
-    return 0;
+    return nullptr;
   }
   SourceLocation getIdentifierLoc() const { return Name.StartLocation; }
 
@@ -1902,7 +1933,7 @@ public:
       if (!DeclTypeInfo[i].isParen())
         return &DeclTypeInfo[i];
     }
-    return 0;
+    return nullptr;
   }
 
   /// Return the outermost (furthest from the declarator) chunk of
@@ -1913,7 +1944,7 @@ public:
       if (!DeclTypeInfo[i-1].isParen())
         return &DeclTypeInfo[i-1];
     }
-    return 0;
+    return nullptr;
   }
 
   /// isArrayOfUnknownBound - This method returns true if the declarator
@@ -2076,6 +2107,9 @@ public:
   void setExtension(bool Val = true) { Extension = Val; }
   bool getExtension() const { return Extension; }
 
+  void setObjCIvar(bool Val = true) { ObjCIvar = Val; }
+  bool isObjCIvar() const { return ObjCIvar; }
+
   void setInvalidType(bool Val = true) { InvalidType = Val; }
   bool isInvalidType() const {
     return InvalidType || DS.getTypeSpecType() == DeclSpec::TST_error;
@@ -2124,7 +2158,7 @@ struct FieldDeclarator {
   Declarator D;
   Expr *BitfieldSize;
   explicit FieldDeclarator(const DeclSpec &DS)
-    : D(DS, Declarator::MemberContext), BitfieldSize(0) { }
+    : D(DS, Declarator::MemberContext), BitfieldSize(nullptr) { }
 };
 
 /// \brief Represents a C++11 virt-specifier-seq.
@@ -2141,6 +2175,8 @@ public:
 
   bool SetSpecifier(Specifier VS, SourceLocation Loc,
                     const char *&PrevSpec);
+
+  bool isUnset() const { return Specifiers == 0; }
 
   bool isOverrideSpecified() const { return Specifiers & VS_Override; }
   SourceLocation getOverrideLoc() const { return VS_overrideLoc; }
@@ -2162,25 +2198,23 @@ private:
   SourceLocation LastLocation;
 };
 
-/// \brief An individual capture in a lambda introducer.
-struct LambdaCapture {
-  LambdaCaptureKind Kind;
-  SourceLocation Loc;
-  IdentifierInfo *Id;
-  SourceLocation EllipsisLoc;
-  ExprResult Init;
-  ParsedType InitCaptureType;
-  LambdaCapture(LambdaCaptureKind Kind, SourceLocation Loc,
-                IdentifierInfo* Id,
-                SourceLocation EllipsisLoc,
-                ExprResult Init, ParsedType InitCaptureType)
-    : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc), Init(Init),
-        InitCaptureType(InitCaptureType)
-  {}
-};
-
 /// \brief Represents a complete lambda introducer.
 struct LambdaIntroducer {
+  /// \brief An individual capture in a lambda introducer.
+  struct LambdaCapture {
+    LambdaCaptureKind Kind;
+    SourceLocation Loc;
+    IdentifierInfo *Id;
+    SourceLocation EllipsisLoc;
+    ExprResult Init;
+    ParsedType InitCaptureType;
+    LambdaCapture(LambdaCaptureKind Kind, SourceLocation Loc,
+                  IdentifierInfo *Id, SourceLocation EllipsisLoc,
+                  ExprResult Init, ParsedType InitCaptureType)
+        : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc), Init(Init),
+          InitCaptureType(InitCaptureType) {}
+  };
+
   SourceRange Range;
   SourceLocation DefaultLoc;
   LambdaCaptureDefault Default;

@@ -1,4 +1,4 @@
-# These are the functions which clang needs when it is targetting a previous
+# These are the functions which clang needs when it is targeting a previous
 # version of the OS. The issue is that the backend may use functions which were
 # not present in the libgcc that shipped on the platform. In such cases, we link
 # with a version of the library which contains private_extern definitions of all
@@ -204,6 +204,26 @@ THUMB2_FUNCTIONS := \
 	switch32 \
 	switch8 \
 	switchu8 \
+	sync_fetch_and_add_4 \
+	sync_fetch_and_sub_4 \
+	sync_fetch_and_and_4 \
+	sync_fetch_and_or_4 \
+	sync_fetch_and_xor_4 \
+	sync_fetch_and_nand_4 \
+	sync_fetch_and_max_4 \
+	sync_fetch_and_umax_4 \
+	sync_fetch_and_min_4 \
+	sync_fetch_and_umin_4 \
+	sync_fetch_and_add_8 \
+	sync_fetch_and_sub_8 \
+	sync_fetch_and_and_8 \
+	sync_fetch_and_or_8 \
+	sync_fetch_and_xor_8 \
+	sync_fetch_and_nand_8 \
+	sync_fetch_and_max_8 \
+	sync_fetch_and_umax_8 \
+	sync_fetch_and_min_8 \
+	sync_fetch_and_umin_8
 
 I386_FUNCTIONS :=  \
 	i686.get_pc_thunk.eax \

@@ -136,7 +136,7 @@ void DeclInfo::fill() {
   IsInstanceMethod = false;
   IsClassMethod = false;
   ParamVars = None;
-  TemplateParameters = NULL;
+  TemplateParameters = nullptr;
 
   if (!CommentDecl) {
     // If there is no declaration, the defaults is our only guess.
@@ -281,7 +281,7 @@ void DeclInfo::fill() {
         ArrayRef<ParmVarDecl *> Params = FTL.getParams();
         ParamVars = ArrayRef<const ParmVarDecl *>(Params.data(),
                                                   Params.size());
-        ReturnType = FTL.getResultLoc().getType();
+        ReturnType = FTL.getReturnLoc().getType();
         break;
       }
       if (TemplateSpecializationTypeLoc STL =
@@ -302,7 +302,7 @@ void DeclInfo::fill() {
           ArrayRef<ParmVarDecl *> Params = FTL.getParams();
           ParamVars = ArrayRef<const ParmVarDecl *>(Params.data(),
                                                     Params.size());
-          ReturnType = FTL.getResultLoc().getType();
+          ReturnType = FTL.getReturnLoc().getType();
         }
         break;
       }

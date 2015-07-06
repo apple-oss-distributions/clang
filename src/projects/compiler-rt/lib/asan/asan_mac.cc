@@ -17,14 +17,13 @@
 
 #include "asan_interceptors.h"
 #include "asan_internal.h"
-#include "asan_mac.h"
 #include "asan_mapping.h"
 #include "asan_stack.h"
 #include "asan_thread.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_mac.h"
 
-#include <crt_externs.h>  // for _NSGetArgv
 #include <dlfcn.h>  // for dladdr()
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -38,58 +37,37 @@
 #include <unistd.h>
 #include <libkern/OSAtomic.h>
 
+// from <crt_externs.h>, but we don't have that file on iOS
+extern "C" {
+  extern char ***_NSGetArgv(void);
+  extern char ***_NSGetEnviron(void);
+}
+
 namespace __asan {
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
   ucontext_t *ucontext = (ucontext_t*)context;
-# if SANITIZER_WORDSIZE == 64
+# if defined(__aarch64__)
+  *pc = ucontext->uc_mcontext->__ss.__pc;
+  *bp = ucontext->uc_mcontext->__ss.__lr;
+  *sp = ucontext->uc_mcontext->__ss.__sp;
+# elif defined(__x86_64__)
   *pc = ucontext->uc_mcontext->__ss.__rip;
   *bp = ucontext->uc_mcontext->__ss.__rbp;
   *sp = ucontext->uc_mcontext->__ss.__rsp;
-# else
+# elif defined(__arm__)
+  *pc = ucontext->uc_mcontext->__ss.__pc;
+  *bp = ucontext->uc_mcontext->__ss.__lr;
+  *sp = ucontext->uc_mcontext->__ss.__sp;
+# elif defined(__i386__)
   *pc = ucontext->uc_mcontext->__ss.__eip;
   *bp = ucontext->uc_mcontext->__ss.__ebp;
   *sp = ucontext->uc_mcontext->__ss.__esp;
-# endif  // SANITIZER_WORDSIZE
+# else
+# error "Unknown architecture"
+# endif
 }
 
-MacosVersion cached_macos_version = MACOS_VERSION_UNINITIALIZED;
-
-MacosVersion GetMacosVersionInternal() {
-  int mib[2] = { CTL_KERN, KERN_OSRELEASE };
-  char version[100];
-  uptr len = 0, maxlen = sizeof(version) / sizeof(version[0]);
-  for (uptr i = 0; i < maxlen; i++) version[i] = '\0';
-  // Get the version length.
-  CHECK_NE(sysctl(mib, 2, 0, &len, 0, 0), -1);
-  CHECK_LT(len, maxlen);
-  CHECK_NE(sysctl(mib, 2, version, &len, 0, 0), -1);
-  switch (version[0]) {
-    case '9': return MACOS_VERSION_LEOPARD;
-    case '1': {
-      switch (version[1]) {
-        case '0': return MACOS_VERSION_SNOW_LEOPARD;
-        case '1': return MACOS_VERSION_LION;
-        case '2': return MACOS_VERSION_MOUNTAIN_LION;
-        case '3': return MACOS_VERSION_MAVERICKS;
-        default: return MACOS_VERSION_UNKNOWN;
-      }
-    }
-    default: return MACOS_VERSION_UNKNOWN;
-  }
-}
-
-MacosVersion GetMacosVersion() {
-  atomic_uint32_t *cache =
-      reinterpret_cast<atomic_uint32_t*>(&cached_macos_version);
-  MacosVersion result =
-      static_cast<MacosVersion>(atomic_load(cache, memory_order_acquire));
-  if (result == MACOS_VERSION_UNINITIALIZED) {
-    result = GetMacosVersionInternal();
-    atomic_store(cache, result, memory_order_release);
-  }
-  return result;
-}
 
 bool PlatformHasDifferentMemcpyAndMemmove() {
   // On OS X 10.7 memcpy() and memmove() are both resolved
@@ -139,7 +117,6 @@ void LeakyResetEnv(const char *name, const char *name_value) {
 }
 
 void MaybeReexec() {
-  if (!flags()->allow_reexec) return;
   // Make sure the dynamic ASan runtime library is preloaded so that the
   // wrappers work. If it is not, set DYLD_INSERT_LIBRARIES and re-exec
   // ourselves.
@@ -151,7 +128,7 @@ void MaybeReexec() {
       internal_strlen(dyld_insert_libraries) : 0;
   uptr fname_len = internal_strlen(info.dli_fname);
   if (!dyld_insert_libraries ||
-      !REAL(strstr)(dyld_insert_libraries, info.dli_fname)) {
+      !REAL(strstr)(dyld_insert_libraries, StripModuleName(info.dli_fname))) {
     // DYLD_INSERT_LIBRARIES is not set or does not contain the runtime
     // library.
     char program_name[1024];
@@ -177,8 +154,15 @@ void MaybeReexec() {
     VReport(1, "exec()-ing the program with\n");
     VReport(1, "%s=%s\n", kDyldInsertLibraries, new_env);
     VReport(1, "to enable ASan wrappers.\n");
-    VReport(1, "Set ASAN_OPTIONS=allow_reexec=0 to disable this.\n");
     execv(program_name, *_NSGetArgv());
+
+    // We get here only if execv() failed.
+    Report("ERROR: The process is launched without DYLD_INSERT_LIBRARIES, "
+           "which is required for ASan to work. ASan tried to set the "
+           "environment variable and re-execute itself, but execv() failed, "
+           "possibly because of sandbox restrictions. Make sure to launch the "
+           "executable with:\n%s=%s\n", kDyldInsertLibraries, new_env);
+    CHECK("execv failed" && 0);
   } else {
     // DYLD_INSERT_LIBRARIES is set and contains the runtime library.
     if (old_env_len == fname_len) {
@@ -236,8 +220,15 @@ void *AsanDoesNotSupportStaticLinkage() {
   return 0;
 }
 
+// No-op. Mac does not support static linkage anyway.
+void AsanCheckDynamicRTPrereqs() {}
+
+// No-op. Mac does not support static linkage anyway.
+void AsanCheckIncompatibleRT() {}
+
 bool AsanInterceptsSignal(int signum) {
-  return (signum == SIGSEGV || signum == SIGBUS) && flags()->handle_segv;
+  return (signum == SIGSEGV || signum == SIGBUS) &&
+         common_flags()->handle_segv;
 }
 
 void AsanPlatformThreadInit() {
@@ -327,7 +318,7 @@ using namespace __asan;  // NOLINT
 // The caller retains control of the allocated context.
 extern "C"
 asan_block_context_t *alloc_asan_context(void *ctxt, dispatch_function_t func,
-                                         StackTrace *stack) {
+                                         BufferedStackTrace *stack) {
   asan_block_context_t *asan_ctxt =
       (asan_block_context_t*) asan_malloc(sizeof(asan_block_context_t), stack);
   asan_ctxt->block = ctxt;
@@ -406,30 +397,39 @@ void dispatch_source_set_event_handler(dispatch_source_t ds, void(^work)(void));
 
 INTERCEPTOR(void, dispatch_async,
             dispatch_queue_t dq, void(^work)(void)) {
+  ENABLE_FRAME_POINTER;
   GET_ASAN_BLOCK(work);
   REAL(dispatch_async)(dq, asan_block);
 }
 
 INTERCEPTOR(void, dispatch_group_async,
             dispatch_group_t dg, dispatch_queue_t dq, void(^work)(void)) {
+  ENABLE_FRAME_POINTER;
   GET_ASAN_BLOCK(work);
   REAL(dispatch_group_async)(dg, dq, asan_block);
 }
 
 INTERCEPTOR(void, dispatch_after,
             dispatch_time_t when, dispatch_queue_t queue, void(^work)(void)) {
+  ENABLE_FRAME_POINTER;
   GET_ASAN_BLOCK(work);
   REAL(dispatch_after)(when, queue, asan_block);
 }
 
 INTERCEPTOR(void, dispatch_source_set_cancel_handler,
             dispatch_source_t ds, void(^work)(void)) {
+  if (!work) {
+    REAL(dispatch_source_set_cancel_handler)(ds, work);
+    return;
+  }
+  ENABLE_FRAME_POINTER;
   GET_ASAN_BLOCK(work);
   REAL(dispatch_source_set_cancel_handler)(ds, asan_block);
 }
 
 INTERCEPTOR(void, dispatch_source_set_event_handler,
             dispatch_source_t ds, void(^work)(void)) {
+  ENABLE_FRAME_POINTER;
   GET_ASAN_BLOCK(work);
   REAL(dispatch_source_set_event_handler)(ds, asan_block);
 }

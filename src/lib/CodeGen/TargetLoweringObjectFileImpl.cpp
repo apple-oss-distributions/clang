@@ -35,8 +35,9 @@
 #include "llvm/Support/ELF.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetLowering.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetSubtargetInfo.h"
 using namespace llvm;
 using namespace dwarf;
 
@@ -48,16 +49,12 @@ MCSymbol *TargetLoweringObjectFileELF::getCFIPersonalitySymbol(
     const GlobalValue *GV, Mangler &Mang, const TargetMachine &TM,
     MachineModuleInfo *MMI) const {
   unsigned Encoding = getPersonalityEncoding();
-  switch (Encoding & 0x70) {
-  default:
-    report_fatal_error("We do not support this DWARF encoding yet!");
-  case dwarf::DW_EH_PE_absptr:
-    return TM.getSymbol(GV, Mang);
-  case dwarf::DW_EH_PE_pcrel: {
+  if ((Encoding & 0x80) == dwarf::DW_EH_PE_indirect)
     return getContext().GetOrCreateSymbol(StringRef("DW.ref.") +
                                           TM.getSymbol(GV, Mang)->getName());
-  }
-  }
+  if ((Encoding & 0x70) == dwarf::DW_EH_PE_absptr)
+    return TM.getSymbol(GV, Mang);
+  report_fatal_error("We do not support this DWARF encoding yet!");
 }
 
 void TargetLoweringObjectFileELF::emitPersonalityValue(MCStreamer &Streamer,
@@ -76,9 +73,10 @@ void TargetLoweringObjectFileELF::emitPersonalityValue(MCStreamer &Streamer,
                                                     Flags,
                                                     SectionKind::getDataRel(),
                                                     0, Label->getName());
-  unsigned Size = TM.getDataLayout()->getPointerSize();
+  unsigned Size = TM.getSubtargetImpl()->getDataLayout()->getPointerSize();
   Streamer.SwitchSection(Sec);
-  Streamer.EmitValueToAlignment(TM.getDataLayout()->getPointerABIAlignment());
+  Streamer.EmitValueToAlignment(
+      TM.getSubtargetImpl()->getDataLayout()->getPointerABIAlignment());
   Streamer.EmitSymbolAttribute(Label, MCSA_ELF_TypeObject);
   const MCExpr *E = MCConstantExpr::Create(Size, getContext());
   Streamer.EmitELFSize(Label, E);
@@ -100,7 +98,7 @@ const MCExpr *TargetLoweringObjectFileELF::getTTypeGlobalReference(
     // Add information about the stub reference to ELFMMI so that the stub
     // gets emitted by the asmprinter.
     MachineModuleInfoImpl::StubValueTy &StubSym = ELFMMI.getGVStubEntry(SSym);
-    if (StubSym.getPointer() == 0) {
+    if (!StubSym.getPointer()) {
       MCSymbol *Sym = TM.getSymbol(GV, Mang);
       StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());
     }
@@ -196,22 +194,40 @@ getELFSectionFlags(SectionKind K) {
   return Flags;
 }
 
-const MCSection *TargetLoweringObjectFileELF::
-getExplicitSectionGlobal(const GlobalValue *GV, SectionKind Kind,
-                         Mangler &Mang, const TargetMachine &TM) const {
+static const Comdat *getELFComdat(const GlobalValue *GV) {
+  const Comdat *C = GV->getComdat();
+  if (!C)
+    return nullptr;
+
+  if (C->getSelectionKind() != Comdat::Any)
+    report_fatal_error("ELF COMDATs only support SelectionKind::Any, '" +
+                       C->getName() + "' cannot be lowered.");
+
+  return C;
+}
+
+const MCSection *TargetLoweringObjectFileELF::getExplicitSectionGlobal(
+    const GlobalValue *GV, SectionKind Kind, Mangler &Mang,
+    const TargetMachine &TM) const {
   StringRef SectionName = GV->getSection();
 
   // Infer section flags from the section name if we can.
   Kind = getELFKindForNamedSection(SectionName, Kind);
 
+  StringRef Group = "";
+  unsigned Flags = getELFSectionFlags(Kind);
+  if (const Comdat *C = getELFComdat(GV)) {
+    Group = C->getName();
+    Flags |= ELF::SHF_GROUP;
+  }
   return getContext().getELFSection(SectionName,
-                                    getELFSectionType(SectionName, Kind),
-                                    getELFSectionFlags(Kind), Kind);
+                                    getELFSectionType(SectionName, Kind), Flags,
+                                    Kind, /*EntrySize=*/0, Group);
 }
 
 /// getSectionPrefixForGlobal - Return the section prefix name used by options
 /// FunctionsSections and DataSections.
-static const char *getSectionPrefixForGlobal(SectionKind Kind) {
+static StringRef getSectionPrefixForGlobal(SectionKind Kind) {
   if (Kind.isText())                 return ".text.";
   if (Kind.isReadOnly())             return ".rodata.";
   if (Kind.isBSS())                  return ".bss.";
@@ -228,7 +244,6 @@ static const char *getSectionPrefixForGlobal(SectionKind Kind) {
   return ".data.rel.ro.";
 }
 
-
 const MCSection *TargetLoweringObjectFileELF::
 SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
                        Mangler &Mang, const TargetMachine &TM) const {
@@ -242,18 +257,20 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
 
   // If this global is linkonce/weak and the target handles this by emitting it
   // into a 'uniqued' section name, create and return the section now.
-  if ((GV->isWeakForLinker() || EmitUniquedSection) &&
+  if ((GV->isWeakForLinker() || EmitUniquedSection || GV->hasComdat()) &&
       !Kind.isCommon()) {
-    const char *Prefix;
-    Prefix = getSectionPrefixForGlobal(Kind);
+    StringRef Prefix = getSectionPrefixForGlobal(Kind);
 
-    SmallString<128> Name(Prefix, Prefix+strlen(Prefix));
+    SmallString<128> Name(Prefix);
     TM.getNameWithPrefix(Name, GV, Mang, true);
 
     StringRef Group = "";
     unsigned Flags = getELFSectionFlags(Kind);
-    if (GV->isWeakForLinker()) {
-      Group = Name.substr(strlen(Prefix));
+    if (GV->isWeakForLinker() || GV->hasComdat()) {
+      if (const Comdat *C = getELFComdat(GV))
+        Group = C->getName();
+      else
+        Group = Name.substr(Prefix.size());
       Flags |= ELF::SHF_GROUP;
     }
 
@@ -272,7 +289,8 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
     // FIXME: this is getting the alignment of the character, not the
     // alignment of the global!
     unsigned Align =
-      TM.getDataLayout()->getPreferredAlignment(cast<GlobalVariable>(GV));
+        TM.getSubtargetImpl()->getDataLayout()->getPreferredAlignment(
+            cast<GlobalVariable>(GV));
 
     const char *SizeSpec = ".rodata.str1.";
     if (Kind.isMergeable2ByteCString())
@@ -323,8 +341,9 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
 /// getSectionForConstant - Given a mergeable constant with the
 /// specified size and relocation information, return a section that it
 /// should be placed in.
-const MCSection *TargetLoweringObjectFileELF::
-getSectionForConstant(SectionKind Kind) const {
+const MCSection *
+TargetLoweringObjectFileELF::getSectionForConstant(SectionKind Kind,
+                                                   const Constant *C) const {
   if (Kind.isMergeableConst4() && MergeableConst4Section)
     return MergeableConst4Section;
   if (Kind.isMergeableConst8() && MergeableConst8Section)
@@ -339,8 +358,8 @@ getSectionForConstant(SectionKind Kind) const {
   return DataRelROSection;
 }
 
-const MCSection *
-TargetLoweringObjectFileELF::getStaticCtorSection(unsigned Priority) const {
+const MCSection *TargetLoweringObjectFileELF::getStaticCtorSection(
+    unsigned Priority, const MCSymbol *KeySym) const {
   // The default scheme is .ctor / .dtor, so we have to invert the priority
   // numbering.
   if (Priority == 65535)
@@ -359,8 +378,8 @@ TargetLoweringObjectFileELF::getStaticCtorSection(unsigned Priority) const {
   }
 }
 
-const MCSection *
-TargetLoweringObjectFileELF::getStaticDtorSection(unsigned Priority) const {
+const MCSection *TargetLoweringObjectFileELF::getStaticDtorSection(
+    unsigned Priority, const MCSymbol *KeySym) const {
   // The default scheme is .ctor / .dtor, so we have to invert the priority
   // numbering.
   if (Priority == 65535)
@@ -418,7 +437,7 @@ emitModuleFlags(MCStreamer &Streamer,
                 Mangler &Mang, const TargetMachine &TM) const {
   unsigned VersionVal = 0;
   unsigned ImageInfoFlags = 0;
-  MDNode *LinkerOptions = 0;
+  MDNode *LinkerOptions = nullptr;
   StringRef SectionVal;
 
   for (ArrayRef<Module::ModuleFlagEntry>::iterator
@@ -436,7 +455,8 @@ emitModuleFlags(MCStreamer &Streamer,
       VersionVal = cast<ConstantInt>(Val)->getZExtValue();
     } else if (Key == "Objective-C Garbage Collection" ||
                Key == "Objective-C GC Only" ||
-               Key == "Objective-C Is Simulated") {
+               Key == "Objective-C Is Simulated" ||
+               Key == "Objective-C Image Swift Version") {
       ImageInfoFlags |= cast<ConstantInt>(Val)->getZExtValue();
     } else if (Key == "Objective-C Image Info Section") {
       SectionVal = cast<MDString>(Val)->getString();
@@ -487,6 +507,15 @@ emitModuleFlags(MCStreamer &Streamer,
   Streamer.AddBlankLine();
 }
 
+static void checkMachOComdat(const GlobalValue *GV) {
+  const Comdat *C = GV->getComdat();
+  if (!C)
+    return;
+
+  report_fatal_error("MachO doesn't support COMDATs, '" + C->getName() +
+                     "' cannot be lowered.");
+}
+
 const MCSection *TargetLoweringObjectFileMachO::getExplicitSectionGlobal(
     const GlobalValue *GV, SectionKind Kind, Mangler &Mang,
     const TargetMachine &TM) const {
@@ -494,6 +523,9 @@ const MCSection *TargetLoweringObjectFileMachO::getExplicitSectionGlobal(
   StringRef Segment, Section;
   unsigned TAA = 0, StubSize = 0;
   bool TAAParsed;
+
+  checkMachOComdat(GV);
+
   std::string ErrorCode =
     MCSectionMachO::ParseSectionSpecifier(GV->getSection(), Segment, Section,
                                           TAA, TAAParsed, StubSize);
@@ -548,15 +580,15 @@ bool TargetLoweringObjectFileMachO::isSectionAtomizableBySymbols(
 
       // These sections are atomized at the element boundaries without using
       // symbols.
-    case MCSectionMachO::S_4BYTE_LITERALS:
-    case MCSectionMachO::S_8BYTE_LITERALS:
-    case MCSectionMachO::S_16BYTE_LITERALS:
-    case MCSectionMachO::S_LITERAL_POINTERS:
-    case MCSectionMachO::S_NON_LAZY_SYMBOL_POINTERS:
-    case MCSectionMachO::S_LAZY_SYMBOL_POINTERS:
-    case MCSectionMachO::S_MOD_INIT_FUNC_POINTERS:
-    case MCSectionMachO::S_MOD_TERM_FUNC_POINTERS:
-    case MCSectionMachO::S_INTERPOSING:
+    case MachO::S_4BYTE_LITERALS:
+    case MachO::S_8BYTE_LITERALS:
+    case MachO::S_16BYTE_LITERALS:
+    case MachO::S_LITERAL_POINTERS:
+    case MachO::S_NON_LAZY_SYMBOL_POINTERS:
+    case MachO::S_LAZY_SYMBOL_POINTERS:
+    case MachO::S_MOD_INIT_FUNC_POINTERS:
+    case MachO::S_MOD_TERM_FUNC_POINTERS:
+    case MachO::S_INTERPOSING:
       return false;
     }
 }
@@ -564,6 +596,7 @@ bool TargetLoweringObjectFileMachO::isSectionAtomizableBySymbols(
 const MCSection *TargetLoweringObjectFileMachO::
 SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
                        Mangler &Mang, const TargetMachine &TM) const {
+  checkMachOComdat(GV);
 
   // Handle thread local data.
   if (Kind.isThreadBSS()) return TLSBSSSection;
@@ -582,22 +615,26 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
 
   // FIXME: Alignment check should be handled by section classifier.
   if (Kind.isMergeable1ByteCString() &&
-      TM.getDataLayout()->getPreferredAlignment(cast<GlobalVariable>(GV)) < 32)
+      TM.getSubtargetImpl()->getDataLayout()->getPreferredAlignment(
+          cast<GlobalVariable>(GV)) < 32)
     return CStringSection;
 
   // Do not put 16-bit arrays in the UString section if they have an
   // externally visible label, this runs into issues with certain linker
   // versions.
   if (Kind.isMergeable2ByteCString() && !GV->hasExternalLinkage() &&
-      TM.getDataLayout()->getPreferredAlignment(cast<GlobalVariable>(GV)) < 32)
+      TM.getSubtargetImpl()->getDataLayout()->getPreferredAlignment(
+          cast<GlobalVariable>(GV)) < 32)
     return UStringSection;
 
-  if (Kind.isMergeableConst()) {
+  // With MachO only variables whose corresponding symbol starts with 'l' or
+  // 'L' can be merged, so we only try merging GVs with private linkage.
+  if (GV->hasPrivateLinkage() && Kind.isMergeableConst()) {
     if (Kind.isMergeableConst4())
       return FourByteConstantSection;
     if (Kind.isMergeableConst8())
       return EightByteConstantSection;
-    if (Kind.isMergeableConst16() && SixteenByteConstantSection)
+    if (Kind.isMergeableConst16())
       return SixteenByteConstantSection;
   }
 
@@ -626,7 +663,8 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
 }
 
 const MCSection *
-TargetLoweringObjectFileMachO::getSectionForConstant(SectionKind Kind) const {
+TargetLoweringObjectFileMachO::getSectionForConstant(SectionKind Kind,
+                                                     const Constant *C) const {
   // If this constant requires a relocation, we have to put it in the data
   // segment, not in the text segment.
   if (Kind.isDataRel() || Kind.isReadOnlyWithRel())
@@ -636,27 +674,9 @@ TargetLoweringObjectFileMachO::getSectionForConstant(SectionKind Kind) const {
     return FourByteConstantSection;
   if (Kind.isMergeableConst8())
     return EightByteConstantSection;
-  if (Kind.isMergeableConst16() && SixteenByteConstantSection)
+  if (Kind.isMergeableConst16())
     return SixteenByteConstantSection;
   return ReadOnlySection;  // .const
-}
-
-/// This hook allows targets to selectively decide not to emit the UsedDirective
-/// for some symbols in llvm.used.
-// FIXME: REMOVE this (rdar://7071300)
-bool TargetLoweringObjectFileMachO::shouldEmitUsedDirectiveFor(
-    const GlobalValue *GV, Mangler &Mang, const TargetMachine &TM) const {
-  // Check whether the mangled name has the "Private" or "LinkerPrivate" prefix.
-  if (GV->hasLocalLinkage() && !isa<Function>(GV)) {
-    // FIXME: ObjC metadata is currently emitted as internal symbols that have
-    // \1L and \0l prefixes on them.  Fix them to be Private/LinkerPrivate and
-    // this horrible hack can go away.
-    MCSymbol *Sym = TM.getSymbol(GV, Mang);
-    if (Sym->getName()[0] == 'L' || Sym->getName()[0] == 'l')
-      return false;
-  }
-
-  return true;
 }
 
 const MCExpr *TargetLoweringObjectFileMachO::getTTypeGlobalReference(
@@ -677,7 +697,7 @@ const MCExpr *TargetLoweringObjectFileMachO::getTTypeGlobalReference(
     MachineModuleInfoImpl::StubValueTy &StubSym =
       GV->hasHiddenVisibility() ? MachOMMI.getHiddenGVStubEntry(SSym) :
                                   MachOMMI.getGVStubEntry(SSym);
-    if (StubSym.getPointer() == 0) {
+    if (!StubSym.getPointer()) {
       MCSymbol *Sym = TM.getSymbol(GV, Mang);
       StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());
     }
@@ -703,7 +723,7 @@ MCSymbol *TargetLoweringObjectFileMachO::getCFIPersonalitySymbol(
   // Add information about the stub reference to MachOMMI so that the stub
   // gets emitted by the asmprinter.
   MachineModuleInfoImpl::StubValueTy &StubSym = MachOMMI.getGVStubEntry(SSym);
-  if (StubSym.getPointer() == 0) {
+  if (!StubSym.getPointer()) {
     MCSymbol *Sym = TM.getSymbol(GV, Mang);
     StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());
   }
@@ -750,6 +770,50 @@ getCOFFSectionFlags(SectionKind K) {
   return Flags;
 }
 
+static const GlobalValue *getComdatGVForCOFF(const GlobalValue *GV) {
+  const Comdat *C = GV->getComdat();
+  assert(C && "expected GV to have a Comdat!");
+
+  StringRef ComdatGVName = C->getName();
+  const GlobalValue *ComdatGV = GV->getParent()->getNamedValue(ComdatGVName);
+  if (!ComdatGV)
+    report_fatal_error("Associative COMDAT symbol '" + ComdatGVName +
+                       "' does not exist.");
+
+  if (ComdatGV->getComdat() != C)
+    report_fatal_error("Associative COMDAT symbol '" + ComdatGVName +
+                       "' is not a key for it's COMDAT.");
+
+  return ComdatGV;
+}
+
+static int getSelectionForCOFF(const GlobalValue *GV) {
+  if (const Comdat *C = GV->getComdat()) {
+    const GlobalValue *ComdatKey = getComdatGVForCOFF(GV);
+    if (const auto *GA = dyn_cast<GlobalAlias>(ComdatKey))
+      ComdatKey = GA->getBaseObject();
+    if (ComdatKey == GV) {
+      switch (C->getSelectionKind()) {
+      case Comdat::Any:
+        return COFF::IMAGE_COMDAT_SELECT_ANY;
+      case Comdat::ExactMatch:
+        return COFF::IMAGE_COMDAT_SELECT_EXACT_MATCH;
+      case Comdat::Largest:
+        return COFF::IMAGE_COMDAT_SELECT_LARGEST;
+      case Comdat::NoDuplicates:
+        return COFF::IMAGE_COMDAT_SELECT_NODUPLICATES;
+      case Comdat::SameSize:
+        return COFF::IMAGE_COMDAT_SELECT_SAME_SIZE;
+      }
+    } else {
+      return COFF::IMAGE_COMDAT_SELECT_ASSOCIATIVE;
+    }
+  } else if (GV->isWeakForLinker()) {
+    return COFF::IMAGE_COMDAT_SELECT_ANY;
+  }
+  return 0;
+}
+
 const MCSection *TargetLoweringObjectFileCOFF::getExplicitSectionGlobal(
     const GlobalValue *GV, SectionKind Kind, Mangler &Mang,
     const TargetMachine &TM) const {
@@ -757,11 +821,21 @@ const MCSection *TargetLoweringObjectFileCOFF::getExplicitSectionGlobal(
   unsigned Characteristics = getCOFFSectionFlags(Kind);
   StringRef Name = GV->getSection();
   StringRef COMDATSymName = "";
-  if (GV->isWeakForLinker()) {
-    Selection = COFF::IMAGE_COMDAT_SELECT_ANY;
-    Characteristics |= COFF::IMAGE_SCN_LNK_COMDAT;
-    MCSymbol *Sym = TM.getSymbol(GV, Mang);
-    COMDATSymName = Sym->getName();
+  if ((GV->isWeakForLinker() || GV->hasComdat()) && !Kind.isCommon()) {
+    Selection = getSelectionForCOFF(GV);
+    const GlobalValue *ComdatGV;
+    if (Selection == COFF::IMAGE_COMDAT_SELECT_ASSOCIATIVE)
+      ComdatGV = getComdatGVForCOFF(GV);
+    else
+      ComdatGV = GV;
+
+    if (!ComdatGV->hasPrivateLinkage()) {
+      MCSymbol *Sym = TM.getSymbol(ComdatGV, Mang);
+      COMDATSymName = Sym->getName();
+      Characteristics |= COFF::IMAGE_SCN_LNK_COMDAT;
+    } else {
+      Selection = 0;
+    }
   }
   return getContext().getCOFFSection(Name,
                                      Characteristics,
@@ -773,7 +847,7 @@ const MCSection *TargetLoweringObjectFileCOFF::getExplicitSectionGlobal(
 static const char *getCOFFSectionNameForUniqueGlobal(SectionKind Kind) {
   if (Kind.isText())
     return ".text";
-  if (Kind.isBSS ())
+  if (Kind.isBSS())
     return ".bss";
   if (Kind.isThreadLocal())
     return ".tls$";
@@ -786,18 +860,39 @@ static const char *getCOFFSectionNameForUniqueGlobal(SectionKind Kind) {
 const MCSection *TargetLoweringObjectFileCOFF::
 SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
                        Mangler &Mang, const TargetMachine &TM) const {
+  // If we have -ffunction-sections then we should emit the global value to a
+  // uniqued section specifically for it.
+  bool EmitUniquedSection;
+  if (Kind.isText())
+    EmitUniquedSection = TM.getFunctionSections();
+  else
+    EmitUniquedSection = TM.getDataSections();
 
   // If this global is linkonce/weak and the target handles this by emitting it
   // into a 'uniqued' section name, create and return the section now.
-  if (GV->isWeakForLinker()) {
+  // Section names depend on the name of the symbol which is not feasible if the
+  // symbol has private linkage.
+  if ((GV->isWeakForLinker() || EmitUniquedSection || GV->hasComdat()) &&
+      !Kind.isCommon()) {
     const char *Name = getCOFFSectionNameForUniqueGlobal(Kind);
     unsigned Characteristics = getCOFFSectionFlags(Kind);
 
     Characteristics |= COFF::IMAGE_SCN_LNK_COMDAT;
-    MCSymbol *Sym = TM.getSymbol(GV, Mang);
-    return getContext().getCOFFSection(Name, Characteristics,
-                                       Kind, Sym->getName(),
-                                       COFF::IMAGE_COMDAT_SELECT_ANY);
+    int Selection = getSelectionForCOFF(GV);
+    if (!Selection)
+      Selection = COFF::IMAGE_COMDAT_SELECT_NODUPLICATES;
+    const GlobalValue *ComdatGV;
+    if (GV->hasComdat())
+      ComdatGV = getComdatGVForCOFF(GV);
+    else
+      ComdatGV = GV;
+
+    if (!ComdatGV->hasPrivateLinkage()) {
+      MCSymbol *Sym = TM.getSymbol(ComdatGV, Mang);
+      StringRef COMDATSymName = Sym->getName();
+      return getContext().getCOFFSection(Name, Characteristics, Kind,
+                                         COMDATSymName, Selection);
+    }
   }
 
   if (Kind.isText())
@@ -809,7 +904,10 @@ SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
   if (Kind.isReadOnly())
     return ReadOnlySection;
 
-  if (Kind.isBSS())
+  // Note: we claim that common symbols are put in BSSSection, but they are
+  // really emitted with the magic .comm directive, which creates a symbol table
+  // entry but not a section.
+  if (Kind.isBSS() || Kind.isCommon())
     return BSSSection;
 
   return DataSection;
@@ -827,7 +925,7 @@ void TargetLoweringObjectFileCOFF::
 emitModuleFlags(MCStreamer &Streamer,
                 ArrayRef<Module::ModuleFlagEntry> ModuleFlags,
                 Mangler &Mang, const TargetMachine &TM) const {
-  MDNode *LinkerOptions = 0;
+  MDNode *LinkerOptions = nullptr;
 
   // Look for the "Linker Options" flag, since it's the only one we support.
   for (ArrayRef<Module::ModuleFlagEntry>::iterator
@@ -868,4 +966,31 @@ emitModuleFlags(MCStreamer &Streamer,
       Streamer.EmitBytes(Escaped);
     }
   }
+}
+
+static const MCSection *getAssociativeCOFFSection(MCContext &Ctx,
+                                                  const MCSection *Sec,
+                                                  const MCSymbol *KeySym) {
+  // Return the normal section if we don't have to be associative.
+  if (!KeySym)
+    return Sec;
+
+  // Make an associative section with the same name and kind as the normal
+  // section.
+  const MCSectionCOFF *SecCOFF = cast<MCSectionCOFF>(Sec);
+  unsigned Characteristics =
+      SecCOFF->getCharacteristics() | COFF::IMAGE_SCN_LNK_COMDAT;
+  return Ctx.getCOFFSection(SecCOFF->getSectionName(), Characteristics,
+                            SecCOFF->getKind(), KeySym->getName(),
+                            COFF::IMAGE_COMDAT_SELECT_ASSOCIATIVE);
+}
+
+const MCSection *TargetLoweringObjectFileCOFF::getStaticCtorSection(
+    unsigned Priority, const MCSymbol *KeySym) const {
+  return getAssociativeCOFFSection(getContext(), StaticCtorSection, KeySym);
+}
+
+const MCSection *TargetLoweringObjectFileCOFF::getStaticDtorSection(
+    unsigned Priority, const MCSymbol *KeySym) const {
+  return getAssociativeCOFFSection(getContext(), StaticDtorSection, KeySym);
 }

@@ -16,7 +16,7 @@ LINK_COMPONENTS := asmparser bitreader support MC MCParser option \
 USEDLIBS = clangQuery.a clangTooling.a clangFrontend.a clangSerialization.a \
 	   clangDriver.a clangParse.a clangSema.a clangEdit.a clangAnalysis.a \
 	   clangAST.a clangASTMatchers.a clangDynamicASTMatchers.a clangLex.a \
-	   clangBasic.a
+	   clangAPINotes.a clangBasic.a
 
 include $(CLANG_LEVEL)/Makefile
 MAKEFILE_UNITTEST_NO_INCLUDE_COMMON := 1

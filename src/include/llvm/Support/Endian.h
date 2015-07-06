@@ -17,7 +17,6 @@
 #include "llvm/Support/AlignOf.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Support/SwapByteOrder.h"
-#include "llvm/Support/type_traits.h"
 
 namespace llvm {
 namespace support {
@@ -39,7 +38,7 @@ namespace endian {
 template<typename value_type, endianness endian>
 inline value_type byte_swap(value_type value) {
   if (endian != native && sys::IsBigEndianHost != (endian == big))
-    return sys::SwapByteOrder(value);
+    sys::swapByteOrder(value);
   return value;
 }
 
@@ -97,7 +96,24 @@ struct packed_endian_specific_integral {
 private:
   AlignedCharArray<PickAlignment<value_type, alignment>::value,
                    sizeof(value_type)> Value;
+
+public:
+  struct ref {
+    explicit ref(void *Ptr) : Ptr(Ptr) {}
+
+    operator value_type() const {
+      return endian::read<value_type, endian, alignment>(Ptr);
+    }
+
+    void operator=(value_type NewValue) {
+      endian::write<value_type, endian, alignment>(Ptr, NewValue);
+    }
+
+  private:
+    void *Ptr;
+  };
 };
+
 } // end namespace detail
 
 typedef detail::packed_endian_specific_integral

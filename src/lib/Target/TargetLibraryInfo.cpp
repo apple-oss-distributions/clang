@@ -190,6 +190,9 @@ const char* TargetLibraryInfo::StandardNames[LibFunc::NumLibFuncs] =
     "isdigit",
     "labs",
     "lchown",
+    "ldexp",
+    "ldexpf",
+    "ldexpl",
     "llabs",
     "log",
     "log10",
@@ -345,7 +348,7 @@ const char* TargetLibraryInfo::StandardNames[LibFunc::NumLibFuncs] =
 
 static bool hasSinCosPiStret(const Triple &T) {
   // Only Darwin variants have _stret versions of combined trig functions.
-  if (!T.isMacOSX() && T.getOS() != Triple::IOS)
+  if (!T.isOSDarwin())
     return false;
 
   // The ABI is rather complicated on x86, so don't do anything special there.
@@ -355,7 +358,7 @@ static bool hasSinCosPiStret(const Triple &T) {
   if (T.isMacOSX() && T.isMacOSXVersionLT(10, 9))
     return false;
 
-  if (T.getOS() == Triple::IOS && T.isOSVersionLT(7, 0))
+  if (T.isiOS() && T.isOSVersionLT(7, 0))
     return false;
 
   return true;
@@ -375,8 +378,17 @@ static void initialize(TargetLibraryInfo &TLI, const Triple &T,
       llvm_unreachable("TargetLibraryInfo function names must be sorted");
   }
 #endif // !NDEBUG
-  
-  // memset_pattern16 is only available on iOS 3.0 and Mac OS/X 10.5 and later.
+
+  // There are no library implementations of mempcy and memset for r600 and
+  // these can be difficult to lower in the backend.
+  if (T.getArch() == Triple::r600) {
+    TLI.setUnavailable(LibFunc::memcpy);
+    TLI.setUnavailable(LibFunc::memset);
+    TLI.setUnavailable(LibFunc::memset_pattern16);
+    return;
+  }
+
+  // memset_pattern16 is only available on iOS 3.0 and Mac OS X 10.5 and later.
   if (T.isMacOSX()) {
     if (T.isMacOSXVersionLT(10, 5))
       TLI.setUnavailable(LibFunc::memset_pattern16);
@@ -414,7 +426,7 @@ static void initialize(TargetLibraryInfo &TLI, const Triple &T,
     TLI.setUnavailable(LibFunc::fiprintf);
   }
 
-  if (T.getOS() == Triple::Win32) {
+  if (T.isOSWindows() && !T.isOSCygMing()) {
     // Win32 does not support long double
     TLI.setUnavailable(LibFunc::acosl);
     TLI.setUnavailable(LibFunc::asinl);
@@ -432,6 +444,8 @@ static void initialize(TargetLibraryInfo &TLI, const Triple &T,
     TLI.setUnavailable(LibFunc::fminl);
     TLI.setUnavailable(LibFunc::fmodl);
     TLI.setUnavailable(LibFunc::frexpl);
+    TLI.setUnavailable(LibFunc::ldexpf);
+    TLI.setUnavailable(LibFunc::ldexpl);
     TLI.setUnavailable(LibFunc::logl);
     TLI.setUnavailable(LibFunc::modfl);
     TLI.setUnavailable(LibFunc::powl);

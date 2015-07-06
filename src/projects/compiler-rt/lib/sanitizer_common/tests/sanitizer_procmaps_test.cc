@@ -10,6 +10,8 @@
 // This file is a part of ThreadSanitizer/AddressSanitizer runtime.
 //
 //===----------------------------------------------------------------------===//
+#if !defined(_WIN32)  // There are no /proc/maps on Windows.
+
 #include "sanitizer_common/sanitizer_procmaps.h"
 #include "gtest/gtest.h"
 
@@ -46,9 +48,11 @@ TEST(MemoryMappingLayout, DumpListOfModules) {
       if (strstr(modules[i].full_name(), binary_name) != 0)
         found = true;
     }
+    modules[i].clear();
   }
   EXPECT_TRUE(found);
   free(modules);
 }
 
 }  // namespace __sanitizer
+#endif  // !defined(_WIN32)

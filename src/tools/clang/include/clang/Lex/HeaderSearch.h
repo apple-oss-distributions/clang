@@ -18,10 +18,10 @@
 #include "clang/Lex/ModuleMap.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Allocator.h"
+#include <memory>
 #include <vector>
 
 namespace clang {
@@ -106,7 +106,7 @@ struct HeaderFileInfo {
       External(false), isModuleHeader(false), isCompilingModuleHeader(false),
       HeaderRole(ModuleMap::NormalHeader),
       Resolved(false), IndexHeaderMapHeader(false), IsValid(0),
-      NumIncludes(0), ControllingMacroID(0), ControllingMacro(0)  {}
+      NumIncludes(0), ControllingMacroID(0), ControllingMacro(nullptr)  {}
 
   /// \brief Retrieve the controlling macro for this header file, if
   /// any.
@@ -194,9 +194,9 @@ class HeaderSearch {
     /// Starting index in SearchDirs that the cached search was performed from.
     /// If there is a hit and this value doesn't match the current query, the
     /// cache has to be ignored.
-    unsigned StartIdx = 0;
+    unsigned StartIdx;
     /// The entry in SearchDirs that satisfied the query.
-    unsigned HitIdx = 0;
+    unsigned HitIdx;
     /// This is non-null if the original filename was mapped to a framework
     /// include via a headermap.
     const char *MappedName;
@@ -220,7 +220,7 @@ class HeaderSearch {
   /// include_alias pragma for Microsoft compatibility.
   typedef llvm::StringMap<std::string, llvm::BumpPtrAllocator>
     IncludeAliasMap;
-  OwningPtr<IncludeAliasMap> IncludeAliases;
+  std::unique_ptr<IncludeAliasMap> IncludeAliases;
 
   /// HeaderMaps - This is a mapping from FileEntry -> HeaderMap, uniquing
   /// headermaps.  This vector owns the headermap.
@@ -296,9 +296,7 @@ public:
   }
 
   /// \brief Checks whether the map exists or not.
-  bool HasIncludeAliasMap() const {
-    return IncludeAliases.isValid();
-  }
+  bool HasIncludeAliasMap() const { return (bool)IncludeAliases; }
 
   /// \brief Map the source include name to the dest include name.
   ///
@@ -386,14 +384,12 @@ public:
   /// \param SuggestedModule If non-null, and the file found is semantically
   /// part of a known module, this will be set to the module that should
   /// be imported instead of preprocessing/parsing the file found.
-  const FileEntry *LookupFile(StringRef Filename, SourceLocation IncludeLoc,
-                              bool isAngled, const DirectoryLookup *FromDir,
-                              const DirectoryLookup *&CurDir,
-                              ArrayRef<const FileEntry *> Includers,
-                              SmallVectorImpl<char> *SearchPath,
-                              SmallVectorImpl<char> *RelativePath,
-                              ModuleMap::KnownHeader *SuggestedModule,
-                              bool SkipCache = false);
+  const FileEntry *LookupFile(
+      StringRef Filename, SourceLocation IncludeLoc, bool isAngled,
+      const DirectoryLookup *FromDir, const DirectoryLookup *&CurDir,
+      ArrayRef<std::pair<const FileEntry *, const DirectoryEntry *>> Includers,
+      SmallVectorImpl<char> *SearchPath, SmallVectorImpl<char> *RelativePath,
+      ModuleMap::KnownHeader *SuggestedModule, bool SkipCache = false);
 
   /// \brief Look up a subframework for the specified \#include file.
   ///
@@ -512,7 +508,6 @@ public:
   ///
   /// \returns The module with the given name.
   Module *lookupModule(StringRef ModuleName, bool AllowSearch = true);
-
 
   /// \brief Try to find a module map file in the given directory, returning
   /// \c nullptr if none is found.

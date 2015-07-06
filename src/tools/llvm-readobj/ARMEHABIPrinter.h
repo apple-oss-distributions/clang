@@ -7,11 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_READOBJ_ARMEHABI_PRINTER_H
-#define LLVM_READOBJ_ARMEHABI_PRINTER_H
+#ifndef LLVM_TOOLS_LLVM_READOBJ_ARMEHABIPRINTER_H
+#define LLVM_TOOLS_LLVM_READOBJ_ARMEHABIPRINTER_H
 
 #include "Error.h"
 #include "StreamWriter.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/ELFTypes.h"
 #include "llvm/Support/ARMEHABI.h"
@@ -19,13 +20,6 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/type_traits.h"
-
-namespace {
-template <typename type_, size_t N>
-size_t countof(const type_ (&)[N]) {
-  return N;
-}
-}
 
 namespace llvm {
 namespace ARM {
@@ -296,7 +290,8 @@ void OpcodeDecoder::PrintRegisters(uint32_t VFPMask, StringRef Prefix) {
 void OpcodeDecoder::Decode(const uint8_t *Opcodes, off_t Offset, size_t Length) {
   for (unsigned OCI = Offset; OCI < Length + Offset; ) {
     bool Decoded = false;
-    for (unsigned REI = 0, REE = countof(Ring); REI != REE && !Decoded; ++REI) {
+    for (unsigned REI = 0, REE = array_lengthof(Ring);
+         REI != REE && !Decoded; ++REI) {
       if ((Opcodes[OCI ^ 3] & Ring[REI].Mask) == Ring[REI].Value) {
         (this->*Ring[REI].Routine)(Opcodes, OCI);
         Decoded = true;
@@ -376,7 +371,7 @@ PrinterContext<ET>::FindExceptionTable(unsigned IndexSectionIndex,
     if (SI->sh_type == ELF::SHT_REL && SI->sh_info == IndexSectionIndex) {
       for (Elf_Rel_iterator RI = ELF->begin_rel(&*SI), RE = ELF->end_rel(&*SI);
            RI != RE; ++RI) {
-        if (RI->r_offset == IndexTableOffset) {
+        if (RI->r_offset == static_cast<unsigned>(IndexTableOffset)) {
           typename object::ELFFile<ET>::Elf_Rela RelA;
           RelA.r_offset = RI->r_offset;
           RelA.r_info = RI->r_info;
@@ -390,7 +385,7 @@ PrinterContext<ET>::FindExceptionTable(unsigned IndexSectionIndex,
       }
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 template <typename ET>
@@ -435,7 +430,7 @@ void PrinterContext<ET>::PrintExceptionTable(const Elf_Shdr *IT,
 
     switch (PersonalityIndex) {
     case AEABI_UNWIND_CPP_PR0:
-      llvm_unreachable("Personality 0 should be compact inline!");
+      PrintOpcodes(Contents->data() + TableEntryOffset, 3, 1);
       break;
     case AEABI_UNWIND_CPP_PR1:
     case AEABI_UNWIND_CPP_PR2:

@@ -18,17 +18,21 @@
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Serialization/ASTBitCodes.h"
 #include "clang/Serialization/ContinuousRangeMap.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Bitcode/BitstreamReader.h"
+#include <memory>
 #include <string>
+
+namespace llvm {
+template <typename Info> class OnDiskChainedHashTable;
+template <typename Info> class OnDiskIterableChainedHashTable;
+}
 
 namespace clang {
 
 class FileEntry;
 class DeclContext;
 class Module;
-template<typename Info> class OnDiskChainedHashTable;
 
 namespace serialization {
 
@@ -49,7 +53,7 @@ struct DeclContextInfo {
   DeclContextInfo()
     : NameLookupTableData(), LexicalDecls(), NumLexicalDecls() {}
 
-  OnDiskChainedHashTable<reader::ASTDeclContextNameLookupTrait>
+  llvm::OnDiskIterableChainedHashTable<reader::ASTDeclContextNameLookupTrait>
     *NameLookupTableData; // an ASTDeclContextNameLookupTable.
   const KindDeclIDPair *LexicalDecls;
   unsigned NumLexicalDecls;
@@ -91,6 +95,8 @@ public:
   bool isOutOfDate() const { return Val.getInt() == OutOfDate; }
   bool isNotFound() const { return Val.getInt() == NotFound; }
 };
+
+typedef unsigned ASTFileSignature;
 
 /// \brief Information about a module that has been loaded by the ASTReader.
 ///
@@ -147,6 +153,10 @@ public:
   /// \brief The file entry for the module file.
   const FileEntry *File;
 
+  /// \brief The signature of the module file, which may be used along with size
+  /// and modification time to identify this particular file.
+  ASTFileSignature Signature;
+
   /// \brief Whether this module has been directly imported by the
   /// user.
   bool DirectlyImported;
@@ -156,7 +166,7 @@ public:
   
   /// \brief The memory buffer that stores the data associated with
   /// this AST file.
-  OwningPtr<llvm::MemoryBuffer> Buffer;
+  std::unique_ptr<llvm::MemoryBuffer> Buffer;
 
   /// \brief The size of this file, in bits.
   uint64_t SizeInBits;
@@ -176,6 +186,9 @@ public:
   /// If module A depends on and imports module B, both modules will have the
   /// same DirectImportLoc, but different ImportLoc (B's ImportLoc will be a
   /// source location inside module A).
+  ///
+  /// WARNING: This is largely useless. It doesn't tell you when a module was
+  /// made visible, just when the first submodule of that module was imported.
   SourceLocation DirectImportLoc;
 
   /// \brief The source location where this module was first imported.

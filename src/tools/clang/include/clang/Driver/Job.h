@@ -7,13 +7,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CLANG_DRIVER_JOB_H_
-#define CLANG_DRIVER_JOB_H_
+#ifndef LLVM_CLANG_DRIVER_JOB_H
+#define LLVM_CLANG_DRIVER_JOB_H
 
 #include "clang/Basic/LLVM.h"
-#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Option/Option.h"
+#include <memory>
 
 namespace llvm {
   class raw_ostream;
@@ -27,6 +27,14 @@ class Tool;
 
 // Re-export this as clang::driver::ArgStringList.
 using llvm::opt::ArgStringList;
+
+struct CrashReportInfo {
+  StringRef Filename;
+  StringRef VFSPath;
+
+  CrashReportInfo(StringRef Filename, StringRef VFSPath)
+      : Filename(Filename), VFSPath(VFSPath) {}
+};
 
 class Job {
 public:
@@ -51,9 +59,9 @@ public:
   /// \param OS - The stream to print on.
   /// \param Terminator - A string to print at the end of the line.
   /// \param Quote - Should separate arguments be quoted.
-  /// \param CrashReport - Whether to print for inclusion in a crash report.
-  virtual void Print(llvm::raw_ostream &OS, const char *Terminator,
-                     bool Quote, bool CrashReport = false) const = 0;
+  /// \param CrashInfo - Details for inclusion in a crash report.
+  virtual void Print(llvm::raw_ostream &OS, const char *Terminator, bool Quote,
+                     CrashReportInfo *CrashInfo = nullptr) const = 0;
 };
 
 /// Command - An executable path/name and argument vector to
@@ -76,8 +84,8 @@ public:
   Command(const Action &_Source, const Tool &_Creator, const char *_Executable,
           const llvm::opt::ArgStringList &_Arguments);
 
-  virtual void Print(llvm::raw_ostream &OS, const char *Terminator,
-                     bool Quote, bool CrashReport = false) const;
+  void Print(llvm::raw_ostream &OS, const char *Terminator, bool Quote,
+             CrashReportInfo *CrashInfo = nullptr) const override;
 
   virtual int Execute(const StringRef **Redirects, std::string *ErrMsg,
                       bool *ExecutionFailed) const;
@@ -87,6 +95,8 @@ public:
 
   /// getCreator - Return the Tool which caused the creation of this job.
   const Tool &getCreator() const { return Creator; }
+
+  const char *getExecutable() const { return Executable; }
 
   const llvm::opt::ArgStringList &getArguments() const { return Arguments; }
 
@@ -104,18 +114,18 @@ public:
                   const char *Executable_, const ArgStringList &Arguments_,
                   Command *Fallback_);
 
-  virtual void Print(llvm::raw_ostream &OS, const char *Terminator,
-                     bool Quote, bool CrashReport = false) const;
+  void Print(llvm::raw_ostream &OS, const char *Terminator, bool Quote,
+             CrashReportInfo *CrashInfo = nullptr) const override;
 
-  virtual int Execute(const StringRef **Redirects, std::string *ErrMsg,
-                      bool *ExecutionFailed) const;
+  int Execute(const StringRef **Redirects, std::string *ErrMsg,
+              bool *ExecutionFailed) const override;
 
   static bool classof(const Job *J) {
     return J->getKind() == FallbackCommandClass;
   }
 
 private:
-  OwningPtr<Command> Fallback;
+  std::unique_ptr<Command> Fallback;
 };
 
 /// JobList - A sequence of jobs to perform.
@@ -133,8 +143,8 @@ public:
   JobList();
   virtual ~JobList();
 
-  virtual void Print(llvm::raw_ostream &OS, const char *Terminator,
-                     bool Quote, bool CrashReport = false) const;
+  void Print(llvm::raw_ostream &OS, const char *Terminator,
+             bool Quote, CrashReportInfo *CrashInfo = nullptr) const override;
 
   /// Add a job to the list (taking ownership).
   void addJob(Job *J) { Jobs.push_back(J); }

@@ -17,8 +17,8 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/TimeValue.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace llvm::sys;

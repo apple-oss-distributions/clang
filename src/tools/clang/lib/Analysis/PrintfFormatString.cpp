@@ -54,13 +54,14 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
                                                   const char *E,
                                                   unsigned &argIndex,
                                                   const LangOptions &LO,
-                                                  const TargetInfo &Target) {
+                                                  const TargetInfo &Target,
+                                                  bool Warn) {
 
   using namespace clang::analyze_format_string;
   using namespace clang::analyze_printf;
 
   const char *I = Beg;
-  const char *Start = 0;
+  const char *Start = nullptr;
   UpdateOnReturn <const char*> UpdateBeg(Beg, I);
 
   // Look for a '%' character that indicates the start of a format specifier.
@@ -83,7 +84,8 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
 
   if (I == E) {
     // No more characters left?
-    H.HandleIncompleteSpecifier(Start, E - Start);
+    if (Warn)
+      H.HandleIncompleteSpecifier(Start, E - Start);
     return true;
   }
 
@@ -93,7 +95,8 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
 
   if (I == E) {
     // No more characters left?
-    H.HandleIncompleteSpecifier(Start, E - Start);
+    if (Warn)
+      H.HandleIncompleteSpecifier(Start, E - Start);
     return true;
   }
 
@@ -118,18 +121,20 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
 
   if (I == E) {
     // No more characters left?
-    H.HandleIncompleteSpecifier(Start, E - Start);
+    if (Warn)
+      H.HandleIncompleteSpecifier(Start, E - Start);
     return true;
   }
 
   // Look for the field width (if any).
   if (ParseFieldWidth(H, FS, Start, I, E,
-                      FS.usesPositionalArg() ? 0 : &argIndex))
+                      FS.usesPositionalArg() ? nullptr : &argIndex))
     return true;
 
   if (I == E) {
     // No more characters left?
-    H.HandleIncompleteSpecifier(Start, E - Start);
+    if (Warn)
+      H.HandleIncompleteSpecifier(Start, E - Start);
     return true;
   }
 
@@ -137,17 +142,19 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
   if (*I == '.') {
     ++I;
     if (I == E) {
-      H.HandleIncompleteSpecifier(Start, E - Start);
+      if (Warn)
+        H.HandleIncompleteSpecifier(Start, E - Start);
       return true;
     }
 
     if (ParsePrecision(H, FS, Start, I, E,
-                       FS.usesPositionalArg() ? 0 : &argIndex))
+                       FS.usesPositionalArg() ? nullptr : &argIndex))
       return true;
 
     if (I == E) {
       // No more characters left?
-      H.HandleIncompleteSpecifier(Start, E - Start);
+      if (Warn)
+        H.HandleIncompleteSpecifier(Start, E - Start);
       return true;
     }
   }
@@ -155,7 +162,8 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
   // Look for the length modifier.
   if (ParseLengthModifier(FS, I, E, LO) && I == E) {
     // No more characters left?
-    H.HandleIncompleteSpecifier(Start, E - Start);
+    if (Warn)
+      H.HandleIncompleteSpecifier(Start, E - Start);
     return true;
   }
 
@@ -235,7 +243,7 @@ bool clang::analyze_format_string::ParsePrintfString(FormatStringHandler &H,
   // Keep looking for a format specifier until we have exhausted the string.
   while (I != E) {
     const PrintfSpecifierResult &FSR = ParsePrintfSpecifier(H, I, E, argIndex,
-                                                            LO, Target);
+                                                            LO, Target, true);
     // Did a fail-stop error of any kind occur when parsing the specifier?
     // If so, don't do any more processing.
     if (FSR.shouldStop())
@@ -250,6 +258,34 @@ bool clang::analyze_format_string::ParsePrintfString(FormatStringHandler &H,
       return true;
   }
   assert(I == E && "Format string not exhausted");
+  return false;
+}
+
+bool clang::analyze_format_string::ParseFormatStringHasSArg(const char *I,
+                                                            const char *E,
+                                                            const LangOptions &LO,
+                                                            const TargetInfo &Target) {
+  
+  unsigned argIndex = 0;
+  
+  // Keep looking for a %s format specifier until we have exhausted the string.
+  FormatStringHandler H;
+  while (I != E) {
+    const PrintfSpecifierResult &FSR = ParsePrintfSpecifier(H, I, E, argIndex,
+                                                            LO, Target, false);
+    // Did a fail-stop error of any kind occur when parsing the specifier?
+    // If so, don't do any more processing.
+    if (FSR.shouldStop())
+      return false;
+    // Did we exhaust the string or encounter an error that
+    // we can recover from?
+    if (!FSR.hasValue())
+      continue;
+    const analyze_printf::PrintfSpecifier &FS = FSR.getValue();
+    // Return true if this a %s format specifier.
+    if (FS.getConversionSpecifier().getKind() == ConversionSpecifier::Kind::sArg)
+      return true;
+  }
   return false;
 }
 

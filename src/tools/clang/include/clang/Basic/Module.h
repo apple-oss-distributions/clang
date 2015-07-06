@@ -55,17 +55,6 @@ public:
   /// \brief The parent of this module. This will be NULL for the top-level
   /// module.
   Module *Parent;
-
-  /// \brief The module map file that (along with the module name) uniquely
-  /// identifies this module.
-  ///
-  /// The particular module that \c Name refers to may depend on how the module
-  /// was found in header search. However, the combination of \c Name and
-  /// \c ModuleMap will be globally unique for top-level modules. In the case of
-  /// inferred modules, \c ModuleMap will contain the module map that allowed
-  /// the inference (e.g. contained 'Module *') rather than the virtual
-  /// inferred module map file.
-  const FileEntry *ModuleMap;
   
   /// \brief The umbrella header or directory.
   llvm::PointerUnion<const DirectoryEntry *, const FileEntry *> Umbrella;
@@ -145,6 +134,11 @@ public:
   /// headers in it are system headers).
   unsigned IsSystem : 1;
 
+  /// \brief Whether this is an 'extern "C"' module (which implicitly puts all
+  /// headers in it within an 'extern "C"' block, and allows the module to be
+  /// imported within such a block).
+  unsigned IsExternC : 1;
+
   /// \brief Whether this is an inferred submodule (module * { ... }).
   unsigned IsInferred : 1;
 
@@ -179,10 +173,13 @@ public:
     MacrosVisible,
     /// \brief All of the names in this module are visible.
     AllVisible
-  };  
-  
-  ///\ brief The visibility of names within this particular module.
+  };
+
+  /// \brief The visibility of names within this particular module.
   NameVisibilityKind NameVisibility;
+
+  /// \brief The location at which macros within this module became visible.
+  SourceLocation MacroVisibilityLoc;
 
   /// \brief The location of the inferred submodule.
   SourceLocation InferredSubmoduleLoc;
@@ -274,21 +271,9 @@ public:
   /// \brief The list of conflicts.
   std::vector<Conflict> Conflicts;
 
-  /// \brief Construct a top-level module.
-  explicit Module(StringRef Name, SourceLocation DefinitionLoc,
-                  bool IsFramework)
-    : Name(Name), DefinitionLoc(DefinitionLoc), Parent(0),Umbrella(),ASTFile(0),
-      IsAvailable(true), IsFromModuleFile(false), IsFramework(IsFramework), 
-      IsExplicit(false), IsSystem(false),
-      InferSubmodules(false), InferExplicitSubmodules(false),
-      InferExportWildcard(false), ConfigMacrosExhaustive(false),
-      NameVisibility(Hidden) { }
-  
   /// \brief Construct a new module or submodule.
-  ///
-  /// For an explanation of \p ModuleMap, see Module::ModuleMap.
   Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent,
-         const FileEntry *ModuleMap, bool IsFramework, bool IsExplicit);
+         bool IsFramework, bool IsExplicit);
   
   ~Module();
   
@@ -313,11 +298,11 @@ public:
                    HeaderDirective &MissingHeader) const;
 
   /// \brief Determine whether this module is a submodule.
-  bool isSubModule() const { return Parent != 0; }
+  bool isSubModule() const { return Parent != nullptr; }
   
   /// \brief Determine whether this module is a submodule of the given other
   /// module.
-  bool isSubModuleOf(Module *Other) const;
+  bool isSubModuleOf(const Module *Other) const;
   
   /// \brief Determine whether this module is a part of a framework,
   /// either because it is a framework module or because it is a submodule
@@ -364,8 +349,8 @@ public:
 
   /// \brief Set the serialized AST file for the top-level module of this module.
   void setASTFile(const FileEntry *File) {
-    assert((File == 0 || getASTFile() == 0 || getASTFile() == File) &&
-           "file path changed");
+    assert((File == nullptr || getASTFile() == nullptr ||
+            getASTFile() == File) && "file path changed");
     getTopLevelModule()->ASTFile = File;
   }
 
@@ -427,6 +412,10 @@ public:
 
   /// \brief Determine whether the specified module would be visible to
   /// a lookup at the end of this module.
+  ///
+  /// FIXME: This may return incorrect results for (submodules of) the
+  /// module currently being built, if it's queried before we see all
+  /// of its imports.
   bool isModuleVisible(const Module *M) const {
     if (VisibleModulesCache.empty())
       buildVisibleModulesCache();

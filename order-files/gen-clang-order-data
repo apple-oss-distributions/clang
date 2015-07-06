@@ -107,31 +107,44 @@ def get_test_cases(opts):
     #
     # These are preprocessed inputs for x86_64, but we build them for several
     # different architectures.
-    # FIXME: These are currently building with all warnings disabled. It
-    # would be good to start with the Xcode default warnings and selectively
-    # disable only the ones that trigger often in the code.
+
     for flags in (('-O0', '-g'), ('-Os', '-g'), ('-O2',), ('-O3',)):
 
         input = '403.gcc__combine.c'
+        # Warning suppress flags are added to disable the warnings triggered
+        # by the project tests. It should contain the minimal set of flags
+        # for each project so that most warnings are checked but no warnings
+        # are triggered. We want to exercise the code that checks the warnings
+        # but not the code reports the diagnostics.
+        warning_suppress_flags = ('-Wno-unneeded-internal-declaration',
+                '-Wno-enum-conversion', '-Wno-conditional-uninitialized',
+                '-Wno-shorten-64-to-32')
         for arch in ('x86_64', 'i386', 'arm64', 'armv7'):
             test_name = '%s__%s__%s' % (input, arch, ''.join(flags))
             yield (
                 test_name, None, False,
-                ('-c', input, '-arch', arch, '-w') + flags)
+                ('-c', input, '-arch', arch) + flags +
+                XcodeDefaultWarningsC + warning_suppress_flags)
 
         input = 'JavaScriptCore__Interpreter.cpp'
+        warning_suppress_flags = ('-Wno-inline-new-delete',
+                '-Wno-shorten-64-to-32')
         for arch in ('x86_64', 'arm64'):
             test_name = '%s__%s__%s' % (input, arch, ''.join(flags))
             yield (
                 test_name, None, False,
-                ('-c', input, '-arch', arch, '-w') + flags)
+                ('-c', input, '-arch', arch) + flags +
+                XcodeDefaultWarningsCXX + warning_suppress_flags)
 
         input = 'OmniGroupFrameworks__NSBezierPath-OAExtensions.m'
+        warning_suppress_flags = ('-Wno-format',
+                '-Wno-deprecated-objc-isa-usage', '-Wno-shorten-64-to-32')
         for arch in ('x86_64',):
             test_name = '%s__%s__%s' % (input, arch, ''.join(flags))
             yield (
                 test_name, None, False,
-                ('-c', input, '-arch', arch, '-w') + flags)
+                ('-c', input, '-arch', arch) + flags +
+                XcodeDefaultWarningsObjC + warning_suppress_flags)
 
 
 def get_cc1_command_for_args(cmd, cwd, env):

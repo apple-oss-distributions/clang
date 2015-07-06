@@ -10,12 +10,13 @@ set(INTERCEPTION_SOURCES
 include_directories(..)
 
 set(INTERCEPTION_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+append_no_rtti_flag(INTERCEPTION_CFLAGS)
 
 if(APPLE)
   # Build universal binary on APPLE.
   foreach(os ${SANITIZER_COMMON_SUPPORTED_DARWIN_OS})
     add_compiler_rt_darwin_object_library(RTInterception ${os}
-      ARCH ${SANITIZER_COMMON_SUPPORTED_ARCH}
+      ARCH ${SANITIZER_COMMON_DARWIN_${os}_ARCHES}
       SOURCES ${INTERCEPTION_SOURCES}
       CFLAGS ${INTERCEPTION_CFLAGS})
   endforeach()

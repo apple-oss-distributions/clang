@@ -42,9 +42,6 @@ MCAsmInfoDarwin::MCAsmInfoDarwin() {
   HasMachoTBSSDirective = true; // Uses .tbss
   HasStaticCtorDtorReferenceInStaticMode = true;
 
-  // FIXME: Darwin 10 and newer don't need this.
-  LinkerRequiresNonEmptyDwarfLines = true;
-
   // FIXME: Change this once MC is the system assembler.
   HasAggressiveSymbolFolding = false;
 
@@ -59,4 +56,6 @@ MCAsmInfoDarwin::MCAsmInfoDarwin() {
   HasAltEntry = true;
 
   DwarfUsesRelocationsAcrossSections = false;
+
+  UseIntegratedAssembler = true;
 }

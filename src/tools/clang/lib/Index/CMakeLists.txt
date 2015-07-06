@@ -8,13 +8,12 @@ add_clang_library(clangIndex
 
   ADDITIONAL_HEADERS
   SimpleFormatContext.h
-  )
 
-target_link_libraries(clangIndex
+  LINK_LIBS
   clangAST
   clangBasic
   clangFormat
   clangLex
-  clangRewriteCore
+  clangRewrite
   clangTooling
   )

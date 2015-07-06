@@ -11,12 +11,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "subtarget"
 #include "X86Subtarget.h"
 #include "X86InstrInfo.h"
+#include "X86TargetMachine.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Host.h"
@@ -24,15 +25,24 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
+using namespace llvm;
+
+#define DEBUG_TYPE "subtarget"
+
 #define GET_SUBTARGETINFO_TARGET_DESC
 #define GET_SUBTARGETINFO_CTOR
 #include "X86GenSubtargetInfo.inc"
 
-using namespace llvm;
+// Temporary option to control early if-conversion for x86 while adding machine
+// models.
+static cl::opt<bool>
+X86EarlyIfConv("x86-early-ifcvt", cl::Hidden,
+               cl::desc("Enable early if-conversion on X86"));
 
-#if defined(_MSC_VER)
-#include <intrin.h>
-#endif
 
 /// ClassifyBlockAddressReference - Classify a blockaddress reference for the
 /// current subtarget according to how we should reference it in a non-pcrel
@@ -153,7 +163,7 @@ const char *X86Subtarget::getBZeroEntry() const {
       !getTargetTriple().isMacOSXVersionLT(10, 6))
     return "__bzero";
 
-  return 0;
+  return nullptr;
 }
 
 bool X86Subtarget::hasSinCos() const {
@@ -165,21 +175,24 @@ bool X86Subtarget::hasSinCos() const {
 /// IsLegalToCallImmediateAddr - Return true if the subtarget allows calls
 /// to immediate address.
 bool X86Subtarget::IsLegalToCallImmediateAddr(const TargetMachine &TM) const {
-  if (In64BitMode)
+  // FIXME: I386 PE/COFF supports PC relative calls using IMAGE_REL_I386_REL32
+  // but WinCOFFObjectWriter::RecordRelocation cannot emit them.  Once it does,
+  // the following check for Win32 should be removed.
+  if (In64BitMode || isTargetWin32())
     return false;
   return isTargetELF() || TM.getRelocationModel() == Reloc::Static;
 }
 
 void X86Subtarget::resetSubtargetFeatures(const MachineFunction *MF) {
   AttributeSet FnAttrs = MF->getFunction()->getAttributes();
-  Attribute CPUAttr = FnAttrs.getAttribute(AttributeSet::FunctionIndex,
-                                           "target-cpu");
-  Attribute FSAttr = FnAttrs.getAttribute(AttributeSet::FunctionIndex,
-                                          "target-features");
+  Attribute CPUAttr =
+      FnAttrs.getAttribute(AttributeSet::FunctionIndex, "target-cpu");
+  Attribute FSAttr =
+      FnAttrs.getAttribute(AttributeSet::FunctionIndex, "target-features");
   std::string CPU =
-    !CPUAttr.hasAttribute(Attribute::None) ?CPUAttr.getValueAsString() : "";
+      !CPUAttr.hasAttribute(Attribute::None) ? CPUAttr.getValueAsString() : "";
   std::string FS =
-    !FSAttr.hasAttribute(Attribute::None) ? FSAttr.getValueAsString() : "";
+      !FSAttr.hasAttribute(Attribute::None) ? FSAttr.getValueAsString() : "";
   if (!FS.empty()) {
     initializeEnvironment();
     resetSubtargetFeatures(CPU, FS);
@@ -206,9 +219,6 @@ void X86Subtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
 
   // Make sure the right MCSchedModel is used.
   InitCPUSchedModel(CPUName);
-
-  if (X86ProcFamily == IntelAtom || X86ProcFamily == IntelSLM)
-    PostRAScheduler = true;
 
   InstrItins = getInstrItineraryForCPU(CPUName);
 
@@ -263,8 +273,12 @@ void X86Subtarget::initializeEnvironment() {
   HasERI = false;
   HasCDI = false;
   HasPFI = false;
+  HasDQI = false;
+  HasBWI = false;
+  HasVLX = false;
   HasADX = false;
   HasSHA = false;
+  HasSGX = false;
   HasPRFCHW = false;
   HasRDSEED = false;
   IsBTMemSlow = false;
@@ -274,37 +288,101 @@ void X86Subtarget::initializeEnvironment() {
   HasCmpxchg16b = false;
   UseLeaForSP = false;
   HasSlowDivide = false;
-  PostRAScheduler = false;
   PadShortFunctions = false;
   CallRegIndirect = false;
   LEAUsesAG = false;
+  SlowLEA = false;
+  SlowIncDec = false;
   stackAlignment = 4;
   // FIXME: this is a known good value for Yonah. How about others?
   MaxInlineSizeThreshold = 128;
 }
 
-X86Subtarget::X86Subtarget(const std::string &TT, const std::string &CPU,
-                           const std::string &FS,
-                           unsigned StackAlignOverride)
-  : X86GenSubtargetInfo(TT, CPU, FS)
-  , X86ProcFamily(Others)
-  , PICStyle(PICStyles::None)
-  , TargetTriple(TT)
-  , StackAlignOverride(StackAlignOverride)
-  , In64BitMode(TargetTriple.getArch() == Triple::x86_64)
-  , In32BitMode(TargetTriple.getArch() == Triple::x86 &&
-                TargetTriple.getEnvironment() != Triple::CODE16)
-  , In16BitMode(TargetTriple.getArch() == Triple::x86 &&
-                TargetTriple.getEnvironment() == Triple::CODE16) {
-  initializeEnvironment();
-  resetSubtargetFeatures(CPU, FS);
+static std::string computeDataLayout(const Triple &TT) {
+  // X86 is little endian
+  std::string Ret = "e";
+
+  Ret += DataLayout::getManglingComponent(TT);
+  // X86 and x32 have 32 bit pointers.
+  if ((TT.isArch64Bit() &&
+       (TT.getEnvironment() == Triple::GNUX32 || TT.isOSNaCl())) ||
+      !TT.isArch64Bit())
+    Ret += "-p:32:32";
+
+  // Some ABIs align 64 bit integers and doubles to 64 bits, others to 32.
+  if (TT.isArch64Bit() || TT.isOSWindows() || TT.isOSNaCl())
+    Ret += "-i64:64";
+  else
+    Ret += "-f64:32:64";
+
+  // Some ABIs align long double to 128 bits, others to 32.
+  if (TT.isOSNaCl())
+    ; // No f80
+  else if (TT.isArch64Bit() || TT.isOSDarwin())
+    Ret += "-f80:128";
+  else
+    Ret += "-f80:32";
+
+  // The registers can hold 8, 16, 32 or, in x86-64, 64 bits.
+  if (TT.isArch64Bit())
+    Ret += "-n8:16:32:64";
+  else
+    Ret += "-n8:16:32";
+
+  // The stack is aligned to 32 bits on some ABIs and 128 bits on others.
+  if (!TT.isArch64Bit() && TT.isOSWindows())
+    Ret += "-S32";
+  else
+    Ret += "-S128";
+
+  return Ret;
 }
 
-bool X86Subtarget::enablePostRAScheduler(
-           CodeGenOpt::Level OptLevel,
-           TargetSubtargetInfo::AntiDepBreakMode& Mode,
-           RegClassVector& CriticalPathRCs) const {
-  Mode = TargetSubtargetInfo::ANTIDEP_CRITICAL;
-  CriticalPathRCs.clear();
-  return PostRAScheduler && OptLevel >= CodeGenOpt::Default;
+X86Subtarget &X86Subtarget::initializeSubtargetDependencies(StringRef CPU,
+                                                            StringRef FS) {
+  initializeEnvironment();
+  resetSubtargetFeatures(CPU, FS);
+  return *this;
 }
+
+X86Subtarget::X86Subtarget(const std::string &TT, const std::string &CPU,
+                           const std::string &FS, X86TargetMachine &TM,
+                           unsigned StackAlignOverride)
+    : X86GenSubtargetInfo(TT, CPU, FS), X86ProcFamily(Others),
+      PICStyle(PICStyles::None), TargetTriple(TT),
+      DL(computeDataLayout(TargetTriple)),
+      StackAlignOverride(StackAlignOverride),
+      In64BitMode(TargetTriple.getArch() == Triple::x86_64),
+      In32BitMode(TargetTriple.getArch() == Triple::x86 &&
+                  TargetTriple.getEnvironment() != Triple::CODE16),
+      In16BitMode(TargetTriple.getArch() == Triple::x86 &&
+                  TargetTriple.getEnvironment() == Triple::CODE16),
+      TSInfo(DL), InstrInfo(initializeSubtargetDependencies(CPU, FS)),
+      TLInfo(TM), FrameLowering(TargetFrameLowering::StackGrowsDown,
+                                getStackAlignment(), is64Bit() ? -8 : -4),
+      JITInfo(hasSSE1()) {
+  // Determine the PICStyle based on the target selected.
+  if (TM.getRelocationModel() == Reloc::Static) {
+    // Unless we're in PIC or DynamicNoPIC mode, set the PIC style to None.
+    setPICStyle(PICStyles::None);
+  } else if (is64Bit()) {
+    // PIC in 64 bit mode is always rip-rel.
+    setPICStyle(PICStyles::RIPRel);
+  } else if (isTargetCOFF()) {
+    setPICStyle(PICStyles::None);
+  } else if (isTargetDarwin()) {
+    if (TM.getRelocationModel() == Reloc::PIC_)
+      setPICStyle(PICStyles::StubPIC);
+    else {
+      assert(TM.getRelocationModel() == Reloc::DynamicNoPIC);
+      setPICStyle(PICStyles::StubDynamicNoPIC);
+    }
+  } else if (isTargetELF()) {
+    setPICStyle(PICStyles::GOT);
+  }
+}
+
+bool X86Subtarget::enableEarlyIfConversion() const {
+  return hasCMov() && X86EarlyIfConv;
+}
+

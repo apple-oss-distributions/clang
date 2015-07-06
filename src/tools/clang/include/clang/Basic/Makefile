@@ -6,8 +6,8 @@ BUILT_SOURCES = \
 	DiagnosticFrontendKinds.inc DiagnosticLexKinds.inc \
 	DiagnosticParseKinds.inc DiagnosticSemaKinds.inc \
 	DiagnosticSerializationKinds.inc \
+	AttrHasAttributeImpl.inc \
 	DiagnosticIndexName.inc DiagnosticGroups.inc AttrList.inc arm_neon.inc \
-	arm64_simd.inc \
 	Version.inc
 
 TABLEGEN_INC_FILES_COMMON = 1
@@ -49,14 +49,15 @@ $(ObjDir)/AttrList.inc.tmp : Attr.td $(CLANG_TBLGEN) $(ObjDir)/.dir
 	$(Verb) $(ClangTableGen) -gen-clang-attr-list -o $(call SYSPATH, $@) \
 	  -I $(PROJ_SRC_DIR)/../.. $<
 
+$(ObjDir)/AttrHasAttributeImpl.inc.tmp : Attr.td $(CLANG_TBLGEN) \
+                                  $(ObjDir)/.dir
+	$(Echo) "Building Clang __has_attribute implementation with tblgen"
+	$(Verb) $(ClangTableGen) -gen-clang-attr-has-attribute-impl -o $(call SYSPATH, $@) \
+		-I $(PROJ_SRC_DIR)/../../ $<
+
 $(ObjDir)/arm_neon.inc.tmp : arm_neon.td $(CLANG_TBLGEN) $(ObjDir)/.dir
 	$(Echo) "Building Clang arm_neon.inc with tblgen"
 	$(Verb) $(ClangTableGen) -gen-arm-neon-sema -o $(call SYSPATH, $@) \
-	  -I $(PROJ_SRC_DIR)/../.. $<
-
-$(ObjDir)/arm64_simd.inc.tmp : arm64_simd.td $(CLANG_TBLGEN) $(ObjDir)/.dir
-	$(Echo) "Building Clang arm64_simd.inc with tblgen"
-	$(Verb) $(ClangTableGen) -gen-arm64-simd-sema -o $(call SYSPATH, $@) \
 	  -I $(PROJ_SRC_DIR)/../.. $<
 
 $(ObjDir)/Version.inc.tmp : Version.inc.in Makefile $(LLVM_OBJ_ROOT)/Makefile.config $(ObjDir)/.dir

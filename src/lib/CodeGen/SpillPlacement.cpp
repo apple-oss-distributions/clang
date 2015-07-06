@@ -27,7 +27,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "spillplacement"
 #include "SpillPlacement.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/CodeGen/EdgeBundles.h"
@@ -42,6 +41,8 @@
 #include "llvm/Support/Format.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "spillplacement"
 
 static cl::opt<bool>
 UseLoopDepth("spill-uses-loop-depth", cl::Hidden,
@@ -228,7 +229,7 @@ bool SpillPlacement::runOnMachineFunction(MachineFunction &mf) {
 
 void SpillPlacement::releaseMemory() {
   delete[] nodes;
-  nodes = 0;
+  nodes = nullptr;
 }
 
 /// activate - mark node n as active if it wasn't already.
@@ -355,7 +356,7 @@ void SpillPlacement::iterate() {
     // iteration is not zero, the last node was just updated.
     bool Changed = false;
     for (SmallVectorImpl<unsigned>::const_reverse_iterator I =
-           iteration == 0 ? Linked.rbegin() : llvm::next(Linked.rbegin()),
+           iteration == 0 ? Linked.rbegin() : std::next(Linked.rbegin()),
            E = Linked.rend(); I != E; ++I) {
       unsigned n = *I;
       if (nodes[n].update(nodes)) {
@@ -370,7 +371,7 @@ void SpillPlacement::iterate() {
     // Scan forwards, skipping the first node which was just updated.
     Changed = false;
     for (SmallVectorImpl<unsigned>::const_iterator I =
-           llvm::next(Linked.begin()), E = Linked.end(); I != E; ++I) {
+           std::next(Linked.begin()), E = Linked.end(); I != E; ++I) {
       unsigned n = *I;
       if (nodes[n].update(nodes)) {
         Changed = true;
@@ -403,6 +404,6 @@ SpillPlacement::finish() {
       ActiveNodes->reset(n);
       Perfect = false;
     }
-  ActiveNodes = 0;
+  ActiveNodes = nullptr;
   return Perfect;
 }

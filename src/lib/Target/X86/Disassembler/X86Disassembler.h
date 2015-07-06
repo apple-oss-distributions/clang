@@ -71,22 +71,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef X86DISASSEMBLER_H
-#define X86DISASSEMBLER_H
-
-#define INSTRUCTION_SPECIFIER_FIELDS \
-  uint16_t operands;
-
-#define INSTRUCTION_IDS               \
-  uint16_t instructionIDs;
+#ifndef LLVM_LIB_TARGET_X86_DISASSEMBLER_X86DISASSEMBLER_H
+#define LLVM_LIB_TARGET_X86_DISASSEMBLER_X86DISASSEMBLER_H
 
 #include "X86DisassemblerDecoderCommon.h"
-
-#undef INSTRUCTION_SPECIFIER_FIELDS
-#undef INSTRUCTION_IDS
-
 #include "llvm/MC/MCDisassembler.h"
-#include <memory>
 
 namespace llvm {
 
@@ -111,12 +100,10 @@ public:
 public:
 
   /// getInstruction - See MCDisassembler.
-  DecodeStatus getInstruction(MCInst &instr,
-                              uint64_t &size,
-                              const MemoryObject &region,
-                              uint64_t address,
+  DecodeStatus getInstruction(MCInst &instr, uint64_t &size,
+                              const MemoryObject &region, uint64_t address,
                               raw_ostream &vStream,
-                              raw_ostream &cStream) const;
+                              raw_ostream &cStream) const override;
 
 private:
   DisassemblerMode              fMode;

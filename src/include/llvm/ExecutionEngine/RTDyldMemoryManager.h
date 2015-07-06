@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_EXECUTIONENGINE_RT_DYLD_MEMORY_MANAGER_H
-#define LLVM_EXECUTIONENGINE_RT_DYLD_MEMORY_MANAGER_H
+#ifndef LLVM_EXECUTIONENGINE_RTDYLDMEMORYMANAGER_H
+#define LLVM_EXECUTIONENGINE_RTDYLDMEMORYMANAGER_H
 
 #include "llvm-c/ExecutionEngine.h"
 #include "llvm/ADT/StringRef.h"
@@ -114,7 +114,7 @@ public:
   /// operations needed to reliably use the memory are also performed.
   ///
   /// Returns true if an error occurred, false otherwise.
-  virtual bool finalizeMemory(std::string *ErrMsg = 0) = 0;
+  virtual bool finalizeMemory(std::string *ErrMsg = nullptr) = 0;
 };
 
 // Create wrappers for C Binding types (see CBindingWrapping.h).
@@ -123,4 +123,4 @@ DEFINE_SIMPLE_CONVERSION_FUNCTIONS(
 
 } // namespace llvm
 
-#endif // LLVM_EXECUTIONENGINE_RT_DYLD_MEMORY_MANAGER_H
+#endif
