@@ -84,6 +84,8 @@ RuntimeLibrary.darwin.Configs := \
 
 IOS_SDK := $(shell xcrun --show-sdk-path -sdk iphoneos 2> /dev/null)
 IOSSIM_SDK := $(shell xcrun --show-sdk-path -sdk iphonesimulator 2> /dev/null)
+WATCHOS_SDK := $(shell xcrun --show-sdk-path -sdk watchos 2> /dev/null)
+WATCHOSSIM_SDK := $(shell xcrun --show-sdk-path -sdk watchsimulator 2> /dev/null)
 
 LinkerSupportedArches = \
   $(shell \
@@ -111,6 +113,14 @@ ifneq ($(IOS_SDK),)
 ifneq ($(call LinkerSupportedArches,armv7 armv7s arm64),)
 RuntimeLibrary.darwin.Configs += asan_ios_dynamic.dylib
 endif
+endif
+
+ifneq ($(WATCHOS_SDK)$(WATCHOSSIM_SDK),)
+RuntimeLibrary.darwin.Configs += watchos.a profile_watchos.a
+endif
+
+ifneq ($(WATCHOS_SDK),)
+RuntimeLibrary.darwin.Configs += cc_kext_watchos.a
 endif
 
 RuntimeLibrary.macho_embedded.Configs := \

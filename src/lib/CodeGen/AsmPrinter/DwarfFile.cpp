@@ -8,13 +8,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "DwarfFile.h"
-
 #include "DwarfDebug.h"
 #include "DwarfUnit.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/LEB128.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 
 namespace llvm {
@@ -48,25 +47,18 @@ void DwarfFile::addUnit(std::unique_ptr<DwarfUnit> U) {
 
 // Emit the various dwarf units to the unit section USection with
 // the abbreviations going into ASection.
-void DwarfFile::emitUnits(DwarfDebug *DD, const MCSymbol *ASectionSym) {
+void DwarfFile::emitUnits(bool UseOffsets) {
   for (const auto &TheU : CUs) {
     DIE &Die = TheU->getUnitDie();
     const MCSection *USection = TheU->getSection();
     Asm->OutStreamer.SwitchSection(USection);
 
-    // Emit the compile units header.
-    Asm->OutStreamer.EmitLabel(TheU->getLabelBegin());
+    TheU->emitHeader(UseOffsets);
 
-    // Emit size of content not including length itself
-    Asm->OutStreamer.AddComment("Length of Unit");
-    Asm->EmitInt32(TheU->getHeaderSize() + Die.getSize());
-
-    TheU->emitHeader(ASectionSym);
-
-    DD->emitDIE(Die);
-    Asm->OutStreamer.EmitLabel(TheU->getLabelEnd());
+    Asm->emitDwarfDIE(Die);
   }
 }
+
 // Compute the size and offset for each DIE.
 void DwarfFile::computeSizeAndOffsets() {
   // Offset from the first CU in the debug info section is 0 initially.
@@ -111,14 +103,14 @@ unsigned DwarfFile::computeSizeAndOffset(DIE &Die, unsigned Offset) {
     Offset += Values[i]->SizeOf(Asm, AbbrevData[i].getForm());
 
   // Get the children.
-  const auto &Children = Die.getChildren();
+  auto &Children = Die.getChildren();
 
   // Size the DIE children if any.
   if (!Children.empty()) {
     assert(Abbrev.hasChildren() && "Children flag not set");
 
     for (auto &Child : Children)
-      Offset = computeSizeAndOffset(*Child, Offset);
+      Offset = computeSizeAndOffset(Child, Offset);
 
     // End of children marker.
     Offset += sizeof(int8_t);
@@ -127,30 +119,55 @@ unsigned DwarfFile::computeSizeAndOffset(DIE &Die, unsigned Offset) {
   Die.setSize(Offset - Die.getOffset());
   return Offset;
 }
+
 void DwarfFile::emitAbbrevs(const MCSection *Section) {
   // Check to see if it is worth the effort.
   if (!Abbreviations.empty()) {
     // Start the debug abbrev section.
     Asm->OutStreamer.SwitchSection(Section);
-
-    // For each abbrevation.
-    for (const DIEAbbrev *Abbrev : Abbreviations) {
-      // Emit the abbrevations code (base 1 index.)
-      Asm->EmitULEB128(Abbrev->getNumber(), "Abbreviation Code");
-
-      // Emit the abbreviations data.
-      Abbrev->Emit(Asm);
-    }
-
-    // Mark end of abbreviations.
-    Asm->EmitULEB128(0, "EOM(3)");
+    Asm->emitDwarfAbbrevs(Abbreviations);
   }
 }
 
 // Emit strings into a string section.
 void DwarfFile::emitStrings(const MCSection *StrSection,
-                            const MCSection *OffsetSection,
-                            const MCSymbol *StrSecSym) {
-  StrPool.emit(*Asm, StrSection, OffsetSection, StrSecSym);
+                            const MCSection *OffsetSection) {
+  StrPool.emit(*Asm, StrSection, OffsetSection);
+}
+
+bool DwarfFile::addScopeVariable(LexicalScope *LS, DbgVariable *Var) {
+  SmallVectorImpl<DbgVariable *> &Vars = ScopeVariables[LS];
+  const DILocalVariable *DV = Var->getVariable();
+  // Variables with positive arg numbers are parameters.
+  if (unsigned ArgNum = DV->getArg()) {
+    // Keep all parameters in order at the start of the variable list to ensure
+    // function types are correct (no out-of-order parameters)
+    //
+    // This could be improved by only doing it for optimized builds (unoptimized
+    // builds have the right order to begin with), searching from the back (this
+    // would catch the unoptimized case quickly), or doing a binary search
+    // rather than linear search.
+    auto I = Vars.begin();
+    while (I != Vars.end()) {
+      unsigned CurNum = (*I)->getVariable()->getArg();
+      // A local (non-parameter) variable has been found, insert immediately
+      // before it.
+      if (CurNum == 0)
+        break;
+      // A later indexed parameter has been found, insert immediately before it.
+      if (CurNum > ArgNum)
+        break;
+      if (CurNum == ArgNum) {
+        (*I)->addMMIEntry(*Var);
+        return false;
+      }
+      ++I;
+    }
+    Vars.insert(I, Var);
+    return true;
+  }
+
+  Vars.push_back(Var);
+  return true;
 }
 }

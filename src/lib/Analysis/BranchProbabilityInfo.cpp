@@ -28,7 +28,7 @@ using namespace llvm;
 
 INITIALIZE_PASS_BEGIN(BranchProbabilityInfo, "branch-prob",
                       "Branch Probability Analysis", false, true)
-INITIALIZE_PASS_DEPENDENCY(LoopInfo)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_END(BranchProbabilityInfo, "branch-prob",
                     "Branch Probability Analysis", false, true)
 
@@ -190,13 +190,14 @@ bool BranchProbabilityInfo::calcMetadataWeights(BasicBlock *BB) {
     return false;
 
   // Build up the final weights that will be used in a temporary buffer, but
-  // don't add them until all weihts are present. Each weight value is clamped
+  // don't add them until all weights are present. Each weight value is clamped
   // to [1, getMaxWeightFor(BB)].
   uint32_t WeightLimit = getMaxWeightFor(BB);
   SmallVector<uint32_t, 2> Weights;
   Weights.reserve(TI->getNumSuccessors());
   for (unsigned i = 1, e = WeightsNode->getNumOperands(); i != e; ++i) {
-    ConstantInt *Weight = dyn_cast<ConstantInt>(WeightsNode->getOperand(i));
+    ConstantInt *Weight =
+        mdconst::dyn_extract<ConstantInt>(WeightsNode->getOperand(i));
     if (!Weight)
       return false;
     Weights.push_back(
@@ -377,6 +378,14 @@ bool BranchProbabilityInfo::calcZeroHeuristics(BasicBlock *BB) {
   if (!CV)
     return false;
 
+  // If the LHS is the result of AND'ing a value with a single bit bitmask,
+  // we don't have information about probabilities.
+  if (Instruction *LHS = dyn_cast<Instruction>(CI->getOperand(0)))
+    if (LHS->getOpcode() == Instruction::And)
+      if (ConstantInt *AndRHS = dyn_cast<ConstantInt>(LHS->getOperand(1)))
+        if (AndRHS->getUniqueInteger().isPowerOf2())
+          return false;
+
   bool isProb;
   if (CV->isZero()) {
     switch (CI->getPredicate()) {
@@ -483,7 +492,7 @@ bool BranchProbabilityInfo::calcInvokeHeuristics(BasicBlock *BB) {
 }
 
 void BranchProbabilityInfo::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<LoopInfo>();
+  AU.addRequired<LoopInfoWrapperPass>();
   AU.setPreservesAll();
 }
 
@@ -491,7 +500,7 @@ bool BranchProbabilityInfo::runOnFunction(Function &F) {
   DEBUG(dbgs() << "---- Branch Probability Info : " << F.getName()
                << " ----\n\n");
   LastF = &F; // Store the last function we ran on for printing.
-  LI = &getAnalysis<LoopInfo>();
+  LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   assert(PostDominatedByUnreachable.empty());
   assert(PostDominatedByColdCall.empty());
 

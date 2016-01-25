@@ -142,7 +142,7 @@ def t_blxtarget : Operand<i32> {
 
 // t_addrmode_pc := <label> => pc + imm8 * 4
 //
-def t_addrmode_pc : Operand<i32> {
+def t_addrmode_pc : MemOperand {
   let EncoderMethod = "getAddrModePCOpValue";
   let DecoderMethod = "DecodeThumbAddrModePC";
   let PrintMethod = "printThumbLdrLabelOperand";
@@ -153,7 +153,7 @@ def t_addrmode_pc : Operand<i32> {
 // t_addrmode_rr := reg + reg
 //
 def t_addrmode_rr_asm_operand : AsmOperandClass { let Name = "MemThumbRR"; }
-def t_addrmode_rr : Operand<i32>,
+def t_addrmode_rr : MemOperand,
                     ComplexPattern<i32, 2, "SelectThumbAddrModeRR", []> {
   let EncoderMethod = "getThumbAddrModeRegRegOpValue";
   let PrintMethod = "printThumbAddrModeRROperand";
@@ -169,7 +169,7 @@ def t_addrmode_rr : Operand<i32>,
 // the reg+imm forms will match instead. This is a horrible way to do that,
 // as it forces tight coupling between the methods, but it's how selectiondag
 // currently works.
-def t_addrmode_rrs1 : Operand<i32>,
+def t_addrmode_rrs1 : MemOperand,
                       ComplexPattern<i32, 2, "SelectThumbAddrModeRI5S1", []> {
   let EncoderMethod = "getThumbAddrModeRegRegOpValue";
   let PrintMethod = "printThumbAddrModeRROperand";
@@ -177,7 +177,7 @@ def t_addrmode_rrs1 : Operand<i32>,
   let ParserMatchClass = t_addrmode_rr_asm_operand;
   let MIOperandInfo = (ops tGPR:$base, tGPR:$offsreg);
 }
-def t_addrmode_rrs2 : Operand<i32>,
+def t_addrmode_rrs2 : MemOperand,
                       ComplexPattern<i32, 2, "SelectThumbAddrModeRI5S2", []> {
   let EncoderMethod = "getThumbAddrModeRegRegOpValue";
   let DecoderMethod = "DecodeThumbAddrModeRR";
@@ -185,7 +185,7 @@ def t_addrmode_rrs2 : Operand<i32>,
   let ParserMatchClass = t_addrmode_rr_asm_operand;
   let MIOperandInfo = (ops tGPR:$base, tGPR:$offsreg);
 }
-def t_addrmode_rrs4 : Operand<i32>,
+def t_addrmode_rrs4 : MemOperand,
                       ComplexPattern<i32, 2, "SelectThumbAddrModeRI5S4", []> {
   let EncoderMethod = "getThumbAddrModeRegRegOpValue";
   let DecoderMethod = "DecodeThumbAddrModeRR";
@@ -197,7 +197,7 @@ def t_addrmode_rrs4 : Operand<i32>,
 // t_addrmode_is4 := reg + imm5 * 4
 //
 def t_addrmode_is4_asm_operand : AsmOperandClass { let Name = "MemThumbRIs4"; }
-def t_addrmode_is4 : Operand<i32>,
+def t_addrmode_is4 : MemOperand,
                      ComplexPattern<i32, 2, "SelectThumbAddrModeImm5S4", []> {
   let EncoderMethod = "getAddrModeISOpValue";
   let DecoderMethod = "DecodeThumbAddrModeIS";
@@ -209,7 +209,7 @@ def t_addrmode_is4 : Operand<i32>,
 // t_addrmode_is2 := reg + imm5 * 2
 //
 def t_addrmode_is2_asm_operand : AsmOperandClass { let Name = "MemThumbRIs2"; }
-def t_addrmode_is2 : Operand<i32>,
+def t_addrmode_is2 : MemOperand,
                      ComplexPattern<i32, 2, "SelectThumbAddrModeImm5S2", []> {
   let EncoderMethod = "getAddrModeISOpValue";
   let DecoderMethod = "DecodeThumbAddrModeIS";
@@ -221,7 +221,7 @@ def t_addrmode_is2 : Operand<i32>,
 // t_addrmode_is1 := reg + imm5
 //
 def t_addrmode_is1_asm_operand : AsmOperandClass { let Name = "MemThumbRIs1"; }
-def t_addrmode_is1 : Operand<i32>,
+def t_addrmode_is1 : MemOperand,
                      ComplexPattern<i32, 2, "SelectThumbAddrModeImm5S1", []> {
   let EncoderMethod = "getAddrModeISOpValue";
   let DecoderMethod = "DecodeThumbAddrModeIS";
@@ -235,7 +235,7 @@ def t_addrmode_is1 : Operand<i32>,
 // FIXME: This really shouldn't have an explicit SP operand at all. It should
 // be implicit, just like in the instruction encoding itself.
 def t_addrmode_sp_asm_operand : AsmOperandClass { let Name = "MemThumbSPI"; }
-def t_addrmode_sp : Operand<i32>,
+def t_addrmode_sp : MemOperand,
                     ComplexPattern<i32, 2, "SelectThumbAddrModeSP", []> {
   let EncoderMethod = "getAddrModeThumbSPOpValue";
   let DecoderMethod = "DecodeThumbAddrModeSP";
@@ -358,6 +358,14 @@ def tADDrSPi : T1pI<(outs tGPR:$dst), (ins GPRsp:$sp, t_imm0_1020s4:$imm),
   let Inst{10-8} = dst;
   let Inst{7-0}  = imm;
   let DecoderMethod = "DecodeThumbAddSpecialReg";
+}
+
+// Thumb1 frame lowering is rather fragile, we hope to be able to use
+// tADDrSPi, but we may need to insert a sequence that clobbers CPSR.
+def tADDframe : PseudoInst<(outs tGPR:$dst), (ins i32imm:$base, i32imm:$offset),
+                           NoItinerary, []>,
+                Requires<[IsThumb, IsThumb1Only]> {
+  let Defs = [CPSR];
 }
 
 // ADD sp, sp, #<imm7>
@@ -513,10 +521,11 @@ let isBranch = 1, isTerminator = 1, isBarrier = 1 in {
                           Sched<[WriteBrTbl]>;
 
   def tBR_JTr : tPseudoInst<(outs),
-                      (ins tGPR:$target, i32imm:$jt, i32imm:$id),
+                      (ins tGPR:$target, i32imm:$jt),
                       0, IIC_Br,
-                      [(ARMbrjt tGPR:$target, tjumptable:$jt, imm:$id)]>,
+                      [(ARMbrjt tGPR:$target, tjumptable:$jt)]>,
                       Sched<[WriteBrTbl]> {
+    let Size = 2;
     list<Predicate> Predicates = [IsThumb, IsThumb1Only];
   }
 }
@@ -706,7 +715,7 @@ def tSTRspi : T1pIs<(outs), (ins tGPR:$Rt, t_addrmode_sp:$addr), IIC_iStore_i,
 //
 
 // These require base address to be written back or one of the loaded regs.
-let neverHasSideEffects = 1 in {
+let hasSideEffects = 0 in {
 
 let mayLoad = 1, hasExtraDefRegAllocReq = 1 in
 def tLDMIA : T1I<(outs), (ins tGPR:$Rn, pred:$p, reglist:$regs, variable_ops),
@@ -746,7 +755,7 @@ def tSTMIA_UPD : Thumb1I<(outs GPR:$wb),
   let Inst{7-0}  = regs;
 }
 
-} // neverHasSideEffects
+} // hasSideEffects
 
 def : InstAlias<"ldm${p} $Rn!, $regs",
                 (tLDMIA tGPR:$Rn, pred:$p, reglist:$regs)>,
@@ -880,7 +889,7 @@ def tADDrr :                    // A8.6.6 T1
                 "add", "\t$Rd, $Rn, $Rm",
                 [(set tGPR:$Rd, (add tGPR:$Rn, tGPR:$Rm))]>, Sched<[WriteALU]>;
 
-let neverHasSideEffects = 1 in
+let hasSideEffects = 0 in
 def tADDhirr : T1pIt<(outs GPR:$Rdn), (ins GPR:$Rn, GPR:$Rm), IIC_iALUr,
                      "add", "\t$Rdn, $Rm", []>,
                T1Special<{0,0,?,?}>, Sched<[WriteALU]> {
@@ -1040,7 +1049,7 @@ def : tInstAlias <"movs $Rdn, $imm",
 
 // A7-73: MOV(2) - mov setting flag.
 
-let neverHasSideEffects = 1 in {
+let hasSideEffects = 0 in {
 def tMOVr : Thumb1pI<(outs GPR:$Rd), (ins GPR:$Rm), AddrModeNone,
                       2, IIC_iMOVr,
                       "mov", "\t$Rd, $Rm", "", []>,
@@ -1062,7 +1071,7 @@ def tMOVSr      : T1I<(outs tGPR:$Rd), (ins tGPR:$Rm), IIC_iMOVr,
   let Inst{5-3}  = Rm;
   let Inst{2-0}  = Rd;
 }
-} // neverHasSideEffects
+} // hasSideEffects
 
 // Multiply register
 let isCommutable = 1 in
@@ -1240,13 +1249,13 @@ def tADR : T1I<(outs tGPR:$Rd), (ins t_adrlabel:$addr, pred:$p),
   let DecoderMethod = "DecodeThumbAddSpecialReg";
 }
 
-let neverHasSideEffects = 1, isReMaterializable = 1 in
+let hasSideEffects = 0, isReMaterializable = 1 in
 def tLEApcrel   : tPseudoInst<(outs tGPR:$Rd), (ins i32imm:$label, pred:$p),
                               2, IIC_iALUi, []>, Sched<[WriteALU]>;
 
 let hasSideEffects = 1 in
 def tLEApcrelJT : tPseudoInst<(outs tGPR:$Rd),
-                              (ins i32imm:$label, nohash_imm:$id, pred:$p),
+                              (ins i32imm:$label, pred:$p),
                               2, IIC_iALUi, []>, Sched<[WriteALU]>;
 
 //===----------------------------------------------------------------------===//
@@ -1289,7 +1298,7 @@ def tInt_eh_sjlj_longjmp : XI<(outs), (ins GPR:$src, GPR:$scratch),
                               AddrModeNone, 0, IndexModeNone,
                               Pseudo, NoItinerary, "", "",
                               [(ARMeh_sjlj_longjmp GPR:$src, GPR:$scratch)]>,
-                             Requires<[IsThumb, IsIOS]>;
+                             Requires<[IsThumb]>;
 
 //===----------------------------------------------------------------------===//
 // Non-Instruction Patterns
@@ -1345,10 +1354,18 @@ def tLDRLIT_ga_abs : PseudoInst<(outs tGPR:$dst), (ins i32imm:$src),
                                       (ARMWrapper tglobaladdr:$src))]>,
                      Requires<[IsThumb, DontUseMovt]>;
 
+// TLS globals
+def : Pat<(ARMWrapperPIC tglobaltlsaddr:$addr),
+          (tLDRLIT_ga_pcrel tglobaltlsaddr:$addr)>,
+      Requires<[IsThumb, DontUseMovt]>;
+def : Pat<(ARMWrapper tglobaltlsaddr:$addr),
+          (tLDRLIT_ga_abs tglobaltlsaddr:$addr)>,
+      Requires<[IsThumb, DontUseMovt]>;
+
 
 // JumpTable
-def : T1Pat<(ARMWrapperJT tjumptable:$dst, imm:$id),
-            (tLEApcrelJT tjumptable:$dst, imm:$id)>;
+def : T1Pat<(ARMWrapperJT tjumptable:$dst),
+            (tLEApcrelJT tjumptable:$dst)>;
 
 // Direct calls
 def : T1Pat<(ARMtcall texternalsym:$func), (tBL texternalsym:$func)>,

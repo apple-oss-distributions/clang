@@ -40,6 +40,7 @@ public:
   void clear() { flag = false; }
   void setPosition(const char *position) {
     assert(position);
+    flag = true;
     this->position = position;
   }
   const char *getPosition() const {
@@ -79,6 +80,7 @@ public:
     AsLongDouble, // 'L'
     AsAllocate,   // for '%as', GNU extension to C90 scanf
     AsMAllocate,  // for '%ms', GNU extension to scanf
+    AsWide,       // 'w' (MSVCRT, like l but only for c, C, s, S, or Z
     AsWideChar = AsLong // for '%ls', only makes sense for printf
   };
 
@@ -153,6 +155,8 @@ public:
     SArg,
 
     // ** Printf-specific **
+
+    ZArg, // MS extension
 
     // Objective-C specific specifiers.
     ObjCObjArg,  // '@'
@@ -422,12 +426,14 @@ class PrintfSpecifier : public analyze_format_string::FormatSpecifier {
   OptionalFlag HasSpacePrefix; // ' '
   OptionalFlag HasAlternativeForm; // '#'
   OptionalFlag HasLeadingZeroes; // '0'
+  OptionalFlag HasObjCTechnicalTerm; // '[tt]'
   OptionalAmount Precision;
 public:
   PrintfSpecifier() :
     FormatSpecifier(/* isPrintf = */ true),
     HasThousandsGrouping("'"), IsLeftJustified("-"), HasPlusPrefix("+"),
-    HasSpacePrefix(" "), HasAlternativeForm("#"), HasLeadingZeroes("0") {}
+    HasSpacePrefix(" "), HasAlternativeForm("#"), HasLeadingZeroes("0"),
+    HasObjCTechnicalTerm("tt") {}
 
   static PrintfSpecifier Parse(const char *beg, const char *end);
 
@@ -436,28 +442,25 @@ public:
     CS = cs;
   }
   void setHasThousandsGrouping(const char *position) {
-    HasThousandsGrouping = true;
     HasThousandsGrouping.setPosition(position);
   }
   void setIsLeftJustified(const char *position) {
-    IsLeftJustified = true;
     IsLeftJustified.setPosition(position);
   }
   void setHasPlusPrefix(const char *position) {
-    HasPlusPrefix = true;
     HasPlusPrefix.setPosition(position);
   }
   void setHasSpacePrefix(const char *position) {
-    HasSpacePrefix = true;
     HasSpacePrefix.setPosition(position);
   }
   void setHasAlternativeForm(const char *position) {
-    HasAlternativeForm = true;
     HasAlternativeForm.setPosition(position);
   }
   void setHasLeadingZeros(const char *position) {
-    HasLeadingZeroes = true;
     HasLeadingZeroes.setPosition(position);
+  }
+  void setHasObjCTechnicalTerm(const char *position) {
+    HasObjCTechnicalTerm.setPosition(position);
   }
   void setUsesPositionalArg() { UsesPositionalArg = true; }
 
@@ -495,6 +498,7 @@ public:
   const OptionalFlag &hasAlternativeForm() const { return HasAlternativeForm; }
   const OptionalFlag &hasLeadingZeros() const { return HasLeadingZeroes; }
   const OptionalFlag &hasSpacePrefix() const { return HasSpacePrefix; }
+  const OptionalFlag &hasObjCTechnicalTerm() const { return HasObjCTechnicalTerm; }
   bool usesPositionalArg() const { return UsesPositionalArg; }
 
   /// Changes the specifier and length according to a QualType, retaining any
@@ -552,7 +556,6 @@ public:
     SuppressAssignment("*") {}
 
   void setSuppressAssignment(const char *position) {
-    SuppressAssignment = true;
     SuppressAssignment.setPosition(position);
   }
 
@@ -608,6 +611,15 @@ public:
   virtual void HandleIncompleteSpecifier(const char *startSpecifier,
                                          unsigned specifierLen) {}
 
+  virtual void HandleEmptyObjCModifierFlag(const char *startFlags,
+                                           unsigned flagsLen) {}
+
+  virtual void HandleInvalidObjCModifierFlag(const char *startFlag,
+                                             unsigned flagLen) {}
+
+  virtual void HandleObjCFlagsWithNonObjCConversion(const char *flagsStart,
+                                            const char *flagsEnd,
+                                            const char *conversionPosition) {}
   // Printf-specific handlers.
 
   virtual bool HandleInvalidPrintfConversionSpecifier(

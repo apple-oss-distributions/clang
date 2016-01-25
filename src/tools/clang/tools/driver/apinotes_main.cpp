@@ -59,16 +59,7 @@ int cc1apinotes_main(ArrayRef<const char *> Argv, const char *Argv0,
   static cl::opt<std::string>
   OutputFilename("o", cl::desc("Output file name"), cl::cat(APINotesCategory));
 
-  // Hide unrelated options.
-  StringMap<cl::Option*> Options;
-  cl::getRegisteredOptions(Options);
-  for (StringMap<cl::Option *>::iterator I = Options.begin(),
-                                         E = Options.end();
-                                         I != E; ++I) {
-    if (I->second->Category != &APINotesCategory &&
-        I->first() != "help" && I->first() != "version")
-      I->second->setHiddenFlag(cl::ReallyHidden);
-  }
+  cl::HideUnrelatedOptions(APINotesCategory);
 
   SmallVector<const char *, 4> Args;
   Args.push_back(Argv0);
@@ -113,13 +104,16 @@ int cc1apinotes_main(ArrayRef<const char *> Argv, const char *Argv0,
         case llvm::Triple::IOS:
           targetOS = api_notes::OSType::IOS;
           break;
+        case llvm::Triple::WatchOS:
+          targetOS = api_notes::OSType::WatchOS;
+          break;
         default:
-          errs() << "traget is not supported\n";
+          errs() << "target is not supported\n";
           return 1;
       }
     }
-    std::string ErrorInfo;
-    llvm::raw_fd_ostream os(OutputFilename.getValue().c_str(), ErrorInfo,
+    std::error_code EC;
+    llvm::raw_fd_ostream os(OutputFilename, EC,
                             llvm::sys::fs::OpenFlags::F_None);
 
     if (api_notes::compileAPINotes(input, os, targetOS))
@@ -137,8 +131,8 @@ int cc1apinotes_main(ArrayRef<const char *> Argv, const char *Argv0,
       return 1;
     }
 
-    std::string ErrorInfo;
-    llvm::raw_fd_ostream os(OutputFilename.getValue().c_str(), ErrorInfo,
+    std::error_code EC;
+    llvm::raw_fd_ostream os(OutputFilename, EC,
                             llvm::sys::fs::OpenFlags::F_None);
 
     if (api_notes::decompileAPINotes(std::move(fileBufOrErr.get()), os))

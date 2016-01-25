@@ -25,7 +25,11 @@ TARGETS := $(shell $(targets))
 
 SRCROOT = .
 
+ifneq ($(findstring utils/buildit, $(SRCROOT)),utils/buildit)
 SRC = $(shell cd $(SRCROOT) && pwd | sed s,/private,,)
+else
+SRC = $(shell cd $(SRCROOT)/../.. && pwd | sed s,/private,,)
+endif
 OBJROOT = $(SRC)/obj
 SYMROOT = $(OBJROOT)/../sym
 DSTROOT = $(OBJROOT)/../dst
@@ -60,12 +64,19 @@ endif
 
 # NOTE : Always put version numbers at the end because they are optional.
 install: $(OBJROOT) $(SYMROOT) $(DSTROOT)
-	cd $(OBJROOT) && \
+	# Keep this temporary here until B&I has updated the make target for
+	# LLVMForJavaScriptCore.
+	if [ "$(RC_ProjectName)" == "LLVMForJavaScriptCore" ]; then \
+	  cd $(OBJROOT) && \
+	  $(SRC)/utils/buildit/build_llvm_jsc $(ENABLE_ASSERTIONS) $(LLVM_OPTIMIZED); \
+	else \
+	  cd $(OBJROOT) && \
 	  $(SRC)/utils/buildit/build_llvm "$(RC_ARCHS)" "$(TARGETS)" \
 	    $(SRC) $(PREFIX) $(DSTROOT) $(SYMROOT) \
 	    $(ENABLE_ASSERTIONS) $(LLVM_OPTIMIZED) \
 	    $(ARM_HOSTED_BUILD) $(IOS_SIM_BUILD) \
-	    $(RC_ProjectSourceVersion) $(RC_ProjectSourceSubversion) 
+	    $(RC_ProjectSourceVersion) $(RC_ProjectSourceSubversion); \
+	fi
 
 EmbeddedHosted:
 	$(MAKE) ARM_HOSTED_BUILD=yes PREFIX=/usr/local install
@@ -81,6 +92,14 @@ Embedded:
 	ARM_PLATFORM=`xcodebuild -version -sdk iphoneos PlatformPath` && \
 	$(MAKE) DSTROOT=$(DSTROOT)$$ARM_PLATFORM/Developer install
 
+LLVMForJavaScriptCore: $(OBJROOT) $(SYMROOT) $(DSTROOT)
+	cd $(OBJROOT) && \
+	  $(SRC)/utils/buildit/build_llvm_jsc $(ENABLE_ASSERTIONS) $(LLVM_OPTIMIZED)
+
+# include subproject Project.mk files
+$(info Include subproject Project.mk files)
+include $(shell find $(SRC) -name Project.mk)
+
 # installhdrs does nothing, because the headers aren't useful until
 # the compiler is installed.
 installhdrs:
@@ -95,13 +114,15 @@ installsrc:
 	@echo ++++++++++++++++++++++
 	@echo
 	if [ $(SRCROOT) != . ]; then \
-	  $(PAX) -rw . $(SRCROOT); \
+	  tar cf - --dereference . | (cd $(SRCROOT) && tar xf -) \
 	fi
 	find -d "$(SRCROOT)" \( -type d -a -name .svn -o \
+							-type d -a -name .git -o \
 	                        -type f -a -name .DS_Store -o \
-				-name \*~ -o -name .\#\* \) \
-	  -exec rm -rf {} \;
-	rm -rf "$(SRCROOT)/test"
+							-name \*~ -o -name .\#\* \) 
+	  						-exec rm -rf {} \;
+	find -d "$(SRCROOT)" -type d -a -name test -exec rm -rf {} \;
+	cp $(SRCROOT)/utils/buildit/GNUmakefile $(SRCROOT)
 
 #######################################################################
 

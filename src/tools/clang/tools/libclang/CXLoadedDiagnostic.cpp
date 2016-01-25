@@ -16,8 +16,8 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/LLVM.h"
-#include "clang/Frontend/SerializedDiagnostics.h"
 #include "clang/Frontend/SerializedDiagnosticReader.h"
+#include "clang/Frontend/SerializedDiagnostics.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -314,9 +314,9 @@ std::error_code DiagLoader::visitStartOfDiagnostic() {
 std::error_code DiagLoader::visitEndOfDiagnostic() {
   auto D = CurrentDiags.pop_back_val();
   if (CurrentDiags.empty())
-    TopDiags->appendDiagnostic(D.release());
+    TopDiags->appendDiagnostic(std::move(D));
   else
-    CurrentDiags.back()->getChildDiagnostics().appendDiagnostic(D.release());
+    CurrentDiags.back()->getChildDiagnostics().appendDiagnostic(std::move(D));
   return std::error_code();
 }
 

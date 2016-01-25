@@ -233,6 +233,15 @@ def ProcA15      : SubtargetFeature<"a15", "ARMProcFamily", "CortexA15",
                                     FeatureAvoidPartialCPSR,
                                     FeatureTrustZone, FeatureVirtualization]>;
 
+def ProcA17     : SubtargetFeature<"a17", "ARMProcFamily", "CortexA17",
+                                   "Cortex-A17 ARM processors",
+                                   [FeatureVMLxForwarding,
+                                    FeatureT2XtPk, FeatureVFP4,
+                                    FeatureHWDiv, FeatureHWDivARM,
+                                    FeatureAvoidPartialCPSR,
+                                    FeatureVirtualization,
+                                    FeatureTrustZone]>;
+
 def ProcA53     : SubtargetFeature<"a53", "ARMProcFamily", "CortexA53",
                                    "Cortex-A53 ARM processors",
                                    [FeatureHWDiv, FeatureHWDivARM,
@@ -264,13 +273,6 @@ def ProcKrait   : SubtargetFeature<"krait", "ARMProcFamily", "Krait",
                                     FeatureVFP4,
                                     FeatureHWDiv,
                                     FeatureHWDivARM]>;
-
-
-def FeatureAPCS  : SubtargetFeature<"apcs", "TargetABI", "ARM_ABI_APCS",
-                                   "Use the APCS ABI">;
-
-def FeatureAAPCS : SubtargetFeature<"aapcs", "TargetABI", "ARM_ABI_AAPCS",
-                                   "Use the AAPCS ABI">;
 
 
 class ProcNoItin<string Name, list<SubtargetFeature> Features>
@@ -352,12 +354,8 @@ def : ProcessorModel<"cortex-a8",   CortexA8Model,
                                      FeatureAClass]>;
 def : ProcessorModel<"cortex-a9",   CortexA9Model,
                                     [ProcA9, HasV7Ops, FeatureNEON, FeatureDB,
-                                     FeatureDSPThumb2, FeatureHasRAS,
+                                     FeatureDSPThumb2, FeatureHasRAS, FeatureMP,
                                      FeatureAClass]>;
-def : ProcessorModel<"cortex-a9-mp", CortexA9Model,
-                                    [ProcA9, HasV7Ops, FeatureNEON, FeatureDB,
-                                     FeatureDSPThumb2, FeatureMP,
-                                     FeatureHasRAS, FeatureAClass]>;
 
 // FIXME: A12 has currently the same Schedule model as A9
 def : ProcessorModel<"cortex-a12", CortexA9Model,
@@ -370,6 +368,12 @@ def : ProcessorModel<"cortex-a15",   CortexA9Model,
                                     [ProcA15, HasV7Ops, FeatureNEON, FeatureDB,
                                      FeatureDSPThumb2, FeatureHasRAS,
                                      FeatureAClass]>;
+
+// FIXME: A17 has currently the same Schedule model as A9
+def : ProcessorModel<"cortex-a17",  CortexA9Model,
+                                    [ProcA17, HasV7Ops, FeatureNEON, FeatureDB,
+                                     FeatureDSPThumb2, FeatureMP,
+                                     FeatureHasRAS, FeatureAClass]>;
 
 // FIXME: krait has currently the same Schedule model as A9
 def : ProcessorModel<"krait",       CortexA9Model,
@@ -397,6 +401,12 @@ def : ProcNoItin<"cortex-m4",       [HasV7Ops,
                                      FeatureT2XtPk, FeatureVFP4,
                                      FeatureVFPOnlySP, FeatureD16,
                                      FeatureMClass]>;
+def : ProcNoItin<"cortex-m7",       [HasV7Ops,
+                                     FeatureThumb2, FeatureNoARM, FeatureDB,
+                                     FeatureHWDiv, FeatureDSPThumb2,
+                                     FeatureT2XtPk, FeatureFPARMv8,
+                                     FeatureD16, FeatureMClass]>;
+
 
 // Swift uArch Processors.
 def : ProcessorModel<"swift",       SwiftModel,
@@ -409,6 +419,10 @@ def : ProcNoItin<"cortex-a53",      [ProcA53, HasV8Ops, FeatureAClass,
                                     FeatureDB, FeatureFPARMv8,
                                     FeatureNEON, FeatureDSPThumb2]>;
 def : ProcNoItin<"cortex-a57",      [ProcA57, HasV8Ops, FeatureAClass,
+                                    FeatureDB, FeatureFPARMv8,
+                                    FeatureNEON, FeatureDSPThumb2]>;
+// FIXME: Cortex-A72 is currently modelled as an Cortex-A57.
+def : ProcNoItin<"cortex-a72",      [ProcA57, HasV8Ops, FeatureAClass,
                                     FeatureDB, FeatureFPARMv8,
                                     FeatureNEON, FeatureDSPThumb2]>;
 
@@ -440,7 +454,15 @@ def ARMInstrInfo : InstrInfo;
 // Declare the target which we are implementing
 //===----------------------------------------------------------------------===//
 
+def ARMAsmWriter : AsmWriter {
+  string AsmWriterClassName  = "InstPrinter";
+  int PassSubtarget = 1;
+  int Variant = 0;
+  bit isMCAsmWriter = 1;
+}
+
 def ARM : Target {
   // Pull in Instruction Info:
   let InstructionSet = ARMInstrInfo;
+  let AssemblyWriters = [ARMAsmWriter];
 }

@@ -13,7 +13,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ProfileData/CoverageMapping.h"
-
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallSet.h"
@@ -21,6 +20,8 @@
 #include "llvm/ProfileData/InstrProfReader.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/Path.h"
 
 using namespace llvm;
 using namespace coverage;
@@ -178,56 +179,75 @@ void FunctionRecordIterator::skipOtherFiles() {
     *this = FunctionRecordIterator();
 }
 
+/// Get the function name from the record, removing the filename prefix if
+/// necessary.
+static StringRef getFuncNameWithoutPrefix(const CoverageMappingRecord &Record) {
+  StringRef FunctionName = Record.FunctionName;
+  if (Record.Filenames.empty())
+    return FunctionName;
+  StringRef Filename = sys::path::filename(Record.Filenames[0]);
+  if (FunctionName.startswith(Filename))
+    FunctionName = FunctionName.drop_front(Filename.size() + 1);
+  return FunctionName;
+}
+
 ErrorOr<std::unique_ptr<CoverageMapping>>
-CoverageMapping::load(ObjectFileCoverageMappingReader &CoverageReader,
+CoverageMapping::load(CoverageMappingReader &CoverageReader,
                       IndexedInstrProfReader &ProfileReader) {
   auto Coverage = std::unique_ptr<CoverageMapping>(new CoverageMapping());
 
   std::vector<uint64_t> Counts;
   for (const auto &Record : CoverageReader) {
+    CounterMappingContext Ctx(Record.Expressions);
+
     Counts.clear();
     if (std::error_code EC = ProfileReader.getFunctionCounts(
             Record.FunctionName, Record.FunctionHash, Counts)) {
-      if (EC != instrprof_error::hash_mismatch &&
-          EC != instrprof_error::unknown_function)
+      if (EC == instrprof_error::hash_mismatch) {
+        Coverage->MismatchedFunctionCount++;
+        continue;
+      } else if (EC != instrprof_error::unknown_function)
         return EC;
-      Coverage->MismatchedFunctionCount++;
-      continue;
+      Counts.assign(Record.MappingRegions.size(), 0);
     }
+    Ctx.setCounts(Counts);
 
-    assert(Counts.size() != 0 && "Function's counts are empty");
-    FunctionRecord Function(Record.FunctionName, Record.Filenames,
-                            Counts.front());
-    CounterMappingContext Ctx(Record.Expressions, Counts);
+    assert(!Record.MappingRegions.empty() && "Function has no regions");
+
+    FunctionRecord Function(getFuncNameWithoutPrefix(Record), Record.Filenames);
     for (const auto &Region : Record.MappingRegions) {
       ErrorOr<int64_t> ExecutionCount = Ctx.evaluate(Region.Count);
       if (!ExecutionCount)
         break;
-      Function.CountedRegions.push_back(CountedRegion(Region, *ExecutionCount));
+      Function.pushRegion(Region, *ExecutionCount);
     }
     if (Function.CountedRegions.size() != Record.MappingRegions.size()) {
       Coverage->MismatchedFunctionCount++;
       continue;
     }
 
-    Coverage->Functions.push_back(Function);
+    Coverage->Functions.push_back(std::move(Function));
   }
 
   return std::move(Coverage);
 }
 
 ErrorOr<std::unique_ptr<CoverageMapping>>
-CoverageMapping::load(StringRef ObjectFilename, StringRef ProfileFilename) {
+CoverageMapping::load(StringRef ObjectFilename, StringRef ProfileFilename,
+                      StringRef Arch) {
   auto CounterMappingBuff = MemoryBuffer::getFileOrSTDIN(ObjectFilename);
-  if (auto EC = CounterMappingBuff.getError())
+  if (std::error_code EC = CounterMappingBuff.getError())
     return EC;
-  ObjectFileCoverageMappingReader CoverageReader(CounterMappingBuff.get());
-  if (auto EC = CoverageReader.readHeader())
+  auto CoverageReaderOrErr =
+      BinaryCoverageReader::create(CounterMappingBuff.get(), Arch);
+  if (std::error_code EC = CoverageReaderOrErr.getError())
     return EC;
-  std::unique_ptr<IndexedInstrProfReader> ProfileReader;
-  if (auto EC = IndexedInstrProfReader::create(ProfileFilename, ProfileReader))
+  auto CoverageReader = std::move(CoverageReaderOrErr.get());
+  auto ProfileReaderOrErr = IndexedInstrProfReader::create(ProfileFilename);
+  if (auto EC = ProfileReaderOrErr.getError())
     return EC;
-  return load(CoverageReader, *ProfileReader);
+  auto ProfileReader = std::move(ProfileReaderOrErr.get());
+  return load(*CoverageReader, *ProfileReader);
 }
 
 namespace {
@@ -305,20 +325,22 @@ class SegmentBuilder {
 public:
   /// Build a list of CoverageSegments from a sorted list of Regions.
   std::vector<CoverageSegment> buildSegments(ArrayRef<CountedRegion> Regions) {
+    const CountedRegion *PrevRegion = nullptr;
     for (const auto &Region : Regions) {
       // Pop any regions that end before this one starts.
       while (!ActiveRegions.empty() &&
              ActiveRegions.back()->endLoc() <= Region.startLoc())
         popRegion();
-      if (Segments.size() && Segments.back().Line == Region.LineStart &&
-          Segments.back().Col == Region.ColumnStart) {
-        if (Region.Kind != coverage::CounterMappingRegion::SkippedRegion)
+      if (PrevRegion && PrevRegion->startLoc() == Region.startLoc() &&
+          PrevRegion->endLoc() == Region.endLoc()) {
+        if (Region.Kind == coverage::CounterMappingRegion::CodeRegion)
           Segments.back().addCount(Region.ExecutionCount);
       } else {
         // Add this region to the stack.
         ActiveRegions.push_back(&Region);
         startSegment(Region);
       }
+      PrevRegion = &Region;
     }
     // Pop any regions that are left in the stack.
     while (!ActiveRegions.empty())
@@ -410,6 +432,7 @@ CoverageData CoverageMapping::getCoverageForFile(StringRef Filename) {
   }
 
   sortNestedRegions(Regions.begin(), Regions.end());
+  DEBUG(dbgs() << "Emitting segments for file: " << Filename << "\n");
   FileCoverage.Segments = SegmentBuilder().buildSegments(Regions);
 
   return FileCoverage;
@@ -451,6 +474,7 @@ CoverageMapping::getCoverageForFunction(const FunctionRecord &Function) {
     }
 
   sortNestedRegions(Regions.begin(), Regions.end());
+  DEBUG(dbgs() << "Emitting segments for function: " << Function.Name << "\n");
   FunctionCoverage.Segments = SegmentBuilder().buildSegments(Regions);
 
   return FunctionCoverage;
@@ -469,6 +493,8 @@ CoverageMapping::getCoverageForExpansion(const ExpansionRecord &Expansion) {
     }
 
   sortNestedRegions(Regions.begin(), Regions.end());
+  DEBUG(dbgs() << "Emitting segments for expansion of file " << Expansion.FileID
+               << "\n");
   ExpansionCoverage.Segments = SegmentBuilder().buildSegments(Regions);
 
   return ExpansionCoverage;
@@ -476,7 +502,12 @@ CoverageMapping::getCoverageForExpansion(const ExpansionRecord &Expansion) {
 
 LLVMCoverageMappingRef LLVMCreateCoverageMapping(const char *ObjectFilename,
                                                  const char *ProfileFilename) {
-  auto CMOrErr = CoverageMapping::load(ObjectFilename, ProfileFilename);
+  return LLVMCreateCoverageMappingForArch(ObjectFilename, ProfileFilename, "");
+}
+
+LLVMCoverageMappingRef LLVMCreateCoverageMappingForArch(
+    const char *ObjectFilename, const char *ProfileFilename, const char *Arch) {
+  auto CMOrErr = CoverageMapping::load(ObjectFilename, ProfileFilename, Arch);
   if (!CMOrErr)
     return nullptr;
   return wrap(CMOrErr->release());
@@ -585,4 +616,34 @@ LLVMBool LLVMGetCoverageSegmentHasCount(LLVMCoverageSegmentRef CSR) {
 
 LLVMBool LLVMGetCoverageSegmentIsRegionEntry(LLVMCoverageSegmentRef CSR) {
   return unwrap(CSR)->IsRegionEntry;
+}
+
+namespace {
+class CoverageMappingErrorCategoryType : public std::error_category {
+  const char *name() const LLVM_NOEXCEPT override { return "llvm.coveragemap"; }
+  std::string message(int IE) const override {
+    auto E = static_cast<coveragemap_error>(IE);
+    switch (E) {
+    case coveragemap_error::success:
+      return "Success";
+    case coveragemap_error::eof:
+      return "End of File";
+    case coveragemap_error::no_data_found:
+      return "No coverage data found";
+    case coveragemap_error::unsupported_version:
+      return "Unsupported coverage format version";
+    case coveragemap_error::truncated:
+      return "Truncated coverage data";
+    case coveragemap_error::malformed:
+      return "Malformed coverage data";
+    }
+    llvm_unreachable("A value of coveragemap_error has no message.");
+  }
+};
+}
+
+static ManagedStatic<CoverageMappingErrorCategoryType> ErrorCategory;
+
+const std::error_category &llvm::coveragemap_category() {
+  return *ErrorCategory;
 }

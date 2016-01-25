@@ -37,6 +37,7 @@
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Tooling/CompilationDatabase.h"
@@ -188,7 +189,9 @@ int main(int argc, const char **argv) {
     if (!Compilations)
       llvm::report_fatal_error(ErrorMessage);
   }
-  tooling::RefactoringTool Tool(*Compilations, SourcePaths);
+  tooling::RefactoringTool Tool(
+      SharedModuleProvider::Create<LLVMModuleProvider>(), *Compilations,
+      SourcePaths);
   ast_matchers::MatchFinder Finder;
   FixCStrCall Callback(&Tool.getReplacements());
   Finder.addMatcher(

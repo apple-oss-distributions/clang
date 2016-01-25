@@ -15,6 +15,7 @@
 #include "UseAuto.h"
 #include "UseAutoActions.h"
 #include "UseAutoMatchers.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 
 using clang::ast_matchers::MatchFinder;
 using namespace clang;
@@ -22,7 +23,8 @@ using namespace clang::tooling;
 
 int UseAutoTransform::apply(const clang::tooling::CompilationDatabase &Database,
                             const std::vector<std::string> &SourcePaths) {
-  ClangTool UseAutoTool(Database, SourcePaths);
+  ClangTool UseAutoTool(Database, SourcePaths,
+                        SharedModuleProvider::Create<LLVMModuleProvider>());
 
   unsigned AcceptedChanges = 0;
 

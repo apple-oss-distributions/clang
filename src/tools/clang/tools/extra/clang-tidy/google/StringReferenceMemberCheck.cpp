@@ -8,9 +8,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "StringReferenceMemberCheck.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
-#include "clang/AST/ASTContext.h"
 
 using namespace clang::ast_matchers;
 
@@ -26,12 +26,8 @@ void StringReferenceMemberCheck::registerMatchers(
   auto ConstString = qualType(isConstQualified(), hasDeclaration(String));
 
   // Ignore members in template instantiations.
-  auto InTemplateInstantiation = hasAncestor(
-      decl(anyOf(recordDecl(ast_matchers::isTemplateInstantiation()),
-                 functionDecl(ast_matchers::isTemplateInstantiation()))));
-
   Finder->addMatcher(fieldDecl(hasType(references(ConstString)),
-                               unless(InTemplateInstantiation)).bind("member"),
+                               unless(isInstantiated())).bind("member"),
                      this);
 }
 

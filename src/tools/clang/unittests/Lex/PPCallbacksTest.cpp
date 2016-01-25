@@ -17,6 +17,7 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/ModuleLoader.h"
@@ -27,14 +28,18 @@
 #include "llvm/Support/Path.h"
 #include "gtest/gtest.h"
 
-using namespace llvm;
-using namespace llvm::sys;
 using namespace clang;
 
 namespace {
 
 // Stub out module loading.
 class VoidModuleLoader : public ModuleLoader {
+public:
+  VoidModuleLoader()
+    : ModuleLoader(SharedModuleProvider::Create<LLVMModuleProvider>())
+  { }
+
+private:
   ModuleLoadResult loadModule(SourceLocation ImportLoc, 
                               ModuleIdPath Path,
                               Module::NameVisibilityKind Visibility,
@@ -142,7 +147,7 @@ protected:
       FileMgr.getVirtualFile(HeaderPath, 0, 0);
 
       // Add header's parent path to search path.
-      StringRef SearchPath = path::parent_path(HeaderPath);
+      StringRef SearchPath = llvm::sys::path::parent_path(HeaderPath);
       const DirectoryEntry *DE = FileMgr.getDirectory(SearchPath);
       DirectoryLookup DL(DE, SrcMgr::C_User, false);
       HeaderInfo.AddSearchPath(DL, IsSystemHeader);
@@ -160,8 +165,9 @@ protected:
   // the InclusionDirective callback.
   CharSourceRange InclusionDirectiveFilenameRange(const char* SourceText, 
       const char* HeaderPath, bool SystemHeader) {
-    MemoryBuffer *Buf = MemoryBuffer::getMemBuffer(SourceText);
-    SourceMgr.setMainFileID(SourceMgr.createFileID(Buf));
+    std::unique_ptr<llvm::MemoryBuffer> Buf =
+        llvm::MemoryBuffer::getMemBuffer(SourceText);
+    SourceMgr.setMainFileID(SourceMgr.createFileID(std::move(Buf)));
 
     VoidModuleLoader ModLoader;
 
@@ -176,7 +182,7 @@ protected:
                     /*OwnsHeaderSearch =*/false);
     PP.Initialize(*Target);
     InclusionDirectiveCallbacks* Callbacks = new InclusionDirectiveCallbacks;
-    PP.addPPCallbacks(Callbacks); // Takes ownership.
+    PP.addPPCallbacks(std::unique_ptr<PPCallbacks>(Callbacks));
 
     // Lex source text.
     PP.EnterMainSourceFile();
@@ -197,8 +203,9 @@ protected:
     LangOptions OpenCLLangOpts;
     OpenCLLangOpts.OpenCL = 1;
 
-    MemoryBuffer* sourceBuf = MemoryBuffer::getMemBuffer(SourceText, "test.cl");
-    SourceMgr.setMainFileID(SourceMgr.createFileID(sourceBuf));
+    std::unique_ptr<llvm::MemoryBuffer> SourceBuf =
+        llvm::MemoryBuffer::getMemBuffer(SourceText, "test.cl");
+    SourceMgr.setMainFileID(SourceMgr.createFileID(std::move(SourceBuf)));
 
     VoidModuleLoader ModLoader;
     HeaderSearch HeaderInfo(new HeaderSearchOptions, SourceMgr, Diags, 
@@ -221,7 +228,7 @@ protected:
     Sema S(PP, Context, Consumer);
     Parser P(PP, S, false);
     PragmaOpenCLExtensionCallbacks* Callbacks = new PragmaOpenCLExtensionCallbacks;
-    PP.addPPCallbacks(Callbacks); // Takes ownership.
+    PP.addPPCallbacks(std::unique_ptr<PPCallbacks>(Callbacks));
 
     // Lex source text.
     PP.EnterMainSourceFile();

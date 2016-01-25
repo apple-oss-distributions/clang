@@ -44,22 +44,23 @@ namespace llvm {
 }
 
 namespace clang {
-class Sema;
 class ASTContext;
+class ASTDeserializationListener;
+class ASTFrontendAction;
 class ASTReader;
 class CodeCompleteConsumer;
-class CompilerInvocation;
 class CompilerInstance;
+class CompilerInvocation;
 class Decl;
 class DiagnosticsEngine;
 class FileEntry;
 class FileManager;
 class HeaderSearch;
+class ModuleProvider;
 class Preprocessor;
+class Sema;
 class SourceManager;
 class TargetInfo;
-class ASTFrontendAction;
-class ASTDeserializationListener;
 
 /// \brief Utility class for loading a ASTContext from an AST file.
 ///
@@ -305,8 +306,7 @@ private:
   /// \brief The language options used when we load an AST file.
   LangOptions ASTFileLangOpts;
 
-  static void ConfigureDiags(IntrusiveRefCntPtr<DiagnosticsEngine> &Diags,
-                             const char **ArgBegin, const char **ArgEnd,
+  static void ConfigureDiags(IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
                              ASTUnit &AST, bool CaptureDiagnostics);
 
   void TranslateStoredDiagnostics(FileManager &FileMgr,
@@ -420,14 +420,28 @@ private:
   ASTUnit(const ASTUnit &) LLVM_DELETED_FUNCTION;
   void operator=(const ASTUnit &) LLVM_DELETED_FUNCTION;
   
-  explicit ASTUnit(bool MainFileIsAST);
+  explicit ASTUnit(SharedModuleProvider MP, bool MainFileIsAST);
 
   void CleanTemporaryFiles();
-  bool Parse(std::unique_ptr<llvm::MemoryBuffer> OverrideMainBuffer);
-  
-  std::pair<llvm::MemoryBuffer *, std::pair<unsigned, bool> >
-  ComputePreamble(CompilerInvocation &Invocation, 
-                  unsigned MaxLines, bool &CreatedBuffer);
+  bool Parse(SharedModuleProvider MP,
+             std::unique_ptr<llvm::MemoryBuffer> OverrideMainBuffer);
+
+  struct ComputedPreamble {
+    llvm::MemoryBuffer *Buffer;
+    std::unique_ptr<llvm::MemoryBuffer> Owner;
+    unsigned Size;
+    bool PreambleEndsAtStartOfLine;
+    ComputedPreamble(llvm::MemoryBuffer *Buffer,
+                     std::unique_ptr<llvm::MemoryBuffer> Owner, unsigned Size,
+                     bool PreambleEndsAtStartOfLine)
+        : Buffer(Buffer), Owner(std::move(Owner)), Size(Size),
+          PreambleEndsAtStartOfLine(PreambleEndsAtStartOfLine) {}
+    ComputedPreamble(ComputedPreamble &&C)
+        : Buffer(C.Buffer), Owner(std::move(C.Owner)), Size(C.Size),
+          PreambleEndsAtStartOfLine(C.PreambleEndsAtStartOfLine) {}
+  };
+  ComputedPreamble ComputePreamble(CompilerInvocation &Invocation,
+                                   unsigned MaxLines);
 
   std::unique_ptr<llvm::MemoryBuffer> getMainBufferWithPrecompiledPreamble(
       const CompilerInvocation &PreambleInvocationIn, bool AllowRebuild = true,
@@ -663,8 +677,8 @@ public:
   /// \brief Returns an iterator range for the local preprocessing entities
   /// of the local Preprocessor, if this is a parsed source file, or the loaded
   /// preprocessing entities of the primary module if this is an AST file.
-  std::pair<PreprocessingRecord::iterator, PreprocessingRecord::iterator>
-    getLocalPreprocessingEntities() const;
+  llvm::iterator_range<PreprocessingRecord::iterator>
+  getLocalPreprocessingEntities() const;
 
   /// \brief Type for a function iterating over a number of declarations.
   /// \returns true to continue iteration and false to abort.
@@ -683,8 +697,8 @@ public:
   /// module file.
   bool isModuleFile();
 
-  llvm::MemoryBuffer *getBufferForFile(StringRef Filename,
-                                       std::string *ErrorStr = nullptr);
+  std::unique_ptr<llvm::MemoryBuffer>
+  getBufferForFile(StringRef Filename, std::string *ErrorStr = nullptr);
 
   /// \brief Determine what kind of translation unit this AST represents.
   TranslationUnitKind getTranslationUnitKind() const { return TUKind; }
@@ -695,6 +709,7 @@ public:
 
   /// \brief Create a ASTUnit. Gets ownership of the passed CompilerInvocation. 
   static ASTUnit *create(CompilerInvocation *CI,
+                         SharedModuleProvider MP,
                          IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
                          bool CaptureDiagnostics,
                          bool UserFilesAreVolatile);
@@ -708,9 +723,10 @@ public:
   ///
   /// \returns - The initialized ASTUnit or null if the AST failed to load.
   static std::unique_ptr<ASTUnit> LoadFromASTFile(
-      const std::string &Filename, IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
-      const FileSystemOptions &FileSystemOpts, bool OnlyLocalDecls = false,
-      ArrayRef<RemappedFile> RemappedFiles = None,
+      const std::string &Filename, SharedModuleProvider MP,
+      IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
+      const FileSystemOptions &FileSystemOpts,
+      bool OnlyLocalDecls = false, ArrayRef<RemappedFile> RemappedFiles = None,
       bool CaptureDiagnostics = false, bool AllowPCHWithCompilerErrors = false,
       bool UserFilesAreVolatile = false);
 
@@ -753,7 +769,8 @@ public:
   /// created ASTUnit was passed in \p Unit then the caller can check that.
   ///
   static ASTUnit *LoadFromCompilerInvocationAction(
-      CompilerInvocation *CI, IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
+      CompilerInvocation *CI, SharedModuleProvider MP,
+      IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
       ASTFrontendAction *Action = nullptr, ASTUnit *Unit = nullptr,
       bool Persistent = true, StringRef ResourceFilesPath = StringRef(),
       bool OnlyLocalDecls = false, bool CaptureDiagnostics = false,
@@ -774,7 +791,8 @@ public:
   // FIXME: Move OnlyLocalDecls, UseBumpAllocator to setters on the ASTUnit, we
   // shouldn't need to specify them at construction time.
   static std::unique_ptr<ASTUnit> LoadFromCompilerInvocation(
-      CompilerInvocation *CI, IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
+      CompilerInvocation *CI, SharedModuleProvider MP,
+      IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
       bool OnlyLocalDecls = false, bool CaptureDiagnostics = false,
       bool PrecompilePreamble = false, TranslationUnitKind TUKind = TU_Complete,
       bool CacheCodeCompletionResults = false,
@@ -801,6 +819,7 @@ public:
   // shouldn't need to specify them at construction time.
   static ASTUnit *LoadFromCommandLine(
       const char **ArgBegin, const char **ArgEnd,
+      SharedModuleProvider MP,
       IntrusiveRefCntPtr<DiagnosticsEngine> Diags, StringRef ResourceFilesPath,
       bool OnlyLocalDecls = false, bool CaptureDiagnostics = false,
       ArrayRef<RemappedFile> RemappedFiles = None,

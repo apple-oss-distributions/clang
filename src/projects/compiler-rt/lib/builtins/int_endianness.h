@@ -33,7 +33,8 @@
 
 /* .. */
 
-#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__minix)
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__DragonFly__) ||   \
+    defined(__minix)
 #include <sys/endian.h>
 
 #if _BYTE_ORDER == _BIG_ENDIAN
@@ -61,7 +62,8 @@
 
 /* .. */
 
-/* Mac OSX has __BIG_ENDIAN__ or __LITTLE_ENDIAN__ automatically set by the compiler (at least with GCC) */
+/* Mac OSX has __BIG_ENDIAN__ or __LITTLE_ENDIAN__ automatically set by the
+ * compiler (at least with GCC) */
 #if defined(__APPLE__) || defined(__ellcc__ )
 
 #ifdef __BIG_ENDIAN__
@@ -83,15 +85,14 @@
 /* .. */
 
 #if defined(__linux__)
-#include <endian.h>
 
-#if __BYTE_ORDER == __BIG_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define _YUGA_LITTLE_ENDIAN 0
 #define _YUGA_BIG_ENDIAN    1
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
+#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define _YUGA_LITTLE_ENDIAN 1
 #define _YUGA_BIG_ENDIAN    0
-#endif /* __BYTE_ORDER */
+#endif /* __BYTE_ORDER__ */
 
 #endif /* GNU/Linux */
 

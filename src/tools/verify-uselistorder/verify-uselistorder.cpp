@@ -52,7 +52,7 @@
 
 using namespace llvm;
 
-#define DEBUG_TYPE "use-list-order"
+#define DEBUG_TYPE "uselistorder"
 
 static cl::opt<std::string> InputFilename(cl::Positional,
                                           cl::desc("<input bitcode file>"),
@@ -108,42 +108,42 @@ struct ValueMapping {
 bool TempFile::init(const std::string &Ext) {
   SmallVector<char, 64> Vector;
   DEBUG(dbgs() << " - create-temp-file\n");
-  if (auto EC = sys::fs::createTemporaryFile("use-list-order", Ext, Vector)) {
-    (void)EC;
-    DEBUG(dbgs() << "error: " << EC.message() << "\n");
+  if (auto EC = sys::fs::createTemporaryFile("uselistorder", Ext, Vector)) {
+    errs() << "verify-uselistorder: error: " << EC.message() << "\n";
     return true;
   }
   assert(!Vector.empty());
 
   Filename.assign(Vector.data(), Vector.data() + Vector.size());
   Remover.setFile(Filename, !SaveTemps);
-  DEBUG(dbgs() << " - filename = " << Filename << "\n");
+  if (SaveTemps)
+    outs() << " - filename = " << Filename << "\n";
   return false;
 }
 
 bool TempFile::writeBitcode(const Module &M) const {
   DEBUG(dbgs() << " - write bitcode\n");
-  std::string ErrorInfo;
-  raw_fd_ostream OS(Filename.c_str(), ErrorInfo, sys::fs::F_None);
-  if (!ErrorInfo.empty()) {
-    DEBUG(dbgs() << "error: " << ErrorInfo << "\n");
+  std::error_code EC;
+  raw_fd_ostream OS(Filename, EC, sys::fs::F_None);
+  if (EC) {
+    errs() << "verify-uselistorder: error: " << EC.message() << "\n";
     return true;
   }
 
-  WriteBitcodeToFile(&M, OS);
+  WriteBitcodeToFile(&M, OS, /* ShouldPreserveUseListOrder */ true);
   return false;
 }
 
 bool TempFile::writeAssembly(const Module &M) const {
   DEBUG(dbgs() << " - write assembly\n");
-  std::string ErrorInfo;
-  raw_fd_ostream OS(Filename.c_str(), ErrorInfo, sys::fs::F_Text);
-  if (!ErrorInfo.empty()) {
-    DEBUG(dbgs() << "error: " << ErrorInfo << "\n");
+  std::error_code EC;
+  raw_fd_ostream OS(Filename, EC, sys::fs::F_Text);
+  if (EC) {
+    errs() << "verify-uselistorder: error: " << EC.message() << "\n";
     return true;
   }
 
-  OS << M;
+  M.print(OS, nullptr, /* ShouldPreserveUseListOrder */ true);
   return false;
 }
 
@@ -152,14 +152,17 @@ std::unique_ptr<Module> TempFile::readBitcode(LLVMContext &Context) const {
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOr =
       MemoryBuffer::getFile(Filename);
   if (!BufferOr) {
-    DEBUG(dbgs() << "error: " << BufferOr.getError().message() << "\n");
+    errs() << "verify-uselistorder: error: " << BufferOr.getError().message()
+           << "\n";
     return nullptr;
   }
 
   MemoryBuffer *Buffer = BufferOr.get().get();
-  ErrorOr<Module *> ModuleOr = parseBitcodeFile(Buffer, Context);
+  ErrorOr<Module *> ModuleOr =
+      parseBitcodeFile(Buffer->getMemBufferRef(), Context);
   if (!ModuleOr) {
-    DEBUG(dbgs() << "error: " << ModuleOr.getError().message() << "\n");
+    errs() << "verify-uselistorder: error: " << ModuleOr.getError().message()
+           << "\n";
     return nullptr;
   }
   return std::unique_ptr<Module>(ModuleOr.get());
@@ -168,9 +171,9 @@ std::unique_ptr<Module> TempFile::readBitcode(LLVMContext &Context) const {
 std::unique_ptr<Module> TempFile::readAssembly(LLVMContext &Context) const {
   DEBUG(dbgs() << " - read assembly\n");
   SMDiagnostic Err;
-  std::unique_ptr<Module> M(ParseAssemblyFile(Filename, Err, Context));
+  std::unique_ptr<Module> M = parseAssemblyFile(Filename, Err, Context);
   if (!M.get())
-    DEBUG(dbgs() << "error: "; Err.print("verify-use-list-order", dbgs()));
+    Err.print("verify-uselistorder", errs());
   return M;
 }
 
@@ -196,9 +199,12 @@ ValueMapping::ValueMapping(const Module &M) {
       map(G.getInitializer());
   for (const GlobalAlias &A : M.aliases())
     map(A.getAliasee());
-  for (const Function &F : M)
+  for (const Function &F : M) {
     if (F.hasPrefixData())
       map(F.getPrefixData());
+    if (F.hasPrologueData())
+      map(F.getPrologueData());
+  }
 
   // Function bodies.
   for (const Function &F : M) {
@@ -338,7 +344,6 @@ static void verifyAfterRoundTrip(const Module &M,
     report_fatal_error("use-list order changed");
 }
 static void verifyBitcodeUseListOrder(const Module &M) {
-  errs() << "*** verify-use-list-order: bitcode ***\n";
   TempFile F;
   if (F.init("bc"))
     report_fatal_error("failed to initialize bitcode file");
@@ -351,7 +356,6 @@ static void verifyBitcodeUseListOrder(const Module &M) {
 }
 
 static void verifyAssemblyUseListOrder(const Module &M) {
-  errs() << "*** verify-use-list-order: assembly ***\n";
   TempFile F;
   if (F.init("ll"))
     report_fatal_error("failed to initialize assembly file");
@@ -364,7 +368,9 @@ static void verifyAssemblyUseListOrder(const Module &M) {
 }
 
 static void verifyUseListOrder(const Module &M) {
+  outs() << "verify bitcode\n";
   verifyBitcodeUseListOrder(M);
+  outs() << "verify assembly\n";
   verifyAssemblyUseListOrder(M);
 }
 
@@ -462,9 +468,12 @@ static void changeUseLists(Module &M, Changer changeValueUseList) {
       changeValueUseList(G.getInitializer());
   for (GlobalAlias &A : M.aliases())
     changeValueUseList(A.getAliasee());
-  for (Function &F : M)
+  for (Function &F : M) {
     if (F.hasPrefixData())
       changeValueUseList(F.getPrefixData());
+    if (F.hasPrologueData())
+      changeValueUseList(F.getPrologueData());
+  }
 
   // Function bodies.
   for (Function &F : M) {
@@ -490,7 +499,6 @@ static void changeUseLists(Module &M, Changer changeValueUseList) {
 }
 
 static void shuffleUseLists(Module &M, unsigned SeedOffset) {
-  errs() << "*** shuffle-use-lists ***\n";
   std::minstd_rand0 Gen(std::minstd_rand0::default_seed + SeedOffset);
   DenseSet<Value *> Seen;
   changeUseLists(M, [&](Value *V) { shuffleValueUseLists(V, Gen, Seen); });
@@ -498,7 +506,6 @@ static void shuffleUseLists(Module &M, unsigned SeedOffset) {
 }
 
 static void reverseUseLists(Module &M) {
-  errs() << "*** reverse-use-lists ***\n";
   DenseSet<Value *> Seen;
   changeUseLists(M, [&](Value *V) { reverseValueUseLists(V, Seen); });
   DEBUG(dbgs() << "\n");
@@ -520,40 +527,35 @@ int main(int argc, char **argv) {
   SMDiagnostic Err;
 
   // Load the input module...
-  std::unique_ptr<Module> M;
-  M.reset(ParseIRFile(InputFilename, Err, Context));
+  std::unique_ptr<Module> M = parseIRFile(InputFilename, Err, Context);
 
   if (!M.get()) {
     Err.print(argv[0], errs());
     return 1;
   }
-  if (verifyModule(*M, &errs()))
-    report_fatal_error("verification failed");
-
-  errs() << "*** verify-use-list-order ***\n";
-  // Can't verify if order isn't preserved.
-  if (!shouldPreserveBitcodeUseListOrder()) {
-    errs() << "warning: forcing -preserve-bc-use-list-order\n";
-    setPreserveBitcodeUseListOrder(true);
-  }
-  if (!shouldPreserveAssemblyUseListOrder()) {
-    errs() << "warning: forcing -preserve-ll-use-list-order\n";
-    setPreserveAssemblyUseListOrder(true);
+  if (verifyModule(*M, &errs())) {
+    errs() << argv[0] << ": " << InputFilename
+           << ": error: input module is broken!\n";
+    return 1;
   }
 
   // Verify the use lists now and after reversing them.
+  outs() << "*** verify-uselistorder ***\n";
   verifyUseListOrder(*M);
+  outs() << "reverse\n";
   reverseUseLists(*M);
   verifyUseListOrder(*M);
 
   for (unsigned I = 0, E = NumShuffles; I != E; ++I) {
-    errs() << "*** shuffle iteration: " << I + 1 << " of " << E << " ***\n";
+    outs() << "\n";
 
     // Shuffle with a different (deterministic) seed each time.
+    outs() << "shuffle (" << I + 1 << " of " << E << ")\n";
     shuffleUseLists(*M, I);
 
     // Verify again before and after reversing.
     verifyUseListOrder(*M);
+    outs() << "reverse\n";
     reverseUseLists(*M);
     verifyUseListOrder(*M);
   }

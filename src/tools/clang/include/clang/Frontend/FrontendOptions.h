@@ -186,13 +186,18 @@ public:
     ObjCMT_DesignatedInitializer = 0x800,
     /// \brief Enable converting setter/getter expressions to property-dot syntx.
     ObjCMT_PropertyDotSyntax = 0x1000,
+    /// \brief Enable APINote annotations on declarations.
+    ObjCMT_ApiNotes = 0x2000,
+    ObjCMT_Swift_Unavailable = 0x4000,
     ObjCMT_MigrateDecls = (ObjCMT_ReadonlyProperty | ObjCMT_ReadwriteProperty |
                            ObjCMT_Annotation | ObjCMT_Instancetype |
                            ObjCMT_NsMacros | ObjCMT_ProtocolConformance |
                            ObjCMT_NsAtomicIOSOnlyProperty |
-                           ObjCMT_DesignatedInitializer),
+                           ObjCMT_DesignatedInitializer |
+                           ObjCMT_ApiNotes | ObjCMT_Swift_Unavailable),
     ObjCMT_MigrateAll = (ObjCMT_Literals | ObjCMT_Subscripting |
-                         ObjCMT_MigrateDecls | ObjCMT_PropertyDotSyntax)
+                         ObjCMT_MigrateDecls | ObjCMT_PropertyDotSyntax |
+                         ObjCMT_ApiNotes | ObjCMT_Swift_Unavailable)
   };
   unsigned ObjCMTAction;
   std::string ObjCMTWhiteListPath;
@@ -235,6 +240,13 @@ public:
 
   /// The list of plugins to load.
   std::vector<std::string> Plugins;
+
+  /// \brief The list of module map files to load before processing the input.
+  std::vector<std::string> ModuleMapFiles;
+
+  /// \brief The list of additional prebuilt module files to load before
+  /// processing the input.
+  std::vector<std::string> ModuleFiles;
 
   /// \brief The list of AST files to merge.
   std::vector<std::string> ASTMergeFiles;

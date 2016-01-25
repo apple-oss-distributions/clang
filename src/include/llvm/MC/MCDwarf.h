@@ -16,16 +16,16 @@
 #define LLVM_MC_MCDWARF_H
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/raw_ostream.h"
 #include <map>
-#include <vector>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace llvm {
 class MCAsmBackend;
@@ -178,6 +178,19 @@ public:
   }
 };
 
+struct MCDwarfLineTableParameters {
+  /// First special line opcode - leave room for the standard opcodes.
+  /// Note: If you want to change this, you'll have to update the
+  /// "StandardOpcodeLengths" table that is emitted in
+  /// \c Emit().
+  unsigned char DWARF2LineOpcodeBase = 13;
+  /// Minimum line offset in a special line info. opcode.  The value
+  /// -5 was chosen to give a reasonable range of values.
+  char DWARF2LineBase = -5;
+  /// Range of line offsets in a special line info. opcode.
+  unsigned char DWARF2LineRange = 14;
+};
+  
 struct MCDwarfLineTableHeader {
   MCSymbol *Label;
   SmallVector<std::string, 3> MCDwarfDirs;
@@ -185,12 +198,15 @@ struct MCDwarfLineTableHeader {
   StringMap<unsigned> SourceIdMap;
   StringRef CompilationDir;
 
-  MCDwarfLineTableHeader() : Label(nullptr) {}
+  MCDwarfLineTableHeader()
+    : Label(nullptr) {}
   unsigned getFile(StringRef &Directory, StringRef &FileName,
                    unsigned FileNumber = 0);
-  std::pair<MCSymbol *, MCSymbol *> Emit(MCStreamer *MCOS) const;
   std::pair<MCSymbol *, MCSymbol *>
-  Emit(MCStreamer *MCOS, ArrayRef<char> SpecialOpcodeLengths) const;
+  Emit(MCStreamer *MCOS, MCDwarfLineTableParameters Params) const;
+  std::pair<MCSymbol *, MCSymbol *>
+  Emit(MCStreamer *MCOS, MCDwarfLineTableParameters Params,
+       ArrayRef<char> SpecialOpcodeLengths) const;
 };
 
 class MCDwarfDwoLineTable {
@@ -202,7 +218,7 @@ public:
   unsigned getFile(StringRef Directory, StringRef FileName) {
     return Header.getFile(Directory, FileName);
   }
-  void Emit(MCStreamer &MCOS) const;
+  void Emit(MCStreamer &MCOS, MCDwarfLineTableParameters Params) const;
 };
 
 class MCDwarfLineTable {
@@ -211,10 +227,10 @@ class MCDwarfLineTable {
 
 public:
   // This emits the Dwarf file and the line tables for all Compile Units.
-  static void Emit(MCObjectStreamer *MCOS);
+  static void Emit(MCObjectStreamer *MCOS, MCDwarfLineTableParameters Params);
 
   // This emits the Dwarf file and the line tables for a given Compile Unit.
-  void EmitCU(MCObjectStreamer *MCOS) const;
+  void EmitCU(MCObjectStreamer *MCOS, MCDwarfLineTableParameters Params) const;
 
   unsigned getFile(StringRef &Directory, StringRef &FileName,
                    unsigned FileNumber = 0);
@@ -258,11 +274,13 @@ public:
 class MCDwarfLineAddr {
 public:
   /// Utility function to encode a Dwarf pair of LineDelta and AddrDeltas.
-  static void Encode(MCContext &Context, int64_t LineDelta, uint64_t AddrDelta,
+  static void Encode(MCContext &Context, MCDwarfLineTableParameters Params,
+                     int64_t LineDelta, uint64_t AddrDelta,
                      raw_ostream &OS);
 
   /// Utility function to emit the encoding to a streamer.
-  static void Emit(MCStreamer *MCOS, int64_t LineDelta, uint64_t AddrDelta);
+  static void Emit(MCStreamer *MCOS,  MCDwarfLineTableParameters Params,
+                   int64_t LineDelta, uint64_t AddrDelta);
 };
 
 class MCGenDwarfInfo {
@@ -311,6 +329,7 @@ public:
     OpRememberState,
     OpRestoreState,
     OpOffset,
+    OpRealignedOffset,
     OpDefCfaRegister,
     OpDefCfaOffset,
     OpDefCfa,
@@ -331,17 +350,24 @@ private:
     int Offset;
     unsigned Register2;
   };
+  int Align;
+  int Offset2;
   std::vector<char> Values;
 
   MCCFIInstruction(OpType Op, MCSymbol *L, unsigned R, int O, StringRef V)
       : Operation(Op), Label(L), Register(R), Offset(O),
         Values(V.begin(), V.end()) {
-    assert(Op != OpRegister);
+    assert(Op != OpRegister && Op != OpRealignedOffset);
   }
 
   MCCFIInstruction(OpType Op, MCSymbol *L, unsigned R1, unsigned R2)
       : Operation(Op), Label(L), Register(R1), Register2(R2) {
     assert(Op == OpRegister);
+  }
+
+  MCCFIInstruction(OpType Op, MCSymbol *L, unsigned R, int O1, int A, int O2)
+    : Operation(Op), Label(L), Register(R), Offset(O1), Align(A), Offset2(O2) {
+    assert(Op == OpRealignedOffset);
   }
 
 public:
@@ -385,6 +411,15 @@ public:
   static MCCFIInstruction createRelOffset(MCSymbol *L, unsigned Register,
                                           int Offset) {
     return MCCFIInstruction(OpRelOffset, L, Register, Offset, "");
+  }
+
+  /// \brief .cfi_realigned_offset Previous value of Register is saved at (CFA +
+  /// PreOffset) & -Align + PostOffset.
+  static MCCFIInstruction createRealignedOffset(MCSymbol *L, unsigned Register,
+                                                int PreOffset, int Align,
+                                                int PostOffset) {
+    return MCCFIInstruction(OpRealignedOffset, L, Register, PreOffset, Align,
+                            PostOffset);
   }
 
   /// \brief .cfi_register Previous value of Register1 is saved in
@@ -439,9 +474,10 @@ public:
 
   unsigned getRegister() const {
     assert(Operation == OpDefCfa || Operation == OpOffset ||
-           Operation == OpRestore || Operation == OpUndefined ||
-           Operation == OpSameValue || Operation == OpDefCfaRegister ||
-           Operation == OpRelOffset || Operation == OpRegister);
+           Operation == OpRealignedOffset || Operation == OpRestore ||
+           Operation == OpUndefined || Operation == OpSameValue ||
+           Operation == OpDefCfaRegister || Operation == OpRelOffset ||
+           Operation == OpRegister);
     return Register;
   }
 
@@ -452,12 +488,22 @@ public:
 
   int getOffset() const {
     assert(Operation == OpDefCfa || Operation == OpOffset ||
-           Operation == OpRelOffset || Operation == OpDefCfaOffset ||
-           Operation == OpAdjustCfaOffset);
+           Operation == OpRelOffset || Operation == OpRealignedOffset ||
+           Operation == OpDefCfaOffset || Operation == OpAdjustCfaOffset);
     return Offset;
   }
 
-  const StringRef getValues() const {
+  int getAlign() const {
+    assert(Operation == OpRealignedOffset);
+    return Align;
+  }
+
+  int getOffset2() const {
+    assert(Operation == OpRealignedOffset);
+    return Offset2;
+  }
+
+  StringRef getValues() const {
     assert(Operation == OpEscape);
     return StringRef(&Values[0], Values.size());
   }
@@ -466,13 +512,15 @@ public:
 struct MCDwarfFrameInfo {
   MCDwarfFrameInfo()
       : Begin(nullptr), End(nullptr), Personality(nullptr), Lsda(nullptr),
-        Instructions(), PersonalityEncoding(), LsdaEncoding(0),
-        CompactUnwindEncoding(0), IsSignalFrame(false), IsSimple(false) {}
+        Instructions(), CurrentCfaRegister(0), PersonalityEncoding(),
+        LsdaEncoding(0), CompactUnwindEncoding(0), IsSignalFrame(false),
+        IsSimple(false) {}
   MCSymbol *Begin;
   MCSymbol *End;
   const MCSymbol *Personality;
   const MCSymbol *Lsda;
   std::vector<MCCFIInstruction> Instructions;
+  unsigned CurrentCfaRegister;
   unsigned PersonalityEncoding;
   unsigned LsdaEncoding;
   uint32_t CompactUnwindEncoding;

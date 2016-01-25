@@ -19,9 +19,31 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Support/Locale.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
+
+const DiagnosticBuilder &clang::operator<<(const DiagnosticBuilder &DB,
+                                           DiagNullabilityKind nullability) {
+  StringRef string;
+  switch (nullability.first) {
+  case NullabilityKind::NonNull:
+    string = nullability.second ? "'nonnull'" : "'_Nonnull'";
+    break;
+
+  case NullabilityKind::Nullable:
+    string = nullability.second ? "'nullable'" : "'_Nullable'";
+    break;
+
+  case NullabilityKind::Unspecified:
+    string = nullability.second ? "'null_unspecified'" : "'_Null_unspecified'";
+    break;
+  }
+
+  DB.AddString(string);
+  return DB;
+}
 
 static void DummyArgToStringFn(DiagnosticsEngine::ArgumentKind AK, intptr_t QT,
                             StringRef Modifier, StringRef Argument,
@@ -33,13 +55,11 @@ static void DummyArgToStringFn(DiagnosticsEngine::ArgumentKind AK, intptr_t QT,
   Output.append(Str.begin(), Str.end());
 }
 
-
 DiagnosticsEngine::DiagnosticsEngine(
-                       const IntrusiveRefCntPtr<DiagnosticIDs> &diags,
-                       DiagnosticOptions *DiagOpts,       
-                       DiagnosticConsumer *client, bool ShouldOwnClient)
-  : Diags(diags), DiagOpts(DiagOpts), Client(client),
-    OwnsDiagClient(ShouldOwnClient), SourceMgr(nullptr) {
+    const IntrusiveRefCntPtr<DiagnosticIDs> &diags, DiagnosticOptions *DiagOpts,
+    DiagnosticConsumer *client, bool ShouldOwnClient)
+    : Diags(diags), DiagOpts(DiagOpts), Client(nullptr), SourceMgr(nullptr) {
+  setClient(client, ShouldOwnClient);
   ArgToStringFn = DummyArgToStringFn;
   ArgToStringCookie = nullptr;
 
@@ -64,17 +84,15 @@ DiagnosticsEngine::DiagnosticsEngine(
 }
 
 DiagnosticsEngine::~DiagnosticsEngine() {
-  if (OwnsDiagClient)
-    delete Client;
+  // If we own the diagnostic client, destroy it first so that it can access the
+  // engine from its destructor.
+  setClient(nullptr);
 }
 
 void DiagnosticsEngine::setClient(DiagnosticConsumer *client,
                                   bool ShouldOwnClient) {
-  if (OwnsDiagClient && Client)
-    delete Client;
-  
+  Owner.reset(ShouldOwnClient ? client : nullptr);
   Client = client;
-  OwnsDiagClient = ShouldOwnClient;
 }
 
 void DiagnosticsEngine::pushMappings(SourceLocation Loc) {
@@ -101,7 +119,6 @@ void DiagnosticsEngine::Reset() {
   
   NumWarnings = 0;
   NumErrors = 0;
-  NumErrorsSuppressed = 0;
   TrapNumErrorsOccurred = 0;
   TrapNumUnrecoverableErrorsOccurred = 0;
   
@@ -633,6 +650,21 @@ FormatDiagnostic(SmallVectorImpl<char> &OutStr) const {
 void Diagnostic::
 FormatDiagnostic(const char *DiagStr, const char *DiagEnd,
                  SmallVectorImpl<char> &OutStr) const {
+
+  // When the diagnostic string is only "%0", the entire string is being given
+  // by an outside source.  Remove unprintable characters from this string
+  // and skip all the other string processing.
+  if (DiagEnd - DiagStr == 2 &&
+      StringRef(DiagStr, DiagEnd - DiagStr).equals("%0") &&
+      getArgKind(0) == DiagnosticsEngine::ak_std_string) {
+    const std::string &S = getArgStdStr(0);
+    for (char c : S) {
+      if (llvm::sys::locale::isPrint(c) || c == '\t') {
+        OutStr.push_back(c);
+      }
+    }
+    return;
+  }
 
   /// FormattedArgs - Keep track of all of the arguments formatted by
   /// ConvertArgToString and pass them into subsequent calls to

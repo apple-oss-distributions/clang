@@ -14,9 +14,13 @@ TOOLNAME = pp-trace
 # No plugins, optimize startup time.
 TOOL_NO_EXPORTS = 1
 
-LINK_COMPONENTS := mcparser bitreader support mc option TransformUtils
-USEDLIBS = clangFrontend.a clangSerialization.a clangDriver.a \
+include $(CLANG_LEVEL)/../../Makefile.config
+LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader bitwriter \
+                   instrumentation ipo support mc objcarcopts option
+
+USEDLIBS = clangFrontend.a clangCodeGen.a clangSerialization.a clangDriver.a \
            clangTooling.a clangParse.a clangSema.a clangAnalysis.a \
-           clangEdit.a clangAST.a clangLex.a clangAPINotes.a clangBasic.a
+           clangEdit.a clangAST.a clangLex.a clangAPINotes.a clangBasic.a \
+	   clangIndex.a
 
 include $(CLANG_LEVEL)/Makefile

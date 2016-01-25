@@ -13,6 +13,7 @@
 #include "tsan_report.h"
 #include "tsan_platform.h"
 #include "tsan_rtl.h"
+#include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stacktrace_printer.h"
 
@@ -70,7 +71,7 @@ ReportDesc::~ReportDesc() {
   // FIXME(dvyukov): it must be leaking a lot of memory.
 }
 
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
 
 const int kThreadBufSize = 32;
 const char *thread_name(char *buf, int tid) {
@@ -87,6 +88,8 @@ static const char *ReportTypeString(ReportType typ) {
     return "data race on vptr (ctor/dtor vs virtual call)";
   if (typ == ReportTypeUseAfterFree)
     return "heap-use-after-free";
+  if (typ == ReportTypeVptrUseAfterFree)
+    return "heap-use-after-free (virtual call vs free)";
   if (typ == ReportTypeThreadLeak)
     return "thread leak";
   if (typ == ReportTypeMutexDestroyLocked)
@@ -160,12 +163,15 @@ static void PrintLocation(const ReportLocation *loc) {
   bool print_stack = false;
   Printf("%s", d.Location());
   if (loc->type == ReportLocationGlobal) {
-    Printf("  Location is global '%s' of size %zu at %p (%s+%p)\n\n", loc->name,
-           loc->size, loc->addr, StripModuleName(loc->module), loc->offset);
+    const DataInfo &global = loc->global;
+    Printf("  Location is global '%s' of size %zu at %p (%s+%p)\n\n",
+           global.name, global.size, global.start,
+           StripModuleName(global.module), global.module_offset);
   } else if (loc->type == ReportLocationHeap) {
     char thrbuf[kThreadBufSize];
     Printf("  Location is heap block of size %zu at %p allocated by %s:\n",
-        loc->size, loc->addr, thread_name(thrbuf, loc->tid));
+           loc->heap_chunk_size, loc->heap_chunk_start,
+           thread_name(thrbuf, loc->tid));
     print_stack = true;
   } else if (loc->type == ReportLocationStack) {
     Printf("  Location is stack of %s.\n\n", thread_name(thrbuf, loc->tid));
@@ -338,7 +344,7 @@ void PrintReport(const ReportDesc *rep) {
   Printf("==================\n");
 }
 
-#else  // #ifndef TSAN_GO
+#else  // #ifndef SANITIZER_GO
 
 const int kMainThreadId = 1;
 

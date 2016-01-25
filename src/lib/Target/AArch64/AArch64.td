@@ -98,6 +98,8 @@ def : ProcessorModel<"generic", NoSchedModel, [FeatureFPARMv8,
 
 def : ProcessorModel<"cortex-a53", CortexA53Model, [ProcA53]>;
 def : ProcessorModel<"cortex-a57", CortexA57Model, [ProcA57]>;
+// FIXME: Cortex-A72 is currently modelled as an Cortex-A57.
+def : ProcessorModel<"cortex-a72", CortexA57Model, [ProcA57]>;
 def : ProcessorModel<"cyclone", CycloneModel, [ProcCyclone]>;
 
 //===----------------------------------------------------------------------===//
@@ -121,12 +123,14 @@ def AppleAsmParserVariant : AsmParserVariant {
 // AsmWriter bits get associated with the correct class.
 def GenericAsmWriter : AsmWriter {
   string AsmWriterClassName  = "InstPrinter";
+  int PassSubtarget = 1;
   int Variant = 0;
   bit isMCAsmWriter = 1;
 }
 
 def AppleAsmWriter : AsmWriter {
   let AsmWriterClassName = "AppleInstPrinter";
+  int PassSubtarget = 1;
   int Variant = 1;
   int isMCAsmWriter = 1;
 }

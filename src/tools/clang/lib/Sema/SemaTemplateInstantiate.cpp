@@ -207,6 +207,12 @@ void Sema::InstantiatingTemplate::Initialize(
     sema::TemplateDeductionInfo *DeductionInfo) {
   SavedInNonInstantiationSFINAEContext =
       SemaRef.InNonInstantiationSFINAEContext;
+  // Don't allow further instantiation if a fatal error has occcured.  Any
+  // diagnostics we might have raised will not be visible.
+  if (SemaRef.Diags.hasFatalErrorOccurred()) {
+    Invalid = true;
+    return;
+  }
   Invalid = CheckInstantiationDepth(PointOfInstantiation, InstantiationRange);
   if (!Invalid) {
     ActiveTemplateInstantiation Inst;
@@ -771,6 +777,8 @@ namespace {
                           QualType ObjectType = QualType(),
                           NamedDecl *FirstQualifierInScope = nullptr);
 
+    const LoopHintAttr *TransformLoopHintAttr(const LoopHintAttr *LH);
+
     ExprResult TransformPredefinedExpr(PredefinedExpr *E);
     ExprResult TransformDeclRefExpr(DeclRefExpr *E);
     ExprResult TransformCXXDefaultArgExpr(CXXDefaultArgExpr *E);
@@ -793,11 +801,17 @@ namespace {
     ExprResult TransformFunctionParmPackExpr(FunctionParmPackExpr *E);
 
     QualType TransformFunctionProtoType(TypeLocBuilder &TLB,
-                                        FunctionProtoTypeLoc TL);
+                                        FunctionProtoTypeLoc TL) {
+      // Call the base version; it will forward to our overridden version below.
+      return inherited::TransformFunctionProtoType(TLB, TL);
+    }
+
+    template<typename Fn>
     QualType TransformFunctionProtoType(TypeLocBuilder &TLB,
                                         FunctionProtoTypeLoc TL,
                                         CXXRecordDecl *ThisContext,
-                                        unsigned ThisTypeQuals);
+                                        unsigned ThisTypeQuals,
+                                        Fn TransformExceptionSpec);
 
     ParmVarDecl *TransformFunctionTypeParam(ParmVarDecl *OldParm,
                                             int indexAdjustment,
@@ -1131,6 +1145,24 @@ TemplateInstantiator::TransformTemplateParmRefExpr(DeclRefExpr *E,
   return transformNonTypeTemplateParmRef(NTTP, E->getLocation(), Arg);
 }
 
+const LoopHintAttr *
+TemplateInstantiator::TransformLoopHintAttr(const LoopHintAttr *LH) {
+  Expr *TransformedExpr = getDerived().TransformExpr(LH->getValue()).get();
+
+  if (TransformedExpr == LH->getValue())
+    return LH;
+
+  // Generate error if there is a problem with the value.
+  if (getSema().CheckLoopHintExpr(TransformedExpr, LH->getLocation()))
+    return LH;
+
+  // Create new LoopHintValueAttr with integral expression in place of the
+  // non-type template parameter.
+  return LoopHintAttr::CreateImplicit(
+      getSema().Context, LH->getSemanticSpelling(), LH->getOption(),
+      LH->getState(), TransformedExpr, LH->getRange());
+}
+
 ExprResult TemplateInstantiator::transformNonTypeTemplateParmRef(
                                                  NonTypeTemplateParmDecl *parm,
                                                  SourceLocation loc,
@@ -1311,21 +1343,16 @@ ExprResult TemplateInstantiator::TransformCXXDefaultArgExpr(
                                         E->getParam());
 }
 
-QualType TemplateInstantiator::TransformFunctionProtoType(TypeLocBuilder &TLB,
-                                                      FunctionProtoTypeLoc TL) {
-  // We need a local instantiation scope for this function prototype.
-  LocalInstantiationScope Scope(SemaRef, /*CombineWithOuterScope=*/true);
-  return inherited::TransformFunctionProtoType(TLB, TL);
-}
-
+template<typename Fn>
 QualType TemplateInstantiator::TransformFunctionProtoType(TypeLocBuilder &TLB,
                                  FunctionProtoTypeLoc TL,
                                  CXXRecordDecl *ThisContext,
-                                 unsigned ThisTypeQuals) {
+                                 unsigned ThisTypeQuals,
+                                 Fn TransformExceptionSpec) {
   // We need a local instantiation scope for this function prototype.
   LocalInstantiationScope Scope(SemaRef, /*CombineWithOuterScope=*/true);
-  return inherited::TransformFunctionProtoType(TLB, TL, ThisContext, 
-                                               ThisTypeQuals);  
+  return inherited::TransformFunctionProtoType(
+      TLB, TL, ThisContext, ThisTypeQuals, TransformExceptionSpec);
 }
 
 ParmVarDecl *
@@ -1560,7 +1587,8 @@ static bool NeedsInstantiationAsFunctionType(TypeSourceInfo *T) {
 
 /// A form of SubstType intended specifically for instantiating the
 /// type of a FunctionDecl.  Its purpose is solely to force the
-/// instantiation of default-argument expressions.
+/// instantiation of default-argument expressions and to avoid
+/// instantiating an exception-specification.
 TypeSourceInfo *Sema::SubstFunctionDeclType(TypeSourceInfo *T,
                                 const MultiLevelTemplateArgumentList &Args,
                                 SourceLocation Loc,
@@ -1583,9 +1611,17 @@ TypeSourceInfo *Sema::SubstFunctionDeclType(TypeSourceInfo *T,
 
   QualType Result;
 
-  if (FunctionProtoTypeLoc Proto = TL.getAs<FunctionProtoTypeLoc>()) {
-    Result = Instantiator.TransformFunctionProtoType(TLB, Proto, ThisContext,
-                                                     ThisTypeQuals);
+  if (FunctionProtoTypeLoc Proto =
+          TL.IgnoreParens().getAs<FunctionProtoTypeLoc>()) {
+    // Instantiate the type, other than its exception specification. The
+    // exception specification is instantiated in InitFunctionInstantiation
+    // once we've built the FunctionDecl.
+    // FIXME: Set the exception specification to EST_Uninstantiated here,
+    // instead of rebuilding the function type again later.
+    Result = Instantiator.TransformFunctionProtoType(
+        TLB, Proto, ThisContext, ThisTypeQuals,
+        [](FunctionProtoType::ExceptionSpecInfo &ESI,
+           bool &Changed) { return false; });
   } else {
     Result = Instantiator.TransformType(TLB, TL);
   }
@@ -1593,6 +1629,26 @@ TypeSourceInfo *Sema::SubstFunctionDeclType(TypeSourceInfo *T,
     return nullptr;
 
   return TLB.getTypeSourceInfo(Context, Result);
+}
+
+void Sema::SubstExceptionSpec(FunctionDecl *New, const FunctionProtoType *Proto,
+                              const MultiLevelTemplateArgumentList &Args) {
+  FunctionProtoType::ExceptionSpecInfo ESI =
+      Proto->getExtProtoInfo().ExceptionSpec;
+  assert(ESI.Type != EST_Uninstantiated);
+
+  TemplateInstantiator Instantiator(*this, Args, New->getLocation(),
+                                    New->getDeclName());
+
+  SmallVector<QualType, 4> ExceptionStorage;
+  bool Changed = false;
+  if (Instantiator.TransformExceptionSpec(
+          New->getTypeSourceInfo()->getTypeLoc().getLocEnd(), ESI,
+          ExceptionStorage, Changed))
+    // On error, recover by dropping the exception specification.
+    ESI.Type = EST_None;
+
+  UpdateExceptionSpec(New, ESI);
 }
 
 ParmVarDecl *Sema::SubstParmVarDecl(ParmVarDecl *OldParm, 
@@ -2505,7 +2561,10 @@ Sema::InstantiateClassMembers(SourceLocation PointOfInstantiation,
       // Always skip the injected-class-name, along with any
       // redeclarations of nested classes, since both would cause us
       // to try to instantiate the members of a class twice.
-      if (Record->isInjectedClassName() || Record->getPreviousDecl())
+      // Skip closure types; they'll get instantiated when we instantiate
+      // the corresponding lambda-expression.
+      if (Record->isInjectedClassName() || Record->getPreviousDecl() ||
+          Record->isLambda())
         continue;
       
       MemberSpecializationInfo *MSInfo = Record->getMemberSpecializationInfo();
@@ -2709,8 +2768,7 @@ bool Sema::Subst(const TemplateArgumentLoc *Args, unsigned NumArgs,
   return Instantiator.TransformTemplateArguments(Args, NumArgs, Result);
 }
 
-
-static const Decl* getCanonicalParmVarDecl(const Decl *D) {
+static const Decl *getCanonicalParmVarDecl(const Decl *D) {
   // When storing ParmVarDecls in the local instantiation scope, we always
   // want to use the ParmVarDecl from the canonical function declaration,
   // since the map is then valid for any redeclaration or definition of that
@@ -2718,7 +2776,10 @@ static const Decl* getCanonicalParmVarDecl(const Decl *D) {
   if (const ParmVarDecl *PV = dyn_cast<ParmVarDecl>(D)) {
     if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(PV->getDeclContext())) {
       unsigned i = PV->getFunctionScopeIndex();
-      return FD->getCanonicalDecl()->getParamDecl(i);
+      // This parameter might be from a freestanding function type within the
+      // function and isn't necessarily referring to one of FD's parameters.
+      if (FD->getParamDecl(i) == PV)
+        return FD->getCanonicalDecl()->getParamDecl(i);
     }
   }
   return D;
@@ -2767,12 +2828,22 @@ LocalInstantiationScope::findInstantiationOf(const Decl *D) {
 void LocalInstantiationScope::InstantiatedLocal(const Decl *D, Decl *Inst) {
   D = getCanonicalParmVarDecl(D);
   llvm::PointerUnion<Decl *, DeclArgumentPack *> &Stored = LocalDecls[D];
-  if (Stored.isNull())
+  if (Stored.isNull()) {
+#ifndef NDEBUG
+    // It should not be present in any surrounding scope either.
+    LocalInstantiationScope *Current = this;
+    while (Current->CombineWithOuterScope && Current->Outer) {
+      Current = Current->Outer;
+      assert(Current->LocalDecls.find(D) == Current->LocalDecls.end() &&
+             "Instantiated local in inner and outer scopes");
+    }
+#endif
     Stored = Inst;
-  else if (DeclArgumentPack *Pack = Stored.dyn_cast<DeclArgumentPack *>())
+  } else if (DeclArgumentPack *Pack = Stored.dyn_cast<DeclArgumentPack *>()) {
     Pack->push_back(Inst);
-  else
+  } else {
     assert(Stored.get<Decl *>() == Inst && "Already instantiated this local");
+  }
 }
 
 void LocalInstantiationScope::InstantiatedLocalPackArg(const Decl *D, 
@@ -2783,9 +2854,16 @@ void LocalInstantiationScope::InstantiatedLocalPackArg(const Decl *D,
 }
 
 void LocalInstantiationScope::MakeInstantiatedLocalArgPack(const Decl *D) {
+#ifndef NDEBUG
+  // This should be the first time we've been told about this decl.
+  for (LocalInstantiationScope *Current = this;
+       Current && Current->CombineWithOuterScope; Current = Current->Outer)
+    assert(Current->LocalDecls.find(D) == Current->LocalDecls.end() &&
+           "Creating local pack after instantiation of local");
+#endif
+
   D = getCanonicalParmVarDecl(D);
   llvm::PointerUnion<Decl *, DeclArgumentPack *> &Stored = LocalDecls[D];
-  assert(Stored.isNull() && "Already instantiated this local");
   DeclArgumentPack *Pack = new DeclArgumentPack;
   Stored = Pack;
   ArgumentPacks.push_back(Pack);

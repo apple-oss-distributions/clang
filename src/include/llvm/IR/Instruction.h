@@ -54,7 +54,12 @@ public:
   inline const BasicBlock *getParent() const { return Parent; }
   inline       BasicBlock *getParent()       { return Parent; }
 
-  const DataLayout *getDataLayout() const;
+  /// \brief Return the module owning the function this instruction belongs to
+  /// or nullptr it the function does not have a module.
+  ///
+  /// Note: this is undefined behavior if the instruction does not have a
+  /// parent, or the parent basic block does not have a parent function.
+  const Module *getModule() const;
 
   /// removeFromParent - This method unlinks 'this' from the containing basic
   /// block, but does not delete it.
@@ -129,9 +134,7 @@ public:
 
   /// hasMetadata() - Return true if this instruction has any metadata attached
   /// to it.
-  bool hasMetadata() const {
-    return !DbgLoc.isUnknown() || hasMetadataHashEntry();
-  }
+  bool hasMetadata() const { return DbgLoc || hasMetadataHashEntry(); }
 
   /// hasMetadataOtherThanDebugLoc - Return true if this instruction has
   /// metadata attached to it other than a debug location.
@@ -156,15 +159,16 @@ public:
   /// getAllMetadata - Get all metadata attached to this Instruction.  The first
   /// element of each pair returned is the KindID, the second element is the
   /// metadata value.  This list is returned sorted by the KindID.
-  void getAllMetadata(SmallVectorImpl<std::pair<unsigned, MDNode*> > &MDs)const{
+  void
+  getAllMetadata(SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const {
     if (hasMetadata())
       getAllMetadataImpl(MDs);
   }
 
   /// getAllMetadataOtherThanDebugLoc - This does the same thing as
   /// getAllMetadata, except that it filters out the debug location.
-  void getAllMetadataOtherThanDebugLoc(SmallVectorImpl<std::pair<unsigned,
-                                       MDNode*> > &MDs) const {
+  void getAllMetadataOtherThanDebugLoc(
+      SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const {
     if (hasMetadataOtherThanDebugLoc())
       getAllMetadataOtherThanDebugLocImpl(MDs);
   }
@@ -185,7 +189,7 @@ public:
   /// convenience method for passes to do so.
   void dropUnknownMetadata(ArrayRef<unsigned> KnownIDs);
   void dropUnknownMetadata() {
-    return dropUnknownMetadata(ArrayRef<unsigned>());
+    return dropUnknownMetadata(None);
   }
   void dropUnknownMetadata(unsigned ID1) {
     return dropUnknownMetadata(makeArrayRef(ID1));
@@ -200,7 +204,7 @@ public:
   void setAAMetadata(const AAMDNodes &N);
 
   /// setDebugLoc - Set the debug location information for this instruction.
-  void setDebugLoc(const DebugLoc &Loc) { DbgLoc = Loc; }
+  void setDebugLoc(DebugLoc Loc) { DbgLoc = std::move(Loc); }
 
   /// getDebugLoc - Return the debug location for this node as a DebugLoc.
   const DebugLoc &getDebugLoc() const { return DbgLoc; }
@@ -230,10 +234,15 @@ public:
   /// this flag.
   void setHasAllowReciprocal(bool B);
 
-  /// Convenience function for setting all the fast-math flags on this
+  /// Convenience function for setting multiple fast-math flags on this
   /// instruction, which must be an operator which supports these flags. See
-  /// LangRef.html for the meaning of these flats.
+  /// LangRef.html for the meaning of these flags.
   void setFastMathFlags(FastMathFlags FMF);
+
+  /// Convenience function for transferring all fast-math flag values to this
+  /// instruction, which must be an operator which supports these flags. See
+  /// LangRef.html for the meaning of these flags.
+  void copyFastMathFlags(FastMathFlags FMF);
 
   /// Determine whether the unsafe-algebra flag is set.
   bool hasUnsafeAlgebra() const;
@@ -252,7 +261,7 @@ public:
 
   /// Convenience function for getting all the fast-math flags, which must be an
   /// operator which supports these flags. See LangRef.html for the meaning of
-  /// these flats.
+  /// these flags.
   FastMathFlags getFastMathFlags() const;
 
   /// Copy I's fast-math flags
@@ -268,9 +277,10 @@ private:
   // These are all implemented in Metadata.cpp.
   MDNode *getMetadataImpl(unsigned KindID) const;
   MDNode *getMetadataImpl(StringRef Kind) const;
-  void getAllMetadataImpl(SmallVectorImpl<std::pair<unsigned,MDNode*> > &)const;
-  void getAllMetadataOtherThanDebugLocImpl(SmallVectorImpl<std::pair<unsigned,
-                                           MDNode*> > &) const;
+  void
+  getAllMetadataImpl(SmallVectorImpl<std::pair<unsigned, MDNode *>> &) const;
+  void getAllMetadataOtherThanDebugLocImpl(
+      SmallVectorImpl<std::pair<unsigned, MDNode *>> &) const;
   void clearMetadataHashEntries();
 public:
   //===--------------------------------------------------------------------===//
@@ -332,6 +342,11 @@ public:
   bool mayReadOrWriteMemory() const {
     return mayReadFromMemory() || mayWriteToMemory();
   }
+
+  /// isAtomic - Return true if this instruction has an
+  /// AtomicOrdering of unordered or higher.
+  ///
+  bool isAtomic() const;
 
   /// mayThrow - Return true if this instruction may throw an exception.
   ///

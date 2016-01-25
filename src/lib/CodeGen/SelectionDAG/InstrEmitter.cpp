@@ -27,7 +27,6 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetLowering.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
 using namespace llvm;
 
@@ -407,11 +406,10 @@ void InstrEmitter::AddOperand(MachineInstrBuilder &MIB,
     Type *Type = CP->getType();
     // MachineConstantPool wants an explicit alignment.
     if (Align == 0) {
-      Align =
-          TM->getSubtargetImpl()->getDataLayout()->getPrefTypeAlignment(Type);
+      Align = MF->getTarget().getDataLayout()->getPrefTypeAlignment(Type);
       if (Align == 0) {
         // Alignment of vector types.  FIXME!
-        Align = TM->getSubtargetImpl()->getDataLayout()->getTypeAllocSize(Type);
+        Align = MF->getTarget().getDataLayout()->getTypeAllocSize(Type);
       }
     }
 
@@ -649,14 +647,20 @@ MachineInstr *
 InstrEmitter::EmitDbgValue(SDDbgValue *SD,
                            DenseMap<SDValue, unsigned> &VRBaseMap) {
   uint64_t Offset = SD->getOffset();
-  MDNode* MDPtr = SD->getMDPtr();
+  MDNode *Var = SD->getVariable();
+  MDNode *Expr = SD->getExpression();
   DebugLoc DL = SD->getDebugLoc();
+  assert(cast<DILocalVariable>(Var)->isValidLocationForIntrinsic(DL) &&
+         "Expected inlined-at fields to agree");
 
   if (SD->getKind() == SDDbgValue::FRAMEIX) {
     // Stack address; this needs to be lowered in target-dependent fashion.
     // EmitTargetCodeForFrameDebugValue is responsible for allocation.
     return BuildMI(*MF, DL, TII->get(TargetOpcode::DBG_VALUE))
-        .addFrameIndex(SD->getFrameIx()).addImm(Offset).addMetadata(MDPtr);
+        .addFrameIndex(SD->getFrameIx())
+        .addImm(Offset)
+        .addMetadata(Var)
+        .addMetadata(Expr);
   }
   // Otherwise, we're going to create an instruction here.
   const MCInstrDesc &II = TII->get(TargetOpcode::DBG_VALUE);
@@ -702,7 +706,8 @@ InstrEmitter::EmitDbgValue(SDDbgValue *SD,
     MIB.addReg(0U, RegState::Debug);
   }
 
-  MIB.addMetadata(MDPtr);
+  MIB.addMetadata(Var);
+  MIB.addMetadata(Expr);
 
   return &*MIB;
 }
@@ -865,9 +870,7 @@ EmitMachineNode(SDNode *Node, bool IsClone, bool IsCloned,
     MIB->setPhysRegsDeadExcept(UsedRegs, *TRI);
 
   // Run post-isel target hook to adjust this instruction if needed.
-#ifdef NDEBUG
   if (II.hasPostISelHook())
-#endif
     TLI->AdjustInstrPostInstrSelection(MIB, Node);
 }
 
@@ -950,6 +953,9 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
     // Remember to operand index of the group flags.
     SmallVector<unsigned, 8> GroupIdx;
 
+    // Remember registers that are part of early-clobber defs.
+    SmallVector<unsigned, 8> ECRegs;
+
     // Add all of the operand registers to the instruction.
     for (unsigned i = InlineAsm::Op_FirstOperand; i != NumOps;) {
       unsigned Flags =
@@ -978,6 +984,7 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
           unsigned Reg = cast<RegisterSDNode>(Node->getOperand(i))->getReg();
           MIB.addReg(Reg, RegState::Define | RegState::EarlyClobber |
                   getImplRegState(TargetRegisterInfo::isPhysicalRegister(Reg)));
+          ECRegs.push_back(Reg);
         }
         break;
       case InlineAsm::Kind_RegUse:  // Use of register.
@@ -1003,6 +1010,19 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
       }
     }
 
+    // GCC inline assembly allows input operands to also be early-clobber
+    // output operands (so long as the operand is written only after it's
+    // used), but this does not match the semantics of our early-clobber flag.
+    // If an early-clobber operand register is also an input operand register,
+    // then remove the early-clobber flag.
+    for (unsigned Reg : ECRegs) {
+      if (MIB->readsRegister(Reg, TRI)) {
+        MachineOperand *MO = MIB->findRegisterDefOperand(Reg, false, TRI);
+        assert(MO && "No def operand for clobbered register?");
+        MO->setIsEarlyClobber(false);
+      }
+    }
+
     // Get the mdnode from the asm if it exists and add it to the instruction.
     SDValue MDV = Node->getOperand(InlineAsm::Op_MDNode);
     const MDNode *MD = cast<MDNodeSDNode>(MDV)->getMD();
@@ -1019,8 +1039,8 @@ EmitSpecialNode(SDNode *Node, bool IsClone, bool IsCloned,
 /// at the given position in the given block.
 InstrEmitter::InstrEmitter(MachineBasicBlock *mbb,
                            MachineBasicBlock::iterator insertpos)
-    : MF(mbb->getParent()), MRI(&MF->getRegInfo()), TM(&MF->getTarget()),
-      TII(TM->getSubtargetImpl()->getInstrInfo()),
-      TRI(TM->getSubtargetImpl()->getRegisterInfo()),
-      TLI(TM->getSubtargetImpl()->getTargetLowering()), MBB(mbb),
+    : MF(mbb->getParent()), MRI(&MF->getRegInfo()),
+      TII(MF->getSubtarget().getInstrInfo()),
+      TRI(MF->getSubtarget().getRegisterInfo()),
+      TLI(MF->getSubtarget().getTargetLowering()), MBB(mbb),
       InsertPos(insertpos) {}

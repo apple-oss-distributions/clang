@@ -15,16 +15,19 @@ add_clang_library(clangTidy
   clangAST
   clangASTMatchers
   clangBasic
+  clangCodeGen
   clangFrontend
   clangRewrite
   clangSema
   clangStaticAnalyzerCore
   clangStaticAnalyzerFrontend
   clangTooling
+  clangToolingCore
   )
 
 add_subdirectory(tool)
 add_subdirectory(llvm)
 add_subdirectory(google)
 add_subdirectory(misc)
+add_subdirectory(readability)
 add_subdirectory(utils)

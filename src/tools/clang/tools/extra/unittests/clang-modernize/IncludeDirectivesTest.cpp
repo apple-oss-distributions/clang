@@ -34,7 +34,8 @@ static void applyActionOnCode(FrontendAction *ToolAction, StringRef Code) {
   sys::path::append(InputFile, "input.cc");
 
   ASSERT_TRUE(
-      tooling::runToolOnCodeWithArgs(ToolAction, Code, Args, InputFile.str()));
+      tooling::runToolOnCodeWithArgs(
+          ToolAction, Code, Args, InputFile.str()));
 }
 
 namespace {

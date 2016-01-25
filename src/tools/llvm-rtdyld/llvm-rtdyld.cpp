@@ -12,16 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/StringMap.h"
-#include "llvm/DebugInfo/DIContext.h"
-#include "llvm/ExecutionEngine/ObjectBuffer.h"
-#include "llvm/ExecutionEngine/ObjectImage.h"
+#include "llvm/DebugInfo/DWARF/DIContext.h"
 #include "llvm/ExecutionEngine/RuntimeDyld.h"
 #include "llvm/ExecutionEngine/RuntimeDyldChecker.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler.h"
-#include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCInstPrinter.h"
+#include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Support/CommandLine.h"
@@ -30,10 +28,10 @@
 #include "llvm/Support/Memory.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 #include <list>
 #include <system_error>
 
@@ -207,23 +205,32 @@ static int printLineInfoForInput() {
     if (std::error_code EC = InputBuffer.getError())
       return Error("unable to read input: '" + EC.message() + "'");
 
-    std::unique_ptr<ObjectImage> LoadedObject;
+    ErrorOr<std::unique_ptr<ObjectFile>> MaybeObj(
+      ObjectFile::createObjectFile((*InputBuffer)->getMemBufferRef()));
+
+    if (std::error_code EC = MaybeObj.getError())
+      return Error("unable to create object file: '" + EC.message() + "'");
+
+    ObjectFile &Obj = **MaybeObj;
+
     // Load the object file
-    LoadedObject.reset(
-        Dyld.loadObject(new ObjectBuffer(InputBuffer.get().release())));
-    if (!LoadedObject) {
+    std::unique_ptr<RuntimeDyld::LoadedObjectInfo> LoadedObjInfo =
+      Dyld.loadObject(Obj);
+
+    if (Dyld.hasError())
       return Error(Dyld.getErrorString());
-    }
 
     // Resolve all the relocations we can.
     Dyld.resolveRelocations();
 
+    OwningBinary<ObjectFile> DebugObj = LoadedObjInfo->getObjectForDebug(Obj);
+
     std::unique_ptr<DIContext> Context(
-        DIContext::getDWARFContext(*LoadedObject->getObjectFile()));
+      DIContext::getDWARFContext(*DebugObj.getBinary()));
 
     // Use symbol info to iterate functions in the object.
-    for (object::symbol_iterator I = LoadedObject->begin_symbols(),
-                                 E = LoadedObject->end_symbols();
+    for (object::symbol_iterator I = DebugObj.getBinary()->symbol_begin(),
+                                 E = DebugObj.getBinary()->symbol_end();
          I != E; ++I) {
       object::SymbolRef::Type SymType;
       if (I->getType(SymType)) continue;
@@ -268,11 +275,17 @@ static int executeInput() {
         MemoryBuffer::getFileOrSTDIN(InputFileList[i]);
     if (std::error_code EC = InputBuffer.getError())
       return Error("unable to read input: '" + EC.message() + "'");
-    std::unique_ptr<ObjectImage> LoadedObject;
+    ErrorOr<std::unique_ptr<ObjectFile>> MaybeObj(
+      ObjectFile::createObjectFile((*InputBuffer)->getMemBufferRef()));
+
+    if (std::error_code EC = MaybeObj.getError())
+      return Error("unable to create object file: '" + EC.message() + "'");
+
+    ObjectFile &Obj = **MaybeObj;
+
     // Load the object file
-    LoadedObject.reset(
-        Dyld.loadObject(new ObjectBuffer(InputBuffer.get().release())));
-    if (!LoadedObject) {
+    Dyld.loadObject(Obj);
+    if (Dyld.hasError()) {
       return Error(Dyld.getErrorString());
     }
   }
@@ -493,7 +506,7 @@ static int linkAndVerify() {
   std::unique_ptr<MCInstrInfo> MII(TheTarget->createMCInstrInfo());
 
   std::unique_ptr<MCInstPrinter> InstPrinter(
-    TheTarget->createMCInstPrinter(0, *MAI, *MII, *MRI, *STI));
+      TheTarget->createMCInstPrinter(Triple(TripleName), 0, *MAI, *MII, *MRI));
 
   // Load any dylibs requested on the command line.
   loadDylibs();
@@ -512,14 +525,21 @@ static int linkAndVerify() {
     // Load the input memory buffer.
     ErrorOr<std::unique_ptr<MemoryBuffer>> InputBuffer =
         MemoryBuffer::getFileOrSTDIN(InputFileList[i]);
+
     if (std::error_code EC = InputBuffer.getError())
       return Error("unable to read input: '" + EC.message() + "'");
 
-    std::unique_ptr<ObjectImage> LoadedObject;
+    ErrorOr<std::unique_ptr<ObjectFile>> MaybeObj(
+      ObjectFile::createObjectFile((*InputBuffer)->getMemBufferRef()));
+
+    if (std::error_code EC = MaybeObj.getError())
+      return Error("unable to create object file: '" + EC.message() + "'");
+
+    ObjectFile &Obj = **MaybeObj;
+
     // Load the object file
-    LoadedObject.reset(
-        Dyld.loadObject(new ObjectBuffer(InputBuffer.get().release())));
-    if (!LoadedObject) {
+    Dyld.loadObject(Obj);
+    if (Dyld.hasError()) {
       return Error(Dyld.getErrorString());
     }
   }

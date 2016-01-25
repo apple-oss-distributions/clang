@@ -24,9 +24,13 @@ using __sanitizer::uptr;
 extern "C" {
   // This function should be called at the very beginning of the process,
   // before any instrumented code is executed and before any call to malloc.
-  // Please note that __asan_init is a macro that is replaced with
-  // __asan_init_vXXX at compile-time.
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_init();
+
+  // This function exists purely to get a linker/loader error when using
+  // incompatible versions of instrumentation and runtime library. Please note
+  // that __asan_version_mismatch_check is a macro that is replaced with
+  // __asan_version_mismatch_check_vXXX at compile-time.
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_version_mismatch_check();
 
   // This structure is used to describe the source location of a place where
   // global was defined.
@@ -171,6 +175,12 @@ extern "C" {
 
   SANITIZER_INTERFACE_ATTRIBUTE
   void __asan_poison_cxx_array_cookie(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_load_cxx_array_cookie(uptr *p);
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __asan_poison_intra_object_redzone(uptr p, uptr size);
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __asan_unpoison_intra_object_redzone(uptr p, uptr size);
 }  // extern "C"
 
 #endif  // ASAN_INTERFACE_INTERNAL_H

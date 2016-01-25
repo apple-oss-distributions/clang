@@ -34,6 +34,7 @@
 #include "clang/Rewrite/Frontend/FrontendActions.h"
 #include "clang/StaticAnalyzer/Frontend/AnalysisConsumer.h"
 #include "clang/Tooling/Refactoring.h"
+#include "clang/Tooling/ReplacementsYaml.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
@@ -213,13 +214,16 @@ ClangTidyASTConsumerFactory::CreateASTConsumer(
   Context.setASTContext(&Compiler.getASTContext());
 
   std::vector<std::unique_ptr<ClangTidyCheck>> Checks;
-  GlobList &Filter = Context.getChecksFilter();
-  CheckFactories->createChecks(Filter, Checks);
+  CheckFactories->createChecks(&Context, Checks);
+
+  ast_matchers::MatchFinder::MatchFinderOptions FinderOptions;
+  if (auto *P = Context.getCheckProfileData())
+    FinderOptions.CheckProfiling.emplace(P->Records);
 
   std::unique_ptr<ast_matchers::MatchFinder> Finder(
-      new ast_matchers::MatchFinder);
+      new ast_matchers::MatchFinder(std::move(FinderOptions)));
+
   for (auto &Check : Checks) {
-    Check->setContext(&Context);
     Check->registerMatchers(&*Finder);
     Check->registerPPCallbacks(Compiler);
   }
@@ -234,6 +238,7 @@ ClangTidyASTConsumerFactory::CreateASTConsumer(
   AnalyzerOptions->Config["cfg-temporary-dtors"] =
       Context.getOptions().AnalyzeTemporaryDtors ? "true" : "false";
 
+  GlobList &Filter = Context.getChecksFilter();
   AnalyzerOptions->CheckersControlList = getCheckersControlList(Filter);
   if (!AnalyzerOptions->CheckersControlList.empty()) {
     AnalyzerOptions->AnalysisStoreOpt = RegionStoreModel;
@@ -241,9 +246,7 @@ ClangTidyASTConsumerFactory::CreateASTConsumer(
     AnalyzerOptions->AnalyzeNestedBlocks = true;
     AnalyzerOptions->eagerlyAssumeBinOpBifurcation = true;
     std::unique_ptr<ento::AnalysisASTConsumer> AnalysisConsumer =
-        ento::CreateAnalysisConsumer(
-            Compiler.getPreprocessor(), Compiler.getFrontendOpts().OutputFile,
-            AnalyzerOptions, Compiler.getFrontendOpts().Plugins);
+        ento::CreateAnalysisConsumer(Compiler);
     AnalysisConsumer->AddDiagnosticConsumer(
         new AnalyzerDiagnosticConsumer(Context));
     Consumers.push_back(std::move(AnalysisConsumer));
@@ -252,9 +255,9 @@ ClangTidyASTConsumerFactory::CreateASTConsumer(
       std::move(Consumers), std::move(Finder), std::move(Checks));
 }
 
-std::vector<std::string>
-ClangTidyASTConsumerFactory::getCheckNames(GlobList &Filter) {
+std::vector<std::string> ClangTidyASTConsumerFactory::getCheckNames() {
   std::vector<std::string> CheckNames;
+  GlobList &Filter = Context.getChecksFilter();
   for (const auto &CheckFactory : *CheckFactories) {
     if (Filter.contains(CheckFactory.first))
       CheckNames.push_back(CheckFactory.first);
@@ -265,6 +268,15 @@ ClangTidyASTConsumerFactory::getCheckNames(GlobList &Filter) {
 
   std::sort(CheckNames.begin(), CheckNames.end());
   return CheckNames;
+}
+
+ClangTidyOptions::OptionMap ClangTidyASTConsumerFactory::getCheckOptions() {
+  ClangTidyOptions::OptionMap Options;
+  std::vector<std::unique_ptr<ClangTidyCheck>> Checks;
+  CheckFactories->createChecks(&Context, Checks);
+  for (const auto &Check : Checks)
+    Check->storeOptions(Options);
+  return Options;
 }
 
 ClangTidyASTConsumerFactory::CheckersList
@@ -308,24 +320,54 @@ void ClangTidyCheck::run(const ast_matchers::MatchFinder::MatchResult &Result) {
   check(Result);
 }
 
-void ClangTidyCheck::setName(StringRef Name) {
-  assert(CheckName.empty());
-  CheckName = Name.str();
+OptionsView::OptionsView(StringRef CheckName,
+                         const ClangTidyOptions::OptionMap &CheckOptions)
+    : NamePrefix(CheckName.str() + "."), CheckOptions(CheckOptions) {}
+
+std::string OptionsView::get(StringRef LocalName, std::string Default) const {
+  const auto &Iter = CheckOptions.find(NamePrefix + LocalName.str());
+  if (Iter != CheckOptions.end())
+    return Iter->second;
+  return Default;
+}
+
+void OptionsView::store(ClangTidyOptions::OptionMap &Options,
+                        StringRef LocalName, StringRef Value) const {
+  Options[NamePrefix + LocalName.str()] = Value;
+}
+
+void OptionsView::store(ClangTidyOptions::OptionMap &Options,
+                        StringRef LocalName, int64_t Value) const {
+  store(Options, LocalName, llvm::itostr(Value));
 }
 
 std::vector<std::string> getCheckNames(const ClangTidyOptions &Options) {
   clang::tidy::ClangTidyContext Context(
-      new DefaultOptionsProvider(ClangTidyGlobalOptions(), Options));
+      llvm::make_unique<DefaultOptionsProvider>(ClangTidyGlobalOptions(),
+                                                Options));
   ClangTidyASTConsumerFactory Factory(Context);
-  return Factory.getCheckNames(Context.getChecksFilter());
+  return Factory.getCheckNames();
 }
 
-ClangTidyStats runClangTidy(ClangTidyOptionsProvider *OptionsProvider,
-                            const tooling::CompilationDatabase &Compilations,
-                            ArrayRef<std::string> InputFiles,
-                            std::vector<ClangTidyError> *Errors) {
-  ClangTool Tool(Compilations, InputFiles);
-  clang::tidy::ClangTidyContext Context(OptionsProvider);
+ClangTidyOptions::OptionMap getCheckOptions(const ClangTidyOptions &Options) {
+  clang::tidy::ClangTidyContext Context(
+      llvm::make_unique<DefaultOptionsProvider>(ClangTidyGlobalOptions(),
+                                                Options));
+  ClangTidyASTConsumerFactory Factory(Context);
+  return Factory.getCheckOptions();
+}
+
+ClangTidyStats
+runClangTidy(std::unique_ptr<ClangTidyOptionsProvider> OptionsProvider,
+             SharedModuleProvider MP,
+             const tooling::CompilationDatabase &Compilations,
+             ArrayRef<std::string> InputFiles,
+             std::vector<ClangTidyError> *Errors, ProfileData *Profile) {
+  ClangTool Tool(Compilations, InputFiles, MP);
+  clang::tidy::ClangTidyContext Context(std::move(OptionsProvider));
+  if (Profile)
+    Context.setCheckProfileData(Profile);
+
   ClangTidyDiagnosticConsumer DiagConsumer(Context);
 
   Tool.setDiagnosticConsumer(&DiagConsumer);
@@ -362,6 +404,17 @@ void handleErrors(const std::vector<ClangTidyError> &Errors, bool Fix) {
   for (const ClangTidyError &Error : Errors)
     Reporter.reportDiagnostic(Error);
   Reporter.Finish();
+}
+
+void exportReplacements(const std::vector<ClangTidyError> &Errors,
+                        raw_ostream &OS) {
+  tooling::TranslationUnitReplacements TUR;
+  for (const ClangTidyError &Error : Errors)
+    TUR.Replacements.insert(TUR.Replacements.end(), Error.Fix.begin(),
+                            Error.Fix.end());
+
+  yaml::Output YAML(OS);
+  YAML << TUR;
 }
 
 } // namespace tidy

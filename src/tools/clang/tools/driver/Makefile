@@ -33,10 +33,11 @@ endif
 
 LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader bitwriter codegen \
                    instrumentation ipo irreader linker objcarcopts option \
-                   profiledata selectiondag
+                   profiledata selectiondag \
+                   object
 USEDLIBS = clangFrontendTool.a clangFrontend.a clangDriver.a \
            clangSerialization.a clangCodeGen.a clangParse.a clangSema.a \
-           clangRewriteFrontend.a clangRewrite.a
+           clangRewriteFrontend.a clangRewrite.a clangIndex.a
 
 ifeq ($(ENABLE_CLANG_STATIC_ANALYZER),1)
 USEDLIBS += clangStaticAnalyzerFrontend.a clangStaticAnalyzerCheckers.a \

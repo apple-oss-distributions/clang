@@ -241,7 +241,7 @@ namespace {
       auto classID = endian::readNext<IdentifierID, little, unaligned>(data);
       auto selectorID = endian::readNext<SelectorID, little, unaligned>(data);
       auto isInstance = endian::readNext<uint8_t, little, unaligned>(data);
-      return { classID, selectorID, isInstance };
+      return internal_key_type{ classID, selectorID, isInstance };
     }
     
     static data_type ReadData(internal_key_type key, const uint8_t *data,
@@ -1139,8 +1139,9 @@ Optional<ObjCMethodInfo> APINotesReader::lookupObjCMethod(
   if (!selectorID)
     return None;
 
-  auto known = Impl.ObjCMethodTable->find({contextID.Value, *selectorID,
-                                           isInstanceMethod});
+  auto known = Impl.ObjCMethodTable->find(
+      ObjCMethodTableInfo::internal_key_type{
+          contextID.Value, *selectorID, isInstanceMethod});
   if (known == Impl.ObjCMethodTable->end())
     return None;
 

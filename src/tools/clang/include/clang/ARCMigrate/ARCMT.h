@@ -13,10 +13,12 @@
 #include "clang/ARCMigrate/FileRemapper.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Frontend/CompilerInvocation.h"
+#include "clang/Lex/ModuleLoader.h"
 
 namespace clang {
   class ASTContext;
   class DiagnosticConsumer;
+  class ModuleProvider;
 
 namespace arcmt {
   class MigrationPass;
@@ -39,6 +41,7 @@ namespace arcmt {
 /// \returns false if no error is produced, true otherwise.
 bool checkForManualIssues(CompilerInvocation &CI,
                           const FrontendInputFile &Input,
+                          SharedModuleProvider MP,
                           DiagnosticConsumer *DiagClient,
                           bool emitPremigrationARCErrors = false,
                           StringRef plistOut = StringRef());
@@ -49,6 +52,7 @@ bool checkForManualIssues(CompilerInvocation &CI,
 /// \returns false if no error is produced, true otherwise.
 bool applyTransformations(CompilerInvocation &origCI,
                           const FrontendInputFile &Input,
+                          SharedModuleProvider MP,
                           DiagnosticConsumer *DiagClient);
 
 /// \brief Applies automatic modifications and produces temporary files
@@ -64,6 +68,7 @@ bool applyTransformations(CompilerInvocation &origCI,
 /// \returns false if no error is produced, true otherwise.
 bool migrateWithTemporaryFiles(CompilerInvocation &origCI,
                                const FrontendInputFile &Input,
+                               SharedModuleProvider MP,
                                DiagnosticConsumer *DiagClient,
                                StringRef outputDir,
                                bool emitPremigrationARCErrors,
@@ -93,13 +98,15 @@ std::vector<TransformFn> getAllTransformations(LangOptions::GCMode OrigGCMode,
 
 class MigrationProcess {
   CompilerInvocation OrigCI;
+  SharedModuleProvider MP;
   DiagnosticConsumer *DiagClient;
   FileRemapper Remapper;
 
 public:
   bool HadARCErrors;
 
-  MigrationProcess(const CompilerInvocation &CI, DiagnosticConsumer *diagClient,
+  MigrationProcess(const CompilerInvocation &CI,
+                   SharedModuleProvider MP, DiagnosticConsumer *diagClient,
                    StringRef outputDir = StringRef());
 
   class RewriteListener {

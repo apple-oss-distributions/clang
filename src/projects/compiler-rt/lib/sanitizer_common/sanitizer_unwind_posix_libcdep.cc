@@ -96,7 +96,7 @@ uptr Unwind_GetIP(struct _Unwind_Context *ctx) {
 
 struct UnwindTraceArg {
   BufferedStackTrace *stack;
-  uptr max_depth;
+  u32 max_depth;
 };
 
 _Unwind_Reason_Code Unwind_Trace(struct _Unwind_Context *ctx, void *param) {
@@ -110,22 +110,27 @@ _Unwind_Reason_Code Unwind_Trace(struct _Unwind_Context *ctx, void *param) {
 
 #if !defined(__APPLE__)
 
-void BufferedStackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
+void BufferedStackTrace::SlowUnwindStack(uptr pc, u32 max_depth) {
   CHECK_GE(max_depth, 2);
   size = 0;
   UnwindTraceArg arg = {this, Min(max_depth + 1, kStackTraceMax)};
   _Unwind_Backtrace(Unwind_Trace, &arg);
   // We need to pop a few frames so that pc is on top.
   uptr to_pop = LocatePcInTrace(pc);
-  // trace_buffer[0] belongs to the current function so we always pop it.
-  if (to_pop == 0)
+  // trace_buffer[0] belongs to the current function so we always pop it,
+  // unless there is only 1 frame in the stack trace (1 frame is always better
+  // than 0!).
+  // 1-frame stacks don't normally happen, but this depends on the actual
+  // unwinder implementation (libgcc, libunwind, etc) which is outside of our
+  // control.
+  if (to_pop == 0 && size > 1)
     to_pop = 1;
   PopStackFrames(to_pop);
   trace_buffer[0] = pc;
 }
 
 void BufferedStackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
-                                                    uptr max_depth) {
+                                                    u32 max_depth) {
   CHECK_GE(max_depth, 2);
   if (!unwind_backtrace_signal_arch) {
     SlowUnwindStack(pc, max_depth);

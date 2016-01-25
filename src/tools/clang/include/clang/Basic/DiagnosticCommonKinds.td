@@ -99,20 +99,21 @@ def err_enum_template : Error<"enumeration cannot be a template">;
 let CategoryName = "Nullability Issue" in {
 
 def warn_nullability_duplicate : Warning<
-  "duplicate nullability specifier "
-  "'%select{%select{__|}1nonnull|%select{__|}1nullable|"
-  "%select{__|}1null_unspecified}0'">,
+  "duplicate nullability specifier %0">,
+  InGroup<Nullability>;
+  
+def warn_conflicting_nullability_attr_overriding_ret_types : Warning<
+  "conflicting nullability specifier on return types, %0 "
+  "conflicts with existing specifier %1">,
+  InGroup<Nullability>;
+
+def warn_conflicting_nullability_attr_overriding_param_types : Warning<
+  "conflicting nullability specifier on parameter types, %0 "
+  "conflicts with existing specifier %1">,
   InGroup<Nullability>;
 
 def err_nullability_conflicting : Error<
-  "nullability specifier "
-  "'%select{%select{__|}1nonnull|%select{__|}1nullable|"
-  "%select{__|}1null_unspecified}0' "
-  "conflicts with existing specifier '%select{%select{__|}3nonnull|"
-  "%select{__|}3nullable|%select{__|}3null_unspecified}2'">;
-
-def note_nullability_here : Note<
-  "'%select{__nonnull|__nullable|__null_unspecified}0' specified here">;
+  "nullability specifier %0 conflicts with existing specifier %1">;
 
 }
 
@@ -133,6 +134,16 @@ def ext_integer_literal_too_large_for_signed : ExtWarn<
   "integer literal is too large to be represented in a signed integer type, "
   "interpreting as unsigned">,
   InGroup<DiagGroup<"implicitly-unsigned-literal">>;
+
+// SEH
+def err_seh_expected_handler : Error<
+  "expected '__except' or '__finally' block">;
+def err_seh___except_block : Error<
+  "%0 only allowed in __except block or filter expression">;
+def err_seh___except_filter : Error<
+  "%0 only allowed in __except filter expression">;
+def err_seh___finally_block : Error<
+  "%0 only allowed in __finally block">;
 
 // Sema && AST
 def note_invalid_subexpr_in_const_expr : Note<

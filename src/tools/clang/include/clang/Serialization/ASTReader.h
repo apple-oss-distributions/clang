@@ -115,7 +115,8 @@ public:
   ///
   /// \returns true to indicate the options are invalid or false otherwise.
   virtual bool ReadLanguageOptions(const LangOptions &LangOpts,
-                                   bool Complain) {
+                                   bool Complain,
+                                   bool AllowCompatibleDifferences) {
     return false;
   }
 
@@ -194,6 +195,13 @@ public:
                               bool isOverridden) {
     return true;
   }
+
+  /// \brief Returns true if this \c ASTReaderListener wants to receive the
+  /// imports of the AST file via \c visitImport, false otherwise.
+  virtual bool needsImportVisitation() const { return false; }
+  /// \brief If needsImportVisitation returns \c true, this is called for each
+  /// AST file imported by this AST file.
+  virtual void visitImport(StringRef Filename) {}
 };
 
 /// \brief Simple wrapper class for chaining listeners.
@@ -207,10 +215,14 @@ public:
                            std::unique_ptr<ASTReaderListener> Second)
       : First(std::move(First)), Second(std::move(Second)) {}
 
+  std::unique_ptr<ASTReaderListener> takeFirst() { return std::move(First); }
+  std::unique_ptr<ASTReaderListener> takeSecond() { return std::move(Second); }
+
   bool ReadFullVersionInformation(StringRef FullVersion) override;
   void ReadModuleName(StringRef ModuleName) override;
   void ReadModuleMapFile(StringRef ModuleMapPath) override;
-  bool ReadLanguageOptions(const LangOptions &LangOpts, bool Complain) override;
+  bool ReadLanguageOptions(const LangOptions &LangOpts, bool Complain,
+                           bool AllowCompatibleDifferences) override;
   bool ReadTargetOptions(const TargetOptions &TargetOpts,
                          bool Complain) override;
   bool ReadDiagnosticOptions(IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts,
@@ -243,8 +255,8 @@ public:
   PCHValidator(Preprocessor &PP, ASTReader &Reader)
     : PP(PP), Reader(Reader) {}
 
-  bool ReadLanguageOptions(const LangOptions &LangOpts,
-                           bool Complain) override;
+  bool ReadLanguageOptions(const LangOptions &LangOpts, bool Complain,
+                           bool AllowCompatibleDifferences) override;
   bool ReadTargetOptions(const TargetOptions &TargetOpts,
                          bool Complain) override;
   bool ReadDiagnosticOptions(IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts,
@@ -349,6 +361,7 @@ private:
 
   SourceManager &SourceMgr;
   FileManager &FileMgr;
+  const ModuleProvider &MP;
   DiagnosticsEngine &Diags;
 
   /// \brief The semantic analysis object that will be processing the
@@ -428,6 +441,12 @@ private:
   llvm::SmallVector<std::pair<serialization::GlobalDeclID, Decl*>, 16>
       PendingUpdateRecords;
 
+  enum class PendingFakeDefinitionKind { NotFake, Fake, FakeLoaded };
+
+  /// \brief The DefinitionData pointers that we faked up for class definitions
+  /// that we needed but hadn't loaded yet.
+  llvm::DenseMap<void *, PendingFakeDefinitionKind> PendingFakeDefinitionData;
+
   struct ReplacedDeclInfo {
     ModuleFile *Mod;
     uint64_t Offset;
@@ -442,6 +461,16 @@ private:
       DeclReplacementMap;
   /// \brief Declarations that have been replaced in a later file in the chain.
   DeclReplacementMap ReplacedDecls;
+
+  /// \brief Declarations that have been imported and have typedef names for
+  /// linkage purposes.
+  llvm::DenseMap<std::pair<DeclContext*, IdentifierInfo*>, NamedDecl*>
+      ImportedTypedefNamesForLinkage;
+
+  /// \brief Mergeable declaration contexts that have anonymous declarations
+  /// within them, and those anonymous declarations.
+  llvm::DenseMap<DeclContext*, llvm::SmallVector<NamedDecl*, 2>>
+    AnonymousDeclarationsForMerging;
 
   struct FileDeclsInfo {
     ModuleFile *Mod;
@@ -753,6 +782,11 @@ private:
   /// Sema tracks these because it checks for the key functions being defined
   /// at the end of the TU, in which case it directs CodeGen to emit the VTable.
   SmallVector<uint64_t, 16> DynamicClasses;
+
+  /// \brief The IDs of all potentially unused typedef names in the chain.
+  ///
+  /// Sema tracks these to emit warnings.
+  SmallVector<uint64_t, 16> UnusedLocalTypedefNameCandidates;
 
   /// \brief The IDs of the declarations Sema stores directly.
   ///
@@ -1091,12 +1125,11 @@ private:
   serialization::InputFile getInputFile(ModuleFile &F, unsigned ID,
                                         bool Complain = true);
 
-  /// \brief Get a FileEntry out of stored-in-PCH filename, making sure we take
-  /// into account all the necessary relocations.
-  const FileEntry *getFileEntry(StringRef filename);
+public:
+  void ResolveImportedPath(ModuleFile &M, std::string &Filename);
+  static void ResolveImportedPath(std::string &Filename, StringRef Prefix);
 
-  void MaybeAddSystemRootToFilename(ModuleFile &M, std::string &Filename);
-
+private:
   struct ImportedModule {
     ModuleFile *Mod;
     ModuleFile *ImportedBy;
@@ -1119,7 +1152,7 @@ private:
                                  const ModuleFile *ImportedBy,
                                  unsigned ClientLoadCapabilities);
   ASTReadResult ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities);
-  bool ParseLineTable(ModuleFile &F, SmallVectorImpl<uint64_t> &Record);
+  bool ParseLineTable(ModuleFile &F, const RecordData &Record);
   bool ReadSourceManagerBlock(ModuleFile &F);
   llvm::BitstreamCursor &SLocCursorForID(int ID);
   SourceLocation getImportLocation(ModuleFile *F);
@@ -1129,7 +1162,8 @@ private:
   ASTReadResult ReadSubmoduleBlock(ModuleFile &F,
                                    unsigned ClientLoadCapabilities);
   static bool ParseLanguageOptions(const RecordData &Record, bool Complain,
-                                   ASTReaderListener &Listener);
+                                   ASTReaderListener &Listener,
+                                   bool AllowCompatibleDifferences);
   static bool ParseTargetOptions(const RecordData &Record, bool Complain,
                                  ASTReaderListener &Listener);
   static bool ParseDiagnosticOptions(const RecordData &Record, bool Complain,
@@ -1190,66 +1224,38 @@ private:
 
   /// \brief Returns (begin, end) pair for the preprocessed entities of a
   /// particular module.
-  std::pair<PreprocessingRecord::iterator, PreprocessingRecord::iterator>
-    getModulePreprocessedEntities(ModuleFile &Mod) const;
+  llvm::iterator_range<PreprocessingRecord::iterator>
+  getModulePreprocessedEntities(ModuleFile &Mod) const;
 
-  class ModuleDeclIterator {
+  class ModuleDeclIterator
+      : public llvm::iterator_adaptor_base<
+            ModuleDeclIterator, const serialization::LocalDeclID *,
+            std::random_access_iterator_tag, const Decl *, ptrdiff_t,
+            const Decl *, const Decl *> {
     ASTReader *Reader;
     ModuleFile *Mod;
-    const serialization::LocalDeclID *Pos;
 
   public:
-    typedef const Decl *value_type;
-    typedef value_type&         reference;
-    typedef value_type*         pointer;
-
-    ModuleDeclIterator() : Reader(nullptr), Mod(nullptr), Pos(nullptr) { }
+    ModuleDeclIterator()
+        : iterator_adaptor_base(nullptr), Reader(nullptr), Mod(nullptr) {}
 
     ModuleDeclIterator(ASTReader *Reader, ModuleFile *Mod,
                        const serialization::LocalDeclID *Pos)
-      : Reader(Reader), Mod(Mod), Pos(Pos) { }
+        : iterator_adaptor_base(Pos), Reader(Reader), Mod(Mod) {}
 
     value_type operator*() const {
-      return Reader->GetDecl(Reader->getGlobalDeclID(*Mod, *Pos));
+      return Reader->GetDecl(Reader->getGlobalDeclID(*Mod, *I));
     }
+    value_type operator->() const { return **this; }
 
-    ModuleDeclIterator &operator++() {
-      ++Pos;
-      return *this;
-    }
-
-    ModuleDeclIterator operator++(int) {
-      ModuleDeclIterator Prev(*this);
-      ++Pos;
-      return Prev;
-    }
-
-    ModuleDeclIterator &operator--() {
-      --Pos;
-      return *this;
-    }
-
-    ModuleDeclIterator operator--(int) {
-      ModuleDeclIterator Prev(*this);
-      --Pos;
-      return Prev;
-    }
-
-    friend bool operator==(const ModuleDeclIterator &LHS,
-                           const ModuleDeclIterator &RHS) {
-      assert(LHS.Reader == RHS.Reader && LHS.Mod == RHS.Mod);
-      return LHS.Pos == RHS.Pos;
-    }
-
-    friend bool operator!=(const ModuleDeclIterator &LHS,
-                           const ModuleDeclIterator &RHS) {
-      assert(LHS.Reader == RHS.Reader && LHS.Mod == RHS.Mod);
-      return LHS.Pos != RHS.Pos;
+    bool operator==(const ModuleDeclIterator &RHS) const {
+      assert(Reader == RHS.Reader && Mod == RHS.Mod);
+      return I == RHS.I;
     }
   };
 
-  std::pair<ModuleDeclIterator, ModuleDeclIterator>
-    getModuleFileLevelDecls(ModuleFile &Mod);
+  llvm::iterator_range<ModuleDeclIterator>
+  getModuleFileLevelDecls(ModuleFile &Mod);
 
   void PassInterestingDeclsToConsumer();
   void PassInterestingDeclToConsumer(Decl *D);
@@ -1287,6 +1293,9 @@ public:
   /// \param Context the AST context that this precompiled header will be
   /// loaded into.
   ///
+  /// \param MP module provider that takes care of the physical
+  /// representation of Clang modules.
+  ///
   /// \param isysroot If non-NULL, the system include path specified by the
   /// user. This is only used with relocatable PCH files. If non-NULL,
   /// a relocatable PCH file will use the default path "/".
@@ -1308,7 +1317,8 @@ public:
   ///
   /// \param UseGlobalIndex If true, the AST reader will try to load and use
   /// the global module index.
-  ASTReader(Preprocessor &PP, ASTContext &Context, StringRef isysroot = "",
+  ASTReader(Preprocessor &PP, ASTContext &Context, const ModuleProvider &MP,
+            StringRef isysroot = "",
             bool DisableValidation = false,
             bool AllowASTWithCompilerErrors = false,
             bool AllowConfigurationMismatch = false,
@@ -1380,12 +1390,17 @@ public:
   void makeNamesVisible(const HiddenNames &Names, Module *Owner,
                         bool FromFinalization);
 
+  /// \brief Take the AST callbacks listener.
+  std::unique_ptr<ASTReaderListener> takeListener() {
+    return std::move(Listener);
+  }
+
   /// \brief Set the AST callbacks listener.
   void setListener(std::unique_ptr<ASTReaderListener> Listener) {
     this->Listener = std::move(Listener);
   }
 
-  /// \brief Add an AST callbak listener.
+  /// \brief Add an AST callback listener.
   ///
   /// Takes ownership of \p L.
   void addListener(std::unique_ptr<ASTReaderListener> L) {
@@ -1394,6 +1409,30 @@ public:
                                                       std::move(Listener));
     Listener = std::move(L);
   }
+
+  /// RAII object to temporarily add an AST callback listener.
+  class ListenerScope {
+    ASTReader &Reader;
+    bool Chained;
+
+  public:
+    ListenerScope(ASTReader &Reader, std::unique_ptr<ASTReaderListener> L)
+        : Reader(Reader), Chained(false) {
+      auto Old = Reader.takeListener();
+      if (Old) {
+        Chained = true;
+        L = llvm::make_unique<ChainedASTReaderListener>(std::move(L),
+                                                        std::move(Old));
+      }
+      Reader.setListener(std::move(L));
+    }
+    ~ListenerScope() {
+      auto New = Reader.takeListener();
+      if (Chained)
+        Reader.setListener(static_cast<ChainedASTReaderListener *>(New.get())
+                               ->takeSecond());
+    }
+  };
 
   /// \brief Set the AST deserialization listener.
   void setDeserializationListener(ASTDeserializationListener *Listener,
@@ -1452,6 +1491,7 @@ public:
   /// the AST file, without actually loading the AST file.
   static std::string getOriginalSourceFile(const std::string &ASTFileName,
                                            FileManager &FileMgr,
+                                           const ModuleProvider &MP,
                                            DiagnosticsEngine &Diags);
 
   /// \brief Read the control block for the named AST file.
@@ -1459,12 +1499,14 @@ public:
   /// \returns true if an error occurred, false otherwise.
   static bool readASTFileControlBlock(StringRef Filename,
                                       FileManager &FileMgr,
+                                      const ModuleProvider &MP,
                                       ASTReaderListener &Listener);
 
   /// \brief Determine whether the given AST file is acceptable to load into a
   /// translation unit with the given language and target options.
   static bool isAcceptableASTFile(StringRef Filename,
                                   FileManager &FileMgr,
+                                  const ModuleProvider &MP,
                                   const LangOptions &LangOpts,
                                   const TargetOptions &TargetOpts,
                                   const PreprocessorOptions &PPOpts,
@@ -1786,6 +1828,9 @@ public:
 
   void ReadDynamicClasses(SmallVectorImpl<CXXRecordDecl *> &Decls) override;
 
+  void ReadUnusedLocalTypedefNameCandidates(
+      llvm::SmallSetVector<const TypedefNameDecl *, 4> &Decls) override;
+
   void ReadLocallyScopedExternCDecls(
                                   SmallVectorImpl<NamedDecl *> &Decls) override;
 
@@ -1887,6 +1932,11 @@ public:
   ///
   /// Note: overrides method in ExternalASTSource
   Module *getModule(unsigned ID) override;
+
+  /// \brief Return a descriptor for the corresponding module.
+  llvm::Optional<ASTSourceDescriptor> getSourceDescriptor(unsigned ID) override;
+  /// \brief Return a descriptor for the module.
+  ASTSourceDescriptor getSourceDescriptor(const Module &M) override;
 
   /// \brief Retrieve a selector from the given module with its local ID
   /// number.
@@ -1990,6 +2040,9 @@ public:
 
   // \brief Read a string
   static std::string ReadString(const RecordData &Record, unsigned &Idx);
+
+  // \brief Read a path
+  std::string ReadPath(ModuleFile &F, const RecordData &Record, unsigned &Idx);
 
   /// \brief Read a version tuple.
   static VersionTuple ReadVersionTuple(const RecordData &Record, unsigned &Idx);

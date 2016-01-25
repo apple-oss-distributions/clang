@@ -241,12 +241,23 @@ public:
   /// Complain if this tool chain doesn't support Objective-C ARC.
   virtual void CheckObjCARC() const {}
 
+  /// Complain if this tool chain doesn't support Bitcode build flow.
+  virtual void CheckBitcodeSupport() const {}
+
   /// UseDwarfDebugFlags - Embed the compile options to clang into the Dwarf
   /// compile unit information.
   virtual bool UseDwarfDebugFlags() const { return false; }
 
   /// UseSjLjExceptions - Does this tool chain use SjLj exceptions.
-  virtual bool UseSjLjExceptions() const { return false; }
+  virtual bool UseSjLjExceptions(const llvm::opt::ArgList &Args) const {
+    return false;
+  }
+
+  /// getThreadModel() - Which thread model does this target use?
+  virtual std::string getThreadModel() const { return "posix"; }
+
+  /// isThreadModelSupported() - Does this target support a thread model?
+  virtual bool isThreadModelSupported(const StringRef Model) const;
 
   /// ComputeLLVMTriple - Return the LLVM target triple to use, after taking
   /// command line arguments into account.

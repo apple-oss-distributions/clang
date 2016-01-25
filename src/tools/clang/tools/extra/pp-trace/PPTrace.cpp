@@ -51,6 +51,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Driver/Options.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -109,7 +110,8 @@ public:
   PPTraceConsumer(SmallSet<std::string, 4> &Ignore,
                   std::vector<CallbackCall> &CallbackCalls, Preprocessor &PP) {
     // PP takes ownership.
-    PP.addPPCallbacks(new PPCallbacksTracker(Ignore, CallbackCalls, PP));
+    PP.addPPCallbacks(llvm::make_unique<PPCallbacksTracker>(Ignore,
+                                                            CallbackCalls, PP));
   }
 };
 
@@ -199,7 +201,8 @@ int main(int Argc, const char **Argv) {
   std::vector<CallbackCall> CallbackCalls;
 
   // Create the tool and run the compilation.
-  ClangTool Tool(*Compilations, SourcePaths);
+  ClangTool Tool(*Compilations, SourcePaths,
+                 SharedModuleProvider::Create<LLVMModuleProvider>());
   PPTraceFrontendActionFactory Factory(Ignore, CallbackCalls);
   int HadErrors = Tool.run(&Factory);
 
@@ -212,12 +215,11 @@ int main(int Argc, const char **Argv) {
     HadErrors = outputPPTrace(CallbackCalls, llvm::outs());
   } else {
     // Set up output file.
-    std::string Error;
-    llvm::tool_output_file Out(OutputFileName.c_str(), Error,
-                               llvm::sys::fs::F_Text);
-    if (!Error.empty()) {
+    std::error_code EC;
+    llvm::tool_output_file Out(OutputFileName, EC, llvm::sys::fs::F_Text);
+    if (EC) {
       llvm::errs() << "pp-trace: error creating " << OutputFileName << ":"
-                   << Error << "\n";
+                   << EC.message() << "\n";
       return 1;
     }
 

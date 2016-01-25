@@ -21,3 +21,6 @@ CompileCommonOpts := $(filter-out -Wno-long-long,$(CompileCommonOpts))
 ifdef LLVM_VERSION_INFO
 CompileCommonOpts += -DLLVM_VERSION_INFO='"$(LLVM_VERSION_INFO)"'
 endif
+ifdef CLANG_VENDOR
+CompileCommonOpts += -DCLANG_VENDOR='"$(CLANG_VENDOR)"'
+endif

@@ -272,6 +272,13 @@ struct is_power2 {
 inline cst_pred_ty<is_power2> m_Power2() { return cst_pred_ty<is_power2>(); }
 inline api_pred_ty<is_power2> m_Power2(const APInt *&V) { return V; }
 
+struct is_maxsignedvalue {
+  bool isValue(const APInt &C) { return C.isMaxSignedValue(); }
+};
+
+inline cst_pred_ty<is_maxsignedvalue> m_MaxSignedValue() { return cst_pred_ty<is_maxsignedvalue>(); }
+inline api_pred_ty<is_maxsignedvalue> m_MaxSignedValue(const APInt *&V) { return V; }
+
 template <typename Class> struct bind_ty {
   Class *&VR;
   bind_ty(Class *&V) : VR(V) {}
@@ -348,6 +355,29 @@ struct bind_const_intval_ty {
     return false;
   }
 };
+
+/// \brief Match a specified integer value or vector of all elements of that
+// value.
+struct specific_intval {
+  uint64_t Val;
+  specific_intval(uint64_t V) : Val(V) {}
+
+  template <typename ITy> bool match(ITy *V) {
+    const auto *CI = dyn_cast<ConstantInt>(V);
+    if (!CI && V->getType()->isVectorTy())
+      if (const auto *C = dyn_cast<Constant>(V))
+        CI = dyn_cast_or_null<ConstantInt>(C->getSplatValue());
+
+    if (CI && CI->getBitWidth() <= 64)
+      return CI->getZExtValue() == Val;
+
+    return false;
+  }
+};
+
+/// \brief Match a specific integer value or vector with all elements equal to
+/// the value.
+inline specific_intval m_SpecificInt(uint64_t V) { return specific_intval(V); }
 
 /// \brief Match a ConstantInt and bind to its value.  This does not match
 /// ConstantInts wider than 64-bits.
@@ -1179,6 +1209,18 @@ m_Intrinsic(const T0 &Op0, const T1 &Op1, const T2 &Op2, const T3 &Op3) {
 template <typename Opnd0>
 inline typename m_Intrinsic_Ty<Opnd0>::Ty m_BSwap(const Opnd0 &Op0) {
   return m_Intrinsic<Intrinsic::bswap>(Op0);
+}
+
+template <typename Opnd0, typename Opnd1>
+inline typename m_Intrinsic_Ty<Opnd0, Opnd1>::Ty m_FMin(const Opnd0 &Op0,
+                                                        const Opnd1 &Op1) {
+  return m_Intrinsic<Intrinsic::minnum>(Op0, Op1);
+}
+
+template <typename Opnd0, typename Opnd1>
+inline typename m_Intrinsic_Ty<Opnd0, Opnd1>::Ty m_FMax(const Opnd0 &Op0,
+                                                        const Opnd1 &Op1) {
+  return m_Intrinsic<Intrinsic::maxnum>(Op0, Op1);
 }
 
 } // end namespace PatternMatch

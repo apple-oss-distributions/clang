@@ -16,6 +16,7 @@ using namespace arcmt;
 
 bool CheckAction::BeginInvocation(CompilerInstance &CI) {
   if (arcmt::checkForManualIssues(CI.getInvocation(), getCurrentInput(),
+                                  CI.getSharedModuleProvider(),
                                   CI.getDiagnostics().getClient()))
     return false; // errors, stop the action.
 
@@ -29,6 +30,7 @@ CheckAction::CheckAction(FrontendAction *WrappedAction)
 
 bool ModifyAction::BeginInvocation(CompilerInstance &CI) {
   return !arcmt::applyTransformations(CI.getInvocation(), getCurrentInput(),
+                                      CI.getSharedModuleProvider(),
                                       CI.getDiagnostics().getClient());
 }
 
@@ -38,6 +40,7 @@ ModifyAction::ModifyAction(FrontendAction *WrappedAction)
 bool MigrateAction::BeginInvocation(CompilerInstance &CI) {
   if (arcmt::migrateWithTemporaryFiles(CI.getInvocation(),
                                        getCurrentInput(),
+                                       CI.getSharedModuleProvider(),
                                        CI.getDiagnostics().getClient(),
                                        MigrateDir,
                                        EmitPremigrationARCErros,

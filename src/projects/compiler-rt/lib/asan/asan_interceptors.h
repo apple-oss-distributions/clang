@@ -15,7 +15,7 @@
 #define ASAN_INTERCEPTORS_H
 
 #include "asan_internal.h"
-#include "sanitizer_common/sanitizer_interception.h"
+#include "interception/interception.h"
 #include "sanitizer_common/sanitizer_platform_interceptors.h"
 
 // Use macro to describe if specific function should be
@@ -26,7 +26,6 @@
 # define ASAN_INTERCEPT_STRDUP 1
 # define ASAN_INTERCEPT_INDEX 1
 # define ASAN_INTERCEPT_PTHREAD_CREATE 1
-# define ASAN_INTERCEPT_MLOCKX 1
 # define ASAN_INTERCEPT_FORK 1
 #else
 # define ASAN_INTERCEPT_ATOLL_AND_STRTOLL 0
@@ -34,7 +33,6 @@
 # define ASAN_INTERCEPT_STRDUP 0
 # define ASAN_INTERCEPT_INDEX 0
 # define ASAN_INTERCEPT_PTHREAD_CREATE 0
-# define ASAN_INTERCEPT_MLOCKX 0
 # define ASAN_INTERCEPT_FORK 0
 #endif
 

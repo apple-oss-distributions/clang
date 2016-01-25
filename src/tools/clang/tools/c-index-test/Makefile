@@ -28,8 +28,9 @@ LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader support mc option
 # when -static is given to linker on cygming.
 USEDLIBS = clang.a \
 	   clangIndex.a clangFormat.a clangRewrite.a \
-	   clangFrontend.a clangDriver.a \
+	   clangFrontend.a clangCodeGen.a clangIndex.a clangDriver.a \
 	   clangTooling.a \
+	   clangToolingCore.a \
 	   clangSerialization.a clangParse.a clangSema.a \
 	   clangAnalysis.a clangEdit.a clangAST.a clangLex.a \
 	   clangAPINotes.a clangBasic.a

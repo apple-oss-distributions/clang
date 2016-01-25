@@ -76,7 +76,8 @@ PrintedStmtMatches(StringRef Code, const std::vector<std::string> &Args,
   std::unique_ptr<FrontendActionFactory> Factory(
       newFrontendActionFactory(&Finder));
 
-  if (!runToolOnCodeWithArgs(Factory->create(), Code, Args))
+  if (!runToolOnCodeWithArgs(
+      Factory->create(), Code, Args))
     return testing::AssertionFailure()
       << "Parsing error in \"" << Code.str() << "\"";
 

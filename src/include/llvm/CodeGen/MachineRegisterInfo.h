@@ -52,6 +52,9 @@ private:
   /// accurate when after this flag is cleared.
   bool TracksLiveness;
 
+  /// True if subregister liveness is tracked.
+  bool TracksSubRegLiveness;
+
   /// VRegInfo - Information we keep for each virtual register.
   ///
   /// Each element in this list contains the register class of the vreg and the
@@ -70,7 +73,7 @@ private:
 
   /// PhysRegUseDefLists - This is an array of the head of the use/def list for
   /// physical registers.
-  MachineOperand **PhysRegUseDefLists;
+  std::vector<MachineOperand *> PhysRegUseDefLists;
 
   /// getRegUseDefListHead - Return the head pointer for the register use/def
   /// list for the specified virtual or physical register.
@@ -124,7 +127,6 @@ private:
   void operator=(const MachineRegisterInfo&) LLVM_DELETED_FUNCTION;
 public:
   explicit MachineRegisterInfo(const MachineFunction *MF);
-  ~MachineRegisterInfo();
 
   const TargetRegisterInfo *getTargetRegisterInfo() const {
     return MF->getSubtarget().getRegisterInfo();
@@ -179,6 +181,12 @@ public:
   /// This should be called by late passes that invalidate the liveness
   /// information.
   void invalidateLiveness() { TracksLiveness = false; }
+
+  bool tracksSubRegLiveness() const { return TracksSubRegLiveness; }
+
+  void enableSubRegLiveness(bool Enable = true) {
+    TracksSubRegLiveness = Enable;
+  }
 
   //===--------------------------------------------------------------------===//
   // Register Info
@@ -585,7 +593,7 @@ public:
   /// virtual register, for example after removing instructions or splitting
   /// the live range.
   ///
-  bool recomputeRegClass(unsigned Reg, const TargetMachine&);
+  bool recomputeRegClass(unsigned Reg);
 
   /// createVirtualRegister - Create and return a new virtual register in the
   /// function with the specified register class.
@@ -768,6 +776,10 @@ public:
   void EmitLiveInCopies(MachineBasicBlock *EntryMBB,
                         const TargetRegisterInfo &TRI,
                         const TargetInstrInfo &TII);
+
+  /// Returns a mask covering all bits that can appear in lane masks of
+  /// subregisters of the virtual register @p Reg.
+  unsigned getMaxLaneMaskForVReg(unsigned Reg) const;
 
   /// defusechain_iterator - This class provides iterator support for machine
   /// operands in the function that use or define a specific register.  If

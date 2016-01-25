@@ -140,6 +140,18 @@ enum {
   FCMLEz,
   FCMLTz,
 
+  // Vector across-lanes addition
+  // Only the lower result lane is defined.
+  SADDV,
+  UADDV,
+
+  // Vector across-lanes min/max
+  // Only the lower result lane is defined.
+  SMINV,
+  UMINV,
+  SMAXV,
+  UMAXV,
+
   // Vector bitwise negation
   NOT,
 
@@ -161,6 +173,16 @@ enum {
   // {s|u}int to FP within a FP register.
   SITOF,
   UITOF,
+
+  /// Natural vector cast. ISD::BITCAST is not natural in the big-endian
+  /// world w.r.t vectors; which causes additional REV instructions to be
+  /// generated to compensate for the byte-swapping. But sometimes we do
+  /// need to re-interpret the data in SIMD vector registers in big-endian
+  /// mode without emitting such REV instructions.
+  NVCAST,
+
+  SMULL,
+  UMULL,
 
   // NEON Load/Store with post-increment base updates
   LD2post = ISD::FIRST_TARGET_MEMORY_OPCODE,
@@ -197,10 +219,10 @@ class AArch64TargetLowering : public TargetLowering {
   bool RequireStrictAlign;
 
 public:
-  explicit AArch64TargetLowering(TargetMachine &TM);
+  explicit AArch64TargetLowering(const TargetMachine &TM,
+                                 const AArch64Subtarget &STI);
 
-  /// Selects the correct CCAssignFn for a the given CallingConvention
-  /// value.
+  /// Selects the correct CCAssignFn for a given CallingConvention value.
   CCAssignFn *CCAssignFnForCall(CallingConv::ID CC, bool IsVarArg) const;
 
   /// computeKnownBitsForTargetNode - Determine which of the bits specified in
@@ -213,7 +235,7 @@ public:
   MVT getScalarShiftAmountTy(EVT LHSTy) const override;
 
   /// allowsMisalignedMemoryAccesses - Returns true if the target allows
-  /// unaligned memory accesses. of the specified type.
+  /// unaligned memory accesses of the specified type.
   bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AddrSpace = 0,
                                       unsigned Align = 1,
                                       bool *Fast = nullptr) const override {
@@ -234,10 +256,6 @@ public:
 
   /// getFunctionAlignment - Return the Log2 alignment of this function.
   unsigned getFunctionAlignment(const Function *F) const;
-
-  /// getMaximalGlobalOffset - Returns the maximal possible offset which can
-  /// be used for loads / stores from the global.
-  unsigned getMaximalGlobalOffset() const override;
 
   /// Returns true if a cast between SrcAS and DestAS is a noop.
   bool isNoopAddrSpaceCast(unsigned SrcAS, unsigned DestAS) const override {
@@ -318,18 +336,23 @@ public:
   bool shouldConvertConstantLoadToIntImm(const APInt &Imm,
                                          Type *Ty) const override;
 
+  bool hasLoadLinkedStoreConditional() const override;
   Value *emitLoadLinked(IRBuilder<> &Builder, Value *Addr,
                         AtomicOrdering Ord) const override;
   Value *emitStoreConditional(IRBuilder<> &Builder, Value *Val,
                               Value *Addr, AtomicOrdering Ord) const override;
 
-  bool shouldExpandAtomicInIR(Instruction *Inst) const override;
+  bool shouldExpandAtomicLoadInIR(LoadInst *LI) const override;
+  bool shouldExpandAtomicStoreInIR(StoreInst *SI) const override;
+  bool shouldExpandAtomicRMWInIR(AtomicRMWInst *AI) const override;
 
   bool useLoadStackGuardNode() const override;
   TargetLoweringBase::LegalizeTypeAction
   getPreferredVectorAction(EVT VT) const override;
 
 private:
+  bool isExtFreeImpl(const Instruction *Ext) const override;
+
   /// Subtarget - Keep a pointer to the AArch64Subtarget around so that we can
   /// make the right decision when generating code for different targets.
   const AArch64Subtarget *Subtarget;
@@ -337,6 +360,10 @@ private:
   void addTypeForNEON(EVT VT, EVT PromotedBitwiseVT);
   void addDRTypeForNEON(MVT VT);
   void addQRTypeForNEON(MVT VT);
+
+  bool supportSwiftError() const override {
+    return true;
+  }
 
   SDValue
   LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
@@ -428,6 +455,7 @@ private:
 
   SDValue BuildSDIVPow2(SDNode *N, const APInt &Divisor, SelectionDAG &DAG,
                         std::vector<SDNode *> *Created) const override;
+  bool combineRepeatedFPDivisors(unsigned NumUsers) const override;
 
   ConstraintType
   getConstraintType(const std::string &Constraint) const override;
@@ -440,7 +468,8 @@ private:
                                  const char *constraint) const override;
 
   std::pair<unsigned, const TargetRegisterClass *>
-  getRegForInlineAsmConstraint(const std::string &Constraint,
+  getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
+                               const std::string &Constraint,
                                MVT VT) const override;
   void LowerAsmOperandForConstraint(SDValue Op, std::string &Constraint,
                                     std::vector<SDValue> &Ops,
@@ -460,6 +489,10 @@ private:
 
   void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
                           SelectionDAG &DAG) const override;
+
+  bool functionArgumentNeedsConsecutiveRegisters(Type *Ty,
+                                                 CallingConv::ID CallConv,
+                                                 bool isVarArg) const override;
 };
 
 namespace AArch64 {

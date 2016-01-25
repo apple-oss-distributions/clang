@@ -154,24 +154,26 @@ void llvm::CloneFunctionInto(Function *NewFunc, const Function *OldFunc,
                        TypeMapper, Materializer);
 }
 
-// Find the MDNode which corresponds to the DISubprogram data that described F.
-static MDNode* FindSubprogram(const Function *F, DebugInfoFinder &Finder) {
-  for (DISubprogram Subprogram : Finder.subprograms()) {
-    if (Subprogram.describes(F)) return Subprogram;
+// Find the MDNode which corresponds to the subprogram data that described F.
+static DISubprogram *FindSubprogram(const Function *F,
+                                    DebugInfoFinder &Finder) {
+  for (DISubprogram *Subprogram : Finder.subprograms()) {
+    if (Subprogram->describes(F))
+      return Subprogram;
   }
   return nullptr;
 }
 
 // Add an operand to an existing MDNode. The new operand will be added at the
 // back of the operand list.
-static void AddOperand(MDNode *Node, Value *Operand) {
-  SmallVector<Value*, 16> Operands;
-  for (unsigned i = 0; i < Node->getNumOperands(); i++) {
-    Operands.push_back(Node->getOperand(i));
-  }
-  Operands.push_back(Operand);
-  MDNode *NewNode = MDNode::get(Node->getContext(), Operands);
-  Node->replaceAllUsesWith(NewNode);
+static void AddOperand(DICompileUnit *CU, DISubprogramArray SPs,
+                       Metadata *NewSP) {
+  SmallVector<Metadata *, 16> NewSPs;
+  NewSPs.reserve(SPs.size() + 1);
+  for (auto *SP : SPs)
+    NewSPs.push_back(SP);
+  NewSPs.push_back(NewSP);
+  CU->replaceSubprograms(MDTuple::get(CU->getContext(), NewSPs));
 }
 
 // Clone the module-level debug info associated with OldFunc. The cloned data
@@ -181,22 +183,23 @@ static void CloneDebugInfoMetadata(Function *NewFunc, const Function *OldFunc,
   DebugInfoFinder Finder;
   Finder.processModule(*OldFunc->getParent());
 
-  const MDNode *OldSubprogramMDNode = FindSubprogram(OldFunc, Finder);
+  const DISubprogram *OldSubprogramMDNode = FindSubprogram(OldFunc, Finder);
   if (!OldSubprogramMDNode) return;
 
   // Ensure that OldFunc appears in the map.
   // (if it's already there it must point to NewFunc anyway)
   VMap[OldFunc] = NewFunc;
-  DISubprogram NewSubprogram(MapValue(OldSubprogramMDNode, VMap));
+  auto *NewSubprogram =
+      cast<DISubprogram>(MapMetadata(OldSubprogramMDNode, VMap));
 
-  for (DICompileUnit CU : Finder.compile_units()) {
-    DIArray Subprograms(CU.getSubprograms());
-
+  for (auto *CU : Finder.compile_units()) {
+    auto Subprograms = CU->getSubprograms();
     // If the compile unit's function list contains the old function, it should
     // also contain the new one.
-    for (unsigned i = 0; i < Subprograms.getNumElements(); i++) {
-      if ((MDNode*)Subprograms.getElement(i) == OldSubprogramMDNode) {
-        AddOperand(Subprograms, NewSubprogram);
+    for (auto *SP : Subprograms) {
+      if (SP == OldSubprogramMDNode) {
+        AddOperand(CU, Subprograms, NewSubprogram);
+        break;
       }
     }
   }
@@ -259,17 +262,15 @@ namespace {
     bool ModuleLevelChanges;
     const char *NameSuffix;
     ClonedCodeInfo *CodeInfo;
-    const DataLayout *DL;
   public:
     PruningFunctionCloner(Function *newFunc, const Function *oldFunc,
                           ValueToValueMapTy &valueMap,
                           bool moduleLevelChanges,
                           const char *nameSuffix, 
-                          ClonedCodeInfo *codeInfo,
-                          const DataLayout *DL)
+                          ClonedCodeInfo *codeInfo)
     : NewFunc(newFunc), OldFunc(oldFunc),
       VMap(valueMap), ModuleLevelChanges(moduleLevelChanges),
-      NameSuffix(nameSuffix), CodeInfo(codeInfo), DL(DL) {
+      NameSuffix(nameSuffix), CodeInfo(codeInfo) {
     }
 
     /// CloneBlock - The specified block is found to be reachable, clone it and
@@ -326,7 +327,8 @@ void PruningFunctionCloner::CloneBlock(const BasicBlock *BB,
       // If we can simplify this instruction to some other value, simply add
       // a mapping to that value rather than inserting a new instruction into
       // the basic block.
-      if (Value *V = SimplifyInstruction(NewInst, DL)) {
+      if (Value *V =
+              SimplifyInstruction(NewInst, BB->getModule()->getDataLayout())) {
         // On the off-chance that this simplifies to an instruction in the old
         // function, map it back into the new function.
         if (Value *MappedV = VMap.lookup(V))
@@ -422,7 +424,6 @@ void llvm::CloneAndPruneFunctionInto(Function *NewFunc, const Function *OldFunc,
                                      SmallVectorImpl<ReturnInst*> &Returns,
                                      const char *NameSuffix, 
                                      ClonedCodeInfo *CodeInfo,
-                                     const DataLayout *DL,
                                      Instruction *TheCall) {
   assert(NameSuffix && "NameSuffix cannot be null!");
   
@@ -433,7 +434,7 @@ void llvm::CloneAndPruneFunctionInto(Function *NewFunc, const Function *OldFunc,
 #endif
 
   PruningFunctionCloner PFC(NewFunc, OldFunc, VMap, ModuleLevelChanges,
-                            NameSuffix, CodeInfo, DL);
+                            NameSuffix, CodeInfo);
 
   // Clone the entry block, and anything recursively reachable from it.
   std::vector<const BasicBlock*> CloneWorklist;
@@ -563,7 +564,7 @@ void llvm::CloneAndPruneFunctionInto(Function *NewFunc, const Function *OldFunc,
   // node).
   for (unsigned Idx = 0, Size = PHIToResolve.size(); Idx != Size; ++Idx)
     if (PHINode *PN = dyn_cast<PHINode>(VMap[PHIToResolve[Idx]]))
-      recursivelySimplifyInstruction(PN, DL);
+      recursivelySimplifyInstruction(PN);
 
   // Now that the inlined function body has been fully constructed, go through
   // and zap unconditional fall-through branches.  This happen all the time when

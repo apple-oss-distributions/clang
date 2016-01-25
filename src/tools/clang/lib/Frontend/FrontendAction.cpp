@@ -190,8 +190,8 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 
     IntrusiveRefCntPtr<DiagnosticsEngine> Diags(&CI.getDiagnostics());
 
-    std::unique_ptr<ASTUnit> AST =
-        ASTUnit::LoadFromASTFile(InputFile, Diags, CI.getFileSystemOpts());
+    std::unique_ptr<ASTUnit> AST = ASTUnit::LoadFromASTFile(
+        InputFile, CI.getSharedModuleProvider(), Diags, CI.getFileSystemOpts());
 
     if (!AST)
       goto failure;
@@ -272,6 +272,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
            Dir != DirEnd && !EC; Dir.increment(EC)) {
         // Check whether this is an acceptable AST file.
         if (ASTReader::isAcceptableASTFile(Dir->path(), FileMgr,
+                                           CI.getModuleProvider(),
                                            CI.getLangOpts(),
                                            CI.getTargetOpts(),
                                            CI.getPreprocessorOpts(),
@@ -289,8 +290,10 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     }
   }
 
-  // Set up the preprocessor.
-  CI.createPreprocessor(getTranslationUnitKind());
+  // Set up the preprocessor if needed. When parsing model files the
+  // preprocessor of the original source is reused.
+  if (!isModelParsingAction())
+    CI.createPreprocessor(getTranslationUnitKind());
 
   // Inform the diagnostic client we are processing a source file.
   CI.getDiagnosticClient().BeginSourceFile(CI.getLangOpts(),
@@ -309,15 +312,19 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   // Create the AST context and consumer unless this is a preprocessor only
   // action.
   if (!usesPreprocessorOnly()) {
-    CI.createASTContext();
+    // Parsing a model file should reuse the existing ASTContext.
+    if (!isModelParsingAction())
+      CI.createASTContext();
 
     std::unique_ptr<ASTConsumer> Consumer =
         CreateWrappedASTConsumer(CI, InputFile);
     if (!Consumer)
       goto failure;
 
-    CI.getASTContext().setASTMutationListener(Consumer->GetASTMutationListener());
-    
+    // FIXME: should not overwrite ASTMutationListener when parsing model files?
+    if (!isModelParsingAction())
+      CI.getASTContext().setASTMutationListener(Consumer->GetASTMutationListener());
+
     if (!CI.getPreprocessorOpts().ChainedIncludes.empty()) {
       // Convert headers to PCH and chain them.
       IntrusiveRefCntPtr<ExternalSemaSource> source, FinalReader;
@@ -379,6 +386,20 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
            "doesn't support modules");
   }
 
+  // If we were asked to load any module map files, do so now.
+  for (const auto &Filename : CI.getFrontendOpts().ModuleMapFiles) {
+    if (auto *File = CI.getFileManager().getFile(Filename))
+      CI.getPreprocessor().getHeaderSearchInfo().loadModuleMapFile(
+          File, /*IsSystem*/false);
+    else
+      CI.getDiagnostics().Report(diag::err_module_map_not_found) << Filename;
+  }
+
+  // If we were asked to load any module files, do so now.
+  for (const auto &ModuleFile : CI.getFrontendOpts().ModuleFiles)
+    if (!CI.loadModuleFile(ModuleFile))
+      goto failure;
+
   // If there is a layout overrides file, attach an external AST source that
   // provides the layouts from that file.
   if (!CI.getFrontendOpts().OverrideRecordLayoutsFile.empty() && 
@@ -423,7 +444,7 @@ bool FrontendAction::Execute() {
   if (CI.shouldBuildGlobalModuleIndex() && CI.hasFileManager() &&
       CI.hasPreprocessor()) {
     GlobalModuleIndex::writeIndex(
-      CI.getFileManager(),
+      CI.getFileManager(), CI.getModuleProvider(),
       CI.getPreprocessor().getHeaderSearchInfo().getModuleCachePath());
   }
 
@@ -448,16 +469,12 @@ void FrontendAction::EndSourceFile() {
   // FIXME: There is more per-file stuff we could just drop here?
   bool DisableFree = CI.getFrontendOpts().DisableFree;
   if (DisableFree) {
-    if (!isCurrentFileAST()) {
-      CI.resetAndLeakSema();
-      CI.resetAndLeakASTContext();
-    }
+    CI.resetAndLeakSema();
+    CI.resetAndLeakASTContext();
     BuryPointer(CI.takeASTConsumer().get());
   } else {
-    if (!isCurrentFileAST()) {
-      CI.setSema(nullptr);
-      CI.setASTContext(nullptr);
-    }
+    CI.setSema(nullptr);
+    CI.setASTContext(nullptr);
     CI.setASTConsumer(nullptr);
   }
 
@@ -474,13 +491,16 @@ void FrontendAction::EndSourceFile() {
   // FrontendAction.
   CI.clearOutputFiles(/*EraseFiles=*/shouldEraseOutputFiles());
 
-  // FIXME: Only do this if DisableFree is set.
   if (isCurrentFileAST()) {
-    CI.resetAndLeakSema();
-    CI.resetAndLeakASTContext();
-    CI.resetAndLeakPreprocessor();
-    CI.resetAndLeakSourceManager();
-    CI.resetAndLeakFileManager();
+    if (DisableFree) {
+      CI.resetAndLeakPreprocessor();
+      CI.resetAndLeakSourceManager();
+      CI.resetAndLeakFileManager();
+    } else {
+      CI.setPreprocessor(nullptr);
+      CI.setSourceManager(nullptr);
+      CI.setFileManager(nullptr);
+    }
   }
 
   setCompilerInstance(nullptr);

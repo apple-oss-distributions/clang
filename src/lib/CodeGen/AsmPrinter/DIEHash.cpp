@@ -13,11 +13,11 @@
 
 #include "ByteStreamer.h"
 #include "DIEHash.h"
-#include "DIE.h"
 #include "DwarfDebug.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include "llvm/CodeGen/DIE.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/Endian.h"
@@ -261,7 +261,7 @@ void DIEHash::hashDIEEntry(dwarf::Attribute Attribute, dwarf::Tag Tag,
     return;
   }
 
-  // otherwise, b) use the letter 'T' as a the marker, ...
+  // otherwise, b) use the letter 'T' as the marker, ...
   addULEB128('T');
 
   addULEB128(Attribute);
@@ -277,16 +277,20 @@ void DIEHash::hashDIEEntry(dwarf::Attribute Attribute, dwarf::Tag Tag,
 void DIEHash::hashBlockData(const SmallVectorImpl<DIEValue *> &Values) {
   for (SmallVectorImpl<DIEValue *>::const_iterator I = Values.begin(),
                                                    E = Values.end();
-       I != E; ++I)
-    Hash.update((uint64_t)cast<DIEInteger>(*I)->getValue());
+       I != E; ++I) {
+   if (auto *Label = dyn_cast<DIELabel>(*I))
+      Hash.update(Label->getValue()->getName());
+   else
+      Hash.update((uint64_t)cast<DIEInteger>(*I)->getValue());
+  }
 }
 
 // Hash the contents of a loclistptr class.
 void DIEHash::hashLocList(const DIELocList &LocList) {
   HashingByteStreamer Streamer(*this);
   DwarfDebug &DD = *AP->getDwarfDebug();
-  for (const auto &Entry :
-       DD.getDebugLocEntries()[LocList.getValue()].List)
+  const DebugLocStream &Locs = DD.getDebugLocs();
+  for (const auto &Entry : Locs.getEntries(Locs.getList(LocList.getValue())))
     DD.emitDebugLocEntry(Streamer, Entry);
 }
 
@@ -466,15 +470,15 @@ void DIEHash::computeHash(const DIE &Die) {
   for (auto &C : Die.getChildren()) {
     // 7.27 Step 7
     // If C is a nested type entry or a member function entry, ...
-    if (isType(C->getTag()) || C->getTag() == dwarf::DW_TAG_subprogram) {
-      StringRef Name = getDIEStringAttr(*C, dwarf::DW_AT_name);
+    if (isType(C.getTag()) || C.getTag() == dwarf::DW_TAG_subprogram) {
+      StringRef Name = getDIEStringAttr(C, dwarf::DW_AT_name);
       // ... and has a DW_AT_name attribute
       if (!Name.empty()) {
-        hashNestedType(*C, Name);
+        hashNestedType(C, Name);
         continue;
       }
     }
-    computeHash(*C);
+    computeHash(C);
   }
 
   // Following the last (or if there are no children), append a zero byte.

@@ -209,7 +209,7 @@ CXXRecordDecl::setBases(CXXBaseSpecifier const * const *Bases,
     // Now go through all virtual bases of this base and add them.
     for (const auto &VBase : BaseClassDecl->vbases()) {
       // Add this base if it's not already in the list.
-      if (SeenVBaseTypes.insert(C.getCanonicalType(VBase.getType()))) {
+      if (SeenVBaseTypes.insert(C.getCanonicalType(VBase.getType())).second) {
         VBases.push_back(&VBase);
 
         // C++11 [class.copy]p8:
@@ -225,7 +225,7 @@ CXXRecordDecl::setBases(CXXBaseSpecifier const * const *Bases,
 
     if (Base->isVirtual()) {
       // Add this base if it's not already in the list.
-      if (SeenVBaseTypes.insert(C.getCanonicalType(BaseType)))
+      if (SeenVBaseTypes.insert(C.getCanonicalType(BaseType)).second)
         VBases.push_back(Base);
 
       // C++0x [meta.unary.prop] is_empty:
@@ -1173,7 +1173,7 @@ static void CollectVisibleConversions(ASTContext &Context,
 
 /// getVisibleConversionFunctions - get all conversion functions visible
 /// in current class; including conversion function templates.
-std::pair<CXXRecordDecl::conversion_iterator,CXXRecordDecl::conversion_iterator>
+llvm::iterator_range<CXXRecordDecl::conversion_iterator>
 CXXRecordDecl::getVisibleConversionFunctions() {
   ASTContext &Ctx = getASTContext();
 
@@ -1189,7 +1189,7 @@ CXXRecordDecl::getVisibleConversionFunctions() {
       data().ComputedVisibleConversions = true;
     }
   }
-  return std::make_pair(Set->begin(), Set->end());
+  return llvm::make_range(Set->begin(), Set->end());
 }
 
 void CXXRecordDecl::removeConversion(const NamedDecl *ConvDecl) {
@@ -1693,12 +1693,12 @@ const Type *CXXCtorInitializer::getBaseClass() const {
 }
 
 SourceLocation CXXCtorInitializer::getSourceLocation() const {
-  if (isAnyMemberInitializer())
-    return getMemberLocation();
-
   if (isInClassMemberInitializer())
     return getAnyMember()->getLocation();
   
+  if (isAnyMemberInitializer())
+    return getMemberLocation();
+
   if (TypeSourceInfo *TSInfo = Initializee.get<TypeSourceInfo*>())
     return TSInfo->getTypeLoc().getLocalSourceRange().getBegin();
   
@@ -2001,6 +2001,16 @@ NamespaceDecl *NamespaceDecl::getMostRecentDeclImpl() {
 
 void NamespaceAliasDecl::anchor() { }
 
+NamespaceAliasDecl *NamespaceAliasDecl::getNextRedeclarationImpl() {
+  return getNextRedeclaration();
+}
+NamespaceAliasDecl *NamespaceAliasDecl::getPreviousDeclImpl() {
+  return getPreviousDecl();
+}
+NamespaceAliasDecl *NamespaceAliasDecl::getMostRecentDeclImpl() {
+  return getMostRecentDecl();
+}
+
 NamespaceAliasDecl *NamespaceAliasDecl::Create(ASTContext &C, DeclContext *DC,
                                                SourceLocation UsingLoc,
                                                SourceLocation AliasLoc,
@@ -2008,15 +2018,16 @@ NamespaceAliasDecl *NamespaceAliasDecl::Create(ASTContext &C, DeclContext *DC,
                                            NestedNameSpecifierLoc QualifierLoc,
                                                SourceLocation IdentLoc,
                                                NamedDecl *Namespace) {
+  // FIXME: Preserve the aliased namespace as written.
   if (NamespaceDecl *NS = dyn_cast_or_null<NamespaceDecl>(Namespace))
     Namespace = NS->getOriginalNamespace();
-  return new (C, DC) NamespaceAliasDecl(DC, UsingLoc, AliasLoc, Alias,
+  return new (C, DC) NamespaceAliasDecl(C, DC, UsingLoc, AliasLoc, Alias,
                                         QualifierLoc, IdentLoc, Namespace);
 }
 
 NamespaceAliasDecl *
 NamespaceAliasDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
-  return new (C, ID) NamespaceAliasDecl(nullptr, SourceLocation(),
+  return new (C, ID) NamespaceAliasDecl(C, nullptr, SourceLocation(),
                                         SourceLocation(), nullptr,
                                         NestedNameSpecifierLoc(),
                                         SourceLocation(), nullptr);

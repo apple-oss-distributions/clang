@@ -4,10 +4,10 @@ add_clang_library(clangTidyMiscModule
   ArgumentCommentCheck.cpp
   BoolPointerImplicitConversion.cpp
   MiscTidyModule.cpp
-  RedundantSmartptrGet.cpp
   SwappedArgumentsCheck.cpp
   UndelegatedConstructor.cpp
   UnusedRAII.cpp
+  UniqueptrResetRelease.cpp
   UseOverride.cpp
 
   LINK_LIBS

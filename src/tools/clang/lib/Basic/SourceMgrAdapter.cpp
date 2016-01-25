@@ -67,7 +67,7 @@ SourceLocation SourceMgrAdapter::mapLocation(const llvm::SourceMgr &llvmSrcMgr,
                                                  bufferName));
 
       // Add this memory buffer to the Clang source manager.
-      fileID = SrcMgr.createFileID(bufferCopy.release());
+      fileID = SrcMgr.createFileID(std::move(bufferCopy));
     }
 
     // Save the mapping.

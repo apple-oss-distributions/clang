@@ -27,6 +27,11 @@ static bool useCompactUnwind(const Triple &T) {
   if (T.getArch() == Triple::aarch64)
     return true;
 
+  // armv7k always has it.
+  if (T.getArchName().equals("thumbv7k") ||
+      T.getArchName().equals("armv7k"))
+    return true;
+
   // Use it on newer version of OS X.
   if (T.isMacOSX() && !T.isMacOSXVersionLT(10, 6))
     return true;
@@ -45,6 +50,9 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
 
   if (T.isOSDarwin() && T.getArch() == Triple::aarch64)
     SupportsCompactUnwindWithoutEHFrame = true;
+
+  if (T.isOSDarwin() && T.getArchName().equals("thumbv7k"))
+    OmitDwarfIfHaveCompactUnwind = true;
 
   PersonalityEncoding = dwarf::DW_EH_PE_indirect | dwarf::DW_EH_PE_pcrel
     | dwarf::DW_EH_PE_sdata4;
@@ -176,9 +184,11 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
                              SectionKind::getReadOnly());
 
     if (T.getArch() == Triple::x86_64 || T.getArch() == Triple::x86)
-      CompactUnwindDwarfEHFrameOnly = 0x04000000;
+      CompactUnwindDwarfEHFrameOnly = 0x04000000;  // UNWIND_X86_64_MODE_DWARF
     else if (T.getArch() == Triple::aarch64)
-      CompactUnwindDwarfEHFrameOnly = 0x03000000;
+      CompactUnwindDwarfEHFrameOnly = 0x03000000;  // UNWIND_ARM64_MODE_DWARF
+    else if (T.getArch() == Triple::arm || T.getArch() == Triple::thumb)
+      CompactUnwindDwarfEHFrameOnly = 0x04000000;  // UNWIND_ARM_MODE_DWARF
   }
 
   // Debug Information.
@@ -199,6 +209,11 @@ void MCObjectFileInfo::InitMachOMCObjectFileInfo(Triple T) {
     Ctx->getMachOSection("__DWARF", "__apple_types",
                          MachO::S_ATTR_DEBUG,
                          SectionKind::getMetadata());
+
+  DwarfAccelExternalTypesSection =
+      Ctx->getMachOSection("__DWARF", "__apple_exttypes",
+                           MachO::S_ATTR_DEBUG,
+                           SectionKind::getMetadata());
 
   DwarfAbbrevSection =
     Ctx->getMachOSection("__DWARF", "__debug_abbrev",
@@ -273,6 +288,12 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
   case Triple::mips64el:
     FDECFIEncoding = dwarf::DW_EH_PE_sdata8;
     break;
+  case Triple::x86_64:
+    FDECFIEncoding = dwarf::DW_EH_PE_pcrel |
+                     ((CMModel == CodeModel::Large) ? dwarf::DW_EH_PE_sdata8
+                                                    : dwarf::DW_EH_PE_sdata4);
+
+    break;
   default:
     FDECFIEncoding = dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4;
     break;
@@ -338,6 +359,8 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
     break;
   case Triple::mips:
   case Triple::mipsel:
+  case Triple::mips64:
+  case Triple::mips64el:
     // MIPS uses indirect pointer to refer personality functions, so that the
     // eh_frame section can be read-only.  DW.ref.personality will be generated
     // for relocation.
@@ -399,7 +422,7 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
   // platform.
   EHSectionType = ELF::SHT_PROGBITS;
   EHSectionFlags = ELF::SHF_ALLOC;
-  if (T.getOS() == Triple::Solaris) {
+  if (T.isOSSolaris()) {
     if (T.getArch() == Triple::x86_64)
       EHSectionType = ELF::SHT_X86_64_UNWIND;
     else
@@ -408,83 +431,54 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
 
 
   // ELF
-  BSSSection =
-    Ctx->getELFSection(".bss", ELF::SHT_NOBITS,
-                       ELF::SHF_WRITE | ELF::SHF_ALLOC,
-                       SectionKind::getBSS());
+  BSSSection = Ctx->getELFSection(".bss", ELF::SHT_NOBITS,
+                                  ELF::SHF_WRITE | ELF::SHF_ALLOC);
 
-  TextSection =
-    Ctx->getELFSection(".text", ELF::SHT_PROGBITS,
-                       ELF::SHF_EXECINSTR |
-                       ELF::SHF_ALLOC,
-                       SectionKind::getText());
+  TextSection = Ctx->getELFSection(".text", ELF::SHT_PROGBITS,
+                                   ELF::SHF_EXECINSTR | ELF::SHF_ALLOC);
 
-  DataSection =
-    Ctx->getELFSection(".data", ELF::SHT_PROGBITS,
-                       ELF::SHF_WRITE |ELF::SHF_ALLOC,
-                       SectionKind::getDataRel());
+  DataSection = Ctx->getELFSection(".data", ELF::SHT_PROGBITS,
+                                   ELF::SHF_WRITE | ELF::SHF_ALLOC);
 
   ReadOnlySection =
-    Ctx->getELFSection(".rodata", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC,
-                       SectionKind::getReadOnly());
+      Ctx->getELFSection(".rodata", ELF::SHT_PROGBITS, ELF::SHF_ALLOC);
 
   TLSDataSection =
-    Ctx->getELFSection(".tdata", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC | ELF::SHF_TLS |
-                       ELF::SHF_WRITE,
-                       SectionKind::getThreadData());
+      Ctx->getELFSection(".tdata", ELF::SHT_PROGBITS,
+                         ELF::SHF_ALLOC | ELF::SHF_TLS | ELF::SHF_WRITE);
 
-  TLSBSSSection =
-    Ctx->getELFSection(".tbss", ELF::SHT_NOBITS,
-                       ELF::SHF_ALLOC | ELF::SHF_TLS |
-                       ELF::SHF_WRITE,
-                       SectionKind::getThreadBSS());
+  TLSBSSSection = Ctx->getELFSection(
+      ".tbss", ELF::SHT_NOBITS, ELF::SHF_ALLOC | ELF::SHF_TLS | ELF::SHF_WRITE);
 
-  DataRelSection =
-    Ctx->getELFSection(".data.rel", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_WRITE,
-                       SectionKind::getDataRel());
+  DataRelSection = Ctx->getELFSection(".data.rel", ELF::SHT_PROGBITS,
+                                      ELF::SHF_ALLOC | ELF::SHF_WRITE);
 
-  DataRelLocalSection =
-    Ctx->getELFSection(".data.rel.local", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_WRITE,
-                       SectionKind::getDataRelLocal());
+  DataRelLocalSection = Ctx->getELFSection(".data.rel.local", ELF::SHT_PROGBITS,
+                                           ELF::SHF_ALLOC | ELF::SHF_WRITE);
 
-  DataRelROSection =
-    Ctx->getELFSection(".data.rel.ro", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_WRITE,
-                       SectionKind::getReadOnlyWithRel());
+  DataRelROSection = Ctx->getELFSection(".data.rel.ro", ELF::SHT_PROGBITS,
+                                        ELF::SHF_ALLOC | ELF::SHF_WRITE);
 
-  DataRelROLocalSection =
-    Ctx->getELFSection(".data.rel.ro.local", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_WRITE,
-                       SectionKind::getReadOnlyWithRelLocal());
+  DataRelROLocalSection = Ctx->getELFSection(
+      ".data.rel.ro.local", ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_WRITE);
 
   MergeableConst4Section =
-    Ctx->getELFSection(".rodata.cst4", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_MERGE,
-                       SectionKind::getMergeableConst4());
+      Ctx->getELFSection(".rodata.cst4", ELF::SHT_PROGBITS,
+                         ELF::SHF_ALLOC | ELF::SHF_MERGE, 4, "");
 
   MergeableConst8Section =
-    Ctx->getELFSection(".rodata.cst8", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_MERGE,
-                       SectionKind::getMergeableConst8());
+      Ctx->getELFSection(".rodata.cst8", ELF::SHT_PROGBITS,
+                         ELF::SHF_ALLOC | ELF::SHF_MERGE, 8, "");
 
   MergeableConst16Section =
-    Ctx->getELFSection(".rodata.cst16", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_MERGE,
-                       SectionKind::getMergeableConst16());
+      Ctx->getELFSection(".rodata.cst16", ELF::SHT_PROGBITS,
+                         ELF::SHF_ALLOC | ELF::SHF_MERGE, 16, "");
 
-  StaticCtorSection =
-    Ctx->getELFSection(".ctors", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_WRITE,
-                       SectionKind::getDataRel());
+  StaticCtorSection = Ctx->getELFSection(".ctors", ELF::SHT_PROGBITS,
+                                         ELF::SHF_ALLOC | ELF::SHF_WRITE);
 
-  StaticDtorSection =
-    Ctx->getELFSection(".dtors", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC |ELF::SHF_WRITE,
-                       SectionKind::getDataRel());
+  StaticDtorSection = Ctx->getELFSection(".dtors", ELF::SHT_PROGBITS,
+                                         ELF::SHF_ALLOC | ELF::SHF_WRITE);
 
   // Exception Handling Sections.
 
@@ -492,112 +486,77 @@ void MCObjectFileInfo::InitELFMCObjectFileInfo(Triple T) {
   // it contains relocatable pointers.  In PIC mode, this is probably a big
   // runtime hit for C++ apps.  Either the contents of the LSDA need to be
   // adjusted or this should be a data section.
-  LSDASection =
-    Ctx->getELFSection(".gcc_except_table", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC,
-                       SectionKind::getReadOnly());
+  LSDASection = Ctx->getELFSection(".gcc_except_table", ELF::SHT_PROGBITS,
+                                   ELF::SHF_ALLOC);
 
   COFFDebugSymbolsSection = nullptr;
 
   // Debug Info Sections.
   DwarfAbbrevSection =
-    Ctx->getELFSection(".debug_abbrev", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
-  DwarfInfoSection =
-    Ctx->getELFSection(".debug_info", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
-  DwarfLineSection =
-    Ctx->getELFSection(".debug_line", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
-  DwarfFrameSection =
-    Ctx->getELFSection(".debug_frame", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_abbrev", ELF::SHT_PROGBITS, 0);
+  DwarfInfoSection = Ctx->getELFSection(".debug_info", ELF::SHT_PROGBITS, 0);
+  DwarfLineSection = Ctx->getELFSection(".debug_line", ELF::SHT_PROGBITS, 0);
+  DwarfFrameSection = Ctx->getELFSection(".debug_frame", ELF::SHT_PROGBITS, 0);
   DwarfPubNamesSection =
-    Ctx->getELFSection(".debug_pubnames", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_pubnames", ELF::SHT_PROGBITS, 0);
   DwarfPubTypesSection =
-    Ctx->getELFSection(".debug_pubtypes", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_pubtypes", ELF::SHT_PROGBITS, 0);
   DwarfGnuPubNamesSection =
-    Ctx->getELFSection(".debug_gnu_pubnames", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_gnu_pubnames", ELF::SHT_PROGBITS, 0);
   DwarfGnuPubTypesSection =
-    Ctx->getELFSection(".debug_gnu_pubtypes", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_gnu_pubtypes", ELF::SHT_PROGBITS, 0);
   DwarfStrSection =
-    Ctx->getELFSection(".debug_str", ELF::SHT_PROGBITS,
-                       ELF::SHF_MERGE | ELF::SHF_STRINGS,
-                       SectionKind::getMergeable1ByteCString());
-  DwarfLocSection =
-    Ctx->getELFSection(".debug_loc", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_str", ELF::SHT_PROGBITS,
+                         ELF::SHF_MERGE | ELF::SHF_STRINGS, 1, "");
+  DwarfLocSection = Ctx->getELFSection(".debug_loc", ELF::SHT_PROGBITS, 0);
   DwarfARangesSection =
-    Ctx->getELFSection(".debug_aranges", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_aranges", ELF::SHT_PROGBITS, 0);
   DwarfRangesSection =
-    Ctx->getELFSection(".debug_ranges", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_ranges", ELF::SHT_PROGBITS, 0);
   DwarfMacroInfoSection =
-    Ctx->getELFSection(".debug_macinfo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_macinfo", ELF::SHT_PROGBITS, 0);
 
   // DWARF5 Experimental Debug Info
 
   // Accelerator Tables
   DwarfAccelNamesSection =
-    Ctx->getELFSection(".apple_names", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".apple_names", ELF::SHT_PROGBITS, 0);
   DwarfAccelObjCSection =
-    Ctx->getELFSection(".apple_objc", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".apple_objc", ELF::SHT_PROGBITS, 0);
   DwarfAccelNamespaceSection =
-    Ctx->getELFSection(".apple_namespaces", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".apple_namespaces", ELF::SHT_PROGBITS, 0);
   DwarfAccelTypesSection =
-    Ctx->getELFSection(".apple_types", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".apple_types", ELF::SHT_PROGBITS, 0);
+  DwarfAccelExternalTypesSection =
+      Ctx->getELFSection(".apple_exttypes", ELF::SHT_PROGBITS, 0);
 
   // Fission Sections
   DwarfInfoDWOSection =
-    Ctx->getELFSection(".debug_info.dwo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_info.dwo", ELF::SHT_PROGBITS, 0);
   DwarfTypesDWOSection =
-    Ctx->getELFSection(".debug_types.dwo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_types.dwo", ELF::SHT_PROGBITS, 0);
   DwarfAbbrevDWOSection =
-    Ctx->getELFSection(".debug_abbrev.dwo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_abbrev.dwo", ELF::SHT_PROGBITS, 0);
   DwarfStrDWOSection =
-    Ctx->getELFSection(".debug_str.dwo", ELF::SHT_PROGBITS,
-                       ELF::SHF_MERGE | ELF::SHF_STRINGS,
-                       SectionKind::getMergeable1ByteCString());
+      Ctx->getELFSection(".debug_str.dwo", ELF::SHT_PROGBITS,
+                         ELF::SHF_MERGE | ELF::SHF_STRINGS, 1, "");
   DwarfLineDWOSection =
-    Ctx->getELFSection(".debug_line.dwo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_line.dwo", ELF::SHT_PROGBITS, 0);
   DwarfLocDWOSection =
-    Ctx->getELFSection(".debug_loc.dwo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_loc.dwo", ELF::SHT_PROGBITS, 0);
   DwarfStrOffDWOSection =
-    Ctx->getELFSection(".debug_str_offsets.dwo", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
-  DwarfAddrSection =
-    Ctx->getELFSection(".debug_addr", ELF::SHT_PROGBITS, 0,
-                       SectionKind::getMetadata());
+      Ctx->getELFSection(".debug_str_offsets.dwo", ELF::SHT_PROGBITS, 0);
+  DwarfAddrSection = Ctx->getELFSection(".debug_addr", ELF::SHT_PROGBITS, 0);
 
   StackMapSection =
-    Ctx->getELFSection(".llvm_stackmaps", ELF::SHT_PROGBITS,
-                       ELF::SHF_ALLOC,
-                       SectionKind::getMetadata());
-
+      Ctx->getELFSection(".llvm_stackmaps", ELF::SHT_PROGBITS, ELF::SHF_ALLOC);
 }
 
 
 void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
   bool IsWoA = T.getArch() == Triple::arm || T.getArch() == Triple::thumb;
 
-  // The object file format cannot represent common symbols with explicit
-  // alignments.
-  CommDirectiveSupportsAlignment = false;
+  CommDirectiveSupportsAlignment = true;
 
   // COFF
   BSSSection =
@@ -781,6 +740,34 @@ void MCObjectFileInfo::InitCOFFMCObjectFileInfo(Triple T) {
                         COFF::IMAGE_SCN_MEM_READ,
                         SectionKind::getMetadata());
 
+  DwarfAccelNamesSection =
+      Ctx->getCOFFSection(".apple_names",
+                          COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getMetadata());
+  DwarfAccelNamespaceSection =
+      Ctx->getCOFFSection(".apple_namespaces",
+                          COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getMetadata());
+  DwarfAccelTypesSection =
+      Ctx->getCOFFSection(".apple_types",
+                          COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getMetadata());
+  DwarfAccelExternalTypesSection =
+      Ctx->getCOFFSection(".apple_exttypes",
+                          COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                          COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getMetadata());
+
+  DwarfAccelObjCSection =
+      Ctx->getCOFFSection(".apple_objc",
+                          COFF::IMAGE_SCN_MEM_DISCARDABLE |
+                          COFF::IMAGE_SCN_MEM_READ,
+                          SectionKind::getMetadata());
+
   DrectveSection =
     Ctx->getCOFFSection(".drectve",
                         COFF::IMAGE_SCN_LNK_INFO |
@@ -818,6 +805,7 @@ void MCObjectFileInfo::InitMCObjectFileInfo(StringRef T, Reloc::Model relocm,
   CommDirectiveSupportsAlignment = true;
   SupportsWeakOmittedEHFrame = true;
   SupportsCompactUnwindWithoutEHFrame = false;
+  OmitDwarfIfHaveCompactUnwind = false;
 
   PersonalityEncoding = LSDAEncoding = FDECFIEncoding = TTypeEncoding =
       dwarf::DW_EH_PE_absptr;
@@ -857,7 +845,7 @@ void MCObjectFileInfo::InitMCObjectFileInfo(StringRef T, Reloc::Model relocm,
 
 const MCSection *MCObjectFileInfo::getDwarfTypesSection(uint64_t Hash) const {
   return Ctx->getELFSection(".debug_types", ELF::SHT_PROGBITS, ELF::SHF_GROUP,
-                            SectionKind::getMetadata(), 0, utostr(Hash));
+                            0, utostr(Hash));
 }
 
 void MCObjectFileInfo::InitEHFrameSection() {
@@ -871,9 +859,7 @@ void MCObjectFileInfo::InitEHFrameSection() {
                            SectionKind::getReadOnly());
   else if (Env == IsELF)
     EHFrameSection =
-      Ctx->getELFSection(".eh_frame", EHSectionType,
-                         EHSectionFlags,
-                         SectionKind::getDataRel());
+        Ctx->getELFSection(".eh_frame", EHSectionType, EHSectionFlags);
   else
     EHFrameSection =
       Ctx->getCOFFSection(".eh_frame",

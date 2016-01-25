@@ -130,8 +130,11 @@ std::string getClangToolFullVersion(StringRef ToolName) {
      << getClangFullRepositoryVersion();
 
   // If vendor supplied, include the base LLVM version as well.
+  // Apple Internal: Omit this information. rdar://15621010
+#if 0
 #ifdef CLANG_VENDOR
   OS << " (based on " << BACKEND_PACKAGE_STRING << ")";
+#endif
 #endif
 
   return OS.str();

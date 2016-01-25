@@ -51,7 +51,8 @@ void DwarfCFIException::endModule() {
   if (moveTypeModule == AsmPrinter::CFI_M_Debug)
     Asm->OutStreamer.EmitCFISections(false, true);
 
-  if (!Asm->MAI->isExceptionHandlingDwarf())
+  // SjLj uses this pass and it doesn't need this info.
+  if (!Asm->MAI->usesCFIForEH())
     return;
 
   const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
@@ -90,7 +91,7 @@ void DwarfCFIException::beginFunction(const MachineFunction *MF) {
 
   const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
   unsigned PerEncoding = TLOF.getPersonalityEncoding();
-  const Function *Per = MMI->getPersonalities()[MMI->getPersonalityIndex()];
+  const Function *Per = MMI->getPersonality();
 
   shouldEmitPersonality = hasLandingPads &&
     PerEncoding != dwarf::DW_EH_PE_omit && Per;
@@ -112,18 +113,6 @@ void DwarfCFIException::beginFunction(const MachineFunction *MF) {
       TLOF.getCFIPersonalitySymbol(Per, *Asm->Mang, Asm->TM, MMI);
   Asm->OutStreamer.EmitCFIPersonality(Sym, PerEncoding);
 
-  MCSymbol *EHBegin =
-      Asm->GetTempSymbol("eh_func_begin", Asm->getFunctionNumber());
-  if (Asm->MAI->useAssignmentForEHBegin()) {
-    MCContext &Ctx = Asm->OutContext;
-    MCSymbol *CurPos = Ctx.CreateTempSymbol();
-    Asm->OutStreamer.EmitLabel(CurPos);
-    Asm->OutStreamer.EmitAssignment(EHBegin,
-                                    MCSymbolRefExpr::Create(CurPos, Ctx));
-  } else {
-    Asm->OutStreamer.EmitLabel(EHBegin);
-  }
-
   // Provide LSDA information.
   if (!shouldEmitLSDA)
     return;
@@ -143,9 +132,6 @@ void DwarfCFIException::endFunction(const MachineFunction *) {
 
   if (!shouldEmitPersonality)
     return;
-
-  Asm->OutStreamer.EmitLabel(Asm->GetTempSymbol("eh_func_end",
-                                                Asm->getFunctionNumber()));
 
   // Map all labels and get rid of any dead landing pads.
   MMI->TidyLandingPads();

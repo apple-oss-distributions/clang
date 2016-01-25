@@ -23,6 +23,7 @@
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Version.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Format/Format.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -305,22 +306,7 @@ int main(int argc, const char **argv) {
 
   TransformManager.registerTransforms();
 
-  // Hide all options we don't define ourselves. Move pre-defined 'help',
-  // 'help-list', and 'version' to our general category.
-  llvm::StringMap<cl::Option*> Options;
-  cl::getRegisteredOptions(Options);
-  const cl::OptionCategory **CategoryEnd =
-      VisibleCategories + llvm::array_lengthof(VisibleCategories);
-  for (llvm::StringMap<cl::Option *>::iterator I = Options.begin(),
-                                               E = Options.end();
-       I != E; ++I) {
-    if (I->first() == "help" || I->first() == "version" ||
-        I->first() == "help-list")
-      I->second->setCategory(GeneralCategory);
-    else if (std::find(VisibleCategories, CategoryEnd, I->second->Category) ==
-             CategoryEnd)
-      I->second->setHiddenFlag(cl::ReallyHidden);
-  }
+  cl::HideUnrelatedOptions(llvm::makeArrayRef(VisibleCategories));
   cl::SetVersionPrinter(&printVersion);
 
   // Parse options and generate compilations.
@@ -469,7 +455,8 @@ int main(int argc, const char **argv) {
     llvm::errs() << "Replacements serialized to: " << TempDestinationDir << "\n";
 
   if (FinalSyntaxCheck) {
-    ClangTool SyntaxTool(*Compilations, SourcePaths);
+    ClangTool SyntaxTool(*Compilations, SourcePaths,
+                         SharedModuleProvider::Create<LLVMModuleProvider>());
     if (SyntaxTool.run(newFrontendActionFactory<SyntaxOnlyAction>().get()) != 0)
       return 1;
   }

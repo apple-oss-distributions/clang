@@ -7,12 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "../lib/CodeGen/AsmPrinter/DIE.h"
+#include "llvm/CodeGen/DIE.h"
 #include "../lib/CodeGen/AsmPrinter/DIEHash.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/Format.h"
-#include "llvm/ADT/STLExtras.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
@@ -60,7 +60,7 @@ TEST(DIEHashTest, NamedType) {
 TEST(DIEHashTest, NamespacedType) {
   DIE CU(dwarf::DW_TAG_compile_unit);
 
-  auto Space = make_unique<DIE>(dwarf::DW_TAG_namespace);
+  DIE *Space = new DIE(dwarf::DW_TAG_namespace);
   DIEInteger One(1);
   DIEString SpaceStr(&One, "space");
   Space->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &SpaceStr);
@@ -68,14 +68,14 @@ TEST(DIEHashTest, NamespacedType) {
   Space->addValue(dwarf::DW_AT_declaration, dwarf::DW_FORM_flag_present, &One);
   // sibling?
 
-  auto Foo = make_unique<DIE>(dwarf::DW_TAG_structure_type);
+  DIE *Foo = new DIE(dwarf::DW_TAG_structure_type);
   DIEString FooStr(&One, "foo");
   Foo->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
   Foo->addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &One);
 
   DIE &N = *Foo;
-  Space->addChild(std::move(Foo));
-  CU.addChild(std::move(Space));
+  Space->addChild(Foo);
+  CU.addChild(Space);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(N);
 
@@ -98,7 +98,7 @@ TEST(DIEHashTest, TypeWithMember) {
 
   DIEEntry IntRef(Int);
 
-  auto Member = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Member = new DIE(dwarf::DW_TAG_member);
   DIEString MemberStr(&Four, "member");
   Member->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemberStr);
   DIEInteger Zero(0);
@@ -106,7 +106,7 @@ TEST(DIEHashTest, TypeWithMember) {
                    &Zero);
   Member->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &IntRef);
 
-  Unnamed.addChild(std::move(Member));
+  Unnamed.addChild(Member);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Unnamed);
 
@@ -129,7 +129,7 @@ TEST(DIEHashTest, ReusedType) {
 
   DIEEntry IntRef(Int);
 
-  auto Mem1 = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem1 = new DIE(dwarf::DW_TAG_member);
   DIEString Mem1Str(&Four, "mem1");
   Mem1->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &Mem1Str);
   DIEInteger Zero(0);
@@ -137,16 +137,16 @@ TEST(DIEHashTest, ReusedType) {
                  &Zero);
   Mem1->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &IntRef);
 
-  Unnamed.addChild(std::move(Mem1));
+  Unnamed.addChild(Mem1);
 
-  auto Mem2 = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem2 = new DIE(dwarf::DW_TAG_member);
   DIEString Mem2Str(&Four, "mem2");
   Mem2->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &Mem2Str);
   Mem2->addValue(dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data1,
                  &Four);
   Mem2->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &IntRef);
 
-  Unnamed.addChild(std::move(Mem2));
+  Unnamed.addChild(Mem2);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Unnamed);
 
@@ -161,14 +161,14 @@ TEST(DIEHashTest, RecursiveType) {
   DIEString FooStr(&One, "foo");
   Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-  auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem = new DIE(dwarf::DW_TAG_member);
   DIEString MemStr(&One, "mem");
   Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
   DIEEntry FooRef(Foo);
   Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &FooRef);
   // DW_AT_external and DW_AT_declaration are ignored anyway, so skip them.
 
-  Foo.addChild(std::move(Mem));
+  Foo.addChild(Mem);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Foo);
 
@@ -183,7 +183,7 @@ TEST(DIEHashTest, Pointer) {
   DIEString FooStr(&Eight, "foo");
   Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-  auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem = new DIE(dwarf::DW_TAG_member);
   DIEString MemStr(&Eight, "mem");
   Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
   DIEInteger Zero(0);
@@ -197,7 +197,7 @@ TEST(DIEHashTest, Pointer) {
   DIEEntry FooPtrRef(FooPtr);
   Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &FooPtrRef);
 
-  Foo.addChild(std::move(Mem));
+  Foo.addChild(Mem);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Foo);
 
@@ -212,7 +212,7 @@ TEST(DIEHashTest, Reference) {
   DIEString FooStr(&Eight, "foo");
   Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-  auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem = new DIE(dwarf::DW_TAG_member);
   DIEString MemStr(&Eight, "mem");
   Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
   DIEInteger Zero(0);
@@ -230,7 +230,7 @@ TEST(DIEHashTest, Reference) {
   DIEEntry FooRefConstRef(FooRefConst);
   Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &FooRefConstRef);
 
-  Foo.addChild(std::move(Mem));
+  Foo.addChild(Mem);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Foo);
 
@@ -245,7 +245,7 @@ TEST(DIEHashTest, RValueReference) {
   DIEString FooStr(&Eight, "foo");
   Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-  auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem = new DIE(dwarf::DW_TAG_member);
   DIEString MemStr(&Eight, "mem");
   Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
   DIEInteger Zero(0);
@@ -263,7 +263,7 @@ TEST(DIEHashTest, RValueReference) {
   DIEEntry FooRefConstRef(FooRefConst);
   Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &FooRefConstRef);
 
-  Foo.addChild(std::move(Mem));
+  Foo.addChild(Mem);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Foo);
 
@@ -278,7 +278,7 @@ TEST(DIEHashTest, PtrToMember) {
   DIEString FooStr(&Eight, "foo");
   Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-  auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem = new DIE(dwarf::DW_TAG_member);
   DIEString MemStr(&Eight, "mem");
   Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
   DIEInteger Zero(0);
@@ -293,7 +293,7 @@ TEST(DIEHashTest, PtrToMember) {
   DIEEntry PtrToFooMemRef(PtrToFooMem);
   Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &PtrToFooMemRef);
 
-  Foo.addChild(std::move(Mem));
+  Foo.addChild(Mem);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Foo);
 
@@ -322,7 +322,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMatch) {
     Foo.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &Eight);
     Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-    auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+    DIE *Mem = new DIE(dwarf::DW_TAG_member);
     Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
     Mem->addValue(dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data1,
                   &Zero);
@@ -337,7 +337,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMatch) {
     DIEEntry PtrToFooMemRef(PtrToFooMem);
     Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &PtrToFooMemRef);
 
-    Foo.addChild(std::move(Mem));
+    Foo.addChild(Mem);
 
     MD5ResDecl = DIEHash().computeTypeSignature(Foo);
   }
@@ -351,7 +351,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMatch) {
     Foo.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &Eight);
     Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-    auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+    DIE *Mem = new DIE(dwarf::DW_TAG_member);
     Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
     Mem->addValue(dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data1,
                   &Zero);
@@ -366,7 +366,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMatch) {
     DIEEntry PtrToFooMemRef(PtrToFooMem);
     Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &PtrToFooMemRef);
 
-    Foo.addChild(std::move(Mem));
+    Foo.addChild(Mem);
 
     MD5ResDef = DIEHash().computeTypeSignature(Foo);
   }
@@ -395,7 +395,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMisMatch) {
     Foo.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &Eight);
     Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-    auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+    DIE *Mem = new DIE(dwarf::DW_TAG_member);
     Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
     Mem->addValue(dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data1,
                   &Zero);
@@ -409,7 +409,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMisMatch) {
     DIEEntry PtrToFooMemRef(PtrToFooMem);
     Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &PtrToFooMemRef);
 
-    Foo.addChild(std::move(Mem));
+    Foo.addChild(Mem);
 
     MD5ResDecl = DIEHash().computeTypeSignature(Foo);
   }
@@ -423,7 +423,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMisMatch) {
     Foo.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &Eight);
     Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-    auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+    DIE *Mem = new DIE(dwarf::DW_TAG_member);
     Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
     Mem->addValue(dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data1,
                   &Zero);
@@ -437,7 +437,7 @@ TEST(DIEHashTest, PtrToMemberDeclDefMisMatch) {
     DIEEntry PtrToFooMemRef(PtrToFooMem);
     Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &PtrToFooMemRef);
 
-    Foo.addChild(std::move(Mem));
+    Foo.addChild(Mem);
 
     MD5ResDef = DIEHash().computeTypeSignature(Foo);
   }
@@ -465,7 +465,7 @@ TEST(DIEHashTest, RefUnnamedType) {
   Foo.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &Eight);
   Foo.addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
 
-  auto Mem = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *Mem = new DIE(dwarf::DW_TAG_member);
   Mem->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &MemStr);
   Mem->addValue(dwarf::DW_AT_data_member_location, dwarf::DW_FORM_data1, &Zero);
 
@@ -477,7 +477,7 @@ TEST(DIEHashTest, RefUnnamedType) {
   DIEEntry UnnamedPtrRef(UnnamedPtr);
   Mem->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &UnnamedPtrRef);
 
-  Foo.addChild(std::move(Mem));
+  Foo.addChild(Mem);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Foo);
 
@@ -490,12 +490,12 @@ TEST(DIEHashTest, NestedType) {
   DIEInteger One(1);
   Unnamed.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &One);
 
-  auto Foo = make_unique<DIE>(dwarf::DW_TAG_structure_type);
+  DIE *Foo = new DIE(dwarf::DW_TAG_structure_type);
   DIEString FooStr(&One, "foo");
   Foo->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FooStr);
   Foo->addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &One);
 
-  Unnamed.addChild(std::move(Foo));
+  Unnamed.addChild(Foo);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Unnamed);
 
@@ -509,11 +509,11 @@ TEST(DIEHashTest, MemberFunc) {
   DIEInteger One(1);
   Unnamed.addValue(dwarf::DW_AT_byte_size, dwarf::DW_FORM_data1, &One);
 
-  auto Func = make_unique<DIE>(dwarf::DW_TAG_subprogram);
+  DIE *Func = new DIE(dwarf::DW_TAG_subprogram);
   DIEString FuncStr(&One, "func");
   Func->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &FuncStr);
 
-  Unnamed.addChild(std::move(Func));
+  Unnamed.addChild(Func);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(Unnamed);
 
@@ -533,7 +533,7 @@ TEST(DIEHashTest, MemberFuncFlag) {
   A.addValue(dwarf::DW_AT_decl_file, dwarf::DW_FORM_data1, &One);
   A.addValue(dwarf::DW_AT_decl_line, dwarf::DW_FORM_data1, &One);
 
-  auto Func = make_unique<DIE>(dwarf::DW_TAG_subprogram);
+  DIE *Func = new DIE(dwarf::DW_TAG_subprogram);
   DIEString FuncStr(&One, "func");
   DIEString FuncLinkage(&One, "_ZN1A4funcEv");
   DIEInteger Two(2);
@@ -544,7 +544,7 @@ TEST(DIEHashTest, MemberFuncFlag) {
   Func->addValue(dwarf::DW_AT_linkage_name, dwarf::DW_FORM_strp, &FuncLinkage);
   Func->addValue(dwarf::DW_AT_declaration, dwarf::DW_FORM_flag_present, &One);
 
-  A.addChild(std::move(Func));
+  A.addChild(Func);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(A);
 
@@ -579,7 +579,7 @@ TEST(DIEHashTest, MemberSdata) {
   PITyDIE->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &IntTy);
 
   DIEEntry PITy(*PITyDIE);
-  auto PI = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *PI = new DIE(dwarf::DW_TAG_member);
   DIEString PIStr(&One, "PI");
   DIEInteger Two(2);
   DIEInteger NegThree(-3);
@@ -591,7 +591,7 @@ TEST(DIEHashTest, MemberSdata) {
   PI->addValue(dwarf::DW_AT_declaration, dwarf::DW_FORM_flag_present, &One);
   PI->addValue(dwarf::DW_AT_const_value, dwarf::DW_FORM_sdata, &NegThree);
 
-  A.addChild(std::move(PI));
+  A.addChild(PI);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(A);
   ASSERT_EQ(0x9a216000dd3788a7ULL, MD5Res);
@@ -623,7 +623,7 @@ TEST(DIEHashTest, MemberBlock) {
   PITyDIE->addValue(dwarf::DW_AT_type, dwarf::DW_FORM_ref4, &FloatTy);
 
   DIEEntry PITy(*PITyDIE);
-  auto PI = make_unique<DIE>(dwarf::DW_TAG_member);
+  DIE *PI = new DIE(dwarf::DW_TAG_member);
   DIEString PIStr(&One, "PI");
   DIEInteger Two(2);
   PI->addValue(dwarf::DW_AT_name, dwarf::DW_FORM_strp, &PIStr);
@@ -646,7 +646,7 @@ TEST(DIEHashTest, MemberBlock) {
 
   PI->addValue(dwarf::DW_AT_const_value, dwarf::DW_FORM_block1, &PIBlock);
 
-  A.addChild(std::move(PI));
+  A.addChild(PI);
 
   uint64_t MD5Res = DIEHash().computeTypeSignature(A);
   ASSERT_EQ(0x493af53ad3d3f651ULL, MD5Res);

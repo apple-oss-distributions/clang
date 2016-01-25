@@ -18,6 +18,7 @@
 #include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
@@ -187,7 +188,7 @@ private:
   IntrusiveRefCntPtr<DiagnosticIDs> Diags;
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts;
   DiagnosticConsumer *Client;
-  bool OwnsDiagClient;
+  std::unique_ptr<DiagnosticConsumer> Owner;
   SourceManager *SourceMgr;
 
   /// \brief Mapping information for diagnostics.
@@ -302,7 +303,6 @@ private:
 
   unsigned NumWarnings;         ///< Number of warnings reported
   unsigned NumErrors;           ///< Number of errors reported
-  unsigned NumErrorsSuppressed; ///< Number of errors suppressed
 
   /// \brief A function pointer that converts an opaque diagnostic
   /// argument to a strings.
@@ -369,14 +369,11 @@ public:
   const DiagnosticConsumer *getClient() const { return Client; }
 
   /// \brief Determine whether this \c DiagnosticsEngine object own its client.
-  bool ownsClient() const { return OwnsDiagClient; }
-  
+  bool ownsClient() const { return Owner != nullptr; }
+
   /// \brief Return the current diagnostic client along with ownership of that
   /// client.
-  DiagnosticConsumer *takeClient() {
-    OwnsDiagClient = false;
-    return Client;
-  }
+  std::unique_ptr<DiagnosticConsumer> takeClient() { return std::move(Owner); }
 
   bool hasSourceManager() const { return SourceMgr != nullptr; }
   SourceManager &getSourceManager() const {
@@ -1103,6 +1100,13 @@ inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
     DB.AddFixItHint(Hint);
   return DB;
 }
+
+/// A nullability kind paired with a bit indicating whether it used a
+/// context-sensitive keyword.
+typedef std::pair<NullabilityKind, bool> DiagNullabilityKind;
+
+const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
+                                    DiagNullabilityKind nullability);
 
 inline DiagnosticBuilder DiagnosticsEngine::Report(SourceLocation Loc,
                                                    unsigned DiagID) {

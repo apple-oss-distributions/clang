@@ -183,10 +183,10 @@ struct MultiArgConstructor {
   explicit MultiArgConstructor(int x, bool positive)
     : x(x), y(positive ? x : -x) {}
 
-  MultiArgConstructor(const MultiArgConstructor &) = delete;
-  MultiArgConstructor(MultiArgConstructor &&) = delete;
-  MultiArgConstructor &operator=(const MultiArgConstructor &) = delete;
-  MultiArgConstructor &operator=(MultiArgConstructor &&) = delete;
+  MultiArgConstructor(const MultiArgConstructor &) LLVM_DELETED_FUNCTION;
+  MultiArgConstructor(MultiArgConstructor &&) LLVM_DELETED_FUNCTION;
+  MultiArgConstructor &operator=(const MultiArgConstructor &) LLVM_DELETED_FUNCTION;
+  MultiArgConstructor &operator=(MultiArgConstructor &&) LLVM_DELETED_FUNCTION;
 
   static unsigned Destructions;
   ~MultiArgConstructor() {
@@ -324,15 +324,36 @@ TEST_F(OptionalTest, MoveOnlyAssigningAssignment) {
   EXPECT_EQ(1u, MoveOnly::Destructions);
 }
 
-TEST_F(OptionalTest, MoveOnlyEmplace) {
-  Optional<MoveOnly> A;
-  MoveOnly::ResetCounts();
+struct Immovable {
+  static unsigned Constructions;
+  static unsigned Destructions;
+  int val;
+  explicit Immovable(int val) : val(val) {
+    ++Constructions;
+  }
+  ~Immovable() {
+    ++Destructions;
+  }
+  static void ResetCounts() {
+    Constructions = 0;
+    Destructions = 0;
+  }
+private:
+  // This should disable all move/copy operations.
+  Immovable(Immovable&& other) LLVM_DELETED_FUNCTION;
+};
+
+unsigned Immovable::Constructions = 0;
+unsigned Immovable::Destructions = 0;
+
+TEST_F(OptionalTest, ImmovableEmplace) {
+  Optional<Immovable> A;
+  Immovable::ResetCounts();
   A.emplace(4);
   EXPECT_TRUE((bool)A);
   EXPECT_EQ(4, A->val);
-  EXPECT_EQ(0u, MoveOnly::MoveConstructions);
-  EXPECT_EQ(0u, MoveOnly::MoveAssignments);
-  EXPECT_EQ(0u, MoveOnly::Destructions);
+  EXPECT_EQ(1u, Immovable::Constructions);
+  EXPECT_EQ(0u, Immovable::Destructions);
 }
 
 #if LLVM_HAS_RVALUE_REFERENCE_THIS

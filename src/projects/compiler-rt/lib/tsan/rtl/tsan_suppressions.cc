@@ -33,7 +33,7 @@ static const char *const std_suppressions =
 "race:std::_Sp_counted_ptr_inplace<std::thread::_Impl\n";
 
 // Can be overriden in frontend.
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
 extern "C" const char *WEAK __tsan_default_suppressions() {
   return 0;
 }
@@ -46,7 +46,7 @@ static bool suppressions_inited = false;
 void InitializeSuppressions() {
   CHECK(!suppressions_inited);
   SuppressionContext::InitIfNecessary();
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
   SuppressionContext::Get()->Parse(__tsan_default_suppressions());
   SuppressionContext::Get()->Parse(std_suppressions);
 #endif
@@ -59,6 +59,8 @@ SuppressionType conv(ReportType typ) {
   else if (typ == ReportTypeVptrRace)
     return SuppressionRace;
   else if (typ == ReportTypeUseAfterFree)
+    return SuppressionRace;
+  else if (typ == ReportTypeVptrUseAfterFree)
     return SuppressionRace;
   else if (typ == ReportTypeThreadLeak)
     return SuppressionThread;
@@ -99,7 +101,7 @@ uptr IsSuppressed(ReportType typ, const ReportStack *stack, Suppression **sp) {
       DPrintf("ThreadSanitizer: matched suppression '%s'\n", s->templ);
       s->hit_count++;
       *sp = s;
-      return frame->pc;
+      return info.address;
     }
   }
   return 0;
@@ -113,13 +115,13 @@ uptr IsSuppressed(ReportType typ, const ReportLocation *loc, Suppression **sp) {
   if (stype == SuppressionNone)
     return 0;
   Suppression *s;
-  if (SuppressionContext::Get()->Match(loc->name, stype, &s) ||
-      SuppressionContext::Get()->Match(loc->file, stype, &s) ||
-      SuppressionContext::Get()->Match(loc->module, stype, &s)) {
+  const DataInfo &global = loc->global;
+  if (SuppressionContext::Get()->Match(global.name, stype, &s) ||
+      SuppressionContext::Get()->Match(global.module, stype, &s)) {
       DPrintf("ThreadSanitizer: matched suppression '%s'\n", s->templ);
       s->hit_count++;
       *sp = s;
-      return loc->addr;
+      return global.start;
   }
   return 0;
 }

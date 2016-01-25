@@ -62,6 +62,21 @@ namespace __asan {
 class AsanThread;
 using __sanitizer::StackTrace;
 
+struct SignalContext {
+  void *context;
+  uptr addr;
+  uptr pc;
+  uptr sp;
+  uptr bp;
+
+  SignalContext(void *context, uptr addr, uptr pc, uptr sp, uptr bp) :
+      context(context), addr(addr), pc(pc), sp(sp), bp(bp) {
+  }
+
+  // Creates signal context in a platform-specific manner.
+  static SignalContext Create(void *siginfo, void *context);
+};
+
 void AsanInitFromRtl();
 
 // asan_rtl.cc
@@ -78,8 +93,8 @@ void AsanCheckIncompatibleRT();
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
 void AsanOnSIGSEGV(int, void *siginfo, void *context);
 
+void DisableReexec();
 void MaybeReexec();
-bool AsanInterceptsSignal(int signum);
 void ReadContextStack(void *context, uptr *stack, uptr *ssize);
 void AsanPlatformThreadInit();
 void StopInitOrderChecking();
@@ -92,9 +107,9 @@ void PlatformTSDDtor(void *tsd);
 
 void AppendToErrorMessageBuffer(const char *buffer);
 
-void ParseExtraActivationFlags();
-
 void *AsanDlSymNext(const char *sym);
+
+void ReserveShadowMemoryRange(uptr beg, uptr end);
 
 // Platform-specific options.
 #if SANITIZER_MAC
@@ -135,6 +150,9 @@ const int kAsanStackUseAfterScopeMagic = 0xf8;
 const int kAsanGlobalRedzoneMagic = 0xf9;
 const int kAsanInternalHeapMagic = 0xfe;
 const int kAsanArrayCookieMagic = 0xac;
+const int kAsanIntraObjectRedzone = 0xbb;
+const int kAsanAllocaLeftMagic = 0xca;
+const int kAsanAllocaRightMagic = 0xcb;
 
 static const uptr kCurrentStackFrameMagic = 0x41B58AB3;
 static const uptr kRetiredStackFrameMagic = 0x45E0360E;

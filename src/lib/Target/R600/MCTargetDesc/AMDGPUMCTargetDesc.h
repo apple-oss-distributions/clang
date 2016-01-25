@@ -30,14 +30,14 @@ class Target;
 class raw_ostream;
 
 extern Target TheAMDGPUTarget;
+extern Target TheGCNTarget;
 
 MCCodeEmitter *createR600MCCodeEmitter(const MCInstrInfo &MCII,
                                        const MCRegisterInfo &MRI,
-                                       const MCSubtargetInfo &STI);
+                                       MCContext &Ctx);
 
 MCCodeEmitter *createSIMCCodeEmitter(const MCInstrInfo &MCII,
                                      const MCRegisterInfo &MRI,
-                                     const MCSubtargetInfo &STI,
                                      MCContext &Ctx);
 
 MCAsmBackend *createAMDGPUAsmBackend(const Target &T, const MCRegisterInfo &MRI,

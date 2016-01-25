@@ -29,6 +29,7 @@
 #include "clang/Basic/Module.h"
 #include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
+#include "clang/Frontend/FrontendDiagnostic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
@@ -36,6 +37,11 @@ using namespace clang;
 
 Decl *clang::getPrimaryMergedDecl(Decl *D) {
   return D->getASTContext().getPrimaryMergedDecl(D);
+}
+
+// Defined here so that it can be inlined into its direct callers.
+bool Decl::isOutOfLine() const {
+  return !getLexicalDeclContext()->Equals(getDeclContext());
 }
 
 //===----------------------------------------------------------------------===//
@@ -613,9 +619,12 @@ static LinkageInfo getLVForNamespaceScopeDecl(const NamedDecl *D,
     // Explicitly declared static.
     if (Function->getCanonicalDecl()->getStorageClass() == SC_Static)
       return LinkageInfo(InternalLinkage, DefaultVisibility, false);
+  } else if (const auto *IFD = dyn_cast<IndirectFieldDecl>(D)) {
+    //   - a data member of an anonymous union.
+    const VarDecl *VD = IFD->getVarDecl();
+    assert(VD && "Expected a VarDecl in this IndirectFieldDecl!");
+    return getLVForNamespaceScopeDecl(VD, computation);
   }
-  //   - a data member of an anonymous union.
-  assert(!isa<IndirectFieldDecl>(D) && "Didn't expect an IndirectFieldDecl!");
   assert(!isa<FieldDecl>(D) && "Didn't expect a FieldDecl!");
 
   if (D->isInAnonymousNamespace()) {
@@ -1183,7 +1192,7 @@ static LinkageInfo getLVForLocalDecl(const NamedDecl *D,
   } else {
     const FunctionDecl *FD = cast<FunctionDecl>(OuterD);
     if (!FD->isInlined() &&
-        FD->getTemplateSpecializationKind() == TSK_Undeclared)
+        !isTemplateInstantiation(FD->getTemplateSpecializationKind()))
       return LinkageInfo::none();
 
     LV = getLVForDecl(FD, computation);
@@ -2622,7 +2631,7 @@ void FunctionDecl::setDeclsInPrototypeScope(ArrayRef<NamedDecl *> NewDecls) {
   if (!NewDecls.empty()) {
     NamedDecl **A = new (getASTContext()) NamedDecl*[NewDecls.size()];
     std::copy(NewDecls.begin(), NewDecls.end(), A);
-    DeclsInPrototypeScope = ArrayRef<NamedDecl *>(A, NewDecls.size());
+    DeclsInPrototypeScope = llvm::makeArrayRef(A, NewDecls.size());
     // Move declarations introduced in prototype to the function context.
     for (auto I : NewDecls) {
       DeclContext *DC = I->getDeclContext();
@@ -3279,7 +3288,7 @@ bool FieldDecl::isAnonymousStructOrUnion() const {
 
 unsigned FieldDecl::getBitWidthValue(const ASTContext &Ctx) const {
   assert(isBitField() && "not a bitfield");
-  Expr *BitWidth = InitializerOrBitWidth.getPointer();
+  Expr *BitWidth = static_cast<Expr *>(InitStorage.getPointer());
   return BitWidth->EvaluateKnownConstInt(Ctx).getZExtValue();
 }
 
@@ -3293,30 +3302,39 @@ unsigned FieldDecl::getFieldIndex() const {
   unsigned Index = 0;
   const RecordDecl *RD = getParent();
 
-  for (RecordDecl::field_iterator I = RD->field_begin(), E = RD->field_end();
-       I != E; ++I, ++Index)
-    I->getCanonicalDecl()->CachedFieldIndex = Index + 1;
+  for (auto *Field : RD->fields()) {
+    Field->getCanonicalDecl()->CachedFieldIndex = Index + 1;
+    ++Index;
+  }
 
   assert(CachedFieldIndex && "failed to find field in parent");
   return CachedFieldIndex - 1;
 }
 
 SourceRange FieldDecl::getSourceRange() const {
-  if (const Expr *E = InitializerOrBitWidth.getPointer())
-    return SourceRange(getInnerLocStart(), E->getLocEnd());
-  return DeclaratorDecl::getSourceRange();
+  switch (InitStorage.getInt()) {
+  // All three of these cases store an optional Expr*.
+  case ISK_BitWidthOrNothing:
+  case ISK_InClassCopyInit:
+  case ISK_InClassListInit:
+    if (const Expr *E = static_cast<const Expr *>(InitStorage.getPointer()))
+      return SourceRange(getInnerLocStart(), E->getLocEnd());
+    // FALLTHROUGH
+
+  case ISK_CapturedVLAType:
+    return DeclaratorDecl::getSourceRange();
+  }
+  llvm_unreachable("bad init storage kind");
 }
 
-void FieldDecl::setBitWidth(Expr *Width) {
-  assert(!InitializerOrBitWidth.getPointer() && !hasInClassInitializer() &&
-         "bit width or initializer already set");
-  InitializerOrBitWidth.setPointer(Width);
-}
-
-void FieldDecl::setInClassInitializer(Expr *Init) {
-  assert(!InitializerOrBitWidth.getPointer() && hasInClassInitializer() &&
-         "bit width or initializer already set");
-  InitializerOrBitWidth.setPointer(Init);
+void FieldDecl::setCapturedVLAType(const VariableArrayType *VLAType) {
+  assert((getParent()->isLambda() || getParent()->isCapturedRecord()) &&
+         "capturing type in non-lambda or captured record.");
+  assert(InitStorage.getInt() == ISK_BitWidthOrNothing &&
+         InitStorage.getPointer() == nullptr &&
+         "bit width, initializer or captured type already set");
+  InitStorage.setPointerAndInt(const_cast<VariableArrayType *>(VLAType),
+                               ISK_CapturedVLAType);
 }
 
 //===----------------------------------------------------------------------===//
@@ -3539,6 +3557,20 @@ bool RecordDecl::isInjectedClassName() const {
     cast<RecordDecl>(getDeclContext())->getDeclName() == getDeclName();
 }
 
+bool RecordDecl::isLambda() const {
+  if (auto RD = dyn_cast<CXXRecordDecl>(this))
+    return RD->isLambda();
+  return false;
+}
+
+bool RecordDecl::isCapturedRecord() const {
+  return hasAttr<CapturedRecordAttr>();
+}
+
+void RecordDecl::setCapturedRecord() {
+  addAttr(CapturedRecordAttr::CreateImplicit(getASTContext()));
+}
+
 RecordDecl::field_iterator RecordDecl::field_begin() const {
   if (hasExternalLexicalStorage() && !LoadedFieldsFromExternalStorage)
     LoadFieldsFromExternalStorage();
@@ -3557,7 +3589,7 @@ void RecordDecl::completeDefinition() {
 /// This which can be turned on with an attribute, pragma, or the
 /// -mms-bitfields command-line option.
 bool RecordDecl::isMsStruct(const ASTContext &C) const {
-  return hasAttr<MsStructAttr>() || C.getLangOpts().MSBitfields == 1;
+  return hasAttr<MSStructAttr>() || C.getLangOpts().MSBitfields == 1;
 }
 
 static bool isFieldOrIndirectField(Decl::Kind K) {
@@ -3595,6 +3627,64 @@ void RecordDecl::LoadFieldsFromExternalStorage() const {
   std::tie(FirstDecl, LastDecl) = BuildDeclChain(Decls,
                                                  /*FieldsAlreadyLoaded=*/false);
 }
+
+bool RecordDecl::mayInsertExtraPadding(bool EmitRemark) const {
+  ASTContext &Context = getASTContext();
+  if (!Context.getLangOpts().Sanitize.has(SanitizerKind::Address) ||
+      !Context.getLangOpts().SanitizeAddressFieldPadding)
+    return false;
+  const auto &Blacklist = Context.getSanitizerBlacklist();
+  const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(this);
+  // We may be able to relax some of these requirements.
+  int ReasonToReject = -1;
+  if (!CXXRD || CXXRD->isExternCContext())
+    ReasonToReject = 0;  // is not C++.
+  else if (CXXRD->hasAttr<PackedAttr>())
+    ReasonToReject = 1;  // is packed.
+  else if (CXXRD->isUnion())
+    ReasonToReject = 2;  // is a union.
+  else if (CXXRD->isTriviallyCopyable())
+    ReasonToReject = 3;  // is trivially copyable.
+  else if (CXXRD->hasTrivialDestructor())
+    ReasonToReject = 4;  // has trivial destructor.
+  else if (CXXRD->isStandardLayout())
+    ReasonToReject = 5;  // is standard layout.
+  else if (Blacklist.isBlacklistedLocation(getLocation(), "field-padding"))
+    ReasonToReject = 6;  // is in a blacklisted file.
+  else if (Blacklist.isBlacklistedType(getQualifiedNameAsString(),
+                                       "field-padding"))
+    ReasonToReject = 7;  // is blacklisted.
+
+  if (EmitRemark) {
+    if (ReasonToReject >= 0)
+      Context.getDiagnostics().Report(
+          getLocation(),
+          diag::remark_sanitize_address_insert_extra_padding_rejected)
+          << getQualifiedNameAsString() << ReasonToReject;
+    else
+      Context.getDiagnostics().Report(
+          getLocation(),
+          diag::remark_sanitize_address_insert_extra_padding_accepted)
+          << getQualifiedNameAsString();
+  }
+  return ReasonToReject < 0;
+}
+
+const FieldDecl *RecordDecl::findFirstNamedDataMember() const {
+  for (const auto *I : fields()) {
+    if (I->getIdentifier())
+      return I;
+
+    if (const RecordType *RT = I->getType()->getAs<RecordType>())
+      if (const FieldDecl *NamedDataMember =
+          RT->getDecl()->findFirstNamedDataMember())
+        return NamedDataMember;
+  }
+
+  // We didn't find a named data member.
+  return nullptr;
+}
+
 
 //===----------------------------------------------------------------------===//
 // BlockDecl Implementation
@@ -3673,6 +3763,13 @@ LabelDecl *LabelDecl::Create(ASTContext &C, DeclContext *DC,
 LabelDecl *LabelDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   return new (C, ID) LabelDecl(nullptr, SourceLocation(), nullptr, nullptr,
                                SourceLocation());
+}
+
+void LabelDecl::setMSAsmLabel(StringRef Name) {
+  char *Buffer = new (getASTContext(), 1) char[Name.size() + 1];
+  memcpy(Buffer, Name.data(), Name.size());
+  Buffer[Name.size()] = '\0';
+  MSAsmName = Buffer;
 }
 
 void ValueDecl::anchor() { }
@@ -3910,8 +4007,8 @@ ArrayRef<SourceLocation> ImportDecl::getIdentifierLocs() const {
 
   const SourceLocation *StoredLocs
     = reinterpret_cast<const SourceLocation *>(this + 1);
-  return ArrayRef<SourceLocation>(StoredLocs, 
-                                  getNumModuleIdentifiers(getImportedModule()));
+  return llvm::makeArrayRef(StoredLocs,
+                            getNumModuleIdentifiers(getImportedModule()));
 }
 
 SourceRange ImportDecl::getSourceRange() const {

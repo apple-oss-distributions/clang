@@ -39,6 +39,10 @@ DisableGVNLoadPRE("disable-gvn-loadpre", cl::init(false),
   cl::desc("Do not run the GVN load PRE pass"));
 
 static cl::opt<bool>
+DisableLTOVectorization("disable-lto-vectorization", cl::init(false),
+  cl::desc("Do not run loop or slp vectorization during LTO"));
+
+static cl::opt<bool>
 UseDiagnosticHandler("use-diagnostic-handler", cl::init(false),
   cl::desc("Use a diagnostic handler to test the handler interface"));
 
@@ -64,6 +68,10 @@ DSOSymbols("dso-symbol",
 static cl::opt<bool> ListSymbolsOnly(
     "list-symbols-only", cl::init(false),
     cl::desc("Instead of running LTO, list the symbols in each IR file"));
+
+static cl::opt<bool> SetMergedModule(
+    "set-merged-module", cl::init(false),
+    cl::desc("Use the first input module as the merged module"));
 
 namespace {
 struct ModuleInfo {
@@ -190,19 +198,22 @@ int main(int argc, char **argv) {
       return 1;
     }
 
+    LTOModule *LTOMod = Module.get();
 
-    if (!CodeGen.addModule(Module.get(), error)) {
-      errs() << argv[0] << ": error adding file '" << InputFilenames[i]
-             << "': " << error << "\n";
+    // We use the first input module as the destination module when
+    // SetMergedModule is true.
+    if (SetMergedModule && i == BaseArg) {
+      // Transfer ownership to the code generator.
+      CodeGen.setModule(Module.release());
+    } else if (!CodeGen.addModule(Module.get()))
       return 1;
-    }
 
-    unsigned NumSyms = Module->getSymbolCount();
+    unsigned NumSyms = LTOMod->getSymbolCount();
     for (unsigned I = 0; I < NumSyms; ++I) {
-      StringRef Name = Module->getSymbolName(I);
+      StringRef Name = LTOMod->getSymbolName(I);
       if (!DSOSymbolsSet.count(Name))
         continue;
-      lto_symbol_attributes Attrs = Module->getSymbolAttributes(I);
+      lto_symbol_attributes Attrs = LTOMod->getSymbolAttributes(I);
       unsigned Scope = Attrs & LTO_SYMBOL_SCOPE_MASK;
       if (Scope != LTO_SYMBOL_SCOPE_DEFAULT_CAN_BE_HIDDEN)
         KeptDSOSyms.push_back(Name);
@@ -217,6 +228,9 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < KeptDSOSyms.size(); ++i)
     CodeGen.addMustPreserveSymbol(KeptDSOSyms[i].c_str());
 
+  // Set cpu and attrs strings for the default target/subtarget.
+  CodeGen.setCpu(MCPU.c_str());
+
   std::string attrs;
   for (unsigned i = 0; i < MAttrs.size(); ++i) {
     if (i > 0)
@@ -230,19 +244,20 @@ int main(int argc, char **argv) {
   if (!OutputFilename.empty()) {
     size_t len = 0;
     std::string ErrorInfo;
-    const void *Code = CodeGen.compile(&len, DisableOpt, DisableInline,
-                                       DisableGVNLoadPRE, ErrorInfo);
+    const void *Code =
+        CodeGen.compile(&len, DisableOpt, DisableInline, DisableGVNLoadPRE,
+                        DisableLTOVectorization, ErrorInfo);
     if (!Code) {
       errs() << argv[0]
              << ": error compiling the code: " << ErrorInfo << "\n";
       return 1;
     }
 
-    raw_fd_ostream FileStream(OutputFilename.c_str(), ErrorInfo,
-                              sys::fs::F_None);
-    if (!ErrorInfo.empty()) {
+    std::error_code EC;
+    raw_fd_ostream FileStream(OutputFilename, EC, sys::fs::F_None);
+    if (EC) {
       errs() << argv[0] << ": error opening the file '" << OutputFilename
-             << "': " << ErrorInfo << "\n";
+             << "': " << EC.message() << "\n";
       return 1;
     }
 
@@ -251,7 +266,8 @@ int main(int argc, char **argv) {
     std::string ErrorInfo;
     const char *OutputName = nullptr;
     if (!CodeGen.compile_to_file(&OutputName, DisableOpt, DisableInline,
-                                 DisableGVNLoadPRE, ErrorInfo)) {
+                                 DisableGVNLoadPRE, DisableLTOVectorization,
+                                 ErrorInfo)) {
       errs() << argv[0]
              << ": error compiling the code: " << ErrorInfo
              << "\n";

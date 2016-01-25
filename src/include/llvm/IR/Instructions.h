@@ -17,8 +17,8 @@
 #define LLVM_IR_INSTRUCTIONS_H
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -135,11 +135,23 @@ public:
     return getSubclassDataFromInstruction() & 32;
   }
 
-  /// \brief Specify whether this alloca is used to represent a the arguments to
+  /// \brief Specify whether this alloca is used to represent the arguments to
   /// a call.
   void setUsedWithInAlloca(bool V) {
     setInstructionSubclassData((getSubclassDataFromInstruction() & ~32) |
                                (V ? 32 : 0));
+  }
+
+  /// \brief Return true if this alloca is used as a swifterror argument to a
+  /// call.
+  bool isSwiftError() const {
+    return getSubclassDataFromInstruction() & 64;
+  }
+
+  /// \brief Specify whether this alloca is used to represent a swifterror.
+  void setSwiftError(bool V) {
+    setInstructionSubclassData((getSubclassDataFromInstruction() & ~64) |
+                               (V ? 64 : 0));
   }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -241,7 +253,6 @@ public:
                                (xthread << 6));
   }
 
-  bool isAtomic() const { return getOrdering() != NotAtomic; }
   void setAtomic(AtomicOrdering Ordering,
                  SynchronizationScope SynchScope = CrossThread) {
     setOrdering(Ordering);
@@ -361,7 +372,6 @@ public:
                                (xthread << 6));
   }
 
-  bool isAtomic() const { return getOrdering() != NotAtomic; }
   void setAtomic(AtomicOrdering Ordering,
                  SynchronizationScope SynchScope = CrossThread) {
     setOrdering(Ordering);
@@ -653,7 +663,7 @@ public:
     Sub,
     /// *p = old & v
     And,
-    /// *p = ~old & v
+    /// *p = ~(old & v)
     Nand,
     /// *p = old | v
     Or,

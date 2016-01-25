@@ -18,6 +18,7 @@
 #include "llvm/LTO/LTOCodeGenerator.h"
 #include "llvm/LTO/LTOModule.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/TargetSelect.h"
 
 // extra command-line flags needed for LTOCodeGenerator
@@ -33,6 +34,10 @@ static cl::opt<bool>
 DisableGVNLoadPRE("disable-gvn-loadpre", cl::init(false),
   cl::desc("Do not run the GVN load PRE pass"));
 
+static cl::opt<bool>
+DisableLTOVectorization("disable-lto-vectorization", cl::init(false),
+  cl::desc("Do not run loop or slp vectorization during LTO"));
+
 // Holds most recent error string.
 // *** Not thread safe ***
 static std::string sLastErrorString;
@@ -47,6 +52,12 @@ static bool parsedOptions = false;
 // Initialize the configured targets if they have not been initialized.
 static void lto_initialize() {
   if (!initialized) {
+#ifdef LLVM_ON_WIN32
+    // Dialog box on crash disabling doesn't work across DLL boundaries, so do
+    // it here.
+    llvm::sys::DisableSystemDialogsOnCrash();
+#endif
+
     InitializeAllTargetInfos();
     InitializeAllTargets();
     InitializeAllTargetMCs();
@@ -231,10 +242,18 @@ lto_code_gen_t lto_codegen_create_in_local_context(void) {
   return createCodeGen(/* InLocalContext */ true);
 }
 
+void lto_codegen_reset_context(lto_code_gen_t cg) {
+  unwrap(cg)->resetContext();
+}
+
 void lto_codegen_dispose(lto_code_gen_t cg) { delete unwrap(cg); }
 
 bool lto_codegen_add_module(lto_code_gen_t cg, lto_module_t mod) {
-  return !unwrap(cg)->addModule(unwrap(mod), sLastErrorString);
+  return !unwrap(cg)->addModule(unwrap(mod));
+}
+
+void lto_codegen_set_module(lto_code_gen_t cg, lto_module_t mod) {
+  unwrap(cg)->setModule(unwrap(mod));
 }
 
 bool lto_codegen_set_debug_model(lto_code_gen_t cg, lto_debug_model debug) {
@@ -281,7 +300,28 @@ const void *lto_codegen_compile(lto_code_gen_t cg, size_t *length) {
     parsedOptions = true;
   }
   return unwrap(cg)->compile(length, DisableOpt, DisableInline,
-                             DisableGVNLoadPRE, sLastErrorString);
+                             DisableGVNLoadPRE, DisableLTOVectorization,
+                             sLastErrorString);
+}
+
+bool lto_codegen_optimize(lto_code_gen_t cg) {
+  if (!parsedOptions) {
+    unwrap(cg)->parseCodeGenDebugOptions();
+    lto_add_attrs(cg);
+    parsedOptions = true;
+  }
+  return !unwrap(cg)->optimize(DisableOpt, DisableInline,
+                               DisableGVNLoadPRE, DisableLTOVectorization,
+                               sLastErrorString);
+}
+
+const void *lto_codegen_compile_optimized(lto_code_gen_t cg, size_t *length) {
+  if (!parsedOptions) {
+    unwrap(cg)->parseCodeGenDebugOptions();
+    lto_add_attrs(cg);
+    parsedOptions = true;
+  }
+  return unwrap(cg)->compileOptimized(length, sLastErrorString);
 }
 
 bool lto_codegen_compile_to_file(lto_code_gen_t cg, const char **name) {
@@ -290,10 +330,30 @@ bool lto_codegen_compile_to_file(lto_code_gen_t cg, const char **name) {
     lto_add_attrs(cg);
     parsedOptions = true;
   }
-  return !unwrap(cg)->compile_to_file(name, DisableOpt, DisableInline,
-                                      DisableGVNLoadPRE, sLastErrorString);
+  return !unwrap(cg)->compile_to_file(
+      name, DisableOpt, DisableInline, DisableGVNLoadPRE,
+      DisableLTOVectorization, sLastErrorString);
+}
+
+bool lto_codegen_hide_symbols(lto_code_gen_t cg) {
+  return unwrap(cg)->hideSymbols();
+}
+bool lto_codegen_write_symbol_reverse_map(lto_code_gen_t cg, const char *path) {
+  return unwrap(cg)->writeReverseMap(path);
 }
 
 void lto_codegen_debug_options(lto_code_gen_t cg, const char *opt) {
   unwrap(cg)->setCodeGenDebugOptions(opt);
+}
+
+unsigned int lto_api_version() { return LTO_API_VERSION; }
+
+void lto_codegen_set_should_internalize(lto_code_gen_t cg,
+                                        bool ShouldInternalize) {
+  unwrap(cg)->setShouldInternalize(ShouldInternalize);
+}
+
+void lto_codegen_set_should_embed_uselists(lto_code_gen_t cg,
+                                           lto_bool_t ShouldEmbedUselists) {
+  unwrap(cg)->setShouldEmbedUselists(ShouldEmbedUselists);
 }

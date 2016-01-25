@@ -906,6 +906,8 @@ static ArgEffect getStopTrackingHardEquivalent(ArgEffect E) {
   case IncRef:
   case IncRefMsg:
   case MakeCollectable:
+  case UnretainedOutParameter:
+  case RetainedOutParameter:
   case MayEscape:
   case StopTracking:
   case StopTrackingHard:
@@ -1335,7 +1337,18 @@ RetainSummaryManager::updateSummaryFromAnnotations(const RetainSummary *&Summ,
     if (pd->hasAttr<NSConsumedAttr>())
       Template->addArg(AF, parm_idx, DecRefMsg);
     else if (pd->hasAttr<CFConsumedAttr>())
-      Template->addArg(AF, parm_idx, DecRef);      
+      Template->addArg(AF, parm_idx, DecRef);
+    else if (pd->hasAttr<CFReturnsRetainedAttr>()) {
+      QualType PointeeTy = pd->getType()->getPointeeType();
+      if (!PointeeTy.isNull())
+        if (coreFoundation::isCFObjectRef(PointeeTy))
+          Template->addArg(AF, parm_idx, RetainedOutParameter);
+    } else if (pd->hasAttr<CFReturnsNotRetainedAttr>()) {
+      QualType PointeeTy = pd->getType()->getPointeeType();
+      if (!PointeeTy.isNull())
+        if (coreFoundation::isCFObjectRef(PointeeTy))
+          Template->addArg(AF, parm_idx, UnretainedOutParameter);
+    }
   }
 
   QualType RetTy = FD->getReturnType();
@@ -1366,7 +1379,17 @@ RetainSummaryManager::updateSummaryFromAnnotations(const RetainSummary *&Summ,
       Template->addArg(AF, parm_idx, DecRefMsg);      
     else if (pd->hasAttr<CFConsumedAttr>()) {
       Template->addArg(AF, parm_idx, DecRef);      
-    }   
+    } else if (pd->hasAttr<CFReturnsRetainedAttr>()) {
+      QualType PointeeTy = pd->getType()->getPointeeType();
+      if (!PointeeTy.isNull())
+        if (coreFoundation::isCFObjectRef(PointeeTy))
+          Template->addArg(AF, parm_idx, RetainedOutParameter);
+    } else if (pd->hasAttr<CFReturnsNotRetainedAttr>()) {
+      QualType PointeeTy = pd->getType()->getPointeeType();
+      if (!PointeeTy.isNull())
+        if (coreFoundation::isCFObjectRef(PointeeTy))
+          Template->addArg(AF, parm_idx, UnretainedOutParameter);
+    }
   }
 
   QualType RetTy = MD->getReturnType();
@@ -1605,19 +1628,19 @@ void RetainSummaryManager::InitializeMethodSummaries() {
 
   // Create summaries QCRenderer/QCView -createSnapShotImageOfType:
   addInstMethSummary("QCRenderer", AllocSumm,
-                     "createSnapshotImageOfType", NULL);
+                     "createSnapshotImageOfType", nullptr);
   addInstMethSummary("QCView", AllocSumm,
-                     "createSnapshotImageOfType", NULL);
+                     "createSnapshotImageOfType", nullptr);
 
   // Create summaries for CIContext, 'createCGImage' and
   // 'createCGLayerWithSize'.  These objects are CF objects, and are not
   // automatically garbage collected.
   addInstMethSummary("CIContext", CFAllocSumm,
-                     "createCGImage", "fromRect", NULL);
-  addInstMethSummary("CIContext", CFAllocSumm,
-                     "createCGImage", "fromRect", "format", "colorSpace", NULL);
-  addInstMethSummary("CIContext", CFAllocSumm, "createCGLayerWithSize",
-           "info", NULL);
+                     "createCGImage", "fromRect", nullptr);
+  addInstMethSummary("CIContext", CFAllocSumm, "createCGImage", "fromRect",
+                     "format", "colorSpace", nullptr);
+  addInstMethSummary("CIContext", CFAllocSumm, "createCGLayerWithSize", "info",
+                     nullptr);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1742,9 +1765,9 @@ namespace {
                                    BugReporterContext &BRC,
                                    BugReport &BR) override;
 
-    PathDiagnosticPiece *getEndPath(BugReporterContext &BRC,
-                                    const ExplodedNode *N,
-                                    BugReport &BR) override;
+    std::unique_ptr<PathDiagnosticPiece> getEndPath(BugReporterContext &BRC,
+                                                    const ExplodedNode *N,
+                                                    BugReport &BR) override;
   };
 
   class CFRefLeakReportVisitor : public CFRefReportVisitor {
@@ -1753,17 +1776,17 @@ namespace {
                            const SummaryLogTy &log)
        : CFRefReportVisitor(sym, GCEnabled, log) {}
 
-    PathDiagnosticPiece *getEndPath(BugReporterContext &BRC,
-                                    const ExplodedNode *N,
-                                    BugReport &BR) override;
+    std::unique_ptr<PathDiagnosticPiece> getEndPath(BugReporterContext &BRC,
+                                                    const ExplodedNode *N,
+                                                    BugReport &BR) override;
 
-    BugReporterVisitor *clone() const override {
+    std::unique_ptr<BugReporterVisitor> clone() const override {
       // The curiously-recurring template pattern only works for one level of
       // subclassing. Rather than make a new template base for
       // CFRefReportVisitor, we simply override clone() to do the right thing.
       // This could be trouble someday if BugReporterVisitorImpl is ever
       // used for something else besides a convenient implementation of clone().
-      return new CFRefLeakReportVisitor(*this);
+      return llvm::make_unique<CFRefLeakReportVisitor>(*this);
     }
   };
 
@@ -1776,7 +1799,7 @@ namespace {
                 bool registerVisitor = true)
       : BugReport(D, D.getDescription(), n) {
       if (registerVisitor)
-        addVisitor(new CFRefReportVisitor(sym, GCEnabled, Log));
+        addVisitor(llvm::make_unique<CFRefReportVisitor>(sym, GCEnabled, Log));
       addGCModeDescription(LOpts, GCEnabled);
     }
 
@@ -1784,16 +1807,15 @@ namespace {
                 const SummaryLogTy &Log, ExplodedNode *n, SymbolRef sym,
                 StringRef endText)
       : BugReport(D, D.getDescription(), endText, n) {
-      addVisitor(new CFRefReportVisitor(sym, GCEnabled, Log));
+      addVisitor(llvm::make_unique<CFRefReportVisitor>(sym, GCEnabled, Log));
       addGCModeDescription(LOpts, GCEnabled);
     }
 
-    std::pair<ranges_iterator, ranges_iterator> getRanges() override {
+    llvm::iterator_range<ranges_iterator> getRanges() override {
       const CFRefBug& BugTy = static_cast<CFRefBug&>(getBugType());
       if (!BugTy.isLeak())
         return BugReport::getRanges();
-      else
-        return std::make_pair(ranges_iterator(), ranges_iterator());
+      return llvm::make_range(ranges_iterator(), ranges_iterator());
     }
   };
 
@@ -2271,18 +2293,16 @@ GetAllocationSite(ProgramStateManager& StateMgr, const ExplodedNode *N,
                         InterestingMethodContext);
 }
 
-PathDiagnosticPiece*
+std::unique_ptr<PathDiagnosticPiece>
 CFRefReportVisitor::getEndPath(BugReporterContext &BRC,
-                               const ExplodedNode *EndN,
-                               BugReport &BR) {
+                               const ExplodedNode *EndN, BugReport &BR) {
   BR.markInteresting(Sym);
   return BugReporterVisitor::getDefaultEndPath(BRC, EndN, BR);
 }
 
-PathDiagnosticPiece*
+std::unique_ptr<PathDiagnosticPiece>
 CFRefLeakReportVisitor::getEndPath(BugReporterContext &BRC,
-                                   const ExplodedNode *EndN,
-                                   BugReport &BR) {
+                                   const ExplodedNode *EndN, BugReport &BR) {
 
   // Tell the BugReporterContext to report cases when the tracked symbol is
   // assigned to different variables, etc.
@@ -2362,7 +2382,7 @@ CFRefLeakReportVisitor::getEndPath(BugReporterContext &BRC,
     os << " is not referenced later in this execution path and has a retain "
           "count of +" << RV->getCount();
 
-  return new PathDiagnosticEventPiece(L, os.str());
+  return llvm::make_unique<PathDiagnosticEventPiece>(L, os.str());
 }
 
 CFRefLeakReport::CFRefLeakReport(CFRefBug &D, const LangOptions &LOpts,
@@ -2429,7 +2449,7 @@ CFRefLeakReport::CFRefLeakReport(CFRefBug &D, const LangOptions &LOpts,
     }
   }
 
-  addVisitor(new CFRefLeakReportVisitor(sym, GCEnabled, Log));
+  addVisitor(llvm::make_unique<CFRefLeakReportVisitor>(sym, GCEnabled, Log));
 }
 
 //===----------------------------------------------------------------------===//
@@ -2751,7 +2771,6 @@ void RetainCountChecker::checkPostStmt(const CastExpr *CE,
   
   if (hasErr) {
     // FIXME: If we get an error during a bridge cast, should we report it?
-    // Should we assert that there is no error?
     return;
   }
 
@@ -2956,6 +2975,40 @@ void RetainCountChecker::processSummaryOfInlined(const RetainSummary &Summ,
   C.addTransition(state);
 }
 
+static ProgramStateRef updateOutParameter(ProgramStateRef State,
+                                          SVal ArgVal,
+                                          ArgEffect Effect) {
+  auto *ArgRegion = dyn_cast_or_null<TypedValueRegion>(ArgVal.getAsRegion());
+  if (!ArgRegion)
+    return State;
+
+  QualType PointeeTy = ArgRegion->getValueType();
+  if (!coreFoundation::isCFObjectRef(PointeeTy))
+    return State;
+
+  SVal PointeeVal = State->getSVal(ArgRegion);
+  SymbolRef Pointee = PointeeVal.getAsLocSymbol();
+  if (!Pointee)
+    return State;
+
+  switch (Effect) {
+  case UnretainedOutParameter:
+    State = setRefBinding(State, Pointee,
+                          RefVal::makeNotOwned(RetEffect::CF, PointeeTy));
+    break;
+  case RetainedOutParameter:
+    // Do nothing. Retained out parameters will either point to a +1 reference
+    // or NULL, but the way you check for failure differs depending on the API.
+    // Consequently, we don't have a good way to track them yet.
+    break;
+
+  default:
+    llvm_unreachable("only for out parameters");
+  }
+
+  return State;
+}
+
 void RetainCountChecker::checkSummary(const RetainSummary &Summ,
                                       const CallEvent &CallOrMsg,
                                       CheckerContext &C) const {
@@ -2969,9 +3022,12 @@ void RetainCountChecker::checkSummary(const RetainSummary &Summ,
   for (unsigned idx = 0, e = CallOrMsg.getNumArgs(); idx != e; ++idx) {
     SVal V = CallOrMsg.getArgSVal(idx);
 
-    if (SymbolRef Sym = V.getAsLocSymbol()) {
+    ArgEffect Effect = Summ.getArg(idx);
+    if (Effect == RetainedOutParameter || Effect == UnretainedOutParameter) {
+      state = updateOutParameter(state, V, Effect);
+    } else if (SymbolRef Sym = V.getAsLocSymbol()) {
       if (const RefVal *T = getRefBinding(state, Sym)) {
-        state = updateSymbol(state, Sym, *T, Summ.getArg(idx), hasErr, C);
+        state = updateSymbol(state, Sym, *T, Effect, hasErr, C);
         if (hasErr) {
           ErrorRange = CallOrMsg.getArgSourceRange(idx);
           ErrorSym = Sym;
@@ -3119,6 +3175,11 @@ RetainCountChecker::updateSymbol(ProgramStateRef state, SymbolRef sym,
     case MakeCollectable:
     case DecRefMsgAndStopTrackingHard:
       llvm_unreachable("DecRefMsg/IncRefMsg/MakeCollectable already converted");
+
+    case UnretainedOutParameter:
+    case RetainedOutParameter:
+      llvm_unreachable("Applies to pointer-to-pointer parameters, which should "
+                       "not have ref state.");
 
     case Dealloc:
       // Any use of -dealloc in GC is *bad*.

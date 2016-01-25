@@ -80,9 +80,9 @@ static MachineOperand earlyUseOperand(MachineOperand Op) {
   return Op;
 }
 
-SystemZTargetLowering::SystemZTargetLowering(const TargetMachine &tm)
-    : TargetLowering(tm, new TargetLoweringObjectFileELF()),
-      Subtarget(tm.getSubtarget<SystemZSubtarget>()) {
+SystemZTargetLowering::SystemZTargetLowering(const TargetMachine &tm,
+                                             const SystemZSubtarget &STI)
+    : TargetLowering(tm), Subtarget(STI) {
   MVT PtrVT = getPointerTy();
 
   // Set up the register classes.
@@ -96,7 +96,7 @@ SystemZTargetLowering::SystemZTargetLowering(const TargetMachine &tm)
   addRegisterClass(MVT::f128, &SystemZ::FP128BitRegClass);
 
   // Compute derived properties from the register classes
-  computeRegisterProperties();
+  computeRegisterProperties(Subtarget.getRegisterInfo());
 
   // Set up special registers.
   setExceptionPointerRegister(SystemZ::R6D);
@@ -218,10 +218,12 @@ SystemZTargetLowering::SystemZTargetLowering(const TargetMachine &tm)
   setOperationAction(ISD::SRA_PARTS, MVT::i64, Expand);
 
   // We have native instructions for i8, i16 and i32 extensions, but not i1.
-  setLoadExtAction(ISD::SEXTLOAD, MVT::i1, Promote);
-  setLoadExtAction(ISD::ZEXTLOAD, MVT::i1, Promote);
-  setLoadExtAction(ISD::EXTLOAD,  MVT::i1, Promote);
   setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i1, Expand);
+  for (MVT VT : MVT::integer_valuetypes()) {
+    setLoadExtAction(ISD::SEXTLOAD, VT, MVT::i1, Promote);
+    setLoadExtAction(ISD::ZEXTLOAD, VT, MVT::i1, Promote);
+    setLoadExtAction(ISD::EXTLOAD,  VT, MVT::i1, Promote);
+  }
 
   // Handle the various types of symbolic address.
   setOperationAction(ISD::ConstantPool,     PtrVT, Custom);
@@ -275,7 +277,8 @@ SystemZTargetLowering::SystemZTargetLowering(const TargetMachine &tm)
   // Needed so that we don't try to implement f128 constant loads using
   // a load-and-extend of a f80 constant (in cases where the constant
   // would fit in an f80).
-  setLoadExtAction(ISD::EXTLOAD, MVT::f80, Expand);
+  for (MVT VT : MVT::fp_valuetypes())
+    setLoadExtAction(ISD::EXTLOAD, VT, MVT::f80, Expand);
 
   // Floating-point truncation and stores need to be done separately.
   setTruncStoreAction(MVT::f64,  MVT::f32, Expand);
@@ -496,8 +499,10 @@ parseRegisterNumber(const std::string &Constraint,
   return std::make_pair(0U, nullptr);
 }
 
-std::pair<unsigned, const TargetRegisterClass *> SystemZTargetLowering::
-getRegForInlineAsmConstraint(const std::string &Constraint, MVT VT) const {
+std::pair<unsigned, const TargetRegisterClass *>
+SystemZTargetLowering::getRegForInlineAsmConstraint(
+    const TargetRegisterInfo *TRI, const std::string &Constraint,
+    MVT VT) const {
   if (Constraint.size() == 1) {
     // GCC Constraint Letters
     switch (Constraint[0]) {
@@ -554,7 +559,7 @@ getRegForInlineAsmConstraint(const std::string &Constraint, MVT VT) const {
                                  SystemZMC::FP64Regs);
     }
   }
-  return TargetLowering::getRegForInlineAsmConstraint(Constraint, VT);
+  return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
 }
 
 void SystemZTargetLowering::
@@ -673,9 +678,9 @@ LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
   MachineFrameInfo *MFI = MF.getFrameInfo();
   MachineRegisterInfo &MRI = MF.getRegInfo();
   SystemZMachineFunctionInfo *FuncInfo =
-    MF.getInfo<SystemZMachineFunctionInfo>();
-  auto *TFL = static_cast<const SystemZFrameLowering *>(
-      DAG.getSubtarget().getFrameLowering());
+      MF.getInfo<SystemZMachineFunctionInfo>();
+  auto *TFL =
+      static_cast<const SystemZFrameLowering *>(Subtarget.getFrameLowering());
 
   // Assign locations to all of the incoming arguments.
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -782,7 +787,7 @@ LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
   return Chain;
 }
 
-static bool canUseSiblingCall(CCState ArgCCInfo,
+static bool canUseSiblingCall(const CCState &ArgCCInfo,
                               SmallVectorImpl<CCValAssign> &ArgLocs) {
   // Punt if there are any indirect or stack arguments, or if the call
   // needs the call-saved argument register R6.
@@ -914,9 +919,8 @@ SystemZTargetLowering::LowerCall(CallLoweringInfo &CLI,
                                   RegsToPass[I].second.getValueType()));
 
   // Add a register mask operand representing the call-preserved registers.
-  const TargetRegisterInfo *TRI =
-      getTargetMachine().getSubtargetImpl()->getRegisterInfo();
-  const uint32_t *Mask = TRI->getCallPreservedMask(CallConv);
+  const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  const uint32_t *Mask = TRI->getCallPreservedMask(MF, CallConv);
   assert(Mask && "Missing call preserved mask for calling convention");
   Ops.push_back(DAG.getRegisterMask(Mask));
 
@@ -1828,15 +1832,59 @@ SDValue SystemZTargetLowering::lowerGlobalAddress(GlobalAddressSDNode *Node,
   return Result;
 }
 
+SDValue SystemZTargetLowering::lowerTLSGetOffset(GlobalAddressSDNode *Node,
+                                                 SelectionDAG &DAG,
+                                                 unsigned Opcode,
+                                                 SDValue GOTOffset) const {
+  SDLoc DL(Node);
+  EVT PtrVT = getPointerTy();
+  SDValue Chain = DAG.getEntryNode();
+  SDValue Glue;
+
+  // __tls_get_offset takes the GOT offset in %r2 and the GOT in %r12.
+  SDValue GOT = DAG.getGLOBAL_OFFSET_TABLE(PtrVT);
+  Chain = DAG.getCopyToReg(Chain, DL, SystemZ::R12D, GOT, Glue);
+  Glue = Chain.getValue(1);
+  Chain = DAG.getCopyToReg(Chain, DL, SystemZ::R2D, GOTOffset, Glue);
+  Glue = Chain.getValue(1);
+
+  // The first call operand is the chain and the second is the TLS symbol.
+  SmallVector<SDValue, 8> Ops;
+  Ops.push_back(Chain);
+  Ops.push_back(DAG.getTargetGlobalAddress(Node->getGlobal(), DL,
+                                           Node->getValueType(0),
+                                           0, 0));
+
+  // Add argument registers to the end of the list so that they are
+  // known live into the call.
+  Ops.push_back(DAG.getRegister(SystemZ::R2D, PtrVT));
+  Ops.push_back(DAG.getRegister(SystemZ::R12D, PtrVT));
+
+  // Add a register mask operand representing the call-preserved registers.
+  const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  const uint32_t *Mask =
+      TRI->getCallPreservedMask(DAG.getMachineFunction(), CallingConv::C);
+  assert(Mask && "Missing call preserved mask for calling convention");
+  Ops.push_back(DAG.getRegisterMask(Mask));
+
+  // Glue the call to the argument copies.
+  Ops.push_back(Glue);
+
+  // Emit the call.
+  SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
+  Chain = DAG.getNode(Opcode, DL, NodeTys, Ops);
+  Glue = Chain.getValue(1);
+
+  // Copy the return value from %r2.
+  return DAG.getCopyFromReg(Chain, DL, SystemZ::R2D, PtrVT, Glue);
+}
+
 SDValue SystemZTargetLowering::lowerGlobalTLSAddress(GlobalAddressSDNode *Node,
 						     SelectionDAG &DAG) const {
   SDLoc DL(Node);
   const GlobalValue *GV = Node->getGlobal();
   EVT PtrVT = getPointerTy();
   TLSModel::Model model = DAG.getTarget().getTLSModel(GV);
-
-  if (model != TLSModel::LocalExec)
-    llvm_unreachable("only local-exec TLS mode supported");
 
   // The high part of the thread pointer is in access register 0.
   SDValue TPHi = DAG.getNode(SystemZISD::EXTRACT_ACCESS, DL, MVT::i32,
@@ -1853,15 +1901,79 @@ SDValue SystemZTargetLowering::lowerGlobalTLSAddress(GlobalAddressSDNode *Node,
 				    DAG.getConstant(32, PtrVT));
   SDValue TP = DAG.getNode(ISD::OR, DL, PtrVT, TPHiShifted, TPLo);
 
-  // Get the offset of GA from the thread pointer.
-  SystemZConstantPoolValue *CPV =
-    SystemZConstantPoolValue::Create(GV, SystemZCP::NTPOFF);
+  // Get the offset of GA from the thread pointer, based on the TLS model.
+  SDValue Offset;
+  switch (model) {
+    case TLSModel::GeneralDynamic: {
+      // Load the GOT offset of the tls_index (module ID / per-symbol offset).
+      SystemZConstantPoolValue *CPV =
+        SystemZConstantPoolValue::Create(GV, SystemZCP::TLSGD);
 
-  // Force the offset into the constant pool and load it from there.
-  SDValue CPAddr = DAG.getConstantPool(CPV, PtrVT, 8);
-  SDValue Offset = DAG.getLoad(PtrVT, DL, DAG.getEntryNode(),
-			       CPAddr, MachinePointerInfo::getConstantPool(),
-			       false, false, false, 0);
+      Offset = DAG.getConstantPool(CPV, PtrVT, 8);
+      Offset = DAG.getLoad(PtrVT, DL, DAG.getEntryNode(),
+                           Offset, MachinePointerInfo::getConstantPool(),
+                           false, false, false, 0);
+
+      // Call __tls_get_offset to retrieve the offset.
+      Offset = lowerTLSGetOffset(Node, DAG, SystemZISD::TLS_GDCALL, Offset);
+      break;
+    }
+
+    case TLSModel::LocalDynamic: {
+      // Load the GOT offset of the module ID.
+      SystemZConstantPoolValue *CPV =
+        SystemZConstantPoolValue::Create(GV, SystemZCP::TLSLDM);
+
+      Offset = DAG.getConstantPool(CPV, PtrVT, 8);
+      Offset = DAG.getLoad(PtrVT, DL, DAG.getEntryNode(),
+                           Offset, MachinePointerInfo::getConstantPool(),
+                           false, false, false, 0);
+
+      // Call __tls_get_offset to retrieve the module base offset.
+      Offset = lowerTLSGetOffset(Node, DAG, SystemZISD::TLS_LDCALL, Offset);
+
+      // Note: The SystemZLDCleanupPass will remove redundant computations
+      // of the module base offset.  Count total number of local-dynamic
+      // accesses to trigger execution of that pass.
+      SystemZMachineFunctionInfo* MFI =
+        DAG.getMachineFunction().getInfo<SystemZMachineFunctionInfo>();
+      MFI->incNumLocalDynamicTLSAccesses();
+
+      // Add the per-symbol offset.
+      CPV = SystemZConstantPoolValue::Create(GV, SystemZCP::DTPOFF);
+
+      SDValue DTPOffset = DAG.getConstantPool(CPV, PtrVT, 8);
+      DTPOffset = DAG.getLoad(PtrVT, DL, DAG.getEntryNode(),
+                              DTPOffset, MachinePointerInfo::getConstantPool(),
+                              false, false, false, 0);
+
+      Offset = DAG.getNode(ISD::ADD, DL, PtrVT, Offset, DTPOffset);
+      break;
+    }
+
+    case TLSModel::InitialExec: {
+      // Load the offset from the GOT.
+      Offset = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0,
+                                          SystemZII::MO_INDNTPOFF);
+      Offset = DAG.getNode(SystemZISD::PCREL_WRAPPER, DL, PtrVT, Offset);
+      Offset = DAG.getLoad(PtrVT, DL, DAG.getEntryNode(),
+                           Offset, MachinePointerInfo::getGOT(),
+                           false, false, false, 0);
+      break;
+    }
+
+    case TLSModel::LocalExec: {
+      // Force the offset into the constant pool and load it from there.
+      SystemZConstantPoolValue *CPV =
+        SystemZConstantPoolValue::Create(GV, SystemZCP::NTPOFF);
+
+      Offset = DAG.getConstantPool(CPV, PtrVT, 8);
+      Offset = DAG.getLoad(PtrVT, DL, DAG.getEntryNode(),
+                           Offset, MachinePointerInfo::getConstantPool(),
+                           false, false, false, 0);
+      break;
+    }
+  }
 
   // Add the base and offset together.
   return DAG.getNode(ISD::ADD, DL, PtrVT, TP, Offset);
@@ -2611,8 +2723,8 @@ static unsigned forceReg(MachineInstr *MI, MachineOperand &Base,
 MachineBasicBlock *
 SystemZTargetLowering::emitSelect(MachineInstr *MI,
                                   MachineBasicBlock *MBB) const {
-  const SystemZInstrInfo *TII = static_cast<const SystemZInstrInfo *>(
-      MBB->getParent()->getSubtarget().getInstrInfo());
+  const SystemZInstrInfo *TII =
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
 
   unsigned DestReg  = MI->getOperand(0).getReg();
   unsigned TrueReg  = MI->getOperand(1).getReg();
@@ -2660,8 +2772,8 @@ SystemZTargetLowering::emitCondStore(MachineInstr *MI,
                                      MachineBasicBlock *MBB,
                                      unsigned StoreOpcode, unsigned STOCOpcode,
                                      bool Invert) const {
-  const SystemZInstrInfo *TII = static_cast<const SystemZInstrInfo *>(
-      MBB->getParent()->getSubtarget().getInstrInfo());
+  const SystemZInstrInfo *TII =
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
 
   unsigned SrcReg     = MI->getOperand(0).getReg();
   MachineOperand Base = MI->getOperand(1);
@@ -2730,7 +2842,7 @@ SystemZTargetLowering::emitAtomicLoadBinary(MachineInstr *MI,
                                             bool Invert) const {
   MachineFunction &MF = *MBB->getParent();
   const SystemZInstrInfo *TII =
-      static_cast<const SystemZInstrInfo *>(MF.getSubtarget().getInstrInfo());
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
   MachineRegisterInfo &MRI = MF.getRegInfo();
   bool IsSubWord = (BitSize < 32);
 
@@ -2800,14 +2912,10 @@ SystemZTargetLowering::emitAtomicLoadBinary(MachineInstr *MI,
     unsigned Tmp = MRI.createVirtualRegister(RC);
     BuildMI(MBB, DL, TII->get(BinOpcode), Tmp)
       .addReg(RotatedOldVal).addOperand(Src2);
-    if (BitSize < 32)
+    if (BitSize <= 32)
       // XILF with the upper BitSize bits set.
       BuildMI(MBB, DL, TII->get(SystemZ::XILF), RotatedNewVal)
-        .addReg(Tmp).addImm(uint32_t(~0 << (32 - BitSize)));
-    else if (BitSize == 32)
-      // XILF with every bit set.
-      BuildMI(MBB, DL, TII->get(SystemZ::XILF), RotatedNewVal)
-        .addReg(Tmp).addImm(~uint32_t(0));
+        .addReg(Tmp).addImm(-1U << (32 - BitSize));
     else {
       // Use LCGR and add -1 to the result, which is more compact than
       // an XILF, XILH pair.
@@ -2854,7 +2962,7 @@ SystemZTargetLowering::emitAtomicLoadMinMax(MachineInstr *MI,
                                             unsigned BitSize) const {
   MachineFunction &MF = *MBB->getParent();
   const SystemZInstrInfo *TII =
-      static_cast<const SystemZInstrInfo *>(MF.getSubtarget().getInstrInfo());
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
   MachineRegisterInfo &MRI = MF.getRegInfo();
   bool IsSubWord = (BitSize < 32);
 
@@ -2966,7 +3074,7 @@ SystemZTargetLowering::emitAtomicCmpSwapW(MachineInstr *MI,
                                           MachineBasicBlock *MBB) const {
   MachineFunction &MF = *MBB->getParent();
   const SystemZInstrInfo *TII =
-      static_cast<const SystemZInstrInfo *>(MF.getSubtarget().getInstrInfo());
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
   MachineRegisterInfo &MRI = MF.getRegInfo();
 
   // Extract the operands.  Base can be a register or a frame index.
@@ -3083,7 +3191,7 @@ SystemZTargetLowering::emitExt128(MachineInstr *MI,
                                   bool ClearEven, unsigned SubReg) const {
   MachineFunction &MF = *MBB->getParent();
   const SystemZInstrInfo *TII =
-      static_cast<const SystemZInstrInfo *>(MF.getSubtarget().getInstrInfo());
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
   MachineRegisterInfo &MRI = MF.getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
 
@@ -3115,7 +3223,7 @@ SystemZTargetLowering::emitMemMemWrapper(MachineInstr *MI,
                                          unsigned Opcode) const {
   MachineFunction &MF = *MBB->getParent();
   const SystemZInstrInfo *TII =
-      static_cast<const SystemZInstrInfo *>(MF.getSubtarget().getInstrInfo());
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
   MachineRegisterInfo &MRI = MF.getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
 
@@ -3285,7 +3393,7 @@ SystemZTargetLowering::emitStringWrapper(MachineInstr *MI,
                                          unsigned Opcode) const {
   MachineFunction &MF = *MBB->getParent();
   const SystemZInstrInfo *TII =
-      static_cast<const SystemZInstrInfo *>(MF.getSubtarget().getInstrInfo());
+      static_cast<const SystemZInstrInfo *>(Subtarget.getInstrInfo());
   MachineRegisterInfo &MRI = MF.getRegInfo();
   DebugLoc DL = MI->getDebugLoc();
 

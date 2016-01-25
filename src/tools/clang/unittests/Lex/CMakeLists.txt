@@ -11,7 +11,9 @@ add_clang_unittest(LexTests
 target_link_libraries(LexTests
   clangAST
   clangBasic
+  clangCodeGen
   clangLex
+  clangAPINotes
   clangParse
   clangSema
   )

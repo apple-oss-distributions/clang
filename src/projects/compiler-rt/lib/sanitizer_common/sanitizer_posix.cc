@@ -30,6 +30,10 @@
 #include <sys/personality.h>
 #endif
 
+#if defined(__APPLE__)
+#include <mach/vm_statistics.h>
+#endif
+
 namespace __sanitizer {
 
 // ------------- sanitizer_common.h
@@ -78,19 +82,21 @@ static uptr GetKernelAreaSize() {
 
 uptr GetMaxVirtualAddress() {
 #if SANITIZER_WORDSIZE == 64
-# if defined(__powerpc64__) && defined(__BIG_ENDIAN__)
+# if defined(__aarch64__) && SANITIZER_IOS && !SANITIZER_IOSSIM
+  // Ideally, we would derive the upper bound from MACH_VM_MAX_ADDRESS. The
+  // upper bound can change depending on the device.
+  return 0x200000000 - 1;
+# elif defined(__powerpc64__) || defined(__aarch64__)
   // On PowerPC64 we have two different address space layouts: 44- and 46-bit.
   // We somehow need to figure out which one we are using now and choose
   // one of 0x00000fffffffffffUL and 0x00003fffffffffffUL.
   // Note that with 'ulimit -s unlimited' the stack is moved away from the top
   // of the address space, so simply checking the stack address is not enough.
-  return (1ULL << 44) - 1;  // 0x00000fffffffffffUL
-# elif defined(__powerpc64__) && defined(__LITTLE_ENDIAN__)
-  return (1ULL << 46) - 1;  // 0x00003fffffffffffUL
-# elif defined(__aarch64__) && SANITIZER_IOS && !SANITIZER_IOSSIM
-  return 0x1a0000000 - 1;
-# elif defined(__aarch64__)
-  return (1ULL << 39) - 1;
+  // This should (does) work for both PowerPC64 Endian modes.
+  // Similarly, aarch64 has multiple address space layouts: 39, 42 and 47-bit.
+  return (1ULL << (MostSignificantSetBitIndex(GET_CURRENT_FRAME()) + 1)) - 1;
+# elif defined(__mips64)
+  return (1ULL << 40) - 1;  // 0x000000ffffffffffUL;
 # else
   return (1ULL << 47) - 1;  // 0x00007fffffffffffUL;
 # endif
@@ -107,7 +113,8 @@ void *MmapOrDie(uptr size, const char *mem_type) {
   size = RoundUpTo(size, GetPageSizeCached());
   uptr res = internal_mmap(0, size,
                             PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANON, -1, 0);
+                            MAP_PRIVATE | MAP_ANON,
+                            VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL), 0);
   int reserrno;
   if (internal_iserror(res, &reserrno)) {
     static int recursion_count;
@@ -145,7 +152,7 @@ void *MmapNoReserveOrDie(uptr size, const char *mem_type) {
       RoundUpTo(size, PageSize),
       PROT_READ | PROT_WRITE,
       MAP_PRIVATE | MAP_ANON | MAP_NORESERVE,
-      -1, 0);
+      VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL), 0);
   int reserrno;
   if (internal_iserror(p, &reserrno)) {
     Report("ERROR: %s failed to "
@@ -163,7 +170,7 @@ void *MmapFixedNoReserve(uptr fixed_addr, uptr size) {
       RoundUpTo(size, PageSize),
       PROT_READ | PROT_WRITE,
       MAP_PRIVATE | MAP_ANON | MAP_FIXED | MAP_NORESERVE,
-      -1, 0);
+      VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL), 0);
   int reserrno;
   if (internal_iserror(p, &reserrno))
     Report("ERROR: %s failed to "
@@ -179,7 +186,7 @@ void *MmapFixedOrDie(uptr fixed_addr, uptr size) {
       RoundUpTo(size, PageSize),
       PROT_READ | PROT_WRITE,
       MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-      -1, 0);
+      VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL), 0);
   int reserrno;
   if (internal_iserror(p, &reserrno)) {
     Report("ERROR: %s failed to "
@@ -195,7 +202,8 @@ void *Mprotect(uptr fixed_addr, uptr size) {
   return (void *)internal_mmap((void*)fixed_addr, size,
                                PROT_NONE,
                                MAP_PRIVATE | MAP_ANON | MAP_FIXED |
-                               MAP_NORESERVE, -1, 0);
+                               MAP_NORESERVE,
+                               VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL), 0);
 }
 
 void *MapFileToMemory(const char *file_name, uptr *buff_size) {
@@ -239,7 +247,9 @@ bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
   while (proc_maps.Next(&start, &end,
                         /*offset*/0, /*filename*/0, /*filename_size*/0,
                         /*protection*/0)) {
-    if (!IntervalsAreSeparate(start, end, range_start, range_end))
+    if (start == end) continue;  // Empty range.
+    CHECK_NE(0, end);
+    if (!IntervalsAreSeparate(start, end - 1, range_start, range_end))
       return false;
   }
   return true;
@@ -287,45 +297,28 @@ char *FindPathToBinary(const char *name) {
   return 0;
 }
 
-void MaybeOpenReportFile() {
-  if (!log_to_file) return;
-  uptr pid = internal_getpid();
-  // If in tracer, use the parent's file.
-  if (pid == stoptheworld_tracer_pid)
-    pid = stoptheworld_tracer_ppid;
-  if (report_fd_pid == pid) return;
-  InternalScopedBuffer<char> report_path_full(4096);
-  internal_snprintf(report_path_full.data(), report_path_full.size(),
-                    "%s.%zu", report_path_prefix, pid);
-  uptr openrv = OpenFile(report_path_full.data(), true);
-  if (internal_iserror(openrv)) {
-    report_fd = kStderrFd;
-    log_to_file = false;
-    Report("ERROR: Can't open file: %s\n", report_path_full.data());
-    Die();
-  }
-  if (report_fd != kInvalidFd) {
-    // We're in the child. Close the parent's log.
-    internal_close(report_fd);
-  }
-  report_fd = openrv;
-  report_fd_pid = pid;
+bool IsPathSeparator(const char c) {
+  return c == '/';
 }
 
-void RawWrite(const char *buffer) {
-  static const char *kRawWriteError =
-      "RawWrite can't output requested buffer!\n";
-  uptr length = (uptr)internal_strlen(buffer);
-  MaybeOpenReportFile();
-  if (length != internal_write(report_fd, buffer, length)) {
-    internal_write(report_fd, kRawWriteError, internal_strlen(kRawWriteError));
+bool IsAbsolutePath(const char *path) {
+  return path != nullptr && IsPathSeparator(path[0]);
+}
+
+void ReportFile::Write(const char *buffer, uptr length) {
+  SpinMutexLock l(mu);
+  static const char *kWriteError =
+      "ReportFile::Write() can't output requested buffer!\n";
+  ReopenIfNecessary();
+  if (length != internal_write(fd, buffer, length)) {
+    internal_write(fd, kWriteError, internal_strlen(kWriteError));
     Die();
   }
 }
 
 bool GetCodeRangeForFile(const char *module, uptr *start, uptr *end) {
   uptr s, e, off, prot;
-  InternalScopedString buff(4096);
+  InternalScopedString buff(kMaxPathLength);
   MemoryMappingLayout proc_maps(/*cache_enabled*/false);
   while (proc_maps.Next(&s, &e, &off, buff.data(), buff.size(), &prot)) {
     if ((prot & MemoryMappingLayout::kProtectionExecute) != 0

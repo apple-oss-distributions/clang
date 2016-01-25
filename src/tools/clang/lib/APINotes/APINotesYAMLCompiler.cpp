@@ -43,7 +43,8 @@
  Name: AppKit             # The name of the framework
 
  Availability: OSX        # Optional: Specifies which platform the API is
-                          # available on. [OSX / iOS / none/ available]
+                          # available on. [OSX / iOS / WatchOS / none/
+                          #                available]
 
  AvailabilityMsg: ""  # Optional: Custom availability message to display to
                           # the user, when API is not available.
@@ -141,6 +142,7 @@ namespace {
     Available = 0,
     OSX,
     IOS,
+    WatchOS,
     None,
   };
 
@@ -211,6 +213,7 @@ namespace {
     ClassesSeq Protocols;
     FunctionsSeq Functions;
     GlobalVariablesSeq Globals;
+
     LLVM_ATTRIBUTE_DEPRECATED(
       void dump() LLVM_ATTRIBUTE_USED,
       "only for use within the debugger");
@@ -261,6 +264,7 @@ namespace llvm {
       static void enumeration(IO &io, APIAvailability &value) {
         io.enumCase(value, "OSX",       APIAvailability::OSX);
         io.enumCase(value, "iOS",       APIAvailability::IOS);
+        io.enumCase(value, "WatchOS",   APIAvailability::WatchOS);
         io.enumCase(value, "none",      APIAvailability::None);
         io.enumCase(value, "available", APIAvailability::Available);
       }
@@ -529,7 +533,7 @@ static bool compile(const Module &module,
       llvm::StringSet<> knownProperties;
       for (const auto &prop : cl.Properties) {
         // Check for duplicate property definitions.
-        if (!knownProperties.insert(prop.Name)) {
+        if (!knownProperties.insert(prop.Name).second) {
           emitError("duplicate definition of property '" + cl.Name + "." +
                     prop.Name + "'");
           continue;
@@ -559,7 +563,7 @@ static bool compile(const Module &module,
       llvm::StringSet<> knownClasses;
       for (const auto &cl : TheModule.Classes) {
         // Check for duplicate class definitions.
-        if (!knownClasses.insert(cl.Name)) {
+        if (!knownClasses.insert(cl.Name).second) {
           emitError("multiple definitions of class '" + cl.Name + "'");
           continue;
         }
@@ -571,7 +575,7 @@ static bool compile(const Module &module,
       llvm::StringSet<> knownProtocols;
       for (const auto &pr : TheModule.Protocols) {
         // Check for duplicate protocol definitions.
-        if (!knownProtocols.insert(pr.Name)) {
+        if (!knownProtocols.insert(pr.Name).second) {
           emitError("multiple definitions of protocol '" + pr.Name + "'");
           continue;
         }
@@ -583,7 +587,7 @@ static bool compile(const Module &module,
       llvm::StringSet<> knownGlobals;
       for (const auto &global : TheModule.Globals) {
         // Check for duplicate global variables.
-        if (!knownGlobals.insert(global.Name)) {
+        if (!knownGlobals.insert(global.Name).second) {
           emitError("multiple definitions of global variable '" +
                     global.Name + "'");
           continue;
@@ -602,7 +606,7 @@ static bool compile(const Module &module,
       llvm::StringSet<> knownFunctions;
       for (const auto &function : TheModule.Functions) {
         // Check for duplicate global functions.
-        if (!knownFunctions.insert(function.Name)) {
+        if (!knownFunctions.insert(function.Name).second) {
           emitError("multiple definitions of global function '" +
                     function.Name + "'");
           continue;

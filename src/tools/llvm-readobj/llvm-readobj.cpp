@@ -25,6 +25,7 @@
 #include "StreamWriter.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ELFObjectFile.h"
+#include "llvm/Object/MachOUniversal.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
@@ -141,6 +142,24 @@ namespace opts {
   cl::opt<bool>
   MipsPLTGOT("mips-plt-got",
              cl::desc("Display the MIPS GOT and PLT GOT sections"));
+
+  // -coff-imports
+  cl::opt<bool>
+  COFFImports("coff-imports", cl::desc("Display the PE/COFF import table"));
+
+  // -coff-exports
+  cl::opt<bool>
+  COFFExports("coff-exports", cl::desc("Display the PE/COFF export table"));
+
+  // -coff-directives
+  cl::opt<bool>
+  COFFDirectives("coff-directives",
+                 cl::desc("Display the PE/COFF .drectve section"));
+
+  // -coff-basereloc
+  cl::opt<bool>
+  COFFBaseRelocs("coff-basereloc",
+                 cl::desc("Display the PE/COFF .reloc section"));
 } // namespace opts
 
 static int ReturnValue = EXIT_SUCCESS;
@@ -159,8 +178,8 @@ bool error(std::error_code EC) {
 
 bool relocAddressLess(RelocationRef a, RelocationRef b) {
   uint64_t a_addr, b_addr;
-  if (error(a.getOffset(a_addr))) return false;
-  if (error(b.getOffset(b_addr))) return false;
+  if (error(a.getOffset(a_addr))) exit(ReturnValue);
+  if (error(b.getOffset(b_addr))) exit(ReturnValue);
   return a_addr < b_addr;
 }
 
@@ -266,6 +285,14 @@ static void dumpObject(const ObjectFile *Obj) {
   if (isMipsArch(Obj->getArch()) && Obj->isELF())
     if (opts::MipsPLTGOT)
       Dumper->printMipsPLTGOT();
+  if (opts::COFFImports)
+    Dumper->printCOFFImports();
+  if (opts::COFFExports)
+    Dumper->printCOFFExports();
+  if (opts::COFFDirectives)
+    Dumper->printCOFFDirectives();
+  if (opts::COFFBaseRelocs)
+    Dumper->printCOFFBaseReloc();
 }
 
 
@@ -289,6 +316,19 @@ static void dumpArchive(const Archive *Arc) {
   }
 }
 
+/// @brief Dumps each object file in \a MachO Universal Binary;
+static void dumpMachOUniversalBinary(const MachOUniversalBinary *UBinary) {
+  for (const MachOUniversalBinary::ObjectForArch &Obj : UBinary->objects()) {
+    ErrorOr<std::unique_ptr<MachOObjectFile>> ObjOrErr = Obj.getAsObjectFile();
+    if (std::error_code EC = ObjOrErr.getError()) {
+      reportError(UBinary->getFileName(), EC.message());
+      continue;
+    }
+
+    if (MachOObjectFile *MachOObj = ObjOrErr.get().get())
+      dumpObject(MachOObj);
+  }
+}
 
 /// @brief Opens \a File and dumps it.
 static void dumpInput(StringRef File) {
@@ -308,6 +348,9 @@ static void dumpInput(StringRef File) {
 
   if (Archive *Arc = dyn_cast<Archive>(&Binary))
     dumpArchive(Arc);
+  else if (MachOUniversalBinary *UBinary =
+               dyn_cast<MachOUniversalBinary>(&Binary))
+    dumpMachOUniversalBinary(UBinary);
   else if (ObjectFile *Obj = dyn_cast<ObjectFile>(&Binary))
     dumpObject(Obj);
   else

@@ -25,6 +25,7 @@
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/circular_raw_ostream.h"
 
@@ -39,22 +40,30 @@ namespace llvm {
 /// Exported boolean set by the -debug option.
 bool DebugFlag = false;
 
-static std::string CurrentDebugType;
+static ManagedStatic<std::vector<std::string>> CurrentDebugType;
 
-// isCurrentDebugType - Return true if the specified string is the debug type
-// specified on the command line, or if none was specified on the command line
-// with the -debug-only=X option.
-//
+/// Return true if the specified string is the debug type
+/// specified on the command line, or if none was specified on the command line
+/// with the -debug-only=X option.
 bool isCurrentDebugType(const char *DebugType) {
-  return CurrentDebugType.empty() || DebugType == CurrentDebugType;
+  if (CurrentDebugType->empty())
+    return true;
+  // see if DebugType is in list. Note: do not use find() as that forces us to
+  // unnecessarily create an std::string instance.
+  for (auto d : *CurrentDebugType) {
+    if (d == DebugType)
+      return true;
+  }
+  return false;
 }
 
-/// setCurrentDebugType - Set the current debug type, as if the -debug-only=X
+/// Set the current debug type, as if the -debug-only=X
 /// option were specified.  Note that DebugFlag also needs to be set to true for
 /// debug output to be produced.
 ///
 void setCurrentDebugType(const char *Type) {
-  CurrentDebugType = Type;
+  CurrentDebugType->clear();
+  CurrentDebugType->push_back(Type);
 }
 
 } // namespace llvm
@@ -82,8 +91,10 @@ namespace {
 
 struct DebugOnlyOpt {
   void operator=(const std::string &Val) const {
-    DebugFlag |= !Val.empty();
-    CurrentDebugType = Val;
+    if (Val.empty())
+      return;
+    DebugFlag = true;
+    CurrentDebugType->push_back(Val);
   }
 };
 
@@ -93,7 +104,7 @@ static DebugOnlyOpt DebugOnlyOptLoc;
 
 static cl::opt<DebugOnlyOpt, true, cl::parser<std::string> >
 DebugOnly("debug-only", cl::desc("Enable a specific type of debug output"),
-          cl::Hidden, cl::value_desc("debug string"),
+          cl::Hidden, cl::ZeroOrMore, cl::value_desc("debug string"),
           cl::location(DebugOnlyOptLoc), cl::ValueRequired);
 
 // Signal handlers - dump debug output on termination.

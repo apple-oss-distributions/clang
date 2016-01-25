@@ -133,7 +133,7 @@ ExprResult Sema::BuildObjCStringLiteral(SourceLocation AtLoc, StringLiteral *S){
           ObjCInterfaceDecl::Create (Context, 
                                      Context.getTranslationUnitDecl(), 
                                      SourceLocation(), NSIdent, 
-                                     nullptr, SourceLocation());
+                                     nullptr, nullptr, SourceLocation());
         Ty = Context.getObjCInterfaceType(NSStringIDecl);
         Context.setObjCNSStringType(Ty);
       }
@@ -208,7 +208,8 @@ static ObjCMethodDecl *getNSNumberFactoryMethod(Sema &S, SourceLocation Loc,
         S.NSNumberDecl = ObjCInterfaceDecl::Create(CX,
                                                    CX.getTranslationUnitDecl(),
                                                    SourceLocation(), NSNumberId,
-                                                   nullptr, SourceLocation());
+                                                   nullptr, nullptr,
+                                                   SourceLocation());
       } else {
         // Otherwise, require a declaration of NSNumber.
         S.Diag(Loc, diag::err_undeclared_nsnumber);
@@ -473,7 +474,8 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
             NSStringDecl = ObjCInterfaceDecl::Create(Context, TU,
                                                      SourceLocation(),
                                                      NSStringId,
-                                                     nullptr, SourceLocation());
+                                                     nullptr, nullptr,
+                                                     SourceLocation());
           } else {
             Diag(SR.getBegin(), diag::err_undeclared_nsstring);
             return ExprError();
@@ -642,7 +644,7 @@ ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
                             Context.getTranslationUnitDecl(),
                             SourceLocation(),
                             NSAPIObj->getNSClassId(NSAPI::ClassId_NSArray),
-                            nullptr, SourceLocation());
+                            nullptr, nullptr, SourceLocation());
 
     if (!NSArrayDecl) {
       Diag(SR.getBegin(), diag::err_undeclared_nsarray);
@@ -757,7 +759,7 @@ ExprResult Sema::BuildObjCDictionaryLiteral(SourceRange SR,
                             Context.getTranslationUnitDecl(),
                             SourceLocation(),
                             NSAPIObj->getNSClassId(NSAPI::ClassId_NSDictionary),
-                            nullptr, SourceLocation());
+                            nullptr, nullptr, SourceLocation());
 
     if (!NSDictionaryDecl) {
       Diag(SR.getBegin(), diag::err_undeclared_nsdictionary);
@@ -843,8 +845,11 @@ ExprResult Sema::BuildObjCDictionaryLiteral(SourceRange SR,
               LookupProtocol(&Context.Idents.get("NSCopying"), SR.getBegin())) {
             ObjCProtocolDecl *PQ[] = {NSCopyingPDecl};
             QIDNSCopying = 
-              Context.getObjCObjectType(Context.ObjCBuiltinIdTy,
-                                        (ObjCProtocolDecl**) PQ,1);
+              Context.getObjCObjectType(Context.ObjCBuiltinIdTy, { },
+                                        llvm::makeArrayRef(
+                                          (ObjCProtocolDecl**) PQ,
+                                          1),
+                                        false);
             QIDNSCopying = Context.getObjCObjectPointerType(QIDNSCopying);
           }
         }
@@ -987,7 +992,7 @@ static bool HelperToDiagnoseMismatchedMethodsInGlobalPool(Sema &S,
   ObjCMethodList *M = &MethList;
   bool Warned = false;
   for (M = M->getNext(); M; M=M->getNext()) {
-    ObjCMethodDecl *MatchingMethodDecl = M->Method;
+    ObjCMethodDecl *MatchingMethodDecl = M->getMethod();
     if (MatchingMethodDecl == Method ||
         isa<ObjCImplDecl>(MatchingMethodDecl->getDeclContext()) ||
         MatchingMethodDecl->getSelector() != Method->getSelector())
@@ -1167,7 +1172,7 @@ static QualType getBaseMessageSendResultType(Sema &S,
                                              bool isSuperMessage) {
   assert(Method && "Must have a method");
   if (!Method->hasRelatedResultType())
-    return Method->getSendResultType();
+    return Method->getSendResultType(ReceiverType);
 
   ASTContext &Context = S.Context;
 
@@ -1175,7 +1180,8 @@ static QualType getBaseMessageSendResultType(Sema &S,
   // result type to the returned result.
   auto transferNullability = [&](QualType type) -> QualType {
     // If the method's result type has nullability, extract it.
-    if (auto nullability = Method->getSendResultType()->getNullability(Context)){
+    if (auto nullability = Method->getSendResultType(ReceiverType)
+                             ->getNullability(Context)){
       // Strip off any outer nullability sugar from the provided type.
       (void)AttributedType::stripOuterNullability(type);
 
@@ -1194,7 +1200,8 @@ static QualType getBaseMessageSendResultType(Sema &S,
   //     was a class message send, T is the declared return type of the method
   //     found
   if (Method->isInstanceMethod() && isClassMessage)
-    return stripObjCInstanceType(Context, Method->getSendResultType());
+    return stripObjCInstanceType(Context, 
+                                 Method->getSendResultType(ReceiverType));
 
   //   - if the receiver is super, T is a pointer to the class of the
   //     enclosing method definition
@@ -1208,14 +1215,14 @@ static QualType getBaseMessageSendResultType(Sema &S,
   }
 
   //   - if the receiver is the name of a class U, T is a pointer to U
-  if (ReceiverType->getAs<ObjCInterfaceType>() ||
-      ReceiverType->isObjCQualifiedInterfaceType())
+  if (ReceiverType->getAsObjCInterfaceType())
     return transferNullability(Context.getObjCObjectPointerType(ReceiverType));
   //   - if the receiver is of type Class or qualified Class type,
   //     T is the declared return type of the method.
   if (ReceiverType->isObjCClassType() ||
       ReceiverType->isObjCQualifiedClassType())
-    return stripObjCInstanceType(Context, Method->getSendResultType());
+    return stripObjCInstanceType(Context, 
+                                 Method->getSendResultType(ReceiverType));
 
   //   - if the receiver is id, qualified id, Class, or qualified Class, T
   //     is the receiver type, otherwise
@@ -1478,6 +1485,10 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
     return false;
   }
 
+  // Compute the set of type arguments to be substituted into each parameter
+  // type.
+  Optional<ArrayRef<QualType>> typeArgs
+    = ReceiverType->getObjCSubstitutions(Method->getDeclContext());
   bool IsError = false;
   for (unsigned i = 0; i < NumNamedArgs; i++) {
     // We can't do any type-checking on a type-dependent argument.
@@ -1511,18 +1522,38 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
       continue;
     }
 
+    QualType origParamType = param->getType();
+    QualType paramType = origParamType;
+    if (typeArgs)
+      paramType = paramType.substObjCTypeArgs(
+                    Context,
+                    *typeArgs,
+                    ObjCSubstitutionContext::Parameter);
+
     if (RequireCompleteType(argExpr->getSourceRange().getBegin(),
-                            param->getType(),
+                            paramType,
                             diag::err_call_incomplete_argument, argExpr))
       return true;
 
-    InitializedEntity Entity = InitializedEntity::InitializeParameter(Context,
-                                                                      param);
+    InitializedEntity Entity
+      = InitializedEntity::InitializeParameter(Context, param, paramType);
     ExprResult ArgE = PerformCopyInitialization(Entity, SourceLocation(), argExpr);
     if (ArgE.isInvalid())
       IsError = true;
-    else
+    else {
       Args[i] = ArgE.getAs<Expr>();
+
+      // If we are type-erasing a block to a block-compatible
+      // Objective-C pointer type, we may need to extend the lifetime
+      // of the block object.
+      if (typeArgs && Args[i]->isRValue() && paramType->isBlockPointerType() &&
+          Args[i]->getType()->isBlockPointerType() &&
+          origParamType->isObjCObjectPointerType()) {
+        ExprResult arg = Args[i];
+        maybeExtendBlockObject(arg);
+        Args[i] = arg.get();
+      }
+    }
   }
 
   // Promote additional arguments to variadic methods.
@@ -1552,7 +1583,7 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
 
   // Do additional checkings on method.
   IsError |= CheckObjCMethodCall(
-      Method, SelLoc, makeArrayRef<const Expr *>(Args.data(), Args.size()));
+      Method, SelLoc, makeArrayRef(Args.data(), Args.size()));
 
   return IsError;
 }
@@ -1610,64 +1641,6 @@ ObjCMethodDecl *Sema::LookupMethodInQualifiedType(Selector Sel,
     }
   }
   return nullptr;
-}
-
-static void DiagnoseARCUseOfWeakReceiver(Sema &S, Expr *Receiver) {
-  if (!Receiver)
-    return;
-  
-  if (OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(Receiver))
-    Receiver = OVE->getSourceExpr();
-  
-  Expr *RExpr = Receiver->IgnoreParenImpCasts();
-  SourceLocation Loc = RExpr->getLocStart();
-  QualType T = RExpr->getType();
-  const ObjCPropertyDecl *PDecl = nullptr;
-  const ObjCMethodDecl *GDecl = nullptr;
-  if (PseudoObjectExpr *POE = dyn_cast<PseudoObjectExpr>(RExpr)) {
-    RExpr = POE->getSyntacticForm();
-    if (ObjCPropertyRefExpr *PRE = dyn_cast<ObjCPropertyRefExpr>(RExpr)) {
-      if (PRE->isImplicitProperty()) {
-        GDecl = PRE->getImplicitPropertyGetter();
-        if (GDecl) {
-          T = GDecl->getReturnType();
-        }
-      }
-      else {
-        PDecl = PRE->getExplicitProperty();
-        if (PDecl) {
-          T = PDecl->getType();
-        }
-      }
-    }
-  }
-  else if (ObjCMessageExpr *ME = dyn_cast<ObjCMessageExpr>(RExpr)) {
-    // See if receiver is a method which envokes a synthesized getter
-    // backing a 'weak' property.
-    ObjCMethodDecl *Method = ME->getMethodDecl();
-    if (Method && Method->getSelector().getNumArgs() == 0) {
-      PDecl = Method->findPropertyDecl();
-      if (PDecl)
-        T = PDecl->getType();
-    }
-  }
-  
-  if (T.getObjCLifetime() != Qualifiers::OCL_Weak) {
-    if (!PDecl)
-      return;
-    if (!(PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_weak))
-      return;
-  }
-
-  S.Diag(Loc, diag::warn_receiver_is_weak)
-    << ((!PDecl && !GDecl) ? 0 : (PDecl ? 1 : 2));
-
-  if (PDecl)
-    S.Diag(PDecl->getLocation(), diag::note_property_declare);
-  else if (GDecl)
-    S.Diag(GDecl->getLocation(), diag::note_method_declared_at) << GDecl;
-
-  S.Diag(Loc, diag::note_arc_assign_to_strong);
 }
 
 /// HandleExprPropertyRefExpr - Handle foo.bar where foo is a pointer to an
@@ -1798,10 +1771,11 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
   }
 
   // Attempt to correct for typos in property names.
-  DeclFilterCCC<ObjCPropertyDecl> Validator;
-  if (TypoCorrection Corrected = CorrectTypo(
-          DeclarationNameInfo(MemberName, MemberLoc), LookupOrdinaryName,
-          nullptr, nullptr, Validator, CTK_ErrorRecovery, IFace, false, OPT)) {
+  if (TypoCorrection Corrected =
+          CorrectTypo(DeclarationNameInfo(MemberName, MemberLoc),
+                      LookupOrdinaryName, nullptr, nullptr,
+                      llvm::make_unique<DeclFilterCCC<ObjCPropertyDecl>>(),
+                      CTK_ErrorRecovery, IFace, false, OPT)) {
     diagnoseTypo(Corrected, PDiag(diag::err_property_not_found_suggest)
                               << MemberName << QualType(OPT, 0));
     DeclarationName TypoResult = Corrected.getCorrection();
@@ -1847,37 +1821,38 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
   ObjCInterfaceDecl *IFace = getObjCInterfaceDecl(receiverNamePtr,
                                                   receiverNameLoc);
 
-  bool IsSuper = false;
+  QualType SuperType;
   if (!IFace) {
     // If the "receiver" is 'super' in a method, handle it as an expression-like
     // property reference.
     if (receiverNamePtr->isStr("super")) {
-      IsSuper = true;
-
       if (ObjCMethodDecl *CurMethod = tryCaptureObjCSelf(receiverNameLoc)) {
-        if (CurMethod->isInstanceMethod()) {
-          ObjCInterfaceDecl *Super =
-            CurMethod->getClassInterface()->getSuperClass();
-          if (!Super) {
-            // The current class does not have a superclass.
-            Diag(receiverNameLoc, diag::error_root_class_cannot_use_super)
-            << CurMethod->getClassInterface()->getIdentifier();
-            return ExprError();
+        if (ObjCInterfaceDecl *Class = CurMethod->getClassInterface()) {
+          if (CurMethod->isInstanceMethod()) {
+            SuperType = QualType(Class->getSuperClassType(), 0);
+            if (SuperType.isNull()) {
+              // The current class does not have a superclass.
+              Diag(receiverNameLoc, diag::error_root_class_cannot_use_super)
+              << Class->getIdentifier();
+              return ExprError();
+            }
+            QualType T = Context.getObjCObjectPointerType(SuperType);
+
+            return HandleExprPropertyRefExpr(T->castAs<ObjCObjectPointerType>(),
+                                             /*BaseExpr*/nullptr,
+                                             SourceLocation()/*OpLoc*/,
+                                             &propertyName,
+                                             propertyNameLoc,
+                                             receiverNameLoc, T, true);
           }
-          QualType T = Context.getObjCInterfaceType(Super);
-          T = Context.getObjCObjectPointerType(T);
 
-          return HandleExprPropertyRefExpr(T->getAsObjCInterfacePointerType(),
-                                           /*BaseExpr*/nullptr,
-                                           SourceLocation()/*OpLoc*/, 
-                                           &propertyName,
-                                           propertyNameLoc,
-                                           receiverNameLoc, T, true);
+          // Otherwise, if this is a class method, try dispatching to our
+          // superclass.
+          SuperType = QualType(
+                        CurMethod->getClassInterface()->getSuperClassType(),
+                        0);
+          IFace = Class->getSuperClass();
         }
-
-        // Otherwise, if this is a class method, try dispatching to our
-        // superclass.
-        IFace = CurMethod->getClassInterface()->getSuperClass();
       }
     }
 
@@ -1906,7 +1881,7 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
   // Look for the matching setter, in case it is needed.
   Selector SetterSel =
     SelectorTable::constructSetterSelector(PP.getIdentifierTable(),
-                                           PP.getSelectorTable(),
+                                            PP.getSelectorTable(),
                                            &propertyName);
 
   ObjCMethodDecl *Setter = IFace->lookupClassMethod(SetterSel);
@@ -1923,11 +1898,11 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
     return ExprError();
 
   if (Getter || Setter) {
-    if (IsSuper)
+    if (!SuperType.isNull())
       return new (Context)
           ObjCPropertyRefExpr(Getter, Setter, Context.PseudoObjectTy, VK_LValue,
                               OK_ObjCProperty, propertyNameLoc, receiverNameLoc,
-                              Context.getObjCInterfaceType(IFace));
+                              SuperType);
 
     return new (Context) ObjCPropertyRefExpr(
         Getter, Setter, Context.PseudoObjectTy, VK_LValue, OK_ObjCProperty,
@@ -2026,11 +2001,10 @@ Sema::ObjCMessageKind Sema::getObjCMessageKind(Scope *S,
   }
   }
 
-  ObjCInterfaceOrSuperCCC Validator(getCurMethodDecl());
-  if (TypoCorrection Corrected =
-          CorrectTypo(Result.getLookupNameInfo(), Result.getLookupKind(), S,
-                      nullptr, Validator, CTK_ErrorRecovery, nullptr, false,
-                      nullptr, false)) {
+  if (TypoCorrection Corrected = CorrectTypo(
+          Result.getLookupNameInfo(), Result.getLookupKind(), S, nullptr,
+          llvm::make_unique<ObjCInterfaceOrSuperCCC>(getCurMethodDecl()),
+          CTK_ErrorRecovery, nullptr, false, nullptr, false)) {
     if (Corrected.isKeyword()) {
       // If we've found the keyword "super" (the only keyword that would be
       // returned by CorrectTypo), this is a send to super.
@@ -2075,8 +2049,8 @@ ExprResult Sema::ActOnSuperMessage(Scope *S,
     return ExprError();
   }
 
-  ObjCInterfaceDecl *Super = Class->getSuperClass();
-  if (!Super) {
+  QualType SuperTy(Class->getSuperClassType(), 0);
+  if (SuperTy.isNull()) {
     // The current class does not have a superclass.
     Diag(SuperLoc, diag::error_root_class_cannot_use_super)
       << Class->getIdentifier();
@@ -2091,7 +2065,6 @@ ExprResult Sema::ActOnSuperMessage(Scope *S,
   if (Method->isInstanceMethod()) {
     // Since we are in an instance method, this is an instance
     // message to the superclass instance.
-    QualType SuperTy = Context.getObjCInterfaceType(Super);
     SuperTy = Context.getObjCObjectPointerType(SuperTy);
     return BuildInstanceMessage(nullptr, SuperTy, SuperLoc,
                                 Sel, /*Method=*/nullptr,
@@ -2101,7 +2074,7 @@ ExprResult Sema::ActOnSuperMessage(Scope *S,
   // Since we are in a class method, this is a class message to
   // the superclass.
   return BuildClassMessage(/*ReceiverTypeInfo=*/nullptr,
-                           Context.getObjCInterfaceType(Super),
+                           SuperTy,
                            SuperLoc, Sel, /*Method=*/nullptr,
                            LBracLoc, SelectorLocs, RBracLoc, Args);
 }
@@ -2542,28 +2515,38 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
   // of the more detailed type-checking on the receiver.
 
   if (!Method) {
-    // Handle messages to id.
-    bool receiverIsId = ReceiverType->isObjCIdType();
-    if (receiverIsId || ReceiverType->isBlockPointerType() ||
+    // Handle messages to id and __kindof types (where we use the
+    // global method pool).
+    // FIXME: The type bound is currently ignored by lookup in the
+    // global pool.
+    const ObjCObjectType *typeBound = nullptr;
+    bool receiverIsIdLike = ReceiverType->isObjCIdOrObjectKindOfType(Context,
+                                                                     typeBound);
+    if (receiverIsIdLike || ReceiverType->isBlockPointerType() ||
         (Receiver && Context.isObjCNSObjectType(Receiver->getType()))) {
       Method = LookupInstanceMethodInGlobalPool(Sel, 
                                                 SourceRange(LBracLoc, RBracLoc),
-                                                receiverIsId);
+                                                receiverIsIdLike);
       if (!Method)
         Method = LookupFactoryMethodInGlobalPool(Sel, 
                                                  SourceRange(LBracLoc,RBracLoc),
-                                                 receiverIsId);
-      if (Method)
+                                                 receiverIsIdLike);
+      if (Method) {
         if (ObjCMethodDecl *BestMethod =
               SelectBestMethod(Sel, ArgsIn, Method->isInstanceMethod()))
           Method = BestMethod;
-    } else if (ReceiverType->isObjCClassType() ||
+        if (!AreMultipleMethodsInGlobalPool(Sel, Method->isInstanceMethod()))
+          DiagnoseUseOfDecl(Method, SelLoc);
+      }
+    } else if (ReceiverType->isObjCClassOrClassKindOfType() ||
                ReceiverType->isObjCQualifiedClassType()) {
       // Handle messages to Class.
-      // We allow sending a message to a qualified Class ("Class<foo>"), which 
-      // is ok as long as one of the protocols implements the selector (if not, warn).
-      if (const ObjCObjectPointerType *QClassTy 
-            = ReceiverType->getAsObjCQualifiedClassType()) {
+      // We allow sending a message to a qualified Class ("Class<foo>"), which
+      // is ok as long as one of the protocols implements the selector (if not,
+      // warn).
+      if (!ReceiverType->isObjCClassOrClassKindOfType()) {
+        const ObjCObjectPointerType *QClassTy
+          = ReceiverType->getAsObjCQualifiedClassType();
         // Search protocols for class methods.
         Method = LookupMethodInQualifiedType(Sel, QClassTy, false);
         if (!Method) {
@@ -2858,15 +2841,6 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
   }
 
   if (getLangOpts().ObjCAutoRefCount) {
-    // Do not warn about IBOutlet weak property receivers being set to null
-    // as this cannot asynchronously happen.
-    bool WarnWeakReceiver = true;
-    if (isImplicit && Method)
-      if (const ObjCPropertyDecl *PropertyDecl = Method->findPropertyDecl())
-        WarnWeakReceiver = !PropertyDecl->hasAttr<IBOutletAttr>();
-    if (WarnWeakReceiver)
-      DiagnoseARCUseOfWeakReceiver(*this, Receiver);
-    
     // In ARC, annotate delegate init calls.
     if (Result->getMethodFamily() == OMF_init &&
         (SuperLoc.isValid() || isSelfExpr(Receiver))) {
@@ -3129,17 +3103,20 @@ namespace {
 
     /// Some declaration references are okay.
     ACCResult VisitDeclRefExpr(DeclRefExpr *e) {
-      // References to global constants from system headers are okay.
-      // These are things like 'kCFStringTransformToLatin'.  They are
-      // can also be assumed to be immune to retains.
       VarDecl *var = dyn_cast<VarDecl>(e->getDecl());
+      // References to global constants are okay.
       if (isAnyRetainable(TargetClass) &&
           isAnyRetainable(SourceClass) &&
           var &&
           var->getStorageClass() == SC_Extern &&
-          var->getType().isConstQualified() &&
-          Context.getSourceManager().isInSystemHeader(var->getLocation())) {
-        return ACC_bottom;
+          var->getType().isConstQualified()) {
+
+        // In system headers, they can also be assumed to be immune to retains.
+        // These are things like 'kCFStringTransformToLatin'.
+        if (Context.getSourceManager().isInSystemHeader(var->getLocation()))
+          return ACC_bottom;
+
+        return ACC_plusZero;
       }
 
       // Nothing else.
@@ -3522,7 +3499,7 @@ static bool CheckObjCBridgeNSCast(Sema &S, QualType castType, Expr *castExpr,
               ObjCInterfaceDecl *CastClass
                 = InterfacePointerType->getObjectType()->getInterface();
               if ((CastClass == ExprClass) ||
-                  (CastClass && ExprClass->isSuperClassOf(CastClass)))
+                  (CastClass && CastClass->isSuperClassOf(ExprClass)))
                 return true;
               if (warn)
                 S.Diag(castExpr->getLocStart(), diag::warn_objc_invalid_bridge)
@@ -3545,12 +3522,13 @@ static bool CheckObjCBridgeNSCast(Sema &S, QualType castType, Expr *castExpr,
               return false;
            }
           }
+        } else if (!castType->isObjCIdType()) {
+          S.Diag(castExpr->getLocStart(), diag::err_objc_cf_bridged_not_interface)
+            << castExpr->getType() << Parm;
+          S.Diag(TDNDecl->getLocStart(), diag::note_declared_at);
+          if (Target)
+            S.Diag(Target->getLocStart(), diag::note_declared_at);
         }
-        S.Diag(castExpr->getLocStart(), diag::err_objc_cf_bridged_not_interface)
-          << castExpr->getType() << Parm;
-        S.Diag(TDNDecl->getLocStart(), diag::note_declared_at);
-        if (Target)
-          S.Diag(Target->getLocStart(), diag::note_declared_at);
         return true;
       }
       return false;
@@ -3570,6 +3548,9 @@ static bool CheckObjCBridgeCFCast(Sema &S, QualType castType, Expr *castExpr,
     if (TB *ObjCBAttr = getObjCBridgeAttr<TB>(TD)) {
       if (IdentifierInfo *Parm = ObjCBAttr->getBridgedType()) {
         HadTheAttribute = true;
+        if (Parm->isStr("id"))
+          return true;
+
         NamedDecl *Target = nullptr;
         // Check for an existing type with this name.
         LookupResult R(S, DeclarationName(Parm), SourceLocation(),

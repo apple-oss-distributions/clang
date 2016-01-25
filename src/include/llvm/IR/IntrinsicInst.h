@@ -28,6 +28,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Metadata.h"
 
 namespace llvm {
   /// IntrinsicInst - A useful wrapper class for inspecting calls to intrinsic
@@ -81,7 +82,19 @@ namespace llvm {
   class DbgDeclareInst : public DbgInfoIntrinsic {
   public:
     Value *getAddress() const;
-    MDNode *getVariable() const { return cast<MDNode>(getArgOperand(1)); }
+    DILocalVariable *getVariable() const {
+      return cast<DILocalVariable>(getRawVariable());
+    }
+    DIExpression *getExpression() const {
+      return cast<DIExpression>(getRawExpression());
+    }
+
+    Metadata *getRawVariable() const {
+      return cast<MetadataAsValue>(getArgOperand(1))->getMetadata();
+    }
+    Metadata *getRawExpression() const {
+      return cast<MetadataAsValue>(getArgOperand(2))->getMetadata();
+    }
 
     // Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const IntrinsicInst *I) {
@@ -102,7 +115,19 @@ namespace llvm {
       return cast<ConstantInt>(
                           const_cast<Value*>(getArgOperand(1)))->getZExtValue();
     }
-    MDNode *getVariable() const { return cast<MDNode>(getArgOperand(2)); }
+    DILocalVariable *getVariable() const {
+      return cast<DILocalVariable>(getRawVariable());
+    }
+    DIExpression *getExpression() const {
+      return cast<DIExpression>(getRawExpression());
+    }
+
+    Metadata *getRawVariable() const {
+      return cast<MetadataAsValue>(getArgOperand(2))->getMetadata();
+    }
+    Metadata *getRawExpression() const {
+      return cast<MetadataAsValue>(getArgOperand(3))->getMetadata();
+    }
 
     // Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const IntrinsicInst *I) {

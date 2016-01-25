@@ -41,6 +41,10 @@ public:
     /// version of iOS.
     iOS,
 
+    /// 'watchos' is a variant of iOS for Apple's watchOS. The version
+    /// is a release version of watchOS.
+    WatchOS,
+
     /// 'gcc' is the Objective-C runtime shipped with GCC, implementing a
     /// fragile Objective-C ABI
     GCC,
@@ -81,6 +85,7 @@ public:
     case GNUstep: return true;
     case ObjFW: return true;
     case iOS: return true;
+    case WatchOS: return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -114,6 +119,7 @@ public:
     case FragileMacOSX:
     case MacOSX:
     case iOS:
+    case WatchOS:
       return false;
     case GCC:
     case GNUstep:
@@ -136,6 +142,7 @@ public:
     case FragileMacOSX: return false;
     case MacOSX: return true;
     case iOS: return true;
+    case WatchOS: return true;
     case GCC: return false;
     case GNUstep: return true;
     case ObjFW: return true;
@@ -153,6 +160,7 @@ public:
     case FragileMacOSX: return false;
     case MacOSX: return getVersion() >= VersionTuple(10, 7);
     case iOS: return getVersion() >= VersionTuple(5);
+    case WatchOS: return true;
 
     case GCC: return false;
     case GNUstep: return getVersion() >= VersionTuple(1, 6);
@@ -168,6 +176,8 @@ public:
         return getVersion() >= VersionTuple(10, 8);
       case iOS:
         return (getVersion() >= VersionTuple(6));
+      case WatchOS:
+        return true;
       case GNUstep:
         return getVersion() >= VersionTuple(1, 7);
     
@@ -195,8 +205,9 @@ public:
   bool hasSubscripting() const {
     switch (getKind()) {
     case FragileMacOSX: return false;
-    case MacOSX: return getVersion() >= VersionTuple(10, 8);
-    case iOS: return getVersion() >= VersionTuple(6);
+    case MacOSX: return getVersion() >= VersionTuple(10, 11);
+    case iOS: return getVersion() >= VersionTuple(9);
+    case WatchOS: return true;
 
     // This is really a lie, because some implementations and versions
     // of the runtime do not support ARC.  Probably -fgnu-runtime
@@ -224,6 +235,7 @@ public:
       return true;
     case MacOSX:
     case iOS:
+    case WatchOS:
     case GNUstep:
     case ObjFW:
       return false;
@@ -245,6 +257,7 @@ public:
     case FragileMacOSX: return getVersion() >= VersionTuple(10, 8);
     case MacOSX: return getVersion() >= VersionTuple(10, 8);
     case iOS: return getVersion() >= VersionTuple(5);
+    case WatchOS: return true;
     case GCC: return false;
     case GNUstep: return false;
     case ObjFW: return false;
@@ -257,6 +270,7 @@ public:
     switch (getKind()) {
     case MacOSX: return true;
     case iOS: return true;
+    case WatchOS: return true;
     case FragileMacOSX: return false;
     case GCC: return true;
     case GNUstep: return true;
@@ -270,6 +284,7 @@ public:
     switch (getKind()) {
     case MacOSX: return true;
     case iOS: return true;
+    case WatchOS: return true;
     case FragileMacOSX: return false;
     case GCC: return true;
     case GNUstep: return true;
@@ -283,10 +298,28 @@ public:
     case FragileMacOSX:
     case MacOSX:
     case iOS:
+    case WatchOS:
       return true;
     case GNUstep:
       return getVersion() >= VersionTuple(1, 7);
     default: return false;
+    }
+  }
+
+  /// Are the empty collection symbols available?
+  bool hasEmptyCollections() const {
+    switch (getKind()) {
+    case MacOSX:
+      return getVersion() >= VersionTuple(10, 11);
+    case iOS:
+      return getVersion() >= VersionTuple(9);
+    case WatchOS:
+      return getVersion() >= VersionTuple(2);
+    case GNUstep:
+      return false;
+      
+    default:
+      return false;
     }
   }
 

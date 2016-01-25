@@ -260,7 +260,7 @@ public:
     /// loop.
     ///
     /// This function should only be called when distributing mass.  As long as
-    /// there are no irreducilbe edges to Node, then it will have complexity
+    /// there are no irreducible edges to Node, then it will have complexity
     /// O(1) in this context.
     ///
     /// In general, the complexity is O(L), where L is the number of loop
@@ -717,9 +717,6 @@ void IrreducibleGraph::addEdges(const BlockNode &Node,
 ///     frequencies to an appropriate range in uint64_t.
 ///
 /// It has some known flaws.
-///
-///   - Loop scale is limited to 4096 per loop (2^12) to avoid exhausting
-///     BlockFrequency's 64-bit integer precision.
 ///
 ///   - The model of irreducible control flow is a rough approximation.
 ///

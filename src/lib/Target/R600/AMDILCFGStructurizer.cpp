@@ -621,7 +621,7 @@ DebugLoc AMDGPUCFGStructurizer::getLastDebugLocInBB(MachineBasicBlock *MBB) {
   for (MachineBasicBlock::iterator It = MBB->begin(); It != MBB->end();
       ++It) {
     MachineInstr *instr = &(*It);
-    if (instr->getDebugLoc().isUnknown() == false)
+    if (instr->getDebugLoc())
       DL = instr->getDebugLoc();
   }
   return DL;

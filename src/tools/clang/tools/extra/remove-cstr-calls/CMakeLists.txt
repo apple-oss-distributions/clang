@@ -11,7 +11,9 @@ target_link_libraries(remove-cstr-calls
   clangAST
   clangASTMatchers
   clangBasic
+  clangCodeGen
   clangFrontend
   clangLex
   clangTooling
+  clangToolingCore
   )

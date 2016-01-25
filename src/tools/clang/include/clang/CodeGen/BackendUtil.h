@@ -35,6 +35,9 @@ namespace clang {
                          const TargetOptions &TOpts, const LangOptions &LOpts,
                          StringRef TDesc, llvm::Module *M, BackendAction Action,
                          raw_ostream *OS);
+
+  void EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts);
+  bool ContainInlineAsm(llvm::Module *M);
 }
 
 #endif

@@ -7,13 +7,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "InputInfo.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Job.h"
 #include "clang/Driver/Tool.h"
 #include "clang/Driver/ToolChain.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
@@ -21,16 +24,21 @@
 using namespace clang::driver;
 using llvm::raw_ostream;
 using llvm::StringRef;
+using llvm::ArrayRef;
 
 Job::~Job() {}
 
-Command::Command(const Action &_Source, const Tool &_Creator,
-                 const char *_Executable,
-                 const ArgStringList &_Arguments)
-    : Job(CommandClass), Source(_Source), Creator(_Creator),
-      Executable(_Executable), Arguments(_Arguments) {}
+Command::Command(const Action &Source, const Tool &Creator,
+                 const char *Executable, const ArgStringList &Arguments,
+                 ArrayRef<InputInfo> Inputs)
+    : Job(CommandClass), Source(Source), Creator(Creator),
+      Executable(Executable), Arguments(Arguments), ResponseFile(nullptr) {
+  for (const auto &II : Inputs)
+    if (II.isFilename())
+      InputFilenames.push_back(II.getFilename());
+}
 
-static int skipArgs(const char *Flag) {
+static int skipArgs(const char *Flag, bool HaveCrashVFS) {
   // These flags are all of the form -Flag <Arg> and are treated as two
   // arguments.  Therefore, we need to skip the flag and the next argument.
   bool Res = llvm::StringSwitch<bool>(Flag)
@@ -39,9 +47,11 @@ static int skipArgs(const char *Flag) {
     .Cases("-fdebug-compilation-dir", "-idirafter", true)
     .Cases("-include", "-include-pch", "-internal-isystem", true)
     .Cases("-internal-externc-isystem", "-iprefix", "-iwithprefix", true)
-    .Cases("-iwithprefixbefore", "-isysroot", "-isystem", "-iquote", true)
+    .Cases("-iwithprefixbefore", "-isystem", "-iquote", true)
     .Cases("-resource-dir", "-serialize-diagnostic-file", true)
     .Cases("-dwarf-debug-flags", "-ivfsoverlay", true)
+    // Some include flags shouldn't be skipped if we have a crash VFS
+    .Case("-isysroot", !HaveCrashVFS)
     .Default(false);
 
   // Match found.
@@ -70,7 +80,7 @@ static int skipArgs(const char *Flag) {
   return 0;
 }
 
-static void PrintArg(raw_ostream &OS, const char *Arg, bool Quote) {
+void Command::printArg(raw_ostream &OS, const char *Arg, bool Quote) {
   const bool Escape = std::strpbrk(Arg, "\"\\$");
 
   if (!Quote && !Escape) {
@@ -88,57 +98,159 @@ static void PrintArg(raw_ostream &OS, const char *Arg, bool Quote) {
   OS << '"';
 }
 
+void Command::writeResponseFile(raw_ostream &OS) const {
+  // In a file list, we only write the set of inputs to the response file
+  if (Creator.getResponseFilesSupport() == Tool::RF_FileList) {
+    for (const char *Arg : InputFileList) {
+      OS << Arg << '\n';
+    }
+    return;
+  }
+
+  // In regular response files, we send all arguments to the response file
+  for (const char *Arg : Arguments) {
+    OS << '"';
+
+    for (; *Arg != '\0'; Arg++) {
+      if (*Arg == '\"' || *Arg == '\\') {
+        OS << '\\';
+      }
+      OS << *Arg;
+    }
+
+    OS << "\" ";
+  }
+}
+
+void Command::buildArgvForResponseFile(
+    llvm::SmallVectorImpl<const char *> &Out) const {
+  // When not a file list, all arguments are sent to the response file.
+  // This leaves us to set the argv to a single parameter, requesting the tool
+  // to read the response file.
+  if (Creator.getResponseFilesSupport() != Tool::RF_FileList) {
+    Out.push_back(Executable);
+    Out.push_back(ResponseFileFlag.c_str());
+    return;
+  }
+
+  llvm::StringSet<> Inputs;
+  for (const char *InputName : InputFileList)
+    Inputs.insert(InputName);
+  Out.push_back(Executable);
+  // In a file list, build args vector ignoring parameters that will go in the
+  // response file (elements of the InputFileList vector)
+  bool FirstInput = true;
+  for (const char *Arg : Arguments) {
+    if (Inputs.count(Arg) == 0) {
+      Out.push_back(Arg);
+    } else if (FirstInput) {
+      FirstInput = false;
+      Out.push_back(Creator.getResponseFileFlag());
+      Out.push_back(ResponseFile);
+    }
+  }
+}
+
 void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
                     CrashReportInfo *CrashInfo) const {
   // Always quote the exe.
   OS << ' ';
-  PrintArg(OS, Executable, /*Quote=*/true);
+  printArg(OS, Executable, /*Quote=*/true);
 
-  StringRef MainFilename;
-  // We'll need the argument to -main-file-name to find the input file name.
-  if (CrashInfo)
-    for (size_t I = 0, E = Arguments.size(); I + 1 < E; ++I)
-      if (StringRef(Arguments[I]).equals("-main-file-name"))
-        MainFilename = Arguments[I + 1];
+  llvm::ArrayRef<const char *> Args = Arguments;
+  llvm::SmallVector<const char *, 128> ArgsRespFile;
+  if (ResponseFile != nullptr) {
+    buildArgvForResponseFile(ArgsRespFile);
+    Args = ArrayRef<const char *>(ArgsRespFile).slice(1); // no executable name
+  }
 
-  for (size_t i = 0, e = Arguments.size(); i < e; ++i) {
-    const char *const Arg = Arguments[i];
+  bool HaveCrashVFS = CrashInfo && !CrashInfo->VFSPath.empty();
+  for (size_t i = 0, e = Args.size(); i < e; ++i) {
+    const char *const Arg = Args[i];
 
     if (CrashInfo) {
-      if (int Skip = skipArgs(Arg)) {
+      if (int Skip = skipArgs(Arg, HaveCrashVFS)) {
         i += Skip - 1;
         continue;
-      } else if (llvm::sys::path::filename(Arg) == MainFilename &&
-                 (i == 0 || StringRef(Arguments[i - 1]) != "-main-file-name")) {
+      }
+      auto Found = std::find_if(InputFilenames.begin(), InputFilenames.end(),
+                                [&Arg](StringRef IF) { return IF == Arg; });
+      if (Found != InputFilenames.end() &&
+          (i == 0 || StringRef(Args[i - 1]) != "-main-file-name")) {
         // Replace the input file name with the crashinfo's file name.
         OS << ' ';
         StringRef ShortName = llvm::sys::path::filename(CrashInfo->Filename);
-        PrintArg(OS, ShortName.str().c_str(), Quote);
+        printArg(OS, ShortName.str().c_str(), Quote);
         continue;
       }
     }
 
     OS << ' ';
-    PrintArg(OS, Arg, Quote);
+    printArg(OS, Arg, Quote);
   }
 
-  if (CrashInfo && !CrashInfo->VFSPath.empty()) {
+  if (CrashInfo && HaveCrashVFS) {
     OS << ' ';
-    PrintArg(OS, "-ivfsoverlay", Quote);
+    printArg(OS, "-ivfsoverlay", Quote);
     OS << ' ';
-    PrintArg(OS, CrashInfo->VFSPath.str().c_str(), Quote);
+    printArg(OS, CrashInfo->VFSPath.str().c_str(), Quote);
+  }
+
+  if (ResponseFile != nullptr) {
+    OS << "\n Arguments passed via response file:\n";
+    writeResponseFile(OS);
+    // Avoiding duplicated newline terminator, since FileLists are
+    // newline-separated.
+    if (Creator.getResponseFilesSupport() != Tool::RF_FileList)
+      OS << "\n";
+    OS << " (end of response file)";
   }
 
   OS << Terminator;
 }
 
+void Command::setResponseFile(const char *FileName) {
+  ResponseFile = FileName;
+  ResponseFileFlag = Creator.getResponseFileFlag();
+  ResponseFileFlag += FileName;
+}
+
 int Command::Execute(const StringRef **Redirects, std::string *ErrMsg,
                      bool *ExecutionFailed) const {
   SmallVector<const char*, 128> Argv;
-  Argv.push_back(Executable);
-  for (size_t i = 0, e = Arguments.size(); i != e; ++i)
-    Argv.push_back(Arguments[i]);
+
+  if (ResponseFile == nullptr) {
+    Argv.push_back(Executable);
+    for (size_t i = 0, e = Arguments.size(); i != e; ++i)
+      Argv.push_back(Arguments[i]);
+    Argv.push_back(nullptr);
+
+    return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ nullptr,
+                                     Redirects, /*secondsToWait*/ 0,
+                                     /*memoryLimit*/ 0, ErrMsg,
+                                     ExecutionFailed);
+  }
+
+  // We need to put arguments in a response file (command is too large)
+  // Open stream to store the response file contents
+  std::string RespContents;
+  llvm::raw_string_ostream SS(RespContents);
+
+  // Write file contents and build the Argv vector
+  writeResponseFile(SS);
+  buildArgvForResponseFile(Argv);
   Argv.push_back(nullptr);
+  SS.flush();
+
+  // Save the response file in the appropriate encoding
+  if (std::error_code EC = writeFileWithEncoding(
+          ResponseFile, RespContents, Creator.getResponseFileEncoding())) {
+    if (ErrMsg)
+      *ErrMsg = EC.message();
+    if (ExecutionFailed)
+      *ExecutionFailed = true;
+    return -1;
+  }
 
   return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ nullptr,
                                    Redirects, /*secondsToWait*/ 0,
@@ -148,9 +260,10 @@ int Command::Execute(const StringRef **Redirects, std::string *ErrMsg,
 FallbackCommand::FallbackCommand(const Action &Source_, const Tool &Creator_,
                                  const char *Executable_,
                                  const ArgStringList &Arguments_,
-                                 Command *Fallback_)
-    : Command(Source_, Creator_, Executable_, Arguments_), Fallback(Fallback_) {
-}
+                                 ArrayRef<InputInfo> Inputs,
+                                 std::unique_ptr<Command> Fallback_)
+    : Command(Source_, Creator_, Executable_, Arguments_, Inputs),
+      Fallback(std::move(Fallback_)) {}
 
 void FallbackCommand::Print(raw_ostream &OS, const char *Terminator,
                             bool Quote, CrashReportInfo *CrashInfo) const {
@@ -187,17 +300,10 @@ int FallbackCommand::Execute(const StringRef **Redirects, std::string *ErrMsg,
 
 JobList::JobList() : Job(JobListClass) {}
 
-JobList::~JobList() {
-  for (iterator it = begin(), ie = end(); it != ie; ++it)
-    delete *it;
-}
-
 void JobList::Print(raw_ostream &OS, const char *Terminator, bool Quote,
                     CrashReportInfo *CrashInfo) const {
-  for (const_iterator it = begin(), ie = end(); it != ie; ++it)
-    (*it)->Print(OS, Terminator, Quote, CrashInfo);
+  for (const auto &Job : *this)
+    Job.Print(OS, Terminator, Quote, CrashInfo);
 }
 
-void JobList::clear() {
-  DeleteContainerPointers(Jobs);
-}
+void JobList::clear() { Jobs.clear(); }

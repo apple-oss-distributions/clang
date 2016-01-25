@@ -78,7 +78,7 @@ inline void addNodeToInterval(Interval *Int, BasicBlock *BB) {
 //
 inline void addNodeToInterval(Interval *Int, Interval *I) {
   // Add all of the nodes in I as new nodes in Int.
-  copy(I->Nodes.begin(), I->Nodes.end(), back_inserter(Int->Nodes));
+  Int->Nodes.insert(Int->Nodes.end(), I->Nodes.begin(), I->Nodes.end());
 }
 
 
@@ -112,7 +112,7 @@ public:
     }
   }
 
-  inline ~IntervalIterator() {
+  ~IntervalIterator() {
     if (IOwnMem)
       while (!IntStack.empty()) {
         delete operator*();
@@ -120,13 +120,13 @@ public:
       }
   }
 
-  inline bool operator==(const _Self& x) const { return IntStack == x.IntStack;}
-  inline bool operator!=(const _Self& x) const { return !operator==(x); }
+  bool operator==(const _Self &x) const { return IntStack == x.IntStack; }
+  bool operator!=(const _Self &x) const { return !(*this == x); }
 
-  inline const Interval *operator*() const { return IntStack.back().first; }
-  inline       Interval *operator*()       { return IntStack.back().first; }
-  inline const Interval *operator->() const { return operator*(); }
-  inline       Interval *operator->()       { return operator*(); }
+  const Interval *operator*() const { return IntStack.back().first; }
+  Interval *operator*() { return IntStack.back().first; }
+  const Interval *operator->() const { return operator*(); }
+  Interval *operator->() { return operator*(); }
 
   _Self& operator++() {  // Preincrement
     assert(!IntStack.empty() && "Attempting to use interval iterator at end!");
@@ -150,7 +150,7 @@ public:
 
     return *this;
   }
-  inline _Self operator++(int) { // Postincrement
+  _Self operator++(int) { // Postincrement
     _Self tmp = *this; ++*this; return tmp;
   }
 
@@ -165,10 +165,10 @@ private:
   //
   bool ProcessInterval(NodeTy *Node) {
     BasicBlock *Header = getNodeHeader(Node);
-    if (Visited.count(Header)) return false;
+    if (!Visited.insert(Header).second)
+      return false;
 
     Interval *Int = new Interval(Header);
-    Visited.insert(Header);   // The header has now been visited!
 
     // Check all of our successors to see if they are in the interval...
     for (typename GT::ChildIteratorType I = GT::child_begin(Node),

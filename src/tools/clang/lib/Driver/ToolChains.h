@@ -239,6 +239,13 @@ public:
                          bool IsEmbedded = false,
                          bool AddRPath = false) const;
 
+  /// Add any profiling runtime libraries that are needed. This is essentially a
+  /// MachO specific version of addProfileRT in Tools.cpp.
+  virtual void addProfileRTLibs(const llvm::opt::ArgList &Args,
+                                llvm::opt::ArgStringList &CmdArgs) const {
+    // There aren't any profiling libs for embedded targets currently.
+  }
+
   /// }
   /// @name ToolChain Implementation
   /// {
@@ -256,7 +263,7 @@ public:
 
   bool IsBlocksDefault() const override {
     // Always allow blocks on Apple; users interested in versioning are
-    // expected to use /usr/include/Blocks.h.
+    // expected to use /usr/include/Block.h.
     return true;
   }
   bool IsIntegratedAssemblerDefault() const override {
@@ -299,7 +306,7 @@ public:
 
   bool UseDwarfDebugFlags() const override;
 
-  bool UseSjLjExceptions() const override {
+  bool UseSjLjExceptions(const llvm::opt::ArgList &Args) const override {
     return false;
   }
 
@@ -322,7 +329,9 @@ public:
   enum DarwinPlatformKind {
     MacOS,
     IPhoneOS,
-    IPhoneOSSimulator
+    IPhoneOSSimulator,
+    WatchOS,
+    WatchOSSimulator
   };
 
   mutable DarwinPlatformKind TargetPlatform;
@@ -362,9 +371,13 @@ public:
                          llvm::opt::ArgStringList &CmdArgs) const override;
 
   bool isKernelStatic() const override {
-    return !isTargetIPhoneOS() || isIPhoneOSVersionLT(6, 0) ||
+    return (!(isTargetIPhoneOS() && !isIPhoneOSVersionLT(6, 0)) &&
+            !isTargetWatchOS()) ||
            getTriple().getArch() == llvm::Triple::aarch64;
   }
+
+  void addProfileRTLibs(const llvm::opt::ArgList &Args,
+                        llvm::opt::ArgStringList &CmdArgs) const override;
 
 protected:
   /// }
@@ -400,6 +413,21 @@ protected:
   bool isTargetIOSBased() const {
     assert(TargetInitialized && "Target not initialized!");
     return isTargetIPhoneOS() || isTargetIOSSimulator();
+  }
+
+  bool isTargetWatchOS() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == WatchOS;
+  }
+
+  bool isTargetWatchOSSimulator() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == WatchOSSimulator;
+  }
+
+  bool isTargetWatchOSBased() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == WatchOS || TargetPlatform == WatchOSSimulator;
   }
 
   bool isTargetMacOS() const {
@@ -450,7 +478,7 @@ public:
   unsigned GetDefaultStackProtectorLevel(bool KernelOrKext) const override {
     // Stack protectors default to on for user code on 10.5,
     // and for everything in 10.6 and beyond
-    if (isTargetIOSBased())
+    if (isTargetIOSBased() || isTargetWatchOSBased())
       return 1;
     else if (isTargetMacOS() && !isMacosxVersionLT(10, 6))
       return 1;
@@ -464,7 +492,9 @@ public:
 
   void CheckObjCARC() const override;
 
-  bool UseSjLjExceptions() const override;
+  bool UseSjLjExceptions(const llvm::opt::ArgList &Args) const override;
+
+  void CheckBitcodeSupport() const override;
 };
 
 /// DarwinClang - The Darwin toolchain used by Clang.
@@ -488,7 +518,8 @@ public:
   AddCCKextLibArgs(const llvm::opt::ArgList &Args,
                    llvm::opt::ArgStringList &CmdArgs) const override;
 
-  virtual void addClangWarningOptions(llvm::opt::ArgStringList &CC1Args) const;
+  virtual void addClangWarningOptions(llvm::opt::ArgStringList &CC1Args)
+                                                      const override;
 
   void
   AddLinkARCArgs(const llvm::opt::ArgList &Args,
@@ -533,17 +564,6 @@ public:
     return 2;
   }
 
-  virtual bool IsIntegratedAssemblerDefault() const override {
-    switch (getTriple().getArch()) {
-    case llvm::Triple::ppc:
-    case llvm::Triple::sparc:
-    case llvm::Triple::sparcv9:
-      return true;
-    default:
-      return Generic_ELF::IsIntegratedAssemblerDefault();
-    }
-  }
-
 protected:
   Tool *buildAssembler() const override;
   Tool *buildLinker() const override;
@@ -585,17 +605,8 @@ public:
   void
   AddClangCXXStdlibIncludeArgs(const llvm::opt::ArgList &DriverArgs,
                                llvm::opt::ArgStringList &CC1Args) const override;
-  bool IsIntegratedAssemblerDefault() const override {
-    switch (getTriple().getArch()) {
-    case llvm::Triple::ppc:
-    case llvm::Triple::ppc64:
-      return true;
-    default:
-      return Generic_ELF::IsIntegratedAssemblerDefault();
-    }
-  }
 
-  bool UseSjLjExceptions() const override;
+  bool UseSjLjExceptions(const llvm::opt::ArgList &Args) const override;
   bool isPIEDefault() const override;
 protected:
   Tool *buildAssembler() const override;
@@ -617,16 +628,6 @@ public:
                               llvm::opt::ArgStringList &CC1Args) const override;
   bool IsUnwindTablesDefault() const override {
     return true;
-  }
-  bool IsIntegratedAssemblerDefault() const override {
-    switch (getTriple().getArch()) {
-    case llvm::Triple::ppc:
-    case llvm::Triple::ppc64:
-    case llvm::Triple::ppc64le:
-      return true;
-    default:
-      return Generic_ELF::IsIntegratedAssemblerDefault();
-    }
   }
 
 protected:
@@ -680,10 +681,10 @@ protected:
 
 private:
   static bool addLibStdCXXIncludePaths(Twine Base, Twine Suffix,
-                                       Twine TargetArchDir, Twine IncludeSuffix,
-                                       const llvm::opt::ArgList &DriverArgs,
-                                       llvm::opt::ArgStringList &CC1Args);
-  static bool addLibStdCXXIncludePaths(Twine Base, Twine TargetArchDir,
+                                       StringRef GCCTriple,
+                                       StringRef GCCMultiarchTriple,
+                                       StringRef TargetMultiarchTriple,
+                                       Twine IncludeSuffix,
                                        const llvm::opt::ArgList &DriverArgs,
                                        llvm::opt::ArgStringList &CC1Args);
 
@@ -711,7 +712,8 @@ public:
 
   StringRef GetGCCLibAndIncVersion() const { return GCCLibAndIncVersion.Text; }
 
-  static std::string GetGnuDir(const std::string &InstalledDir);
+  static std::string GetGnuDir(const std::string &InstalledDir,
+                               const llvm::opt::ArgList &Args);
 
   static StringRef GetTargetCPU(const llvm::opt::ArgList &Args);
 };
@@ -730,10 +732,10 @@ public:
   bool isPICDefaultForced() const override;
 };
 
-class LLVM_LIBRARY_VISIBILITY Windows : public ToolChain {
+class LLVM_LIBRARY_VISIBILITY MSVCToolChain : public ToolChain {
 public:
-  Windows(const Driver &D, const llvm::Triple &Triple,
-          const llvm::opt::ArgList &Args);
+  MSVCToolChain(const Driver &D, const llvm::Triple &Triple,
+                const llvm::opt::ArgList &Args);
 
   bool IsIntegratedAssemblerDefault() const override;
   bool IsUnwindTablesDefault() const override;
@@ -748,11 +750,50 @@ public:
   AddClangCXXStdlibIncludeArgs(const llvm::opt::ArgList &DriverArgs,
                                llvm::opt::ArgStringList &CC1Args) const override;
 
+  bool getWindowsSDKDir(std::string &path, int &major, int &minor) const;
+  bool getWindowsSDKLibraryPath(std::string &path) const;
+  bool getVisualStudioInstallDir(std::string &path) const;
+  bool getVisualStudioBinariesFolder(const char *clangProgramPath,
+                                     std::string &path) const;
+
 protected:
+  void AddSystemIncludeWithSubfolder(const llvm::opt::ArgList &DriverArgs,
+                                     llvm::opt::ArgStringList &CC1Args,
+                                     const std::string &folder,
+                                     const char *subfolder) const;
+
   Tool *buildLinker() const override;
   Tool *buildAssembler() const override;
 };
 
+class LLVM_LIBRARY_VISIBILITY CrossWindowsToolChain : public Generic_GCC {
+public:
+  CrossWindowsToolChain(const Driver &D, const llvm::Triple &T,
+                        const llvm::opt::ArgList &Args);
+
+  bool IsIntegratedAssemblerDefault() const override { return true; }
+  bool IsUnwindTablesDefault() const override;
+  bool isPICDefault() const override;
+  bool isPIEDefault() const override;
+  bool isPICDefaultForced() const override;
+
+  unsigned int GetDefaultStackProtectorLevel(bool KernelOrKext) const override {
+    return 0;
+  }
+
+  void AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                                 llvm::opt::ArgStringList &CC1Args)
+      const override;
+  void AddClangCXXStdlibIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                                    llvm::opt::ArgStringList &CC1Args)
+      const override;
+  void AddCXXStdlibLibArgs(const llvm::opt::ArgList &Args,
+                           llvm::opt::ArgStringList &CmdArgs) const override;
+
+protected:
+  Tool *buildLinker() const override;
+  Tool *buildAssembler() const override;
+};
 
 class LLVM_LIBRARY_VISIBILITY XCore : public ToolChain {
 public:

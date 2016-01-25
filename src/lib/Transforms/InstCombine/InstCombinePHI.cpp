@@ -11,11 +11,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "InstCombine.h"
+#include "InstCombineInternal.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/InstructionSimplify.h"
-#include "llvm/IR/DataLayout.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "instcombine"
@@ -506,12 +505,12 @@ Instruction *InstCombiner::FoldPHIArgOpIntoPHI(PHINode &PN) {
 /// DeadPHICycle - Return true if this PHI node is only used by a PHI node cycle
 /// that is dead.
 static bool DeadPHICycle(PHINode *PN,
-                         SmallPtrSet<PHINode*, 16> &PotentiallyDeadPHIs) {
+                         SmallPtrSetImpl<PHINode*> &PotentiallyDeadPHIs) {
   if (PN->use_empty()) return true;
   if (!PN->hasOneUse()) return false;
 
   // Remember this node, and if we find the cycle, return.
-  if (!PotentiallyDeadPHIs.insert(PN))
+  if (!PotentiallyDeadPHIs.insert(PN).second)
     return true;
 
   // Don't scan crazily complex things.
@@ -528,9 +527,9 @@ static bool DeadPHICycle(PHINode *PN,
 /// NonPhiInVal.  This happens with mutually cyclic phi nodes like:
 ///   z = some value; x = phi (y, z); y = phi (x, z)
 static bool PHIsEqualValue(PHINode *PN, Value *NonPhiInVal,
-                           SmallPtrSet<PHINode*, 16> &ValueEqualPHIs) {
+                           SmallPtrSetImpl<PHINode*> &ValueEqualPHIs) {
   // See if we already saw this PHI node.
-  if (!ValueEqualPHIs.insert(PN))
+  if (!ValueEqualPHIs.insert(PN).second)
     return true;
 
   // Don't scan crazily complex things.
@@ -654,7 +653,7 @@ Instruction *InstCombiner::SliceUpIllegalIntegerPHI(PHINode &FirstPhi) {
 
       // If the user is a PHI, inspect its uses recursively.
       if (PHINode *UserPN = dyn_cast<PHINode>(UserI)) {
-        if (PHIsInspected.insert(UserPN))
+        if (PHIsInspected.insert(UserPN).second)
           PHIsToSlice.push_back(UserPN);
         continue;
       }
@@ -788,7 +787,7 @@ Instruction *InstCombiner::SliceUpIllegalIntegerPHI(PHINode &FirstPhi) {
 // PHINode simplification
 //
 Instruction *InstCombiner::visitPHINode(PHINode &PN) {
-  if (Value *V = SimplifyInstruction(&PN, DL, TLI))
+  if (Value *V = SimplifyInstruction(&PN, DL, TLI, DT, AC))
     return ReplaceInstUsesWith(PN, V);
 
   // If all PHI operands are the same operation, pull them through the PHI,
@@ -891,8 +890,8 @@ Instruction *InstCombiner::visitPHINode(PHINode &PN) {
   // it is only used by trunc or trunc(lshr) operations.  If so, we split the
   // PHI into the various pieces being extracted.  This sort of thing is
   // introduced when SROA promotes an aggregate to a single large integer type.
-  if (PN.getType()->isIntegerTy() && DL &&
-      !DL->isLegalInteger(PN.getType()->getPrimitiveSizeInBits()))
+  if (PN.getType()->isIntegerTy() &&
+      !DL.isLegalInteger(PN.getType()->getPrimitiveSizeInBits()))
     if (Instruction *Res = SliceUpIllegalIntegerPHI(PN))
       return Res;
 

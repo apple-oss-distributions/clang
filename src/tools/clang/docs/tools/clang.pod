@@ -328,6 +328,12 @@ debug information.  This is the default on Darwin.  Note that Clang
 will never emit type information for types that are not referenced at
 all by the program.
 
+=item B<-gmodules>
+
+Generate debug information that references types defined in clang
+modules. The resulting objects will have smaller debug info which will
+speed up dsymutil and debugging with lldb.
+
 =item B<-fexceptions>
 
 Enable generation of unwind information, this allows exceptions to be thrown

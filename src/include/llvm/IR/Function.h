@@ -87,11 +87,25 @@ private:
   ValueSymbolTable *SymTab;               ///< Symbol table of args/instructions
   AttributeSet AttributeSets;             ///< Parameter attributes
 
-  // HasLazyArguments is stored in Value::SubclassData.
-  /*bool HasLazyArguments;*/
+  /*
+   * Value::SubclassData
+   *
+   * bit 0  : HasLazyArguments
+   * bit 1  : HasPrefixData
+   * bit 2  : HasPrologueData
+   * bit 3-6: CallingConvention
+   */
 
-  // The Calling Convention is stored in Value::SubclassData.
-  /*CallingConv::ID CallingConvention;*/
+  /// Bits from GlobalObject::GlobalObjectSubclassData.
+  enum {
+    /// Whether this function is materializable.
+    IsMaterializableBit = 1 << 0,
+    HasMetadataHashEntryBit = 1 << 1
+  };
+  void setGlobalObjectBit(unsigned Mask, bool Value) {
+    setGlobalObjectSubClassData((~Mask & getGlobalObjectSubClassData()) |
+                                (Value ? Mask : 0u));
+  }
 
   friend class SymbolTableListTraits<Function, Module>;
 
@@ -102,7 +116,7 @@ private:
   /// needs it.  The hasLazyArguments predicate returns true if the arg list
   /// hasn't been set up yet.
   bool hasLazyArguments() const {
-    return getSubclassDataFromValue() & 1;
+    return getSubclassDataFromValue() & (1<<0);
   }
   void CheckLazyArguments() const {
     if (hasLazyArguments())
@@ -143,6 +157,9 @@ public:
   /// arguments.
   bool isVarArg() const;
 
+  bool isMaterializable() const;
+  void setIsMaterializable(bool V);
+
   /// getIntrinsicID - This method returns the ID number of the specified
   /// function, or Intrinsic::not_intrinsic if the function is not an
   /// intrinsic, or if the pointer is null.  This value is always defined to be
@@ -159,11 +176,11 @@ public:
   /// calling convention of this function.  The enum values for the known
   /// calling conventions are defined in CallingConv.h.
   CallingConv::ID getCallingConv() const {
-    return static_cast<CallingConv::ID>(getSubclassDataFromValue() >> 2);
+    return static_cast<CallingConv::ID>(getSubclassDataFromValue() >> 3);
   }
   void setCallingConv(CallingConv::ID CC) {
-    setValueSubclassData((getSubclassDataFromValue() & 3) |
-                         (static_cast<unsigned>(CC) << 2));
+    setValueSubclassData((getSubclassDataFromValue() & 7) |
+                         (static_cast<unsigned>(CC) << 3));
   }
 
   /// @brief Return the attribute list for this Function.
@@ -210,6 +227,11 @@ public:
   }
   Attribute getFnAttribute(StringRef Kind) const {
     return AttributeSets.getAttribute(AttributeSet::FunctionIndex, Kind);
+  }
+
+  /// \brief Return the stack alignment for the function.
+  unsigned getFnStackAlignment() const {
+    return AttributeSets.getStackAlignment(AttributeSet::FunctionIndex);
   }
 
   /// hasGC/getGC/setGC/clearGC - The name of the garbage collection algorithm
@@ -445,11 +467,18 @@ public:
   bool arg_empty() const;
 
   bool hasPrefixData() const {
-    return getSubclassDataFromValue() & 2;
+    return getSubclassDataFromValue() & (1<<1);
   }
 
   Constant *getPrefixData() const;
   void setPrefixData(Constant *PrefixData);
+
+  bool hasPrologueData() const {
+    return getSubclassDataFromValue() & (1<<2);
+  }
+
+  Constant *getPrologueData() const;
+  void setPrologueData(Constant *PrologueData);
 
   /// viewCFG - This function is meant for use from the debugger.  You can just
   /// say 'call F->viewCFG()' and a ghostview window should pop up from the
@@ -501,12 +530,50 @@ public:
   /// setjmp or other function that gcc recognizes as "returning twice".
   bool callsFunctionThatReturnsTwice() const;
 
+  /// \brief Check if this has any metadata.
+  bool hasMetadata() const { return hasMetadataHashEntry(); }
+
+  /// \brief Get the current metadata attachment, if any.
+  ///
+  /// Returns \c nullptr if such an attachment is missing.
+  /// @{
+  MDNode *getMetadata(unsigned KindID) const;
+  MDNode *getMetadata(StringRef Kind) const;
+  /// @}
+
+  /// \brief Set a particular kind of metadata attachment.
+  ///
+  /// Sets the given attachment to \c MD, erasing it if \c MD is \c nullptr or
+  /// replacing it if it already exists.
+  /// @{
+  void setMetadata(unsigned KindID, MDNode *MD);
+  void setMetadata(StringRef Kind, MDNode *MD);
+  /// @}
+
+  /// \brief Get all current metadata attachments.
+  void
+  getAllMetadata(SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const;
+
+  /// \brief Drop metadata not in the given list.
+  ///
+  /// Drop all metadata from \c this not included in \c KnownIDs.
+  void dropUnknownMetadata(ArrayRef<unsigned> KnownIDs);
+
 private:
   // Shadow Value::setValueSubclassData with a private forwarding method so that
   // subclasses cannot accidentally use it.
   void setValueSubclassData(unsigned short D) {
     Value::setValueSubclassData(D);
   }
+
+  bool hasMetadataHashEntry() const {
+    return getGlobalObjectSubClassData() & HasMetadataHashEntryBit;
+  }
+  void setHasMetadataHashEntry(bool HasEntry) {
+    setGlobalObjectBit(HasMetadataHashEntryBit, HasEntry);
+  }
+
+  void clearMetadata();
 };
 
 inline ValueSymbolTable *
@@ -518,6 +585,9 @@ inline ValueSymbolTable *
 ilist_traits<Argument>::getSymTab(Function *F) {
   return F ? &F->getValueSymbolTable() : nullptr;
 }
+
+/// \brief Overwrite attribute Kind in function F.
+void overrideFunctionAttribute(StringRef Kind, StringRef Value, Function &F);
 
 } // End llvm namespace
 

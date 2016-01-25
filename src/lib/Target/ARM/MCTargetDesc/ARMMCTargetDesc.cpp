@@ -64,10 +64,60 @@ static bool getMCRDeprecationInfo(MCInst &MI, MCSubtargetInfo &STI,
 }
 
 static bool getITDeprecationInfo(MCInst &MI, MCSubtargetInfo &STI,
-                                  std::string &Info) {
-  if (STI.getFeatureBits() & llvm::ARM::HasV8Ops &&
-      MI.getOperand(1).isImm() && MI.getOperand(1).getImm() != 8) {
-    Info = "applying IT instruction to more than one subsequent instruction is deprecated";
+                                 std::string &Info) {
+  if (STI.getFeatureBits() & llvm::ARM::HasV8Ops && MI.getOperand(1).isImm() &&
+      MI.getOperand(1).getImm() != 8) {
+    Info = "applying IT instruction to more than one subsequent instruction is "
+           "deprecated";
+    return true;
+  }
+
+  return false;
+}
+
+static bool getARMStoreDeprecationInfo(MCInst &MI, MCSubtargetInfo &STI,
+                                       std::string &Info) {
+  assert((~STI.getFeatureBits() & llvm::ARM::ModeThumb) &&
+         "cannot predicate thumb instructions");
+
+  assert(MI.getNumOperands() >= 4 && "expected >= 4 arguments");
+  for (unsigned OI = 4, OE = MI.getNumOperands(); OI < OE; ++OI) {
+    assert(MI.getOperand(OI).isReg() && "expected register");
+    if (MI.getOperand(OI).getReg() == ARM::SP ||
+        MI.getOperand(OI).getReg() == ARM::PC) {
+      Info = "use of SP or PC in the list is deprecated";
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool getARMLoadDeprecationInfo(MCInst &MI, MCSubtargetInfo &STI,
+                                      std::string &Info) {
+  assert((~STI.getFeatureBits() & llvm::ARM::ModeThumb) &&
+         "cannot predicate thumb instructions");
+
+  assert(MI.getNumOperands() >= 4 && "expected >= 4 arguments");
+  bool ListContainsPC = false, ListContainsLR = false;
+  for (unsigned OI = 4, OE = MI.getNumOperands(); OI < OE; ++OI) {
+    assert(MI.getOperand(OI).isReg() && "expected register");
+    switch (MI.getOperand(OI).getReg()) {
+    default:
+      break;
+    case ARM::LR:
+      ListContainsLR = true;
+      break;
+    case ARM::PC:
+      ListContainsPC = true;
+      break;
+    case ARM::SP:
+      Info = "use of SP in the list is deprecated";
+      return true;
+    }
+  }
+
+  if (ListContainsPC && ListContainsLR) {
+    Info = "use of LR and PC simultaneously in the list is deprecated";
     return true;
   }
 
@@ -90,6 +140,8 @@ std::string ARM_MC::ParseARMTriple(StringRef TT, StringRef CPU) {
   bool NoCPU = CPU == "generic" || CPU.empty();
   std::string ARMArchFeature;
   switch (triple.getSubArch()) {
+  default:
+    llvm_unreachable("invalid sub-architecture for ARM");
   case Triple::ARMSubArch_v8:
     if (NoCPU)
       // v8a: FeatureDB, FeatureFPARMv8, FeatureNEON, FeatureDSPThumb2,
@@ -124,6 +176,15 @@ std::string ARM_MC::ParseARMTriple(StringRef TT, StringRef CPU) {
       // v7s: FeatureNEON, FeatureDB, FeatureDSPThumb2, FeatureHasRAS
       //      Swift
       ARMArchFeature = "+v7,+swift,+neon,+db,+t2dsp,+ras";
+    else
+      // Use CPU to figure out the exact features.
+      ARMArchFeature = "+v7";
+    break;
+  case Triple::ARMSubArch_v7k:
+    if (NoCPU)
+      // v7k: FeatureNEON, FeatureDB, FeatureDSPThumb2, FeatureHasRAS
+      //      A7
+      ARMArchFeature = "+v7,+a7,+neon,+db,+t2dsp,+ras";
     else
       // Use CPU to figure out the exact features.
       ARMArchFeature = "+v7";
@@ -246,11 +307,8 @@ static MCCodeGenInfo *createARMMCCodeGenInfo(StringRef TT, Reloc::Model RM,
 // This is duplicated code. Refactor this.
 static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
                                     MCContext &Ctx, MCAsmBackend &MAB,
-                                    raw_ostream &OS,
-                                    MCCodeEmitter *Emitter,
-                                    const MCSubtargetInfo &STI,
-                                    bool RelaxAll,
-                                    bool NoExecStack) {
+                                    raw_ostream &OS, MCCodeEmitter *Emitter,
+                                    const MCSubtargetInfo &STI, bool RelaxAll) {
   Triple TheTriple(TT);
 
   switch (TheTriple.getObjectFormat()) {
@@ -264,19 +322,18 @@ static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
     assert(TheTriple.isOSWindows() && "non-Windows ARM COFF is not supported");
     return createARMWinCOFFStreamer(Ctx, MAB, *Emitter, OS);
   case Triple::ELF:
-    return createARMELFStreamer(Ctx, MAB, OS, Emitter, false, NoExecStack,
+    return createARMELFStreamer(Ctx, MAB, OS, Emitter, false,
                                 TheTriple.getArch() == Triple::thumb);
   }
 }
 
-static MCInstPrinter *createARMMCInstPrinter(const Target &T,
+static MCInstPrinter *createARMMCInstPrinter(const Triple &T,
                                              unsigned SyntaxVariant,
                                              const MCAsmInfo &MAI,
                                              const MCInstrInfo &MII,
-                                             const MCRegisterInfo &MRI,
-                                             const MCSubtargetInfo &STI) {
+                                             const MCRegisterInfo &MRI) {
   if (SyntaxVariant == 0)
-    return new ARMInstPrinter(MAI, MII, MRI, STI);
+    return new ARMInstPrinter(MAI, MII, MRI);
   return nullptr;
 }
 
@@ -406,11 +463,15 @@ extern "C" void LLVMInitializeARMTargetMC() {
   TargetRegistry::RegisterAsmStreamer(TheThumbLETarget, createMCAsmStreamer);
   TargetRegistry::RegisterAsmStreamer(TheThumbBETarget, createMCAsmStreamer);
 
-  // Register the null streamer.
-  TargetRegistry::RegisterNullStreamer(TheARMLETarget, createARMNullStreamer);
-  TargetRegistry::RegisterNullStreamer(TheARMBETarget, createARMNullStreamer);
-  TargetRegistry::RegisterNullStreamer(TheThumbLETarget, createARMNullStreamer);
-  TargetRegistry::RegisterNullStreamer(TheThumbBETarget, createARMNullStreamer);
+  // Register the null TargetStreamer.
+  TargetRegistry::RegisterNullTargetStreamer(TheARMLETarget,
+                                             createARMNullTargetStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheARMBETarget,
+                                             createARMNullTargetStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheThumbLETarget,
+                                             createARMNullTargetStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheThumbBETarget,
+                                             createARMNullTargetStreamer);
 
   // Register the MCInstPrinter.
   TargetRegistry::RegisterMCInstPrinter(TheARMLETarget, createARMMCInstPrinter);

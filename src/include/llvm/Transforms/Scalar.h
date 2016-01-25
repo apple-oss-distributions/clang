@@ -21,6 +21,7 @@ namespace llvm {
 
 class BasicBlockPass;
 class FunctionPass;
+class ModulePass;
 class Pass;
 class GetElementPtrInst;
 class PassInfo;
@@ -33,6 +34,13 @@ class TargetMachine;
 // ConstantPropagation - A worklist driven constant propagation pass
 //
 FunctionPass *createConstantPropagationPass();
+
+//===----------------------------------------------------------------------===//
+//
+// AlignmentFromAssumptions - Use assume intrinsics to set load/store
+// alignments.
+//
+FunctionPass *createAlignmentFromAssumptionsPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -91,6 +99,13 @@ FunctionPass *createScalarReplAggregatesPass(signed Threshold = -1,
 
 //===----------------------------------------------------------------------===//
 //
+// InductiveRangeCheckElimination - Transform loops to elide range checks on
+// linear functions of the induction variable.
+//
+Pass *createInductiveRangeCheckEliminationPass();
+
+//===----------------------------------------------------------------------===//
+//
 // InductionVariableSimplify - Transform induction variables in a program to all
 // use a single canonical induction variable per loop.
 //
@@ -123,7 +138,7 @@ Pass *createLICMPass();
 //
 Pass *createLoopStrengthReducePass();
 
-Pass *createGlobalMergePass(const TargetMachine *TM = nullptr);
+Pass *createGlobalMergePass(const TargetMachine *TM, unsigned MaximalOffset);
 
 //===----------------------------------------------------------------------===//
 //
@@ -199,16 +214,17 @@ FunctionPass *createReassociatePass();
 //===----------------------------------------------------------------------===//
 //
 // JumpThreading - Thread control through mult-pred/multi-succ blocks where some
-// preds always go to some succ.
+// preds always go to some succ. Thresholds other than minus one override the
+// internal BB duplication default threshold.
 //
-FunctionPass *createJumpThreadingPass();
+FunctionPass *createJumpThreadingPass(int Threshold = -1);
 
 //===----------------------------------------------------------------------===//
 //
 // CFGSimplification - Merge basic blocks, eliminate unreachable blocks,
 // simplify terminator instructions, etc...
 //
-FunctionPass *createCFGSimplificationPass();
+FunctionPass *createCFGSimplificationPass(int Threshold = -1);
 
 //===----------------------------------------------------------------------===//
 //
@@ -387,13 +403,34 @@ FunctionPass *createAddDiscriminatorsPass();
 //
 // SeparateConstOffsetFromGEP - Split GEPs for better CSE
 //
-FunctionPass *createSeparateConstOffsetFromGEPPass();
+FunctionPass *
+createSeparateConstOffsetFromGEPPass(const TargetMachine *TM = nullptr,
+                                     bool LowerGEP = false);
 
 //===----------------------------------------------------------------------===//
 //
 // LoadCombine - Combine loads into bigger loads.
 //
 BasicBlockPass *createLoadCombinePass();
+
+FunctionPass *createStraightLineStrengthReducePass();
+
+
+//===----------------------------------------------------------------------===//
+//
+// PlaceSafepoints - Rewrite any IR calls to gc.statepoints and insert any
+// safepoint polls (method entry, backedge) that might be required.  This pass
+// does not generate explicit relocation sequences - that's handled by
+// RewriteStatepointsForGC which can be run at an arbitrary point in the pass
+// order following this pass.
+//
+ModulePass *createPlaceSafepointsPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LoopDistribute - Distribute loops.
+//
+FunctionPass *createLoopDistributePass();
 
 } // End llvm namespace
 

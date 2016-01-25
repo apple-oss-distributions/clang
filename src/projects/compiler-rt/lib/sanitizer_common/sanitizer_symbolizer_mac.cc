@@ -15,11 +15,21 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_MAC
 
+#include "sanitizer_mac.h"
 #include "sanitizer_symbolizer.h"
 #include "sanitizer_symbolizer_mac.h"
 
 #include <dlfcn.h>
 #include <stdlib.h>
+
+// C++ demangling function, as required by Itanium C++ ABI. This is weak,
+// because we do not require a C++ ABI library to be linked to a program
+// using sanitizers; if it's not present, we'll just use the mangled name.
+namespace __cxxabiv1 {
+  extern "C" SANITIZER_WEAK_ATTRIBUTE
+  char *__cxa_demangle(const char *mangled, char *buffer,
+                       size_t *length, int *status);
+}
 
 namespace __sanitizer {
 
@@ -33,6 +43,15 @@ bool AtosSymbolizer::StartSubprocessIfNotStarted() {
   int main_process_pid = getpid();
   int fd;
 
+  if (!sandbox_allows_to_perform("process-fork")) {
+    // Stop, fork() is not allowed.
+    VReport(1, "Forking external symbolizer is not allowed under sandbox.\n");
+    forkfailed_ = true;
+    return false;
+  }
+
+  // Continue, fork() is allowed.
+
   // Use forkpty to disable buffering in the new terminal.
   int pid = forkpty(&fd, 0, 0, 0);
   if (pid == -1) {
@@ -42,9 +61,6 @@ bool AtosSymbolizer::StartSubprocessIfNotStarted() {
     return false;
   } else if (pid == 0) {
     // Child subprocess.
-
-    // Make `atos` work in the iOS Simulator.
-    unsetenv("DYLD_ROOT_PATH");
 
     char pid_str[16] = {0};
     internal_snprintf(pid_str, sizeof(pid_str), "%d", main_process_pid);
@@ -78,13 +94,28 @@ static const char *ExtractToken(const char *str, const char *delimiter,
   return prefix_end;
 }
 
+static const char* getSafeSymbolicatedString(const char* p) {
+  return p ? p : "??";
+}
+
 static void DlAddrIntoStringBuffer(uptr addr, char *buffer, uptr size) {
   Dl_info info;
   int result = dladdr((const void *)addr, &info);
+
   if (result) {
+    const char* func_name = getSafeSymbolicatedString(info.dli_sname);
+
+    // Try to demangle the name.
+    if (__cxxabiv1::__cxa_demangle) {
+      int demangler_status = 0;
+      const char* demangled_func_name =
+        __cxxabiv1::__cxa_demangle(func_name, 0, 0, &demangler_status);
+      func_name = (demangler_status == 0) ? demangled_func_name : func_name;
+    }
+
     uptr offset = addr - (uptr)info.dli_saddr;
-    internal_snprintf(buffer, size, "%s (in %s) + 0x%x\n", info.dli_sname,
-                      info.dli_fname, offset);
+    internal_snprintf(buffer, size, "%s (in %s) + 0x%x\n", func_name,
+                      getSafeSymbolicatedString(info.dli_fname), offset);
   } else {
     internal_snprintf(buffer, size, "0x%x\n", addr);
   }

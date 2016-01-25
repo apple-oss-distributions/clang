@@ -270,7 +270,7 @@ void MacOSKeychainAPIChecker::
   os << "Deallocator doesn't match the allocator: '"
      << FunctionsToTrack[PDeallocIdx].Name << "' should be used.";
   BugReport *Report = new BugReport(*BT, os.str(), N);
-  Report->addVisitor(new SecKeychainBugVisitor(AP.first));
+  Report->addVisitor(llvm::make_unique<SecKeychainBugVisitor>(AP.first));
   Report->addRange(ArgExpr->getSourceRange());
   markInteresting(Report, AP);
   C.emitReport(Report);
@@ -315,7 +315,7 @@ void MacOSKeychainAPIChecker::checkPreStmt(const CallExpr *CE,
               << FunctionsToTrack[DIdx].Name
               << "'.";
           BugReport *Report = new BugReport(*BT, os.str(), N);
-          Report->addVisitor(new SecKeychainBugVisitor(V));
+          Report->addVisitor(llvm::make_unique<SecKeychainBugVisitor>(V));
           Report->addRange(ArgExpr->getSourceRange());
           Report->markInteresting(AS->Region);
           C.emitReport(Report);
@@ -438,7 +438,7 @@ void MacOSKeychainAPIChecker::checkPreStmt(const CallExpr *CE,
     initBugType();
     BugReport *Report = new BugReport(*BT,
         "Only call free if a valid (non-NULL) buffer was returned.", N);
-    Report->addVisitor(new SecKeychainBugVisitor(ArgSM));
+    Report->addVisitor(llvm::make_unique<SecKeychainBugVisitor>(ArgSM));
     Report->addRange(ArgExpr->getSourceRange());
     Report->markInteresting(AS->Region);
     C.emitReport(Report);
@@ -550,7 +550,7 @@ BugReport *MacOSKeychainAPIChecker::
   BugReport *Report = new BugReport(*BT, os.str(), N, LocUsedForUniqueing,
                                    AllocNode->getLocationContext()->getDecl());
 
-  Report->addVisitor(new SecKeychainBugVisitor(AP.first));
+  Report->addVisitor(llvm::make_unique<SecKeychainBugVisitor>(AP.first));
   markInteresting(Report, AP);
   return Report;
 }

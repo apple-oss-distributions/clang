@@ -8,14 +8,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/STLExtras.h"
+#include "RuntimeDyldCheckerImpl.h"
+#include "RuntimeDyldImpl.h"
 #include "llvm/ExecutionEngine/RuntimeDyldChecker.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler.h"
 #include "llvm/MC/MCInst.h"
-#include "llvm/Support/StringRefMemoryObject.h"
 #include "llvm/Support/Path.h"
-#include "RuntimeDyldCheckerImpl.h"
-#include "RuntimeDyldImpl.h"
 #include <cctype>
 #include <memory>
 
@@ -261,9 +260,7 @@ private:
                    << "'. Instruction has only "
                    << format("%i", Inst.getNumOperands())
                    << " operands.\nInstruction is:\n  ";
-      Inst.dump_pretty(ErrMsgStream,
-                       Checker.Disassembler->getContext().getAsmInfo(),
-                       Checker.InstPrinter);
+      Inst.dump_pretty(ErrMsgStream, Checker.InstPrinter);
       return std::make_pair(EvalResult(ErrMsgStream.str()), "");
     }
 
@@ -273,9 +270,7 @@ private:
       raw_string_ostream ErrMsgStream(ErrMsg);
       ErrMsgStream << "Operand '" << format("%i", OpIdx) << "' of instruction '"
                    << Symbol << "' is not an immediate.\nInstruction is:\n  ";
-      Inst.dump_pretty(ErrMsgStream,
-                       Checker.Disassembler->getContext().getAsmInfo(),
-                       Checker.InstPrinter);
+      Inst.dump_pretty(ErrMsgStream, Checker.InstPrinter);
 
       return std::make_pair(EvalResult(ErrMsgStream.str()), "");
     }
@@ -668,7 +663,9 @@ private:
   bool decodeInst(StringRef Symbol, MCInst &Inst, uint64_t &Size) const {
     MCDisassembler *Dis = Checker.Disassembler;
     StringRef SectionMem = Checker.getSubsectionStartingAt(Symbol);
-    StringRefMemoryObject SectionBytes(SectionMem, 0);
+    ArrayRef<uint8_t> SectionBytes(
+        reinterpret_cast<const uint8_t *>(SectionMem.data()),
+        SectionMem.size());
 
     MCDisassembler::DecodeStatus S =
         Dis->getInstruction(Inst, Size, SectionBytes, 0, nulls(), nulls());
@@ -739,7 +736,9 @@ uint64_t RuntimeDyldCheckerImpl::getSymbolLinkerAddr(StringRef Symbol) const {
 }
 
 uint64_t RuntimeDyldCheckerImpl::getSymbolRemoteAddr(StringRef Symbol) const {
-  return getRTDyld().getAnySymbolRemoteAddress(Symbol);
+  if (uint64_t InternalSymbolAddr = getRTDyld().getSymbolLoadAddress(Symbol))
+      return InternalSymbolAddr;
+  return getRTDyld().MemMgr->getSymbolAddress(Symbol);
 }
 
 uint64_t RuntimeDyldCheckerImpl::readMemoryAtAddr(uint64_t SrcAddr,
@@ -825,7 +824,10 @@ std::pair<uint64_t, std::string> RuntimeDyldCheckerImpl::getStubAddrFor(
   auto StubOffsetItr = SymbolStubs.find(SymbolName);
   if (StubOffsetItr == SymbolStubs.end())
     return std::make_pair(0,
-                          ("Symbol '" + SymbolName + "' not found.\n").str());
+                          ("Stub for symbol '" + SymbolName + "' not found. "
+                           "If '" + SymbolName + "' is an internal symbol this "
+                           "may indicate that the stub target offset is being "
+                           "computed incorrectly.\n").str());
 
   uint64_t StubOffset = StubOffsetItr->second;
 
@@ -844,14 +846,16 @@ std::pair<uint64_t, std::string> RuntimeDyldCheckerImpl::getStubAddrFor(
 
 StringRef
 RuntimeDyldCheckerImpl::getSubsectionStartingAt(StringRef Name) const {
-  RuntimeDyldImpl::SymbolTableMap::const_iterator pos =
+  RTDyldSymbolTable::const_iterator pos =
       getRTDyld().GlobalSymbolTable.find(Name);
   if (pos == getRTDyld().GlobalSymbolTable.end())
     return StringRef();
-  RuntimeDyldImpl::SymbolLoc Loc = pos->second;
-  uint8_t *SectionAddr = getRTDyld().getSectionAddress(Loc.first);
-  return StringRef(reinterpret_cast<const char *>(SectionAddr) + Loc.second,
-                   getRTDyld().Sections[Loc.first].Size - Loc.second);
+  const auto &SymInfo = pos->second;
+  uint8_t *SectionAddr = getRTDyld().getSectionAddress(SymInfo.getSectionID());
+  return StringRef(reinterpret_cast<const char *>(SectionAddr) +
+                     SymInfo.getOffset(),
+                   getRTDyld().Sections[SymInfo.getSectionID()].Size -
+                     SymInfo.getOffset());
 }
 
 void RuntimeDyldCheckerImpl::registerSection(
@@ -881,9 +885,10 @@ void RuntimeDyldCheckerImpl::registerStubMap(
       // If this is a (Section, Offset) pair, do a reverse lookup in the
       // global symbol table to find the name.
       for (auto &GSTEntry : getRTDyld().GlobalSymbolTable) {
-        if (GSTEntry.second.first == StubMapEntry.first.SectionID &&
-            GSTEntry.second.second ==
-                static_cast<uint64_t>(StubMapEntry.first.Offset)) {
+        const auto &SymInfo = GSTEntry.second;
+        if (SymInfo.getSectionID() == StubMapEntry.first.SectionID &&
+            SymInfo.getOffset() ==
+              static_cast<uint64_t>(StubMapEntry.first.Offset)) {
           SymbolName = GSTEntry.first();
           break;
         }

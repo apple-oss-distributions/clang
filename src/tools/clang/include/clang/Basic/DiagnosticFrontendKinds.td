@@ -35,6 +35,10 @@ def err_fe_backend_plugin: Error<"%0">, BackendInfo;
 def remark_fe_backend_plugin: Remark<"%0">, BackendInfo, InGroup<RemarkBackendPlugin>;
 def note_fe_backend_plugin: Note<"%0">, BackendInfo;
 
+def warn_fe_override_module : Warning<
+    "overriding the module target triple with %0">, 
+    InGroup<DiagGroup<"override-module">>;
+
 def remark_fe_backend_optimization_remark : Remark<"%0">, BackendInfo,
     InGroup<BackendOptimizationRemark>;
 def remark_fe_backend_optimization_remark_missed : Remark<"%0">, BackendInfo,
@@ -45,6 +49,16 @@ def warn_fe_backend_optimization_failure : Warning<"%0">, BackendInfo,
     InGroup<BackendOptimizationFailure>, DefaultWarn;
 def note_fe_backend_optimization_remark_invalid_loc : Note<"could "
   "not determine the original source location for %0:%1:%2">;
+
+def remark_sanitize_address_insert_extra_padding_accepted : Remark<
+    "-fsanitize-address-field-padding applied to %0">, ShowInSystemHeader,
+    InGroup<SanitizeAddressRemarks>;
+def remark_sanitize_address_insert_extra_padding_rejected : Remark<
+    "-fsanitize-address-field-padding ignored for %0 because it "
+    "%select{is not C++|is packed|is a union|is trivially copyable|"
+    "has trivial destructor|is standard layout|is in a blacklisted file|"
+    "is blacklisted}1">, ShowInSystemHeader,
+    InGroup<SanitizeAddressRemarks>;
 
 def err_fe_invalid_code_complete_file : Error<
     "cannot locate code-completion file %0">, DefaultFatal;
@@ -146,7 +160,7 @@ def warn_incompatible_analyzer_plugin_api : Warning<
     InGroup<DiagGroup<"analyzer-incompatible-plugin"> >;
 def note_incompatible_analyzer_plugin_api : Note<
     "current API version is '%0', but plugin was compiled with version '%1'">;
-    
+
 def err_module_map_not_found : Error<"module map file '%0' not found">, 
   DefaultFatal;
 def err_missing_module_name : Error<
@@ -173,11 +187,19 @@ def warn_module_config_macro_undef : Warning<
 def note_module_def_undef_here : Note<
   "macro was %select{defined|#undef'd}0 here">;
 def remark_module_build : Remark<"building module '%0' as '%1'">,
-  InGroup<DiagGroup<"module-build">>;
+  InGroup<ModuleBuild>;
+def remark_module_build_done : Remark<"finished building module '%0'">,
+  InGroup<ModuleBuild>;
 
 def err_conflicting_module_names : Error<
   "conflicting module names specified: '-fmodule-name=%0' and "
   "'-fmodule-implementation-of %1'">;
+def err_conflicting_module_files : Error<
+  "module '%0' is defined in both '%1' and '%2'">;
+def err_module_file_not_found : Error<
+  "file '%0' is not a precompiled module file">, DefaultFatal;
+def err_module_file_not_module : Error<
+  "AST file '%0' was not built as a module">, DefaultFatal;
 
 def err_missing_vfs_overlay_file : Error<
   "virtual filesystem overlay file '%0' not found">, DefaultFatal;
@@ -187,5 +209,8 @@ def err_invalid_vfs_overlay : Error<
 def err_no_apinotes_cache_path : Error<
   "-fapinotes was provided without -fapinotes-cache-path=<directory>">,
   DefaultFatal;
+
+def err_inline_asm_not_allowed : Error<
+  "inline asm is used in the module with -fno-gnu-inline-asm">;
 
 }

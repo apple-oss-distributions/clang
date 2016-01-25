@@ -98,6 +98,11 @@ public:
   //                            Visitor Methods
   //===--------------------------------------------------------------------===//
 
+  void Visit(Expr *E) {
+    ApplyDebugLocation DL(CGF, E);
+    StmtVisitor<AggExprEmitter>::Visit(E);
+  }
+
   void VisitStmt(Stmt *S) {
     CGF.ErrorUnsupported(S, "aggregate expression");
   }
@@ -1408,7 +1413,8 @@ void CodeGenFunction::EmitAggregateCopy(llvm::Value *DestPtr,
       assert((Record->hasTrivialCopyConstructor() || 
               Record->hasTrivialCopyAssignment() ||
               Record->hasTrivialMoveConstructor() ||
-              Record->hasTrivialMoveAssignment()) &&
+              Record->hasTrivialMoveAssignment() ||
+              Record->isUnion()) &&
              "Trying to aggregate-copy a type without a trivial copy/move "
              "constructor or assignment operator");
       // Ignore empty classes in C++.

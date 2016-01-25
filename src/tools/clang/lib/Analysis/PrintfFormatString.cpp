@@ -49,6 +49,24 @@ static bool ParsePrecision(FormatStringHandler &H, PrintfSpecifier &FS,
   return false;
 }
 
+static bool ParseObjCFlags(FormatStringHandler &H, PrintfSpecifier &FS,
+                           const char *FlagBeg, const char *E, bool Warn) {
+   StringRef Flag(FlagBeg, E - FlagBeg);
+   // Currently there is only one flag.
+   if (Flag == "tt") {
+     FS.setHasObjCTechnicalTerm(FlagBeg);
+     return false;
+   }
+   // Handle either the case of no flag or an invalid flag.
+   if (Warn) {
+     if (Flag == "")
+       H.HandleEmptyObjCModifierFlag(FlagBeg, E  - FlagBeg);
+     else
+       H.HandleInvalidObjCModifierFlag(FlagBeg, E  - FlagBeg);
+   }
+   return true;
+}
+
 static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
                                                   const char *&Beg,
                                                   const char *E,
@@ -167,6 +185,38 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
     return true;
   }
 
+  // Look for the Objective-C modifier flags, if any.
+  // We parse these here, even if they don't apply to
+  // the conversion specifier, and then emit an error
+  // later if the conversion specifier isn't '@'.  This
+  // enables better recovery, and we don't know if
+  // these flags are applicable until later.
+  const char *ObjCModifierFlagsStart = nullptr,
+             *ObjCModifierFlagsEnd = nullptr;
+  if (*I == '[') {
+    ObjCModifierFlagsStart = I;
+    ++I;
+    auto flagStart = I;
+    for (;; ++I) {
+      ObjCModifierFlagsEnd = I;
+      if (I == E) {
+        if (Warn)
+          H.HandleIncompleteSpecifier(Start, E - Start);
+        return true;
+      }
+      // Did we find the closing ']'?
+      if (*I == ']') {
+        if (ParseObjCFlags(H, FS, flagStart, I, Warn))
+          return true;
+        ++I;
+        break;
+      }
+      // There are no separators defined yet for multiple
+      // Objective-C modifier flags.  When those are
+      // defined, this is the place to check.
+    }
+  }
+
   if (*I == '\0') {
     // Detect spurious null characters, which are likely errors.
     H.HandleNullChar(I);
@@ -206,7 +256,7 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
     case '@': k = ConversionSpecifier::ObjCObjArg; break;
     // Glibc specific.
     case 'm': k = ConversionSpecifier::PrintErrno; break;
-    // Apple-specific
+    // Apple-specific.
     case 'D':
       if (Target.getTriple().isOSDarwin())
         k = ConversionSpecifier::DArg;
@@ -219,7 +269,23 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
       if (Target.getTriple().isOSDarwin())
         k = ConversionSpecifier::UArg;
       break;
+    // MS specific.
+    case 'Z':
+      if (Target.getTriple().isOSMSVCRT())
+        k = ConversionSpecifier::ZArg;
   }
+  
+  // Check to see if we used the Objective-C modifier flags with
+  // a conversion specifier other than '@'.
+  if (k != ConversionSpecifier::ObjCObjArg &&
+      k != ConversionSpecifier::InvalidSpecifier &&
+      ObjCModifierFlagsStart) {
+    H.HandleObjCFlagsWithNonObjCConversion(ObjCModifierFlagsStart,
+                                           ObjCModifierFlagsEnd + 1,
+                                           conversionPosition);
+    return true;
+  }
+  
   PrintfConversionSpecifier CS(conversionPosition, k);
   FS.setConversionSpecifier(CS);
   if (CS.consumesDataArgument() && !FS.usesPositionalArg())
@@ -302,9 +368,14 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
 
   if (CS.getKind() == ConversionSpecifier::cArg)
     switch (LM.getKind()) {
-      case LengthModifier::None: return Ctx.IntTy;
+      case LengthModifier::None:
+        return Ctx.IntTy;
       case LengthModifier::AsLong:
+      case LengthModifier::AsWide:
         return ArgType(ArgType::WIntTy, "wint_t");
+      case LengthModifier::AsShort:
+        if (Ctx.getTargetInfo().getTriple().isOSMSVCRT())
+          return Ctx.IntTy;
       default:
         return ArgType::Invalid();
     }
@@ -339,6 +410,7 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
         return ArgType(Ctx.getPointerDiffType(), "ptrdiff_t");
       case LengthModifier::AsAllocate:
       case LengthModifier::AsMAllocate:
+      case LengthModifier::AsWide:
         return ArgType::Invalid();
     }
 
@@ -373,6 +445,7 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
         return ArgType();
       case LengthModifier::AsAllocate:
       case LengthModifier::AsMAllocate:
+      case LengthModifier::AsWide:
         return ArgType::Invalid();
     }
 
@@ -408,6 +481,7 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
       case LengthModifier::AsInt32:
       case LengthModifier::AsInt3264:
       case LengthModifier::AsInt64:
+      case LengthModifier::AsWide:
         return ArgType::Invalid();
     }
   }
@@ -420,15 +494,23 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
                          "const unichar *");
         return ArgType(ArgType::WCStrTy, "wchar_t *");
       }
+      if (LM.getKind() == LengthModifier::AsWide)
+        return ArgType(ArgType::WCStrTy, "wchar_t *");
       return ArgType::CStrTy;
     case ConversionSpecifier::SArg:
       if (IsObjCLiteral)
         return ArgType(Ctx.getPointerType(Ctx.UnsignedShortTy.withConst()),
                        "const unichar *");
+      if (Ctx.getTargetInfo().getTriple().isOSMSVCRT() &&
+          LM.getKind() == LengthModifier::AsShort)
+        return ArgType::CStrTy;
       return ArgType(ArgType::WCStrTy, "wchar_t *");
     case ConversionSpecifier::CArg:
       if (IsObjCLiteral)
         return ArgType(Ctx.UnsignedShortTy, "unichar");
+      if (Ctx.getTargetInfo().getTriple().isOSMSVCRT() &&
+          LM.getKind() == LengthModifier::AsShort)
+        return Ctx.IntTy;
       return ArgType(Ctx.WideCharTy, "wchar_t");
     case ConversionSpecifier::pArg:
       return ArgType::CPointerTy;

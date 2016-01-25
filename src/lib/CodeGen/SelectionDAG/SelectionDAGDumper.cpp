@@ -141,6 +141,8 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
 
   // Unary operators
   case ISD::FABS:                       return "fabs";
+  case ISD::FMINNUM:                    return "fminnum";
+  case ISD::FMAXNUM:                    return "fmaxnum";
   case ISD::FNEG:                       return "fneg";
   case ISD::FSQRT:                      return "fsqrt";
   case ISD::FSIN:                       return "fsin";
@@ -267,6 +269,8 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
     // Other operators
   case ISD::LOAD:                       return "load";
   case ISD::STORE:                      return "store";
+  case ISD::MLOAD:                      return "masked_load";
+  case ISD::MSTORE:                     return "masked_store";
   case ISD::VAARG:                      return "vaarg";
   case ISD::VACOPY:                     return "vacopy";
   case ISD::VAEND:                      return "vaend";
@@ -514,22 +518,20 @@ void SDNode::print_details(raw_ostream &OS, const SelectionDAG *G) const {
   if (getNodeId() != -1)
     OS << " [ID=" << getNodeId() << ']';
 
-  DebugLoc dl = getDebugLoc();
-  if (G && !dl.isUnknown()) {
-    DIScope
-      Scope(dl.getScope(G->getMachineFunction().getFunction()->getContext()));
-    OS << " dbg:";
-    assert((!Scope || Scope.isScope()) &&
-      "Scope of a DebugLoc should be null or a DIScope.");
-    // Omit the directory, since it's usually long and uninteresting.
-    if (Scope)
-      OS << Scope.getFilename();
-    else
-      OS << "<unknown>";
-    OS << ':' << dl.getLine();
-    if (dl.getCol() != 0)
-      OS << ':' << dl.getCol();
-  }
+  if (!G)
+    return;
+
+  DILocation *L = getDebugLoc();
+  if (!L)
+    return;
+
+  if (auto *Scope = L->getScope())
+    OS << Scope->getFilename();
+  else
+    OS << "<unknown>";
+  OS << ':' << L->getLine();
+  if (unsigned C = L->getColumn())
+    OS << ':' << C;
 }
 
 static void DumpNodes(const SDNode *N, unsigned indent, const SelectionDAG *G) {
@@ -567,7 +569,7 @@ void SDNode::printr(raw_ostream &OS, const SelectionDAG *G) const {
 typedef SmallPtrSet<const SDNode *, 128> VisitedSDNodeSet;
 static void DumpNodesr(raw_ostream &OS, const SDNode *N, unsigned indent,
                        const SelectionDAG *G, VisitedSDNodeSet &once) {
-  if (!once.insert(N))          // If we've been here before, return now.
+  if (!once.insert(N).second) // If we've been here before, return now.
     return;
 
   // Dump the current SDNode, but don't end the line yet.

@@ -17,6 +17,7 @@
 #include "AddOverrideActions.h"
 #include "AddOverrideMatchers.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 
 using clang::ast_matchers::MatchFinder;
 using namespace clang::tooling;
@@ -30,7 +31,8 @@ static cl::opt<bool> DetectMacros(
 
 int AddOverrideTransform::apply(const CompilationDatabase &Database,
                                 const std::vector<std::string> &SourcePaths) {
-  ClangTool AddOverrideTool(Database, SourcePaths);
+  ClangTool AddOverrideTool(Database, SourcePaths,
+                            SharedModuleProvider::Create<LLVMModuleProvider>());
   unsigned AcceptedChanges = 0;
   MatchFinder Finder;
   AddOverrideFixer Fixer(AcceptedChanges, DetectMacros,

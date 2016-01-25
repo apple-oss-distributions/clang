@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "InstCombine.h"
+#include "InstCombineInternal.h"
 #include "llvm/IR/PatternMatch.h"
 using namespace llvm;
 using namespace PatternMatch;
@@ -201,8 +201,8 @@ Instruction *InstCombiner::visitExtractElementInst(ExtractElementInst &EI) {
       APInt UndefElts(VectorWidth, 0);
       APInt DemandedMask(VectorWidth, 0);
       DemandedMask.setBit(IndexVal);
-      if (Value *V = SimplifyDemandedVectorElts(EI.getOperand(0),
-                                                DemandedMask, UndefElts)) {
+      if (Value *V = SimplifyDemandedVectorElts(EI.getOperand(0), DemandedMask,
+                                                UndefElts)) {
         EI.setOperand(0, V);
         return &EI;
       }

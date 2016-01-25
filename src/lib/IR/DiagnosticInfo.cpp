@@ -98,7 +98,8 @@ DiagnosticInfoInlineAsm::DiagnosticInfoInlineAsm(const Instruction &I,
       Instr(&I) {
   if (const MDNode *SrcLoc = I.getMetadata("srcloc")) {
     if (SrcLoc->getNumOperands() != 0)
-      if (const ConstantInt *CI = dyn_cast<ConstantInt>(SrcLoc->getOperand(0)))
+      if (const auto *CI =
+              mdconst::dyn_extract<ConstantInt>(SrcLoc->getOperand(0)))
         LocCookie = CI->getZExtValue();
   }
 }
@@ -128,16 +129,17 @@ void DiagnosticInfoSampleProfile::print(DiagnosticPrinter &DP) const {
 }
 
 bool DiagnosticInfoOptimizationBase::isLocationAvailable() const {
-  return getDebugLoc().isUnknown() == false;
+  return getDebugLoc();
 }
 
 void DiagnosticInfoOptimizationBase::getLocation(StringRef *Filename,
                                                  unsigned *Line,
                                                  unsigned *Column) const {
-  DILocation DIL(getDebugLoc().getAsMDNode(getFunction().getContext()));
-  *Filename = DIL.getFilename();
-  *Line = DIL.getLineNumber();
-  *Column = DIL.getColumnNumber();
+  DILocation *L = getDebugLoc();
+  assert(L != nullptr && "debug location is invalid");
+  *Filename = L->getFilename();
+  *Line = L->getLine();
+  *Column = L->getColumn();
 }
 
 const std::string DiagnosticInfoOptimizationBase::getLocationStr() const {

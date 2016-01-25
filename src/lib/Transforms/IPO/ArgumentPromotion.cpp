@@ -69,28 +69,27 @@ namespace {
     bool runOnSCC(CallGraphSCC &SCC) override;
     static char ID; // Pass identification, replacement for typeid
     explicit ArgPromotion(unsigned maxElements = 3)
-        : CallGraphSCCPass(ID), DL(nullptr), maxElements(maxElements) {
+        : CallGraphSCCPass(ID), maxElements(maxElements) {
       initializeArgPromotionPass(*PassRegistry::getPassRegistry());
     }
 
     /// A vector used to hold the indices of a single GEP instruction
     typedef std::vector<uint64_t> IndicesVector;
 
-    const DataLayout *DL;
   private:
-    bool isDenselyPacked(Type *type);
+    bool isDenselyPacked(Type *type, const DataLayout &DL);
     bool canPaddingBeAccessed(Argument *Arg);
     CallGraphNode *PromoteArguments(CallGraphNode *CGN);
     bool isSafeToPromoteArgument(Argument *Arg, bool isByVal) const;
     CallGraphNode *DoPromotion(Function *F,
-                               SmallPtrSet<Argument*, 8> &ArgsToPromote,
-                               SmallPtrSet<Argument*, 8> &ByValArgsToTransform);
+                              SmallPtrSetImpl<Argument*> &ArgsToPromote,
+                              SmallPtrSetImpl<Argument*> &ByValArgsToTransform);
     
     using llvm::Pass::doInitialization;
     bool doInitialization(CallGraph &CG) override;
     /// The maximum number of elements to expand, or 0 for unlimited.
     unsigned maxElements;
-    DenseMap<const Function *, DISubprogram> FunctionDIs;
+    DenseMap<const Function *, DISubprogram *> FunctionDIs;
   };
 }
 
@@ -109,9 +108,6 @@ Pass *llvm::createArgumentPromotionPass(unsigned maxElements) {
 bool ArgPromotion::runOnSCC(CallGraphSCC &SCC) {
   bool Changed = false, LocalChange;
 
-  DataLayoutPass *DLP = getAnalysisIfAvailable<DataLayoutPass>();
-  DL = DLP ? &DLP->getDataLayout() : nullptr;
-
   do {  // Iterate until we stop promoting from this SCC.
     LocalChange = false;
     // Attempt to promote arguments from all functions in this SCC.
@@ -128,7 +124,7 @@ bool ArgPromotion::runOnSCC(CallGraphSCC &SCC) {
 }
 
 /// \brief Checks if a type could have padding bytes.
-bool ArgPromotion::isDenselyPacked(Type *type) {
+bool ArgPromotion::isDenselyPacked(Type *type, const DataLayout &DL) {
 
   // There is no size information, so be conservative.
   if (!type->isSized())
@@ -136,7 +132,7 @@ bool ArgPromotion::isDenselyPacked(Type *type) {
 
   // If the alloc size is not equal to the storage size, then there are padding
   // bytes. For x86_fp80 on x86-64, size: 80 alloc size: 128.
-  if (!DL || DL->getTypeSizeInBits(type) != DL->getTypeAllocSizeInBits(type))
+  if (DL.getTypeSizeInBits(type) != DL.getTypeAllocSizeInBits(type))
     return false;
 
   if (!isa<CompositeType>(type))
@@ -144,19 +140,20 @@ bool ArgPromotion::isDenselyPacked(Type *type) {
 
   // For homogenous sequential types, check for padding within members.
   if (SequentialType *seqTy = dyn_cast<SequentialType>(type))
-    return isa<PointerType>(seqTy) || isDenselyPacked(seqTy->getElementType());
+    return isa<PointerType>(seqTy) ||
+           isDenselyPacked(seqTy->getElementType(), DL);
 
   // Check for padding within and between elements of a struct.
   StructType *StructTy = cast<StructType>(type);
-  const StructLayout *Layout = DL->getStructLayout(StructTy);
+  const StructLayout *Layout = DL.getStructLayout(StructTy);
   uint64_t StartPos = 0;
   for (unsigned i = 0, E = StructTy->getNumElements(); i < E; ++i) {
     Type *ElTy = StructTy->getElementType(i);
-    if (!isDenselyPacked(ElTy))
+    if (!isDenselyPacked(ElTy, DL))
       return false;
     if (StartPos != Layout->getElementOffsetInBits(i))
       return false;
-    StartPos += DL->getTypeAllocSizeInBits(ElTy);
+    StartPos += DL.getTypeAllocSizeInBits(ElTy);
   }
 
   return true;
@@ -182,7 +179,7 @@ bool ArgPromotion::canPaddingBeAccessed(Argument *arg) {
     Value *V = WorkList.back();
     WorkList.pop_back();
     if (isa<GetElementPtrInst>(V) || isa<PHINode>(V)) {
-      if (PtrValues.insert(V))
+      if (PtrValues.insert(V).second)
         WorkList.insert(WorkList.end(), V->user_begin(), V->user_end());
     } else if (StoreInst *Store = dyn_cast<StoreInst>(V)) {
       Stores.push_back(Store);
@@ -230,6 +227,14 @@ CallGraphNode *ArgPromotion::PromoteArguments(CallGraphNode *CGN) {
       isSelfRecursive = true;
   }
   
+  // Don't promote arguments for variadic functions. Adding, removing, or
+  // changing non-pack parameters can change the classification of pack
+  // parameters. Frontends encode that classification at the call site in the
+  // IR, while in the callee the classification is determined dynamically based
+  // on the number of registers consumed so far.
+  if (F->isVarArg()) return nullptr;
+  const DataLayout &DL = F->getParent()->getDataLayout();
+
   // Check to see which arguments are promotable.  If an argument is promotable,
   // add it to ArgsToPromote.
   SmallPtrSet<Argument*, 8> ArgsToPromote;
@@ -243,8 +248,8 @@ CallGraphNode *ArgPromotion::PromoteArguments(CallGraphNode *CGN) {
     // packed or if we can prove the padding bytes are never accessed. This does
     // not apply to inalloca.
     bool isSafeToPromote =
-      PtrArg->hasByValAttr() &&
-      (isDenselyPacked(AgTy) || !canPaddingBeAccessed(PtrArg));
+        PtrArg->hasByValAttr() &&
+        (isDenselyPacked(AgTy, DL) || !canPaddingBeAccessed(PtrArg));
     if (isSafeToPromote) {
       if (StructType *STy = dyn_cast<StructType>(AgTy)) {
         if (maxElements > 0 && STy->getNumElements() > maxElements) {
@@ -303,9 +308,9 @@ CallGraphNode *ArgPromotion::PromoteArguments(CallGraphNode *CGN) {
 
 /// AllCallersPassInValidPointerForArgument - Return true if we can prove that
 /// all callees pass in a valid pointer for the specified function argument.
-static bool AllCallersPassInValidPointerForArgument(Argument *Arg,
-                                                    const DataLayout *DL) {
+static bool AllCallersPassInValidPointerForArgument(Argument *Arg) {
   Function *Callee = Arg->getParent();
+  const DataLayout &DL = Callee->getParent()->getDataLayout();
 
   unsigned ArgNo = Arg->getArgNo();
 
@@ -423,7 +428,7 @@ bool ArgPromotion::isSafeToPromoteArgument(Argument *Arg,
   GEPIndicesSet ToPromote;
 
   // If the pointer is always valid, any load with first index 0 is valid.
-  if (isByValOrInAlloca || AllCallersPassInValidPointerForArgument(Arg, DL))
+  if (isByValOrInAlloca || AllCallersPassInValidPointerForArgument(Arg))
     SafeToUnconditionallyLoad.insert(IndicesVector(1, 0));
 
   // First, iterate the entry block and mark loads of (geps of) arguments as
@@ -523,7 +528,7 @@ bool ArgPromotion::isSafeToPromoteArgument(Argument *Arg,
         // of elements of the aggregate.
         return false;
       }
-      ToPromote.insert(Operands);
+      ToPromote.insert(std::move(Operands));
     }
   }
 
@@ -547,18 +552,16 @@ bool ArgPromotion::isSafeToPromoteArgument(Argument *Arg,
     BasicBlock *BB = Load->getParent();
 
     AliasAnalysis::Location Loc = AA.getLocation(Load);
-    if (AA.canInstructionRangeModify(BB->front(), *Load, Loc))
+    if (AA.canInstructionRangeModRef(BB->front(), *Load, Loc,
+        AliasAnalysis::Mod))
       return false;  // Pointer is invalidated!
 
     // Now check every path from the entry block to the load for transparency.
     // To do this, we perform a depth first search on the inverse CFG from the
     // loading block.
-    for (pred_iterator PI = pred_begin(BB), E = pred_end(BB); PI != E; ++PI) {
-      BasicBlock *P = *PI;
-      for (idf_ext_iterator<BasicBlock*, SmallPtrSet<BasicBlock*, 16> >
-             I = idf_ext_begin(P, TranspBlocks),
-             E = idf_ext_end(P, TranspBlocks); I != E; ++I)
-        if (AA.canBasicBlockModify(**I, Loc))
+    for (BasicBlock *P : predecessors(BB)) {
+      for (BasicBlock *TranspBB : inverse_depth_first_ext(P, TranspBlocks))
+        if (AA.canBasicBlockModify(*TranspBB, Loc))
           return false;
     }
   }
@@ -573,8 +576,8 @@ bool ArgPromotion::isSafeToPromoteArgument(Argument *Arg,
 /// arguments, and returns the new function.  At this point, we know that it's
 /// safe to do so.
 CallGraphNode *ArgPromotion::DoPromotion(Function *F,
-                               SmallPtrSet<Argument*, 8> &ArgsToPromote,
-                              SmallPtrSet<Argument*, 8> &ByValArgsToTransform) {
+                             SmallPtrSetImpl<Argument*> &ArgsToPromote,
+                             SmallPtrSetImpl<Argument*> &ByValArgsToTransform) {
 
   // Start by computing a new prototype for the function, which is the same as
   // the old function, but has modified arguments.
@@ -696,8 +699,10 @@ CallGraphNode *ArgPromotion::DoPromotion(Function *F,
   // Patch the pointer to LLVM function in debug info descriptor.
   auto DI = FunctionDIs.find(F);
   if (DI != FunctionDIs.end()) {
-    DISubprogram SP = DI->second;
-    SP.replaceFunction(NF);
+    DISubprogram *SP = DI->second;
+    SP->replaceFunction(NF);
+    // Ensure the map is updated so it can be reused on subsequent argument
+    // promotions of the same function.
     FunctionDIs.erase(DI);
     FunctionDIs[NF] = SP;
   }

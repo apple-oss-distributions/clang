@@ -34,6 +34,7 @@
 #include "llvm/MC/MCInstBuilder.h"
 #include "llvm/MC/MCLinkerOptimizationHint.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/TargetRegistry.h"
 using namespace llvm;
@@ -43,19 +44,13 @@ using namespace llvm;
 namespace {
 
 class AArch64AsmPrinter : public AsmPrinter {
-  /// Subtarget - Keep a pointer to the AArch64Subtarget around so that we can
-  /// make the right decision when printing asm code for different targets.
-  const AArch64Subtarget *Subtarget;
-
   AArch64MCInstLower MCInstLowering;
   StackMaps SM;
 
 public:
-  AArch64AsmPrinter(TargetMachine &TM, MCStreamer &Streamer)
-      : AsmPrinter(TM, Streamer),
-        Subtarget(&TM.getSubtarget<AArch64Subtarget>()),
-        MCInstLowering(OutContext, *Mang, *this), SM(*this), AArch64FI(nullptr),
-        LOHLabelCounter(0) {}
+  AArch64AsmPrinter(TargetMachine &TM, std::unique_ptr<MCStreamer> Streamer)
+      : AsmPrinter(TM, std::move(Streamer)), MCInstLowering(OutContext, *this),
+        SM(*this), AArch64FI(nullptr), LOHLabelCounter(0) {}
 
   const char *getPassName() const override {
     return "AArch64 Assembly Printer";
@@ -124,7 +119,8 @@ private:
 //===----------------------------------------------------------------------===//
 
 void AArch64AsmPrinter::EmitEndOfAsmFile(Module &M) {
-  if (Subtarget->isTargetMachO()) {
+  Triple TT(TM.getTargetTriple());
+  if (TT.isOSBinFormatMachO()) {
     // Funny Darwin hack: This flag tells the linker that no global symbols
     // contain code that falls through to other global symbols (e.g. the obvious
     // implementation of multiple entry points).  If this doesn't occur, the
@@ -135,7 +131,7 @@ void AArch64AsmPrinter::EmitEndOfAsmFile(Module &M) {
   }
 
   // Emit a .data.rel section containing any stubs that were created.
-  if (Subtarget->isTargetELF()) {
+  if (TT.isOSBinFormatELF()) {
     const TargetLoweringObjectFileELF &TLOFELF =
       static_cast<const TargetLoweringObjectFileELF &>(getObjFileLowering());
 
@@ -145,7 +141,7 @@ void AArch64AsmPrinter::EmitEndOfAsmFile(Module &M) {
     MachineModuleInfoELF::SymbolListTy Stubs = MMIELF.GetGVStubList();
     if (!Stubs.empty()) {
       OutStreamer.SwitchSection(TLOFELF.getDataRelSection());
-      const DataLayout *TD = TM.getSubtargetImpl()->getDataLayout();
+      const DataLayout *TD = TM.getDataLayout();
 
       for (unsigned i = 0, e = Stubs.size(); i != e; ++i) {
         OutStreamer.EmitLabel(Stubs[i].first);
@@ -224,6 +220,17 @@ void AArch64AsmPrinter::printOperand(const MachineInstr *MI, unsigned OpNum,
     O << '#' << Imm;
     break;
   }
+  case MachineOperand::MO_GlobalAddress: {
+    const GlobalValue *GV = MO.getGlobal();
+    MCSymbol *Sym = getSymbol(GV);
+
+    // FIXME: Can we get anything other than a plain symbol here?
+    assert(!MO.getTargetFlags() && "Unknown operand target flag!");
+
+    O << *Sym;
+    printOffset(MO.getOffset(), O);
+    break;
+  }
   }
 }
 
@@ -252,8 +259,8 @@ bool AArch64AsmPrinter::printAsmRegInClass(const MachineOperand &MO,
                                            const TargetRegisterClass *RC,
                                            bool isVector, raw_ostream &O) {
   assert(MO.isReg() && "Should only get here with a register!");
-  const AArch64RegisterInfo *RI = static_cast<const AArch64RegisterInfo *>(
-      TM.getSubtargetImpl()->getRegisterInfo());
+  const AArch64RegisterInfo *RI =
+      MF->getSubtarget<AArch64Subtarget>().getRegisterInfo();
   unsigned Reg = MO.getReg();
   unsigned RegToPrint = RC->getRegister(RI->getEncodingValue(Reg));
   assert(RI->regsOverlap(RegToPrint, Reg));
@@ -362,8 +369,8 @@ void AArch64AsmPrinter::PrintDebugValueComment(const MachineInstr *MI,
   assert(NOps == 4);
   OS << '\t' << MAI->getCommentString() << "DEBUG_VALUE: ";
   // cast away const; DIetc do not take const operands for some reason.
-  DIVariable V(const_cast<MDNode *>(MI->getOperand(NOps - 1).getMetadata()));
-  OS << V.getName();
+  OS << cast<DILocalVariable>(MI->getOperand(NOps - 2).getMetadata())
+            ->getName();
   OS << " <- ";
   // Frame address.  Currently handles register +- offset only.
   assert(MI->getOperand(0).isReg() && MI->getOperand(1).isImm());

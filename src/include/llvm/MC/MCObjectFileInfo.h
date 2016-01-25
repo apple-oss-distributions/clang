@@ -38,6 +38,11 @@ protected:
   /// section.
   bool SupportsCompactUnwindWithoutEHFrame;
 
+  /// OmitDwarfIfHaveCompactUnwind - True if the target object file
+  /// supports having some functions with compact unwind and other with
+  /// dwarf unwind.
+  bool OmitDwarfIfHaveCompactUnwind;
+
   /// PersonalityEncoding, LSDAEncoding, TTypeEncoding - Some encoding values
   /// for EH.
   unsigned PersonalityEncoding;
@@ -113,6 +118,7 @@ protected:
   const MCSection *DwarfAccelObjCSection;
   const MCSection *DwarfAccelNamespaceSection;
   const MCSection *DwarfAccelTypesSection;
+  const MCSection *DwarfAccelExternalTypesSection;
 
   /// These are used for the Fission separate debug information files.
   const MCSection *DwarfInfoDWOSection;
@@ -202,6 +208,10 @@ public:
   bool getSupportsCompactUnwindWithoutEHFrame() const {
     return SupportsCompactUnwindWithoutEHFrame;
   }
+  bool getOmitDwarfIfHaveCompactUnwind() const {
+    return OmitDwarfIfHaveCompactUnwind;
+  }
+
   bool getCommDirectiveSupportsAlignment() const {
     return CommDirectiveSupportsAlignment;
   }
@@ -257,6 +267,9 @@ public:
   }
   const MCSection *getDwarfAccelTypesSection() const {
     return DwarfAccelTypesSection;
+  }
+  const MCSection *getDwarfAccelExternalTypesSection() const {
+    return DwarfAccelExternalTypesSection;
   }
   const MCSection *getDwarfInfoDWOSection() const {
     return DwarfInfoDWOSection;

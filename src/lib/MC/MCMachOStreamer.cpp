@@ -55,6 +55,12 @@ public:
       : MCObjectStreamer(Context, MAB, OS, Emitter),
         LabelSections(label) {}
 
+  /// state management
+  void reset() override {
+    HasSectionLabel.clear();
+    MCObjectStreamer::reset();
+  }
+
   /// @name MCStreamer Interface
   /// @{
 
@@ -177,7 +183,7 @@ void MCMachOStreamer::EmitDataRegionEnd() {
   if (!getAssembler().getBackend().hasDataInCodeSupport())
     return;
   std::vector<DataRegionData> &Regions = getAssembler().getDataRegions();
-  assert(Regions.size() && "Mismatched .end_data_region!");
+  assert(!Regions.empty() && "Mismatched .end_data_region!");
   DataRegionData &Data = Regions.back();
   assert(!Data.End && "Mismatched .end_data_region!");
   // Create a temporary label to mark the end of the data region.
@@ -456,6 +462,24 @@ MCStreamer *llvm::createMachOStreamer(MCContext &Context, MCAsmBackend &MAB,
                                       bool RelaxAll,
                                       bool LabelSections) {
   MCMachOStreamer *S = new MCMachOStreamer(Context, MAB, OS, CE, LabelSections);
+  const Triple &TT = Context.getObjectFileInfo()->getTargetTriple();
+  if (TT.isOSDarwin()) {
+    unsigned Major, Minor, Update;
+    TT.getOSVersion(Major, Minor, Update);
+    // If there is a version specified, Major will be non-zero.
+    if (Major) {
+      MCVersionMinType VersionType;
+      if (TT.isWatchOS())
+        VersionType = MCVM_WatchOSVersionMin;
+      else if (TT.isMacOSX())
+        VersionType = MCVM_OSXVersionMin;
+      else {
+        assert(TT.isiOS() && "Must only be iOS platform left");
+        VersionType = MCVM_IOSVersionMin;
+      }
+      S->EmitVersionMin(VersionType, Major, Minor, Update);
+    }
+  }
   if (RelaxAll)
     S->getAssembler().setRelaxAll(true);
   return S;

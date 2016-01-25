@@ -142,13 +142,16 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
 #define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) \
   ASAN_READ_RANGE(ctx, ptr, size)
 #define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)                               \
+  ASAN_INTERCEPTOR_ENTER(ctx, func);                                           \
   do {                                                                         \
     if (asan_init_is_running)                                                  \
       return REAL(func)(__VA_ARGS__);                                          \
-    ASAN_INTERCEPTOR_ENTER(ctx, func);                                         \
     if (SANITIZER_MAC && UNLIKELY(!asan_inited))                               \
       return REAL(func)(__VA_ARGS__);                                          \
     ENSURE_ASAN_INITED();                                                      \
+  } while (false)
+#define COMMON_INTERCEPTOR_DIR_ACQUIRE(ctx, path) \
+  do {                                            \
   } while (false)
 #define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) \
   do {                                         \
@@ -169,8 +172,9 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   } while (false)
 #define COMMON_INTERCEPTOR_BLOCK_REAL(name) REAL(name)
 #define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
-#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, res) CovUpdateMapping()
-#define COMMON_INTERCEPTOR_LIBRARY_UNLOADED() CovUpdateMapping()
+#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, handle) \
+  CoverageUpdateMapping()
+#define COMMON_INTERCEPTOR_LIBRARY_UNLOADED() CoverageUpdateMapping()
 #define COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED (!asan_inited)
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
@@ -190,46 +194,79 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   } while (false)
 #include "sanitizer_common/sanitizer_common_syscalls.inc"
 
+struct ThreadStartParam {
+  atomic_uintptr_t t;
+  atomic_uintptr_t is_registered;
+};
+
 static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
+#if SANITIZER_WINDOWS
+  // FIXME: this is a bandaid fix for PR22025.
   AsanThread *t = (AsanThread*)arg;
   SetCurrentThread(t);
-  return t->ThreadStart(GetTid());
+  return t->ThreadStart(GetTid(), /* signal_thread_is_registered */ nullptr);
+#else
+  ThreadStartParam *param = reinterpret_cast<ThreadStartParam *>(arg);
+  AsanThread *t = nullptr;
+  while ((t = reinterpret_cast<AsanThread *>(
+              atomic_load(&param->t, memory_order_acquire))) == 0)
+    internal_sched_yield();
+  SetCurrentThread(t);
+  return t->ThreadStart(GetTid(), &param->is_registered);
+#endif
 }
 
 #if ASAN_INTERCEPT_PTHREAD_CREATE
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
   EnsureMainThreadIDIsCorrect();
-  // Strict init-order checking in thread-hostile.
+  // Strict init-order checking is thread-hostile.
   if (flags()->strict_init_order)
     StopInitOrderChecking();
   GET_STACK_TRACE_THREAD;
   int detached = 0;
   if (attr != 0)
     REAL(pthread_attr_getdetachstate)(attr, &detached);
-
-  u32 current_tid = GetCurrentTidOrInvalid();
-  AsanThread *t = AsanThread::Create(start_routine, arg);
-  CreateThreadContextArgs args = { t, &stack };
-  asanThreadRegistry().CreateThread(*(uptr*)t, detached, current_tid, &args);
-  return REAL(pthread_create)(thread, attr, asan_thread_start, t);
+  ThreadStartParam param;
+  atomic_store(&param.t, 0, memory_order_relaxed);
+  atomic_store(&param.is_registered, 0, memory_order_relaxed);
+  int result = REAL(pthread_create)(thread, attr, asan_thread_start, &param);
+  if (result == 0) {
+    u32 current_tid = GetCurrentTidOrInvalid();
+    AsanThread *t =
+        AsanThread::Create(start_routine, arg, current_tid, &stack, detached);
+    atomic_store(&param.t, reinterpret_cast<uptr>(t), memory_order_release);
+    // Wait until the AsanThread object is initialized and the ThreadRegistry
+    // entry is in "started" state. One reason for this is that after this
+    // interceptor exits, the child thread's stack may be the only thing holding
+    // the |arg| pointer. This may cause LSan to report a leak if leak checking
+    // happens at a point when the interceptor has already exited, but the stack
+    // range for the child thread is not yet known.
+    while (atomic_load(&param.is_registered, memory_order_acquire) == 0)
+      internal_sched_yield();
+  }
+  return result;
 }
+
+INTERCEPTOR(int, pthread_join, void *t, void **arg) {
+  return real_pthread_join(t, arg);
+}
+
+DEFINE_REAL_PTHREAD_FUNCTIONS
 #endif  // ASAN_INTERCEPT_PTHREAD_CREATE
 
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
 
 #if SANITIZER_ANDROID
 INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
-  if (!AsanInterceptsSignal(signum) ||
-      common_flags()->allow_user_segv_handler) {
+  if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
     return REAL(bsd_signal)(signum, handler);
   }
   return 0;
 }
 #else
 INTERCEPTOR(void*, signal, int signum, void *handler) {
-  if (!AsanInterceptsSignal(signum) ||
-      common_flags()->allow_user_segv_handler) {
+  if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
     return REAL(signal)(signum, handler);
   }
   return 0;
@@ -238,8 +275,7 @@ INTERCEPTOR(void*, signal, int signum, void *handler) {
 
 INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
                             struct sigaction *oldact) {
-  if (!AsanInterceptsSignal(signum) ||
-      common_flags()->allow_user_segv_handler) {
+  if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
     return REAL(sigaction)(signum, act, oldact);
   }
   return 0;
@@ -247,8 +283,8 @@ INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
 
 namespace __sanitizer {
 int real_sigaction(int signum, const void *act, void *oldact) {
-  return REAL(sigaction)(signum,
-                         (struct sigaction *)act, (struct sigaction *)oldact);
+  return REAL(sigaction)(signum, (const struct sigaction *)act,
+                         (struct sigaction *)oldact);
 }
 }  // namespace __sanitizer
 
@@ -334,44 +370,14 @@ INTERCEPTOR(int, _except_handler3, void *a, void *b, void *c, void *d) {
   return REAL(_except_handler3)(a, b, c, d);
 }
 
+#if ASAN_DYNAMIC
+// This handler is named differently in -MT and -MD CRTs.
+#define _except_handler4 _except_handler4_common
+#endif
 INTERCEPTOR(int, _except_handler4, void *a, void *b, void *c, void *d) {
   CHECK(REAL(_except_handler4));
   __asan_handle_no_return();
   return REAL(_except_handler4)(a, b, c, d);
-}
-#endif
-
-#if ASAN_INTERCEPT_MLOCKX
-// intercept mlock and friends.
-// Since asan maps 16T of RAM, mlock is completely unfriendly to asan.
-// All functions return 0 (success).
-static void MlockIsUnsupported() {
-  static bool printed = false;
-  if (printed) return;
-  printed = true;
-  VPrintf(1,
-          "INFO: AddressSanitizer ignores "
-          "mlock/mlockall/munlock/munlockall\n");
-}
-
-INTERCEPTOR(int, mlock, const void *addr, uptr len) {
-  MlockIsUnsupported();
-  return 0;
-}
-
-INTERCEPTOR(int, munlock, const void *addr, uptr len) {
-  MlockIsUnsupported();
-  return 0;
-}
-
-INTERCEPTOR(int, mlockall, int flags) {
-  MlockIsUnsupported();
-  return 0;
-}
-
-INTERCEPTOR(int, munlockall, void) {
-  MlockIsUnsupported();
-  return 0;
 }
 #endif
 
@@ -671,7 +677,7 @@ static inline void FixRealStrtolEndptr(const char *nptr, char **endptr) {
     // We get this symbol by skipping leading blanks and optional +/- sign.
     while (IsSpace(*nptr)) nptr++;
     if (*nptr == '+' || *nptr == '-') nptr++;
-    *endptr = (char*)nptr;
+    *endptr = const_cast<char *>(nptr);
   }
   CHECK(*endptr >= nptr);
 }
@@ -806,15 +812,16 @@ INTERCEPTOR_WINAPI(DWORD, CreateThread,
                    void* security, uptr stack_size,
                    DWORD (__stdcall *start_routine)(void*), void* arg,
                    DWORD thr_flags, void* tid) {
-  // Strict init-order checking in thread-hostile.
+  // Strict init-order checking is thread-hostile.
   if (flags()->strict_init_order)
     StopInitOrderChecking();
   GET_STACK_TRACE_THREAD;
-  u32 current_tid = GetCurrentTidOrInvalid();
-  AsanThread *t = AsanThread::Create(start_routine, arg);
-  CreateThreadContextArgs args = { t, &stack };
+  // FIXME: The CreateThread interceptor is not the same as a pthread_create
+  // one.  This is a bandaid fix for PR22025.
   bool detached = false;  // FIXME: how can we determine it on Windows?
-  asanThreadRegistry().CreateThread(*(uptr*)t, detached, current_tid, &args);
+  u32 current_tid = GetCurrentTidOrInvalid();
+  AsanThread *t =
+        AsanThread::Create(start_routine, arg, current_tid, &stack, detached);
   return REAL(CreateThread)(security, stack_size,
                             asan_thread_start, t, thr_flags, tid);
 }
@@ -872,14 +879,6 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(strtoll);
 #endif
 
-#if ASAN_INTERCEPT_MLOCKX
-  // Intercept mlock/munlock.
-  ASAN_INTERCEPT_FUNC(mlock);
-  ASAN_INTERCEPT_FUNC(munlock);
-  ASAN_INTERCEPT_FUNC(mlockall);
-  ASAN_INTERCEPT_FUNC(munlockall);
-#endif
-
   // Intecept signal- and jump-related functions.
   ASAN_INTERCEPT_FUNC(longjmp);
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
@@ -908,6 +907,7 @@ void InitializeAsanInterceptors() {
   // Intercept threading-related functions
 #if ASAN_INTERCEPT_PTHREAD_CREATE
   ASAN_INTERCEPT_FUNC(pthread_create);
+  ASAN_INTERCEPT_FUNC(pthread_join);
 #endif
 
   // Intercept atexit function.

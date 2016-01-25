@@ -11,7 +11,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
-#include "llvm/ExecutionEngine/JIT.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/ExecutionEngine/ObjectCache.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
@@ -34,15 +33,14 @@ public:
     ObjMap[ModuleID] = copyBuffer(Obj);
   }
 
-  virtual std::unique_ptr<MemoryBuffer> getObject(const Module* M) {
+  virtual std::unique_ptr<MemoryBuffer> getObject(const Module* M) override {
     const MemoryBuffer* BufferFound = getObjectInternal(M);
     ModulesLookedUp.insert(M->getModuleIdentifier());
     if (!BufferFound)
       return nullptr;
     // Our test cache wants to maintain ownership of its object buffers
     // so we make a copy here for the execution engine.
-    return std::unique_ptr<MemoryBuffer>(
-        MemoryBuffer::getMemBufferCopy(BufferFound->getBuffer()));
+    return MemoryBuffer::getMemBufferCopy(BufferFound->getBuffer());
   }
 
   // Test-harness-specific functions
@@ -65,8 +63,8 @@ public:
 private:
   MemoryBuffer *copyBuffer(MemoryBufferRef Buf) {
     // Create a local copy of the buffer.
-    std::unique_ptr<MemoryBuffer> NewBuffer(
-        MemoryBuffer::getMemBufferCopy(Buf.getBuffer()));
+    std::unique_ptr<MemoryBuffer> NewBuffer =
+        MemoryBuffer::getMemBufferCopy(Buf.getBuffer());
     MemoryBuffer *Ret = NewBuffer.get();
     AllocatedBuffers.push_back(std::move(NewBuffer));
     return Ret;
@@ -114,7 +112,7 @@ protected:
 TEST_F(MCJITObjectCacheTest, SetNullObjectCache) {
   SKIP_UNSUPPORTED_PLATFORM;
 
-  createJIT(M.release());
+  createJIT(std::move(M));
 
   TheJIT->setObjectCache(nullptr);
 
@@ -130,7 +128,7 @@ TEST_F(MCJITObjectCacheTest, VerifyBasicObjectCaching) {
   // Save a copy of the module pointer before handing it off to MCJIT.
   const Module * SavedModulePointer = M.get();
 
-  createJIT(M.release());
+  createJIT(std::move(M));
 
   TheJIT->setObjectCache(Cache.get());
 
@@ -157,7 +155,7 @@ TEST_F(MCJITObjectCacheTest, VerifyLoadFromCache) {
   std::unique_ptr<TestObjectCache> Cache(new TestObjectCache);
 
   // Compile this module with an MCJIT engine
-  createJIT(M.release());
+  createJIT(std::move(M));
   TheJIT->setObjectCache(Cache.get());
   TheJIT->finalizeObject();
 
@@ -165,7 +163,7 @@ TEST_F(MCJITObjectCacheTest, VerifyLoadFromCache) {
   TheJIT.reset();
 
   // Create a new memory manager.
-  MM = new SectionMemoryManager;
+  MM.reset(new SectionMemoryManager());
 
   // Create a new module and save it. Use a different return code so we can
   // tell if MCJIT compiled this module or used the cache.
@@ -174,7 +172,7 @@ TEST_F(MCJITObjectCacheTest, VerifyLoadFromCache) {
   const Module * SecondModulePointer = M.get();
 
   // Create a new MCJIT instance to load this module then execute it.
-  createJIT(M.release());
+  createJIT(std::move(M));
   TheJIT->setObjectCache(Cache.get());
   compileAndRun();
 
@@ -191,7 +189,7 @@ TEST_F(MCJITObjectCacheTest, VerifyNonLoadFromCache) {
   std::unique_ptr<TestObjectCache> Cache(new TestObjectCache);
 
   // Compile this module with an MCJIT engine
-  createJIT(M.release());
+  createJIT(std::move(M));
   TheJIT->setObjectCache(Cache.get());
   TheJIT->finalizeObject();
 
@@ -199,7 +197,7 @@ TEST_F(MCJITObjectCacheTest, VerifyNonLoadFromCache) {
   TheJIT.reset();
 
   // Create a new memory manager.
-  MM = new SectionMemoryManager;
+  MM.reset(new SectionMemoryManager());
 
   // Create a new module and save it. Use a different return code so we can
   // tell if MCJIT compiled this module or used the cache. Note that we use
@@ -209,7 +207,7 @@ TEST_F(MCJITObjectCacheTest, VerifyNonLoadFromCache) {
   const Module * SecondModulePointer = M.get();
 
   // Create a new MCJIT instance to load this module then execute it.
-  createJIT(M.release());
+  createJIT(std::move(M));
   TheJIT->setObjectCache(Cache.get());
 
   // Verify that our object cache does not contain the module yet.

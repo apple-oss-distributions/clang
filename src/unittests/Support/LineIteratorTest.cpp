@@ -17,9 +17,9 @@ using namespace llvm::sys;
 namespace {
 
 TEST(LineIteratorTest, Basic) {
-  std::unique_ptr<MemoryBuffer> Buffer(MemoryBuffer::getMemBuffer("line 1\n"
-                                                                  "line 2\n"
-                                                                  "line 3"));
+  std::unique_ptr<MemoryBuffer> Buffer = MemoryBuffer::getMemBuffer("line 1\n"
+                                                                    "line 2\n"
+                                                                    "line 3");
 
   line_iterator I = line_iterator(*Buffer), E;
 
@@ -107,11 +107,11 @@ TEST(LineIteratorTest, CommentSkippingKeepBlanks) {
 
 
 TEST(LineIteratorTest, BlankSkipping) {
-  std::unique_ptr<MemoryBuffer> Buffer(MemoryBuffer::getMemBuffer("\n\n\n"
-                                                                  "line 1\n"
-                                                                  "\n\n\n"
-                                                                  "line 2\n"
-                                                                  "\n\n\n"));
+  std::unique_ptr<MemoryBuffer> Buffer = MemoryBuffer::getMemBuffer("\n\n\n"
+                                                                    "line 1\n"
+                                                                    "\n\n\n"
+                                                                    "line 2\n"
+                                                                    "\n\n\n");
 
   line_iterator I = line_iterator(*Buffer), E;
 
@@ -130,11 +130,11 @@ TEST(LineIteratorTest, BlankSkipping) {
 }
 
 TEST(LineIteratorTest, BlankKeeping) {
-  std::unique_ptr<MemoryBuffer> Buffer(MemoryBuffer::getMemBuffer("\n\n"
-                                                                  "line 3\n"
-                                                                  "\n"
-                                                                  "line 5\n"
-                                                                  "\n\n"));
+  std::unique_ptr<MemoryBuffer> Buffer = MemoryBuffer::getMemBuffer("\n\n"
+                                                                    "line 3\n"
+                                                                    "\n"
+                                                                    "line 5\n"
+                                                                    "\n\n");
   line_iterator I = line_iterator(*Buffer, false), E;
 
   EXPECT_FALSE(I.is_at_eof());
@@ -167,25 +167,25 @@ TEST(LineIteratorTest, BlankKeeping) {
 }
 
 TEST(LineIteratorTest, EmptyBuffers) {
-  std::unique_ptr<MemoryBuffer> Buffer(MemoryBuffer::getMemBuffer(""));
+  std::unique_ptr<MemoryBuffer> Buffer = MemoryBuffer::getMemBuffer("");
   EXPECT_TRUE(line_iterator(*Buffer).is_at_eof());
   EXPECT_EQ(line_iterator(), line_iterator(*Buffer));
   EXPECT_TRUE(line_iterator(*Buffer, false).is_at_eof());
   EXPECT_EQ(line_iterator(), line_iterator(*Buffer, false));
 
-  Buffer.reset(MemoryBuffer::getMemBuffer("\n\n\n"));
+  Buffer = MemoryBuffer::getMemBuffer("\n\n\n");
   EXPECT_TRUE(line_iterator(*Buffer).is_at_eof());
   EXPECT_EQ(line_iterator(), line_iterator(*Buffer));
 
-  Buffer.reset(MemoryBuffer::getMemBuffer("# foo\n"
-                                          "\n"
-                                          "# bar"));
+  Buffer = MemoryBuffer::getMemBuffer("# foo\n"
+                                      "\n"
+                                      "# bar");
   EXPECT_TRUE(line_iterator(*Buffer, true, '#').is_at_eof());
   EXPECT_EQ(line_iterator(), line_iterator(*Buffer, true, '#'));
 
-  Buffer.reset(MemoryBuffer::getMemBuffer("\n"
-                                          "# baz\n"
-                                          "\n"));
+  Buffer = MemoryBuffer::getMemBuffer("\n"
+                                      "# baz\n"
+                                      "\n");
   EXPECT_TRUE(line_iterator(*Buffer, true, '#').is_at_eof());
   EXPECT_EQ(line_iterator(), line_iterator(*Buffer, true, '#'));
 }

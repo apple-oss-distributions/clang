@@ -12,6 +12,13 @@
 //===----------------------------------------------------------------------===//
 #include "asan_test_utils.h"
 
+extern "C" {
+// Set specific ASan options for uninstrumented unittest.
+const char* __asan_default_options() {
+  return "abort_on_error=0";
+}
+}  // extern "C"
+
 int main(int argc, char **argv) {
   testing::GTEST_FLAG(death_test_style) = "threadsafe";
   testing::InitGoogleTest(&argc, argv);

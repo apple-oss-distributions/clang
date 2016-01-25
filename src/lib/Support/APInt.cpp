@@ -454,8 +454,10 @@ APInt APInt::XorSlowCase(const APInt& RHS) const {
   for (unsigned i = 0; i < numWords; ++i)
     val[i] = pVal[i] ^ RHS.pVal[i];
 
+  APInt Result(val, getBitWidth());
   // 0^0==1 so clear the high bits in case they got set.
-  return APInt(val, getBitWidth()).clearUnusedBits();
+  Result.clearUnusedBits();
+  return Result;
 }
 
 APInt APInt::operator*(const APInt& RHS) const {
@@ -473,7 +475,8 @@ APInt APInt::operator+(const APInt& RHS) const {
     return APInt(BitWidth, VAL + RHS.VAL);
   APInt Result(BitWidth, 0);
   add(Result.pVal, this->pVal, RHS.pVal, getNumWords());
-  return Result.clearUnusedBits();
+  Result.clearUnusedBits();
+  return Result;
 }
 
 APInt APInt::operator-(const APInt& RHS) const {
@@ -482,7 +485,8 @@ APInt APInt::operator-(const APInt& RHS) const {
     return APInt(BitWidth, VAL - RHS.VAL);
   APInt Result(BitWidth, 0);
   sub(Result.pVal, this->pVal, RHS.pVal, getNumWords());
-  return Result.clearUnusedBits();
+  Result.clearUnusedBits();
+  return Result;
 }
 
 bool APInt::EqualSlowCase(const APInt& RHS) const {
@@ -1114,7 +1118,9 @@ APInt APInt::ashr(unsigned shiftAmt) const {
   uint64_t fillValue = (isNegative() ? -1ULL : 0);
   for (unsigned i = breakWord+1; i < getNumWords(); ++i)
     val[i] = fillValue;
-  return APInt(val, BitWidth).clearUnusedBits();
+  APInt Result(val, BitWidth);
+  Result.clearUnusedBits();
+  return Result;
 }
 
 /// Logical right-shift this APInt by shiftAmt.
@@ -1151,7 +1157,9 @@ APInt APInt::lshr(unsigned shiftAmt) const {
   // If we are shifting less than a word, compute the shift with a simple carry
   if (shiftAmt < APINT_BITS_PER_WORD) {
     lshrNear(val, pVal, getNumWords(), shiftAmt);
-    return APInt(val, BitWidth).clearUnusedBits();
+    APInt Result(val, BitWidth);
+    Result.clearUnusedBits();
+    return Result;
   }
 
   // Compute some values needed by the remaining shift algorithms
@@ -1164,7 +1172,9 @@ APInt APInt::lshr(unsigned shiftAmt) const {
       val[i] = pVal[i+offset];
     for (unsigned i = getNumWords()-offset; i < getNumWords(); i++)
       val[i] = 0;
-    return APInt(val,BitWidth).clearUnusedBits();
+    APInt Result(val, BitWidth);
+    Result.clearUnusedBits();
+    return Result;
   }
 
   // Shift the low order words
@@ -1178,7 +1188,9 @@ APInt APInt::lshr(unsigned shiftAmt) const {
   // Remaining words are 0
   for (unsigned i = breakWord+1; i < getNumWords(); ++i)
     val[i] = 0;
-  return APInt(val, BitWidth).clearUnusedBits();
+  APInt Result(val, BitWidth);
+  Result.clearUnusedBits();
+  return Result;
 }
 
 /// Left-shift this APInt by shiftAmt.
@@ -1211,7 +1223,9 @@ APInt APInt::shlSlowCase(unsigned shiftAmt) const {
       val[i] = pVal[i] << shiftAmt | carry;
       carry = pVal[i] >> (APINT_BITS_PER_WORD - shiftAmt);
     }
-    return APInt(val, BitWidth).clearUnusedBits();
+    APInt Result(val, BitWidth);
+    Result.clearUnusedBits();
+    return Result;
   }
 
   // Compute some values needed by the remaining shift algorithms
@@ -1224,7 +1238,9 @@ APInt APInt::shlSlowCase(unsigned shiftAmt) const {
       val[i] = 0;
     for (unsigned i = offset; i < getNumWords(); i++)
       val[i] = pVal[i-offset];
-    return APInt(val,BitWidth).clearUnusedBits();
+    APInt Result(val, BitWidth);
+    Result.clearUnusedBits();
+    return Result;
   }
 
   // Copy whole words from this to Result.
@@ -1235,7 +1251,9 @@ APInt APInt::shlSlowCase(unsigned shiftAmt) const {
   val[offset] = pVal[0] << wordShift;
   for (i = 0; i < offset; ++i)
     val[i] = 0;
-  return APInt(val, BitWidth).clearUnusedBits();
+  APInt Result(val, BitWidth);
+  Result.clearUnusedBits();
+  return Result;
 }
 
 APInt APInt::rotl(const APInt &rotateAmt) const {
@@ -1303,7 +1321,7 @@ APInt APInt::sqrt() const {
 
   // Okay, all the short cuts are exhausted. We must compute it. The following
   // is a classical Babylonian method for computing the square root. This code
-  // was adapted to APINt from a wikipedia article on such computations.
+  // was adapted to APInt from a wikipedia article on such computations.
   // See http://www.wikipedia.org/ and go to the page named
   // Calculate_an_integer_square_root.
   unsigned nbits = BitWidth, i = 4;
@@ -1490,21 +1508,18 @@ static void KnuthDiv(unsigned *u, unsigned *v, unsigned *q, unsigned* r,
   assert(u && "Must provide dividend");
   assert(v && "Must provide divisor");
   assert(q && "Must provide quotient");
-  assert(u != v && u != q && v != q && "Must us different memory");
+  assert(u != v && u != q && v != q && "Must use different memory");
   assert(n>1 && "n must be > 1");
 
-  // Knuth uses the value b as the base of the number system. In our case b
-  // is 2^31 so we just set it to -1u.
-  uint64_t b = uint64_t(1) << 32;
+  // b denotes the base of the number system. In our case b is 2^32.
+  LLVM_CONSTEXPR uint64_t b = uint64_t(1) << 32;
 
-#if 0
   DEBUG(dbgs() << "KnuthDiv: m=" << m << " n=" << n << '\n');
   DEBUG(dbgs() << "KnuthDiv: original:");
   DEBUG(for (int i = m+n; i >=0; i--) dbgs() << " " << u[i]);
   DEBUG(dbgs() << " by");
   DEBUG(for (int i = n; i >0; i--) dbgs() << " " << v[i-1]);
   DEBUG(dbgs() << '\n');
-#endif
   // D1. [Normalize.] Set d = b / (v[n-1] + 1) and multiply all the digits of
   // u and v by d. Note that we have taken Knuth's advice here to use a power
   // of 2 value for d such that d * v[n-1] >= b/2 (b is the base). A power of
@@ -1529,13 +1544,12 @@ static void KnuthDiv(unsigned *u, unsigned *v, unsigned *q, unsigned* r,
     }
   }
   u[m+n] = u_carry;
-#if 0
+
   DEBUG(dbgs() << "KnuthDiv:   normal:");
   DEBUG(for (int i = m+n; i >=0; i--) dbgs() << " " << u[i]);
   DEBUG(dbgs() << " by");
   DEBUG(for (int i = n; i >0; i--) dbgs() << " " << v[i-1]);
   DEBUG(dbgs() << '\n');
-#endif
 
   // D2. [Initialize j.]  Set j to m. This is the loop counter over the places.
   int j = m;
@@ -1565,44 +1579,23 @@ static void KnuthDiv(unsigned *u, unsigned *v, unsigned *q, unsigned* r,
     // (u[j+n]u[j+n-1]..u[j]) - qp * (v[n-1]...v[1]v[0]). This computation
     // consists of a simple multiplication by a one-place number, combined with
     // a subtraction.
-    bool isNeg = false;
-    for (unsigned i = 0; i < n; ++i) {
-      uint64_t u_tmp = uint64_t(u[j+i]) | (uint64_t(u[j+i+1]) << 32);
-      uint64_t subtrahend = uint64_t(qp) * uint64_t(v[i]);
-      bool borrow = subtrahend > u_tmp;
-      DEBUG(dbgs() << "KnuthDiv: u_tmp == " << u_tmp
-                   << ", subtrahend == " << subtrahend
-                   << ", borrow = " << borrow << '\n');
-
-      uint64_t result = u_tmp - subtrahend;
-      unsigned k = j + i;
-      u[k++] = (unsigned)(result & (b-1)); // subtract low word
-      u[k++] = (unsigned)(result >> 32);   // subtract high word
-      while (borrow && k <= m+n) { // deal with borrow to the left
-        borrow = u[k] == 0;
-        u[k]--;
-        k++;
-      }
-      isNeg |= borrow;
-      DEBUG(dbgs() << "KnuthDiv: u[j+i] == " << u[j+i] << ",  u[j+i+1] == " <<
-                    u[j+i+1] << '\n');
-    }
-    DEBUG(dbgs() << "KnuthDiv: after subtraction:");
-    DEBUG(for (int i = m+n; i >=0; i--) dbgs() << " " << u[i]);
-    DEBUG(dbgs() << '\n');
     // The digits (u[j+n]...u[j]) should be kept positive; if the result of
     // this step is actually negative, (u[j+n]...u[j]) should be left as the
     // true value plus b**(n+1), namely as the b's complement of
     // the true value, and a "borrow" to the left should be remembered.
-    //
-    if (isNeg) {
-      bool carry = true;  // true because b's complement is "complement + 1"
-      for (unsigned i = 0; i <= m+n; ++i) {
-        u[i] = ~u[i] + carry; // b's complement
-        carry = carry && u[i] == 0;
-      }
+    int64_t borrow = 0;
+    for (unsigned i = 0; i < n; ++i) {
+      uint64_t p = uint64_t(qp) * uint64_t(v[i]);
+      int64_t subres = int64_t(u[j+i]) - borrow - (unsigned)p;
+      u[j+i] = (unsigned)subres;
+      borrow = (p >> 32) - (subres >> 32);
+      DEBUG(dbgs() << "KnuthDiv: u[j+i] = " << u[j+i]
+                   << ", borrow = " << borrow << '\n');
     }
-    DEBUG(dbgs() << "KnuthDiv: after complement:");
+    bool isNeg = u[j+n] < borrow;
+    u[j+n] -= (unsigned)borrow;
+
+    DEBUG(dbgs() << "KnuthDiv: after subtraction:");
     DEBUG(for (int i = m+n; i >=0; i--) dbgs() << " " << u[i]);
     DEBUG(dbgs() << '\n');
 
@@ -1626,7 +1619,7 @@ static void KnuthDiv(unsigned *u, unsigned *v, unsigned *q, unsigned* r,
       u[j+n] += carry;
     }
     DEBUG(dbgs() << "KnuthDiv: after correction:");
-    DEBUG(for (int i = m+n; i >=0; i--) dbgs() <<" " << u[i]);
+    DEBUG(for (int i = m+n; i >=0; i--) dbgs() << " " << u[i]);
     DEBUG(dbgs() << "\nKnuthDiv: digit result = " << q[j] << '\n');
 
   // D7. [Loop on j.]  Decrease j by one. Now if j >= 0, go back to D3.
@@ -1659,9 +1652,7 @@ static void KnuthDiv(unsigned *u, unsigned *v, unsigned *q, unsigned* r,
     }
     DEBUG(dbgs() << '\n');
   }
-#if 0
   DEBUG(dbgs() << '\n');
-#endif
 }
 
 void APInt::divide(const APInt LHS, unsigned lhsWords,
@@ -1785,6 +1776,8 @@ void APInt::divide(const APInt LHS, unsigned lhsWords,
 
     // The quotient is in Q. Reconstitute the quotient into Quotient's low
     // order words.
+    // This case is currently dead as all users of divide() handle trivial cases
+    // earlier.
     if (lhsWords == 1) {
       uint64_t tmp =
         uint64_t(Q[0]) | (uint64_t(Q[1]) << (APINT_BITS_PER_WORD / 2));
@@ -1938,6 +1931,18 @@ APInt APInt::srem(const APInt &RHS) const {
 
 void APInt::udivrem(const APInt &LHS, const APInt &RHS,
                     APInt &Quotient, APInt &Remainder) {
+  assert(LHS.BitWidth == RHS.BitWidth && "Bit widths must be the same");
+
+  // First, deal with the easy case
+  if (LHS.isSingleWord()) {
+    assert(RHS.VAL != 0 && "Divide by zero?");
+    uint64_t QuotVal = LHS.VAL / RHS.VAL;
+    uint64_t RemVal = LHS.VAL % RHS.VAL;
+    Quotient = APInt(LHS.BitWidth, QuotVal);
+    Remainder = APInt(LHS.BitWidth, RemVal);
+    return;
+  }
+
   // Get some size facts about the dividend and divisor
   unsigned lhsBits  = LHS.getActiveBits();
   unsigned lhsWords = !lhsBits ? 0 : (APInt::whichWord(lhsBits - 1) + 1);
@@ -2280,8 +2285,7 @@ void APInt::print(raw_ostream &OS, bool isSigned) const {
 
 // Assumed by lowHalf, highHalf, partMSB and partLSB.  A fairly safe
 // and unrestricting assumption.
-#define COMPILE_TIME_ASSERT(cond) extern int CTAssert[(cond) ? 1 : -1]
-COMPILE_TIME_ASSERT(integerPartWidth % 2 == 0);
+static_assert(integerPartWidth % 2 == 0, "Part width must be divisible by 2!");
 
 /* Some handy functions local to this file.  */
 namespace {

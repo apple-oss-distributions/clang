@@ -49,6 +49,19 @@ LLVMCoverageMappingRef LLVMCreateCoverageMapping(const char *ObjectFilename,
                                                  const char *ProfileFilename);
 
 /**
+ * Create a new CoverageMapping targetting a particular architecture.
+ *
+ * Use this when the object file is a fat binary.
+ *
+ * Every call to this function should be paired with a call to
+ * LLVMDisposeCoverageMapping() or the CoverageMapping will leak memory.
+ */
+LLVMCoverageMappingRef
+LLVMCreateCoverageMappingForArch(const char *ObjectFilename,
+                                 const char *ProfileFilename,
+                                 const char *Arch);
+
+/**
  * Destroy a CoverageMapping instance.
  */
 void LLVMDisposeCoverageMapping(LLVMCoverageMappingRef CMR);

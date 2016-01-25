@@ -11,8 +11,10 @@
 //  modules for the ASTReader.
 //
 //===----------------------------------------------------------------------===//
+#include "clang/AST/ModuleProvider.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/ModuleMap.h"
+#include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/GlobalModuleIndex.h"
 #include "clang/Serialization/ModuleManager.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -67,6 +69,13 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
   // Look for the file entry. This only fails if the expected size or
   // modification time differ.
   const FileEntry *Entry;
+  if (Type == MK_ExplicitModule) {
+    // If we're not expecting to pull this file out of the module cache, it
+    // might have a different mtime due to being moved across filesystems in
+    // a distributed build. The size must still match, though. (As must the
+    // contents, but we can't check that.)
+    ExpectedModTime = 0;
+  }
   if (lookupModuleFile(FileName, ExpectedSize, ExpectedModTime, Entry)) {
     ErrorStr = "module file out of date";
     return OutOfDate;
@@ -92,7 +101,7 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
     ModuleEntry = New;
 
     New->InputFilesValidationTimestamp = 0;
-    if (New->Kind == MK_Module) {
+    if (New->Kind == MK_ImplicitModule) {
       std::string TimestampFilename = New->getTimestampFilename();
       vfs::Status Status;
       // A cached stat value would be fine as well.
@@ -107,32 +116,30 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
       New->Buffer = std::move(Buffer);
     } else {
       // Open the AST file.
-      std::error_code ec;
+      llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> Buf(
+          (std::error_code()));
       if (FileName == "-") {
-        llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> Buf =
-            llvm::MemoryBuffer::getSTDIN();
-        ec = Buf.getError();
-        if (ec)
-          ErrorStr = ec.message();
-        else
-          New->Buffer = std::move(Buf.get());
+        Buf = llvm::MemoryBuffer::getSTDIN();
       } else {
         // Leave the FileEntry open so if it gets read again by another
         // ModuleManager it must be the same underlying file.
         // FIXME: Because FileManager::getFile() doesn't guarantee that it will
         // give us an open file, this may not be 100% reliable.
-        New->Buffer.reset(FileMgr.getBufferForFile(New->File, &ErrorStr,
-                                                   /*IsVolatile*/false,
-                                                   /*ShouldClose*/false));
+        Buf = FileMgr.getBufferForFile(New->File,
+                                       /*IsVolatile=*/false,
+                                       /*ShouldClose=*/false);
       }
-      
-      if (!New->Buffer)
+
+      if (!Buf) {
+        ErrorStr = Buf.getError().message();
         return Missing;
+      }
+
+      New->Buffer = std::move(*Buf);
     }
-    
-    // Initialize the stream
-    New->StreamFile.init((const unsigned char *)New->Buffer->getBufferStart(),
-                         (const unsigned char *)New->Buffer->getBufferEnd());
+
+    // Initialize the stream.
+    MP.UnwrapModuleContainer(New->Buffer->getMemBufferRef(), New->StreamFile);
   }
 
   if (ExpectedSignature) {
@@ -263,8 +270,8 @@ void ModuleManager::moduleFileAccepted(ModuleFile *MF) {
   ModulesInCommonWithGlobalIndex.push_back(MF);
 }
 
-ModuleManager::ModuleManager(FileManager &FileMgr)
-  : FileMgr(FileMgr), GlobalIndex(), FirstVisitState(nullptr) {}
+ModuleManager::ModuleManager(FileManager &FileMgr, const ModuleProvider &MP)
+  : FileMgr(FileMgr), MP(MP), GlobalIndex(), FirstVisitState(nullptr) {}
 
 ModuleManager::~ModuleManager() {
   for (unsigned i = 0, e = Chain.size(); i != e; ++i)

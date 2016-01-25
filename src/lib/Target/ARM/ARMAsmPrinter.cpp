@@ -57,6 +57,11 @@ using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
 
+ARMAsmPrinter::ARMAsmPrinter(TargetMachine &TM,
+                             std::unique_ptr<MCStreamer> Streamer)
+    : AsmPrinter(TM, std::move(Streamer)), AFI(nullptr), MCP(nullptr),
+      InConstantPool(false) {}
+
 void ARMAsmPrinter::EmitFunctionBodyEnd() {
   // Make sure to terminate any constant pools that were at the end
   // of the function.
@@ -76,8 +81,7 @@ void ARMAsmPrinter::EmitFunctionEntryLabel() {
 }
 
 void ARMAsmPrinter::EmitXXStructor(const Constant *CV) {
-  uint64_t Size =
-      TM.getSubtargetImpl()->getDataLayout()->getTypeAllocSize(CV->getType());
+  uint64_t Size = TM.getDataLayout()->getTypeAllocSize(CV->getType());
   assert(Size && "C++ constructor pointer had zero size!");
 
   const GlobalValue *GV = dyn_cast<GlobalValue>(CV->stripPointerCasts());
@@ -99,6 +103,7 @@ void ARMAsmPrinter::EmitXXStructor(const Constant *CV) {
 bool ARMAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
   AFI = MF.getInfo<ARMFunctionInfo>();
   MCP = MF.getConstantPool();
+  Subtarget = &MF.getSubtarget<ARMSubtarget>();
 
   SetupMachineFunction(MF);
 
@@ -119,6 +124,23 @@ bool ARMAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
 
   // Emit the rest of the function body.
   EmitFunctionBody();
+
+  // If we need V4T thumb mode Register Indirect Jump pads, emit them.
+  // These are created per function, rather than per TU, since it's
+  // relatively easy to exceed the thumb branch range within a TU.
+  if (! ThumbIndirectPads.empty()) {
+    OutStreamer.EmitAssemblerFlag(MCAF_Code16);
+    EmitAlignment(1);
+    for (unsigned i = 0, e = ThumbIndirectPads.size(); i < e; i++) {
+      OutStreamer.EmitLabel(ThumbIndirectPads[i].second);
+      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::tBX)
+        .addReg(ThumbIndirectPads[i].first)
+        // Add predicate operands.
+        .addImm(ARMCC::AL)
+        .addReg(0));
+    }
+    ThumbIndirectPads.clear();
+  }
 
   // We didn't modify anything.
   return false;
@@ -182,17 +204,17 @@ void ARMAsmPrinter::printOperand(const MachineInstr *MI, int OpNum,
 //===--------------------------------------------------------------------===//
 
 MCSymbol *ARMAsmPrinter::
-GetARMJTIPICJumpTableLabel2(unsigned uid, unsigned uid2) const {
-  const DataLayout *DL = TM.getSubtargetImpl()->getDataLayout();
+GetARMJTIPICJumpTableLabel(unsigned uid) const {
+  const DataLayout *DL = TM.getDataLayout();
   SmallString<60> Name;
   raw_svector_ostream(Name) << DL->getPrivateGlobalPrefix() << "JTI"
-    << getFunctionNumber() << '_' << uid << '_' << uid2;
+                            << getFunctionNumber() << '_' << uid;
   return OutContext.GetOrCreateSymbol(Name.str());
 }
 
 
 MCSymbol *ARMAsmPrinter::GetARMSJLJEHLabel() const {
-  const DataLayout *DL = TM.getSubtargetImpl()->getDataLayout();
+  const DataLayout *DL = TM.getDataLayout();
   SmallString<60> Name;
   raw_svector_ostream(Name) << DL->getPrivateGlobalPrefix() << "SJLJEH"
     << getFunctionNumber();
@@ -414,7 +436,8 @@ void ARMAsmPrinter::emitInlineAsmEnd(const MCSubtargetInfo &StartInfo,
 }
 
 void ARMAsmPrinter::EmitStartOfAsmFile(Module &M) {
-  if (Subtarget->isTargetMachO()) {
+  Triple TT(TM.getTargetTriple());
+  if (TT.isOSBinFormatMachO()) {
     Reloc::Model RelocM = TM.getRelocationModel();
     if (RelocM == Reloc::PIC_ || RelocM == Reloc::DynamicNoPIC) {
       // Declare all the text sections up front (before the DWARF sections
@@ -477,10 +500,17 @@ void ARMAsmPrinter::EmitStartOfAsmFile(Module &M) {
   OutStreamer.EmitAssemblerFlag(MCAF_SyntaxUnified);
 
   // Emit ARM Build Attributes
-  if (Subtarget->isTargetELF())
+  if (TT.isOSBinFormatELF())
     emitAttributes();
 
-  if (!M.getModuleInlineAsm().empty() && Subtarget->isThumb())
+  // Use the triple's architecture and subarchitecture to determine
+  // if we're thumb for the purposes of the top level code16 assembler
+  // flag.
+  bool isThumb = TT.getArch() == Triple::thumb ||
+                 TT.getArch() == Triple::thumbeb ||
+                 TT.getSubArch() == Triple::ARMSubArch_v7m ||
+                 TT.getSubArch() == Triple::ARMSubArch_v6m;
+  if (!M.getModuleInlineAsm().empty() && isThumb)
     OutStreamer.EmitAssemblerFlag(MCAF_Code16);
 }
 
@@ -509,7 +539,8 @@ emitNonLazySymbolPointer(MCStreamer &OutStreamer, MCSymbol *StubLabel,
 
 
 void ARMAsmPrinter::EmitEndOfAsmFile(Module &M) {
-  if (Subtarget->isTargetMachO()) {
+  Triple TT(TM.getTargetTriple());
+  if (TT.isOSBinFormatMachO()) {
     // All darwin targets use mach-o.
     const TargetLoweringObjectFileMachO &TLOFMacho =
       static_cast<const TargetLoweringObjectFileMachO &>(getObjFileLowering());
@@ -552,7 +583,7 @@ void ARMAsmPrinter::EmitEndOfAsmFile(Module &M) {
   }
 
   // Emit a .data.rel section containing any stubs that were created.
-  if (Subtarget->isTargetELF()) {
+  if (TT.isOSBinFormatELF()) {
     const TargetLoweringObjectFileELF &TLOFELF =
       static_cast<const TargetLoweringObjectFileELF &>(getObjFileLowering());
 
@@ -562,7 +593,7 @@ void ARMAsmPrinter::EmitEndOfAsmFile(Module &M) {
     MachineModuleInfoELF::SymbolListTy Stubs = MMIELF.GetGVStubList();
     if (!Stubs.empty()) {
       OutStreamer.SwitchSection(TLOFELF.getDataRelSection());
-      const DataLayout *TD = TM.getSubtargetImpl()->getDataLayout();
+      const DataLayout *TD = TM.getDataLayout();
 
       for (auto &stub: Stubs) {
         OutStreamer.EmitLabel(stub.first);
@@ -612,67 +643,88 @@ void ARMAsmPrinter::emitAttributes() {
   MCTargetStreamer &TS = *OutStreamer.getTargetStreamer();
   ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
 
+  ATS.emitTextAttribute(ARMBuildAttrs::conformance, "2.09");
+
   ATS.switchVendor("aeabi");
 
-  std::string CPUString = Subtarget->getCPUString();
+  // Compute ARM ELF Attributes based on the default subtarget that
+  // we'd have constructed. The existing ARM behavior isn't LTO clean
+  // anyhow.
+  // FIXME: For ifunc related functions we could iterate over and look
+  // for a feature string that doesn't match the default one.
+  StringRef TT = TM.getTargetTriple();
+  StringRef CPU = TM.getTargetCPU();
+  StringRef FS = TM.getTargetFeatureString();
+  std::string ArchFS = ARM_MC::ParseARMTriple(TT, CPU);
+  if (!FS.empty()) {
+    if (!ArchFS.empty())
+      ArchFS = ArchFS + "," + FS.str();
+    else
+      ArchFS = FS;
+  }
+  const ARMBaseTargetMachine &ATM =
+      static_cast<const ARMBaseTargetMachine &>(TM);
+  const ARMSubtarget STI(TT, CPU, ArchFS, ATM, ATM.isLittleEndian());
+
+  std::string CPUString = STI.getCPUString();
 
   // FIXME: remove krait check when GNU tools support krait cpu
   if (CPUString != "generic" && CPUString != "krait")
     ATS.emitTextAttribute(ARMBuildAttrs::CPU_name, CPUString);
 
-  ATS.emitAttribute(ARMBuildAttrs::CPU_arch,
-                    getArchForCPU(CPUString, Subtarget));
+  ATS.emitAttribute(ARMBuildAttrs::CPU_arch, getArchForCPU(CPUString, &STI));
 
   // Tag_CPU_arch_profile must have the default value of 0 when "Architecture
   // profile is not applicable (e.g. pre v7, or cross-profile code)".
-  if (Subtarget->hasV7Ops()) {
-    if (Subtarget->isAClass()) {
+  if (STI.hasV7Ops()) {
+    if (STI.isAClass()) {
       ATS.emitAttribute(ARMBuildAttrs::CPU_arch_profile,
                         ARMBuildAttrs::ApplicationProfile);
-    } else if (Subtarget->isRClass()) {
+    } else if (STI.isRClass()) {
       ATS.emitAttribute(ARMBuildAttrs::CPU_arch_profile,
                         ARMBuildAttrs::RealTimeProfile);
-    } else if (Subtarget->isMClass()) {
+    } else if (STI.isMClass()) {
       ATS.emitAttribute(ARMBuildAttrs::CPU_arch_profile,
                         ARMBuildAttrs::MicroControllerProfile);
     }
   }
 
-  ATS.emitAttribute(ARMBuildAttrs::ARM_ISA_use, Subtarget->hasARMOps() ?
-                      ARMBuildAttrs::Allowed : ARMBuildAttrs::Not_Allowed);
-  if (Subtarget->isThumb1Only()) {
-    ATS.emitAttribute(ARMBuildAttrs::THUMB_ISA_use,
-                      ARMBuildAttrs::Allowed);
-  } else if (Subtarget->hasThumb2()) {
+  ATS.emitAttribute(ARMBuildAttrs::ARM_ISA_use,
+                    STI.hasARMOps() ? ARMBuildAttrs::Allowed
+                                    : ARMBuildAttrs::Not_Allowed);
+  if (STI.isThumb1Only()) {
+    ATS.emitAttribute(ARMBuildAttrs::THUMB_ISA_use, ARMBuildAttrs::Allowed);
+  } else if (STI.hasThumb2()) {
     ATS.emitAttribute(ARMBuildAttrs::THUMB_ISA_use,
                       ARMBuildAttrs::AllowThumb32);
   }
 
-  if (Subtarget->hasNEON()) {
+  if (STI.hasNEON()) {
     /* NEON is not exactly a VFP architecture, but GAS emit one of
      * neon/neon-fp-armv8/neon-vfpv4/vfpv3/vfpv2 for .fpu parameters */
-    if (Subtarget->hasFPARMv8()) {
-      if (Subtarget->hasCrypto())
+    if (STI.hasFPARMv8()) {
+      if (STI.hasCrypto())
         ATS.emitFPU(ARM::CRYPTO_NEON_FP_ARMV8);
       else
         ATS.emitFPU(ARM::NEON_FP_ARMV8);
-    }
-    else if (Subtarget->hasVFP4())
+    } else if (STI.hasVFP4())
       ATS.emitFPU(ARM::NEON_VFPV4);
     else
       ATS.emitFPU(ARM::NEON);
     // Emit Tag_Advanced_SIMD_arch for ARMv8 architecture
-    if (Subtarget->hasV8Ops())
+    if (STI.hasV8Ops())
       ATS.emitAttribute(ARMBuildAttrs::Advanced_SIMD_arch,
                         ARMBuildAttrs::AllowNeonARMv8);
   } else {
-    if (Subtarget->hasFPARMv8())
-      ATS.emitFPU(ARM::FP_ARMV8);
-    else if (Subtarget->hasVFP4())
-      ATS.emitFPU(Subtarget->hasD16() ? ARM::VFPV4_D16 : ARM::VFPV4);
-    else if (Subtarget->hasVFP3())
-      ATS.emitFPU(Subtarget->hasD16() ? ARM::VFPV3_D16 : ARM::VFPV3);
-    else if (Subtarget->hasVFP2())
+    if (STI.hasFPARMv8())
+      // FPv5 and FP-ARMv8 have the same instructions, so are modeled as one
+      // FPU, but there are two different names for it depending on the CPU.
+      ATS.emitFPU(STI.hasD16() ? ARM::FPV5_D16 : ARM::FP_ARMV8);
+    else if (STI.hasVFP4())
+      ATS.emitFPU(STI.hasD16() ? ARM::VFPV4_D16 : ARM::VFPV4);
+    else if (STI.hasVFP3())
+      ATS.emitFPU(STI.hasD16() ? ARM::VFPV3_D16 : ARM::VFPV3);
+    else if (STI.hasVFP2())
       ATS.emitFPU(ARM::VFPV2);
   }
 
@@ -692,11 +744,42 @@ void ARMAsmPrinter::emitAttributes() {
 
   // Signal various FP modes.
   if (!TM.Options.UnsafeFPMath) {
-    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal, ARMBuildAttrs::Allowed);
-    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_exceptions,
-                      ARMBuildAttrs::Allowed);
+    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
+                      ARMBuildAttrs::IEEEDenormals);
+    ATS.emitAttribute(ARMBuildAttrs::ABI_FP_exceptions, ARMBuildAttrs::Allowed);
+
+    // If the user has permitted this code to choose the IEEE 754
+    // rounding at run-time, emit the rounding attribute.
+    if (TM.Options.HonorSignDependentRoundingFPMathOption)
+      ATS.emitAttribute(ARMBuildAttrs::ABI_FP_rounding, ARMBuildAttrs::Allowed);
+  } else {
+    if (!STI.hasVFP2()) {
+      // When the target doesn't have an FPU (by design or
+      // intention), the assumptions made on the software support
+      // mirror that of the equivalent hardware support *if it
+      // existed*. For v7 and better we indicate that denormals are
+      // flushed preserving sign, and for V6 we indicate that
+      // denormals are flushed to positive zero.
+      if (STI.hasV7Ops())
+        ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
+                          ARMBuildAttrs::PreserveFPSign);
+    } else if (STI.hasVFP3()) {
+      // In VFPv4, VFPv4U, VFPv3, or VFPv3U, it is preserved. That is,
+      // the sign bit of the zero matches the sign bit of the input or
+      // result that is being flushed to zero.
+      ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
+                        ARMBuildAttrs::PreserveFPSign);
+    }
+    // For VFPv2 implementations it is implementation defined as
+    // to whether denormals are flushed to positive zero or to
+    // whatever the sign of zero is (ARM v7AR ARM 2.7.5). Historically
+    // LLVM has chosen to flush this to positive zero (most likely for
+    // GCC compatibility), so that's the chosen value here (the
+    // absence of its emission implies zero).
   }
 
+  // TM.Options.NoInfsFPMath && TM.Options.NoNaNsFPMath is the
+  // equivalent of GCC's -ffinite-math-only flag.
   if (TM.Options.NoInfsFPMath && TM.Options.NoNaNsFPMath)
     ATS.emitAttribute(ARMBuildAttrs::ABI_FP_number_model,
                       ARMBuildAttrs::Allowed);
@@ -704,27 +787,41 @@ void ARMAsmPrinter::emitAttributes() {
     ATS.emitAttribute(ARMBuildAttrs::ABI_FP_number_model,
                       ARMBuildAttrs::AllowIEE754);
 
+  if (STI.allowsUnalignedMem())
+    ATS.emitAttribute(ARMBuildAttrs::CPU_unaligned_access,
+                      ARMBuildAttrs::Allowed);
+  else
+    ATS.emitAttribute(ARMBuildAttrs::CPU_unaligned_access,
+                      ARMBuildAttrs::Not_Allowed);
+
   // FIXME: add more flags to ARMBuildAttributes.h
   // 8-bytes alignment stuff.
   ATS.emitAttribute(ARMBuildAttrs::ABI_align_needed, 1);
   ATS.emitAttribute(ARMBuildAttrs::ABI_align_preserved, 1);
 
   // ABI_HardFP_use attribute to indicate single precision FP.
-  if (Subtarget->isFPOnlySP())
+  if (STI.isFPOnlySP())
     ATS.emitAttribute(ARMBuildAttrs::ABI_HardFP_use,
                       ARMBuildAttrs::HardFPSinglePrecision);
 
   // Hard float.  Use both S and D registers and conform to AAPCS-VFP.
-  if (Subtarget->isAAPCS_ABI() && TM.Options.FloatABIType == FloatABI::Hard)
+  if (STI.isAAPCS_ABI() && TM.Options.FloatABIType == FloatABI::Hard)
     ATS.emitAttribute(ARMBuildAttrs::ABI_VFP_args, ARMBuildAttrs::HardFPAAPCS);
 
   // FIXME: Should we signal R9 usage?
 
-  if (Subtarget->hasFP16())
-      ATS.emitAttribute(ARMBuildAttrs::FP_HP_extension, ARMBuildAttrs::AllowHPFP);
+  if (STI.hasFP16())
+    ATS.emitAttribute(ARMBuildAttrs::FP_HP_extension, ARMBuildAttrs::AllowHPFP);
 
-  if (Subtarget->hasMPExtension())
-      ATS.emitAttribute(ARMBuildAttrs::MPextension_use, ARMBuildAttrs::AllowMP);
+  // FIXME: To support emitting this build attribute as GCC does, the
+  // -mfp16-format option and associated plumbing must be
+  // supported. For now the __fp16 type is exposed by default, so this
+  // attribute should be emitted with value 1.
+  ATS.emitAttribute(ARMBuildAttrs::ABI_FP_16bit_format,
+                    ARMBuildAttrs::FP16FormatIEEE);
+
+  if (STI.hasMPExtension())
+    ATS.emitAttribute(ARMBuildAttrs::MPextension_use, ARMBuildAttrs::AllowMP);
 
   // Hardware divide in ARM mode is part of base arch, starting from ARMv8.
   // If only Thumb hwdiv is present, it must also be in base arch (ARMv7-R/M).
@@ -732,14 +829,14 @@ void ARMAsmPrinter::emitAttributes() {
   // arch, supplying -hwdiv downgrades the effective arch, via ClearImpliedBits.
   // AllowDIVExt is only emitted if hwdiv isn't available in the base arch;
   // otherwise, the default value (AllowDIVIfExists) applies.
-  if (Subtarget->hasDivideInARMMode() && !Subtarget->hasV8Ops())
-      ATS.emitAttribute(ARMBuildAttrs::DIV_use, ARMBuildAttrs::AllowDIVExt);
+  if (STI.hasDivideInARMMode() && !STI.hasV8Ops())
+    ATS.emitAttribute(ARMBuildAttrs::DIV_use, ARMBuildAttrs::AllowDIVExt);
 
   if (MMI) {
     if (const Module *SourceModule = MMI->getModule()) {
       // ABI_PCS_wchar_t to indicate wchar_t width
       // FIXME: There is no way to emit value 0 (wchar_t prohibited).
-      if (auto WCharWidthValue = cast_or_null<ConstantInt>(
+      if (auto WCharWidthValue = mdconst::extract_or_null<ConstantInt>(
               SourceModule->getModuleFlag("wchar_size"))) {
         int WCharWidth = WCharWidthValue->getZExtValue();
         assert((WCharWidth == 2 || WCharWidth == 4) &&
@@ -750,7 +847,7 @@ void ARMAsmPrinter::emitAttributes() {
       // ABI_enum_size to indicate enum width
       // FIXME: There is no way to emit value 0 (enums prohibited) or value 3
       //        (all enums contain a value needing 32 bits to encode).
-      if (auto EnumWidthValue = cast_or_null<ConstantInt>(
+      if (auto EnumWidthValue = mdconst::extract_or_null<ConstantInt>(
               SourceModule->getModuleFlag("min_enum_size"))) {
         int EnumWidth = EnumWidthValue->getZExtValue();
         assert((EnumWidth == 1 || EnumWidth == 4) &&
@@ -765,22 +862,20 @@ void ARMAsmPrinter::emitAttributes() {
   // it as another callee-saved register, but not as SB or a TLS pointer; It
   // would instead be nicer to push this from the frontend as metadata, as we do
   // for the wchar and enum size tags
-  if (Subtarget->isR9Reserved())
-      ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
-                        ARMBuildAttrs::R9Reserved);
+  if (STI.isR9Reserved())
+    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use, ARMBuildAttrs::R9Reserved);
   else
-      ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
-                        ARMBuildAttrs::R9IsGPR);
+    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use, ARMBuildAttrs::R9IsGPR);
 
-  if (Subtarget->hasTrustZone() && Subtarget->hasVirtualization())
-      ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
-                        ARMBuildAttrs::AllowTZVirtualization);
-  else if (Subtarget->hasTrustZone())
-      ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
-                        ARMBuildAttrs::AllowTZ);
-  else if (Subtarget->hasVirtualization())
-      ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
-                        ARMBuildAttrs::AllowVirtualization);
+  if (STI.hasTrustZone() && STI.hasVirtualization())
+    ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
+                      ARMBuildAttrs::AllowTZVirtualization);
+  else if (STI.hasTrustZone())
+    ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
+                      ARMBuildAttrs::AllowTZ);
+  else if (STI.hasVirtualization())
+    ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
+                      ARMBuildAttrs::AllowVirtualization);
 
   ATS.finishAttributeSection();
 }
@@ -849,9 +944,8 @@ MCSymbol *ARMAsmPrinter::GetARMGVSymbol(const GlobalValue *GV,
 
 void ARMAsmPrinter::
 EmitMachineConstantPoolValue(MachineConstantPoolValue *MCPV) {
-  const DataLayout *DL = TM.getSubtargetImpl()->getDataLayout();
-  int Size =
-      TM.getSubtargetImpl()->getDataLayout()->getTypeAllocSize(MCPV->getType());
+  const DataLayout *DL = TM.getDataLayout();
+  int Size = TM.getDataLayout()->getTypeAllocSize(MCPV->getType());
 
   ARMConstantPoolValue *ACPV = static_cast<ARMConstantPoolValue*>(MCPV);
 
@@ -910,20 +1004,16 @@ EmitMachineConstantPoolValue(MachineConstantPoolValue *MCPV) {
   OutStreamer.EmitValue(Expr, Size);
 }
 
-void ARMAsmPrinter::EmitJumpTable(const MachineInstr *MI) {
-  unsigned Opcode = MI->getOpcode();
-  int OpNum = 1;
-  if (Opcode == ARM::BR_JTadd)
-    OpNum = 2;
-  else if (Opcode == ARM::BR_JTm)
-    OpNum = 3;
-
-  const MachineOperand &MO1 = MI->getOperand(OpNum);
-  const MachineOperand &MO2 = MI->getOperand(OpNum+1); // Unique Id
+void ARMAsmPrinter::EmitJumpTableAddrs(const MachineInstr *MI) {
+  const MachineOperand &MO1 = MI->getOperand(1);
   unsigned JTI = MO1.getIndex();
 
+  // Make sure the Thumb jump table is 4-byte aligned. This will be a nop for
+  // ARM mode tables.
+  EmitAlignment(2);
+
   // Emit a label for the jump table.
-  MCSymbol *JTISymbol = GetARMJTIPICJumpTableLabel2(JTI, MO2.getImm());
+  MCSymbol *JTISymbol = GetARMJTIPICJumpTableLabel(JTI);
   OutStreamer.EmitLabel(JTISymbol);
 
   // Mark the jump table as data-in-code.
@@ -961,56 +1051,67 @@ void ARMAsmPrinter::EmitJumpTable(const MachineInstr *MI) {
   OutStreamer.EmitDataRegion(MCDR_DataRegionEnd);
 }
 
-void ARMAsmPrinter::EmitJump2Table(const MachineInstr *MI) {
-  unsigned Opcode = MI->getOpcode();
-  int OpNum = (Opcode == ARM::t2BR_JT) ? 2 : 1;
-  const MachineOperand &MO1 = MI->getOperand(OpNum);
-  const MachineOperand &MO2 = MI->getOperand(OpNum+1); // Unique Id
+void ARMAsmPrinter::EmitJumpTableInsts(const MachineInstr *MI) {
+  const MachineOperand &MO1 = MI->getOperand(1);
   unsigned JTI = MO1.getIndex();
 
-  MCSymbol *JTISymbol = GetARMJTIPICJumpTableLabel2(JTI, MO2.getImm());
+  MCSymbol *JTISymbol = GetARMJTIPICJumpTableLabel(JTI);
   OutStreamer.EmitLabel(JTISymbol);
 
   // Emit each entry of the table.
   const MachineJumpTableInfo *MJTI = MF->getJumpTableInfo();
   const std::vector<MachineJumpTableEntry> &JT = MJTI->getJumpTables();
   const std::vector<MachineBasicBlock*> &JTBBs = JT[JTI].MBBs;
-  unsigned OffsetWidth = 4;
-  if (MI->getOpcode() == ARM::t2TBB_JT) {
-    OffsetWidth = 1;
-    // Mark the jump table as data-in-code.
-    OutStreamer.EmitDataRegion(MCDR_DataRegionJT8);
-  } else if (MI->getOpcode() == ARM::t2TBH_JT) {
-    OffsetWidth = 2;
-    // Mark the jump table as data-in-code.
-    OutStreamer.EmitDataRegion(MCDR_DataRegionJT16);
-  }
 
   for (unsigned i = 0, e = JTBBs.size(); i != e; ++i) {
     MachineBasicBlock *MBB = JTBBs[i];
     const MCExpr *MBBSymbolExpr = MCSymbolRefExpr::Create(MBB->getSymbol(),
                                                           OutContext);
     // If this isn't a TBB or TBH, the entries are direct branch instructions.
-    if (OffsetWidth == 4) {
-      EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2B)
+    EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2B)
         .addExpr(MBBSymbolExpr)
         .addImm(ARMCC::AL)
         .addReg(0));
-      continue;
-    }
+  }
+}
+
+void ARMAsmPrinter::EmitJumpTableTBInst(const MachineInstr *MI,
+                                        unsigned OffsetWidth) {
+  assert((OffsetWidth == 1 || OffsetWidth == 2) && "invalid tbb/tbh width");
+  const MachineOperand &MO1 = MI->getOperand(1);
+  unsigned JTI = MO1.getIndex();
+
+  MCSymbol *JTISymbol = GetARMJTIPICJumpTableLabel(JTI);
+  OutStreamer.EmitLabel(JTISymbol);
+
+  // Emit each entry of the table.
+  const MachineJumpTableInfo *MJTI = MF->getJumpTableInfo();
+  const std::vector<MachineJumpTableEntry> &JT = MJTI->getJumpTables();
+  const std::vector<MachineBasicBlock*> &JTBBs = JT[JTI].MBBs;
+
+  // Mark the jump table as data-in-code.
+  OutStreamer.EmitDataRegion(OffsetWidth == 1 ? MCDR_DataRegionJT8
+                                              : MCDR_DataRegionJT16);
+
+  for (auto MBB : JTBBs) {
+    const MCExpr *MBBSymbolExpr = MCSymbolRefExpr::Create(MBB->getSymbol(),
+                                                          OutContext);
     // Otherwise it's an offset from the dispatch instruction. Construct an
     // MCExpr for the entry. We want a value of the form:
-    // (BasicBlockAddr - TableBeginAddr) / 2
+    // (BasicBlockAddr - TBBInstAddr + 4) / 2
     //
     // For example, a TBB table with entries jumping to basic blocks BB0 and BB1
     // would look like:
     // LJTI_0_0:
-    //    .byte (LBB0 - LJTI_0_0) / 2
-    //    .byte (LBB1 - LJTI_0_0) / 2
-    const MCExpr *Expr =
-      MCBinaryExpr::CreateSub(MBBSymbolExpr,
-                              MCSymbolRefExpr::Create(JTISymbol, OutContext),
-                              OutContext);
+    //    .byte (LBB0 - (LCPI0_0 + 4)) / 2
+    //    .byte (LBB1 - (LCPI0_0 + 4)) / 2
+    // where LCPI0_0 is a label defined just before the TBB instruction using
+    // this table.
+    MCSymbol *TBInstPC = GetCPISymbol(MI->getOperand(0).getImm());
+    const MCExpr *Expr = MCBinaryExpr::CreateAdd(
+        MCSymbolRefExpr::Create(TBInstPC, OutContext),
+        MCConstantExpr::Create(4, OutContext), OutContext);
+    Expr = MCBinaryExpr::CreateSub(MBBSymbolExpr, Expr, OutContext);
     Expr = MCBinaryExpr::CreateDiv(Expr, MCConstantExpr::Create(2, OutContext),
                                    OutContext);
     OutStreamer.EmitValue(Expr, OffsetWidth);
@@ -1018,8 +1119,10 @@ void ARMAsmPrinter::EmitJump2Table(const MachineInstr *MI) {
   // Mark the end of jump table data-in-code region. 32-bit offsets use
   // actual branch instructions here, so we don't mark those as a data-region
   // at all.
-  if (OffsetWidth != 4)
-    OutStreamer.EmitDataRegion(MCDR_DataRegionEnd);
+  OutStreamer.EmitDataRegion(MCDR_DataRegionEnd);
+
+  // Make sure the next instruction is 2-byte aligned.
+  EmitAlignment(1);
 }
 
 void ARMAsmPrinter::EmitUnwindingInstruction(const MachineInstr *MI) {
@@ -1167,7 +1270,7 @@ void ARMAsmPrinter::EmitUnwindingInstruction(const MachineInstr *MI) {
 #include "ARMGenMCPseudoLowering.inc"
 
 void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
-  const DataLayout *DL = TM.getSubtargetImpl()->getDataLayout();
+  const DataLayout *DL = TM.getDataLayout();
 
   // If we just ended a constant pool, mark it as such.
   if (InConstantPool && MI->getOpcode() != ARM::CONSTPOOL_ENTRY) {
@@ -1212,17 +1315,16 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
   case ARM::tLEApcrelJT:
   case ARM::t2LEApcrelJT: {
     MCSymbol *JTIPICSymbol =
-      GetARMJTIPICJumpTableLabel2(MI->getOperand(1).getIndex(),
-                                  MI->getOperand(2).getImm());
+      GetARMJTIPICJumpTableLabel(MI->getOperand(1).getIndex());
     EmitToStreamer(OutStreamer, MCInstBuilder(MI->getOpcode() ==
-                                              ARM::t2LEApcrelJT ? ARM::t2ADR
+                                               ARM::t2LEApcrelJT ? ARM::t2ADR
                   : (MI->getOpcode() == ARM::tLEApcrelJT ? ARM::tADR
                      : ARM::ADR))
       .addReg(MI->getOperand(0).getReg())
       .addExpr(MCSymbolRefExpr::Create(JTIPICSymbol, OutContext))
       // Add predicate operands.
-      .addImm(MI->getOperand(3).getImm())
-      .addReg(MI->getOperand(4).getReg()));
+      .addImm(MI->getOperand(2).getImm())
+      .addReg(MI->getOperand(3).getReg()));
     return;
   }
   // Darwin call instructions are just normal call instructions with different
@@ -1242,18 +1344,34 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
     return;
   }
   case ARM::tBX_CALL: {
-    EmitToStreamer(OutStreamer, MCInstBuilder(ARM::tMOVr)
-      .addReg(ARM::LR)
-      .addReg(ARM::PC)
-      // Add predicate operands.
-      .addImm(ARMCC::AL)
-      .addReg(0));
+    if (Subtarget->hasV5TOps())
+      llvm_unreachable("Expected BLX to be selected for v5t+");
 
-    EmitToStreamer(OutStreamer, MCInstBuilder(ARM::tBX)
-      .addReg(MI->getOperand(0).getReg())
-      // Add predicate operands.
-      .addImm(ARMCC::AL)
-      .addReg(0));
+    // On ARM v4t, when doing a call from thumb mode, we need to ensure
+    // that the saved lr has its LSB set correctly (the arch doesn't
+    // have blx).
+    // So here we generate a bl to a small jump pad that does bx rN.
+    // The jump pads are emitted after the function body.
+
+    unsigned TReg = MI->getOperand(0).getReg();
+    MCSymbol *TRegSym = nullptr;
+    for (unsigned i = 0, e = ThumbIndirectPads.size(); i < e; i++) {
+      if (ThumbIndirectPads[i].first == TReg) {
+        TRegSym = ThumbIndirectPads[i].second;
+        break;
+      }
+    }
+
+    if (!TRegSym) {
+      TRegSym = OutContext.CreateTempSymbol();
+      ThumbIndirectPads.push_back(std::make_pair(TReg, TRegSym));
+    }
+
+    // Create a link-saving branch to the Reg Indirect Jump Pad.
+    EmitToStreamer(OutStreamer, MCInstBuilder(ARM::tBL)
+        // Predicate comes first here.
+        .addImm(ARMCC::AL).addReg(0)
+        .addExpr(MCSymbolRefExpr::Create(TRegSym, OutContext)));
     return;
   }
   case ARM::BMOVPCRX_CALL: {
@@ -1473,6 +1591,16 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       EmitGlobalConstant(MCPE.Val.ConstVal);
     return;
   }
+  case ARM::JUMPTABLE_ADDRS:
+    EmitJumpTableAddrs(MI);
+    return;
+  case ARM::JUMPTABLE_INSTS:
+    EmitJumpTableInsts(MI);
+    return;
+  case ARM::JUMPTABLE_TBB:
+  case ARM::JUMPTABLE_TBH:
+    EmitJumpTableTBInst(MI, MI->getOpcode() == ARM::JUMPTABLE_TBB ? 1 : 2);
+    return;
   case ARM::t2BR_JT: {
     // Lower and emit the instruction itself, then the jump table following it.
     EmitToStreamer(OutStreamer, MCInstBuilder(ARM::tMOVr)
@@ -1481,37 +1609,19 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       // Add predicate operands.
       .addImm(ARMCC::AL)
       .addReg(0));
-
-    // Output the data for the jump table itself
-    EmitJump2Table(MI);
     return;
   }
-  case ARM::t2TBB_JT: {
-    // Lower and emit the instruction itself, then the jump table following it.
-    EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2TBB)
-      .addReg(ARM::PC)
-      .addReg(MI->getOperand(0).getReg())
-      // Add predicate operands.
-      .addImm(ARMCC::AL)
-      .addReg(0));
-
-    // Output the data for the jump table itself
-    EmitJump2Table(MI);
-    // Make sure the next instruction is 2-byte aligned.
-    EmitAlignment(1);
-    return;
-  }
+  case ARM::t2TBB_JT:
   case ARM::t2TBH_JT: {
-    // Lower and emit the instruction itself, then the jump table following it.
-    EmitToStreamer(OutStreamer, MCInstBuilder(ARM::t2TBH)
-      .addReg(ARM::PC)
-      .addReg(MI->getOperand(0).getReg())
-      // Add predicate operands.
-      .addImm(ARMCC::AL)
-      .addReg(0));
-
-    // Output the data for the jump table itself
-    EmitJump2Table(MI);
+    unsigned Opc = MI->getOpcode() == ARM::t2TBB_JT ? ARM::t2TBB : ARM::t2TBH;
+    // Lower and emit the PC label, then the instruction itself.
+    OutStreamer.EmitLabel(GetCPISymbol(MI->getOperand(3).getImm()));
+    EmitToStreamer(OutStreamer, MCInstBuilder(Opc)
+                                     .addReg(MI->getOperand(0).getReg())
+                                     .addReg(MI->getOperand(1).getReg())
+                                     // Add predicate operands.
+                                     .addImm(ARMCC::AL)
+                                     .addReg(0));
     return;
   }
   case ARM::tBR_JTr:
@@ -1531,13 +1641,6 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
     if (Opc == ARM::MOVr)
       TmpInst.addOperand(MCOperand::CreateReg(0));
     EmitToStreamer(OutStreamer, TmpInst);
-
-    // Make sure the Thumb jump table is 4-byte aligned.
-    if (Opc == ARM::tMOVr)
-      EmitAlignment(2);
-
-    // Output the data for the jump table itself
-    EmitJumpTable(MI);
     return;
   }
   case ARM::BR_JTm: {
@@ -1561,9 +1664,6 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
     TmpInst.addOperand(MCOperand::CreateImm(ARMCC::AL));
     TmpInst.addOperand(MCOperand::CreateReg(0));
     EmitToStreamer(OutStreamer, TmpInst);
-
-    // Output the data for the jump table itself
-    EmitJumpTable(MI);
     return;
   }
   case ARM::BR_JTadd: {
@@ -1578,9 +1678,6 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       .addReg(0)
       // Add 's' bit operand (always reg0 for this)
       .addReg(0));
-
-    // Output the data for the jump table itself
-    EmitJumpTable(MI);
     return;
   }
   case ARM::SPACE:

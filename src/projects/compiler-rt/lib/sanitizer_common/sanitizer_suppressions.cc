@@ -80,22 +80,55 @@ SuppressionContext *SuppressionContext::Get() {
   return suppression_ctx;
 }
 
+static bool GetPathAssumingFileIsRelativeToExec(const char *file_path,
+                                                /*out*/char *new_file_path,
+                                                uptr new_file_path_size) {
+  InternalScopedString exec(kMaxPathLength);
+  if (ReadBinaryName(exec.data(), exec.size())) {
+    const char *file_name_pos = StripModuleName(exec.data());
+    uptr path_to_exec_len = file_name_pos - exec.data();
+    internal_strncat(new_file_path, exec.data(),
+                     Min(path_to_exec_len, new_file_path_size - 1));
+    internal_strncat(new_file_path, file_path,
+                     new_file_path_size - internal_strlen(new_file_path) - 1);
+    return true;
+  }
+  return false;
+}
+
 void SuppressionContext::InitIfNecessary() {
   if (suppression_ctx)
     return;
   suppression_ctx = new(placeholder) SuppressionContext;
   if (common_flags()->suppressions[0] == '\0')
     return;
+
+  // If we cannot find the file, check if its location is relative to
+  // the location of the executable.
+  const char *filename = common_flags()->suppressions;
+  InternalScopedString new_file_path(kMaxPathLength);
+  if (!FileExists(filename) && !IsAbsolutePath(filename) &&
+      GetPathAssumingFileIsRelativeToExec(filename, new_file_path.data(),
+                                          new_file_path.size())) {
+    filename = new_file_path.data();
+  }
+
+  // Read the file.
   char *suppressions_from_file;
   uptr buffer_size;
+  const uptr max_len = 1 << 26;
   uptr contents_size =
-      ReadFileToBuffer(common_flags()->suppressions, &suppressions_from_file,
-                       &buffer_size, 1 << 26 /* max_len */);
+    ReadFileToBuffer(filename, &suppressions_from_file,
+                     &buffer_size, max_len);
+  VPrintf(1, "%s: reading suppressions file at %s\n",
+          SanitizerToolName, filename);
+
   if (contents_size == 0) {
     Printf("%s: failed to read suppressions file '%s'\n", SanitizerToolName,
            common_flags()->suppressions);
     Die();
   }
+
   suppression_ctx->Parse(suppressions_from_file);
 }
 

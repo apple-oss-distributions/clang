@@ -11,6 +11,7 @@ add_clang_library(clangQuery
   clangAST
   clangASTMatchers
   clangBasic
+  clangCodeGen
   clangDynamicASTMatchers
   clangFrontend
   )

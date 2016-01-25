@@ -23,12 +23,14 @@
 #include "CursorVisitor.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Mangle.h"
+#include "clang/AST/ModuleProvider.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticCategories.h"
 #include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/Version.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -240,9 +242,8 @@ static bool visitPreprocessedEntitiesInRange(SourceRange R,
       FID = FileID();
   }
 
-  std::pair<PreprocessingRecord::iterator, PreprocessingRecord::iterator>
-    Entities = PPRec.getPreprocessedEntitiesInRange(R);
-  return Visitor.visitPreprocessedEntities(Entities.first, Entities.second,
+  const auto &Entities = PPRec.getPreprocessedEntitiesInRange(R);
+  return Visitor.visitPreprocessedEntities(Entities.begin(), Entities.end(),
                                            PPRec, FID);
 }
 
@@ -917,6 +918,18 @@ bool CursorVisitor::VisitTemplateTemplateParmDecl(TemplateTemplateParmDecl *D) {
   return false;
 }
 
+bool CursorVisitor::VisitObjCTypeParamDecl(ObjCTypeParamDecl *D) {
+  // Visit the bound, if it's explicit.
+  if (D->hasExplicitBound()) {
+    if (auto TInfo = D->getTypeSourceInfo()) {
+      if (Visit(TInfo->getTypeLoc()))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 bool CursorVisitor::VisitObjCMethodDecl(ObjCMethodDecl *ND) {
   if (TypeSourceInfo *TSInfo = ND->getReturnTypeSourceInfo())
     if (Visit(TSInfo->getTypeLoc()))
@@ -1022,6 +1035,9 @@ bool CursorVisitor::VisitObjCCategoryDecl(ObjCCategoryDecl *ND) {
                                    TU)))
     return true;
 
+  if (VisitObjCTypeParamList(ND->getTypeParamList()))
+    return true;
+
   ObjCCategoryDecl::protocol_loc_iterator PL = ND->protocol_loc_begin();
   for (ObjCCategoryDecl::protocol_iterator I = ND->protocol_begin(),
          E = ND->protocol_end(); I != E; ++I, ++PL)
@@ -1081,11 +1097,28 @@ bool CursorVisitor::VisitObjCPropertyDecl(ObjCPropertyDecl *PD) {
   return false;
 }
 
+bool CursorVisitor::VisitObjCTypeParamList(ObjCTypeParamList *typeParamList) {
+  if (!typeParamList)
+    return false;
+
+  for (auto *typeParam : *typeParamList) {
+    // Visit the type parameter.
+    if (Visit(MakeCXCursor(typeParam, TU, RegionOfInterest)))
+      return true;
+  }
+
+  return false;
+}
+
 bool CursorVisitor::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
   if (!D->isThisDeclarationADefinition()) {
     // Forward declaration is treated like a reference.
     return Visit(MakeCursorObjCClassRef(D, D->getLocation(), TU));
   }
+
+  // Objective-C type parameters.
+  if (VisitObjCTypeParamList(D->getTypeParamListAsWritten()))
+    return true;
 
   // Issue callbacks for super class.
   if (D->getSuperClass() &&
@@ -1093,6 +1126,10 @@ bool CursorVisitor::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
                                         D->getSuperClassLoc(),
                                         TU)))
     return true;
+
+  if (TypeSourceInfo *SuperClassTInfo = D->getSuperClassTInfo())
+    if (Visit(SuperClassTInfo->getTypeLoc()))
+      return true;
 
   ObjCInterfaceDecl::protocol_loc_iterator PL = D->protocol_loc_begin();
   for (ObjCInterfaceDecl::protocol_iterator I = D->protocol_begin(),
@@ -1260,6 +1297,7 @@ bool CursorVisitor::VisitNestedNameSpecifier(NestedNameSpecifier *NNS,
   case NestedNameSpecifier::TypeSpecWithTemplate:
   case NestedNameSpecifier::Global:
   case NestedNameSpecifier::Identifier:
+  case NestedNameSpecifier::Super:
     break;      
   }
   
@@ -1301,6 +1339,7 @@ CursorVisitor::VisitNestedNameSpecifierLoc(NestedNameSpecifierLoc Qualifier) {
         
     case NestedNameSpecifier::Global:
     case NestedNameSpecifier::Identifier:
+    case NestedNameSpecifier::Super:
       break;              
     }
   }
@@ -1484,6 +1523,11 @@ bool CursorVisitor::VisitObjCInterfaceTypeLoc(ObjCInterfaceTypeLoc TL) {
 bool CursorVisitor::VisitObjCObjectTypeLoc(ObjCObjectTypeLoc TL) {
   if (TL.hasBaseTypeAsWritten() && Visit(TL.getBaseLoc()))
     return true;
+
+  for (unsigned I = 0, N = TL.getNumTypeArgs(); I != N; ++I) {
+    if (Visit(TL.getTypeArgTInfo(I)->getTypeLoc()))
+      return true;
+  }
 
   for (unsigned I = 0, N = TL.getNumProtocols(); I != N; ++I) {
     if (Visit(MakeCursorObjCProtocolRef(TL.getProtocol(I), TL.getProtocolLoc(I),
@@ -1861,15 +1905,18 @@ public:
   void VisitOpaqueValueExpr(const OpaqueValueExpr *E);
   void VisitLambdaExpr(const LambdaExpr *E);
   void VisitOMPExecutableDirective(const OMPExecutableDirective *D);
+  void VisitOMPLoopDirective(const OMPLoopDirective *D);
   void VisitOMPParallelDirective(const OMPParallelDirective *D);
   void VisitOMPSimdDirective(const OMPSimdDirective *D);
   void VisitOMPForDirective(const OMPForDirective *D);
+  void VisitOMPForSimdDirective(const OMPForSimdDirective *D);
   void VisitOMPSectionsDirective(const OMPSectionsDirective *D);
   void VisitOMPSectionDirective(const OMPSectionDirective *D);
   void VisitOMPSingleDirective(const OMPSingleDirective *D);
   void VisitOMPMasterDirective(const OMPMasterDirective *D);
   void VisitOMPCriticalDirective(const OMPCriticalDirective *D);
   void VisitOMPParallelForDirective(const OMPParallelForDirective *D);
+  void VisitOMPParallelForSimdDirective(const OMPParallelForSimdDirective *D);
   void VisitOMPParallelSectionsDirective(const OMPParallelSectionsDirective *D);
   void VisitOMPTaskDirective(const OMPTaskDirective *D);
   void VisitOMPTaskyieldDirective(const OMPTaskyieldDirective *D);
@@ -1878,6 +1925,8 @@ public:
   void VisitOMPFlushDirective(const OMPFlushDirective *D);
   void VisitOMPOrderedDirective(const OMPOrderedDirective *D);
   void VisitOMPAtomicDirective(const OMPAtomicDirective *D);
+  void VisitOMPTargetDirective(const OMPTargetDirective *D);
+  void VisitOMPTeamsDirective(const OMPTeamsDirective *D);
 
 private:
   void AddDeclarationNameInfo(const Stmt *S);
@@ -1998,12 +2047,16 @@ void OMPClauseEnqueue::VisitOMPSeqCstClause(const OMPSeqCstClause *) {}
 
 template<typename T>
 void OMPClauseEnqueue::VisitOMPClauseList(T *Node) {
-  for (const auto *I : Node->varlists())
+  for (const auto *I : Node->varlists()) {
     Visitor->AddStmt(I);
+  }
 }
 
 void OMPClauseEnqueue::VisitOMPPrivateClause(const OMPPrivateClause *C) {
   VisitOMPClauseList(C);
+  for (const auto *E : C->private_copies()) {
+    Visitor->AddStmt(E);
+  }
 }
 void OMPClauseEnqueue::VisitOMPFirstprivateClause(
                                         const OMPFirstprivateClause *C) {
@@ -2228,8 +2281,21 @@ void EnqueueVisitor::VisitMemberExpr(const MemberExpr *M) {
   // visit it.
   // FIXME: If we ever want to show these implicit accesses, this will be
   // unfortunate. However, clang_getCursor() relies on this behavior.
-  if (!M->isImplicitAccess())
-    AddStmt(M->getBase());
+  if (M->isImplicitAccess())
+    return;
+
+  // Ignore base anonymous struct/union fields, otherwise they will shadow the
+  // real field that that we are interested in.
+  if (auto *SubME = dyn_cast<MemberExpr>(M->getBase())) {
+    if (auto *FD = dyn_cast_or_null<FieldDecl>(SubME->getMemberDecl())) {
+      if (FD->isAnonymousStructOrUnion()) {
+        AddStmt(SubME->getBase());
+        return;
+      }
+    }
+  }
+
+  AddStmt(M->getBase());
 }
 void EnqueueVisitor::VisitObjCEncodeExpr(const ObjCEncodeExpr *E) {
   AddTypeLoc(E->getEncodedTypeSourceInfo());
@@ -2332,16 +2398,24 @@ void EnqueueVisitor::VisitOMPExecutableDirective(
     EnqueueChildren(*I);
 }
 
+void EnqueueVisitor::VisitOMPLoopDirective(const OMPLoopDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
 void EnqueueVisitor::VisitOMPParallelDirective(const OMPParallelDirective *D) {
   VisitOMPExecutableDirective(D);
 }
 
 void EnqueueVisitor::VisitOMPSimdDirective(const OMPSimdDirective *D) {
-  VisitOMPExecutableDirective(D);
+  VisitOMPLoopDirective(D);
 }
 
 void EnqueueVisitor::VisitOMPForDirective(const OMPForDirective *D) {
-  VisitOMPExecutableDirective(D);
+  VisitOMPLoopDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPForSimdDirective(const OMPForSimdDirective *D) {
+  VisitOMPLoopDirective(D);
 }
 
 void EnqueueVisitor::VisitOMPSectionsDirective(const OMPSectionsDirective *D) {
@@ -2367,7 +2441,12 @@ void EnqueueVisitor::VisitOMPCriticalDirective(const OMPCriticalDirective *D) {
 
 void
 EnqueueVisitor::VisitOMPParallelForDirective(const OMPParallelForDirective *D) {
-  VisitOMPExecutableDirective(D);
+  VisitOMPLoopDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPParallelForSimdDirective(
+    const OMPParallelForSimdDirective *D) {
+  VisitOMPLoopDirective(D);
 }
 
 void EnqueueVisitor::VisitOMPParallelSectionsDirective(
@@ -2401,6 +2480,14 @@ void EnqueueVisitor::VisitOMPOrderedDirective(const OMPOrderedDirective *D) {
 }
 
 void EnqueueVisitor::VisitOMPAtomicDirective(const OMPAtomicDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPTargetDirective(const OMPTargetDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPTeamsDirective(const OMPTeamsDirective *D) {
   VisitOMPExecutableDirective(D);
 }
 
@@ -2708,6 +2795,7 @@ struct RegisterFatalErrorHandler {
 static llvm::ManagedStatic<RegisterFatalErrorHandler> RegisterFatalErrorHandlerOnce;
 
 extern "C" {
+
 CXIndex clang_createIndex(int excludeDeclarationsFromPCH,
                           int displayDiagnostics) {
   // We use crash recovery to make some of our APIs more reliable, implicitly
@@ -2720,7 +2808,8 @@ CXIndex clang_createIndex(int excludeDeclarationsFromPCH,
   // registered once.
   (void)*RegisterFatalErrorHandlerOnce;
 
-  CIndexer *CIdxr = new CIndexer();
+  auto MP = SharedModuleProvider::Create<SimpleModuleProvider>();
+  CIndexer *CIdxr = new CIndexer(MP);
   if (excludeDeclarationsFromPCH)
     CIdxr->setOnlyLocalDecls();
   if (displayDiagnostics)
@@ -2763,7 +2852,7 @@ CXTranslationUnit clang_createTranslationUnit(CXIndex CIdx,
                                               const char *ast_filename) {
   CXTranslationUnit TU;
   enum CXErrorCode Result =
-      clang_createTranslationUnit2(CIdx, ast_filename, &TU);
+    clang_createTranslationUnit2(CIdx, ast_filename, &TU);
   (void)Result;
   assert((TU && Result == CXError_Success) ||
          (!TU && Result != CXError_Success));
@@ -2786,9 +2875,12 @@ enum CXErrorCode clang_createTranslationUnit2(CXIndex CIdx,
   CIndexer *CXXIdx = static_cast<CIndexer *>(CIdx);
   FileSystemOptions FileSystemOpts;
 
-  IntrusiveRefCntPtr<DiagnosticsEngine> Diags;
+  IntrusiveRefCntPtr<DiagnosticsEngine> Diags =
+      CompilerInstance::createDiagnostics(new DiagnosticOptions());
   std::unique_ptr<ASTUnit> AU = ASTUnit::LoadFromASTFile(
-      ast_filename, Diags, FileSystemOpts, CXXIdx->getOnlyLocalDecls(), None,
+      ast_filename, CXXIdx->getModuleProvider(),
+      Diags, FileSystemOpts,
+      CXXIdx->getOnlyLocalDecls(), None,
       /*CaptureDiagnostics=*/true,
       /*AllowPCHWithCompilerErrors=*/true,
       /*UserFilesAreVolatile=*/true);
@@ -2878,9 +2970,9 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
     std::vector<ASTUnit::RemappedFile> > RemappedCleanup(RemappedFiles.get());
 
   for (auto &UF : PTUI->unsaved_files) {
-    llvm::MemoryBuffer *MB =
+    std::unique_ptr<llvm::MemoryBuffer> MB =
         llvm::MemoryBuffer::getMemBufferCopy(getContents(UF), UF.Filename);
-    RemappedFiles->push_back(std::make_pair(UF.Filename, MB));
+    RemappedFiles->push_back(std::make_pair(UF.Filename, MB.release()));
   }
 
   std::unique_ptr<std::vector<const char *>> Args(
@@ -2926,7 +3018,8 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   unsigned NumErrors = Diags->getClient()->getNumErrors();
   std::unique_ptr<ASTUnit> ErrUnit;
   std::unique_ptr<ASTUnit> Unit(ASTUnit::LoadFromCommandLine(
-      Args->data(), Args->data() + Args->size(), Diags,
+  Args->data(), Args->data() + Args->size(),
+      CXXIdx->getModuleProvider(), Diags,
       CXXIdx->getClangResourcesPath(), CXXIdx->getOnlyLocalDecls(),
       /*CaptureDiagnostics=*/true, *RemappedFiles.get(),
       /*RemappedFilesKeepOriginalName=*/true, PrecompilePreamble, TUKind,
@@ -3162,9 +3255,9 @@ static void clang_reparseTranslationUnit_Impl(void *UserData) {
     std::vector<ASTUnit::RemappedFile> > RemappedCleanup(RemappedFiles.get());
 
   for (auto &UF : RTUI->unsaved_files) {
-    llvm::MemoryBuffer *MB =
+    std::unique_ptr<llvm::MemoryBuffer> MB =
         llvm::MemoryBuffer::getMemBufferCopy(getContents(UF), UF.Filename);
-    RemappedFiles->push_back(std::make_pair(UF.Filename, MB));
+    RemappedFiles->push_back(std::make_pair(UF.Filename, MB.release()));
   }
 
   if (!CXXUnit->Reparse(*RemappedFiles.get()))
@@ -3671,6 +3764,18 @@ CXSourceRange clang_Cursor_getSpellingNameRange(CXCursor C,
     return clang_getNullRange();
   }
 
+  if (C.kind == CXCursor_CXXMethod || C.kind == CXCursor_Destructor ||
+      C.kind == CXCursor_ConversionFunction) {
+    if (pieceIndex > 0)
+      return clang_getNullRange();
+    if (const FunctionDecl *FD =
+            dyn_cast_or_null<FunctionDecl>(getCursorDecl(C))) {
+      DeclarationNameInfo FunctionName = FD->getNameInfo();
+      return cxloc::translateSourceRange(Ctx, FunctionName.getSourceRange());
+    }
+    return clang_getNullRange();
+  }
+
   // FIXME: A CXCursor_InclusionDirective should give the location of the
   // filename, but we don't keep track of this.
 
@@ -4127,6 +4232,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("OMPSimdDirective");
   case CXCursor_OMPForDirective:
     return cxstring::createRef("OMPForDirective");
+  case CXCursor_OMPForSimdDirective:
+    return cxstring::createRef("OMPForSimdDirective");
   case CXCursor_OMPSectionsDirective:
     return cxstring::createRef("OMPSectionsDirective");
   case CXCursor_OMPSectionDirective:
@@ -4139,6 +4246,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("OMPCriticalDirective");
   case CXCursor_OMPParallelForDirective:
     return cxstring::createRef("OMPParallelForDirective");
+  case CXCursor_OMPParallelForSimdDirective:
+    return cxstring::createRef("OMPParallelForSimdDirective");
   case CXCursor_OMPParallelSectionsDirective:
     return cxstring::createRef("OMPParallelSectionsDirective");
   case CXCursor_OMPTaskDirective:
@@ -4155,6 +4264,12 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("OMPOrderedDirective");
   case CXCursor_OMPAtomicDirective:
     return cxstring::createRef("OMPAtomicDirective");
+  case CXCursor_OMPTargetDirective:
+    return cxstring::createRef("OMPTargetDirective");
+  case CXCursor_OMPTeamsDirective:
+    return cxstring::createRef("OMPTeamsDirective");
+  case CXCursor_OverloadCandidate:
+      return cxstring::createRef("OverloadCandidate");
   }
 
   llvm_unreachable("Unhandled CXCursorKind");
@@ -4265,7 +4380,12 @@ static enum CXChildVisitResult GetCursorVisitor(CXCursor cursor,
     *BestCursor = getTypeRefedCallExprCursor(*BestCursor);
     return CXChildVisit_Recurse;
   }
-  
+
+  // If we already have an Objective-C superclass reference, don't
+  // update it further.
+  if (BestCursor->kind == CXCursor_ObjCSuperClassRef)
+    return CXChildVisit_Break;
+
   *BestCursor = cursor;
   return CXChildVisit_Recurse;
 }
@@ -4891,6 +5011,7 @@ CXCursor clang_getCursorDefinition(CXCursor C) {
   case Decl::ClassScopeFunctionSpecialization:
   case Decl::Import:
   case Decl::OMPThreadPrivate:
+  case Decl::ObjCTypeParam:
     return C;
 
   // Declaration kinds that don't make any sense here, but are
@@ -6172,6 +6293,7 @@ static CXLanguageKind getDeclLanguage(const Decl *D) {
     case Decl::ObjCProperty:
     case Decl::ObjCPropertyImpl:
     case Decl::ObjCProtocol:
+    case Decl::ObjCTypeParam:
       return CXLanguage_ObjC;
     case Decl::CXXConstructor:
     case Decl::CXXConversion:
@@ -6376,6 +6498,40 @@ static const Decl *maybeGetTemplateCursor(const Decl *D) {
   return D;
 }
 
+
+enum CX_StorageClass clang_Cursor_getStorageClass(CXCursor C) {
+  StorageClass sc = SC_None;
+  const Decl *D = getCursorDecl(C);
+  if (D) {
+    if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+      sc = FD->getStorageClass();
+    } else if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+      sc = VD->getStorageClass();
+    } else {
+      return CX_SC_Invalid;
+    }
+  } else {
+    return CX_SC_Invalid;
+  }
+  switch (sc) {
+  case SC_None:
+    return CX_SC_None;
+  case SC_Extern:
+    return CX_SC_Extern;
+  case SC_Static:
+    return CX_SC_Static;
+  case SC_PrivateExtern:
+    return CX_SC_PrivateExtern;
+  case SC_OpenCLWorkGroupLocal:
+    return CX_SC_OpenCLWorkGroupLocal;
+  case SC_Auto:
+    return CX_SC_Auto;
+  case SC_Register:
+    return CX_SC_Register;
+  }
+  llvm_unreachable("Unhandled storage class!");
+}
+
 CXCursor clang_getCursorSemanticParent(CXCursor cursor) {
   if (clang_isDeclaration(cursor.kind)) {
     if (const Decl *D = getCursorDecl(cursor)) {
@@ -6570,11 +6726,7 @@ CXModule clang_getModuleForFile(CXTranslationUnit TU, CXFile File) {
   HeaderSearch &HS = Unit.getPreprocessor().getHeaderSearchInfo();
   ModuleMap::KnownHeader Header = HS.findModuleForHeader(FE);
   
-  if (Module *Mod = Header.getModule()) {
-    if (Header.getRole() != ModuleMap::ExcludedHeader)
-      return Mod;
-  }
-  return nullptr;
+  return Header.getModule();
 }
 
 CXFile clang_Module_getASTFile(CXModule CXMod) {
@@ -6860,7 +7012,7 @@ CXTUResourceUsage clang_getCXTUResourceUsage(CXTranslationUnit TU) {
 
   CXTUResourceUsage usage = { (void*) entries.get(),
                             (unsigned) entries->size(),
-                            entries->size() ? &(*entries)[0] : nullptr };
+                            !entries->empty() ? &(*entries)[0] : nullptr };
   entries.release();
   return usage;
 }

@@ -26,14 +26,19 @@
 // Apple-internal CrashReporter support.
 #if SANITIZER_MAC
 # include <asl.h>
+# include <os/trace.h>
 # if defined(__has_include) && __has_include(<CrashReporterClient.h>)
 #  define HAVE_CRASHREPORTERCLIENT_H 1
 #  include <CrashReporterClient.h>
 extern "C" {
 CRASH_REPORTER_CLIENT_HIDDEN
 struct crashreporter_annotations_t gCRAnnotations
-        __attribute__((section("__DATA," CRASHREPORTER_ANNOTATIONS_SECTION)))
-        = { CRASHREPORTER_ANNOTATIONS_VERSION, 0, 0, 0, 0, 0, 0 };
+    __attribute__((section("__DATA," CRASHREPORTER_ANNOTATIONS_SECTION))) = {
+        CRASHREPORTER_ANNOTATIONS_VERSION, 0, 0, 0, 0, 0, 0,
+#if CRASHREPORTER_ANNOTATIONS_VERSION > 4
+        0,
+#endif
+};
 }
 # endif
 #endif
@@ -57,7 +62,7 @@ struct ReportData {
 };
 
 static bool report_happened = false;
-static ReportData report_data = {};
+static ReportData report_data = {0, 0, 0, 0, false, 0, ""};
 
 void AppendToErrorMessageBuffer(const char *buffer) {
   // Apple-internal CrashReporter support: Always store reports into buffer.
@@ -76,7 +81,7 @@ void AppendToErrorMessageBuffer(const char *buffer) {
                      buffer, remaining);
     error_message_buffer[error_message_buffer_size - 1] = '\0';
     // FIXME: reallocate the buffer instead of truncating the message.
-    error_message_buffer_pos += remaining > length ? length : remaining;
+    error_message_buffer_pos += Min(remaining, length);
   }
 }
 
@@ -110,6 +115,8 @@ class Decorator: public __sanitizer::SanitizerCommonDecorator {
         return Cyan();
       case kAsanUserPoisonedMemoryMagic:
       case kAsanContiguousContainerOOBMagic:
+      case kAsanAllocaLeftMagic:
+      case kAsanAllocaRightMagic:
         return Blue();
       case kAsanStackUseAfterScopeMagic:
         return Magenta();
@@ -117,20 +124,31 @@ class Decorator: public __sanitizer::SanitizerCommonDecorator {
         return Red();
       case kAsanInternalHeapMagic:
         return Yellow();
+      case kAsanIntraObjectRedzone:
+        return Yellow();
       default:
         return Default();
     }
   }
   const char *EndShadowByte() { return Default(); }
+  const char *MemoryByte() { return Magenta(); }
+  const char *EndMemoryByte() { return Default(); }
 };
 
 // ---------------------- Helper functions ----------------------- {{{1
 
-static void PrintShadowByte(InternalScopedString *str, const char *before,
-                            u8 byte, const char *after = "\n") {
+static void PrintMemoryByte(InternalScopedString *str, const char *before,
+    u8 byte, bool in_shadow, const char *after = "\n") {
   Decorator d;
-  str->append("%s%s%x%x%s%s", before, d.ShadowByte(byte), byte >> 4, byte & 15,
-              d.EndShadowByte(), after);
+  str->append("%s%s%x%x%s%s", before,
+              in_shadow ? d.ShadowByte(byte) : d.MemoryByte(),
+              byte >> 4, byte & 15,
+              in_shadow ? d.EndShadowByte() : d.EndMemoryByte(), after);
+}
+
+static void PrintShadowByte(InternalScopedString *str, const char *before,
+    u8 byte, const char *after = "\n") {
+  PrintMemoryByte(str, before, byte, /*in_shadow*/true, after);
 }
 
 static void PrintShadowBytes(InternalScopedString *str, const char *before,
@@ -182,7 +200,27 @@ static void PrintLegend(InternalScopedString *str) {
                   kAsanContiguousContainerOOBMagic);
   PrintShadowByte(str, "  Array cookie:            ",
                   kAsanArrayCookieMagic);
+  PrintShadowByte(str, "  Intra object redzone:    ",
+                  kAsanIntraObjectRedzone);
   PrintShadowByte(str, "  ASan internal:           ", kAsanInternalHeapMagic);
+  PrintShadowByte(str, "  Left alloca redzone:     ", kAsanAllocaLeftMagic);
+  PrintShadowByte(str, "  Right alloca redzone:    ", kAsanAllocaRightMagic);
+}
+
+void MaybeDumpInstructionBytes(uptr pc) {
+  if (!flags()->dump_instruction_bytes || (pc < GetPageSizeCached()))
+    return;
+  InternalScopedString str(1024);
+  str.append("First 16 instruction bytes at pc: ");
+  if (IsAccessibleMemoryRange(pc, 16)) {
+    for (int i = 0; i < 16; ++i) {
+      PrintMemoryByte(&str, "", ((u8 *)pc)[i], /*in_shadow*/false, " ");
+    }
+    str.append("\n");
+  } else {
+    str.append("unaccessible\n");
+  }
+  Report("%s", str.data());
 }
 
 static void PrintShadowMemoryForAddress(uptr addr) {
@@ -583,6 +621,36 @@ void DescribeThread(AsanThreadContext *context) {
 
 // -------------------- Different kinds of reports ----------------- {{{1
 
+// Removes the ANSI escape sequences from the input string (in-place).
+void RemoveANSIEscapeSequencesFromString(char *str) {
+  if (!str)
+    return;
+
+  // We are going to remove the escape sequences in place.
+  char *s = str;
+  char *z = str;
+  while (*s != '\0') {
+    // Skip ANSI escape sequences.
+    if (*s == '\033' && *(s + 1) == '[') {
+      while (*s != 'm' && *s != '\0') {
+        s++;
+      }
+      if (*s == '\0') {
+        break;
+      }
+    // Copy over the buffer content.
+    } else if (s != z) {
+      CHECK_GT(s, z);
+      *z = *s;
+      z++;
+    }
+    s++;
+  }
+
+  // Null terminate the string.
+  *z = '\0';
+}
+
 // Use ScopedInErrorReport to run common actions just before and
 // immediately after printing error report.
 class ScopedInErrorReport {
@@ -594,7 +662,7 @@ class ScopedInErrorReport {
       // Do not print more than one report, otherwise they will mix up.
       // Error reporting functions shouldn't return at this situation, as
       // they are defined as no-return.
-      Report("AddressSanitizer: while reporting a bug found another one."
+      Report("AddressSanitizer: while reporting a bug found another one. "
                  "Ignoring.\n");
       u32 current_tid = GetCurrentTidOrInvalid();
       if (current_tid != reporting_thread_tid) {
@@ -631,10 +699,21 @@ class ScopedInErrorReport {
       __asan_print_accumulated_stats();
 
     // Apple-internal CrashReporter support: Save report to ASL and CrashLog.
-    asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", error_message_buffer);
+    if (error_message_buffer_size > 0) {
+      RemoveANSIEscapeSequencesFromString(error_message_buffer);
+      // Always log the full message to syslog.
+      asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", error_message_buffer);
+
+      // Log with genealogy. This will make it into the Crash Log on embedded.
+      if (&_os_trace_with_buffer != nullptr) {
+        os_trace("AddressSanitizer reported a failure. "
+                 "Consult syslog for more information.");
+      }
+
 #if HAVE_CRASHREPORTERCLIENT_H
-    CRSetCrashLogMessage(error_message_buffer);
+      CRSetCrashLogMessage(error_message_buffer);
 #endif
+    }
 
     if (error_report_callback) {
       error_report_callback(error_message_buffer);
@@ -644,40 +723,47 @@ class ScopedInErrorReport {
   }
 };
 
-void ReportStackOverflow(uptr pc, uptr sp, uptr bp, void *context, uptr addr) {
-  ScopedInErrorReport in_report;
+void ReportStackOverflow(const SignalContext &sig) {
+  ReportData report = { sig.pc, sig.sp, sig.bp, sig.addr, /*is_write*/false, 0,
+                        "Stack overflow detected" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   Report(
       "ERROR: AddressSanitizer: stack-overflow on address %p"
       " (pc %p bp %p sp %p T%d)\n",
-      (void *)addr, (void *)pc, (void *)bp, (void *)sp,
+      (void *)sig.addr, (void *)sig.pc, (void *)sig.bp, (void *)sig.sp,
       GetCurrentTidOrInvalid());
   Printf("%s", d.EndWarning());
-  GET_STACK_TRACE_SIGNAL(pc, bp, context);
+  GET_STACK_TRACE_SIGNAL(sig);
   stack.Print();
   ReportErrorSummary("stack-overflow", &stack);
 }
 
-void ReportSIGSEGV(const char *description, uptr pc, uptr sp, uptr bp,
-                   void *context, uptr addr) {
+void ReportSIGSEGV(const char *description, const SignalContext &sig) {
   ScopedInErrorReport in_report;
   Decorator d;
   Printf("%s", d.Warning());
   Report(
       "ERROR: AddressSanitizer: %s on unknown address %p"
       " (pc %p bp %p sp %p T%d)\n",
-      description, (void *)addr, (void *)pc, (void *)bp, (void *)sp,
-      GetCurrentTidOrInvalid());
+      description, (void *)sig.addr, (void *)sig.pc, (void *)sig.bp,
+      (void *)sig.sp, GetCurrentTidOrInvalid());
+  if (sig.pc < GetPageSizeCached()) {
+    Report("Hint: pc points to the zero page.\n");
+  }
   Printf("%s", d.EndWarning());
-  GET_STACK_TRACE_SIGNAL(pc, bp, context);
+  GET_STACK_TRACE_SIGNAL(sig);
   stack.Print();
+  MaybeDumpInstructionBytes(sig.pc);
   Printf("AddressSanitizer can not provide additional info.\n");
   ReportErrorSummary("SEGV", &stack);
 }
 
 void ReportDoubleFree(uptr addr, BufferedStackTrace *free_stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "Attempt to deallocate a freed object" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   char tname[128];
@@ -696,7 +782,9 @@ void ReportDoubleFree(uptr addr, BufferedStackTrace *free_stack) {
 
 void ReportNewDeleteSizeMismatch(uptr addr, uptr delete_size,
                                  BufferedStackTrace *free_stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "unknown-crash" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   char tname[128];
@@ -719,7 +807,9 @@ void ReportNewDeleteSizeMismatch(uptr addr, uptr delete_size,
 }
 
 void ReportFreeNotMalloced(uptr addr, BufferedStackTrace *free_stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "Attempt to free a non-allocated address" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   char tname[128];
@@ -743,7 +833,9 @@ void ReportAllocTypeMismatch(uptr addr, BufferedStackTrace *free_stack,
   static const char *dealloc_names[] =
     {"INVALID", "free", "operator delete", "operator delete []"};
   CHECK_NE(alloc_type, dealloc_type);
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "Mismatch between allocation and deallocation APIs" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   Report("ERROR: AddressSanitizer: alloc-dealloc-mismatch (%s vs %s) on %p\n",
@@ -759,7 +851,9 @@ void ReportAllocTypeMismatch(uptr addr, BufferedStackTrace *free_stack,
 }
 
 void ReportMallocUsableSizeNotOwned(uptr addr, BufferedStackTrace *stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "unknown-crash" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   Report("ERROR: AddressSanitizer: attempting to call "
@@ -773,7 +867,9 @@ void ReportMallocUsableSizeNotOwned(uptr addr, BufferedStackTrace *stack) {
 
 void ReportSanitizerGetAllocatedSizeNotOwned(uptr addr,
                                              BufferedStackTrace *stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "unknown-crash" };
+  ScopedInErrorReport in_report(&report);
   Decorator d;
   Printf("%s", d.Warning());
   Report("ERROR: AddressSanitizer: attempting to call "
@@ -828,6 +924,9 @@ void ReportBadParamsToAnnotateContiguousContainer(uptr beg, uptr end,
          "      old_mid : %p\n"
          "      new_mid : %p\n",
          beg, end, old_mid, new_mid);
+  uptr granularity = SHADOW_GRANULARITY;
+  if (!IsAligned(beg, granularity))
+    Report("ERROR: beg is not aligned by %d\n", granularity);
   stack->Print();
   ReportErrorSummary("bad-__sanitizer_annotate_contiguous_container", stack);
 }
@@ -904,7 +1003,10 @@ void WarnMacFreeUnallocated(uptr addr, uptr zone_ptr, const char *zone_name,
 
 void ReportMacMzReallocUnknown(uptr addr, uptr zone_ptr, const char *zone_name,
                                BufferedStackTrace *stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "unknown-crash" };
+  ScopedInErrorReport in_report(&report);
+
   Printf("mz_realloc(%p) -- attempting to realloc unallocated memory.\n"
              "This is an unrecoverable problem, exiting now.\n",
              addr);
@@ -915,7 +1017,10 @@ void ReportMacMzReallocUnknown(uptr addr, uptr zone_ptr, const char *zone_name,
 
 void ReportMacCfReallocUnknown(uptr addr, uptr zone_ptr, const char *zone_name,
                                BufferedStackTrace *stack) {
-  ScopedInErrorReport in_report;
+  ReportData report = { 0, 0, 0, addr, /*is_write*/false, 0,
+                        "unknown-crash" };
+  ScopedInErrorReport in_report(&report);
+
   Printf("cf_realloc(%p) -- attempting to realloc unallocated memory.\n"
              "This is an unrecoverable problem, exiting now.\n",
              addr);
@@ -977,6 +1082,13 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp, uptr addr, int is_write,
         break;
       case kAsanGlobalRedzoneMagic:
         bug_descr = "global-buffer-overflow";
+        break;
+      case kAsanIntraObjectRedzone:
+        bug_descr = "intra-object-overflow";
+        break;
+      case kAsanAllocaLeftMagic:
+      case kAsanAllocaRightMagic:
+        bug_descr = "dynamic-stack-buffer-overflow";
         break;
     }
   }

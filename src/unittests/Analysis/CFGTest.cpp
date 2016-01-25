@@ -30,20 +30,16 @@ namespace {
 class IsPotentiallyReachableTest : public testing::Test {
 protected:
   void ParseAssembly(const char *Assembly) {
-    M.reset(new Module("Module", getGlobalContext()));
-
     SMDiagnostic Error;
-    bool Parsed = ParseAssemblyString(Assembly, M.get(),
-                                      Error, M->getContext()) == M.get();
+    M = parseAssemblyString(Assembly, Error, getGlobalContext());
 
     std::string errMsg;
     raw_string_ostream os(errMsg);
     Error.print("", os);
 
-    if (!Parsed) {
-      // A failure here means that the test itself is buggy.
+    // A failure here means that the test itself is buggy.
+    if (!M)
       report_fatal_error(os.str().c_str());
-    }
 
     Function *F = M->getFunction("test");
     if (F == nullptr)
@@ -76,7 +72,7 @@ protected:
         PassInfo *PI = new PassInfo("isPotentiallyReachable testing pass",
                                     "", &ID, nullptr, true, true);
         PassRegistry::getPassRegistry()->registerPass(*PI, false);
-        initializeLoopInfoPass(*PassRegistry::getPassRegistry());
+        initializeLoopInfoWrapperPassPass(*PassRegistry::getPassRegistry());
         initializeDominatorTreeWrapperPassPass(
             *PassRegistry::getPassRegistry());
         return 0;
@@ -84,7 +80,7 @@ protected:
 
       void getAnalysisUsage(AnalysisUsage &AU) const {
         AU.setPreservesAll();
-        AU.addRequired<LoopInfo>();
+        AU.addRequired<LoopInfoWrapperPass>();
         AU.addRequired<DominatorTreeWrapperPass>();
       }
 
@@ -92,7 +88,7 @@ protected:
         if (!F.hasName() || F.getName() != "test")
           return false;
 
-        LoopInfo *LI = &getAnalysis<LoopInfo>();
+        LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
         DominatorTree *DT =
             &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
         EXPECT_EQ(isPotentiallyReachable(A, B, nullptr, nullptr),

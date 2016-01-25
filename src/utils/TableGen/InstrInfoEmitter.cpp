@@ -143,7 +143,7 @@ InstrInfoEmitter::GetOperandInfo(const CodeGenInstruction &Inst) {
         Res += "|(1<<MCOI::OptionalDef)";
 
       // Fill in operand type.
-      Res += ", MCOI::";
+      Res += ", ";
       assert(!Op.OperandType.empty() && "Invalid operand type.");
       Res += Op.OperandType;
 
@@ -476,7 +476,7 @@ void InstrInfoEmitter::emitRecord(const CodeGenInstruction &Inst, unsigned Num,
      << SchedModels.getSchedClassIdx(Inst) << ",\t"
      << Inst.TheDef->getValueAsInt("Size") << ",\t0";
 
-  // Emit all of the target indepedent flags...
+  // Emit all of the target independent flags...
   if (Inst.isPseudo)           OS << "|(1<<MCID::Pseudo)";
   if (Inst.isReturn)           OS << "|(1<<MCID::Return)";
   if (Inst.isBranch)           OS << "|(1<<MCID::Branch)";
@@ -587,14 +587,16 @@ void InstrInfoEmitter::emitEnums(raw_ostream &OS) {
   for (const CodeGenInstruction *Inst : NumberedInstructions)
     OS << "    " << Inst->TheDef->getName() << "\t= " << Num++ << ",\n";
   OS << "    INSTRUCTION_LIST_END = " << NumberedInstructions.size() << "\n";
-  OS << "  };\n";
+  OS << "  };\n\n";
   OS << "namespace Sched {\n";
   OS << "  enum {\n";
   Num = 0;
   for (const auto &Class : SchedModels.explicit_classes())
     OS << "    " << Class.Name << "\t= " << Num++ << ",\n";
   OS << "    SCHED_LIST_END = " << SchedModels.numInstrSchedClasses() << "\n";
-  OS << "  };\n}\n}\n";
+  OS << "  };\n";
+  OS << "} // End Sched namespace\n";
+  OS << "} // End " << Namespace << " namespace\n";
   OS << "} // End llvm namespace \n";
 
   OS << "#endif // GET_INSTRINFO_ENUM\n\n";

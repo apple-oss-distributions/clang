@@ -64,9 +64,8 @@ APINotesManager::~APINotesManager() {
 
 /// \brief Write a new timestamp file with the given path.
 static void writeTimestampFile(StringRef TimestampFile) {
-  std::string ErrorString;
-  llvm::raw_fd_ostream Out(TimestampFile.str().c_str(), ErrorString,
-                           llvm::sys::fs::F_None);
+  std::error_code EC;
+  llvm::raw_fd_ostream Out(TimestampFile.str(), EC, llvm::sys::fs::F_None);
 }
 
 /// \brief Prune the API notes cache of API notes that haven't been accessed in
@@ -144,15 +143,14 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
   if (!APINotesFileExt.empty() &&
       APINotesFileExt.substr(1) == BINARY_APINOTES_EXTENSION) {
     // Load the file.
-    std::unique_ptr<llvm::MemoryBuffer> 
-      Buffer(FileMgr.getBufferForFile(APINotesFile));
+    auto Buffer = FileMgr.getBufferForFile(APINotesFile);
     if (!Buffer) {
       Readers[HeaderDir] = nullptr;
       return true;
     }
 
     // Load the binary form.
-    auto Reader = APINotesReader::get(std::move(Buffer));
+    auto Reader = APINotesReader::get(std::move(Buffer.get()));
     if (!Reader) {
       Readers[HeaderDir] = nullptr;
       return true;
@@ -189,13 +187,12 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
                                                       /*openFile=*/true,
                                                       /*cacheFailure=*/false)) {
     // Load the file contents.
-    if (auto Buffer = std::unique_ptr<llvm::MemoryBuffer>(
-                        FileMgr.getBufferForFile(CompiledFile))) {
+    if (auto Buffer = FileMgr.getBufferForFile(CompiledFile)) {
       // Make sure the file is up-to-date.
       if (CompiledFile->getModificationTime()
             >= APINotesFile->getModificationTime()) {
         // Load the file.
-        if (auto Reader = APINotesReader::get(std::move(Buffer))) {
+        if (auto Reader = APINotesReader::get(std::move(Buffer.get()))) {
           // Success.
           ++NumBinaryCacheHits;
           Readers[HeaderDir] = Reader.release();
@@ -213,8 +210,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
   }
 
   // Open the source file.
-  std::unique_ptr<llvm::MemoryBuffer> 
-    Buffer(FileMgr.getBufferForFile(APINotesFile));
+  auto Buffer = FileMgr.getBufferForFile(APINotesFile);
   if (!Buffer) {
     Readers[HeaderDir] = nullptr;
     return true;
@@ -231,7 +227,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
                                    diag::note_apinotes_message,
                                    APINotesFile);
     llvm::raw_svector_ostream OS(APINotesBuffer);
-    if (api_notes::compileAPINotes(Buffer->getBuffer(),
+    if (api_notes::compileAPINotes(Buffer.get()->getBuffer(),
                                    OS,
                                    api_notes::OSType::Absent,
                                    srcMgrAdapter.getDiagHandler(),
@@ -241,10 +237,9 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
     }
     OS.flush();
 
-    // Make a copy of the APINotes files into the buffer.
-    Buffer = std::unique_ptr<llvm::MemoryBuffer>(
-               llvm::MemoryBuffer::getMemBufferCopy(
-                 StringRef(APINotesBuffer.data(), APINotesBuffer.size())));
+    // Make a copy of the compiled form into the buffer.
+    Buffer = llvm::MemoryBuffer::getMemBufferCopy(
+               StringRef(APINotesBuffer.data(), APINotesBuffer.size()));
   }
 
   // Save the binary form into the cache. Perform this operation
@@ -266,7 +261,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
     bool hadError;
     {
       llvm::raw_fd_ostream Out(TemporaryFD, /*shouldClose=*/true);
-      Out.write(Buffer->getBufferStart(), Buffer->getBufferSize());
+      Out.write(Buffer.get()->getBufferStart(), Buffer.get()->getBufferSize());
       Out.flush();
 
       hadError = Out.has_error();
@@ -280,7 +275,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
   }
 
   // Load the binary form we just compiled.
-  auto Reader = APINotesReader::get(std::move(Buffer));
+  auto Reader = APINotesReader::get(std::move(*Buffer));
   assert(Reader && "Could not load the API notes we just generated?");
 
   // Record the reader.

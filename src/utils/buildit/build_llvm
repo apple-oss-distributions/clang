@@ -107,9 +107,7 @@ COMMON_CONFIGURE_OPTS="\
   --enable-optimized=$LLVM_OPTIMIZED \
   --disable-bindings \
   --disable-zlib \
-  --enable-terminfo=no \
-  --enable-crash-overrides=no \
-  --enable-libcpp"
+  --enable-terminfo=no"
 
 COMMON_MAKEFLAGS="\
   UNIVERSAL=1 \

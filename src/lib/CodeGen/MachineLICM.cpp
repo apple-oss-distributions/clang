@@ -49,6 +49,11 @@ AvoidSpeculation("avoid-speculation",
                  cl::desc("MachineLICM should avoid speculation"),
                  cl::init(true), cl::Hidden);
 
+static cl::opt<bool>
+HoistCheapInsts("hoist-cheap-insts",
+                cl::desc("MachineLICM should hoist even cheap instructions"),
+                cl::init(false), cl::Hidden);
+
 STATISTIC(NumHoisted,
           "Number of machine instructions hoisted out of loops");
 STATISTIC(NumLowRP,
@@ -62,7 +67,6 @@ STATISTIC(NumPostRAHoisted,
 
 namespace {
   class MachineLICM : public MachineFunctionPass {
-    const TargetMachine   *TM;
     const TargetInstrInfo *TII;
     const TargetLoweringBase *TLI;
     const TargetRegisterInfo *TRI;
@@ -143,9 +147,6 @@ namespace {
       RegPressure.clear();
       RegLimit.clear();
       BackTrace.clear();
-      for (DenseMap<unsigned,std::vector<const MachineInstr*> >::iterator
-             CI = CSEMap.begin(), CE = CSEMap.end(); CI != CE; ++CI)
-        CI->second.clear();
       CSEMap.clear();
     }
 
@@ -325,13 +326,12 @@ bool MachineLICM::runOnMachineFunction(MachineFunction &MF) {
     return false;
 
   Changed = FirstInLoop = false;
-  TM = &MF.getTarget();
-  TII = TM->getSubtargetImpl()->getInstrInfo();
-  TLI = TM->getSubtargetImpl()->getTargetLowering();
-  TRI = TM->getSubtargetImpl()->getRegisterInfo();
+  TII = MF.getSubtarget().getInstrInfo();
+  TLI = MF.getSubtarget().getTargetLowering();
+  TRI = MF.getSubtarget().getRegisterInfo();
   MFI = MF.getFrameInfo();
   MRI = &MF.getRegInfo();
-  InstrItins = TM->getSubtargetImpl()->getInstrItineraryData();
+  InstrItins = MF.getSubtarget().getInstrItineraryData();
 
   PreRegAlloc = MRI->isSSA();
 
@@ -693,6 +693,10 @@ void MachineLICM::ExitScopeIfDone(MachineDomTreeNode *Node,
 /// one pass without iteration.
 ///
 void MachineLICM::HoistOutOfLoop(MachineDomTreeNode *HeaderN) {
+  MachineBasicBlock *Preheader = getCurPreheader();
+  if (!Preheader)
+    return;
+
   SmallVector<MachineDomTreeNode*, 32> Scopes;
   SmallVector<MachineDomTreeNode*, 8> WorkList;
   DenseMap<MachineDomTreeNode*, MachineDomTreeNode*> ParentMap;
@@ -700,7 +704,7 @@ void MachineLICM::HoistOutOfLoop(MachineDomTreeNode *HeaderN) {
 
   // Perform a DFS walk to determine the order of visit.
   WorkList.push_back(HeaderN);
-  do {
+  while (!WorkList.empty()) {
     MachineDomTreeNode *Node = WorkList.pop_back_val();
     assert(Node && "Null dominator tree node?");
     MachineBasicBlock *BB = Node->getBlock();
@@ -734,27 +738,20 @@ void MachineLICM::HoistOutOfLoop(MachineDomTreeNode *HeaderN) {
       ParentMap[Child] = Node;
       WorkList.push_back(Child);
     }
-  } while (!WorkList.empty());
-
-  if (Scopes.size() != 0) {
-    MachineBasicBlock *Preheader = getCurPreheader();
-    if (!Preheader)
-      return;
-
-    // Compute registers which are livein into the loop headers.
-    RegSeen.clear();
-    BackTrace.clear();
-    InitRegPressure(Preheader);
   }
+
+  if (Scopes.size() == 0)
+    return;
+
+  // Compute registers which are livein into the loop headers.
+  RegSeen.clear();
+  BackTrace.clear();
+  InitRegPressure(Preheader);
 
   // Now perform LICM.
   for (unsigned i = 0, e = Scopes.size(); i != e; ++i) {
     MachineDomTreeNode *Node = Scopes[i];
     MachineBasicBlock *MBB = Node->getBlock();
-
-    MachineBasicBlock *Preheader = getCurPreheader();
-    if (!Preheader)
-      continue;
 
     EnterScope(MBB);
 
@@ -823,7 +820,7 @@ void MachineLICM::InitRegPressure(MachineBasicBlock *BB) {
       if (!TargetRegisterInfo::isVirtualRegister(Reg))
         continue;
 
-      bool isNew = RegSeen.insert(Reg);
+      bool isNew = RegSeen.insert(Reg).second;
       unsigned RCId, RCCost;
       getRegisterClassIDAndCost(MI, Reg, i, RCId, RCCost);
       if (MO.isDef())
@@ -855,7 +852,7 @@ void MachineLICM::UpdateRegPressure(const MachineInstr *MI) {
     if (!TargetRegisterInfo::isVirtualRegister(Reg))
       continue;
 
-    bool isNew = RegSeen.insert(Reg);
+    bool isNew = RegSeen.insert(Reg).second;
     if (MO.isDef())
       Defs.push_back(Reg);
     else if (!isNew && isOperandKill(MO, MRI)) {
@@ -1080,7 +1077,7 @@ bool MachineLICM::CanCauseHighRegPressure(DenseMap<unsigned, int> &Cost,
 
     // Don't hoist cheap instructions if they would increase register pressure,
     // even if we're under the limit.
-    if (CheapInstr)
+    if (CheapInstr && !HoistCheapInsts)
       return true;
 
     for (unsigned i = BackTrace.size(); i != 0; --i) {
@@ -1300,15 +1297,7 @@ void MachineLICM::InitCSEMap(MachineBasicBlock *BB) {
   for (MachineBasicBlock::iterator I = BB->begin(),E = BB->end(); I != E; ++I) {
     const MachineInstr *MI = &*I;
     unsigned Opcode = MI->getOpcode();
-    DenseMap<unsigned, std::vector<const MachineInstr*> >::iterator
-      CI = CSEMap.find(Opcode);
-    if (CI != CSEMap.end())
-      CI->second.push_back(MI);
-    else {
-      std::vector<const MachineInstr*> CSEMIs;
-      CSEMIs.push_back(MI);
-      CSEMap.insert(std::make_pair(Opcode, CSEMIs));
-    }
+    CSEMap[Opcode].push_back(MI);
   }
 }
 
@@ -1448,11 +1437,8 @@ bool MachineLICM::Hoist(MachineInstr *MI, MachineBasicBlock *Preheader) {
     // Add to the CSE map.
     if (CI != CSEMap.end())
       CI->second.push_back(MI);
-    else {
-      std::vector<const MachineInstr*> CSEMIs;
-      CSEMIs.push_back(MI);
-      CSEMap.insert(std::make_pair(Opcode, CSEMIs));
-    }
+    else
+      CSEMap[Opcode].push_back(MI);
   }
 
   ++NumHoisted;

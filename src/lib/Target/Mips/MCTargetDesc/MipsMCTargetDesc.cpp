@@ -43,7 +43,7 @@ using namespace llvm;
 
 /// Select the Mips CPU for the given triple and cpu name.
 /// FIXME: Merge with the copy in MipsSubtarget.cpp
-static inline StringRef selectMipsCPU(StringRef TT, StringRef CPU) {
+StringRef MIPS_MC::selectMipsCPU(StringRef TT, StringRef CPU) {
   if (CPU.empty() || CPU == "generic") {
     Triple TheTriple(TT);
     if (TheTriple.getArch() == Triple::mips ||
@@ -69,7 +69,7 @@ static MCRegisterInfo *createMipsMCRegisterInfo(StringRef TT) {
 
 static MCSubtargetInfo *createMipsMCSubtargetInfo(StringRef TT, StringRef CPU,
                                                   StringRef FS) {
-  CPU = selectMipsCPU(TT, CPU);
+  CPU = MIPS_MC::selectMipsCPU(TT, CPU);
   MCSubtargetInfo *X = new MCSubtargetInfo();
   InitMipsMCSubtargetInfo(X, TT, CPU, FS);
   return X;
@@ -97,27 +97,23 @@ static MCCodeGenInfo *createMipsMCCodeGenInfo(StringRef TT, Reloc::Model RM,
   return X;
 }
 
-static MCInstPrinter *createMipsMCInstPrinter(const Target &T,
+static MCInstPrinter *createMipsMCInstPrinter(const Triple &T,
                                               unsigned SyntaxVariant,
                                               const MCAsmInfo &MAI,
                                               const MCInstrInfo &MII,
-                                              const MCRegisterInfo &MRI,
-                                              const MCSubtargetInfo &STI) {
+                                              const MCRegisterInfo &MRI) {
   return new MipsInstPrinter(MAI, MII, MRI);
 }
 
 static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
                                     MCContext &Context, MCAsmBackend &MAB,
                                     raw_ostream &OS, MCCodeEmitter *Emitter,
-                                    const MCSubtargetInfo &STI,
-                                    bool RelaxAll, bool NoExecStack) {
+                                    const MCSubtargetInfo &STI, bool RelaxAll) {
   MCStreamer *S;
   if (!Triple(TT).isOSNaCl())
-    S = createMipsELFStreamer(Context, MAB, OS, Emitter, STI, RelaxAll,
-                              NoExecStack);
+    S = createMipsELFStreamer(Context, MAB, OS, Emitter, STI, RelaxAll);
   else
-    S = createMipsNaClELFStreamer(Context, MAB, OS, Emitter, STI, RelaxAll,
-                                  NoExecStack);
+    S = createMipsNaClELFStreamer(Context, MAB, OS, Emitter, STI, RelaxAll);
   new MipsTargetELFStreamer(*S, STI);
   return S;
 }
@@ -133,10 +129,8 @@ createMCAsmStreamer(MCContext &Ctx, formatted_raw_ostream &OS,
   return S;
 }
 
-static MCStreamer *createMipsNullStreamer(MCContext &Ctx) {
-  MCStreamer *S = llvm::createNullStreamer(Ctx);
-  new MipsTargetStreamer(*S);
-  return S;
+static MCTargetStreamer *createMipsNullTargetStreamer(MCStreamer &S) {
+  return new MipsTargetStreamer(S);
 }
 
 extern "C" void LLVMInitializeMipsTargetMC() {
@@ -193,11 +187,14 @@ extern "C" void LLVMInitializeMipsTargetMC() {
   TargetRegistry::RegisterAsmStreamer(TheMips64Target, createMCAsmStreamer);
   TargetRegistry::RegisterAsmStreamer(TheMips64elTarget, createMCAsmStreamer);
 
-  TargetRegistry::RegisterNullStreamer(TheMipsTarget, createMipsNullStreamer);
-  TargetRegistry::RegisterNullStreamer(TheMipselTarget, createMipsNullStreamer);
-  TargetRegistry::RegisterNullStreamer(TheMips64Target, createMipsNullStreamer);
-  TargetRegistry::RegisterNullStreamer(TheMips64elTarget,
-                                       createMipsNullStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheMipsTarget,
+                                             createMipsNullTargetStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheMipselTarget,
+                                             createMipsNullTargetStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheMips64Target,
+                                             createMipsNullTargetStreamer);
+  TargetRegistry::RegisterNullTargetStreamer(TheMips64elTarget,
+                                             createMipsNullTargetStreamer);
 
   // Register the asm backend.
   TargetRegistry::RegisterMCAsmBackend(TheMipsTarget,

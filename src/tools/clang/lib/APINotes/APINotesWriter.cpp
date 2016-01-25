@@ -821,9 +821,10 @@ void APINotesWriter::addObjCMethod(ContextID contextID,
                                    bool isInstanceMethod,
                                    const ObjCMethodInfo &info) {
   SelectorID selectorID = Impl.getSelector(selector);
-  assert(!Impl.ObjCMethods.count({contextID.Value, selectorID,
-                                  isInstanceMethod}));
-  Impl.ObjCMethods[{contextID.Value, selectorID, isInstanceMethod}] = info;
+  auto key = std::tuple<unsigned, unsigned, char>{
+      contextID.Value, selectorID, isInstanceMethod};
+  assert(!Impl.ObjCMethods.count(key));
+  Impl.ObjCMethods[key] = info;
 
   // If this method is a designated initializer, update the class to note that
   // it has designated initializers.

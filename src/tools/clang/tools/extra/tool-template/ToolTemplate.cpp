@@ -37,6 +37,7 @@
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -75,7 +76,8 @@ static cl::OptionCategory ToolTemplateCategory("tool-template options");
 int main(int argc, const char **argv) {
   llvm::sys::PrintStackTraceOnErrorSignal();
   CommonOptionsParser OptionsParser(argc, argv, ToolTemplateCategory);
-  RefactoringTool Tool(OptionsParser.getCompilations(),
+  RefactoringTool Tool(SharedModuleProvider::Create<LLVMModuleProvider>(),
+                       OptionsParser.getCompilations(),
                        OptionsParser.getSourcePathList());
   ast_matchers::MatchFinder Finder;
   ToolTemplateCallback Callback(&Tool.getReplacements());

@@ -44,6 +44,8 @@ namespace {
     void PrintObjCMethodType(ASTContext &Ctx, Decl::ObjCDeclQualifier Quals, 
                              QualType T);
 
+    void PrintObjCTypeParams(ObjCTypeParamList *Params);
+
   public:
     DeclPrinter(raw_ostream &Out, const PrintingPolicy &Policy,
                 unsigned Indentation = 0, bool PrintInstantiation = false)
@@ -384,6 +386,9 @@ void DeclPrinter::VisitRecordDecl(RecordDecl *D) {
   if (!Policy.SuppressSpecifiers && D->isModulePrivate())
     Out << "__module_private__ ";
   Out << D->getKindName();
+
+  prettyPrintAttributes(D);
+
   if (D->getIdentifier())
     Out << ' ' << *D;
 
@@ -775,6 +780,9 @@ void DeclPrinter::VisitCXXRecordDecl(CXXRecordDecl *D) {
   if (!Policy.SuppressSpecifiers && D->isModulePrivate())
     Out << "__module_private__ ";
   Out << D->getKindName();
+
+  prettyPrintAttributes(D);
+
   if (D->getIdentifier())
     Out << ' ' << *D;
 
@@ -946,13 +954,44 @@ void DeclPrinter::PrintObjCMethodType(ASTContext &Ctx,
   if (Quals & Decl::ObjCDeclQualifier::OBJC_TQ_Oneway)
     Out << "oneway ";
   if (Quals & Decl::ObjCDeclQualifier::OBJC_TQ_CSNullability) {
-    if (auto nullability = AttributedType::stripOuterNullability(T)) {
-      Out << getNullabilitySpelling(*nullability).substr(2) << ' ';
-    }
+    if (auto nullability = AttributedType::stripOuterNullability(T))
+      Out << getNullabilitySpelling(*nullability, true) << ' ';
   }
   
   Out << Ctx.getUnqualifiedObjCPointerType(T).getAsString(Policy);
   Out << ')';
+}
+
+void DeclPrinter::PrintObjCTypeParams(ObjCTypeParamList *Params) {
+  Out << "<";
+  unsigned First = true;
+  for (auto *Param : *Params) {
+    if (First) {
+      First = false;
+    } else {
+      Out << ", ";
+    }
+
+    switch (Param->getVariance()) {
+    case ObjCTypeParamVariance::Invariant:
+      break;
+
+    case ObjCTypeParamVariance::Covariant:
+      Out << "__covariant ";
+      break;
+
+    case ObjCTypeParamVariance::Contravariant:
+      Out << "__contravariant ";
+      break;
+    }
+
+    Out << Param->getDeclName().getAsString();
+
+    if (Param->hasExplicitBound()) {
+      Out << " : " << Param->getUnderlyingType().getAsString(Policy);
+    }
+  }
+  Out << "> ";
 }
 
 void DeclPrinter::VisitObjCMethodDecl(ObjCMethodDecl *OMD) {
@@ -1031,13 +1070,22 @@ void DeclPrinter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *OID) {
 
   if (!OID->isThisDeclarationADefinition()) {
     Out << "@class " << I << ";";
+
+    if (auto TypeParams = OID->getTypeParamListAsWritten()) {
+      PrintObjCTypeParams(TypeParams);
+    }
+
     return;
   }
   bool eolnOut = false;
+  Out << "@interface " << I;
+
+  if (auto TypeParams = OID->getTypeParamListAsWritten()) {
+    PrintObjCTypeParams(TypeParams);
+  }
+  
   if (SID)
-    Out << "@interface " << I << " : " << *SID;
-  else
-    Out << "@interface " << I;
+    Out << " : " << QualType(OID->getSuperClassType(), 0).getAsString(Policy);
 
   // Protocols?
   const ObjCList<ObjCProtocolDecl> &Protocols = OID->getReferencedProtocols();
@@ -1100,7 +1148,11 @@ void DeclPrinter::VisitObjCCategoryImplDecl(ObjCCategoryImplDecl *PID) {
 }
 
 void DeclPrinter::VisitObjCCategoryDecl(ObjCCategoryDecl *PID) {
-  Out << "@interface " << *PID->getClassInterface() << '(' << *PID << ")\n";
+  Out << "@interface " << *PID->getClassInterface();
+  if (auto TypeParams = PID->getTypeParamList()) {
+    PrintObjCTypeParams(TypeParams);
+  }
+  Out << "(" << *PID << ")\n";
   if (PID->ivar_size() > 0) {
     Out << "{\n";
     Indentation += Policy.Indentation;
@@ -1199,7 +1251,7 @@ void DeclPrinter::VisitObjCPropertyDecl(ObjCPropertyDecl *PDecl) {
           Out << (first ? ' ' : ',') << "null_resettable";
         } else {
           Out << (first ? ' ' : ',')
-              << getNullabilitySpelling(*nullability).substr(2);
+              << getNullabilitySpelling(*nullability, true);
         }
         first = false;
       }

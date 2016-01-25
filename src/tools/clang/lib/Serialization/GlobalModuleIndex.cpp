@@ -12,9 +12,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "ASTReaderInternals.h"
+#include "clang/AST/ModuleProvider.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Serialization/ASTBitCodes.h"
+#include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/GlobalModuleIndex.h"
 #include "clang/Serialization/Module.h"
 #include "llvm/ADT/DenseMap.h"
@@ -384,6 +386,7 @@ namespace {
   /// \brief Builder that generates the global module index file.
   class GlobalModuleIndexBuilder {
     FileManager &FileMgr;
+    const ModuleProvider &MP;
 
     /// \brief Mapping from files to module file information.
     typedef llvm::MapVector<const FileEntry *, ModuleFileInfo> ModuleFilesMap;
@@ -416,7 +419,9 @@ namespace {
     }
 
   public:
-    explicit GlobalModuleIndexBuilder(FileManager &FileMgr) : FileMgr(FileMgr){}
+    explicit GlobalModuleIndexBuilder(FileManager &FileMgr,
+                                      const ModuleProvider &MP)
+    : FileMgr(FileMgr), MP(MP) {}
 
     /// \brief Load the contents of the given module file into the builder.
     ///
@@ -493,19 +498,16 @@ namespace {
 
 bool GlobalModuleIndexBuilder::loadModuleFile(const FileEntry *File) {
   // Open the module file.
-  std::unique_ptr<llvm::MemoryBuffer> Buffer;
-  std::string ErrorStr;
-  Buffer.reset(FileMgr.getBufferForFile(File, &ErrorStr, /*isVolatile=*/true));
+
+  auto Buffer = FileMgr.getBufferForFile(File, /*isVolatile=*/true);
   if (!Buffer) {
     return true;
   }
 
   // Initialize the input stream
   llvm::BitstreamReader InStreamFile;
-  llvm::BitstreamCursor InStream;
-  InStreamFile.init((const unsigned char *)Buffer->getBufferStart(),
-                  (const unsigned char *)Buffer->getBufferEnd());
-  InStream.init(InStreamFile);
+  MP.UnwrapModuleContainer((*Buffer)->getMemBufferRef(), InStreamFile);
+  llvm::BitstreamCursor InStream(InStreamFile);
 
   // Sniff for the signature.
   if (InStream.Read(8) != 'C' ||
@@ -766,7 +768,8 @@ void GlobalModuleIndexBuilder::writeIndex(llvm::BitstreamWriter &Stream) {
 }
 
 GlobalModuleIndex::ErrorCode
-GlobalModuleIndex::writeIndex(FileManager &FileMgr, StringRef Path) {
+GlobalModuleIndex::writeIndex(FileManager &FileMgr, const ModuleProvider &MP,
+                              StringRef Path) {
   llvm::SmallString<128> IndexPath;
   IndexPath += Path;
   llvm::sys::path::append(IndexPath, IndexFileName);
@@ -789,7 +792,7 @@ GlobalModuleIndex::writeIndex(FileManager &FileMgr, StringRef Path) {
   }
 
   // The module index builder.
-  GlobalModuleIndexBuilder Builder(FileMgr);
+  GlobalModuleIndexBuilder Builder(FileMgr, MP);
   
   // Load each of the module files.
   std::error_code EC;

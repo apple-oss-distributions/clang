@@ -25,6 +25,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -34,11 +35,11 @@
 #include "llvm/TableGen/Record.h"
 #include "llvm/TableGen/SetTheory.h"
 #include "llvm/TableGen/TableGenBackend.h"
-#include <string>
-#include <sstream>
-#include <vector>
-#include <map>
 #include <algorithm>
+#include <map>
+#include <sstream>
+#include <string>
+#include <vector>
 using namespace llvm;
 
 namespace {
@@ -1393,7 +1394,7 @@ void Intrinsic::emitBody(StringRef CallPrefix) {
     }
   }
 
-  assert(Lines.size() && "Empty def?");
+  assert(!Lines.empty() && "Empty def?");
   if (!RetVar.getType().isVoid())
     Lines.back().insert(0, RetVar.getName() + " = ");
 
@@ -1637,16 +1638,14 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagShuffle(DagInit *DI){
                   "Different types in arguments to shuffle!");
 
   SetTheory ST;
-  LowHalf LH;
-  HighHalf HH;
-  MaskExpander ME(Arg1.first.getNumElements());
-  Rev R(Arg1.first.getElementSizeInBits());
   SetTheory::RecSet Elts;
-  ST.addOperator("lowhalf", &LH);
-  ST.addOperator("highhalf", &HH);
-  ST.addOperator("rev", &R);
-  ST.addExpander("MaskExpand", &ME);
-  ST.evaluate(DI->getArg(2), Elts, ArrayRef<SMLoc>());
+  ST.addOperator("lowhalf", llvm::make_unique<LowHalf>());
+  ST.addOperator("highhalf", llvm::make_unique<HighHalf>());
+  ST.addOperator("rev",
+                 llvm::make_unique<Rev>(Arg1.first.getElementSizeInBits()));
+  ST.addExpander("MaskExpand",
+                 llvm::make_unique<MaskExpander>(Arg1.first.getNumElements()));
+  ST.evaluate(DI->getArg(2), Elts, None);
 
   std::string S = "__builtin_shufflevector(" + Arg1.second + ", " + Arg2.second;
   for (auto &E : Elts) {

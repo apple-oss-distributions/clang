@@ -181,6 +181,10 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     return "builtin";
   if (hasAttribute(Attribute::ByVal))
     return "byval";
+  if (hasAttribute(Attribute::SwiftError))
+    return "swifterror";
+  if (hasAttribute(Attribute::SwiftSelf))
+    return "swiftself";
   if (hasAttribute(Attribute::InAlloca))
     return "inalloca";
   if (hasAttribute(Attribute::InlineHint))
@@ -426,6 +430,8 @@ uint64_t AttributeImpl::getAttrMask(Attribute::AttrKind Val) {
   case Attribute::InAlloca:        return 1ULL << 43;
   case Attribute::NonNull:         return 1ULL << 44;
   case Attribute::JumpTable:       return 1ULL << 45;
+  case Attribute::SwiftSelf:       return 1ULL << 46;
+  case Attribute::SwiftError:      return 1ULL << 47;
   case Attribute::Dereferenceable:
     llvm_unreachable("dereferenceable attribute not supported in raw format");
   }
@@ -795,12 +801,10 @@ AttributeSet AttributeSet::removeAttributes(LLVMContext &C, unsigned Index,
   if (!pImpl) return AttributeSet();
   if (!Attrs.pImpl) return *this;
 
-#ifndef NDEBUG
   // FIXME it is not obvious how this should work for alignment.
   // For now, say we can't pass in alignment, which no current use does.
   assert(!Attrs.hasAttribute(Index, Attribute::Alignment) &&
          "Attempt to change alignment!");
-#endif
 
   // Add the attribute slots before the one we're trying to add.
   SmallVector<AttributeSet, 4> AttrSet;

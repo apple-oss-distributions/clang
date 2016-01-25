@@ -28,10 +28,10 @@ struct TKPair {
 };
 }
 
-static TKPair TKIncludes[] = {
+static const TKPair TKIncludes[] = {
   {"NSException_SenTestFailure.h", "NSException_XCTestAdditions.h"},
-  {"NSInvocation_SenTesting.h",     0},
-  {"SenInterfaceTestCase.h",        0},
+  {"NSInvocation_SenTesting.h",     nullptr},
+  {"SenInterfaceTestCase.h",        nullptr},
   {"SenTest.h",                     "XCAbstractTest.h"},
   {"SenTestCase_Macros.h",          "XCTestAssertions.h"},
   {"SenTestCase.h",                 "XCTestCase.h"},
@@ -39,7 +39,7 @@ static TKPair TKIncludes[] = {
   {"SenTestDefines.h",              "XCTestDefines.h"},
   {"SenTestDistributedNotifier.h",  "XCTestDistributedNotifier.h"},
   {"SenTestingKit.h",               "XCTest.h"},
-  {"SenTestingUtilities.h",         0},
+  {"SenTestingUtilities.h",         nullptr},
   {"SenTestLog.h",                  "XCTestLog.h"},
   {"SenTestObserver.h",             "XCTestObserver.h"},
   {"SenTestProbe.h",                "XCTestProbe.h"},
@@ -48,7 +48,7 @@ static TKPair TKIncludes[] = {
   {"SenTestSuiteRun.h",             "XCTestSuiteRun.h"}
 };
 
-static TKPair TKMacros[] = {
+static const TKPair TKMacros[] = {
   {"STAssertNil",                 "XCTAssertNil"},
   {"STAssertNotNil",              "XCTAssertNotNil"},
   {"STAssertTrue",                "XCTAssertTrue"},
@@ -85,11 +85,11 @@ static TKPair TKMacros[] = {
 
   {"SENTEST_EXPORT",              "XCT_EXPORT"},
   {"SENTEST_IMPORT",              "XCT_IMPORT"},
-  {"SENTEST_STATIC_INLINE",       0},
-  {"SENTEST_EXTERN_INLINE",       0}
+  {"SENTEST_STATIC_INLINE",       nullptr},
+  {"SENTEST_EXTERN_INLINE",       nullptr}
 };
 
-static TKPair TKDecls[] = {
+static const TKPair TKDecls[] = {
   {"SenTestFailureException",       "XCTestFailureException"},
   {"SenFailureTypeKey",             "XCTestFailureTypeKey"},
   {"SenConditionFailure",           "XCTestConditionFailure"},
@@ -136,7 +136,7 @@ using namespace clang;
 using namespace arcmt;
 
 XCTMigrator::XCTMigrator(edit::EditedSource &Editor, ASTContext &Ctx)
-  : Editor(Editor), Ctx(Ctx), SenKitDir(0) {
+  : Editor(Editor), Ctx(Ctx), SenKitDir(nullptr) {
 
   IdentifierTable &Ids = Ctx.Idents;
   for (unsigned i = 0, e = sizeof(TKIncludes)/sizeof(TKPair); i != e; ++i)
@@ -144,10 +144,10 @@ XCTMigrator::XCTMigrator(edit::EditedSource &Editor, ASTContext &Ctx)
         TKIncludes[i].XCTStr ? TKIncludes[i].XCTStr : StringRef();
   for (unsigned i = 0, e = sizeof(TKMacros)/sizeof(TKPair); i != e; ++i)
     MacrosMap[&Ids.get(TKMacros[i].SenTestStr)] =
-        TKMacros[i].XCTStr ? &Ids.get(TKMacros[i].XCTStr) : 0;
+        TKMacros[i].XCTStr ? &Ids.get(TKMacros[i].XCTStr) : nullptr;
   for (unsigned i = 0, e = sizeof(TKDecls)/sizeof(TKPair); i != e; ++i)
     DeclsMap[&Ids.get(TKDecls[i].SenTestStr)] =
-        TKDecls[i].XCTStr ? &Ids.get(TKDecls[i].XCTStr) : 0;
+        TKDecls[i].XCTStr ? &Ids.get(TKDecls[i].XCTStr) : nullptr;
 
   STComposeStringName = DeclarationName(&Ids.get("STComposeString"));
 }
@@ -300,7 +300,7 @@ public:
       IncludesSet.insert(TKIncludes[i].SenTestStr);
   }
 
-  virtual bool needsInputFileVisitation() { return true; }
+  bool needsInputFileVisitation() override { return true; }
   bool visitInputFile(StringRef Filename, bool isSystem, bool isOverride) override {
     if (isSystem)
       return false;
@@ -330,11 +330,13 @@ void XCTMigrator::handleInvocation(CompilerInstance &CI) {
     CI.createFileManager();
   XCTSenTestingPCHCheck PCHCheck;
   ASTReader::readASTFileControlBlock(PPOpts.ImplicitPCHInclude,
-                                     CI.getFileManager(), PCHCheck);
+                                     CI.getFileManager(),
+                                     CI.getModuleProvider(), PCHCheck);
   if (PCHCheck.ContainsSenHeader) {
     std::string PrefixHeader =
         ASTReader::getOriginalSourceFile(PPOpts.ImplicitPCHInclude,
                                          CI.getFileManager(),
+                                         CI.getModuleProvider(),
                                          CI.getDiagnostics());
     if (!PrefixHeader.empty())
       PPOpts.Includes.insert(PPOpts.Includes.begin(), PrefixHeader);
@@ -382,8 +384,6 @@ public:
   bool shouldWalkTypesOfTypeLocs() const { return false; }
 
   bool VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
-    if (ObjCInterfaceDecl *ID = D->getSuperClass())
-      XCTM.migrateRef(ID, D->getSuperClassLoc());
     return true;
   }
 

@@ -30,6 +30,7 @@
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCTargetAsmParser.h"
@@ -123,6 +124,8 @@ struct AssemblerInvocation {
 
   unsigned RelaxAll : 1;
   unsigned NoExecStack : 1;
+  unsigned FatalWarnings : 1;
+  unsigned EmbedBitcode : 1;
 
   /// @}
 
@@ -138,7 +141,9 @@ public:
     ShowEncoding = 0;
     RelaxAll = 0;
     NoExecStack = 0;
+    FatalWarnings = 0;
     DwarfVersion = 3;
+    EmbedBitcode = 0;
   }
 
   static bool CreateFromArgs(AssemblerInvocation &Res,
@@ -246,7 +251,10 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
 
   // Assemble Options
   Opts.RelaxAll = Args->hasArg(OPT_mrelax_all);
-  Opts.NoExecStack =  Args->hasArg(OPT_mno_exec_stack);
+  Opts.NoExecStack = Args->hasArg(OPT_mno_exec_stack);
+  Opts.FatalWarnings =  Args->hasArg(OPT_massembler_fatal_warnings);
+
+  Opts.EmbedBitcode = Args->hasArg(OPT_fembed_bitcode);
 
   return Success;
 }
@@ -262,13 +270,12 @@ static formatted_raw_ostream *GetOutputStream(AssemblerInvocation &Opts,
   if (Opts.OutputPath != "-")
     sys::RemoveFileOnSignal(Opts.OutputPath);
 
-  std::string Error;
-  raw_fd_ostream *Out =
-      new raw_fd_ostream(Opts.OutputPath.c_str(), Error,
-                         (Binary ? sys::fs::F_None : sys::fs::F_Text));
-  if (!Error.empty()) {
-    Diags.Report(diag::err_fe_unable_to_open_output)
-      << Opts.OutputPath << Error;
+  std::error_code EC;
+  raw_fd_ostream *Out = new raw_fd_ostream(
+      Opts.OutputPath, EC, (Binary ? sys::fs::F_None : sys::fs::F_Text));
+  if (EC) {
+    Diags.Report(diag::err_fe_unable_to_open_output) << Opts.OutputPath
+                                                     << EC.message();
     delete Out;
     return nullptr;
   }
@@ -295,7 +302,7 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
   SourceMgr SrcMgr;
 
   // Tell SrcMgr about this buffer, which is what the parser will pick up.
-  SrcMgr.AddNewSourceBuffer(Buffer->release(), SMLoc());
+  SrcMgr.AddNewSourceBuffer(std::move(*Buffer), SMLoc());
 
   // Record the location of the include directories so that the lexer can find
   // it later.
@@ -356,13 +363,12 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
 
   // FIXME: There is a bit of code duplication with addPassesToEmitFile.
   if (Opts.OutputType == AssemblerInvocation::FT_Asm) {
-    MCInstPrinter *IP =
-      TheTarget->createMCInstPrinter(Opts.OutputAsmVariant, *MAI, *MCII, *MRI,
-                                     *STI);
+    MCInstPrinter *IP = TheTarget->createMCInstPrinter(
+        llvm::Triple(Opts.Triple), Opts.OutputAsmVariant, *MAI, *MCII, *MRI);
     MCCodeEmitter *CE = nullptr;
     MCAsmBackend *MAB = nullptr;
     if (Opts.ShowEncoding) {
-      CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, *STI, Ctx);
+      CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, Ctx);
       MAB = TheTarget->createMCAsmBackend(*MRI, Opts.Triple, Opts.CPU);
     }
     Str.reset(TheTarget->createAsmStreamer(Ctx, *Out, /*asmverbose*/true,
@@ -374,13 +380,25 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
   } else {
     assert(Opts.OutputType == AssemblerInvocation::FT_Obj &&
            "Invalid file type!");
-    MCCodeEmitter *CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, *STI, Ctx);
+    MCCodeEmitter *CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, Ctx);
     MCAsmBackend *MAB = TheTarget->createMCAsmBackend(*MRI, Opts.Triple,
                                                       Opts.CPU);
     Str.reset(TheTarget->createMCObjectStreamer(Opts.Triple, Ctx, *MAB, *Out,
-                                                CE, *STI, Opts.RelaxAll,
-                                                Opts.NoExecStack));
-    Str.get()->InitSections();
+                                                CE, *STI, Opts.RelaxAll));
+    Str.get()->InitSections(Opts.NoExecStack);
+
+    if (Opts.EmbedBitcode &&
+        Ctx.getObjectFileInfo()->getObjectFileType() ==
+                                 MCObjectFileInfo::IsMachO) {
+      // When -fembed-bitcode is passed to clang_as, a 1-byte marker
+      // is emitted in __LLVM,__asm section to tell the linker to add
+      // the macho object into the bundle
+      const MCSection *AsmLabel = Ctx.getMachOSection("__LLVM", "__asm",
+                                      MachO::S_REGULAR, 4,
+                                      SectionKind::getDataNoRel());
+      Str.get()->SwitchSection(AsmLabel);
+      Str.get()->EmitZeros(1);
+    }
   }
 
   bool Failed = false;

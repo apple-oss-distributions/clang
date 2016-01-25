@@ -11,6 +11,7 @@ target_link_libraries(pp-trace
   clangAPINotes
   clangAST
   clangBasic
+  clangCodeGen
   clangFrontend
   clangLex
   clangTooling

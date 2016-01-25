@@ -62,8 +62,8 @@ struct CachedMapping {
 static CachedMapping cached_mapping;
 static StaticSpinMutex mapping_mu;
 
-void CovUpdateMapping(uptr caller_pc) {
-  if (!common_flags()->coverage || !common_flags()->coverage_direct) return;
+void CovUpdateMapping(const char *coverage_dir, uptr caller_pc) {
+  if (!common_flags()->coverage_direct) return;
 
   SpinMutexLock l(&mapping_mu);
 
@@ -71,12 +71,11 @@ void CovUpdateMapping(uptr caller_pc) {
     return;
 
   InternalScopedString text(kMaxTextSize);
+
   {
-    InternalScopedBuffer<char> modules_data(kMaxNumberOfModules *
-                                            sizeof(LoadedModule));
-    LoadedModule *modules = (LoadedModule *)modules_data.data();
-    CHECK(modules);
-    int n_modules = GetListOfModules(modules, kMaxNumberOfModules,
+    InternalScopedBuffer<LoadedModule> modules(kMaxNumberOfModules);
+    CHECK(modules.data());
+    int n_modules = GetListOfModules(modules.data(), kMaxNumberOfModules,
                                      /* filter */ 0);
 
     text.append("%d\n", sizeof(uptr) * 8);
@@ -98,15 +97,15 @@ void CovUpdateMapping(uptr caller_pc) {
   }
 
   int err;
-  InternalScopedString tmp_path(64 +
-                                internal_strlen(common_flags()->coverage_dir));
+  InternalScopedString tmp_path(64 + internal_strlen(coverage_dir));
   uptr res = internal_snprintf((char *)tmp_path.data(), tmp_path.size(),
-                    "%s/%zd.sancov.map.tmp", common_flags()->coverage_dir,
-                    internal_getpid());
+                               "%s/%zd.sancov.map.tmp", coverage_dir,
+                               internal_getpid());
   CHECK_LE(res, tmp_path.size());
   uptr map_fd = OpenFile(tmp_path.data(), true);
-  if (internal_iserror(map_fd)) {
-    Report(" Coverage: failed to open %s for writing\n", tmp_path.data());
+  if (internal_iserror(map_fd, &err)) {
+    Report(" Coverage: failed to open %s for writing: %d\n", tmp_path.data(),
+           err);
     Die();
   }
 
@@ -117,9 +116,9 @@ void CovUpdateMapping(uptr caller_pc) {
   }
   internal_close(map_fd);
 
-  InternalScopedString path(64 + internal_strlen(common_flags()->coverage_dir));
+  InternalScopedString path(64 + internal_strlen(coverage_dir));
   res = internal_snprintf((char *)path.data(), path.size(), "%s/%zd.sancov.map",
-                    common_flags()->coverage_dir, internal_getpid());
+                          coverage_dir, internal_getpid());
   CHECK_LE(res, path.size());
   res = internal_rename(tmp_path.data(), path.data());
   if (internal_iserror(res, &err)) {

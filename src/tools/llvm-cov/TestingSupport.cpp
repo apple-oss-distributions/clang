@@ -8,15 +8,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Object/ObjectFile.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/LEB128.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/Support/ManagedStatic.h"
-#include "llvm/Support/MemoryObject.h"
-#include "llvm/Support/Signals.h"
 #include "llvm/Support/PrettyStackTrace.h"
-#include <system_error>
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/raw_ostream.h"
 #include <functional>
+#include <system_error>
 
 using namespace llvm;
 using namespace object;
@@ -41,7 +40,7 @@ int convertForTestingMain(int argc, const char *argv[]) {
     errs() << "error: " << Err.message() << "\n";
     return 1;
   }
-  ObjectFile *OF = ObjErr.get().getBinary().get();
+  ObjectFile *OF = ObjErr.get().getBinary();
   auto BytesInAddress = OF->getBytesInAddress();
   if (BytesInAddress != 8) {
     errs() << "error: 64 bit binary expected\n";
@@ -67,11 +66,10 @@ int convertForTestingMain(int argc, const char *argv[]) {
     return 1;
 
   // Get the contents of the given sections.
+  uint64_t ProfileNamesAddress = ProfileNames.getAddress();
   StringRef CoverageMappingData;
-  uint64_t ProfileNamesAddress;
   StringRef ProfileNamesData;
   if (CoverageMapping.getContents(CoverageMappingData) ||
-      ProfileNames.getAddress(ProfileNamesAddress) ||
       ProfileNames.getContents(ProfileNamesData))
     return 1;
 

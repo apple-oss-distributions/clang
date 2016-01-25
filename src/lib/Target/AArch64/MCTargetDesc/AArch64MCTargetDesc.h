@@ -18,12 +18,15 @@
 #include <string>
 
 namespace llvm {
+class formatted_raw_ostream;
 class MCAsmBackend;
 class MCCodeEmitter;
 class MCContext;
 class MCInstrInfo;
+class MCInstPrinter;
 class MCRegisterInfo;
 class MCObjectWriter;
+class MCStreamer;
 class MCSubtargetInfo;
 class StringRef;
 class Target;
@@ -34,9 +37,8 @@ extern Target TheAArch64beTarget;
 extern Target TheARM64Target;
 
 MCCodeEmitter *createAArch64MCCodeEmitter(const MCInstrInfo &MCII,
-                                        const MCRegisterInfo &MRI,
-                                        const MCSubtargetInfo &STI,
-                                        MCContext &Ctx);
+                                          const MCRegisterInfo &MRI,
+                                          MCContext &Ctx);
 MCAsmBackend *createAArch64leAsmBackend(const Target &T,
                                         const MCRegisterInfo &MRI, StringRef TT,
                                         StringRef CPU);
@@ -50,6 +52,11 @@ MCObjectWriter *createAArch64ELFObjectWriter(raw_ostream &OS, uint8_t OSABI,
 MCObjectWriter *createAArch64MachObjectWriter(raw_ostream &OS, uint32_t CPUType,
                                             uint32_t CPUSubtype);
 
+MCStreamer *
+createAArch64MCAsmStreamer(MCContext &Ctx, formatted_raw_ostream &OS,
+                           bool isVerboseAsm, bool useDwarfDirectory,
+                           MCInstPrinter *InstPrint, MCCodeEmitter *CE,
+                           MCAsmBackend *TAB, bool ShowInst);
 } // End llvm namespace
 
 // Defines symbolic names for AArch64 registers.  This defines a mapping from

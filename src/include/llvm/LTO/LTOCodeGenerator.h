@@ -41,6 +41,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/Transforms/Utils/Obfuscation.h"
 #include <string>
 #include <vector>
 
@@ -65,7 +66,10 @@ struct LTOCodeGenerator {
   ~LTOCodeGenerator();
 
   // Merge given module, return true on success.
-  bool addModule(struct LTOModule*, std::string &errMsg);
+  bool addModule(struct LTOModule *);
+
+  // Set the destination module.
+  void setModule(struct LTOModule *);
 
   void setTargetOptions(TargetOptions options);
   void setDebugInfo(lto_debug_model);
@@ -73,6 +77,9 @@ struct LTOCodeGenerator {
 
   void setCpu(const char *mCpu) { MCpu = mCpu; }
   void setAttr(const char *mAttr) { MAttr = mAttr; }
+
+  void setShouldInternalize(bool Value) { ShouldInternalize = Value; }
+  void setShouldEmbedUselists(bool Value) { ShouldEmbedUselists = Value; }
 
   void addMustPreserveSymbol(const char *sym) { MustPreserveSymbols[sym] = 1; }
 
@@ -102,6 +109,7 @@ struct LTOCodeGenerator {
                        bool disableOpt,
                        bool disableInline,
                        bool disableGVNLoadPRE,
+                       bool disableVectorization,
                        std::string &errMsg);
 
   // As with compile_to_file(), this function compiles the merged module into
@@ -113,21 +121,43 @@ struct LTOCodeGenerator {
                       bool disableOpt,
                       bool disableInline,
                       bool disableGVNLoadPRE,
+                      bool disableVectorization,
                       std::string &errMsg);
+
+  // Optimizes the merged module. Returns true on success.
+  bool optimize(bool disableOpt,
+                bool disableInline,
+                bool disableGVNLoadPRE,
+                bool disableVectorization,
+                std::string &errMsg);
+
+  // Compiles the merged optimized module into a single object file. It brings
+  // the object to a buffer, and returns the buffer to the caller. Return NULL
+  // if the compilation was not successful.
+  const void *compileOptimized(size_t *length, std::string &errMsg);
+
+  // reset the codegen context
+  void resetContext();
+
+  // Hide all non-external symbols from the bitcode.
+  bool hideSymbols();
+
+  // Write the reverse mapping of hidden symbols from the stripped bitcode
+  bool writeReverseMap(const char *Path);
 
   void setDiagnosticHandler(lto_diagnostic_handler_t, void *);
 
-  LLVMContext &getContext() { return Context; }
+  LLVMContext &getContext() { return *Context; }
 
 private:
   void initializeLTOPasses();
 
-  bool generateObjectFile(raw_ostream &out, bool disableOpt, bool disableInline,
-                          bool disableGVNLoadPRE, std::string &errMsg);
+  bool compileOptimized(raw_ostream &out, std::string &errMsg);
+  bool compileOptimizedToFile(const char **name, std::string &errMsg);
   void applyScopeRestrictions();
-  void applyRestriction(GlobalValue &GV, const ArrayRef<StringRef> &Libcalls,
+  void applyRestriction(GlobalValue &GV, ArrayRef<StringRef> Libcalls,
                         std::vector<const char *> &MustPreserveList,
-                        SmallPtrSet<GlobalValue *, 8> &AsmUsed,
+                        SmallPtrSetImpl<GlobalValue *> &AsmUsed,
                         Mangler &Mangler);
   bool determineTarget(std::string &errMsg);
 
@@ -137,24 +167,30 @@ private:
 
   typedef StringMap<uint8_t> StringSet;
 
-  void initialize();
+  void destroyMergedModule();
   std::unique_ptr<LLVMContext> OwnedContext;
-  LLVMContext &Context;
+  LLVMContext *Context;
   Linker IRLinker;
-  TargetMachine *TargetMach;
-  bool EmitDwarfDebugInfo;
-  bool ScopeRestrictionsDone;
-  lto_codegen_model CodeModel;
+  TargetMachine *TargetMach = nullptr;
+  bool EmitDwarfDebugInfo = false;
+  bool ScopeRestrictionsDone = false;
+  lto_codegen_model CodeModel = LTO_CODEGEN_PIC_MODEL_DEFAULT;
   StringSet MustPreserveSymbols;
   StringSet AsmUndefinedRefs;
-  MemoryBuffer *NativeObjectFile;
+  std::unique_ptr<MemoryBuffer> NativeObjectFile;
   std::vector<char *> CodegenOptions;
   std::string MCpu;
   std::string MAttr;
   std::string NativeObjectPath;
   TargetOptions Options;
-  lto_diagnostic_handler_t DiagHandler;
-  void *DiagContext;
+  lto_diagnostic_handler_t DiagHandler = nullptr;
+  void *DiagContext = nullptr;
+  LTOModule *OwnedModule = nullptr;
+  bool ShouldInternalize = true;
+  bool ShouldEmbedUselists = false;
+
+  // For symbol hiding/obfuscation
+  obfuscate::IncrementObfuscator IncrObfuscate = {true};
 };
 }
 #endif

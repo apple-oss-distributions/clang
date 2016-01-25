@@ -29,6 +29,7 @@
 #include "Query.h"
 #include "QueryParser.h"
 #include "QuerySession.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
@@ -69,7 +70,8 @@ int main(int argc, const char **argv) {
   }
 
   ClangTool Tool(OptionsParser.getCompilations(),
-                 OptionsParser.getSourcePathList());
+                 OptionsParser.getSourcePathList(),
+                 SharedModuleProvider::Create<LLVMModuleProvider>());
   std::vector<std::unique_ptr<ASTUnit>> ASTs;
   if (Tool.buildASTs(ASTs) != 0)
     return 1;

@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Option/Arg.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -64,7 +65,8 @@ void initializePollyPasses(llvm::PassRegistry &Registry);
 #endif
 
 int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
-  std::unique_ptr<CompilerInstance> Clang(new CompilerInstance());
+  std::unique_ptr<CompilerInstance> Clang(new CompilerInstance(
+      SharedModuleProvider::Create<LLVMModuleProvider>()));
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
 
   // Initialize targets first, so that --version shows registered targets.
@@ -122,7 +124,7 @@ int cc1_main(ArrayRef<const char *> Argv, const char *Argv0, void *MainAddr) {
   if (Clang->getFrontendOpts().DisableFree) {
     if (llvm::AreStatisticsEnabled() || Clang->getFrontendOpts().ShowStats)
       llvm::PrintStatistics();
-    BuryPointer(Clang.release());
+    BuryPointer(std::move(Clang));
     return !Success;
   }
 

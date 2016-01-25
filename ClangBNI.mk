@@ -55,10 +55,11 @@ help:
 ##
 # Variable defaults.
 
-# Install to $DT_TOOLCHAIN_DIR if it is set, otherwise $DEVELOPER_DIR.
+# Install to $TOOLCHAIN_INSTALL_DIR if it is set, otherwise $DEVELOPER_DIR.
 DEVELOPER_DIR ?= /Developer
 DT_TOOLCHAIN_DIR ?= $(DEVELOPER_DIR)
-Default_Install_Root := /$(DT_VARIANT)$(DT_TOOLCHAIN_DIR)
+TOOLCHAIN_INSTALL_DIR ?= $(DT_TOOLCHAIN_DIR)
+Default_Install_Root := /$(DT_VARIANT)$(TOOLCHAIN_INSTALL_DIR)
 # Don't install root links or license.
 Post_Install_RootLinks := 0
 Post_Install_OpenSourceLicense := 0
@@ -74,7 +75,7 @@ Extra_Make_Variables :=
 Extra_Make_Variables += NO_INSTALL_ARCHIVES=1
 # LLVM level install target is 'install-clang.
 LLVM_Install_Target := \
-	OPTIONAL_DIRS="tools/llvm-cov tools/llvm-profdata" \
+	OPTIONAL_DIRS="tools/llvm-cov tools/dsymutil tools/llvm-profdata tools/llvm-dwarfdump" \
 	install-clang
 
 ##
@@ -127,11 +128,8 @@ $(error "B&I build variable RC_ProjectSourceVersion must be set")
 endif
 endif
 
-# Set the Clang_Tag based on RC_ProjectNameAndSourceVersion.
-ifeq ($(RC_ProjectNameAndSourceVersion),)
-RC_ProjectNameAndSourceVersion := "clang-$(RC_ProjectSourceVersion)"
-endif
-Clang_Tag := $(RC_ProjectNameAndSourceVersion)
+# Set the Clang_Tag based on RC_ProjectSourceVersion.
+Clang_Tag := "clang-$(RC_ProjectSourceVersion)"
 
 # Select optimized mode.
 ifeq ($(Clang_Use_Optimized), 1)
@@ -172,7 +170,7 @@ $(error "invalid setting for clang autogenerate profile: '$(Clang_Autogenerate_P
 endif
 
 # Select whether to build everything (for testing purposes).
-Clang_Only_Build_Target := ONLY_TOOLS="clang lto llvm-cov llvm-profdata" all
+Clang_Only_Build_Target := ONLY_TOOLS="clang lto llvm-cov dsymutil llvm-profdata llvm-dwarfdump" all
 ifeq ($(Clang_Build_All), 1)
 Clang_Build_Target := all
 else ifeq ($(Clang_Build_All), 0)
@@ -205,7 +203,7 @@ endif
 # CC options for configure ends up breaking tests that can't be bothered to
 # quote things properly, and that is too hard to fix.
 Clang_Make_Variables += \
-  LLVM_VERSION_INFO="from Apple Clang $(Clang_Version) (build $(RC_ProjectSourceVersion))"
+  LLVM_VERSION_INFO="Apple LLVM $(Clang_Version) (clang-$(RC_ProjectSourceVersion))"
 
 # Set destination information.
 ifneq ($(INSTALL_LOCATION),)
@@ -391,6 +389,10 @@ OSL		= $(DSTROOT)/$(Install_Prefix)/local/OpenSourceLicenses
 
 PATH := ${OBJROOT}/bin:${PATH}
 
+# LLVM's makefiles key on RC_ProjectName to enable B&I behavior that we don't
+# want for clang builds because clang-ib handles this purpose.
+unexport RC_ProjectName
+
 ##
 # Build Logic
 
@@ -482,6 +484,7 @@ install-clang_final: build-clang
 	$(_v) ln -sf clang++ $(DSTROOT)/$(Install_Prefix)/bin/c++
 	$(_v) ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1
 	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1
+	$(_v) ln -sf llvm-dsymutil $(DSTROOT)/$(Install_Prefix)/bin/dsymutil
 	$(_v) ln -sf llvm-cov $(DSTROOT)/$(Install_Prefix)/bin/gcov
 	# REMINDER: The llvm-cov.1 file here needs to be regenerated manually
 	# whenever the llvm-cov documentation changes!!

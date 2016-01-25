@@ -264,6 +264,9 @@ public:
   /// isNegative - Return true if the sign bit is set.
   bool isNegative() const { return Val.isNegative(); }
 
+  /// isInfinity - Return true if the value is infinity
+  bool isInfinity() const { return Val.isInfinity(); }
+
   /// isNaN - Return true if the value is a NaN.
   bool isNaN() const { return Val.isNaN(); }
 
@@ -321,6 +324,9 @@ public:
   /// getElementValue - Return a zero of the right value for the specified GEP
   /// index.
   Constant *getElementValue(unsigned Idx) const;
+
+  /// \brief Return the number of elements in the array, vector, or struct.
+  unsigned getNumElements() const;
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   ///
@@ -383,7 +389,7 @@ protected:
 public:
   // ConstantStruct accessors
   static Constant *get(StructType *T, ArrayRef<Constant*> V);
-  static Constant *get(StructType *T, ...) END_WITH_NULL;
+  static Constant *get(StructType *T, ...) LLVM_END_WITH_NULL;
 
   /// getAnon - Return an anonymous struct that has the specified
   /// elements.  If the struct is possibly empty, then you must specify a
@@ -670,6 +676,15 @@ public:
   static Constant *get(LLVMContext &Context, ArrayRef<float> Elts);
   static Constant *get(LLVMContext &Context, ArrayRef<double> Elts);
 
+  /// getFP() constructors - Return a constant with array type with an element
+  /// count and element type of float with precision matching the number of
+  /// bits in the ArrayRef passed in. (i.e. half for 16bits, float for 32bits,
+  /// double for 64bits) Note that this can return a ConstantAggregateZero
+  /// object.
+  static Constant *getFP(LLVMContext &Context, ArrayRef<uint16_t> Elts);
+  static Constant *getFP(LLVMContext &Context, ArrayRef<uint32_t> Elts);
+  static Constant *getFP(LLVMContext &Context, ArrayRef<uint64_t> Elts);
+
   /// getString - This method constructs a CDS and initializes it with a text
   /// string. The default behavior (AddNull==true) causes a null terminator to
   /// be placed at the end of the array (increasing the length of the string by
@@ -721,6 +736,15 @@ public:
   static Constant *get(LLVMContext &Context, ArrayRef<uint64_t> Elts);
   static Constant *get(LLVMContext &Context, ArrayRef<float> Elts);
   static Constant *get(LLVMContext &Context, ArrayRef<double> Elts);
+
+  /// getFP() constructors - Return a constant with vector type with an element
+  /// count and element type of float with the precision matching the number of
+  /// bits in the ArrayRef passed in.  (i.e. half for 16bits, float for 32bits,
+  /// double for 64bits) Note that this can return a ConstantAggregateZero
+  /// object.
+  static Constant *getFP(LLVMContext &Context, ArrayRef<uint16_t> Elts);
+  static Constant *getFP(LLVMContext &Context, ArrayRef<uint32_t> Elts);
+  static Constant *getFP(LLVMContext &Context, ArrayRef<uint64_t> Elts);
 
   /// getSplat - Return a ConstantVector with the specified constant in each
   /// element.  The specified constant has to be a of a compatible type (i8/i16/
@@ -1192,6 +1216,9 @@ public:
   /// getElementValue - Return an undef of the right value for the specified GEP
   /// index.
   UndefValue *getElementValue(unsigned Idx) const;
+
+  /// \brief Return the number of elements in the array, vector, or struct.
+  unsigned getNumElements() const;
 
   void destroyConstant() override;
 

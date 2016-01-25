@@ -1637,10 +1637,12 @@ multiclass AddSub<bit isSub, string mnemonic,
                   SDPatternOperator OpNode = null_frag> {
   let hasSideEffects = 0, isReMaterializable = 1, isAsCheapAsAMove = 1 in {
   // Add/Subtract immediate
+  let AddedComplexity = 6 in
   def Wri  : BaseAddSubImm<isSub, 0, GPR32sp, GPR32sp, addsub_shifted_imm32,
                            mnemonic, OpNode> {
     let Inst{31} = 0;
   }
+  let AddedComplexity = 6 in
   def Xri  : BaseAddSubImm<isSub, 0, GPR64sp, GPR64sp, addsub_shifted_imm64,
                            mnemonic, OpNode> {
     let Inst{31} = 1;
@@ -4383,7 +4385,7 @@ class BaseSIMDVectorLShiftLongBySize<bit Q, bits<2> size,
 }
 
 multiclass SIMDVectorLShiftLongBySizeBHS {
-  let neverHasSideEffects = 1 in {
+  let hasSideEffects = 0 in {
   def v8i8  : BaseSIMDVectorLShiftLongBySize<0, 0b00, V64,
                                              "shll", ".8h",  ".8b", "8">;
   def v16i8 : BaseSIMDVectorLShiftLongBySize<1, 0b00, V128,
@@ -5260,6 +5262,10 @@ multiclass SIMDZipVector<bits<3>opc, string asm,
   def v2i64  : BaseSIMDZipVector<0b111, opc, V128,
       asm, ".2d", OpNode, v2i64>;
 
+  def : Pat<(v4f16 (OpNode V64:$Rn, V64:$Rm)),
+        (!cast<Instruction>(NAME#"v4i16") V64:$Rn, V64:$Rm)>;
+  def : Pat<(v8f16 (OpNode V128:$Rn, V128:$Rm)),
+        (!cast<Instruction>(NAME#"v8i16") V128:$Rn, V128:$Rm)>;
   def : Pat<(v2f32 (OpNode V64:$Rn, V64:$Rm)),
         (!cast<Instruction>(NAME#"v2i32") V64:$Rn, V64:$Rm)>;
   def : Pat<(v4f32 (OpNode V128:$Rn, V128:$Rm)),

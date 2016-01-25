@@ -117,7 +117,7 @@ TEST(AddressSanitizer, CallocReturnsZeroMem) {
 }
 
 // No valloc on Windows or Android.
-#if !defined(_WIN32) && !defined(ANDROID) && !defined(__ANDROID__)
+#if !defined(_WIN32) && !defined(__ANDROID__)
 TEST(AddressSanitizer, VallocTest) {
   void *a = valloc(100);
   EXPECT_EQ(0U, (uintptr_t)a % kPageSize);
@@ -602,9 +602,10 @@ NOINLINE void SigLongJmpFunc1(sigjmp_buf buf) {
   siglongjmp(buf, 1);
 }
 
-#if !defined(__ANDROID__) && \
-    !defined(__powerpc64__) && !defined(__powerpc__)
-// Does not work on Power:
+#if !defined(__ANDROID__) && !defined(__arm__) && \
+    !defined(__powerpc64__) && !defined(__powerpc__) && \
+    !defined(__aarch64__)
+// Does not work on Power and ARM:
 // https://code.google.com/p/address-sanitizer/issues/detail?id=185
 TEST(AddressSanitizer, BuiltinLongJmpTest) {
   static jmp_buf buf;
@@ -615,7 +616,7 @@ TEST(AddressSanitizer, BuiltinLongJmpTest) {
   }
 }
 #endif  // !defined(__ANDROID__) && !defined(__powerpc64__) &&
-        // !defined(__powerpc__)
+        // !defined(__powerpc__) && !defined(__arm__)
 
 TEST(AddressSanitizer, UnderscopeLongJmpTest) {
   static jmp_buf buf;
@@ -769,7 +770,7 @@ char* MallocAndMemsetString(size_t size) {
   return MallocAndMemsetString(size, 'z');
 }
 
-#if defined(__linux__) && !defined(ANDROID) && !defined(__ANDROID__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #define READ_TEST(READ_N_BYTES)                                          \
   char *x = new char[10];                                                \
   int fd = open("/proc/self/stat", O_RDONLY);                            \
@@ -792,7 +793,7 @@ TEST(AddressSanitizer, pread64) {
 TEST(AddressSanitizer, read) {
   READ_TEST(read(fd, x, 15));
 }
-#endif  // defined(__linux__) && !defined(ANDROID) && !defined(__ANDROID__)
+#endif  // defined(__linux__) && !defined(__ANDROID__)
 
 // This test case fails
 // Clang optimizes memcpy/memset calls which lead to unaligned access
@@ -832,7 +833,7 @@ NOINLINE static int LargeFunction(bool do_bad_access) {
   x[18]++;
   x[19]++;
 
-  delete x;
+  delete[] x;
   return res;
 }
 
@@ -1153,7 +1154,7 @@ TEST(AddressSanitizer, AttributeNoSanitizeAddressTest) {
 //   https://code.google.com/p/address-sanitizer/issues/detail?id=131
 // Windows support is tracked here:
 //   https://code.google.com/p/address-sanitizer/issues/detail?id=309
-#if !defined(ANDROID) && !defined(__ANDROID__) && \
+#if !defined(__ANDROID__) && \
     !defined(__APPLE__) && \
     !defined(_WIN32)
 static string MismatchStr(const string &str) {
@@ -1282,5 +1283,35 @@ TEST(AddressSanitizer, pthread_getschedparam) {
       "AddressSanitizer: stack-buffer-.*flow");
   int res = pthread_getschedparam(pthread_self(), &policy, &param);
   ASSERT_EQ(0, res);
+}
+#endif
+
+#if SANITIZER_TEST_HAS_PRINTF_L
+static int vsnprintf_l_wrapper(char *s, size_t n,
+                               locale_t l, const char *format, ...) {
+  va_list va;
+  va_start(va, format);
+  int res = vsnprintf_l(s, n , l, format, va);
+  va_end(va);
+  return res;
+}
+
+TEST(AddressSanitizer, snprintf_l) {
+  char buff[5];
+  // Check that snprintf_l() works fine with Asan.
+  int res = snprintf_l(buff, 5,
+                       _LIBCPP_GET_C_LOCALE, "%s", "snprintf_l()");
+  EXPECT_EQ(12, res);
+  // Check that vsnprintf_l() works fine with Asan.
+  res = vsnprintf_l_wrapper(buff, 5,
+                            _LIBCPP_GET_C_LOCALE, "%s", "vsnprintf_l()");
+  EXPECT_EQ(13, res);
+
+  EXPECT_DEATH(snprintf_l(buff, 10,
+                          _LIBCPP_GET_C_LOCALE, "%s", "snprintf_l()"),
+                "AddressSanitizer: stack-buffer-overflow");
+  EXPECT_DEATH(vsnprintf_l_wrapper(buff, 10,
+                                  _LIBCPP_GET_C_LOCALE, "%s", "vsnprintf_l()"),
+                "AddressSanitizer: stack-buffer-overflow");
 }
 #endif

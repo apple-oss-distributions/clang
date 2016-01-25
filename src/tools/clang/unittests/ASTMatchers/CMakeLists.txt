@@ -9,6 +9,7 @@ target_link_libraries(ASTMatchersTests
   clangAST
   clangASTMatchers
   clangBasic
+  clangCodeGen
   clangFrontend
   clangTooling
   )

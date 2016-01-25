@@ -36,43 +36,6 @@ void ExitSymbolizer() {
   thr->ignore_interceptors--;
 }
 
-ReportStack *NewReportStackEntry(uptr addr) {
-  ReportStack *ent = (ReportStack*)internal_alloc(MBlockReportStack,
-                                                  sizeof(ReportStack));
-  internal_memset(ent, 0, sizeof(*ent));
-  ent->pc = addr;
-  return ent;
-}
-
-static ReportStack *NewReportStackEntry(const AddressInfo &info) {
-  ReportStack *ent = NewReportStackEntry(info.address);
-  if (info.module)
-    ent->module = internal_strdup(info.module);
-  ent->offset = info.module_offset;
-  if (info.function)
-    ent->func = internal_strdup(info.function);
-  if (info.file)
-    ent->file = internal_strdup(info.file);
-  ent->line = info.line;
-  ent->col = info.column;
-  return ent;
-}
-
-
-  ReportStack *next;
-  char *module;
-  uptr offset;
-  uptr pc;
-  char *func;
-  char *file;
-  int line;
-  int col;
-
-
-// Denotes fake PC values that come from JIT/JAVA/etc.
-// For such PC values __tsan_symbolize_external() will be called.
-const uptr kExternalPCBit = 1ULL << 60;
-
 // May be overriden by JIT/JAVA/etc,
 // whatever produces PCs marked with kExternalPCBit.
 extern "C" bool __tsan_symbolize_external(uptr pc,
@@ -113,18 +76,8 @@ ReportLocation *SymbolizeData(uptr addr) {
   DataInfo info;
   if (!Symbolizer::GetOrInit()->SymbolizeData(addr, &info))
     return 0;
-  ReportLocation *ent = (ReportLocation*)internal_alloc(MBlockReportStack,
-                                                        sizeof(ReportLocation));
-  internal_memset(ent, 0, sizeof(*ent));
-  ent->type = ReportLocationGlobal;
-  if (info.module)
-    ent->module = internal_strdup(info.module);
-  ent->offset = info.module_offset;
-  if (info.name)
-    ent->name = internal_strdup(info.name);
-  ent->addr = info.start;
-  ent->size = info.size;
-  info.Clear();
+  ReportLocation *ent = ReportLocation::New(ReportLocationGlobal);
+  ent->global = info;
   return ent;
 }
 

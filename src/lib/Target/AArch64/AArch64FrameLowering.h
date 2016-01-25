@@ -61,6 +61,13 @@ public:
 
   void processFunctionBeforeCalleeSavedScan(MachineFunction &MF,
                                             RegScavenger *RS) const override;
+
+  bool
+  assignCalleeSavedSpillSlots(MachineFunction &MF,
+                              const TargetRegisterInfo *TRI,
+                              std::vector<CalleeSavedInfo> &CSI,
+                              unsigned &MinCSFrameIndex,
+                              unsigned &MaxCSFrameIndex) const override;
 };
 
 } // End llvm namespace

@@ -16,6 +16,7 @@
 #include "PassByValue.h"
 #include "PassByValueActions.h"
 #include "PassByValueMatchers.h"
+#include "clang/CodeGen/LLVMModuleProvider.h"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -23,7 +24,8 @@ using namespace clang::ast_matchers;
 
 int PassByValueTransform::apply(const tooling::CompilationDatabase &Database,
                                 const std::vector<std::string> &SourcePaths) {
-  ClangTool Tool(Database, SourcePaths);
+  ClangTool Tool(Database, SourcePaths,
+                 SharedModuleProvider::Create<LLVMModuleProvider>());
   unsigned AcceptedChanges = 0;
   unsigned RejectedChanges = 0;
   MatchFinder Finder;

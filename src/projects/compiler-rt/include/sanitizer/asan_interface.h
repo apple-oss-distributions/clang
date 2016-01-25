@@ -55,7 +55,7 @@ extern "C" {
   // Otherwise returns 0.
   int __asan_address_is_poisoned(void const volatile *addr);
 
-  // If at least on byte in [beg, beg+size) is poisoned, return the address
+  // If at least one byte in [beg, beg+size) is poisoned, return the address
   // of the first such byte. Otherwise return 0.
   void *__asan_region_is_poisoned(void *beg, size_t size);
 
@@ -114,8 +114,7 @@ extern "C" {
   // Returns the old value.
   int __asan_set_error_exit_code(int exit_code);
 
-  // Sets the callback to be called right before death on error.
-  // Passing 0 will unset the callback.
+  // Deprecated. Call __sanitizer_set_death_callback instead.
   void __asan_set_death_callback(void (*callback)(void));
 
   void __asan_set_error_report_callback(void (*callback)(const char*));

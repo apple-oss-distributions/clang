@@ -24,6 +24,7 @@
 #include <iterator>
 #include <memory>
 #include <utility> // for std::pair
+#include <cassert>
 
 namespace llvm {
 
@@ -348,10 +349,11 @@ inline int (*get_array_pod_sort_comparator(const T &))
 /// default to std::less.
 template<class IteratorTy>
 inline void array_pod_sort(IteratorTy Start, IteratorTy End) {
-  // Don't dereference start iterator of empty sequence.
-  if (Start == End) return;
-  qsort(&*Start, End-Start, sizeof(*Start),
-        get_array_pod_sort_comparator(*Start));
+  // Don't inefficiently call qsort with one element or trigger undefined
+  // behavior with an empty sequence.
+  auto NElts = End - Start;
+  if (NElts <= 1) return;
+  qsort(&*Start, NElts, sizeof(*Start), get_array_pod_sort_comparator(*Start));
 }
 
 template <class IteratorTy>
@@ -360,9 +362,11 @@ inline void array_pod_sort(
     int (*Compare)(
         const typename std::iterator_traits<IteratorTy>::value_type *,
         const typename std::iterator_traits<IteratorTy>::value_type *)) {
-  // Don't dereference start iterator of empty sequence.
-  if (Start == End) return;
-  qsort(&*Start, End - Start, sizeof(*Start),
+  // Don't inefficiently call qsort with one element or trigger undefined
+  // behavior with an empty sequence.
+  auto NElts = End - Start;
+  if (NElts <= 1) return;
+  qsort(&*Start, NElts, sizeof(*Start),
         reinterpret_cast<int (*)(const void *, const void *)>(Compare));
 }
 
@@ -545,10 +549,45 @@ make_unique(size_t n) {
 
 #endif
 
+struct FreeDeleter {
+  void operator()(void* v) {
+    ::free(v);
+  }
+};
+
 template<typename First, typename Second>
 struct pair_hash {
   size_t operator()(const std::pair<First, Second> &P) const {
     return std::hash<First>()(P.first) * 31 + std::hash<Second>()(P.second);
+  }
+};
+
+/// A functor like C++14's std::less<void> in its absence.
+struct less {
+  template <typename A, typename B> bool operator()(A &&a, B &&b) const {
+    return std::forward<A>(a) < std::forward<B>(b);
+  }
+};
+
+/// A functor like C++14's std::equal<void> in its absence.
+struct equal {
+  template <typename A, typename B> bool operator()(A &&a, B &&b) const {
+    return std::forward<A>(a) == std::forward<B>(b);
+  }
+};
+
+/// Binary functor that adapts to any other binary functor after dereferencing
+/// operands.
+template <typename T> struct deref {
+  T func;
+  // Could be further improved to cope with non-derivable functors and
+  // non-binary functors (should be a variadic template member function
+  // operator()).
+  template <typename A, typename B>
+  auto operator()(A &lhs, B &rhs) const -> decltype(func(*lhs, *rhs)) {
+    assert(lhs);
+    assert(rhs);
+    return func(*lhs, *rhs);
   }
 };
 

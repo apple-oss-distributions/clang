@@ -16,4 +16,5 @@ add_clang_library(modernizeCore
   clangFrontend
   clangLex
   clangTooling
+  clangToolingCore
   )

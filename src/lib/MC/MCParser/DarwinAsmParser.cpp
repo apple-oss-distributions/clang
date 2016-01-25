@@ -164,6 +164,8 @@ public:
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveTLV>(".tlv");
 
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveIdent>(".ident");
+    addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(
+      ".watchos_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(".ios_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(
       ".macosx_version_min");
@@ -638,13 +640,13 @@ bool DarwinAsmParser::parseDirectiveSecureLogUnique(StringRef, SMLoc IDLoc) {
   // Open the secure log file if we haven't already.
   raw_ostream *OS = getContext().getSecureLog();
   if (!OS) {
-    std::string Err;
-    OS = new raw_fd_ostream(SecureLogFile, Err,
+    std::error_code EC;
+    OS = new raw_fd_ostream(SecureLogFile, EC,
                             sys::fs::F_Append | sys::fs::F_Text);
-    if (!Err.empty()) {
+    if (EC) {
        delete OS;
        return Error(IDLoc, Twine("can't open secure log file: ") +
-                    SecureLogFile + " (" + Err + ")");
+                               SecureLogFile + " (" + EC.message() + ")");
     }
     getContext().setSecureLog(OS);
   }
@@ -870,6 +872,7 @@ bool DarwinAsmParser::parseDirectiveDataRegionEnd(StringRef, SMLoc) {
 bool DarwinAsmParser::parseVersionMin(StringRef Directive, SMLoc) {
   int64_t Major = 0, Minor = 0, Update = 0;
   int Kind = StringSwitch<int>(Directive)
+    .Case(".watchos_version_min", MCVM_WatchOSVersionMin)
     .Case(".ios_version_min", MCVM_IOSVersionMin)
     .Case(".macosx_version_min", MCVM_OSXVersionMin);
   // Get the major version number.

@@ -71,6 +71,11 @@ public:
     ///                  /help/topic/com.arm.doc.ihi0059a/IHI0059A_cppabi64.pdf
     iOS64,
 
+    /// The iOS v7k is a modernisation of the iOS ABI, which roughly means it's
+    /// the iOS64 ABI ported to 32-bits. The primary difference from iOS64 is
+    /// that RTTI objects must still be unique at the moment.
+    iOSv7k,
+
     /// The generic AArch64 ABI is also a modified version of the Itanium ABI,
     /// but it has fewer divergences than the 32-bit ARM ABI.
     ///
@@ -114,6 +119,7 @@ public:
     case GenericARM:
     case iOS:
     case iOS64:
+    case iOSv7k:
       return true;
 
     case Microsoft:
@@ -130,6 +136,7 @@ public:
     case GenericARM:
     case iOS:
     case iOS64:
+    case iOSv7k:
       return false;
 
     case Microsoft:
@@ -206,6 +213,7 @@ public:
     switch (getKind()) {
     case GenericARM:
     case iOS64:
+    case iOSv7k:
       return false;
 
     case GenericAArch64:
@@ -262,6 +270,7 @@ public:
     // iOS on ARM64 uses the C++11 POD rules.  It does not honor the
     // Itanium exception about classes with over-large bitfields.
     case iOS64:
+    case iOSv7k:
       return UseTailPaddingUnlessPOD11;
 
     // MSVC always allocates fields in the tail-padding of a base class

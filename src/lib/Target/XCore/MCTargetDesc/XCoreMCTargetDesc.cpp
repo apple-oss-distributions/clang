@@ -81,12 +81,11 @@ static MCCodeGenInfo *createXCoreMCCodeGenInfo(StringRef TT, Reloc::Model RM,
   return X;
 }
 
-static MCInstPrinter *createXCoreMCInstPrinter(const Target &T,
+static MCInstPrinter *createXCoreMCInstPrinter(const Triple &T,
                                                unsigned SyntaxVariant,
                                                const MCAsmInfo &MAI,
                                                const MCInstrInfo &MII,
-                                               const MCRegisterInfo &MRI,
-                                               const MCSubtargetInfo &STI) {
+                                               const MCRegisterInfo &MRI) {
   return new XCoreInstPrinter(MAI, MII, MRI);
 }
 
@@ -99,10 +98,10 @@ class XCoreTargetAsmStreamer : public XCoreTargetStreamer {
   formatted_raw_ostream &OS;
 public:
   XCoreTargetAsmStreamer(MCStreamer &S, formatted_raw_ostream &OS);
-  virtual void emitCCTopData(StringRef Name) override;
-  virtual void emitCCTopFunction(StringRef Name) override;
-  virtual void emitCCBottomData(StringRef Name) override;
-  virtual void emitCCBottomFunction(StringRef Name) override;
+  void emitCCTopData(StringRef Name) override;
+  void emitCCTopFunction(StringRef Name) override;
+  void emitCCBottomData(StringRef Name) override;
+  void emitCCBottomFunction(StringRef Name) override;
 };
 
 XCoreTargetAsmStreamer::XCoreTargetAsmStreamer(MCStreamer &S,

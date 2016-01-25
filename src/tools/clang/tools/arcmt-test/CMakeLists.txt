@@ -9,6 +9,7 @@ add_clang_executable(arcmt-test
 target_link_libraries(arcmt-test
   clangARCMigrate
   clangBasic
+  clangCodeGen
   clangFrontend
   clangLex
   )

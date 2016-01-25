@@ -5,19 +5,16 @@ include_directories(..)
 set(TSAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 # SANITIZER_COMMON_CFLAGS contains -fPIC, but it's performance-critical for
 # TSan runtime to be built with -fPIE to reduce the number of register spills.
-append_if(COMPILER_RT_HAS_FPIE_FLAG -fPIE TSAN_CFLAGS)
+append_list_if(COMPILER_RT_HAS_FPIE_FLAG -fPIE TSAN_CFLAGS)
 append_no_rtti_flag(TSAN_CFLAGS)
 
 set(TSAN_RTL_CFLAGS ${TSAN_CFLAGS})
-append_if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG -Wframe-larger-than=512 TSAN_RTL_CFLAGS)
-append_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors TSAN_RTL_CFLAGS)
+append_list_if(COMPILER_RT_HAS_MSSE3_FLAG -msse3 TSAN_RTL_CFLAGS)
+append_list_if(SANITIZER_LIMIT_FRAME_SIZE -Wframe-larger-than=512
+               TSAN_RTL_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors
+               TSAN_RTL_CFLAGS)
 # FIXME: Add support for --sysroot=. compile flag:
-
-if("${CMAKE_BUILD_TYPE}" EQUAL "Release")
-  set(TSAN_COMMON_DEFINITIONS DEBUG=0)
-else()
-  set(TSAN_COMMON_DEFINITIONS DEBUG=1)
-endif()
 
 set(TSAN_SOURCES
   rtl/tsan_clock.cc
@@ -58,6 +55,7 @@ set(TSAN_HEADERS
   rtl/tsan_dense_alloc.h
   rtl/tsan_fd.h
   rtl/tsan_flags.h
+  rtl/tsan_flags.inc
   rtl/tsan_ignoreset.h
   rtl/tsan_interface_ann.h
   rtl/tsan_interface.h
@@ -101,6 +99,15 @@ if(CAN_TARGET_x86_64 AND UNIX AND NOT APPLE)
 endif()
 
 add_dependencies(compiler-rt tsan)
+
+# Sanity check for Go runtime.
+set(BUILDGO_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/go/buildgo.sh)
+add_custom_target(GotsanRuntimeCheck
+  COMMAND CC=${CMAKE_C_COMPILER} IN_TMPDIR=1 SILENT=1 ${BUILDGO_SCRIPT}
+  DEPENDS clang_rt.tsan-${arch} ${BUILDGO_SCRIPT}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/go
+  COMMENT "Checking TSan Go runtime..."
+  VERBATIM)
 
 # Build libcxx instrumented with TSan.
 if(TSAN_SUPPORTED_ARCH AND

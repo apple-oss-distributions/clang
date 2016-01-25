@@ -8,8 +8,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/SerializedDiagnosticPrinter.h"
-#include "clang/Frontend/SerializedDiagnosticReader.h"
-#include "clang/Frontend/SerializedDiagnostics.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/FileManager.h"
@@ -17,6 +15,8 @@
 #include "clang/Basic/Version.h"
 #include "clang/Frontend/DiagnosticRenderer.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include "clang/Frontend/SerializedDiagnosticReader.h"
+#include "clang/Frontend/SerializedDiagnostics.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Lex/Lexer.h"
 #include "llvm/ADT/DenseSet.h"
@@ -305,9 +305,9 @@ private:
 
 namespace clang {
 namespace serialized_diags {
-DiagnosticConsumer *create(StringRef OutputFile, DiagnosticOptions *Diags,
-                           bool MergeChildRecords) {
-  return new SDiagsWriter(OutputFile, Diags, MergeChildRecords);
+std::unique_ptr<DiagnosticConsumer>
+create(StringRef OutputFile, DiagnosticOptions *Diags, bool MergeChildRecords) {
+  return llvm::make_unique<SDiagsWriter>(OutputFile, Diags, MergeChildRecords);
 }
 
 } // end namespace serialized_diags
@@ -477,7 +477,7 @@ void SDiagsWriter::EmitBlockInfoBlock() {
   AddSourceLocationAbbrev(Abbrev);
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 10)); // Category.  
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 10)); // Mapped Diag ID.
-  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 16)); // Text size.
+  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 16)); // Text size.
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Diagnostc text.
   Abbrevs.set(RECORD_DIAG, Stream.EmitBlockInfoAbbrev(BLOCK_DIAG, Abbrev));
   
@@ -542,11 +542,9 @@ void SDiagsWriter::EmitMetaBlock() {
 }
 
 unsigned SDiagsWriter::getEmitCategory(unsigned int category) {
-  if (State->Categories.count(category))
+  if (!State->Categories.insert(category).second)
     return category;
-  
-  State->Categories.insert(category);
-  
+
   // We use a local version of 'Record' so that we can be generating
   // another record when we lazily generate one for the category entry.
   RecordData Record;
@@ -818,13 +816,12 @@ void SDiagsWriter::finish() {
         getMetaDiags()->Report(diag::warn_fe_serialized_diag_merge_failure);
   }
 
-  std::string ErrorInfo;
-  auto OS = llvm::make_unique<llvm::raw_fd_ostream>(
-      State->OutputFile.c_str(), ErrorInfo, llvm::sys::fs::F_None);
-
-  if (!ErrorInfo.empty()) {
+  std::error_code EC;
+  auto OS = llvm::make_unique<llvm::raw_fd_ostream>(State->OutputFile.c_str(),
+                                                    EC, llvm::sys::fs::F_None);
+  if (EC) {
     getMetaDiags()->Report(diag::warn_fe_serialized_diag_failure)
-        << State->OutputFile << ErrorInfo;
+        << State->OutputFile << EC.message();
     return;
   }
 

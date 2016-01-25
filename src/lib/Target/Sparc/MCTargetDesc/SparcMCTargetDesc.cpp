@@ -125,10 +125,8 @@ static MCCodeGenInfo *createSparcV9MCCodeGenInfo(StringRef TT, Reloc::Model RM,
 static MCStreamer *createMCStreamer(const Target &T, StringRef TT,
                                     MCContext &Context, MCAsmBackend &MAB,
                                     raw_ostream &OS, MCCodeEmitter *Emitter,
-                                    const MCSubtargetInfo &STI, bool RelaxAll,
-                                    bool NoExecStack) {
-  MCStreamer *S =
-      createELFStreamer(Context, MAB, OS, Emitter, RelaxAll, NoExecStack);
+                                    const MCSubtargetInfo &STI, bool RelaxAll) {
+  MCStreamer *S = createELFStreamer(Context, MAB, OS, Emitter, RelaxAll);
   new SparcTargetELFStreamer(*S);
   return S;
 }
@@ -145,13 +143,12 @@ createMCAsmStreamer(MCContext &Ctx, formatted_raw_ostream &OS,
   return S;
 }
 
-static MCInstPrinter *createSparcMCInstPrinter(const Target &T,
-                                              unsigned SyntaxVariant,
-                                              const MCAsmInfo &MAI,
-                                              const MCInstrInfo &MII,
-                                              const MCRegisterInfo &MRI,
-                                              const MCSubtargetInfo &STI) {
-  return new SparcInstPrinter(MAI, MII, MRI, STI);
+static MCInstPrinter *createSparcMCInstPrinter(const Triple &T,
+                                               unsigned SyntaxVariant,
+                                               const MCAsmInfo &MAI,
+                                               const MCInstrInfo &MII,
+                                               const MCRegisterInfo &MRI) {
+  return new SparcInstPrinter(MAI, MII, MRI);
 }
 
 extern "C" void LLVMInitializeSparcTargetMC() {

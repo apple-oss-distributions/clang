@@ -75,10 +75,9 @@ MachineCopyPropagation::SourceNoLongerAvailable(unsigned Reg,
            I != E; ++I) {
         unsigned MappedDef = *I;
         // Source of copy is no longer available for propagation.
-        if (AvailCopyMap.erase(MappedDef)) {
-          for (MCSubRegIterator SR(MappedDef, TRI); SR.isValid(); ++SR)
-            AvailCopyMap.erase(*SR);
-        }
+        AvailCopyMap.erase(MappedDef);
+        for (MCSubRegIterator SR(MappedDef, TRI); SR.isValid(); ++SR)
+          AvailCopyMap.erase(*SR);
       }
     }
   }
@@ -267,6 +266,14 @@ bool MachineCopyPropagation::CopyPropagateBlock(MachineBasicBlock &MBB) {
           MaybeDeadCopies.remove(CI->second);
         }
       }
+      // Treat undef use like defs for copy propagation but not for
+      // dead copy. We would need to do a liveness check to be sure the copy
+      // is dead for undef uses.
+      // The backends are allowed to do whatever they want with undef value
+      // and we cannot be sure this register will not be rewritten to break
+      // some false dependencies for the hardware for instance.
+      if (MO.isUndef())
+        Defs.push_back(Reg);
     }
 
     // The instruction has a register mask operand which means that it clobbers

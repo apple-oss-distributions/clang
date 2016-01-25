@@ -429,6 +429,7 @@ private:
   bool TraverseFunctionHelper(FunctionDecl *D);
   bool TraverseVarHelper(VarDecl *D);
   bool TraverseOMPExecutableDirective(OMPExecutableDirective *S);
+  bool TraverseOMPLoopDirective(OMPLoopDirective *S);
   bool TraverseOMPClause(OMPClause *C);
 #define OPENMP_CLAUSE(Name, Class) bool Visit##Class(Class *C);
 #include "clang/Basic/OpenMPKinds.def"
@@ -689,6 +690,7 @@ bool RecursiveASTVisitor<Derived>::TraverseNestedNameSpecifier(
   case NestedNameSpecifier::Namespace:
   case NestedNameSpecifier::NamespaceAlias:
   case NestedNameSpecifier::Global:
+  case NestedNameSpecifier::Super:
     return true;
 
   case NestedNameSpecifier::TypeSpec:
@@ -713,6 +715,7 @@ bool RecursiveASTVisitor<Derived>::TraverseNestedNameSpecifierLoc(
   case NestedNameSpecifier::Namespace:
   case NestedNameSpecifier::NamespaceAlias:
   case NestedNameSpecifier::Global:
+  case NestedNameSpecifier::Super:
     return true;
 
   case NestedNameSpecifier::TypeSpec:
@@ -940,6 +943,9 @@ DEF_TRAVERSE_TYPE(FunctionProtoType, {
   for (const auto &E : T->exceptions()) {
     TRY_TO(TraverseType(E));
   }
+
+  if (Expr *NE = T->getNoexceptExpr())
+    TRY_TO(TraverseStmt(NE));
 })
 
 DEF_TRAVERSE_TYPE(UnresolvedUsingType, {})
@@ -1002,6 +1008,8 @@ DEF_TRAVERSE_TYPE(ObjCObjectType, {
   // type is itself.
   if (T->getBaseType().getTypePtr() != T)
     TRY_TO(TraverseType(T->getBaseType()));
+  for (auto typeArg : T->getTypeArgsAsWritten())
+    TRY_TO(TraverseType(typeArg));
 })
 
 DEF_TRAVERSE_TYPE(ObjCObjectPointerType,
@@ -1148,6 +1156,9 @@ DEF_TRAVERSE_TYPELOC(FunctionProtoType, {
   for (const auto &E : T->exceptions()) {
     TRY_TO(TraverseType(E));
   }
+
+  if (Expr *NE = T->getNoexceptExpr())
+    TRY_TO(TraverseStmt(NE));
 })
 
 DEF_TRAVERSE_TYPELOC(UnresolvedUsingType, {})
@@ -1225,6 +1236,8 @@ DEF_TRAVERSE_TYPELOC(ObjCObjectType, {
   // type is itself.
   if (TL.getTypePtr()->getBaseType().getTypePtr() != TL.getTypePtr())
     TRY_TO(TraverseTypeLoc(TL.getBaseLoc()));
+  for (unsigned i = 0, n = TL.getNumTypeArgs(); i != n; ++i)
+    TRY_TO(TraverseTypeLoc(TL.getTypeArgTInfo(i)->getTypeLoc()));
 })
 
 DEF_TRAVERSE_TYPELOC(ObjCObjectPointerType,
@@ -1371,7 +1384,11 @@ DEF_TRAVERSE_DECL(ObjCCompatibleAliasDecl, {// FIXME: implement
                                            })
 
 DEF_TRAVERSE_DECL(ObjCCategoryDecl, {// FIXME: implement
-                                    })
+  if (ObjCTypeParamList *typeParamList = D->getTypeParamList()) {
+    for (auto typeParam : *typeParamList)
+      TRY_TO(TraverseObjCTypeParamDecl(typeParam));
+  }
+})
 
 DEF_TRAVERSE_DECL(ObjCCategoryImplDecl, {// FIXME: implement
                                         })
@@ -1380,7 +1397,15 @@ DEF_TRAVERSE_DECL(ObjCImplementationDecl, {// FIXME: implement
                                           })
 
 DEF_TRAVERSE_DECL(ObjCInterfaceDecl, {// FIXME: implement
-                                     })
+  if (ObjCTypeParamList *typeParamList = D->getTypeParamListAsWritten()) {
+    for (auto typeParam : *typeParamList)
+      TRY_TO(TraverseObjCTypeParamDecl(typeParam));
+  }
+
+  if (TypeSourceInfo *superTInfo = D->getSuperClassTInfo()) {
+    TRY_TO(TraverseTypeLoc(superTInfo->getTypeLoc()));
+  }
+})
 
 DEF_TRAVERSE_DECL(ObjCProtocolDecl, {// FIXME: implement
                                     })
@@ -1397,6 +1422,15 @@ DEF_TRAVERSE_DECL(ObjCMethodDecl, {
     TRY_TO(TraverseStmt(D->getBody()));
   }
   return true;
+})
+
+DEF_TRAVERSE_DECL(ObjCTypeParamDecl, {
+  if (D->hasExplicitBound()) {
+    TRY_TO(TraverseTypeLoc(D->getTypeSourceInfo()->getTypeLoc()));
+    // We shouldn't traverse D->getTypeForDecl(); it's a result of
+    // declaring the type alias, not something that was written in the
+    // source.
+  }
 })
 
 DEF_TRAVERSE_DECL(ObjCPropertyDecl, {
@@ -2023,12 +2057,20 @@ DEF_TRAVERSE_STMT(CXXStaticCastExpr, {
 // to the syntactic form.
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::TraverseInitListExpr(InitListExpr *S) {
-  if (InitListExpr *Syn = S->getSyntacticForm())
-    S = Syn;
-  TRY_TO(WalkUpFromInitListExpr(S));
-  // All we need are the default actions.  FIXME: use a helper function.
-  for (Stmt::child_range range = S->children(); range; ++range) {
-    TRY_TO(TraverseStmt(*range));
+  InitListExpr *Syn = S->isSemanticForm() ? S->getSyntacticForm() : S;
+  if (Syn) {
+    TRY_TO(WalkUpFromInitListExpr(Syn));
+    // All we need are the default actions.  FIXME: use a helper function.
+    for (Stmt::child_range range = Syn->children(); range; ++range) {
+      TRY_TO(TraverseStmt(*range));
+    }
+  }
+  InitListExpr *Sem = S->isSemanticForm() ? S : S->getSemanticForm();
+  if (Sem) {
+    TRY_TO(WalkUpFromInitListExpr(Sem));
+    for (Stmt::child_range range = Sem->children(); range; ++range) {
+      TRY_TO(TraverseStmt(*range));
+    }
   }
   return true;
 }
@@ -2144,21 +2186,29 @@ bool RecursiveASTVisitor<Derived>::TraverseLambdaExpr(LambdaExpr *S) {
     TRY_TO(TraverseLambdaCapture(S, C));
   }
 
-  if (S->hasExplicitParameters() || S->hasExplicitResultType()) {
-    TypeLoc TL = S->getCallOperator()->getTypeSourceInfo()->getTypeLoc();
-    if (S->hasExplicitParameters() && S->hasExplicitResultType()) {
-      // Visit the whole type.
-      TRY_TO(TraverseTypeLoc(TL));
-    } else if (FunctionProtoTypeLoc Proto = TL.getAs<FunctionProtoTypeLoc>()) {
-      if (S->hasExplicitParameters()) {
-        // Visit parameters.
-        for (unsigned I = 0, N = Proto.getNumParams(); I != N; ++I) {
-          TRY_TO(TraverseDecl(Proto.getParam(I)));
-        }
-      } else {
-        TRY_TO(TraverseTypeLoc(Proto.getReturnLoc()));
+  TypeLoc TL = S->getCallOperator()->getTypeSourceInfo()->getTypeLoc();
+  FunctionProtoTypeLoc Proto = TL.castAs<FunctionProtoTypeLoc>();
+
+  if (S->hasExplicitParameters() && S->hasExplicitResultType()) {
+    // Visit the whole type.
+    TRY_TO(TraverseTypeLoc(TL));
+  } else {
+    if (S->hasExplicitParameters()) {
+      // Visit parameters.
+      for (unsigned I = 0, N = Proto.getNumParams(); I != N; ++I) {
+        TRY_TO(TraverseDecl(Proto.getParam(I)));
       }
+    } else if (S->hasExplicitResultType()) {
+      TRY_TO(TraverseTypeLoc(Proto.getReturnLoc()));
     }
+
+    auto *T = Proto.getTypePtr();
+    for (const auto &E : T->exceptions()) {
+      TRY_TO(TraverseType(E));
+    }
+
+    if (Expr *NE = T->getNoexceptExpr())
+      TRY_TO(TraverseStmt(NE));
   }
 
   TRY_TO(TraverseLambdaBody(S));
@@ -2259,6 +2309,7 @@ DEF_TRAVERSE_STMT(CapturedStmt, { TRY_TO(TraverseDecl(S->getCapturedDecl())); })
 
 DEF_TRAVERSE_STMT(CXXOperatorCallExpr, {})
 DEF_TRAVERSE_STMT(OpaqueValueExpr, {})
+DEF_TRAVERSE_STMT(TypoExpr, {})
 DEF_TRAVERSE_STMT(CUDAKernelCallExpr, {})
 
 // These operators (all of them) do not need any action except
@@ -2275,6 +2326,7 @@ DEF_TRAVERSE_STMT(SubstNonTypeTemplateParmPackExpr, {})
 DEF_TRAVERSE_STMT(SubstNonTypeTemplateParmExpr, {})
 DEF_TRAVERSE_STMT(FunctionParmPackExpr, {})
 DEF_TRAVERSE_STMT(MaterializeTemporaryExpr, {})
+DEF_TRAVERSE_STMT(CXXFoldExpr, {})
 DEF_TRAVERSE_STMT(AtomicExpr, {})
 
 // These literals (all of them) do not need any action.
@@ -2301,6 +2353,12 @@ bool RecursiveASTVisitor<Derived>::TraverseOMPExecutableDirective(
   return true;
 }
 
+template <typename Derived>
+bool
+RecursiveASTVisitor<Derived>::TraverseOMPLoopDirective(OMPLoopDirective *S) {
+  return TraverseOMPExecutableDirective(S);
+}
+
 DEF_TRAVERSE_STMT(OMPParallelDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
@@ -2308,6 +2366,9 @@ DEF_TRAVERSE_STMT(OMPSimdDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 DEF_TRAVERSE_STMT(OMPForDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPForSimdDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 DEF_TRAVERSE_STMT(OMPSectionsDirective,
@@ -2328,6 +2389,9 @@ DEF_TRAVERSE_STMT(OMPCriticalDirective, {
 })
 
 DEF_TRAVERSE_STMT(OMPParallelForDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPParallelForSimdDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 DEF_TRAVERSE_STMT(OMPParallelSectionsDirective,
@@ -2352,6 +2416,12 @@ DEF_TRAVERSE_STMT(OMPOrderedDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 DEF_TRAVERSE_STMT(OMPAtomicDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPTargetDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPTeamsDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 // OpenMP clauses.
@@ -2479,6 +2549,9 @@ bool RecursiveASTVisitor<Derived>::VisitOMPClauseList(T *Node) {
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPPrivateClause(OMPPrivateClause *C) {
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->private_copies()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 
@@ -2486,6 +2559,12 @@ template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPFirstprivateClause(
     OMPFirstprivateClause *C) {
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->private_copies()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->inits()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 

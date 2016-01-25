@@ -79,6 +79,7 @@ public:
 class TargetLoweringObjectFileMachO : public TargetLoweringObjectFile {
 public:
   virtual ~TargetLoweringObjectFileMachO() {}
+  TargetLoweringObjectFileMachO();
 
   /// Extract the dependent library name from a linker option string. Returns
   /// StringRef() if the option does not specify a library.
@@ -88,8 +89,6 @@ public:
   void emitModuleFlags(MCStreamer &Streamer,
                        ArrayRef<Module::ModuleFlagEntry> ModuleFlags,
                        Mangler &Mang, const TargetMachine &TM) const override;
-
-  bool isSectionAtomizableBySymbols(const MCSection &Section) const override;
 
   const MCSection *
     SelectSectionForGlobal(const GlobalValue *GV,
@@ -115,6 +114,12 @@ public:
   MCSymbol *getCFIPersonalitySymbol(const GlobalValue *GV, Mangler &Mang,
                                     const TargetMachine &TM,
                                     MachineModuleInfo *MMI) const override;
+
+  /// Get MachO PC relative GOT entry relocation
+  const MCExpr *getIndirectSymViaGOTPCRel(const MCSymbol *Sym,
+                                          const MCValue &MV, int64_t Offset,
+                                          MachineModuleInfo *MMI,
+                                          MCStreamer &Streamer) const override;
 };
 
 

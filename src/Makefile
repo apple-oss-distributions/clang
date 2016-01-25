@@ -24,7 +24,7 @@ LEVEL := .
 # "llvmCore", then this is an "Apple-style" build; search for
 # "Apple-style" in the comments for more info.  Anything else is a
 # normal build.
-ifneq ($(findstring llvmCore, $(RC_ProjectName)),llvmCore)  # Normal build (not "Apple-style").
+ifndef RC_ProjectName # Normal build (not "Apple-style").
 
 ifeq ($(BUILD_DIRS_ONLY),1)
   DIRS := lib/Support lib/TableGen utils tools/llvm-config
@@ -70,6 +70,7 @@ ifeq ($(MAKECMDGOALS),install-clang)
   DIRS := tools/clang/tools/driver tools/clang/lib/Headers \
           tools/clang/tools/libclang \
           tools/clang/tools/c-index-test \
+          tools/clang/tools/clang-format \
           tools/clang/include/clang-c \
           tools/clang/runtime tools/clang/docs \
           tools/lto

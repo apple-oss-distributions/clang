@@ -30,7 +30,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/raw_ostream.h"
 
-#ifndef NDEBUG
+#if 0
 #include "llvm/Support/GraphWriter.h"
 #endif
 
@@ -752,6 +752,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::CXXTryStmtClass:
     case Stmt::CXXTypeidExprClass:
     case Stmt::CXXUuidofExprClass:
+    case Stmt::CXXFoldExprClass:
     case Stmt::MSPropertyRefExprClass:
     case Stmt::CXXUnresolvedConstructExprClass:
     case Stmt::DependentScopeDeclRefExprClass:
@@ -760,6 +761,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::ExpressionTraitExprClass:
     case Stmt::UnresolvedLookupExprClass:
     case Stmt::UnresolvedMemberExprClass:
+    case Stmt::TypoExprClass:
     case Stmt::CXXNoexceptExprClass:
     case Stmt::PackExpansionExprClass:
     case Stmt::SubstNonTypeTemplateParmPackExprClass:
@@ -801,12 +803,14 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::OMPParallelDirectiveClass:
     case Stmt::OMPSimdDirectiveClass:
     case Stmt::OMPForDirectiveClass:
+    case Stmt::OMPForSimdDirectiveClass:
     case Stmt::OMPSectionsDirectiveClass:
     case Stmt::OMPSectionDirectiveClass:
     case Stmt::OMPSingleDirectiveClass:
     case Stmt::OMPMasterDirectiveClass:
     case Stmt::OMPCriticalDirectiveClass:
     case Stmt::OMPParallelForDirectiveClass:
+    case Stmt::OMPParallelForSimdDirectiveClass:
     case Stmt::OMPParallelSectionsDirectiveClass:
     case Stmt::OMPTaskDirectiveClass:
     case Stmt::OMPTaskyieldDirectiveClass:
@@ -815,6 +819,8 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::OMPFlushDirectiveClass:
     case Stmt::OMPOrderedDirectiveClass:
     case Stmt::OMPAtomicDirectiveClass:
+    case Stmt::OMPTargetDirectiveClass:
+    case Stmt::OMPTeamsDirectiveClass:
       llvm_unreachable("Stmt should not be in analyzer evaluation loop");
 
     case Stmt::ObjCSubscriptRefExprClass:
@@ -864,7 +870,6 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::ObjCProtocolExprClass:
     case Stmt::ObjCSelectorExprClass:
     case Stmt::ParenListExprClass:
-    case Stmt::PredefinedExprClass:
     case Stmt::ShuffleVectorExprClass:
     case Stmt::ConvertVectorExprClass:
     case Stmt::VAArgExprClass:
@@ -876,6 +881,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
 
     // Cases we intentionally don't evaluate, since they don't need
     // to be explicitly evaluated.
+    case Stmt::PredefinedExprClass:
     case Stmt::AddrLabelExprClass:
     case Stmt::AttributedStmtClass:
     case Stmt::IntegerLiteralClass:
@@ -2386,7 +2392,7 @@ void ExprEngine::VisitMSAsmStmt(const MSAsmStmt *A, ExplodedNode *Pred,
 // Visualization.
 //===----------------------------------------------------------------------===//
 
-#ifndef NDEBUG
+#if 0
 static ExprEngine* GraphPrintCheckerState;
 static SourceManager* GraphPrintSourceManager;
 
@@ -2642,7 +2648,7 @@ struct DOTGraphTraits<ExplodedNode*> :
 } // end llvm namespace
 #endif
 
-#ifndef NDEBUG
+#if 0
 template <typename ITERATOR>
 ExplodedNode *GetGraphNode(ITERATOR I) { return *I; }
 
@@ -2654,7 +2660,7 @@ GetGraphNode<llvm::DenseMap<ExplodedNode*, Expr*>::iterator>
 #endif
 
 void ExprEngine::ViewGraph(bool trim) {
-#ifndef NDEBUG
+#if 0
   if (trim) {
     std::vector<const ExplodedNode*> Src;
 
@@ -2685,7 +2691,7 @@ void ExprEngine::ViewGraph(bool trim) {
 }
 
 void ExprEngine::ViewGraph(ArrayRef<const ExplodedNode*> Nodes) {
-#ifndef NDEBUG
+#if 0
   GraphPrintCheckerState = this;
   GraphPrintSourceManager = &getContext().getSourceManager();
 

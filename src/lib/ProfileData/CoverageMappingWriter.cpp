@@ -90,7 +90,8 @@ public:
 ///     A counter with kind Counter::Expression and an expression
 ///     with kind CounterExpression::Add
 /// Remaining bits - Counter/Expression ID.
-unsigned encodeCounter(ArrayRef<CounterExpression> Expressions, Counter C) {
+static unsigned encodeCounter(ArrayRef<CounterExpression> Expressions,
+                              Counter C) {
   unsigned Tag = unsigned(C.getKind());
   if (C.isExpression())
     Tag += Expressions[C.getExpressionID()].Kind;
@@ -108,7 +109,7 @@ static void writeCounter(ArrayRef<CounterExpression> Expressions, Counter C,
 void CoverageMappingWriter::write(raw_ostream &OS) {
   // Sort the regions in an ascending order by the file id and the starting
   // location.
-  std::sort(MappingRegions.begin(), MappingRegions.end());
+  std::stable_sort(MappingRegions.begin(), MappingRegions.end());
 
   // Write out the fileid -> filename mapping.
   encodeULEB128(VirtualFileMapping.size(), OS);
@@ -171,11 +172,7 @@ void CoverageMappingWriter::write(raw_ostream &OS) {
     }
     assert(I->LineStart >= PrevLineStart);
     encodeULEB128(I->LineStart - PrevLineStart, OS);
-    uint64_t CodeBeforeColumnStart =
-        uint64_t(I->HasCodeBefore) |
-        (uint64_t(I->ColumnStart)
-         << CounterMappingRegion::EncodingHasCodeBeforeBits);
-    encodeULEB128(CodeBeforeColumnStart, OS);
+    encodeULEB128(I->ColumnStart, OS);
     assert(I->LineEnd >= I->LineStart);
     encodeULEB128(I->LineEnd - I->LineStart, OS);
     encodeULEB128(I->ColumnEnd, OS);

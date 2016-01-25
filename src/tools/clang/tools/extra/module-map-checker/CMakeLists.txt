@@ -10,7 +10,9 @@ target_link_libraries(module-map-checker
   clangAPINotes
   clangAST
   clangBasic
+  clangCodeGen
   clangFrontend
+  clangIndex
   clangLex
   clangTooling
   )

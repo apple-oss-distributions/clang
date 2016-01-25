@@ -40,7 +40,8 @@ typedef bool lto_bool_t;
  * @{
  */
 
-#define LTO_API_VERSION 11
+#define LTO_API_VERSION 15
+#define LTO_APPLE_INTERNAL 1
 
 /**
  * \since prior to LTO_API_VERSION=3
@@ -171,7 +172,7 @@ lto_module_create_from_memory(const void* mem, size_t length);
  * Loads an object file from memory with an extra path argument.
  * Returns NULL on error (check lto_get_error_message() for details).
  *
- * \since prior to LTO_API_VERSION=9
+ * \since LTO_API_VERSION=9
  */
 extern lto_module_t
 lto_module_create_from_memory_with_path(const void* mem, size_t length,
@@ -374,6 +375,19 @@ extern lto_code_gen_t
 lto_codegen_create_in_local_context(void);
 
 /**
+ * Reset the context owned by the code generator.
+ *
+ * The context owned by the code generator is reset.
+ * All the modules add/set to the code generator will be destroyed.
+ * All the modules created with the previous context will be invalidated.
+ *
+ * \since prior to LTO_API_VERSION=13
+ *                 LTO_APPLE_INTERNAL
+ */
+extern void
+lto_codegen_reset_context(lto_code_gen_t);
+
+/**
  * Frees all code generator and all memory it internally allocated.
  * Upon return the lto_code_gen_t is no longer valid.
  *
@@ -394,6 +408,17 @@ lto_codegen_dispose(lto_code_gen_t);
  */
 extern lto_bool_t
 lto_codegen_add_module(lto_code_gen_t cg, lto_module_t mod);
+
+/**
+ * Sets the object module for code generation. This will transfer the ownship of
+ * the module to code generator.
+ *
+ * \c cg and \c mod must both be in the same context.
+ *
+ * \since LTO_API_VERSION=13
+ */
+extern void
+lto_codegen_set_module(lto_code_gen_t cg, lto_module_t mod);
 
 /**
  * Sets if debug info should be generated.
@@ -464,6 +489,8 @@ lto_codegen_write_merged_modules(lto_code_gen_t cg, const char* path);
 
 /**
  * Generates code for all added modules into one native object file.
+ * This calls lto_codegen_optimize then lto_codegen_compile_optimized.
+ *
  * On success returns a pointer to a generated mach-o/ELF buffer and
  * length set to the buffer size.  The buffer is owned by the
  * lto_code_gen_t and will be freed when lto_codegen_dispose()
@@ -477,6 +504,9 @@ lto_codegen_compile(lto_code_gen_t cg, size_t* length);
 
 /**
  * Generates code for all added modules into one native object file.
+ * This calls lto_codegen_optimize then lto_codegen_compile_optimized (instead
+ * of returning a generated mach-o/ELF buffer, it writes to a file).
+ *
  * The name of the file is written to name. Returns true on error.
  *
  * \since LTO_API_VERSION=5
@@ -484,6 +514,56 @@ lto_codegen_compile(lto_code_gen_t cg, size_t* length);
 extern lto_bool_t
 lto_codegen_compile_to_file(lto_code_gen_t cg, const char** name);
 
+/**
+ * Runs optimization for the merged module. Returns true on error.
+ *
+ * \since LTO_API_VERSION=12
+ */
+extern lto_bool_t
+lto_codegen_optimize(lto_code_gen_t cg);
+
+/**
+ * Generates code for the optimized merged module into one native object file.
+ * It will not run any IR optimizations on the merged module.
+ *
+ * On success returns a pointer to a generated mach-o/ELF buffer and length set
+ * to the buffer size.  The buffer is owned by the lto_code_gen_t and will be
+ * freed when lto_codegen_dispose() is called, or
+ * lto_codegen_compile_optimized() is called again. On failure, returns NULL
+ * (check lto_get_error_message() for details).
+ *
+ * \since LTO_API_VERSION=12
+ */
+extern const void*
+lto_codegen_compile_optimized(lto_code_gen_t cg, size_t* length);
+
+/**
+ * Hide the names of all non-exported symbols from bitcode.
+ *
+ * On success returns true.
+ *
+ * \since LTO_API_VERSION=13
+ *        LTO_APPLE_INTERNAL
+ */
+extern bool lto_codegen_hide_symbols(lto_code_gen_t cg);
+/**
+ * When hiding non-exported symbols, write the reverse map to a file
+ *
+ * On success returns true.
+ *
+ * \since LTO_API_VERSION=13
+ *        LTO_APPLE_INTERNAL
+ */
+extern bool lto_codegen_write_symbol_reverse_map(lto_code_gen_t cg,
+                                                 const char *path);
+
+/**
+ * Returns the runtime API version.
+ *
+ * \since LTO_API_VERSION=12
+ */
+extern unsigned int
+lto_api_version(void);
 
 /**
  * Sets options to help debug codegen bugs.
@@ -501,6 +581,28 @@ lto_codegen_debug_options(lto_code_gen_t cg, const char *);
  */
 extern void
 lto_initialize_disassembler(void);
+
+/**
+ * Sets if we should run internalize pass during optimization and code
+ * generation.
+ *
+ * \since LTO_API_VERSION=14
+ */
+extern void
+lto_codegen_set_should_internalize(lto_code_gen_t cg,
+                                   lto_bool_t ShouldInternalize);
+
+/**
+ * \brief Set whether to embed uselists in bitcode.
+ *
+ * Sets whether \a lto_codegen_write_merged_modules() should embed uselists in
+ * output bitcode.  This should be turned on for all -save-temps output.
+ *
+ * \since LTO_API_VERSION=15
+ */
+extern void
+lto_codegen_set_should_embed_uselists(lto_code_gen_t cg,
+                                      lto_bool_t ShouldEmbedUselists);
 
 #ifdef __cplusplus
 }

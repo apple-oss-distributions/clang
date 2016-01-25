@@ -18,11 +18,11 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ProfileData/InstrProf.h"
+#include "llvm/Support/EndianStream.h"
+#include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/LineIterator.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/EndianStream.h"
 #include "llvm/Support/OnDiskHashTable.h"
-
 #include <iterator>
 
 namespace llvm {
@@ -94,8 +94,10 @@ public:
 
   /// Factory method to create an appropriately typed reader for the given
   /// instrprof file.
-  static std::error_code create(std::string Path,
-                                std::unique_ptr<InstrProfReader> &Result);
+  static ErrorOr<std::unique_ptr<InstrProfReader>> create(std::string Path);
+
+  static ErrorOr<std::unique_ptr<InstrProfReader>>
+  create(std::unique_ptr<MemoryBuffer> Buffer);
 };
 
 /// Reader for the simple text based instrprof format.
@@ -296,8 +298,11 @@ public:
   uint64_t getMaximumFunctionCount() { return MaxFunctionCount; }
 
   /// Factory method to create an indexed reader.
-  static std::error_code
-  create(std::string Path, std::unique_ptr<IndexedInstrProfReader> &Result);
+  static ErrorOr<std::unique_ptr<IndexedInstrProfReader>>
+  create(std::string Path);
+
+  static ErrorOr<std::unique_ptr<IndexedInstrProfReader>>
+  create(std::unique_ptr<MemoryBuffer> Buffer);
 };
 
 } // end namespace llvm

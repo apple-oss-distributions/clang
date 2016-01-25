@@ -25,9 +25,9 @@ namespace llvm {
 template <typename EltTy>
 class TinyPtrVector {
 public:
-  using VecTy = llvm::SmallVector<EltTy, 4>;
-  using value_type = typename VecTy::value_type;
-  using PtrUnion = llvm::PointerUnion<EltTy, VecTy *>;
+  typedef llvm::SmallVector<EltTy, 4> VecTy;
+  typedef typename VecTy::value_type value_type;
+  typedef llvm::PointerUnion<EltTy, VecTy *> PtrUnion;
 
 private:
   PtrUnion Val;
@@ -110,7 +110,7 @@ public:
   // implicit conversion operator to ArrayRef.
   operator ArrayRef<EltTy>() const {
     if (Val.isNull())
-      return ArrayRef<EltTy>();
+      return None;
     if (Val.template is<EltTy>())
       return *Val.getAddrOfPtr1();
     return *Val.template get<VecTy*>();

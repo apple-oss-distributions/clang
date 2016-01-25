@@ -12,6 +12,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCAsmBackend.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAsmLayout.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
@@ -20,6 +21,7 @@
 #include "llvm/MC/MCFixupKindInfo.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCSection.h"
+#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Debug.h"
@@ -27,7 +29,6 @@
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/MC/MCSectionELF.h"
 #include <tuple>
 using namespace llvm;
 
@@ -200,7 +201,17 @@ const MCSymbol *MCAsmLayout::getBaseSymbol(const MCSymbol &Symbol) const {
   if (!A)
     return nullptr;
 
-  return &A->getSymbol();
+  const MCSymbol &ASym = A->getSymbol();
+  const MCAssembler &Asm = getAssembler();
+  const MCSymbolData &ASD = Asm.getSymbolData(ASym);
+  if (ASD.isCommon()) {
+    // FIXME: we should probably add a SMLoc to MCExpr.
+    Asm.getContext().FatalError(SMLoc(),
+                                "Common symbol " + ASym.getName() +
+                                    " cannot be used in assignment expr");
+  }
+
+  return &ASym;
 }
 
 uint64_t MCAsmLayout::getSectionAddressSize(const MCSectionData *SD) const {
@@ -291,7 +302,9 @@ MCSectionData::MCSectionData(const MCSection &_Section, MCAssembler *A)
   : Section(&_Section),
     Ordinal(~UINT32_C(0)),
     Alignment(1),
-    BundleLockState(NotBundleLocked), BundleGroupBeforeFirstInst(false),
+    BundleLockState(NotBundleLocked),
+    BundleLockNestingDepth(0),
+    BundleGroupBeforeFirstInst(false),
     HasInstructions(false)
 {
   if (A)
@@ -328,17 +341,33 @@ MCSectionData::getSubsectionInsertionPoint(unsigned Subsection) {
   return IP;
 }
 
+void MCSectionData::setBundleLockState(BundleLockStateType NewState) {
+  if (NewState == NotBundleLocked) {
+    if (BundleLockNestingDepth == 0) {
+      report_fatal_error("Mismatched bundle_lock/unlock directives");
+    }
+    if (--BundleLockNestingDepth == 0) {
+      BundleLockState = NotBundleLocked;
+    }
+    return;
+  }
+
+  // If any of the directives is an align_to_end directive, the whole nested
+  // group is align_to_end. So don't downgrade from align_to_end to just locked.
+  if (BundleLockState != BundleLockedAlignToEnd) {
+    BundleLockState = NewState;
+  }
+  ++BundleLockNestingDepth;
+}
+
 /* *** */
 
 MCSymbolData::MCSymbolData() : Symbol(nullptr) {}
 
 MCSymbolData::MCSymbolData(const MCSymbol &_Symbol, MCFragment *_Fragment,
                            uint64_t _Offset, MCAssembler *A)
-  : Symbol(&_Symbol), Fragment(_Fragment), Offset(_Offset),
-    IsExternal(false), IsPrivateExtern(false),
-    CommonSize(0), SymbolSize(nullptr), CommonAlign(0),
-    Flags(0), Index(0)
-{
+    : Symbol(&_Symbol), Fragment(_Fragment), Offset(_Offset),
+      SymbolSize(nullptr), CommonAlign(-1U), Flags(0), Index(0) {
   if (A)
     A->getSymbolList().push_back(this);
 }
@@ -348,9 +377,9 @@ MCSymbolData::MCSymbolData(const MCSymbol &_Symbol, MCFragment *_Fragment,
 MCAssembler::MCAssembler(MCContext &Context_, MCAsmBackend &Backend_,
                          MCCodeEmitter &Emitter_, MCObjectWriter &Writer_,
                          raw_ostream &OS_)
-  : Context(Context_), Backend(Backend_), Emitter(Emitter_), Writer(Writer_),
-    OS(OS_), BundleAlignSize(0), RelaxAll(false), NoExecStack(false),
-    SubsectionsViaSymbols(false), ELFHeaderEFlags(0) {
+    : Context(Context_), Backend(Backend_), Emitter(Emitter_), Writer(Writer_),
+      OS(OS_), BundleAlignSize(0), RelaxAll(false),
+      SubsectionsViaSymbols(false), ELFHeaderEFlags(0) {
   VersionMinInfo.Major = 0; // Major version == 0 for "none specified"
 }
 
@@ -364,11 +393,15 @@ void MCAssembler::reset() {
   SymbolMap.clear();
   IndirectSymbols.clear();
   DataRegions.clear();
+  LinkerOptions.clear();
+  FileNames.clear();
   ThumbFuncs.clear();
+  BundleAlignSize = 0;
   RelaxAll = false;
-  NoExecStack = false;
   SubsectionsViaSymbols = false;
   ELFHeaderEFlags = 0;
+  LOHContainer.reset();
+  VersionMinInfo.Major = 0;
 
   // reset objects owned by us
   getBackend().reset();
@@ -402,6 +435,16 @@ bool MCAssembler::isThumbFunc(const MCSymbol *Symbol) const {
   return true;
 }
 
+void MCAssembler::addLocalUsedInReloc(const MCSymbol &Sym) {
+  assert(Sym.isTemporary());
+  LocalsUsedInReloc.insert(&Sym);
+}
+
+bool MCAssembler::isLocalUsedInReloc(const MCSymbol &Sym) const {
+  assert(Sym.isTemporary());
+  return LocalsUsedInReloc.count(&Sym);
+}
+
 bool MCAssembler::isSymbolLinkerVisible(const MCSymbol &Symbol) const {
   // Non-temporary labels should always be visible to the linker.
   if (!Symbol.isTemporary())
@@ -411,8 +454,10 @@ bool MCAssembler::isSymbolLinkerVisible(const MCSymbol &Symbol) const {
   if (!Symbol.isInSection())
     return false;
 
-  // Otherwise, check if the section requires symbols even for temporary labels.
-  return getBackend().doesSectionRequireSymbols(Symbol.getSection());
+  if (isLocalUsedInReloc(Symbol))
+    return true;
+
+  return false;
 }
 
 const MCSymbolData *MCAssembler::getAtom(const MCSymbolData *SD) const {
@@ -426,8 +471,8 @@ const MCSymbolData *MCAssembler::getAtom(const MCSymbolData *SD) const {
 
   // Non-linker visible symbols in sections which can't be atomized have no
   // defining atom.
-  if (!getBackend().isSectionAtomizable(
-        SD->getFragment()->getParent()->getSection()))
+  if (!getContext().getAsmInfo()->isSectionAtomizableBySymbols(
+          SD->getFragment()->getParent()->getSection()))
     return nullptr;
 
   // Otherwise, return the atom for the containing fragment.
@@ -855,6 +900,29 @@ std::pair<uint64_t, bool> MCAssembler::handleFixup(const MCAsmLayout &Layout,
   return std::make_pair(FixedValue, IsPCRel);
 }
 
+/// \brief Evaluate all fixups for all sections and emit relocations
+/// as necessary.
+void MCAssembler::fixup(MCAsmLayout &Layout) {
+  for (MCAssembler::iterator it = begin(), ie = end(); it != ie; ++it) {
+    for (MCSectionData::iterator it2 = it->begin(),
+           ie2 = it->end(); it2 != ie2; ++it2) {
+      MCEncodedFragmentWithFixups *F =
+        dyn_cast<MCEncodedFragmentWithFixups>(it2);
+      if (F) {
+        for (MCEncodedFragmentWithFixups::fixup_iterator it3 = F->fixup_begin(),
+               ie3 = F->fixup_end(); it3 != ie3; ++it3) {
+          MCFixup &Fixup = *it3;
+          uint64_t FixedValue;
+          bool IsPCRel;
+          std::tie(FixedValue, IsPCRel) = handleFixup(Layout, *F, Fixup);
+          getBackend().applyFixup(Fixup, F->getContents().data(),
+                                  F->getContents().size(), FixedValue, IsPCRel);
+        }
+      }
+    }
+  }
+}
+
 void MCAssembler::Finish() {
   DEBUG_WITH_TYPE("mc-dump", {
       llvm::errs() << "assembler backend - pre-layout\n--\n";
@@ -906,26 +974,9 @@ void MCAssembler::Finish() {
   // example, to set the index fields in the symbol data).
   getWriter().ExecutePostLayoutBinding(*this, Layout);
 
-  // Evaluate and apply the fixups, generating relocation entries as necessary.
-  for (MCAssembler::iterator it = begin(), ie = end(); it != ie; ++it) {
-    for (MCSectionData::iterator it2 = it->begin(),
-           ie2 = it->end(); it2 != ie2; ++it2) {
-      MCEncodedFragmentWithFixups *F =
-        dyn_cast<MCEncodedFragmentWithFixups>(it2);
-      if (F) {
-        for (MCEncodedFragmentWithFixups::fixup_iterator it3 = F->fixup_begin(),
-             ie3 = F->fixup_end(); it3 != ie3; ++it3) {
-          MCFixup &Fixup = *it3;
-          uint64_t FixedValue;
-          bool IsPCRel;
-          std::tie(FixedValue, IsPCRel) = handleFixup(Layout, *F, Fixup);
-          getBackend().applyFixup(Fixup, F->getContents().data(),
-                                  F->getContents().size(), FixedValue, IsPCRel);
-        }
-      }
-    }
-  }
-
+  // Evaluate fixups.
+  fixup(Layout);
+  
   // Write the object file.
   getWriter().WriteObject(*this, Layout);
 
@@ -1017,7 +1068,8 @@ bool MCAssembler::relaxDwarfLineAddr(MCAsmLayout &Layout,
   SmallString<8> &Data = DF.getContents();
   Data.clear();
   raw_svector_ostream OSE(Data);
-  MCDwarfLineAddr::Encode(Context, LineDelta, AddrDelta, OSE);
+  MCDwarfLineAddr::Encode(Context, getDWARFLinetableParameters(),
+                          LineDelta, AddrDelta, OSE);
   OSE.flush();
   return OldSize != Data.size();
 }
@@ -1239,8 +1291,10 @@ void MCSymbolData::dump() const {
   raw_ostream &OS = llvm::errs();
 
   OS << "<MCSymbolData Symbol:" << getSymbol()
-     << " Fragment:" << getFragment() << " Offset:" << getOffset()
-     << " Flags:" << getFlags() << " Index:" << getIndex();
+     << " Fragment:" << getFragment();
+  if (!isCommon())
+    OS << " Offset:" << getOffset();
+  OS << " Flags:" << getFlags() << " Index:" << getIndex();
   if (isCommon())
     OS << " (common, size:" << getCommonSize()
        << " align: " << getCommonAlignment() << ")";

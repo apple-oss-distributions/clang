@@ -13,6 +13,7 @@
 ///
 //===----------------------------------------------------------------------===//
 
+#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "ReplaceAutoPtr.h"
 #include "ReplaceAutoPtrActions.h"
 #include "ReplaceAutoPtrMatchers.h"
@@ -24,7 +25,8 @@ using namespace clang::ast_matchers;
 int
 ReplaceAutoPtrTransform::apply(const CompilationDatabase &Database,
                                const std::vector<std::string> &SourcePaths) {
-  ClangTool Tool(Database, SourcePaths);
+  ClangTool Tool(Database, SourcePaths,
+                 SharedModuleProvider::Create<LLVMModuleProvider>());
   unsigned AcceptedChanges = 0;
   MatchFinder Finder;
   AutoPtrReplacer Replacer(AcceptedChanges, /*Owner=*/ *this);

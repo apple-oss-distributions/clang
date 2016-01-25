@@ -30,9 +30,11 @@
 #include "sanitizer_procmaps.h"
 
 #include <fcntl.h>
+#include <mach-o/dyld.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -46,6 +48,26 @@
 extern "C" {
   extern char ***_NSGetArgv(void);
   extern char ***_NSGetEnviron(void);
+}
+
+// Forward declare SPI from sandbox/private.h.
+extern "C" {
+enum sandbox_filter_type {
+  SANDBOX_FILTER_NONE,
+  SANDBOX_FILTER_PATH,
+  SANDBOX_FILTER_GLOBAL_NAME,
+  SANDBOX_FILTER_LOCAL_NAME,
+  SANDBOX_FILTER_APPLEEVENT_DESTINATION,
+  SANDBOX_FILTER_RIGHT_NAME,
+  SANDBOX_FILTER_PREFERENCE_DOMAIN,
+  SANDBOX_FILTER_KEXT_BUNDLE_ID,
+  SANDBOX_FILTER_INFO_TYPE,
+  SANDBOX_FILTER_NOTIFICATION,
+};
+extern const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT;
+extern const enum sandbox_filter_type SANDBOX_CHECK_CANONICAL;
+int sandbox_check(pid_t pid, const char *operation,
+                  enum sandbox_filter_type type, ...);
 }
 
 namespace __sanitizer {
@@ -114,6 +136,10 @@ uptr internal_readlink(const char *path, char *buf, uptr bufsize) {
   return readlink(path, buf, bufsize);
 }
 
+uptr internal_unlink(const char *path) {
+  return unlink(path);
+}
+
 uptr internal_sched_yield() {
   return sched_yield();
 }
@@ -144,8 +170,25 @@ uptr internal_ftruncate(fd_t fd, uptr size) {
   return ftruncate(fd, size);
 }
 
+// Use the SPI to check if we are allowed to perform the operation.
+bool sandbox_allows_to_perform(const char *operation) {
+  static const enum sandbox_filter_type filter =
+    (enum sandbox_filter_type)(SANDBOX_FILTER_NONE | SANDBOX_CHECK_NO_REPORT);
+  if ((&sandbox_check != nullptr) &&
+      (sandbox_check(getpid(), operation, filter) > 0) ) {
+    return false;
+  }
+
+  return true;
+}
+
 // ----------------- sanitizer_common.h
 bool FileExists(const char *filename) {
+  if (!sandbox_allows_to_perform("file-read-data")) {
+    VReport(1, "Checking file existance is not allowed under sandbox.\n");
+    return false;
+  }
+
   struct stat st;
   if (stat(filename, &st))
     return false;
@@ -205,6 +248,21 @@ const char *GetEnv(const char *name) {
   return 0;
 }
 
+uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
+  CHECK_LE(kMaxPathLength, buf_len);
+
+  // On OS X the executable path is saved to the stack by dyld. Reading it
+  // from there is much faster than calling dladdr, especially for large
+  // binaries with symbols.
+  InternalScopedString exe_path(kMaxPathLength);
+  uint32_t size = exe_path.size();
+  if (_NSGetExecutablePath(exe_path.data(), &size) == 0 &&
+      realpath(exe_path.data(), buf) != 0) {
+    return internal_strlen(buf);
+  }
+  return 0;
+}
+
 void ReExec() {
   UNIMPLEMENTED();
 }
@@ -216,10 +274,6 @@ void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
 
 uptr GetPageSize() {
   return sysconf(_SC_PAGESIZE);
-}
-
-BlockingMutex::BlockingMutex(LinkerInitialized) {
-  // We assume that OS_SPINLOCK_INIT is zero
 }
 
 BlockingMutex::BlockingMutex() {
@@ -325,6 +379,13 @@ MacosVersion GetMacosVersion() {
   }
   return result;
 }
+
+uptr GetRSS() {
+  return 0;
+}
+
+void *internal_start_thread(void (*func)(void *arg), void *arg) { return 0; }
+void internal_join_thread(void *th) { }
 
 }  // namespace __sanitizer
 

@@ -24,7 +24,7 @@
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/LeakDetector.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/Support/Debug.h"
@@ -45,7 +45,6 @@ MachineBasicBlock::MachineBasicBlock(MachineFunction &mf, const BasicBlock *bb)
 }
 
 MachineBasicBlock::~MachineBasicBlock() {
-  LeakDetector::removeGarbageObject(this);
 }
 
 /// getSymbol - Return the MCSymbol for this basic block.
@@ -54,9 +53,7 @@ MCSymbol *MachineBasicBlock::getSymbol() const {
   if (!CachedMCSymbol) {
     const MachineFunction *MF = getParent();
     MCContext &Ctx = MF->getContext();
-    const TargetMachine &TM = MF->getTarget();
-    const char *Prefix =
-        TM.getSubtargetImpl()->getDataLayout()->getPrivateGlobalPrefix();
+    const char *Prefix = Ctx.getAsmInfo()->getPrivateLabelPrefix();
     CachedMCSymbol = Ctx.GetOrCreateSymbol(Twine(Prefix) + "BB" +
                                            Twine(MF->getFunctionNumber()) +
                                            "_" + Twine(getNumber()));
@@ -87,14 +84,11 @@ void ilist_traits<MachineBasicBlock>::addNodeToList(MachineBasicBlock *N) {
   for (MachineBasicBlock::instr_iterator
          I = N->instr_begin(), E = N->instr_end(); I != E; ++I)
     I->AddRegOperandsToUseLists(RegInfo);
-
-  LeakDetector::removeGarbageObject(N);
 }
 
 void ilist_traits<MachineBasicBlock>::removeNodeFromList(MachineBasicBlock *N) {
   N->getParent()->removeFromMBBNumbering(N->Number);
   N->Number = -1;
-  LeakDetector::addGarbageObject(N);
 }
 
 
@@ -109,8 +103,6 @@ void ilist_traits<MachineInstr>::addNodeToList(MachineInstr *N) {
   // use/def lists.
   MachineFunction *MF = Parent->getParent();
   N->AddRegOperandsToUseLists(MF->getRegInfo());
-
-  LeakDetector::removeGarbageObject(N);
 }
 
 /// removeNodeFromList (MI) - When we remove an instruction from a basic block
@@ -124,8 +116,6 @@ void ilist_traits<MachineInstr>::removeNodeFromList(MachineInstr *N) {
     N->RemoveRegOperandsFromUseLists(MF->getRegInfo());
 
   N->setParent(nullptr);
-
-  LeakDetector::addGarbageObject(N);
 }
 
 /// transferNodesFromList (MI) - When moving a range of instructions from one
@@ -272,6 +262,20 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
        << " is null\n";
     return;
   }
+  const Function *F = MF->getFunction();
+  const Module *M = F ? F->getParent() : nullptr;
+  ModuleSlotTracker MST(M);
+  print(OS, MST, Indexes);
+}
+
+void MachineBasicBlock::print(raw_ostream &OS, ModuleSlotTracker &MST,
+                              SlotIndexes *Indexes) const {
+  const MachineFunction *MF = getParent();
+  if (!MF) {
+    OS << "Can't print out MachineBasicBlock because parent MachineFunction"
+       << " is null\n";
+    return;
+  }
 
   if (Indexes)
     OS << Indexes->getMBBStartIdx(this) << '\t';
@@ -281,7 +285,7 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
   const char *Comma = "";
   if (const BasicBlock *LBB = getBasicBlock()) {
     OS << Comma << "derived from LLVM BB ";
-    LBB->printAsOperand(OS, /*PrintType=*/false);
+    LBB->printAsOperand(OS, /*PrintType=*/false, MST);
     Comma = ", ";
   }
   if (isLandingPad()) { OS << Comma << "EH LANDING PAD"; Comma = ", "; }
@@ -318,7 +322,7 @@ void MachineBasicBlock::print(raw_ostream &OS, SlotIndexes *Indexes) const {
     OS << '\t';
     if (I->isInsideBundle())
       OS << "  * ";
-    I->print(OS, &getParent()->getTarget());
+    I->print(OS, MST);
   }
 
   // Print the successors of this block according to the CFG.
@@ -1066,7 +1070,7 @@ bool MachineBasicBlock::CorrectExtraCFGEdges(MachineBasicBlock *DestA,
   MachineBasicBlock::succ_iterator SI = succ_begin();
   while (SI != succ_end()) {
     const MachineBasicBlock *MBB = *SI;
-    if (!SeenMBBs.insert(MBB) ||
+    if (!SeenMBBs.insert(MBB).second ||
         (MBB != DestA && MBB != DestB && !MBB->isLandingPad())) {
       // This is a superfluous edge, remove it.
       SI = removeSuccessor(SI);

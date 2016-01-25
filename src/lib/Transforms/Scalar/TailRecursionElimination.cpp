@@ -63,6 +63,7 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
@@ -124,7 +125,7 @@ namespace {
 char TailCallElim::ID = 0;
 INITIALIZE_PASS_BEGIN(TailCallElim, "tailcallelim",
                       "Tail Call Elimination", false, false)
-INITIALIZE_AG_DEPENDENCY(TargetTransformInfo)
+INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_END(TailCallElim, "tailcallelim",
                     "Tail Call Elimination", false, false)
 
@@ -134,7 +135,7 @@ FunctionPass *llvm::createTailCallEliminationPass() {
 }
 
 void TailCallElim::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<TargetTransformInfo>();
+  AU.addRequired<TargetTransformInfoWrapperPass>();
 }
 
 /// \brief Scan the specified function for alloca instructions.
@@ -175,7 +176,7 @@ struct AllocaDerivedValueTracker {
 
     auto AddUsesToWorklist = [&](Value *V) {
       for (auto &U : V->uses()) {
-        if (!Visited.insert(&U))
+        if (!Visited.insert(&U).second)
           continue;
         Worklist.push_back(&U);
       }
@@ -382,7 +383,7 @@ bool TailCallElim::runTRE(Function &F) {
   // right, so don't even try to convert it...
   if (F.getFunctionType()->isVarArg()) return false;
 
-  TTI = &getAnalysis<TargetTransformInfo>();
+  TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
   BasicBlock *OldEntry = nullptr;
   bool TailCallsAreMarkedTail = false;
   SmallVector<PHINode*, 8> ArgumentPHIs;
@@ -431,7 +432,7 @@ bool TailCallElim::runTRE(Function &F) {
     PHINode *PN = ArgumentPHIs[i];
 
     // If the PHI Node is a dynamic constant, replace it with the value it is.
-    if (Value *PNV = SimplifyInstruction(PN)) {
+    if (Value *PNV = SimplifyInstruction(PN, F.getParent()->getDataLayout())) {
       PN->replaceAllUsesWith(PNV);
       PN->eraseFromParent();
     }

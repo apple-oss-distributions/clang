@@ -364,8 +364,9 @@ bool CallInst::paramHasAttr(unsigned i, Attribute::AttrKind A) const {
 
 /// IsConstantOne - Return true only if val is constant int 1
 static bool IsConstantOne(Value *val) {
-  assert(val && "IsConstantOne does not work with NULL val");
-  return isa<ConstantInt>(val) && cast<ConstantInt>(val)->isOne();
+  assert(val && "IsConstantOne does not work with nullptr val");
+  const ConstantInt *CVal = dyn_cast<ConstantInt>(val);
+  return CVal && CVal->isOne();
 }
 
 static Instruction *createMalloc(Instruction *InsertBefore,
@@ -418,7 +419,7 @@ static Instruction *createMalloc(Instruction *InsertBefore,
   Value *MallocFunc = MallocF;
   if (!MallocFunc)
     // prototype malloc as "void *malloc(size_t)"
-    MallocFunc = M->getOrInsertFunction("malloc", BPTy, IntPtrTy, NULL);
+    MallocFunc = M->getOrInsertFunction("malloc", BPTy, IntPtrTy, nullptr);
   PointerType *AllocPtrType = PointerType::getUnqual(AllocTy);
   CallInst *MCall = nullptr;
   Instruction *Result = nullptr;
@@ -491,7 +492,7 @@ static Instruction* createFree(Value* Source, Instruction *InsertBefore,
   Type *VoidTy = Type::getVoidTy(M->getContext());
   Type *IntPtrTy = Type::getInt8PtrTy(M->getContext());
   // prototype free as "void free(void*)"
-  Value *FreeFunc = M->getOrInsertFunction("free", VoidTy, IntPtrTy, NULL);
+  Value *FreeFunc = M->getOrInsertFunction("free", VoidTy, IntPtrTy, nullptr);
   CallInst* Result = nullptr;
   Value *PtrCast = Source;
   if (InsertBefore) {
@@ -795,11 +796,8 @@ void BranchInst::swapSuccessors() {
     return;
 
   // The first operand is the name. Fetch them backwards and build a new one.
-  Value *Ops[] = {
-    ProfileData->getOperand(0),
-    ProfileData->getOperand(2),
-    ProfileData->getOperand(1)
-  };
+  Metadata *Ops[] = {ProfileData->getOperand(0), ProfileData->getOperand(2),
+                     ProfileData->getOperand(1)};
   setMetadata(LLVMContext::MD_prof,
               MDNode::get(ProfileData->getContext(), Ops));
 }
@@ -2030,6 +2028,39 @@ bool BinaryOperator::isExact() const {
   return cast<PossiblyExactOperator>(this)->isExact();
 }
 
+void BinaryOperator::copyIRFlags(const Value *V) {
+  // Copy the wrapping flags.
+  if (auto *OB = dyn_cast<OverflowingBinaryOperator>(V)) {
+    setHasNoSignedWrap(OB->hasNoSignedWrap());
+    setHasNoUnsignedWrap(OB->hasNoUnsignedWrap());
+  }
+
+  // Copy the exact flag.
+  if (auto *PE = dyn_cast<PossiblyExactOperator>(V))
+    setIsExact(PE->isExact());
+  
+  // Copy the fast-math flags.
+  if (auto *FP = dyn_cast<FPMathOperator>(V))
+    copyFastMathFlags(FP->getFastMathFlags());
+}
+
+void BinaryOperator::andIRFlags(const Value *V) {
+  if (auto *OB = dyn_cast<OverflowingBinaryOperator>(V)) {
+    setHasNoSignedWrap(hasNoSignedWrap() & OB->hasNoSignedWrap());
+    setHasNoUnsignedWrap(hasNoUnsignedWrap() & OB->hasNoUnsignedWrap());
+  }
+  
+  if (auto *PE = dyn_cast<PossiblyExactOperator>(V))
+    setIsExact(isExact() & PE->isExact());
+  
+  if (auto *FP = dyn_cast<FPMathOperator>(V)) {
+    FastMathFlags FM = getFastMathFlags();
+    FM &= FP->getFastMathFlags();
+    copyFastMathFlags(FM);
+  }
+}
+
+
 //===----------------------------------------------------------------------===//
 //                             FPMathOperator Class
 //===----------------------------------------------------------------------===//
@@ -2039,10 +2070,10 @@ bool BinaryOperator::isExact() const {
 /// default precision.
 float FPMathOperator::getFPAccuracy() const {
   const MDNode *MD =
-    cast<Instruction>(this)->getMetadata(LLVMContext::MD_fpmath);
+      cast<Instruction>(this)->getMetadata(LLVMContext::MD_fpmath);
   if (!MD)
     return 0.0;
-  ConstantFP *Accuracy = cast<ConstantFP>(MD->getOperand(0));
+  ConstantFP *Accuracy = mdconst::extract<ConstantFP>(MD->getOperand(0));
   return Accuracy->getValueAPF().convertToFloat();
 }
 
@@ -2126,21 +2157,15 @@ bool CastInst::isNoopCast(Type *IntPtrTy) const {
   return isNoopCast(getOpcode(), getOperand(0)->getType(), getType(), IntPtrTy);
 }
 
-bool CastInst::isNoopCast(const DataLayout *DL) const {
-  if (!DL) {
-    // Assume maximum pointer size.
-    return isNoopCast(Type::getInt64Ty(getContext()));
-  }
-
+bool CastInst::isNoopCast(const DataLayout &DL) const {
   Type *PtrOpTy = nullptr;
   if (getOpcode() == Instruction::PtrToInt)
     PtrOpTy = getOperand(0)->getType();
   else if (getOpcode() == Instruction::IntToPtr)
     PtrOpTy = getType();
 
-  Type *IntPtrTy = PtrOpTy
-                 ? DL->getIntPtrType(PtrOpTy)
-                 : DL->getIntPtrType(getContext(), 0);
+  Type *IntPtrTy =
+      PtrOpTy ? DL.getIntPtrType(PtrOpTy) : DL.getIntPtrType(getContext(), 0);
 
   return isNoopCast(getOpcode(), getOperand(0)->getType(), getType(), IntPtrTy);
 }
@@ -2202,7 +2227,7 @@ unsigned CastInst::isEliminableCastPair(
     {  0, 0, 0,99,99, 0, 0,99,99,99, 0, 3, 0}, // FPToSI         |
     { 99,99,99, 0, 0,99,99, 0, 0,99,99, 4, 0}, // UIToFP         +- firstOp
     { 99,99,99, 0, 0,99,99, 0, 0,99,99, 4, 0}, // SIToFP         |
-    { 99,99,99, 0, 0,99,99, 1, 0,99,99, 4, 0}, // FPTrunc        |
+    { 99,99,99, 0, 0,99,99, 0, 0,99,99, 4, 0}, // FPTrunc        |
     { 99,99,99, 2, 2,99,99,10, 2,99,99, 4, 0}, // FPExt          |
     {  1, 0, 0,99,99, 0, 0,99,99,99, 7, 3, 0}, // PtrToInt       |
     { 99,99,99,99,99,99,99,99,99,11,99,15, 0}, // IntToPtr       |
@@ -2525,6 +2550,17 @@ CastInst *CastInst::CreatePointerBitCastOrAddrSpaceCast(
   return Create(Instruction::BitCast, S, Ty, Name, InsertBefore);
 }
 
+CastInst *CastInst::CreateBitOrPointerCast(Value *S, Type *Ty,
+                                           const Twine &Name,
+                                           Instruction *InsertBefore) {
+  if (S->getType()->isPointerTy() && Ty->isIntegerTy())
+    return Create(Instruction::PtrToInt, S, Ty, Name, InsertBefore);
+  if (S->getType()->isIntegerTy() && Ty->isPointerTy())
+    return Create(Instruction::IntToPtr, S, Ty, Name, InsertBefore);
+
+  return Create(Instruction::BitCast, S, Ty, Name, InsertBefore);
+}
+
 CastInst *CastInst::CreateIntegerCast(Value *C, Type *Ty,
                                       bool isSigned, const Twine &Name,
                                       Instruction *InsertBefore) {
@@ -2682,6 +2718,18 @@ bool CastInst::isBitCastable(Type *SrcTy, Type *DestTy) {
   return true;
 }
 
+bool CastInst::isBitOrNoopPointerCastable(Type *SrcTy, Type *DestTy,
+                                          const DataLayout &DL) {
+  if (auto *PtrTy = dyn_cast<PointerType>(SrcTy))
+    if (auto *IntTy = dyn_cast<IntegerType>(DestTy))
+      return IntTy->getBitWidth() == DL.getPointerTypeSizeInBits(PtrTy);
+  if (auto *PtrTy = dyn_cast<PointerType>(DestTy))
+    if (auto *IntTy = dyn_cast<IntegerType>(SrcTy))
+      return IntTy->getBitWidth() == DL.getPointerTypeSizeInBits(PtrTy);
+
+  return isBitCastable(SrcTy, DestTy);
+}
+
 // Provide a way to get a "cast" where the cast opcode is inferred from the
 // types and size of the operand. This, basically, is a parallel of the
 // logic in the castIsValid function below.  This axiom should hold:
@@ -2797,10 +2845,6 @@ CastInst::castIsValid(Instruction::CastOps op, Value *S, Type *DstTy) {
 
   // Check for type sanity on the arguments
   Type *SrcTy = S->getType();
-
-  // If this is a cast to the same type then it's trivially true.
-  if (SrcTy == DstTy)
-    return true;
 
   if (!SrcTy->isFirstClassType() || !DstTy->isFirstClassType() ||
       SrcTy->isAggregateType() || DstTy->isAggregateType())
@@ -3604,6 +3648,7 @@ AllocaInst *AllocaInst::clone_impl() const {
   AllocaInst *Result = new AllocaInst(getAllocatedType(),
                                       (Value *)getOperand(0), getAlignment());
   Result->setUsedWithInAlloca(isUsedWithInAlloca());
+  Result->setSwiftError(isSwiftError());
   return Result;
 }
 

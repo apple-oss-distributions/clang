@@ -60,6 +60,17 @@ static cl::opt<unsigned> AlignAllBlock("align-all-blocks",
                                                 "blocks in the function."),
                                        cl::init(0), cl::Hidden);
 
+static cl::opt<bool> OnlyHotBadCFGConflictCheck(
+    "only-hot-bad-cfg-conflict-check",
+    cl::desc("Only check that a hot successor doesn't have a hot predecessor."),
+    cl::init(false), cl::Hidden);
+
+static cl::opt<bool> NoBadCFGConflictCheck(
+    "no-bad-cfg-conflict-check",
+    cl::desc("Don't check whether a hot successor has a more important "
+             "predecessor."),
+    cl::init(false), cl::Hidden);
+
 // FIXME: Find a good default for this flag and remove the flag.
 static cl::opt<unsigned>
 ExitBlockBias("block-placement-exit-block-bias",
@@ -374,28 +385,32 @@ MachineBasicBlock *MachineBlockPlacement::selectBestSuccessor(
         continue;
       }
 
-      // Make sure that a hot successor doesn't have a globally more important
-      // predecessor.
-      BlockFrequency CandidateEdgeFreq
-        = MBFI->getBlockFreq(BB) * SuccProb * HotProb.getCompl();
-      bool BadCFGConflict = false;
-      for (MachineBasicBlock::pred_iterator PI = (*SI)->pred_begin(),
-                                            PE = (*SI)->pred_end();
-           PI != PE; ++PI) {
-        if (*PI == *SI || (BlockFilter && !BlockFilter->count(*PI)) ||
-            BlockToChain[*PI] == &Chain)
-          continue;
-        BlockFrequency PredEdgeFreq
-          = MBFI->getBlockFreq(*PI) * MBPI->getEdgeProbability(*PI, *SI);
-        if (PredEdgeFreq >= CandidateEdgeFreq) {
-          BadCFGConflict = true;
-          break;
+      if (!NoBadCFGConflictCheck) {
+        // Make sure that a hot successor doesn't have a globally more
+        // important predecessor.
+        BlockFrequency CandidateEdgeFreq =
+            OnlyHotBadCFGConflictCheck
+                ? MBFI->getBlockFreq(BB) * SuccProb
+                : MBFI->getBlockFreq(BB) * SuccProb * HotProb.getCompl();
+        bool BadCFGConflict = false;
+        for (MachineBasicBlock::pred_iterator PI = (*SI)->pred_begin(),
+                                              PE = (*SI)->pred_end();
+             PI != PE; ++PI) {
+          if (*PI == *SI || (BlockFilter && !BlockFilter->count(*PI)) ||
+              BlockToChain[*PI] == &Chain)
+            continue;
+          BlockFrequency PredEdgeFreq =
+              MBFI->getBlockFreq(*PI) * MBPI->getEdgeProbability(*PI, *SI);
+          if (PredEdgeFreq >= CandidateEdgeFreq) {
+            BadCFGConflict = true;
+            break;
+          }
         }
-      }
-      if (BadCFGConflict) {
-        DEBUG(dbgs() << "    " << getBlockName(*SI) << " -> " << SuccProb
-                     << " (prob) (non-cold CFG conflict)\n");
-        continue;
+        if (BadCFGConflict) {
+          DEBUG(dbgs() << "    " << getBlockName(*SI) << " -> " << SuccProb
+                       << " (prob) (non-cold CFG conflict)\n");
+          continue;
+        }
       }
     }
 
@@ -813,7 +828,7 @@ void MachineBlockPlacement::buildLoopChains(MachineFunction &F,
                                    BE = L.block_end();
        BI != BE; ++BI) {
     BlockChain &Chain = *BlockToChain[*BI];
-    if (!UpdatedPreds.insert(&Chain))
+    if (!UpdatedPreds.insert(&Chain).second)
       continue;
 
     assert(Chain.LoopPredecessors == 0);
@@ -914,7 +929,7 @@ void MachineBlockPlacement::buildCFGChains(MachineFunction &F) {
   for (MachineFunction::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     MachineBasicBlock *BB = &*FI;
     BlockChain &Chain = *BlockToChain[BB];
-    if (!UpdatedPreds.insert(&Chain))
+    if (!UpdatedPreds.insert(&Chain).second)
       continue;
 
     assert(Chain.LoopPredecessors == 0);
@@ -1043,12 +1058,8 @@ void MachineBlockPlacement::buildCFGChains(MachineFunction &F) {
   // exclusively on the loop info here so that we can align backedges in
   // unnatural CFGs and backedges that were introduced purely because of the
   // loop rotations done during this layout pass.
-  if (F.getFunction()->getAttributes().
-        hasAttribute(AttributeSet::FunctionIndex, Attribute::OptimizeForSize))
+  if (F.getFunction()->hasFnAttribute(Attribute::OptimizeForSize))
     return;
-  unsigned Align = TLI->getPrefLoopAlignment();
-  if (!Align)
-    return;  // Don't care about loop alignment.
   if (FunctionChain.begin() == FunctionChain.end())
     return;  // Empty chain.
 
@@ -1065,6 +1076,10 @@ void MachineBlockPlacement::buildCFGChains(MachineFunction &F) {
     MachineLoop *L = MLI->getLoopFor(*BI);
     if (!L)
       continue;
+
+    unsigned Align = TLI->getPrefLoopAlignment(L);
+    if (!Align)
+      continue;  // Don't care about loop alignment.
 
     // If the block is cold relative to the function entry don't waste space
     // aligning it.

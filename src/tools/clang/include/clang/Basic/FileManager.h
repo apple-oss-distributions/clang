@@ -241,12 +241,11 @@ public:
 
   /// \brief Open the specified file as a MemoryBuffer, returning a new
   /// MemoryBuffer if successful, otherwise returning null.
-  llvm::MemoryBuffer *getBufferForFile(const FileEntry *Entry,
-                                       std::string *ErrorStr = nullptr,
-                                       bool isVolatile = false,
-                                       bool ShouldCloseOpenFile = true);
-  llvm::MemoryBuffer *getBufferForFile(StringRef Filename,
-                                       std::string *ErrorStr = nullptr);
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
+  getBufferForFile(const FileEntry *Entry, bool isVolatile = false,
+                   bool ShouldCloseOpenFile = true);
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
+  getBufferForFile(StringRef Filename);
 
   /// \brief Get the 'stat' information for the given \p Path.
   ///
@@ -263,7 +262,13 @@ public:
   /// \brief If path is not absolute and FileSystemOptions set the working
   /// directory, the path is modified to be relative to the given
   /// working directory.
-  void FixupRelativePath(SmallVectorImpl<char> &path) const;
+  /// \returns true if \c path changed.
+  bool FixupRelativePath(SmallVectorImpl<char> &path) const;
+
+  /// Makes \c Path absolute taking into account FileSystemOptions and the
+  /// working directory option.
+  /// \returns true if \c Path changed to absolute.
+  bool makeAbsolutePath(SmallVectorImpl<char> &Path) const;
 
   /// \brief Produce an array mapping from the unique IDs assigned to each
   /// file to the corresponding FileEntry pointer.

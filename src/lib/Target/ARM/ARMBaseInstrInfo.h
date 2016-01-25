@@ -156,6 +156,13 @@ public:
   unsigned isStoreToStackSlotPostFE(const MachineInstr *MI,
                                     int &FrameIndex) const override;
 
+  void copyToCPSR(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                  unsigned SrcReg, bool KillSrc,
+                  const ARMSubtarget &Subtarget) const;
+  void copyFromCPSR(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                    unsigned DestReg, bool KillSrc,
+                    const ARMSubtarget &Subtarget) const;
+
   void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
                    DebugLoc DL, unsigned DestReg, unsigned SrcReg,
                    bool KillSrc) const override;
@@ -254,7 +261,9 @@ public:
                      unsigned &TrueOp, unsigned &FalseOp,
                      bool &Optimizable) const override;
 
-  MachineInstr *optimizeSelect(MachineInstr *MI, bool) const override;
+  MachineInstr *optimizeSelect(MachineInstr *MI,
+                               SmallPtrSetImpl<MachineInstr *> &SeenMIs,
+                               bool) const override;
 
   /// FoldImmediate - 'Reg' is known to be defined by a move immediate
   /// instruction, try to fold the immediate into the use instruction.
@@ -281,12 +290,6 @@ public:
                                       const TargetRegisterInfo*) const override;
   void breakPartialRegDependency(MachineBasicBlock::iterator, unsigned,
                                  const TargetRegisterInfo *TRI) const override;
-
-  void
-  getUnconditionalBranch(MCInst &Branch,
-                         const MCSymbolRefExpr *BranchTarget) const override;
-
-  void getTrap(MCInst &MI) const override;
 
   /// Get the number of addresses by LDM or VLDM or zero for unknown.
   unsigned getNumLDMAddresses(const MachineInstr *MI) const;

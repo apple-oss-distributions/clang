@@ -44,6 +44,18 @@ void FlushUnneededShadowMemory(uptr addr, uptr size) {
   madvise((void*)addr, size, MADV_DONTNEED);
 }
 
+void NoHugePagesInRegion(uptr addr, uptr size) {
+#ifdef MADV_NOHUGEPAGE  // May not be defined on old systems.
+  madvise((void *)addr, size, MADV_NOHUGEPAGE);
+#endif  // MADV_NOHUGEPAGE
+}
+
+void DontDumpShadowMemory(uptr addr, uptr length) {
+#ifdef MADV_DONTDUMP
+  madvise((void *)addr, length, MADV_DONTDUMP);
+#endif
+}
+
 static rlim_t getlim(int res) {
   rlimit rlim;
   CHECK_EQ(0, getrlimit(res, &rlim));
@@ -55,7 +67,7 @@ static void setlim(int res, rlim_t lim) {
   volatile struct rlimit rlim;
   rlim.rlim_cur = lim;
   rlim.rlim_max = lim;
-  if (setrlimit(res, (struct rlimit*)&rlim)) {
+  if (setrlimit(res, const_cast<struct rlimit *>(&rlim))) {
     Report("ERROR: %s setrlimit() failed %d\n", SanitizerToolName, errno);
     Die();
   }
@@ -165,6 +177,28 @@ void InstallDeadlySignalHandlers(SignalHandlerType handler) {
   MaybeInstallSigaction(SIGBUS, handler);
 }
 #endif  // SANITIZER_GO
+
+bool IsAccessibleMemoryRange(uptr beg, uptr size) {
+  uptr page_size = GetPageSizeCached();
+  // Checking too large memory ranges is slow.
+  CHECK_LT(size, page_size * 10);
+  int sock_pair[2];
+  if (pipe(sock_pair))
+    return false;
+  uptr bytes_written =
+      internal_write(sock_pair[1], reinterpret_cast<void *>(beg), size);
+  int write_errno;
+  bool result;
+  if (internal_iserror(bytes_written, &write_errno)) {
+    CHECK_EQ(EFAULT, write_errno);
+    result = false;
+  } else {
+    result = (bytes_written == size);
+  }
+  internal_close(sock_pair[0]);
+  internal_close(sock_pair[1]);
+  return result;
+}
 
 }  // namespace __sanitizer
 

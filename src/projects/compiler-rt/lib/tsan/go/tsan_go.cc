@@ -28,23 +28,8 @@ bool IsExpectedReport(uptr addr, uptr size) {
   return false;
 }
 
-void *internal_start_thread(void(*func)(void*), void *arg) {
-  return 0;
-}
-
-void internal_join_thread(void *th) {
-}
-
 ReportLocation *SymbolizeData(uptr addr) {
   return 0;
-}
-
-ReportStack *NewReportStackEntry(uptr addr) {
-  ReportStack *ent = (ReportStack*)internal_alloc(MBlockReportStack,
-                                                  sizeof(ReportStack));
-  internal_memset(ent, 0, sizeof(*ent));
-  ent->pc = addr;
-  return ent;
 }
 
 void *internal_alloc(MBlockType typ, uptr sz) {

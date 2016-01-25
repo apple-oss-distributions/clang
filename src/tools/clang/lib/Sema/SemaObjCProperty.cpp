@@ -103,15 +103,6 @@ static void checkARCPropertyDecl(Sema &S, ObjCPropertyDecl *property) {
     << propertyLifetime;
 }
 
-static unsigned deduceWeakPropertyFromType(Sema &S, QualType T) {
-  if ((S.getLangOpts().getGC() != LangOptions::NonGC && 
-       T.isObjCGCWeak()) ||
-      (S.getLangOpts().ObjCAutoRefCount &&
-       T.getObjCLifetime() == Qualifiers::OCL_Weak))
-    return ObjCDeclSpec::DQ_PR_weak;
-  return 0;
-}
-
 /// \brief Check this Objective-C property against a property declared in the
 /// given protocol.
 static void
@@ -119,7 +110,7 @@ CheckPropertyAgainstProtocol(Sema &S, ObjCPropertyDecl *Prop,
                              ObjCProtocolDecl *Proto,
                              llvm::SmallPtrSetImpl<ObjCProtocolDecl *> &Known) {
   // Have we seen this protocol before?
-  if (!Known.insert(Proto))
+  if (!Known.insert(Proto).second)
     return;
 
   // Look for a property with the same name.
@@ -146,9 +137,10 @@ Decl *Sema::ActOnProperty(Scope *S, SourceLocation AtLoc,
                           tok::ObjCKeywordKind MethodImplKind,
                           DeclContext *lexicalDC) {
   unsigned Attributes = ODS.getPropertyAttributes();
+  FD.D.setObjCWeakProperty((Attributes & ObjCDeclSpec::DQ_PR_weak) != 0);
   TypeSourceInfo *TSI = GetTypeForDeclarator(FD.D, S);
   QualType T = TSI->getType();
-  Attributes |= deduceWeakPropertyFromType(*this, T);
+  Attributes |= deduceWeakPropertyFromType(T);
   bool isReadWrite = ((Attributes & ObjCDeclSpec::DQ_PR_readwrite) ||
                       // default is readwrite!
                       !(Attributes & ObjCDeclSpec::DQ_PR_readonly));
@@ -413,9 +405,11 @@ Sema::HandlePropertyInClassExtension(Scope *S,
     // this conversion is safe only because the wider type is for a 'readonly'
     // property in primary class and 'narrowed' type for a 'readwrite' property
     // in continuation class.
-    if (!isa<ObjCObjectPointerType>(PIDecl->getType()) ||
-        !isa<ObjCObjectPointerType>(PDecl->getType()) ||
-        (!isObjCPointerConversion(PDecl->getType(), PIDecl->getType(), 
+    QualType PrimaryClassPropertyT = Context.getCanonicalType(PIDecl->getType());
+    QualType ClassExtPropertyT = Context.getCanonicalType(PDecl->getType());
+    if (!isa<ObjCObjectPointerType>(PrimaryClassPropertyT) ||
+        !isa<ObjCObjectPointerType>(ClassExtPropertyT) ||
+        (!isObjCPointerConversion(ClassExtPropertyT, PrimaryClassPropertyT,
                                   ConvertedType, IncompatibleObjC))
         || IncompatibleObjC) {
       Diag(AtLoc, 
@@ -431,7 +425,7 @@ Sema::HandlePropertyInClassExtension(Scope *S,
   if (isReadWrite && (PIkind & ObjCPropertyDecl::OBJC_PR_readonly)) {
     PIkind &= ~ObjCPropertyDecl::OBJC_PR_readonly;
     PIkind |= ObjCPropertyDecl::OBJC_PR_readwrite;
-    PIkind |= deduceWeakPropertyFromType(*this, PIDecl->getType());
+    PIkind |= deduceWeakPropertyFromType(PIDecl->getType());
     unsigned ClassExtensionMemoryModel = getOwnershipRule(Attributes);
     unsigned PrimaryClassMemoryModel = getOwnershipRule(PIkind);
     if (PrimaryClassMemoryModel && ClassExtensionMemoryModel &&
@@ -1163,7 +1157,9 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
                                  CK_LValueToRValue, SelfExpr, nullptr,
                                  VK_RValue);
       Expr *IvarRefExpr =
-        new (Context) ObjCIvarRefExpr(Ivar, Ivar->getType(), PropertyDiagLoc,
+        new (Context) ObjCIvarRefExpr(Ivar,
+                                      Ivar->getUsageType(SelfDecl->getType()),
+                                      PropertyDiagLoc,
                                       Ivar->getLocation(),
                                       LoadSelfExpr, true, true);
       ExprResult Res = PerformCopyInitialization(
@@ -1213,7 +1209,9 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
                                  CK_LValueToRValue, SelfExpr, nullptr,
                                  VK_RValue);
       Expr *lhs =
-        new (Context) ObjCIvarRefExpr(Ivar, Ivar->getType(), PropertyDiagLoc,
+        new (Context) ObjCIvarRefExpr(Ivar,
+                                      Ivar->getUsageType(SelfDecl->getType()),
+                                      PropertyDiagLoc,
                                       Ivar->getLocation(),
                                       LoadSelfExpr, true, true);
       ObjCMethodDecl::param_iterator P = setterMethod->param_begin();
@@ -1764,7 +1762,7 @@ void Sema::DiagnoseUnimplementedProperties(Scope *S, ObjCImplDecl* IMPDecl,
   }
 }
 
-void Sema::diagnoseNullResettableSynthesizedSetters(ObjCImplDecl *impDecl) {
+void Sema::diagnoseNullResettableSynthesizedSetters(const ObjCImplDecl *impDecl) {
   for (const auto *propertyImpl : impDecl->property_impls()) {
     const auto *property = propertyImpl->getPropertyDecl();
 
@@ -1952,10 +1950,16 @@ void Sema::DiagnoseMissingDesignatedInitOverrides(
          I = DesignatedInits.begin(), E = DesignatedInits.end(); I != E; ++I) {
     const ObjCMethodDecl *MD = *I;
     if (!InitSelSet.count(MD->getSelector())) {
-      Diag(ImplD->getLocation(),
-           diag::warn_objc_implementation_missing_designated_init_override)
-        << MD->getSelector();
-      Diag(MD->getLocation(), diag::note_objc_designated_init_marked_here);
+      bool Ignore = false;
+      if (auto *IMD = IFD->getInstanceMethod(MD->getSelector())) {
+        Ignore = IMD->isUnavailable();
+      }
+      if (!Ignore) {
+        Diag(ImplD->getLocation(),
+             diag::warn_objc_implementation_missing_designated_init_override)
+          << MD->getSelector();
+        Diag(MD->getLocation(), diag::note_objc_designated_init_marked_here);
+      }
     }
   }
 }
@@ -2031,7 +2035,7 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
     if (property->getPropertyAttributes() &
         ObjCPropertyDecl::OBJC_PR_null_resettable) {
       QualType modifiedTy = resultTy;
-      if (auto nullability = AttributedType::stripOuterNullability(modifiedTy)){
+      if (auto nullability = AttributedType::stripOuterNullability(modifiedTy)) {
         if (*nullability == NullabilityKind::Unspecified)
           resultTy = Context.getAttributedType(AttributedType::attr_nonnull,
                                                modifiedTy, modifiedTy);
@@ -2101,7 +2105,8 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
                                 ObjCMethodDecl::Optional :
                                 ObjCMethodDecl::Required);
 
-      // If the property is null_resettable, the getter returns nonnull.
+      // If the property is null_resettable, the setter accepts a
+      // nullable value.
       QualType paramTy = property->getType().getUnqualifiedType();
       if (property->getPropertyAttributes() &
           ObjCPropertyDecl::OBJC_PR_null_resettable) {
@@ -2288,6 +2293,22 @@ void Sema::CheckObjCPropertyAttributes(Decl *PDecl,
       Diag(Loc, diag::err_objc_property_attr_mutually_exclusive)
         << "strong" << "weak";
       Attributes &= ~ObjCDeclSpec::DQ_PR_weak;
+  }
+
+  if (Attributes & ObjCDeclSpec::DQ_PR_weak) {
+    // 'weak' and 'nonnull' are mutually exclusive.
+    if (auto nullability = PropertyTy->getNullability(Context)) {
+      if (*nullability == NullabilityKind::NonNull)
+        Diag(Loc, diag::err_objc_property_attr_mutually_exclusive)
+          << "nonnull" << "weak";
+    } else {
+        PropertyTy =
+          Context.getAttributedType(
+            AttributedType::getNullabilityAttrKind(NullabilityKind::Nullable),
+            PropertyTy, PropertyTy);
+        TypeSourceInfo *TSInfo = PropertyDecl->getTypeSourceInfo();
+        PropertyDecl->setType(PropertyTy, TSInfo);
+    }
   }
 
   if ((Attributes & ObjCDeclSpec::DQ_PR_atomic) &&

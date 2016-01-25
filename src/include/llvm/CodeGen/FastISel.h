@@ -18,9 +18,9 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/Target/TargetLowering.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Target/TargetLowering.h"
 
 namespace llvm {
 
@@ -40,12 +40,15 @@ public:
     bool IsByVal : 1;
     bool IsInAlloca : 1;
     bool IsReturned : 1;
+    bool IsSwiftSelf : 1;
+    bool IsSwiftError : 1;
     uint16_t Alignment;
 
     ArgListEntry()
         : Val(nullptr), Ty(nullptr), IsSExt(false), IsZExt(false),
           IsInReg(false), IsSRet(false), IsNest(false), IsByVal(false),
-          IsInAlloca(false), IsReturned(false), Alignment(0) {}
+          IsInAlloca(false), IsReturned(false), IsSwiftSelf(false),
+          IsSwiftError(false), Alignment(0) {}
 
     /// \brief Set CallLoweringInfo attribute flags based on a call instruction
     /// and called function attributes.
@@ -76,6 +79,8 @@ public:
     unsigned ResultReg;
     unsigned NumResultRegs;
 
+    bool IsPatchPoint;
+
     SmallVector<Value *, 16> OutVals;
     SmallVector<ISD::ArgFlagsTy, 16> OutFlags;
     SmallVector<unsigned, 16> OutRegs;
@@ -87,7 +92,7 @@ public:
           IsInReg(false), DoesNotReturn(false), IsReturnValueUsed(true),
           IsTailCall(false), NumFixedArgs(-1), CallConv(CallingConv::C),
           Callee(nullptr), SymName(nullptr), CS(nullptr), Call(nullptr),
-          ResultReg(0), NumResultRegs(0) {}
+          ResultReg(0), NumResultRegs(0), IsPatchPoint(false) {}
 
     CallLoweringInfo &setCallee(Type *ResultTy, FunctionType *FuncTy,
                                 const Value *Target, ArgListTy &&ArgsList,
@@ -159,6 +164,11 @@ public:
 
     CallLoweringInfo &setTailCall(bool Value = true) {
       IsTailCall = Value;
+      return *this;
+    }
+
+    CallLoweringInfo &setIsPatchPoint(bool Value = true) {
+      IsPatchPoint = Value;
       return *this;
     }
 

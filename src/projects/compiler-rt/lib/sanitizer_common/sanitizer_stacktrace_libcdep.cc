@@ -44,7 +44,7 @@ void StackTrace::Print() const {
   Printf("\n");
 }
 
-void BufferedStackTrace::Unwind(uptr max_depth, uptr pc, uptr bp, void *context,
+void BufferedStackTrace::Unwind(u32 max_depth, uptr pc, uptr bp, void *context,
                                 uptr stack_top, uptr stack_bottom,
                                 bool request_fast_unwind) {
   top_frame_bp = (max_depth > 0) ? bp : 0;
@@ -59,10 +59,12 @@ void BufferedStackTrace::Unwind(uptr max_depth, uptr pc, uptr bp, void *context,
     return;
   }
   if (!WillUseFastUnwind(request_fast_unwind)) {
+#if !defined(__APPLE__)
     if (context)
       SlowUnwindStackWithContext(pc, context, max_depth);
     else
       SlowUnwindStack(pc, max_depth);
+#endif
   } else {
     FastUnwindStack(pc, bp, stack_top, stack_bottom, max_depth);
   }

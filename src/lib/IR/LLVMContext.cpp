@@ -76,6 +76,23 @@ LLVMContext::LLVMContext() : pImpl(new LLVMContextImpl(*this)) {
   unsigned NoAliasID = getMDKindID("noalias");
   assert(NoAliasID == MD_noalias && "noalias kind id drifted");
   (void)NoAliasID;
+
+  // Create the 'nontemporal' metadata kind.
+  unsigned NonTemporalID = getMDKindID("nontemporal");
+  assert(NonTemporalID == MD_nontemporal && "nontemporal kind id drifted");
+  (void)NonTemporalID;
+
+  // Create the 'llvm.mem.parallel_loop_access' metadata kind.
+  unsigned MemParallelLoopAccessID = getMDKindID("llvm.mem.parallel_loop_access");
+  assert(MemParallelLoopAccessID == MD_mem_parallel_loop_access &&
+         "mem_parallel_loop_access kind id drifted");
+  (void)MemParallelLoopAccessID;
+
+
+  // Create the 'nonnull' metadata kind.
+  unsigned NonNullID = getMDKindID("nonnull");
+  assert(NonNullID == MD_nonnull && "nonnull kind id drifted");
+  (void)NonNullID;
 }
 LLVMContext::~LLVMContext() { delete pImpl; }
 
@@ -212,33 +229,16 @@ void LLVMContext::emitError(unsigned LocCookie, const Twine &ErrorStr) {
 // Metadata Kind Uniquing
 //===----------------------------------------------------------------------===//
 
-#ifndef NDEBUG
-/// isValidName - Return true if Name is a valid custom metadata handler name.
-static bool isValidName(StringRef MDName) {
-  if (MDName.empty())
-    return false;
-
-  if (!std::isalpha(static_cast<unsigned char>(MDName[0])))
-    return false;
-
-  for (StringRef::iterator I = MDName.begin() + 1, E = MDName.end(); I != E;
-       ++I) {
-    if (!std::isalnum(static_cast<unsigned char>(*I)) && *I != '_' &&
-        *I != '-' && *I != '.')
-      return false;
-  }
-  return true;
-}
-#endif
-
 /// getMDKindID - Return a unique non-zero ID for the specified metadata kind.
 unsigned LLVMContext::getMDKindID(StringRef Name) const {
-  assert(isValidName(Name) && "Invalid MDNode name");
+  assert(!std::isdigit(Name.front()) &&
+         "Named metadata may not start with a digit");
 
   // If this is new, assign it its ID.
-  return
-    pImpl->CustomMDKindNames.GetOrCreateValue(
-      Name, pImpl->CustomMDKindNames.size()).second;
+  return pImpl->CustomMDKindNames.insert(std::make_pair(
+                                             Name,
+                                             pImpl->CustomMDKindNames.size()))
+      .first->second;
 }
 
 /// getHandlerNames - Populate client supplied smallvector using custome

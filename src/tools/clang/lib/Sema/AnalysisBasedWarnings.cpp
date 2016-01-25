@@ -530,44 +530,37 @@ static void CheckFallThroughForBody(Sema &S, const Decl *D, const Stmt *Body,
   if (CD.checkDiagnostics(Diags, ReturnsVoid, HasNoReturn))
       return;
 
-  // FIXME: Function try block
-  if (const CompoundStmt *Compound = dyn_cast<CompoundStmt>(Body)) {
-    switch (CheckFallThrough(AC)) {
-      case UnknownFallThrough:
-        break;
+  SourceLocation LBrace = Body->getLocStart(), RBrace = Body->getLocEnd();
+  // Either in a function body compound statement, or a function-try-block.
+  switch (CheckFallThrough(AC)) {
+    case UnknownFallThrough:
+      break;
 
-      case MaybeFallThrough:
-        if (HasNoReturn)
-          S.Diag(Compound->getRBracLoc(),
-                 CD.diag_MaybeFallThrough_HasNoReturn);
-        else if (!ReturnsVoid)
-          S.Diag(Compound->getRBracLoc(),
-                 CD.diag_MaybeFallThrough_ReturnsNonVoid);
-        break;
-      case AlwaysFallThrough:
-        if (HasNoReturn)
-          S.Diag(Compound->getRBracLoc(),
-                 CD.diag_AlwaysFallThrough_HasNoReturn);
-        else if (!ReturnsVoid)
-          S.Diag(Compound->getRBracLoc(),
-                 CD.diag_AlwaysFallThrough_ReturnsNonVoid);
-        break;
-      case NeverFallThroughOrReturn:
-        if (ReturnsVoid && !HasNoReturn && CD.diag_NeverFallThroughOrReturn) {
-          if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
-            S.Diag(Compound->getLBracLoc(), CD.diag_NeverFallThroughOrReturn)
-              << 0 << FD;
-          } else if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D)) {
-            S.Diag(Compound->getLBracLoc(), CD.diag_NeverFallThroughOrReturn)
-              << 1 << MD;
-          } else {
-            S.Diag(Compound->getLBracLoc(), CD.diag_NeverFallThroughOrReturn);
-          }
+    case MaybeFallThrough:
+      if (HasNoReturn)
+        S.Diag(RBrace, CD.diag_MaybeFallThrough_HasNoReturn);
+      else if (!ReturnsVoid)
+        S.Diag(RBrace, CD.diag_MaybeFallThrough_ReturnsNonVoid);
+      break;
+    case AlwaysFallThrough:
+      if (HasNoReturn)
+        S.Diag(RBrace, CD.diag_AlwaysFallThrough_HasNoReturn);
+      else if (!ReturnsVoid)
+        S.Diag(RBrace, CD.diag_AlwaysFallThrough_ReturnsNonVoid);
+      break;
+    case NeverFallThroughOrReturn:
+      if (ReturnsVoid && !HasNoReturn && CD.diag_NeverFallThroughOrReturn) {
+        if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+          S.Diag(LBrace, CD.diag_NeverFallThroughOrReturn) << 0 << FD;
+        } else if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D)) {
+          S.Diag(LBrace, CD.diag_NeverFallThroughOrReturn) << 1 << MD;
+        } else {
+          S.Diag(LBrace, CD.diag_NeverFallThroughOrReturn);
         }
-        break;
-      case NeverFallThrough:
-        break;
-    }
+      }
+      break;
+    case NeverFallThrough:
+      break;
   }
 }
 
@@ -923,7 +916,7 @@ namespace {
       // issue a warn_fallthrough_attr_unreachable for them.
       for (const auto *B : *Cfg) {
         const Stmt *L = B->getLabel();
-        if (L && isa<SwitchCase>(L) && ReachableBlocks.insert(B))
+        if (L && isa<SwitchCase>(L) && ReachableBlocks.insert(B).second)
           BlockQueue.push_back(B);
       }
 
@@ -933,7 +926,7 @@ namespace {
         for (CFGBlock::const_succ_iterator I = P->succ_begin(),
                                            E = P->succ_end();
              I != E; ++I) {
-          if (*I && ReachableBlocks.insert(*I))
+          if (*I && ReachableBlocks.insert(*I).second)
             BlockQueue.push_back(*I);
         }
       }
@@ -1475,6 +1468,20 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     return ONS;
   }
 
+  OptionalNotes getNotes(const PartialDiagnosticAt &Note1,
+                         const PartialDiagnosticAt &Note2) const {
+    OptionalNotes ONS;
+    ONS.push_back(Note1);
+    ONS.push_back(Note2);
+    if (Verbose && CurrentFunction) {
+      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getLocStart(),
+                                S.PDiag(diag::note_thread_warning_in_fun)
+                                    << CurrentFunction->getNameAsString());
+      ONS.push_back(FNote);
+    }
+    return ONS;
+  }
+
   // Helper functions
   void warnLockMismatch(unsigned DiagID, StringRef Kind, Name LockName,
                         SourceLocation Loc) {
@@ -1605,13 +1612,25 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
         case POK_FunctionCall:
           DiagID = diag::warn_fun_requires_lock_precise;
           break;
+        case POK_PassByRef:
+          DiagID = diag::warn_guarded_pass_by_reference;
+          break;
+        case POK_PtPassByRef:
+          DiagID = diag::warn_pt_guarded_pass_by_reference;
+          break;
       }
       PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
                                                        << D->getNameAsString()
                                                        << LockName << LK);
       PartialDiagnosticAt Note(Loc, S.PDiag(diag::note_found_mutex_near_match)
                                         << *PossibleMatch);
-      Warnings.push_back(DelayedDiag(Warning, getNotes(Note)));
+      if (Verbose && POK == POK_VarAccess) {
+        PartialDiagnosticAt VNote(D->getLocation(),
+                                 S.PDiag(diag::note_guarded_by_declared_here)
+                                     << D->getNameAsString());
+        Warnings.push_back(DelayedDiag(Warning, getNotes(Note, VNote)));
+      } else
+        Warnings.push_back(DelayedDiag(Warning, getNotes(Note)));
     } else {
       switch (POK) {
         case POK_VarAccess:
@@ -1622,6 +1641,12 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
           break;
         case POK_FunctionCall:
           DiagID = diag::warn_fun_requires_lock;
+          break;
+        case POK_PassByRef:
+          DiagID = diag::warn_guarded_pass_by_reference;
+          break;
+        case POK_PtPassByRef:
+          DiagID = diag::warn_pt_guarded_pass_by_reference;
           break;
       }
       PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
@@ -1637,8 +1662,9 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     }
   }
 
+
   virtual void handleNegativeNotHeld(StringRef Kind, Name LockName, Name Neg,
-                                     SourceLocation Loc) {
+                                     SourceLocation Loc) override {
     PartialDiagnosticAt Warning(Loc,
         S.PDiag(diag::warn_acquire_requires_negative_cap)
         << Kind << LockName << Neg);
@@ -1650,6 +1676,22 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
                              SourceLocation Loc) override {
     PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_fun_excludes_mutex)
                                          << Kind << FunName << LockName);
+    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+  }
+
+
+  virtual void handleLockAcquiredBefore(StringRef Kind, Name L1Name,
+                                        Name L2Name, SourceLocation Loc)
+      override {
+    PartialDiagnosticAt Warning(Loc,
+      S.PDiag(diag::warn_acquired_before) << Kind << L1Name << L2Name);
+    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+  }
+
+  virtual void handleBeforeAfterCycle(Name L1Name, SourceLocation Loc)
+      override {
+    PartialDiagnosticAt Warning(Loc,
+      S.PDiag(diag::warn_acquired_before_after_cycle) << L1Name);
     Warnings.push_back(DelayedDiag(Warning, getNotes()));
   }
 
@@ -1678,7 +1720,7 @@ class ConsumedWarningsHandler : public ConsumedWarningsHandlerBase {
   DiagList Warnings;
   
 public:
-  
+
   ConsumedWarningsHandler(Sema &S) : S(S) {}
 
   void emitDiagnostics() override {
@@ -1955,7 +1997,8 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
     if (!Diags.isIgnored(diag::warn_thread_safety_verbose, D->getLocStart()))
       Reporter.setVerbose(true);
 
-    threadSafety::runThreadSafetyAnalysis(AC, Reporter);
+    threadSafety::runThreadSafetyAnalysis(AC, Reporter,
+                                          &S.ThreadSafetyDeclCache);
     Reporter.emitDiagnostics();
   }
 

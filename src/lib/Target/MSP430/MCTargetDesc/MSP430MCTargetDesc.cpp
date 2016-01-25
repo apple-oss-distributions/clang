@@ -39,7 +39,7 @@ static MCInstrInfo *createMSP430MCInstrInfo() {
 
 static MCRegisterInfo *createMSP430MCRegisterInfo(StringRef TT) {
   MCRegisterInfo *X = new MCRegisterInfo();
-  InitMSP430MCRegisterInfo(X, MSP430::PCW);
+  InitMSP430MCRegisterInfo(X, MSP430::PC);
   return X;
 }
 
@@ -58,12 +58,11 @@ static MCCodeGenInfo *createMSP430MCCodeGenInfo(StringRef TT, Reloc::Model RM,
   return X;
 }
 
-static MCInstPrinter *createMSP430MCInstPrinter(const Target &T,
+static MCInstPrinter *createMSP430MCInstPrinter(const Triple &T,
                                                 unsigned SyntaxVariant,
                                                 const MCAsmInfo &MAI,
                                                 const MCInstrInfo &MII,
-                                                const MCRegisterInfo &MRI,
-                                                const MCSubtargetInfo &STI) {
+                                                const MCRegisterInfo &MRI) {
   if (SyntaxVariant == 0)
     return new MSP430InstPrinter(MAI, MII, MRI);
   return nullptr;

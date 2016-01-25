@@ -27,7 +27,6 @@
 #include "clang/Analysis/Analyses/ThreadSafetyTraverse.h"
 #include "clang/Analysis/AnalysisContext.h"
 #include "clang/Basic/OperatorKinds.h"
-
 #include <memory>
 #include <ostream>
 #include <sstream>
@@ -287,6 +286,14 @@ public:
             sx::partiallyMatches(CapExpr, other.CapExpr);
   }
 
+  const ValueDecl* valueDecl() const {
+    if (Negated)
+      return nullptr;
+    if (auto *P = dyn_cast<til::Project>(CapExpr))
+      return P->clangDecl();
+    return nullptr;
+  }
+
   std::string toString() const {
     if (Negated)
       return "!" + sx::toString(CapExpr);
@@ -477,9 +484,9 @@ private:
                                            // Indexed by clang BlockID.
 
   LVarDefinitionMap CurrentLVarMap;
-  std::vector<til::Variable*> CurrentArguments;
-  std::vector<til::Variable*> CurrentInstructions;
-  std::vector<til::Variable*> IncompleteArgs;
+  std::vector<til::Phi*>   CurrentArguments;
+  std::vector<til::SExpr*> CurrentInstructions;
+  std::vector<til::Phi*>   IncompleteArgs;
   til::BasicBlock *CurrentBB;
   BlockInfo *CurrentBlockInfo;
 };

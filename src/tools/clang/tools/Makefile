@@ -28,7 +28,7 @@ OPTIONAL_PARALLEL_DIRS := extra
 
 ifeq ($(BUILD_CLANG_ONLY),YES)
   DIRS := libclang c-index-test
-  PARALLEL_DIRS := driver
+  PARALLEL_DIRS := clang-format driver
   OPTIONAL_PARALLEL_DIRS :=
 endif
 

@@ -40,12 +40,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/Analysis.h"
-#include "llvm/CodeGen/FastISel.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/Loads.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/FastISel.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -62,7 +63,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
@@ -86,6 +86,8 @@ void FastISel::ArgListEntry::setAttributes(ImmutableCallSite *CS,
   IsByVal = CS->paramHasAttr(AttrIdx, Attribute::ByVal);
   IsInAlloca = CS->paramHasAttr(AttrIdx, Attribute::InAlloca);
   IsReturned = CS->paramHasAttr(AttrIdx, Attribute::Returned);
+  IsSwiftSelf = CS->paramHasAttr(AttrIdx, Attribute::SwiftSelf);
+  IsSwiftError = CS->paramHasAttr(AttrIdx, Attribute::SwiftError);
   Alignment = CS->getParamAlignment(AttrIdx);
 }
 
@@ -497,7 +499,7 @@ bool FastISel::selectGetElementPtr(const User *I) {
        OI != E; ++OI) {
     const Value *Idx = *OI;
     if (auto *StTy = dyn_cast<StructType>(Ty)) {
-      unsigned Field = cast<ConstantInt>(Idx)->getZExtValue();
+      uint64_t Field = cast<ConstantInt>(Idx)->getZExtValue();
       if (Field) {
         // N = N + Offset
         TotalOffs += DL.getStructLayout(StTy)->getElementOffset(Field);
@@ -518,8 +520,8 @@ bool FastISel::selectGetElementPtr(const User *I) {
         if (CI->isZero())
           continue;
         // N = N + Offset
-        TotalOffs +=
-            DL.getTypeAllocSize(Ty) * cast<ConstantInt>(CI)->getSExtValue();
+        uint64_t IdxN = CI->getValue().sextOrTrunc(64).getSExtValue();
+        TotalOffs += DL.getTypeAllocSize(Ty) * IdxN;
         if (TotalOffs >= MaxOffs) {
           N = fastEmit_ri_(VT, ISD::ADD, N, NIsKill, TotalOffs, VT);
           if (!N) // Unhandled operand. Halt "fast" selection and bail.
@@ -728,6 +730,7 @@ bool FastISel::selectPatchpoint(const CallInst *I) {
   // For AnyRegCC the arguments are lowered later on manually.
   unsigned NumCallArgs = IsAnyRegCC ? 0 : NumArgs;
   CallLoweringInfo CLI;
+  CLI.setIsPatchPoint();
   if (!lowerCallOperands(I, NumMetaOpers, NumCallArgs, Callee, IsAnyRegCC, CLI))
     return false;
 
@@ -800,7 +803,8 @@ bool FastISel::selectPatchpoint(const CallInst *I) {
     return false;
 
   // Push the register mask info.
-  Ops.push_back(MachineOperand::CreateRegMask(TRI.getCallPreservedMask(CC)));
+  Ops.push_back(MachineOperand::CreateRegMask(
+      TRI.getCallPreservedMask(*FuncInfo.MF, CC)));
 
   // Add scratch registers as implicit def and early clobber.
   const MCPhysReg *ScratchRegs = TLI.getScratchRegisters(CC);
@@ -933,6 +937,10 @@ bool FastISel::lowerCallTo(CallLoweringInfo &CLI) {
       Flags.setInReg();
     if (Arg.IsSRet)
       Flags.setSRet();
+    if (Arg.IsSwiftSelf)
+      Flags.setSwiftSelf();
+    if (Arg.IsSwiftError)
+      Flags.setSwiftError();
     if (Arg.IsByVal)
       Flags.setByVal();
     if (Arg.IsInAlloca) {
@@ -1078,10 +1086,8 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
     return true;
   case Intrinsic::dbg_declare: {
     const DbgDeclareInst *DI = cast<DbgDeclareInst>(II);
-    DIVariable DIVar(DI->getVariable());
-    assert((!DIVar || DIVar.isVariable()) &&
-           "Variable in DbgDeclareInst should be either null or a DIVariable.");
-    if (!DIVar || !FuncInfo.MF->getMMI().hasDebugInfo()) {
+    assert(DI->getVariable() && "Missing variable");
+    if (!FuncInfo.MF->getMMI().hasDebugInfo()) {
       DEBUG(dbgs() << "Dropping debug info for " << *DI << "\n");
       return true;
     }
@@ -1121,17 +1127,20 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
                                      false);
 
     if (Op) {
+      assert(DI->getVariable()->isValidLocationForIntrinsic(DbgLoc) &&
+             "Expected inlined-at fields to agree");
       if (Op->isReg()) {
         Op->setIsDebug(true);
         BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
                 TII.get(TargetOpcode::DBG_VALUE), false, Op->getReg(), 0,
-                DI->getVariable());
+                DI->getVariable(), DI->getExpression());
       } else
         BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
                 TII.get(TargetOpcode::DBG_VALUE))
             .addOperand(*Op)
             .addImm(0)
-            .addMetadata(DI->getVariable());
+            .addMetadata(DI->getVariable())
+            .addMetadata(DI->getExpression());
     } else {
       // We can't yet handle anything else here because it would require
       // generating code, thus altering codegen because of debug info.
@@ -1144,34 +1153,40 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
     const DbgValueInst *DI = cast<DbgValueInst>(II);
     const MCInstrDesc &II = TII.get(TargetOpcode::DBG_VALUE);
     const Value *V = DI->getValue();
+    assert(DI->getVariable()->isValidLocationForIntrinsic(DbgLoc) &&
+           "Expected inlined-at fields to agree");
     if (!V) {
       // Currently the optimizer can produce this; insert an undef to
       // help debugging.  Probably the optimizer should not do this.
       BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II)
           .addReg(0U)
           .addImm(DI->getOffset())
-          .addMetadata(DI->getVariable());
+          .addMetadata(DI->getVariable())
+          .addMetadata(DI->getExpression());
     } else if (const auto *CI = dyn_cast<ConstantInt>(V)) {
       if (CI->getBitWidth() > 64)
         BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II)
             .addCImm(CI)
             .addImm(DI->getOffset())
-            .addMetadata(DI->getVariable());
+            .addMetadata(DI->getVariable())
+            .addMetadata(DI->getExpression());
       else
         BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II)
             .addImm(CI->getZExtValue())
             .addImm(DI->getOffset())
-            .addMetadata(DI->getVariable());
+            .addMetadata(DI->getVariable())
+            .addMetadata(DI->getExpression());
     } else if (const auto *CF = dyn_cast<ConstantFP>(V)) {
       BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II)
           .addFPImm(CF)
           .addImm(DI->getOffset())
-          .addMetadata(DI->getVariable());
+          .addMetadata(DI->getVariable())
+          .addMetadata(DI->getExpression());
     } else if (unsigned Reg = lookUpRegForValue(V)) {
       // FIXME: This does not handle register-indirect values at offset 0.
       bool IsIndirect = DI->getOffset() != 0;
       BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II, IsIndirect, Reg,
-              DI->getOffset(), DI->getVariable());
+              DI->getOffset(), DI->getVariable(), DI->getExpression());
     } else {
       // We can't yet handle anything else here because it would require
       // generating code, thus altering codegen because of debug info.
@@ -1288,12 +1303,24 @@ bool FastISel::selectBitCast(const User *I) {
   return true;
 }
 
+// Return true if we should copy from swift error to the final vreg as specified
+// by SwiftErrorWorklist.
+static bool shouldCopySwiftErrorsToFinalVRegs(const TargetLowering &TLI,
+                                              FunctionLoweringInfo &FuncInfo) {
+  if (!TLI.supportSwiftError())
+    return false;
+  return FuncInfo.SwiftErrorWorklist.count(FuncInfo.MBB);
+}
+
 bool FastISel::selectInstruction(const Instruction *I) {
   // Just before the terminator instruction, insert instructions to
   // feed PHI nodes in successor blocks.
-  if (isa<TerminatorInst>(I))
+  if (isa<TerminatorInst>(I)) {
+    if (shouldCopySwiftErrorsToFinalVRegs(TLI, FuncInfo))
+      return false;
     if (!handlePHINodesInSuccessorBlocks(I->getParent()))
       return false;
+  }
 
   DbgLoc = I->getDebugLoc();
 
@@ -1574,10 +1601,10 @@ FastISel::FastISel(FunctionLoweringInfo &FuncInfo,
                    bool SkipTargetIndependentISel)
     : FuncInfo(FuncInfo), MF(FuncInfo.MF), MRI(FuncInfo.MF->getRegInfo()),
       MFI(*FuncInfo.MF->getFrameInfo()), MCP(*FuncInfo.MF->getConstantPool()),
-      TM(FuncInfo.MF->getTarget()), DL(*TM.getSubtargetImpl()->getDataLayout()),
-      TII(*TM.getSubtargetImpl()->getInstrInfo()),
-      TLI(*TM.getSubtargetImpl()->getTargetLowering()),
-      TRI(*TM.getSubtargetImpl()->getRegisterInfo()), LibInfo(LibInfo),
+      TM(FuncInfo.MF->getTarget()), DL(*TM.getDataLayout()),
+      TII(*MF->getSubtarget().getInstrInfo()),
+      TLI(*MF->getSubtarget().getTargetLowering()),
+      TRI(*MF->getSubtarget().getRegisterInfo()), LibInfo(LibInfo),
       SkipTargetIndependentISel(SkipTargetIndependentISel) {}
 
 FastISel::~FastISel() {}
@@ -1971,7 +1998,7 @@ bool FastISel::handlePHINodesInSuccessorBlocks(const BasicBlock *LLVMBB) {
 
     // If this terminator has multiple identical successors (common for
     // switches), only handle each succ once.
-    if (!SuccsHandled.insert(SuccMBB))
+    if (!SuccsHandled.insert(SuccMBB).second)
       continue;
 
     MachineBasicBlock::iterator MBBI = SuccMBB->begin();
@@ -1995,9 +2022,7 @@ bool FastISel::handlePHINodesInSuccessorBlocks(const BasicBlock *LLVMBB) {
       EVT VT = TLI.getValueType(PN->getType(), /*AllowUnknown=*/true);
       if (VT == MVT::Other || !TLI.isTypeLegal(VT)) {
         // Handle integer promotions, though, because they're common and easy.
-        if (VT == MVT::i1 || VT == MVT::i8 || VT == MVT::i16)
-          VT = TLI.getTypeToTransformTo(LLVMBB->getContext(), VT);
-        else {
+        if (!(VT == MVT::i1 || VT == MVT::i8 || VT == MVT::i16)) {
           FuncInfo.PHINodesToUpdate.resize(FuncInfo.OrigNumPHINodesToUpdate);
           return false;
         }
@@ -2119,8 +2144,8 @@ FastISel::createMachineMemOperandFor(const Instruction *I) const {
   } else
     return nullptr;
 
-  bool IsNonTemporal = I->getMetadata("nontemporal") != nullptr;
-  bool IsInvariant = I->getMetadata("invariant.load") != nullptr;
+  bool IsNonTemporal = I->getMetadata(LLVMContext::MD_nontemporal) != nullptr;
+  bool IsInvariant = I->getMetadata(LLVMContext::MD_invariant_load) != nullptr;
   const MDNode *Ranges = I->getMetadata(LLVMContext::MD_range);
 
   AAMDNodes AAInfo;
@@ -2129,8 +2154,7 @@ FastISel::createMachineMemOperandFor(const Instruction *I) const {
   if (Alignment == 0) // Ensure that codegen never sees alignment 0.
     Alignment = DL.getABITypeAlignment(ValTy);
 
-  unsigned Size =
-      TM.getSubtargetImpl()->getDataLayout()->getTypeStoreSize(ValTy);
+  unsigned Size = DL.getTypeStoreSize(ValTy);
 
   if (IsVolatile)
     Flags |= MachineMemOperand::MOVolatile;

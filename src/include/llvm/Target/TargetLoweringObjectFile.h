@@ -29,22 +29,29 @@ namespace llvm {
   class MCSymbol;
   class MCSymbolRefExpr;
   class MCStreamer;
+  class MCValue;
   class ConstantExpr;
   class GlobalValue;
   class TargetMachine;
 
 class TargetLoweringObjectFile : public MCObjectFileInfo {
   MCContext *Ctx;
-  const DataLayout *DL;
 
   TargetLoweringObjectFile(
     const TargetLoweringObjectFile&) LLVM_DELETED_FUNCTION;
   void operator=(const TargetLoweringObjectFile&) LLVM_DELETED_FUNCTION;
 
+protected:
+  const DataLayout *DL;
+  bool SupportIndirectSymViaGOTPCRel;
+  bool SupportGOTPCRelWithOffset;
+
 public:
   MCContext &getContext() const { return *Ctx; }
 
-  TargetLoweringObjectFile() : MCObjectFileInfo(), Ctx(nullptr), DL(nullptr) {}
+  TargetLoweringObjectFile() : MCObjectFileInfo(), Ctx(nullptr), DL(nullptr),
+                               SupportIndirectSymViaGOTPCRel(false),
+                               SupportGOTPCRelWithOffset(true) {}
 
   virtual ~TargetLoweringObjectFile();
 
@@ -151,16 +158,31 @@ public:
     return nullptr;
   }
 
-  /// \brief True if the section is atomized using the symbols in it.
-  /// This is false if the section is not atomized at all (most ELF sections) or
-  /// if it is atomized based on its contents (MachO' __TEXT,__cstring for
-  /// example).
-  virtual bool isSectionAtomizableBySymbols(const MCSection &Section) const;
+  /// \brief Target supports replacing a data "PC"-relative access to a symbol
+  /// through another symbol, by accessing the later via a GOT entry instead?
+  bool supportIndirectSymViaGOTPCRel() const {
+    return SupportIndirectSymViaGOTPCRel;
+  }
+
+  /// \brief Target GOT "PC"-relative relocation supports encoding an additional
+  /// binary expression with an offset?
+  bool supportGOTPCRelWithOffset() const {
+    return SupportGOTPCRelWithOffset;
+  }
+
+  /// \brief Get the target specific PC relative GOT entry relocation
+  virtual const MCExpr *getIndirectSymViaGOTPCRel(const MCSymbol *Sym,
+                                                  const MCValue &MV,
+                                                  int64_t Offset,
+                                                  MachineModuleInfo *MMI,
+                                                  MCStreamer &Streamer) const {
+    return nullptr;
+  }
 
 protected:
   virtual const MCSection *
   SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
-                         Mangler &Mang, const TargetMachine &TM) const;
+                         Mangler &Mang, const TargetMachine &TM) const = 0;
 };
 
 } // end namespace llvm

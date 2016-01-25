@@ -42,6 +42,7 @@ namespace driver {
   class Command;
   class Compilation;
   class InputInfo;
+  class Job;
   class JobAction;
   class SanitizerArgs;
   class ToolChain;
@@ -59,6 +60,18 @@ class Driver {
     CPPMode,
     CLMode
   } Mode;
+
+  enum SaveTempsMode {
+    SaveTempsNone,
+    SaveTempsCwd,
+    SaveTempsObj
+  } SaveTemps;
+
+  enum BitcodeEmbedMode {
+    EmbedNone,
+    EmbedMarker,
+    EmbedBitcode
+  } BitcodeEmbed;
 
 public:
   // Diag - Forwarding function for diagnostics.
@@ -102,9 +115,6 @@ public:
 
   /// Default target triple.
   std::string DefaultTargetTriple;
-
-  /// Default name for linked images (e.g., "a.out").
-  std::string DefaultImageName;
 
   /// Driver title to use with help.
   std::string DriverTitle;
@@ -180,6 +190,8 @@ private:
   mutable llvm::StringMap<ToolChain *> ToolChains;
 
 private:
+  phases::ID FinalPhaseForDiagnostics;
+
   /// TranslateInputArgs - Create a new derived argument list from the input
   /// arguments, after applying the standard argument translations.
   llvm::opt::DerivedArgList *
@@ -189,6 +201,12 @@ private:
   // which option we used to determine the final phase.
   phases::ID getFinalPhase(const llvm::opt::DerivedArgList &DAL,
                            llvm::opt::Arg **FinalPhaseArg = nullptr) const;
+
+  // Before executing jobs, sets up response files for commands that need them.
+  void setUpResponseFiles(Compilation &C, Job &J);
+
+  void generatePrefixedToolNames(const char *Tool, const ToolChain &TC,
+                                 SmallVectorImpl<std::string> &Names) const;
 
 public:
   Driver(StringRef _ClangExecutable,
@@ -227,6 +245,12 @@ public:
   void setInstalledDir(StringRef Value) {
     InstalledDir = Value;
   }
+
+  bool isSaveTempsEnabled() const { return SaveTemps != SaveTempsNone; }
+  bool isSaveTempsObj() const { return SaveTemps == SaveTempsObj; }
+
+  bool embedBitcodeEnabled() const { return BitcodeEmbed == EmbedBitcode; }
+  bool embedBitcodeMarkerOnly() const { return BitcodeEmbed == EmbedMarker; }
 
   /// @}
   /// @name Primary Functionality
@@ -291,10 +315,10 @@ public:
   /// arguments and return an appropriate exit code.
   ///
   /// This routine handles additional processing that must be done in addition
-  /// to just running the subprocesses, for example reporting errors, removing
-  /// temporary files, etc.
-  int ExecuteCompilation(const Compilation &C,
-     SmallVectorImpl< std::pair<int, const Command *> > &FailingCommands) const;
+  /// to just running the subprocesses, for example reporting errors, setting
+  /// up response files, removing temporary files, etc.
+  int ExecuteCompilation(Compilation &C,
+     SmallVectorImpl< std::pair<int, const Command *> > &FailingCommands);
   
   /// generateCompilationDiagnostics - Generate diagnostics information 
   /// including preprocessed source file(s).
@@ -343,8 +367,9 @@ public:
   /// ConstructAction - Construct the appropriate action to do for
   /// \p Phase on the \p Input, taking in to account arguments
   /// like -fsyntax-only or --analyze.
-  Action *ConstructPhaseAction(const llvm::opt::ArgList &Args, phases::ID Phase,
-                               Action *Input) const;
+  std::unique_ptr<Action>
+  ConstructPhaseAction(const llvm::opt::ArgList &Args, phases::ID Phase,
+                       std::unique_ptr<Action> Input) const;
 
   /// BuildJobsForAction - Construct the jobs to perform for the
   /// action \p A.
@@ -356,6 +381,9 @@ public:
                           bool MultipleArchs,
                           const char *LinkingOutput,
                           InputInfo &Result) const;
+
+  /// Returns the default name for linked images (e.g., "a.out").
+  const char *getDefaultImageName() const;
 
   /// GetNamedOutputPath - Return the name to use for the output of
   /// the action \p JA. The result is appended to the compilation's

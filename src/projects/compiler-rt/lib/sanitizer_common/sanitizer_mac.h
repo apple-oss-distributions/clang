@@ -32,6 +32,9 @@ enum MacosVersion {
 
 MacosVersion GetMacosVersion();
 
+// Check if the operation can be performed under the sandbox.
+bool sandbox_allows_to_perform(const char *operation);
+
 }  // namespace __sanitizer
 
 #endif  // SANITIZER_MAC
