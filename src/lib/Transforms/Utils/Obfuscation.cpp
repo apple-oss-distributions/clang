@@ -91,38 +91,49 @@ void Obfuscator::obfuscateModule(Module &M,
                                  std::function<bool(Value &)> preserve) {
   // Obfuscate value names
   {
-    SmallVector<GlobalValue *, 64> Worklist;
+    typedef std::pair<GlobalValue*, SmallString<64>> WorkEntry;
+    SmallVector<WorkEntry, 64> Worklist;
     auto hasName = [](const Value &V) { return V.getName() != ""; };
     for (auto &F : M) {
       if (hasName(F) && !preserve(F))
-        Worklist.push_back(&F);
+        Worklist.push_back({&F, F.getName()});
       // While we're here, drop parameter names if they exist
       for (auto &Arg : F.args())
         Arg.setName("");
     }
     for (auto &I : M.globals())
       if (hasName(I) && !preserve(I))
-        Worklist.push_back(&I);
+        Worklist.push_back({&I, I.getName()});
     for (auto &I : M.aliases())
       if (hasName(I) && !preserve(I))
-        Worklist.push_back(&I);
-    for (auto I : Worklist)
-      I->setName(obfuscate(I->getName()));
+        Worklist.push_back({&I, I.getName()});
+    // Obfuscate all the symbols in the list.
+    // Run two passes across the worklist, first time rename to a temp name
+    // to avoid conflicts.
+    for (auto &I : Worklist)
+      // Just set to something but don't really care what it becames.
+      I.first->setName("__obfs_tmp#");
+    for (auto &I : Worklist)
+      I.first->setName(obfuscate(I.second));
   }
 
   // Drop type names
   TypeFinder TF;
   TF.run(M, true);
   for (auto I : TF)
+    // typename is not in the symbol table so temporary conflict is ok.
     I->setName(obfuscateTypeName(I->getName()));
 
   // Obfuscate debug info strings
   MDSRecursiveModify Modify(M.getContext(),
                             [this](StringRef S) { return obfuscate(S); });
 
-  // llvm.dbg.cu needs to be obfuscated
+  // llvm.dbg.cu and llvm.gcov  needs to be obfuscated
   if (auto DBG = M.getNamedMetadata("llvm.dbg.cu"))
     Modify.addEntryPoint(DBG);
+  if (auto GCOV = M.getNamedMetadata("llvm.gcov"))
+    Modify.addEntryPoint(GCOV);
+
   Modify.run();
 
   // llvm.dbg.value/declare's "variable" argument needs to be obfuscated

@@ -35,6 +35,16 @@
 # include <TargetConditionals.h>
 # if TARGET_OS_IPHONE
 #  define SANITIZER_IOS    1
+#  if TARGET_OS_WATCH
+#   define SANITIZER_WATCHOS 1
+#  else
+#   define SANITIZER_WATCHOS 0
+#  endif
+#  if TARGET_OS_TV
+#   define SANITIZER_TVOS 1
+#  else
+#   define SANITIZER_TVOS 0
+#  endif
 # else
 #  define SANITIZER_IOS    0
 # endif

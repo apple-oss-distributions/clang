@@ -35,6 +35,12 @@
 # define ASAN_HAS_EXCEPTIONS 1
 #endif
 
+#ifndef ASAN_LOW_MEMORY
+#if SANITIZER_IOS
+#  define ASAN_LOW_MEMORY 1
+#endif
+#endif
+
 // If set, values like allocator chunk size, as well as defaults for some flags
 // will be changed towards less memory overhead.
 #ifndef ASAN_LOW_MEMORY

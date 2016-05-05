@@ -371,9 +371,11 @@ bool llvm::StripDebugInfo(Module &M) {
 class GLTOMapper {
   DenseMap<Metadata *, Metadata *> Replacements;
 
+public:
   // Empty nodes
   MDNode *EmptyNode;
   MDNode *EmptySubroutineType;
+private:
 
   // Remember what linkage name we originally had before stripping. If we end up
   // making two subprograms identical who originally had different linkage
@@ -458,6 +460,10 @@ private:
 
   // Create a new compile unit, to replace the one given
   DICompileUnit *getReplacementCU(DICompileUnit *CU) {
+    // Drop skeleton CUs.
+    if (CU->getDWOId())
+      return nullptr;
+
     auto EmissionKind = 2; // -g-line-tables-only
     auto *File = cast_or_null<DIFile>(map(CU->getFile()));
     auto *EnumTypes = cast<MDTuple>(EmptyNode);
@@ -648,23 +654,20 @@ bool llvm::convertDebugInfoToLineTables(Module &M) {
 
   // 4) Create a new llvm.dbg.cu, which is equivalent to the one
   // -gline-tables-only would have created.
-  if (auto *CUMD = M.getNamedMetadata("llvm.dbg.cu")) {
-    SmallVector<MDNode*, 8> CUs;
-    for (MDNode *OldCU : CUMD->operands()) {
-      // Drop skeleton CUs.
-      if (!cast<DICompileUnit>(OldCU)->getDWOId()) {
-        Mapper.traverseAndRemap(OldCU);
-        auto *NewCU = Mapper.mapNode(OldCU);
-        Changed |= NewCU != OldCU;
-        CUs.push_back(NewCU);
-      } else
-        Changed |= 1;
+  for (auto &NMD : M.getNamedMDList()) {
+    SmallVector<MDNode *, 8> Ops;
+    for (MDNode *Op : NMD.operands()) {
+      Mapper.traverseAndRemap(Op);
+      auto *NewOp = Mapper.mapNode(Op);
+      Changed |= NewOp != Op;
+      Ops.push_back(NewOp);
     }
 
     if (Changed) {
-      CUMD->dropAllReferences();
-      for (MDNode *CU : CUs)
-        CUMD->addOperand(CU);
+      NMD.dropAllReferences();
+      for (auto *Op : Ops)
+        if (Op)
+          NMD.addOperand(Op);
     }
   }
 

@@ -35,6 +35,7 @@ namespace api_notes {
   enum class OSType {
     OSX,
     IOS,
+    TvOS,
     WatchOS,
     Absent
   };

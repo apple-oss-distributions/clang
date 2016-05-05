@@ -14,6 +14,7 @@
 
 #include "llvm/LTO/LTOCodeGenerator.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
@@ -40,6 +41,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/Host.h"
+#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -588,6 +590,9 @@ void LTOCodeGenerator::resetContext() {
   std::swap(OwnedContext, newContext);
 }
 
+// StringSet holds all the special symbols.
+static ManagedStatic<llvm::StringSet<>> SpecialSymbolSet;
+
 bool LTOCodeGenerator::hideSymbols() {
   std::string Err;
   determineTarget(Err);
@@ -629,10 +634,41 @@ bool LTOCodeGenerator::hideSymbols() {
     return TLI.getLibFunc(S, F);
   };
 
+  static const char* const SpecialSymbols[] = {
+#define COMPILER_SYMBOL(Name) #Name,
+#include "llvm/Transforms/Utils/CompilerRTSymbols.def"
+#undef COMPILER_SYMBOL
+      "objc_retain",
+      "objc_release",
+      "objc_autorelease",
+      "objc_retainAutoreleasedReturnValue",
+      "objc_retainBlock",
+      "objc_autoreleaseReturnValue",
+      "objc_autoreleasePoolPush",
+      "objc_loadWeakRetained",
+      "objc_loadWeak",
+      "objc_destroyWeak",
+      "objc_storeWeak",
+      "objc_initWeak",
+      "objc_moveWeak",
+      "objc_copyWeak",
+      "objc_retainedObject",
+      "objc_unretainedObject",
+      "objc_unretainedPointer"
+  };
+  static const unsigned NumSpecialSymbols = sizeof(SpecialSymbols) /
+                                            sizeof(const char *);
+  // Create and insert the symbols into StringSet.
+  if (!SpecialSymbolSet.isConstructed()) {
+    for (unsigned i = 0; i < NumSpecialSymbols; ++i)
+      SpecialSymbolSet->insert(StringRef(SpecialSymbols[i]));
+  }
+  // Take the address of the StringSet so it can be captured.
+  auto SymbolSet = &*SpecialSymbolSet;
   // Whether this is a special symbol that the compiler recognizes. This can
   // either be a compiler-internal symbol, or an external symbol that the
   // compiler special cases. Eitherway, checks based on name
-  auto isSpecialSymbolName = [](StringRef Name) {
+  auto isSpecialSymbolName = [SymbolSet](StringRef Name) {
     if (Name.startswith("llvm.") || Name.startswith("__stack_chk") ||
         Name.startswith("clang.arc"))
       return true;
@@ -647,24 +683,9 @@ bool LTOCodeGenerator::hideSymbols() {
 
     // Some special external names, which might of gotten dropped due to
     // optimizations
-    if (Name.startswith("objc_"))
-      return Name.equals("objc_retain") ||
-             Name.equals("objc_release") ||
-             Name.equals("objc_autorelease") ||
-             Name.equals("objc_retainAutoreleasedReturnValue") ||
-             Name.equals("objc_retainBlock") ||
-             Name.equals("objc_autoreleaseReturnValue") ||
-             Name.equals("objc_autoreleasePoolPush") ||
-             Name.equals("objc_loadWeakRetained") ||
-             Name.equals("objc_loadWeak") ||
-             Name.equals("objc_destroyWeak") ||
-             Name.equals("objc_storeWeak") ||
-             Name.equals("objc_initWeak") ||
-             Name.equals("objc_moveWeak") ||
-             Name.equals("objc_copyWeak") ||
-             Name.equals("objc_retainedObject") ||
-             Name.equals("objc_unretainedObject") ||
-             Name.equals("objc_unretainedPointer");
+    if (SymbolSet->count(Name))
+      return true;
+
     return false;
   };
 

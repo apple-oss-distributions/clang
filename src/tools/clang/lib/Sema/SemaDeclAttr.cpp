@@ -2062,6 +2062,28 @@ static void handleAvailabilityAttr(Sema &S, Decl *D,
         if (NewAttr)
           D->addAttr(NewAttr);
       }
+  } else if (S.Context.getTargetInfo().getTriple().isTvOS()) {
+    // Transcribe "ios" to "tvos" (and add a new attribute) if the versioning
+    // matches before the start of the tvOS platform.
+    IdentifierInfo *NewII = nullptr;
+    if (II->getName() == "ios")
+      NewII = &S.Context.Idents.get("tvos");
+    else if (II->getName() == "ios_app_extension")
+      NewII = &S.Context.Idents.get("tvos_app_extension");
+
+    if (NewII) {
+        AvailabilityAttr *NewAttr = S.mergeAvailabilityAttr(ND,
+                                                            SourceRange(),
+                                                            NewII,
+                                                            Introduced.Version,
+                                                            Deprecated.Version,
+                                                            Obsoleted.Version,
+                                                            IsUnavailable, Str,
+                                                            /*Override=*/false,
+                                                            Index);
+        if (NewAttr)
+          D->addAttr(NewAttr);
+      }
   }
 }
 

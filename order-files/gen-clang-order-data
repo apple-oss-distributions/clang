@@ -257,7 +257,8 @@ def execute_test_case(test_case, opts):
 
     # Create a scrubbed environment to execute the tests in.
     test_env = {
-        'PATH' : os.environ['PATH'] }
+        'PATH'    : os.environ['PATH'],
+        'SDKROOT' : os.environ['SDKROOT'] }
 
     # Gather data on the driver invocation.
     if opts.sample_driver and test_driver:

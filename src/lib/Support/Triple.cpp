@@ -170,6 +170,7 @@ const char *Triple::getOSTypeName(OSType Kind) {
   case NVCL: return "nvcl";
   case AMDHSA: return "amdhsa";
   case PS4: return "ps4";
+  case TvOS: return "tvos";
   case WatchOS: return "watchos";
   }
 
@@ -380,6 +381,7 @@ static Triple::OSType parseOS(StringRef OSName) {
     .StartsWith("nvcl", Triple::NVCL)
     .StartsWith("amdhsa", Triple::AMDHSA)
     .StartsWith("ps4", Triple::PS4)
+    .StartsWith("tvos", Triple::TvOS)
     .StartsWith("watchos", Triple::WatchOS)
     .Default(Triple::UnknownOS);
 }
@@ -776,6 +778,7 @@ bool Triple::getMacOSXVersion(unsigned &Major, unsigned &Minor,
       return false;
     break;
   case IOS:
+  case TvOS:
   case WatchOS:
     // Ignore the version from the triple.  This is only handled because the
     // the clang driver combines OS X and IOS support into a common Darwin
@@ -805,6 +808,7 @@ void Triple::getiOSVersion(unsigned &Major, unsigned &Minor,
     Micro = 0;
     break;
   case IOS:
+  case TvOS:
     getOSVersion(Major, Minor, Micro);
     // Default to 5.0 (or 7.0 for arm64).
     if (Major == 0)
@@ -993,6 +997,7 @@ Triple Triple::get64BitArchVariant() const {
   Triple T(*this);
   switch (getArch()) {
   case Triple::UnknownArch:
+  case Triple::amdil:
   case Triple::arm:
   case Triple::armeb:
   case Triple::hexagon:
@@ -1033,7 +1038,6 @@ Triple Triple::get64BitArchVariant() const {
   case Triple::ppc:     T.setArch(Triple::ppc64);     break;
   case Triple::sparc:   T.setArch(Triple::sparcv9);   break;
   case Triple::x86:     T.setArch(Triple::x86_64);    break;
-  case Triple::amdil:   T.setArch(Triple::amdil64);   break;
   case Triple::hsail:   T.setArch(Triple::hsail64);   break;
   case Triple::spir:    T.setArch(Triple::spir64);    break;
   case Triple::gpu_32:  T.setArch(Triple::gpu_64);    break;

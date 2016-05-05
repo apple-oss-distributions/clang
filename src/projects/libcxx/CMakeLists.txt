@@ -270,7 +270,12 @@ endif()
 
 append_if(LIBCXX_CXX_FLAGS LIBCXX_TARGET_TRIPLE
           "-target ${LIBCXX_TARGET_TRIPLE}")
-append_if(LIBCXX_CXX_FLAGS LIBCXX_SYSROOT "--sysroot ${LIBCXX_SYSROOT}")
+if (APPLE)
+  append_if(LIBCXX_CXX_FLAGS LIBCXX_SYSROOT "-isysroot ${LIBCXX_SYSROOT}")
+else()
+  append_if(LIBCXX_CXX_FLAGS LIBCXX_SYSROOT "--sysroot ${LIBCXX_SYSROOT}")
+endif()
+
 append_if(LIBCXX_CXX_FLAGS LIBCXX_GCC_TOOLCHAIN
           "-gcc-toolchain ${LIBCXX_GCC_TOOLCHAIN}")
 

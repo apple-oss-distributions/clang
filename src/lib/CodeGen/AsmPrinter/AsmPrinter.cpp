@@ -201,6 +201,8 @@ bool AsmPrinter::doInitialization(Module &M) {
       MCVersionMinType VersionType;
       if (TT.isWatchOS())
         VersionType = MCVM_WatchOSVersionMin;
+      else if (TT.isTvOS())
+        VersionType = MCVM_TvOSVersionMin;
       else if (TT.isMacOSX())
         VersionType = MCVM_OSXVersionMin;
       else

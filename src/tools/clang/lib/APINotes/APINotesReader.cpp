@@ -1060,6 +1060,7 @@ APINotesReader::APINotesReader(std::unique_ptr<llvm::MemoryBuffer> inputBuffer,
 }
 
 APINotesReader::~APINotesReader() {
+  delete &Impl;
 }
 
 std::unique_ptr<APINotesReader> 

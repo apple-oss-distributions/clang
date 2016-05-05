@@ -146,6 +146,7 @@ public:
     NVCL,       // NVIDIA OpenCL
     AMDHSA,     // AMD HSA Runtime
     PS4,
+    TvOS,       // AppleTVOS
     WatchOS,    // Apple watchOS
   };
   enum EnvironmentType {
@@ -379,8 +380,17 @@ public:
   }
 
   /// Is this an iOS triple.
+  /// Note: This identifies AppleTVOS as a variant of iOS. If that ever
+  /// changes, i.e., if the two operating systems diverge or their version
+  /// numbers get out of sync, that will need to be changed.
+  /// WatchOS has completely different version numbers so it is not included.
   bool isiOS() const {
-    return getOS() == Triple::IOS;
+    return getOS() == Triple::IOS || isTvOS();
+  }
+
+  /// Is this an AppleTVOS triple.
+  bool isTvOS() const {
+    return getOS() == Triple::TvOS;
   }
 
   /// Is this an Apple watchOS triple.

@@ -640,6 +640,7 @@ StringRef tools::arm::getARMFloatABI(const Driver &D, const ArgList &Args,
     case llvm::Triple::Darwin:
     case llvm::Triple::MacOSX:
     case llvm::Triple::IOS:
+    case llvm::Triple::TvOS:
     case llvm::Triple::WatchOS: {
       // Darwin defaults to "softfp" for v6 and v7 except for v7k, which
       // uses "hard".
@@ -5947,7 +5948,7 @@ const char *arm::getLLVMArchSuffixForARM(StringRef CPU) {
     .Cases("arm1176jzf-s",  "mpcorenovfp",  "mpcore", "v6")
     .Cases("arm1156t2-s",  "arm1156t2f-s", "v6t2")
     .Cases("cortex-a5", "cortex-a8", "v7")
-    .Case("cortex-a7", "v7k")
+    .Case("cortex-a7", "v7k")    
     .Cases("cortex-a9", "cortex-a12", "cortex-a15", "cortex-a17", "krait", "v7")
     .Cases("cortex-r4", "cortex-r5", "v7r")
     .Case("cortex-m0", "v6m")

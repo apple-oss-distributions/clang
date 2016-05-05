@@ -330,6 +330,8 @@ public:
     MacOS,
     IPhoneOS,
     IPhoneOSSimulator,
+    TvOS,
+    TvOSSimulator,
     WatchOS,
     WatchOSSimulator
   };
@@ -402,17 +404,33 @@ protected:
 
   bool isTargetIPhoneOS() const {
     assert(TargetInitialized && "Target not initialized!");
-    return TargetPlatform == IPhoneOS;
+    return TargetPlatform == IPhoneOS || TargetPlatform == TvOS;
   }
 
   bool isTargetIOSSimulator() const {
     assert(TargetInitialized && "Target not initialized!");
-    return TargetPlatform == IPhoneOSSimulator;
+    return (TargetPlatform == IPhoneOSSimulator ||
+            TargetPlatform == TvOSSimulator);
   }
 
   bool isTargetIOSBased() const {
     assert(TargetInitialized && "Target not initialized!");
     return isTargetIPhoneOS() || isTargetIOSSimulator();
+  }
+
+  bool isTargetTvOS() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == TvOS;
+  }
+
+  bool isTargetTvOSSimulator() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == TvOSSimulator;
+  }
+
+  bool isTargetTvOSBased() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == TvOS || TargetPlatform == TvOSSimulator;
   }
 
   bool isTargetWatchOS() const {

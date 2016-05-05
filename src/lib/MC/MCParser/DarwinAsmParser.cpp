@@ -166,6 +166,7 @@ public:
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveIdent>(".ident");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(
       ".watchos_version_min");
+    addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(".tvos_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(".ios_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(
       ".macosx_version_min");
@@ -873,6 +874,7 @@ bool DarwinAsmParser::parseVersionMin(StringRef Directive, SMLoc) {
   int64_t Major = 0, Minor = 0, Update = 0;
   int Kind = StringSwitch<int>(Directive)
     .Case(".watchos_version_min", MCVM_WatchOSVersionMin)
+    .Case(".tvos_version_min", MCVM_TvOSVersionMin)
     .Case(".ios_version_min", MCVM_IOSVersionMin)
     .Case(".macosx_version_min", MCVM_OSXVersionMin);
   // Get the major version number.

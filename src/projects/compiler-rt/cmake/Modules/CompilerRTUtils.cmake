@@ -70,6 +70,8 @@ macro(darwin_drop_unsupported_arches os)
                 COMPILE_DEFINITIONS "${TARGET_${arch}_CFLAGS} -arch ${arch}" ${DARWIN_${os}_CFLAGS}
                 OUTPUT_VARIABLE TARGET_${arch}_OUTPUT
                 CMAKE_FLAGS "-DCMAKE_EXE_LINKER_FLAGS=${arch_linker_flags}")
+    set(TRY_COMPILE_OUTPUT ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/simple.${os}.${arch}.output)
+    file(WRITE ${TRY_COMPILE_OUTPUT} ${TARGET_${arch}_OUTPUT})
     if(${CAN_TARGET_${arch}})
       list(APPEND WORKING_ARCHES ${arch})
     else()

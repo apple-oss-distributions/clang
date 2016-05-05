@@ -32,6 +32,7 @@ void llvm::initializeTransformUtils(PassRegistry &Registry) {
   initializeUnifyFunctionExitNodesPass(Registry);
   initializeInstSimplifierPass(Registry);
   initializeMetaRenamerPass(Registry);
+  initializeStripNonLineTableDebugInfoPass(Registry);
 }
 
 /// LLVMInitializeTransformUtils - C binding for initializeTransformUtilsPasses.

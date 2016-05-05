@@ -359,6 +359,7 @@ static int DumpLoadCommand(const MachOObjectFile &Obj,
   case MachO::LC_LINKER_OPTION:
     return DumpLinkerOptionsCommand(Obj, LCI);
   case MachO::LC_VERSION_MIN_WATCHOS:
+  case MachO::LC_VERSION_MIN_TVOS:
   case MachO::LC_VERSION_MIN_IPHONEOS:
   case MachO::LC_VERSION_MIN_MACOSX:
     return DumpVersionMin(Obj, LCI);

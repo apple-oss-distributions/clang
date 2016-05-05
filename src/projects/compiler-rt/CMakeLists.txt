@@ -292,6 +292,8 @@ if(APPLE)
   find_darwin_sdk_dir(OSX_SDK_DIR macosx)
   find_darwin_sdk_dir(IOSSIM_SDK_DIR iphonesimulator)
   find_darwin_sdk_dir(IOS_SDK_DIR iphoneos)
+  find_darwin_sdk_dir(WATCHOSSIM_SDK_DIR watchsimulator)
+  find_darwin_sdk_dir(WATCHOS_SDK_DIR watchos)
 
   string(REGEX MATCH "-mmacosx-version-min="
          MACOSX_VERSION_MIN_FLAG "${CMAKE_CXX_FLAGS}")
@@ -302,6 +304,8 @@ if(APPLE)
   set(SANITIZER_MIN_OSX_VERSION 10.7)
   set(SANITIZER_MIN_IOSSIM_VERSION 7.0)
   set(SANITIZER_MIN_IOS_VERSION 6.0)
+  set(SANITIZER_MIN_WATCHOSSIM_VERSION 1.0)
+  set(SANITIZER_MIN_WATCHOS_VERSION 1.0)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "") # We're setting the flag manually below.
   set(DARWIN_osx_CFLAGS -mmacosx-version-min=${SANITIZER_MIN_OSX_VERSION}
     -isysroot ${OSX_SDK_DIR} -stdlib=libc++)
@@ -310,6 +314,14 @@ if(APPLE)
     -stdlib=libc++ -isysroot ${IOSSIM_SDK_DIR})
   set(DARWIN_ios_CFLAGS -miphoneos-version-min=${SANITIZER_MIN_IOS_VERSION}
     -stdlib=libc++ -isysroot ${IOS_SDK_DIR})
+  set(DARWIN_watchossim_CFLAGS
+    -stdlib=libc++
+    -mwatchos-version-min=${SANITIZER_MIN_WATCHOSSIM_VERSION}
+    -isysroot ${WATCHOSSIM_SDK_DIR})
+  set(DARWIN_watchos_CFLAGS
+    -stdlib=libc++
+    -mwatchos-version-min=${SANITIZER_MIN_WATCHOS_VERSION}
+    -isysroot ${WATCHOS_SDK_DIR})
   set(DARWIN_osx_LINKFLAGS -mmacosx-version-min=${SANITIZER_MIN_OSX_VERSION}
     -isysroot ${OSX_SDK_DIR} -stdlib=libc++)
   set(DARWIN_iossim_LINKFLAGS
@@ -318,6 +330,14 @@ if(APPLE)
     -stdlib=libc++ -isysroot ${IOSSIM_SDK_DIR})
   set(DARWIN_ios_LINKFLAGS -miphoneos-version-min=${SANITIZER_MIN_IOS_VERSION}
     -Wl,-segalign,0x4000 -stdlib=libc++ -isysroot ${IOS_SDK_DIR})
+  set(DARWIN_watchossim_LINKFLAGS
+    -stdlib=libc++ -lc++
+    -mwatchos-simulator-version-min=${SANITIZER_MIN_WATCHOSSIM_VERSION}
+    -isysroot ${WATCHOSSIM_SDK_DIR})
+  set(DARWIN_watchos_LINKFLAGS
+    -stdlib=libc++ -lc++
+    -mwatchos-version-min=${SANITIZER_MIN_WATCHOS_VERSION}
+    -isysroot ${WATCHOS_SDK_DIR})
 
   if (IOSSIM_SDK_DIR AND NOT MACOSX_VERSION_MIN_FLAG)
     set(SANITIZER_COMMON_DARWIN_iossim_ARCHES "i386;x86_64")
@@ -332,6 +352,22 @@ if(APPLE)
     darwin_drop_unsupported_arches(ios)
     if(SANITIZER_COMMON_DARWIN_ios_ARCHES)
       list(APPEND SANITIZER_COMMON_SUPPORTED_DARWIN_OS ios)
+    endif()
+  endif()
+
+  if (WATCHOS_SDK_DIR AND NOT MACOSX_VERSION_MIN_FLAG)
+    set(SANITIZER_COMMON_DARWIN_watchos_ARCHES "armv7;armv7k;armv7s;arm64")
+    darwin_drop_unsupported_arches(watchos)
+    if(SANITIZER_COMMON_DARWIN_watchos_ARCHES)
+      list(APPEND SANITIZER_COMMON_SUPPORTED_DARWIN_OS watchos)
+    endif()
+  endif()
+
+  if (WATCHOSSIM_SDK_DIR AND NOT MACOSX_VERSION_MIN_FLAG)
+    set(SANITIZER_COMMON_DARWIN_watchossim_ARCHES "i386;x86_64")
+    darwin_drop_unsupported_arches(watchossim)
+    if(SANITIZER_COMMON_DARWIN_watchossim_ARCHES)
+      list(APPEND SANITIZER_COMMON_SUPPORTED_DARWIN_OS watchossim)
     endif()
   endif()
 endif()

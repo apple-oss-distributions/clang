@@ -617,6 +617,7 @@ static void initialize(TargetLibraryInfoImpl &TLI, const Triple &T,
     }
     break;
   case Triple::IOS:
+  case Triple::TvOS:
   case Triple::WatchOS:
     TLI.setUnavailable(LibFunc::exp10l);
     if (!T.isWatchOS() && (T.isOSVersionLT(7, 0) ||
@@ -652,6 +653,7 @@ static void initialize(TargetLibraryInfoImpl &TLI, const Triple &T,
   case Triple::Darwin:
   case Triple::MacOSX:
   case Triple::IOS:
+  case Triple::TvOS:
   case Triple::WatchOS:
   case Triple::FreeBSD:
   case Triple::Linux:

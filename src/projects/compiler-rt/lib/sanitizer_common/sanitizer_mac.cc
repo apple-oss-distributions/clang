@@ -334,7 +334,13 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
 }
 
 bool IsDeadlySignal(int signum) {
+#if (SANITIZER_WATCHOS || SANITIZER_TVOS) && !SANITIZER_IOSSIM
+  // Handling fatal signals on watchOS and tvOS devices is disallowed
+  // (rdar://21952708).
+  return false;
+#else
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
+#endif
 }
 
 MacosVersion cached_macos_version = MACOS_VERSION_UNINITIALIZED;

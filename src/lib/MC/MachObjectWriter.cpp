@@ -877,6 +877,9 @@ void MachObjectWriter::WriteObject(MCAssembler &Asm,
     case MCVM_IOSVersionMin:
       LCType = MachO::LC_VERSION_MIN_IPHONEOS;
       break;
+    case MCVM_TvOSVersionMin:
+      LCType = MachO::LC_VERSION_MIN_TVOS;
+      break;
     case MCVM_WatchOSVersionMin:
       LCType = MachO::LC_VERSION_MIN_WATCHOS;
       break;

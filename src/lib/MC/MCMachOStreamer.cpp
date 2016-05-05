@@ -471,6 +471,8 @@ MCStreamer *llvm::createMachOStreamer(MCContext &Context, MCAsmBackend &MAB,
       MCVersionMinType VersionType;
       if (TT.isWatchOS())
         VersionType = MCVM_WatchOSVersionMin;
+      else if (TT.isTvOS())                                                     
+        VersionType = MCVM_TvOSVersionMin;                                      
       else if (TT.isMacOSX())
         VersionType = MCVM_OSXVersionMin;
       else {
