@@ -194,6 +194,15 @@ const char* lto_module_get_symbol_name(lto_module_t mod, unsigned int index) {
   return unwrap(mod)->getSymbolName(index);
 }
 
+unsigned int lto_module_get_num_asm_symbols(lto_module_t mod) {
+  return unwrap(mod)->getAsmSymbolCount();
+}
+
+const char* lto_module_get_asm_symbol_name(lto_module_t mod,
+                                           unsigned int index) {
+  return unwrap(mod)->getAsmSymbolName(index);
+}
+
 lto_symbol_attributes lto_module_get_symbol_attribute(lto_module_t mod,
                                                       unsigned int index) {
   return unwrap(mod)->getSymbolAttributes(index);
@@ -340,6 +349,10 @@ bool lto_codegen_hide_symbols(lto_code_gen_t cg) {
 }
 bool lto_codegen_write_symbol_reverse_map(lto_code_gen_t cg, const char *path) {
   return unwrap(cg)->writeReverseMap(path);
+}
+
+const char* lto_codegen_lookup_hidden_name(lto_code_gen_t cg, const char *sym) {
+  return unwrap(cg)->lookupHiddenName(sym);
 }
 
 void lto_codegen_debug_options(lto_code_gen_t cg, const char *opt) {

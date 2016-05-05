@@ -419,6 +419,8 @@ static bool inFunctionScope(CompileUnit &U, unsigned Idx) {
 void CompileUnit::markEverythingAsKept() {
   unsigned Idx = 0;
 
+  setHasInterestingContent();
+
   for (auto &I : Info) {
     I.Keep = true;
     const auto *DIE = OrigUnit.getDIEAtIndex(Idx++);
@@ -4576,7 +4578,6 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
         exitDsymutil(1);
       }
       Unit = new CompileUnit(*CU, UnitID++, !Options.NoODR, Obj);
-      Unit->setHasInterestingContent();
       gatherDIEParents(CUDie, 0, *Unit, &RootDeclContext, StringPool,
                        DeclContexts);
       // Keep everything.

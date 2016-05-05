@@ -2193,7 +2193,7 @@ llvm::DIType *CGDebugInfo::getTypeASTRefOrNull(Decl *TyDecl, llvm::DIFile *F) {
         // instantiated inside functions.
         return nullptr;
     if (auto *RD = dyn_cast<CXXRecordDecl>(TyDecl)) {
-      if (!RD->getDefinition())
+      if (!RD->getDefinition() || RD->isDynamicClass())
         return nullptr;
       Tag = getTagForRecord(RD);
       UID = getUniqueTagTypeName(cast<TagType>(RD->getTypeForDecl()), CGM, TheCU);

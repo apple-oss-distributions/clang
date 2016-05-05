@@ -142,6 +142,9 @@ struct LTOCodeGenerator {
   // Hide all non-external symbols from the bitcode.
   bool hideSymbols();
 
+  // Lookup obfuscation for a symbol
+  const char* lookupHiddenName(const char* SymbolName);
+
   // Write the reverse mapping of hidden symbols from the stripped bitcode
   bool writeReverseMap(const char *Path);
 
@@ -188,6 +191,9 @@ private:
   LTOModule *OwnedModule = nullptr;
   bool ShouldInternalize = true;
   bool ShouldEmbedUselists = false;
+
+  typedef StringMap<StringRef, BumpPtrAllocator&> MangleNameMap;
+  std::unique_ptr<MangleNameMap> MangledNames;
 
   // For symbol hiding/obfuscation
   obfuscate::IncrementObfuscator IncrObfuscate = {true};

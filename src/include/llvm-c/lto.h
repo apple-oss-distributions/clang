@@ -280,6 +280,24 @@ lto_module_get_symbol_attribute(lto_module_t mod, unsigned int index);
 
 
 /**
+ * Returns the number of asm symbols in the object module.
+ *
+ * \since prior to LTO_APPLE_INTERNAL
+ */
+extern unsigned int
+lto_module_get_num_asm_symbols(lto_module_t mod);
+
+
+/**
+ * Returns the name of the ith asm symbol in the object module.
+ *
+ * \since prior to LTO_APPLE_INTERNAL
+ */
+extern const char*
+lto_module_get_asm_symbol_name(lto_module_t mod, unsigned int index);
+
+
+/**
  * Returns the number of dependent libraries in the object module.
  *
  * \since LTO_API_VERSION=8
@@ -546,6 +564,7 @@ lto_codegen_compile_optimized(lto_code_gen_t cg, size_t* length);
  *        LTO_APPLE_INTERNAL
  */
 extern bool lto_codegen_hide_symbols(lto_code_gen_t cg);
+
 /**
  * When hiding non-exported symbols, write the reverse map to a file
  *
@@ -556,6 +575,17 @@ extern bool lto_codegen_hide_symbols(lto_code_gen_t cg);
  */
 extern bool lto_codegen_write_symbol_reverse_map(lto_code_gen_t cg,
                                                  const char *path);
+
+/**
+ * Lookup the hidden name for the symbol.
+ *
+ * On success returns the hiddened name. If name not hidden, returns nullptr
+ *
+ * \since LTO_API_VERSION=17
+ *        LTO_APPLE_INTERNAL
+ */
+extern const char* lto_codegen_lookup_hidden_name(lto_code_gen_t cg,
+                                                  const char *sym);
 
 /**
  * Returns the runtime API version.

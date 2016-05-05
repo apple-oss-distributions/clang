@@ -603,6 +603,9 @@ bool LTOCodeGenerator::hideSymbols() {
   // itself (i.e. pre-mangling).
   StringMap<detail::DenseSetEmpty, BumpPtrAllocator &> Preserves(
       IncrObfuscate.getAllocator());
+  StringMap<GlobalValue*, BumpPtrAllocator &> MangledValues(
+      IncrObfuscate.getAllocator());
+
   Mangler Mangler(TargetMach->getDataLayout());
   auto tryAddPreserve = [&](GlobalValue &GV) {
     if (GV.hasPrivateLinkage())
@@ -612,6 +615,8 @@ bool LTOCodeGenerator::hideSymbols() {
 
     if (MustPreserveSymbols.count(Buffer))
       Preserves.insert({GV.getName(), {}});
+    else
+      MangledValues.insert({IncrObfuscate.copyString(Buffer), &GV});
   };
 
   Module *MergedModule = IRLinker.getModule();
@@ -697,8 +702,29 @@ bool LTOCodeGenerator::hideSymbols() {
 
   IncrObfuscate.obfuscateModule(OwnedModule->getModule(), mustPreserve);
 
+  if (!MangledNames) {
+    MangledNames.reset(new MangleNameMap(IncrObfuscate.getAllocator()));
+  }
+  for (auto &E : MangledValues) {
+    SmallString<64> Buffer;
+    TargetMach->getNameWithPrefix(Buffer, E.getValue(), Mangler);
+    MangledNames->insert({E.getKey(), IncrObfuscate.copyString(Buffer)});
+  }
+
   return true;
 }
+
+const char* LTOCodeGenerator::lookupHiddenName(const char* SymbolName){
+  if (SymbolName == nullptr)
+    return nullptr;
+
+  if (MangledNames->count(SymbolName)) {
+    return MangledNames->lookup(SymbolName).data();
+  }
+
+  return nullptr;
+}
+
 bool LTOCodeGenerator::writeReverseMap(const char *Path) {
   // Create output file
   std::error_code EC;

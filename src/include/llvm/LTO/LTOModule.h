@@ -58,6 +58,7 @@ private:
   StringSet<>                             _defines;
   StringMap<NameAndAttributes> _undefines;
   std::vector<const char*>                _asm_undefines;
+  std::vector<const char*>                _asm_symbols;
 
   LTOModule(std::unique_ptr<object::IRObjectFile> Obj, TargetMachine *TM);
   LTOModule(std::unique_ptr<object::IRObjectFile> Obj, TargetMachine *TM,
@@ -142,6 +143,20 @@ public:
       return _symbols[index].name;
     return nullptr;
   }
+
+  /// Get the number of asm symbols
+  uint32_t getAsmSymbolCount() {
+    return _asm_symbols.size();
+  }
+
+  /// Get the name of the asm symbol at the specified index.
+  const char *getAsmSymbolName(uint32_t index) {
+    if (index < _asm_symbols.size())
+      return _asm_symbols[index];
+    return nullptr;
+  }
+
+
 
   /// Get the number of dependent libraries
   uint32_t getDependentLibraryCount() {

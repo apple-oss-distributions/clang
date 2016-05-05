@@ -74,13 +74,6 @@ protected:
     return P;
   }
 
-  // As StringRef::copy, but will terminate with null
-  char *copyString(StringRef S) {
-    auto Ret = allocateString(S.size());
-    std::copy(S.begin(), S.end(), Ret);
-    return Ret;
-  }
-
   virtual ~Obfuscator() {}
 
 public:
@@ -107,6 +100,13 @@ public:
       ReverseMap.insert({Res, OldName});
     }
     return Res;
+  }
+
+  // As StringRef::copy, but will terminate with null
+  char *copyString(StringRef S) {
+    auto Ret = allocateString(S.size());
+    std::copy(S.begin(), S.end(), Ret);
+    return Ret;
   }
 
   /// \brief Obfuscate a type name

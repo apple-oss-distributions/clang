@@ -1240,7 +1240,8 @@ void AggExprEmitter::VisitInitListExpr(InitListExpr *E) {
       assert(LV.isSimple());
       if (CGF.needsEHCleanup(dtorKind)) {
         if (!cleanupDominator)
-          cleanupDominator = CGF.Builder.CreateUnreachable(); // placeholder
+          cleanupDominator = CGF.Builder.CreateLoad(
+              llvm::Constant::getNullValue(CGF.Int8PtrTy)); // placeholder
 
         CGF.pushDestroy(EHCleanup, LV.getAddress(), field->getType(),
                         CGF.getDestroyer(dtorKind), false);
