@@ -66,11 +66,63 @@ static QualType Desugar(ASTContext &Context, QualType QT, bool &ShouldAKA) {
       continue;
     }
 
-    // Don't desugar template specializations, unless it's an alias template.
-    if (const TemplateSpecializationType *TST
-          = dyn_cast<TemplateSpecializationType>(Ty))
-      if (!TST->isTypeAlias())
+    // Desugar FunctionType if return type or any parameter type should be
+    // desugared. Preserve nullability attribute on desugared types.
+    if (const FunctionType *FT = dyn_cast<FunctionType>(Ty)) {
+      bool DesugarReturn = false;
+      QualType SugarRT = FT->getReturnType();
+      QualType RT = Desugar(Context, SugarRT, DesugarReturn);
+      if (auto nullability = AttributedType::stripOuterNullability(SugarRT)) {
+        RT = Context.getAttributedType(
+            AttributedType::getNullabilityAttrKind(*nullability), RT, RT);
+      }
+
+      bool DesugarArgument = false;
+      SmallVector<QualType, 4> Args;
+      const FunctionProtoType *FPT = dyn_cast<FunctionProtoType>(FT);
+      if (FPT) {
+        for (QualType SugarPT : FPT->param_types()) {
+          QualType PT = Desugar(Context, SugarPT, DesugarArgument);
+          if (auto nullability =
+                  AttributedType::stripOuterNullability(SugarPT)) {
+            PT = Context.getAttributedType(
+                AttributedType::getNullabilityAttrKind(*nullability), PT, PT);
+          }
+          Args.push_back(PT);
+        }
+      }
+
+      if (DesugarReturn || DesugarArgument) {
+        ShouldAKA = true;
+        QT = FPT ? Context.getFunctionType(RT, Args, FPT->getExtProtoInfo())
+                 : Context.getFunctionNoProtoType(RT, FT->getExtInfo());
         break;
+      }
+    }
+
+    // Desugar template specializations if any template argument should be
+    // desugared.
+    if (const TemplateSpecializationType *TST =
+            dyn_cast<TemplateSpecializationType>(Ty)) {
+      if (!TST->isTypeAlias()) {
+        bool DesugarArgument = false;
+        SmallVector<TemplateArgument, 4> Args;
+        for (unsigned I = 0, N = TST->getNumArgs(); I != N; ++I) {
+          const TemplateArgument &Arg = TST->getArg(I);
+          if (Arg.getKind() == TemplateArgument::Type)
+            Args.push_back(Desugar(Context, Arg.getAsType(), DesugarArgument));
+          else
+            Args.push_back(Arg);
+        }
+
+        if (DesugarArgument) {
+          ShouldAKA = true;
+          QT = Context.getTemplateSpecializationType(
+              TST->getTemplateName(), Args.data(), Args.size(), QT);
+        }
+        break;
+      }
+    }
 
     // Don't desugar magic Objective-C types.
     if (QualType(Ty,0) == Context.getObjCIdType() ||
@@ -80,7 +132,8 @@ static QualType Desugar(ASTContext &Context, QualType QT, bool &ShouldAKA) {
       break;
 
     // Don't desugar va_list.
-    if (QualType(Ty,0) == Context.getBuiltinVaListType())
+    if (QualType(Ty, 0) == Context.getBuiltinVaListType() ||
+        QualType(Ty, 0) == Context.getBuiltinMSVaListType())
       break;
 
     // Otherwise, do a single-step desugar.
@@ -192,8 +245,8 @@ ConvertTypeToDiagnosticString(ASTContext &Context, QualType Ty,
     if (CompareCanTy == CanTy)
       continue;  // Same canonical types
     std::string CompareS = CompareTy.getAsString(Context.getPrintingPolicy());
-    bool aka;
-    QualType CompareDesugar = Desugar(Context, CompareTy, aka);
+    bool ShouldAKA = false;
+    QualType CompareDesugar = Desugar(Context, CompareTy, ShouldAKA);
     std::string CompareDesugarStr =
         CompareDesugar.getAsString(Context.getPrintingPolicy());
     if (CompareS != S && CompareDesugarStr != S)
@@ -392,8 +445,6 @@ void clang::FormatASTNodeDiagnosticArgument(
     }
 
   }
-
-  OS.flush();
 
   if (NeedQuotes) {
     Output.insert(Output.begin()+OldEnd, '\'');
@@ -1014,9 +1065,11 @@ class TemplateDiff {
       Tree.SetDefault(FromIter.isEnd() && FromExpr, ToIter.isEnd() && ToExpr);
       if (FromDefaultNonTypeDecl->getType()->isIntegralOrEnumerationType()) {
         if (FromExpr)
-          HasFromInt = GetInt(Context, FromIter, FromExpr, FromInt);
+          HasFromInt = GetInt(Context, FromIter, FromExpr, FromInt,
+                              FromDefaultNonTypeDecl->getType());
         if (ToExpr)
-          HasToInt = GetInt(Context, ToIter, ToExpr, ToInt);
+          HasToInt = GetInt(Context, ToIter, ToExpr, ToInt,
+                            ToDefaultNonTypeDecl->getType());
       }
       if (HasFromInt && HasToInt) {
         Tree.SetNode(FromInt, ToInt, HasFromInt, HasToInt);
@@ -1037,9 +1090,11 @@ class TemplateDiff {
 
     if (HasFromInt || HasToInt) {
       if (!HasFromInt && FromExpr)
-        HasFromInt = GetInt(Context, FromIter, FromExpr, FromInt);
+        HasFromInt = GetInt(Context, FromIter, FromExpr, FromInt,
+                            FromDefaultNonTypeDecl->getType());
       if (!HasToInt && ToExpr)
-        HasToInt = GetInt(Context, ToIter, ToExpr, ToInt);
+        HasToInt = GetInt(Context, ToIter, ToExpr, ToInt,
+                          ToDefaultNonTypeDecl->getType());
       Tree.SetNode(FromInt, ToInt, HasFromInt, HasToInt);
       if (HasFromInt && HasToInt) {
         Tree.SetSame(FromInt == ToInt);
@@ -1221,9 +1276,11 @@ class TemplateDiff {
   }
 
   /// GetInt - Retrieves the template integer argument, including evaluating
-  /// default arguments.
+  /// default arguments.  If the value comes from an expression, extend the
+  /// APSInt to size of IntegerType to match the behavior in
+  /// Sema::CheckTemplateArgument
   static bool GetInt(ASTContext &Context, const TSTiterator &Iter,
-                     Expr *ArgExpr, llvm::APSInt &Int) {
+                     Expr *ArgExpr, llvm::APSInt &Int, QualType IntegerType) {
     // Default, value-depenedent expressions require fetching
     // from the desugared TemplateArgument, otherwise expression needs to
     // be evaluatable.
@@ -1235,12 +1292,14 @@ class TemplateDiff {
         case TemplateArgument::Expression:
           ArgExpr = Iter.getDesugar().getAsExpr();
           Int = ArgExpr->EvaluateKnownConstInt(Context);
+          Int = Int.extOrTrunc(Context.getTypeSize(IntegerType));
           return true;
         default:
           llvm_unreachable("Unexpected template argument kind");
       }
     } else if (ArgExpr->isEvaluatable(Context)) {
       Int = ArgExpr->EvaluateKnownConstInt(Context);
+      Int = Int.extOrTrunc(Context.getTypeSize(IntegerType));
       return true;
     }
 

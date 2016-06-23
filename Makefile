@@ -21,7 +21,7 @@ Clang_Final_Extra_Options :=
 # Build all LLVM tools; not just clang?
 Clang_Build_All        := 0
 # Set the Clang version.
-Clang_Version          := 7.0.0
+Clang_Version          := 7.3.0
 # Enable bootstrap.
 Clang_Enable_Bootstrap := 1
 # Enable automatic order file generation, when using buildit.
@@ -49,3 +49,8 @@ Clang_libLTO_SearchPath :=
 ##
 # Include build logic.
 include ClangBNI.mk
+
+# CMake build
+include src/tools/clang/utils/buildit/Project.mk
+include src/projects/compiler-rt/utils/buildit/Project.mk
+

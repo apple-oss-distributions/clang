@@ -561,7 +561,7 @@ bool ForLoopIndexUseVisitor::TraverseMemberExpr(MemberExpr *Member) {
              "Operator-> takes more than one argument");
       Obj = getDeclRef(Call->getArg(0));
       ResultExpr = Obj;
-      ExprType = Call->getCallReturnType();
+      ExprType = Call->getCallReturnType(*Context);
     }
   }
 
@@ -578,7 +578,7 @@ bool ForLoopIndexUseVisitor::TraverseMemberExpr(MemberExpr *Member) {
                                    Context->getLangOpts());
     // If something complicated is happening (i.e. the next token isn't an
     // arrow), give up on making this work.
-    if (!ArrowLoc.isInvalid()) {
+    if (ArrowLoc.isValid()) {
       Usages.push_back(Usage(ResultExpr, /*IsArrow=*/true,
                              SourceRange(Base->getExprLoc(), ArrowLoc)));
       return true;
@@ -811,7 +811,7 @@ void LoopFixer::doConversion(ASTContext *Context,
     AliasVarIsRef = AliasVar->getType()->isReferenceType();
 
     // We keep along the entire DeclStmt to keep the correct range here.
-    const SourceRange &ReplaceRange = AliasDecl->getSourceRange();
+    SourceRange ReplaceRange = AliasDecl->getSourceRange();
 
     std::string ReplacementText;
     if (AliasUseRequired)

@@ -7,7 +7,7 @@ add_clang_unittest(FrontendTests
   )
 target_link_libraries(FrontendTests
   clangAST
-  clangCodeGen
+  clangBasic
   clangFrontend
   clangLex
   clangSema

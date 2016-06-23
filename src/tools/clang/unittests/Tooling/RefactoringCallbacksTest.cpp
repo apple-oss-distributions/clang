@@ -27,8 +27,7 @@ void expectRewritten(const std::string &Code,
   Finder.addMatcher(AMatcher, &Callback);
   std::unique_ptr<tooling::FrontendActionFactory> Factory(
       tooling::newFrontendActionFactory(&Finder));
-  ASSERT_TRUE(tooling::runToolOnCode(
-      Factory->create(), Code))
+  ASSERT_TRUE(tooling::runToolOnCode(Factory->create(), Code))
       << "Parsing error in \"" << Code << "\"";
   RewriterTestContext Context;
   FileID ID = Context.createInMemoryFile("input.cc", Code);
@@ -72,7 +71,7 @@ TEST(RefactoringCallbacksTest, ReplacesStmtWithStmt) {
   ReplaceStmtWithStmt Callback("always-false", "should-be");
   expectRewritten(Code, Expected,
       id("always-false", conditionalOperator(
-          hasCondition(boolLiteral(equals(false))),
+          hasCondition(cxxBoolLiteral(equals(false))),
           hasFalseExpression(id("should-be", expr())))),
       Callback);
 }
@@ -93,7 +92,7 @@ TEST(RefactoringCallbacksTest, RemovesEntireIfOnEmptyElse) {
   std::string Expected = "void f() {  }";
   ReplaceIfStmtWithItsBody Callback("id", false);
   expectRewritten(Code, Expected,
-      id("id", ifStmt(hasCondition(boolLiteral(equals(false))))),
+      id("id", ifStmt(hasCondition(cxxBoolLiteral(equals(false))))),
       Callback);
 }
 

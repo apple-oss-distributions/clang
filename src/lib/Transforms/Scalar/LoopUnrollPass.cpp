@@ -14,8 +14,10 @@
 
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/CodeMetrics.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -23,14 +25,13 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/UnrollLoop.h"
-#include "llvm/IR/InstVisitor.h"
-#include "llvm/Analysis/InstructionSimplify.h"
 #include <climits>
 
 using namespace llvm;
@@ -38,24 +39,24 @@ using namespace llvm;
 #define DEBUG_TYPE "loop-unroll"
 
 static cl::opt<unsigned>
-UnrollThreshold("unroll-threshold", cl::init(150), cl::Hidden,
-  cl::desc("The cut-off point for automatic loop unrolling"));
+    UnrollThreshold("unroll-threshold", cl::init(150), cl::Hidden,
+                    cl::desc("The baseline cost threshold for loop unrolling"));
+
+static cl::opt<unsigned> UnrollPercentDynamicCostSavedThreshold(
+    "unroll-percent-dynamic-cost-saved-threshold", cl::init(20), cl::Hidden,
+    cl::desc("The percentage of estimated dynamic cost which must be saved by "
+             "unrolling to allow unrolling up to the max threshold."));
+
+static cl::opt<unsigned> UnrollDynamicCostSavingsDiscount(
+    "unroll-dynamic-cost-savings-discount", cl::init(2000), cl::Hidden,
+    cl::desc("This is the amount discounted from the total unroll cost when "
+             "the unrolled form has a high dynamic cost savings (triggered by "
+             "the '-unroll-perecent-dynamic-cost-saved-threshold' flag)."));
 
 static cl::opt<unsigned> UnrollMaxIterationsCountToAnalyze(
     "unroll-max-iteration-count-to-analyze", cl::init(0), cl::Hidden,
     cl::desc("Don't allow loop unrolling to simulate more than this number of"
              "iterations when checking full unroll profitability"));
-
-static cl::opt<unsigned> UnrollMinPercentOfOptimized(
-    "unroll-percent-of-optimized-for-complete-unroll", cl::init(20), cl::Hidden,
-    cl::desc("If complete unrolling could trigger further optimizations, and, "
-             "by that, remove the given percent of instructions, perform the "
-             "complete unroll even if it's beyond the threshold"));
-
-static cl::opt<unsigned> UnrollAbsoluteThreshold(
-    "unroll-absolute-threshold", cl::init(2000), cl::Hidden,
-    cl::desc("Don't unroll if the unrolled size is bigger than this threshold,"
-             " even if we can remove big portion of instructions later."));
 
 static cl::opt<unsigned>
 UnrollCount("unroll-count", cl::init(0), cl::Hidden,
@@ -82,16 +83,18 @@ namespace {
     static char ID; // Pass ID, replacement for typeid
     LoopUnroll(int T = -1, int C = -1, int P = -1, int R = -1) : LoopPass(ID) {
       CurrentThreshold = (T == -1) ? UnrollThreshold : unsigned(T);
-      CurrentAbsoluteThreshold = UnrollAbsoluteThreshold;
-      CurrentMinPercentOfOptimized = UnrollMinPercentOfOptimized;
+      CurrentPercentDynamicCostSavedThreshold =
+          UnrollPercentDynamicCostSavedThreshold;
+      CurrentDynamicCostSavingsDiscount = UnrollDynamicCostSavingsDiscount;
       CurrentCount = (C == -1) ? UnrollCount : unsigned(C);
       CurrentAllowPartial = (P == -1) ? UnrollAllowPartial : (bool)P;
       CurrentRuntime = (R == -1) ? UnrollRuntime : (bool)R;
 
       UserThreshold = (T != -1) || (UnrollThreshold.getNumOccurrences() > 0);
-      UserAbsoluteThreshold = (UnrollAbsoluteThreshold.getNumOccurrences() > 0);
-      UserPercentOfOptimized =
-          (UnrollMinPercentOfOptimized.getNumOccurrences() > 0);
+      UserPercentDynamicCostSavedThreshold =
+          (UnrollPercentDynamicCostSavedThreshold.getNumOccurrences() > 0);
+      UserDynamicCostSavingsDiscount =
+          (UnrollDynamicCostSavingsDiscount.getNumOccurrences() > 0);
       UserAllowPartial = (P != -1) ||
                          (UnrollAllowPartial.getNumOccurrences() > 0);
       UserRuntime = (R != -1) || (UnrollRuntime.getNumOccurrences() > 0);
@@ -115,18 +118,18 @@ namespace {
 
     unsigned CurrentCount;
     unsigned CurrentThreshold;
-    unsigned CurrentAbsoluteThreshold;
-    unsigned CurrentMinPercentOfOptimized;
-    bool     CurrentAllowPartial;
-    bool     CurrentRuntime;
-    bool     UserCount;            // CurrentCount is user-specified.
-    bool     UserThreshold;        // CurrentThreshold is user-specified.
-    bool UserAbsoluteThreshold;    // CurrentAbsoluteThreshold is
-                                   // user-specified.
-    bool UserPercentOfOptimized;   // CurrentMinPercentOfOptimized is
-                                   // user-specified.
-    bool     UserAllowPartial;     // CurrentAllowPartial is user-specified.
-    bool     UserRuntime;          // CurrentRuntime is user-specified.
+    unsigned CurrentPercentDynamicCostSavedThreshold;
+    unsigned CurrentDynamicCostSavingsDiscount;
+    bool CurrentAllowPartial;
+    bool CurrentRuntime;
+
+    // Flags for whether the 'current' settings are user-specified.
+    bool UserCount;
+    bool UserThreshold;
+    bool UserPercentDynamicCostSavedThreshold;
+    bool UserDynamicCostSavingsDiscount;
+    bool UserAllowPartial;
+    bool UserRuntime;
 
     bool runOnLoop(Loop *L, LPPassManager &LPM) override;
 
@@ -135,20 +138,22 @@ namespace {
     ///
     void getAnalysisUsage(AnalysisUsage &AU) const override {
       AU.addRequired<AssumptionCacheTracker>();
+      AU.addRequired<DominatorTreeWrapperPass>();
       AU.addRequired<LoopInfoWrapperPass>();
       AU.addPreserved<LoopInfoWrapperPass>();
       AU.addRequiredID(LoopSimplifyID);
       AU.addPreservedID(LoopSimplifyID);
       AU.addRequiredID(LCSSAID);
       AU.addPreservedID(LCSSAID);
-      AU.addRequired<ScalarEvolution>();
-      AU.addPreserved<ScalarEvolution>();
+      AU.addRequired<ScalarEvolutionWrapperPass>();
+      AU.addPreserved<ScalarEvolutionWrapperPass>();
       AU.addRequired<TargetTransformInfoWrapperPass>();
       // FIXME: Loop unroll requires LCSSA. And LCSSA requires dom info.
       // If loop unroll does not preserve dom info then LCSSA pass on next
       // loop will receive invalid dom info.
       // For now, recreate dom info, if loop is unrolled.
       AU.addPreserved<DominatorTreeWrapperPass>();
+      AU.addPreserved<GlobalsAAWrapperPass>();
     }
 
     // Fill in the UnrollingPreferences parameter with values from the
@@ -156,8 +161,9 @@ namespace {
     void getUnrollingPreferences(Loop *L, const TargetTransformInfo &TTI,
                                  TargetTransformInfo::UnrollingPreferences &UP) {
       UP.Threshold = CurrentThreshold;
-      UP.AbsoluteThreshold = CurrentAbsoluteThreshold;
-      UP.MinPercentOfOptimized = CurrentMinPercentOfOptimized;
+      UP.PercentDynamicCostSavedThreshold =
+          CurrentPercentDynamicCostSavedThreshold;
+      UP.DynamicCostSavingsDiscount = CurrentDynamicCostSavingsDiscount;
       UP.OptSizeThreshold = OptSizeUnrollThreshold;
       UP.PartialThreshold = CurrentThreshold;
       UP.PartialOptSizeThreshold = OptSizeUnrollThreshold;
@@ -165,6 +171,7 @@ namespace {
       UP.MaxCount = UINT_MAX;
       UP.Partial = CurrentAllowPartial;
       UP.Runtime = CurrentRuntime;
+      UP.AllowExpensiveTripCount = false;
       TTI.getUnrollingPreferences(L, UP);
     }
 
@@ -182,11 +189,11 @@ namespace {
     // total unrolled size.  Parameters Threshold and PartialThreshold
     // are set to the maximum unrolled size for fully and partially
     // unrolled loops respectively.
-    void selectThresholds(const Loop *L, bool HasPragma,
+    void selectThresholds(const Loop *L, bool UsePragmaThreshold,
                           const TargetTransformInfo::UnrollingPreferences &UP,
                           unsigned &Threshold, unsigned &PartialThreshold,
-                          unsigned &AbsoluteThreshold,
-                          unsigned &PercentOfOptimizedForCompleteUnroll) {
+                          unsigned &PercentDynamicCostSavedThreshold,
+                          unsigned &DynamicCostSavingsDiscount) {
       // Determine the current unrolling threshold.  While this is
       // normally set from UnrollThreshold, it is overridden to a
       // smaller value if the current function is marked as
@@ -194,19 +201,22 @@ namespace {
       // specified.
       Threshold = UserThreshold ? CurrentThreshold : UP.Threshold;
       PartialThreshold = UserThreshold ? CurrentThreshold : UP.PartialThreshold;
-      AbsoluteThreshold = UserAbsoluteThreshold ? CurrentAbsoluteThreshold
-                                                : UP.AbsoluteThreshold;
-      PercentOfOptimizedForCompleteUnroll = UserPercentOfOptimized
-                                                ? CurrentMinPercentOfOptimized
-                                                : UP.MinPercentOfOptimized;
+      PercentDynamicCostSavedThreshold =
+          UserPercentDynamicCostSavedThreshold
+              ? CurrentPercentDynamicCostSavedThreshold
+              : UP.PercentDynamicCostSavedThreshold;
+      DynamicCostSavingsDiscount = UserDynamicCostSavingsDiscount
+                                       ? CurrentDynamicCostSavingsDiscount
+                                       : UP.DynamicCostSavingsDiscount;
 
       if (!UserThreshold &&
+          // FIXME: Use Function::optForSize().
           L->getHeader()->getParent()->hasFnAttribute(
               Attribute::OptimizeForSize)) {
         Threshold = UP.OptSizeThreshold;
         PartialThreshold = UP.PartialOptSizeThreshold;
       }
-      if (HasPragma) {
+      if (UsePragmaThreshold) {
         // If the loop has an unrolling pragma, we want to be more
         // aggressive with unrolling limits.  Set thresholds to at
         // least the PragmaTheshold value which is larger than the
@@ -219,9 +229,9 @@ namespace {
       }
     }
     bool canUnrollCompletely(Loop *L, unsigned Threshold,
-                             unsigned AbsoluteThreshold, uint64_t UnrolledSize,
-                             unsigned NumberOfOptimizedInstructions,
-                             unsigned PercentOfOptimizedForCompleteUnroll);
+                             unsigned PercentDynamicCostSavedThreshold,
+                             unsigned DynamicCostSavingsDiscount,
+                             uint64_t UnrolledCost, uint64_t RolledDynamicCost);
   };
 }
 
@@ -229,10 +239,11 @@ char LoopUnroll::ID = 0;
 INITIALIZE_PASS_BEGIN(LoopUnroll, "loop-unroll", "Unroll loops", false, false)
 INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
 INITIALIZE_PASS_DEPENDENCY(LCSSA)
-INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass)
 INITIALIZE_PASS_END(LoopUnroll, "loop-unroll", "Unroll loops", false, false)
 
 Pass *llvm::createLoopUnrollPass(int Threshold, int Count, int AllowPartial,
@@ -245,73 +256,6 @@ Pass *llvm::createSimpleLoopUnrollPass() {
 }
 
 namespace {
-/// \brief SCEV expressions visitor used for finding expressions that would
-/// become constants if the loop L is unrolled.
-struct FindConstantPointers {
-  /// \brief Shows whether the expression is ConstAddress+Constant or not.
-  bool IndexIsConstant;
-
-  /// \brief Used for filtering out SCEV expressions with two or more AddRec
-  /// subexpressions.
-  ///
-  /// Used to filter out complicated SCEV expressions, having several AddRec
-  /// sub-expressions. We don't handle them, because unrolling one loop
-  /// would help to replace only one of these inductions with a constant, and
-  /// consequently, the expression would remain non-constant.
-  bool HaveSeenAR;
-
-  /// \brief If the SCEV expression becomes ConstAddress+Constant, this value
-  /// holds ConstAddress. Otherwise, it's nullptr.
-  Value *BaseAddress;
-
-  /// \brief The loop, which we try to completely unroll.
-  const Loop *L;
-
-  ScalarEvolution &SE;
-
-  FindConstantPointers(const Loop *L, ScalarEvolution &SE)
-      : IndexIsConstant(true), HaveSeenAR(false), BaseAddress(nullptr),
-        L(L), SE(SE) {}
-
-  bool follow(const SCEV *S) {
-    if (const SCEVUnknown *SC = dyn_cast<SCEVUnknown>(S)) {
-      // We've reached the leaf node of SCEV, it's most probably just a
-      // variable.
-      // If it's the only one SCEV-subexpression, then it might be a base
-      // address of an index expression.
-      // If we've already recorded base address, then just give up on this SCEV
-      // - it's too complicated.
-      if (BaseAddress) {
-        IndexIsConstant = false;
-        return false;
-      }
-      BaseAddress = SC->getValue();
-      return false;
-    }
-    if (isa<SCEVConstant>(S))
-      return false;
-    if (const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(S)) {
-      // If the current SCEV expression is AddRec, and its loop isn't the loop
-      // we are about to unroll, then we won't get a constant address after
-      // unrolling, and thus, won't be able to eliminate the load.
-      if (AR->getLoop() != L) {
-        IndexIsConstant = false;
-        return false;
-      }
-      // We don't handle multiple AddRecs here, so give up in this case.
-      if (HaveSeenAR) {
-        IndexIsConstant = false;
-        return false;
-      }
-      HaveSeenAR = true;
-    }
-
-    // Continue traversal.
-    return true;
-  }
-  bool isDone() const { return !IndexIsConstant; }
-};
-
 // This class is used to get an estimate of the optimization effects that we
 // could get from complete loop unrolling. It comes from the fact that some
 // loads might be replaced with concrete constant values and that could trigger
@@ -328,67 +272,113 @@ struct FindConstantPointers {
 //   v = b[0]* 0 + b[1]* 1 + b[2]* 0
 // And finally:
 //   v = b[1]
-class UnrollAnalyzer : public InstVisitor<UnrollAnalyzer, bool> {
-  typedef SetVector<BasicBlock *, SmallVector<BasicBlock *, 16>,
-                    SmallPtrSet<BasicBlock *, 16>> BBSetVector;
+class UnrolledInstAnalyzer : private InstVisitor<UnrolledInstAnalyzer, bool> {
+  typedef InstVisitor<UnrolledInstAnalyzer, bool> Base;
+  friend class InstVisitor<UnrolledInstAnalyzer, bool>;
+  struct SimplifiedAddress {
+    Value *Base = nullptr;
+    ConstantInt *Offset = nullptr;
+  };
 
-  typedef InstVisitor<UnrollAnalyzer, bool> Base;
-  friend class InstVisitor<UnrollAnalyzer, bool>;
+public:
+  UnrolledInstAnalyzer(unsigned Iteration,
+                       DenseMap<Value *, Constant *> &SimplifiedValues,
+                       ScalarEvolution &SE)
+      : SimplifiedValues(SimplifiedValues), SE(SE) {
+      IterationNumber = SE.getConstant(APInt(64, Iteration));
+  }
 
-  typedef struct {
-    Value *BaseAddr;
-    uint64_t Start;
-    uint64_t Step;
-  } SCEVGEPDescriptor;
+  // Allow access to the initial visit method.
+  using Base::visit;
 
-  /// \brief The loop we're going to analyze.
-  const Loop *L;
+private:
+  /// \brief A cache of pointer bases and constant-folded offsets corresponding
+  /// to GEP (or derived from GEP) instructions.
+  ///
+  /// In order to find the base pointer one needs to perform non-trivial
+  /// traversal of the corresponding SCEV expression, so it's good to have the
+  /// results saved.
+  DenseMap<Value *, SimplifiedAddress> SimplifiedAddresses;
 
-  /// \brief TripCount of the given loop.
-  unsigned TripCount;
+  /// \brief SCEV expression corresponding to number of currently simulated
+  /// iteration.
+  const SCEV *IterationNumber;
+
+  /// \brief A Value->Constant map for keeping values that we managed to
+  /// constant-fold on the given iteration.
+  ///
+  /// While we walk the loop instructions, we build up and maintain a mapping
+  /// of simplified values specific to this iteration.  The idea is to propagate
+  /// any special information we have about loads that can be replaced with
+  /// constants after complete unrolling, and account for likely simplifications
+  /// post-unrolling.
+  DenseMap<Value *, Constant *> &SimplifiedValues;
 
   ScalarEvolution &SE;
 
-  const TargetTransformInfo &TTI;
-
-  // While we walk the loop instructions, we we build up and maintain a mapping
-  // of simplified values specific to this iteration.  The idea is to propagate
-  // any special information we have about loads that can be replaced with
-  // constants after complete unrolling, and account for likely simplifications
-  // post-unrolling.
-  DenseMap<Value *, Constant *> SimplifiedValues;
-
-  // Similarly, we keep track of all instructions that become dead.
-  // We don't need to map them to a value, that's why we use Set instead of Map
-  // here.
-  SmallPtrSet<Instruction *, 16> DeadInstructions;
-
-  // To avoid requesting SCEV info on every iteration, request it once, and
-  // for each value that would become ConstAddress+Constant after loop
-  // unrolling, save the corresponding data.
-  SmallDenseMap<Value *, SCEVGEPDescriptor> SCEVCache;
-
-  /// \brief Number of currently simulated iteration.
+  /// \brief Try to simplify instruction \param I using its SCEV expression.
   ///
-  /// If an expression is ConstAddress+Constant, then the Constant is
-  /// Start + Iteration*Step, where Start and Step could be obtained from
-  /// SCEVCache.
-  unsigned Iteration;
+  /// The idea is that some AddRec expressions become constants, which then
+  /// could trigger folding of other instructions. However, that only happens
+  /// for expressions whose start value is also constant, which isn't always the
+  /// case. In another common and important case the start value is just some
+  /// address (i.e. SCEVUnknown) - in this case we compute the offset and save
+  /// it along with the base address instead.
+  bool simplifyInstWithSCEV(Instruction *I) {
+    if (!SE.isSCEVable(I->getType()))
+      return false;
 
-  /// \brief Upper threshold for complete unrolling.
-  unsigned MaxUnrolledLoopSize;
+    const SCEV *S = SE.getSCEV(I);
+    if (auto *SC = dyn_cast<SCEVConstant>(S)) {
+      SimplifiedValues[I] = SC->getValue();
+      return true;
+    }
 
-  // Provide base case for our instruction visit.
-  bool visitInstruction(Instruction &I) { return false; };
+    auto *AR = dyn_cast<SCEVAddRecExpr>(S);
+    if (!AR)
+      return false;
 
-  // TODO: Add visitors for other instruction types, e.g. ZExt, SExt.
-  //
-  // Probaly it's worth to hoist the code for estimating the simplifications
-  // effects to a separate class, since we have a very similar code in
-  // InlineCost already.
+    const SCEV *ValueAtIteration = AR->evaluateAtIteration(IterationNumber, SE);
+    // Check if the AddRec expression becomes a constant.
+    if (auto *SC = dyn_cast<SCEVConstant>(ValueAtIteration)) {
+      SimplifiedValues[I] = SC->getValue();
+      return true;
+    }
+
+    // Check if the offset from the base address becomes a constant.
+    auto *Base = dyn_cast<SCEVUnknown>(SE.getPointerBase(S));
+    if (!Base)
+      return false;
+    auto *Offset =
+        dyn_cast<SCEVConstant>(SE.getMinusSCEV(ValueAtIteration, Base));
+    if (!Offset)
+      return false;
+    SimplifiedAddress Address;
+    Address.Base = Base->getValue();
+    Address.Offset = Offset->getValue();
+    SimplifiedAddresses[I] = Address;
+    return true;
+  }
+
+  /// Base case for the instruction visitor.
+  bool visitInstruction(Instruction &I) {
+    return simplifyInstWithSCEV(&I);
+  }
+
+  /// Try to simplify binary operator I.
+  ///
+  /// TODO: Probably it's worth to hoist the code for estimating the
+  /// simplifications effects to a separate class, since we have a very similar
+  /// code in InlineCost already.
   bool visitBinaryOperator(BinaryOperator &I) {
-    Value *LHS = lookupSimplifiedValue(I.getOperand(0));
-    Value *RHS = lookupSimplifiedValue(I.getOperand(1));
+    Value *LHS = I.getOperand(0), *RHS = I.getOperand(1);
+    if (!isa<Constant>(LHS))
+      if (Constant *SimpleLHS = SimplifiedValues.lookup(LHS))
+        LHS = SimpleLHS;
+    if (!isa<Constant>(RHS))
+      if (Constant *SimpleRHS = SimplifiedValues.lookup(RHS))
+        RHS = SimpleRHS;
+
     Value *SimpleV = nullptr;
     const DataLayout &DL = I.getModule()->getDataLayout();
     if (auto FI = dyn_cast<FPMathOperator>(&I))
@@ -397,26 +387,27 @@ class UnrollAnalyzer : public InstVisitor<UnrollAnalyzer, bool> {
     else
       SimpleV = SimplifyBinOp(I.getOpcode(), LHS, RHS, DL);
 
-    if (SimpleV)
-      NumberOfOptimizedInstructions += TTI.getUserCost(&I);
-
-    if (Constant *C = dyn_cast_or_null<Constant>(SimpleV)) {
+    if (Constant *C = dyn_cast_or_null<Constant>(SimpleV))
       SimplifiedValues[&I] = C;
+
+    if (SimpleV)
       return true;
-    }
-    return false;
+    return Base::visitBinaryOperator(I);
   }
 
+  /// Try to fold load I.
   bool visitLoad(LoadInst &I) {
-    Value *AddrOp = lookupSimplifiedValue(I.getPointerOperand());
+    Value *AddrOp = I.getPointerOperand();
 
-    auto It = SCEVCache.find(AddrOp);
-    if (It == SCEVCache.end())
+    auto AddressIt = SimplifiedAddresses.find(AddrOp);
+    if (AddressIt == SimplifiedAddresses.end())
       return false;
-    SCEVGEPDescriptor d = It->second;
+    ConstantInt *SimplifiedAddrOp = AddressIt->second.Offset;
 
-    auto GV = dyn_cast<GlobalVariable>(d.BaseAddr);
-    if (!GV || !GV->hasInitializer())
+    auto *GV = dyn_cast<GlobalVariable>(AddressIt->second.Base);
+    // We're only interested in loads that can be completely folded to a
+    // constant.
+    if (!GV || !GV->hasDefinitiveInitializer() || !GV->isConstant())
       return false;
 
     ConstantDataSequential *CDS =
@@ -424,176 +415,295 @@ class UnrollAnalyzer : public InstVisitor<UnrollAnalyzer, bool> {
     if (!CDS)
       return false;
 
-    unsigned ElemSize = CDS->getElementType()->getPrimitiveSizeInBits() / 8U;
-    uint64_t Index = (d.Start + d.Step * Iteration) / ElemSize;
-    if (Index >= CDS->getNumElements())
+    // We might have a vector load from an array. FIXME: for now we just bail
+    // out in this case, but we should be able to resolve and simplify such
+    // loads.
+    if(!CDS->isElementTypeCompatible(I.getType()))
       return false;
+
+    int ElemSize = CDS->getElementType()->getPrimitiveSizeInBits() / 8U;
+    assert(SimplifiedAddrOp->getValue().getActiveBits() < 64 &&
+           "Unexpectedly large index value.");
+    int64_t Index = SimplifiedAddrOp->getSExtValue() / ElemSize;
+    if (Index >= CDS->getNumElements()) {
+      // FIXME: For now we conservatively ignore out of bound accesses, but
+      // we're allowed to perform the optimization in this case.
+      return false;
+    }
 
     Constant *CV = CDS->getElementAsConstant(Index);
     assert(CV && "Constant expected.");
     SimplifiedValues[&I] = CV;
 
-    NumberOfOptimizedInstructions += TTI.getUserCost(&I);
     return true;
   }
 
-  // Visit all GEPs in the loop and find those which after complete loop
-  // unrolling would become a constant, or BaseAddress+Constant.  Such GEPs
-  // could allow to evaluate a load to a constant later - for now we just store
-  // the corresponding BaseAddress and StartValue with StepValue in the
-  // SCEVCache.
-  void cacheSCEVResults() {
-    for (auto BB : L->getBlocks()) {
-      for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I) {
-        if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-          Value *V = cast<Value>(GEP);
-          if (!SE.isSCEVable(V->getType()))
-              continue;
-          const SCEV *S = SE.getSCEV(V);
-          FindConstantPointers Visitor(L, SE);
-          SCEVTraversal<FindConstantPointers> T(Visitor);
-          // Try to find (BaseAddress+Step+Offset) tuple.
-          // If succeeded, save it to the cache - it might help in folding
-          // loads.
-          T.visitAll(S);
-          if (!Visitor.IndexIsConstant || !Visitor.BaseAddress)
-            continue;
-
-          SCEVGEPDescriptor d;
-          d.BaseAddr = Visitor.BaseAddress;
-          const SCEV *BaseAddrSE = SE.getSCEV(d.BaseAddr);
-          if (BaseAddrSE->getType() != S->getType())
-            continue;
-          const SCEV *OffSE = SE.getMinusSCEV(S, BaseAddrSE);
-          const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(OffSE);
-
-          if (!AR)
-            continue;
-
-          const SCEVConstant *StepSE =
-              dyn_cast<SCEVConstant>(AR->getStepRecurrence(SE));
-          const SCEVConstant *StartSE = dyn_cast<SCEVConstant>(AR->getStart());
-          if (!StepSE || !StartSE)
-            continue;
-
-          APInt StepAP = StepSE->getValue()->getValue();
-          APInt StartAP = StartSE->getValue()->getValue();
-          if (StartAP.getActiveBits() > 32 || StepAP.getActiveBits() > 32)
-            continue;
-
-          d.Start = StartAP.getLimitedValue();
-          d.Step = StepAP.getLimitedValue();
-
-          SCEVCache[V] = d;
-        }
-      }
-    }
-  }
-
-  // If SimplifiedValues contains V, return corresponding simplified value.
-  // Otherwise, return V as is.
-  Value *lookupSimplifiedValue(Value *V) {
-    if (isa<Constant>(V))
-      return V;
-    if (Constant *SimplifiedV = SimplifiedValues.lookup(V))
-      return SimplifiedV;
-    return V;
-  }
-
-public:
-  UnrollAnalyzer(const Loop *L, unsigned TripCount, ScalarEvolution &SE,
-                 const TargetTransformInfo &TTI, unsigned MaxUnrolledLoopSize)
-      : L(L), TripCount(TripCount), SE(SE), TTI(TTI),
-        MaxUnrolledLoopSize(MaxUnrolledLoopSize) {}
-
-  /// \brief Count the number of optimized instructions.
-  unsigned NumberOfOptimizedInstructions;
-
-  /// \brief Count the total number of instructions.
-  unsigned UnrolledLoopSize;
-
-  // Complete loop unrolling can make some loads constant, and we need to know
-  // if that would expose any further optimization opportunities.  This routine
-  // estimates this optimization.  It assigns computed number of instructions,
-  // that potentially might be optimized away, to NumberOfOptimizedInstructions,
-  // and total number of instructions to UnrolledLoopSize (not counting blocks
-  // that won't be reached, if we were able to compute the condition).
-  // Return false if we can't analyze the loop, or if we discovered that
-  // unrolling won't give anything. Otherwise, return true.
-  bool analyzeLoop() {
-    BBSetVector BBWorklist;
-    UnrolledLoopSize = 0;
-    NumberOfOptimizedInstructions = 0;
-
-    // Don't simulate loops with a big or unknown tripcount
-    if (!UnrollMaxIterationsCountToAnalyze || !TripCount ||
-        TripCount > UnrollMaxIterationsCountToAnalyze)
-      return false;
-
-    // To avoid compute SCEV-expressions on every iteration, compute them once
-    // and store interesting to us in SCEVCache.
-    cacheSCEVResults();
-
-    // Simulate execution of each iteration of the loop counting instructions,
-    // which would be simplified.
-    // Since the same load will take different values on different iterations,
-    // we literally have to go through all loop's iterations.
-    for (Iteration = 0; Iteration < TripCount; ++Iteration) {
-      SimplifiedValues.clear();
-      DeadInstructions.clear();
-      BBWorklist.clear();
-      BBWorklist.insert(L->getHeader());
-      // Note that we *must not* cache the size, this loop grows the worklist.
-      for (unsigned Idx = 0; Idx != BBWorklist.size(); ++Idx) {
-        BasicBlock *BB = BBWorklist[Idx];
-        if (BB->empty())
-          continue;
-
-        // Visit all instructions in the given basic block and try to simplify
-        // it.  We don't change the actual IR, just count optimization
-        // opportunities.
-        for (Instruction &I : *BB) {
-          UnrolledLoopSize += TTI.getUserCost(&I);
-          Base::visit(I);
-          // If unrolled body turns out to be too big, bail out.
-          if (UnrolledLoopSize - NumberOfOptimizedInstructions >
-              MaxUnrolledLoopSize)
-            return false;
-        }
-
-        // Add BB's successors to the worklist.
-        for (BasicBlock *Succ : successors(BB))
-          if (L->contains(Succ))
-            BBWorklist.insert(Succ);
+  bool visitCastInst(CastInst &I) {
+    // Propagate constants through casts.
+    Constant *COp = dyn_cast<Constant>(I.getOperand(0));
+    if (!COp)
+      COp = SimplifiedValues.lookup(I.getOperand(0));
+    if (COp)
+      if (Constant *C =
+              ConstantExpr::getCast(I.getOpcode(), COp, I.getType())) {
+        SimplifiedValues[&I] = C;
+        return true;
       }
 
-      // If we found no optimization opportunities on the first iteration, we
-      // won't find them on later ones too.
-      if (!NumberOfOptimizedInstructions)
-        return false;
-      for (unsigned Idx = BBWorklist.size() - 1; Idx != 0; --Idx) {
-        BasicBlock *BB = BBWorklist[Idx];
-        if (BB->empty())
-          continue;
-        for (BasicBlock::reverse_iterator I = BB->rbegin(), E = BB->rend(); I != E; ++I) {
-          if (SimplifiedValues.count(&*I))
-            continue;
-          if (DeadInstructions.count(&*I))
-            continue;
-          if (std::all_of(I->user_begin(), I->user_end(), [&](User *U) {
-                return SimplifiedValues.count(cast<Instruction>(U)) +
-                       DeadInstructions.count(cast<Instruction>(U));
-                })) {
-            NumberOfOptimizedInstructions += TTI.getUserCost(&*I);
-            DeadInstructions.insert(&*I);
+    return Base::visitCastInst(I);
+  }
+
+  bool visitCmpInst(CmpInst &I) {
+    Value *LHS = I.getOperand(0), *RHS = I.getOperand(1);
+
+    // First try to handle simplified comparisons.
+    if (!isa<Constant>(LHS))
+      if (Constant *SimpleLHS = SimplifiedValues.lookup(LHS))
+        LHS = SimpleLHS;
+    if (!isa<Constant>(RHS))
+      if (Constant *SimpleRHS = SimplifiedValues.lookup(RHS))
+        RHS = SimpleRHS;
+
+    if (!isa<Constant>(LHS) && !isa<Constant>(RHS)) {
+      auto SimplifiedLHS = SimplifiedAddresses.find(LHS);
+      if (SimplifiedLHS != SimplifiedAddresses.end()) {
+        auto SimplifiedRHS = SimplifiedAddresses.find(RHS);
+        if (SimplifiedRHS != SimplifiedAddresses.end()) {
+          SimplifiedAddress &LHSAddr = SimplifiedLHS->second;
+          SimplifiedAddress &RHSAddr = SimplifiedRHS->second;
+          if (LHSAddr.Base == RHSAddr.Base) {
+            LHS = LHSAddr.Offset;
+            RHS = RHSAddr.Offset;
           }
         }
       }
     }
-    return true;
+
+    if (Constant *CLHS = dyn_cast<Constant>(LHS)) {
+      if (Constant *CRHS = dyn_cast<Constant>(RHS)) {
+        if (Constant *C = ConstantExpr::getCompare(I.getPredicate(), CLHS, CRHS)) {
+          SimplifiedValues[&I] = C;
+          return true;
+        }
+      }
+    }
+
+    return Base::visitCmpInst(I);
   }
 };
 } // namespace
+
+
+namespace {
+struct EstimatedUnrollCost {
+  /// \brief The estimated cost after unrolling.
+  int UnrolledCost;
+
+  /// \brief The estimated dynamic cost of executing the instructions in the
+  /// rolled form.
+  int RolledDynamicCost;
+};
+}
+
+/// \brief Figure out if the loop is worth full unrolling.
+///
+/// Complete loop unrolling can make some loads constant, and we need to know
+/// if that would expose any further optimization opportunities.  This routine
+/// estimates this optimization.  It computes cost of unrolled loop
+/// (UnrolledCost) and dynamic cost of the original loop (RolledDynamicCost). By
+/// dynamic cost we mean that we won't count costs of blocks that are known not
+/// to be executed (i.e. if we have a branch in the loop and we know that at the
+/// given iteration its condition would be resolved to true, we won't add up the
+/// cost of the 'false'-block).
+/// \returns Optional value, holding the RolledDynamicCost and UnrolledCost. If
+/// the analysis failed (no benefits expected from the unrolling, or the loop is
+/// too big to analyze), the returned value is None.
+static Optional<EstimatedUnrollCost>
+analyzeLoopUnrollCost(const Loop *L, unsigned TripCount, DominatorTree &DT,
+                      ScalarEvolution &SE, const TargetTransformInfo &TTI,
+                      int MaxUnrolledLoopSize) {
+  // We want to be able to scale offsets by the trip count and add more offsets
+  // to them without checking for overflows, and we already don't want to
+  // analyze *massive* trip counts, so we force the max to be reasonably small.
+  assert(UnrollMaxIterationsCountToAnalyze < (INT_MAX / 2) &&
+         "The unroll iterations max is too large!");
+
+  // Don't simulate loops with a big or unknown tripcount
+  if (!UnrollMaxIterationsCountToAnalyze || !TripCount ||
+      TripCount > UnrollMaxIterationsCountToAnalyze)
+    return None;
+
+  SmallSetVector<BasicBlock *, 16> BBWorklist;
+  DenseMap<Value *, Constant *> SimplifiedValues;
+  SmallPtrSet<Instruction *, 16> DeadInstructions;
+  SmallVector<std::pair<Value *, Constant *>, 4> SimplifiedInputValues;
+
+  // The estimated cost of the unrolled form of the loop. We try to estimate
+  // this by simplifying as much as we can while computing the estimate.
+  int UnrolledCost = 0;
+  // We also track the estimated dynamic (that is, actually executed) cost in
+  // the rolled form. This helps identify cases when the savings from unrolling
+  // aren't just exposing dead control flows, but actual reduced dynamic
+  // instructions due to the simplifications which we expect to occur after
+  // unrolling.
+  int RolledDynamicCost = 0;
+
+  // Ensure that we don't violate the loop structure invariants relied on by
+  // this analysis.
+  assert(L->isLoopSimplifyForm() && "Must put loop into normal form first.");
+  assert(L->isLCSSAForm(DT) &&
+         "Must have loops in LCSSA form to track live-out values.");
+
+  DEBUG(dbgs() << "Starting LoopUnroll profitability analysis...\n");
+
+  // Simulate execution of each iteration of the loop counting instructions,
+  // which would be simplified.
+  // Since the same load will take different values on different iterations,
+  // we literally have to go through all loop's iterations.
+  for (unsigned Iteration = 0; Iteration < TripCount; ++Iteration) {
+    DEBUG(dbgs() << " Analyzing iteration " << Iteration << "\n");
+
+    // Prepare for the iteration by collecting any simplified entry or backedge
+    // inputs.
+    for (Instruction &I : *L->getHeader()) {
+      auto *PHI = dyn_cast<PHINode>(&I);
+      if (!PHI)
+        break;
+
+      // The loop header PHI nodes must have exactly two input: one from the
+      // loop preheader and one from the loop latch.
+      assert(
+          PHI->getNumIncomingValues() == 2 &&
+          "Must have an incoming value only for the preheader and the latch.");
+
+      Value *V = PHI->getIncomingValueForBlock(
+          Iteration == 0 ? L->getLoopPreheader() : L->getLoopLatch());
+      Constant *C = dyn_cast<Constant>(V);
+      if (Iteration != 0 && !C)
+        C = SimplifiedValues.lookup(V);
+      if (C)
+        SimplifiedInputValues.push_back({PHI, C});
+    }
+
+    // Now clear and re-populate the map for the next iteration.
+    SimplifiedValues.clear();
+    while (!SimplifiedInputValues.empty())
+      SimplifiedValues.insert(SimplifiedInputValues.pop_back_val());
+
+    UnrolledInstAnalyzer Analyzer(Iteration, SimplifiedValues, SE);
+
+    BBWorklist.clear();
+    BBWorklist.insert(L->getHeader());
+    // Note that we *must not* cache the size, this loop grows the worklist.
+    for (unsigned Idx = 0; Idx != BBWorklist.size(); ++Idx) {
+      BasicBlock *BB = BBWorklist[Idx];
+
+      // Visit all instructions in the given basic block and try to simplify
+      // it.  We don't change the actual IR, just count optimization
+      // opportunities.
+      for (Instruction &I : *BB) {
+        int InstCost = TTI.getUserCost(&I);
+
+        // Visit the instruction to analyze its loop cost after unrolling,
+        // and if the visitor returns false, include this instruction in the
+        // unrolled cost.
+        if (!Analyzer.visit(I))
+          UnrolledCost += InstCost;
+        else {
+          DEBUG(dbgs() << "  " << I
+                       << " would be simplified if loop is unrolled.\n");
+          (void)0;
+        }
+
+        // Also track this instructions expected cost when executing the rolled
+        // loop form.
+        RolledDynamicCost += InstCost;
+
+        // If unrolled body turns out to be too big, bail out.
+        if (UnrolledCost > MaxUnrolledLoopSize) {
+          DEBUG(dbgs() << "  Exceeded threshold.. exiting.\n"
+                       << "  UnrolledCost: " << UnrolledCost
+                       << ", MaxUnrolledLoopSize: " << MaxUnrolledLoopSize
+                       << "\n");
+          return None;
+        }
+      }
+
+      TerminatorInst *TI = BB->getTerminator();
+
+      // Add in the live successors by first checking whether we have terminator
+      // that may be simplified based on the values simplified by this call.
+      if (BranchInst *BI = dyn_cast<BranchInst>(TI)) {
+        if (BI->isConditional()) {
+          if (Constant *SimpleCond =
+                  SimplifiedValues.lookup(BI->getCondition())) {
+            BasicBlock *Succ = nullptr;
+            // Just take the first successor if condition is undef
+            if (isa<UndefValue>(SimpleCond))
+              Succ = BI->getSuccessor(0);
+            else
+              Succ = BI->getSuccessor(
+                  cast<ConstantInt>(SimpleCond)->isZero() ? 1 : 0);
+            if (L->contains(Succ))
+              BBWorklist.insert(Succ);
+            continue;
+          }
+        }
+      } else if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
+        if (Constant *SimpleCond =
+                SimplifiedValues.lookup(SI->getCondition())) {
+          BasicBlock *Succ = nullptr;
+          // Just take the first successor if condition is undef
+          if (isa<UndefValue>(SimpleCond))
+            Succ = SI->getSuccessor(0);
+          else
+            Succ = SI->findCaseValue(cast<ConstantInt>(SimpleCond))
+                       .getCaseSuccessor();
+          if (L->contains(Succ))
+            BBWorklist.insert(Succ);
+          continue;
+        }
+      }
+
+      // Add BB's successors to the worklist.
+      for (BasicBlock *Succ : successors(BB))
+        if (L->contains(Succ))
+          BBWorklist.insert(Succ);
+    }
+
+    // If we found no optimization opportunities on the first iteration, we
+    // won't find them on later ones too.
+    if (UnrolledCost == RolledDynamicCost) {
+      DEBUG(dbgs() << "  No opportunities found.. exiting.\n"
+                   << "  UnrolledCost: " << UnrolledCost << "\n");
+      return None;
+    }
+
+    for (unsigned Idx = BBWorklist.size() - 1; Idx != 0; --Idx) {
+      BasicBlock *BB = BBWorklist[Idx];
+      if (BB->empty())
+        continue;
+      for (BasicBlock::reverse_iterator I = BB->rbegin(), E = BB->rend();
+           I != E; ++I) {
+        if (SimplifiedValues.count(&*I))
+          continue;
+        if (DeadInstructions.count(&*I))
+          continue;
+        if (std::all_of(I->user_begin(), I->user_end(), [&](User *U) {
+              return SimplifiedValues.count(cast<Instruction>(U)) +
+                     DeadInstructions.count(cast<Instruction>(U));
+            })) {
+          UnrolledCost -= TTI.getUserCost(&*I);
+          DeadInstructions.insert(&*I);
+        }
+      }
+    }
+  }
+  DEBUG(dbgs() << "Analysis finished:\n"
+               << "UnrolledCost: " << UnrolledCost << ", "
+               << "RolledDynamicCost: " << RolledDynamicCost << "\n");
+  return {{UnrolledCost, RolledDynamicCost}};
+}
 
 /// ApproximateLoopSize - Approximate the size of the loop.
 static unsigned ApproximateLoopSize(const Loop *L, unsigned &NumCalls,
@@ -637,9 +747,20 @@ static bool HasUnrollFullPragma(const Loop *L) {
   return GetUnrollMetadataForLoop(L, "llvm.loop.unroll.full");
 }
 
+// Returns true if the loop has an unroll(enable) pragma. This metadata is used
+// for both "#pragma unroll" and "#pragma clang loop unroll(enable)" directives.
+static bool HasUnrollEnablePragma(const Loop *L) {
+  return GetUnrollMetadataForLoop(L, "llvm.loop.unroll.enable");
+}
+
 // Returns true if the loop has an unroll(disable) pragma.
 static bool HasUnrollDisablePragma(const Loop *L) {
   return GetUnrollMetadataForLoop(L, "llvm.loop.unroll.disable");
+}
+
+// Returns true if the loop has an runtime unroll(disable) pragma.
+static bool HasRuntimeUnrollDisablePragma(const Loop *L) {
+  return GetUnrollMetadataForLoop(L, "llvm.loop.unroll.runtime.disable");
 }
 
 // If loop has an unroll_count pragma return the (necessarily
@@ -693,51 +814,56 @@ static void SetLoopAlreadyUnrolled(Loop *L) {
   L->setLoopID(NewLoopID);
 }
 
-bool LoopUnroll::canUnrollCompletely(
-    Loop *L, unsigned Threshold, unsigned AbsoluteThreshold,
-    uint64_t UnrolledSize, unsigned NumberOfOptimizedInstructions,
-    unsigned PercentOfOptimizedForCompleteUnroll) {
+bool LoopUnroll::canUnrollCompletely(Loop *L, unsigned Threshold,
+                                     unsigned PercentDynamicCostSavedThreshold,
+                                     unsigned DynamicCostSavingsDiscount,
+                                     uint64_t UnrolledCost,
+                                     uint64_t RolledDynamicCost) {
 
   if (Threshold == NoThreshold) {
     DEBUG(dbgs() << "  Can fully unroll, because no threshold is set.\n");
     return true;
   }
 
-  if (UnrolledSize <= Threshold) {
-    DEBUG(dbgs() << "  Can fully unroll, because unrolled size: "
-                 << UnrolledSize << "<" << Threshold << "\n");
+  if (UnrolledCost <= Threshold) {
+    DEBUG(dbgs() << "  Can fully unroll, because unrolled cost: "
+                 << UnrolledCost << "<" << Threshold << "\n");
     return true;
   }
 
-  // If we can overflow computing percentage of optimized instructions, just
-  // give a conservative answer. Anyway, we don't want to deal with such a
-  // big loops.
-  if (NumberOfOptimizedInstructions > UINT_MAX / 100)
-    NumberOfOptimizedInstructions = 0;
+  assert(UnrolledCost && "UnrolledCost can't be 0 at this point.");
+  assert(RolledDynamicCost >= UnrolledCost &&
+         "Cannot have a higher unrolled cost than a rolled cost!");
 
-  unsigned PercentOfOptimizedInstructions =
-      NumberOfOptimizedInstructions * 100 /
-      UnrolledSize; // The previous check guards us from div by 0
-  if (UnrolledSize <= AbsoluteThreshold &&
-      PercentOfOptimizedInstructions >= PercentOfOptimizedForCompleteUnroll) {
-    DEBUG(dbgs() << "  Can fully unroll, because unrolling will help removing "
-                 << PercentOfOptimizedInstructions
-                 << "% instructions (threshold: "
-                 << PercentOfOptimizedForCompleteUnroll << "%)\n");
-    DEBUG(dbgs() << "  Unrolled size (" << UnrolledSize
-                 << ") is less than the threshold (" << AbsoluteThreshold
-                 << ").\n");
+  // Compute the percentage of the dynamic cost in the rolled form that is
+  // saved when unrolled. If unrolling dramatically reduces the estimated
+  // dynamic cost of the loop, we use a higher threshold to allow more
+  // unrolling.
+  unsigned PercentDynamicCostSaved =
+      (uint64_t)(RolledDynamicCost - UnrolledCost) * 100ull / RolledDynamicCost;
+
+  if (PercentDynamicCostSaved >= PercentDynamicCostSavedThreshold &&
+      (int64_t)UnrolledCost - (int64_t)DynamicCostSavingsDiscount <=
+          (int64_t)Threshold) {
+    DEBUG(dbgs() << "  Can fully unroll, because unrolling will reduce the "
+                    "expected dynamic cost by " << PercentDynamicCostSaved
+                 << "% (threshold: " << PercentDynamicCostSavedThreshold
+                 << "%)\n"
+                 << "  and the unrolled cost (" << UnrolledCost
+                 << ") is less than the max threshold ("
+                 << DynamicCostSavingsDiscount << ").\n");
     return true;
   }
 
   DEBUG(dbgs() << "  Too large to fully unroll:\n");
-  DEBUG(dbgs() << "    Unrolled size: " << UnrolledSize << "\n");
-  DEBUG(dbgs() << "    Estimated number of optimized instructions: "
-               << NumberOfOptimizedInstructions << "\n");
-  DEBUG(dbgs() << "    Absolute threshold: " << AbsoluteThreshold << "\n");
-  DEBUG(dbgs() << "    Minimum percent of removed instructions: "
-               << PercentOfOptimizedForCompleteUnroll << "\n");
-  DEBUG(dbgs() << "    Threshold for small loops: " << Threshold << "\n");
+  DEBUG(dbgs() << "    Threshold: " << Threshold << "\n");
+  DEBUG(dbgs() << "    Max threshold: " << DynamicCostSavingsDiscount << "\n");
+  DEBUG(dbgs() << "    Percent cost saved threshold: "
+               << PercentDynamicCostSavedThreshold << "%\n");
+  DEBUG(dbgs() << "    Unrolled cost: " << UnrolledCost << "\n");
+  DEBUG(dbgs() << "    Rolled dynamic cost: " << RolledDynamicCost << "\n");
+  DEBUG(dbgs() << "    Percent cost saved: " << PercentDynamicCostSaved
+               << "\n");
   return false;
 }
 
@@ -752,7 +878,7 @@ unsigned LoopUnroll::selectUnrollCount(
   unsigned Count = UserCount ? CurrentCount : 0;
 
   // If there is no user-specified count, unroll pragmas have the next
-  // highest precendence.
+  // highest precedence.
   if (Count == 0) {
     if (PragmaCount) {
       Count = PragmaCount;
@@ -787,8 +913,9 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
 
   Function &F = *L->getHeader()->getParent();
 
+  auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  ScalarEvolution *SE = &getAnalysis<ScalarEvolution>();
+  ScalarEvolution *SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   const TargetTransformInfo &TTI =
       getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
   auto &AC = getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
@@ -801,8 +928,9 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
     return false;
   }
   bool PragmaFullUnroll = HasUnrollFullPragma(L);
+  bool PragmaEnableUnroll = HasUnrollEnablePragma(L);
   unsigned PragmaCount = UnrollCountPragmaValue(L);
-  bool HasPragma = PragmaFullUnroll || PragmaCount > 0;
+  bool HasPragma = PragmaFullUnroll || PragmaEnableUnroll || PragmaCount > 0;
 
   TargetTransformInfo::UnrollingPreferences UP;
   getUnrollingPreferences(L, TTI, UP);
@@ -848,9 +976,19 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
   }
 
   unsigned Threshold, PartialThreshold;
-  unsigned AbsoluteThreshold, PercentOfOptimizedForCompleteUnroll;
-  selectThresholds(L, HasPragma, UP, Threshold, PartialThreshold,
-                   AbsoluteThreshold, PercentOfOptimizedForCompleteUnroll);
+  unsigned PercentDynamicCostSavedThreshold;
+  unsigned DynamicCostSavingsDiscount;
+  // Only use the high pragma threshold when we have a target unroll factor such
+  // as with "#pragma unroll N" or a pragma indicating full unrolling and the
+  // trip count is known. Otherwise we rely on the standard threshold to
+  // heuristically select a reasonable unroll count.
+  bool UsePragmaThreshold =
+      PragmaCount > 0 ||
+      ((PragmaFullUnroll || PragmaEnableUnroll) && TripCount != 0);
+
+  selectThresholds(L, UsePragmaThreshold, UP, Threshold, PartialThreshold,
+                   PercentDynamicCostSavedThreshold,
+                   DynamicCostSavingsDiscount);
 
   // Given Count, TripCount and thresholds determine the type of
   // unrolling which is to be performed.
@@ -859,22 +997,21 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
   if (TripCount && Count == TripCount) {
     Unrolling = Partial;
     // If the loop is really small, we don't need to run an expensive analysis.
-    if (canUnrollCompletely(
-            L, Threshold, AbsoluteThreshold,
-            UnrolledSize, 0, 100)) {
+    if (canUnrollCompletely(L, Threshold, 100, DynamicCostSavingsDiscount,
+                            UnrolledSize, UnrolledSize)) {
       Unrolling = Full;
     } else {
       // The loop isn't that small, but we still can fully unroll it if that
       // helps to remove a significant number of instructions.
       // To check that, run additional analysis on the loop.
-      UnrollAnalyzer UA(L, TripCount, *SE, TTI, AbsoluteThreshold);
-      if (UA.analyzeLoop() && canUnrollCompletely(
-              L, Threshold, AbsoluteThreshold,
-              std::min<uint64_t>(UnrolledSize, UA.UnrolledLoopSize),
-              UA.NumberOfOptimizedInstructions,
-              PercentOfOptimizedForCompleteUnroll)) {
-        Unrolling = Full;
-      }
+      if (Optional<EstimatedUnrollCost> Cost =
+              analyzeLoopUnrollCost(L, TripCount, DT, *SE, TTI,
+                                    Threshold + DynamicCostSavingsDiscount))
+        if (canUnrollCompletely(L, Threshold, PercentDynamicCostSavedThreshold,
+                                DynamicCostSavingsDiscount, Cost->UnrolledCost,
+                                Cost->RolledDynamicCost)) {
+          Unrolling = Full;
+        }
     }
   } else if (TripCount && Count < TripCount) {
     Unrolling = Partial;
@@ -884,9 +1021,15 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
 
   // Reduce count based on the type of unrolling and the threshold values.
   unsigned OriginalCount = Count;
-  bool AllowRuntime = UserRuntime ? CurrentRuntime : UP.Runtime;
+  bool AllowRuntime = PragmaEnableUnroll || (PragmaCount > 0) ||
+                      (UserRuntime ? CurrentRuntime : UP.Runtime);
+  // Don't unroll a runtime trip count loop with unroll full pragma.
+  if (HasRuntimeUnrollDisablePragma(L) || PragmaFullUnroll) {
+    AllowRuntime = false;
+  }
   if (Unrolling == Partial) {
-    bool AllowPartial = UserAllowPartial ? CurrentAllowPartial : UP.Partial;
+    bool AllowPartial = PragmaEnableUnroll ||
+                        (UserAllowPartial ? CurrentAllowPartial : UP.Partial);
     if (!AllowPartial && !CountSetExplicitly) {
       DEBUG(dbgs() << "  will not try to unroll partially because "
                    << "-unroll-allow-partial not given\n");
@@ -926,23 +1069,27 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
     DebugLoc LoopLoc = L->getStartLoc();
     Function *F = Header->getParent();
     LLVMContext &Ctx = F->getContext();
-    if (PragmaFullUnroll && PragmaCount == 0) {
-      if (TripCount && Count != TripCount) {
-        emitOptimizationRemarkMissed(
-            Ctx, DEBUG_TYPE, *F, LoopLoc,
-            "Unable to fully unroll loop as directed by unroll(full) pragma "
-            "because unrolled size is too large.");
-      } else if (!TripCount) {
-        emitOptimizationRemarkMissed(
-            Ctx, DEBUG_TYPE, *F, LoopLoc,
-            "Unable to fully unroll loop as directed by unroll(full) pragma "
-            "because loop has a runtime trip count.");
-      }
-    } else if (PragmaCount > 0 && Count != OriginalCount) {
+    if ((PragmaCount > 0) && Count != OriginalCount) {
       emitOptimizationRemarkMissed(
           Ctx, DEBUG_TYPE, *F, LoopLoc,
           "Unable to unroll loop the number of times directed by "
           "unroll_count pragma because unrolled size is too large.");
+    } else if (PragmaFullUnroll && !TripCount) {
+      emitOptimizationRemarkMissed(
+          Ctx, DEBUG_TYPE, *F, LoopLoc,
+          "Unable to fully unroll loop as directed by unroll(full) pragma "
+          "because loop has a runtime trip count.");
+    } else if (PragmaEnableUnroll && Count != TripCount && Count < 2) {
+      emitOptimizationRemarkMissed(
+          Ctx, DEBUG_TYPE, *F, LoopLoc,
+          "Unable to unroll loop as directed by unroll(enable) pragma because "
+          "unrolled size is too large.");
+    } else if ((PragmaFullUnroll || PragmaEnableUnroll) && TripCount &&
+               Count != TripCount) {
+      emitOptimizationRemarkMissed(
+          Ctx, DEBUG_TYPE, *F, LoopLoc,
+          "Unable to fully unroll loop as directed by unroll pragma because "
+          "unrolled size is too large.");
     }
   }
 
@@ -953,8 +1100,8 @@ bool LoopUnroll::runOnLoop(Loop *L, LPPassManager &LPM) {
   }
 
   // Unroll the loop.
-  if (!UnrollLoop(L, Count, TripCount, AllowRuntime, TripMultiple, LI, this,
-                  &LPM, &AC))
+  if (!UnrollLoop(L, Count, TripCount, AllowRuntime, UP.AllowExpensiveTripCount,
+                  TripMultiple, LI, this, &LPM, &AC))
     return false;
 
   return true;

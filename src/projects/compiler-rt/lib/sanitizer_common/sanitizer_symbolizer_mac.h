@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file is shared between AddressSanitizer and ThreadSanitizer
-// run-time libraries.
+// This file is shared between various sanitizers' runtime libraries.
+//
 // Header for Mac-specific "atos" symbolizer.
 //===----------------------------------------------------------------------===//
 
@@ -18,37 +18,31 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_MAC
 
-#include "sanitizer_allocator_internal.h"
-#include "sanitizer_common.h"
-#include "sanitizer_symbolizer.h"
-
-#include <unistd.h>
-#include <util.h>
-#include <sys/errno.h>
+#include "sanitizer_symbolizer_internal.h"
 
 namespace __sanitizer {
 
-class AtosSymbolizer : public ExternalSymbolizerInterface {
+class DlAddrSymbolizer : public SymbolizerTool {
  public:
-  explicit AtosSymbolizer(const char *atos_path) : atos_path_(atos_path) {}
+  bool SymbolizePC(uptr addr, SymbolizedStack *stack) override;
+  bool SymbolizeData(uptr addr, DataInfo *info) override;
+};
 
-  void ParseSymbolizedStackFrames(const char *str, SymbolizedStack *res);
-  char *SendCommand(uptr addr, bool is_data, const char *module_name,
-                    uptr module_offset);
+class AtosSymbolizerProcess;
+
+class AtosSymbolizer : public SymbolizerTool {
+ public:
+  explicit AtosSymbolizer(const char *path, LowLevelAllocator *allocator);
+
+  bool SymbolizePC(uptr addr, SymbolizedStack *stack) override;
+  bool SymbolizeData(uptr addr, DataInfo *info) override;
 
  private:
-  bool StartSubprocessIfNotStarted();
-
-  const char *atos_path_;
-  int fd_to_child_ = 0;
-
-  static const uptr kBufferSize = 16 * 1024;
-  char buffer_[kBufferSize];
-  bool forkfailed_ = false;
+  AtosSymbolizerProcess *process_;
 };
 
 } // namespace __sanitizer
 
-#endif // SANITIZER_MAC
+#endif  // SANITIZER_MAC
 
 #endif // SANITIZER_SYMBOLIZER_MAC_H

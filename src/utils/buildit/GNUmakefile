@@ -119,10 +119,10 @@ installsrc:
 	find -d "$(SRCROOT)" \( -type d -a -name .svn -o \
 							-type d -a -name .git -o \
 	                        -type f -a -name .DS_Store -o \
-							-name \*~ -o -name .\#\* \) 
+							-name \*~ -o -name .\#\* \) \
 	  						-exec rm -rf {} \;
 	find -d "$(SRCROOT)" -type d -a -name test -exec rm -rf {} \;
-	cp $(SRCROOT)/utils/buildit/GNUmakefile $(SRCROOT)
+	find "$(SRCROOT)" -type f -name GNUmakefile -exec cp {} $(SRCROOT) \;
 
 #######################################################################
 

@@ -49,12 +49,6 @@ FunctionPass *createX86FloatingPointStackifierPass();
 /// AVX and SSE.
 FunctionPass *createX86IssueVZeroUpperPass();
 
-/// createX86EmitCodeToMemory - Returns a pass that converts a register
-/// allocated function into raw machine code in a dynamically
-/// allocated chunk of memory.
-///
-FunctionPass *createEmitX86CodeToMemory();
-
 /// createX86PadShortFunctions - Return a pass that pads short functions
 /// with NOOPs. This will prevent a stall when returning on the Atom.
 FunctionPass *createX86PadShortFunctions();
@@ -69,6 +63,17 @@ FunctionPass *createX86FixupLEAs();
 /// esp-relative movs with pushes.
 FunctionPass *createX86CallFrameOptimization();
 
+/// createX86WinEHStatePass - Return an IR pass that inserts EH registration
+/// stack objects and explicit EH state updates. This pass must run after EH
+/// preparation, which does Windows-specific but architecture-neutral
+/// preparation.
+FunctionPass *createX86WinEHStatePass();
+
+/// Return a Machine IR pass that expands X86-specific pseudo
+/// instructions into a sequence of actual instructions. This pass
+/// must run after prologue/epilogue insertion and before lowering
+/// the MachineInstr to MC.
+FunctionPass *createX86ExpandPseudoPass();
 } // End llvm namespace
 
 #endif

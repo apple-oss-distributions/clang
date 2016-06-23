@@ -16,6 +16,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/TargetFolder.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -24,7 +25,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Analysis/TargetLibraryInfo.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "bounds-checking"
@@ -82,7 +82,7 @@ BasicBlock *BoundsChecking::getTrapBB() {
   Builder->SetInsertPoint(TrapBB);
 
   llvm::Value *F = Intrinsic::getDeclaration(Fn->getParent(), Intrinsic::trap);
-  CallInst *TrapCall = Builder->CreateCall(F);
+  CallInst *TrapCall = Builder->CreateCall(F, {});
   TrapCall->setDoesNotReturn();
   TrapCall->setDoesNotThrow();
   TrapCall->setDebugLoc(Inst->getDebugLoc());
@@ -106,7 +106,7 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   }
   ++ChecksAdded;
 
-  Instruction *Inst = Builder->GetInsertPoint();
+  BasicBlock::iterator Inst = Builder->GetInsertPoint();
   BasicBlock *OldBB = Inst->getParent();
   BasicBlock *Cont = OldBB->splitBasicBlock(Inst);
   OldBB->getTerminator()->eraseFromParent();

@@ -38,6 +38,26 @@ public:
     return false;
   }
 };
+
+/// \brief RAIIObject to destroy the contents of a SmallVector of
+/// TemplateIdAnnotation pointers and clear the vector.
+class DestroyTemplateIdAnnotationsRAIIObj {
+  SmallVectorImpl<TemplateIdAnnotation *> &Container;
+
+public:
+  DestroyTemplateIdAnnotationsRAIIObj(
+      SmallVectorImpl<TemplateIdAnnotation *> &Container)
+      : Container(Container) {}
+
+  ~DestroyTemplateIdAnnotationsRAIIObj() {
+    for (SmallVectorImpl<TemplateIdAnnotation *>::iterator I =
+             Container.begin(),
+                                                           E = Container.end();
+         I != E; ++I)
+      (*I)->Destroy();
+    Container.clear();
+  }
+};
 } // end anonymous namespace
 
 IdentifierInfo *Parser::getSEHExceptKeyword() {
@@ -262,6 +282,7 @@ bool Parser::SkipUntil(ArrayRef<tok::TokenKind> Toks, SkipUntilFlags Flags) {
       // Ran out of tokens.
       return false;
 
+    case tok::annot_pragma_openmp:
     case tok::annot_pragma_openmp_end:
       // Stop before an OpenMP pragma boundary.
     case tok::annot_module_begin:
@@ -414,6 +435,15 @@ Parser::~Parser() {
 
   PP.clearCodeCompletionHandler();
 
+  if (getLangOpts().DelayedTemplateParsing &&
+      !PP.isIncrementalProcessingEnabled() && !TemplateIds.empty()) {
+    // If an ASTConsumer parsed delay-parsed templates in their
+    // HandleTranslationUnit() method, TemplateIds created there were not
+    // guarded by a DestroyTemplateIdAnnotationsRAIIObj object in
+    // ParseTopLevelDecl(). Destroy them here.
+    DestroyTemplateIdAnnotationsRAIIObj CleanupRAII(TemplateIds);
+  }
+
   assert(TemplateIds.empty() && "Still alive TemplateIdAnnotations around?");
 }
 
@@ -447,11 +477,15 @@ void Parser::Initialize() {
 
   Ident_super = &PP.getIdentifierTable().get("super");
 
-  if (getLangOpts().AltiVec) {
+  Ident_vector = nullptr;
+  Ident_bool = nullptr;
+  Ident_pixel = nullptr;
+  if (getLangOpts().AltiVec || getLangOpts().ZVector) {
     Ident_vector = &PP.getIdentifierTable().get("vector");
-    Ident_pixel = &PP.getIdentifierTable().get("pixel");
     Ident_bool = &PP.getIdentifierTable().get("bool");
   }
+  if (getLangOpts().AltiVec)
+    Ident_pixel = &PP.getIdentifierTable().get("pixel");
 
   Ident_introduced = nullptr;
   Ident_deprecated = nullptr;
@@ -494,26 +528,6 @@ void Parser::Initialize() {
   ConsumeToken();
 }
 
-namespace {
-  /// \brief RAIIObject to destroy the contents of a SmallVector of
-  /// TemplateIdAnnotation pointers and clear the vector.
-  class DestroyTemplateIdAnnotationsRAIIObj {
-    SmallVectorImpl<TemplateIdAnnotation *> &Container;
-  public:
-    DestroyTemplateIdAnnotationsRAIIObj(SmallVectorImpl<TemplateIdAnnotation *>
-                                       &Container)
-      : Container(Container) {}
-
-    ~DestroyTemplateIdAnnotationsRAIIObj() {
-      for (SmallVectorImpl<TemplateIdAnnotation *>::iterator I =
-           Container.begin(), E = Container.end();
-           I != E; ++I)
-        (*I)->Destroy();
-      Container.clear();
-    }
-  };
-}
-
 void Parser::LateTemplateParserCleanupCallback(void *P) {
   // While this RAII helper doesn't bracket any actual work, the destructor will
   // clean up annotations that were created during ActOnEndOfTranslationUnit
@@ -545,8 +559,14 @@ bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result) {
     return false;
 
   case tok::annot_module_begin:
+    Actions.ActOnModuleBegin(Tok.getLocation(), reinterpret_cast<Module *>(
+                                                    Tok.getAnnotationValue()));
+    ConsumeToken();
+    return false;
+
   case tok::annot_module_end:
-    // FIXME: Update visibility based on the submodule we're in.
+    Actions.ActOnModuleEnd(Tok.getLocation(), reinterpret_cast<Module *>(
+                                                  Tok.getAnnotationValue()));
     ConsumeToken();
     return false;
 
@@ -1048,10 +1068,17 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
 
   // Tell the actions module that we have entered a function definition with the
   // specified Declarator for the function.
-  Decl *Res = TemplateInfo.TemplateParams?
-      Actions.ActOnStartOfFunctionTemplateDef(getCurScope(),
-                                              *TemplateInfo.TemplateParams, D)
-    : Actions.ActOnStartOfFunctionDef(getCurScope(), D);
+  Sema::SkipBodyInfo SkipBody;
+  Decl *Res = Actions.ActOnStartOfFunctionDef(getCurScope(), D,
+                                              TemplateInfo.TemplateParams
+                                                  ? *TemplateInfo.TemplateParams
+                                                  : MultiTemplateParamsArg(),
+                                              &SkipBody);
+
+  if (SkipBody.ShouldSkip) {
+    SkipFunctionBody();
+    return Res;
+  }
 
   // Break out of the ParsingDeclarator context before we parse the body.
   D.complete(Res);
@@ -1062,7 +1089,6 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
 
   if (TryConsumeToken(tok::equal)) {
     assert(getLangOpts().CPlusPlus && "Only C++ function definitions have '='");
-    Actions.ActOnFinishFunctionBody(Res, nullptr, false);
 
     bool Delete = false;
     SourceLocation KWLoc;
@@ -1090,6 +1116,8 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
       SkipUntil(tok::semi);
     }
 
+    Stmt *GeneratedBody = Res ? Res->getBody() : nullptr;
+    Actions.ActOnFinishFunctionBody(Res, GeneratedBody, false);
     return Res;
   }
 
@@ -1115,6 +1143,28 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
     ParseLexedAttributeList(*LateParsedAttrs, Res, false, true);
 
   return ParseFunctionStatementBody(Res, BodyScope);
+}
+
+void Parser::SkipFunctionBody() {
+  if (Tok.is(tok::equal)) {
+    SkipUntil(tok::semi);
+    return;
+  }
+
+  bool IsFunctionTryBlock = Tok.is(tok::kw_try);
+  if (IsFunctionTryBlock)
+    ConsumeToken();
+
+  CachedTokens Skipped;
+  if (ConsumeAndStoreFunctionPrologue(Skipped))
+    SkipMalformedDecl();
+  else {
+    SkipUntil(tok::r_brace);
+    while (IsFunctionTryBlock && Tok.is(tok::kw_catch)) {
+      SkipUntil(tok::l_brace);
+      SkipUntil(tok::r_brace);
+    }
+  }
 }
 
 /// ParseKNRParamDeclarations - Parse 'declaration-list[opt]' which provides
@@ -1473,7 +1523,7 @@ bool Parser::TryKeywordIdentFallback(bool DisableKeyword) {
     << PP.getSpelling(Tok)
     << DisableKeyword;
   if (DisableKeyword)
-    Tok.getIdentifierInfo()->RevertTokenIDToIdentifier();
+    Tok.getIdentifierInfo()->revertTokenIDToIdentifier();
   Tok.setKind(tok::identifier);
   return true;
 }
@@ -1969,6 +2019,37 @@ Parser::DeclGroupPtrTy Parser::ParseModuleImport(SourceLocation AtLoc) {
   return Actions.ConvertDeclToDeclGroup(Import.get());
 }
 
+/// \brief Try recover parser when module annotation appears where it must not
+/// be found.
+/// \returns false if the recover was successful and parsing may be continued, or
+/// true if parser must bail out to top level and handle the token there.
+bool Parser::parseMisplacedModuleImport() {
+  while (true) {
+    switch (Tok.getKind()) {
+    case tok::annot_module_end:
+      // Inform caller that recovery failed, the error must be handled at upper
+      // level.
+      return true;
+    case tok::annot_module_begin:
+      Actions.diagnoseMisplacedModuleImport(reinterpret_cast<Module *>(
+        Tok.getAnnotationValue()), Tok.getLocation());
+      return true;
+    case tok::annot_module_include:
+      // Module import found where it should not be, for instance, inside a
+      // namespace. Recover by importing the module.
+      Actions.ActOnModuleInclude(Tok.getLocation(),
+                                 reinterpret_cast<Module *>(
+                                 Tok.getAnnotationValue()));
+      ConsumeToken();
+      // If there is another module import, process it.
+      continue;
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
 bool BalancedDelimiterTracker::diagnoseOverflow() {
   P.Diag(P.Tok, diag::err_bracket_depth_exceeded)
     << P.getLangOpts().BracketDepth;
@@ -1996,7 +2077,10 @@ bool BalancedDelimiterTracker::expectAndConsume(unsigned DiagID,
 bool BalancedDelimiterTracker::diagnoseMissingClose() {
   assert(!P.Tok.is(Close) && "Should have consumed closing delimiter");
 
-  P.Diag(P.Tok, diag::err_expected) << Close;
+  if (P.Tok.is(tok::annot_module_end))
+    P.Diag(P.Tok, diag::err_missing_before_module_end) << Close;
+  else
+    P.Diag(P.Tok, diag::err_expected) << Close;
   P.Diag(LOpen, diag::note_matching) << Kind;
 
   // If we're not already at some kind of closing bracket, skip to our closing

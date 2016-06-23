@@ -62,10 +62,10 @@ struct LDTLSCleanup : public MachineFunctionPass {
     for (MachineBasicBlock::iterator I = BB->begin(), E = BB->end(); I != E;
          ++I) {
       switch (I->getOpcode()) {
-      case AArch64::TLSDESC_BLR:
+      case AArch64::TLSDESC_CALLSEQ:
         // Make sure it's a local dynamic access.
-        if (!I->getOperand(1).isSymbol() ||
-            strcmp(I->getOperand(1).getSymbolName(), "_TLS_MODULE_BASE_"))
+        if (!I->getOperand(0).isSymbol() ||
+            strcmp(I->getOperand(0).getSymbolName(), "_TLS_MODULE_BASE_"))
           break;
 
         if (TLSBaseAddrReg)
@@ -117,10 +117,10 @@ struct LDTLSCleanup : public MachineFunctionPass {
     *TLSBaseAddrReg = RegInfo.createVirtualRegister(&AArch64::GPR64RegClass);
 
     // Insert a copy from X0 to TLSBaseAddrReg for later.
-    MachineInstr *Next = I->getNextNode();
-    MachineInstr *Copy = BuildMI(*I->getParent(), Next, I->getDebugLoc(),
-                                 TII->get(TargetOpcode::COPY),
-                                 *TLSBaseAddrReg).addReg(AArch64::X0);
+    MachineInstr *Copy =
+        BuildMI(*I->getParent(), ++I->getIterator(), I->getDebugLoc(),
+                TII->get(TargetOpcode::COPY), *TLSBaseAddrReg)
+            .addReg(AArch64::X0);
 
     return Copy;
   }

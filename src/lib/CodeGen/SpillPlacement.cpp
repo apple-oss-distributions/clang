@@ -30,25 +30,17 @@
 #include "SpillPlacement.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/CodeGen/EdgeBundles.h"
-#include "llvm/CodeGen/LiveIntervalAnalysis.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Format.h"
 #include "llvm/Support/ManagedStatic.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "spillplacement"
-
-static cl::opt<bool>
-UseLoopDepth("spill-uses-loop-depth", cl::Hidden,
-  cl::desc("Spill uses loop depth heuristic"),
-  cl::init(false));
 
 char SpillPlacement::ID = 0;
 INITIALIZE_PASS_BEGIN(SpillPlacement, "spill-code-placement",
@@ -195,12 +187,9 @@ bool SpillPlacement::runOnMachineFunction(MachineFunction &mf) {
   BlockFrequencies.resize(mf.getNumBlockIDs());
   MBFI = &getAnalysis<MachineBlockFrequencyInfo>();
   setThreshold(MBFI->getEntryFreq());
-  for (MachineFunction::iterator I = mf.begin(), E = mf.end(); I != E; ++I) {
-    unsigned Num = I->getNumber();
-    BlockFrequencies[Num] = UseLoopDepth?
-      LiveIntervals::getSpillWeight(true, false,
-                                    loops->getLoopDepth(I))
-      : MBFI->getBlockFreq(I);
+  for (auto &I : mf) {
+    unsigned Num = I.getNumber();
+    BlockFrequencies[Num] = MBFI->getBlockFreq(&I);
   }
 
   // We never change the function.

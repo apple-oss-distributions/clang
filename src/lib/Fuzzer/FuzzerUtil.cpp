@@ -10,45 +10,48 @@
 //===----------------------------------------------------------------------===//
 
 #include "FuzzerInternal.h"
-#include <iostream>
+#include <sstream>
+#include <iomanip>
 #include <sys/time.h>
 #include <cassert>
 #include <cstring>
 #include <signal.h>
+#include <sstream>
+#include <unistd.h>
 
 namespace fuzzer {
 
 void Print(const Unit &v, const char *PrintAfter) {
-  std::cerr << v.size() << ": ";
   for (auto x : v)
-    std::cerr << (unsigned) x << " ";
-  std::cerr << PrintAfter;
+    Printf("0x%x,", (unsigned) x);
+  Printf("%s", PrintAfter);
 }
 
 void PrintASCII(const Unit &U, const char *PrintAfter) {
-  for (auto X : U)
-    std::cerr << (char)((isascii(X) && X >= ' ') ? X : '?');
-  std::cerr << PrintAfter;
+  for (auto X : U) {
+    if (isprint(X))
+      Printf("%c", X);
+    else
+      Printf("\\x%x", (unsigned)X);
+  }
+  Printf("%s", PrintAfter);
 }
 
-std::string Hash(const Unit &in) {
-  size_t h1 = 0, h2 = 0;
-  for (auto x : in) {
-    h1 += x;
-    h1 *= 5;
-    h2 += x;
-    h2 *= 7;
-  }
-  return std::to_string(h1) + std::to_string(h2);
+std::string Hash(const Unit &U) {
+  uint8_t Hash[kSHA1NumBytes];
+  ComputeSHA1(U.data(), U.size(), Hash);
+  std::stringstream SS;
+  for (int i = 0; i < kSHA1NumBytes; i++)
+    SS << std::hex << std::setfill('0') << std::setw(2) << (unsigned)Hash[i];
+  return SS.str();
 }
 
 static void AlarmHandler(int, siginfo_t *, void *) {
-  Fuzzer::AlarmCallback();
+  Fuzzer::StaticAlarmCallback();
 }
 
 void SetTimer(int Seconds) {
   struct itimerval T {{Seconds, 0}, {Seconds, 0}};
-  std::cerr << "SetTimer " << Seconds << "\n";
   int Res = setitimer(ITIMER_REAL, &T, nullptr);
   assert(Res == 0);
   struct sigaction sigact;
@@ -57,5 +60,111 @@ void SetTimer(int Seconds) {
   Res = sigaction(SIGALRM, &sigact, 0);
   assert(Res == 0);
 }
+
+int NumberOfCpuCores() {
+  FILE *F = popen("nproc", "r");
+  int N = 0;
+  fscanf(F, "%d", &N);
+  fclose(F);
+  return N;
+}
+
+void ExecuteCommand(const std::string &Command) {
+  system(Command.c_str());
+}
+
+bool ToASCII(Unit &U) {
+  bool Changed = false;
+  for (auto &X : U) {
+    auto NewX = X;
+    NewX &= 127;
+    if (!isspace(NewX) && !isprint(NewX))
+      NewX = ' ';
+    Changed |= NewX != X;
+    X = NewX;
+  }
+  return Changed;
+}
+
+bool IsASCII(const Unit &U) {
+  for (auto X : U)
+    if (!(isprint(X) || isspace(X))) return false;
+  return true;
+}
+
+bool ParseOneDictionaryEntry(const std::string &Str, Unit *U) {
+  U->clear();
+  if (Str.empty()) return false;
+  size_t L = 0, R = Str.size() - 1;  // We are parsing the range [L,R].
+  // Skip spaces from both sides.
+  while (L < R && isspace(Str[L])) L++;
+  while (R > L && isspace(Str[R])) R--;
+  if (R - L < 2) return false;
+  // Check the closing "
+  if (Str[R] != '"') return false;
+  R--;
+  // Find the opening "
+  while (L < R && Str[L] != '"') L++;
+  if (L >= R) return false;
+  assert(Str[L] == '\"');
+  L++;
+  assert(L <= R);
+  for (size_t Pos = L; Pos <= R; Pos++) {
+    uint8_t V = (uint8_t)Str[Pos];
+    if (!isprint(V) && !isspace(V)) return false;
+    if (V =='\\') {
+      // Handle '\\'
+      if (Pos + 1 <= R && (Str[Pos + 1] == '\\' || Str[Pos + 1] == '"')) {
+        U->push_back(Str[Pos + 1]);
+        Pos++;
+        continue;
+      }
+      // Handle '\xAB'
+      if (Pos + 3 <= R && Str[Pos + 1] == 'x'
+           && isxdigit(Str[Pos + 2]) && isxdigit(Str[Pos + 3])) {
+        char Hex[] = "0xAA";
+        Hex[2] = Str[Pos + 2];
+        Hex[3] = Str[Pos + 3];
+        U->push_back(strtol(Hex, nullptr, 16));
+        Pos += 3;
+        continue;
+      }
+      return false;  // Invalid escape.
+    } else {
+      // Any other character.
+      U->push_back(V);
+    }
+  }
+  return true;
+}
+
+bool ParseDictionaryFile(const std::string &Text, std::vector<Unit> *Units) {
+  if (Text.empty()) {
+    Printf("ParseDictionaryFile: file does not exist or is empty\n");
+    return false;
+  }
+  std::istringstream ISS(Text);
+  Units->clear();
+  Unit U;
+  int LineNo = 0;
+  std::string S;
+  while (std::getline(ISS, S, '\n')) {
+    LineNo++;
+    size_t Pos = 0;
+    while (Pos < S.size() && isspace(S[Pos])) Pos++;  // Skip spaces.
+    if (Pos == S.size()) continue;  // Empty line.
+    if (S[Pos] == '#') continue;  // Comment line.
+    if (ParseOneDictionaryEntry(S, &U)) {
+      Units->push_back(U);
+    } else {
+      Printf("ParseDictionaryFile: error in line %d\n\t\t%s\n", LineNo,
+             S.c_str());
+      return false;
+    }
+  }
+  return true;
+}
+
+int GetPid() { return getpid(); }
 
 }  // namespace fuzzer

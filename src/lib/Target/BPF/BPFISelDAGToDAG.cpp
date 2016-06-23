@@ -17,16 +17,16 @@
 #include "BPFSubtarget.h"
 #include "BPFTargetMachine.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
-#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
-#include "llvm/Target/TargetMachine.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Target/TargetMachine.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "bpf-isel"
@@ -50,15 +50,17 @@ private:
 
   // Complex Pattern for address selection.
   bool SelectAddr(SDValue Addr, SDValue &Base, SDValue &Offset);
+  bool SelectFIAddr(SDValue Addr, SDValue &Base, SDValue &Offset);
 };
 }
 
 // ComplexPattern used on BPF Load/Store instructions
 bool BPFDAGToDAGISel::SelectAddr(SDValue Addr, SDValue &Base, SDValue &Offset) {
   // if Address is FI, get the TargetFrameIndex.
+  SDLoc DL(Addr);
   if (FrameIndexSDNode *FIN = dyn_cast<FrameIndexSDNode>(Addr)) {
     Base   = CurDAG->getTargetFrameIndex(FIN->getIndex(), MVT::i64);
-    Offset = CurDAG->getTargetConstant(0, MVT::i64);
+    Offset = CurDAG->getTargetConstant(0, DL, MVT::i64);
     return true;
   }
 
@@ -66,7 +68,7 @@ bool BPFDAGToDAGISel::SelectAddr(SDValue Addr, SDValue &Base, SDValue &Offset) {
       Addr.getOpcode() == ISD::TargetGlobalAddress)
     return false;
 
-  // Addresses of the form FI+const or FI|const
+  // Addresses of the form Addr+const or Addr|const
   if (CurDAG->isBaseWithConstantOffset(Addr)) {
     ConstantSDNode *CN = dyn_cast<ConstantSDNode>(Addr.getOperand(1));
     if (isInt<32>(CN->getSExtValue())) {
@@ -78,14 +80,39 @@ bool BPFDAGToDAGISel::SelectAddr(SDValue Addr, SDValue &Base, SDValue &Offset) {
       else
         Base = Addr.getOperand(0);
 
-      Offset = CurDAG->getTargetConstant(CN->getSExtValue(), MVT::i64);
+      Offset = CurDAG->getTargetConstant(CN->getSExtValue(), DL, MVT::i64);
       return true;
     }
   }
 
   Base   = Addr;
-  Offset = CurDAG->getTargetConstant(0, MVT::i64);
+  Offset = CurDAG->getTargetConstant(0, DL, MVT::i64);
   return true;
+}
+
+// ComplexPattern used on BPF FI instruction
+bool BPFDAGToDAGISel::SelectFIAddr(SDValue Addr, SDValue &Base, SDValue &Offset) {
+  SDLoc DL(Addr);
+
+  if (!CurDAG->isBaseWithConstantOffset(Addr))
+    return false;
+
+  // Addresses of the form Addr+const or Addr|const
+  ConstantSDNode *CN = dyn_cast<ConstantSDNode>(Addr.getOperand(1));
+  if (isInt<32>(CN->getSExtValue())) {
+
+    // If the first operand is a FI, get the TargetFI Node
+    if (FrameIndexSDNode *FIN =
+            dyn_cast<FrameIndexSDNode>(Addr.getOperand(0)))
+      Base = CurDAG->getTargetFrameIndex(FIN->getIndex(), MVT::i64);
+    else
+      return false;
+
+    Offset = CurDAG->getTargetConstant(CN->getSExtValue(), DL, MVT::i64);
+    return true;
+  }
+
+  return false;
 }
 
 SDNode *BPFDAGToDAGISel::Select(SDNode *Node) {
@@ -103,13 +130,6 @@ SDNode *BPFDAGToDAGISel::Select(SDNode *Node) {
   // tablegen selection should be handled here.
   switch (Opcode) {
   default: break;
-
-  case ISD::UNDEF: {
-    errs() << "BUG: "; Node->dump(CurDAG); errs() << '\n';
-    report_fatal_error("shouldn't see UNDEF during Select");
-    break;
-  }
-
   case ISD::INTRINSIC_W_CHAIN: {
     unsigned IntNo = cast<ConstantSDNode>(Node->getOperand(1))->getZExtValue();
     switch (IntNo) {
@@ -132,7 +152,7 @@ SDNode *BPFDAGToDAGISel::Select(SDNode *Node) {
   }
 
   case ISD::FrameIndex: {
-    int FI = dyn_cast<FrameIndexSDNode>(Node)->getIndex();
+    int FI = cast<FrameIndexSDNode>(Node)->getIndex();
     EVT VT = Node->getValueType(0);
     SDValue TFI = CurDAG->getTargetFrameIndex(FI, VT);
     unsigned Opc = BPF::MOV_rr;

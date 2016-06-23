@@ -7,13 +7,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/CodeGen/VirtRegMap.h"
 #include "llvm/CodeGen/CalcSpillWeights.h"
 #include "llvm/CodeGen/LiveIntervalAnalysis.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetInstrInfo.h"
@@ -23,13 +23,9 @@ using namespace llvm;
 
 #define DEBUG_TYPE "calcspillweights"
 
-static cl::opt<bool>
-UseLoopDepth("calc-spill-weights-uses-loop-depth", cl::Hidden,
-  cl::desc("The calculation of spill weights uses loop depth heuristic"),
-  cl::init(false));
-
 void llvm::calculateSpillWeightsAndHints(LiveIntervals &LIS,
                            MachineFunction &MF,
+                           VirtRegMap *VRM,
                            const MachineLoopInfo &MLI,
                            const MachineBlockFrequencyInfo &MBFI,
                            VirtRegAuxInfo::NormalizingFn norm) {
@@ -37,7 +33,7 @@ void llvm::calculateSpillWeightsAndHints(LiveIntervals &LIS,
                << "********** Function: " << MF.getName() << '\n');
 
   MachineRegisterInfo &MRI = MF.getRegInfo();
-  VirtRegAuxInfo VRAI(MF, LIS, MLI, MBFI, norm);
+  VirtRegAuxInfo VRAI(MF, LIS, VRM, MLI, MBFI, norm);
   for (unsigned i = 0, e = MRI.getNumVirtRegs(); i != e; ++i) {
     unsigned Reg = TargetRegisterInfo::index2VirtReg(i);
     if (MRI.reg_nodbg_empty(Reg))
@@ -80,7 +76,10 @@ static unsigned copyHint(const MachineInstr *mi, unsigned reg,
 // Check if all values in LI are rematerializable
 static bool isRematerializable(const LiveInterval &LI,
                                const LiveIntervals &LIS,
+                               VirtRegMap *VRM,
                                const TargetInstrInfo &TII) {
+  unsigned Reg = LI.reg;
+  unsigned Original = VRM ? VRM->getOriginal(Reg) : 0;
   for (LiveInterval::const_vni_iterator I = LI.vni_begin(), E = LI.vni_end();
        I != E; ++I) {
     const VNInfo *VNI = *I;
@@ -91,6 +90,36 @@ static bool isRematerializable(const LiveInterval &LI,
 
     MachineInstr *MI = LIS.getInstructionFromIndex(VNI->def);
     assert(MI && "Dead valno in interval");
+
+    // Trace copies introduced by live range splitting.  The inline
+    // spiller can rematerialize through these copies, so the spill
+    // weight must reflect this.
+    if (VRM) {
+      while (MI->isFullCopy()) {
+        // The copy destination must match the interval register.
+        if (MI->getOperand(0).getReg() != Reg)
+          return false;
+
+        // Get the source register.
+        Reg = MI->getOperand(1).getReg();
+
+        // If the original (pre-splitting) registers match this
+        // copy came from a split.
+        if (!TargetRegisterInfo::isVirtualRegister(Reg) ||
+            VRM->getOriginal(Reg) != Original)
+          return false;
+
+        // Follow the copy live-in value.
+        const LiveInterval &SrcLI = LIS.getInterval(Reg);
+        LiveQueryResult SrcQ = SrcLI.Query(VNI->def);
+        VNI = SrcQ.valueIn();
+        assert(VNI && "Copy from non-existing value");
+        if (VNI->isPHIDef())
+          return false;
+        MI = LIS.getInstructionFromIndex(VNI->def);
+        assert(MI && "Dead valno in interval");
+      }
+    }
 
     if (!TII.isTriviallyReMaterializable(MI, LIS.getAliasAnalysis()))
       return false;
@@ -104,7 +133,6 @@ VirtRegAuxInfo::calculateSpillWeightAndHint(LiveInterval &li) {
   const TargetRegisterInfo &tri = *MF.getSubtarget().getRegisterInfo();
   MachineBasicBlock *mbb = nullptr;
   MachineLoop *loop = nullptr;
-  unsigned loopDepth = 0;
   bool isExiting = false;
   float totalWeight = 0;
   unsigned numInstr = 0; // Number of instructions using li
@@ -136,16 +164,14 @@ VirtRegAuxInfo::calculateSpillWeightAndHint(LiveInterval &li) {
       if (mi->getParent() != mbb) {
         mbb = mi->getParent();
         loop = Loops.getLoopFor(mbb);
-        loopDepth = loop ? loop->getLoopDepth() : 0;
         isExiting = loop ? loop->isLoopExiting(mbb) : false;
       }
 
       // Calculate instr weight.
       bool reads, writes;
       std::tie(reads, writes) = mi->readsWritesVirtualRegister(li.reg);
-      weight = UseLoopDepth?
-        LiveIntervals::getSpillWeight(writes, reads, loopDepth)
-        : LiveIntervals::getSpillWeight(writes, reads, &MBFI, mi);
+      weight = LiveIntervals::getSpillWeight(
+        writes, reads, &MBFI, mi);
 
       // Give extra weight to what looks like a loop induction variable update.
       if (writes && isExiting && LIS.isLiveOutOfMBB(li, mbb))
@@ -197,7 +223,7 @@ VirtRegAuxInfo::calculateSpillWeightAndHint(LiveInterval &li) {
   // it is a preferred candidate for spilling.
   // FIXME: this gets much more complicated once we support non-trivial
   // re-materialization.
-  if (isRematerializable(li, LIS, *MF.getSubtarget().getInstrInfo()))
+  if (isRematerializable(li, LIS, VRM, *MF.getSubtarget().getInstrInfo()))
     totalWeight *= 0.5F;
 
   li.weight = normalize(totalWeight, li.getSize(), numInstr);

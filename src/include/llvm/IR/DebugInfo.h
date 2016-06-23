@@ -44,9 +44,6 @@ DISubprogram *getDISubprogram(const MDNode *Scope);
 /// \returns a valid subprogram, if found. Otherwise, return \c nullptr.
 DISubprogram *getDISubprogram(const Function *F);
 
-/// \brief Find underlying composite type.
-DICompositeTypeBase *getDICompositeType(DIType *T);
-
 /// \brief Generate map by visiting all retained types.
 DITypeIdentifierMap generateDITypeIdentifierMap(const NamedMDNode *CU_Nodes);
 
@@ -59,7 +56,7 @@ bool StripDebugInfo(Module &M);
 bool stripDebugInfo(Function &F);
 
 /// \brief Convert debug info in the module if it exists to that which would be
-/// gneerated from -gline-tables-only alone.
+/// generated from -gline-tables-only alone.
 ///
 /// To do this, we strip any debug info that wouldn't of been generated from
 /// -gline-tables-only and modify some remaining debug info (e.g. scopes) to
@@ -154,8 +151,6 @@ private:
   /// \brief Specify if TypeIdentifierMap is initialized.
   bool TypeMapInitialized;
 };
-
-DenseMap<const Function *, DISubprogram *> makeSubprogramMap(const Module &M);
 
 } // end namespace llvm
 

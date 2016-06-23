@@ -6,6 +6,9 @@ target_link_libraries(clang-query
   clangASTMatchers
   clangBasic
   clangDynamicASTMatchers
+  clangFrontend
   clangQuery
   clangTooling
   )
+
+install(TARGETS clang-query RUNTIME DESTINATION bin)

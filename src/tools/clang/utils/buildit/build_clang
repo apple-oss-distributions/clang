@@ -1,0 +1,337 @@
+#!/bin/sh
+# LLVM LOCAL file B&I
+
+set -x
+
+# Build LLVM the "Apple way".
+# Parameters:
+
+HOSTS_LIST=`echo $RC_ARCHS | sed 's/[[:space:]]/;/g'`
+
+# The first parameter is a yes/no that indicates whether assertions should be
+# enabled in the LLVM libs/tools.
+LLVM_ASSERTIONS="$1"
+
+# The second parameter is a yes/no that indicates whether this is an optimized
+# build.
+LLVM_OPTIMIZED="$2"
+
+CLANG_VERSION="$3"
+
+SDKROOT_PATH=`xcodebuild -version -sdk $SDKROOT Path`
+
+if [ "$LLVM_OPTIMIZED" = "1" ]; then
+    BUILD_TYPE=RelWithDebInfo
+else
+    BUILD_TYPE=Debug
+fi
+
+if [ "$LLVM_INCLUDE_TESTS" = "yes" ]; then
+    INCLUDE_TESTS=On
+else
+    INCLUDE_TESTS=Off
+fi
+
+if [ "$BUILD_INSTRUMENTED" = "yes" ]; then
+  INSTRUMENTATION_FLAGS="\
+    -DCMAKE_CXX_FLAGS=-fprofile-instr-generate \
+    -DCMAKE_C_FLAGS=-fprofile-instr-generate \
+    -DCMAKE_SHARED_LINKER_FLAGS=-fprofile-instr-generate \
+    -DCMAKE_EXE_LINKER_FLAGS=-fprofile-instr-generate"
+fi
+
+if [ "$CLANG_REPOSITORY_STRING" = "" ]; then
+  CLANG_REPOSITORY_STRING=clang-$RC_ProjectSourceVersion
+fi
+
+if [ "$LLVM_REPOSITORY" != "" ]; then
+  LLVM_REPOSITORY_FLAG="-DLLVM_REPOSITORY=$LLVM_REPOSITORY \
+    -DBOOTSTRAP_LLVM_REPOSITORY=$LLVM_REPOSITORY"
+fi
+
+if [ "$SVN_REVISION" != "" ]; then
+  SVN_REVISION_FLAG="-DBOOTSTRAP_SVN_REVISION=$SVN_REVISION \
+    -DBOOTSTRAP_CLANG_APPEND_VC_REV=On"
+fi
+
+if [ -d $SRCROOT/src ]; then
+  LLVM_SRCROOT=$SRCROOT/src
+  IB_ROOT=$SRCROOT
+else
+  LLVM_SRCROOT=$SRCROOT
+  IB_ROOT=$LLVM_SRCROOT/tools/clang/utils/ib
+fi
+
+MAJOR_VERSION=`echo $CLANG_VERSION | awk -F'.' '{print $1}'`
+MINOR_VERSION=`echo $CLANG_VERSION | awk -F'.' '{print $2}'`
+MAJ_MIN_VER=${MAJOR_VERSION}.${MINOR_VERSION}
+
+SUBMISSION_MAJOR=`echo $RC_ProjectSourceVersion | awk -F'.' '{print $1}'`
+SUBMISSION_MINOR=`echo $RC_ProjectSourceVersion | awk -F'.' '{print $2}'`
+SUBMISSION_PATCH=`echo $RC_ProjectSourceVersion | awk -F'.' '{print $3}'`
+SUB_MAJ_MIN_VER=${SUBMISSION_MAJOR}.${SUBMISSION_MINOR}
+
+CMAKE_TOOLCHAIN_FLAGS="\
+  -DCMAKE_TOOLCHAIN_FILE=$LLVM_SRCROOT/cmake/platforms/iOS.cmake \
+  -DCMAKE_SYSTEM_NAME=Darwin \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET='' \
+  -DLLVM_TOOL_LLVM_CONFIG_BUILD=Off \
+  -DLLVM_ENABLE_THREADS=Off"
+ORDER_FILE=$IB_ROOT/static-order-files/armv7/clang.order
+
+OSX=MacOSX.platform
+
+if [ "${SDKROOT_PATH#*$OSX}" != "$SDKROOT_PATH"  ]; then
+  BUILDING_HOST=YES
+  CMAKE_TOOLCHAIN_FLAGS=""
+  ORDER_FILE=$IB_ROOT/static-order-files/x86_64/clang.order
+  PROFILE_DATA=$IB_ROOT/clang.profdata.bz2
+  if [ -e $PROFILE_DATA ]; then
+    bzcat $PROFILE_DATA > $OBJROOT/clang.profdata
+    PROFDATA_FILE_CMAKE_FLAG="-DBOOTSTRAP_LLVM_PROFDATA_FILE=$OBJROOT/clang.profdata"
+  fi
+fi
+
+if [ -e $ORDER_FILE ]; then
+  ORDER_FILE_CMAKE_FLAG="-DCLANG_ORDER_FILE=$ORDER_FILE"
+fi
+
+# calculate the link pool
+mem=`sysctl hw.memsize | cut -d: -f2-`
+link_threads=`expr $mem / 3500000000`
+
+CMAKE=`xcrun -find cmake`
+NINJA=`xcrun -find ninja`
+CC=`xcrun -find clang`
+CXX=`xcrun -find clang++`
+PREFIX=$DSTROOT
+CMAKE_OPTS="\
+  -DLLVM_ENABLE_ASSERTIONS:BOOL=$LLVM_ASSERTIONS \
+  -DBOOTSTRAP_LLVM_ENABLE_ASSERTIONS:BOOL=$LLVM_ASSERTIONS \
+  -DCMAKE_INSTALL_PREFIX=$PREFIX \
+  -DCMAKE_MAKE_PROGRAM=$NINJA \
+  -DCMAKE_CXX_COMPILER=$CXX \
+  -DCMAKE_C_COMPILER=$CC \
+  -DLLVM_PARALLEL_LINK_JOBS=$link_threads \
+  -DBOOTSTRAP_LLVM_PARALLEL_LINK_JOBS=$link_threads"
+
+################################################################################
+
+# Build the LLVM tree native.
+mkdir -p $OBJROOT/obj-llvm-native || exit 1
+cd $OBJROOT/obj-llvm-native || exit 1
+
+# First build the native tblgen's
+OLD_SDKROOT=$SDKROOT
+OLD_TOOLCHAIN_INSTALL_DIR=$TOOLCHAIN_INSTALL_DIR
+OLD_TOOLCHAINS=$TOOLCHAINS
+OLD_IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET
+OLD_TVOS_DEPLOYMENT_TARGET=$TVOS_DEPLOYMENT_TARGET
+OLD_WATCHOS_DEPLOYMENT_TARGET=$WATCHOS_DEPLOYMENT_TARGET
+
+# If we're building for iOS, we need to set up a native host environment
+if [ "$RC_PURPLE" = "YES" ]; then
+  IPHONEOS_DEPLOYMENT_TARGET=
+  TVOS_DEPLOYMENT_TARGET=
+  WATCHOS_DEPLOYMENT_TARGET=
+  SDKROOT=macosx
+  TOOLCHAIN_INSTALL_DIR=
+  TOOLCHAINS=
+fi
+
+$CMAKE -G Ninja \
+    $CMAKE_OPTS \
+    -DLLVM_TARGETS_TO_BUILD="X86;ARM;AArch64" \
+    -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_INCLUDE_EXAMPLES=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    "$LLVM_SRCROOT" \
+    || exit 1
+
+SDKROOT=$SDKROOT TOOLCHAIN_INSTALL_DIR= TOOLCHAINS= IPHONEOS_DEPLOYMENT_TARGET= TVOS_DEPLOYMENT_TARGET= WATCHOS_DEPLOYMENT_TARGET= $NINJA -v llvm-tblgen clang-tblgen llvm-config
+if [ $? != 0 ] ; then
+    echo "error: Clang 'make native tablegen exes' failed!"
+    exit 1
+fi
+
+SDKROOT=$OLD_SDKROOT
+IPHONEOS_DEPLOYMENT_TARGET=$OLD_IPHONEOS_DEPLOYMENT_TARGET
+TVOS_DEPLOYMENT_TARGET=$OLD_TVOS_DEPLOYMENT_TARGET
+WATCHOS_DEPLOYMENT_TARGET=$OLD_WATCHOS_DEPLOYMENT_TARGET
+TOOLCHAIN_INSTALL_DIR=$OLD_TOOLCHAIN_INSTALL_DIR
+TOOLCHAINS=$OLD_TOOLCHAINS
+################################################################################
+
+# Build the LLVM tree universal.
+mkdir -p $OBJROOT/obj-llvm || exit 1
+cd $OBJROOT/obj-llvm || exit 1
+
+if [ "$BUILDING_HOST" = "YES" ]; then
+  CACHE_FILE=$LLVM_SRCROOT/tools/clang/cmake/caches/Apple-stage1.cmake
+  BUILD_TARGET=stage2-install
+else
+  CACHE_FILE=$LLVM_SRCROOT/tools/clang/cmake/caches/Apple-device.cmake
+  BUILD_TARGET=install
+fi
+
+TOOLCHAIN_USR=$DSTROOT/$TOOLCHAIN_INSTALL_DIR/usr
+
+$CMAKE -G 'Ninja' -C $CACHE_FILE \
+    $CMAKE_OPTS $LLVM_REPOSITORY_FLAG $SVN_REVISION_FLAG \
+    -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+    -DCMAKE_OSX_ARCHITECTURES="$HOSTS_LIST" \
+    -DLLVM_TABLEGEN=$OBJROOT/obj-llvm-native/bin/llvm-tblgen \
+    -DCLANG_TABLEGEN=$OBJROOT/obj-llvm-native/bin/clang-tblgen \
+    -DCMAKE_INSTALL_PREFIX=$TOOLCHAIN_USR \
+    -DPACKAGE_VERSION=$CLANG_VERSION \
+    -DLLVM_VERSION_MAJOR=$SUBMISSION_MAJOR \
+    -DLLVM_VERSION_MINOR=$SUBMISSION_MINOR \
+    -DLLVM_VERSION_PATCH=$SUBMISSION_PATCH \
+    -DCLANG_REPOSITORY_STRING=$CLANG_REPOSITORY_STRING \
+    -DAPPLE_BITCODE_VERSION=$RC_ProjectSourceVersion \
+    -DLLVM_VERSION_SUFFIX="" \
+    -DCMAKE_VERBOSE_MAKEFILE=On \
+    -DBOOTSTRAP_LLVM_INCLUDE_TESTS=$INCLUDE_TESTS \
+    -DBOOTSTRAP_LLVM_INCLUDE_UTILS=$INCLUDE_TESTS \
+    -DBOOTSTRAP_CLANG_INCLUDE_TESTS=$INCLUDE_TESTS \
+    -DBOOTSTRAP_CLANG_TOOL_C_ARCMT_TEST_BUILD=$INCLUDE_TESTS \
+    -DBOOTSTRAP_CLANG_TOOL_C_INDEX_TEST_BUILD=$INCLUDE_TESTS \
+    -DBOOTSTRAP_CLANG_TOOL_LIBCLANG_BUILD=$INCLUDE_TESTS \
+    -DBOOTSTRAP_LLVM_BUILD_RUNTIME=Off \
+    $CMAKE_TOOLCHAIN_FLAGS \
+    $ORDER_FILE_CMAKE_FLAG \
+    $PROFDATA_FILE_CMAKE_FLAG \
+    $INSTRUMENTATION_FLAGS \
+    "$LLVM_SRCROOT" \
+    || exit 1
+
+if [ "$BUILDING_HOST" = "YES" ]; then
+  $NINJA -v install-libcxx
+  if ! test $? == 0 ; then
+      echo "error: LLVM 'ninja install-libcxx' failed!"
+      exit 1
+  fi
+fi
+
+$NINJA -v $BUILD_TARGET
+if ! test $? == 0 ; then
+    echo "error: LLVM 'ninja stage2-install' failed!"
+    exit 1
+fi
+
+# Build the runtime
+if [ "$BUILDING_HOST" = "YES" ]; then
+  mkdir -p $OBJROOT/obj-rt || exit 1
+  cd $OBJROOT/obj-rt|| exit 1
+
+  OLD_OSX_DEPLOYMENT_TARGET=OSX_DEPLOYMENT_TARGET
+  OSX_DEPLOYMENT_TARGET=
+  $CMAKE -G 'Ninja' -C $LLVM_SRCROOT/projects/compiler-rt/cmake/caches/Apple.cmake \
+      $CMAKE_OPTS \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLLVM_CONFIG_PATH=$OBJROOT/obj-llvm-native/bin/llvm-config \
+      -DCMAKE_INSTALL_PREFIX=$TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/ \
+      -DCMAKE_C_COMPILER=$TOOLCHAIN_USR/bin/clang \
+      -DCMAKE_CXX_COMPILER=$TOOLCHAIN_USR/bin/clang++ \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=10.7 \
+      "$LLVM_SRCROOT/projects/compiler-rt" \
+      || exit 1
+
+  $NINJA -v install
+  if ! test $? == 0 ; then
+      echo "error: LLVM 'ninja install (compiler-rt)' failed!"
+      exit 1
+  fi
+  OSX_DEPLOYMENT_TARGET=OLD_OSX_DEPLOYMENT_TARGET
+fi
+
+# DSTROOT fixups
+mkdir -p $TOOLCHAIN_USR/local/lib/
+mkdir -p $TOOLCHAIN_USR/local/lib/clang/
+mkdir -p $TOOLCHAIN_USR/local/bin/
+mkdir -p $TOOLCHAIN_USR/local/include/
+mkdir -p $TOOLCHAIN_USR/share/man/man1/
+mkdir -p $DSTROOT/usr/local/bin/
+
+# fixup bin
+cp $OBJROOT/obj-llvm/tools/clang/stage2-bins/bin/c-index-test $TOOLCHAIN_USR/local/bin/
+mv $TOOLCHAIN_USR/bin/clang-format $TOOLCHAIN_USR/local/bin/
+rm $TOOLCHAIN_USR/bin/git-clang-format
+rm $TOOLCHAIN_USR/bin/clang-check
+rm $TOOLCHAIN_USR/bin/clang
+mv $TOOLCHAIN_USR/bin/clang-$MAJ_MIN_VER $TOOLCHAIN_USR/bin/clang
+
+# fixup headers
+mv $TOOLCHAIN_USR/include/llvm-c $TOOLCHAIN_USR/local/include/llvm-c
+mv $TOOLCHAIN_USR/include/clang-c $TOOLCHAIN_USR/local/include/clang-c
+install -m 0444 $LLVM_SRCROOT/include/llvm-c/Support.h $TOOLCHAIN_USR/local/include/llvm-c/
+install -m 0444 $LLVM_SRCROOT/include/llvm-c/ProfileData.h $TOOLCHAIN_USR/local/include/llvm-c/
+install -m 0444 $LLVM_SRCROOT/tools/clang/include/clang-c/module.modulemap $TOOLCHAIN_USR/local/include/clang-c/module.modulemap
+
+# other fixup
+install  $LLVM_SRCROOT/utils/clang-parse-diagnostics-file $DSTROOT/usr/local/bin/clang-parse-diagnostics-file
+rm -rf $TOOLCHAIN_USR/share/clang
+rm -rf $TOOLCHAIN_USR/include/c++/v1/support/
+rm $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/asan_blacklist.txt
+rm $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/cfi_blacklist.txt
+COMBINE=$LLVM_SRCROOT/tools/clang/utils/buildit/combine.sh
+$COMBINE $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.profile_ios.a $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.profile_iossim.a
+$COMBINE $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.profile_tvos.a $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.profile_tvossim.a
+$COMBINE $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.profile_watchos.a $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.profile_watchossim.a
+rm -rf $TOOLCHAIN_USR/lib/clang/$CLANG_VERSION/lib/darwin/libclang_rt.safestack_*
+echo 1 > $OBJROOT/enable_objc_gc
+install -m 0444 $OBJROOT/enable_objc_gc $TOOLCHAIN_USR/local/lib/clang/enable_objc_gc
+echo 1 > $OBJROOT/ignore_mrc_weak
+install -m 0444 $OBJROOT/ignore_mrc_weak $TOOLCHAIN_USR/local/lib/clang/ignore_mrc_weak
+
+#install licenses and manpages
+if [ -d $IB_ROOT ]; then
+  mkdir -p $TOOLCHAIN_USR/local/OpenSourceVersions/
+  install -m 0444 $IB_ROOT/clang.plist $TOOLCHAIN_USR/local/OpenSourceVersions/clang.plist
+  install -m 0444 $IB_ROOT/llvm-cov.1 $TOOLCHAIN_USR/share/man/man1/llvm-cov.1
+  install -m 0444 $IB_ROOT/llvm-profdata.1 $TOOLCHAIN_USR/share/man/man1/llvm-profdata.1
+  install -m 0444 $IB_ROOT/clang.1 $TOOLCHAIN_USR/share/man/man1/clang.1
+fi
+mkdir -p $TOOLCHAIN_USR/local/OpenSourceLicenses/
+install -m 0444 $LLVM_SRCROOT/LICENSE.TXT $TOOLCHAIN_USR/local/OpenSourceLicenses/clang-llvm.txt
+install -m 0444 $LLVM_SRCROOT/tools/clang/LICENSE.TXT $TOOLCHAIN_USR/local/OpenSourceLicenses/clang.txt
+
+
+cd $TOOLCHAIN_USR/share/man/man1
+ln -sf clang.1 cc.1
+ln -sf clang.1 clang++.1
+ln -sf clang++.1 c++.1
+ln -sf llvm-cov.1 gcov.1
+
+# symlink dsymutil and gcov
+cd $TOOLCHAIN_USR/bin
+
+ln -s llvm-dsymutil dsymutil
+ln -s llvm-cov gcov
+
+cd $SYMROOT || exit 1
+
+# Clean out SYM_DIR in case -noclean was passed to buildit.
+rm -rf * || exit 1
+
+# Save .dSYM files
+cd $PREFIX || exit 1
+if [ "$BUILDING_HOST" = "YES" ]; then
+  OBJECT_DIR=$OBJROOT/obj-llvm/tools/clang/stage2-bins/
+else
+  OBJECT_DIR=$OBJROOT/obj-llvm/
+fi
+
+find $OBJECT_DIR -name \*.dSYM -exec cp -r {} $SYMROOT/ \; || exit 1
+find $OBJECT_DIR -type f -perm +111 -exec cp -r {} $SYMROOT/ \; || exit 1
+
+mv $SYMROOT/clang-$MAJ_MIN_VER $SYMROOT/clang
+mv $SYMROOT/clang-$MAJ_MIN_VER.dSYM $SYMROOT/clang.dSYM
+
+chgrp -h -R wheel $DSTROOT
+chgrp -R wheel $DSTROOT
+
+################################################################################
+# w00t! Done!
+
+exit 0

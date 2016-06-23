@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_CLANG_TIDY_H
-#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_CLANG_TIDY_H
+#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_CLANGTIDY_H
+#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_CLANGTIDY_H
 
 #include "ClangTidyDiagnosticConsumer.h"
 #include "ClangTidyOptions.h"
@@ -82,9 +82,9 @@ private:
 
 /// \brief Base class for all clang-tidy checks.
 ///
-/// To implement a \c ClangTidyCheck, write a subclass and overwrite some of the
+/// To implement a \c ClangTidyCheck, write a subclass and override some of the
 /// base class's methods. E.g. to implement a check that validates namespace
-/// declarations, overwrite \c registerMatchers:
+/// declarations, override \c registerMatchers:
 ///
 /// \code
 /// registerMatchers(ast_matchers::MatchFinder *Finder) {
@@ -92,7 +92,7 @@ private:
 /// }
 /// \endcode
 ///
-/// and then overwrite \c check(const MatchResult &Result) to do the actual
+/// and then override \c check(const MatchResult &Result) to do the actual
 /// check for each match.
 ///
 /// A new \c ClangTidyCheck instance is created per translation unit.
@@ -113,15 +113,13 @@ public:
     assert(!CheckName.empty());
   }
 
-  virtual ~ClangTidyCheck() {}
-
-  /// \brief Overwrite this to register \c PPCallbacks with \c Compiler.
+  /// \brief Override this to register \c PPCallbacks with \c Compiler.
   ///
   /// This should be used for clang-tidy checks that analyze preprocessor-
   /// dependent properties, e.g. the order of include directives.
   virtual void registerPPCallbacks(CompilerInstance &Compiler) {}
 
-  /// \brief Overwrite this to register ASTMatchers with \p Finder.
+  /// \brief Override this to register ASTMatchers with \p Finder.
   ///
   /// This should be used by clang-tidy checks that analyze code properties that
   /// dependent on AST knowledge.
@@ -158,6 +156,10 @@ private:
 
 protected:
   OptionsView Options;
+  /// \brief Returns the main file name of the current translation unit.
+  StringRef getCurrentMainFile() const { return Context->getCurrentFile(); }
+  /// \brief Returns the language options from the context.
+  LangOptions getLangOpts() const { return Context->getLangOpts(); }
 };
 
 class ClangTidyCheckFactories;
@@ -202,7 +204,6 @@ ClangTidyOptions::OptionMap getCheckOptions(const ClangTidyOptions &Options);
 /// MatchFinder, and will contain the result of the profile.
 ClangTidyStats
 runClangTidy(std::unique_ptr<ClangTidyOptionsProvider> OptionsProvider,
-             SharedModuleProvider MP,
              const tooling::CompilationDatabase &Compilations,
              ArrayRef<std::string> InputFiles,
              std::vector<ClangTidyError> *Errors,
@@ -223,4 +224,4 @@ void exportReplacements(const std::vector<ClangTidyError> &Errors,
 } // end namespace tidy
 } // end namespace clang
 
-#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_CLANG_TIDY_H
+#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_CLANGTIDY_H

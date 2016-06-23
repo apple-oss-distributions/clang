@@ -16,13 +16,13 @@
 #include "XCore.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Module.h"
-#include "llvm/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/TargetRegistry.h"
 using namespace llvm;
 
 /// XCoreTargetMachine ctor - Create an ILP32 architecture model
 ///
-XCoreTargetMachine::XCoreTargetMachine(const Target &T, StringRef TT,
+XCoreTargetMachine::XCoreTargetMachine(const Target &T, const Triple &TT,
                                        StringRef CPU, StringRef FS,
                                        const TargetOptions &Options,
                                        Reloc::Model RM, CodeModel::Model CM,
@@ -85,6 +85,7 @@ extern "C" void LLVMInitializeXCoreTarget() {
 }
 
 TargetIRAnalysis XCoreTargetMachine::getTargetIRAnalysis() {
-  return TargetIRAnalysis(
-      [this](Function &) { return TargetTransformInfo(XCoreTTIImpl(this)); });
+  return TargetIRAnalysis([this](const Function &F) {
+    return TargetTransformInfo(XCoreTTIImpl(this, F));
+  });
 }

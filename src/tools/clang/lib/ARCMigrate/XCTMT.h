@@ -12,6 +12,7 @@
 
 #include "clang/AST/DeclarationName.h"
 #include "clang/Basic/SourceLocation.h"
+#include "clang/Lex/MacroInfo.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Allocator.h"
@@ -62,7 +63,7 @@ public:
   void migrateRef(NamedDecl *D, SourceLocation Loc);
   void migrateMacro(IdentifierInfo *Name, SourceRange Range,
                     SourceLocation DefLoc, const MacroArgs *Args,
-                    const MacroDirective *MD);
+                    const MacroDefinition &MD);
   void migrateNilDescArg(SourceRange Range);
   void migrateInclude(llvm::StringRef Filename, CharSourceRange FilenameRange,
                       SourceLocation HashLoc, bool isAngled);
@@ -74,7 +75,7 @@ public:
 
 private:
   bool isFromSenTestInclude(SourceLocation Loc);
-  void keepMacroArgInfo(const MacroArgs *Args, const MacroDirective *MD);
+  void keepMacroArgInfo(const MacroArgs *Args, const MacroDefinition &MD);
 };
 
 } // end namespace arcmt

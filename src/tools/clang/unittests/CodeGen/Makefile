@@ -10,10 +10,9 @@
 CLANG_LEVEL = ../..
 TESTNAME = CodeGen
 include $(CLANG_LEVEL)/../../Makefile.config
-LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader ipo objcarcopts \
-                   instrumentation bitwriter support mc option DebugInfoDWARF \
-                   profiledata
-USEDLIBS = clangFrontend.a clangCodeGen.a clangIndex.a clangSerialization.a \
+LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader mc option \
+                   profiledata support
+USEDLIBS = clangCodeGen.a clangFrontend.a clangSerialization.a \
            clangDriver.a \
            clangParse.a clangSema.a clangAnalysis.a \
            clangEdit.a clangAST.a clangLex.a clangAPINotes.a clangBasic.a

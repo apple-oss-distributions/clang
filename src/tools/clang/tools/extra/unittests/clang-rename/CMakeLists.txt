@@ -17,7 +17,6 @@ add_extra_unittest(ClangRenameTests
 target_link_libraries(ClangRenameTests
   clangAST
   clangBasic
-  clangCodeGen
   clangFrontend
   clangIndex
   clangTooling

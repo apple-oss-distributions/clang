@@ -13,7 +13,6 @@
 
 #include "clang-c/BuildSystem.h"
 #include "CXString.h"
-#include "clang/AST/ModuleProvider.h"
 #include "clang/Basic/VirtualFileSystem.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/CBindingWrapping.h"
@@ -85,6 +84,10 @@ clang_VirtualFileOverlay_writeToBuffer(CXVirtualFileOverlay VFO, unsigned,
   return CXError_Success;
 }
 
+void clang_free(void *buffer) {
+  free(buffer);
+}
+
 void clang_VirtualFileOverlay_dispose(CXVirtualFileOverlay VFO) {
   delete unwrap(VFO);
 }
@@ -146,4 +149,3 @@ clang_ModuleMapDescriptor_writeToBuffer(CXModuleMapDescriptor MMD, unsigned,
 void clang_ModuleMapDescriptor_dispose(CXModuleMapDescriptor MMD) {
   delete MMD;
 }
-

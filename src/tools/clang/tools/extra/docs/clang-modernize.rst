@@ -1,5 +1,14 @@
 .. index:: clang-modernize
 
+.. note::
+
+   **Deprecation**
+
+   As of September 2015 all :program:`clang-modernize` transforms have been
+   ported to :doc:`clang-tidy/index`. :program:`clang-modernize` is deprecated
+   and is going to be removed soon.
+
+
 ==================================
 Clang C++ Modernizer User's Manual
 ==================================
@@ -51,7 +60,7 @@ args, it's probably best to use a *compilation database*.
 A `compilation database`_ contains the command-line arguments for multiple
 files. If the code you want to transform can be built with CMake, you can
 generate this database easily by running CMake with the
-``-DCMAKE_EXPORT_COMPILE_COMMANDS`` option. The Ninja_ build system, since
+``-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`` option. The Ninja_ build system, since
 v1.2, can create this file too using the *compdb* tool: ``ninja -t compdb``. If
 you're not already using either of these tools or cannot easily make use of
 them you might consider looking into Bear_.
@@ -81,34 +90,6 @@ situation you are dealing with.
 .. _Building LLVM with CMake: http://llvm.org/docs/CMake.html
 .. _Clang Tools Documentation: http://clang.llvm.org/docs/ClangTools.html
 
-Getting Involved
-================
-
-If you find a bug
-
-.. raw:: html
-
-  <input type="button" id="logbug" value="Log a Bug!" />
-  <script type="text/javascript" src="https://cpp11-migrate.atlassian.net/s/en_USpfg3b3-1988229788/6095/34/1.4.0-m2/_/download/batch/com.atlassian.jira.collector.plugin.jira-issue-collector-plugin:issuecollector/com.atlassian.jira.collector.plugin.jira-issue-collector-plugin:issuecollector.js?collectorId=50813874"></script>
-  <script type="text/javascript">window.ATL_JQ_PAGE_PROPS =  {
-    "triggerFunction": function(showCollectorDialog) {
-      //Requries that jQuery is available! 
-      jQuery("#logbug").click(function(e) {
-        e.preventDefault();
-        showCollectorDialog();
-      });
-    }};
-  </script>
-
-Bugs and feature development of the Modernizer are tracked at
-http://cpp11-migrate.atlassian.net. If you want to get involved the front page
-shows a list of outstanding issues or you can browse around the project to get
-familiar. To take on issues or contribute feature requests and/or bug reports
-you need to sign up for an account from the `log in page`_. An account also
-lets you sign up for notifications on issues or vote for unassigned issues to
-be completed.
-
-.. _log in page: https://cpp11-migrate.atlassian.net/login
 
 .. _transforms:
 

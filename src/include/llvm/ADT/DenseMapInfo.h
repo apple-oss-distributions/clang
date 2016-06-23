@@ -14,6 +14,9 @@
 #ifndef LLVM_ADT_DENSEMAPINFO_H
 #define LLVM_ADT_DENSEMAPINFO_H
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
 #include "llvm/Support/type_traits.h"
 #include <tuple>
@@ -57,7 +60,7 @@ template<> struct DenseMapInfo<char> {
     return LHS == RHS;
   }
 };
-  
+
 // Provide DenseMapInfo for unsigned ints.
 template<> struct DenseMapInfo<unsigned> {
   static inline unsigned getEmptyKey() { return ~0U; }
@@ -169,7 +172,6 @@ struct DenseMapInfo<std::pair<T, U> > {
   }
 };
 
-#if LLVM_HAS_VARIADIC_TEMPLATES
 template<typename ...Ts>
 struct DenseMapInfo<std::tuple<Ts...> > {
   typedef std::tuple<Ts...> Tuple;
@@ -222,132 +224,56 @@ struct DenseMapInfo<std::tuple<Ts...> > {
     return isEqualImpl<0>(lhs, rhs, atEnd);
   }
 };
-#else
-template<typename T1>
-struct DenseMapInfo<std::tuple<T1> > {
-  typedef std::tuple<T1> Tuple;
 
-  /// Helper class
-  static inline Tuple getEmptyKey() {
-    return Tuple(DenseMapInfo<T1>::getEmptyKey());
+// Provide DenseMapInfo for StringRefs.
+template <> struct DenseMapInfo<StringRef> {
+  static inline StringRef getEmptyKey() {
+    return StringRef(reinterpret_cast<const char *>(~static_cast<uintptr_t>(0)),
+                     0);
   }
-
-  static inline Tuple getTombstoneKey() {
-    return Tuple(DenseMapInfo<T1>::getTombstoneKey());
+  static inline StringRef getTombstoneKey() {
+    return StringRef(reinterpret_cast<const char *>(~static_cast<uintptr_t>(1)),
+                     0);
   }
-
-  static unsigned getHashValue(const Tuple& values) {
-    return DenseMapInfo<T1>::getHashValue(std::get<0>(values));
+  static unsigned getHashValue(StringRef Val) {
+    assert(Val.data() != getEmptyKey().data() && "Cannot hash the empty key!");
+    assert(Val.data() != getTombstoneKey().data() &&
+           "Cannot hash the tombstone key!");
+    return (unsigned)(hash_value(Val));
   }
-
-  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
-    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs));
-  }
-};
-
-template<typename T1, typename T2>
-struct DenseMapInfo<std::tuple<T1, T2> > {
-  typedef std::tuple<T1, T2> Tuple;
-
-  /// Helper class
-  static inline Tuple getEmptyKey() {
-    return Tuple(DenseMapInfo<T1>::getEmptyKey(),
-                 DenseMapInfo<T2>::getEmptyKey());
-  }
-
-  static inline Tuple getTombstoneKey() {
-    return Tuple(DenseMapInfo<T1>::getTombstoneKey(),
-                 DenseMapInfo<T2>::getTombstoneKey());
-  }
-
-  static unsigned getHashValue(const Tuple& values) {
-    return combineHashValue(
-             DenseMapInfo<T1>::getHashValue(std::get<0>(values)),
-             DenseMapInfo<T2>::getHashValue(std::get<1>(values)));
-  }
-
-  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
-    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs)) &&
-           DenseMapInfo<T2>::isEqual(std::get<1>(lhs), std::get<1>(rhs));
+  static bool isEqual(StringRef LHS, StringRef RHS) {
+    if (RHS.data() == getEmptyKey().data())
+      return LHS.data() == getEmptyKey().data();
+    if (RHS.data() == getTombstoneKey().data())
+      return LHS.data() == getTombstoneKey().data();
+    return LHS == RHS;
   }
 };
 
-template<typename T1, typename T2, typename T3>
-struct DenseMapInfo<std::tuple<T1, T2, T3> > {
-  typedef std::tuple<T1, T2, T3> Tuple;
-
-  /// Helper class
-  static inline Tuple getEmptyKey() {
-    return Tuple(DenseMapInfo<T1>::getEmptyKey(),
-                 DenseMapInfo<T2>::getEmptyKey(),
-                 DenseMapInfo<T3>::getEmptyKey());
+// Provide DenseMapInfo for ArrayRefs.
+template <typename T> struct DenseMapInfo<ArrayRef<T>> {
+  static inline ArrayRef<T> getEmptyKey() {
+    return ArrayRef<T>(reinterpret_cast<const T *>(~static_cast<uintptr_t>(0)),
+                       size_t(0));
   }
-
-  static inline Tuple getTombstoneKey() {
-    return Tuple(DenseMapInfo<T1>::getTombstoneKey(),
-                 DenseMapInfo<T2>::getTombstoneKey(),
-                 DenseMapInfo<T3>::getTombstoneKey());
+  static inline ArrayRef<T> getTombstoneKey() {
+    return ArrayRef<T>(reinterpret_cast<const T *>(~static_cast<uintptr_t>(1)),
+                       size_t(0));
   }
-
-  static unsigned getHashValue(const Tuple& values) {
-    unsigned result = DenseMapInfo<T1>::getHashValue(std::get<0>(values));
-    result = combineHashValue(
-               result,
-               DenseMapInfo<T2>::getHashValue(std::get<1>(values)));
-    result = combineHashValue(
-               result,
-               DenseMapInfo<T3>::getHashValue(std::get<2>(values)));
-    return result;
+  static unsigned getHashValue(ArrayRef<T> Val) {
+    assert(Val.data() != getEmptyKey().data() && "Cannot hash the empty key!");
+    assert(Val.data() != getTombstoneKey().data() &&
+           "Cannot hash the tombstone key!");
+    return (unsigned)(hash_value(Val));
   }
-
-  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
-    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs)) &&
-           DenseMapInfo<T2>::isEqual(std::get<1>(lhs), std::get<1>(rhs)) &&
-           DenseMapInfo<T3>::isEqual(std::get<2>(lhs), std::get<2>(rhs));
+  static bool isEqual(ArrayRef<T> LHS, ArrayRef<T> RHS) {
+    if (RHS.data() == getEmptyKey().data())
+      return LHS.data() == getEmptyKey().data();
+    if (RHS.data() == getTombstoneKey().data())
+      return LHS.data() == getTombstoneKey().data();
+    return LHS == RHS;
   }
 };
-
-template<typename T1, typename T2, typename T3, typename T4>
-struct DenseMapInfo<std::tuple<T1, T2, T3, T4> > {
-  typedef std::tuple<T1, T2, T3, T4> Tuple;
-
-  /// Helper class
-  static inline Tuple getEmptyKey() {
-    return Tuple(DenseMapInfo<T1>::getEmptyKey(),
-                 DenseMapInfo<T2>::getEmptyKey(),
-                 DenseMapInfo<T3>::getEmptyKey(),
-                 DenseMapInfo<T4>::getEmptyKey());
-  }
-
-  static inline Tuple getTombstoneKey() {
-    return Tuple(DenseMapInfo<T1>::getTombstoneKey(),
-                 DenseMapInfo<T2>::getTombstoneKey(),
-                 DenseMapInfo<T3>::getTombstoneKey(),
-                 DenseMapInfo<T4>::getTombstoneKey());
-  }
-
-  static unsigned getHashValue(const Tuple& values) {
-    unsigned result = DenseMapInfo<T1>::getHashValue(std::get<0>(values));
-    result = combineHashValue(
-               result,
-               DenseMapInfo<T2>::getHashValue(std::get<1>(values)));
-    result = combineHashValue(
-               result,
-               DenseMapInfo<T3>::getHashValue(std::get<2>(values)));
-    result = combineHashValue(
-               result,
-               DenseMapInfo<T4>::getHashValue(std::get<3>(values)));
-    return result;
-  }
-
-  static bool isEqual(const Tuple &lhs, const Tuple &rhs) {
-    return DenseMapInfo<T1>::isEqual(std::get<0>(lhs), std::get<0>(rhs)) &&
-           DenseMapInfo<T2>::isEqual(std::get<1>(lhs), std::get<1>(rhs)) &&
-           DenseMapInfo<T3>::isEqual(std::get<2>(lhs), std::get<2>(rhs)) &&
-           DenseMapInfo<T4>::isEqual(std::get<3>(lhs), std::get<3>(rhs));
-  }
-};
-#endif
 
 } // end namespace llvm
 

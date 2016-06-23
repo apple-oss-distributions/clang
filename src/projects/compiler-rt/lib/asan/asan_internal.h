@@ -21,8 +21,6 @@
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
-#define ASAN_DEFAULT_FAILURE_EXITCODE 1
-
 #if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
 # error "The AddressSanitizer run-time should not be"
         " instrumented by AddressSanitizer"
@@ -33,6 +31,12 @@
 // If set, asan will intercept C++ exception api call(s).
 #ifndef ASAN_HAS_EXCEPTIONS
 # define ASAN_HAS_EXCEPTIONS 1
+#endif
+
+#ifndef ASAN_LOW_MEMORY
+#if SANITIZER_IOS
+#  define ASAN_LOW_MEMORY 1
+#endif
 #endif
 
 // If set, values like allocator chunk size, as well as defaults for some flags
@@ -62,21 +66,6 @@ namespace __asan {
 class AsanThread;
 using __sanitizer::StackTrace;
 
-struct SignalContext {
-  void *context;
-  uptr addr;
-  uptr pc;
-  uptr sp;
-  uptr bp;
-
-  SignalContext(void *context, uptr addr, uptr pc, uptr sp, uptr bp) :
-      context(context), addr(addr), pc(pc), sp(sp), bp(bp) {
-  }
-
-  // Creates signal context in a platform-specific manner.
-  static SignalContext Create(void *siginfo, void *context);
-};
-
 void AsanInitFromRtl();
 
 // asan_rtl.cc
@@ -90,13 +79,11 @@ void *AsanDoesNotSupportStaticLinkage();
 void AsanCheckDynamicRTPrereqs();
 void AsanCheckIncompatibleRT();
 
-void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
-void AsanOnSIGSEGV(int, void *siginfo, void *context);
+void AsanOnDeadlySignal(int, void *siginfo, void *context);
 
 void DisableReexec();
 void MaybeReexec();
 void ReadContextStack(void *context, uptr *stack, uptr *ssize);
-void AsanPlatformThreadInit();
 void StopInitOrderChecking();
 
 // Wrapper for TLS/TSD.
@@ -109,7 +96,7 @@ void AppendToErrorMessageBuffer(const char *buffer);
 
 void *AsanDlSymNext(const char *sym);
 
-void ReserveShadowMemoryRange(uptr beg, uptr end);
+void ReserveShadowMemoryRange(uptr beg, uptr end, const char *name);
 
 // Platform-specific options.
 #if SANITIZER_MAC

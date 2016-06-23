@@ -7,18 +7,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_OVERLOADED_UNARY_AND_CHECK_H
-#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_OVERLOADED_UNARY_AND_CHECK_H
+#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_OVERLOADEDUNARYANDCHECK_H
+#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_OVERLOADEDUNARYANDCHECK_H
 
 #include "../ClangTidy.h"
 
 namespace clang {
 namespace tidy {
+namespace google {
 namespace runtime {
 
-/// \brief Finds overloads of unary operator &.
+/// Finds overloads of unary `operator &`.
 ///
 /// http://google-styleguide.googlecode.com/svn/trunk/cppguide.xml?showone=Operator_Overloading#Operator_Overloading
+///
 /// Corresponding cpplint.py check name: 'runtime/operator'.
 class OverloadedUnaryAndCheck : public ClangTidyCheck {
 public:
@@ -29,7 +31,8 @@ public:
 };
 
 } // namespace runtime
+} // namespace google
 } // namespace tidy
 } // namespace clang
 
-#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_OVERLOADED_UNARY_AND_CHECK_H
+#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_OVERLOADEDUNARYANDCHECK_H

@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "DebugMap.h"
+#include "BinaryHolder.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/DataTypes.h"
@@ -20,45 +21,18 @@ namespace dsymutil {
 using namespace llvm::object;
 
 DebugMapObject::DebugMapObject(StringRef ObjectFilename,
-                               sys::TimeValue Timestamp,
-                               bool SwiftModule)
-    : Filename(ObjectFilename), Timestamp(Timestamp),
-      SwiftModule(SwiftModule) {}
+                               sys::TimeValue Timestamp, bool SwiftModule)
+    : Filename(ObjectFilename), Timestamp(Timestamp), SwiftModule(SwiftModule) {
+}
 
-bool DebugMapObject::addSymbol(StringRef Name, uint64_t ObjectAddress,
-                               uint64_t LinkedAddress, uint32_t Size,
-                               StringRef Section, bool FromAnotherObjectFile) {
+bool DebugMapObject::addSymbol(StringRef Name, Optional<uint64_t> ObjectAddress,
+                               uint64_t LinkedAddress, uint32_t Size) {
   auto InsertResult = Symbols.insert(
-      std::make_pair(Name, SymbolMapping(ObjectAddress, LinkedAddress, Section,
-                                         Size, FromAnotherObjectFile)));
+      std::make_pair(Name, SymbolMapping(ObjectAddress, LinkedAddress, Size)));
 
-  DebugMapEntry &Entry = *InsertResult.first;
-
-  // If the symbol is section based, then its address is
-  // meaningful. As we put every symbol in the debug map, we might
-  // have multiple aliases though (this happens with asm labels or C
-  // aliases). Prefer to store one that has a linked address.
-  if (!Section.empty()) {
-    DebugMapEntry *&MapEntry = AddressToMapping[ObjectAddress];
-    if (!MapEntry ||
-        (LinkedAddress != object::UnknownAddressOrSize &&
-         MapEntry->getValue().BinaryAddress == object::UnknownAddressOrSize))
-      MapEntry = &Entry;
-  }
-
-  if (!InsertResult.second) {
-    if (Size)
-      Entry.getValue().Size = Size;
-    if (!FromAnotherObjectFile && Entry.getValue().FromAnotherObjectFile) {
-      Entry.getValue().ObjectAddress = ObjectAddress;
-      Entry.getValue().BinaryAddress = LinkedAddress;
-    }
-    Entry.getValue().FromAnotherObjectFile = FromAnotherObjectFile;
-    return Entry.getValue().ObjectAddress == ObjectAddress &&
-           Entry.getValue().BinaryAddress == LinkedAddress;
-  }
-
-  return true;
+  if (ObjectAddress && InsertResult.second)
+    AddressToMapping[*ObjectAddress] = &*InsertResult.first;
+  return InsertResult.second;
 }
 
 void DebugMapObject::print(raw_ostream &OS) const {
@@ -74,16 +48,13 @@ void DebugMapObject::print(raw_ostream &OS) const {
       Entries.begin(), Entries.end(),
       [](const Entry &LHS, const Entry &RHS) { return LHS.first < RHS.first; });
   for (const auto &Sym : Entries) {
-    OS << format("\t%016" PRIx64 " => %016" PRIx64,
-                 uint64_t(Sym.second.ObjectAddress),
-                 uint64_t(Sym.second.BinaryAddress))
-       <<  "+" << format_hex(uint32_t(Sym.second.Size), 3)
-       << format("\t%s %s",
-                 Sym.first.data(),
-                 Sym.second.FromAnotherObjectFile ? "(other object)" : "");
-    if (!Sym.second.Section.empty())
-      OS << "\tin " << Sym.second.Section;
-    OS << '\n';
+    if (Sym.second.ObjectAddress)
+      OS << format("\t%016" PRIx64, uint64_t(*Sym.second.ObjectAddress));
+    else
+      OS << "\t????????????????";
+    OS << format(" => %016" PRIx64 "+0x%x\t%s\n",
+                 uint64_t(Sym.second.BinaryAddress), uint32_t(Sym.second.Size),
+                 Sym.first.data());
   }
   OS << '\n';
 }
@@ -95,8 +66,8 @@ void DebugMapObject::dump() const { print(errs()); }
 DebugMapObject &DebugMap::addDebugMapObject(StringRef ObjectFilePath,
                                             sys::TimeValue Timestamp,
                                             bool SwiftModule) {
-  Objects.emplace_back(new DebugMapObject(ObjectFilePath, Timestamp,
-                                          SwiftModule));
+  Objects.emplace_back(
+      new DebugMapObject(ObjectFilePath, Timestamp, SwiftModule));
   return *Objects.back();
 }
 
@@ -109,44 +80,179 @@ DebugMapObject::lookupSymbol(StringRef SymbolName) const {
 }
 
 const DebugMapObject::DebugMapEntry *
-DebugMapObject::lookupObjectAddress(uint64_t Address,
-                                    StringRef Section) const {
-  // FIXME: We allow to return a unexact match is the entry right
-  // before the address is in the same section. This handle some cases
-  // where the relocation in a variable location isn't mentioned in
-  // the debug map because it has somehow been coalesced with a
-  // neighbor value. This looks like a debug info bug (Only example in
-  // the OpenGL project). We don't want to return that if the address
-  // had a valid symbol in the object file. To do this, we fill the
-  // map with every symbol that was present in the object even if they
-  // weren't linked. With this setup, only addresses whose symbol
-  // 'disapeared' will get the closest match treatment.
-  auto Mapping = AddressToMapping.upper_bound(Address);
-  if (Mapping != AddressToMapping.begin())
-    --Mapping;
-
-  // If the section is empty, this is a scattered relocation. Return
-  // the closest match in that case, it should be the base symbol of
-  // the scattered reloc.
-  if (Mapping == AddressToMapping.end() ||
-      Mapping->second->getValue().ObjectAddress > Address ||
-      (!Section.empty() && Mapping->second->getValue().Section != Section))
+DebugMapObject::lookupObjectAddress(uint64_t Address) const {
+  auto Mapping = AddressToMapping.find(Address);
+  if (Mapping == AddressToMapping.end())
     return nullptr;
-  return Mapping->second;
+  return Mapping->getSecond();
 }
 
 void DebugMap::print(raw_ostream &OS) const {
-  // yaml::Output yout(OS);
-  // yout << const_cast<DebugMap&>(*this);
-  OS << "DEBUG MAP: " << BinaryTriple.getTriple()
-     << "\n\tobject addr =>  executable addr\tsymbol name\n";
-  for (const auto &Obj : objects())
-    Obj->print(OS);
-  OS << "END DEBUG MAP\n";
+  yaml::Output yout(OS, /* Ctxt = */ nullptr, /* WrapColumn = */ 0);
+  yout << const_cast<DebugMap &>(*this);
 }
 
 #ifndef NDEBUG
 void DebugMap::dump() const { print(errs()); }
 #endif
+
+namespace {
+struct YAMLContext {
+  StringRef PrependPath;
+  Triple BinaryTriple;
+};
+}
+
+ErrorOr<std::vector<std::unique_ptr<DebugMap>>>
+DebugMap::parseYAMLDebugMap(StringRef InputFile, StringRef PrependPath,
+                            bool Verbose) {
+  auto ErrOrFile = MemoryBuffer::getFileOrSTDIN(InputFile);
+  if (auto Err = ErrOrFile.getError())
+    return Err;
+
+  YAMLContext Ctxt;
+
+  Ctxt.PrependPath = PrependPath;
+
+  std::unique_ptr<DebugMap> Res;
+  yaml::Input yin((*ErrOrFile)->getBuffer(), &Ctxt);
+  yin >> Res;
+
+  if (auto EC = yin.error())
+    return EC;
+  std::vector<std::unique_ptr<DebugMap>> Result;
+  Result.push_back(std::move(Res));
+  return std::move(Result);
+}
+}
+
+namespace yaml {
+
+// Normalize/Denormalize between YAML and a DebugMapObject.
+struct MappingTraits<dsymutil::DebugMapObject>::YamlDMO {
+  YamlDMO(IO &io) { Timestamp = 0; }
+  YamlDMO(IO &io, dsymutil::DebugMapObject &Obj);
+  dsymutil::DebugMapObject denormalize(IO &IO);
+
+  std::string Filename;
+  sys::TimeValue::SecondsType Timestamp;
+  std::vector<dsymutil::DebugMapObject::YAMLSymbolMapping> Entries;
+};
+
+void MappingTraits<std::pair<std::string, DebugMapObject::SymbolMapping>>::
+    mapping(IO &io, std::pair<std::string, DebugMapObject::SymbolMapping> &s) {
+  io.mapRequired("sym", s.first);
+  io.mapOptional("objAddr", s.second.ObjectAddress);
+  io.mapRequired("binAddr", s.second.BinaryAddress);
+  io.mapOptional("size", s.second.Size);
+}
+
+void MappingTraits<dsymutil::DebugMapObject>::mapping(
+    IO &io, dsymutil::DebugMapObject &DMO) {
+  MappingNormalization<YamlDMO, dsymutil::DebugMapObject> Norm(io, DMO);
+  io.mapRequired("filename", Norm->Filename);
+  io.mapOptional("timestamp", Norm->Timestamp);
+  io.mapRequired("symbols", Norm->Entries);
+}
+
+void ScalarTraits<Triple>::output(const Triple &val, void *,
+                                  llvm::raw_ostream &out) {
+  out << val.str();
+}
+
+StringRef ScalarTraits<Triple>::input(StringRef scalar, void *, Triple &value) {
+  value = Triple(scalar);
+  return StringRef();
+}
+
+size_t
+SequenceTraits<std::vector<std::unique_ptr<dsymutil::DebugMapObject>>>::size(
+    IO &io, std::vector<std::unique_ptr<dsymutil::DebugMapObject>> &seq) {
+  return seq.size();
+}
+
+dsymutil::DebugMapObject &
+SequenceTraits<std::vector<std::unique_ptr<dsymutil::DebugMapObject>>>::element(
+    IO &, std::vector<std::unique_ptr<dsymutil::DebugMapObject>> &seq,
+    size_t index) {
+  if (index >= seq.size()) {
+    seq.resize(index + 1);
+    seq[index].reset(new dsymutil::DebugMapObject);
+  }
+  return *seq[index];
+}
+
+void MappingTraits<dsymutil::DebugMap>::mapping(IO &io,
+                                                dsymutil::DebugMap &DM) {
+  io.mapRequired("triple", DM.BinaryTriple);
+  io.mapOptional("binary-path", DM.BinaryPath);
+  if (void *Ctxt = io.getContext())
+    reinterpret_cast<YAMLContext *>(Ctxt)->BinaryTriple = DM.BinaryTriple;
+  io.mapOptional("objects", DM.Objects);
+}
+
+void MappingTraits<std::unique_ptr<dsymutil::DebugMap>>::mapping(
+    IO &io, std::unique_ptr<dsymutil::DebugMap> &DM) {
+  if (!DM)
+    DM.reset(new DebugMap());
+  io.mapRequired("triple", DM->BinaryTriple);
+  io.mapOptional("binary-path", DM->BinaryPath);
+  if (void *Ctxt = io.getContext())
+    reinterpret_cast<YAMLContext *>(Ctxt)->BinaryTriple = DM->BinaryTriple;
+  io.mapOptional("objects", DM->Objects);
+}
+
+MappingTraits<dsymutil::DebugMapObject>::YamlDMO::YamlDMO(
+    IO &io, dsymutil::DebugMapObject &Obj) {
+  Filename = Obj.Filename;
+  Timestamp = Obj.getTimestamp().toEpochTime();
+  Entries.reserve(Obj.Symbols.size());
+  for (auto &Entry : Obj.Symbols)
+    Entries.push_back(std::make_pair(Entry.getKey(), Entry.getValue()));
+}
+
+dsymutil::DebugMapObject
+MappingTraits<dsymutil::DebugMapObject>::YamlDMO::denormalize(IO &IO) {
+  BinaryHolder BinHolder(/* Verbose =*/false);
+  const auto &Ctxt = *reinterpret_cast<YAMLContext *>(IO.getContext());
+  SmallString<80> Path(Ctxt.PrependPath);
+  StringMap<uint64_t> SymbolAddresses;
+
+  sys::path::append(Path, Filename);
+  auto ErrOrObjectFiles = BinHolder.GetObjectFiles(Path);
+  if (auto EC = ErrOrObjectFiles.getError()) {
+    llvm::errs() << "warning: Unable to open " << Path << " " << EC.message()
+                 << '\n';
+  } else if (auto ErrOrObjectFile = BinHolder.Get(Ctxt.BinaryTriple)) {
+    // Rewrite the object file symbol addresses in the debug map. The
+    // YAML input is mainly used to test llvm-dsymutil without
+    // requiring binaries checked-in. If we generate the object files
+    // during the test, we can't hardcode the symbols addresses, so
+    // look them up here and rewrite them.
+    for (const auto &Sym : ErrOrObjectFile->symbols()) {
+      uint64_t Address = Sym.getValue();
+      ErrorOr<StringRef> Name = Sym.getName();
+      if (!Name ||
+          (Sym.getFlags() & (SymbolRef::SF_Absolute | SymbolRef::SF_Common)))
+        continue;
+      SymbolAddresses[*Name] = Address;
+    }
+  }
+
+  sys::TimeValue TV;
+  TV.fromEpochTime(Timestamp);
+  dsymutil::DebugMapObject Res(Path, TV, false);
+  for (auto &Entry : Entries) {
+    auto &Mapping = Entry.second;
+    Optional<uint64_t> ObjAddress;
+    if (Mapping.ObjectAddress)
+      ObjAddress = *Mapping.ObjectAddress;
+    auto AddressIt = SymbolAddresses.find(Entry.first);
+    if (AddressIt != SymbolAddresses.end())
+      ObjAddress = AddressIt->getValue();
+    Res.addSymbol(Entry.first, ObjAddress, Mapping.BinaryAddress, Mapping.Size);
+  }
+  return Res;
+}
 }
 }

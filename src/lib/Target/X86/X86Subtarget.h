@@ -47,7 +47,7 @@ class X86Subtarget final : public X86GenSubtargetInfo {
 
 protected:
   enum X86SSEEnum {
-    NoMMXSSE, MMX, SSE1, SSE2, SSE3, SSSE3, SSE41, SSE42, AVX, AVX2, AVX512F
+    NoSSE, SSE1, SSE2, SSE3, SSSE3, SSE41, SSE42, AVX, AVX2, AVX512F
   };
 
   enum X863DNowEnum {
@@ -64,7 +64,7 @@ protected:
   /// Which PIC style to use
   PICStyles::Style PICStyle;
 
-  /// MMX, SSE1, SSE2, SSE3, SSSE3, SSE41, SSE42, or none supported.
+  /// SSE1, SSE2, SSE3, SSSE3, SSE41, SSE42, or none supported.
   X86SSEEnum X86SSELevel;
 
   /// 3DNow, 3DNow Athlon, or none supported.
@@ -73,6 +73,9 @@ protected:
   /// True if this processor has conditional move instructions
   /// (generally pentium pro+).
   bool HasCMov;
+
+  /// True if this processor supports MMX instructions.
+  bool HasMMX;
 
   /// True if the processor supports X86-64 instructions.
   bool HasX86_64;
@@ -85,6 +88,18 @@ protected:
 
   /// Target has AES instructions
   bool HasAES;
+
+  /// Target has FXSAVE/FXRESTOR instructions
+  bool HasFXSR;
+
+  /// Target has XSAVE instructions
+  bool HasXSAVE;
+  /// Target has XSAVEOPT instructions
+  bool HasXSAVEOPT;
+  /// Target has XSAVEC instructions
+  bool HasXSAVEC;
+  /// Target has XSAVES instructions
+  bool HasXSAVES;
 
   /// Target has carry-less multiplication
   bool HasPCLMUL;
@@ -146,10 +161,10 @@ protected:
   /// True if SHLD instructions are slow.
   bool IsSHLDSlow;
 
-  /// True if unaligned memory access is fast.
-  bool IsUAMemFast;
+  /// True if unaligned memory accesses of 16-bytes are slow.
+  bool IsUAMem16Slow;
 
-  /// True if unaligned 32-byte memory accesses are slow.
+  /// True if unaligned memory accesses of 32-bytes are slow.
   bool IsUAMem32Slow;
 
   /// True if SSE operations can have unaligned memory operands.
@@ -190,16 +205,6 @@ protected:
   /// True if INC and DEC instructions are slow when writing to flags
   bool SlowIncDec;
 
-  /// Use the RSQRT* instructions to optimize square root calculations.
-  /// For this to be profitable, the cost of FSQRT and FDIV must be
-  /// substantially higher than normal FP ops like FADD and FMUL.
-  bool UseSqrtEst;
-
-  /// Use the RCP* instructions to optimize FP division calculations.
-  /// For this to be profitable, the cost of FDIV must be
-  /// substantially higher than normal FP ops like FADD and FMUL.
-  bool UseReciprocalEst;
-
   /// Processor has AVX-512 PreFetch Instructions
   bool HasPFI;
 
@@ -217,6 +222,12 @@ protected:
 
   /// Processor has AVX-512 Vector Length eXtenstions
   bool HasVLX;
+
+  /// Processot supports MPX - Memory Protection Extensions
+  bool HasMPX;
+
+  /// Use software floating point for code generation.
+  bool UseSoftFloat;
 
   /// The minimum alignment known to hold of the stack frame on
   /// entry to the function and which must be maintained by every function.
@@ -257,9 +268,8 @@ public:
   /// This constructor initializes the data members to match that
   /// of the specified triple.
   ///
-  X86Subtarget(const std::string &TT, const std::string &CPU,
-               const std::string &FS, const X86TargetMachine &TM,
-               unsigned StackAlignOverride);
+  X86Subtarget(const Triple &TT, const std::string &CPU, const std::string &FS,
+               const X86TargetMachine &TM, unsigned StackAlignOverride);
 
   const X86TargetLowering *getTargetLowering() const override {
     return &TLInfo;
@@ -324,7 +334,7 @@ public:
   void setPICStyle(PICStyles::Style Style)  { PICStyle = Style; }
 
   bool hasCMov() const { return HasCMov; }
-  bool hasMMX() const { return X86SSELevel >= MMX; }
+  bool hasMMX() const { return HasMMX; }
   bool hasSSE1() const { return X86SSELevel >= SSE1; }
   bool hasSSE2() const { return X86SSELevel >= SSE2; }
   bool hasSSE3() const { return X86SSELevel >= SSE3; }
@@ -341,6 +351,11 @@ public:
   bool has3DNowA() const { return X863DNowLevel >= ThreeDNowA; }
   bool hasPOPCNT() const { return HasPOPCNT; }
   bool hasAES() const { return HasAES; }
+  bool hasFXSR() const { return HasFXSR; }
+  bool hasXSAVE() const { return HasXSAVE; }
+  bool hasXSAVEOPT() const { return HasXSAVEOPT; }
+  bool hasXSAVEC() const { return HasXSAVEC; }
+  bool hasXSAVES() const { return HasXSAVES; }
   bool hasPCLMUL() const { return HasPCLMUL; }
   bool hasFMA() const { return HasFMA; }
   // FIXME: Favor FMA when both are enabled. Is this the right thing to do?
@@ -362,7 +377,7 @@ public:
   bool hasRDSEED() const { return HasRDSEED; }
   bool isBTMemSlow() const { return IsBTMemSlow; }
   bool isSHLDSlow() const { return IsSHLDSlow; }
-  bool isUnalignedMemAccessFast() const { return IsUAMemFast; }
+  bool isUnalignedMem16Slow() const { return IsUAMem16Slow; }
   bool isUnalignedMem32Slow() const { return IsUAMem32Slow; }
   bool hasSSEUnalignedMem() const { return HasSSEUnalignedMem; }
   bool hasCmpxchg16b() const { return HasCmpxchg16b; }
@@ -374,17 +389,17 @@ public:
   bool LEAusesAG() const { return LEAUsesAG; }
   bool slowLEA() const { return SlowLEA; }
   bool slowIncDec() const { return SlowIncDec; }
-  bool useSqrtEst() const { return UseSqrtEst; }
-  bool useReciprocalEst() const { return UseReciprocalEst; }
   bool hasCDI() const { return HasCDI; }
   bool hasPFI() const { return HasPFI; }
   bool hasERI() const { return HasERI; }
   bool hasDQI() const { return HasDQI; }
   bool hasBWI() const { return HasBWI; }
   bool hasVLX() const { return HasVLX; }
+  bool hasMPX() const { return HasMPX; }
 
   bool isAtom() const { return X86ProcFamily == IntelAtom; }
   bool isSLM() const { return X86ProcFamily == IntelSLM; }
+  bool useSoftFloat() const { return UseSoftFloat; }
 
   const Triple &getTargetTriple() const { return TargetTriple; }
 
@@ -399,9 +414,11 @@ public:
   bool isTargetMachO() const { return TargetTriple.isOSBinFormatMachO(); }
 
   bool isTargetLinux() const { return TargetTriple.isOSLinux(); }
+  bool isTargetAndroid() const { return TargetTriple.isAndroid(); }
   bool isTargetNaCl() const { return TargetTriple.isOSNaCl(); }
   bool isTargetNaCl32() const { return isTargetNaCl() && !is64Bit(); }
   bool isTargetNaCl64() const { return isTargetNaCl() && is64Bit(); }
+  bool isTargetMCU() const { return TargetTriple.isOSIAMCU(); }
 
   bool isTargetWindowsMSVC() const {
     return TargetTriple.isWindowsMSVCEnvironment();
@@ -409,6 +426,10 @@ public:
 
   bool isTargetKnownWindowsMSVC() const {
     return TargetTriple.isKnownWindowsMSVCEnvironment();
+  }
+
+  bool isTargetWindowsCoreCLR() const {
+    return TargetTriple.isWindowsCoreCLREnvironment();
   }
 
   bool isTargetWindowsCygwin() const {
@@ -452,8 +473,26 @@ public:
   }
 
   bool isCallingConvWin64(CallingConv::ID CC) const {
-    return (isTargetWin64() && CC != CallingConv::X86_64_SysV) ||
-           CC == CallingConv::X86_64_Win64;
+    switch (CC) {
+    // On Win64, all these conventions just use the default convention.
+    case CallingConv::C:
+    case CallingConv::Fast:
+    case CallingConv::X86_FastCall:
+    case CallingConv::X86_StdCall:
+    case CallingConv::X86_ThisCall:
+    case CallingConv::X86_VectorCall:
+    case CallingConv::Intel_OCL_BI:
+      return isTargetWin64();
+    // This convention allows using the Win64 convention on other targets.
+    case CallingConv::X86_64_Win64:
+      return true;
+    // This convention allows using the SysV convention on Windows targets.
+    case CallingConv::X86_64_SysV:
+      return false;
+    // Otherwise, who knows what this is.
+    default:
+      return false;
+    }
   }
 
   /// ClassifyGlobalReference - Classify a global variable reference for the

@@ -80,27 +80,28 @@ X86GenericDisassembler::X86GenericDisassembler(
                                          MCContext &Ctx,
                                          std::unique_ptr<const MCInstrInfo> MII)
   : MCDisassembler(STI, Ctx), MII(std::move(MII)) {
-  switch (STI.getFeatureBits() &
-          (X86::Mode16Bit | X86::Mode32Bit | X86::Mode64Bit)) {
-  case X86::Mode16Bit:
+  const FeatureBitset &FB = STI.getFeatureBits();
+  if (FB[X86::Mode16Bit]) {
     fMode = MODE_16BIT;
-    break;
-  case X86::Mode32Bit:
+    return;
+  } else if (FB[X86::Mode32Bit]) {
     fMode = MODE_32BIT;
-    break;
-  case X86::Mode64Bit:
+    return;
+  } else if (FB[X86::Mode64Bit]) {
     fMode = MODE_64BIT;
-    break;
-  default:
-    llvm_unreachable("Invalid CPU mode");
+    return;
   }
+
+  llvm_unreachable("Invalid CPU mode");
 }
 
+namespace {
 struct Region {
   ArrayRef<uint8_t> Bytes;
   uint64_t Base;
   Region(ArrayRef<uint8_t> Bytes, uint64_t Base) : Bytes(Bytes), Base(Base) {}
 };
+} // end anonymous namespace
 
 /// A callback function that wraps the readByte method from Region.
 ///
@@ -180,7 +181,7 @@ static void translateRegister(MCInst &mcInst, Reg reg) {
 #undef ENTRY
 
   uint8_t llvmRegnum = llvmRegnums[reg];
-  mcInst.addOperand(MCOperand::CreateReg(llvmRegnum));
+  mcInst.addOperand(MCOperand::createReg(llvmRegnum));
 }
 
 /// tryAddingSymbolicOperand - trys to add a symbolic operand in place of the
@@ -248,11 +249,11 @@ static bool translateSrcIndex(MCInst &mcInst, InternalInstruction &insn) {
     assert(insn.mode == MODE_16BIT);
     baseRegNo = insn.prefixPresent[0x67] ? X86::ESI : X86::SI;
   }
-  MCOperand baseReg = MCOperand::CreateReg(baseRegNo);
+  MCOperand baseReg = MCOperand::createReg(baseRegNo);
   mcInst.addOperand(baseReg);
 
   MCOperand segmentReg;
-  segmentReg = MCOperand::CreateReg(segmentRegnums[insn.segmentOverride]);
+  segmentReg = MCOperand::createReg(segmentRegnums[insn.segmentOverride]);
   mcInst.addOperand(segmentReg);
   return false;
 }
@@ -273,7 +274,7 @@ static bool translateDstIndex(MCInst &mcInst, InternalInstruction &insn) {
     assert(insn.mode == MODE_16BIT);
     baseRegNo = insn.prefixPresent[0x67] ? X86::EDI : X86::DI;
   }
-  MCOperand baseReg = MCOperand::CreateReg(baseRegNo);
+  MCOperand baseReg = MCOperand::createReg(baseRegNo);
   mcInst.addOperand(baseReg);
   return false;
 }
@@ -344,14 +345,30 @@ static void translateImmediate(MCInst &mcInst, uint64_t immediate,
       unsigned NewOpc;
       switch (mcInst.getOpcode()) {
       default: llvm_unreachable("unexpected opcode");
-      case X86::CMPPDrmi: NewOpc = X86::CMPPDrmi_alt; break;
-      case X86::CMPPDrri: NewOpc = X86::CMPPDrri_alt; break;
-      case X86::CMPPSrmi: NewOpc = X86::CMPPSrmi_alt; break;
-      case X86::CMPPSrri: NewOpc = X86::CMPPSrri_alt; break;
-      case X86::CMPSDrm:  NewOpc = X86::CMPSDrm_alt;  break;
-      case X86::CMPSDrr:  NewOpc = X86::CMPSDrr_alt;  break;
-      case X86::CMPSSrm:  NewOpc = X86::CMPSSrm_alt;  break;
-      case X86::CMPSSrr:  NewOpc = X86::CMPSSrr_alt;  break;
+      case X86::CMPPDrmi:  NewOpc = X86::CMPPDrmi_alt;  break;
+      case X86::CMPPDrri:  NewOpc = X86::CMPPDrri_alt;  break;
+      case X86::CMPPSrmi:  NewOpc = X86::CMPPSrmi_alt;  break;
+      case X86::CMPPSrri:  NewOpc = X86::CMPPSrri_alt;  break;
+      case X86::CMPSDrm:   NewOpc = X86::CMPSDrm_alt;   break;
+      case X86::CMPSDrr:   NewOpc = X86::CMPSDrr_alt;   break;
+      case X86::CMPSSrm:   NewOpc = X86::CMPSSrm_alt;   break;
+      case X86::CMPSSrr:   NewOpc = X86::CMPSSrr_alt;   break;
+      case X86::VPCOMBri:  NewOpc = X86::VPCOMBri_alt;  break;
+      case X86::VPCOMBmi:  NewOpc = X86::VPCOMBmi_alt;  break;
+      case X86::VPCOMWri:  NewOpc = X86::VPCOMWri_alt;  break;
+      case X86::VPCOMWmi:  NewOpc = X86::VPCOMWmi_alt;  break;
+      case X86::VPCOMDri:  NewOpc = X86::VPCOMDri_alt;  break;
+      case X86::VPCOMDmi:  NewOpc = X86::VPCOMDmi_alt;  break;
+      case X86::VPCOMQri:  NewOpc = X86::VPCOMQri_alt;  break;
+      case X86::VPCOMQmi:  NewOpc = X86::VPCOMQmi_alt;  break;
+      case X86::VPCOMUBri: NewOpc = X86::VPCOMUBri_alt; break;
+      case X86::VPCOMUBmi: NewOpc = X86::VPCOMUBmi_alt; break;
+      case X86::VPCOMUWri: NewOpc = X86::VPCOMUWri_alt; break;
+      case X86::VPCOMUWmi: NewOpc = X86::VPCOMUWmi_alt; break;
+      case X86::VPCOMUDri: NewOpc = X86::VPCOMUDri_alt; break;
+      case X86::VPCOMUDmi: NewOpc = X86::VPCOMUDmi_alt; break;
+      case X86::VPCOMUQri: NewOpc = X86::VPCOMUQri_alt; break;
+      case X86::VPCOMUQmi: NewOpc = X86::VPCOMUQmi_alt; break;
       }
       // Switch opcode to the one that doesn't get special printing.
       mcInst.setOpcode(NewOpc);
@@ -362,26 +379,28 @@ static void translateImmediate(MCInst &mcInst, uint64_t immediate,
       unsigned NewOpc;
       switch (mcInst.getOpcode()) {
       default: llvm_unreachable("unexpected opcode");
-      case X86::VCMPPDrmi:  NewOpc = X86::VCMPPDrmi_alt;  break;
-      case X86::VCMPPDrri:  NewOpc = X86::VCMPPDrri_alt;  break;
-      case X86::VCMPPSrmi:  NewOpc = X86::VCMPPSrmi_alt;  break;
-      case X86::VCMPPSrri:  NewOpc = X86::VCMPPSrri_alt;  break;
-      case X86::VCMPSDrm:   NewOpc = X86::VCMPSDrm_alt;   break;
-      case X86::VCMPSDrr:   NewOpc = X86::VCMPSDrr_alt;   break;
-      case X86::VCMPSSrm:   NewOpc = X86::VCMPSSrm_alt;   break;
-      case X86::VCMPSSrr:   NewOpc = X86::VCMPSSrr_alt;   break;
-      case X86::VCMPPDYrmi: NewOpc = X86::VCMPPDYrmi_alt; break;
-      case X86::VCMPPDYrri: NewOpc = X86::VCMPPDYrri_alt; break;
-      case X86::VCMPPSYrmi: NewOpc = X86::VCMPPSYrmi_alt; break;
-      case X86::VCMPPSYrri: NewOpc = X86::VCMPPSYrri_alt; break;
-      case X86::VCMPPDZrmi: NewOpc = X86::VCMPPDZrmi_alt; break;
-      case X86::VCMPPDZrri: NewOpc = X86::VCMPPDZrri_alt; break;
-      case X86::VCMPPSZrmi: NewOpc = X86::VCMPPSZrmi_alt; break;
-      case X86::VCMPPSZrri: NewOpc = X86::VCMPPSZrri_alt; break;
-      case X86::VCMPSDZrm:  NewOpc = X86::VCMPSDZrmi_alt; break;
-      case X86::VCMPSDZrr:  NewOpc = X86::VCMPSDZrri_alt; break;
-      case X86::VCMPSSZrm:  NewOpc = X86::VCMPSSZrmi_alt; break;
-      case X86::VCMPSSZrr:  NewOpc = X86::VCMPSSZrri_alt; break;
+      case X86::VCMPPDrmi:   NewOpc = X86::VCMPPDrmi_alt;   break;
+      case X86::VCMPPDrri:   NewOpc = X86::VCMPPDrri_alt;   break;
+      case X86::VCMPPSrmi:   NewOpc = X86::VCMPPSrmi_alt;   break;
+      case X86::VCMPPSrri:   NewOpc = X86::VCMPPSrri_alt;   break;
+      case X86::VCMPSDrm:    NewOpc = X86::VCMPSDrm_alt;    break;
+      case X86::VCMPSDrr:    NewOpc = X86::VCMPSDrr_alt;    break;
+      case X86::VCMPSSrm:    NewOpc = X86::VCMPSSrm_alt;    break;
+      case X86::VCMPSSrr:    NewOpc = X86::VCMPSSrr_alt;    break;
+      case X86::VCMPPDYrmi:  NewOpc = X86::VCMPPDYrmi_alt;  break;
+      case X86::VCMPPDYrri:  NewOpc = X86::VCMPPDYrri_alt;  break;
+      case X86::VCMPPSYrmi:  NewOpc = X86::VCMPPSYrmi_alt;  break;
+      case X86::VCMPPSYrri:  NewOpc = X86::VCMPPSYrri_alt;  break;
+      case X86::VCMPPDZrmi:  NewOpc = X86::VCMPPDZrmi_alt;  break;
+      case X86::VCMPPDZrri:  NewOpc = X86::VCMPPDZrri_alt;  break;
+      case X86::VCMPPDZrrib: NewOpc = X86::VCMPPDZrrib_alt; break;
+      case X86::VCMPPSZrmi:  NewOpc = X86::VCMPPSZrmi_alt;  break;
+      case X86::VCMPPSZrri:  NewOpc = X86::VCMPPSZrri_alt;  break;
+      case X86::VCMPPSZrrib: NewOpc = X86::VCMPPSZrrib_alt; break;
+      case X86::VCMPSDZrm:   NewOpc = X86::VCMPSDZrmi_alt;  break;
+      case X86::VCMPSDZrr:   NewOpc = X86::VCMPSDZrri_alt;  break;
+      case X86::VCMPSSZrm:   NewOpc = X86::VCMPSSZrmi_alt;  break;
+      case X86::VCMPSSZrr:   NewOpc = X86::VCMPSSZrri_alt;  break;
       }
       // Switch opcode to the one that doesn't get special printing.
       mcInst.setOpcode(NewOpc);
@@ -521,19 +540,27 @@ static void translateImmediate(MCInst &mcInst, uint64_t immediate,
   case TYPE_XMM32:
   case TYPE_XMM64:
   case TYPE_XMM128:
-    mcInst.addOperand(MCOperand::CreateReg(X86::XMM0 + (immediate >> 4)));
+    mcInst.addOperand(MCOperand::createReg(X86::XMM0 + (immediate >> 4)));
     return;
   case TYPE_XMM256:
-    mcInst.addOperand(MCOperand::CreateReg(X86::YMM0 + (immediate >> 4)));
+    mcInst.addOperand(MCOperand::createReg(X86::YMM0 + (immediate >> 4)));
     return;
   case TYPE_XMM512:
-    mcInst.addOperand(MCOperand::CreateReg(X86::ZMM0 + (immediate >> 4)));
+    mcInst.addOperand(MCOperand::createReg(X86::ZMM0 + (immediate >> 4)));
     return;
+  case TYPE_BNDR:
+    mcInst.addOperand(MCOperand::createReg(X86::BND0 + (immediate >> 4)));
   case TYPE_REL8:
     isBranch = true;
     pcrel = insn.startLocation + insn.immediateOffset + insn.immediateSize;
-    if(immediate & 0x80)
+    if (immediate & 0x80)
       immediate |= ~(0xffull);
+    break;
+  case TYPE_REL16:
+    isBranch = true;
+    pcrel = insn.startLocation + insn.immediateOffset + insn.immediateSize;
+    if (immediate & 0x8000)
+      immediate |= ~(0xffffull);
     break;
   case TYPE_REL32:
   case TYPE_REL64:
@@ -550,12 +577,12 @@ static void translateImmediate(MCInst &mcInst, uint64_t immediate,
   if(!tryAddingSymbolicOperand(immediate + pcrel, isBranch, insn.startLocation,
                                insn.immediateOffset, insn.immediateSize,
                                mcInst, Dis))
-    mcInst.addOperand(MCOperand::CreateImm(immediate));
+    mcInst.addOperand(MCOperand::createImm(immediate));
 
   if (type == TYPE_MOFFS8 || type == TYPE_MOFFS16 ||
       type == TYPE_MOFFS32 || type == TYPE_MOFFS64) {
     MCOperand segmentReg;
-    segmentReg = MCOperand::CreateReg(segmentRegnums[insn.segmentOverride]);
+    segmentReg = MCOperand::createReg(segmentRegnums[insn.segmentOverride]);
     mcInst.addOperand(segmentReg);
   }
 }
@@ -588,7 +615,7 @@ static bool translateRMRegister(MCInst &mcInst,
     return true;
 #define ENTRY(x)                                                      \
   case EA_REG_##x:                                                    \
-    mcInst.addOperand(MCOperand::CreateReg(X86::x)); break;
+    mcInst.addOperand(MCOperand::createReg(X86::x)); break;
   ALL_REGS
 #undef ENTRY
   }
@@ -633,12 +660,12 @@ static bool translateRMMemory(MCInst &mcInst, InternalInstruction &insn,
         return true;
 #define ENTRY(x)                                          \
       case SIB_BASE_##x:                                  \
-        baseReg = MCOperand::CreateReg(X86::x); break;
+        baseReg = MCOperand::createReg(X86::x); break;
       ALL_SIB_BASES
 #undef ENTRY
       }
     } else {
-      baseReg = MCOperand::CreateReg(0);
+      baseReg = MCOperand::createReg(0);
     }
 
     // Check whether we are handling VSIB addressing mode for GATHER.
@@ -688,7 +715,7 @@ static bool translateRMMemory(MCInst &mcInst, InternalInstruction &insn,
         return true;
 #define ENTRY(x)                                          \
       case SIB_INDEX_##x:                                 \
-        indexReg = MCOperand::CreateReg(X86::x); break;
+        indexReg = MCOperand::createReg(X86::x); break;
       EA_BASES_32BIT
       EA_BASES_64BIT
       REGS_XMM
@@ -697,10 +724,10 @@ static bool translateRMMemory(MCInst &mcInst, InternalInstruction &insn,
 #undef ENTRY
       }
     } else {
-      indexReg = MCOperand::CreateReg(0);
+      indexReg = MCOperand::createReg(0);
     }
 
-    scaleAmount = MCOperand::CreateImm(insn.sibScale);
+    scaleAmount = MCOperand::createImm(insn.sibScale);
   } else {
     switch (insn.eaBase) {
     case EA_BASE_NONE:
@@ -714,31 +741,31 @@ static bool translateRMMemory(MCInst &mcInst, InternalInstruction &insn,
         tryAddingPcLoadReferenceComment(insn.startLocation +
                                         insn.displacementOffset,
                                         insn.displacement + pcrel, Dis);
-        baseReg = MCOperand::CreateReg(X86::RIP); // Section 2.2.1.6
+        baseReg = MCOperand::createReg(X86::RIP); // Section 2.2.1.6
       }
       else
-        baseReg = MCOperand::CreateReg(0);
+        baseReg = MCOperand::createReg(0);
 
-      indexReg = MCOperand::CreateReg(0);
+      indexReg = MCOperand::createReg(0);
       break;
     case EA_BASE_BX_SI:
-      baseReg = MCOperand::CreateReg(X86::BX);
-      indexReg = MCOperand::CreateReg(X86::SI);
+      baseReg = MCOperand::createReg(X86::BX);
+      indexReg = MCOperand::createReg(X86::SI);
       break;
     case EA_BASE_BX_DI:
-      baseReg = MCOperand::CreateReg(X86::BX);
-      indexReg = MCOperand::CreateReg(X86::DI);
+      baseReg = MCOperand::createReg(X86::BX);
+      indexReg = MCOperand::createReg(X86::DI);
       break;
     case EA_BASE_BP_SI:
-      baseReg = MCOperand::CreateReg(X86::BP);
-      indexReg = MCOperand::CreateReg(X86::SI);
+      baseReg = MCOperand::createReg(X86::BP);
+      indexReg = MCOperand::createReg(X86::SI);
       break;
     case EA_BASE_BP_DI:
-      baseReg = MCOperand::CreateReg(X86::BP);
-      indexReg = MCOperand::CreateReg(X86::DI);
+      baseReg = MCOperand::createReg(X86::BP);
+      indexReg = MCOperand::createReg(X86::DI);
       break;
     default:
-      indexReg = MCOperand::CreateReg(0);
+      indexReg = MCOperand::createReg(0);
       switch (insn.eaBase) {
       default:
         debug("Unexpected eaBase");
@@ -749,7 +776,7 @@ static bool translateRMMemory(MCInst &mcInst, InternalInstruction &insn,
         //   placeholders to keep the compiler happy.
 #define ENTRY(x)                                        \
       case EA_BASE_##x:                                 \
-        baseReg = MCOperand::CreateReg(X86::x); break;
+        baseReg = MCOperand::createReg(X86::x); break;
       ALL_EA_BASES
 #undef ENTRY
 #define ENTRY(x) case EA_REG_##x:
@@ -761,12 +788,12 @@ static bool translateRMMemory(MCInst &mcInst, InternalInstruction &insn,
       }
     }
 
-    scaleAmount = MCOperand::CreateImm(1);
+    scaleAmount = MCOperand::createImm(1);
   }
 
-  displacement = MCOperand::CreateImm(insn.displacement);
+  displacement = MCOperand::createImm(insn.displacement);
 
-  segmentReg = MCOperand::CreateReg(segmentRegnums[insn.segmentOverride]);
+  segmentReg = MCOperand::createReg(segmentRegnums[insn.segmentOverride]);
 
   mcInst.addOperand(baseReg);
   mcInst.addOperand(scaleAmount);
@@ -810,6 +837,7 @@ static bool translateRM(MCInst &mcInst, const OperandSpecifier &operand,
   case TYPE_VK16:
   case TYPE_DEBUGREG:
   case TYPE_CONTROLREG:
+  case TYPE_BNDR:
     return translateRMRegister(mcInst, insn);
   case TYPE_M:
   case TYPE_M8:
@@ -838,7 +866,7 @@ static bool translateRM(MCInst &mcInst, const OperandSpecifier &operand,
 /// @param stackPos     - The stack position to translate.
 static void translateFPRegister(MCInst &mcInst,
                                 uint8_t stackPos) {
-  mcInst.addOperand(MCOperand::CreateReg(X86::ST0 + stackPos));
+  mcInst.addOperand(MCOperand::createReg(X86::ST0 + stackPos));
 }
 
 /// translateMaskRegister - Translates a 3-bit mask register number to
@@ -854,7 +882,7 @@ static bool translateMaskRegister(MCInst &mcInst,
     return true;
   }
 
-  mcInst.addOperand(MCOperand::CreateReg(X86::K0 + maskRegNum));
+  mcInst.addOperand(MCOperand::createReg(X86::K0 + maskRegNum));
   return false;
 }
 
@@ -936,6 +964,7 @@ static bool translateInstruction(MCInst &mcInst,
     return true;
   }
 
+  mcInst.clear();
   mcInst.setOpcode(insn.instructionID);
   // If when reading the prefix bytes we determined the overlapping 0xf2 or 0xf3
   // prefix bytes should be disassembled as xrelease and xacquire then set the

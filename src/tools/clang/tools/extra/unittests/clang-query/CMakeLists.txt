@@ -14,7 +14,9 @@ add_extra_unittest(ClangQueryTests
 target_link_libraries(ClangQueryTests
   clangAST
   clangASTMatchers
+  clangBasic
   clangDynamicASTMatchers
+  clangFrontend
   clangQuery
   clangTooling
   )

@@ -17,6 +17,7 @@ using namespace clang::ast_matchers;
 
 namespace clang {
 namespace tidy {
+namespace misc {
 
 ArgumentCommentCheck::ArgumentCommentCheck(StringRef Name,
                                            ClangTidyContext *Context)
@@ -25,7 +26,7 @@ ArgumentCommentCheck::ArgumentCommentCheck(StringRef Name,
 
 void ArgumentCommentCheck::registerMatchers(MatchFinder *Finder) {
   Finder->addMatcher(
-      callExpr(unless(operatorCallExpr()),
+      callExpr(unless(cxxOperatorCallExpr()),
                // NewCallback's arguments relate to the pointed function, don't
                // check them against NewCallback's parameter names.
                // FIXME: Make this configurable.
@@ -33,7 +34,7 @@ void ArgumentCommentCheck::registerMatchers(MatchFinder *Finder) {
                    hasName("NewCallback"), hasName("NewPermanentCallback"))))))
           .bind("expr"),
       this);
-  Finder->addMatcher(constructExpr().bind("expr"), this);
+  Finder->addMatcher(cxxConstructExpr().bind("expr"), this);
 }
 
 std::vector<std::pair<SourceLocation, StringRef>>
@@ -181,5 +182,6 @@ void ArgumentCommentCheck::check(const MatchFinder::MatchResult &Result) {
   }
 }
 
+} // namespace misc
 } // namespace tidy
 } // namespace clang

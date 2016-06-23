@@ -35,6 +35,22 @@ class DiagnosticConsumer;
 class DiagnosticsEngine;
 class HeaderSearch;
 class ModuleMapParser;
+
+/// \brief A mechanism to observe the actions of the module map parser as it
+/// reads module map files.
+class ModuleMapCallbacks {
+public:
+  virtual ~ModuleMapCallbacks() {}
+
+  /// \brief Called when a module map file has been read.
+  ///
+  /// \param FileStart A SourceLocation referring to the start of the file's
+  /// contents.
+  /// \param File The file itself.
+  /// \param IsSystem Whether this is a module map from a system include path.
+  virtual void moduleMapFileRead(SourceLocation FileStart,
+                                 const FileEntry &File, bool IsSystem) {}
+};
   
 class ModuleMap {
   SourceManager &SourceMgr;
@@ -42,6 +58,8 @@ class ModuleMap {
   const LangOptions &LangOpts;
   const TargetInfo *Target;
   HeaderSearch &HeaderInfo;
+
+  llvm::SmallVector<std::unique_ptr<ModuleMapCallbacks>, 1> Callbacks;
   
   /// \brief The directory used for Clang-supplied, builtin include headers,
   /// such as "stdint.h".
@@ -61,8 +79,11 @@ public:
   std::string SourceModuleName;
 
 private:
-  /// \brief The top-level modules that are known.
+  /// \brief The unshadowed top-level modules that are known.
   llvm::StringMap<Module *> Modules;
+
+  /// \brief The number of modules we have created in total.
+  unsigned NumCreatedModules;
 
 public:
   /// \brief Flags describing the role of a module header.
@@ -91,6 +112,13 @@ public:
     KnownHeader() : Storage(nullptr, NormalHeader) { }
     KnownHeader(Module *M, ModuleHeaderRole Role) : Storage(M, Role) { }
 
+    friend bool operator==(const KnownHeader &A, const KnownHeader &B) {
+      return A.Storage == B.Storage;
+    }
+    friend bool operator!=(const KnownHeader &A, const KnownHeader &B) {
+      return A.Storage != B.Storage;
+    }
+
     /// \brief Retrieve the module the header is stored in.
     Module *getModule() const { return Storage.getPointer(); }
 
@@ -104,7 +132,7 @@ public:
 
     // \brief Whether this known header is valid (i.e., it has an
     // associated module).
-    LLVM_EXPLICIT operator bool() const {
+    explicit operator bool() const {
       return Storage.getPointer() != nullptr;
     }
   };
@@ -126,6 +154,15 @@ private:
   /// in the module map over to the module that includes them via its umbrella
   /// header.
   llvm::DenseMap<const DirectoryEntry *, Module *> UmbrellaDirs;
+
+  /// \brief A generation counter that is used to test whether modules of the
+  /// same name may shadow or are illegal redefintions.
+  ///
+  /// Modules from earlier scopes may shadow modules from later ones.
+  /// Modules from the same scope may not have the same name.
+  unsigned CurrentModuleScopeID = 0;
+
+  llvm::DenseMap<Module *, unsigned> ModuleScopeIDs;
 
   /// \brief The set of attributes that can be attached to a module.
   struct Attributes {
@@ -221,6 +258,10 @@ private:
   KnownHeader findHeaderInUmbrellaDirs(const FileEntry *File,
                     SmallVectorImpl<const DirectoryEntry *> &IntermediateDirs);
 
+  /// \brief Given that \p File is not in the Headers map, look it up within
+  /// umbrella directories and find or create a module for it.
+  KnownHeader findOrCreateModuleForHeaderInUmbrellaDir(const FileEntry *File);
+
   /// \brief A convenience method to determine if \p File is (possibly nested)
   /// in an umbrella directory.
   bool isHeaderInUmbrellaDirs(const FileEntry *File) {
@@ -260,24 +301,27 @@ public:
     BuiltinIncludeDir = Dir;
   }
 
+  /// \brief Add a module map callback.
+  void addModuleMapCallbacks(std::unique_ptr<ModuleMapCallbacks> Callback) {
+    Callbacks.push_back(std::move(Callback));
+  }
+
   /// \brief Retrieve the module that owns the given header file, if any.
   ///
   /// \param File The header file that is likely to be included.
   ///
-  /// \param RequestingModule Specifies the module the header is intended to be
-  /// used from.  Used to disambiguate if a header is present in multiple
-  /// modules.
-  ///
-  /// \param IncludeTextualHeaders If \c true, also find textual headers. By
-  /// default, these are treated like excluded headers and result in no known
-  /// header being found.
-  ///
   /// \returns The module KnownHeader, which provides the module that owns the
   /// given header file.  The KnownHeader is default constructed to indicate
   /// that no module owns this header file.
-  KnownHeader findModuleForHeader(const FileEntry *File,
-                                  Module *RequestingModule = nullptr,
-                                  bool IncludeTextualHeaders = false);
+  KnownHeader findModuleForHeader(const FileEntry *File);
+
+  /// \brief Retrieve all the modules that contain the given header file. This
+  /// may not include umbrella modules, nor information from external sources,
+  /// if they have not yet been inferred / loaded.
+  ///
+  /// Typically, \ref findModuleForHeader should be used instead, as it picks
+  /// the preferred module for the header.
+  ArrayRef<KnownHeader> findAllModulesForHeader(const FileEntry *File) const;
 
   /// \brief Reports errors if a module must not include a specific file.
   ///
@@ -352,6 +396,24 @@ public:
   /// framework directory.
   Module *inferFrameworkModule(const DirectoryEntry *FrameworkDir,
                                bool IsSystem, Module *Parent);
+
+  /// \brief Create a new top-level module that is shadowed by
+  /// \p ShadowingModule.
+  Module *createShadowedModule(StringRef Name, bool IsFramework,
+                               Module *ShadowingModule);
+
+  /// \brief Creates a new declaration scope for module names, allowing
+  /// previously defined modules to shadow definitions from the new scope.
+  ///
+  /// \note Module names from earlier scopes will shadow names from the new
+  /// scope, which is the opposite of how shadowing works for variables.
+  void finishModuleDeclarationScope() { CurrentModuleScopeID += 1; }
+
+  bool mayShadowNewModule(Module *ExistingModule) {
+    assert(!ExistingModule->Parent && "expected top-level module");
+    assert(ModuleScopeIDs.count(ExistingModule) && "unknown module");
+    return ModuleScopeIDs[ExistingModule] < CurrentModuleScopeID;
+  }
 
   /// \brief Retrieve the module map file containing the definition of the given
   /// module.
@@ -432,16 +494,18 @@ public:
   
   /// \brief Sets the umbrella header of the given module to the given
   /// header.
-  void setUmbrellaHeader(Module *Mod, const FileEntry *UmbrellaHeader);
+  void setUmbrellaHeader(Module *Mod, const FileEntry *UmbrellaHeader,
+                         Twine NameAsWritten);
 
   /// \brief Sets the umbrella directory of the given module to the given
   /// directory.
-  void setUmbrellaDir(Module *Mod, const DirectoryEntry *UmbrellaDir);
+  void setUmbrellaDir(Module *Mod, const DirectoryEntry *UmbrellaDir,
+                      Twine NameAsWritten);
 
   /// \brief Adds this header to the given module.
   /// \param Role The role of the header wrt the module.
   void addHeader(Module *Mod, Module::Header Header,
-                 ModuleHeaderRole Role);
+                 ModuleHeaderRole Role, bool Imported = false);
 
   /// \brief Marks this header as being excluded from the given module.
   void excludeHeader(Module *Mod, Module::Header Header);
@@ -457,9 +521,13 @@ public:
   /// \param HomeDir The directory in which relative paths within this module
   ///        map file will be resolved.
   ///
+  /// \param ExternModuleLoc The location of the "extern module" declaration
+  ///        that caused us to load this module map file, if any.
+  ///
   /// \returns true if an error occurred, false otherwise.
   bool parseModuleMapFile(const FileEntry *File, bool IsSystem,
-                          const DirectoryEntry *HomeDir);
+                          const DirectoryEntry *HomeDir,
+                          SourceLocation ExternModuleLoc = SourceLocation());
     
   /// \brief Dump the contents of the module map, for debugging purposes.
   void dump();

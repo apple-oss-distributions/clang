@@ -70,8 +70,8 @@ class CXXScopeSpec {
   NestedNameSpecifierLocBuilder Builder;
 
 public:
-  const SourceRange &getRange() const { return Range; }
-  void setRange(const SourceRange &R) { Range = R; }
+  SourceRange getRange() const { return Range; }
+  void setRange(SourceRange R) { Range = R; }
   void setBeginLoc(SourceLocation Loc) { Range.setBegin(Loc); }
   void setEndLoc(SourceLocation Loc) { Range.setEnd(Loc); }
   SourceLocation getBeginLoc() const { return Range.getBegin(); }
@@ -358,6 +358,9 @@ private:
   // constexpr-specifier
   unsigned Constexpr_specified : 1;
 
+  // concept-specifier
+  unsigned Concept_specified : 1;
+
   union {
     UnionParsedType TypeRep;
     Decl *DeclRep;
@@ -385,7 +388,7 @@ private:
   SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc, TQ_atomicLoc;
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc, FS_noreturnLoc;
   SourceLocation FS_forceinlineLoc;
-  SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc;
+  SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc, ConceptLoc;
 
   WrittenBuiltinSpecs writtenBS;
   void SaveWrittenBuiltinSpecs();
@@ -400,8 +403,8 @@ private:
     return (T == TST_typeofExpr || T == TST_decltype);
   }
 
-  DeclSpec(const DeclSpec &) LLVM_DELETED_FUNCTION;
-  void operator=(const DeclSpec &) LLVM_DELETED_FUNCTION;
+  DeclSpec(const DeclSpec &) = delete;
+  void operator=(const DeclSpec &) = delete;
 public:
   static bool isDeclRep(TST T) {
     return (T == TST_enum || T == TST_struct ||
@@ -429,6 +432,7 @@ public:
       FS_noreturn_specified(false),
       Friend_specified(false),
       Constexpr_specified(false),
+      Concept_specified(false),
       Attrs(attrFactory),
       writtenBS(),
       ObjCQualifiers(nullptr) {
@@ -489,7 +493,7 @@ public:
   CXXScopeSpec &getTypeSpecScope() { return TypeScope; }
   const CXXScopeSpec &getTypeSpecScope() const { return TypeScope; }
 
-  const SourceRange &getSourceRange() const LLVM_READONLY { return Range; }
+  SourceRange getSourceRange() const LLVM_READONLY { return Range; }
   SourceLocation getLocStart() const LLVM_READONLY { return Range.getBegin(); }
   SourceLocation getLocEnd() const LLVM_READONLY { return Range.getEnd(); }
 
@@ -676,6 +680,8 @@ public:
                             unsigned &DiagID);
   bool SetConstexprSpec(SourceLocation Loc, const char *&PrevSpec,
                         unsigned &DiagID);
+  bool SetConceptSpec(SourceLocation Loc, const char *&PrevSpec,
+                      unsigned &DiagID);
 
   bool isFriendSpecified() const { return Friend_specified; }
   SourceLocation getFriendSpecLoc() const { return FriendLoc; }
@@ -686,9 +692,17 @@ public:
   bool isConstexprSpecified() const { return Constexpr_specified; }
   SourceLocation getConstexprSpecLoc() const { return ConstexprLoc; }
 
+  bool isConceptSpecified() const { return Concept_specified; }
+  SourceLocation getConceptSpecLoc() const { return ConceptLoc; }
+
   void ClearConstexprSpec() {
     Constexpr_specified = false;
     ConstexprLoc = SourceLocation();
+  }
+
+  void ClearConceptSpec() {
+    Concept_specified = false;
+    ConceptLoc = SourceLocation();
   }
 
   AttributePool &getAttributePool() const {
@@ -854,8 +868,8 @@ private:
 /// \brief Represents a C++ unqualified-id that has been parsed. 
 class UnqualifiedId {
 private:
-  UnqualifiedId(const UnqualifiedId &Other) LLVM_DELETED_FUNCTION;
-  const UnqualifiedId &operator=(const UnqualifiedId &) LLVM_DELETED_FUNCTION;
+  UnqualifiedId(const UnqualifiedId &Other) = delete;
+  const UnqualifiedId &operator=(const UnqualifiedId &) = delete;
 
 public:
   /// \brief Describes the kind of unqualified-id parsed.
@@ -1241,8 +1255,11 @@ struct DeclaratorChunk {
     /// any.
     unsigned MutableLoc;
 
-    /// \brief The location of the keyword introducing the spec, if any.
-    unsigned ExceptionSpecLoc;
+    /// \brief The beginning location of the exception specification, if any.
+    unsigned ExceptionSpecLocBeg;
+
+    /// \brief The end location of the exception specification, if any.
+    unsigned ExceptionSpecLocEnd;
 
     /// Params - This is a pointer to a new[]'d array of ParamInfo objects that
     /// describe the parameters specified by this function declarator.  null if
@@ -1309,8 +1326,16 @@ struct DeclaratorChunk {
       return SourceLocation::getFromRawEncoding(RParenLoc);
     }
 
-    SourceLocation getExceptionSpecLoc() const {
-      return SourceLocation::getFromRawEncoding(ExceptionSpecLoc);
+    SourceLocation getExceptionSpecLocBeg() const {
+      return SourceLocation::getFromRawEncoding(ExceptionSpecLocBeg);
+    }
+
+    SourceLocation getExceptionSpecLocEnd() const {
+      return SourceLocation::getFromRawEncoding(ExceptionSpecLocEnd);
+    }
+
+    SourceRange getExceptionSpecRange() const {
+      return SourceRange(getExceptionSpecLocBeg(), getExceptionSpecLocEnd());
     }
 
     /// \brief Retrieve the location of the ref-qualifier, if any.
@@ -1424,7 +1449,8 @@ struct DeclaratorChunk {
   static DeclaratorChunk getPointer(unsigned TypeQuals, SourceLocation Loc,
                                     SourceLocation ConstQualLoc,
                                     SourceLocation VolatileQualLoc,
-                                    SourceLocation RestrictQualLoc) {
+                                    SourceLocation RestrictQualLoc,
+                                    SourceLocation AtomicQualLoc) {
     DeclaratorChunk I;
     I.Kind                = Pointer;
     I.Loc                 = Loc;
@@ -1432,6 +1458,7 @@ struct DeclaratorChunk {
     I.Ptr.ConstQualLoc    = ConstQualLoc.getRawEncoding();
     I.Ptr.VolatileQualLoc = VolatileQualLoc.getRawEncoding();
     I.Ptr.RestrictQualLoc = RestrictQualLoc.getRawEncoding();
+    I.Ptr.AtomicQualLoc   = AtomicQualLoc.getRawEncoding();
     I.Ptr.AttrList        = nullptr;
     return I;
   }
@@ -1480,7 +1507,7 @@ struct DeclaratorChunk {
                                      SourceLocation RestrictQualifierLoc,
                                      SourceLocation MutableLoc,
                                      ExceptionSpecificationType ESpecType,
-                                     SourceLocation ESpecLoc,
+                                     SourceRange ESpecRange,
                                      ParsedType *Exceptions,
                                      SourceRange *ExceptionRanges,
                                      unsigned NumExceptions,
@@ -1688,7 +1715,7 @@ public:
   }
 
   /// \brief Get the source range that spans this declarator.
-  const SourceRange &getSourceRange() const LLVM_READONLY { return Range; }
+  SourceRange getSourceRange() const LLVM_READONLY { return Range; }
   SourceLocation getLocStart() const LLVM_READONLY { return Range.getBegin(); }
   SourceLocation getLocEnd() const LLVM_READONLY { return Range.getEnd(); }
 
@@ -1708,7 +1735,7 @@ public:
   /// given declspec, unless its location is invalid. Adopts the range start if
   /// the current range start is invalid.
   void ExtendWithDeclSpec(const DeclSpec &DS) {
-    const SourceRange &SR = DS.getSourceRange();
+    SourceRange SR = DS.getSourceRange();
     if (Range.getBegin().isInvalid())
       Range.setBegin(SR.getBegin());
     if (!SR.getEnd().isInvalid())
@@ -2181,6 +2208,9 @@ public:
   /// redeclaration time if the decl is static.
   bool isStaticMember();
 
+  /// Returns true if this declares a constructor or a destructor.
+  bool isCtorOrDtor();
+
   void setRedeclaration(bool Val) { Redeclaration = Val; }
   bool isRedeclaration() const { return Redeclaration; }
 };
@@ -2204,7 +2234,7 @@ public:
     VS_Sealed = 4
   };
 
-  VirtSpecifiers() : Specifiers(0) { }
+  VirtSpecifiers() : Specifiers(0), LastSpecifier(VS_None) { }
 
   bool SetSpecifier(Specifier VS, SourceLocation Loc,
                     const char *&PrevSpec);
@@ -2222,13 +2252,24 @@ public:
 
   static const char *getSpecifierName(Specifier VS);
 
+  SourceLocation getFirstLocation() const { return FirstLocation; }
   SourceLocation getLastLocation() const { return LastLocation; }
+  Specifier getLastSpecifier() const { return LastSpecifier; }
   
 private:
   unsigned Specifiers;
+  Specifier LastSpecifier;
 
   SourceLocation VS_overrideLoc, VS_finalLoc;
+  SourceLocation FirstLocation;
   SourceLocation LastLocation;
+};
+
+enum class LambdaCaptureInitKind {
+  NoInit,     //!< [a]
+  CopyInit,   //!< [a = b], [a = {b}]
+  DirectInit, //!< [a(b)]
+  ListInit    //!< [a{b}]
 };
 
 /// \brief Represents a complete lambda introducer.
@@ -2239,13 +2280,15 @@ struct LambdaIntroducer {
     SourceLocation Loc;
     IdentifierInfo *Id;
     SourceLocation EllipsisLoc;
+    LambdaCaptureInitKind InitKind;
     ExprResult Init;
     ParsedType InitCaptureType;
     LambdaCapture(LambdaCaptureKind Kind, SourceLocation Loc,
                   IdentifierInfo *Id, SourceLocation EllipsisLoc,
-                  ExprResult Init, ParsedType InitCaptureType)
-        : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc), Init(Init),
-          InitCaptureType(InitCaptureType) {}
+                  LambdaCaptureInitKind InitKind, ExprResult Init,
+                  ParsedType InitCaptureType)
+        : Kind(Kind), Loc(Loc), Id(Id), EllipsisLoc(EllipsisLoc),
+          InitKind(InitKind), Init(Init), InitCaptureType(InitCaptureType) {}
   };
 
   SourceRange Range;
@@ -2261,10 +2304,11 @@ struct LambdaIntroducer {
                   SourceLocation Loc,
                   IdentifierInfo* Id,
                   SourceLocation EllipsisLoc,
+                  LambdaCaptureInitKind InitKind,
                   ExprResult Init, 
                   ParsedType InitCaptureType) {
-    Captures.push_back(LambdaCapture(Kind, Loc, Id, EllipsisLoc, Init, 
-        InitCaptureType));
+    Captures.push_back(LambdaCapture(Kind, Loc, Id, EllipsisLoc, InitKind, Init,
+                                     InitCaptureType));
   }
 };
 

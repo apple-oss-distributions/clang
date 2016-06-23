@@ -12,18 +12,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Scalar.h"
-
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AliasSetTracker.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/TargetFolder.h"
-#include "llvm/Pass.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
@@ -42,9 +42,9 @@ struct PointerOffsetPair {
 };
 
 struct LoadPOPPair {
+  LoadPOPPair() = default;
   LoadPOPPair(LoadInst *L, PointerOffsetPair P, unsigned O)
       : Load(L), POP(P), InsertOrder(O) {}
-  LoadPOPPair() {}
   LoadInst *Load;
   PointerOffsetPair POP;
   /// \brief The new load needs to be created before the first load in IR order.
@@ -57,7 +57,7 @@ class LoadCombine : public BasicBlockPass {
 
 public:
   LoadCombine() : BasicBlockPass(ID), C(nullptr), AA(nullptr) {
-    initializeSROAPass(*PassRegistry::getPassRegistry());
+    initializeLoadCombinePass(*PassRegistry::getPassRegistry());
   }
   
   using llvm::Pass::doInitialization;
@@ -224,7 +224,7 @@ bool LoadCombine::runOnBasicBlock(BasicBlock &BB) {
   if (skipOptnoneFunction(BB))
     return false;
 
-  AA = &getAnalysis<AliasAnalysis>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
 
   IRBuilder<true, TargetFolder> TheBuilder(
       BB.getContext(), TargetFolder(BB.getModule()->getDataLayout()));
@@ -263,8 +263,8 @@ bool LoadCombine::runOnBasicBlock(BasicBlock &BB) {
 void LoadCombine::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
 
-  AU.addRequired<AliasAnalysis>();
-  AU.addPreserved<AliasAnalysis>();
+  AU.addRequired<AAResultsWrapperPass>();
+  AU.addPreserved<GlobalsAAWrapperPass>();
 }
 
 char LoadCombine::ID = 0;
@@ -275,7 +275,8 @@ BasicBlockPass *llvm::createLoadCombinePass() {
 
 INITIALIZE_PASS_BEGIN(LoadCombine, "load-combine", "Combine Adjacent Loads",
                       false, false)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
 INITIALIZE_PASS_END(LoadCombine, "load-combine", "Combine Adjacent Loads",
                     false, false)
 

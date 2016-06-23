@@ -36,7 +36,7 @@
 #include "llvm/LinkAllIR.h"
 #include "llvm/LinkAllPasses.h"
 #include "llvm/MC/SubtargetFeature.h"
-#include "llvm/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Host.h"
@@ -190,7 +190,7 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
     cl::desc("Preserve use-list order when writing LLVM assembly."),
     cl::init(false), cl::Hidden);
 
-static inline void addPass(PassManagerBase &PM, Pass *P) {
+static inline void addPass(legacy::PassManagerBase &PM, Pass *P) {
   // Add the pass to the pass manager...
   PM.add(P);
 
@@ -203,7 +203,8 @@ static inline void addPass(PassManagerBase &PM, Pass *P) {
 /// OptLevel.
 ///
 /// OptLevel - Optimization Level
-static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
+static void AddOptimizationPasses(legacy::PassManagerBase &MPM,
+                                  legacy::FunctionPassManager &FPM,
                                   unsigned OptLevel, unsigned SizeLevel) {
   FPM.add(createVerifierPass()); // Verify that input is correct
 
@@ -237,7 +238,7 @@ static void AddOptimizationPasses(PassManagerBase &MPM,FunctionPassManager &FPM,
   Builder.populateModulePassManager(MPM);
 }
 
-static void AddStandardLinkPasses(PassManagerBase &PM) {
+static void AddStandardLinkPasses(legacy::PassManagerBase &PM) {
   PassManagerBuilder Builder;
   Builder.VerifyInput = true;
   if (DisableOptimizations)
@@ -252,7 +253,7 @@ static void AddStandardLinkPasses(PassManagerBase &PM) {
 // CodeGen-related helper functions.
 //
 
-CodeGenOpt::Level GetCodeGenOptLevel() {
+static CodeGenOpt::Level GetCodeGenOptLevel() {
   if (OptLevelO1)
     return CodeGenOpt::Less;
   if (OptLevelO2)
@@ -264,7 +265,8 @@ CodeGenOpt::Level GetCodeGenOptLevel() {
 
 // Returns the TargetMachine instance or zero if no triple is provided.
 static TargetMachine* GetTargetMachine(Triple TheTriple, StringRef CPUStr,
-                                       StringRef FeaturesStr) {
+                                       StringRef FeaturesStr,
+                                       const TargetOptions &Options) {
   std::string Error;
   const Target *TheTarget = TargetRegistry::lookupTarget(MArch, TheTriple,
                                                          Error);
@@ -274,8 +276,7 @@ static TargetMachine* GetTargetMachine(Triple TheTriple, StringRef CPUStr,
   }
 
   return TheTarget->createTargetMachine(TheTriple.getTriple(),
-                                        CPUStr, FeaturesStr,
-                                        InitTargetOptionsFromCodeGenFlags(),
+                                        CPUStr, FeaturesStr, Options,
                                         RelocModel, CMModel,
                                         GetCodeGenOptLevel());
 }
@@ -311,7 +312,6 @@ int main(int argc, char **argv) {
   initializeVectorization(Registry);
   initializeIPO(Registry);
   initializeAnalysis(Registry);
-  initializeIPA(Registry);
   initializeTransformUtils(Registry);
   initializeInstCombine(Registry);
   initializeInstrumentation(Registry);
@@ -322,6 +322,8 @@ int main(int argc, char **argv) {
   initializeAtomicExpandPass(Registry);
   initializeRewriteSymbolsPass(Registry);
   initializeWinEHPreparePass(Registry);
+  initializeDwarfEHPreparePass(Registry);
+  initializeSjLjEHPreparePass(Registry);
 
 #ifdef LINK_POLLY_INTO_TOOLS
   polly::initializePollyPasses(Registry);
@@ -384,16 +386,19 @@ int main(int argc, char **argv) {
   Triple ModuleTriple(M->getTargetTriple());
   std::string CPUStr, FeaturesStr;
   TargetMachine *Machine = nullptr;
+  const TargetOptions Options = InitTargetOptionsFromCodeGenFlags();
+
   if (ModuleTriple.getArch()) {
     CPUStr = getCPUStr();
     FeaturesStr = getFeaturesStr();
-    Machine = GetTargetMachine(ModuleTriple, CPUStr, FeaturesStr);
+    Machine = GetTargetMachine(ModuleTriple, CPUStr, FeaturesStr, Options);
   }
 
   std::unique_ptr<TargetMachine> TM(Machine);
 
-  // Override function attributes.
-  overrideFunctionAttributes(CPUStr, FeaturesStr, *M);
+  // Override function attributes based on CPUStr, FeaturesStr, and command line
+  // flags.
+  setFunctionAttributes(CPUStr, FeaturesStr, *M);
 
   // If the output is set to be emitted to standard out, and standard out is a
   // console, print out a warning message and refuse to do it.  We don't
@@ -426,7 +431,7 @@ int main(int argc, char **argv) {
   // Create a PassManager to hold and optimize the collection of passes we are
   // about to build.
   //
-  PassManager Passes;
+  legacy::PassManager Passes;
 
   // Add an appropriate TargetLibraryInfo pass for the module's triple.
   TargetLibraryInfoImpl TLII(ModuleTriple);

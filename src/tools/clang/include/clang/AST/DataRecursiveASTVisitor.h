@@ -24,6 +24,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
+#include "clang/AST/ExprOpenMP.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
@@ -42,7 +43,7 @@
   OPERATOR(PostInc) OPERATOR(PostDec) OPERATOR(PreInc) OPERATOR(PreDec)        \
       OPERATOR(AddrOf) OPERATOR(Deref) OPERATOR(Plus) OPERATOR(Minus)          \
       OPERATOR(Not) OPERATOR(LNot) OPERATOR(Real) OPERATOR(Imag)               \
-      OPERATOR(Extension)
+      OPERATOR(Extension) OPERATOR(Coawait)
 
 // All binary operators (excluding compound assign operators).
 #define BINOP_LIST()                                                           \
@@ -531,10 +532,7 @@ bool RecursiveASTVisitor<Derived>::TraverseStmt(Stmt *S) {
       }
     }
 
-    for (SmallVectorImpl<Stmt *>::reverse_iterator RI = StmtsToEnqueue.rbegin(),
-                                                   RE = StmtsToEnqueue.rend();
-         RI != RE; ++RI)
-      Queue.push_back(*RI);
+    Queue.append(StmtsToEnqueue.rbegin(), StmtsToEnqueue.rend());
   }
 
   return true;
@@ -791,7 +789,7 @@ template <typename Derived>
 bool
 RecursiveASTVisitor<Derived>::TraverseLambdaCapture(LambdaExpr *LE,
                                                     const LambdaCapture *C) {
-  if (C->isInitCapture())
+  if (LE->isInitCapture(C))
     TRY_TO(TraverseDecl(C->getCapturedVar()));
   return true;
 }
@@ -943,8 +941,9 @@ DEF_TRAVERSE_TYPE(ObjCObjectType, {
   // type is itself.
   if (T->getBaseType().getTypePtr() != T)
     TRY_TO(TraverseType(T->getBaseType()));
-  for (auto typeArg : T->getTypeArgsAsWritten())
+  for (auto typeArg : T->getTypeArgsAsWritten()) {
     TRY_TO(TraverseType(typeArg));
+  }
 })
 
 DEF_TRAVERSE_TYPE(ObjCObjectPointerType,
@@ -1288,6 +1287,8 @@ DEF_TRAVERSE_DECL(
      // D->getAnonymousNamespace().
     })
 
+DEF_TRAVERSE_DECL(ExternCContextDecl, {})
+
 DEF_TRAVERSE_DECL(NamespaceAliasDecl, {
   // We shouldn't traverse an aliased namespace, since it will be
   // defined (and, therefore, traversed) somewhere else.
@@ -1313,8 +1314,9 @@ DEF_TRAVERSE_DECL(ObjCCompatibleAliasDecl, {// FIXME: implement
 
 DEF_TRAVERSE_DECL(ObjCCategoryDecl, {// FIXME: implement
   if (ObjCTypeParamList *typeParamList = D->getTypeParamList()) {
-    for (auto typeParam : *typeParamList)
+    for (auto typeParam : *typeParamList) {
       TRY_TO(TraverseObjCTypeParamDecl(typeParam));
+    }
   }
   return true;
 })
@@ -1327,8 +1329,9 @@ DEF_TRAVERSE_DECL(ObjCImplementationDecl, {// FIXME: implement
 
 DEF_TRAVERSE_DECL(ObjCInterfaceDecl, {// FIXME: implement
   if (ObjCTypeParamList *typeParamList = D->getTypeParamListAsWritten()) {
-    for (auto typeParam : *typeParamList)
+    for (auto typeParam : *typeParamList) {
       TRY_TO(TraverseObjCTypeParamDecl(typeParam));
+    }
   }
 
   if (TypeSourceInfo *superTInfo = D->getSuperClassTInfo()) {
@@ -1546,6 +1549,10 @@ DEF_TRAVERSE_DECL(FunctionTemplateDecl, {
   if (getDerived().shouldVisitTemplateInstantiations() &&
       D == D->getCanonicalDecl())
     TRY_TO(TraverseFunctionInstantiations(D));
+})
+
+DEF_TRAVERSE_DECL(BuiltinTemplateDecl, {
+  TRY_TO(TraverseTemplateParameterListHelper(D->getTemplateParameters()));
 })
 
 DEF_TRAVERSE_DECL(TemplateTemplateParmDecl, {
@@ -1888,8 +1895,8 @@ DEF_TRAVERSE_DECL(ParmVarDecl, {
     TRY_TO(WalkUpFrom##STMT(S));                                               \
     StmtQueueAction StmtQueue(*this);                                          \
     { CODE; }                                                                  \
-    for (Stmt::child_range range = S->children(); range; ++range) {            \
-      StmtQueue.queue(*range);                                                 \
+    for (Stmt *SubStmt : S->children()) {                                      \
+      StmtQueue.queue(SubStmt);                                                \
     }                                                                          \
     return true;                                                               \
   }
@@ -2038,8 +2045,8 @@ bool RecursiveASTVisitor<Derived>::TraverseInitListExpr(InitListExpr *S) {
   TRY_TO(WalkUpFromInitListExpr(S));
   StmtQueueAction StmtQueue(*this);
   // All we need are the default actions.  FIXME: use a helper function.
-  for (Stmt::child_range range = S->children(); range; ++range) {
-    StmtQueue.queue(*range);
+  for (Stmt *SubStmt : S->children()) {
+    StmtQueue.queue(SubStmt);
   }
   return true;
 }
@@ -2201,6 +2208,7 @@ DEF_TRAVERSE_STMT(CXXMemberCallExpr, {})
 // over the children.
 DEF_TRAVERSE_STMT(AddrLabelExpr, {})
 DEF_TRAVERSE_STMT(ArraySubscriptExpr, {})
+DEF_TRAVERSE_STMT(OMPArraySectionExpr, {})
 DEF_TRAVERSE_STMT(BlockExpr, {
   TRY_TO(TraverseDecl(S->getBlockDecl()));
   return true; // no child statements to loop through.
@@ -2228,9 +2236,11 @@ DEF_TRAVERSE_STMT(CXXThisExpr, {})
 DEF_TRAVERSE_STMT(CXXThrowExpr, {})
 DEF_TRAVERSE_STMT(UserDefinedLiteral, {})
 DEF_TRAVERSE_STMT(DesignatedInitExpr, {})
+DEF_TRAVERSE_STMT(DesignatedInitUpdateExpr, {})
 DEF_TRAVERSE_STMT(ExtVectorElementExpr, {})
 DEF_TRAVERSE_STMT(GNUNullExpr, {})
 DEF_TRAVERSE_STMT(ImplicitValueInitExpr, {})
+DEF_TRAVERSE_STMT(NoInitExpr, {})
 DEF_TRAVERSE_STMT(ObjCBoolLiteralExpr, {})
 DEF_TRAVERSE_STMT(ObjCEncodeExpr, {
   if (TypeSourceInfo *TInfo = S->getEncodedTypeSourceInfo())
@@ -2299,6 +2309,12 @@ DEF_TRAVERSE_STMT(FunctionParmPackExpr, {})
 DEF_TRAVERSE_STMT(MaterializeTemporaryExpr, {})
 DEF_TRAVERSE_STMT(CXXFoldExpr, {})
 DEF_TRAVERSE_STMT(AtomicExpr, {})
+
+// Coroutine support.
+DEF_TRAVERSE_STMT(CoroutineBodyStmt, {})
+DEF_TRAVERSE_STMT(CoreturnStmt, {})
+DEF_TRAVERSE_STMT(CoawaitExpr, {})
+DEF_TRAVERSE_STMT(CoyieldExpr, {})
 
 // These literals (all of them) do not need any action.
 DEF_TRAVERSE_STMT(IntegerLiteral, {})
@@ -2380,6 +2396,15 @@ DEF_TRAVERSE_STMT(OMPBarrierDirective,
 DEF_TRAVERSE_STMT(OMPTaskwaitDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
+DEF_TRAVERSE_STMT(OMPTaskgroupDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPCancellationPointDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPCancelDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
 DEF_TRAVERSE_STMT(OMPFlushDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
@@ -2390,6 +2415,9 @@ DEF_TRAVERSE_STMT(OMPAtomicDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 DEF_TRAVERSE_STMT(OMPTargetDirective,
+                  { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+DEF_TRAVERSE_STMT(OMPTargetDataDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
 
 DEF_TRAVERSE_STMT(OMPTeamsDirective,
@@ -2439,6 +2467,12 @@ bool RecursiveASTVisitor<Derived>::VisitOMPSafelenClause(OMPSafelenClause *C) {
 }
 
 template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPSimdlenClause(OMPSimdlenClause *C) {
+  TRY_TO(TraverseStmt(C->getSimdlen()));
+  return true;
+}
+
+template <typename Derived>
 bool
 RecursiveASTVisitor<Derived>::VisitOMPCollapseClause(OMPCollapseClause *C) {
   TRY_TO(TraverseStmt(C->getNumForLoops()));
@@ -2459,11 +2493,13 @@ template <typename Derived>
 bool
 RecursiveASTVisitor<Derived>::VisitOMPScheduleClause(OMPScheduleClause *C) {
   TRY_TO(TraverseStmt(C->getChunkSize()));
+  TRY_TO(TraverseStmt(C->getHelperChunkSize()));
   return true;
 }
 
 template <typename Derived>
-bool RecursiveASTVisitor<Derived>::VisitOMPOrderedClause(OMPOrderedClause *) {
+bool RecursiveASTVisitor<Derived>::VisitOMPOrderedClause(OMPOrderedClause *C) {
+  TRY_TO(TraverseStmt(C->getNumForLoops()));
   return true;
 }
 
@@ -2509,6 +2545,16 @@ bool RecursiveASTVisitor<Derived>::VisitOMPSeqCstClause(OMPSeqCstClause *) {
 }
 
 template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPThreadsClause(OMPThreadsClause *) {
+  return true;
+}
+
+template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPSIMDClause(OMPSIMDClause *) {
+  return true;
+}
+
+template <typename Derived>
 template <typename T>
 bool RecursiveASTVisitor<Derived>::VisitOMPClauseList(T *Node) {
   for (auto *E : Node->varlists()) {
@@ -2543,6 +2589,18 @@ template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPLastprivateClause(
     OMPLastprivateClause *C) {
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->private_copies()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->source_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->destination_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->assignment_ops()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 
@@ -2555,7 +2613,20 @@ bool RecursiveASTVisitor<Derived>::VisitOMPSharedClause(OMPSharedClause *C) {
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPLinearClause(OMPLinearClause *C) {
   TRY_TO(TraverseStmt(C->getStep()));
+  TRY_TO(TraverseStmt(C->getCalcStep()));
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->privates()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->inits()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->updates()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->finals()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 
@@ -2569,6 +2640,15 @@ bool RecursiveASTVisitor<Derived>::VisitOMPAlignedClause(OMPAlignedClause *C) {
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPCopyinClause(OMPCopyinClause *C) {
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->source_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->destination_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->assignment_ops()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 
@@ -2576,6 +2656,15 @@ template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPCopyprivateClause(
     OMPCopyprivateClause *C) {
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->source_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->destination_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->assignment_ops()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 
@@ -2585,12 +2674,36 @@ RecursiveASTVisitor<Derived>::VisitOMPReductionClause(OMPReductionClause *C) {
   TRY_TO(TraverseNestedNameSpecifierLoc(C->getQualifierLoc()));
   TRY_TO(TraverseDeclarationNameInfo(C->getNameInfo()));
   TRY_TO(VisitOMPClauseList(C));
+  for (auto *E : C->privates()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->lhs_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->rhs_exprs()) {
+    TRY_TO(TraverseStmt(E));
+  }
+  for (auto *E : C->reduction_ops()) {
+    TRY_TO(TraverseStmt(E));
+  }
   return true;
 }
 
 template <typename Derived>
 bool RecursiveASTVisitor<Derived>::VisitOMPFlushClause(OMPFlushClause *C) {
   TRY_TO(VisitOMPClauseList(C));
+  return true;
+}
+
+template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPDependClause(OMPDependClause *C) {
+  TRY_TO(VisitOMPClauseList(C));
+  return true;
+}
+
+template <typename Derived>
+bool RecursiveASTVisitor<Derived>::VisitOMPDeviceClause(OMPDeviceClause *C) {
+  TRY_TO(TraverseStmt(C->getDevice()));
   return true;
 }
 

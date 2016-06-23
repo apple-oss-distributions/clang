@@ -1,3 +1,4 @@
+
 //===- HexagonInstrInfo.h - Hexagon Instruction Information -----*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
@@ -31,9 +32,10 @@ class HexagonInstrInfo : public HexagonGenInstrInfo {
   virtual void anchor();
   const HexagonRegisterInfo RI;
   const HexagonSubtarget &Subtarget;
-  typedef unsigned Opcode_t;
 
 public:
+  typedef unsigned Opcode_t;
+
   explicit HexagonInstrInfo(HexagonSubtarget &ST);
 
   /// getRegisterInfo - TargetInstrInfo is a superset of MRegister info.  As
@@ -67,8 +69,7 @@ public:
   unsigned RemoveBranch(MachineBasicBlock &MBB) const override;
 
   unsigned InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
-                        MachineBasicBlock *FBB,
-                        const SmallVectorImpl<MachineOperand> &Cond,
+                        MachineBasicBlock *FBB, ArrayRef<MachineOperand> Cond,
                         DebugLoc DL) const override;
 
   bool analyzeCompare(const MachineInstr *MI,
@@ -102,15 +103,23 @@ public:
                        const TargetRegisterClass *RC,
                        SmallVectorImpl<MachineInstr*> &NewMIs) const;
 
-  MachineInstr* foldMemoryOperandImpl(MachineFunction &MF,
-                                      MachineInstr* MI,
-                                      const SmallVectorImpl<unsigned> &Ops,
+  /// expandPostRAPseudo - This function is called for all pseudo instructions
+  /// that remain after register allocation. Many pseudo instructions are
+  /// created to help register allocation. This is the place to convert them
+  /// into real instructions. The target can edit MI in place, or it can insert
+  /// new instructions and erase MI. The function should return true if
+  /// anything was changed.
+  bool expandPostRAPseudo(MachineBasicBlock::iterator MI) const override;
+
+  MachineInstr *foldMemoryOperandImpl(MachineFunction &MF, MachineInstr *MI,
+                                      ArrayRef<unsigned> Ops,
+                                      MachineBasicBlock::iterator InsertPt,
                                       int FrameIndex) const override;
 
-  MachineInstr* foldMemoryOperandImpl(MachineFunction &MF,
-                                      MachineInstr* MI,
-                                      const SmallVectorImpl<unsigned> &Ops,
-                                      MachineInstr* LoadMI) const override {
+  MachineInstr *foldMemoryOperandImpl(MachineFunction &MF, MachineInstr *MI,
+                                      ArrayRef<unsigned> Ops,
+                                      MachineBasicBlock::iterator InsertPt,
+                                      MachineInstr *LoadMI) const override {
     return nullptr;
   }
 
@@ -119,17 +128,17 @@ public:
   bool isBranch(const MachineInstr *MI) const;
   bool isPredicable(MachineInstr *MI) const override;
   bool PredicateInstruction(MachineInstr *MI,
-                    const SmallVectorImpl<MachineOperand> &Cond) const override;
+                            ArrayRef<MachineOperand> Cond) const override;
 
   bool isProfitableToIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
                            unsigned ExtraPredCycles,
-                           const BranchProbability &Probability) const override;
+                           BranchProbability Probability) const override;
 
   bool isProfitableToIfCvt(MachineBasicBlock &TMBB,
                            unsigned NumTCycles, unsigned ExtraTCycles,
                            MachineBasicBlock &FMBB,
                            unsigned NumFCycles, unsigned ExtraFCycles,
-                           const BranchProbability &Probability) const override;
+                           BranchProbability Probability) const override;
 
   bool isPredicated(const MachineInstr *MI) const override;
   bool isPredicated(unsigned Opcode) const;
@@ -139,14 +148,14 @@ public:
   bool isPredicatedNew(unsigned Opcode) const;
   bool DefinesPredicate(MachineInstr *MI,
                         std::vector<MachineOperand> &Pred) const override;
-  bool SubsumesPredicate(const SmallVectorImpl<MachineOperand> &Pred1,
-                   const SmallVectorImpl<MachineOperand> &Pred2) const override;
+  bool SubsumesPredicate(ArrayRef<MachineOperand> Pred1,
+                         ArrayRef<MachineOperand> Pred2) const override;
 
   bool
   ReverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const override;
 
   bool isProfitableToDupForIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
-                           const BranchProbability &Probability) const override;
+                                 BranchProbability Probability) const override;
 
   DFAPacketizer *
   CreateTargetScheduleState(const TargetSubtargetInfo &STI) const override;
@@ -154,7 +163,7 @@ public:
   bool isSchedulingBoundary(const MachineInstr *MI,
                             const MachineBasicBlock *MBB,
                             const MachineFunction &MF) const override;
-  bool isValidOffset(const int Opcode, const int Offset) const;
+  bool isValidOffset(unsigned Opcode, int Offset, bool Extend = true) const;
   bool isValidAutoIncImm(const EVT VT, const int Offset) const;
   bool isMemOp(const MachineInstr *MI) const;
   bool isSpillPredRegOp(const MachineInstr *MI) const;
@@ -178,6 +187,7 @@ public:
   bool isConditionalStore(const MachineInstr* MI) const;
   bool isNewValueInst(const MachineInstr* MI) const;
   bool isNewValue(const MachineInstr* MI) const;
+  bool isNewValue(Opcode_t Opcode) const;
   bool isDotNewInst(const MachineInstr* MI) const;
   int GetDotOldOp(const int opc) const;
   int GetDotNewOp(const MachineInstr* MI) const;
@@ -193,11 +203,13 @@ public:
   bool isNewValueStore(const MachineInstr* MI) const;
   bool isNewValueStore(unsigned Opcode) const;
   bool isNewValueJump(const MachineInstr* MI) const;
+  bool isNewValueJump(Opcode_t Opcode) const;
   bool isNewValueJumpCandidate(const MachineInstr *MI) const;
 
 
   void immediateExtend(MachineInstr *MI) const;
-  bool isConstExtended(MachineInstr *MI) const;
+  bool isConstExtended(const MachineInstr *MI) const;
+  unsigned getSize(const MachineInstr *MI) const;  
   int getDotNewPredJumpOp(MachineInstr *MI,
                       const MachineBranchProbabilityInfo *MBPI) const;
   unsigned getAddrMode(const MachineInstr* MI) const;
@@ -209,10 +221,11 @@ public:
   bool NonExtEquivalentExists (const MachineInstr *MI) const;
   short getNonExtOpcode(const MachineInstr *MI) const;
   bool PredOpcodeHasJMP_c(Opcode_t Opcode) const;
-  bool PredOpcodeHasNot(Opcode_t Opcode) const;
-
-private:
-  int getMatchingCondBranchOpcode(int Opc, bool sense) const;
+  bool predOpcodeHasNot(ArrayRef<MachineOperand> Cond) const;
+  bool isEndLoopN(Opcode_t Opcode) const;
+  bool getPredReg(ArrayRef<MachineOperand> Cond, unsigned &PredReg,
+                  unsigned &PredRegPos, unsigned &PredRegFlags) const;
+  int getCondOpcode(int Opc, bool sense) const;
 
 };
 

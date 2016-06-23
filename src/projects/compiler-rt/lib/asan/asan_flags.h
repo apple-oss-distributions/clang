@@ -27,10 +27,6 @@
 // 4) overriden from env variable ASAN_OPTIONS.
 // 5) overriden during ASan activation (for now used on Android only).
 
-#if SANITIZER_MAC
-#define ASAN_DEFAULT_OPTIONS abort_on_error=1  // NOLINT
-#endif
-
 namespace __asan {
 
 struct Flags {
@@ -45,8 +41,8 @@ extern Flags asan_flags_dont_use_directly;
 inline Flags *flags() {
   return &asan_flags_dont_use_directly;
 }
-void RegisterAsanFlags(FlagParser *parser, Flags *f);
-void InitializeFlags(Flags *f);
+
+void InitializeFlags();
 
 }  // namespace __asan
 

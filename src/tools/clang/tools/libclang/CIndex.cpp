@@ -23,14 +23,12 @@
 #include "CursorVisitor.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Mangle.h"
-#include "clang/AST/ModuleProvider.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticCategories.h"
 #include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/Version.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -55,6 +53,7 @@
 #include "llvm/Support/Program.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/Signals.h"
+#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -148,7 +147,7 @@ CXSourceRange cxloc::translateSourceRange(const SourceManager &SM,
   SourceLocation EndLoc = R.getEnd();
   if (EndLoc.isValid() && EndLoc.isMacroID() && !SM.isMacroArgExpansion(EndLoc))
     EndLoc = SM.getExpansionRange(EndLoc).second;
-  if (R.isTokenRange() && !EndLoc.isInvalid()) {
+  if (R.isTokenRange() && EndLoc.isValid()) {
     unsigned Length = Lexer::MeasureTokenLength(SM.getSpellingLoc(EndLoc),
                                                 SM, LangOpts);
     EndLoc = EndLoc.getLocWithOffset(Length);
@@ -456,14 +455,14 @@ bool CursorVisitor::visitPreprocessedEntities(InputIterator First,
     if (MacroExpansion *ME = dyn_cast<MacroExpansion>(PPE)) {
       if (Visit(MakeMacroExpansionCursor(ME, TU)))
         return true;
-      
+
       continue;
     }
-    
-    if (MacroDefinition *MD = dyn_cast<MacroDefinition>(PPE)) {
+
+    if (MacroDefinitionRecord *MD = dyn_cast<MacroDefinitionRecord>(PPE)) {
       if (Visit(MakeMacroDefinitionCursor(MD, TU)))
         return true;
-      
+
       continue;
     }
     
@@ -570,8 +569,8 @@ bool CursorVisitor::VisitChildren(CXCursor Cursor) {
     SourceLocation Loc = AU->mapLocationToPreamble(BeginLoc);
     const MacroInfo *MI =
         getMacroInfo(cxcursor::getCursorMacroDefinition(Cursor), TU);
-    if (MacroDefinition *MacroDef =
-          checkForMacroInMacroDefinition(MI, Loc, TU))
+    if (MacroDefinitionRecord *MacroDef =
+            checkForMacroInMacroDefinition(MI, Loc, TU))
       return Visit(cxcursor::MakeMacroExpansionCursor(MacroDef, BeginLoc, TU));
   }
 
@@ -1461,9 +1460,19 @@ bool CursorVisitor::VisitBuiltinTypeLoc(BuiltinTypeLoc TL) {
   case BuiltinType::OCLImage1dBuffer:
   case BuiltinType::OCLImage2d:
   case BuiltinType::OCLImage2dArray:
+  case BuiltinType::OCLImage2dDepth:
+  case BuiltinType::OCLImage2dArrayDepth:
+  case BuiltinType::OCLImage2dMSAA:
+  case BuiltinType::OCLImage2dArrayMSAA:
+  case BuiltinType::OCLImage2dMSAADepth:
+  case BuiltinType::OCLImage2dArrayMSAADepth:
   case BuiltinType::OCLImage3d:
   case BuiltinType::OCLSampler:
   case BuiltinType::OCLEvent:
+  case BuiltinType::OCLClkEvent:
+  case BuiltinType::OCLQueue:
+  case BuiltinType::OCLNDRange:
+  case BuiltinType::OCLReserveID:
 #define BUILTIN_TYPE(Id, SingletonId)
 #define SIGNED_TYPE(Id, SingletonId) case BuiltinType::Id:
 #define UNSIGNED_TYPE(Id, SingletonId) case BuiltinType::Id:
@@ -1514,10 +1523,7 @@ bool CursorVisitor::VisitTemplateTypeParmTypeLoc(TemplateTypeParmTypeLoc TL) {
 }
 
 bool CursorVisitor::VisitObjCInterfaceTypeLoc(ObjCInterfaceTypeLoc TL) {
-  if (Visit(MakeCursorObjCClassRef(TL.getIFaceDecl(), TL.getNameLoc(), TU)))
-    return true;
-
-  return false;
+  return Visit(MakeCursorObjCClassRef(TL.getIFaceDecl(), TL.getNameLoc(), TU));
 }
 
 bool CursorVisitor::VisitObjCObjectTypeLoc(ObjCObjectTypeLoc TL) {
@@ -1635,10 +1641,7 @@ bool CursorVisitor::VisitUnaryTransformTypeLoc(UnaryTransformTypeLoc TL) {
 }
 
 bool CursorVisitor::VisitDependentNameTypeLoc(DependentNameTypeLoc TL) {
-  if (VisitNestedNameSpecifierLoc(TL.getQualifierLoc()))
-    return true;
-  
-  return false;
+  return VisitNestedNameSpecifierLoc(TL.getQualifierLoc());
 }
 
 bool CursorVisitor::VisitDependentTemplateSpecializationTypeLoc(
@@ -1761,7 +1764,7 @@ public:
     return VJ->getKind() == DeclVisitKind;
   }
   const Decl *get() const { return static_cast<const Decl *>(data[0]); }
-  bool isFirst() const { return data[1] ? true : false; }
+  bool isFirst() const { return data[1] != nullptr; }
 };
 class TypeLocVisit : public VisitorJob {
 public:
@@ -1922,10 +1925,15 @@ public:
   void VisitOMPTaskyieldDirective(const OMPTaskyieldDirective *D);
   void VisitOMPBarrierDirective(const OMPBarrierDirective *D);
   void VisitOMPTaskwaitDirective(const OMPTaskwaitDirective *D);
+  void VisitOMPTaskgroupDirective(const OMPTaskgroupDirective *D);
+  void
+  VisitOMPCancellationPointDirective(const OMPCancellationPointDirective *D);
+  void VisitOMPCancelDirective(const OMPCancelDirective *D);
   void VisitOMPFlushDirective(const OMPFlushDirective *D);
   void VisitOMPOrderedDirective(const OMPOrderedDirective *D);
   void VisitOMPAtomicDirective(const OMPAtomicDirective *D);
   void VisitOMPTargetDirective(const OMPTargetDirective *D);
+  void VisitOMPTargetDataDirective(const OMPTargetDataDirective *D);
   void VisitOMPTeamsDirective(const OMPTeamsDirective *D);
 
 private:
@@ -1976,8 +1984,8 @@ void EnqueueVisitor::AddTypeLoc(TypeSourceInfo *TI) {
  }
 void EnqueueVisitor::EnqueueChildren(const Stmt *S) {
   unsigned size = WL.size();
-  for (Stmt::const_child_range Child = S->children(); Child; ++Child) {
-    AddStmt(*Child);
+  for (const Stmt *SubStmt : S->children()) {
+    AddStmt(SubStmt);
   }
   if (size == WL.size())
     return;
@@ -2015,6 +2023,10 @@ void OMPClauseEnqueue::VisitOMPSafelenClause(const OMPSafelenClause *C) {
   Visitor->AddStmt(C->getSafelen());
 }
 
+void OMPClauseEnqueue::VisitOMPSimdlenClause(const OMPSimdlenClause *C) {
+  Visitor->AddStmt(C->getSimdlen());
+}
+
 void OMPClauseEnqueue::VisitOMPCollapseClause(const OMPCollapseClause *C) {
   Visitor->AddStmt(C->getNumForLoops());
 }
@@ -2025,9 +2037,12 @@ void OMPClauseEnqueue::VisitOMPProcBindClause(const OMPProcBindClause *C) { }
 
 void OMPClauseEnqueue::VisitOMPScheduleClause(const OMPScheduleClause *C) {
   Visitor->AddStmt(C->getChunkSize());
+  Visitor->AddStmt(C->getHelperChunkSize());
 }
 
-void OMPClauseEnqueue::VisitOMPOrderedClause(const OMPOrderedClause *) {}
+void OMPClauseEnqueue::VisitOMPOrderedClause(const OMPOrderedClause *C) {
+  Visitor->AddStmt(C->getNumForLoops());
+}
 
 void OMPClauseEnqueue::VisitOMPNowaitClause(const OMPNowaitClause *) {}
 
@@ -2044,6 +2059,14 @@ void OMPClauseEnqueue::VisitOMPUpdateClause(const OMPUpdateClause *) {}
 void OMPClauseEnqueue::VisitOMPCaptureClause(const OMPCaptureClause *) {}
 
 void OMPClauseEnqueue::VisitOMPSeqCstClause(const OMPSeqCstClause *) {}
+
+void OMPClauseEnqueue::VisitOMPThreadsClause(const OMPThreadsClause *) {}
+
+void OMPClauseEnqueue::VisitOMPSIMDClause(const OMPSIMDClause *) {}
+
+void OMPClauseEnqueue::VisitOMPDeviceClause(const OMPDeviceClause *C) {
+  Visitor->AddStmt(C->getDevice());
+}
 
 template<typename T>
 void OMPClauseEnqueue::VisitOMPClauseList(T *Node) {
@@ -2065,16 +2088,53 @@ void OMPClauseEnqueue::VisitOMPFirstprivateClause(
 void OMPClauseEnqueue::VisitOMPLastprivateClause(
                                         const OMPLastprivateClause *C) {
   VisitOMPClauseList(C);
+  for (auto *E : C->private_copies()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->source_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->destination_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->assignment_ops()) {
+    Visitor->AddStmt(E);
+  }
 }
 void OMPClauseEnqueue::VisitOMPSharedClause(const OMPSharedClause *C) {
   VisitOMPClauseList(C);
 }
 void OMPClauseEnqueue::VisitOMPReductionClause(const OMPReductionClause *C) {
   VisitOMPClauseList(C);
+  for (auto *E : C->privates()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->lhs_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->rhs_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->reduction_ops()) {
+    Visitor->AddStmt(E);
+  }
 }
 void OMPClauseEnqueue::VisitOMPLinearClause(const OMPLinearClause *C) {
   VisitOMPClauseList(C);
+  for (const auto *E : C->privates()) {
+    Visitor->AddStmt(E);
+  }
+  for (const auto *E : C->inits()) {
+    Visitor->AddStmt(E);
+  }
+  for (const auto *E : C->updates()) {
+    Visitor->AddStmt(E);
+  }
+  for (const auto *E : C->finals()) {
+    Visitor->AddStmt(E);
+  }
   Visitor->AddStmt(C->getStep());
+  Visitor->AddStmt(C->getCalcStep());
 }
 void OMPClauseEnqueue::VisitOMPAlignedClause(const OMPAlignedClause *C) {
   VisitOMPClauseList(C);
@@ -2082,12 +2142,33 @@ void OMPClauseEnqueue::VisitOMPAlignedClause(const OMPAlignedClause *C) {
 }
 void OMPClauseEnqueue::VisitOMPCopyinClause(const OMPCopyinClause *C) {
   VisitOMPClauseList(C);
+  for (auto *E : C->source_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->destination_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->assignment_ops()) {
+    Visitor->AddStmt(E);
+  }
 }
 void
 OMPClauseEnqueue::VisitOMPCopyprivateClause(const OMPCopyprivateClause *C) {
   VisitOMPClauseList(C);
+  for (auto *E : C->source_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->destination_exprs()) {
+    Visitor->AddStmt(E);
+  }
+  for (auto *E : C->assignment_ops()) {
+    Visitor->AddStmt(E);
+  }
 }
 void OMPClauseEnqueue::VisitOMPFlushClause(const OMPFlushClause *C) {
+  VisitOMPClauseList(C);
+}
+void OMPClauseEnqueue::VisitOMPDependClause(const OMPDependClause *C) {
   VisitOMPClauseList(C);
 }
 }
@@ -2114,10 +2195,8 @@ void EnqueueVisitor::VisitCompoundLiteralExpr(const CompoundLiteralExpr *E) {
   AddTypeLoc(E->getTypeSourceInfo());
 }
 void EnqueueVisitor::VisitCompoundStmt(const CompoundStmt *S) {
-  for (CompoundStmt::const_reverse_body_iterator I = S->body_rbegin(),
-        E = S->body_rend(); I != E; ++I) {
-    AddStmt(*I);
-  }
+  for (auto &I : llvm::reverse(S->body()))
+    AddStmt(I);
 }
 void EnqueueVisitor::
 VisitMSDependentExistsStmt(const MSDependentExistsStmt *S) {
@@ -2471,6 +2550,11 @@ void EnqueueVisitor::VisitOMPTaskwaitDirective(const OMPTaskwaitDirective *D) {
   VisitOMPExecutableDirective(D);
 }
 
+void EnqueueVisitor::VisitOMPTaskgroupDirective(
+    const OMPTaskgroupDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
 void EnqueueVisitor::VisitOMPFlushDirective(const OMPFlushDirective *D) {
   VisitOMPExecutableDirective(D);
 }
@@ -2487,7 +2571,21 @@ void EnqueueVisitor::VisitOMPTargetDirective(const OMPTargetDirective *D) {
   VisitOMPExecutableDirective(D);
 }
 
+void EnqueueVisitor::VisitOMPTargetDataDirective(const 
+                                                 OMPTargetDataDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
 void EnqueueVisitor::VisitOMPTeamsDirective(const OMPTeamsDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPCancellationPointDirective(
+    const OMPCancellationPointDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPCancelDirective(const OMPCancelDirective *D) {
   VisitOMPExecutableDirective(D);
 }
 
@@ -2735,7 +2833,7 @@ namespace {
 typedef SmallVector<SourceRange, 4> RefNamePieces;
 RefNamePieces
 buildPieces(unsigned NameFlags, bool IsMemberRefExpr,
-            const DeclarationNameInfo &NI, const SourceRange &QLoc,
+            const DeclarationNameInfo &NI, SourceRange QLoc,
             const ASTTemplateArgumentListInfo *TemplateArgs = nullptr) {
   const bool WantQualifier = NameFlags & CXNameRange_WantQualifier;
   const bool WantTemplateArgs = NameFlags & CXNameRange_WantTemplateArgs;
@@ -2795,7 +2893,6 @@ struct RegisterFatalErrorHandler {
 static llvm::ManagedStatic<RegisterFatalErrorHandler> RegisterFatalErrorHandlerOnce;
 
 extern "C" {
-
 CXIndex clang_createIndex(int excludeDeclarationsFromPCH,
                           int displayDiagnostics) {
   // We use crash recovery to make some of our APIs more reliable, implicitly
@@ -2808,8 +2905,14 @@ CXIndex clang_createIndex(int excludeDeclarationsFromPCH,
   // registered once.
   (void)*RegisterFatalErrorHandlerOnce;
 
-  auto MP = SharedModuleProvider::Create<SimpleModuleProvider>();
-  CIndexer *CIdxr = new CIndexer(MP);
+  // Initialize targets for clang module support.
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmPrinters();
+  llvm::InitializeAllAsmParsers();
+
+  CIndexer *CIdxr = new CIndexer();
+
   if (excludeDeclarationsFromPCH)
     CIdxr->setOnlyLocalDecls();
   if (displayDiagnostics)
@@ -2852,7 +2955,7 @@ CXTranslationUnit clang_createTranslationUnit(CXIndex CIdx,
                                               const char *ast_filename) {
   CXTranslationUnit TU;
   enum CXErrorCode Result =
-    clang_createTranslationUnit2(CIdx, ast_filename, &TU);
+      clang_createTranslationUnit2(CIdx, ast_filename, &TU);
   (void)Result;
   assert((TU && Result == CXError_Success) ||
          (!TU && Result != CXError_Success));
@@ -2878,8 +2981,8 @@ enum CXErrorCode clang_createTranslationUnit2(CXIndex CIdx,
   IntrusiveRefCntPtr<DiagnosticsEngine> Diags =
       CompilerInstance::createDiagnostics(new DiagnosticOptions());
   std::unique_ptr<ASTUnit> AU = ASTUnit::LoadFromASTFile(
-      ast_filename, CXXIdx->getModuleProvider(),
-      Diags, FileSystemOpts,
+      ast_filename, CXXIdx->getPCHContainerOperations()->getRawReader(), Diags,
+      FileSystemOpts, /*UseDebugInfo=*/false,
       CXXIdx->getOnlyLocalDecls(), None,
       /*CaptureDiagnostics=*/true,
       /*AllowPCHWithCompilerErrors=*/true,
@@ -2907,35 +3010,19 @@ clang_createTranslationUnitFromSourceFile(CXIndex CIdx,
                                     Options);
 }
 
-struct ParseTranslationUnitInfo {
-  CXIndex CIdx;
-  const char *source_filename;
-  const char *const *command_line_args;
-  int num_command_line_args;
-  ArrayRef<CXUnsavedFile> unsaved_files;
-  unsigned options;
-  CXTranslationUnit *out_TU;
-  CXErrorCode &result;
-};
-static void clang_parseTranslationUnit_Impl(void *UserData) {
-  const ParseTranslationUnitInfo *PTUI =
-      static_cast<ParseTranslationUnitInfo *>(UserData);
-  CXIndex CIdx = PTUI->CIdx;
-  const char *source_filename = PTUI->source_filename;
-  const char * const *command_line_args = PTUI->command_line_args;
-  int num_command_line_args = PTUI->num_command_line_args;
-  unsigned options = PTUI->options;
-  CXTranslationUnit *out_TU = PTUI->out_TU;
-
+static CXErrorCode
+clang_parseTranslationUnit_Impl(CXIndex CIdx, const char *source_filename,
+                                const char *const *command_line_args,
+                                int num_command_line_args,
+                                ArrayRef<CXUnsavedFile> unsaved_files,
+                                unsigned options, CXTranslationUnit *out_TU) {
   // Set up the initial return values.
   if (out_TU)
     *out_TU = nullptr;
 
   // Check arguments.
-  if (!CIdx || !out_TU) {
-    PTUI->result = CXError_InvalidArguments;
-    return;
-  }
+  if (!CIdx || !out_TU)
+    return CXError_InvalidArguments;
 
   CIndexer *CXXIdx = static_cast<CIndexer *>(CIdx);
 
@@ -2969,7 +3056,7 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   llvm::CrashRecoveryContextCleanupRegistrar<
     std::vector<ASTUnit::RemappedFile> > RemappedCleanup(RemappedFiles.get());
 
-  for (auto &UF : PTUI->unsaved_files) {
+  for (auto &UF : unsaved_files) {
     std::unique_ptr<llvm::MemoryBuffer> MB =
         llvm::MemoryBuffer::getMemBufferCopy(getContents(UF), UF.Filename);
     RemappedFiles->push_back(std::make_pair(UF.Filename, MB.release()));
@@ -3018,14 +3105,20 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   unsigned NumErrors = Diags->getClient()->getNumErrors();
   std::unique_ptr<ASTUnit> ErrUnit;
   std::unique_ptr<ASTUnit> Unit(ASTUnit::LoadFromCommandLine(
-  Args->data(), Args->data() + Args->size(),
-      CXXIdx->getModuleProvider(), Diags,
+      Args->data(), Args->data() + Args->size(),
+      CXXIdx->getPCHContainerOperations(), Diags,
       CXXIdx->getClangResourcesPath(), CXXIdx->getOnlyLocalDecls(),
       /*CaptureDiagnostics=*/true, *RemappedFiles.get(),
       /*RemappedFilesKeepOriginalName=*/true, PrecompilePreamble, TUKind,
       CacheCodeCompletionResults, IncludeBriefCommentsInCodeCompletion,
       /*AllowPCHWithCompilerErrors=*/true, SkipFunctionBodies,
-      /*UserFilesAreVolatile=*/true, ForSerialization, &ErrUnit));
+      /*UserFilesAreVolatile=*/true, ForSerialization,
+      CXXIdx->getPCHContainerOperations()->getRawReader().getFormat(),
+      &ErrUnit));
+
+  // Early failures in LoadFromCommandLine may return with ErrUnit unset.
+  if (!Unit && !ErrUnit)
+    return CXError_ASTReadError;
 
   if (NumErrors != Diags->getClient()->getNumErrors()) {
     // Make sure to check that 'Unit' is non-NULL.
@@ -3033,12 +3126,11 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
       printDiagsToStderr(Unit ? Unit.get() : ErrUnit.get());
   }
 
-  if (isASTReadError(Unit ? Unit.get() : ErrUnit.get())) {
-    PTUI->result = CXError_ASTReadError;
-  } else {
-    *PTUI->out_TU = MakeCXTranslationUnit(CXXIdx, Unit.release());
-    PTUI->result = *PTUI->out_TU ? CXError_Success : CXError_Failure;
-  }
+  if (isASTReadError(Unit ? Unit.get() : ErrUnit.get()))
+    return CXError_ASTReadError;
+
+  *out_TU = MakeCXTranslationUnit(CXXIdx, Unit.release());
+  return *out_TU ? CXError_Success : CXError_Failure;
 }
 
 CXTranslationUnit
@@ -3078,18 +3170,14 @@ enum CXErrorCode clang_parseTranslationUnit2(
     return CXError_InvalidArguments;
 
   CXErrorCode result = CXError_Failure;
-  ParseTranslationUnitInfo PTUI = {
-      CIdx,
-      source_filename,
-      command_line_args,
-      num_command_line_args,
-      llvm::makeArrayRef(unsaved_files, num_unsaved_files),
-      options,
-      out_TU,
-      result};
+  auto ParseTranslationUnitImpl = [=, &result] {
+    result = clang_parseTranslationUnit_Impl(
+        CIdx, source_filename, command_line_args, num_command_line_args,
+        llvm::makeArrayRef(unsaved_files, num_unsaved_files), options, out_TU);
+  };
   llvm::CrashRecoveryContext CRC;
 
-  if (!RunSafely(CRC, clang_parseTranslationUnit_Impl, &PTUI)) {
+  if (!RunSafely(CRC, ParseTranslationUnitImpl)) {
     fprintf(stderr, "libclang: crash detected during parsing: {\n");
     fprintf(stderr, "  'source_filename' : '%s'\n", source_filename);
     fprintf(stderr, "  'command_line_args' : [");
@@ -3112,38 +3200,349 @@ enum CXErrorCode clang_parseTranslationUnit2(
 
     return CXError_Crashed;
   } else if (getenv("LIBCLANG_RESOURCE_USAGE")) {
-    if (CXTranslationUnit *TU = PTUI.out_TU)
+    if (CXTranslationUnit *TU = out_TU)
       PrintLibclangResourceUsage(*TU);
   }
 
   return result;
 }
 
+CXString clang_Type_getObjCEncoding(CXType CT) {
+  CXTranslationUnit tu = static_cast<CXTranslationUnit>(CT.data[1]);
+  ASTContext &Ctx = getASTUnit(tu)->getASTContext();
+  std::string encoding;
+  Ctx.getObjCEncodingForType(QualType::getFromOpaquePtr(CT.data[0]),
+                             encoding);
+
+  return cxstring::createDup(encoding);
+}
+
+static const IdentifierInfo *getMacroIdentifier(CXCursor C) {
+  if (C.kind == CXCursor_MacroDefinition) {
+    if (const MacroDefinitionRecord *MDR = getCursorMacroDefinition(C))
+      return MDR->getName();
+  } else if (C.kind == CXCursor_MacroExpansion) {
+    MacroExpansionCursor ME = getCursorMacroExpansion(C);
+    return ME.getName();
+  }
+  return nullptr;
+}
+
+unsigned clang_Cursor_isMacroFunctionLike(CXCursor C) {
+  const IdentifierInfo *II = getMacroIdentifier(C);
+  if (!II) {
+    return false;
+  }
+  ASTUnit *ASTU = getCursorASTUnit(C);
+  Preprocessor &PP = ASTU->getPreprocessor();
+  if (const MacroInfo *MI = PP.getMacroInfo(II))
+    return MI->isFunctionLike();
+  return false;
+}
+
+unsigned clang_Cursor_isMacroBuiltin(CXCursor C) {
+  const IdentifierInfo *II = getMacroIdentifier(C);
+  if (!II) {
+    return false;
+  }
+  ASTUnit *ASTU = getCursorASTUnit(C);
+  Preprocessor &PP = ASTU->getPreprocessor();
+  if (const MacroInfo *MI = PP.getMacroInfo(II))
+    return MI->isBuiltinMacro();
+  return false;
+}
+
+unsigned clang_Cursor_isFunctionInlined(CXCursor C) {
+  const Decl *D = getCursorDecl(C);
+  const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D);
+  if (!FD) {
+    return false;
+  }
+  return FD->isInlined();
+}
+
+static StringLiteral* getCFSTR_value(CallExpr *callExpr) {
+  if (callExpr->getNumArgs() != 1) {
+    return nullptr;
+  }
+
+  StringLiteral *S = nullptr;
+  auto *arg = callExpr->getArg(0);
+  if (arg->getStmtClass() == Stmt::ImplicitCastExprClass) {
+    ImplicitCastExpr *I = static_cast<ImplicitCastExpr *>(arg);
+    auto *subExpr = I->getSubExprAsWritten();
+
+    if(subExpr->getStmtClass() != Stmt::StringLiteralClass){
+      return nullptr;
+    }
+
+    S = static_cast<StringLiteral *>(I->getSubExprAsWritten());
+  } else if (arg->getStmtClass() == Stmt::StringLiteralClass) {
+    S = static_cast<StringLiteral *>(callExpr->getArg(0));
+  } else {
+    return nullptr;
+  }
+  return S;
+}
+
+typedef struct {
+  CXEvalResultKind EvalType;
+  union {
+    int intVal;
+    double floatVal;
+    char *stringVal;
+  } EvalData;
+} ExprEvalResult;
+
+void clang_EvalResult_dispose(CXEvalResult E) {
+  ExprEvalResult *ER = (ExprEvalResult *)E;
+  if (ER) {
+    CXEvalResultKind evalType = ER->EvalType;
+
+    if (evalType != CXEval_UnExposed &&  evalType != CXEval_Float &&
+            evalType != CXEval_Int && ER->EvalData.stringVal) {
+            free((void *) ER->EvalData.stringVal);
+    }
+    free((void *)ER);
+  }
+}
+
+CXEvalResultKind clang_EvalResult_getKind(CXEvalResult E) {
+  if (!E) {
+    return CXEval_UnExposed;
+  }
+  return ((ExprEvalResult *)E)->EvalType;
+}
+
+int clang_EvalResult_getAsInt(CXEvalResult E) {
+  if (!E) {
+    return 0;
+  }
+  return ((ExprEvalResult *)E)->EvalData.intVal;
+}
+
+double clang_EvalResult_getAsDouble(CXEvalResult E) {
+  if (!E) {
+    return 0;
+  }
+  return ((ExprEvalResult *)E)->EvalData.floatVal;
+}
+
+const char* clang_EvalResult_getAsStr(CXEvalResult E) {
+  if (!E) {
+    return nullptr;
+  }
+  return ((ExprEvalResult *)E)->EvalData.stringVal;
+}
+
+static const ExprEvalResult* evaluateExpr(Expr *expr, CXCursor C) {
+  Expr::EvalResult ER;
+  ASTContext &ctx = getCursorContext(C);
+  if (!expr) {
+    return nullptr;
+  }
+  expr = expr->IgnoreParens();
+  bool res = expr->EvaluateAsRValue(ER, ctx);
+  QualType rettype;
+  CallExpr *callExpr;
+  ExprEvalResult *result = (ExprEvalResult *) malloc(sizeof(ExprEvalResult));
+  if (!result) {
+    return nullptr;
+  }
+  result->EvalType = CXEval_UnExposed;
+
+  if (res) {
+
+    if (ER.Val.isInt()) {
+      result->EvalType = CXEval_Int;
+      result->EvalData.intVal = ER.Val.getInt().getExtValue();
+      return result;
+    } else if (ER.Val.isFloat()) {
+
+      llvm::SmallVector<char, 100> Buffer;
+      ER.Val.getFloat().toString(Buffer);
+      std::string floatStr(Buffer.data(), Buffer.size());
+      result->EvalType = CXEval_Float;
+      bool ignored;
+      llvm::APFloat apFloat = ER.Val.getFloat();
+      apFloat.convert(llvm::APFloat::IEEEdouble,
+                      llvm::APFloat::rmNearestTiesToEven, &ignored);
+      result->EvalData.floatVal = apFloat.convertToDouble();
+      return result;
+
+    } else if (expr->getStmtClass() == Stmt::ImplicitCastExprClass) {
+
+      const ImplicitCastExpr *I = dyn_cast<ImplicitCastExpr>(expr);
+      auto *subExpr = I->getSubExprAsWritten();
+      if (subExpr->getStmtClass() == Stmt::StringLiteralClass ||
+          subExpr->getStmtClass() == Stmt::ObjCStringLiteralClass) {
+
+        const StringLiteral *StrE = nullptr;
+        const ObjCStringLiteral *ObjCExpr;
+        ObjCExpr = dyn_cast<ObjCStringLiteral>(subExpr);
+
+        if (ObjCExpr) {
+          StrE = ObjCExpr->getString();
+          result->EvalType = CXEval_ObjCStrLiteral;
+        } else {
+          StrE = cast<StringLiteral>(I->getSubExprAsWritten());
+          result->EvalType = CXEval_StrLiteral;
+        }
+
+        std::string strRef(StrE->getString().str());
+        result->EvalData.stringVal = (char *)malloc(strRef.size()+1);
+        strncpy((char*)result->EvalData.stringVal, strRef.c_str(),
+                   strRef.size());
+        result->EvalData.stringVal[strRef.size()] = '\0';
+        return result;
+      }
+
+    } else if (expr->getStmtClass() == Stmt::ObjCStringLiteralClass ||
+             expr->getStmtClass() == Stmt::StringLiteralClass) {
+
+      const StringLiteral *StrE = nullptr;
+      const ObjCStringLiteral *ObjCExpr;
+      ObjCExpr = dyn_cast<ObjCStringLiteral>(expr);
+
+      if (ObjCExpr) {
+        StrE = ObjCExpr->getString();
+        result->EvalType = CXEval_ObjCStrLiteral;
+      } else {
+        StrE = cast<StringLiteral>(expr);
+        result->EvalType = CXEval_StrLiteral;
+      }
+
+      std::string strRef(StrE->getString().str());
+      result->EvalData.stringVal = (char *)malloc(strRef.size()+1);
+      strncpy((char*)result->EvalData.stringVal, strRef.c_str(),
+                  strRef.size());
+      result->EvalData.stringVal[strRef.size()] = '\0';
+      return result;
+
+    } else if (expr->getStmtClass() == Stmt::CStyleCastExprClass) {
+
+      CStyleCastExpr *CC = static_cast<CStyleCastExpr *>(expr);
+
+      rettype = CC->getType();
+      if (rettype.getAsString() == "CFStringRef" &&
+            CC->getSubExpr()->getStmtClass() == Stmt::CallExprClass) {
+
+        callExpr = static_cast<CallExpr *>(CC->getSubExpr());
+        StringLiteral* S = getCFSTR_value(callExpr);
+        if (S) {
+          std::string strLiteral(S->getString().str());
+          result->EvalType = CXEval_CFStr;
+
+          result->EvalData.stringVal = (char *)malloc(strLiteral.size()+1);
+          strncpy((char*)result->EvalData.stringVal, strLiteral.c_str(),
+                     strLiteral.size());
+          result->EvalData.stringVal[strLiteral.size()] = '\0';
+          return result;
+        }
+      }
+
+    } else if (expr->getStmtClass() == Stmt::CallExprClass) {
+
+      callExpr = static_cast<CallExpr *>(expr);
+      rettype = callExpr->getCallReturnType(ctx);
+
+      if (rettype->isVectorType() || callExpr->getNumArgs() > 1) {
+        return nullptr;
+      }
+      if (rettype->isIntegralType(ctx) || rettype->isRealFloatingType()) {
+        if(callExpr->getNumArgs() == 1 &&
+              !callExpr->getArg(0)->getType()->isIntegralType(ctx)){
+
+          return nullptr;
+        }
+      } else if(rettype.getAsString() == "CFStringRef") {
+
+        StringLiteral* S = getCFSTR_value(callExpr);
+        if (S) {
+          std::string strLiteral(S->getString().str());
+          result->EvalType = CXEval_CFStr;
+          result->EvalData.stringVal = (char *)malloc(strLiteral.size()+1);
+          strncpy((char*)result->EvalData.stringVal, strLiteral.c_str(),
+                     strLiteral.size());
+          result->EvalData.stringVal[strLiteral.size()] = '\0';
+          return result;
+        }
+      }
+
+    } else if (expr->getStmtClass() == Stmt::DeclRefExprClass) {
+
+      DeclRefExpr *D = static_cast<DeclRefExpr *>(expr);
+      ValueDecl *V = D->getDecl();
+      if (V->getKind() == Decl::Function) {
+        std::string strName(V->getNameAsString());
+        result->EvalType = CXEval_Other;
+        result->EvalData.stringVal = (char *)malloc(strName.size()+1);
+        strncpy((char*)result->EvalData.stringVal, strName.c_str(),
+                   strName.size());
+        result->EvalData.stringVal[strName.size()] = '\0';
+        return result;
+      }
+    }
+
+  }
+
+  clang_EvalResult_dispose((CXEvalResult *)result);
+  return nullptr;
+}
+
+CXEvalResult clang_Cursor_Evaluate(CXCursor C) {
+  const Decl *D = getCursorDecl(C);
+  if (D) {
+    const Expr *expr = nullptr;
+    if (auto *Var = dyn_cast<VarDecl>(D)) {
+      expr = Var->getInit();
+    } else if (auto *Field = dyn_cast<FieldDecl>(D)) {
+      expr = Field->getInClassInitializer();
+    }
+    if (expr)
+      return (CXEvalResult)evaluateExpr((Expr *)expr, C);
+    return nullptr;
+  }
+
+  const CompoundStmt *compoundStmt = dyn_cast_or_null<CompoundStmt>(getCursorStmt(C));
+  if (compoundStmt) {
+    Expr *expr = nullptr;
+    for (auto *bodyIterator : compoundStmt->body()) {
+      if ((expr = dyn_cast<Expr>(bodyIterator))) {
+        break;
+      }
+    }
+    if (expr)
+      return (CXEvalResult)evaluateExpr(expr, C);
+  }
+  return nullptr;
+}
+
+unsigned clang_Cursor_hasAttrs(CXCursor C) {
+  const Decl *D = getCursorDecl(C);
+  if (!D) {
+    return 0;
+  }
+
+  if (D->hasAttrs()) {
+    return 1;
+  }
+
+  return 0;
+}
 unsigned clang_defaultSaveOptions(CXTranslationUnit TU) {
   return CXSaveTranslationUnit_None;
 }  
 
-namespace {
-
-struct SaveTranslationUnitInfo {
-  CXTranslationUnit TU;
-  const char *FileName;
-  unsigned options;
-  CXSaveError result;
-};
-
-}
-
-static void clang_saveTranslationUnit_Impl(void *UserData) {
-  SaveTranslationUnitInfo *STUI =
-    static_cast<SaveTranslationUnitInfo*>(UserData);
-
-  CIndexer *CXXIdx = STUI->TU->CIdx;
+static CXSaveError clang_saveTranslationUnit_Impl(CXTranslationUnit TU,
+                                                  const char *FileName,
+                                                  unsigned options) {
+  CIndexer *CXXIdx = TU->CIdx;
   if (CXXIdx->isOptEnabled(CXGlobalOpt_ThreadBackgroundPriorityForIndexing))
     setThreadBackgroundPriority();
 
-  bool hadError = cxtu::getASTUnit(STUI->TU)->Save(STUI->FileName);
-  STUI->result = hadError ? CXSaveError_Unknown : CXSaveError_None;
+  bool hadError = cxtu::getASTUnit(TU)->Save(FileName);
+  return hadError ? CXSaveError_Unknown : CXSaveError_None;
 }
 
 int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
@@ -3162,16 +3561,19 @@ int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
   if (!CXXUnit->hasSema())
     return CXSaveError_InvalidTU;
 
-  SaveTranslationUnitInfo STUI = { TU, FileName, options, CXSaveError_None };
+  CXSaveError result;
+  auto SaveTranslationUnitImpl = [=, &result]() {
+    result = clang_saveTranslationUnit_Impl(TU, FileName, options);
+  };
 
   if (!CXXUnit->getDiagnostics().hasUnrecoverableErrorOccurred() ||
       getenv("LIBCLANG_NOTHREADS")) {
-    clang_saveTranslationUnit_Impl(&STUI);
+    SaveTranslationUnitImpl();
 
     if (getenv("LIBCLANG_RESOURCE_USAGE"))
       PrintLibclangResourceUsage(TU);
 
-    return STUI.result;
+    return result;
   }
 
   // We have an AST that has invalid nodes due to compiler errors.
@@ -3179,7 +3581,7 @@ int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
 
   llvm::CrashRecoveryContext CRC;
 
-  if (!RunSafely(CRC, clang_saveTranslationUnit_Impl, &STUI)) {
+  if (!RunSafely(CRC, SaveTranslationUnitImpl)) {
     fprintf(stderr, "libclang: crash detected during AST saving: {\n");
     fprintf(stderr, "  'filename' : '%s'\n", FileName);
     fprintf(stderr, "  'options' : %d,\n", options);
@@ -3191,7 +3593,7 @@ int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
     PrintLibclangResourceUsage(TU);
   }
 
-  return STUI.result;
+  return result;
 }
 
 void clang_disposeTranslationUnit(CXTranslationUnit CTUnit) {
@@ -3215,25 +3617,14 @@ unsigned clang_defaultReparseOptions(CXTranslationUnit TU) {
   return CXReparse_None;
 }
 
-struct ReparseTranslationUnitInfo {
-  CXTranslationUnit TU;
-  ArrayRef<CXUnsavedFile> unsaved_files;
-  unsigned options;
-  CXErrorCode &result;
-};
-
-static void clang_reparseTranslationUnit_Impl(void *UserData) {
-  const ReparseTranslationUnitInfo *RTUI =
-      static_cast<ReparseTranslationUnitInfo *>(UserData);
-  CXTranslationUnit TU = RTUI->TU;
-  unsigned options = RTUI->options;
-  (void) options;
-
+static CXErrorCode
+clang_reparseTranslationUnit_Impl(CXTranslationUnit TU,
+                                  ArrayRef<CXUnsavedFile> unsaved_files,
+                                  unsigned options) {
   // Check arguments.
   if (isNotUsableTU(TU)) {
     LOG_BAD_TU(TU);
-    RTUI->result = CXError_InvalidArguments;
-    return;
+    return CXError_InvalidArguments;
   }
 
   // Reset the associated diagnostics.
@@ -3254,16 +3645,18 @@ static void clang_reparseTranslationUnit_Impl(void *UserData) {
   llvm::CrashRecoveryContextCleanupRegistrar<
     std::vector<ASTUnit::RemappedFile> > RemappedCleanup(RemappedFiles.get());
 
-  for (auto &UF : RTUI->unsaved_files) {
+  for (auto &UF : unsaved_files) {
     std::unique_ptr<llvm::MemoryBuffer> MB =
         llvm::MemoryBuffer::getMemBufferCopy(getContents(UF), UF.Filename);
     RemappedFiles->push_back(std::make_pair(UF.Filename, MB.release()));
   }
 
-  if (!CXXUnit->Reparse(*RemappedFiles.get()))
-    RTUI->result = CXError_Success;
-  else if (isASTReadError(CXXUnit))
-    RTUI->result = CXError_ASTReadError;
+  if (!CXXUnit->Reparse(CXXIdx->getPCHContainerOperations(),
+                        *RemappedFiles.get()))
+    return CXError_Success;
+  if (isASTReadError(CXXUnit))
+    return CXError_ASTReadError;
+  return CXError_Failure;
 }
 
 int clang_reparseTranslationUnit(CXTranslationUnit TU,
@@ -3277,19 +3670,20 @@ int clang_reparseTranslationUnit(CXTranslationUnit TU,
   if (num_unsaved_files && !unsaved_files)
     return CXError_InvalidArguments;
 
-  CXErrorCode result = CXError_Failure;
-  ReparseTranslationUnitInfo RTUI = {
-      TU, llvm::makeArrayRef(unsaved_files, num_unsaved_files), options,
-      result};
+  CXErrorCode result;
+  auto ReparseTranslationUnitImpl = [=, &result]() {
+    result = clang_reparseTranslationUnit_Impl(
+        TU, llvm::makeArrayRef(unsaved_files, num_unsaved_files), options);
+  };
 
   if (getenv("LIBCLANG_NOTHREADS")) {
-    clang_reparseTranslationUnit_Impl(&RTUI);
+    ReparseTranslationUnitImpl();
     return result;
   }
 
   llvm::CrashRecoveryContext CRC;
 
-  if (!RunSafely(CRC, clang_reparseTranslationUnit_Impl, &RTUI)) {
+  if (!RunSafely(CRC, ReparseTranslationUnitImpl)) {
     fprintf(stderr, "libclang: crash detected during reparsing\n");
     cxtu::getASTUnit(TU)->setUnsafeToFree(true);
     return CXError_Crashed;
@@ -3698,6 +4092,19 @@ CXString clang_getCursorSpelling(CXCursor C) {
     return cxstring::createRef("packed");
   }
 
+  if (C.kind == CXCursor_VisibilityAttr) {
+    const VisibilityAttr *AA = cast<VisibilityAttr>(cxcursor::getCursorAttr(C));
+    switch (AA->getVisibility()) {
+    case VisibilityAttr::VisibilityType::Default:
+      return cxstring::createRef("default");
+    case VisibilityAttr::VisibilityType::Hidden:
+      return cxstring::createRef("hidden");
+    case VisibilityAttr::VisibilityType::Protected:
+      return cxstring::createRef("protected");
+    }
+    llvm_unreachable("unknown visibility type");
+  }
+
   return cxstring::createEmpty();
 }
 
@@ -3811,17 +4218,20 @@ CXString clang_Cursor_getMangling(CXCursor C) {
 
   std::string FrontendBuf;
   llvm::raw_string_ostream FrontendBufOS(FrontendBuf);
-  MC->mangleName(ND, FrontendBufOS);
+  if (MC->shouldMangleDeclName(ND)) {
+    MC->mangleName(ND, FrontendBufOS);
+  } else {
+    ND->printName(FrontendBufOS);
+  }
 
   // Now apply backend mangling.
   std::unique_ptr<llvm::DataLayout> DL(
-      new llvm::DataLayout(Ctx.getTargetInfo().getTargetDescription()));
-  llvm::Mangler BackendMangler(DL.get());
+      new llvm::DataLayout(Ctx.getTargetInfo().getDataLayoutString()));
 
   std::string FinalBuf;
   llvm::raw_string_ostream FinalBufOS(FinalBuf);
-  BackendMangler.getNameWithPrefix(FinalBufOS,
-                                   llvm::Twine(FrontendBufOS.str()));
+  llvm::Mangler::getNameWithPrefix(FinalBufOS, llvm::Twine(FrontendBufOS.str()),
+                                   *DL);
 
   return cxstring::createDup(FinalBufOS.str());
 }
@@ -3990,6 +4400,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
       return cxstring::createRef("UnaryOperator");
   case CXCursor_ArraySubscriptExpr:
       return cxstring::createRef("ArraySubscriptExpr");
+  case CXCursor_OMPArraySectionExpr:
+      return cxstring::createRef("OMPArraySectionExpr");
   case CXCursor_BinaryOperator:
       return cxstring::createRef("BinaryOperator");
   case CXCursor_CompoundAssignOperator:
@@ -4178,6 +4590,12 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("attribute(host)");
   case CXCursor_CUDASharedAttr:
     return cxstring::createRef("attribute(shared)");
+  case CXCursor_VisibilityAttr:
+    return cxstring::createRef("attribute(visibility)");
+  case CXCursor_DLLExport:
+    return cxstring::createRef("attribute(dllexport)");
+  case CXCursor_DLLImport:
+    return cxstring::createRef("attribute(dllimport)");
   case CXCursor_PreprocessingDirective:
     return cxstring::createRef("preprocessing directive");
   case CXCursor_MacroDefinition:
@@ -4258,6 +4676,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("OMPBarrierDirective");
   case CXCursor_OMPTaskwaitDirective:
     return cxstring::createRef("OMPTaskwaitDirective");
+  case CXCursor_OMPTaskgroupDirective:
+    return cxstring::createRef("OMPTaskgroupDirective");
   case CXCursor_OMPFlushDirective:
     return cxstring::createRef("OMPFlushDirective");
   case CXCursor_OMPOrderedDirective:
@@ -4266,8 +4686,14 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("OMPAtomicDirective");
   case CXCursor_OMPTargetDirective:
     return cxstring::createRef("OMPTargetDirective");
+  case CXCursor_OMPTargetDataDirective:
+    return cxstring::createRef("OMPTargetDataDirective");
   case CXCursor_OMPTeamsDirective:
     return cxstring::createRef("OMPTeamsDirective");
+  case CXCursor_OMPCancellationPointDirective:
+    return cxstring::createRef("OMPCancellationPointDirective");
+  case CXCursor_OMPCancelDirective:
+    return cxstring::createRef("OMPCancelDirective");
   case CXCursor_OverloadCandidate:
       return cxstring::createRef("OverloadCandidate");
   }
@@ -4891,9 +5317,10 @@ CXCursor clang_getCursorReferenced(CXCursor C) {
 
     return clang_getNullCursor();
   }
-  
+
   if (C.kind == CXCursor_MacroExpansion) {
-    if (const MacroDefinition *Def = getCursorMacroExpansion(C).getDefinition())
+    if (const MacroDefinitionRecord *Def =
+            getCursorMacroExpansion(C).getDefinition())
       return MakeMacroDefinitionCursor(Def, tu);
   }
 
@@ -5012,12 +5439,14 @@ CXCursor clang_getCursorDefinition(CXCursor C) {
   case Decl::Import:
   case Decl::OMPThreadPrivate:
   case Decl::ObjCTypeParam:
+  case Decl::BuiltinTemplate:
     return C;
 
   // Declaration kinds that don't make any sense here, but are
   // nonetheless harmless.
   case Decl::Empty:
   case Decl::TranslationUnit:
+  case Decl::ExternCContext:
     break;
 
   // Declaration kinds for which the definition is not resolvable.
@@ -5966,16 +6395,6 @@ MarkMacroArgTokensVisitorDelegate(CXCursor cursor, CXCursor parent,
                                                                      parent);
 }
 
-namespace {
-  struct clang_annotateTokens_Data {
-    CXTranslationUnit TU;
-    ASTUnit *CXXUnit;
-    CXToken *Tokens;
-    unsigned NumTokens;
-    CXCursor *Cursors;
-  };
-}
-
 /// \brief Used by \c annotatePreprocessorTokens.
 /// \returns true if lexing was finished, false otherwise.
 static bool lexNext(Lexer &Lex, Token &Tok,
@@ -6068,11 +6487,12 @@ static void annotatePreprocessorTokens(CXTranslationUnit TU,
         if (MI) {
           SourceLocation SaveLoc = Tok.getLocation();
           Tok.setLocation(CXXUnit->mapLocationToPreamble(SaveLoc));
-          MacroDefinition *MacroDef = checkForMacroInMacroDefinition(MI,Tok,TU);
+          MacroDefinitionRecord *MacroDef =
+              checkForMacroInMacroDefinition(MI, Tok, TU);
           Tok.setLocation(SaveLoc);
           if (MacroDef)
-            Cursors[NextIdx-1] = MakeMacroExpansionCursor(MacroDef,
-                                                         Tok.getLocation(), TU);
+            Cursors[NextIdx - 1] =
+                MakeMacroExpansionCursor(MacroDef, Tok.getLocation(), TU);
         }
       } while (!Tok.isAtStartOfLine());
 
@@ -6094,13 +6514,9 @@ static void annotatePreprocessorTokens(CXTranslationUnit TU,
 }
 
 // This gets run a separate thread to avoid stack blowout.
-static void clang_annotateTokensImpl(void *UserData) {
-  CXTranslationUnit TU = ((clang_annotateTokens_Data*)UserData)->TU;
-  ASTUnit *CXXUnit = ((clang_annotateTokens_Data*)UserData)->CXXUnit;
-  CXToken *Tokens = ((clang_annotateTokens_Data*)UserData)->Tokens;
-  const unsigned NumTokens = ((clang_annotateTokens_Data*)UserData)->NumTokens;
-  CXCursor *Cursors = ((clang_annotateTokens_Data*)UserData)->Cursors;
-
+static void clang_annotateTokensImpl(CXTranslationUnit TU, ASTUnit *CXXUnit,
+                                     CXToken *Tokens, unsigned NumTokens,
+                                     CXCursor *Cursors) {
   CIndexer *CXXIdx = TU->CIdx;
   if (CXXIdx->isOptEnabled(CXGlobalOpt_ThreadBackgroundPriorityForEditing))
     setThreadBackgroundPriority();
@@ -6236,11 +6652,12 @@ void clang_annotateTokens(CXTranslationUnit TU,
     return;
 
   ASTUnit::ConcurrencyCheck Check(*CXXUnit);
-  
-  clang_annotateTokens_Data data = { TU, CXXUnit, Tokens, NumTokens, Cursors };
+
+  auto AnnotateTokensImpl = [=]() {
+    clang_annotateTokensImpl(TU, CXXUnit, Tokens, NumTokens, Cursors);
+  };
   llvm::CrashRecoveryContext CRC;
-  if (!RunSafely(CRC, clang_annotateTokensImpl, &data,
-                 GetSafetyThreadStackSize() * 2)) {
+  if (!RunSafely(CRC, AnnotateTokensImpl, GetSafetyThreadStackSize() * 2)) {
     fprintf(stderr, "libclang: crash detected while annotating tokens\n");
   }
 }
@@ -6328,7 +6745,7 @@ extern "C" {
 
 static CXAvailabilityKind getCursorAvailabilityForDecl(const Decl *D) {
   if (isa<FunctionDecl>(D) && cast<FunctionDecl>(D)->isDeleted())
-    return CXAvailability_Available;
+    return CXAvailability_NotAvailable;
   
   switch (D->getAvailability()) {
   case AR_Available:
@@ -6522,8 +6939,6 @@ enum CX_StorageClass clang_Cursor_getStorageClass(CXCursor C) {
     return CX_SC_Static;
   case SC_PrivateExtern:
     return CX_SC_PrivateExtern;
-  case SC_OpenCLWorkGroupLocal:
-    return CX_SC_OpenCLWorkGroupLocal;
   case SC_Auto:
     return CX_SC_Auto;
   case SC_Register:
@@ -6803,6 +7218,16 @@ CXFile clang_Module_getTopLevelHeader(CXTranslationUnit TU,
 //===----------------------------------------------------------------------===//
 
 extern "C" {
+unsigned clang_CXXField_isMutable(CXCursor C) {
+  if (!clang_isDeclaration(C.kind))
+    return 0;
+
+  if (const auto D = cxcursor::getCursorDecl(C))
+    if (const auto FD = dyn_cast_or_null<FieldDecl>(D))
+      return FD->isMutable() ? 1 : 0;
+  return 0;
+}
+
 unsigned clang_CXXMethod_isPureVirtual(CXCursor C) {
   if (!clang_isDeclaration(C.kind))
     return 0;
@@ -7089,14 +7514,13 @@ static unsigned SafetyStackThreadSize = 8 << 20;
 
 namespace clang {
 
-bool RunSafely(llvm::CrashRecoveryContext &CRC,
-               void (*Fn)(void*), void *UserData,
+bool RunSafely(llvm::CrashRecoveryContext &CRC, llvm::function_ref<void()> Fn,
                unsigned Size) {
   if (!Size)
     Size = GetSafetyThreadStackSize();
   if (Size)
-    return CRC.RunSafelyOnThread(Fn, UserData, Size);
-  return CRC.RunSafely(Fn, UserData);
+    return CRC.RunSafelyOnThread(Fn, Size);
+  return CRC.RunSafely(Fn);
 }
 
 unsigned GetSafetyThreadStackSize() {
@@ -7149,7 +7573,7 @@ MacroInfo *cxindex::getMacroInfo(const IdentifierInfo &II,
 
   ASTUnit *Unit = cxtu::getASTUnit(TU);
   Preprocessor &PP = Unit->getPreprocessor();
-  MacroDirective *MD = PP.getMacroDirectiveHistory(&II);
+  MacroDirective *MD = PP.getLocalMacroDirectiveHistory(&II);
   if (MD) {
     for (MacroDirective::DefInfo
            Def = MD->getDefinition(); Def; Def = Def.getPreviousDefinition()) {
@@ -7161,7 +7585,7 @@ MacroInfo *cxindex::getMacroInfo(const IdentifierInfo &II,
   return nullptr;
 }
 
-const MacroInfo *cxindex::getMacroInfo(const MacroDefinition *MacroDef,
+const MacroInfo *cxindex::getMacroInfo(const MacroDefinitionRecord *MacroDef,
                                        CXTranslationUnit TU) {
   if (!MacroDef || !TU)
     return nullptr;
@@ -7172,9 +7596,9 @@ const MacroInfo *cxindex::getMacroInfo(const MacroDefinition *MacroDef,
   return getMacroInfo(*II, MacroDef->getLocation(), TU);
 }
 
-MacroDefinition *cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI,
-                                                         const Token &Tok,
-                                                         CXTranslationUnit TU) {
+MacroDefinitionRecord *
+cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI, const Token &Tok,
+                                        CXTranslationUnit TU) {
   if (!MI || !TU)
     return nullptr;
   if (Tok.isNot(tok::raw_identifier))
@@ -7206,16 +7630,16 @@ MacroDefinition *cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI,
   if (std::find(MI->arg_begin(), MI->arg_end(), &II) != MI->arg_end())
     return nullptr;
 
-  MacroDirective *InnerMD = PP.getMacroDirectiveHistory(&II);
+  MacroDirective *InnerMD = PP.getLocalMacroDirectiveHistory(&II);
   if (!InnerMD)
     return nullptr;
 
   return PPRec->findMacroDefinition(InnerMD->getMacroInfo());
 }
 
-MacroDefinition *cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI,
-                                                         SourceLocation Loc,
-                                                         CXTranslationUnit TU) {
+MacroDefinitionRecord *
+cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI, SourceLocation Loc,
+                                        CXTranslationUnit TU) {
   if (Loc.isInvalid() || !MI || !TU)
     return nullptr;
 
@@ -7318,8 +7742,6 @@ Logger &cxindex::Logger::operator<<(const llvm::format_object_base &Fmt) {
 static llvm::ManagedStatic<llvm::sys::Mutex> LoggingMutex;
 
 cxindex::Logger::~Logger() {
-  LogOS.flush();
-
   llvm::sys::ScopedLock L(*LoggingMutex);
 
   static llvm::TimeRecord sBeginTR = llvm::TimeRecord::getCurrentTime();
@@ -7335,10 +7757,10 @@ cxindex::Logger::~Logger() {
 
   llvm::TimeRecord TR = llvm::TimeRecord::getCurrentTime();
   OS << llvm::format("%7.4f] ", TR.getWallTime() - sBeginTR.getWallTime());
-  OS << Msg.str() << '\n';
+  OS << Msg << '\n';
 
   if (Trace) {
-    llvm::sys::PrintStackTrace(stderr);
+    llvm::sys::PrintStackTrace(OS);
     OS << "--------------------------------------------------\n";
   }
 }

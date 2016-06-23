@@ -82,22 +82,13 @@ namespace SrcMgr {
   /// \brief One instance of this struct is kept for every file loaded or used.
   ///
   /// This object owns the MemoryBuffer object.
-  class ContentCache {
+  class LLVM_ALIGNAS(8) ContentCache {
     enum CCFlags {
       /// \brief Whether the buffer is invalid.
       InvalidFlag = 0x01,
       /// \brief Whether the buffer should not be freed on destruction.
       DoNotFreeFlag = 0x02
     };
-
-    // Note that the first member of this class is an aligned character buffer
-    // to ensure that this class has an alignment of 8 bytes. This wastes
-    // 8 bytes for every ContentCache object, but each of these corresponds to
-    // a file loaded into memory, so the 8 bytes doesn't seem terribly
-    // important. It is quite awkward to fit this aligner into any other part
-    // of the class due to the lack of portable ways to combine it with other
-    // members.
-    llvm::AlignedCharArray<8, 1> NonceAligner;
 
     /// \brief The actual buffer containing the characters from the input
     /// file.
@@ -142,14 +133,9 @@ namespace SrcMgr {
     /// \brief True if this content cache was initially created for a source
     /// file considered as a system one.
     unsigned IsSystemFile : 1;
-    
-    ContentCache(const FileEntry *Ent = nullptr)
-      : Buffer(nullptr, false), OrigEntry(Ent), ContentsEntry(Ent),
-        SourceLineCache(nullptr), NumLines(0), BufferOverridden(false),
-        IsSystemFile(false) {
-      (void)NonceAligner; // Silence warnings about unused member.
-    }
-    
+
+    ContentCache(const FileEntry *Ent = nullptr) : ContentCache(Ent, Ent) {}
+
     ContentCache(const FileEntry *Ent, const FileEntry *contentEnt)
       : Buffer(nullptr, false), OrigEntry(Ent), ContentsEntry(contentEnt),
         SourceLineCache(nullptr), NumLines(0), BufferOverridden(false),
@@ -231,7 +217,7 @@ namespace SrcMgr {
 
   private:
     // Disable assignments.
-    ContentCache &operator=(const ContentCache& RHS) LLVM_DELETED_FUNCTION;
+    ContentCache &operator=(const ContentCache& RHS) = delete;
   };
 
   // Assert that the \c ContentCache objects will always be 8-byte aligned so
@@ -705,8 +691,8 @@ class SourceManager : public RefCountedBase<SourceManager> {
   SmallVector<std::pair<std::string, FullSourceLoc>, 2> StoredModuleBuildStack;
 
   // SourceManager doesn't support copy construction.
-  explicit SourceManager(const SourceManager&) LLVM_DELETED_FUNCTION;
-  void operator=(const SourceManager&) LLVM_DELETED_FUNCTION;
+  explicit SourceManager(const SourceManager&) = delete;
+  void operator=(const SourceManager&) = delete;
 public:
   SourceManager(DiagnosticsEngine &Diag, FileManager &FileMgr,
                 bool UserFilesAreVolatile = false);
@@ -864,6 +850,13 @@ public:
   ///
   /// This should be called before parsing has begun.
   void disableFileContentsOverride(const FileEntry *File);
+
+  /// \brief Request that the contents of the given source file are written
+  /// to a created module file if they are used in this compilation. This
+  /// removes the requirement that the file still exist when the module is used
+  /// (but does not make the file visible to header search and the like when
+  /// the module is used).
+  void embedFileContentsInModule(const FileEntry *SourceFile);
 
   //===--------------------------------------------------------------------===//
   // FileID manipulation methods.
@@ -1153,10 +1146,14 @@ public:
   /// \brief Tests whether the given source location represents a macro
   /// argument's expansion into the function-like macro definition.
   ///
+  /// \param StartLoc If non-null and function returns true, it is set to the
+  /// start location of the macro argument expansion.
+  ///
   /// Such source locations only appear inside of the expansion
   /// locations representing where a particular function-like macro was
   /// expanded.
-  bool isMacroArgExpansion(SourceLocation Loc) const;
+  bool isMacroArgExpansion(SourceLocation Loc,
+                           SourceLocation *StartLoc = nullptr) const;
 
   /// \brief Tests whether the given source location represents the expansion of
   /// a macro body.
@@ -1476,6 +1473,8 @@ public:
   /// \brief Print statistics to stderr.
   ///
   void PrintStats() const;
+
+  void dump() const;
 
   /// \brief Get the number of local SLocEntries we have.
   unsigned local_sloc_entry_size() const { return LocalSLocEntryTable.size(); }

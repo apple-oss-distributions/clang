@@ -29,6 +29,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 using namespace llvm;
 
@@ -55,20 +56,16 @@ static const char *const LoopMDName = "llvm.loop";
 
 /// isLoopInvariant - Return true if the specified value is loop invariant
 ///
-bool Loop::isLoopInvariant(Value *V) const {
-  if (Instruction *I = dyn_cast<Instruction>(V))
+bool Loop::isLoopInvariant(const Value *V) const {
+  if (const Instruction *I = dyn_cast<Instruction>(V))
     return !contains(I);
   return true;  // All non-instructions are loop invariant
 }
 
 /// hasLoopInvariantOperands - Return true if all the operands of the
 /// specified instruction are loop invariant.
-bool Loop::hasLoopInvariantOperands(Instruction *I) const {
-  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
-    if (!isLoopInvariant(I->getOperand(i)))
-      return false;
-
-  return true;
+bool Loop::hasLoopInvariantOperands(const Instruction *I) const {
+  return all_of(I->operands(), [this](Value *V) { return isLoopInvariant(V); });
 }
 
 /// makeLoopInvariant - If the given value is an instruciton inside of the
@@ -105,8 +102,8 @@ bool Loop::makeLoopInvariant(Instruction *I, bool &Changed,
     return false;
   if (I->mayReadFromMemory())
     return false;
-  // The landingpad instruction is immobile.
-  if (isa<LandingPadInst>(I))
+  // EH block instructions are immobile.
+  if (I->isEHPad())
     return false;
   // Determine the insertion point, unless one was given.
   if (!InsertPt) {
@@ -196,6 +193,15 @@ bool Loop::isLCSSAForm(DominatorTree &DT) const {
   return true;
 }
 
+bool Loop::isRecursivelyLCSSAForm(DominatorTree &DT) const {
+  if (!isLCSSAForm(DT))
+    return false;
+
+  return std::all_of(begin(), end(), [&](const Loop *L) {
+    return L->isRecursivelyLCSSAForm(DT);
+  });
+}
+
 /// isLoopSimplifyForm - Return true if the Loop is in the form that
 /// the LoopSimplify form transforms loops to, which is sometimes called
 /// normal form.
@@ -223,6 +229,8 @@ bool Loop::isSafeToClone() const {
         if (CI->cannotDuplicate())
           return false;
       }
+      if (BI->getType()->isTokenTy() && BI->isUsedOutsideOfBlock(*I))
+        return false;
     }
   }
   return true;
@@ -605,6 +613,10 @@ Loop *UnloopUpdater::getNearestLoop(BasicBlock *BB, Loop *BBLoop) {
   return NearLoop;
 }
 
+LoopInfo::LoopInfo(const DominatorTreeBase<BasicBlock> &DomTree) {
+  analyze(DomTree);
+}
+
 /// updateUnloop - The last backedge has been removed from a loop--now the
 /// "unloop". Find a new parent for the blocks contained within unloop and
 /// update the loop tree. We don't necessarily have valid dominators at this
@@ -678,13 +690,27 @@ LoopInfo LoopAnalysis::run(Function &F, AnalysisManager<Function> *AM) {
   // objects. I don't want to add that kind of complexity until the scope of
   // the problem is better understood.
   LoopInfo LI;
-  LI.Analyze(AM->getResult<DominatorTreeAnalysis>(F));
-  return std::move(LI);
+  LI.analyze(AM->getResult<DominatorTreeAnalysis>(F));
+  return LI;
 }
 
 PreservedAnalyses LoopPrinterPass::run(Function &F,
                                        AnalysisManager<Function> *AM) {
   AM->getResult<LoopAnalysis>(F).print(OS);
+  return PreservedAnalyses::all();
+}
+
+PrintLoopPass::PrintLoopPass() : OS(dbgs()) {}
+PrintLoopPass::PrintLoopPass(raw_ostream &OS, const std::string &Banner)
+    : OS(OS), Banner(Banner) {}
+
+PreservedAnalyses PrintLoopPass::run(Loop &L) {
+  OS << Banner;
+  for (auto *Block : L.blocks())
+    if (Block)
+      Block->print(OS);
+    else
+      OS << "Printing <null> block";
   return PreservedAnalyses::all();
 }
 
@@ -701,7 +727,7 @@ INITIALIZE_PASS_END(LoopInfoWrapperPass, "loops", "Natural Loop Information",
 
 bool LoopInfoWrapperPass::runOnFunction(Function &) {
   releaseMemory();
-  LI.Analyze(getAnalysis<DominatorTreeWrapperPass>().getDomTree());
+  LI.analyze(getAnalysis<DominatorTreeWrapperPass>().getDomTree());
   return false;
 }
 

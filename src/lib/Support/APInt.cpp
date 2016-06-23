@@ -162,7 +162,7 @@ APInt& APInt::operator=(uint64_t RHS) {
   return clearUnusedBits();
 }
 
-/// Profile - This method 'profiles' an APInt for use with FoldingSet.
+/// This method 'profiles' an APInt for use with FoldingSet.
 void APInt::Profile(FoldingSetNodeID& ID) const {
   ID.AddInteger(BitWidth);
 
@@ -176,7 +176,7 @@ void APInt::Profile(FoldingSetNodeID& ID) const {
     ID.AddInteger(pVal[i]);
 }
 
-/// add_1 - This function adds a single "digit" integer, y, to the multiple
+/// This function adds a single "digit" integer, y, to the multiple
 /// "digit" integer array,  x[]. x[] is modified to reflect the addition and
 /// 1 is returned if there is a carry out, otherwise 0 is returned.
 /// @returns the carry of the addition.
@@ -202,7 +202,7 @@ APInt& APInt::operator++() {
   return clearUnusedBits();
 }
 
-/// sub_1 - This function subtracts a single "digit" (64-bit word), y, from
+/// This function subtracts a single "digit" (64-bit word), y, from
 /// the multi-digit integer array, x[], propagating the borrowed 1 value until
 /// no further borrowing is neeeded or it runs out of "digits" in x.  The result
 /// is 1 if "borrowing" exhausted the digits in x, or 0 if x was not exhausted.
@@ -231,7 +231,7 @@ APInt& APInt::operator--() {
   return clearUnusedBits();
 }
 
-/// add - This function adds the integer array x to the integer array Y and
+/// This function adds the integer array x to the integer array Y and
 /// places the result in dest.
 /// @returns the carry out from the addition
 /// @brief General addition of 64-bit integer arrays
@@ -672,12 +672,20 @@ hash_code llvm::hash_value(const APInt &Arg) {
   return hash_combine_range(Arg.pVal, Arg.pVal + Arg.getNumWords());
 }
 
-/// HiBits - This function returns the high "numBits" bits of this APInt.
+bool APInt::isSplat(unsigned SplatSizeInBits) const {
+  assert(getBitWidth() % SplatSizeInBits == 0 &&
+         "SplatSizeInBits must divide width!");
+  // We can check that all parts of an integer are equal by making use of a
+  // little trick: rotate and check if it's still the same value.
+  return *this == rotl(SplatSizeInBits);
+}
+
+/// This function returns the high "numBits" bits of this APInt.
 APInt APInt::getHiBits(unsigned numBits) const {
   return APIntOps::lshr(*this, BitWidth - numBits);
 }
 
-/// LoBits - This function returns the low "numBits" bits of this APInt.
+/// This function returns the low "numBits" bits of this APInt.
 APInt APInt::getLoBits(unsigned numBits) const {
   return APIntOps::lshr(APIntOps::shl(*this, BitWidth - numBits),
                         BitWidth - numBits);
@@ -713,7 +721,7 @@ unsigned APInt::countLeadingZerosSlowCase() const {
 
 unsigned APInt::countLeadingOnes() const {
   if (isSingleWord())
-    return CountLeadingOnes_64(VAL << (APINT_BITS_PER_WORD - BitWidth));
+    return llvm::countLeadingOnes(VAL << (APINT_BITS_PER_WORD - BitWidth));
 
   unsigned highWordBits = BitWidth % APINT_BITS_PER_WORD;
   unsigned shift;
@@ -724,13 +732,13 @@ unsigned APInt::countLeadingOnes() const {
     shift = APINT_BITS_PER_WORD - highWordBits;
   }
   int i = getNumWords() - 1;
-  unsigned Count = CountLeadingOnes_64(pVal[i] << shift);
+  unsigned Count = llvm::countLeadingOnes(pVal[i] << shift);
   if (Count == highWordBits) {
     for (i--; i >= 0; --i) {
       if (pVal[i] == -1ULL)
         Count += APINT_BITS_PER_WORD;
       else {
-        Count += CountLeadingOnes_64(pVal[i]);
+        Count += llvm::countLeadingOnes(pVal[i]);
         break;
       }
     }
@@ -756,14 +764,14 @@ unsigned APInt::countTrailingOnesSlowCase() const {
   for (; i < getNumWords() && pVal[i] == -1ULL; ++i)
     Count += APINT_BITS_PER_WORD;
   if (i < getNumWords())
-    Count += CountTrailingOnes_64(pVal[i]);
+    Count += llvm::countTrailingOnes(pVal[i]);
   return std::min(Count, BitWidth);
 }
 
 unsigned APInt::countPopulationSlowCase() const {
   unsigned Count = 0;
   for (unsigned i = 0; i < getNumWords(); ++i)
-    Count += CountPopulation_64(pVal[i]);
+    Count += llvm::countPopulation(pVal[i]);
   return Count;
 }
 
@@ -853,7 +861,7 @@ APInt llvm::APIntOps::RoundDoubleToAPInt(double Double, unsigned width) {
   return isNeg ? -Tmp : Tmp;
 }
 
-/// RoundToDouble - This function converts this APInt to a double.
+/// This function converts this APInt to a double.
 /// The layout for double is as following (IEEE Standard 754):
 ///  --------------------------------------
 /// |  Sign    Exponent    Fraction    Bias |
@@ -1310,13 +1318,8 @@ APInt APInt::sqrt() const {
   // libc sqrt function which will probably use a hardware sqrt computation.
   // This should be faster than the algorithm below.
   if (magnitude < 52) {
-#if HAVE_ROUND
     return APInt(BitWidth,
                  uint64_t(::round(::sqrt(double(isSingleWord()?VAL:pVal[0])))));
-#else
-    return APInt(BitWidth,
-                 uint64_t(::sqrt(double(isSingleWord()?VAL:pVal[0])) + 0.5));
-#endif
   }
 
   // Okay, all the short cuts are exhausted. We must compute it. The following
@@ -2256,9 +2259,8 @@ void APInt::toString(SmallVectorImpl<char> &Str, unsigned Radix,
   std::reverse(Str.begin()+StartDig, Str.end());
 }
 
-/// toString - This returns the APInt as a std::string.  Note that this is an
-/// inefficient method.  It is better to pass in a SmallVector/SmallString
-/// to the methods above.
+/// Returns the APInt as a std::string. Note that this is an inefficient method.
+/// It is better to pass in a SmallVector/SmallString to the methods above.
 std::string APInt::toString(unsigned Radix = 10, bool Signed = true) const {
   SmallString<40> S;
   toString(S, Radix, Signed, /* formatAsCLiteral = */false);
@@ -2271,13 +2273,13 @@ void APInt::dump() const {
   this->toStringUnsigned(U);
   this->toStringSigned(S);
   dbgs() << "APInt(" << BitWidth << "b, "
-         << U.str() << "u " << S.str() << "s)";
+         << U << "u " << S << "s)";
 }
 
 void APInt::print(raw_ostream &OS, bool isSigned) const {
   SmallString<40> S;
   this->toString(S, 10, isSigned, /* formatAsCLiteral = */false);
-  OS << S.str();
+  OS << S;
 }
 
 // This implements a variety of operations on a representation of

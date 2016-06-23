@@ -457,7 +457,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief The null pointer literal (C++11 [lex.nullptr])
@@ -484,7 +486,9 @@ public:
     return T->getStmtClass() == CXXNullPtrLiteralExprClass;
   }
 
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief Implicit construction of a std::initializer_list<T> object from an
@@ -607,7 +611,8 @@ public:
 
   // Iterators
   child_range children() {
-    if (isTypeOperand()) return child_range();
+    if (isTypeOperand())
+      return child_range(child_iterator(), child_iterator());
     Stmt **begin = reinterpret_cast<Stmt**>(&Operand);
     return child_range(begin, begin + 1);
   }
@@ -749,7 +754,8 @@ public:
 
   // Iterators
   child_range children() {
-    if (isTypeOperand()) return child_range();
+    if (isTypeOperand())
+      return child_range(child_iterator(), child_iterator());
     Stmt **begin = reinterpret_cast<Stmt**>(&Operand);
     return child_range(begin, begin + 1);
   }
@@ -797,7 +803,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief A C++ throw-expression (C++ [except.throw]).
@@ -859,13 +867,9 @@ public:
 /// This wraps up a function call argument that was created from the
 /// corresponding parameter's default argument, when the call did not
 /// explicitly supply arguments for all of the parameters.
-class CXXDefaultArgExpr : public Expr {
+class CXXDefaultArgExpr final : public Expr {
   /// \brief The parameter whose default is being used.
-  ///
-  /// When the bit is set, the subexpression is stored after the
-  /// CXXDefaultArgExpr itself. When the bit is clear, the parameter's
-  /// actual default expression is the subexpression.
-  llvm::PointerIntPair<ParmVarDecl *, 1, bool> Param;
+  ParmVarDecl *Param;
 
   /// \brief The location where the default argument expression was used.
   SourceLocation Loc;
@@ -877,16 +881,7 @@ class CXXDefaultArgExpr : public Expr {
              : param->getDefaultArg()->getType(),
            param->getDefaultArg()->getValueKind(),
            param->getDefaultArg()->getObjectKind(), false, false, false, false),
-      Param(param, false), Loc(Loc) { }
-
-  CXXDefaultArgExpr(StmtClass SC, SourceLocation Loc, ParmVarDecl *param,
-                    Expr *SubExpr)
-    : Expr(SC, SubExpr->getType(),
-           SubExpr->getValueKind(), SubExpr->getObjectKind(),
-           false, false, false, false),
-      Param(param, true), Loc(Loc) {
-    *reinterpret_cast<Expr **>(this + 1) = SubExpr;
-  }
+      Param(param), Loc(Loc) { }
 
 public:
   CXXDefaultArgExpr(EmptyShell Empty) : Expr(CXXDefaultArgExprClass, Empty) {}
@@ -898,24 +893,15 @@ public:
     return new (C) CXXDefaultArgExpr(CXXDefaultArgExprClass, Loc, Param);
   }
 
-  // \p Param is the parameter whose default argument is used by this
-  // expression, and \p SubExpr is the expression that will actually be used.
-  static CXXDefaultArgExpr *Create(const ASTContext &C, SourceLocation Loc,
-                                   ParmVarDecl *Param, Expr *SubExpr);
-
   // Retrieve the parameter that the argument was created from.
-  const ParmVarDecl *getParam() const { return Param.getPointer(); }
-  ParmVarDecl *getParam() { return Param.getPointer(); }
+  const ParmVarDecl *getParam() const { return Param; }
+  ParmVarDecl *getParam() { return Param; }
 
   // Retrieve the actual argument to the function call.
   const Expr *getExpr() const {
-    if (Param.getInt())
-      return *reinterpret_cast<Expr const * const*> (this + 1);
     return getParam()->getDefaultArg();
   }
   Expr *getExpr() {
-    if (Param.getInt())
-      return *reinterpret_cast<Expr **> (this + 1);
     return getParam()->getDefaultArg();
   }
 
@@ -935,7 +921,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
@@ -991,7 +979,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 
   friend class ASTReader;
   friend class ASTStmtReader;
@@ -1401,23 +1391,37 @@ class LambdaExpr : public Expr {
       ExplicitResultType(false), HasArrayIndexVars(true) { 
     getStoredStmts()[NumCaptures] = nullptr;
   }
-  
-  Stmt **getStoredStmts() const {
-    return reinterpret_cast<Stmt **>(const_cast<LambdaExpr *>(this) + 1);
+
+  Stmt **getStoredStmts() { return reinterpret_cast<Stmt **>(this + 1); }
+
+  Stmt *const *getStoredStmts() const {
+    return reinterpret_cast<Stmt *const *>(this + 1);
   }
-  
+
   /// \brief Retrieve the mapping from captures to the first array index
   /// variable.
-  unsigned *getArrayIndexStarts() const {
+  unsigned *getArrayIndexStarts() {
     return reinterpret_cast<unsigned *>(getStoredStmts() + NumCaptures + 1);
   }
 
+  const unsigned *getArrayIndexStarts() const {
+    return reinterpret_cast<const unsigned *>(getStoredStmts() + NumCaptures +
+                                              1);
+  }
+
   /// \brief Retrieve the complete set of array-index variables.
-  VarDecl **getArrayIndexVars() const {
+  VarDecl **getArrayIndexVars() {
     unsigned ArrayIndexSize = llvm::RoundUpToAlignment(
         sizeof(unsigned) * (NumCaptures + 1), llvm::alignOf<VarDecl *>());
     return reinterpret_cast<VarDecl **>(
         reinterpret_cast<char *>(getArrayIndexStarts()) + ArrayIndexSize);
+  }
+
+  VarDecl *const *getArrayIndexVars() const {
+    unsigned ArrayIndexSize = llvm::RoundUpToAlignment(
+        sizeof(unsigned) * (NumCaptures + 1), llvm::alignOf<VarDecl *>());
+    return reinterpret_cast<VarDecl *const *>(
+        reinterpret_cast<const char *>(getArrayIndexStarts()) + ArrayIndexSize);
   }
 
 public:
@@ -1451,6 +1455,9 @@ public:
   SourceLocation getCaptureDefaultLoc() const {
     return CaptureDefaultLoc;
   }
+
+  /// \brief Determine whether one of this lambda's captures is an init-capture.
+  bool isInitCapture(const LambdaCapture *Capture) const;
 
   /// \brief An iterator that walks over the captures of the lambda,
   /// both implicit and explicit.
@@ -1498,31 +1505,54 @@ public:
   /// arguments.
   typedef Expr **capture_init_iterator;
 
+  /// \brief Const iterator that walks over the capture initialization
+  /// arguments.
+  typedef Expr *const *const_capture_init_iterator;
+
   /// \brief Retrieve the initialization expressions for this lambda's captures.
-  llvm::iterator_range<capture_init_iterator> capture_inits() const {
+  llvm::iterator_range<capture_init_iterator> capture_inits() {
     return llvm::iterator_range<capture_init_iterator>(capture_init_begin(),
                                                        capture_init_end());
   }
 
+  /// \brief Retrieve the initialization expressions for this lambda's captures.
+  llvm::iterator_range<const_capture_init_iterator> capture_inits() const {
+    return llvm::iterator_range<const_capture_init_iterator>(
+        capture_init_begin(), capture_init_end());
+  }
+
   /// \brief Retrieve the first initialization argument for this
   /// lambda expression (which initializes the first capture field).
-  capture_init_iterator capture_init_begin() const {
+  capture_init_iterator capture_init_begin() {
     return reinterpret_cast<Expr **>(getStoredStmts());
+  }
+
+  /// \brief Retrieve the first initialization argument for this
+  /// lambda expression (which initializes the first capture field).
+  const_capture_init_iterator capture_init_begin() const {
+    return reinterpret_cast<Expr *const *>(getStoredStmts());
   }
 
   /// \brief Retrieve the iterator pointing one past the last
   /// initialization argument for this lambda expression.
-  capture_init_iterator capture_init_end() const {
-    return capture_init_begin() + NumCaptures;    
+  capture_init_iterator capture_init_end() {
+    return capture_init_begin() + NumCaptures;
   }
 
-  /// \brief Retrieve the set of index variables used in the capture 
+  /// \brief Retrieve the iterator pointing one past the last
+  /// initialization argument for this lambda expression.
+  const_capture_init_iterator capture_init_end() const {
+    return capture_init_begin() + NumCaptures;
+  }
+
+  /// \brief Retrieve the set of index variables used in the capture
   /// initializer of an array captured by copy.
   ///
-  /// \param Iter The iterator that points at the capture initializer for 
+  /// \param Iter The iterator that points at the capture initializer for
   /// which we are extracting the corresponding index variables.
-  ArrayRef<VarDecl *> getCaptureInitIndexVars(capture_init_iterator Iter) const;
-  
+  ArrayRef<VarDecl *>
+  getCaptureInitIndexVars(const_capture_init_iterator Iter) const;
+
   /// \brief Retrieve the source range covering the lambda introducer,
   /// which contains the explicit capture list surrounded by square
   /// brackets ([...]).
@@ -1612,7 +1642,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief Represents a new-expression for memory allocation and constructor
@@ -1766,6 +1798,14 @@ public:
 
   typedef ExprIterator arg_iterator;
   typedef ConstExprIterator const_arg_iterator;
+
+  llvm::iterator_range<arg_iterator> placement_arguments() {
+    return llvm::make_range(placement_arg_begin(), placement_arg_end());
+  }
+
+  llvm::iterator_range<const_arg_iterator> placement_arguments() const {
+    return llvm::make_range(placement_arg_begin(), placement_arg_end());
+  }
 
   arg_iterator placement_arg_begin() {
     return SubExprs + Array + hasInitializer();
@@ -2161,8 +2201,10 @@ public:
   }
   
   // Iterators
-  child_range children() { return child_range(); }
-  
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
+
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
 
@@ -2234,7 +2276,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 
   friend class ASTStmtReader;
 };
@@ -2291,7 +2335,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 
   friend class ASTStmtReader;
 };
@@ -2299,7 +2345,7 @@ public:
 
 /// \brief A reference to an overloaded function set, either an
 /// \c UnresolvedLookupExpr or an \c UnresolvedMemberExpr.
-class OverloadExpr : public Expr {
+class LLVM_ALIGNAS(/*alignof(uint64_t)*/ 8) OverloadExpr : public Expr {
   /// \brief The common name of these declarations.
   DeclarationNameInfo NameInfo;
 
@@ -2582,7 +2628,9 @@ public:
     return getNameInfo().getLocEnd();
   }
 
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == UnresolvedLookupExprClass;
@@ -2603,7 +2651,8 @@ public:
 /// qualifier (X<T>::) and the name of the entity being referenced
 /// ("value"). Such expressions will instantiate to a DeclRefExpr once the
 /// declaration can be found.
-class DependentScopeDeclRefExpr : public Expr {
+class LLVM_ALIGNAS(/*alignof(uint64_t)*/ 8) DependentScopeDeclRefExpr
+    : public Expr {
   /// \brief The nested-name-specifier that qualifies this unresolved
   /// declaration name.
   NestedNameSpecifierLoc QualifierLoc;
@@ -2744,7 +2793,9 @@ public:
     return T->getStmtClass() == DependentScopeDeclRefExprClass;
   }
 
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
@@ -2948,7 +2999,8 @@ public:
 /// Like UnresolvedMemberExprs, these can be either implicit or
 /// explicit accesses.  It is only possible to get one of these with
 /// an implicit access if a qualifier is provided.
-class CXXDependentScopeMemberExpr : public Expr {
+class LLVM_ALIGNAS(/*alignof(uint64_t)*/ 8) CXXDependentScopeMemberExpr
+    : public Expr {
   /// \brief The expression for the base pointer or class reference,
   /// e.g., the \c x in x.f.  Can be null in implicit accesses.
   Stmt *Base;
@@ -3180,7 +3232,8 @@ public:
 
   // Iterators
   child_range children() {
-    if (isImplicitAccess()) return child_range();
+    if (isImplicitAccess())
+      return child_range(child_iterator(), child_iterator());
     return child_range(&Base, &Base + 1);
   }
 
@@ -3203,7 +3256,8 @@ public:
 /// In the final AST, an explicit access always becomes a MemberExpr.
 /// An implicit access may become either a MemberExpr or a
 /// DeclRefExpr, depending on whether the member is static.
-class UnresolvedMemberExpr : public OverloadExpr {
+class LLVM_ALIGNAS(/*alignof(uint64_t)*/ 8) UnresolvedMemberExpr
+    : public OverloadExpr {
   /// \brief Whether this member expression used the '->' operator or
   /// the '.' operator.
   bool IsArrow : 1;
@@ -3322,10 +3376,22 @@ public:
 
   // Iterators
   child_range children() {
-    if (isImplicitAccess()) return child_range();
+    if (isImplicitAccess())
+      return child_range(child_iterator(), child_iterator());
     return child_range(&Base, &Base + 1);
   }
 };
+
+inline ASTTemplateKWAndArgsInfo *OverloadExpr::getTemplateKWAndArgsInfo() {
+  if (!HasTemplateKWAndArgsInfo)
+    return nullptr;
+  if (isa<UnresolvedLookupExpr>(this))
+    return reinterpret_cast<ASTTemplateKWAndArgsInfo *>(
+        cast<UnresolvedLookupExpr>(this) + 1);
+  else
+    return reinterpret_cast<ASTTemplateKWAndArgsInfo *>(
+        cast<UnresolvedMemberExpr>(this) + 1);
+}
 
 /// \brief Represents a C++11 noexcept expression (C++ [expr.unary.noexcept]).
 ///
@@ -3448,15 +3514,6 @@ public:
   }
 };
 
-inline ASTTemplateKWAndArgsInfo *OverloadExpr::getTemplateKWAndArgsInfo() {
-  if (!HasTemplateKWAndArgsInfo) return nullptr;
-  if (isa<UnresolvedLookupExpr>(this))
-    return reinterpret_cast<ASTTemplateKWAndArgsInfo*>
-      (cast<UnresolvedLookupExpr>(this) + 1);
-  else
-    return reinterpret_cast<ASTTemplateKWAndArgsInfo*>
-      (cast<UnresolvedMemberExpr>(this) + 1);
-}
 
 /// \brief Represents an expression that computes the length of a parameter
 /// pack.
@@ -3479,43 +3536,51 @@ class SizeOfPackExpr : public Expr {
 
   /// \brief The length of the parameter pack, if known.
   ///
-  /// When this expression is value-dependent, the length of the parameter pack
-  /// is unknown. When this expression is not value-dependent, the length is
-  /// known.
+  /// When this expression is not value-dependent, this is the length of
+  /// the pack. When the expression was parsed rather than instantiated
+  /// (and thus is value-dependent), this is zero.
+  ///
+  /// After partial substitution into a sizeof...(X) expression (for instance,
+  /// within an alias template or during function template argument deduction),
+  /// we store a trailing array of partially-substituted TemplateArguments,
+  /// and this is the length of that array.
   unsigned Length;
 
-  /// \brief The parameter pack itself.
+  /// \brief The parameter pack.
   NamedDecl *Pack;
 
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
 
-public:
-  /// \brief Create a value-dependent expression that computes the length of
+  /// \brief Create an expression that computes the length of
   /// the given parameter pack.
   SizeOfPackExpr(QualType SizeType, SourceLocation OperatorLoc, NamedDecl *Pack,
-                 SourceLocation PackLoc, SourceLocation RParenLoc)
-    : Expr(SizeOfPackExprClass, SizeType, VK_RValue, OK_Ordinary,
-           /*TypeDependent=*/false, /*ValueDependent=*/true,
-           /*InstantiationDependent=*/true,
-           /*ContainsUnexpandedParameterPack=*/false),
-      OperatorLoc(OperatorLoc), PackLoc(PackLoc), RParenLoc(RParenLoc),
-      Length(0), Pack(Pack) { }
-
-  /// \brief Create an expression that computes the length of
-  /// the given parameter pack, which is already known.
-  SizeOfPackExpr(QualType SizeType, SourceLocation OperatorLoc, NamedDecl *Pack,
                  SourceLocation PackLoc, SourceLocation RParenLoc,
-                 unsigned Length)
-  : Expr(SizeOfPackExprClass, SizeType, VK_RValue, OK_Ordinary,
-         /*TypeDependent=*/false, /*ValueDependent=*/false,
-         /*InstantiationDependent=*/false,
-         /*ContainsUnexpandedParameterPack=*/false),
-    OperatorLoc(OperatorLoc), PackLoc(PackLoc), RParenLoc(RParenLoc),
-    Length(Length), Pack(Pack) { }
+                 Optional<unsigned> Length, ArrayRef<TemplateArgument> PartialArgs)
+      : Expr(SizeOfPackExprClass, SizeType, VK_RValue, OK_Ordinary,
+             /*TypeDependent=*/false, /*ValueDependent=*/!Length,
+             /*InstantiationDependent=*/!Length,
+             /*ContainsUnexpandedParameterPack=*/false),
+        OperatorLoc(OperatorLoc), PackLoc(PackLoc), RParenLoc(RParenLoc),
+        Length(Length ? *Length : PartialArgs.size()), Pack(Pack) {
+    assert((!Length || PartialArgs.empty()) &&
+           "have partial args for non-dependent sizeof... expression");
+    TemplateArgument *Args = reinterpret_cast<TemplateArgument *>(this + 1);
+    std::uninitialized_copy(PartialArgs.begin(), PartialArgs.end(), Args);
+  }
 
   /// \brief Create an empty expression.
-  SizeOfPackExpr(EmptyShell Empty) : Expr(SizeOfPackExprClass, Empty) { }
+  SizeOfPackExpr(EmptyShell Empty, unsigned NumPartialArgs)
+      : Expr(SizeOfPackExprClass, Empty), Length(NumPartialArgs), Pack() {}
+
+public:
+  static SizeOfPackExpr *Create(ASTContext &Context, SourceLocation OperatorLoc,
+                                NamedDecl *Pack, SourceLocation PackLoc,
+                                SourceLocation RParenLoc,
+                                Optional<unsigned> Length = None,
+                                ArrayRef<TemplateArgument> PartialArgs = None);
+  static SizeOfPackExpr *CreateDeserialized(ASTContext &Context,
+                                            unsigned NumPartialArgs);
 
   /// \brief Determine the location of the 'sizeof' keyword.
   SourceLocation getOperatorLoc() const { return OperatorLoc; }
@@ -3539,6 +3604,23 @@ public:
     return Length;
   }
 
+  /// \brief Determine whether this represents a partially-substituted sizeof...
+  /// expression, such as is produced for:
+  ///
+  ///   template<typename ...Ts> using X = int[sizeof...(Ts)];
+  ///   template<typename ...Us> void f(X<Us..., 1, 2, 3, Us...>);
+  bool isPartiallySubstituted() const {
+    return isValueDependent() && Length;
+  }
+
+  /// \brief Get
+  ArrayRef<TemplateArgument> getPartialArguments() const {
+    assert(isPartiallySubstituted());
+    const TemplateArgument *Args =
+        reinterpret_cast<const TemplateArgument *>(this + 1);
+    return llvm::makeArrayRef(Args, Args + Length);
+  }
+
   SourceLocation getLocStart() const LLVM_READONLY { return OperatorLoc; }
   SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
 
@@ -3547,7 +3629,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief Represents a reference to a non-type template parameter
@@ -3650,7 +3734,9 @@ public:
   }
 
   // Iterators
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief Represents a reference to a function parameter pack that has been
@@ -3679,7 +3765,7 @@ class FunctionParmPackExpr : public Expr {
 
   FunctionParmPackExpr(QualType T, ParmVarDecl *ParamPack,
                        SourceLocation NameLoc, unsigned NumParams,
-                       Decl * const *Params);
+                       ParmVarDecl *const *Params);
 
   friend class ASTReader;
   friend class ASTStmtReader;
@@ -3688,7 +3774,7 @@ public:
   static FunctionParmPackExpr *Create(const ASTContext &Context, QualType T,
                                       ParmVarDecl *ParamPack,
                                       SourceLocation NameLoc,
-                                      ArrayRef<Decl *> Params);
+                                      ArrayRef<ParmVarDecl *> Params);
   static FunctionParmPackExpr *CreateEmpty(const ASTContext &Context,
                                            unsigned NumParams);
 
@@ -3717,7 +3803,9 @@ public:
     return T->getStmtClass() == FunctionParmPackExprClass;
   }
 
-  child_range children() { return child_range(); }
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
 };
 
 /// \brief Represents a prvalue temporary that is written into memory so that
@@ -3896,6 +3984,142 @@ public:
 
   // Iterators
   child_range children() { return child_range(SubExprs, SubExprs + 2); }
+};
+
+/// \brief Represents a 'co_await' expression. This expression checks whether its
+/// operand is ready, and suspends the coroutine if not. Then (after the resume
+/// if suspended) it resumes the coroutine and extracts the value from the
+/// operand. This implies making four calls:
+///
+///   <operand>.operator co_await() or operator co_await(<operand>)
+///   <result>.await_ready()
+///   <result>.await_suspend(h)
+///   <result>.await_resume()
+///
+/// where h is a handle to the coroutine, and <result> is the result of calling
+/// operator co_await() if it exists or the original operand otherwise.
+///
+/// Note that the coroutine is prepared for suspension before the 'await_suspend'
+/// call, but resumes after that call, which may cause parts of the
+/// 'await_suspend' expression to occur much later than expected.
+class CoawaitExpr : public Expr {
+  SourceLocation CoawaitLoc;
+
+  enum SubExpr { Operand, Ready, Suspend, Resume, Count };
+  Stmt *SubExprs[SubExpr::Count];
+
+  friend class ASTStmtReader;
+public:
+  CoawaitExpr(SourceLocation CoawaitLoc, Expr *Operand, Expr *Ready,
+              Expr *Suspend, Expr *Resume)
+      : Expr(CoawaitExprClass, Resume->getType(), Resume->getValueKind(),
+             Resume->getObjectKind(),
+             Resume->isTypeDependent(),
+             Resume->isValueDependent(),
+             Operand->isInstantiationDependent(),
+             Operand->containsUnexpandedParameterPack()),
+      CoawaitLoc(CoawaitLoc) {
+    SubExprs[CoawaitExpr::Operand] = Operand;
+    SubExprs[CoawaitExpr::Ready] = Ready;
+    SubExprs[CoawaitExpr::Suspend] = Suspend;
+    SubExprs[CoawaitExpr::Resume] = Resume;
+  }
+  CoawaitExpr(SourceLocation CoawaitLoc, QualType Ty, Expr *Operand)
+      : Expr(CoawaitExprClass, Ty, VK_RValue, OK_Ordinary,
+             true, true, true, Operand->containsUnexpandedParameterPack()),
+        CoawaitLoc(CoawaitLoc) {
+    assert(Operand->isTypeDependent() && Ty->isDependentType() &&
+           "wrong constructor for non-dependent co_await expression");
+    SubExprs[CoawaitExpr::Operand] = Operand;
+    SubExprs[CoawaitExpr::Ready] = nullptr;
+    SubExprs[CoawaitExpr::Suspend] = nullptr;
+    SubExprs[CoawaitExpr::Resume] = nullptr;
+  }
+  CoawaitExpr(EmptyShell Empty) : Expr(CoawaitExprClass, Empty) {
+    SubExprs[CoawaitExpr::Operand] = nullptr;
+    SubExprs[CoawaitExpr::Ready] = nullptr;
+    SubExprs[CoawaitExpr::Suspend] = nullptr;
+    SubExprs[CoawaitExpr::Resume] = nullptr;
+  }
+
+  SourceLocation getKeywordLoc() const { return CoawaitLoc; }
+  Expr *getOperand() const {
+    return static_cast<Expr*>(SubExprs[SubExpr::Operand]);
+  }
+
+  Expr *getReadyExpr() const {
+    return static_cast<Expr*>(SubExprs[SubExpr::Ready]);
+  }
+  Expr *getSuspendExpr() const {
+    return static_cast<Expr*>(SubExprs[SubExpr::Suspend]);
+  }
+  Expr *getResumeExpr() const {
+    return static_cast<Expr*>(SubExprs[SubExpr::Resume]);
+  }
+
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return CoawaitLoc;
+  }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return getOperand()->getLocEnd();
+  }
+
+  child_range children() {
+    return child_range(SubExprs, SubExprs + SubExpr::Count);
+  }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == CoawaitExprClass;
+  }
+};
+
+/// \brief Represents a 'co_yield' expression. This expression provides a value
+/// to the coroutine promise and optionally suspends the coroutine. This implies
+/// a making call to <promise>.yield_value(<operand>), which we name the "promise
+/// call".
+class CoyieldExpr : public Expr {
+  SourceLocation CoyieldLoc;
+
+  /// The operand of the 'co_yield' expression.
+  Stmt *Operand;
+  /// The implied call to the promise object. May be null if the
+  /// coroutine has not yet been finalized.
+  Stmt *PromiseCall;
+
+  friend class ASTStmtReader;
+public:
+  CoyieldExpr(SourceLocation CoyieldLoc, QualType Void, Expr *Operand)
+      : Expr(CoyieldExprClass, Void, VK_RValue, OK_Ordinary, false, false,
+             Operand->isInstantiationDependent(),
+             Operand->containsUnexpandedParameterPack()),
+        CoyieldLoc(CoyieldLoc), Operand(Operand), PromiseCall(nullptr) {}
+  CoyieldExpr(EmptyShell Empty) : Expr(CoyieldExprClass, Empty) {}
+
+  SourceLocation getKeywordLoc() const { return CoyieldLoc; }
+  Expr *getOperand() const { return static_cast<Expr*>(Operand); }
+
+  /// \brief Get the call to the promise objet that is implied by an evaluation
+  /// of this expression. Will be nullptr if the coroutine has not yet been
+  /// finalized.
+  Expr *getPromiseCall() const { return static_cast<Expr*>(PromiseCall); }
+
+  /// \brief Set the resolved promise call. This is delayed until the
+  /// complete coroutine body has been parsed and the promise type is known.
+  void finalize(Stmt *PC) { PromiseCall = PC; }
+
+  SourceLocation getLocStart() const LLVM_READONLY { return CoyieldLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return Operand->getLocEnd();
+  }
+
+  child_range children() {
+    Stmt **Which = PromiseCall ? &PromiseCall : &Operand;
+    return child_range(Which, Which + 1);
+  }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == CoyieldExprClass;
+  }
 };
 
 }  // end namespace clang

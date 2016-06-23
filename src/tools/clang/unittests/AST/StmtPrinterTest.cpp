@@ -44,7 +44,7 @@ class PrintMatch : public MatchFinder::MatchCallback {
 public:
   PrintMatch() : NumFoundStmts(0) {}
 
-  virtual void run(const MatchFinder::MatchResult &Result) {
+  void run(const MatchFinder::MatchResult &Result) override {
     const Stmt *S = Result.Nodes.getStmtAs<Stmt>("id");
     if (!S)
       return;
@@ -76,8 +76,7 @@ PrintedStmtMatches(StringRef Code, const std::vector<std::string> &Args,
   std::unique_ptr<FrontendActionFactory> Factory(
       newFrontendActionFactory(&Finder));
 
-  if (!runToolOnCodeWithArgs(
-      Factory->create(), Code, Args))
+  if (!runToolOnCodeWithArgs(Factory->create(), Code, Args))
     return testing::AssertionFailure()
       << "Parsing error in \"" << Code.str() << "\"";
 
@@ -197,7 +196,7 @@ TEST(StmtPrinter, TestCXXConversionDeclImplicit) {
     "void foo(A a, A b) {"
     "  bar(a & b);"
     "}",
-    memberCallExpr(anything()).bind("id"),
+    cxxMemberCallExpr(anything()).bind("id"),
     "a & b"));
 }
 
@@ -211,7 +210,7 @@ TEST(StmtPrinter, TestCXXConversionDeclExplicit) {
     "void foo(A a, A b) {"
     "  auto x = (a & b).operator void *();"
     "}",
-    memberCallExpr(anything()).bind("id"),
+    cxxMemberCallExpr(anything()).bind("id"),
     "(a & b)"));
     // WRONG; Should be: (a & b).operator void *()
 }

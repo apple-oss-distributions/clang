@@ -14,6 +14,7 @@
 #include "WindowsSupport.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ConvertUTF.h"
+#include "llvm/Support/Errc.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/WindowsError.h"
 #include "llvm/Support/raw_ostream.h"
@@ -74,8 +75,15 @@ ErrorOr<std::string> sys::findProgramByName(StringRef Name,
 
     do {
       U16Result.reserve(Len);
-      Len = ::SearchPathW(Path, c_str(U16Name),
-                          U16Ext.empty() ? nullptr : c_str(U16Ext),
+      // Lets attach the extension manually. That is needed for files
+      // with a point in name like aaa.bbb. SearchPathW will not add extension
+      // from its argument to such files because it thinks they already had one.
+      SmallVector<wchar_t, MAX_PATH> U16NameExt;
+      if (std::error_code EC =
+              windows::UTF8ToUTF16(Twine(Name + Ext).str(), U16NameExt))
+        return EC;
+
+      Len = ::SearchPathW(Path, c_str(U16NameExt), nullptr,
                           U16Result.capacity(), U16Result.data(), nullptr);
     } while (Len > U16Result.capacity());
 
@@ -249,6 +257,14 @@ static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
       *ErrMsg = "program not executable";
     return false;
   }
+
+  // can_execute may succeed by looking at Program + ".exe". CreateProcessW
+  // will implicitly add the .exe if we provide a command line without an
+  // executable path, but since we use an explicit executable, we have to add
+  // ".exe" ourselves.
+  SmallString<64> ProgramStorage;
+  if (!sys::fs::exists(Program))
+    Program = Twine(Program + ".exe").toStringRef(ProgramStorage);
 
   // Windows wants a command line, not an array of args, to pass to the new
   // process.  We have to concatenate them all, while quoting the args that
@@ -434,7 +450,8 @@ ProcessInfo sys::Wait(const ProcessInfo &PI, unsigned SecondsToWait,
   DWORD status;
   BOOL rc = GetExitCodeProcess(PI.ProcessHandle, &status);
   DWORD err = GetLastError();
-  CloseHandle(PI.ProcessHandle);
+  if (err != ERROR_INVALID_HANDLE)
+    CloseHandle(PI.ProcessHandle);
 
   if (!rc) {
     SetLastError(err);
@@ -513,7 +530,7 @@ llvm::sys::writeFileWithEncoding(StringRef FileName, StringRef Contents,
   }
 
   if (OS.has_error())
-    return std::make_error_code(std::errc::io_error);
+    return make_error_code(errc::io_error);
 
   return EC;
 }

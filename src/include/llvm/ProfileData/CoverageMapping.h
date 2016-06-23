@@ -26,6 +26,7 @@
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/raw_ostream.h"
 #include <system_error>
+#include <tuple>
 
 namespace llvm {
 class IndexedInstrProfReader;
@@ -105,7 +106,7 @@ struct CounterExpression {
 };
 
 /// \brief A Counter expression builder is used to construct the
-/// counter expressions. It avoids unecessary duplication
+/// counter expressions. It avoids unnecessary duplication
 /// and simplifies algebraic expressions.
 class CounterExpressionBuilder {
   /// \brief A list of all the counter expressions
@@ -237,7 +238,7 @@ class CounterMappingContext {
 
 public:
   CounterMappingContext(ArrayRef<CounterExpression> Expressions,
-                        ArrayRef<uint64_t> CounterValues = ArrayRef<uint64_t>())
+                        ArrayRef<uint64_t> CounterValues = None)
       : Expressions(Expressions), CounterValues(CounterValues) {}
 
   void setCounts(ArrayRef<uint64_t> Counts) { CounterValues = Counts; }
@@ -458,7 +459,7 @@ public:
 
   /// \brief Get the list of function instantiations in the file.
   ///
-  /// Fucntions that are instantiated more than once, such as C++ template
+  /// Functions that are instantiated more than once, such as C++ template
   /// specializations, have distinct coverage records for each instantiation.
   std::vector<const FunctionRecord *> getInstantiations(StringRef Filename);
 

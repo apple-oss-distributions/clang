@@ -33,8 +33,8 @@ class ObjCPropertyImplDecl;
 class CXXCtorInitializer;
 
 class ObjCListBase {
-  ObjCListBase(const ObjCListBase &) LLVM_DELETED_FUNCTION;
-  void operator=(const ObjCListBase &) LLVM_DELETED_FUNCTION;
+  ObjCListBase(const ObjCListBase &) = delete;
+  void operator=(const ObjCListBase &) = delete;
 protected:
   /// List is an array of pointers to objects that are not owned by this object.
   void **List;
@@ -332,7 +332,9 @@ public:
   SourceRange getReturnTypeSourceRange() const;
 
   /// \brief Determine the type of an expression that sends a message to this
-  /// function.
+  /// function. This replaces the type parameters with the types they would
+  /// get if the receiver was parameterless (e.g. it may replace the type
+  /// parameter with 'id').
   QualType getSendResultType() const;
 
   /// Determine the type of an expression that sends a message to this
@@ -400,6 +402,9 @@ public:
   /// or getCmdDecl(). The call is ignored if the implicit paramters
   /// have already been created.
   void createImplicitParams(ASTContext &Context, const ObjCInterfaceDecl *ID);
+
+  /// \return the type for \c self and set \arg selfIsPseudoStrong and
+  /// \arg selfIsConsumed accordingly.
   QualType getSelfType(ASTContext &Context, const ObjCInterfaceDecl *OID,
                        bool &selfIsPseudoStrong, bool &selfIsConsumed);
 
@@ -608,9 +613,15 @@ public:
 /// @end
 /// \endcode
 class ObjCTypeParamList {
+  /// Stores the components of a SourceRange as a POD.
+  struct PODSourceRange {
+    unsigned Begin;
+    unsigned End;
+  };
+
   union { 
     /// Location of the left and right angle brackets.
-    SourceRange Brackets;
+    PODSourceRange Brackets;
 
     // Used only for alignment.
     ObjCTypeParamDecl *AlignmentHack;
@@ -661,9 +672,15 @@ public:
     return *(end() - 1);
   }
 
-  SourceLocation getLAngleLoc() const { return Brackets.getBegin(); }
-  SourceLocation getRAngleLoc() const { return Brackets.getEnd(); }
-  SourceRange getSourceRange() const { return Brackets; }
+  SourceLocation getLAngleLoc() const {
+    return SourceLocation::getFromRawEncoding(Brackets.Begin);
+  }
+  SourceLocation getRAngleLoc() const {
+    return SourceLocation::getFromRawEncoding(Brackets.End);
+  }
+  SourceRange getSourceRange() const {
+    return SourceRange(getLAngleLoc(), getRAngleLoc());
+  }
 
   /// Gather the default set of type arguments to be substituted for
   /// these type parameters when dealing with an unspecialized type.
@@ -845,15 +862,9 @@ class ObjCInterfaceDecl : public ObjCContainerDecl
     /// declaration.
     ObjCInterfaceDecl *Definition;
     
-    /// Class's super class.
-    ///
     /// When non-null, this is always an ObjCObjectType.
     TypeSourceInfo *SuperClassTInfo;
     
-    /// Complete definition of the class - only when IsPartialInterface
-    /// is true.
-    ObjCInterfaceDecl *CompleteDefinition;
-
     /// Protocols referenced in the \@interface  declaration
     ObjCProtocolList ReferencedProtocols;
 
@@ -882,9 +893,6 @@ class ObjCInterfaceDecl : public ObjCContainerDecl
     /// Indicates that this interface decl contains at least one initializer
     /// marked with the 'objc_designated_initializer' attribute.
     bool HasDesignatedInitializers : 1;
-    
-    /// \brief Indicates that this class is a partial interface.
-    bool  IsPartialInterface : 1;
 
     enum InheritedDesignatedInitializersState {
       /// We didn't calculate whether the designated initializers should be
@@ -903,12 +911,10 @@ class ObjCInterfaceDecl : public ObjCContainerDecl
     /// identifier, 
     SourceLocation EndLoc; 
 
-    DefinitionData() : Definition(), SuperClassTInfo(), CompleteDefinition(),
-                       CategoryList(), IvarList(),
+    DefinitionData() : Definition(), SuperClassTInfo(), CategoryList(), IvarList(), 
                        ExternallyCompleted(),
                        IvarListMissingImplementation(true),
                        HasDesignatedInitializers(),
-                       IsPartialInterface(),
                        InheritedDesignatedInitializers(IDI_Unknown) { }
   };
 
@@ -1013,27 +1019,6 @@ public:
     return data().ReferencedProtocols;
   }
 
-  ObjCInterfaceDecl *getCompleteDefinition() const {
-    assert(hasDefinition() &&
-           "Must have definition before looking at CompleteDefinition");
-    return data().CompleteDefinition;
-  }
-
-  void setCompleteDefinition(ObjCInterfaceDecl *IDecl) {
-    assert(hasDefinition() &&
-           "Must have definition before looking at CompleteDefinition");
-    data().CompleteDefinition = IDecl;
-  }
-
-  bool isPartialInterface() const {
-    return hasDefinition() && data().IsPartialInterface;
-  }
-  void setIsPartialInterface() {
-    assert(hasDefinition() &&
-           "Must have definition before looking at IsPartialInterface");
-    data().IsPartialInterface = true;
-  }
-
   ObjCImplementationDecl *getImplementation() const;
   void setImplementation(ObjCImplementationDecl *ImplD);
 
@@ -1043,8 +1028,8 @@ public:
   ObjCMethodDecl *getCategoryInstanceMethod(Selector Sel) const;
   ObjCMethodDecl *getCategoryClassMethod(Selector Sel) const;
   ObjCMethodDecl *getCategoryMethod(Selector Sel, bool isInstance) const {
-    return isInstance ? getInstanceMethod(Sel)
-                      : getClassMethod(Sel);
+    return isInstance ? getCategoryInstanceMethod(Sel)
+                      : getCategoryClassMethod(Sel);
   }
 
   typedef ObjCProtocolList::iterator protocol_iterator;
@@ -1217,13 +1202,8 @@ public:
     // might bring in a definition.
     // Note: a null value indicates that we don't have a definition and that
     // modules are enabled.
-    if (!Data.getOpaqueValue()) {
-      if (IdentifierInfo *II = getIdentifier()) {
-        if (II->isOutOfDate()) {
-          updateOutOfDate(*II);
-        }
-      }
-    }
+    if (!Data.getOpaqueValue())
+      getMostRecentDecl();
 
     return Data.getPointer();
   }
@@ -1232,20 +1212,14 @@ public:
   /// has been forward-declared (with \@class) but not yet defined (with 
   /// \@interface).
   ObjCInterfaceDecl *getDefinition() {
-    ObjCInterfaceDecl *Def = hasDefinition()? Data.getPointer()->Definition : nullptr;
-    if (Def && Def->isPartialInterface() && Def->getCompleteDefinition())
-      return Def->getCompleteDefinition();
-    return Def;
+    return hasDefinition()? Data.getPointer()->Definition : nullptr;
   }
 
   /// \brief Retrieve the definition of this class, or NULL if this class 
   /// has been forward-declared (with \@class) but not yet defined (with 
   /// \@interface).
   const ObjCInterfaceDecl *getDefinition() const {
-    ObjCInterfaceDecl *Def = hasDefinition()? Data.getPointer()->Definition : nullptr;
-    if (Def && Def->isPartialInterface() && Def->getCompleteDefinition())
-      return Def->getCompleteDefinition();
-    return Def;
+    return hasDefinition()? Data.getPointer()->Definition : nullptr;
   }
 
   /// \brief Starts the definition of this Objective-C class, taking it from
@@ -1872,13 +1846,8 @@ public:
     // might bring in a definition.
     // Note: a null value indicates that we don't have a definition and that
     // modules are enabled.
-    if (!Data.getOpaqueValue()) {
-      if (IdentifierInfo *II = getIdentifier()) {
-        if (II->isOutOfDate()) {
-          updateOutOfDate(*II);
-        }
-      }
-    }
+    if (!Data.getOpaqueValue())
+      getMostRecentDecl();
 
     return Data.getPointer();
   }
@@ -2257,8 +2226,8 @@ class ObjCImplementationDecl : public ObjCImplDecl {
   SourceLocation IvarRBraceLoc;
   
   /// Support for ivar initialization.
-  /// IvarInitializers - The arguments used to initialize the ivars
-  CXXCtorInitializer **IvarInitializers;
+  /// \brief The arguments used to initialize the ivars
+  LazyCXXCtorInitializersPtr IvarInitializers;
   unsigned NumIvarInitializers;
 
   /// Do the ivars of this class require initialization other than
@@ -2307,17 +2276,20 @@ public:
   }
 
   /// init_begin() - Retrieve an iterator to the first initializer.
-  init_iterator       init_begin()       { return IvarInitializers; }
+  init_iterator init_begin() {
+    const auto *ConstThis = this;
+    return const_cast<init_iterator>(ConstThis->init_begin());
+  }
   /// begin() - Retrieve an iterator to the first initializer.
-  init_const_iterator init_begin() const { return IvarInitializers; }
+  init_const_iterator init_begin() const;
 
   /// init_end() - Retrieve an iterator past the last initializer.
   init_iterator       init_end()       {
-    return IvarInitializers + NumIvarInitializers;
+    return init_begin() + NumIvarInitializers;
   }
   /// end() - Retrieve an iterator past the last initializer.
   init_const_iterator init_end() const {
-    return IvarInitializers + NumIvarInitializers;
+    return init_begin() + NumIvarInitializers;
   }
   /// getNumArgs - Number of ivars which must be initialized.
   unsigned getNumIvarInitializers() const {
@@ -2522,14 +2494,14 @@ public:
 
   QualType getType() const { return DeclType; }
 
-  /// Retrieve the type when this property is used with a specific base object
-  /// type.
-  QualType getUsageType(QualType objectType) const;
-
-  void setType(QualType T, TypeSourceInfo *TSI) {
+  void setType(QualType T, TypeSourceInfo *TSI) { 
     DeclType = T;
     DeclTypeSourceInfo = TSI; 
   }
+
+  /// Retrieve the type when this property is used with a specific base object
+  /// type.
+  QualType getUsageType(QualType objectType) const;
 
   PropertyAttributeKind getPropertyAttributes() const {
     return PropertyAttributeKind(PropertyAttributes);
@@ -2537,25 +2509,17 @@ public:
   void setPropertyAttributes(PropertyAttributeKind PRVal) {
     PropertyAttributes |= PRVal;
   }
+  void overwritePropertyAttributes(unsigned PRVal) {
+    PropertyAttributes = PRVal;
+  }
 
   PropertyAttributeKind getPropertyAttributesAsWritten() const {
     return PropertyAttributeKind(PropertyAttributesAsWritten);
   }
 
-  bool hasWrittenStorageAttribute() const {
-    return PropertyAttributesAsWritten & (OBJC_PR_assign | OBJC_PR_copy |
-        OBJC_PR_unsafe_unretained | OBJC_PR_retain | OBJC_PR_strong |
-        OBJC_PR_weak);
-  }
-
   void setPropertyAttributesAsWritten(PropertyAttributeKind PRVal) {
     PropertyAttributesAsWritten = PRVal;
   }
-
- void makeitReadWriteAttribute() {
-    PropertyAttributes &= ~OBJC_PR_readonly;
-    PropertyAttributes |= OBJC_PR_readwrite;
- }
 
   // Helper methods for accessing attributes.
 

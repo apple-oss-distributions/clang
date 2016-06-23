@@ -1,4 +1,4 @@
-/*===---- avx512fintrin.h - AVX2 intrinsics -----------------------------------===
+/*===---- avx512erintrin.h - AVX512ER intrinsics ---------------------------===
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,7 +26,6 @@
 
 #ifndef __AVX512ERINTRIN_H
 #define __AVX512ERINTRIN_H
-
 
 // exp2a23
 #define _mm512_exp2a23_round_pd(A, R) __extension__ ({ \

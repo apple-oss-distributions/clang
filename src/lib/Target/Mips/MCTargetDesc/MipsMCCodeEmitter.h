@@ -31,26 +31,27 @@ class MCSubtargetInfo;
 class raw_ostream;
 
 class MipsMCCodeEmitter : public MCCodeEmitter {
-  MipsMCCodeEmitter(const MipsMCCodeEmitter &) LLVM_DELETED_FUNCTION;
-  void operator=(const MipsMCCodeEmitter &) LLVM_DELETED_FUNCTION;
+  MipsMCCodeEmitter(const MipsMCCodeEmitter &) = delete;
+  void operator=(const MipsMCCodeEmitter &) = delete;
   const MCInstrInfo &MCII;
   MCContext &Ctx;
   bool IsLittleEndian;
 
   bool isMicroMips(const MCSubtargetInfo &STI) const;
+  bool isMips32r6(const MCSubtargetInfo &STI) const;
 
 public:
   MipsMCCodeEmitter(const MCInstrInfo &mcii, MCContext &Ctx_, bool IsLittle)
       : MCII(mcii), Ctx(Ctx_), IsLittleEndian(IsLittle) {}
 
-  ~MipsMCCodeEmitter() {}
+  ~MipsMCCodeEmitter() override {}
 
   void EmitByte(unsigned char C, raw_ostream &OS) const;
 
   void EmitInstruction(uint64_t Val, unsigned Size, const MCSubtargetInfo &STI,
                        raw_ostream &OS) const;
 
-  void EncodeInstruction(const MCInst &MI, raw_ostream &OS,
+  void encodeInstruction(const MCInst &MI, raw_ostream &OS,
                          SmallVectorImpl<MCFixup> &Fixups,
                          const MCSubtargetInfo &STI) const override;
 
@@ -171,7 +172,13 @@ public:
   unsigned getMemEncodingMMGPImm7Lsl2(const MCInst &MI, unsigned OpNo,
                                       SmallVectorImpl<MCFixup> &Fixups,
                                       const MCSubtargetInfo &STI) const;
+  unsigned getMemEncodingMMImm9(const MCInst &MI, unsigned OpNo,
+                                SmallVectorImpl<MCFixup> &Fixups,
+                                const MCSubtargetInfo &STI) const;
   unsigned getMemEncodingMMImm12(const MCInst &MI, unsigned OpNo,
+                                 SmallVectorImpl<MCFixup> &Fixups,
+                                 const MCSubtargetInfo &STI) const;
+  unsigned getMemEncodingMMImm16(const MCInst &MI, unsigned OpNo,
                                  SmallVectorImpl<MCFixup> &Fixups,
                                  const MCSubtargetInfo &STI) const;
   unsigned getMemEncodingMMImm4sp(const MCInst &MI, unsigned OpNo,
@@ -184,10 +191,11 @@ public:
                               SmallVectorImpl<MCFixup> &Fixups,
                               const MCSubtargetInfo &STI) const;
 
-  // getLSAImmEncoding - Return binary encoding of LSA immediate.
-  unsigned getLSAImmEncoding(const MCInst &MI, unsigned OpNo,
-                             SmallVectorImpl<MCFixup> &Fixups,
-                             const MCSubtargetInfo &STI) const;
+  /// Subtract Offset then encode as a N-bit unsigned integer.
+  template <unsigned Bits, int Offset>
+  unsigned getUImmWithOffsetEncoding(const MCInst &MI, unsigned OpNo,
+                                     SmallVectorImpl<MCFixup> &Fixups,
+                                     const MCSubtargetInfo &STI) const;
 
   unsigned getSimm19Lsl2Encoding(const MCInst &MI, unsigned OpNo,
                                  SmallVectorImpl<MCFixup> &Fixups,
@@ -205,6 +213,10 @@ public:
                             const MCSubtargetInfo &STI) const;
 
   unsigned getRegisterPairOpValue(const MCInst &MI, unsigned OpNo,
+                                  SmallVectorImpl<MCFixup> &Fixups,
+                                  const MCSubtargetInfo &STI) const;
+
+  unsigned getMovePRegPairOpValue(const MCInst &MI, unsigned OpNo,
                                   SmallVectorImpl<MCFixup> &Fixups,
                                   const MCSubtargetInfo &STI) const;
 

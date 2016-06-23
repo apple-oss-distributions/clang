@@ -14,10 +14,11 @@
 
 namespace clang {
 namespace tidy {
+namespace llvm {
 
-/// \brief Checks the correct order of \c #includes.
+/// Checks the correct order of `#includes`.
 ///
-/// see: http://llvm.org/docs/CodingStandards.html#include-style
+/// See http://llvm.org/docs/CodingStandards.html#include-style
 class IncludeOrderCheck : public ClangTidyCheck {
 public:
   IncludeOrderCheck(StringRef Name, ClangTidyContext *Context)
@@ -25,6 +26,7 @@ public:
   void registerPPCallbacks(CompilerInstance &Compiler) override;
 };
 
+} // namespace llvm
 } // namespace tidy
 } // namespace clang
 

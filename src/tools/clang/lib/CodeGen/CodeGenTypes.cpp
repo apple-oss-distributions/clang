@@ -31,7 +31,6 @@ using namespace CodeGen;
 
 CodeGenTypes::CodeGenTypes(CodeGenModule &cgm)
   : CGM(cgm), Context(cgm.getContext()), TheModule(cgm.getModule()),
-    TheDataLayout(cgm.getDataLayout()),
     Target(cgm.getTarget()), TheCXXABI(cgm.getCXXABI()),
     TheABIInfo(cgm.getTargetCodeGenInfo().getABIInfo()) {
   SkippedLayout = false;
@@ -154,14 +153,16 @@ isSafeToConvert(const RecordDecl *RD, CodeGenTypes &CGT,
 static bool
 isSafeToConvert(QualType T, CodeGenTypes &CGT,
                 llvm::SmallPtrSet<const RecordDecl*, 16> &AlreadyChecked) {
-  T = T.getCanonicalType();
-  
+  // Strip off atomic type sugar.
+  if (const auto *AT = T->getAs<AtomicType>())
+    T = AT->getValueType();
+
   // If this is a record, check it.
-  if (const RecordType *RT = dyn_cast<RecordType>(T))
+  if (const auto *RT = T->getAs<RecordType>())
     return isSafeToConvert(RT->getDecl(), CGT, AlreadyChecked);
-  
+
   // If this is an array, check the elements, which are embedded inline.
-  if (const ArrayType *AT = dyn_cast<ArrayType>(T))
+  if (const auto *AT = CGT.getContext().getAsArrayType(T))
     return isSafeToConvert(AT->getElementType(), CGT, AlreadyChecked);
 
   // Otherwise, there is no concern about transforming this.  We only care about
@@ -387,9 +388,19 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     case BuiltinType::OCLImage1dBuffer:
     case BuiltinType::OCLImage2d:
     case BuiltinType::OCLImage2dArray:
+    case BuiltinType::OCLImage2dDepth:
+    case BuiltinType::OCLImage2dArrayDepth:
+    case BuiltinType::OCLImage2dMSAA:
+    case BuiltinType::OCLImage2dArrayMSAA:
+    case BuiltinType::OCLImage2dMSAADepth:
+    case BuiltinType::OCLImage2dArrayMSAADepth:
     case BuiltinType::OCLImage3d:
     case BuiltinType::OCLSampler:
     case BuiltinType::OCLEvent:
+    case BuiltinType::OCLClkEvent:
+    case BuiltinType::OCLQueue:
+    case BuiltinType::OCLNDRange:
+    case BuiltinType::OCLReserveID:
       ResultType = CGM.getOpenCLRuntime().convertOpenCLSpecificType(Ty);
       break;
     
@@ -715,9 +726,16 @@ bool CodeGenTypes::isZeroInitializable(QualType T) {
   // No need to check for member pointers when not compiling C++.
   if (!Context.getLangOpts().CPlusPlus)
     return true;
-  
-  T = Context.getBaseElementType(T);
-  
+
+  if (const auto *AT = Context.getAsArrayType(T)) {
+    if (isa<IncompleteArrayType>(AT))
+      return true;
+    if (const auto *CAT = dyn_cast<ConstantArrayType>(AT))
+      if (Context.getConstantArrayElementCount(CAT) == 0)
+        return true;
+    T = Context.getBaseElementType(T);
+  }
+
   // Records are non-zero-initializable if they contain any
   // non-zero-initializable subobjects.
   if (const RecordType *RT = T->getAs<RecordType>()) {
@@ -733,6 +751,6 @@ bool CodeGenTypes::isZeroInitializable(QualType T) {
   return true;
 }
 
-bool CodeGenTypes::isZeroInitializable(const CXXRecordDecl *RD) {
+bool CodeGenTypes::isZeroInitializable(const RecordDecl *RD) {
   return getCGRecordLayout(RD).isZeroInitializable();
 }

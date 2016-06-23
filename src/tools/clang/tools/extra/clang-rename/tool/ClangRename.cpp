@@ -21,7 +21,6 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/CommandLineSourceLoc.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
@@ -100,9 +99,7 @@ int main(int argc, const char **argv) {
 
   // Get the USRs.
   auto Files = OP.getSourcePathList();
-  tooling::RefactoringTool Tool(
-      SharedModuleProvider::Create<LLVMModuleProvider>(),
-      OP.getCompilations(), Files);
+  tooling::RefactoringTool Tool(OP.getCompilations(), Files);
   rename::USRFindingAction USRAction(SymbolOffset);
 
   // Find the USRs.

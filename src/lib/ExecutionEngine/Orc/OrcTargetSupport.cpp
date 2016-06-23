@@ -1,102 +1,171 @@
-#include "llvm/ADT/Triple.h"
-#include "llvm/ExecutionEngine/Orc/IndirectionUtils.h"
+//===------- OrcTargetSupport.cpp - Target support utilities for Orc ------===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/Triple.h"
+#include "llvm/ExecutionEngine/Orc/OrcTargetSupport.h"
+#include "llvm/Support/Process.h"
 #include <array>
 
-using namespace llvm;
-
-namespace {
-
-const char *JITCallbackFuncName = "call_jit_for_lazy_compile";
-const char *JITCallbackIndexLabelPrefix = "jit_resolve_";
-
-std::array<const char *, 12> X86GPRsToSave = {{
-    "rbp", "rbx", "r12", "r13", "r14", "r15", // Callee saved.
-    "rdi", "rsi", "rdx", "rcx", "r8", "r9",   // Int args.
-}};
-
-std::array<const char *, 8> X86XMMsToSave = {{
-    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7" // FP args
-}};
-
-template <typename OStream> unsigned saveX86Regs(OStream &OS) {
-  for (const auto &GPR : X86GPRsToSave)
-    OS << "  pushq   %" << GPR << "\n";
-
-  OS << "  subq    $" << (16 * X86XMMsToSave.size()) << ", %rsp\n";
-
-  for (unsigned i = 0; i < X86XMMsToSave.size(); ++i)
-    OS << "  movdqu  %" << X86XMMsToSave[i] << ", "
-       << (16 * (X86XMMsToSave.size() - i - 1)) << "(%rsp)\n";
-
-  return (8 * X86GPRsToSave.size()) + (16 * X86XMMsToSave.size());
-}
-
-template <typename OStream> void restoreX86Regs(OStream &OS) {
-  for (unsigned i = 0; i < X86XMMsToSave.size(); ++i)
-    OS << "  movdqu  " << (16 * i) << "(%rsp), %"
-       << X86XMMsToSave[(X86XMMsToSave.size() - i - 1)] << "\n";
-  OS << "  addq    $" << (16 * X86XMMsToSave.size()) << ", %rsp\n";
-
-  for (unsigned i = 0; i < X86GPRsToSave.size(); ++i)
-    OS << "  popq    %" << X86GPRsToSave[X86GPRsToSave.size() - i - 1] << "\n";
-}
-
-uint64_t call_jit_for_fn(JITResolveCallbackHandler *J, uint64_t FuncIdx) {
-  return J->resolve(FuncIdx);
-}
-}
-
 namespace llvm {
+namespace orc {
 
-std::string getJITResolveCallbackIndexLabel(unsigned I) {
-  std::ostringstream LabelStream;
-  LabelStream << JITCallbackIndexLabelPrefix << I;
-  return LabelStream.str();
+void OrcX86_64::writeResolverCode(uint8_t *ResolverMem, JITReentryFn ReentryFn,
+                                  void *CallbackMgr) {
+
+  const uint8_t ResolverCode[] = {
+                                               // resolver_entry:
+    0x55,                                      // 0x00: pushq     %rbp
+    0x48, 0x89, 0xe5,                          // 0x01: movq      %rsp, %rbp
+    0x50,                                      // 0x04: pushq     %rax
+    0x53,                                      // 0x05: pushq     %rbx
+    0x51,                                      // 0x06: pushq     %rcx
+    0x52,                                      // 0x07: pushq     %rdx
+    0x56,                                      // 0x08: pushq     %rsi
+    0x57,                                      // 0x09: pushq     %rdi
+    0x41, 0x50,                                // 0x0a: pushq     %r8
+    0x41, 0x51,                                // 0x0c: pushq     %r9
+    0x41, 0x52,                                // 0x0e: pushq     %r10
+    0x41, 0x53,                                // 0x10: pushq     %r11
+    0x41, 0x54,                                // 0x12: pushq     %r12
+    0x41, 0x55,                                // 0x14: pushq     %r13
+    0x41, 0x56,                                // 0x16: pushq     %r14
+    0x41, 0x57,                                // 0x18: pushq     %r15
+    0x48, 0x81, 0xec, 0x08, 0x02, 0x00, 0x00,  // 0x1a: subq      20, %rsp
+    0x48, 0x0f, 0xae, 0x04, 0x24,              // 0x21: fxsave64  (%rsp)
+    0x48, 0x8d, 0x3d, 0x43, 0x00, 0x00, 0x00,  // 0x26: leaq      67(%rip), %rdi
+    0x48, 0x8b, 0x3f,                          // 0x2d: movq      (%rdi), %rdi
+    0x48, 0x8b, 0x75, 0x08,                    // 0x30: movq      8(%rbp), %rsi
+    0x48, 0x83, 0xee, 0x06,                    // 0x34: subq      $6, %rsi
+    0x48, 0xb8,                                // 0x38: movabsq   $0, %rax
+
+    // 0x3a: JIT re-entry fn addr:
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+    0xff, 0xd0,                                // 0x42: callq     *%rax
+    0x48, 0x89, 0x45, 0x08,                    // 0x44: movq      %rax, 8(%rbp)
+    0x48, 0x0f, 0xae, 0x0c, 0x24,              // 0x48: fxrstor64 (%rsp)
+    0x48, 0x81, 0xc4, 0x08, 0x02, 0x00, 0x00,  // 0x4d: addq      20, %rsp
+    0x41, 0x5f,                                // 0x54: popq      %r15
+    0x41, 0x5e,                                // 0x56: popq      %r14
+    0x41, 0x5d,                                // 0x58: popq      %r13
+    0x41, 0x5c,                                // 0x5a: popq      %r12
+    0x41, 0x5b,                                // 0x5c: popq      %r11
+    0x41, 0x5a,                                // 0x5e: popq      %r10
+    0x41, 0x59,                                // 0x60: popq      %r9
+    0x41, 0x58,                                // 0x62: popq      %r8
+    0x5f,                                      // 0x64: popq      %rdi
+    0x5e,                                      // 0x65: popq      %rsi
+    0x5a,                                      // 0x66: popq      %rdx
+    0x59,                                      // 0x67: popq      %rcx
+    0x5b,                                      // 0x68: popq      %rbx
+    0x58,                                      // 0x69: popq      %rax
+    0x5d,                                      // 0x6a: popq      %rbp
+    0xc3,                                      // 0x6b: retq
+    0x00, 0x00, 0x00, 0x00,                    // 0x6c: <padding>
+
+    // 0x70: Callback mgr address.
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
+
+  const unsigned ReentryFnAddrOffset = 0x3a;
+  const unsigned CallbackMgrAddrOffset = 0x70;
+  
+  memcpy(ResolverMem, ResolverCode, sizeof(ResolverCode));
+  memcpy(ResolverMem + ReentryFnAddrOffset, &ReentryFn, sizeof(ReentryFn));
+  memcpy(ResolverMem + CallbackMgrAddrOffset, &CallbackMgr,
+         sizeof(CallbackMgr));
 }
 
-void insertX86CallbackAsm(Module &M, JITResolveCallbackHandler &J) {
-  uint64_t CallbackAddr =
-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(call_jit_for_fn));
+void OrcX86_64::writeTrampolines(uint8_t *TrampolineMem, void *ResolverAddr,
+				 unsigned NumTrampolines) {
 
-  std::ostringstream JITCallbackAsm;
-  Triple TT(M.getTargetTriple());
+  unsigned OffsetToPtr = NumTrampolines * TrampolineSize;
 
-  if (TT.getOS() == Triple::Darwin)
-    JITCallbackAsm << ".section __TEXT,__text,regular,pure_instructions\n"
-                   << ".align 4, 0x90\n";
-  else
-    JITCallbackAsm << ".text\n"
-                   << ".align 16, 0x90\n";
+  memcpy(TrampolineMem + OffsetToPtr, &ResolverAddr, sizeof(void*));
 
-  JITCallbackAsm << "jit_object_addr:\n"
-                 << "  .quad " << &J << "\n" << JITCallbackFuncName << ":\n";
+  uint64_t *Trampolines = reinterpret_cast<uint64_t*>(TrampolineMem);
+  uint64_t CallIndirPCRel = 0xf1c40000000015ff;
 
-  uint64_t ReturnAddrOffset = saveX86Regs(JITCallbackAsm);
-
-  // Compute index, load object address, and call JIT.
-  JITCallbackAsm << "  movq    " << ReturnAddrOffset << "(%rsp), %rax\n"
-                 << "  leaq    (jit_indices_start+5)(%rip), %rbx\n"
-                 << "  subq    %rbx, %rax\n"
-                 << "  xorq    %rdx, %rdx\n"
-                 << "  movq    $5, %rbx\n"
-                 << "  divq    %rbx\n"
-                 << "  movq    %rax, %rsi\n"
-                 << "  leaq    jit_object_addr(%rip), %rdi\n"
-                 << "  movq    (%rdi), %rdi\n"
-                 << "  movabsq $" << CallbackAddr << ", %rax\n"
-                 << "  callq   *%rax\n"
-                 << "  movq    %rax, " << ReturnAddrOffset << "(%rsp)\n";
-
-  restoreX86Regs(JITCallbackAsm);
-
-  JITCallbackAsm << "  retq\n"
-                 << "jit_indices_start:\n";
-
-  for (JITResolveCallbackHandler::StubIndex I = 0; I < J.getNumFuncs(); ++I)
-    JITCallbackAsm << getJITResolveCallbackIndexLabel(I) << ":\n"
-                   << "  callq " << JITCallbackFuncName << "\n";
-
-  M.appendModuleInlineAsm(JITCallbackAsm.str());
+  for (unsigned I = 0; I < NumTrampolines; ++I, OffsetToPtr -= TrampolineSize)
+    Trampolines[I] = CallIndirPCRel | ((OffsetToPtr - 6) << 16);
 }
+
+std::error_code OrcX86_64::emitIndirectStubsBlock(IndirectStubsInfo &StubsInfo,
+                                                  unsigned MinStubs,
+                                                  void *InitialPtrVal) {
+  // Stub format is:
+  //
+  // .section __orc_stubs
+  // stub1:
+  //                 jmpq    *ptr1(%rip)
+  //                 .byte   0xC4         ; <- Invalid opcode padding.
+  //                 .byte   0xF1
+  // stub2:
+  //                 jmpq    *ptr2(%rip)
+  //
+  // ...
+  //
+  // .section __orc_ptrs
+  // ptr1:
+  //                 .quad 0x0
+  // ptr2:
+  //                 .quad 0x0
+  //
+  // ...
+
+  const unsigned StubSize = IndirectStubsInfo::StubSize;
+
+  // Emit at least MinStubs, rounded up to fill the pages allocated.
+  unsigned PageSize = sys::Process::getPageSize();
+  unsigned NumPages = ((MinStubs * StubSize) + (PageSize - 1)) / PageSize;
+  unsigned NumStubs = (NumPages * PageSize) / StubSize;
+
+  // Allocate memory for stubs and pointers in one call.
+  std::error_code EC;
+  auto StubsMem =
+    sys::OwningMemoryBlock(
+      sys::Memory::allocateMappedMemory(2 * NumPages * PageSize, nullptr,
+                                        sys::Memory::MF_READ |
+                                        sys::Memory::MF_WRITE,
+                                        EC));
+
+  if (EC)
+    return EC;
+
+  // Create separate MemoryBlocks representing the stubs and pointers.
+  sys::MemoryBlock StubsBlock(StubsMem.base(), NumPages * PageSize);
+  sys::MemoryBlock PtrsBlock(static_cast<char*>(StubsMem.base()) +
+                               NumPages * PageSize,
+                             NumPages * PageSize);
+
+  // Populate the stubs page stubs and mark it executable.
+  uint64_t *Stub = reinterpret_cast<uint64_t*>(StubsBlock.base());
+  uint64_t PtrOffsetField =
+    static_cast<uint64_t>(NumPages * PageSize - 6) << 16;
+  for (unsigned I = 0; I < NumStubs; ++I)
+    Stub[I] = 0xF1C40000000025ff | PtrOffsetField;
+
+  if (auto EC = sys::Memory::protectMappedMemory(StubsBlock,
+                                                 sys::Memory::MF_READ |
+                                                 sys::Memory::MF_EXEC))
+    return EC;
+
+  // Initialize all pointers to point at FailureAddress.
+  void **Ptr = reinterpret_cast<void**>(PtrsBlock.base());
+  for (unsigned I = 0; I < NumStubs; ++I)
+    Ptr[I] = InitialPtrVal;
+
+  StubsInfo.NumStubs = NumStubs;
+  StubsInfo.StubsMem = std::move(StubsMem);
+
+  return std::error_code();
 }
+
+} // End namespace orc.
+} // End namespace llvm.

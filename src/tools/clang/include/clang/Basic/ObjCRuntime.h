@@ -139,7 +139,9 @@ public:
   /// \brief Does this runtime allow ARC at all?
   bool allowsARC() const {
     switch (getKind()) {
-    case FragileMacOSX: return false;
+    case FragileMacOSX:
+      // No stub library for the fragile runtime.
+      return getVersion() >= VersionTuple(10, 7);
     case MacOSX: return true;
     case iOS: return true;
     case WatchOS: return true;
@@ -157,7 +159,7 @@ public:
   /// library.
   bool hasNativeARC() const {
     switch (getKind()) {
-    case FragileMacOSX: return false;
+    case FragileMacOSX: return getVersion() >= VersionTuple(10, 7);
     case MacOSX: return getVersion() >= VersionTuple(10, 7);
     case iOS: return getVersion() >= VersionTuple(5);
     case WatchOS: return true;
@@ -318,6 +320,23 @@ public:
     case GNUstep:
       return false;
       
+    default:
+      return false;
+    }
+  }
+
+  /// Is objc_unsafeClaimAutoreleasedReturnValue available?
+  bool hasARCUnsafeClaimAutoreleasedReturnValue() const {
+    switch (getKind()) {
+    case MacOSX:
+      return getVersion() >= VersionTuple(10, 11);
+    case iOS:
+      return getVersion() >= VersionTuple(9);
+    case WatchOS:
+      return getVersion() >= VersionTuple(2);
+    case GNUstep:
+      return false;
+
     default:
       return false;
     }

@@ -58,7 +58,13 @@ public:
     MD_noalias = 8, // "noalias",
     MD_nontemporal = 9, // "nontemporal"
     MD_mem_parallel_loop_access = 10, // "llvm.mem.parallel_loop_access"
-    MD_nonnull = 11 // "nonnull"
+    MD_nonnull = 11, // "nonnull"
+    MD_dereferenceable = 12, // "dereferenceable"
+    MD_dereferenceable_or_null = 13, // "dereferenceable_or_null"
+    MD_make_implicit = 14, // "make.implicit"
+    MD_unpredictable = 15, // "unpredictable"
+    MD_invariant_group = 16, // "invariant.group"
+    MD_align = 17 // "align"
   };
 
   /// getMDKindID - Return a unique non-zero ID for the specified metadata kind.
@@ -69,6 +75,15 @@ public:
   /// custom metadata IDs registered in this LLVMContext.
   void getMDKindNames(SmallVectorImpl<StringRef> &Result) const;
 
+  /// getOperandBundleTags - Populate client supplied SmallVector with the
+  /// bundle tags registered in this LLVMContext.  The bundle tags are ordered
+  /// by increasing bundle IDs.
+  /// \see LLVMContext::getOperandBundleTagID
+  void getOperandBundleTags(SmallVectorImpl<StringRef> &Result) const;
+
+  /// getOperandBundleTagID - Maps a bundle tag to an integer ID.  Every bundle
+  /// tag registered with an LLVMContext has an unique ID.
+  uint32_t getOperandBundleTagID(StringRef Tag) const;
 
   typedef void (*InlineAsmDiagHandlerTy)(const SMDiagnostic&, void *Context,
                                          unsigned LocCookie);
@@ -176,8 +191,8 @@ public:
   }
 
 private:
-  LLVMContext(LLVMContext&) LLVM_DELETED_FUNCTION;
-  void operator=(LLVMContext&) LLVM_DELETED_FUNCTION;
+  LLVMContext(LLVMContext&) = delete;
+  void operator=(LLVMContext&) = delete;
 
   /// addModule - Register a module as being instantiated in this context.  If
   /// the context is deleted, the module will be deleted as well.

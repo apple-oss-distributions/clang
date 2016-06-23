@@ -10,7 +10,6 @@ target_link_libraries(tool-template
   clangAST
   clangASTMatchers
   clangBasic
-  clangCodeGen
   clangFrontend
   clangTooling
   )

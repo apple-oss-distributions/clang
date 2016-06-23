@@ -150,8 +150,8 @@ DataLayout::InvalidPointerElem = { 0U, 0U, 0U, ~0U };
 const char *DataLayout::getManglingComponent(const Triple &T) {
   if (T.isOSBinFormatMachO())
     return "-m:o";
-  if (T.isOSWindows() && T.getArch() == Triple::x86 && T.isOSBinFormatCOFF())
-    return "-m:w";
+  if (T.isOSWindows() && T.isOSBinFormatCOFF())
+    return T.getArch() == Triple::x86 ? "-m:x" : "-m:w";
   return "-m:e";
 }
 
@@ -359,7 +359,10 @@ void DataLayout::parseSpecifier(StringRef Desc) {
         ManglingMode = MM_Mips;
         break;
       case 'w':
-        ManglingMode = MM_WINCOFF;
+        ManglingMode = MM_WinCOFF;
+        break;
+      case 'x':
+        ManglingMode = MM_WinCOFFX86;
         break;
       }
       break;
@@ -389,9 +392,21 @@ bool DataLayout::operator==(const DataLayout &Other) const {
 void
 DataLayout::setAlignment(AlignTypeEnum align_type, unsigned abi_align,
                          unsigned pref_align, uint32_t bit_width) {
-  assert(abi_align <= pref_align && "Preferred alignment worse than ABI!");
-  assert(pref_align < (1 << 16) && "Alignment doesn't fit in bitfield");
-  assert(bit_width < (1 << 24) && "Bit width doesn't fit in bitfield");
+  if (!isUInt<24>(bit_width))
+    report_fatal_error("Invalid bit width, must be a 24bit integer");
+  if (!isUInt<16>(abi_align))
+    report_fatal_error("Invalid ABI alignment, must be a 16bit integer");
+  if (!isUInt<16>(pref_align))
+    report_fatal_error("Invalid preferred alignment, must be a 16bit integer");
+  if (abi_align != 0 && !isPowerOf2_64(abi_align))
+    report_fatal_error("Invalid ABI alignment, must be a power of 2");
+  if (pref_align != 0 && !isPowerOf2_64(pref_align))
+    report_fatal_error("Invalid preferred alignment, must be a power of 2");
+
+  if (pref_align < abi_align)
+    report_fatal_error(
+        "Preferred alignment cannot be less than the ABI alignment");
+
   for (LayoutAlignElem &Elem : Alignments) {
     if (Elem.AlignType == (unsigned)align_type &&
         Elem.TypeBitWidth == bit_width) {
@@ -417,7 +432,10 @@ DataLayout::findPointerLowerBound(uint32_t AddressSpace) {
 void DataLayout::setPointerAlignment(uint32_t AddrSpace, unsigned ABIAlign,
                                      unsigned PrefAlign,
                                      uint32_t TypeByteWidth) {
-  assert(ABIAlign <= PrefAlign && "Preferred alignment worse than ABI!");
+  if (PrefAlign < ABIAlign)
+    report_fatal_error(
+        "Preferred alignment cannot be less than the ABI alignment");
+
   PointersTy::iterator I = findPointerLowerBound(AddrSpace);
   if (I == Pointers.end() || I->AddressSpace != AddrSpace) {
     Pointers.insert(I, PointerAlignElem::get(AddrSpace, ABIAlign, PrefAlign,
@@ -443,8 +461,8 @@ unsigned DataLayout::getAlignmentInfo(AlignTypeEnum AlignType,
       return ABIInfo ? Alignments[i].ABIAlign : Alignments[i].PrefAlign;
 
     // The best match so far depends on what we're looking for.
-     if (AlignType == INTEGER_ALIGN &&
-         Alignments[i].AlignType == INTEGER_ALIGN) {
+    if (AlignType == INTEGER_ALIGN &&
+        Alignments[i].AlignType == INTEGER_ALIGN) {
       // The "best match" for integers is the smallest size that is larger than
       // the BitWidth requested.
       if (Alignments[i].TypeBitWidth > BitWidth && (BestMatchIdx == -1 ||
@@ -464,9 +482,7 @@ unsigned DataLayout::getAlignmentInfo(AlignTypeEnum AlignType,
     // If we didn't find an integer alignment, fall back on most conservative.
     if (AlignType == INTEGER_ALIGN) {
       BestMatchIdx = LargestInt;
-    } else {
-      assert(AlignType == VECTOR_ALIGN && "Unknown alignment type!");
-
+    } else if (AlignType == VECTOR_ALIGN) {
       // By default, use natural alignment for vector types. This is consistent
       // with what clang and llvm-gcc do.
       unsigned Align = getTypeAllocSize(cast<VectorType>(Ty)->getElementType());
@@ -477,6 +493,19 @@ unsigned DataLayout::getAlignmentInfo(AlignTypeEnum AlignType,
         Align = NextPowerOf2(Align);
       return Align;
     }
+  }
+
+  // If we still couldn't find a reasonable default alignment, fall back
+  // to a simple heuristic that the alignment is the first power of two
+  // greater-or-equal to the store size of the type.  This is a reasonable
+  // approximation of reality, and if the user wanted something less
+  // less conservative, they should have specified it explicitly in the data
+  // layout.
+  if (BestMatchIdx == -1) {
+    unsigned Align = getTypeStoreSize(Ty);
+    if (Align & (Align-1))
+      Align = NextPowerOf2(Align);
+    return Align;
   }
 
   // Since we got a "best match" index, just return it.

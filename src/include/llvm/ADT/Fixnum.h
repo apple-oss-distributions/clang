@@ -59,7 +59,7 @@ class Fixnum {
   void assertValid() const {
     assert((std::is_signed<IntType>::value ? llvm::isInt<Bits>(Value)
                                            : llvm::isUInt<Bits>(Value)) &&
-           "value exceeds limited bit width");      
+           "value exceeds limited bit width");
   }
 
 public:
@@ -173,7 +173,7 @@ public:
     auto opaqueValue = static_cast<IntPointerType>(I) << NumLowBitsAvailable;
     return reinterpret_cast<void *>(opaqueValue);
   }
-  
+
   static inline Fixnum<IntBits, IntType>
   getFromVoidPointer(const void *P) {
     auto opaqueValue = reinterpret_cast<IntPointerType>(P);

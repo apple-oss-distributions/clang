@@ -2,13 +2,27 @@ set(LLVM_LINK_COMPONENTS support)
 
 add_clang_library(clangTidyMiscModule
   ArgumentCommentCheck.cpp
-  BoolPointerImplicitConversion.cpp
+  AssertSideEffectCheck.cpp
+  AssignOperatorSignatureCheck.cpp
+  BoolPointerImplicitConversionCheck.cpp
+  InaccurateEraseCheck.cpp
+  InefficientAlgorithmCheck.cpp
+  MacroParenthesesCheck.cpp
+  MacroRepeatedSideEffectsCheck.cpp
   MiscTidyModule.cpp
+  MoveConstructorInitCheck.cpp
+  NewDeleteOverloadsCheck.cpp
+  NoexceptMoveConstructorCheck.cpp
+  NonCopyableObjects.cpp
+  SizeofContainerCheck.cpp
+  StaticAssertCheck.cpp
   SwappedArgumentsCheck.cpp
+  ThrowByValueCatchByReferenceCheck.cpp
   UndelegatedConstructor.cpp
-  UnusedRAII.cpp
-  UniqueptrResetRelease.cpp
-  UseOverride.cpp
+  UnusedAliasDeclsCheck.cpp
+  UnusedParametersCheck.cpp
+  UnusedRAIICheck.cpp
+  UniqueptrResetReleaseCheck.cpp
 
   LINK_LIBS
   clangAPINotes
@@ -17,4 +31,5 @@ add_clang_library(clangTidyMiscModule
   clangBasic
   clangLex
   clangTidy
+  clangTidyUtils
   )

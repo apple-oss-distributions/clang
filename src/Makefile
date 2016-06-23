@@ -108,7 +108,8 @@ clean::
 	$(Verb) rm -rf BuildTools
 
 cross-compile-build-tools:
-	$(Verb) if [ ! -f BuildTools/Makefile ]; then \
+	$(Verb) default_sdk=`xcrun --show-sdk-path`; \
+	if [ ! -f BuildTools/Makefile ]; then \
           $(MKDIR) BuildTools; \
 	  cd BuildTools ; \
 	  unset CFLAGS ; \
@@ -118,7 +119,7 @@ cross-compile-build-tools:
 	  LD=$(BUILD_LD) ; \
 	  CC=$(BUILD_CC) ; \
 	  CXX=$(BUILD_CXX) ; \
-	  unset SDKROOT ; \
+	  SDKROOT="$${default_sdk}"; \
 	  unset UNIVERSAL_SDK_PATH ; \
 	  configure_opts= ; \
 	  if test "$(ENABLE_LIBCPP)" -ne 0 ; then \
@@ -133,7 +134,7 @@ cross-compile-build-tools:
 	  BUILD_DIRS_ONLY=1 \
 	  UNIVERSAL= \
 	  UNIVERSAL_SDK_PATH= \
-	  SDKROOT= \
+	  SDKROOT="$${default_sdk}" \
 	  TARGET_NATIVE_ARCH="$(TARGET_NATIVE_ARCH)" \
 	  TARGETS_TO_BUILD="$(TARGETS_TO_BUILD)" \
 	  TARGET_LIBS="$(LIBS)" \

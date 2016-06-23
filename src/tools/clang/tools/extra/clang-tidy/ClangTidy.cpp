@@ -36,6 +36,7 @@
 #include "clang/Tooling/Refactoring.h"
 #include "clang/Tooling/ReplacementsYaml.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Signals.h"
@@ -55,7 +56,7 @@ namespace tidy {
 namespace {
 static const char *AnalyzerCheckNamePrefix = "clang-analyzer-";
 
-static StringRef StaticAnalyzerChecks[] = {
+static const StringRef StaticAnalyzerChecks[] = {
 #define GET_CHECKERS
 #define CHECKER(FULLNAME, CLASS, DESCFILE, HELPTEXT, GROUPINDEX, HIDDEN)       \
   FULLNAME,
@@ -204,6 +205,17 @@ ClangTidyASTConsumerFactory::ClangTidyASTConsumerFactory(
   }
 }
 
+static void setStaticAnalyzerCheckerOpts(const ClangTidyOptions &Opts,
+                                         AnalyzerOptionsRef AnalyzerOptions) {
+  StringRef AnalyzerPrefix(AnalyzerCheckNamePrefix);
+  for (const auto &Opt : Opts.CheckOptions) {
+    StringRef OptName(Opt.first);
+    if (!OptName.startswith(AnalyzerPrefix))
+      continue;
+    AnalyzerOptions->Config[OptName.substr(AnalyzerPrefix.size())] = Opt.second;
+  }
+}
+
 std::unique_ptr<clang::ASTConsumer>
 ClangTidyASTConsumerFactory::CreateASTConsumer(
     clang::CompilerInstance &Compiler, StringRef File) {
@@ -241,6 +253,7 @@ ClangTidyASTConsumerFactory::CreateASTConsumer(
   GlobList &Filter = Context.getChecksFilter();
   AnalyzerOptions->CheckersControlList = getCheckersControlList(Filter);
   if (!AnalyzerOptions->CheckersControlList.empty()) {
+    setStaticAnalyzerCheckerOpts(Context.getOptions(), AnalyzerOptions);
     AnalyzerOptions->AnalysisStoreOpt = RegionStoreModel;
     AnalyzerOptions->AnalysisDiagOpt = PD_NONE;
     AnalyzerOptions->AnalyzeNestedBlocks = true;
@@ -359,12 +372,24 @@ ClangTidyOptions::OptionMap getCheckOptions(const ClangTidyOptions &Options) {
 
 ClangTidyStats
 runClangTidy(std::unique_ptr<ClangTidyOptionsProvider> OptionsProvider,
-             SharedModuleProvider MP,
              const tooling::CompilationDatabase &Compilations,
              ArrayRef<std::string> InputFiles,
              std::vector<ClangTidyError> *Errors, ProfileData *Profile) {
-  ClangTool Tool(Compilations, InputFiles, MP);
+  ClangTool Tool(Compilations, InputFiles);
   clang::tidy::ClangTidyContext Context(std::move(OptionsProvider));
+  ArgumentsAdjuster PerFileExtraArgumentsInserter = [&Context](
+      const CommandLineArguments &Args, StringRef Filename) {
+    ClangTidyOptions Opts = Context.getOptionsForFile(Filename);
+    CommandLineArguments AdjustedArgs;
+    if (Opts.ExtraArgsBefore)
+      AdjustedArgs = *Opts.ExtraArgsBefore;
+    AdjustedArgs.insert(AdjustedArgs.begin(), Args.begin(), Args.end());
+    if (Opts.ExtraArgs)
+      AdjustedArgs.insert(AdjustedArgs.end(), Opts.ExtraArgs->begin(),
+                          Opts.ExtraArgs->end());
+    return AdjustedArgs;
+  };
+  Tool.appendArgumentsAdjuster(PerFileExtraArgumentsInserter);
   if (Profile)
     Context.setCheckProfileData(Profile);
 

@@ -24,6 +24,10 @@
 #include <intrin.h>
 #endif
 
+#ifdef __ANDROID_NDK__
+#include <android/api-level.h>
+#endif
+
 namespace llvm {
 /// \brief The behavior an operation has on an input of 0.
 enum ZeroBehavior {
@@ -309,7 +313,7 @@ inline bool isShiftedUInt(uint64_t x) {
 /// isUIntN - Checks if an unsigned integer fits into the given (dynamic)
 /// bit width.
 inline bool isUIntN(unsigned N, uint64_t x) {
-  return x == (x & (~0ULL >> (64 - N)));
+  return N >= 64 || x < (UINT64_C(1)<<(N));
 }
 
 /// isIntN - Checks if an signed integer fits into the given (dynamic)
@@ -375,61 +379,86 @@ inline uint64_t ByteSwap_64(uint64_t Value) {
   return sys::SwapByteOrder_64(Value);
 }
 
-/// CountLeadingOnes_32 - this function performs the operation of
-/// counting the number of ones from the most significant bit to the first zero
-/// bit.  Ex. CountLeadingOnes_32(0xFF0FFF00) == 8.
-/// Returns 32 if the word is all ones.
-inline unsigned CountLeadingOnes_32(uint32_t Value) {
-  return countLeadingZeros(~Value);
+/// \brief Count the number of ones from the most significant bit to the first
+/// zero bit.
+///
+/// Ex. CountLeadingOnes(0xFF0FFF00) == 8.
+/// Only unsigned integral types are allowed.
+///
+/// \param ZB the behavior on an input of all ones. Only ZB_Width and
+/// ZB_Undefined are valid arguments.
+template <typename T>
+std::size_t countLeadingOnes(T Value, ZeroBehavior ZB = ZB_Width) {
+  static_assert(std::numeric_limits<T>::is_integer &&
+                    !std::numeric_limits<T>::is_signed,
+                "Only unsigned integral types are allowed.");
+  return countLeadingZeros(~Value, ZB);
 }
 
-/// CountLeadingOnes_64 - This function performs the operation
-/// of counting the number of ones from the most significant bit to the first
-/// zero bit (64 bit edition.)
-/// Returns 64 if the word is all ones.
-inline unsigned CountLeadingOnes_64(uint64_t Value) {
-  return countLeadingZeros(~Value);
+/// \brief Count the number of ones from the least significant bit to the first
+/// zero bit.
+///
+/// Ex. countTrailingOnes(0x00FF00FF) == 8.
+/// Only unsigned integral types are allowed.
+///
+/// \param ZB the behavior on an input of all ones. Only ZB_Width and
+/// ZB_Undefined are valid arguments.
+template <typename T>
+std::size_t countTrailingOnes(T Value, ZeroBehavior ZB = ZB_Width) {
+  static_assert(std::numeric_limits<T>::is_integer &&
+                    !std::numeric_limits<T>::is_signed,
+                "Only unsigned integral types are allowed.");
+  return countTrailingZeros(~Value, ZB);
 }
 
-/// CountTrailingOnes_32 - this function performs the operation of
-/// counting the number of ones from the least significant bit to the first zero
-/// bit.  Ex. CountTrailingOnes_32(0x00FF00FF) == 8.
-/// Returns 32 if the word is all ones.
-inline unsigned CountTrailingOnes_32(uint32_t Value) {
-  return countTrailingZeros(~Value);
-}
-
-/// CountTrailingOnes_64 - This function performs the operation
-/// of counting the number of ones from the least significant bit to the first
-/// zero bit (64 bit edition.)
-/// Returns 64 if the word is all ones.
-inline unsigned CountTrailingOnes_64(uint64_t Value) {
-  return countTrailingZeros(~Value);
-}
-
-/// CountPopulation_32 - this function counts the number of set bits in a value.
-/// Ex. CountPopulation(0xF000F000) = 8
-/// Returns 0 if the word is zero.
-inline unsigned CountPopulation_32(uint32_t Value) {
+namespace detail {
+template <typename T, std::size_t SizeOfT> struct PopulationCounter {
+  static unsigned count(T Value) {
+    // Generic version, forward to 32 bits.
+    static_assert(SizeOfT <= 4, "Not implemented!");
 #if __GNUC__ >= 4
-  return __builtin_popcount(Value);
+    return __builtin_popcount(Value);
 #else
-  uint32_t v = Value - ((Value >> 1) & 0x55555555);
-  v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
-  return ((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) >> 24;
+    uint32_t v = Value;
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    return ((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) >> 24;
 #endif
+  }
+};
+
+template <typename T> struct PopulationCounter<T, 8> {
+  static unsigned count(T Value) {
+#if __GNUC__ >= 4
+    return __builtin_popcountll(Value);
+#else
+    uint64_t v = Value;
+    v = v - ((v >> 1) & 0x5555555555555555ULL);
+    v = (v & 0x3333333333333333ULL) + ((v >> 2) & 0x3333333333333333ULL);
+    v = (v + (v >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+    return unsigned((uint64_t)(v * 0x0101010101010101ULL) >> 56);
+#endif
+  }
+};
+} // namespace detail
+
+/// \brief Count the number of set bits in a value.
+/// Ex. countPopulation(0xF000F000) = 8
+/// Returns 0 if the word is zero.
+template <typename T>
+inline unsigned countPopulation(T Value) {
+  static_assert(std::numeric_limits<T>::is_integer &&
+                    !std::numeric_limits<T>::is_signed,
+                "Only unsigned integral types are allowed.");
+  return detail::PopulationCounter<T, sizeof(T)>::count(Value);
 }
 
-/// CountPopulation_64 - this function counts the number of set bits in a value,
-/// (64 bit edition.)
-inline unsigned CountPopulation_64(uint64_t Value) {
-#if __GNUC__ >= 4
-  return __builtin_popcountll(Value);
+/// Log2 - This function returns the log base 2 of the specified value
+inline double Log2(double Value) {
+#if defined(__ANDROID_API__) && __ANDROID_API__ < 18
+  return __builtin_log(Value) / __builtin_log(2.0);
 #else
-  uint64_t v = Value - ((Value >> 1) & 0x5555555555555555ULL);
-  v = (v & 0x3333333333333333ULL) + ((v >> 2) & 0x3333333333333333ULL);
-  v = (v + (v >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
-  return unsigned((uint64_t)(v * 0x0101010101010101ULL) >> 56);
+  return log2(Value);
 #endif
 }
 
@@ -518,20 +547,12 @@ inline uint32_t FloatToBits(float Float) {
   return T.I;
 }
 
-/// Platform-independent wrappers for the C99 isnan() function.
-int IsNAN(float f);
-int IsNAN(double d);
-
-/// Platform-independent wrappers for the C99 isinf() function.
-int IsInf(float f);
-int IsInf(double d);
-
 /// MinAlign - A and B are either alignments or offsets.  Return the minimum
 /// alignment that may be assumed after adding the two together.
 inline uint64_t MinAlign(uint64_t A, uint64_t B) {
   // The largest power of 2 that divides both A and B.
   //
-  // Replace "-Value" by "1+~Value" in the following commented code to avoid 
+  // Replace "-Value" by "1+~Value" in the following commented code to avoid
   // MSVC warning C4146
   //    return (A | B) & -(A | B);
   return (A | B) & (1 + ~(A | B));
@@ -578,15 +599,27 @@ inline uint64_t PowerOf2Floor(uint64_t A) {
 /// Returns the next integer (mod 2**64) that is greater than or equal to
 /// \p Value and is a multiple of \p Align. \p Align must be non-zero.
 ///
+/// If non-zero \p Skew is specified, the return value will be a minimal
+/// integer that is greater than or equal to \p Value and equal to
+/// \p Align * N + \p Skew for some integer N. If \p Skew is larger than
+/// \p Align, its value is adjusted to '\p Skew mod \p Align'.
+///
 /// Examples:
 /// \code
 ///   RoundUpToAlignment(5, 8) = 8
 ///   RoundUpToAlignment(17, 8) = 24
 ///   RoundUpToAlignment(~0LL, 8) = 0
 ///   RoundUpToAlignment(321, 255) = 510
+///
+///   RoundUpToAlignment(5, 8, 7) = 7
+///   RoundUpToAlignment(17, 8, 1) = 17
+///   RoundUpToAlignment(~0LL, 8, 3) = 3
+///   RoundUpToAlignment(321, 255, 42) = 552
 /// \endcode
-inline uint64_t RoundUpToAlignment(uint64_t Value, uint64_t Align) {
-  return (Value + Align - 1) / Align * Align;
+inline uint64_t RoundUpToAlignment(uint64_t Value, uint64_t Align,
+                                   uint64_t Skew = 0) {
+  Skew %= Align;
+  return (Value + Align - 1 - Skew) / Align * Align + Skew;
 }
 
 /// Returns the offset to the next integer (mod 2**64) that is greater than
@@ -594,13 +627,6 @@ inline uint64_t RoundUpToAlignment(uint64_t Value, uint64_t Align) {
 /// non-zero.
 inline uint64_t OffsetToAlignment(uint64_t Value, uint64_t Align) {
   return RoundUpToAlignment(Value, Align) - Value;
-}
-
-/// abs64 - absolute value of a 64-bit int.  Not all environments support
-/// "abs" on whatever their name for the 64-bit int type is.  The absolute
-/// value of the largest negative number is undefined, as with "abs".
-inline int64_t abs64(int64_t x) {
-  return (x < 0) ? -x : x;
 }
 
 /// SignExtend32 - Sign extend B-bit number x to 32-bit int.

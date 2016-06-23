@@ -26,16 +26,16 @@
 
 #include "ObjCARC.h"
 #include "ARCRuntimeEntryPoints.h"
-#include "DependencyAnalysis.h"
-#include "ObjCARCAliasAnalysis.h"
-#include "ProvenanceAnalysis.h"
 #include "BlotMapVector.h"
+#include "DependencyAnalysis.h"
+#include "ProvenanceAnalysis.h"
 #include "PtrState.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/ObjCARCAliasAnalysis.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
@@ -105,8 +105,8 @@ static inline bool AreAnyUnderlyingObjectsAnAlloca(const Value *V,
     }
 
     if (const PHINode *PN = dyn_cast<const PHINode>(P)) {
-      for (unsigned i = 0, e = PN->getNumIncomingValues(); i != e; ++i)
-        Worklist.push_back(PN->getIncomingValue(i));
+      for (Value *IncValue : PN->incoming_values())
+        Worklist.push_back(IncValue);
       continue;
     }
   } while (!Worklist.empty());
@@ -218,6 +218,9 @@ namespace {
     const_top_down_ptr_iterator top_down_ptr_end() const {
       return PerPtrTopDown.end();
     }
+    bool hasTopDownPtrs() const {
+      return !PerPtrTopDown.empty();
+    }
 
     typedef decltype(PerPtrBottomUp)::iterator bottom_up_ptr_iterator;
     typedef decltype(
@@ -232,6 +235,9 @@ namespace {
     }
     const_bottom_up_ptr_iterator bottom_up_ptr_end() const {
       return PerPtrBottomUp.end();
+    }
+    bool hasBottomUpPtrs() const {
+      return !PerPtrBottomUp.empty();
     }
 
     /// Mark this block as being an entry block, which has one path from the
@@ -307,6 +313,11 @@ namespace {
   };
 
   const unsigned BBState::OverflowOccurredValue = 0xffffffff;
+}
+
+namespace llvm {
+raw_ostream &operator<<(raw_ostream &OS,
+                        BBState &BBState) LLVM_ATTRIBUTE_UNUSED;
 }
 
 void BBState::InitFromPred(const BBState &Other) {
@@ -406,6 +417,51 @@ void BBState::MergeSucc(const BBState &Other) {
       MI->second.Merge(BottomUpPtrState(), /*TopDown=*/false);
 }
 
+raw_ostream &llvm::operator<<(raw_ostream &OS, BBState &BBInfo) {
+  // Dump the pointers we are tracking.
+  OS << "    TopDown State:\n";
+  if (!BBInfo.hasTopDownPtrs()) {
+    DEBUG(llvm::dbgs() << "        NONE!\n");
+  } else {
+    for (auto I = BBInfo.top_down_ptr_begin(), E = BBInfo.top_down_ptr_end();
+         I != E; ++I) {
+      const PtrState &P = I->second;
+      OS << "        Ptr: " << *I->first
+         << "\n            KnownSafe:        " << (P.IsKnownSafe()?"true":"false")
+         << "\n            ImpreciseRelease: "
+           << (P.IsTrackingImpreciseReleases()?"true":"false") << "\n"
+         << "            HasCFGHazards:    "
+           << (P.IsCFGHazardAfflicted()?"true":"false") << "\n"
+         << "            KnownPositive:    "
+           << (P.HasKnownPositiveRefCount()?"true":"false") << "\n"
+         << "            Seq:              "
+         << P.GetSeq() << "\n";
+    }
+  }
+
+  OS << "    BottomUp State:\n";
+  if (!BBInfo.hasBottomUpPtrs()) {
+    DEBUG(llvm::dbgs() << "        NONE!\n");
+  } else {
+    for (auto I = BBInfo.bottom_up_ptr_begin(), E = BBInfo.bottom_up_ptr_end();
+         I != E; ++I) {
+      const PtrState &P = I->second;
+      OS << "        Ptr: " << *I->first
+         << "\n            KnownSafe:        " << (P.IsKnownSafe()?"true":"false")
+         << "\n            ImpreciseRelease: "
+           << (P.IsTrackingImpreciseReleases()?"true":"false") << "\n"
+         << "            HasCFGHazards:    "
+           << (P.IsCFGHazardAfflicted()?"true":"false") << "\n"
+         << "            KnownPositive:    "
+           << (P.HasKnownPositiveRefCount()?"true":"false") << "\n"
+         << "            Seq:              "
+         << P.GetSeq() << "\n";
+    }
+  }
+
+  return OS;
+}
+
 namespace {
 
   /// \brief The main ARC optimization pass.
@@ -426,7 +482,7 @@ namespace {
     /// A flag indicating whether this optimization pass should run.
     bool Run;
 
-    /// Flags which determine whether each of the interesting runtine functions
+    /// Flags which determine whether each of the interesting runtime functions
     /// is in fact used in the current function.
     unsigned UsedInThisFunction;
 
@@ -500,7 +556,7 @@ namespace {
 char ObjCARCOpt::ID = 0;
 INITIALIZE_PASS_BEGIN(ObjCARCOpt,
                       "objc-arc", "ObjC ARC optimization", false, false)
-INITIALIZE_PASS_DEPENDENCY(ObjCARCAliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(ObjCARCAAWrapperPass)
 INITIALIZE_PASS_END(ObjCARCOpt,
                     "objc-arc", "ObjC ARC optimization", false, false)
 
@@ -509,8 +565,8 @@ Pass *llvm::createObjCARCOptPass() {
 }
 
 void ObjCARCOpt::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<ObjCARCAliasAnalysis>();
-  AU.addRequired<AliasAnalysis>();
+  AU.addRequired<ObjCARCAAWrapperPass>();
+  AU.addRequired<AAResultsWrapperPass>();
   // ARC optimization doesn't currently split critical edges.
   AU.setPreservesCFG();
 }
@@ -525,16 +581,18 @@ ObjCARCOpt::OptimizeRetainRVCall(Function &F, Instruction *RetainRV) {
   ImmutableCallSite CS(Arg);
   if (const Instruction *Call = CS.getInstruction()) {
     if (Call->getParent() == RetainRV->getParent()) {
-      BasicBlock::const_iterator I = Call;
+      BasicBlock::const_iterator I(Call);
       ++I;
-      while (IsNoopInstruction(I)) ++I;
+      while (IsNoopInstruction(&*I))
+        ++I;
       if (&*I == RetainRV)
         return false;
     } else if (const InvokeInst *II = dyn_cast<InvokeInst>(Call)) {
       BasicBlock *RetainRVParent = RetainRV->getParent();
       if (II->getNormalDest() == RetainRVParent) {
         BasicBlock::const_iterator I = RetainRVParent->begin();
-        while (IsNoopInstruction(I)) ++I;
+        while (IsNoopInstruction(&*I))
+          ++I;
         if (&*I == RetainRV)
           return false;
       }
@@ -543,18 +601,21 @@ ObjCARCOpt::OptimizeRetainRVCall(Function &F, Instruction *RetainRV) {
 
   // Check for being preceded by an objc_autoreleaseReturnValue on the same
   // pointer. In this case, we can delete the pair.
-  BasicBlock::iterator I = RetainRV, Begin = RetainRV->getParent()->begin();
+  BasicBlock::iterator I = RetainRV->getIterator(),
+                       Begin = RetainRV->getParent()->begin();
   if (I != Begin) {
-    do --I; while (I != Begin && IsNoopInstruction(I));
-    if (GetBasicARCInstKind(I) == ARCInstKind::AutoreleaseRV &&
-        GetArgRCIdentityRoot(I) == Arg) {
+    do
+      --I;
+    while (I != Begin && IsNoopInstruction(&*I));
+    if (GetBasicARCInstKind(&*I) == ARCInstKind::AutoreleaseRV &&
+        GetArgRCIdentityRoot(&*I) == Arg) {
       Changed = true;
       ++NumPeeps;
 
       DEBUG(dbgs() << "Erasing autoreleaseRV,retainRV pair: " << *I << "\n"
                    << "Erasing " << *RetainRV << "\n");
 
-      EraseInstruction(I);
+      EraseInstruction(&*I);
       EraseInstruction(RetainRV);
       return true;
     }
@@ -713,7 +774,7 @@ void ObjCARCOpt::OptimizeIndividualCalls(Function &F) {
         Constant *Decl = EP.get(ARCRuntimeEntryPointKind::Release);
         CallInst *NewCall = CallInst::Create(Decl, Call->getArgOperand(0), "",
                                              Call);
-        NewCall->setMetadata(MDKindCache.ImpreciseReleaseMDKind,
+        NewCall->setMetadata(MDKindCache.get(ARCMDKindID::ImpreciseRelease),
                              MDNode::get(C, None));
 
         DEBUG(dbgs() << "Replacing autorelease{,RV}(x) with objc_release(x) "
@@ -1043,7 +1104,7 @@ bool ObjCARCOpt::VisitInstructionBottomUp(
   ARCInstKind Class = GetARCInstKind(Inst);
   const Value *Arg = nullptr;
 
-  DEBUG(dbgs() << "Class: " << Class << "\n");
+  DEBUG(dbgs() << "        Class: " << Class << "\n");
 
   switch (Class) {
   case ARCInstKind::Release: {
@@ -1065,8 +1126,10 @@ bool ObjCARCOpt::VisitInstructionBottomUp(
     if (S.MatchWithRetain()) {
       // Don't do retain+release tracking for ARCInstKind::RetainRV, because
       // it's better to let it remain as the first instruction after a call.
-      if (Class != ARCInstKind::RetainRV)
+      if (Class != ARCInstKind::RetainRV) {
+        DEBUG(llvm::dbgs() << "        Matching with: " << *Inst << "\n");
         Retains[Inst] = S.GetRRInfo();
+      }
       S.ClearSequenceProgress();
     }
     // A retain moving bottom up can be a use.
@@ -1153,15 +1216,18 @@ bool ObjCARCOpt::VisitBottomUp(BasicBlock *BB,
     }
   }
 
+  DEBUG(llvm::dbgs() << "Before:\n" << BBStates[BB] << "\n"
+                     << "Performing Dataflow:\n");
+
   // Visit all the instructions, bottom-up.
   for (BasicBlock::iterator I = BB->end(), E = BB->begin(); I != E; --I) {
-    Instruction *Inst = std::prev(I);
+    Instruction *Inst = &*std::prev(I);
 
     // Invoke instructions are visited as part of their successors (below).
     if (isa<InvokeInst>(Inst))
       continue;
 
-    DEBUG(dbgs() << "Visiting " << *Inst << "\n");
+    DEBUG(dbgs() << "    Visiting " << *Inst << "\n");
 
     NestingDetected |= VisitInstructionBottomUp(Inst, BB, Retains, MyStates);
   }
@@ -1176,6 +1242,8 @@ bool ObjCARCOpt::VisitBottomUp(BasicBlock *BB,
       NestingDetected |= VisitInstructionBottomUp(II, BB, Retains, MyStates);
   }
 
+  DEBUG(llvm::dbgs() << "\nFinal State:\n" << BBStates[BB] << "\n");
+
   return NestingDetected;
 }
 
@@ -1186,6 +1254,8 @@ ObjCARCOpt::VisitInstructionTopDown(Instruction *Inst,
   bool NestingDetected = false;
   ARCInstKind Class = GetARCInstKind(Inst);
   const Value *Arg = nullptr;
+
+  DEBUG(llvm::dbgs() << "        Class: " << Class << "\n");
 
   switch (Class) {
   case ARCInstKind::RetainBlock:
@@ -1199,7 +1269,7 @@ ObjCARCOpt::VisitInstructionTopDown(Instruction *Inst,
     Arg = GetArgRCIdentityRoot(Inst);
     TopDownPtrState &S = MyStates.getPtrTopDownState(Arg);
     NestingDetected |= S.InitTopDown(Class, Inst);
-    // A retain can be a potential use; procede to the generic checking
+    // A retain can be a potential use; proceed to the generic checking
     // code below.
     break;
   }
@@ -1211,6 +1281,7 @@ ObjCARCOpt::VisitInstructionTopDown(Instruction *Inst,
     if (S.MatchWithRelease(MDKindCache, Inst)) {
       // If we succeed, copy S's RRInfo into the Release -> {Retain Set
       // Map}. Then we clear S.
+      DEBUG(llvm::dbgs() << "        Matching with: " << *Inst << "\n");
       Releases[Inst] = S.GetRRInfo();
       S.ClearSequenceProgress();
     }
@@ -1272,16 +1343,20 @@ ObjCARCOpt::VisitTopDown(BasicBlock *BB,
     }
   }
 
+  DEBUG(llvm::dbgs() << "Before:\n" << BBStates[BB]  << "\n"
+                     << "Performing Dataflow:\n");
+
   // Visit all the instructions, top-down.
-  for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I) {
-    Instruction *Inst = I;
+  for (Instruction &Inst : *BB) {
+    DEBUG(dbgs() << "    Visiting " << Inst << "\n");
 
-    DEBUG(dbgs() << "Visiting " << *Inst << "\n");
-
-    NestingDetected |= VisitInstructionTopDown(Inst, Releases, MyStates);
+    NestingDetected |= VisitInstructionTopDown(&Inst, Releases, MyStates);
   }
 
+  DEBUG(llvm::dbgs() << "\nState Before Checking for CFG Hazards:\n"
+                     << BBStates[BB] << "\n\n");
   CheckForCFGHazards(BB, BBStates, MyStates);
+  DEBUG(llvm::dbgs() << "Final State:\n" << BBStates[BB] << "\n");
   return NestingDetected;
 }
 
@@ -1341,16 +1416,15 @@ ComputePostOrders(Function &F,
   // Functions may have many exits, and there also blocks which we treat
   // as exits due to ignored edges.
   SmallVector<std::pair<BasicBlock *, BBState::edge_iterator>, 16> PredStack;
-  for (Function::iterator I = F.begin(), E = F.end(); I != E; ++I) {
-    BasicBlock *ExitBB = I;
-    BBState &MyStates = BBStates[ExitBB];
+  for (BasicBlock &ExitBB : F) {
+    BBState &MyStates = BBStates[&ExitBB];
     if (!MyStates.isExit())
       continue;
 
     MyStates.SetAsExit();
 
-    PredStack.push_back(std::make_pair(ExitBB, MyStates.pred_begin()));
-    Visited.insert(ExitBB);
+    PredStack.push_back(std::make_pair(&ExitBB, MyStates.pred_begin()));
+    Visited.insert(&ExitBB);
     while (!PredStack.empty()) {
     reverse_dfs_next_succ:
       BBState::edge_iterator PE = BBStates[PredStack.back().first].pred_end();
@@ -1380,7 +1454,8 @@ bool ObjCARCOpt::Visit(Function &F,
   SmallVector<BasicBlock *, 16> PostOrder;
   SmallVector<BasicBlock *, 16> ReverseCFGPostOrder;
   ComputePostOrders(F, PostOrder, ReverseCFGPostOrder,
-                    MDKindCache.NoObjCARCExceptionsMDKind, BBStates);
+                    MDKindCache.get(ARCMDKindID::NoObjCARCExceptions),
+                    BBStates);
 
   // Use reverse-postorder on the reverse CFG for bottom-up.
   bool BottomUpNestingDetected = false;
@@ -1430,7 +1505,7 @@ void ObjCARCOpt::MoveCalls(Value *Arg, RRInfo &RetainsToMove,
     CallInst *Call = CallInst::Create(Decl, MyArg, "", InsertPt);
     // Attach a clang.imprecise_release metadata tag, if appropriate.
     if (MDNode *M = ReleasesToMove.ReleaseMetadata)
-      Call->setMetadata(MDKindCache.ImpreciseReleaseMDKind, M);
+      Call->setMetadata(MDKindCache.get(ARCMDKindID::ImpreciseRelease), M);
     Call->setDoesNotThrow();
     if (ReleasesToMove.IsTailCallRelease)
       Call->setTailCall();
@@ -1757,7 +1832,7 @@ void ObjCARCOpt::OptimizeWeakCalls(Function &F) {
     // analysis too, but that would want caching. A better approach would be to
     // use the technique that EarlyCSE uses.
     inst_iterator Current = std::prev(I);
-    BasicBlock *CurrentBB = Current.getBasicBlockIterator();
+    BasicBlock *CurrentBB = &*Current.getBasicBlockIterator();
     for (BasicBlock::iterator B = CurrentBB->begin(),
                               J = Current.getInstructionIterator();
          J != B; --J) {
@@ -1773,7 +1848,7 @@ void ObjCARCOpt::OptimizeWeakCalls(Function &F) {
         Value *Arg = Call->getArgOperand(0);
         Value *EarlierArg = EarlierCall->getArgOperand(0);
         switch (PA.getAA()->alias(Arg, EarlierArg)) {
-        case AliasAnalysis::MustAlias:
+        case MustAlias:
           Changed = true;
           // If the load has a builtin retain, insert a plain retain for it.
           if (Class == ARCInstKind::LoadWeakRetained) {
@@ -1785,10 +1860,10 @@ void ObjCARCOpt::OptimizeWeakCalls(Function &F) {
           Call->replaceAllUsesWith(EarlierCall);
           Call->eraseFromParent();
           goto clobbered;
-        case AliasAnalysis::MayAlias:
-        case AliasAnalysis::PartialAlias:
+        case MayAlias:
+        case PartialAlias:
           goto clobbered;
-        case AliasAnalysis::NoAlias:
+        case NoAlias:
           break;
         }
         break;
@@ -1802,7 +1877,7 @@ void ObjCARCOpt::OptimizeWeakCalls(Function &F) {
         Value *Arg = Call->getArgOperand(0);
         Value *EarlierArg = EarlierCall->getArgOperand(0);
         switch (PA.getAA()->alias(Arg, EarlierArg)) {
-        case AliasAnalysis::MustAlias:
+        case MustAlias:
           Changed = true;
           // If the load has a builtin retain, insert a plain retain for it.
           if (Class == ARCInstKind::LoadWeakRetained) {
@@ -1814,10 +1889,10 @@ void ObjCARCOpt::OptimizeWeakCalls(Function &F) {
           Call->replaceAllUsesWith(EarlierCall->getArgOperand(1));
           Call->eraseFromParent();
           goto clobbered;
-        case AliasAnalysis::MayAlias:
-        case AliasAnalysis::PartialAlias:
+        case MayAlias:
+        case PartialAlias:
           goto clobbered;
-        case AliasAnalysis::NoAlias:
+        case NoAlias:
           break;
         }
         break;
@@ -2008,9 +2083,8 @@ void ObjCARCOpt::OptimizeReturns(Function &F) {
 
   SmallPtrSet<Instruction *, 4> DependingInstructions;
   SmallPtrSet<const BasicBlock *, 4> Visited;
-  for (Function::iterator FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
-    BasicBlock *BB = FI;
-    ReturnInst *Ret = dyn_cast<ReturnInst>(&BB->back());
+  for (BasicBlock &BB: F) {
+    ReturnInst *Ret = dyn_cast<ReturnInst>(&BB.back());
 
     DEBUG(dbgs() << "Visiting: " << *Ret << "\n");
 
@@ -2022,19 +2096,16 @@ void ObjCARCOpt::OptimizeReturns(Function &F) {
     // Look for an ``autorelease'' instruction that is a predecessor of Ret and
     // dependent on Arg such that there are no instructions dependent on Arg
     // that need a positive ref count in between the autorelease and Ret.
-    CallInst *Autorelease =
-      FindPredecessorAutoreleaseWithSafePath(Arg, BB, Ret,
-                                             DependingInstructions, Visited,
-                                             PA);
+    CallInst *Autorelease = FindPredecessorAutoreleaseWithSafePath(
+        Arg, &BB, Ret, DependingInstructions, Visited, PA);
     DependingInstructions.clear();
     Visited.clear();
 
     if (!Autorelease)
       continue;
 
-    CallInst *Retain =
-      FindPredecessorRetainWithSafePath(Arg, BB, Autorelease,
-                                        DependingInstructions, Visited, PA);
+    CallInst *Retain = FindPredecessorRetainWithSafePath(
+        Arg, &BB, Autorelease, DependingInstructions, Visited, PA);
     DependingInstructions.clear();
     Visited.clear();
 
@@ -2095,20 +2166,13 @@ bool ObjCARCOpt::doInitialization(Module &M) {
   if (!Run)
     return false;
 
-  // Identify the imprecise release metadata kind.
-  MDKindCache.ImpreciseReleaseMDKind =
-      M.getContext().getMDKindID("clang.imprecise_release");
-  MDKindCache.CopyOnEscapeMDKind =
-      M.getContext().getMDKindID("clang.arc.copy_on_escape");
-  MDKindCache.NoObjCARCExceptionsMDKind =
-      M.getContext().getMDKindID("clang.arc.no_objc_arc_exceptions");
-
   // Intuitively, objc_retain and others are nocapture, however in practice
   // they are not, because they return their argument value. And objc_release
   // calls finalizers which can have arbitrary side effects.
+  MDKindCache.init(&M);
 
   // Initialize our runtime entry point cache.
-  EP.Initialize(&M);
+  EP.init(&M);
 
   return false;
 }
@@ -2126,7 +2190,7 @@ bool ObjCARCOpt::runOnFunction(Function &F) {
   DEBUG(dbgs() << "<<< ObjCARCOpt: Visiting Function: " << F.getName() << " >>>"
         "\n");
 
-  PA.setAA(&getAnalysis<AliasAnalysis>());
+  PA.setAA(&getAnalysis<AAResultsWrapperPass>().getAAResults());
 
 #ifndef NDEBUG
   if (AreStatisticsEnabled()) {

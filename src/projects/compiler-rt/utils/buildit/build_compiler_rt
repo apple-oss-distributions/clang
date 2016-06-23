@@ -1,0 +1,167 @@
+#!/bin/sh
+# LLVM LOCAL file B&I
+
+set -x
+
+# Build LLVM the "Apple way".
+# Parameters:
+
+HOSTS_LIST=`echo $RC_ARCHS | sed 's/[[:space:]]/;/g'`
+
+# The first parameter is a yes/no that indicates whether assertions should be
+# enabled in the LLVM libs/tools.
+LLVM_ASSERTIONS="$1"
+
+# The second parameter is a yes/no that indicates whether this is an optimized
+# build.
+LLVM_OPTIMIZED="$2"
+
+SDKROOT_PATH=`xcodebuild -version -sdk $SDKROOT Path`
+
+if [ "$LLVM_OPTIMIZED" = "1" ]; then
+    BUILD_TYPE=RelWithDebInfo
+else
+    BUILD_TYPE=Debug
+fi
+
+if [ "$LLVM_INCLUDE_TESTS" = "yes" ]; then
+    INCLUDE_TESTS=On
+else
+    INCLUDE_TESTS=Off
+fi
+
+if [ -d $SRCROOT/src ]; then
+  LLVM_SRCROOT=$SRCROOT/src
+else
+  LLVM_SRCROOT=$SRCROOT
+fi
+
+VERSION=`echo $RC_ProjectSourceVersion | sed 's/\..*//'`
+MAJOR_VERISON=${VERSION:0:1}
+MINOR_VERISON=${VERSION:2:3}
+MAJ_MIN_VER=${MAJOR_VERISON}.${MINOR_VERISON}
+FULL_VER=${MAJOR_VERISON}.${MINOR_VERISON}.0
+
+SUBMISSION_MAJOR=`echo $RC_ProjectSourceVersion | awk -F'.' '{print $1}'`
+SUBMISSION_MINOR=`echo $RC_ProjectSourceVersion | awk -F'.' '{print $2}'`
+SUBMISSION_PATCH=`echo $RC_ProjectSourceVersion | awk -F'.' '{print $3}'`
+SUB_MAJ_MIN_VER=${SUBMISSION_MAJOR}.${SUBMISSION_MINOR}
+
+# Figure out how many make processes to run.
+SYSCTL=`sysctl -n hw.activecpu`
+# sysctl -n hw.* does not work when invoked via B&I chroot /BuildRoot.
+# Builders can default to 2, since even if they are single processor,
+# nothing else is running on the machine.
+if [ -z "$SYSCTL" ]; then
+    SYSCTL=2
+fi
+
+CMAKE=`xcrun -find cmake`
+NINJA=`xcrun -find ninja`
+CC=`xcrun -find clang`
+CXX=`xcrun -find clang++`
+PREFIX=$DSTROOT
+CMAKE_OPTS="\
+  -DLLVM_ENABLE_ASSERTIONS:BOOL=$LLVM_ASSERTIONS \
+  -DCMAKE_INSTALL_PREFIX=$PREFIX \
+  -DCMAKE_MAKE_PROGRAM=$NINJA \
+  -DCMAKE_CXX_COMPILER=$CXX \
+  -DCMAKE_C_COMPILER=$CC"
+
+################################################################################
+
+# Build the LLVM tree native.
+mkdir -p $OBJROOT/obj-llvm-native || exit 1
+cd $OBJROOT/obj-llvm-native || exit 1
+
+# First build the native tblgen's
+OLD_SDKROOT=$SDKROOT
+OLD_TOOLCHAIN_INSTALL_DIR=$TOOLCHAIN_INSTALL_DIR
+OLD_TOOLCHAINS=$TOOLCHAINS
+OLD_IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET
+OLD_TVOS_DEPLOYMENT_TARGET=$TVOS_DEPLOYMENT_TARGET
+OLD_WATCHOS_DEPLOYMENT_TARGET=$WATCHOS_DEPLOYMENT_TARGET
+
+# If we're building for iOS, we need to set up a native host environment
+if [ "$RC_PURPLE" = "YES" ]; then
+  IPHONEOS_DEPLOYMENT_TARGET=
+  TVOS_DEPLOYMENT_TARGET=
+  WATCHOS_DEPLOYMENT_TARGET=
+  SDKROOT=macosx
+  TOOLCHAIN_INSTALL_DIR=
+  TOOLCHAINS=
+fi
+
+$CMAKE -G Ninja \
+    $CMAKE_OPTS \
+    -DLLVM_TARGETS_TO_BUILD="X86;ARM;AArch64" \
+    -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_INCLUDE_EXAMPLES=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    "$LLVM_SRCROOT" \
+    || exit 1
+
+SDKROOT=$SDKROOT TOOLCHAIN_INSTALL_DIR= TOOLCHAINS= IPHONEOS_DEPLOYMENT_TARGET= TVOS_DEPLOYMENT_TARGET= WATCHOS_DEPLOYMENT_TARGET= $NINJA -v llvm-config
+if [ $? != 0 ] ; then
+    echo "error: Clang 'make native tablegen exes' failed!"
+    exit 1
+fi
+
+SDKROOT=$OLD_SDKROOT
+IPHONEOS_DEPLOYMENT_TARGET=$OLD_IPHONEOS_DEPLOYMENT_TARGET
+TVOS_DEPLOYMENT_TARGET=$OLD_TVOS_DEPLOYMENT_TARGET
+WATCHOS_DEPLOYMENT_TARGET=$OLD_WATCHOS_DEPLOYMENT_TARGET
+TOOLCHAIN_INSTALL_DIR=$OLD_TOOLCHAIN_INSTALL_DIR
+TOOLCHAINS=$OLD_TOOLCHAINS
+################################################################################
+
+# Build the runtime
+mkdir -p $OBJROOT/obj-rt || exit 1
+cd $OBJROOT/obj-rt|| exit 1
+
+TOOLCHAIN_USR=$DSTROOT/$TOOLCHAIN_INSTALL_DIR/usr
+
+$CMAKE -G 'Ninja' -C $LLVM_SRCROOT/projects/compiler-rt/cmake/caches/Apple.cmake \
+    $CMAKE_OPTS \
+    -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+    -DLLVM_CONFIG_PATH=$OBJROOT/obj-llvm-native/bin/llvm-config \
+    -DCMAKE_INSTALL_PREFIX=$TOOLCHAIN_USR/lib/clang/$FULL_VER/ \
+    -DCOMPILER_RT_BUILD_BUILTINS=On \
+    "$LLVM_SRCROOT/projects/compiler-rt" \
+      || exit 1
+
+$NINJA -v install
+if ! test $? == 0 ; then
+    echo "error: LLVM 'ninja install (compiler-rt)' failed!"
+    exit 1
+fi
+
+# other fixup
+rm $TOOLCHAIN_USR/lib/clang/$FULL_VER/asan_blacklist.txt
+rm $TOOLCHAIN_USR/lib/clang/$FULL_VER/cfi_blacklist.txt
+COMBINE=$LLVM_SRCROOT/tools/clang/utils/buildit/combine.sh
+$COMBINE $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.profile_ios.a $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.profile_iossim.a
+$COMBINE $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.profile_tvos.a $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.profile_tvossim.a
+$COMBINE $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.profile_watchos.a $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.profile_watchossim.a
+rm -rf $TOOLCHAIN_USR/lib/clang/$FULL_VER/lib/darwin/libclang_rt.safestack_*
+
+#install licenses and manpages
+mkdir -p $TOOLCHAIN_USR/local/OpenSourceLicenses/
+install -m 0444 $LLVM_SRCROOT/projects/compiler-rt/LICENSE.TXT $TOOLCHAIN_USR/local/OpenSourceLicenses/compiler-rt.txt
+
+cd $SYMROOT || exit 1
+
+# Clean out SYM_DIR in case -noclean was passed to buildit.
+rm -rf * || exit 1
+
+# Save .dSYM files
+cd $PREFIX || exit 1
+find $OBJROOT/obj-rt/ -name \*.dSYM -exec cp -r {} $SYMROOT/ \; || exit 1
+
+chgrp -h -R wheel $DSTROOT
+chgrp -R wheel $DSTROOT
+
+################################################################################
+# w00t! Done!
+
+exit 0

@@ -66,6 +66,7 @@ static cl::opt<std::string>
 FormatStyleOpt("style", cl::desc(format::StyleOptionHelpDescription),
                cl::init("LLVM"), cl::cat(FormattingCategory));
 
+namespace {
 // Helper object to remove the TUReplacement files (triggered by
 // "remove-change-desc-files" command line option) when exiting current scope.
 class ScopedFileRemover {
@@ -82,8 +83,9 @@ private:
   const TUReplacementFiles &TURFiles;
   clang::DiagnosticsEngine &Diag;
 };
+} // namespace
 
-void printVersion() {
+static void printVersion() {
   outs() << "clang-apply-replacements version " CLANG_VERSION_STRING << "\n";
 }
 
@@ -98,7 +100,8 @@ void printVersion() {
 /// \param[out] Result Contents of the file after applying replacements if
 /// replacements were provided.
 ///
-/// \returns \li true if all replacements were applied successfully.
+/// \returns \parblock
+///          \li true if all replacements were applied successfully.
 ///          \li false if at least one replacement failed to apply.
 static bool
 getRewrittenData(const std::vector<tooling::Replacement> &Replacements,
@@ -115,7 +118,7 @@ getRewrittenData(const std::vector<tooling::Replacement> &Replacements,
   const clang::FileEntry *Entry = Files.getFile(FileName);
   assert(Entry && "Expected an existing file");
   FileID ID = SM.translateFile(Entry);
-  assert(!ID.isInvalid() && "Expected a valid FileID");
+  assert(ID.isValid() && "Expected a valid FileID");
   const RewriteBuffer *Buffer = Rewrites.getRewriteBufferFor(ID);
   Result = std::string(Buffer->begin(), Buffer->end());
 
@@ -132,11 +135,12 @@ getRewrittenData(const std::vector<tooling::Replacement> &Replacements,
 /// replacements were provided.
 /// \param[in] Diagnostics For diagnostic output.
 ///
-/// \returns \li true if all replacements applied successfully.
+/// \returns \parblock
+///          \li true if all replacements applied successfully.
 ///          \li false if at least one replacement failed to apply.
-bool applyReplacements(const std::vector<tooling::Replacement> &Replacements,
-                       std::string &Result,
-                       DiagnosticsEngine &Diagnostics) {
+static bool
+applyReplacements(const std::vector<tooling::Replacement> &Replacements,
+                  std::string &Result, DiagnosticsEngine &Diagnostics) {
   FileManager Files((FileSystemOptions()));
   SourceManager SM(Diagnostics, Files);
   Rewriter Rewrites(SM, LangOptions());
@@ -158,14 +162,15 @@ bool applyReplacements(const std::vector<tooling::Replacement> &Replacements,
 /// \param[in] FormatStyle Style to apply.
 /// \param[in] Diagnostics For diagnostic output.
 ///
-/// \returns \li true if reformatting replacements were all successfully
+/// \returns \parblock
+///          \li true if reformatting replacements were all successfully
 ///          applied.
 ///          \li false if at least one reformatting replacement failed to apply.
-bool applyFormatting(const std::vector<tooling::Replacement> &Replacements,
-                     const StringRef FileData,
-                     std::string &FormattedFileData,
-                     const format::FormatStyle &FormatStyle,
-                     DiagnosticsEngine &Diagnostics) {
+static bool
+applyFormatting(const std::vector<tooling::Replacement> &Replacements,
+                const StringRef FileData, std::string &FormattedFileData,
+                const format::FormatStyle &FormatStyle,
+                DiagnosticsEngine &Diagnostics) {
   assert(!Replacements.empty() && "Need at least one replacement");
 
   RangeVector Ranges = calculateChangedRanges(Replacements);

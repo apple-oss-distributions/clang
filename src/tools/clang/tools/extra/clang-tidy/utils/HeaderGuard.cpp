@@ -29,7 +29,7 @@ static std::string cleanPath(StringRef Path) {
       // Drop the last component.
       NewPath.resize(llvm::sys::path::parent_path(NewPath).size());
     } else {
-      if (!NewPath.empty())
+      if (!NewPath.empty() && !NewPath.endswith("/"))
         NewPath += '/';
       NewPath += *I;
     }
@@ -58,7 +58,7 @@ public:
   }
 
   void Ifndef(SourceLocation Loc, const Token &MacroNameTok,
-              const MacroDirective *MD) override {
+              const MacroDefinition &MD) override {
     if (MD)
       return;
 
@@ -71,7 +71,7 @@ public:
                     const MacroDirective *MD) override {
     // Record all defined macros. We store the whole token to get info on the
     // name later.
-    Macros.emplace_back(MacroNameTok, MD);
+    Macros.emplace_back(MacroNameTok, MD->getMacroInfo());
   }
 
   void Endif(SourceLocation Loc, SourceLocation IfLoc) override {
@@ -84,7 +84,7 @@ public:
     SourceManager &SM = PP->getSourceManager();
 
     for (const auto &MacroEntry : Macros) {
-      const MacroInfo *MI = MacroEntry.second->getMacroInfo();
+      const MacroInfo *MI = MacroEntry.second;
 
       // We use clang's header guard detection. This has the advantage of also
       // emitting a warning for cases where a pseudo header guard is found but
@@ -124,15 +124,12 @@ public:
       // changed the header guard or not.
       if (!FixIts.empty()) {
         if (CurHeaderGuard != NewGuard) {
-          auto D = Check->diag(Ifndef,
-                               "header guard does not follow preferred style");
-          for (FixItHint &Fix : FixIts)
-            D.AddFixItHint(std::move(Fix));
+          Check->diag(Ifndef, "header guard does not follow preferred style")
+              << FixIts;
         } else {
-          auto D = Check->diag(EndIf, "#endif for a header guard should "
-                                      "reference the guard macro in a comment");
-          for (FixItHint &Fix : FixIts)
-            D.AddFixItHint(std::move(Fix));
+          Check->diag(EndIf, "#endif for a header guard should reference the "
+                             "guard macro in a comment")
+              << FixIts;
         }
       }
     }
@@ -271,7 +268,7 @@ public:
   }
 
 private:
-  std::vector<std::pair<Token, const MacroDirective *>> Macros;
+  std::vector<std::pair<Token, const MacroInfo *>> Macros;
   llvm::StringMap<const FileEntry *> Files;
   std::map<const IdentifierInfo *, std::pair<SourceLocation, SourceLocation>>
       Ifndefs;

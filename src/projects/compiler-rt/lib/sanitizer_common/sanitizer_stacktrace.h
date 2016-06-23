@@ -19,9 +19,7 @@ namespace __sanitizer {
 
 static const u32 kStackTraceMax = 256;
 
-#if SANITIZER_LINUX && (defined(__aarch64__) || defined(__powerpc__) || \
-                        defined(__powerpc64__) || defined(__sparc__) || \
-                        defined(__mips__))
+#if SANITIZER_LINUX &&  (defined(__sparc__) || defined(__mips__))
 # define SANITIZER_CAN_FAST_UNWIND 0
 #elif SANITIZER_WINDOWS
 # define SANITIZER_CAN_FAST_UNWIND 0
@@ -102,11 +100,9 @@ struct BufferedStackTrace : public StackTrace {
  private:
   void FastUnwindStack(uptr pc, uptr bp, uptr stack_top, uptr stack_bottom,
                        u32 max_depth);
-#if !defined(__APPLE__)
   void SlowUnwindStack(uptr pc, u32 max_depth);
   void SlowUnwindStackWithContext(uptr pc, void *context,
                                   u32 max_depth);
-#endif
   void PopStackFrames(uptr count);
   uptr LocatePcInTrace(uptr pc);
 

@@ -164,7 +164,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
   // If we haven't pruned the API notes cache yet during this execution, do
   // so now.
   if (!PrunedCache) {
-    pruneAPINotesCache(FileMgr.getFileSystemOptions().APINotesCachePath);
+    pruneAPINotesCache(FileMgr.getFileSystemOpts().APINotesCachePath);
     PrunedCache = true;
   }
 
@@ -175,7 +175,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
 
   // Determine the file name for the cached binary form.
   SmallString<128> CompiledFileName;
-  CompiledFileName += FileMgr.getFileSystemOptions().APINotesCachePath;
+  CompiledFileName += FileMgr.getFileSystemOpts().APINotesCachePath;
   assert(!CompiledFileName.empty() && "No API notes cache path provided?");
   llvm::sys::path::append(CompiledFileName,
     (llvm::Twine(llvm::sys::path::stem(APINotesFileName)) + "-"
@@ -235,7 +235,6 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
       Readers[HeaderDir] = nullptr;
       return true;
     }
-    OS.flush();
 
     // Make a copy of the compiled form into the buffer.
     Buffer = llvm::MemoryBuffer::getMemBufferCopy(
@@ -254,7 +253,7 @@ bool APINotesManager::loadAPINotes(const DirectoryEntry *HeaderDir,
 
   int TemporaryFD;
   llvm::sys::fs::create_directories(
-    FileMgr.getFileSystemOptions().APINotesCachePath);
+    FileMgr.getFileSystemOpts().APINotesCachePath);
   if (!llvm::sys::fs::createUniqueFile(TemporaryBinaryFileName.str(),
                                        TemporaryFD, TemporaryBinaryFileName)) {
     // Write the contents of the buffer.

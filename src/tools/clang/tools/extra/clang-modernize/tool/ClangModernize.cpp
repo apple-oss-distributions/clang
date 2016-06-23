@@ -23,7 +23,6 @@
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Version.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Format/Format.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -37,7 +36,7 @@ namespace cl = llvm::cl;
 using namespace clang;
 using namespace clang::tooling;
 
-TransformOptions GlobalOptions;
+static TransformOptions GlobalOptions;
 
 // All options must belong to locally defined categories for them to get shown
 // by -help. We explicitly hide everything else (except -help and -version).
@@ -46,7 +45,7 @@ static cl::OptionCategory FormattingCategory("Formatting Options");
 static cl::OptionCategory IncludeExcludeCategory("Inclusion/Exclusion Options");
 static cl::OptionCategory SerializeCategory("Serialization Options");
 
-const cl::OptionCategory *VisibleCategories[] = {
+static const cl::OptionCategory *const VisibleCategories[] = {
   &GeneralCategory,   &FormattingCategory, &IncludeExcludeCategory,
   &SerializeCategory, &TransformCategory,  &TransformsOptionsCategory,
 };
@@ -113,7 +112,7 @@ TimingDirectoryName("perf",
                     cl::ValueOptional, cl::value_desc("directory name"),
                     cl::cat(GeneralCategory));
 
-cl::opt<std::string> SupportedCompilers(
+static cl::opt<std::string> SupportedCompilers(
     "for-compilers", cl::value_desc("string"),
     cl::desc("Select transforms targeting the intersection of\n"
              "language features supported by the given compilers.\n"
@@ -190,7 +189,7 @@ SerializeLocation("serialize-dir",
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void printVersion() {
+static void printVersion() {
   llvm::outs() << "clang-modernizer version " CLANG_VERSION_STRING
                << "\n";
 }
@@ -249,7 +248,7 @@ static CompilerVersions handleSupportedCompilers(const char *ProgName,
   return RequiredVersions;
 }
 
-std::unique_ptr<CompilationDatabase>
+static std::unique_ptr<CompilationDatabase>
 autoDetectCompilations(std::string &ErrorMessage) {
   // Auto-detect a compilation database from BuildPath.
   if (BuildPath.getNumOccurrences() > 0)
@@ -455,8 +454,7 @@ int main(int argc, const char **argv) {
     llvm::errs() << "Replacements serialized to: " << TempDestinationDir << "\n";
 
   if (FinalSyntaxCheck) {
-    ClangTool SyntaxTool(*Compilations, SourcePaths,
-                         SharedModuleProvider::Create<LLVMModuleProvider>());
+    ClangTool SyntaxTool(*Compilations, SourcePaths);
     if (SyntaxTool.run(newFrontendActionFactory<SyntaxOnlyAction>().get()) != 0)
       return 1;
   }

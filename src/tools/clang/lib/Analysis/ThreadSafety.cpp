@@ -44,14 +44,13 @@
 #include <sstream>
 #include <utility>
 #include <vector>
-
-
-namespace clang {
-namespace threadSafety {
+using namespace clang;
+using namespace threadSafety;
 
 // Key method definition
 ThreadSafetyHandler::~ThreadSafetyHandler() {}
 
+namespace {
 class TILPrinter :
   public til::PrettyPrinter<TILPrinter, llvm::raw_ostream> {};
 
@@ -68,7 +67,6 @@ static void warnInvalidLock(ThreadSafetyHandler &Handler,
   if (Loc.isValid())
     Handler.handleInvalidLockExp(Kind, Loc);
 }
-
 
 /// \brief A set of CapabilityInfo objects, which are compiled from the
 /// requires attributes on a function.
@@ -250,25 +248,25 @@ public:
   }
 };
 
-
 class ThreadSafetyAnalyzer;
+} // namespace
 
-
+namespace clang {
+namespace threadSafety {
 class BeforeSet {
 private:
   typedef SmallVector<const ValueDecl*, 4>  BeforeVect;
 
   struct BeforeInfo {
-    BeforeInfo() : Vect(nullptr), Visited(false) { }
-    BeforeInfo(BeforeInfo &&O)
-        : Vect(std::move(O.Vect)), Visited(O.Visited)
-    {}
+    BeforeInfo() : Visited(0) {}
+    BeforeInfo(BeforeInfo &&O) : Vect(std::move(O.Vect)), Visited(O.Visited) {}
 
-    std::unique_ptr<BeforeVect> Vect;
-    int                         Visited;
+    BeforeVect Vect;
+    int Visited;
   };
 
-  typedef llvm::DenseMap<const ValueDecl*, BeforeInfo>  BeforeMap;
+  typedef llvm::DenseMap<const ValueDecl *, std::unique_ptr<BeforeInfo>>
+      BeforeMap;
   typedef llvm::DenseMap<const ValueDecl*, bool>        CycleMap;
 
 public:
@@ -276,6 +274,9 @@ public:
 
   BeforeInfo* insertAttrExprs(const ValueDecl* Vd,
                               ThreadSafetyAnalyzer& Analyzer);
+
+  BeforeInfo *getBeforeInfoForDecl(const ValueDecl *Vd,
+                                   ThreadSafetyAnalyzer &Analyzer);
 
   void checkBeforeAfter(const ValueDecl* Vd,
                         const FactSet& FSet,
@@ -286,9 +287,10 @@ private:
   BeforeMap BMap;
   CycleMap  CycMap;
 };
+} // end namespace threadSafety
+} // end namespace clang
 
-
-
+namespace {
 typedef llvm::ImmutableMap<const NamedDecl*, unsigned> LocalVarContext;
 class LocalVariableMap;
 
@@ -787,7 +789,7 @@ static void findBlockLocations(CFG *CFGraph,
       }
     }
 
-    if (!CurrBlockInfo->ExitLoc.isInvalid()) {
+    if (CurrBlockInfo->ExitLoc.isValid()) {
       // This block contains at least one statement. Find the source location
       // of the first statement in the block.
       for (CFGBlock::const_iterator BI = CurrBlock->begin(),
@@ -903,7 +905,7 @@ public:
 /// \brief Class which implements the core thread safety analysis routines.
 class ThreadSafetyAnalyzer {
   friend class BuildLockset;
-  friend class BeforeSet;
+  friend class threadSafety::BeforeSet;
 
   llvm::BumpPtrAllocator Bpa;
   threadSafety::til::MemRegionRef Arena;
@@ -959,33 +961,33 @@ public:
 
   void runAnalysis(AnalysisDeclContext &AC);
 };
-
-
+} // namespace
 
 /// Process acquired_before and acquired_after attributes on Vd.
 BeforeSet::BeforeInfo* BeforeSet::insertAttrExprs(const ValueDecl* Vd,
     ThreadSafetyAnalyzer& Analyzer) {
   // Create a new entry for Vd.
-  auto& Entry = BMap.FindAndConstruct(Vd);
-  BeforeInfo* Info = &Entry.second;
-  BeforeVect* Bv = nullptr;
+  BeforeInfo *Info = nullptr;
+  {
+    // Keep InfoPtr in its own scope in case BMap is modified later and the
+    // reference becomes invalid.
+    std::unique_ptr<BeforeInfo> &InfoPtr = BMap[Vd];
+    if (!InfoPtr)
+      InfoPtr.reset(new BeforeInfo());
+    Info = InfoPtr.get();
+  }
 
   for (Attr* At : Vd->attrs()) {
     switch (At->getKind()) {
       case attr::AcquiredBefore: {
         auto *A = cast<AcquiredBeforeAttr>(At);
 
-        // Create a new BeforeVect for Vd if necessary.
-        if (!Bv) {
-          Bv = new BeforeVect;
-          Info->Vect.reset(Bv);
-        }
         // Read exprs from the attribute, and add them to BeforeVect.
         for (const auto *Arg : A->args()) {
           CapabilityExpr Cp =
             Analyzer.SxBuilder.translateAttrExpr(Arg, nullptr);
           if (const ValueDecl *Cpvd = Cp.valueDecl()) {
-            Bv->push_back(Cpvd);
+            Info->Vect.push_back(Cpvd);
             auto It = BMap.find(Cpvd);
             if (It == BMap.end())
               insertAttrExprs(Cpvd, Analyzer);
@@ -1002,20 +1004,8 @@ BeforeSet::BeforeInfo* BeforeSet::insertAttrExprs(const ValueDecl* Vd,
             Analyzer.SxBuilder.translateAttrExpr(Arg, nullptr);
           if (const ValueDecl *ArgVd = Cp.valueDecl()) {
             // Get entry for mutex listed in attribute
-            BeforeInfo* ArgInfo;
-            auto It = BMap.find(ArgVd);
-            if (It == BMap.end())
-              ArgInfo = insertAttrExprs(ArgVd, Analyzer);
-            else
-              ArgInfo = &It->second;
-
-            // Create a new BeforeVect if necessary.
-            BeforeVect* ArgBv = ArgInfo->Vect.get();
-            if (!ArgBv) {
-              ArgBv = new BeforeVect;
-              ArgInfo->Vect.reset(ArgBv);
-            }
-            ArgBv->push_back(Vd);
+            BeforeInfo *ArgInfo = getBeforeInfoForDecl(ArgVd, Analyzer);
+            ArgInfo->Vect.push_back(Vd);
           }
         }
         break;
@@ -1028,6 +1018,18 @@ BeforeSet::BeforeInfo* BeforeSet::insertAttrExprs(const ValueDecl* Vd,
   return Info;
 }
 
+BeforeSet::BeforeInfo *
+BeforeSet::getBeforeInfoForDecl(const ValueDecl *Vd,
+                                ThreadSafetyAnalyzer &Analyzer) {
+  auto It = BMap.find(Vd);
+  BeforeInfo *Info = nullptr;
+  if (It == BMap.end())
+    Info = insertAttrExprs(Vd, Analyzer);
+  else
+    Info = It->second.get();
+  assert(Info && "BMap contained nullptr?");
+  return Info;
+}
 
 /// Return true if any mutexes in FSet are in the acquired_before set of Vd.
 void BeforeSet::checkBeforeAfter(const ValueDecl* StartVd,
@@ -1042,12 +1044,7 @@ void BeforeSet::checkBeforeAfter(const ValueDecl* StartVd,
     if (!Vd)
       return false;
 
-    BeforeSet::BeforeInfo* Info;
-    auto It = BMap.find(Vd);
-    if (It == BMap.end())
-      Info = insertAttrExprs(Vd, Analyzer);
-    else
-      Info = &It->second;
+    BeforeSet::BeforeInfo *Info = getBeforeInfoForDecl(Vd, Analyzer);
 
     if (Info->Visited == 1)
       return true;
@@ -1055,13 +1052,12 @@ void BeforeSet::checkBeforeAfter(const ValueDecl* StartVd,
     if (Info->Visited == 2)
       return false;
 
-    BeforeVect* Bv = Info->Vect.get();
-    if (!Bv)
+    if (Info->Vect.empty())
       return false;
 
     InfoVect.push_back(Info);
     Info->Visited = 1;
-    for (auto *Vdb : *Bv) {
+    for (auto *Vdb : Info->Vect) {
       // Exclude mutexes in our immediate before set.
       if (FSet.containsMutexDecl(Analyzer.FactMan, Vdb)) {
         StringRef L1 = StartVd->getName();
@@ -1103,6 +1099,7 @@ static const ValueDecl *getValueDecl(const Expr *Exp) {
   return nullptr;
 }
 
+namespace {
 template <typename Ty>
 class has_arg_iterator_range {
   typedef char yes[1];
@@ -1117,6 +1114,7 @@ class has_arg_iterator_range {
 public:
   static const bool value = sizeof(test<Ty>(nullptr)) == sizeof(yes);
 };
+} // namespace
 
 static StringRef ClassifyDiagnostic(const CapabilityAttr *A) {
   return A->getName();
@@ -1307,8 +1305,7 @@ void ThreadSafetyAnalyzer::getMutexIDs(CapExprSet &Mtxs, AttrType *Attr,
   }
 }
 
-
-bool getStaticBooleanValue(Expr* E, bool& TCond) {
+static bool getStaticBooleanValue(Expr *E, bool &TCond) {
   if (isa<CXXNullPtrLiteralExpr>(E) || isa<GNUNullExpr>(E)) {
     TCond = false;
     return true;
@@ -1453,6 +1450,7 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
             CapDiagKind);
 }
 
+namespace {
 /// \brief We use this class to visit different types of expressions in
 /// CFGBlocks, and build up the lockset.
 /// An expression may cause us to add or remove locks from the lockset, or else
@@ -1496,7 +1494,7 @@ public:
   void VisitCXXConstructExpr(CXXConstructExpr *Exp);
   void VisitDeclStmt(DeclStmt *S);
 };
-
+} // namespace
 
 /// \brief Warn if the LSet does not contain a lock sufficient to protect access
 /// of at least the passed in AccessKind.
@@ -1925,34 +1923,42 @@ void BuildLockset::VisitCallExpr(CallExpr *Exp) {
     }
   }
 
-
   if (ExamineArgs) {
     if (FunctionDecl *FD = Exp->getDirectCallee()) {
-      unsigned Fn = FD->getNumParams();
-      unsigned Cn = Exp->getNumArgs();
-      unsigned Skip = 0;
 
-      unsigned i = 0;
-      if (OperatorFun) {
-        if (isa<CXXMethodDecl>(FD)) {
-          // First arg in operator call is implicit self argument,
-          // and doesn't appear in the FunctionDecl.
-          Skip = 1;
-          Cn--;
-        } else {
-          // Ignore the first argument of operators; it's been checked above.
-          i = 1;
+      // NO_THREAD_SAFETY_ANALYSIS does double duty here.  Normally it
+      // only turns off checking within the body of a function, but we also
+      // use it to turn off checking in arguments to the function.  This
+      // could result in some false negatives, but the alternative is to
+      // create yet another attribute.
+      //
+      if (!FD->hasAttr<NoThreadSafetyAnalysisAttr>()) {
+        unsigned Fn = FD->getNumParams();
+        unsigned Cn = Exp->getNumArgs();
+        unsigned Skip = 0;
+
+        unsigned i = 0;
+        if (OperatorFun) {
+          if (isa<CXXMethodDecl>(FD)) {
+            // First arg in operator call is implicit self argument,
+            // and doesn't appear in the FunctionDecl.
+            Skip = 1;
+            Cn--;
+          } else {
+            // Ignore the first argument of operators; it's been checked above.
+            i = 1;
+          }
         }
-      }
-      // Ignore default arguments
-      unsigned n = (Fn < Cn) ? Fn : Cn;
+        // Ignore default arguments
+        unsigned n = (Fn < Cn) ? Fn : Cn;
 
-      for (; i < n; ++i) {
-        ParmVarDecl* Pvd = FD->getParamDecl(i);
-        Expr* Arg = Exp->getArg(i+Skip);
-        QualType Qt = Pvd->getType();
-        if (Qt->isReferenceType())
-          checkAccess(Arg, AK_Read, POK_PassByRef);
+        for (; i < n; ++i) {
+          ParmVarDecl* Pvd = FD->getParamDecl(i);
+          Expr* Arg = Exp->getArg(i+Skip);
+          QualType Qt = Pvd->getType();
+          if (Qt->isReferenceType())
+            checkAccess(Arg, AK_Read, POK_PassByRef);
+        }
       }
     }
   }
@@ -2059,7 +2065,7 @@ void ThreadSafetyAnalyzer::intersectAndWarn(FactSet &FSet1,
 
 
 // Return true if block B never continues to its successors.
-inline bool neverReturns(const CFGBlock* B) {
+static bool neverReturns(const CFGBlock *B) {
   if (B->hasNoReturnElement())
     return true;
   if (B->empty())
@@ -2305,8 +2311,8 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
 
           // Create a dummy expression,
           VarDecl *VD = const_cast<VarDecl*>(AD.getVarDecl());
-          DeclRefExpr DRE(VD, false, VD->getType(), VK_LValue,
-                          AD.getTriggerStmt()->getLocEnd());
+          DeclRefExpr DRE(VD, false, VD->getType().getNonReferenceType(),
+                          VK_LValue, AD.getTriggerStmt()->getLocEnd());
           LocksetBuilder.handleCall(&DRE, DD);
           break;
         }
@@ -2376,24 +2382,20 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
 /// We traverse the blocks in the CFG, compute the set of mutexes that are held
 /// at the end of each block, and issue warnings for thread safety violations.
 /// Each block in the CFG is traversed exactly once.
-void runThreadSafetyAnalysis(AnalysisDeclContext &AC,
-                             ThreadSafetyHandler &Handler,
-                             BeforeSet **BSet) {
+void threadSafety::runThreadSafetyAnalysis(AnalysisDeclContext &AC,
+                                           ThreadSafetyHandler &Handler,
+                                           BeforeSet **BSet) {
   if (!*BSet)
     *BSet = new BeforeSet;
   ThreadSafetyAnalyzer Analyzer(Handler, *BSet);
   Analyzer.runAnalysis(AC);
 }
 
-
-void threadSafetyCleanup(BeforeSet* Cache) {
-  delete Cache;
-}
-
+void threadSafety::threadSafetyCleanup(BeforeSet *Cache) { delete Cache; }
 
 /// \brief Helper function that returns a LockKind required for the given level
 /// of access.
-LockKind getLockKindFromAccessKind(AccessKind AK) {
+LockKind threadSafety::getLockKindFromAccessKind(AccessKind AK) {
   switch (AK) {
     case AK_Read :
       return LK_Shared;
@@ -2402,5 +2404,3 @@ LockKind getLockKindFromAccessKind(AccessKind AK) {
   }
   llvm_unreachable("Unknown AccessKind");
 }
-
-}} // end namespace clang::threadSafety

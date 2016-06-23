@@ -9,7 +9,6 @@ add_clang_unittest(SemaTests
 target_link_libraries(SemaTests
   clangAST
   clangBasic
-  clangCodeGen
   clangFrontend
   clangParse
   clangSema

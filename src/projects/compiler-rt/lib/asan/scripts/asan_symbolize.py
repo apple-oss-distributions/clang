@@ -23,6 +23,7 @@ sysroot_path = None
 binary_name_filter = None
 fix_filename_patterns = None
 logfile = sys.stdin
+allow_system_symbolizer = True
 
 # FIXME: merge the code that calls fix_filename().
 def fix_filename(file_name):
@@ -76,7 +77,7 @@ class LLVMSymbolizer(Symbolizer):
     cmd = [self.symbolizer_path,
            '--use-symbol-table=true',
            '--demangle=%s' % demangle,
-           '--functions=short',
+           '--functions=linkage',
            '--inlining=true',
            '--default-arch=%s' % self.default_arch]
     if self.system == 'Darwin':
@@ -134,12 +135,13 @@ class Addr2LineSymbolizer(Symbolizer):
     super(Addr2LineSymbolizer, self).__init__()
     self.binary = binary
     self.pipe = self.open_addr2line()
+    self.output_terminator = -1
 
   def open_addr2line(self):
     addr2line_tool = 'addr2line'
     if binutils_prefix:
       addr2line_tool = binutils_prefix + addr2line_tool
-    cmd = [addr2line_tool, '-f']
+    cmd = [addr2line_tool, '-fi']
     if demangle:
       cmd += ['--demangle']
     cmd += ['-e', self.binary]
@@ -152,16 +154,23 @@ class Addr2LineSymbolizer(Symbolizer):
     """Overrides Symbolizer.symbolize."""
     if self.binary != binary:
       return None
+    lines = []
     try:
       print >> self.pipe.stdin, offset
-      function_name = self.pipe.stdout.readline().rstrip()
-      file_name = self.pipe.stdout.readline().rstrip()
+      print >> self.pipe.stdin, self.output_terminator
+      is_first_frame = True
+      while True:
+        function_name = self.pipe.stdout.readline().rstrip()
+        file_name = self.pipe.stdout.readline().rstrip()
+        if is_first_frame:
+          is_first_frame = False
+        elif function_name in ['', '??']:
+          assert file_name == function_name
+          break
+        lines.append((function_name, file_name));
     except Exception:
-      function_name = ''
-      file_name = ''
-    file_name = fix_filename(file_name)
-    return ['%s in %s %s' % (addr, function_name, file_name)]
-
+      lines.append(('??', '??:0'))
+    return ['%s in %s %s' % (addr, function, fix_filename(file)) for (function, file) in lines]
 
 class UnbufferedLineConverter(object):
   """
@@ -392,6 +401,8 @@ class SymbolizationLoop(object):
           [BreakpadSymbolizerFactory(binary), self.llvm_symbolizers[binary]])
     result = symbolizers[binary].symbolize(addr, binary, offset)
     if result is None:
+      if not allow_system_symbolizer:
+        raise Exception('Failed to launch or use llvm-symbolizer.')
       # Initialize system symbolizer only if other symbolizers failed.
       symbolizers[binary].append_symbolizer(
           SystemSymbolizerFactory(self.system, addr, binary))

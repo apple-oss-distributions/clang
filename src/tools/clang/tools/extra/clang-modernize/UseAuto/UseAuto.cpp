@@ -15,7 +15,6 @@
 #include "UseAuto.h"
 #include "UseAutoActions.h"
 #include "UseAutoMatchers.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 
 using clang::ast_matchers::MatchFinder;
 using namespace clang;
@@ -23,8 +22,7 @@ using namespace clang::tooling;
 
 int UseAutoTransform::apply(const clang::tooling::CompilationDatabase &Database,
                             const std::vector<std::string> &SourcePaths) {
-  ClangTool UseAutoTool(Database, SourcePaths,
-                        SharedModuleProvider::Create<LLVMModuleProvider>());
+  ClangTool UseAutoTool(Database, SourcePaths);
 
   unsigned AcceptedChanges = 0;
 
@@ -48,6 +46,7 @@ int UseAutoTransform::apply(const clang::tooling::CompilationDatabase &Database,
   return 0;
 }
 
+namespace {
 struct UseAutoFactory : TransformFactory {
   UseAutoFactory() {
     Since.Clang = Version(2, 9);
@@ -60,6 +59,7 @@ struct UseAutoFactory : TransformFactory {
     return new UseAutoTransform(Opts);
   }
 };
+} // namespace
 
 // Register the factory using this statically initialized variable.
 static TransformFactoryRegistry::Add<UseAutoFactory>

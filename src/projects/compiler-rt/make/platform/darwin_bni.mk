@@ -19,10 +19,10 @@ endif
 
 ifneq ($(IPHONEOS_DEPLOYMENT_TARGET),)
 	DEPLOYMENT_FLAGS := -miphoneos-version-min=$(IPHONEOS_DEPLOYMENT_TARGET) 
-else
-	ifneq ($(MACOSX_DEPLOYMENT_TARGET),)
-		DEPLOYMENT_FLAGS := -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) 
-	endif
+else ifneq ($(WATCHOS_DEPLOYMENT_TARGET),)
+	DEPLOYMENT_FLAGS := -mwatchos-version-min=$(WATCHOS_DEPLOYMENT_TARGET) 
+else ifneq ($(MACOSX_DEPLOYMENT_TARGET),)
+	DEPLOYMENT_FLAGS := -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) 
 endif
 
 ifneq (,$(SDKROOT))
@@ -32,7 +32,7 @@ endif
 CFLAGS := -Wall -Os -fomit-frame-pointer -g $(DEPLOYMENT_FLAGS)
 CFLAGS.Static := $(CFLAGS) -static  
 DYLIB_FLAGS := $(DEPLOYMENT_FLAGS) \
-		-Xarch_arm -Wl,-alias_list,$(SRCROOT)/lib/arm/softfloat-alias.list
+		-Xarch_arm -Wl,-alias_list,$(SRCROOT)/lib/builtins/arm/softfloat-alias.list
 
 VISIBILITY_HIDDEN := 0
 VISIBILITY_HIDDEN.Static  := 1
@@ -51,7 +51,7 @@ FUNCTIONS := absvdi2 absvsi2 addvdi3 addvsi3 ashldi3 ashrdi3 \
              atomic_flag_clear atomic_flag_clear_explicit \
              atomic_flag_test_and_set atomic_flag_test_and_set_explicit \
              atomic_signal_fence atomic_thread_fence \
-             extendhfsf2 truncdfhf2 truncsfhf2
+             extendhfsf2 truncdfhf2 truncsfhf2 
 
 FUNCTIONS.i386 := $(FUNCTIONS) \
                 divxc3 fixunsxfdi fixunsxfsi fixxfdi floatdixf \

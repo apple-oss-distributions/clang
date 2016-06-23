@@ -69,14 +69,6 @@ protected:
                                                  StringRef InFile) override;
 };
 
-/// \brief Emits the output of a GeneratePCHAction or GenerateModuleAction into
-/// a Mach-O/ELF/COFF container.
-class GeneratePCMContainerAction : public FrontendAction {
-protected:
-  std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
-                                                 StringRef InFile) override;
-};
-
 class GeneratePCHAction : public ASTFrontendAction {
 protected:
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
@@ -93,11 +85,9 @@ public:
   /// create the PCHGenerator instance returned by CreateASTConsumer.
   ///
   /// \returns true if an error occurred, false otherwise.
-  static bool ComputeASTConsumerArguments(CompilerInstance &CI,
-                                          StringRef InFile,
-                                          std::string &Sysroot,
-                                          std::string &OutputFile,
-                                          raw_ostream *&OS);
+  static raw_pwrite_stream *
+  ComputeASTConsumerArguments(CompilerInstance &CI, StringRef InFile,
+                              std::string &Sysroot, std::string &OutputFile);
 };
 
 class GenerateModuleAction : public ASTFrontendAction {
@@ -127,11 +117,10 @@ public:
   /// create the PCHGenerator instance returned by CreateASTConsumer.
   ///
   /// \returns true if an error occurred, false otherwise.
-  bool ComputeASTConsumerArguments(CompilerInstance &CI,
-                                   StringRef InFile,
-                                   std::string &Sysroot,
-                                   std::string &OutputFile,
-                                   raw_ostream *&OS);
+  raw_pwrite_stream *ComputeASTConsumerArguments(CompilerInstance &CI,
+                                                 StringRef InFile,
+                                                 std::string &Sysroot,
+                                                 std::string &OutputFile);
 };
 
 class SyntaxOnlyAction : public ASTFrontendAction {
@@ -196,7 +185,7 @@ protected:
 
 public:
   ASTMergeAction(FrontendAction *AdaptedAction, ArrayRef<std::string> ASTFiles);
-  virtual ~ASTMergeAction();
+  ~ASTMergeAction() override;
 
   bool usesPreprocessorOnly() const override;
   TranslationUnitKind getTranslationUnitKind() override;

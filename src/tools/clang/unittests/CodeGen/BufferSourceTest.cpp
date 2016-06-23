@@ -12,7 +12,6 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/CodeGen/ModuleBuilder.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Parse/ParseAST.h"
@@ -40,8 +39,7 @@ const char TestProgram[] =
     "EmitCXXGlobalInitFunc test;    ";
 
 TEST(BufferSourceTest, EmitCXXGlobalInitFunc) {
-    CompilerInstance
-        compiler(SharedModuleProvider::Create<LLVMModuleProvider>());
+    CompilerInstance compiler;
 
     compiler.createDiagnostics();
     compiler.getLangOpts().CPlusPlus = 1;
@@ -69,7 +67,7 @@ TEST(BufferSourceTest, EmitCXXGlobalInitFunc) {
             compiler.getCodeGenOpts(),
             llvm::getGlobalContext())));
 
-    compiler.createSema(clang::TU_Prefix,NULL);
+    compiler.createSema(clang::TU_Prefix, nullptr);
 
     clang::SourceManager &sm = compiler.getSourceManager();
     sm.setMainFileID(sm.createFileID(
@@ -78,4 +76,4 @@ TEST(BufferSourceTest, EmitCXXGlobalInitFunc) {
     clang::ParseAST(compiler.getSema(), false, false);
 }
 
-}
+} // end anonymous namespace

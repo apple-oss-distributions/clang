@@ -66,6 +66,8 @@ public:
   public:
     reference(SmallBitVector &b, unsigned Idx) : TheVector(b), BitPos(Idx) {}
 
+    reference(const reference&) = default;
+
     reference& operator=(reference t) {
       *this = bool(t);
       return *this;
@@ -180,11 +182,7 @@ public:
   size_type count() const {
     if (isSmall()) {
       uintptr_t Bits = getSmallBits();
-      if (NumBaseBits == 32)
-        return CountPopulation_32(Bits);
-      if (NumBaseBits == 64)
-        return CountPopulation_64(Bits);
-      llvm_unreachable("Unsupported!");
+      return countPopulation(Bits);
     }
     return getPointer()->count();
   }
@@ -553,19 +551,18 @@ public:
   }
 
 private:
-  template<bool AddBits, bool InvertMask>
+  template <bool AddBits, bool InvertMask>
   void applyMask(const uint32_t *Mask, unsigned MaskWords) {
-    if (NumBaseBits == 64 && MaskWords >= 2) {
-      uint64_t M = Mask[0] | (uint64_t(Mask[1]) << 32);
-      if (InvertMask) M = ~M;
-      if (AddBits) setSmallBits(getSmallBits() | M);
-      else         setSmallBits(getSmallBits() & ~M);
-    } else {
-      uint32_t M = Mask[0];
-      if (InvertMask) M = ~M;
-      if (AddBits) setSmallBits(getSmallBits() | M);
-      else         setSmallBits(getSmallBits() & ~M);
-    }
+    assert(MaskWords <= sizeof(uintptr_t) && "Mask is larger than base!");
+    uintptr_t M = Mask[0];
+    if (NumBaseBits == 64)
+      M |= uint64_t(Mask[1]) << 32;
+    if (InvertMask)
+      M = ~M;
+    if (AddBits)
+      setSmallBits(getSmallBits() | M);
+    else
+      setSmallBits(getSmallBits() & ~M);
   }
 };
 

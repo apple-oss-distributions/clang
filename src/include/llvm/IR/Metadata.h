@@ -32,9 +32,6 @@ class LLVMContext;
 class Module;
 class ModuleSlotTracker;
 
-template<typename ValueSubClass, typename ItemParentClass>
-  class SymbolTableListTraits;
-
 enum LLVMConstants : uint32_t {
   // rdar://20789325: Add a fixed offset from upstream's version number.  This
   // is chosen to match clang-700, which is the first (and hopefully only?)
@@ -100,7 +97,7 @@ protected:
   Metadata(unsigned ID, StorageType Storage)
       : SubclassID(ID), Storage(Storage), SubclassData16(0), SubclassData32(0) {
   }
-  ~Metadata() {}
+  ~Metadata() = default;
 
   /// \brief Default handling of a changed operand, which asserts.
   ///
@@ -133,9 +130,10 @@ public:
   /// If \c M is provided, metadata nodes will be numbered canonically;
   /// otherwise, pointer addresses are substituted.
   /// @{
-  void print(raw_ostream &OS, const Module *M = nullptr) const;
-  void print(raw_ostream &OS, ModuleSlotTracker &MST,
-             const Module *M = nullptr) const;
+  void print(raw_ostream &OS, const Module *M = nullptr,
+             bool IsForDebug = false) const;
+  void print(raw_ostream &OS, ModuleSlotTracker &MST, const Module *M = nullptr,
+             bool IsForDebug = false) const;
   /// @}
 
   /// \brief Print as operand.
@@ -183,7 +181,7 @@ class MetadataAsValue : public Value {
   Metadata *MD;
 
   MetadataAsValue(Type *Ty, Metadata *MD);
-  ~MetadataAsValue();
+  ~MetadataAsValue() override;
 
   /// \brief Drop use of metadata (during teardown).
   void dropUse() { MD = nullptr; }
@@ -272,7 +270,7 @@ protected:
       : Metadata(ID, Uniqued), ReplaceableMetadataImpl(V->getContext()), V(V) {
     assert(V && "Expected valid value");
   }
-  ~ValueAsMetadata() {}
+  ~ValueAsMetadata() = default;
 
 public:
   static ValueAsMetadata *get(Value *V);
@@ -515,9 +513,9 @@ dyn_extract_or_null(Y &&MD) {
 class MDString : public Metadata {
   friend class StringMapEntry<MDString>;
 
-  MDString(const MDString &) LLVM_DELETED_FUNCTION;
-  MDString &operator=(MDString &&) LLVM_DELETED_FUNCTION;
-  MDString &operator=(const MDString &) LLVM_DELETED_FUNCTION;
+  MDString(const MDString &) = delete;
+  MDString &operator=(MDString &&) = delete;
+  MDString &operator=(const MDString &) = delete;
 
   StringMapEntry<MDString> *Entry;
   MDString() : Metadata(MDStringKind, Uniqued), Entry(nullptr) {}
@@ -563,7 +561,7 @@ struct AAMDNodes {
 
   bool operator!=(const AAMDNodes &A) const { return !(*this == A); }
 
-  LLVM_EXPLICIT operator bool() const { return TBAA || Scope || NoAlias; }
+  explicit operator bool() const { return TBAA || Scope || NoAlias; }
 
   /// \brief The tag for type-based alias analysis.
   MDNode *TBAA;
@@ -579,10 +577,12 @@ struct AAMDNodes {
 template<>
 struct DenseMapInfo<AAMDNodes> {
   static inline AAMDNodes getEmptyKey() {
-    return AAMDNodes(DenseMapInfo<MDNode *>::getEmptyKey(), 0, 0);
+    return AAMDNodes(DenseMapInfo<MDNode *>::getEmptyKey(),
+                     nullptr, nullptr);
   }
   static inline AAMDNodes getTombstoneKey() {
-    return AAMDNodes(DenseMapInfo<MDNode *>::getTombstoneKey(), 0, 0);
+    return AAMDNodes(DenseMapInfo<MDNode *>::getTombstoneKey(),
+                     nullptr, nullptr);
   }
   static unsigned getHashValue(const AAMDNodes &Val) {
     return DenseMapInfo<MDNode *>::getHashValue(Val.TBAA) ^
@@ -602,10 +602,10 @@ struct DenseMapInfo<AAMDNodes> {
 ///
 /// In particular, this is used by \a MDNode.
 class MDOperand {
-  MDOperand(MDOperand &&) LLVM_DELETED_FUNCTION;
-  MDOperand(const MDOperand &) LLVM_DELETED_FUNCTION;
-  MDOperand &operator=(MDOperand &&) LLVM_DELETED_FUNCTION;
-  MDOperand &operator=(const MDOperand &) LLVM_DELETED_FUNCTION;
+  MDOperand(MDOperand &&) = delete;
+  MDOperand(const MDOperand &) = delete;
+  MDOperand &operator=(MDOperand &&) = delete;
+  MDOperand &operator=(const MDOperand &) = delete;
 
   Metadata *MD;
 
@@ -661,15 +661,12 @@ template <> struct simplify_type<const MDOperand> {
 class ContextAndReplaceableUses {
   PointerUnion<LLVMContext *, ReplaceableMetadataImpl *> Ptr;
 
-  ContextAndReplaceableUses() LLVM_DELETED_FUNCTION;
-  ContextAndReplaceableUses(ContextAndReplaceableUses &&)
-      LLVM_DELETED_FUNCTION;
-  ContextAndReplaceableUses(const ContextAndReplaceableUses &)
-      LLVM_DELETED_FUNCTION;
+  ContextAndReplaceableUses() = delete;
+  ContextAndReplaceableUses(ContextAndReplaceableUses &&) = delete;
+  ContextAndReplaceableUses(const ContextAndReplaceableUses &) = delete;
+  ContextAndReplaceableUses &operator=(ContextAndReplaceableUses &&) = delete;
   ContextAndReplaceableUses &
-  operator=(ContextAndReplaceableUses &&) LLVM_DELETED_FUNCTION;
-  ContextAndReplaceableUses &
-  operator=(const ContextAndReplaceableUses &) LLVM_DELETED_FUNCTION;
+  operator=(const ContextAndReplaceableUses &) = delete;
 
 public:
   ContextAndReplaceableUses(LLVMContext &Context) : Ptr(&Context) {}
@@ -751,9 +748,9 @@ class MDNode : public Metadata {
   friend class ReplaceableMetadataImpl;
   friend class LLVMContextImpl;
 
-  MDNode(const MDNode &) LLVM_DELETED_FUNCTION;
-  void operator=(const MDNode &) LLVM_DELETED_FUNCTION;
-  void *operator new(size_t) LLVM_DELETED_FUNCTION;
+  MDNode(const MDNode &) = delete;
+  void operator=(const MDNode &) = delete;
+  void *operator new(size_t) = delete;
 
   unsigned NumOperands;
   unsigned NumUnresolved;
@@ -776,7 +773,7 @@ protected:
 
   MDNode(LLVMContext &Context, unsigned ID, StorageType Storage,
          ArrayRef<Metadata *> Ops1, ArrayRef<Metadata *> Ops2 = None);
-  ~MDNode() {}
+  ~MDNode() = default;
 
   void dropAllReferences();
 
@@ -891,6 +888,7 @@ protected:
   void storeDistinctInContext();
   template <class T, class StoreT>
   static T *storeImpl(T *N, StorageType Storage, StoreT &Store);
+  template <class T> static T *storeImpl(T *N, StorageType Storage);
 
 private:
   void handleChangedOperand(void *Ref, Metadata *New);
@@ -923,13 +921,13 @@ private:
     N->recalculateHash();
   }
   template <class NodeTy>
-  static void dispatchRecalculateHash(NodeTy *N, std::false_type) {}
+  static void dispatchRecalculateHash(NodeTy *, std::false_type) {}
   template <class NodeTy>
   static void dispatchResetHash(NodeTy *N, std::true_type) {
     N->setHash(0);
   }
   template <class NodeTy>
-  static void dispatchResetHash(NodeTy *N, std::false_type) {}
+  static void dispatchResetHash(NodeTy *, std::false_type) {}
 
 public:
   typedef const MDOperand *op_iterator;
@@ -973,6 +971,8 @@ public:
   static MDNode *getMostGenericFPMath(MDNode *A, MDNode *B);
   static MDNode *getMostGenericRange(MDNode *A, MDNode *B);
   static MDNode *getMostGenericAliasScope(MDNode *A, MDNode *B);
+  static MDNode *getMostGenericAlignmentOrDereferenceable(MDNode *A, MDNode *B);
+
 };
 
 /// \brief Tuple of metadata.
@@ -1135,11 +1135,10 @@ public:
 ///
 /// TODO: Inherit from Metadata.
 class NamedMDNode : public ilist_node<NamedMDNode> {
-  friend class SymbolTableListTraits<NamedMDNode, Module>;
   friend struct ilist_traits<NamedMDNode>;
   friend class LLVMContextImpl;
   friend class Module;
-  NamedMDNode(const NamedMDNode &) LLVM_DELETED_FUNCTION;
+  NamedMDNode(const NamedMDNode &) = delete;
 
   std::string Name;
   Module *Parent;
@@ -1203,7 +1202,7 @@ public:
   void addOperand(MDNode *M);
   void setOperand(unsigned I, MDNode *New);
   StringRef getName() const;
-  void print(raw_ostream &ROS) const;
+  void print(raw_ostream &ROS, bool IsForDebug = false) const;
   void dump() const;
 
   // ---------------------------------------------------------------------------
@@ -1227,4 +1226,4 @@ public:
 
 } // end llvm namespace
 
-#endif
+#endif // LLVM_IR_METADATA_H

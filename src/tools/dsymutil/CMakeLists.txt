@@ -5,21 +5,17 @@ set(LLVM_LINK_COMPONENTS
   MC
   Object
   Support
+  Target
   )
-
-IF(APPLE)
-set(BUNDLE_COMPONENTS
-  CFBundle.cpp CFString.cpp CFStringUtils.c)
-ENDIF(APPLE)
 
 add_llvm_tool(llvm-dsymutil
   dsymutil.cpp
   BinaryHolder.cpp
+  CFBundle.cpp
   DebugMap.cpp
   DwarfLinker.cpp
   MachODebugMapParser.cpp
   MachOUtils.cpp
-  ${BUNDLE_COMPONENTS}
   )
 
 IF(APPLE)

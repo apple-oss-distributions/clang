@@ -32,11 +32,10 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
-#include <cerrno>
 #include <cstdlib>
 #include <map>
-#include <system_error>
 using namespace llvm;
 using namespace cl;
 
@@ -47,21 +46,21 @@ using namespace cl;
 //
 namespace llvm {
 namespace cl {
-TEMPLATE_INSTANTIATION(class basic_parser<bool>);
-TEMPLATE_INSTANTIATION(class basic_parser<boolOrDefault>);
-TEMPLATE_INSTANTIATION(class basic_parser<int>);
-TEMPLATE_INSTANTIATION(class basic_parser<unsigned>);
-TEMPLATE_INSTANTIATION(class basic_parser<unsigned long long>);
-TEMPLATE_INSTANTIATION(class basic_parser<double>);
-TEMPLATE_INSTANTIATION(class basic_parser<float>);
-TEMPLATE_INSTANTIATION(class basic_parser<std::string>);
-TEMPLATE_INSTANTIATION(class basic_parser<char>);
+template class basic_parser<bool>;
+template class basic_parser<boolOrDefault>;
+template class basic_parser<int>;
+template class basic_parser<unsigned>;
+template class basic_parser<unsigned long long>;
+template class basic_parser<double>;
+template class basic_parser<float>;
+template class basic_parser<std::string>;
+template class basic_parser<char>;
 
-TEMPLATE_INSTANTIATION(class opt<unsigned>);
-TEMPLATE_INSTANTIATION(class opt<int>);
-TEMPLATE_INSTANTIATION(class opt<std::string>);
-TEMPLATE_INSTANTIATION(class opt<char>);
-TEMPLATE_INSTANTIATION(class opt<bool>);
+template class opt<unsigned>;
+template class opt<int>;
+template class opt<std::string>;
+template class opt<char>;
+template class opt<bool>;
 }
 } // end namespace llvm::cl
 
@@ -80,7 +79,6 @@ void parser<double>::anchor() {}
 void parser<float>::anchor() {}
 void parser<std::string>::anchor() {}
 void parser<char>::anchor() {}
-void StringSaver::anchor() {}
 
 //===----------------------------------------------------------------------===//
 
@@ -101,6 +99,9 @@ public:
   StringMap<Option *> OptionsMap;
 
   Option *ConsumeAfterOpt; // The ConsumeAfter option if it exists.
+
+  // This collects the different option categories that have been registered.
+  SmallPtrSet<OptionCategory *, 16> RegisteredOptionCategories;
 
   CommandLineParser() : ProgramOverview(nullptr), ConsumeAfterOpt(nullptr) {}
 
@@ -191,6 +192,20 @@ public:
   }
 
   void printOptionValues();
+
+  void registerCategory(OptionCategory *cat) {
+    assert(std::count_if(RegisteredOptionCategories.begin(),
+                         RegisteredOptionCategories.end(),
+                         [cat](const OptionCategory *Category) {
+                           return cat->getName() == Category->getName();
+                         }) == 0 &&
+           "Duplicate option categories");
+
+    RegisteredOptionCategories.insert(cat);
+  }
+
+private:
+  Option *LookupOption(StringRef &Arg, StringRef &Value);
 };
 
 } // namespace
@@ -218,22 +233,11 @@ void Option::setArgStr(const char *S) {
   ArgStr = S;
 }
 
-// This collects the different option categories that have been registered.
-typedef SmallPtrSet<OptionCategory *, 16> OptionCatSet;
-static ManagedStatic<OptionCatSet> RegisteredOptionCategories;
-
 // Initialise the general option category.
 OptionCategory llvm::cl::GeneralCategory("General options");
 
 void OptionCategory::registerCategory() {
-  assert(std::count_if(RegisteredOptionCategories->begin(),
-                       RegisteredOptionCategories->end(),
-                       [this](const OptionCategory *Category) {
-                         return getName() == Category->getName();
-                       }) == 0 &&
-         "Duplicate option categories");
-
-  RegisteredOptionCategories->insert(this);
+  GlobalParser->registerCategory(this);
 }
 
 //===----------------------------------------------------------------------===//
@@ -243,8 +247,7 @@ void OptionCategory::registerCategory() {
 /// LookupOption - Lookup the option specified by the specified option on the
 /// command line.  If there is a value specified (after an equal sign) return
 /// that as well.  This assumes that leading dashes have already been stripped.
-static Option *LookupOption(StringRef &Arg, StringRef &Value,
-                            const StringMap<Option *> &OptionsMap) {
+Option *CommandLineParser::LookupOption(StringRef &Arg, StringRef &Value) {
   // Reject all dashes.
   if (Arg.empty())
     return nullptr;
@@ -310,7 +313,7 @@ static Option *LookupNearestOption(StringRef Arg,
         if (RHS.empty() || !PermitValue)
           NearestString = OptionNames[i];
         else
-          NearestString = std::string(OptionNames[i]) + "=" + RHS.str();
+          NearestString = (Twine(OptionNames[i]) + "=" + RHS).str();
       }
     }
   }
@@ -561,7 +564,7 @@ void cl::TokenizeGNUCommandLine(StringRef Src, StringSaver &Saver,
     // End the token if this is whitespace.
     if (isWhitespace(Src[I])) {
       if (!Token.empty())
-        NewArgv.push_back(Saver.SaveString(Token.c_str()));
+        NewArgv.push_back(Saver.save(Token.c_str()));
       Token.clear();
       continue;
     }
@@ -572,7 +575,7 @@ void cl::TokenizeGNUCommandLine(StringRef Src, StringSaver &Saver,
 
   // Append the last token after hitting EOF with no whitespace.
   if (!Token.empty())
-    NewArgv.push_back(Saver.SaveString(Token.c_str()));
+    NewArgv.push_back(Saver.save(Token.c_str()));
   // Mark the end of response files
   if (MarkEOLs)
     NewArgv.push_back(nullptr);
@@ -653,7 +656,7 @@ void cl::TokenizeWindowsCommandLine(StringRef Src, StringSaver &Saver,
     if (State == UNQUOTED) {
       // Whitespace means the end of the token.
       if (isWhitespace(Src[I])) {
-        NewArgv.push_back(Saver.SaveString(Token.c_str()));
+        NewArgv.push_back(Saver.save(Token.c_str()));
         Token.clear();
         State = INIT;
         // Mark the end of lines in response files
@@ -688,7 +691,7 @@ void cl::TokenizeWindowsCommandLine(StringRef Src, StringSaver &Saver,
   }
   // Append the last token after hitting EOF with no whitespace.
   if (!Token.empty())
-    NewArgv.push_back(Saver.SaveString(Token.c_str()));
+    NewArgv.push_back(Saver.save(Token.c_str()));
   // Mark the end of response files
   if (MarkEOLs)
     NewArgv.push_back(nullptr);
@@ -697,8 +700,7 @@ void cl::TokenizeWindowsCommandLine(StringRef Src, StringSaver &Saver,
 // It is called byte order marker but the UTF-8 BOM is actually not affected
 // by the host system's endianness.
 static bool hasUTF8ByteOrderMark(ArrayRef<char> S) {
-  return (S.size() >= 3 &&
-          S[0] == '\xef' && S[1] == '\xbb' && S[2] == '\xbf');
+  return (S.size() >= 3 && S[0] == '\xef' && S[1] == '\xbb' && S[2] == '\xbf');
 }
 
 static bool ExpandResponseFile(const char *FName, StringSaver &Saver,
@@ -777,26 +779,6 @@ bool cl::ExpandResponseFiles(StringSaver &Saver, TokenizerCallback Tokenizer,
   return AllExpanded;
 }
 
-namespace {
-class StrDupSaver : public StringSaver {
-  std::vector<char *> Dups;
-
-public:
-  ~StrDupSaver() {
-    for (std::vector<char *>::iterator I = Dups.begin(), E = Dups.end(); I != E;
-         ++I) {
-      char *Dup = *I;
-      free(Dup);
-    }
-  }
-  const char *SaveString(const char *Str) override {
-    char *Dup = strdup(Str);
-    Dups.push_back(Dup);
-    return Dup;
-  }
-};
-}
-
 /// ParseEnvironmentOptions - An alternative entry point to the
 /// CommandLine library, which allows you to read the program's name
 /// from the caller (as PROGNAME) and its command-line arguments from
@@ -816,8 +798,9 @@ void cl::ParseEnvironmentOptions(const char *progName, const char *envVar,
   // Get program's "name", which we wouldn't know without the caller
   // telling us.
   SmallVector<const char *, 20> newArgv;
-  StrDupSaver Saver;
-  newArgv.push_back(Saver.SaveString(progName));
+  BumpPtrAllocator A;
+  StringSaver Saver(A);
+  newArgv.push_back(Saver.save(progName));
 
   // Parse the value of the environment variable into a "command line"
   // and hand it off to ParseCommandLineOptions().
@@ -837,10 +820,9 @@ void CommandLineParser::ParseCommandLineOptions(int argc,
   assert(hasOptions() && "No options specified!");
 
   // Expand response files.
-  SmallVector<const char *, 20> newArgv;
-  for (int i = 0; i != argc; ++i)
-    newArgv.push_back(argv[i]);
-  StrDupSaver Saver;
+  SmallVector<const char *, 20> newArgv(argv, argv + argc);
+  BumpPtrAllocator A;
+  StringSaver Saver(A);
   ExpandResponseFiles(Saver, TokenizeGNUCommandLine, newArgv);
   argv = &newArgv[0];
   argc = static_cast<int>(newArgv.size());
@@ -954,7 +936,7 @@ void CommandLineParser::ParseCommandLineOptions(int argc,
       while (!ArgName.empty() && ArgName[0] == '-')
         ArgName = ArgName.substr(1);
 
-      Handler = LookupOption(ArgName, Value, OptionsMap);
+      Handler = LookupOption(ArgName, Value);
       if (!Handler || Handler->getFormattingFlag() != cl::Positional) {
         ProvidePositionalOption(ActivePositionalArg, argv[i], i);
         continue; // We are done!
@@ -966,7 +948,7 @@ void CommandLineParser::ParseCommandLineOptions(int argc,
       while (!ArgName.empty() && ArgName[0] == '-')
         ArgName = ArgName.substr(1);
 
-      Handler = LookupOption(ArgName, Value, OptionsMap);
+      Handler = LookupOption(ArgName, Value);
 
       // Check to see if this "option" is really a prefixed or grouped argument.
       if (!Handler)
@@ -1514,7 +1496,7 @@ public:
 
   // Invoke the printer.
   void operator=(bool Value) {
-    if (Value == false)
+    if (!Value)
       return;
 
     StrOptionPairVector Opts;
@@ -1577,8 +1559,8 @@ protected:
 
     // Collect registered option categories into vector in preparation for
     // sorting.
-    for (OptionCatSet::const_iterator I = RegisteredOptionCategories->begin(),
-                                      E = RegisteredOptionCategories->end();
+    for (auto I = GlobalParser->RegisteredOptionCategories.begin(),
+              E = GlobalParser->RegisteredOptionCategories.end();
          I != E; ++I) {
       SortedCategories.push_back(*I);
     }
@@ -1715,13 +1697,13 @@ static cl::opt<bool> PrintAllOptions(
     cl::init(false), cl::cat(GenericCategory));
 
 void HelpPrinterWrapper::operator=(bool Value) {
-  if (Value == false)
+  if (!Value)
     return;
 
   // Decide which printer to invoke. If more than one option category is
   // registered then it is useful to show the categorized help instead of
   // uncategorized help.
-  if (RegisteredOptionCategories->size() > 1) {
+  if (GlobalParser->RegisteredOptionCategories.size() > 1) {
     // unhide -help-list option so user can have uncategorized output if they
     // want it.
     HLOp.setHiddenFlag(NotHidden);

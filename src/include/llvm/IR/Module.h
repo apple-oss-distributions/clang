@@ -34,54 +34,6 @@ class LLVMContext;
 class RandomNumberGenerator;
 class StructType;
 
-template<> struct ilist_traits<Function>
-  : public SymbolTableListTraits<Function, Module> {
-
-  // createSentinel is used to get hold of the node that marks the end of the
-  // list... (same trick used here as in ilist_traits<Instruction>)
-  Function *createSentinel() const {
-    return static_cast<Function*>(&Sentinel);
-  }
-  static void destroySentinel(Function*) {}
-
-  Function *provideInitialHead() const { return createSentinel(); }
-  Function *ensureHead(Function*) const { return createSentinel(); }
-  static void noteHead(Function*, Function*) {}
-
-private:
-  mutable ilist_node<Function> Sentinel;
-};
-
-template<> struct ilist_traits<GlobalVariable>
-  : public SymbolTableListTraits<GlobalVariable, Module> {
-  // createSentinel is used to create a node that marks the end of the list.
-  GlobalVariable *createSentinel() const {
-    return static_cast<GlobalVariable*>(&Sentinel);
-  }
-  static void destroySentinel(GlobalVariable*) {}
-
-  GlobalVariable *provideInitialHead() const { return createSentinel(); }
-  GlobalVariable *ensureHead(GlobalVariable*) const { return createSentinel(); }
-  static void noteHead(GlobalVariable*, GlobalVariable*) {}
-private:
-  mutable ilist_node<GlobalVariable> Sentinel;
-};
-
-template<> struct ilist_traits<GlobalAlias>
-  : public SymbolTableListTraits<GlobalAlias, Module> {
-  // createSentinel is used to create a node that marks the end of the list.
-  GlobalAlias *createSentinel() const {
-    return static_cast<GlobalAlias*>(&Sentinel);
-  }
-  static void destroySentinel(GlobalAlias*) {}
-
-  GlobalAlias *provideInitialHead() const { return createSentinel(); }
-  GlobalAlias *ensureHead(GlobalAlias*) const { return createSentinel(); }
-  static void noteHead(GlobalAlias*, GlobalAlias*) {}
-private:
-  mutable ilist_node<GlobalAlias> Sentinel;
-};
-
 template<> struct ilist_traits<NamedMDNode>
   : public ilist_default_traits<NamedMDNode> {
   // createSentinel is used to get hold of a node that marks the end of
@@ -96,6 +48,7 @@ template<> struct ilist_traits<NamedMDNode>
   static void noteHead(NamedMDNode*, NamedMDNode*) {}
   void addNodeToList(NamedMDNode *) {}
   void removeNodeFromList(NamedMDNode *) {}
+
 private:
   mutable ilist_node<NamedMDNode> Sentinel;
 };
@@ -116,11 +69,11 @@ class Module {
 /// @{
 public:
   /// The type for the list of global variables.
-  typedef iplist<GlobalVariable> GlobalListType;
+  typedef SymbolTableList<GlobalVariable> GlobalListType;
   /// The type for the list of functions.
-  typedef iplist<Function> FunctionListType;
+  typedef SymbolTableList<Function> FunctionListType;
   /// The type for the list of aliases.
-  typedef iplist<GlobalAlias> AliasListType;
+  typedef SymbolTableList<GlobalAlias> AliasListType;
   /// The type for the list of named metadata.
   typedef ilist<NamedMDNode> NamedMDListType;
   /// The type of the comdat "symbol" table.
@@ -249,7 +202,7 @@ public:
 
   /// Get the data layout string for the module's target platform. This is
   /// equivalent to getDataLayout()->getStringRepresentation().
-  const std::string getDataLayoutStr() const {
+  const std::string &getDataLayoutStr() const {
     return DL.getStringRepresentation();
   }
 
@@ -294,6 +247,7 @@ public:
   void setTargetTriple(StringRef T) { TargetTriple = T; }
 
   /// Set the module-scope inline assembly blocks.
+  /// A trailing newline is added if the input doesn't have one.
   void setModuleInlineAsm(StringRef Asm) {
     GlobalScopeAsm = Asm;
     if (!GlobalScopeAsm.empty() &&
@@ -301,8 +255,8 @@ public:
       GlobalScopeAsm += '\n';
   }
 
-  /// Append to the module-scope inline assembly blocks, automatically inserting
-  /// a separating newline if necessary.
+  /// Append to the module-scope inline assembly blocks.
+  /// A trailing newline is added if the input doesn't have one.
   void appendModuleInlineAsm(StringRef Asm) {
     GlobalScopeAsm += Asm;
     if (!GlobalScopeAsm.empty() &&
@@ -326,6 +280,11 @@ public:
   /// Populate client supplied SmallVector with the name for custom metadata IDs
   /// registered in this LLVMContext.
   void getMDKindNames(SmallVectorImpl<StringRef> &Result) const;
+
+  /// Populate client supplied SmallVector with the bundle tags registered in
+  /// this LLVMContext.  The bundle tags are ordered by increasing bundle IDs.
+  /// \see LLVMContext::getOperandBundleTagID
+  void getOperandBundleTags(SmallVectorImpl<StringRef> &Result) const;
 
   /// Return the type with the specified name, or null if there is none by that
   /// name.
@@ -491,7 +450,7 @@ public:
   /// If the GlobalValue is read in, and if the GVMaterializer supports it,
   /// release the memory for the function, and set it up to be materialized
   /// lazily. If !isDematerializable(), this method is a no-op.
-  void Dematerialize(GlobalValue *GV);
+  void dematerialize(GlobalValue *GV);
 
   /// Make sure all GlobalValues in this Module are fully read.
   std::error_code materializeAll();
@@ -511,28 +470,28 @@ public:
   const GlobalListType   &getGlobalList() const       { return GlobalList; }
   /// Get the Module's list of global variables.
   GlobalListType         &getGlobalList()             { return GlobalList; }
-  static iplist<GlobalVariable> Module::*getSublistAccess(GlobalVariable*) {
+  static GlobalListType Module::*getSublistAccess(GlobalVariable*) {
     return &Module::GlobalList;
   }
   /// Get the Module's list of functions (constant).
   const FunctionListType &getFunctionList() const     { return FunctionList; }
   /// Get the Module's list of functions.
   FunctionListType       &getFunctionList()           { return FunctionList; }
-  static iplist<Function> Module::*getSublistAccess(Function*) {
+  static FunctionListType Module::*getSublistAccess(Function*) {
     return &Module::FunctionList;
   }
   /// Get the Module's list of aliases (constant).
   const AliasListType    &getAliasList() const        { return AliasList; }
   /// Get the Module's list of aliases.
   AliasListType          &getAliasList()              { return AliasList; }
-  static iplist<GlobalAlias> Module::*getSublistAccess(GlobalAlias*) {
+  static AliasListType Module::*getSublistAccess(GlobalAlias*) {
     return &Module::AliasList;
   }
   /// Get the Module's list of named metadata (constant).
   const NamedMDListType  &getNamedMDList() const      { return NamedMDList; }
   /// Get the Module's list of named metadata.
   NamedMDListType        &getNamedMDList()            { return NamedMDList; }
-  static ilist<NamedMDNode> Module::*getSublistAccess(NamedMDNode*) {
+  static NamedMDListType Module::*getSublistAccess(NamedMDNode*) {
     return &Module::NamedMDList;
   }
   /// Get the symbol table of global variable and function identifiers
@@ -645,11 +604,12 @@ public:
   /// uselistorder directives so that use-lists can be recreated when reading
   /// the assembly.
   void print(raw_ostream &OS, AssemblyAnnotationWriter *AAW,
-             bool ShouldPreserveUseListOrder = false) const;
+             bool ShouldPreserveUseListOrder = false,
+             bool IsForDebug = false) const;
 
   /// Dump the module to stderr (for debugging).
   void dump() const;
-  
+
   /// This function causes all the subinstructions to "let go" of all references
   /// that they are maintaining.  This allows one to 'delete' a whole class at
   /// a time, even though there may be circular references... first all
@@ -664,6 +624,10 @@ public:
 
   /// \brief Returns the Dwarf Version by checking module flags.
   unsigned getDwarfVersion() const;
+
+  /// \brief Returns the CodeView Version by checking module flags.
+  /// Returns zero if not present in module.
+  unsigned getCodeViewFlag() const;
 
 /// @}
 /// @name Utility functions for querying and setting PIC level
@@ -692,7 +656,7 @@ DEFINE_SIMPLE_CONVERSION_FUNCTIONS(Module, LLVMModuleRef)
 inline Module *unwrap(LLVMModuleProviderRef MP) {
   return reinterpret_cast<Module*>(MP);
 }
-  
+
 } // End llvm namespace
 
 #endif

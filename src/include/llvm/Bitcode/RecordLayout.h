@@ -40,10 +40,6 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/MathExtras.h"
 
-#if !LLVM_HAS_VARIADIC_TEMPLATES
-#  error This functionality requires variadic templates
-#endif
-
 namespace llvm {
 
 namespace impl {

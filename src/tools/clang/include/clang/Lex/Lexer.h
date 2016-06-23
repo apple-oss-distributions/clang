@@ -89,8 +89,8 @@ class Lexer : public PreprocessorLexer {
   // CurrentConflictMarkerState - The kind of conflict marker we are handling.
   ConflictMarkerKind CurrentConflictMarkerState;
 
-  Lexer(const Lexer &) LLVM_DELETED_FUNCTION;
-  void operator=(const Lexer &) LLVM_DELETED_FUNCTION;
+  Lexer(const Lexer &) = delete;
+  void operator=(const Lexer &) = delete;
   friend class Preprocessor;
 
   void InitLexer(const char *BufStart, const char *BufPtr, const char *BufEnd);
@@ -228,7 +228,7 @@ public:
   /// Stringify - Convert the specified string into a C string by escaping '\'
   /// and " characters.  This does not add surrounding ""'s to the string.
   /// If Charify is true, this escapes the ' character instead of ".
-  static std::string Stringify(const std::string &Str, bool Charify = false);
+  static std::string Stringify(StringRef Str, bool Charify = false);
 
   /// Stringify - Convert the specified string into a C string by escaping '\'
   /// and " characters.  This does not add surrounding ""'s to the string.

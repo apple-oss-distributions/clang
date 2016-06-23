@@ -26,9 +26,9 @@
 #undef _WIN32_WINNT
 #undef _WIN32_IE
 
-// Require at least Windows XP(5.1) API.
-#define _WIN32_WINNT 0x0501
-#define _WIN32_IE    0x0600 // MinGW at it again.
+// Require at least Windows 7 API.
+#define _WIN32_WINNT 0x0601
+#define _WIN32_IE    0x0800 // MinGW at it again. FIXME: verify if still needed.
 #define WIN32_LEAN_AND_MEAN
 
 #include "llvm/ADT/SmallVector.h"
@@ -92,7 +92,7 @@ public:
   }
 
   // True if Handle is valid.
-  LLVM_EXPLICIT operator bool() const {
+  explicit operator bool() const {
     return HandleTraits::IsValid(Handle) ? true : false;
   }
 

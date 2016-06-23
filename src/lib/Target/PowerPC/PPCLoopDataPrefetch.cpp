@@ -14,12 +14,14 @@
 #define DEBUG_TYPE "ppc-loop-data-prefetch"
 #include "PPC.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/CodeMetrics.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionAliasAnalysis.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
@@ -70,10 +72,10 @@ namespace {
       AU.addPreserved<DominatorTreeWrapperPass>();
       AU.addRequired<LoopInfoWrapperPass>();
       AU.addPreserved<LoopInfoWrapperPass>();
-      AU.addRequired<ScalarEvolution>();
+      AU.addRequired<ScalarEvolutionWrapperPass>();
       // FIXME: For some reason, preserving SE here breaks LSR (even if
       // this pass changes nothing).
-      // AU.addPreserved<ScalarEvolution>();
+      // AU.addPreserved<ScalarEvolutionWrapperPass>();
       AU.addRequired<TargetTransformInfoWrapperPass>();
     }
 
@@ -95,7 +97,7 @@ INITIALIZE_PASS_BEGIN(PPCLoopDataPrefetch, "ppc-loop-data-prefetch",
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass)
 INITIALIZE_PASS_END(PPCLoopDataPrefetch, "ppc-loop-data-prefetch",
                     "PPC Loop Data Prefetch", false, false)
 
@@ -103,18 +105,16 @@ FunctionPass *llvm::createPPCLoopDataPrefetchPass() { return new PPCLoopDataPref
 
 bool PPCLoopDataPrefetch::runOnFunction(Function &F) {
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  SE = &getAnalysis<ScalarEvolution>();
+  SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   DL = &F.getParent()->getDataLayout();
   AC = &getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
   TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
 
   bool MadeChange = false;
 
-  for (LoopInfo::iterator I = LI->begin(), E = LI->end();
-       I != E; ++I) {
-    Loop *L = *I;
-    MadeChange |= runOnLoop(L);
-  }
+  for (auto I = LI->begin(), IE = LI->end(); I != IE; ++I)
+    for (auto L = df_begin(*I), LE = df_end(*I); L != LE; ++L)
+      MadeChange |= runOnLoop(*L);
 
   return MadeChange;
 }
@@ -192,7 +192,7 @@ bool PPCLoopDataPrefetch::runOnLoop(Loop *L) {
         const SCEV *PtrDiff = SE->getMinusSCEV(LSCEVAddRec, K->second);
         if (const SCEVConstant *ConstPtrDiff =
             dyn_cast<SCEVConstant>(PtrDiff)) {
-          int64_t PD = abs64(ConstPtrDiff->getValue()->getSExtValue());
+          int64_t PD = std::abs(ConstPtrDiff->getValue()->getSExtValue());
           if (PD < (int64_t) CacheLineSize) {
             DupPref = true;
             break;
@@ -218,9 +218,11 @@ bool PPCLoopDataPrefetch::runOnLoop(Loop *L) {
       Module *M = (*I)->getParent()->getParent();
       Type *I32 = Type::getInt32Ty((*I)->getContext());
       Value *PrefetchFunc = Intrinsic::getDeclaration(M, Intrinsic::prefetch);
-      Builder.CreateCall4(PrefetchFunc, PrefPtrValue,
-        ConstantInt::get(I32, MemI->mayReadFromMemory() ? 0 : 1),
-        ConstantInt::get(I32, 3), ConstantInt::get(I32, 1));
+      Builder.CreateCall(
+          PrefetchFunc,
+          {PrefPtrValue,
+           ConstantInt::get(I32, MemI->mayReadFromMemory() ? 0 : 1),
+           ConstantInt::get(I32, 3), ConstantInt::get(I32, 1)});
 
       MadeChange = true;
     }

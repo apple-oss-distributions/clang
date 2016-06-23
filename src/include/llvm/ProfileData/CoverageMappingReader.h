@@ -92,10 +92,9 @@ protected:
 class RawCoverageFilenamesReader : public RawCoverageReader {
   std::vector<StringRef> &Filenames;
 
-  RawCoverageFilenamesReader(const RawCoverageFilenamesReader &)
-      LLVM_DELETED_FUNCTION;
+  RawCoverageFilenamesReader(const RawCoverageFilenamesReader &) = delete;
   RawCoverageFilenamesReader &
-  operator=(const RawCoverageFilenamesReader &) LLVM_DELETED_FUNCTION;
+  operator=(const RawCoverageFilenamesReader &) = delete;
 
 public:
   RawCoverageFilenamesReader(StringRef Data, std::vector<StringRef> &Filenames)
@@ -111,10 +110,9 @@ class RawCoverageMappingReader : public RawCoverageReader {
   std::vector<CounterExpression> &Expressions;
   std::vector<CounterMappingRegion> &MappingRegions;
 
-  RawCoverageMappingReader(const RawCoverageMappingReader &)
-      LLVM_DELETED_FUNCTION;
+  RawCoverageMappingReader(const RawCoverageMappingReader &) = delete;
   RawCoverageMappingReader &
-  operator=(const RawCoverageMappingReader &) LLVM_DELETED_FUNCTION;
+  operator=(const RawCoverageMappingReader &) = delete;
 
 public:
   RawCoverageMappingReader(StringRef MappingData,

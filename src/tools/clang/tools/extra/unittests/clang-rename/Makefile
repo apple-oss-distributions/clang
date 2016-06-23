@@ -11,10 +11,9 @@ CLANG_LEVEL = ../../../..
 include $(CLANG_LEVEL)/../../Makefile.config
 
 TESTNAME = ClangRenameTests
-LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader bitwriter \
-                   instrumentation ipo support mc objcarcopts option
-USEDLIBS = clangRename.a clangFrontend.a clangCodeGen.a \
-           clangSerialization.a clangDriver.a \
+LINK_COMPONENTS := asmparser bitreader support MC MCParser option \
+		 TransformUtils
+USEDLIBS = clangRename.a clangFrontend.a clangSerialization.a clangDriver.a \
            clangTooling.a clangParse.a clangSema.a clangIndex.a \
            clangStaticAnalyzerFrontend.a clangStaticAnalyzerCheckers.a \
            clangStaticAnalyzerCore.a clangAnalysis.a clangRewriteFrontend.a \

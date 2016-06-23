@@ -40,6 +40,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetRegisterInfo.h"
@@ -59,6 +60,7 @@ static cl::opt<bool> DisableNewValueJumps("disable-nvjump", cl::Hidden,
     cl::desc("Disable New Value Jumps"));
 
 namespace llvm {
+  FunctionPass *createHexagonNewValueJump();
   void initializeHexagonNewValueJumpPass(PassRegistry&);
 }
 
@@ -199,10 +201,7 @@ static bool commonChecksToProhibitNewValueJump(bool afterRA,
     // of registers by individual passes in the backend. At this time,
     // we don't know the scope of usage and definitions of these
     // instructions.
-    if (MII->getOpcode() == Hexagon::TFR_condset_ii ||
-        MII->getOpcode() == Hexagon::TFR_condset_ri ||
-        MII->getOpcode() == Hexagon::TFR_condset_ir ||
-        MII->getOpcode() == Hexagon::LDriw_pred     ||
+    if (MII->getOpcode() == Hexagon::LDriw_pred     ||
         MII->getOpcode() == Hexagon::STriw_pred)
       return false;
   }
@@ -373,7 +372,7 @@ bool HexagonNewValueJump::runOnMachineFunction(MachineFunction &MF) {
   // Loop through all the bb's of the function
   for (MachineFunction::iterator MBBb = MF.begin(), MBBe = MF.end();
         MBBb != MBBe; ++MBBb) {
-    MachineBasicBlock* MBB = MBBb;
+    MachineBasicBlock *MBB = &*MBBb;
 
     DEBUG(dbgs() << "** dumping bb ** "
                  << MBB->getNumber() << "\n");

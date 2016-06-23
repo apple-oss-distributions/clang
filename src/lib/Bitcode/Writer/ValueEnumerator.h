@@ -100,8 +100,8 @@ private:
   unsigned FirstFuncConstantID;
   unsigned FirstInstID;
 
-  ValueEnumerator(const ValueEnumerator &) LLVM_DELETED_FUNCTION;
-  void operator=(const ValueEnumerator &) LLVM_DELETED_FUNCTION;
+  ValueEnumerator(const ValueEnumerator &) = delete;
+  void operator=(const ValueEnumerator &) = delete;
 public:
   ValueEnumerator(const Module &M, bool ShouldPreserveUseListOrder);
 
@@ -185,6 +185,7 @@ public:
   ///
   void incorporateFunction(const Function &F);
   void purgeFunction();
+  uint64_t computeBitsRequiredForTypeIndicies() const;
 
 private:
   void OptimizeConstants(unsigned CstStart, unsigned CstEnd);

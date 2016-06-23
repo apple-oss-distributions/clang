@@ -14,7 +14,6 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/ModuleLoader.h"
@@ -53,29 +52,21 @@ protected:
 };
 
 class VoidModuleLoader : public ModuleLoader {
-public:
-  VoidModuleLoader()
-    : ModuleLoader(SharedModuleProvider::Create<LLVMModuleProvider>())
-  { }
-
-private:
   ModuleLoadResult loadModule(SourceLocation ImportLoc, 
                               ModuleIdPath Path,
                               Module::NameVisibilityKind Visibility,
-                              bool IsInclusionDirective) override
-  {
+                              bool IsInclusionDirective) override {
     return ModuleLoadResult();
   }
 
   void makeModuleVisible(Module *Mod,
                          Module::NameVisibilityKind Visibility,
-                         SourceLocation ImportLoc,
-                         bool Complain) override { }
+                         SourceLocation ImportLoc) override { }
 
   GlobalModuleIndex *loadGlobalModuleIndex(SourceLocation TriggerLoc) override
     { return nullptr; }
   bool lookupMissingImports(StringRef Name, SourceLocation TriggerLoc) override
-    { return 0; };
+    { return 0; }
 };
 
 TEST_F(SourceManagerTest, isBeforeInTranslationUnit) {
@@ -265,15 +256,15 @@ class MacroTracker : public PPCallbacks {
 
 public:
   explicit MacroTracker(std::vector<MacroAction> &Macros) : Macros(Macros) { }
-  
-  virtual void MacroDefined(const Token &MacroNameTok,
-                            const MacroDirective *MD) {
+
+  void MacroDefined(const Token &MacroNameTok,
+                    const MacroDirective *MD) override {
     Macros.push_back(MacroAction(MD->getLocation(),
                                  MacroNameTok.getIdentifierInfo()->getName(),
                                  true));
   }
-  virtual void MacroExpands(const Token &MacroNameTok, const MacroDirective *MD,
-                            SourceRange Range, const MacroArgs *Args) {
+  void MacroExpands(const Token &MacroNameTok, const MacroDefinition &MD,
+                    SourceRange Range, const MacroArgs *Args) override {
     Macros.push_back(MacroAction(MacroNameTok.getLocation(),
                                  MacroNameTok.getIdentifierInfo()->getName(),
                                  false));

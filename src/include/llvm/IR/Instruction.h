@@ -18,6 +18,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/SymbolTableListTraits.h"
 #include "llvm/IR/User.h"
 
 namespace llvm {
@@ -25,14 +26,16 @@ namespace llvm {
 class FastMathFlags;
 class LLVMContext;
 class MDNode;
+class BasicBlock;
 struct AAMDNodes;
 
-template<typename ValueSubClass, typename ItemParentClass>
-  class SymbolTableListTraits;
+template <>
+struct SymbolTableListSentinelTraits<Instruction>
+    : public ilist_half_embedded_sentinel_traits<Instruction> {};
 
 class Instruction : public User, public ilist_node<Instruction> {
-  void operator=(const Instruction &) LLVM_DELETED_FUNCTION;
-  Instruction(const Instruction &) LLVM_DELETED_FUNCTION;
+  void operator=(const Instruction &) = delete;
+  Instruction(const Instruction &) = delete;
 
   BasicBlock *Parent;
   DebugLoc DbgLoc;                         // 'dbg' Metadata cache.
@@ -44,7 +47,7 @@ class Instruction : public User, public ilist_node<Instruction> {
   };
 public:
   // Out of line virtual method, so the vtable, etc has a home.
-  ~Instruction();
+  ~Instruction() override;
 
   /// user_back - Specialize the methods defined in Value, as we know that an
   /// instruction can only be used by other instructions.
@@ -60,6 +63,14 @@ public:
   /// Note: this is undefined behavior if the instruction does not have a
   /// parent, or the parent basic block does not have a parent function.
   const Module *getModule() const;
+  Module *getModule();
+
+  /// \brief Return the function this instruction belongs to.
+  ///
+  /// Note: it is undefined behavior to call this on an instruction not
+  /// currently inserted into a function.
+  const Function *getFunction() const;
+  Function *getFunction();
 
   /// removeFromParent - This method unlinks 'this' from the containing basic
   /// block, but does not delete it.
@@ -69,14 +80,15 @@ public:
   /// eraseFromParent - This method unlinks 'this' from the containing basic
   /// block and deletes it.
   ///
-  void eraseFromParent();
+  /// \returns an iterator pointing to the element after the erased one
+  SymbolTableList<Instruction>::iterator eraseFromParent();
 
-  /// insertBefore - Insert an unlinked instructions into a basic block
-  /// immediately before the specified instruction.
+  /// Insert an unlinked instruction into a basic block immediately before
+  /// the specified instruction.
   void insertBefore(Instruction *InsertPos);
 
-  /// insertAfter - Insert an unlinked instructions into a basic block
-  /// immediately after the specified instruction.
+  /// Insert an unlinked instruction into a basic block immediately after the
+  /// specified instruction.
   void insertAfter(Instruction *InsertPos);
 
   /// moveBefore - Unlink this instruction from its current basic block and
@@ -184,20 +196,22 @@ public:
   void setMetadata(unsigned KindID, MDNode *Node);
   void setMetadata(StringRef Kind, MDNode *Node);
 
-  /// \brief Drop unknown metadata.
+  /// Drop all unknown metadata except for debug locations.
+  /// @{
   /// Passes are required to drop metadata they don't understand. This is a
   /// convenience method for passes to do so.
-  void dropUnknownMetadata(ArrayRef<unsigned> KnownIDs);
-  void dropUnknownMetadata() {
-    return dropUnknownMetadata(None);
+  void dropUnknownNonDebugMetadata(ArrayRef<unsigned> KnownIDs);
+  void dropUnknownNonDebugMetadata() {
+    return dropUnknownNonDebugMetadata(None);
   }
-  void dropUnknownMetadata(unsigned ID1) {
-    return dropUnknownMetadata(makeArrayRef(ID1));
+  void dropUnknownNonDebugMetadata(unsigned ID1) {
+    return dropUnknownNonDebugMetadata(makeArrayRef(ID1));
   }
-  void dropUnknownMetadata(unsigned ID1, unsigned ID2) {
+  void dropUnknownNonDebugMetadata(unsigned ID1, unsigned ID2) {
     unsigned IDs[] = {ID1, ID2};
-    return dropUnknownMetadata(IDs);
+    return dropUnknownNonDebugMetadata(IDs);
   }
+  /// @}
 
   /// setAAMetadata - Sets the metadata on this instruction from the
   /// AAMDNodes structure.
@@ -362,10 +376,25 @@ public:
   ///
   /// Note that this does not consider malloc and alloca to have side
   /// effects because the newly allocated memory is completely invisible to
-  /// instructions which don't used the returned value.  For cases where this
+  /// instructions which don't use the returned value.  For cases where this
   /// matters, isSafeToSpeculativelyExecute may be more appropriate.
   bool mayHaveSideEffects() const {
     return mayWriteToMemory() || mayThrow() || !mayReturn();
+  }
+
+  /// \brief Return true if the instruction is a variety of EH-block.
+  bool isEHPad() const {
+    switch (getOpcode()) {
+    case Instruction::CatchPad:
+    case Instruction::CatchEndPad:
+    case Instruction::CleanupPad:
+    case Instruction::CleanupEndPad:
+    case Instruction::LandingPad:
+    case Instruction::TerminatePad:
+      return true;
+    default:
+      return false;
+    }
   }
 
   /// clone() - Create a copy of 'this' instruction that is identical in all
@@ -469,7 +498,7 @@ private:
                          (V ? HasMetadataBit : 0));
   }
 
-  friend class SymbolTableListTraits<Instruction, BasicBlock>;
+  friend class SymbolTableListTraits<Instruction>;
   void setParent(BasicBlock *P);
 protected:
   // Instruction subclasses can stick up to 15 bits of stuff into the
@@ -489,8 +518,10 @@ protected:
               Instruction *InsertBefore = nullptr);
   Instruction(Type *Ty, unsigned iType, Use *Ops, unsigned NumOps,
               BasicBlock *InsertAtEnd);
-  virtual Instruction *clone_impl() const = 0;
 
+private:
+  /// Create a copy of this instruction.
+  Instruction *cloneImpl() const;
 };
 
 // Instruction* is only 4-byte aligned.

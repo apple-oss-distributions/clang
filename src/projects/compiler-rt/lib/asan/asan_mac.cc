@@ -24,18 +24,26 @@
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_mac.h"
 
+#if !SANITIZER_IOS
+#include <crt_externs.h>  // for _NSGetArgv and _NSGetEnviron
+#else
+extern "C" {
+  extern char ***_NSGetArgv(void);
+}
+#endif
+
 #include <dlfcn.h>  // for dladdr()
+#include <fcntl.h>
+#include <libkern/OSAtomic.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <pthread.h>
+#include <stdlib.h>  // for free()
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/ucontext.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdlib.h>  // for free()
 #include <unistd.h>
-#include <libkern/OSAtomic.h>
 
 // from <crt_externs.h>, but we don't have that file on iOS
 extern "C" {
@@ -45,34 +53,7 @@ extern "C" {
 
 namespace __asan {
 
-void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
-  ucontext_t *ucontext = (ucontext_t*)context;
-# if defined(__aarch64__)
-  *pc = ucontext->uc_mcontext->__ss.__pc;
-// See <rdar://19552184>.
-# if defined(__IPHONE_8_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_8_0
-  *bp = ucontext->uc_mcontext->__ss.__fp;
-# else
-  *bp = ucontext->uc_mcontext->__ss.__lr;
-# endif
-  *sp = ucontext->uc_mcontext->__ss.__sp;
-# elif defined(__x86_64__)
-  *pc = ucontext->uc_mcontext->__ss.__rip;
-  *bp = ucontext->uc_mcontext->__ss.__rbp;
-  *sp = ucontext->uc_mcontext->__ss.__rsp;
-# elif defined(__arm__)
-  *pc = ucontext->uc_mcontext->__ss.__pc;
-  *bp = ucontext->uc_mcontext->__ss.__r[7];
-  *sp = ucontext->uc_mcontext->__ss.__sp;
-# elif defined(__i386__)
-  *pc = ucontext->uc_mcontext->__ss.__eip;
-  *bp = ucontext->uc_mcontext->__ss.__ebp;
-  *sp = ucontext->uc_mcontext->__ss.__esp;
-# else
-# error "Unknown architecture"
-# endif
-}
-
+void InitializePlatformInterceptors() {}
 
 bool PlatformHasDifferentMemcpyAndMemmove() {
   // On OS X 10.7 memcpy() and memmove() are both resolved
@@ -94,30 +75,27 @@ LowLevelAllocator allocator_for_env;
 // otherwise the corresponding "NAME=value" string is replaced with
 // |name_value|.
 void LeakyResetEnv(const char *name, const char *name_value) {
-  char ***env_ptr = _NSGetEnviron();
-  CHECK(env_ptr);
-  char **environ = *env_ptr;
-  CHECK(environ);
+  char **env = GetEnviron();
   uptr name_len = internal_strlen(name);
-  while (*environ != 0) {
-    uptr len = internal_strlen(*environ);
+  while (*env != 0) {
+    uptr len = internal_strlen(*env);
     if (len > name_len) {
-      const char *p = *environ;
+      const char *p = *env;
       if (!internal_memcmp(p, name, name_len) && p[name_len] == '=') {
         // Match.
         if (name_value) {
           // Replace the old value with the new one.
-          *environ = const_cast<char*>(name_value);
+          *env = const_cast<char*>(name_value);
         } else {
           // Shift the subsequent pointers back.
-          char **del = environ;
+          char **del = env;
           do {
             del[0] = del[1];
           } while (*del++);
         }
       }
     }
-    environ++;
+    env++;
   }
 }
 
@@ -155,9 +133,9 @@ void MaybeReexec() {
   const char *dylib_name = StripModuleName(info.dli_fname);
   uptr dylib_name_len = internal_strlen(dylib_name);
 
-  bool libIsInEnv = dyld_insert_libraries &&
-                    REAL(strstr)(dyld_insert_libraries, dylib_name);
-  if (DyldNeedsEnvVariable() && !libIsInEnv) {
+  bool lib_is_in_env =
+      dyld_insert_libraries && REAL(strstr)(dyld_insert_libraries, dylib_name);
+  if (DyldNeedsEnvVariable() && !lib_is_in_env) {
     // DYLD_INSERT_LIBRARIES is not set or does not contain the runtime
     // library.
     char program_name[1024];
@@ -192,10 +170,9 @@ void MaybeReexec() {
            "possibly because of sandbox restrictions. Make sure to launch the "
            "executable with:\n%s=%s\n", kDyldInsertLibraries, new_env);
     CHECK("execv failed" && 0);
-    libIsInEnv = true;
   }
 
-  if (!libIsInEnv)
+  if (!lib_is_in_env)
     return;
 
   // DYLD_INSERT_LIBRARIES is set and contains the runtime library. Let's remove
@@ -267,9 +244,6 @@ void AsanCheckDynamicRTPrereqs() {}
 
 // No-op. Mac does not support static linkage anyway.
 void AsanCheckIncompatibleRT() {}
-
-void AsanPlatformThreadInit() {
-}
 
 void ReadContextStack(void *context, uptr *stack, uptr *ssize) {
   UNIMPLEMENTED();

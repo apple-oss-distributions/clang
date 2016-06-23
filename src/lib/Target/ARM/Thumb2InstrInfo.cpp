@@ -35,9 +35,9 @@ Thumb2InstrInfo::Thumb2InstrInfo(const ARMSubtarget &STI)
 /// getNoopForMachoTarget - Return the noop instruction to use for a noop.
 void Thumb2InstrInfo::getNoopForMachoTarget(MCInst &NopInst) const {
   NopInst.setOpcode(ARM::tHINT);
-  NopInst.addOperand(MCOperand::CreateImm(0));
-  NopInst.addOperand(MCOperand::CreateImm(ARMCC::AL));
-  NopInst.addOperand(MCOperand::CreateReg(0));
+  NopInst.addOperand(MCOperand::createImm(0));
+  NopInst.addOperand(MCOperand::createImm(ARMCC::AL));
+  NopInst.addOperand(MCOperand::createReg(0));
 }
 
 unsigned Thumb2InstrInfo::getUnindexedOpcode(unsigned Opc) const {
@@ -131,11 +131,9 @@ storeRegToStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
 
   MachineFunction &MF = *MBB.getParent();
   MachineFrameInfo &MFI = *MF.getFrameInfo();
-  MachineMemOperand *MMO =
-    MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FI),
-                            MachineMemOperand::MOStore,
-                            MFI.getObjectSize(FI),
-                            MFI.getObjectAlignment(FI));
+  MachineMemOperand *MMO = MF.getMachineMemOperand(
+      MachinePointerInfo::getFixedStack(MF, FI), MachineMemOperand::MOStore,
+      MFI.getObjectSize(FI), MFI.getObjectAlignment(FI));
 
   if (RC == &ARM::GPRRegClass   || RC == &ARM::tGPRRegClass ||
       RC == &ARM::tcGPRRegClass || RC == &ARM::rGPRRegClass ||
@@ -171,11 +169,9 @@ loadRegFromStackSlot(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
                      const TargetRegisterInfo *TRI) const {
   MachineFunction &MF = *MBB.getParent();
   MachineFrameInfo &MFI = *MF.getFrameInfo();
-  MachineMemOperand *MMO =
-    MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FI),
-                            MachineMemOperand::MOLoad,
-                            MFI.getObjectSize(FI),
-                            MFI.getObjectAlignment(FI));
+  MachineMemOperand *MMO = MF.getMachineMemOperand(
+      MachinePointerInfo::getFixedStack(MF, FI), MachineMemOperand::MOLoad,
+      MFI.getObjectSize(FI), MFI.getObjectAlignment(FI));
   DebugLoc DL;
   if (I != MBB.end()) DL = I->getDebugLoc();
 
@@ -256,14 +252,19 @@ void llvm::emitT2RegPlusImmediate(MachineBasicBlock &MBB,
     if (Fits) {
       if (isSub) {
         BuildMI(MBB, MBBI, dl, TII.get(ARM::t2SUBrr), DestReg)
-          .addReg(BaseReg, RegState::Kill)
+          .addReg(BaseReg)
           .addReg(DestReg, RegState::Kill)
           .addImm((unsigned)Pred).addReg(PredReg).addReg(0)
           .setMIFlags(MIFlags);
       } else {
+        // Here we know that DestReg is not SP but we do not
+        // know anything about BaseReg. t2ADDrr is an invalid
+        // instruction is SP is used as the second argument, but
+        // is fine if SP is the first argument. To be sure we
+        // do not generate invalid encoding, put BaseReg first.
         BuildMI(MBB, MBBI, dl, TII.get(ARM::t2ADDrr), DestReg)
+          .addReg(BaseReg)
           .addReg(DestReg, RegState::Kill)
-          .addReg(BaseReg, RegState::Kill)
           .addImm((unsigned)Pred).addReg(PredReg).addReg(0)
           .setMIFlags(MIFlags);
       }

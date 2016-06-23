@@ -16,34 +16,41 @@ namespace clang {
 namespace tidy {
 namespace readability {
 
-/// \brief Checks that bodies of 'if' statements and loops ('for', 'range-for',
-/// 'do-while', and 'while') are inside braces
+/// Checks that bodies of `if` statements and loops (`for`, `range-for`,
+/// `do-while`, and `while`) are inside braces
 ///
 /// Before:
-/// if (condition)
-///   statement;
+///
+/// \code
+///   if (condition)
+///     statement;
+/// \endcode
 ///
 /// After:
-/// if (condition) {
-///   statement;
-/// }
+///
+/// \code
+///   if (condition) {
+///     statement;
+///   }
+/// \endcode
 ///
 /// Additionally, one can define an option `ShortStatementLines` defining the
 /// minimal number of lines that the statement should have in order to trigger
 /// this check.
+///
 /// The number of lines is counted from the end of condition or initial keyword
-/// (do/else) until the last line of the inner statement.
-/// Default value 0 means that braces will be added to all statements (not
-/// having them already).
+/// (`do`/`else`) until the last line of the inner statement.  Default value 0
+/// means that braces will be added to all statements (not having them already).
 class BracesAroundStatementsCheck : public ClangTidyCheck {
 public:
   BracesAroundStatementsCheck(StringRef Name, ClangTidyContext *Context);
   void storeOptions(ClangTidyOptions::OptionMap &Opts) override;
   void registerMatchers(ast_matchers::MatchFinder *Finder) override;
   void check(const ast_matchers::MatchFinder::MatchResult &Result) override;
+  void onEndOfTranslationUnit() override;
 
 private:
-  void checkStmt(const ast_matchers::MatchFinder::MatchResult &Result,
+  bool checkStmt(const ast_matchers::MatchFinder::MatchResult &Result,
                  const Stmt *S, SourceLocation StartLoc,
                  SourceLocation EndLocHint = SourceLocation());
   template <typename IfOrWhileStmt>
@@ -51,6 +58,7 @@ private:
                                const ASTContext *Context);
 
 private:
+  std::set<const Stmt*> ForceBracesStmts;
   const unsigned ShortStatementLines;
 };
 

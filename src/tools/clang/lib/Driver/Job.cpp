@@ -18,6 +18,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
@@ -26,13 +27,11 @@ using llvm::raw_ostream;
 using llvm::StringRef;
 using llvm::ArrayRef;
 
-Job::~Job() {}
-
 Command::Command(const Action &Source, const Tool &Creator,
                  const char *Executable, const ArgStringList &Arguments,
                  ArrayRef<InputInfo> Inputs)
-    : Job(CommandClass), Source(Source), Creator(Creator),
-      Executable(Executable), Arguments(Arguments), ResponseFile(nullptr) {
+    : Source(Source), Creator(Creator), Executable(Executable),
+      Arguments(Arguments), ResponseFile(nullptr) {
   for (const auto &II : Inputs)
     if (II.isFilename())
       InputFilenames.push_back(II.getFilename());
@@ -50,6 +49,7 @@ static int skipArgs(const char *Flag, bool HaveCrashVFS) {
     .Cases("-iwithprefixbefore", "-isystem", "-iquote", true)
     .Cases("-resource-dir", "-serialize-diagnostic-file", true)
     .Cases("-dwarf-debug-flags", "-ivfsoverlay", true)
+    .Cases("-header-include-file", "-diagnostic-log-file", true)
     // Some include flags shouldn't be skipped if we have a crash VFS
     .Case("-isysroot", !HaveCrashVFS)
     .Default(false);
@@ -107,7 +107,9 @@ void Command::writeResponseFile(raw_ostream &OS) const {
     return;
   }
 
-  // In regular response files, we send all arguments to the response file
+  // In regular response files, we send all arguments to the response file.
+  // Wrapping all arguments in double quotes ensures that both Unix tools and
+  // Windows tools understand the response file.
   for (const char *Arg : Arguments) {
     OS << '"';
 
@@ -194,6 +196,36 @@ void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
     printArg(OS, "-ivfsoverlay", Quote);
     OS << ' ';
     printArg(OS, CrashInfo->VFSPath.str().c_str(), Quote);
+
+    // Get the module cache directory from the VFS overlay. Since we
+    // lack preprocessor info at this point, lookup for the hashed dir
+    // inside <tmp_path_to>.cache/vfs/modules/<hashed_dir>.
+    SmallString<128> CacheDirFullPath = CrashInfo->Filename;
+    llvm::sys::path::replace_extension(CacheDirFullPath, ".cache");
+    SmallString<128> RelModCacheDir = llvm::sys::path::parent_path(
+        llvm::sys::path::parent_path(CrashInfo->VFSPath));
+    llvm::sys::path::append(CacheDirFullPath, "modules");
+
+    std::error_code EC;
+    llvm::sys::fs::directory_iterator Dir(CacheDirFullPath, EC), DirEnd;
+    assert(!EC && Dir != DirEnd &&
+           "module cache should contain only one hash directory");
+    StringRef HashDir = llvm::sys::path::stem(Dir->path());
+    llvm::sys::path::append(RelModCacheDir, "modules", HashDir);
+
+    const char Arg[] = "-fmodules-cache-path=";
+    RelModCacheDir.insert(RelModCacheDir.begin(), Arg, Arg + strlen(Arg));
+
+    // Disable module hash in the reproducer because the computed hash in future
+    // reproduction won't match, making modules cache dir unable to be reused.
+    // TODO: We are currently are unable to reuse modules anyway since there
+    // could be hashes on the .pcm filenames. To fix that the .pcm files in the
+    // output module caches need to be renamed without the hashes. Using this
+    // flag now is already a step in the right direction.
+    OS << ' ';
+    printArg(OS, "-fdisable-module-hash", Quote);
+    OS << ' ';
+    printArg(OS, RelModCacheDir.c_str(), Quote);
   }
 
   if (ResponseFile != nullptr) {
@@ -221,8 +253,7 @@ int Command::Execute(const StringRef **Redirects, std::string *ErrMsg,
 
   if (ResponseFile == nullptr) {
     Argv.push_back(Executable);
-    for (size_t i = 0, e = Arguments.size(); i != e; ++i)
-      Argv.push_back(Arguments[i]);
+    Argv.append(Arguments.begin(), Arguments.end());
     Argv.push_back(nullptr);
 
     return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ nullptr,
@@ -297,8 +328,6 @@ int FallbackCommand::Execute(const StringRef **Redirects, std::string *ErrMsg,
   int SecondaryStatus = Fallback->Execute(Redirects, ErrMsg, ExecutionFailed);
   return SecondaryStatus;
 }
-
-JobList::JobList() : Job(JobListClass) {}
 
 void JobList::Print(raw_ostream &OS, const char *Terminator, bool Quote,
                     CrashReportInfo *CrashInfo) const {

@@ -17,7 +17,6 @@
 #include "AddOverrideActions.h"
 #include "AddOverrideMatchers.h"
 #include "clang/Frontend/CompilerInstance.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 
 using clang::ast_matchers::MatchFinder;
 using namespace clang::tooling;
@@ -31,8 +30,7 @@ static cl::opt<bool> DetectMacros(
 
 int AddOverrideTransform::apply(const CompilationDatabase &Database,
                                 const std::vector<std::string> &SourcePaths) {
-  ClangTool AddOverrideTool(Database, SourcePaths,
-                            SharedModuleProvider::Create<LLVMModuleProvider>());
+  ClangTool AddOverrideTool(Database, SourcePaths);
   unsigned AcceptedChanges = 0;
   MatchFinder Finder;
   AddOverrideFixer Fixer(AcceptedChanges, DetectMacros,
@@ -58,6 +56,7 @@ bool AddOverrideTransform::handleBeginSource(clang::CompilerInstance &CI,
   return Transform::handleBeginSource(CI, Filename);
 }
 
+namespace {
 struct AddOverrideFactory : TransformFactory {
   AddOverrideFactory() {
     // if detecting macros is enabled, do not impose requirements on the
@@ -75,6 +74,7 @@ struct AddOverrideFactory : TransformFactory {
     return new AddOverrideTransform(Opts);
   }
 };
+} // namespace
 
 // Register the factory using this statically initialized variable.
 static TransformFactoryRegistry::Add<AddOverrideFactory>

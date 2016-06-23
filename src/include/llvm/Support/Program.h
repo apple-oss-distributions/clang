@@ -16,10 +16,11 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/ErrorOr.h"
-#include "llvm/Support/Path.h"
 #include <system_error>
 
 namespace llvm {
+class StringRef;
+
 namespace sys {
 
   /// This is the OS-specific separator for PATH like environment variables:
@@ -66,8 +67,7 @@ struct ProcessInfo {
   /// \returns The fully qualified path to the first \p Name in \p Paths if it
   ///   exists. \p Name if \p Name has slashes in it. Otherwise an error.
   ErrorOr<std::string>
-  findProgramByName(StringRef Name,
-                    ArrayRef<StringRef> Paths = ArrayRef<StringRef>());
+  findProgramByName(StringRef Name, ArrayRef<StringRef> Paths = None);
 
   // These functions change the specified standard stream (stdin or stdout) to
   // binary mode. They return errc::success if the specified stream

@@ -18,7 +18,6 @@
 
 #include "DebugMap.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorOr.h"
 #include <functional>
 #include <memory>
@@ -32,21 +31,21 @@ struct LinkOptions {
   bool NoODR;    ///< Do not unique types according to ODR
   bool Minimize; ///< Skip debug_inlined, debug_pubnames and debug_pubtypes
   bool Update;   ///< Do not link, just recompute accelerator tables
-  std::function<StringRef (StringRef)> Translator;
-  std::string PrependPath; //< -oso-prepend-path
+  std::function<StringRef(StringRef)> Translator;
+  std::string PrependPath; ///< -oso-prepend-path
+
   LinkOptions() : Verbose(false), NoOutput(false) {}
 };
 
-/// \brief Extract the DebugMap from the given file.
-/// The file has to be a MachO object file.
+/// \brief Extract the DebugMaps from the given file.
+/// The file has to be a MachO object file. Multiple debug maps can be
+/// returned when the file is universal (aka fat) binary.
 llvm::ErrorOr<std::vector<std::unique_ptr<DebugMap>>>
-parseDebugMap(StringRef InputFile,
-              ArrayRef<std::string> Archs,
-              StringRef PrependPath = "", bool Verbose = false);
+parseDebugMap(StringRef InputFile, ArrayRef<std::string> Archs,
+              StringRef PrependPath, bool Verbose, bool InputIsYAML);
 
 /// \brief Dump the symbol table
-bool dumpStab(StringRef InputFile,
-              ArrayRef<std::string> Archs,
+bool dumpStab(StringRef InputFile, ArrayRef<std::string> Archs,
               StringRef PrependPath = "");
 
 /// \brief Link the Dwarf debuginfo as directed by the passed DebugMap
@@ -59,12 +58,8 @@ bool linkDwarf(StringRef OutputFilename, const DebugMap &DM,
 /// files that we created.
 LLVM_ATTRIBUTE_NORETURN void exitDsymutil(int ExitStatus);
 
-static inline std::string getArchName(const llvm::Triple &T) {
-  if (T.getArch() != llvm::Triple::thumb)
-    return T.getArchName();
-  return (llvm::Twine("arm") + T.getArchName().drop_front(5)).str();
-}
-
+void warn(const Twine &Warning, const Twine &Context);
+bool error(const Twine &Error, const Twine &Context);
 }
 }
 #endif // LLVM_TOOLS_DSYMUTIL_DSYMUTIL_H

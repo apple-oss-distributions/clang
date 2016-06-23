@@ -23,6 +23,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
@@ -30,7 +31,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
@@ -44,6 +44,12 @@ STATISTIC(NumRerolledLoops, "Number of rerolled loops");
 static cl::opt<unsigned>
 MaxInc("max-reroll-increment", cl::init(2048), cl::Hidden,
   cl::desc("The maximum increment for loop rerolling"));
+
+static cl::opt<unsigned>
+NumToleratedFailedMatches("reroll-num-tolerated-failed-matches", cl::init(400),
+                          cl::Hidden,
+                          cl::desc("The maximum number of failures to tolerate"
+                                   " during fuzzy matching. (default: 400)"));
 
 // This loop re-rolling transformation aims to transform loops like this:
 //
@@ -126,8 +132,8 @@ namespace {
     /// has to be less than 25 in order to fit into a SmallBitVector.
     IL_MaxRerollIterations = 16,
     /// The bitvector index used by loop induction variables and other
-    /// instructions that belong to no one particular iteration.
-    IL_LoopIncIdx,
+    /// instructions that belong to all iterations.
+    IL_All,
     IL_End
   };
 
@@ -141,12 +147,12 @@ namespace {
     bool runOnLoop(Loop *L, LPPassManager &LPM) override;
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.addRequired<AliasAnalysis>();
+      AU.addRequired<AAResultsWrapperPass>();
       AU.addRequired<LoopInfoWrapperPass>();
       AU.addPreserved<LoopInfoWrapperPass>();
       AU.addRequired<DominatorTreeWrapperPass>();
       AU.addPreserved<DominatorTreeWrapperPass>();
-      AU.addRequired<ScalarEvolution>();
+      AU.addRequired<ScalarEvolutionWrapperPass>();
       AU.addRequired<TargetLibraryInfoWrapperPass>();
     }
 
@@ -160,7 +166,10 @@ namespace {
     typedef SmallVector<Instruction *, 16> SmallInstructionVector;
     typedef SmallSet<Instruction *, 16>   SmallInstructionSet;
 
-    // A chain of isomorphic instructions, indentified by a single-use PHI,
+    // Map between induction variable and its increment
+    DenseMap<Instruction *, int64_t> IVToIncMap;
+
+    // A chain of isomorphic instructions, identified by a single-use PHI
     // representing a reduction. Only the last value may be used outside the
     // loop.
     struct SimpleLoopReduction {
@@ -294,22 +303,6 @@ namespace {
       // The functions below can be called after we've finished processing all
       // instructions in the loop, and we know which reductions were selected.
 
-      // Is the provided instruction the PHI of a reduction selected for
-      // rerolling?
-      bool isSelectedPHI(Instruction *J) {
-        if (!isa<PHINode>(J))
-          return false;
-
-        for (DenseSet<int>::iterator RI = Reds.begin(), RIE = Reds.end();
-             RI != RIE; ++RI) {
-          int i = *RI;
-          if (cast<Instruction>(J) == PossibleReds[i].getPHI())
-            return true;
-        }
-
-        return false;
-      }
-
       bool validateSelected();
       void replaceSelected();
 
@@ -322,13 +315,48 @@ namespace {
       DenseSet<int> Reds;
     };
 
+    // A DAGRootSet models an induction variable being used in a rerollable
+    // loop. For example,
+    //
+    //   x[i*3+0] = y1
+    //   x[i*3+1] = y2
+    //   x[i*3+2] = y3
+    //
+    //   Base instruction -> i*3
+    //                    +---+----+
+    //                   /    |     \
+    //               ST[y1]  +1     +2  <-- Roots
+    //                        |      |
+    //                      ST[y2] ST[y3]
+    //
+    // There may be multiple DAGRoots, for example:
+    //
+    //   x[i*2+0] = ...   (1)
+    //   x[i*2+1] = ...   (1)
+    //   x[i*2+4] = ...   (2)
+    //   x[i*2+5] = ...   (2)
+    //   x[(i+1234)*2+5678] = ... (3)
+    //   x[(i+1234)*2+5679] = ... (3)
+    //
+    // The loop will be rerolled by adding a new loop induction variable,
+    // one for the Base instruction in each DAGRootSet.
+    //
+    struct DAGRootSet {
+      Instruction *BaseInst;
+      SmallInstructionVector Roots;
+      // The instructions between IV and BaseInst (but not including BaseInst).
+      SmallInstructionSet SubsumedInsts;
+    };
+
     // The set of all DAG roots, and state tracking of all roots
     // for a particular induction variable.
     struct DAGRootTracker {
       DAGRootTracker(LoopReroll *Parent, Loop *L, Instruction *IV,
                      ScalarEvolution *SE, AliasAnalysis *AA,
-                     TargetLibraryInfo *TLI)
-          : Parent(Parent), L(L), SE(SE), AA(AA), TLI(TLI), IV(IV) {}
+                     TargetLibraryInfo *TLI,
+                     DenseMap<Instruction *, int64_t> &IncrMap)
+          : Parent(Parent), L(L), SE(SE), AA(AA), TLI(TLI), IV(IV),
+            IVToIncMap(IncrMap) {}
 
       /// Stage 1: Find all the DAG roots for the induction variable.
       bool findRoots();
@@ -342,8 +370,11 @@ namespace {
     protected:
       typedef MapVector<Instruction*, SmallBitVector> UsesTy;
 
-      bool findScaleFromMul();
-      bool collectAllRoots();
+      bool findRootsRecursive(Instruction *IVU,
+                              SmallInstructionSet SubsumedInsts);
+      bool findRootsBase(Instruction *IVU, SmallInstructionSet SubsumedInsts);
+      bool collectPossibleRoots(Instruction *Base,
+                                std::map<int64_t,Instruction*> &Roots);
 
       bool collectUsedInstructions(SmallInstructionSet &PossibleRedSet);
       void collectInLoopUserSet(const SmallInstructionVector &Roots,
@@ -355,7 +386,14 @@ namespace {
                                 const SmallInstructionSet &Final,
                                 DenseSet<Instruction *> &Users);
 
-      UsesTy::iterator nextInstr(int Val, UsesTy &In, UsesTy::iterator I);
+      UsesTy::iterator nextInstr(int Val, UsesTy &In,
+                                 const SmallInstructionSet &Exclude,
+                                 UsesTy::iterator *StartI=nullptr);
+      bool isBaseInst(Instruction *I);
+      bool isRootInst(Instruction *I);
+      bool instrDependsOn(Instruction *I,
+                          UsesTy::iterator Start,
+                          UsesTy::iterator End);
 
       LoopReroll *Parent;
 
@@ -368,21 +406,21 @@ namespace {
       // The loop induction variable.
       Instruction *IV;
       // Loop step amount.
-      uint64_t Inc;
+      int64_t Inc;
       // Loop reroll count; if Inc == 1, this records the scaling applied
       // to the indvar: a[i*2+0] = ...; a[i*2+1] = ... ;
       // If Inc is not 1, Scale = Inc.
       uint64_t Scale;
-      // If Scale != Inc, then RealIV is IV after its multiplication.
-      Instruction *RealIV;
       // The roots themselves.
-      SmallInstructionVector Roots;
+      SmallVector<DAGRootSet,16> RootSets;
       // All increment instructions for IV.
       SmallInstructionVector LoopIncs;
       // Map of all instructions in the loop (in order) to the iterations
-      // they are used in (or specially, IL_LoopIncIdx for instructions
+      // they are used in (or specially, IL_All for instructions
       // used in the loop increment mechanism).
       UsesTy Uses;
+      // Map between induction variable and its increment
+      DenseMap<Instruction *, int64_t> &IVToIncMap;
     };
 
     void collectPossibleIVs(Loop *L, SmallInstructionVector &PossibleIVs);
@@ -395,10 +433,10 @@ namespace {
 
 char LoopReroll::ID = 0;
 INITIALIZE_PASS_BEGIN(LoopReroll, "loop-reroll", "Reroll loops", false, false)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(LoopReroll, "loop-reroll", "Reroll loops", false, false)
 
@@ -430,21 +468,20 @@ void LoopReroll::collectPossibleIVs(Loop *L,
       continue;
 
     if (const SCEVAddRecExpr *PHISCEV =
-        dyn_cast<SCEVAddRecExpr>(SE->getSCEV(I))) {
+            dyn_cast<SCEVAddRecExpr>(SE->getSCEV(&*I))) {
       if (PHISCEV->getLoop() != L)
         continue;
       if (!PHISCEV->isAffine())
         continue;
       if (const SCEVConstant *IncSCEV =
           dyn_cast<SCEVConstant>(PHISCEV->getStepRecurrence(*SE))) {
-        if (!IncSCEV->getValue()->getValue().isStrictlyPositive())
+        const APInt &AInt = IncSCEV->getValue()->getValue().abs();
+        if (IncSCEV->getValue()->isZero() || AInt.uge(MaxInc))
           continue;
-        if (IncSCEV->getValue()->uge(MaxInc))
-          continue;
-
-        DEBUG(dbgs() << "LRR: Possible IV: " << *I << " = " <<
-              *PHISCEV << "\n");
-        PossibleIVs.push_back(I);
+        IVToIncMap[&*I] = IncSCEV->getValue()->getSExtValue();
+        DEBUG(dbgs() << "LRR: Possible IV: " << *I << " = " << *PHISCEV
+                     << "\n");
+        PossibleIVs.push_back(&*I);
       }
     }
   }
@@ -505,7 +542,7 @@ void LoopReroll::collectPossibleReductions(Loop *L,
     if (!I->getType()->isSingleValueType())
       continue;
 
-    SimpleLoopReduction SLR(I, L);
+    SimpleLoopReduction SLR(&*I, L);
     if (!SLR.valid())
       continue;
 
@@ -584,154 +621,251 @@ static bool isSimpleLoadStore(Instruction *I) {
   return false;
 }
 
+/// Return true if IVU is a "simple" arithmetic operation.
+/// This is used for narrowing the search space for DAGRoots; only arithmetic
+/// and GEPs can be part of a DAGRoot.
+static bool isSimpleArithmeticOp(User *IVU) {
+  if (Instruction *I = dyn_cast<Instruction>(IVU)) {
+    switch (I->getOpcode()) {
+    default: return false;
+    case Instruction::Add:
+    case Instruction::Sub:
+    case Instruction::Mul:
+    case Instruction::Shl:
+    case Instruction::AShr:
+    case Instruction::LShr:
+    case Instruction::GetElementPtr:
+    case Instruction::Trunc:
+    case Instruction::ZExt:
+    case Instruction::SExt:
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool isLoopIncrement(User *U, Instruction *IV) {
+  BinaryOperator *BO = dyn_cast<BinaryOperator>(U);
+  if (!BO || BO->getOpcode() != Instruction::Add)
+    return false;
+
+  for (auto *UU : BO->users()) {
+    PHINode *PN = dyn_cast<PHINode>(UU);
+    if (PN && PN == IV)
+      return true;
+  }
+  return false;
+}
+
+bool LoopReroll::DAGRootTracker::
+collectPossibleRoots(Instruction *Base, std::map<int64_t,Instruction*> &Roots) {
+  SmallInstructionVector BaseUsers;
+
+  for (auto *I : Base->users()) {
+    ConstantInt *CI = nullptr;
+
+    if (isLoopIncrement(I, IV)) {
+      LoopIncs.push_back(cast<Instruction>(I));
+      continue;
+    }
+
+    // The root nodes must be either GEPs, ORs or ADDs.
+    if (auto *BO = dyn_cast<BinaryOperator>(I)) {
+      if (BO->getOpcode() == Instruction::Add ||
+          BO->getOpcode() == Instruction::Or)
+        CI = dyn_cast<ConstantInt>(BO->getOperand(1));
+    } else if (auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
+      Value *LastOperand = GEP->getOperand(GEP->getNumOperands()-1);
+      CI = dyn_cast<ConstantInt>(LastOperand);
+    }
+
+    if (!CI) {
+      if (Instruction *II = dyn_cast<Instruction>(I)) {
+        BaseUsers.push_back(II);
+        continue;
+      } else {
+        DEBUG(dbgs() << "LRR: Aborting due to non-instruction: " << *I << "\n");
+        return false;
+      }
+    }
+
+    int64_t V = std::abs(CI->getValue().getSExtValue());
+    if (Roots.find(V) != Roots.end())
+      // No duplicates, please.
+      return false;
+
+    Roots[V] = cast<Instruction>(I);
+  }
+
+  if (Roots.empty())
+    return false;
+
+  // If we found non-loop-inc, non-root users of Base, assume they are
+  // for the zeroth root index. This is because "add %a, 0" gets optimized
+  // away.
+  if (BaseUsers.size()) {
+    if (Roots.find(0) != Roots.end()) {
+      DEBUG(dbgs() << "LRR: Multiple roots found for base - aborting!\n");
+      return false;
+    }
+    Roots[0] = Base;
+  }
+
+  // Calculate the number of users of the base, or lowest indexed, iteration.
+  unsigned NumBaseUses = BaseUsers.size();
+  if (NumBaseUses == 0)
+    NumBaseUses = Roots.begin()->second->getNumUses();
+
+  // Check that every node has the same number of users.
+  for (auto &KV : Roots) {
+    if (KV.first == 0)
+      continue;
+    if (KV.second->getNumUses() != NumBaseUses) {
+      DEBUG(dbgs() << "LRR: Aborting - Root and Base #users not the same: "
+            << "#Base=" << NumBaseUses << ", #Root=" <<
+            KV.second->getNumUses() << "\n");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool LoopReroll::DAGRootTracker::
+findRootsRecursive(Instruction *I, SmallInstructionSet SubsumedInsts) {
+  // Does the user look like it could be part of a root set?
+  // All its users must be simple arithmetic ops.
+  if (I->getNumUses() > IL_MaxRerollIterations)
+    return false;
+
+  if ((I->getOpcode() == Instruction::Mul ||
+       I->getOpcode() == Instruction::PHI) &&
+      I != IV &&
+      findRootsBase(I, SubsumedInsts))
+    return true;
+
+  SubsumedInsts.insert(I);
+
+  for (User *V : I->users()) {
+    Instruction *I = dyn_cast<Instruction>(V);
+    if (std::find(LoopIncs.begin(), LoopIncs.end(), I) != LoopIncs.end())
+      continue;
+
+    if (!I || !isSimpleArithmeticOp(I) ||
+        !findRootsRecursive(I, SubsumedInsts))
+      return false;
+  }
+  return true;
+}
+
+bool LoopReroll::DAGRootTracker::
+findRootsBase(Instruction *IVU, SmallInstructionSet SubsumedInsts) {
+
+  // The base instruction needs to be a multiply so
+  // that we can erase it.
+  if (IVU->getOpcode() != Instruction::Mul &&
+      IVU->getOpcode() != Instruction::PHI)
+    return false;
+
+  std::map<int64_t, Instruction*> V;
+  if (!collectPossibleRoots(IVU, V))
+    return false;
+
+  // If we didn't get a root for index zero, then IVU must be
+  // subsumed.
+  if (V.find(0) == V.end())
+    SubsumedInsts.insert(IVU);
+
+  // Partition the vector into monotonically increasing indexes.
+  DAGRootSet DRS;
+  DRS.BaseInst = nullptr;
+
+  for (auto &KV : V) {
+    if (!DRS.BaseInst) {
+      DRS.BaseInst = KV.second;
+      DRS.SubsumedInsts = SubsumedInsts;
+    } else if (DRS.Roots.empty()) {
+      DRS.Roots.push_back(KV.second);
+    } else if (V.find(KV.first - 1) != V.end()) {
+      DRS.Roots.push_back(KV.second);
+    } else {
+      // Linear sequence terminated.
+      RootSets.push_back(DRS);
+      DRS.BaseInst = KV.second;
+      DRS.SubsumedInsts = SubsumedInsts;
+      DRS.Roots.clear();
+    }
+  }
+  RootSets.push_back(DRS);
+
+  return true;
+}
+
 bool LoopReroll::DAGRootTracker::findRoots() {
+  Inc = IVToIncMap[IV];
 
-  const SCEVAddRecExpr *RealIVSCEV = cast<SCEVAddRecExpr>(SE->getSCEV(IV));
-  Inc = cast<SCEVConstant>(RealIVSCEV->getOperand(1))->
-    getValue()->getZExtValue();
+  assert(RootSets.empty() && "Unclean state!");
+  if (std::abs(Inc) == 1) {
+    for (auto *IVU : IV->users()) {
+      if (isLoopIncrement(IVU, IV))
+        LoopIncs.push_back(cast<Instruction>(IVU));
+    }
+    if (!findRootsRecursive(IV, SmallInstructionSet()))
+      return false;
+    LoopIncs.push_back(IV);
+  } else {
+    if (!findRootsBase(IV, SmallInstructionSet()))
+      return false;
+  }
 
-  // The effective induction variable, IV, is normally also the real induction
-  // variable. When we're dealing with a loop like:
-  //   for (int i = 0; i < 500; ++i)
-  //     x[3*i] = ...;
-  //     x[3*i+1] = ...;
-  //     x[3*i+2] = ...;
-  // then the real IV is still i, but the effective IV is (3*i).
-  Scale = Inc;
-  RealIV = IV;
-  if (Inc == 1 && !findScaleFromMul())
+  // Ensure all sets have the same size.
+  if (RootSets.empty()) {
+    DEBUG(dbgs() << "LRR: Aborting because no root sets found!\n");
     return false;
+  }
+  for (auto &V : RootSets) {
+    if (V.Roots.empty() || V.Roots.size() != RootSets[0].Roots.size()) {
+      DEBUG(dbgs()
+            << "LRR: Aborting because not all root sets have the same size\n");
+      return false;
+    }
+  }
 
-  // The set of increment instructions for each increment value.
-  if (!collectAllRoots())
-    return false;
+  // And ensure all loop iterations are consecutive. We rely on std::map
+  // providing ordered traversal.
+  for (auto &V : RootSets) {
+    const auto *ADR = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(V.BaseInst));
+    if (!ADR)
+      return false;
 
-  if (Roots.size() > IL_MaxRerollIterations) {
+    // Consider a DAGRootSet with N-1 roots (so N different values including
+    //   BaseInst).
+    // Define d = Roots[0] - BaseInst, which should be the same as
+    //   Roots[I] - Roots[I-1] for all I in [1..N).
+    // Define D = BaseInst@J - BaseInst@J-1, where "@J" means the value at the
+    //   loop iteration J.
+    //
+    // Now, For the loop iterations to be consecutive:
+    //   D = d * N
+
+    unsigned N = V.Roots.size() + 1;
+    const SCEV *StepSCEV = SE->getMinusSCEV(SE->getSCEV(V.Roots[0]), ADR);
+    const SCEV *ScaleSCEV = SE->getConstant(StepSCEV->getType(), N);
+    if (ADR->getStepRecurrence(*SE) != SE->getMulExpr(StepSCEV, ScaleSCEV)) {
+      DEBUG(dbgs() << "LRR: Aborting because iterations are not consecutive\n");
+      return false;
+    }
+  }
+  Scale = RootSets[0].Roots.size() + 1;
+
+  if (Scale > IL_MaxRerollIterations) {
     DEBUG(dbgs() << "LRR: Aborting - too many iterations found. "
-          << "#Found=" << Roots.size() << ", #Max=" << IL_MaxRerollIterations
+          << "#Found=" << Scale << ", #Max=" << IL_MaxRerollIterations
           << "\n");
     return false;
   }
 
-  return true;
-}
-
-// Recognize loops that are setup like this:
-//
-// %iv = phi [ (preheader, ...), (body, %iv.next) ]
-// %scaled.iv = mul %iv, scale
-// f(%scaled.iv)
-// %scaled.iv.1 = add %scaled.iv, 1
-// f(%scaled.iv.1)
-// %scaled.iv.2 = add %scaled.iv, 2
-// f(%scaled.iv.2)
-// %scaled.iv.scale_m_1 = add %scaled.iv, scale-1
-// f(%scaled.iv.scale_m_1)
-// ...
-// %iv.next = add %iv, 1
-// %cmp = icmp(%iv, ...)
-// br %cmp, header, exit
-//
-// and, if found, set IV = %scaled.iv, and add %iv.next to LoopIncs.
-bool LoopReroll::DAGRootTracker::findScaleFromMul() {
-
-  // This is a special case: here we're looking for all uses (except for
-  // the increment) to be multiplied by a common factor. The increment must
-  // be by one. This is to capture loops like:
-  //   for (int i = 0; i < 500; ++i) {
-  //     foo(3*i); foo(3*i+1); foo(3*i+2);
-  //   }
-  if (RealIV->getNumUses() != 2)
-    return false;
-  const SCEVAddRecExpr *RealIVSCEV = cast<SCEVAddRecExpr>(SE->getSCEV(RealIV));
-  Instruction *User1 = cast<Instruction>(*RealIV->user_begin()),
-              *User2 = cast<Instruction>(*std::next(RealIV->user_begin()));
-  if (!SE->isSCEVable(User1->getType()) || !SE->isSCEVable(User2->getType()))
-    return false;
-  const SCEVAddRecExpr *User1SCEV =
-                         dyn_cast<SCEVAddRecExpr>(SE->getSCEV(User1)),
-                       *User2SCEV =
-                         dyn_cast<SCEVAddRecExpr>(SE->getSCEV(User2));
-  if (!User1SCEV || !User1SCEV->isAffine() ||
-      !User2SCEV || !User2SCEV->isAffine())
-    return false;
-
-  // We assume below that User1 is the scale multiply and User2 is the
-  // increment. If this can't be true, then swap them.
-  if (User1SCEV == RealIVSCEV->getPostIncExpr(*SE)) {
-    std::swap(User1, User2);
-    std::swap(User1SCEV, User2SCEV);
-  }
-
-  if (User2SCEV != RealIVSCEV->getPostIncExpr(*SE))
-    return false;
-  assert(User2SCEV->getStepRecurrence(*SE)->isOne() &&
-         "Invalid non-unit step for multiplicative scaling");
-  LoopIncs.push_back(User2);
-
-  if (const SCEVConstant *MulScale =
-      dyn_cast<SCEVConstant>(User1SCEV->getStepRecurrence(*SE))) {
-    // Make sure that both the start and step have the same multiplier.
-    if (RealIVSCEV->getStart()->getType() != MulScale->getType())
-      return false;
-    if (SE->getMulExpr(RealIVSCEV->getStart(), MulScale) !=
-        User1SCEV->getStart())
-      return false;
-
-    ConstantInt *MulScaleCI = MulScale->getValue();
-    if (!MulScaleCI->uge(2) || MulScaleCI->uge(MaxInc))
-      return false;
-    Scale = MulScaleCI->getZExtValue();
-    IV = User1;
-  } else
-    return false;
-
-  DEBUG(dbgs() << "LRR: Found possible scaling " << *User1 << "\n");
-
-  assert(Scale <= MaxInc && "Scale is too large");
-  assert(Scale > 1 && "Scale must be at least 2");
-
-  return true;
-}
-
-// Collect all root increments with respect to the provided induction variable
-// (normally the PHI, but sometimes a multiply). A root increment is an
-// instruction, normally an add, with a positive constant less than Scale. In a
-// rerollable loop, each of these increments is the root of an instruction
-// graph isomorphic to the others. Also, we collect the final induction
-// increment (the increment equal to the Scale), and its users in LoopIncs.
-bool LoopReroll::DAGRootTracker::collectAllRoots() {
-  Roots.resize(Scale-1);
-  
-  for (User *U : IV->users()) {
-    Instruction *UI = cast<Instruction>(U);
-    if (!SE->isSCEVable(UI->getType()))
-      continue;
-    if (UI->getType() != IV->getType())
-      continue;
-    if (!L->contains(UI))
-      continue;
-    if (hasUsesOutsideLoop(UI, L))
-      continue;
-
-    if (const SCEVConstant *Diff = dyn_cast<SCEVConstant>(SE->getMinusSCEV(
-          SE->getSCEV(UI), SE->getSCEV(IV)))) {
-      uint64_t Idx = Diff->getValue()->getValue().getZExtValue();
-      if (Idx > 0 && Idx < Scale) {
-        if (Roots[Idx-1])
-          // No duplicates allowed.
-          return false;
-        Roots[Idx-1] = UI;
-      } else if (Idx == Scale && Inc > 1) {
-        LoopIncs.push_back(UI);
-      }
-    }
-  }
-
-  for (unsigned i = 0; i < Scale-1; ++i) {
-    if (!Roots[i])
-      return false;
-  }
+  DEBUG(dbgs() << "LRR: Successfully found roots: Scale=" << Scale << "\n");
 
   return true;
 }
@@ -744,54 +878,122 @@ bool LoopReroll::DAGRootTracker::collectUsedInstructions(SmallInstructionSet &Po
   }
 
   SmallInstructionSet Exclude;
-  Exclude.insert(Roots.begin(), Roots.end());
+  for (auto &DRS : RootSets) {
+    Exclude.insert(DRS.Roots.begin(), DRS.Roots.end());
+    Exclude.insert(DRS.SubsumedInsts.begin(), DRS.SubsumedInsts.end());
+    Exclude.insert(DRS.BaseInst);
+  }
   Exclude.insert(LoopIncs.begin(), LoopIncs.end());
 
-  DenseSet<Instruction*> VBase;
-  collectInLoopUserSet(IV, Exclude, PossibleRedSet, VBase);
-  for (auto *I : VBase) {
-    Uses[I].set(0);
-  }
-
-  unsigned Idx = 1;
-  for (auto *Root : Roots) {
-    DenseSet<Instruction*> V;
-    collectInLoopUserSet(Root, Exclude, PossibleRedSet, V);
-
-    // While we're here, check the use sets are the same size.
-    if (V.size() != VBase.size()) {
-      DEBUG(dbgs() << "LRR: Aborting - use sets are different sizes\n");
-      return false;
+  for (auto &DRS : RootSets) {
+    DenseSet<Instruction*> VBase;
+    collectInLoopUserSet(DRS.BaseInst, Exclude, PossibleRedSet, VBase);
+    for (auto *I : VBase) {
+      Uses[I].set(0);
     }
 
-    for (auto *I : V) {
-      Uses[I].set(Idx);
+    unsigned Idx = 1;
+    for (auto *Root : DRS.Roots) {
+      DenseSet<Instruction*> V;
+      collectInLoopUserSet(Root, Exclude, PossibleRedSet, V);
+
+      // While we're here, check the use sets are the same size.
+      if (V.size() != VBase.size()) {
+        DEBUG(dbgs() << "LRR: Aborting - use sets are different sizes\n");
+        return false;
+      }
+
+      for (auto *I : V) {
+        Uses[I].set(Idx);
+      }
+      ++Idx;
     }
-    ++Idx;
+
+    // Make sure our subsumed instructions are remembered too.
+    for (auto *I : DRS.SubsumedInsts) {
+      Uses[I].set(IL_All);
+    }
   }
 
   // Make sure the loop increments are also accounted for.
+
   Exclude.clear();
-  Exclude.insert(Roots.begin(), Roots.end());
+  for (auto &DRS : RootSets) {
+    Exclude.insert(DRS.Roots.begin(), DRS.Roots.end());
+    Exclude.insert(DRS.SubsumedInsts.begin(), DRS.SubsumedInsts.end());
+    Exclude.insert(DRS.BaseInst);
+  }
 
   DenseSet<Instruction*> V;
   collectInLoopUserSet(LoopIncs, Exclude, PossibleRedSet, V);
   for (auto *I : V) {
-    Uses[I].set(IL_LoopIncIdx);
+    Uses[I].set(IL_All);
   }
-  if (IV != RealIV)
-    Uses[RealIV].set(IL_LoopIncIdx);
 
   return true;
 
 }
 
+/// Get the next instruction in "In" that is a member of set Val.
+/// Start searching from StartI, and do not return anything in Exclude.
+/// If StartI is not given, start from In.begin().
 LoopReroll::DAGRootTracker::UsesTy::iterator
 LoopReroll::DAGRootTracker::nextInstr(int Val, UsesTy &In,
-                                      UsesTy::iterator I) {
-  while (I != In.end() && I->second.test(Val) == 0)
+                                      const SmallInstructionSet &Exclude,
+                                      UsesTy::iterator *StartI) {
+  UsesTy::iterator I = StartI ? *StartI : In.begin();
+  while (I != In.end() && (I->second.test(Val) == 0 ||
+                           Exclude.count(I->first) != 0))
     ++I;
   return I;
+}
+
+bool LoopReroll::DAGRootTracker::isBaseInst(Instruction *I) {
+  for (auto &DRS : RootSets) {
+    if (DRS.BaseInst == I)
+      return true;
+  }
+  return false;
+}
+
+bool LoopReroll::DAGRootTracker::isRootInst(Instruction *I) {
+  for (auto &DRS : RootSets) {
+    if (std::find(DRS.Roots.begin(), DRS.Roots.end(), I) != DRS.Roots.end())
+      return true;
+  }
+  return false;
+}
+
+/// Return true if instruction I depends on any instruction between
+/// Start and End.
+bool LoopReroll::DAGRootTracker::instrDependsOn(Instruction *I,
+                                                UsesTy::iterator Start,
+                                                UsesTy::iterator End) {
+  for (auto *U : I->users()) {
+    for (auto It = Start; It != End; ++It)
+      if (U == It->first)
+        return true;
+  }
+  return false;
+}
+
+static bool isIgnorableInst(const Instruction *I) {
+  if (isa<DbgInfoIntrinsic>(I))
+    return true;
+  const IntrinsicInst* II = dyn_cast<IntrinsicInst>(I);
+  if (!II)
+    return false;
+  switch (II->getIntrinsicID()) {
+    default:
+      return false;
+    case llvm::Intrinsic::annotation:
+    case Intrinsic::ptr_annotation:
+    case Intrinsic::var_annotation:
+    // TODO: the following intrinsics may also be whitelisted:
+    //   lifetime_start, lifetime_end, invariant_start, invariant_end
+      return true;
+  }
+  return false;
 }
 
 bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
@@ -821,13 +1023,13 @@ bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
 
   // Make sure we mark the reduction PHIs as used in all iterations.
   for (auto *I : PossibleRedPHISet) {
-    Uses[I].set(IL_LoopIncIdx);
+    Uses[I].set(IL_All);
   }
 
   // Make sure all instructions in the loop are in one and only one
   // set.
   for (auto &KV : Uses) {
-    if (KV.second.count() != 1) {
+    if (KV.second.count() != 1 && !isIgnorableInst(KV.first)) {
       DEBUG(dbgs() << "LRR: Aborting - instruction is not used in 1 iteration: "
             << *KV.first << " (#uses=" << KV.second.count() << ")\n");
       return false;
@@ -851,8 +1053,9 @@ bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
     DenseMap<Value *, Value *> BaseMap;
 
     // Compare iteration Iter to the base.
-    auto BaseIt = nextInstr(0, Uses, Uses.begin());
-    auto RootIt = nextInstr(Iter, Uses, Uses.begin());
+    SmallInstructionSet Visited;
+    auto BaseIt = nextInstr(0, Uses, Visited);
+    auto RootIt = nextInstr(Iter, Uses, Visited);
     auto LastRootIt = Uses.begin();
 
     while (BaseIt != Uses.end() && RootIt != Uses.end()) {
@@ -861,21 +1064,59 @@ bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
 
       // Skip over the IV or root instructions; only match their users.
       bool Continue = false;
-      if (BaseInst == RealIV || BaseInst == IV) {
-        BaseIt = nextInstr(0, Uses, ++BaseIt);
+      if (isBaseInst(BaseInst)) {
+        Visited.insert(BaseInst);
+        BaseIt = nextInstr(0, Uses, Visited);
         Continue = true;
       }
-      if (std::find(Roots.begin(), Roots.end(), RootInst) != Roots.end()) {
+      if (isRootInst(RootInst)) {
         LastRootIt = RootIt;
-        RootIt = nextInstr(Iter, Uses, ++RootIt);
+        Visited.insert(RootInst);
+        RootIt = nextInstr(Iter, Uses, Visited);
         Continue = true;
       }
       if (Continue) continue;
 
+      if (!BaseInst->isSameOperationAs(RootInst)) {
+        // Last chance saloon. We don't try and solve the full isomorphism
+        // problem, but try and at least catch the case where two instructions
+        // *of different types* are round the wrong way. We won't be able to
+        // efficiently tell, given two ADD instructions, which way around we
+        // should match them, but given an ADD and a SUB, we can at least infer
+        // which one is which.
+        //
+        // This should allow us to deal with a greater subset of the isomorphism
+        // problem. It does however change a linear algorithm into a quadratic
+        // one, so limit the number of probes we do.
+        auto TryIt = RootIt;
+        unsigned N = NumToleratedFailedMatches;
+        while (TryIt != Uses.end() &&
+               !BaseInst->isSameOperationAs(TryIt->first) &&
+               N--) {
+          ++TryIt;
+          TryIt = nextInstr(Iter, Uses, Visited, &TryIt);
+        }
+
+        if (TryIt == Uses.end() || TryIt == RootIt ||
+            instrDependsOn(TryIt->first, RootIt, TryIt)) {
+          DEBUG(dbgs() << "LRR: iteration root match failed at " << *BaseInst <<
+                " vs. " << *RootInst << "\n");
+          return false;
+        }
+
+        RootIt = TryIt;
+        RootInst = TryIt->first;
+      }
+
       // All instructions between the last root and this root
-      // belong to some other iteration. If they belong to a 
+      // may belong to some other iteration. If they belong to a
       // future iteration, then they're dangerous to alias with.
-      for (; LastRootIt != RootIt; ++LastRootIt) {
+      //
+      // Note that because we allow a limited amount of flexibility in the order
+      // that we visit nodes, LastRootIt might be *before* RootIt, in which
+      // case we've already checked this set of instructions so we shouldn't
+      // do anything.
+      for (; LastRootIt < RootIt; ++LastRootIt) {
         Instruction *I = LastRootIt->first;
         if (LastRootIt->second.find_first() < (int)Iter)
           continue;
@@ -889,12 +1130,6 @@ bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
             !isSafeToSpeculativelyExecute(I))
           // Intervening instructions cause side effects.
           FutureSideEffects = true;
-      }
-
-      if (!BaseInst->isSameOperationAs(RootInst)) {
-        DEBUG(dbgs() << "LRR: iteration root match failed at " << *BaseInst <<
-              " vs. " << *RootInst << "\n");
-        return false;
       }
 
       // Make sure that this instruction, which is in the use set of this
@@ -958,10 +1193,16 @@ bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
                 continue;
 
           DenseMap<Value *, Value *>::iterator BMI = BaseMap.find(Op2);
-          if (BMI != BaseMap.end())
+          if (BMI != BaseMap.end()) {
             Op2 = BMI->second;
-          else if (Roots[Iter-1] == (Instruction*) Op2)
-            Op2 = IV;
+          } else {
+            for (auto &DRS : RootSets) {
+              if (DRS.Roots[Iter-1] == (Instruction*) Op2) {
+                Op2 = DRS.BaseInst;
+                break;
+              }
+            }
+          }
 
           if (BaseInst->getOperand(Swapped ? unsigned(!j) : j) != Op2) {
             // If we've not already decided to swap the matched operands, and
@@ -996,15 +1237,17 @@ bool LoopReroll::DAGRootTracker::validate(ReductionTracker &Reductions) {
       BaseMap.insert(std::make_pair(RootInst, BaseInst));
 
       LastRootIt = RootIt;
-      BaseIt = nextInstr(0, Uses, ++BaseIt);
-      RootIt = nextInstr(Iter, Uses, ++RootIt);
+      Visited.insert(BaseInst);
+      Visited.insert(RootInst);
+      BaseIt = nextInstr(0, Uses, Visited);
+      RootIt = nextInstr(Iter, Uses, Visited);
     }
     assert (BaseIt == Uses.end() && RootIt == Uses.end() &&
             "Mismatched set sizes!");
   }
 
   DEBUG(dbgs() << "LRR: Matched all iteration increments for " <<
-                  *RealIV << "\n");
+                  *IV << "\n");
 
   return true;
 }
@@ -1015,7 +1258,7 @@ void LoopReroll::DAGRootTracker::replace(const SCEV *IterCount) {
   for (BasicBlock::reverse_iterator J = Header->rbegin();
        J != Header->rend();) {
     unsigned I = Uses[&*J].find_first();
-    if (I > 0 && I < IL_LoopIncIdx) {
+    if (I > 0 && I < IL_All) {
       Instruction *D = &*J;
       DEBUG(dbgs() << "LRR: removing: " << *D << "\n");
       D->eraseFromParent();
@@ -1024,56 +1267,55 @@ void LoopReroll::DAGRootTracker::replace(const SCEV *IterCount) {
 
     ++J;
   }
+  bool Negative = IVToIncMap[IV] < 0;
   const DataLayout &DL = Header->getModule()->getDataLayout();
 
-  // Insert the new induction variable.
-  const SCEVAddRecExpr *RealIVSCEV = cast<SCEVAddRecExpr>(SE->getSCEV(RealIV));
-  const SCEV *Start = RealIVSCEV->getStart();
-  if (Inc == 1)
-    Start = SE->getMulExpr(Start,
-                           SE->getConstant(Start->getType(), Scale));
-  const SCEVAddRecExpr *H =
-    cast<SCEVAddRecExpr>(SE->getAddRecExpr(Start,
-                           SE->getConstant(RealIVSCEV->getType(), 1),
-                           L, SCEV::FlagAnyWrap));
-  { // Limit the lifetime of SCEVExpander.
-    SCEVExpander Expander(*SE, DL, "reroll");
-    Value *NewIV = Expander.expandCodeFor(H, IV->getType(), Header->begin());
+  // We need to create a new induction variable for each different BaseInst.
+  for (auto &DRS : RootSets) {
+    // Insert the new induction variable.
+    const SCEVAddRecExpr *RealIVSCEV =
+      cast<SCEVAddRecExpr>(SE->getSCEV(DRS.BaseInst));
+    const SCEV *Start = RealIVSCEV->getStart();
+    const SCEVAddRecExpr *H = cast<SCEVAddRecExpr>(SE->getAddRecExpr(
+        Start, SE->getConstant(RealIVSCEV->getType(), Negative ? -1 : 1), L,
+        SCEV::FlagAnyWrap));
+    { // Limit the lifetime of SCEVExpander.
+      SCEVExpander Expander(*SE, DL, "reroll");
+      Value *NewIV = Expander.expandCodeFor(H, IV->getType(), &Header->front());
 
-    for (auto &KV : Uses) {
-      if (KV.second.find_first() == 0)
-        KV.first->replaceUsesOfWith(IV, NewIV);
-    }
+      for (auto &KV : Uses) {
+        if (KV.second.find_first() == 0)
+          KV.first->replaceUsesOfWith(DRS.BaseInst, NewIV);
+      }
 
-    if (BranchInst *BI = dyn_cast<BranchInst>(Header->getTerminator())) {
-      // FIXME: Why do we need this check?
-      if (Uses[BI].find_first() == IL_LoopIncIdx) {
-        const SCEV *ICSCEV = RealIVSCEV->evaluateAtIteration(IterCount, *SE);
-        if (Inc == 1)
-          ICSCEV =
-            SE->getMulExpr(ICSCEV, SE->getConstant(ICSCEV->getType(), Scale));
-        // Iteration count SCEV minus 1
-        const SCEV *ICMinus1SCEV =
-          SE->getMinusSCEV(ICSCEV, SE->getConstant(ICSCEV->getType(), 1));
+      if (BranchInst *BI = dyn_cast<BranchInst>(Header->getTerminator())) {
+        // FIXME: Why do we need this check?
+        if (Uses[BI].find_first() == IL_All) {
+          const SCEV *ICSCEV = RealIVSCEV->evaluateAtIteration(IterCount, *SE);
 
-        Value *ICMinus1; // Iteration count minus 1
-        if (isa<SCEVConstant>(ICMinus1SCEV)) {
-          ICMinus1 = Expander.expandCodeFor(ICMinus1SCEV, NewIV->getType(), BI);
-        } else {
-          BasicBlock *Preheader = L->getLoopPreheader();
-          if (!Preheader)
-            Preheader = InsertPreheaderForLoop(L, Parent);
+          // Iteration count SCEV minus 1
+          const SCEV *ICMinus1SCEV = SE->getMinusSCEV(
+              ICSCEV, SE->getConstant(ICSCEV->getType(), Negative ? -1 : 1));
 
-          ICMinus1 = Expander.expandCodeFor(ICMinus1SCEV, NewIV->getType(),
-                                            Preheader->getTerminator());
-        }
+          Value *ICMinus1; // Iteration count minus 1
+          if (isa<SCEVConstant>(ICMinus1SCEV)) {
+            ICMinus1 = Expander.expandCodeFor(ICMinus1SCEV, NewIV->getType(), BI);
+          } else {
+            BasicBlock *Preheader = L->getLoopPreheader();
+            if (!Preheader)
+              Preheader = InsertPreheaderForLoop(L, Parent);
 
-        Value *Cond =
+            ICMinus1 = Expander.expandCodeFor(ICMinus1SCEV, NewIV->getType(),
+                                              Preheader->getTerminator());
+          }
+
+          Value *Cond =
             new ICmpInst(BI, CmpInst::ICMP_EQ, NewIV, ICMinus1, "exitcond");
-        BI->setCondition(Cond);
+          BI->setCondition(Cond);
 
-        if (BI->getSuccessor(1) != Header)
-          BI->swapSuccessors();
+          if (BI->getSuccessor(1) != Header)
+            BI->swapSuccessors();
+        }
       }
     }
   }
@@ -1202,13 +1444,13 @@ void LoopReroll::ReductionTracker::replaceSelected() {
 bool LoopReroll::reroll(Instruction *IV, Loop *L, BasicBlock *Header,
                         const SCEV *IterCount,
                         ReductionTracker &Reductions) {
-  DAGRootTracker DAGRoots(this, L, IV, SE, AA, TLI);
+  DAGRootTracker DAGRoots(this, L, IV, SE, AA, TLI, IVToIncMap);
 
   if (!DAGRoots.findRoots())
     return false;
   DEBUG(dbgs() << "LRR: Found all root induction increments for: " <<
                   *IV << "\n");
-  
+
   if (!DAGRoots.validate(Reductions))
     return false;
   if (!Reductions.validateSelected())
@@ -1227,9 +1469,9 @@ bool LoopReroll::runOnLoop(Loop *L, LPPassManager &LPM) {
   if (skipOptnoneFunction(L))
     return false;
 
-  AA = &getAnalysis<AliasAnalysis>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  SE = &getAnalysis<ScalarEvolution>();
+  SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
@@ -1248,13 +1490,13 @@ bool LoopReroll::runOnLoop(Loop *L, LPPassManager &LPM) {
     return Changed;
 
   const SCEV *LIBETC = SE->getBackedgeTakenCount(L);
-  const SCEV *IterCount =
-    SE->getAddExpr(LIBETC, SE->getConstant(LIBETC->getType(), 1));
+  const SCEV *IterCount = SE->getAddExpr(LIBETC, SE->getOne(LIBETC->getType()));
   DEBUG(dbgs() << "LRR: iteration count = " << *IterCount << "\n");
 
   // First, we need to find the induction variable with respect to which we can
   // reroll (there may be several possible options).
   SmallInstructionVector PossibleIVs;
+  IVToIncMap.clear();
   collectPossibleIVs(L, PossibleIVs);
 
   if (PossibleIVs.empty()) {

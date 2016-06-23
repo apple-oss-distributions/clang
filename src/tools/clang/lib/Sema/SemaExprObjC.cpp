@@ -168,6 +168,77 @@ static bool validateBoxingMethod(Sema &S, SourceLocation Loc,
   return true;
 }
 
+/// \brief Maps ObjCLiteralKind to NSClassIdKindKind
+static NSAPI::NSClassIdKindKind ClassKindFromLiteralKind(
+                                            Sema::ObjCLiteralKind LiteralKind) {
+  switch (LiteralKind) {
+    case Sema::LK_Array:
+      return NSAPI::ClassId_NSArray;
+    case Sema::LK_Dictionary:
+      return NSAPI::ClassId_NSDictionary;
+    case Sema::LK_Numeric:
+      return NSAPI::ClassId_NSNumber;
+    case Sema::LK_String:
+      return NSAPI::ClassId_NSString;
+    case Sema::LK_Boxed:
+      return NSAPI::ClassId_NSValue;
+
+    // there is no corresponding matching
+    // between LK_None/LK_Block and NSClassIdKindKind
+    case Sema::LK_Block:
+    case Sema::LK_None:
+      break;
+  }
+  llvm_unreachable("LiteralKind can't be converted into a ClassKind");
+}
+
+/// \brief Validates ObjCInterfaceDecl availability.
+/// ObjCInterfaceDecl, used to create ObjC literals, should be defined
+/// if clang not in a debugger mode.
+static bool ValidateObjCLiteralInterfaceDecl(Sema &S, ObjCInterfaceDecl *Decl,
+                                            SourceLocation Loc,
+                                            Sema::ObjCLiteralKind LiteralKind) {
+  if (!Decl) {
+    NSAPI::NSClassIdKindKind Kind = ClassKindFromLiteralKind(LiteralKind);
+    IdentifierInfo *II = S.NSAPIObj->getNSClassId(Kind);
+    S.Diag(Loc, diag::err_undeclared_objc_literal_class)
+      << II->getName() << LiteralKind;
+    return false;
+  } else if (!Decl->hasDefinition() && !S.getLangOpts().DebuggerObjCLiteral) {
+    S.Diag(Loc, diag::err_undeclared_objc_literal_class)
+      << Decl->getName() << LiteralKind;
+    S.Diag(Decl->getLocation(), diag::note_forward_class);
+    return false;
+  }
+
+  return true;
+}
+
+/// \brief Looks up ObjCInterfaceDecl of a given NSClassIdKindKind.
+/// Used to create ObjC literals, such as NSDictionary (@{}),
+/// NSArray (@[]) and Boxed Expressions (@())
+static ObjCInterfaceDecl *LookupObjCInterfaceDeclForLiteral(Sema &S,
+                                            SourceLocation Loc,
+                                            Sema::ObjCLiteralKind LiteralKind) {
+  NSAPI::NSClassIdKindKind ClassKind = ClassKindFromLiteralKind(LiteralKind);
+  IdentifierInfo *II = S.NSAPIObj->getNSClassId(ClassKind);
+  NamedDecl *IF = S.LookupSingleName(S.TUScope, II, Loc,
+                                     Sema::LookupOrdinaryName);
+  ObjCInterfaceDecl *ID = dyn_cast_or_null<ObjCInterfaceDecl>(IF);
+  if (!ID && S.getLangOpts().DebuggerObjCLiteral) {
+    ASTContext &Context = S.Context;
+    TranslationUnitDecl *TU = Context.getTranslationUnitDecl();
+    ID = ObjCInterfaceDecl::Create (Context, TU, SourceLocation(), II,
+                                    nullptr, nullptr, SourceLocation());
+  }
+
+  if (!ValidateObjCLiteralInterfaceDecl(S, ID, Loc, LiteralKind)) {
+    ID = nullptr;
+  }
+
+  return ID;
+}
+
 /// \brief Retrieve the NSNumber factory method that should be used to create
 /// an Objective-C literal for the given type.
 static ObjCMethodDecl *getNSNumberFactoryMethod(Sema &S, SourceLocation Loc,
@@ -197,29 +268,14 @@ static ObjCMethodDecl *getNSNumberFactoryMethod(Sema &S, SourceLocation Loc,
   // Look up the NSNumber class, if we haven't done so already. It's cached
   // in the Sema instance.
   if (!S.NSNumberDecl) {
-    IdentifierInfo *NSNumberId =
-      S.NSAPIObj->getNSClassId(NSAPI::ClassId_NSNumber);
-    NamedDecl *IF = S.LookupSingleName(S.TUScope, NSNumberId,
-                                       Loc, Sema::LookupOrdinaryName);
-    S.NSNumberDecl = dyn_cast_or_null<ObjCInterfaceDecl>(IF);
+    S.NSNumberDecl = LookupObjCInterfaceDeclForLiteral(S, Loc,
+                                                       Sema::LK_Numeric);
     if (!S.NSNumberDecl) {
-      if (S.getLangOpts().DebuggerObjCLiteral) {
-        // Create a stub definition of NSNumber.
-        S.NSNumberDecl = ObjCInterfaceDecl::Create(CX,
-                                                   CX.getTranslationUnitDecl(),
-                                                   SourceLocation(), NSNumberId,
-                                                   nullptr, nullptr,
-                                                   SourceLocation());
-      } else {
-        // Otherwise, require a declaration of NSNumber.
-        S.Diag(Loc, diag::err_undeclared_nsnumber);
-        return nullptr;
-      }
-    } else if (!S.NSNumberDecl->hasDefinition()) {
-      S.Diag(Loc, diag::err_undeclared_nsnumber);
       return nullptr;
     }
-    
+  }
+
+  if (S.NSNumberPointer.isNull()) {
     // generate the pointer to NSNumber type.
     QualType NSNumberObject = CX.getObjCInterfaceType(S.NSNumberDecl);
     S.NSNumberPointer = CX.getObjCObjectPointerType(NSNumberObject);
@@ -455,6 +511,7 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
   if (RValue.isInvalid()) {
     return ExprError();
   }
+  SourceLocation Loc = SR.getBegin();
   ValueExpr = RValue.get();
   QualType ValueType(ValueExpr->getType());
   if (const PointerType *PT = ValueType->getAs<PointerType>()) {
@@ -462,29 +519,11 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
     if (Context.hasSameUnqualifiedType(PointeeType, Context.CharTy)) {
 
       if (!NSStringDecl) {
-        IdentifierInfo *NSStringId =
-          NSAPIObj->getNSClassId(NSAPI::ClassId_NSString);
-        NamedDecl *Decl = LookupSingleName(TUScope, NSStringId,
-                                           SR.getBegin(), LookupOrdinaryName);
-        NSStringDecl = dyn_cast_or_null<ObjCInterfaceDecl>(Decl);
+        NSStringDecl = LookupObjCInterfaceDeclForLiteral(*this, Loc,
+                                                         Sema::LK_String);
         if (!NSStringDecl) {
-          if (getLangOpts().DebuggerObjCLiteral) {
-            // Support boxed expressions in the debugger w/o NSString declaration.
-            DeclContext *TU = Context.getTranslationUnitDecl();
-            NSStringDecl = ObjCInterfaceDecl::Create(Context, TU,
-                                                     SourceLocation(),
-                                                     NSStringId,
-                                                     nullptr, nullptr,
-                                                     SourceLocation());
-          } else {
-            Diag(SR.getBegin(), diag::err_undeclared_nsstring);
-            return ExprError();
-          }
-        } else if (!NSStringDecl->hasDefinition()) {
-          Diag(SR.getBegin(), diag::err_undeclared_nsstring);
           return ExprError();
         }
-        assert(NSStringDecl && "NSStringDecl should not be NULL");
         QualType NSStringObject = Context.getObjCInterfaceType(NSStringDecl);
         NSStringPointer = Context.getObjCObjectPointerType(NSStringObject);
       }
@@ -518,7 +557,7 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
           BoxingMethod = M;
         }
 
-        if (!validateBoxingMethod(*this, SR.getBegin(), NSStringDecl,
+        if (!validateBoxingMethod(*this, Loc, NSStringDecl,
                                   stringWithUTF8String, BoxingMethod))
            return ExprError();
 
@@ -561,34 +600,128 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
     // FIXME:  Do I need to do anything special with BoolTy expressions?
     
     // Look for the appropriate method within NSNumber.
-    BoxingMethod = getNSNumberFactoryMethod(*this, SR.getBegin(), ValueType);
+    BoxingMethod = getNSNumberFactoryMethod(*this, Loc, ValueType);
     BoxedType = NSNumberPointer;
-
   } else if (const EnumType *ET = ValueType->getAs<EnumType>()) {
     if (!ET->getDecl()->isComplete()) {
-      Diag(SR.getBegin(), diag::err_objc_incomplete_boxed_expression_type)
+      Diag(Loc, diag::err_objc_incomplete_boxed_expression_type)
         << ValueType << ValueExpr->getSourceRange();
       return ExprError();
     }
 
-    BoxingMethod = getNSNumberFactoryMethod(*this, SR.getBegin(),
+    BoxingMethod = getNSNumberFactoryMethod(*this, Loc,
                                             ET->getDecl()->getIntegerType());
     BoxedType = NSNumberPointer;
+  } else if (ValueType->isObjCBoxableRecordType()) {
+    // Support for structure types, that marked as objc_boxable
+    // struct __attribute__((objc_boxable)) s { ... };
+    
+    // Look up the NSValue class, if we haven't done so already. It's cached
+    // in the Sema instance.
+    if (!NSValueDecl) {
+      NSValueDecl = LookupObjCInterfaceDeclForLiteral(*this, Loc,
+                                                      Sema::LK_Boxed);
+      if (!NSValueDecl) {
+        return ExprError();
+      }
+
+      // generate the pointer to NSValue type.
+      QualType NSValueObject = Context.getObjCInterfaceType(NSValueDecl);
+      NSValuePointer = Context.getObjCObjectPointerType(NSValueObject);
+    }
+    
+    if (!ValueWithBytesObjCTypeMethod) {
+      IdentifierInfo *II[] = {
+        &Context.Idents.get("valueWithBytes"),
+        &Context.Idents.get("objCType")
+      };
+      Selector ValueWithBytesObjCType = Context.Selectors.getSelector(2, II);
+      
+      // Look for the appropriate method within NSValue.
+      BoxingMethod = NSValueDecl->lookupClassMethod(ValueWithBytesObjCType);
+      if (!BoxingMethod && getLangOpts().DebuggerObjCLiteral) {
+        // Debugger needs to work even if NSValue hasn't been defined.
+        TypeSourceInfo *ReturnTInfo = nullptr;
+        ObjCMethodDecl *M = ObjCMethodDecl::Create(
+                                               Context,
+                                               SourceLocation(),
+                                               SourceLocation(),
+                                               ValueWithBytesObjCType,
+                                               NSValuePointer,
+                                               ReturnTInfo,
+                                               NSValueDecl,
+                                               /*isInstance=*/false,
+                                               /*isVariadic=*/false,
+                                               /*isPropertyAccessor=*/false,
+                                               /*isImplicitlyDeclared=*/true,
+                                               /*isDefined=*/false,
+                                               ObjCMethodDecl::Required,
+                                               /*HasRelatedResultType=*/false);
+        
+        SmallVector<ParmVarDecl *, 2> Params;
+        
+        ParmVarDecl *bytes =
+        ParmVarDecl::Create(Context, M,
+                            SourceLocation(), SourceLocation(),
+                            &Context.Idents.get("bytes"),
+                            Context.VoidPtrTy.withConst(),
+                            /*TInfo=*/nullptr,
+                            SC_None, nullptr);
+        Params.push_back(bytes);
+        
+        QualType ConstCharType = Context.CharTy.withConst();
+        ParmVarDecl *type =
+        ParmVarDecl::Create(Context, M,
+                            SourceLocation(), SourceLocation(),
+                            &Context.Idents.get("type"),
+                            Context.getPointerType(ConstCharType),
+                            /*TInfo=*/nullptr,
+                            SC_None, nullptr);
+        Params.push_back(type);
+        
+        M->setMethodParams(Context, Params, None);
+        BoxingMethod = M;
+      }
+      
+      if (!validateBoxingMethod(*this, Loc, NSValueDecl,
+                                ValueWithBytesObjCType, BoxingMethod))
+        return ExprError();
+      
+      ValueWithBytesObjCTypeMethod = BoxingMethod;
+    }
+    
+    if (!ValueType.isTriviallyCopyableType(Context)) {
+      Diag(Loc, diag::err_objc_non_trivially_copyable_boxed_expression_type)
+        << ValueType << ValueExpr->getSourceRange();
+      return ExprError();
+    }
+
+    BoxingMethod = ValueWithBytesObjCTypeMethod;
+    BoxedType = NSValuePointer;
   }
 
   if (!BoxingMethod) {
-    Diag(SR.getBegin(), diag::err_objc_illegal_boxed_expression_type)
+    Diag(Loc, diag::err_objc_illegal_boxed_expression_type)
       << ValueType << ValueExpr->getSourceRange();
     return ExprError();
   }
   
-  // Convert the expression to the type that the parameter requires.
-  ParmVarDecl *ParamDecl = BoxingMethod->parameters()[0];
-  InitializedEntity Entity = InitializedEntity::InitializeParameter(Context,
-                                                                    ParamDecl);
-  ExprResult ConvertedValueExpr = PerformCopyInitialization(Entity,
-                                                            SourceLocation(),
-                                                            ValueExpr);
+  DiagnoseUseOfDecl(BoxingMethod, Loc);
+
+  ExprResult ConvertedValueExpr;
+  if (ValueType->isObjCBoxableRecordType()) {
+    InitializedEntity IE = InitializedEntity::InitializeTemporary(ValueType);
+    ConvertedValueExpr = PerformCopyInitialization(IE, ValueExpr->getExprLoc(), 
+                                                   ValueExpr);
+  } else {
+    // Convert the expression to the type that the parameter requires.
+    ParmVarDecl *ParamDecl = BoxingMethod->parameters()[0];
+    InitializedEntity IE = InitializedEntity::InitializeParameter(Context,
+                                                                  ParamDecl);
+    ConvertedValueExpr = PerformCopyInitialization(IE, SourceLocation(),
+                                                   ValueExpr);
+  }
+  
   if (ConvertedValueExpr.isInvalid())
     return ExprError();
   ValueExpr = ConvertedValueExpr.get();
@@ -632,26 +765,16 @@ ExprResult Sema::BuildObjCSubscriptExpression(SourceLocation RB, Expr *BaseExpr,
 }
 
 ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
-  // Look up the NSArray class, if we haven't done so already.
-  if (!NSArrayDecl) {
-    NamedDecl *IF = LookupSingleName(TUScope,
-                                 NSAPIObj->getNSClassId(NSAPI::ClassId_NSArray),
-                                 SR.getBegin(),
-                                 LookupOrdinaryName);
-    NSArrayDecl = dyn_cast_or_null<ObjCInterfaceDecl>(IF);
-    if (!NSArrayDecl && getLangOpts().DebuggerObjCLiteral)
-      NSArrayDecl =  ObjCInterfaceDecl::Create (Context,
-                            Context.getTranslationUnitDecl(),
-                            SourceLocation(),
-                            NSAPIObj->getNSClassId(NSAPI::ClassId_NSArray),
-                            nullptr, nullptr, SourceLocation());
+  SourceLocation Loc = SR.getBegin();
 
+  if (!NSArrayDecl) {
+    NSArrayDecl = LookupObjCInterfaceDeclForLiteral(*this, Loc,
+                                                    Sema::LK_Array);
     if (!NSArrayDecl) {
-      Diag(SR.getBegin(), diag::err_undeclared_nsarray);
       return ExprError();
     }
   }
-  
+
   // Find the arrayWithObjects:count: method, if we haven't done so already.
   QualType IdT = Context.getObjCIdType();
   if (!ArrayWithObjectsMethod) {
@@ -687,7 +810,7 @@ ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
       Method->setMethodParams(Context, Params, None);
     }
 
-    if (!validateBoxingMethod(*this, SR.getBegin(), NSArrayDecl, Sel, Method))
+    if (!validateBoxingMethod(*this, Loc, NSArrayDecl, Sel, Method))
       return ExprError();
 
     // Dig out the type that all elements should be converted to.
@@ -748,25 +871,16 @@ ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
 ExprResult Sema::BuildObjCDictionaryLiteral(SourceRange SR, 
                                             ObjCDictionaryElement *Elements,
                                             unsigned NumElements) {
-  // Look up the NSDictionary class, if we haven't done so already.
-  if (!NSDictionaryDecl) {
-    NamedDecl *IF = LookupSingleName(TUScope,
-                            NSAPIObj->getNSClassId(NSAPI::ClassId_NSDictionary),
-                            SR.getBegin(), LookupOrdinaryName);
-    NSDictionaryDecl = dyn_cast_or_null<ObjCInterfaceDecl>(IF);
-    if (!NSDictionaryDecl && getLangOpts().DebuggerObjCLiteral)
-      NSDictionaryDecl =  ObjCInterfaceDecl::Create (Context,
-                            Context.getTranslationUnitDecl(),
-                            SourceLocation(),
-                            NSAPIObj->getNSClassId(NSAPI::ClassId_NSDictionary),
-                            nullptr, nullptr, SourceLocation());
+  SourceLocation Loc = SR.getBegin();
 
+  if (!NSDictionaryDecl) {
+    NSDictionaryDecl = LookupObjCInterfaceDeclForLiteral(*this, Loc,
+                                                         Sema::LK_Dictionary);
     if (!NSDictionaryDecl) {
-      Diag(SR.getBegin(), diag::err_undeclared_nsdictionary);
-      return ExprError();    
+      return ExprError();
     }
   }
-  
+
   // Find the dictionaryWithObjects:forKeys:count: method, if we haven't done
   // so already.
   QualType IdT = Context.getObjCIdType();
@@ -1046,7 +1160,7 @@ ExprResult Sema::ParseObjCSelectorExpression(Selector Sel,
                                              SourceLocation RParenLoc,
                                              bool WarnMultipleSelectors) {
   ObjCMethodDecl *Method = LookupInstanceMethodInGlobalPool(Sel,
-                             SourceRange(LParenLoc, RParenLoc), false, false);
+                             SourceRange(LParenLoc, RParenLoc));
   if (!Method)
     Method = LookupFactoryMethodInGlobalPool(Sel,
                                           SourceRange(LParenLoc, RParenLoc));
@@ -1064,15 +1178,11 @@ ExprResult Sema::ParseObjCSelectorExpression(Selector Sel,
   } else
     DiagnoseMismatchedSelectors(*this, AtLoc, Method, LParenLoc, RParenLoc,
                                 WarnMultipleSelectors);
-  
+
   if (Method &&
       Method->getImplementationControl() != ObjCMethodDecl::Optional &&
-      !getSourceManager().isInSystemHeader(Method->getLocation())) {
-    llvm::DenseMap<Selector, SourceLocation>::iterator Pos
-      = ReferencedSelectors.find(Sel);
-    if (Pos == ReferencedSelectors.end())
-      ReferencedSelectors.insert(std::make_pair(Sel, AtLoc));
-  }
+      !getSourceManager().isInSystemHeader(Method->getLocation()))
+    ReferencedSelectors.insert(std::make_pair(Sel, AtLoc));
 
   // In ARC, forbid the user from using @selector for 
   // retain/release/autorelease/dealloc/retainCount.
@@ -1523,7 +1633,7 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
     }
 
     QualType origParamType = param->getType();
-    QualType paramType = origParamType;
+    QualType paramType = param->getType();
     if (typeArgs)
       paramType = paramType.substObjCTypeArgs(
                     Context,
@@ -1669,8 +1779,7 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
                           diag::err_property_not_found_forward_class,
                           MemberName, BaseRange))
     return ExprError();
-  
-  // Search for a declared property first.
+ 
   if (ObjCPropertyDecl *PD = IFace->FindPropertyDeclaration(Member)) {
     // Check whether we can reference this property.
     if (DiagnoseUseOfDecl(PD, MemberLoc))
@@ -1827,13 +1936,13 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
     // property reference.
     if (receiverNamePtr->isStr("super")) {
       if (ObjCMethodDecl *CurMethod = tryCaptureObjCSelf(receiverNameLoc)) {
-        if (ObjCInterfaceDecl *Class = CurMethod->getClassInterface()) {
+        if (auto classDecl = CurMethod->getClassInterface()) {
+          SuperType = QualType(classDecl->getSuperClassType(), 0);
           if (CurMethod->isInstanceMethod()) {
-            SuperType = QualType(Class->getSuperClassType(), 0);
             if (SuperType.isNull()) {
               // The current class does not have a superclass.
               Diag(receiverNameLoc, diag::error_root_class_cannot_use_super)
-              << Class->getIdentifier();
+                << CurMethod->getClassInterface()->getIdentifier();
               return ExprError();
             }
             QualType T = Context.getObjCObjectPointerType(SuperType);
@@ -1848,10 +1957,7 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
 
           // Otherwise, if this is a class method, try dispatching to our
           // superclass.
-          SuperType = QualType(
-                        CurMethod->getClassInterface()->getSuperClassType(),
-                        0);
-          IFace = Class->getSuperClass();
+          IFace = CurMethod->getClassInterface()->getSuperClass();
         }
       }
     }
@@ -2535,8 +2641,11 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
         if (ObjCMethodDecl *BestMethod =
               SelectBestMethod(Sel, ArgsIn, Method->isInstanceMethod()))
           Method = BestMethod;
-        if (!AreMultipleMethodsInGlobalPool(Sel, Method->isInstanceMethod()))
+        if (!AreMultipleMethodsInGlobalPool(Sel, Method,
+                                            SourceRange(LBracLoc, RBracLoc),
+                                            receiverIsIdLike)) {
           DiagnoseUseOfDecl(Method, SelLoc);
+        }
       }
     } else if (ReceiverType->isObjCClassOrClassKindOfType() ||
                ReceiverType->isObjCQualifiedClassType()) {
@@ -2575,14 +2684,12 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
           // If not messaging 'self', look for any factory method named 'Sel'.
           if (!Receiver || !isSelfExpr(Receiver)) {
             Method = LookupFactoryMethodInGlobalPool(Sel, 
-                                                SourceRange(LBracLoc, RBracLoc),
-                                                     true);
+                                                SourceRange(LBracLoc, RBracLoc));
             if (!Method) {
               // If no class (factory) method was found, check if an _instance_
               // method of the same name exists in the root class only.
               Method = LookupInstanceMethodInGlobalPool(Sel,
-                                               SourceRange(LBracLoc, RBracLoc),
-                                                        true);
+                                               SourceRange(LBracLoc, RBracLoc));
               if (Method)
                   if (const ObjCInterfaceDecl *ID =
                       dyn_cast<ObjCInterfaceDecl>(Method->getDeclContext())) {
@@ -2659,6 +2766,14 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
             if (OCIType->qual_empty()) {
               Method = LookupInstanceMethodInGlobalPool(Sel,
                                               SourceRange(LBracLoc, RBracLoc));
+              if (Method) {
+                if (auto BestMethod =
+                      SelectBestMethod(Sel, ArgsIn, Method->isInstanceMethod()))
+                  Method = BestMethod;
+                AreMultipleMethodsInGlobalPool(Sel, Method,
+                                               SourceRange(LBracLoc, RBracLoc),
+                                               true);
+              }
               if (Method && !forwardClass)
                 Diag(SelLoc, diag::warn_maynot_respond)
                   << OCIType->getInterfaceDecl()->getIdentifier()
@@ -2871,7 +2986,9 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
       }
     }
   }
-  
+
+  CheckObjCCircularContainer(Result);
+
   return MaybeBindToTemporary(Result);
 }
 
@@ -2880,8 +2997,7 @@ static void RemoveSelectorFromWarningCache(Sema &S, Expr* Arg) {
       dyn_cast<ObjCSelectorExpr>(Arg->IgnoreParenCasts())) {
     Selector Sel = OSE->getSelector();
     SourceLocation Loc = OSE->getAtLoc();
-    llvm::DenseMap<Selector, SourceLocation>::iterator Pos
-    = S.ReferencedSelectors.find(Sel);
+    auto Pos = S.ReferencedSelectors.find(Sel);
     if (Pos != S.ReferencedSelectors.end() && Pos->second == Loc)
       S.ReferencedSelectors.erase(Pos);
   }
@@ -3355,7 +3471,7 @@ diagnoseObjCARCConversion(Sema &S, SourceRange castRange,
     (castRange.isValid() ? castRange.getBegin() : castExpr->getExprLoc());
   
   if (S.makeUnavailableInSystemHeader(loc,
-                "converts between Objective-C and C pointers in -fobjc-arc"))
+                                 UnavailableAttr::IR_ARCForbiddenConversion))
     return;
 
   QualType castExprType = castExpr->getType();

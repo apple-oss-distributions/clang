@@ -63,7 +63,7 @@ public:
                                  Language L);
 
 protected:
-  virtual void run(const MatchFinder::MatchResult &Result);
+  void run(const MatchFinder::MatchResult &Result) override;
   virtual void verify(const MatchFinder::MatchResult &Result,
                       const NodeType &Node) {}
 
@@ -120,8 +120,7 @@ testing::AssertionResult MatchVerifier<NodeType>::match(
 
   // Default to failure in case callback is never called
   setFailure("Could not find match");
-  if (!tooling::runToolOnCodeWithArgs(Factory->create(),
-                                      Code, Args, FileName))
+  if (!tooling::runToolOnCodeWithArgs(Factory->create(), Code, Args, FileName))
     return testing::AssertionFailure() << "Parsing error";
   if (!Verified)
     return testing::AssertionFailure() << VerifyResult;
@@ -167,7 +166,8 @@ public:
   }
 
 protected:
-  void verify(const MatchFinder::MatchResult &Result, const NodeType &Node) {
+  void verify(const MatchFinder::MatchResult &Result,
+              const NodeType &Node) override {
     SourceLocation Loc = getLocation(Node);
     unsigned Line = Result.SourceManager->getSpellingLineNumber(Loc);
     unsigned Column = Result.SourceManager->getSpellingColumnNumber(Loc);
@@ -206,7 +206,8 @@ public:
   }
 
 protected:
-  void verify(const MatchFinder::MatchResult &Result, const NodeType &Node) {
+  void verify(const MatchFinder::MatchResult &Result,
+              const NodeType &Node) override {
     SourceRange R = getRange(Node);
     SourceLocation Begin = R.getBegin();
     SourceLocation End = R.getEnd();
@@ -245,7 +246,7 @@ public:
 
 protected:
   void verify(const MatchFinder::MatchResult &Result,
-              const ast_type_traits::DynTypedNode &Node) {
+              const ast_type_traits::DynTypedNode &Node) override {
     std::string DumpStr;
     llvm::raw_string_ostream Dump(DumpStr);
     Node.dump(Dump, *Result.SourceManager);
@@ -272,7 +273,7 @@ public:
 
 protected:
   void verify(const MatchFinder::MatchResult &Result,
-              const ast_type_traits::DynTypedNode &Node) {
+              const ast_type_traits::DynTypedNode &Node) override {
     std::string PrintStr;
     llvm::raw_string_ostream Print(PrintStr);
     Node.print(Print, Result.Context->getPrintingPolicy());

@@ -6,9 +6,11 @@ set(LLVM_LINK_COMPONENTS
   Core
   IRReader
   MC
+  MIRParser
   ScalarOpts
   SelectionDAG
   Support
+  Target
   )
 
 # Support plugins.
@@ -17,4 +19,4 @@ set(LLVM_NO_DEAD_STRIP 1)
 add_llvm_tool(llc
   llc.cpp
   )
-set_target_properties(llc PROPERTIES ENABLE_EXPORTS 1)
+export_executable_symbols(llc)

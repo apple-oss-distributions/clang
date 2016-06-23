@@ -35,6 +35,7 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 using namespace llvm::objcarc;
@@ -118,9 +119,9 @@ bool ObjCARCContract::optimizeRetainCall(Function &F, Instruction *Retain) {
     return false;
 
   // Check that the call is next to the retain.
-  BasicBlock::const_iterator I = Call;
-  ++I;
-  while (IsNoopInstruction(I)) ++I;
+  BasicBlock::const_iterator I = ++Call->getIterator();
+  while (IsNoopInstruction(&*I))
+    ++I;
   if (&*I != Retain)
     return false;
 
@@ -199,7 +200,7 @@ static StoreInst *findSafeStoreForStoreStrongContraction(LoadInst *Load,
   bool SawRelease = false;
 
   // Get the location associated with Load.
-  AliasAnalysis::Location Loc = AA->getLocation(Load);
+  MemoryLocation Loc = MemoryLocation::get(Load);
 
   // Walk down to find the store and the release, which may be in either order.
   for (auto I = std::next(BasicBlock::iterator(Load)),
@@ -211,7 +212,7 @@ static StoreInst *findSafeStoreForStoreStrongContraction(LoadInst *Load,
       break;
 
     // Now we know that we have not seen either the store or the release. If I
-    // is the the release, mark that we saw the release and continue.
+    // is the release, mark that we saw the release and continue.
     Instruction *Inst = &*I;
     if (Inst == Release) {
       SawRelease = true;
@@ -246,7 +247,7 @@ static StoreInst *findSafeStoreForStoreStrongContraction(LoadInst *Load,
 
     // Ok, now we know we have not seen a store yet. See if Inst can write to
     // our load location, if it can not, just ignore the instruction.
-    if (!(AA->getModRefInfo(Inst, Loc) & AliasAnalysis::Mod))
+    if (!(AA->getModRefInfo(Inst, Loc) & MRI_Mod))
       continue;
 
     Store = dyn_cast<StoreInst>(Inst);
@@ -281,9 +282,9 @@ findRetainForStoreStrongContraction(Value *New, StoreInst *Store,
                                     Instruction *Release,
                                     ProvenanceAnalysis &PA) {
   // Walk up from the Store to find the retain.
-  BasicBlock::iterator I = Store;
+  BasicBlock::iterator I = Store->getIterator();
   BasicBlock::iterator Begin = Store->getParent()->begin();
-  while (I != Begin && GetBasicARCInstKind(I) != ARCInstKind::Retain) {
+  while (I != Begin && GetBasicARCInstKind(&*I) != ARCInstKind::Retain) {
     Instruction *Inst = &*I;
 
     // It is only safe to move the retain to the store if we can prove
@@ -293,7 +294,7 @@ findRetainForStoreStrongContraction(Value *New, StoreInst *Store,
       return nullptr;
     --I;
   }
-  Instruction *Retain = I;
+  Instruction *Retain = &*I;
   if (GetBasicARCInstKind(Retain) != ARCInstKind::Retain)
     return nullptr;
   if (GetArgRCIdentityRoot(Retain) != New)
@@ -428,7 +429,7 @@ bool ObjCARCContract::tryToPeepholeInstruction(
       // to do the return value optimization, insert it now.
       if (!RVInstMarker)
         return false;
-      BasicBlock::iterator BBI = Inst;
+      BasicBlock::iterator BBI = Inst->getIterator();
       BasicBlock *InstParent = Inst->getParent();
 
       // Step up to see if the call immediately precedes the RV call.  If it's
@@ -439,11 +440,11 @@ bool ObjCARCContract::tryToPeepholeInstruction(
           BasicBlock *Pred = InstParent->getSinglePredecessor();
           if (!Pred)
             goto decline_rv_optimization;
-          BBI = Pred->getTerminator();
+          BBI = Pred->getTerminator()->getIterator();
           break;
         }
         --BBI;
-      } while (IsNoopInstruction(BBI));
+      } while (IsNoopInstruction(&*BBI));
 
       if (&*BBI == GetArgRCIdentityRoot(Inst)) {
         DEBUG(dbgs() << "Adding inline asm marker for the return value "
@@ -510,10 +511,10 @@ bool ObjCARCContract::runOnFunction(Function &F) {
     return false;
 
   Changed = false;
-  AA = &getAnalysis<AliasAnalysis>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
-  PA.setAA(&getAnalysis<AliasAnalysis>());
+  PA.setAA(&getAnalysis<AAResultsWrapperPass>().getAAResults());
 
   DEBUG(llvm::dbgs() << "**** ObjCARC Contract ****\n");
 
@@ -628,13 +629,13 @@ bool ObjCARCContract::runOnFunction(Function &F) {
 char ObjCARCContract::ID = 0;
 INITIALIZE_PASS_BEGIN(ObjCARCContract, "objc-arc-contract",
                       "ObjC ARC contraction", false, false)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(ObjCARCContract, "objc-arc-contract",
                     "ObjC ARC contraction", false, false)
 
 void ObjCARCContract::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<AliasAnalysis>();
+  AU.addRequired<AAResultsWrapperPass>();
   AU.addRequired<DominatorTreeWrapperPass>();
   AU.setPreservesCFG();
 }
@@ -647,7 +648,7 @@ bool ObjCARCContract::doInitialization(Module &M) {
   if (!Run)
     return false;
 
-  EP.Initialize(&M);
+  EP.init(&M);
 
   // Initialize RVInstMarker.
   RVInstMarker = nullptr;

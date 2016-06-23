@@ -153,15 +153,10 @@ struct CGRecordLowering {
     return CharUnits::fromQuantity(DataLayout.getABITypeAlignment(Type));
   }
   bool isZeroInitializable(const FieldDecl *FD) {
-    const Type *Type = FD->getType()->getBaseElementTypeUnsafe();
-    if (const MemberPointerType *MPT = Type->getAs<MemberPointerType>())
-      return Types.getCXXABI().isZeroInitializable(MPT);
-    if (const RecordType *RT = Type->getAs<RecordType>())
-      return isZeroInitializable(RT->getDecl());
-    return true;
+    return Types.isZeroInitializable(FD->getType());
   }
   bool isZeroInitializable(const RecordDecl *RD) {
-    return Types.getCGRecordLayout(RD).isZeroInitializable();
+    return Types.isZeroInitializable(RD);
   }
   void appendPaddingBytes(CharUnits Size) {
     if (!Size.isZero())
@@ -214,8 +209,8 @@ struct CGRecordLowering {
   bool IsZeroInitializableAsBase : 1;
   bool Packed : 1;
 private:
-  CGRecordLowering(const CGRecordLowering &) LLVM_DELETED_FUNCTION;
-  void operator =(const CGRecordLowering &) LLVM_DELETED_FUNCTION;
+  CGRecordLowering(const CGRecordLowering &) = delete;
+  void operator =(const CGRecordLowering &) = delete;
 };
 } // namespace {
 
@@ -233,11 +228,7 @@ void CGRecordLowering::setBitFieldInfo(
   Info.Offset = (unsigned)(getFieldBitOffset(FD) - Context.toBits(StartOffset));
   Info.Size = FD->getBitWidthValue(Context);
   Info.StorageSize = (unsigned)DataLayout.getTypeAllocSizeInBits(StorageType);
-  // Here we calculate the actual storage alignment of the bits.  E.g if we've
-  // got an alignment >= 2 and the bitfield starts at offset 6 we've got an
-  // alignment of 2.
-  Info.StorageAlignment =
-      Layout.getAlignment().alignmentAtOffset(StartOffset).getQuantity();
+  Info.StorageOffset = StartOffset;
   if (Info.Size > Info.StorageSize)
     Info.Size = Info.StorageSize;
   // Reverse the bit offsets for big endian machines. Because we represent
@@ -319,9 +310,13 @@ void CGRecordLowering::lowerUnion() {
     // If this is the case, then we aught not to try and come up with a "better"
     // type, it might not be very easy to come up with a Constant which
     // correctly initializes it.
-    if (!SeenNamedMember && Field->getDeclName()) {
-      SeenNamedMember = true;
-      if (!isZeroInitializable(Field)) {
+    if (!SeenNamedMember) {
+      SeenNamedMember = Field->getIdentifier();
+      if (!SeenNamedMember)
+        if (const auto *FieldRD =
+                dyn_cast_or_null<RecordDecl>(Field->getType()->getAsTagDecl()))
+        SeenNamedMember = FieldRD->findFirstNamedDataMember();
+      if (SeenNamedMember && !isZeroInitializable(Field)) {
         IsZeroInitializable = IsZeroInitializableAsBase = false;
         StorageType = FieldType;
       }
@@ -459,7 +454,7 @@ void CGRecordLowering::accumulateBases() {
     // contain only a trailing array member.
     const CXXRecordDecl *BaseDecl = Base.getType()->getAsCXXRecordDecl();
     if (!BaseDecl->isEmpty() &&
-        !Context.getASTRecordLayout(BaseDecl).getSize().isZero())
+        !Context.getASTRecordLayout(BaseDecl).getNonVirtualSize().isZero())
       Members.push_back(MemberInfo(Layout.getBaseClassOffset(BaseDecl),
           MemberInfo::Base, getStorageType(BaseDecl), BaseDecl));
   }
@@ -652,7 +647,7 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
                                         const FieldDecl *FD,
                                         uint64_t Offset, uint64_t Size,
                                         uint64_t StorageSize,
-                                        uint64_t StorageAlignment) {
+                                        CharUnits StorageOffset) {
   // This function is vestigial from CGRecordLayoutBuilder days but is still 
   // used in GCObjCRuntime.cpp.  That usage has a "fixme" attached to it that
   // when addressed will allow for the removal of this function.
@@ -684,7 +679,7 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
     Offset = StorageSize - (Offset + Size);
   }
 
-  return CGBitFieldInfo(Offset, Size, IsSigned, StorageSize, StorageAlignment);
+  return CGBitFieldInfo(Offset, Size, IsSigned, StorageSize, StorageOffset);
 }
 
 CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D,
@@ -857,7 +852,7 @@ void CGBitFieldInfo::print(raw_ostream &OS) const {
      << " Size:" << Size
      << " IsSigned:" << IsSigned
      << " StorageSize:" << StorageSize
-     << " StorageAlignment:" << StorageAlignment << ">";
+     << " StorageOffset:" << StorageOffset.getQuantity() << ">";
 }
 
 void CGBitFieldInfo::dump() const {

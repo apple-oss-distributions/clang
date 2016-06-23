@@ -81,6 +81,15 @@ def err_deleted_non_function : Error<
   "only functions can have deleted definitions">;
 def err_module_not_found : Error<"module '%0' not found">, DefaultFatal;
 def err_module_not_built : Error<"could not build module '%0'">, DefaultFatal;
+def err_module_build_disabled: Error<
+  "module '%0' is needed but has not been provided, and implicit use of module "
+  "files is disabled">, DefaultFatal;
+def err_module_unavailable : Error<
+  "module '%0' %select{is incompatible with|requires}1 feature '%2'">;
+def err_module_header_missing : Error<
+  "%select{|umbrella }0header '%1' not found">;
+def err_module_shadowed : Error<
+  "import of shadowed module '%0'">;
 def err_module_lock_failure : Error<
   "could not acquire lock file for module '%0'">, DefaultFatal;
 def err_module_lock_timeout : Error<
@@ -133,7 +142,23 @@ def err_integer_literal_too_large : Error<
 def ext_integer_literal_too_large_for_signed : ExtWarn<
   "integer literal is too large to be represented in a signed integer type, "
   "interpreting as unsigned">,
-  InGroup<DiagGroup<"implicitly-unsigned-literal">>;
+  InGroup<ImplicitlyUnsignedLiteral>;
+def warn_old_implicitly_unsigned_long : Warning<
+  "integer literal is too large to be represented in type 'long', "
+  "interpreting as 'unsigned long' per C89; this literal will "
+  "%select{have type 'long long'|be ill-formed}0 in C99 onwards">,
+  InGroup<C99Compat>;
+def warn_old_implicitly_unsigned_long_cxx : Warning<
+  "integer literal is too large to be represented in type 'long', "
+  "interpreting as 'unsigned long' per C++98; this literal will "
+  "%select{have type 'long long'|be ill-formed}0 in C++11 onwards">,
+  InGroup<CXX11Compat>;
+def ext_old_implicitly_unsigned_long_cxx : ExtWarn<
+  "integer literal is too large to be represented in type 'long' and is "
+  "subject to undefined behavior under C++98, interpreting as 'unsigned long'; "
+  "this literal will %select{have type 'long long'|be ill-formed}0 "
+  "in C++11 onwards">,
+  InGroup<CXX11Compat>;
 
 // SEH
 def err_seh_expected_handler : Error<
@@ -160,6 +185,8 @@ def err_target_unsupported_fpmath : Error<
     "the '%0' unit is not supported with this instruction set">;
 def err_target_unsupported_unaligned : Error<
   "the %0 sub-architecture does not support unaligned accesses">;
+def err_opt_not_valid_with_opt : Error<
+  "option '%0' cannot be specified with '%1'">;
 
 // Source manager
 def err_cannot_open_file : Error<"cannot open file '%0': %1">, DefaultFatal;
@@ -173,7 +200,8 @@ def err_unable_to_make_temp : Error<
   "unable to make temporary file: %0">;
   
 // Modules
-def err_module_file_conflict : Error<"module '%0' found in both '%1' and '%2'">;
+def err_module_format_unhandled : Error<
+  "no handler registered for module format '%0'">, DefaultFatal;
 
 // TransformActions
 // TODO: Use a custom category name to distinguish rewriter errors.
@@ -190,5 +218,7 @@ def err_apinotes_message : Error<"%0">;
 def warn_apinotes_message : Warning<"%0">;
 def note_apinotes_message : Note<"%0">;
 
-
+// OpenMP
+def err_omp_more_one_clause : Error<
+  "directive '#pragma omp %0' cannot contain more than one '%1' clause%select{| with '%3' name modifier}2">;
 }

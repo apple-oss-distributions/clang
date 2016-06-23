@@ -65,6 +65,8 @@ Post_Install_RootLinks := 0
 Post_Install_OpenSourceLicense := 0
 # Install the magic file that enables use of -fobjc-gc for Apple-internal use.
 Post_Install_EnableObjCGC := 1
+# Install the magic file that automatically passes -fignore-objc-weak
+Post_Install_IgnoreObjCWeak := 1
 # Install to .../usr
 Install_Path_Suffix := usr
 # Include x86, ARM, and ARM64 backends.
@@ -75,7 +77,7 @@ Extra_Make_Variables :=
 Extra_Make_Variables += NO_INSTALL_ARCHIVES=1
 # LLVM level install target is 'install-clang.
 LLVM_Install_Target := \
-	OPTIONAL_DIRS="tools/llvm-cov tools/dsymutil tools/llvm-profdata tools/llvm-dwarfdump" \
+	OPTIONAL_DIRS="tools/llvm-cov tools/dsymutil tools/llvm-profdata tools/llvm-dwarfdump tools/llvm-size tools/llvm-nm tools/llvm-objdump" \
 	install-clang
 
 ##
@@ -170,7 +172,7 @@ $(error "invalid setting for clang autogenerate profile: '$(Clang_Autogenerate_P
 endif
 
 # Select whether to build everything (for testing purposes).
-Clang_Only_Build_Target := ONLY_TOOLS="clang lto llvm-cov dsymutil llvm-profdata llvm-dwarfdump" all
+Clang_Only_Build_Target := ONLY_TOOLS="clang lto llvm-cov dsymutil llvm-profdata llvm-dwarfdump llvm-size llvm-nm llvm-objdump" all
 ifeq ($(Clang_Build_All), 1)
 Clang_Build_Target := all
 else ifeq ($(Clang_Build_All), 0)
@@ -265,7 +267,6 @@ endif
 
 # Set configure flags.
 Common_Configure_Flags = \
-		  --enable-targets=$(LLVM_Backends) \
 		  --disable-timestamps \
 		  $(Assertions_Configure_Flag) \
 		  $(Optimized_Configure_Flag) \
@@ -281,8 +282,10 @@ Common_Configure_Flags = \
 		  --enable-clang-plugin-support=no \
 		  --with-bug-report-url="http://developer.apple.com/bugreporter/"
 Stage1_Configure_Flags = $(Common_Configure_Flags) \
+									--enable-targets=x86 \
                   --with-extra-options="$(Extra_Options)"
 Configure_Flags = $(Common_Configure_Flags) \
+									--enable-targets=$(LLVM_Backends) \
                   --with-internal-prefix="$(Install_Prefix)/local" \
                   --with-extra-options="$(Final_Extra_Options)"
 Instrumented_Configure_Flags = $(Common_Configure_Flags) \
@@ -325,6 +328,13 @@ ifeq ($(Post_Install_EnableObjCGC),1)
 Extra_Clang_Install_Targets += install-clang-enableobjcgc
 else ifneq ($(Post_Install_EnableObjCGC),0)
 $(error "unknown value for post install of enable_objc_gc: '$(Post_Install_EnableObjCGC)'")
+endif
+
+# Install the magic file that automatically passes -fignore-objc-weak?
+ifeq ($(Post_Install_IgnoreObjCWeak),1)
+Extra_Clang_Install_Targets += install-clang-ignoreobjcweak
+else ifneq ($(Post_Install_IgnoreObjCWeak),0)
+$(error "unknown value for post install of ignore_objc_weak: '$(Post_Install_IgnoreObjCWeak)'")
 endif
 
 # Select stage1 compiler to build.
@@ -396,7 +406,7 @@ unexport RC_ProjectName
 ##
 # Build Logic
 
-.PHONY: all help install installsrc installhdrs clean
+.PHONY: all help install install-cross installsrc installhdrs clean
 
 SYSCTL := $(shell if [ `sysctl -n hw.activecpu` -ge 8 -a `sysctl -n hw.memsize` -le 2147483648 ]; then echo 4; else sysctl -n hw.activecpu; fi)
 
@@ -410,7 +420,8 @@ endif
 endif
 
 # Default is to build Clang.
-install: install-clang
+install: clang
+install-cross: clang
 
 # We install the source using rsync. We take particular care to:
 #
@@ -460,7 +471,7 @@ installhdrs:
 .PHONY: configure-clang_final configure-clang_singlestage configure-clang_stage2
 .PHONY: configure-clang_stage1 configure-clang_instrumented
 .PHONY: install-clang-rootlinks install-clang-opensourcelicense
-.PHONY: install-clang-enableobjcgc
+.PHONY: install-clang-enableobjcgc install-clang-ignoreobjcweak
 .PHONY: generate-clang-profdata
 
 install-clang: install-clang_final $(Extra_Clang_Install_Targets)
@@ -480,16 +491,17 @@ install-clang_final: build-clang
 	done
 	./merge-lipo `for arch in $(RC_ARCHS) ; do echo $(OBJROOT)/install-$$arch ; done` $(DSTROOT)
 	$(_v) ln -sf clang $(DSTROOT)/$(Install_Prefix)/bin/cc
+	$(_v) $(MKDIR) $(DSTROOT)/$(Install_Prefix)/share/man/man1/
+	$(INSTALL_FILE) $(SRCROOT)/clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang.1
 	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/cc.1
 	$(_v) ln -sf clang++ $(DSTROOT)/$(Install_Prefix)/bin/c++
 	$(_v) ln -sf clang++.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/c++.1
 	$(_v) ln -sf clang.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/clang++.1
 	$(_v) ln -sf llvm-dsymutil $(DSTROOT)/$(Install_Prefix)/bin/dsymutil
 	$(_v) ln -sf llvm-cov $(DSTROOT)/$(Install_Prefix)/bin/gcov
-	# REMINDER: The llvm-cov.1 file here needs to be regenerated manually
-	# whenever the llvm-cov documentation changes!!
 	$(INSTALL_FILE) $(SRCROOT)/llvm-cov.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/llvm-cov.1
 	$(_v) ln -sf llvm-cov.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/gcov.1
+	$(INSTALL_FILE) $(SRCROOT)/llvm-profdata.1 $(DSTROOT)/$(Install_Prefix)/share/man/man1/llvm-profdata.1
 	$(_v) $(FIND) $(DSTROOT) -perm -0111 -name '*.a' | $(XARGS) chmod a-x
 	@echo "Copying executables into SYMROOT..."
 	$(_v) cd $(DSTROOT) && find . -perm -0111 -type f -print | cpio -pdm $(SYMROOT)
@@ -498,6 +510,12 @@ install-clang_final: build-clang
 	  xargs -n 1 -P $(SYSCTL) $(DSYMUTIL)
 	@echo "Stripping executables in DSTROOT..."
 	$(_v) find $(DSTROOT) -perm -0111 -type f -print | xargs -n 1 -P $(SYSCTL) strip -S
+	# swiftlang is responsible for submitting libclang.dylib.
+	# Note that we still install the headers (usr/local/include/clang-c).
+	# It's a bit akward, but for now it's easier for swiftlang to do it
+	# this way (Same thing for c-index-test).
+	@echo "Removing libclang.dylib"
+	$(_v) rm -f $(DSTROOT)/$(Install_Prefix)/lib/libclang.dylib
 	@echo "Setting permissions for executables in DSTROOT..."
 	$(_v)- $(CHOWN) -R root:wheel $(DSTROOT) $(SYMROOT)
 
@@ -661,6 +679,10 @@ install-clang-enableobjcgc: install-clang_final
 	$(MKDIR) $(DSTROOT)/$(Install_Prefix)/local/lib/clang
 	echo 1 > $(DSTROOT)/$(Install_Prefix)/local/lib/clang/enable_objc_gc
 
+install-clang-ignoreobjcweak: install-clang_final
+	$(MKDIR) $(DSTROOT)/$(Install_Prefix)/local/lib/clang
+	echo 1 > $(DSTROOT)/$(Install_Prefix)/local/lib/clang/ignore_mrc_weak
+
 install-clang-links:
 	$(MKDIR) -p $(DSTROOT)/$(Install_Prefix)/bin
 	ln -sf ../../../../../usr/bin/clang $(DSTROOT)/$(Install_Prefix)/bin/clang
@@ -683,9 +705,9 @@ install-clang-diagnostic:
 ##
 # Cross Compilation Build Support
 
-.PHONY: install-cross build-cross configure-cross setup-tools-cross
+.PHONY: install-device-cross build-cross configure-cross setup-tools-cross
 
-install-cross: build-cross
+install-device-cross: build-cross
 	$(_v) for arch in $(RC_ARCHS) ; do \
 		echo "Installing for $$arch..." && \
 		$(MKDIR) $(OBJROOT)/install-$$arch && \

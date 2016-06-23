@@ -233,14 +233,14 @@ EmitRegUnitPressure(raw_ostream &OS, const CodeGenRegBank &RegBank,
   OS << "// Get the name of this register unit pressure set.\n"
      << "const char *" << ClassName << "::\n"
      << "getRegPressureSetName(unsigned Idx) const {\n"
-     << "  static const char *PressureNameTable[] = {\n";
+     << "  static const char *const PressureNameTable[] = {\n";
   unsigned MaxRegUnitWeight = 0;
   for (unsigned i = 0; i < NumSets; ++i ) {
     const RegUnitSet &RegUnits = RegBank.getRegSetAt(i);
     MaxRegUnitWeight = std::max(MaxRegUnitWeight, RegUnits.Weight);
     OS << "    \"" << RegUnits.Name << "\",\n";
   }
-  OS << "    nullptr };\n"
+  OS << "  };\n"
      << "  return PressureNameTable[Idx];\n"
      << "}\n\n";
 
@@ -610,17 +610,19 @@ static void printMask(raw_ostream &OS, unsigned Val) {
 static bool combine(const CodeGenSubRegIndex *Idx,
                     SmallVectorImpl<CodeGenSubRegIndex*> &Vec) {
   const CodeGenSubRegIndex::CompMap &Map = Idx->getComposites();
-  for (CodeGenSubRegIndex::CompMap::const_iterator
-       I = Map.begin(), E = Map.end(); I != E; ++I) {
-    CodeGenSubRegIndex *&Entry = Vec[I->first->EnumValue - 1];
-    if (Entry && Entry != I->second)
+  for (const auto &I : Map) {
+    CodeGenSubRegIndex *&Entry = Vec[I.first->EnumValue - 1];
+    if (Entry && Entry != I.second)
       return false;
   }
 
   // All entries are compatible. Make it so.
-  for (CodeGenSubRegIndex::CompMap::const_iterator
-       I = Map.begin(), E = Map.end(); I != E; ++I)
-    Vec[I->first->EnumValue - 1] = I->second;
+  for (const auto &I : Map) {
+    auto *&Entry = Vec[I.first->EnumValue - 1];
+    assert((!Entry || Entry == I.second) &&
+           "Expected EnumValue to be unique");
+    Entry = I.second;
+  }
   return true;
 }
 
@@ -714,16 +716,7 @@ RegisterInfoEmitter::emitComposeSubRegIndexLaneMask(raw_ostream &OS,
     for (size_t s = 0, se = Sequences.size(); s != se; ++s, SIdx = NextSIdx) {
       SmallVectorImpl<MaskRolPair> &Sequence = Sequences[s];
       NextSIdx = SIdx + Sequence.size() + 1;
-      if (Sequence.size() != IdxSequence.size())
-        continue;
-      bool Identical = true;
-      for (size_t o = 0, oe = Sequence.size(); o != oe; ++o) {
-        if (Sequence[o] != IdxSequence[o]) {
-          Identical = false;
-          break;
-        }
-      }
-      if (Identical) {
+      if (Sequence == IdxSequence) {
         Found = SIdx;
         break;
       }
@@ -759,7 +752,7 @@ RegisterInfoEmitter::emitComposeSubRegIndexLaneMask(raw_ostream &OS,
     Idx += Sequence.size() + 1;
   }
   OS << "  };\n"
-        "  static const MaskRolOp *CompositeSequences[] = {\n";
+        "  static const MaskRolOp *const CompositeSequences[] = {\n";
   for (size_t i = 0, e = SubRegIndices.size(); i != e; ++i) {
     OS << "    ";
     unsigned Idx = SubReg2SequenceIndexMap[i];
@@ -1077,11 +1070,11 @@ RegisterInfoEmitter::runTargetHeader(raw_ostream &OS, CodeGenTarget &Target,
 
   OS << "namespace llvm {\n\n";
 
+  OS << "class " << TargetName << "FrameLowering;\n\n";
+
   OS << "struct " << ClassName << " : public TargetRegisterInfo {\n"
      << "  explicit " << ClassName
-     << "(unsigned RA, unsigned D = 0, unsigned E = 0, unsigned PC = 0);\n"
-     << "  bool needsStackRealignment(const MachineFunction &) const override\n"
-     << "     { return false; }\n";
+     << "(unsigned RA, unsigned D = 0, unsigned E = 0, unsigned PC = 0);\n";
   if (!RegBank.getSubRegIndices().empty()) {
     OS << "  unsigned composeSubRegIndicesImpl"
        << "(unsigned, unsigned) const override;\n"
@@ -1101,6 +1094,11 @@ RegisterInfoEmitter::runTargetHeader(raw_ostream &OS, CodeGenTarget &Target,
      << "const TargetRegisterClass *RC) const override;\n"
      << "  const int *getRegUnitPressureSets("
      << "unsigned RegUnit) const override;\n"
+     << "  ArrayRef<const char *> getRegMaskNames() const override;\n"
+     << "  ArrayRef<const uint32_t *> getRegMasks() const override;\n"
+     << "  /// Devirtualized TargetFrameLowering.\n"
+     << "  static const " << TargetName << "FrameLowering *getFrameLowering(\n"
+     << "      const MachineFunction &MF);\n"
      << "};\n\n";
 
   const auto &RegisterClasses = RegBank.getRegClasses();
@@ -1293,7 +1291,10 @@ RegisterInfoEmitter::runTargetDesc(raw_ostream &OS, CodeGenTarget &Target,
          << "VTLists + " << VTSeqs.get(RC.VTs) << ",\n    " << RC.getName()
          << "SubClassMask,\n    SuperRegIdxSeqs + "
          << SuperRegIdxSeqs.get(SuperRegIdxLists[RC.EnumValue]) << ",\n    "
-         << format("0x%08x,\n    ", RC.LaneMask);
+         << format("0x%08x,\n    ", RC.LaneMask)
+         << (unsigned)RC.AllocationPriority << ",\n    "
+         << (RC.HasDisjunctSubRegs?"true":"false")
+         << ", /* HasDisjunctSubRegs */\n    ";
       if (RC.getSuperClasses().empty())
         OS << "NullRegClasses,\n    ";
       else
@@ -1448,6 +1449,38 @@ RegisterInfoEmitter::runTargetDesc(raw_ostream &OS, CodeGenTarget &Target,
     OS << "};\n";
   }
   OS << "\n\n";
+
+  OS << "ArrayRef<const uint32_t *> " << ClassName
+     << "::getRegMasks() const {\n";
+  if (!CSRSets.empty()) {
+    OS << "  static const uint32_t *const Masks[] = {\n";
+    for (Record *CSRSet : CSRSets)
+      OS << "    " << CSRSet->getName() << "_RegMask,\n";
+    OS << "  };\n";
+    OS << "  return makeArrayRef(Masks);\n";
+  } else {
+    OS << "  return None;\n";
+  }
+  OS << "}\n\n";
+
+  OS << "ArrayRef<const char *> " << ClassName
+     << "::getRegMaskNames() const {\n";
+  if (!CSRSets.empty()) {
+  OS << "  static const char *const Names[] = {\n";
+    for (Record *CSRSet : CSRSets)
+      OS << "    " << '"' << CSRSet->getName() << '"' << ",\n";
+    OS << "  };\n";
+    OS << "  return makeArrayRef(Names);\n";
+  } else {
+    OS << "  return None;\n";
+  }
+  OS << "}\n\n";
+
+  OS << "const " << TargetName << "FrameLowering *\n" << TargetName
+     << "GenRegisterInfo::getFrameLowering(const MachineFunction &MF) {\n"
+     << "  return static_cast<const " << TargetName << "FrameLowering *>(\n"
+     << "      MF.getSubtarget().getFrameLowering());\n"
+     << "}\n\n";
 
   OS << "} // End llvm namespace\n";
   OS << "#endif // GET_REGINFO_TARGET_DESC\n\n";

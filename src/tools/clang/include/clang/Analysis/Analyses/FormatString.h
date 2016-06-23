@@ -35,7 +35,7 @@ class OptionalFlag {
 public:
   OptionalFlag(const char *Representation)
       : representation(Representation), flag(false) {}
-  bool isSet() { return flag; }
+  bool isSet() const { return flag; }
   void set() { flag = true; }
   void clear() { flag = false; }
   void setPosition(const char *position) {
@@ -50,7 +50,7 @@ public:
   const char *toString() const { return representation; }
 
   // Overloaded operators for bool like qualities
-  LLVM_EXPLICIT operator bool() const { return flag; }
+  explicit operator bool() const { return flag; }
   OptionalFlag& operator=(const bool &rhs) {
     flag = rhs;
     return *this;  // Return a reference to myself.
@@ -154,6 +154,11 @@ public:
     CArg,
     SArg,
 
+    // Apple extension: P specifies to os_log that the data being pointed to is
+    // to be copied by os_log. The precision indicates the number of bytes to
+    // copy.
+    PArg,
+
     // ** Printf-specific **
 
     ZArg, // MS extension
@@ -161,6 +166,12 @@ public:
     // Objective-C specific specifiers.
     ObjCObjArg,  // '@'
     ObjCBeg = ObjCObjArg, ObjCEnd = ObjCObjArg,
+
+    // FreeBSD kernel specific specifiers.
+    FreeBSDbArg,
+    FreeBSDDArg,
+    FreeBSDrArg,
+    FreeBSDyArg,
 
     // GlibC specific specifiers.
     PrintErrno,   // 'm'
@@ -205,7 +216,8 @@ public:
     return EndScanList ? EndScanList - Position : 1;
   }
 
-  bool isIntArg() const { return kind >= IntArgBeg && kind <= IntArgEnd; }
+  bool isIntArg() const { return (kind >= IntArgBeg && kind <= IntArgEnd) ||
+    kind == FreeBSDrArg || kind == FreeBSDyArg; }
   bool isUIntArg() const { return kind >= UIntArgBeg && kind <= UIntArgEnd; }
   bool isAnyIntArg() const { return kind >= IntArgBeg && kind <= UIntArgEnd; }
   const char *toString() const;
@@ -225,6 +237,9 @@ class ArgType {
 public:
   enum Kind { UnknownTy, InvalidTy, SpecificTy, ObjCPointerTy, CPointerTy,
               AnyCharTy, CStrTy, WCStrTy, WIntTy };
+
+  enum MatchKind { NoMatch = 0, Match = 1, NoMatchPedantic };
+
 private:
   const Kind K;
   QualType T;
@@ -248,7 +263,7 @@ public:
     return Res;
   }
 
-  bool matchesType(ASTContext &C, QualType argTy) const;
+  MatchKind matchesType(ASTContext &C, QualType argTy) const;
 
   QualType getRepresentativeType(ASTContext &C) const;
 
@@ -427,13 +442,15 @@ class PrintfSpecifier : public analyze_format_string::FormatSpecifier {
   OptionalFlag HasAlternativeForm; // '#'
   OptionalFlag HasLeadingZeroes; // '0'
   OptionalFlag HasObjCTechnicalTerm; // '[tt]'
+  OptionalFlag IsPrivate; // '{private}'
+  OptionalFlag IsPublic; // '{public}'
   OptionalAmount Precision;
 public:
   PrintfSpecifier() :
     FormatSpecifier(/* isPrintf = */ true),
     HasThousandsGrouping("'"), IsLeftJustified("-"), HasPlusPrefix("+"),
     HasSpacePrefix(" "), HasAlternativeForm("#"), HasLeadingZeroes("0"),
-    HasObjCTechnicalTerm("tt") {}
+    HasObjCTechnicalTerm("tt"), IsPrivate("private"), IsPublic("public") {}
 
   static PrintfSpecifier Parse(const char *beg, const char *end);
 
@@ -461,6 +478,12 @@ public:
   }
   void setHasObjCTechnicalTerm(const char *position) {
     HasObjCTechnicalTerm.setPosition(position);
+  }
+  void setIsPrivate(const char *position) {
+    IsPrivate.setPosition(position);
+  }
+  void setIsPublic(const char *position) {
+    IsPublic.setPosition(position);
   }
   void setUsesPositionalArg() { UsesPositionalArg = true; }
 
@@ -499,6 +522,8 @@ public:
   const OptionalFlag &hasLeadingZeros() const { return HasLeadingZeroes; }
   const OptionalFlag &hasSpacePrefix() const { return HasSpacePrefix; }
   const OptionalFlag &hasObjCTechnicalTerm() const { return HasObjCTechnicalTerm; }
+  const OptionalFlag &isPrivate() const { return IsPrivate; }
+  const OptionalFlag &isPublic() const { return IsPublic; }
   bool usesPositionalArg() const { return UsesPositionalArg; }
 
   /// Changes the specifier and length according to a QualType, retaining any
@@ -655,10 +680,10 @@ public:
 
 bool ParsePrintfString(FormatStringHandler &H,
                        const char *beg, const char *end, const LangOptions &LO,
-                       const TargetInfo &Target);
-  
-bool ParseFormatStringHasSArg(const char *beg, const char *end, const LangOptions &LO,
-                              const TargetInfo &Target);
+                       const TargetInfo &Target, bool isFreeBSDKPrintf);
+
+bool ParseFormatStringHasSArg(const char *beg, const char *end,
+                              const LangOptions &LO, const TargetInfo &Target);
 
 bool ParseScanfString(FormatStringHandler &H,
                       const char *beg, const char *end, const LangOptions &LO,

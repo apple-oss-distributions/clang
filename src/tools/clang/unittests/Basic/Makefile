@@ -9,12 +9,7 @@
 
 CLANG_LEVEL = ../..
 TESTNAME = Basic
-include $(CLANG_LEVEL)/../../Makefile.config
-LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader ipo objcarcopts \
-                   instrumentation bitwriter support mc option DebugInfoDWARF
-USEDLIBS = clangLex.a clangBasic.a \
-	clangSerialization.a clangAST.a clangLex.a clangBasic.a \
-        clangFrontend.a clangCodeGen.a clangDriver.a clangIndex.a 
+LINK_COMPONENTS := support mc
+USEDLIBS = clangLex.a clangBasic.a
 
 include $(CLANG_LEVEL)/unittests/Makefile
-

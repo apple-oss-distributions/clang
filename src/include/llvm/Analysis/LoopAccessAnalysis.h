@@ -29,10 +29,11 @@ namespace llvm {
 
 class Value;
 class DataLayout;
-class AliasAnalysis;
 class ScalarEvolution;
 class Loop;
 class SCEV;
+class SCEVUnionPredicate;
+class LoopAccessInfo;
 
 /// Optimization analysis message produced during vectorization. Messages inform
 /// the user why vectorization did not occur.
@@ -136,6 +137,14 @@ public:
       // We couldn't determine the direction or the distance.
       Unknown,
       // Lexically forward.
+      //
+      // FIXME: If we only have loop-independent forward dependences (e.g. a
+      // read and write of A[i]), LAA will locally deem the dependence "safe"
+      // without querying the MemoryDepChecker.  Therefore we can miss
+      // enumerating loop-independent forward dependences in
+      // getDependences.  Note that as soon as there are different
+      // indices used to access the same array, the MemoryDepChecker *is*
+      // queried and the dependence list is complete.
       Forward,
       // Forward, but if vectorized, is likely to prevent store-to-load
       // forwarding.
@@ -162,13 +171,20 @@ public:
     Dependence(unsigned Source, unsigned Destination, DepType Type)
         : Source(Source), Destination(Destination), Type(Type) {}
 
+    /// \brief Return the source instruction of the dependence.
+    Instruction *getSource(const LoopAccessInfo &LAI) const;
+    /// \brief Return the destination instruction of the dependence.
+    Instruction *getDestination(const LoopAccessInfo &LAI) const;
+
     /// \brief Dependence types that don't prevent vectorization.
     static bool isSafeForVectorization(DepType Type);
 
-    /// \brief Dependence types that can be queried from the analysis.
-    static bool isInterestingDependence(DepType Type);
+    /// \brief Lexically forward dependence.
+    bool isForward() const;
+    /// \brief Lexically backward dependence.
+    bool isBackward() const;
 
-    /// \brief Lexically backward dependence types.
+    /// \brief May be a lexically backward dependence type (includes Unknown).
     bool isPossiblyBackward() const;
 
     /// \brief Print the dependence.  \p Instr is used to map the instruction
@@ -177,10 +193,11 @@ public:
                const SmallVectorImpl<Instruction *> &Instrs) const;
   };
 
-  MemoryDepChecker(ScalarEvolution *Se, const Loop *L)
+  MemoryDepChecker(ScalarEvolution *Se, const Loop *L,
+                   SCEVUnionPredicate &Preds)
       : SE(Se), InnermostLoop(L), AccessIdx(0),
         ShouldRetryWithRuntimeCheck(false), SafeForVectorization(true),
-        RecordInterestingDependences(true) {}
+        RecordDependences(true), Preds(Preds) {}
 
   /// \brief Register the location (instructions are given increasing numbers)
   /// of a write access.
@@ -218,17 +235,30 @@ public:
   /// vectorize the loop with a dynamic array access check.
   bool shouldRetryWithRuntimeCheck() { return ShouldRetryWithRuntimeCheck; }
 
-  /// \brief Returns the interesting dependences.  If null is returned we
-  /// exceeded the MaxInterestingDependence threshold and this information is
-  /// not available.
-  const SmallVectorImpl<Dependence> *getInterestingDependences() const {
-    return RecordInterestingDependences ? &InterestingDependences : nullptr;
+  /// \brief Returns the memory dependences.  If null is returned we exceeded
+  /// the MaxDependences threshold and this information is not
+  /// available.
+  const SmallVectorImpl<Dependence> *getDependences() const {
+    return RecordDependences ? &Dependences : nullptr;
   }
+
+  void clearDependences() { Dependences.clear(); }
 
   /// \brief The vector of memory access instructions.  The indices are used as
   /// instruction identifiers in the Dependence class.
   const SmallVectorImpl<Instruction *> &getMemoryInstructions() const {
     return InstMap;
+  }
+
+  /// \brief Generate a mapping between the memory instructions and their
+  /// indices according to program order.
+  DenseMap<Instruction *, unsigned> generateInstructionOrderMap() const {
+    DenseMap<Instruction *, unsigned> OrderMap;
+
+    for (unsigned I = 0; I < InstMap.size(); ++I)
+      OrderMap[InstMap[I]] = I;
+
+    return OrderMap;
   }
 
   /// \brief Find the set of instructions that read or write via \p Ptr.
@@ -259,15 +289,14 @@ private:
   /// vectorization.
   bool SafeForVectorization;
 
-  //// \brief True if InterestingDependences reflects the dependences in the
-  //// loop.  If false we exceeded MaxInterestingDependence and
-  //// InterestingDependences is invalid.
-  bool RecordInterestingDependences;
+  //// \brief True if Dependences reflects the dependences in the
+  //// loop.  If false we exceeded MaxDependences and
+  //// Dependences is invalid.
+  bool RecordDependences;
 
-  /// \brief Interesting memory dependences collected during the analysis as
-  /// defined by isInterestingDependence.  Only valid if
-  /// RecordInterestingDependences is true.
-  SmallVector<Dependence, 8> InterestingDependences;
+  /// \brief Memory dependences collected during the analysis.  Only valid if
+  /// RecordDependences is true.
+  SmallVector<Dependence, 8> Dependences;
 
   /// \brief Check whether there is a plausible dependence between the two
   /// accesses.
@@ -288,6 +317,176 @@ private:
   /// \brief Check whether the data dependence could prevent store-load
   /// forwarding.
   bool couldPreventStoreLoadForward(unsigned Distance, unsigned TypeByteSize);
+
+  /// The SCEV predicate containing all the SCEV-related assumptions.
+  /// The dependence checker needs this in order to convert SCEVs of pointers
+  /// to more accurate expressions in the context of existing assumptions.
+  /// We also need this in case assumptions about SCEV expressions need to
+  /// be made in order to avoid unknown dependences. For example we might
+  /// assume a unit stride for a pointer in order to prove that a memory access
+  /// is strided and doesn't wrap.
+  SCEVUnionPredicate &Preds;
+};
+
+/// \brief Holds information about the memory runtime legality checks to verify
+/// that a group of pointers do not overlap.
+class RuntimePointerChecking {
+public:
+  struct PointerInfo {
+    /// Holds the pointer value that we need to check.
+    TrackingVH<Value> PointerValue;
+    /// Holds the pointer value at the beginning of the loop.
+    const SCEV *Start;
+    /// Holds the pointer value at the end of the loop.
+    const SCEV *End;
+    /// Holds the information if this pointer is used for writing to memory.
+    bool IsWritePtr;
+    /// Holds the id of the set of pointers that could be dependent because of a
+    /// shared underlying object.
+    unsigned DependencySetId;
+    /// Holds the id of the disjoint alias set to which this pointer belongs.
+    unsigned AliasSetId;
+    /// SCEV for the access.
+    const SCEV *Expr;
+
+    PointerInfo(Value *PointerValue, const SCEV *Start, const SCEV *End,
+                bool IsWritePtr, unsigned DependencySetId, unsigned AliasSetId,
+                const SCEV *Expr)
+        : PointerValue(PointerValue), Start(Start), End(End),
+          IsWritePtr(IsWritePtr), DependencySetId(DependencySetId),
+          AliasSetId(AliasSetId), Expr(Expr) {}
+  };
+
+  RuntimePointerChecking(ScalarEvolution *SE) : Need(false), SE(SE) {}
+
+  /// Reset the state of the pointer runtime information.
+  void reset() {
+    Need = false;
+    Pointers.clear();
+    Checks.clear();
+  }
+
+  /// Insert a pointer and calculate the start and end SCEVs.
+  /// \p We need Preds in order to compute the SCEV expression of the pointer
+  /// according to the assumptions that we've made during the analysis.
+  /// The method might also version the pointer stride according to \p Strides,
+  /// and change \p Preds.
+  void insert(Loop *Lp, Value *Ptr, bool WritePtr, unsigned DepSetId,
+              unsigned ASId, const ValueToValueMap &Strides,
+              SCEVUnionPredicate &Preds);
+
+  /// \brief No run-time memory checking is necessary.
+  bool empty() const { return Pointers.empty(); }
+
+  /// A grouping of pointers. A single memcheck is required between
+  /// two groups.
+  struct CheckingPtrGroup {
+    /// \brief Create a new pointer checking group containing a single
+    /// pointer, with index \p Index in RtCheck.
+    CheckingPtrGroup(unsigned Index, RuntimePointerChecking &RtCheck)
+        : RtCheck(RtCheck), High(RtCheck.Pointers[Index].End),
+          Low(RtCheck.Pointers[Index].Start) {
+      Members.push_back(Index);
+    }
+
+    /// \brief Tries to add the pointer recorded in RtCheck at index
+    /// \p Index to this pointer checking group. We can only add a pointer
+    /// to a checking group if we will still be able to get
+    /// the upper and lower bounds of the check. Returns true in case
+    /// of success, false otherwise.
+    bool addPointer(unsigned Index);
+
+    /// Constitutes the context of this pointer checking group. For each
+    /// pointer that is a member of this group we will retain the index
+    /// at which it appears in RtCheck.
+    RuntimePointerChecking &RtCheck;
+    /// The SCEV expression which represents the upper bound of all the
+    /// pointers in this group.
+    const SCEV *High;
+    /// The SCEV expression which represents the lower bound of all the
+    /// pointers in this group.
+    const SCEV *Low;
+    /// Indices of all the pointers that constitute this grouping.
+    SmallVector<unsigned, 2> Members;
+  };
+
+  /// \brief A memcheck which made up of a pair of grouped pointers.
+  ///
+  /// These *have* to be const for now, since checks are generated from
+  /// CheckingPtrGroups in LAI::addRuntimeChecks which is a const member
+  /// function.  FIXME: once check-generation is moved inside this class (after
+  /// the PtrPartition hack is removed), we could drop const.
+  typedef std::pair<const CheckingPtrGroup *, const CheckingPtrGroup *>
+      PointerCheck;
+
+  /// \brief Generate the checks and store it.  This also performs the grouping
+  /// of pointers to reduce the number of memchecks necessary.
+  void generateChecks(MemoryDepChecker::DepCandidates &DepCands,
+                      bool UseDependencies);
+
+  /// \brief Returns the checks that generateChecks created.
+  const SmallVector<PointerCheck, 4> &getChecks() const { return Checks; }
+
+  /// \brief Decide if we need to add a check between two groups of pointers,
+  /// according to needsChecking.
+  bool needsChecking(const CheckingPtrGroup &M,
+                     const CheckingPtrGroup &N) const;
+
+  /// \brief Returns the number of run-time checks required according to
+  /// needsChecking.
+  unsigned getNumberOfChecks() const { return Checks.size(); }
+
+  /// \brief Print the list run-time memory checks necessary.
+  void print(raw_ostream &OS, unsigned Depth = 0) const;
+
+  /// Print \p Checks.
+  void printChecks(raw_ostream &OS, const SmallVectorImpl<PointerCheck> &Checks,
+                   unsigned Depth = 0) const;
+
+  /// This flag indicates if we need to add the runtime check.
+  bool Need;
+
+  /// Information about the pointers that may require checking.
+  SmallVector<PointerInfo, 2> Pointers;
+
+  /// Holds a partitioning of pointers into "check groups".
+  SmallVector<CheckingPtrGroup, 2> CheckingGroups;
+
+  /// \brief Check if pointers are in the same partition
+  ///
+  /// \p PtrToPartition contains the partition number for pointers (-1 if the
+  /// pointer belongs to multiple partitions).
+  static bool
+  arePointersInSamePartition(const SmallVectorImpl<int> &PtrToPartition,
+                             unsigned PtrIdx1, unsigned PtrIdx2);
+
+  /// \brief Decide whether we need to issue a run-time check for pointer at
+  /// index \p I and \p J to prove their independence.
+  bool needsChecking(unsigned I, unsigned J) const;
+
+  /// \brief Return PointerInfo for pointer at index \p PtrIdx.
+  const PointerInfo &getPointerInfo(unsigned PtrIdx) const {
+    return Pointers[PtrIdx];
+  }
+
+private:
+  /// \brief Groups pointers such that a single memcheck is required
+  /// between two different groups. This will clear the CheckingGroups vector
+  /// and re-compute it. We will only group dependecies if \p UseDependencies
+  /// is true, otherwise we will create a separate group for each pointer.
+  void groupChecks(MemoryDepChecker::DepCandidates &DepCands,
+                   bool UseDependencies);
+
+  /// Generate the checks and return them.
+  SmallVector<PointerCheck, 4>
+  generateChecks() const;
+
+  /// Holds a pointer to the ScalarEvolution analysis.
+  ScalarEvolution *SE;
+
+  /// \brief Set of run-time checks required to establish independence of
+  /// otherwise may-aliasing pointers in the loop.
+  SmallVector<PointerCheck, 4> Checks;
 };
 
 /// \brief Drive the analysis of memory accesses in the loop
@@ -304,80 +503,15 @@ private:
 /// generates run-time checks to prove independence.  This is done by
 /// AccessAnalysis::canCheckPtrAtRT and the checks are maintained by the
 /// RuntimePointerCheck class.
+///
+/// If pointers can wrap or can't be expressed as affine AddRec expressions by
+/// ScalarEvolution, we will generate run-time checks by emitting a
+/// SCEVUnionPredicate.
+///
+/// Checks for both memory dependences and SCEV predicates must be emitted in
+/// order for the results of this analysis to be valid.
 class LoopAccessInfo {
 public:
-  /// This struct holds information about the memory runtime legality check that
-  /// a group of pointers do not overlap.
-  struct RuntimePointerCheck {
-    RuntimePointerCheck() : Need(false) {}
-
-    /// Reset the state of the pointer runtime information.
-    void reset() {
-      Need = false;
-      Pointers.clear();
-      Starts.clear();
-      Ends.clear();
-      IsWritePtr.clear();
-      DependencySetId.clear();
-      AliasSetId.clear();
-    }
-
-    /// Insert a pointer and calculate the start and end SCEVs.
-    void insert(ScalarEvolution *SE, Loop *Lp, Value *Ptr, bool WritePtr,
-                unsigned DepSetId, unsigned ASId,
-                const ValueToValueMap &Strides);
-
-    /// \brief No run-time memory checking is necessary.
-    bool empty() const { return Pointers.empty(); }
-
-    /// \brief Decide whether we need to issue a run-time check for pointer at
-    /// index \p I and \p J to prove their independence.
-    ///
-    /// If \p PtrPartition is set, it contains the partition number for
-    /// pointers (-1 if the pointer belongs to multiple partitions).  In this
-    /// case omit checks between pointers belonging to the same partition.
-    ///
-    /// If \p PtrsInStoreToLoadForwarding is set, it contains the load and store
-    /// pointers such that the stores forward to these load.  Also add memchecks
-    /// for the loads from this set against all the *other* stores *within* the
-    /// same partition.
-    bool needsChecking(
-        unsigned I, unsigned J, const SmallVectorImpl<int> *PtrPartition,
-        const SmallSet<Value *, 8> *PtrsInStoreToLoadForwarding) const;
-
-    /// \brief Return true if any pointer requires run-time checking according
-    /// to needsChecking.
-    ///
-    /// See the explanation for the parameters under needsChecking.
-    bool needsAnyChecking(
-        const SmallVectorImpl<int> *PtrPartition,
-        const SmallSet<Value *, 8> *PtrsInStoreToLoadForwarding) const;
-
-    /// \brief Print the list run-time memory checks necessary.
-    ///
-    /// See the explanation for the parameters under needsChecking.
-    void print(raw_ostream &OS, unsigned Depth = 0,
-               const SmallVectorImpl<int> *PtrPartition = nullptr,
-               const SmallSet<Value *, 8> *PtrsInStoreToLoadForwarding =
-                   nullptr) const;
-
-    /// This flag indicates if we need to add the runtime check.
-    bool Need;
-    /// Holds the pointers that we need to check.
-    SmallVector<TrackingVH<Value>, 2> Pointers;
-    /// Holds the pointer value at the beginning of the loop.
-    SmallVector<const SCEV*, 2> Starts;
-    /// Holds the pointer value at the end of the loop.
-    SmallVector<const SCEV*, 2> Ends;
-    /// Holds the information if this pointer is used for writing to memory.
-    SmallVector<bool, 2> IsWritePtr;
-    /// Holds the id of the set of pointers that could be dependent because of a
-    /// shared underlying object.
-    SmallVector<unsigned, 2> DependencySetId;
-    /// Holds the id of the disjoint alias set to which this pointer belongs.
-    SmallVector<unsigned, 2> AliasSetId;
-  };
-
   LoopAccessInfo(Loop *L, ScalarEvolution *SE, const DataLayout &DL,
                  const TargetLibraryInfo *TLI, AliasAnalysis *AA,
                  DominatorTree *DT, LoopInfo *LI,
@@ -387,13 +521,15 @@ public:
   /// no memory dependence cycles.
   bool canVectorizeMemory() const { return CanVecMem; }
 
-  const RuntimePointerCheck *getRuntimePointerCheck() const {
-    return &PtrRtCheck;
+  const RuntimePointerChecking *getRuntimePointerChecking() const {
+    return &PtrRtChecking;
   }
 
   /// \brief Number of memchecks required to prove independence of otherwise
   /// may-alias pointers.
-  unsigned getNumRuntimePointerChecks() const { return NumComparisons; }
+  unsigned getNumRuntimePointerChecks() const {
+    return PtrRtChecking.getNumberOfChecks();
+  }
 
   /// Return true if the block BB needs to be predicated in order for the loop
   /// to be vectorized.
@@ -412,18 +548,18 @@ public:
   /// Returns a pair of instructions where the first element is the first
   /// instruction generated in possibly a sequence of instructions and the
   /// second value is the final comparator value or NULL if no check is needed.
+  std::pair<Instruction *, Instruction *>
+  addRuntimeChecks(Instruction *Loc) const;
+
+  /// \brief Generete the instructions for the checks in \p PointerChecks.
   ///
-  /// If \p PtrPartition is set, it contains the partition number for pointers
-  /// (-1 if the pointer belongs to multiple partitions).  In this case omit
-  /// checks between pointers belonging to the same partition.
-  ///
-  /// If \p PtrsInStoreToLoadForwarding is set, it contains the load and store
-  /// pointers such that the stores forward to these load.  Also add memchecks
-  /// for the loads from this set against all the *other* stores *within* the
-  /// same partition.
-  std::pair<Instruction *, Instruction *> addRuntimeCheck(
-      Instruction *Loc, const SmallVectorImpl<int> *PtrPartition = nullptr,
-      const SmallSet<Value *, 8> *PtrsInStoreToLoadForwarding = nullptr) const;
+  /// Returns a pair of instructions where the first element is the first
+  /// instruction generated in possibly a sequence of instructions and the
+  /// second value is the final comparator value or NULL if no check is needed.
+  std::pair<Instruction *, Instruction *>
+  addRuntimeChecks(Instruction *Loc,
+                   const SmallVectorImpl<RuntimePointerChecking::PointerCheck>
+                       &PointerChecks) const;
 
   /// \brief The diagnostics report generated for the analysis.  E.g. why we
   /// couldn't analyze the loop.
@@ -448,6 +584,22 @@ public:
   /// Only used in DEBUG build but we don't want NDEBUG-dependent ABI.
   unsigned NumSymbolicStrides;
 
+  /// \brief Checks existence of store to invariant address inside loop.
+  /// If the loop has any store to invariant address, then it returns true,
+  /// else returns false.
+  bool hasStoreToLoopInvariantAddress() const {
+    return StoreToLoopInvariantAddress;
+  }
+
+  /// The SCEV predicate contains all the SCEV-related assumptions.
+  /// The is used to keep track of the minimal set of assumptions on SCEV
+  /// expressions that the analysis needs to make in order to return a
+  /// meaningful result. All SCEV expressions during the analysis should be
+  /// re-written (and therefore simplified) according to Preds.
+  /// A user of LoopAccessAnalysis will need to emit the runtime checks
+  /// associated with this predicate.
+  SCEVUnionPredicate Preds;
+
 private:
   /// \brief Analyze the loop.  Substitute symbolic strides using Strides.
   void analyzeLoop(const ValueToValueMap &Strides);
@@ -460,15 +612,11 @@ private:
 
   /// We need to check that all of the pointers in this list are disjoint
   /// at runtime.
-  RuntimePointerCheck PtrRtCheck;
+  RuntimePointerChecking PtrRtChecking;
 
   /// \brief the Memory Dependence Checker which can determine the
   /// loop-independent and loop-carried dependences between memory accesses.
   MemoryDepChecker DepChecker;
-
-  /// \brief Number of memchecks required to prove independence of otherwise
-  /// may-alias pointers
-  unsigned NumComparisons;
 
   Loop *TheLoop;
   ScalarEvolution *SE;
@@ -486,6 +634,10 @@ private:
   /// \brief Cache the result of analyzeLoop.
   bool CanVecMem;
 
+  /// \brief Indicator for storing to uniform addresses.
+  /// If a loop has write to a loop invariant address then it should be true.
+  bool StoreToLoopInvariantAddress;
+
   /// \brief The diagnostics report generated for the analysis.  E.g. why we
   /// couldn't analyze the loop.
   Optional<LoopAccessReport> Report;
@@ -494,14 +646,26 @@ private:
 Value *stripIntegerCast(Value *V);
 
 ///\brief Return the SCEV corresponding to a pointer with the symbolic stride
-///replaced with constant one.
+/// replaced with constant one, assuming \p Preds is true.
+///
+/// If necessary this method will version the stride of the pointer according
+/// to \p PtrToStride and therefore add a new predicate to \p Preds.
 ///
 /// If \p OrigPtr is not null, use it to look up the stride value instead of \p
 /// Ptr.  \p PtrToStride provides the mapping between the pointer value and its
 /// stride as collected by LoopVectorizationLegality::collectStridedAccess.
 const SCEV *replaceSymbolicStrideSCEV(ScalarEvolution *SE,
                                       const ValueToValueMap &PtrToStride,
-                                      Value *Ptr, Value *OrigPtr = nullptr);
+                                      SCEVUnionPredicate &Preds, Value *Ptr,
+                                      Value *OrigPtr = nullptr);
+
+/// \brief Check the stride of the pointer and ensure that it does not wrap in
+/// the address space, assuming \p Preds is true.
+///
+/// If necessary this method will version the stride of the pointer according
+/// to \p PtrToStride and therefore add a new predicate to \p Preds.
+int isStridedPtr(ScalarEvolution *SE, Value *Ptr, const Loop *Lp,
+                 const ValueToValueMap &StridesMap, SCEVUnionPredicate &Preds);
 
 /// \brief This analysis provides dependence information for the memory accesses
 /// of a loop.
@@ -549,6 +713,17 @@ private:
   DominatorTree *DT;
   LoopInfo *LI;
 };
+
+inline Instruction *MemoryDepChecker::Dependence::getSource(
+    const LoopAccessInfo &LAI) const {
+  return LAI.getDepChecker().getMemoryInstructions()[Source];
+}
+
+inline Instruction *MemoryDepChecker::Dependence::getDestination(
+    const LoopAccessInfo &LAI) const {
+  return LAI.getDepChecker().getMemoryInstructions()[Destination];
+}
+
 } // End llvm namespace
 
 #endif

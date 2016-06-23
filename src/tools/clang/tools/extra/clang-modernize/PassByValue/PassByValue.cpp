@@ -16,7 +16,6 @@
 #include "PassByValue.h"
 #include "PassByValueActions.h"
 #include "PassByValueMatchers.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -24,8 +23,7 @@ using namespace clang::ast_matchers;
 
 int PassByValueTransform::apply(const tooling::CompilationDatabase &Database,
                                 const std::vector<std::string> &SourcePaths) {
-  ClangTool Tool(Database, SourcePaths,
-                 SharedModuleProvider::Create<LLVMModuleProvider>());
+  ClangTool Tool(Database, SourcePaths);
   unsigned AcceptedChanges = 0;
   unsigned RejectedChanges = 0;
   MatchFinder Finder;
@@ -55,6 +53,7 @@ bool PassByValueTransform::handleBeginSource(CompilerInstance &CI,
   return Transform::handleBeginSource(CI, Filename);
 }
 
+namespace {
 struct PassByValueFactory : TransformFactory {
   PassByValueFactory() {
     // Based on the Replace Auto-Ptr Transform that is also using std::move().
@@ -68,6 +67,7 @@ struct PassByValueFactory : TransformFactory {
     return new PassByValueTransform(Opts);
   }
 };
+} // namespace
 
 // Register the factory using this statically initialized variable.
 static TransformFactoryRegistry::Add<PassByValueFactory>

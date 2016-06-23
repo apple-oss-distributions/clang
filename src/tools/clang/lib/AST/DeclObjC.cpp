@@ -54,8 +54,8 @@ void ObjCContainerDecl::anchor() { }
 ///
 ObjCIvarDecl *
 ObjCContainerDecl::getIvarDecl(IdentifierInfo *Id) const {
-  lookup_const_result R = lookup(Id);
-  for (lookup_const_iterator Ivar = R.begin(), IvarEnd = R.end();
+  lookup_result R = lookup(Id);
+  for (lookup_iterator Ivar = R.begin(), IvarEnd = R.end();
        Ivar != IvarEnd; ++Ivar) {
     if (ObjCIvarDecl *ivar = dyn_cast<ObjCIvarDecl>(*Ivar))
       return ivar;
@@ -83,8 +83,8 @@ ObjCContainerDecl::getMethod(Selector Sel, bool isInstance,
   // + (float) class_method;
   // @end
   //
-  lookup_const_result R = lookup(Sel);
-  for (lookup_const_iterator Meth = R.begin(), MethEnd = R.end();
+  lookup_result R = lookup(Sel);
+  for (lookup_iterator Meth = R.begin(), MethEnd = R.end();
        Meth != MethEnd; ++Meth) {
     ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(*Meth);
     if (MD && MD->isInstanceMethod() == isInstance)
@@ -101,8 +101,8 @@ ObjCContainerDecl::getMethod(Selector Sel, bool isInstance,
 bool ObjCContainerDecl::HasUserDeclaredSetterMethod(
     const ObjCPropertyDecl *Property) const {
   Selector Sel = Property->getSetterName();
-  lookup_const_result R = lookup(Sel);
-  for (lookup_const_iterator Meth = R.begin(), MethEnd = R.end();
+  lookup_result R = lookup(Sel);
+  for (lookup_iterator Meth = R.begin(), MethEnd = R.end();
        Meth != MethEnd; ++Meth) {
     ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(*Meth);
     if (MD && MD->isInstanceMethod() && !MD->isImplicit())
@@ -161,8 +161,17 @@ ObjCPropertyDecl::findPropertyDecl(const DeclContext *DC,
         return nullptr;
   }
 
-  DeclContext::lookup_const_result R = DC->lookup(propertyID);
-  for (DeclContext::lookup_const_iterator I = R.begin(), E = R.end(); I != E;
+  // If context is class, then lookup property in its extensions.
+  // This comes before property is looked up in primary class.
+  if (auto *IDecl = dyn_cast<ObjCInterfaceDecl>(DC)) {
+    for (const auto *Ext : IDecl->known_extensions())
+      if (ObjCPropertyDecl *PD = ObjCPropertyDecl::findPropertyDecl(Ext,
+                                                                    propertyID))
+        return PD;
+  }
+
+  DeclContext::lookup_result R = DC->lookup(propertyID);
+  for (DeclContext::lookup_iterator I = R.begin(), E = R.end(); I != E;
        ++I)
     if (ObjCPropertyDecl *PD = dyn_cast<ObjCPropertyDecl>(*I))
       return PD;
@@ -190,6 +199,15 @@ ObjCPropertyDecl *ObjCContainerDecl::FindPropertyDeclaration(
       if (Def->isHidden())
         return nullptr;
   }
+ 
+  // Search the extensions of a class first; they override what's in
+  // the class itself.
+  if (const auto *ClassDecl = dyn_cast<ObjCInterfaceDecl>(this)) {
+    for (const auto *Ext : ClassDecl->visible_extensions()) {
+      if (auto *P = Ext->FindPropertyDeclaration(PropertyId))
+        return P;
+    }
+  }
 
   if (ObjCPropertyDecl *PD =
         ObjCPropertyDecl::findPropertyDecl(cast<DeclContext>(this), PropertyId))
@@ -207,7 +225,7 @@ ObjCPropertyDecl *ObjCContainerDecl::FindPropertyDeclaration(
     }
     case Decl::ObjCInterface: {
       const ObjCInterfaceDecl *OID = cast<ObjCInterfaceDecl>(this);
-      // Look through categories (but not extensions).
+      // Look through categories (but not extensions; they were handled above).
       for (const auto *Cat : OID->visible_categories()) {
         if (!Cat->IsClassExtension())
           if (ObjCPropertyDecl *P = Cat->FindPropertyDeclaration(PropertyId))
@@ -278,10 +296,6 @@ ObjCInterfaceDecl *ObjCInterfaceDecl::getSuperClass() const {
 
   if (const ObjCObjectType *superType = getSuperClassType()) {
     if (ObjCInterfaceDecl *superDecl = superType->getInterface()) {
-      if (superDecl->isPartialInterface() && 
-          superDecl->getCompleteDefinition())
-        return superDecl->getCompleteDefinition();
-
       if (ObjCInterfaceDecl *superDef = superDecl->getDefinition())
         return superDef;
 
@@ -330,6 +344,13 @@ void ObjCInterfaceDecl::collectPropertiesToImplement(PropertyMap &PM,
   for (auto *Prop : properties()) {
     PM[Prop->getIdentifier()] = Prop;
     PO.push_back(Prop);
+  }
+  for (const auto *Ext : known_extensions()) {
+    const ObjCCategoryDecl *ClassExt = Ext;
+    for (auto *Prop : ClassExt->properties()) {
+      PM[Prop->getIdentifier()] = Prop;
+      PO.push_back(Prop);
+    }
   }
   for (const auto *PI : all_referenced_protocols())
     PI->collectPropertiesToImplement(PM, PO);
@@ -394,9 +415,8 @@ void ObjCInterfaceDecl::mergeClassExtensionProtocolList(
     return;
 
   // Merge ProtocolRefs into class's protocol list;
-  for (auto *P : all_referenced_protocols()) {
-    ProtocolRefs.push_back(P);
-  }
+  ProtocolRefs.append(all_referenced_protocol_begin(),
+                      all_referenced_protocol_end());
 
   data().AllReferencedProtocols.set(ProtocolRefs.data(), ProtocolRefs.size(),C);
 }
@@ -677,8 +697,7 @@ ObjCMethodDecl *ObjCInterfaceDecl::lookupPrivateMethod(
 
   // Look through local category implementations associated with the class.
   if (!Method)
-    Method = Instance ? getCategoryInstanceMethod(Sel)
-                      : getCategoryClassMethod(Sel);
+    Method = getCategoryMethod(Sel, Instance);
 
   // Before we give up, check if the selector is an instance method.
   // But only in the root. This matches gcc's behavior and what the
@@ -1188,18 +1207,47 @@ ObjCMethodDecl::findPropertyDecl(bool CheckOverrides) const {
 
   if (isPropertyAccessor()) {
     const ObjCContainerDecl *Container = cast<ObjCContainerDecl>(getParent());
-    // If container is class extension, find its primary class.
-    if (const ObjCCategoryDecl *CatDecl = dyn_cast<ObjCCategoryDecl>(Container))
-      if (CatDecl->IsClassExtension())
-        Container = CatDecl->getClassInterface();
-    
     bool IsGetter = (NumArgs == 0);
 
-    for (const auto *I : Container->properties()) {
-      Selector NextSel = IsGetter ? I->getGetterName()
-                                  : I->getSetterName();
-      if (NextSel == Sel)
-        return I;
+    /// Local function that attempts to find a matching property within the
+    /// given Objective-C container.
+    auto findMatchingProperty =
+      [&](const ObjCContainerDecl *Container) -> const ObjCPropertyDecl * {
+
+      for (const auto *I : Container->properties()) {
+        Selector NextSel = IsGetter ? I->getGetterName()
+                                    : I->getSetterName();
+        if (NextSel == Sel)
+          return I;
+      }
+
+      return nullptr;
+    };
+
+    // Look in the container we were given.
+    if (const auto *Found = findMatchingProperty(Container))
+      return Found;
+
+    // If we're in a category or extension, look in the main class.
+    const ObjCInterfaceDecl *ClassDecl = nullptr;
+    if (const auto *Category = dyn_cast<ObjCCategoryDecl>(Container)) {
+      ClassDecl = Category->getClassInterface();
+      if (const auto *Found = findMatchingProperty(ClassDecl))
+        return Found;
+    } else {
+      // Determine whether the container is a class.
+      ClassDecl = dyn_cast<ObjCInterfaceDecl>(Container);
+    }
+
+    // If we have a class, check its visible extensions.
+    if (ClassDecl) {
+      for (const auto *Ext : ClassDecl->visible_extensions()) {
+        if (Ext == Container)
+          continue;
+
+        if (const auto *Found = findMatchingProperty(Ext))
+          return Found;
+      }
     }
 
     llvm_unreachable("Marked as a property accessor but no property found!");
@@ -1265,8 +1313,10 @@ SourceRange ObjCTypeParamDecl::getSourceRange() const {
 ObjCTypeParamList::ObjCTypeParamList(SourceLocation lAngleLoc,
                                      ArrayRef<ObjCTypeParamDecl *> typeParams,
                                      SourceLocation rAngleLoc)
-  : Brackets(lAngleLoc, rAngleLoc), NumParams(typeParams.size())
+  : NumParams(typeParams.size())
 {
+  Brackets.Begin = lAngleLoc.getRawEncoding();
+  Brackets.End = rAngleLoc.getRawEncoding();
   std::copy(typeParams.begin(), typeParams.end(), begin());
 }
 
@@ -1278,7 +1328,8 @@ ObjCTypeParamList *ObjCTypeParamList::create(
                      SourceLocation rAngleLoc) {
   unsigned size = sizeof(ObjCTypeParamList)
                 + sizeof(ObjCTypeParamDecl *) * typeParams.size();
-  static_assert(alignof(ObjCTypeParamList) >= alignof(ObjCTypeParamDecl*),
+  static_assert(llvm::AlignOf<ObjCTypeParamList>::Alignment >=
+                    llvm::AlignOf<ObjCTypeParamDecl *>::Alignment,
                 "type parameter list needs greater alignment");
   unsigned align = llvm::alignOf<ObjCTypeParamList>();
   void *mem = ctx.Allocate(size, align);
@@ -2012,6 +2063,11 @@ void ObjCImplementationDecl::setIvarInitializers(ASTContext &C,
            numInitializers * sizeof(CXXCtorInitializer*));
     IvarInitializers = ivarInitializers;
   }
+}
+
+ObjCImplementationDecl::init_const_iterator
+ObjCImplementationDecl::init_begin() const {
+  return IvarInitializers.get(getASTContext().getExternalSource());
 }
 
 raw_ostream &clang::operator<<(raw_ostream &OS,

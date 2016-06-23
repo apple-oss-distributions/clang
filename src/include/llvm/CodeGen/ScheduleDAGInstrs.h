@@ -84,9 +84,6 @@ namespace llvm {
     /// TargetSchedModel provides an interface to the machine model.
     TargetSchedModel SchedModel;
 
-    /// isPostRA flag indicates vregs cannot be present.
-    bool IsPostRA;
-
     /// True if the DAG builder should remove kill flags (in preparation for
     /// rescheduling).
     bool RemoveKillFlags;
@@ -154,13 +151,10 @@ namespace llvm {
   public:
     explicit ScheduleDAGInstrs(MachineFunction &mf,
                                const MachineLoopInfo *mli,
-                               bool IsPostRAFlag,
-                               bool RemoveKillFlags = false,
-                               LiveIntervals *LIS = nullptr);
+                               LiveIntervals *LIS = nullptr,
+                               bool RemoveKillFlags = false);
 
-    virtual ~ScheduleDAGInstrs() {}
-
-    bool isPostRA() const { return IsPostRA; }
+    ~ScheduleDAGInstrs() override {}
 
     /// \brief Expose LiveIntervals for use in DAG mutators and such.
     LiveIntervals *getLIS() const { return LIS; }
@@ -260,7 +254,7 @@ namespace llvm {
 #ifndef NDEBUG
     const SUnit *Addr = SUnits.empty() ? nullptr : &SUnits[0];
 #endif
-    SUnits.push_back(SUnit(MI, (unsigned)SUnits.size()));
+    SUnits.emplace_back(MI, (unsigned)SUnits.size());
     assert((Addr == nullptr || Addr == &SUnits[0]) &&
            "SUnits std::vector reallocated on the fly!");
     SUnits.back().OrigNode = &SUnits.back();

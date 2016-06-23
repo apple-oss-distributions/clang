@@ -379,7 +379,7 @@ public:
   void FindExistingPHI(BlkT *BB, BlockListTy *BlockList) {
     for (PhiItT BBI = Traits::PhiItT_begin(BB), BBE = Traits::PhiItT_end(BB);
          BBI != BBE; ++BBI) {
-      PhiT *SomePHI = Traits::InstrIsPHI(BBI);
+      PhiT *SomePHI = Traits::InstrIsPHI(&*BBI);
       if (!SomePHI)
         break;
       if (CheckIfPHIMatches(SomePHI)) {

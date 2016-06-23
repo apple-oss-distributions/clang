@@ -131,7 +131,8 @@ static void reportConflict(
 /// to be deduplicated and checked for conflicts.
 /// \param[in] SM SourceManager required for conflict reporting.
 ///
-/// \returns \li true if conflicts were detected
+/// \returns \parblock
+///          \li true if conflicts were detected
 ///          \li false if no conflicts were detected
 static bool deduplicateAndDetectConflicts(FileToReplacementsMap &Replacements,
                                           SourceManager &SM) {
@@ -183,10 +184,7 @@ bool mergeAndDeduplicate(const TUReplacements &TUs,
   }
 
   // Ask clang to deduplicate and report conflicts.
-  if (deduplicateAndDetectConflicts(GroupedReplacements, SM))
-    return false;
-
-  return true;
+  return !deduplicateAndDetectConflicts(GroupedReplacements, SM);
 }
 
 bool applyReplacements(const FileToReplacementsMap &GroupedReplacements,

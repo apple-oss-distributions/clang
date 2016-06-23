@@ -38,7 +38,6 @@ target_link_libraries(clang-modernize
   clangAST
   clangASTMatchers
   clangBasic
-  clangCodeGen
   clangFormat
   clangFrontend
   clangLex

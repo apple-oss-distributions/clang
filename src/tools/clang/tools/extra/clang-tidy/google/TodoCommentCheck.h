@@ -14,11 +14,12 @@
 
 namespace clang {
 namespace tidy {
+namespace google {
 namespace readability {
 
-/// \brief Finds TODO comments without a username or bug number.
+/// Finds TODO comments without a username or bug number.
 ///
-/// Corresponding cpplint.py check: readability/todo
+/// Corresponding cpplint.py check: 'readability/todo'
 class TodoCommentCheck : public ClangTidyCheck {
 public:
   TodoCommentCheck(StringRef Name, ClangTidyContext *Context);
@@ -30,6 +31,7 @@ private:
 };
 
 } // namespace readability
+} // namespace google
 } // namespace tidy
 } // namespace clang
 

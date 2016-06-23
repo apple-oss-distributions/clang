@@ -8,7 +8,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h"
-#include "../../CodeGen/AsmPrinter/DwarfAccelTable.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -98,7 +97,7 @@ void DWARFAcceleratorTable::dump(raw_ostream &OS) const {
         break;
 
       unsigned DataOffset = AccelSection.getU32(&OffsetsOffset);
-      OS << format("  Hash = 0x%08x (at %x offset) Offset = 0x%08x (at %x offset)\n", Hash, HashOffset - 4, DataOffset, OffsetsOffset - 4);
+      OS << format("  Hash = 0x%08x Offset = 0x%08x\n", Hash, DataOffset);
       if (!AccelSection.isValidOffset(DataOffset)) {
         OS << "    Invalid section offset\n";
         continue;
@@ -130,42 +129,4 @@ void DWARFAcceleratorTable::dump(raw_ostream &OS) const {
     }
   }
 }
-
-DWARFAcceleratorTable::DataIterator
-DWARFAcceleratorTable::find(StringRef Key) const {
-  // Find the bucket.
-  unsigned HashValue = DwarfAccelTable::HashDJB(Key);
-  unsigned Bucket = HashValue % Hdr.NumBuckets;
-  unsigned BucketBase = sizeof(Hdr) + Hdr.HeaderDataLength;
-  unsigned HashesBase = BucketBase + Hdr.NumBuckets * 4;
-  unsigned OffsetsBase = HashesBase + Hdr.NumHashes * 4;
-
-  unsigned BucketOffset = BucketBase + Bucket * 4;
-  unsigned Index = AccelSection.getU32(&BucketOffset);
-      
-  // Search through all hashes in the bucket.
-  for (unsigned HashIdx = Index; HashIdx < Hdr.NumHashes; ++HashIdx) {
-    unsigned HashOffset = HashesBase + HashIdx*4;
-    unsigned OffsetsOffset = OffsetsBase + HashIdx*4;
-    uint32_t Hash = AccelSection.getU32(&HashOffset);
-
-    if (Hash % Hdr.NumBuckets != Bucket)
-      // We already in the next bucket.
-      break;
-
-    unsigned DataOffset = AccelSection.getU32(&OffsetsOffset);
-    unsigned StringOffset = AccelSection.getU32(&DataOffset);
-    RelocAddrMap::const_iterator Reloc = Relocs.find(DataOffset-4);
-    if (Reloc != Relocs.end())
-      StringOffset += Reloc->second.second;
-    if (!StringOffset)
-      break;
-
-    // Finally compare the key.
-    if (Key.equals(StringSection.getCStr(&StringOffset)))
-      return DataIterator(*this, DataOffset);
-  }
-  return DataIterator();
-}
-
 }

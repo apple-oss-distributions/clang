@@ -16,9 +16,8 @@ Contents
    :maxdepth: 1
 
    clang-modernize
-   clang-tidy
+   clang-tidy/index
    modularize
-   module-map-checker
    pp-trace
 
 

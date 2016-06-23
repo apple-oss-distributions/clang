@@ -13,6 +13,7 @@
 
 #include "sanitizer_platform.h"
 #if SANITIZER_MAC
+#include "sanitizer_mac.h"
 
 // Use 64-bit inodes in file operations. ASan does not support OS X 10.5, so
 // the clients will most certainly use 64-bit ones as well.
@@ -25,12 +26,31 @@
 #include "sanitizer_flags.h"
 #include "sanitizer_internal_defs.h"
 #include "sanitizer_libc.h"
-#include "sanitizer_mac.h"
+#include "sanitizer_mac_spi.h"
 #include "sanitizer_placement_new.h"
+#include "sanitizer_platform_limits_posix.h"
 #include "sanitizer_procmaps.h"
 
+#if !SANITIZER_IOS
+#include <crt_externs.h>  // for _NSGetEnviron
+#else
+extern char **environ;
+#endif
+
+#if defined(__has_include) && __has_include(<os/trace.h>)
+#define SANITIZER_OS_TRACE 1
+#include <os/trace.h>
+#else
+#define SANITIZER_OS_TRACE 0
+#endif
+
+#include <asl.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <libkern/OSAtomic.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <mach/vm_statistics.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -41,33 +61,11 @@
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <libkern/OSAtomic.h>
-#include <errno.h>
 
 // from <crt_externs.h>, but we don't have that file on iOS
 extern "C" {
   extern char ***_NSGetArgv(void);
   extern char ***_NSGetEnviron(void);
-}
-
-// Forward declare SPI from sandbox/private.h.
-extern "C" {
-enum sandbox_filter_type {
-  SANDBOX_FILTER_NONE,
-  SANDBOX_FILTER_PATH,
-  SANDBOX_FILTER_GLOBAL_NAME,
-  SANDBOX_FILTER_LOCAL_NAME,
-  SANDBOX_FILTER_APPLEEVENT_DESTINATION,
-  SANDBOX_FILTER_RIGHT_NAME,
-  SANDBOX_FILTER_PREFERENCE_DOMAIN,
-  SANDBOX_FILTER_KEXT_BUNDLE_ID,
-  SANDBOX_FILTER_INFO_TYPE,
-  SANDBOX_FILTER_NOTIFICATION,
-};
-extern const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT;
-extern const enum sandbox_filter_type SANDBOX_CHECK_CANONICAL;
-int sandbox_check(pid_t pid, const char *operation,
-                  enum sandbox_filter_type type, ...);
 }
 
 namespace __sanitizer {
@@ -77,11 +75,16 @@ namespace __sanitizer {
 // ---------------------- sanitizer_libc.h
 uptr internal_mmap(void *addr, size_t length, int prot, int flags,
                    int fd, u64 offset) {
+  if (fd == -1) fd = VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL);
   return (uptr)mmap(addr, length, prot, flags, fd, offset);
 }
 
 uptr internal_munmap(void *addr, uptr length) {
   return munmap(addr, length);
+}
+
+int internal_mprotect(void *addr, uptr length, int prot) {
+  return mprotect(addr, length, prot);
 }
 
 uptr internal_close(fd_t fd) {
@@ -94,11 +97,6 @@ uptr internal_open(const char *filename, int flags) {
 
 uptr internal_open(const char *filename, int flags, u32 mode) {
   return open(filename, flags, mode);
-}
-
-uptr OpenFile(const char *filename, bool write) {
-  return internal_open(filename,
-      write ? O_WRONLY | O_CREAT : O_RDONLY, 0660);
 }
 
 uptr internal_read(fd_t fd, void *buf, uptr count) {
@@ -157,6 +155,13 @@ int internal_sigaction(int signum, const void *act, void *oldact) {
                    (struct sigaction *)act, (struct sigaction *)oldact);
 }
 
+void internal_sigfillset(__sanitizer_sigset_t *set) { sigfillset(set); }
+
+uptr internal_sigprocmask(int how, __sanitizer_sigset_t *set,
+                          __sanitizer_sigset_t *oldset) {
+  return sigprocmask(how, set, oldset);
+}
+
 int internal_fork() {
   // TODO(glider): this may call user's pthread_atfork() handlers which is bad.
   return fork();
@@ -168,18 +173,6 @@ uptr internal_rename(const char *oldpath, const char *newpath) {
 
 uptr internal_ftruncate(fd_t fd, uptr size) {
   return ftruncate(fd, size);
-}
-
-// Use the SPI to check if we are allowed to perform the operation.
-bool sandbox_allows_to_perform(const char *operation) {
-  static const enum sandbox_filter_type filter =
-    (enum sandbox_filter_type)(SANDBOX_FILTER_NONE | SANDBOX_CHECK_NO_REPORT);
-  if ((&sandbox_check != nullptr) &&
-      (sandbox_check(getpid(), operation, filter) > 0) ) {
-    return false;
-  }
-
-  return true;
 }
 
 // ----------------- sanitizer_common.h
@@ -224,7 +217,8 @@ void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
   *stack_bottom = *stack_top - stacksize;
 }
 
-const char *GetEnv(const char *name) {
+char **GetEnviron() {
+#if !SANITIZER_IOS
   char ***env_ptr = _NSGetEnviron();
   if (!env_ptr) {
     Report("_NSGetEnviron() returned NULL. Please make sure __asan_init() is "
@@ -232,18 +226,24 @@ const char *GetEnv(const char *name) {
     CHECK(env_ptr);
   }
   char **environ = *env_ptr;
+#endif
   CHECK(environ);
+  return environ;
+}
+
+const char *GetEnv(const char *name) {
+  char **env = GetEnviron();
   uptr name_len = internal_strlen(name);
-  while (*environ != 0) {
-    uptr len = internal_strlen(*environ);
+  while (*env != 0) {
+    uptr len = internal_strlen(*env);
     if (len > name_len) {
-      const char *p = *environ;
+      const char *p = *env;
       if (!internal_memcmp(p, name, name_len) &&
           p[name_len] == '=') {  // Match.
-        return *environ + name_len + 1;  // String starting after =.
+        return *env + name_len + 1;  // String starting after =.
       }
     }
-    environ++;
+    env++;
   }
   return 0;
 }
@@ -263,13 +263,12 @@ uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
   return 0;
 }
 
-void ReExec() {
-  UNIMPLEMENTED();
+uptr ReadLongProcessName(/*out*/char *buf, uptr buf_len) {
+  return ReadBinaryName(buf, buf_len);
 }
 
-void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
-  (void)args;
-  // Nothing here for now.
+void ReExec() {
+  UNIMPLEMENTED();
 }
 
 uptr GetPageSize() {
@@ -334,7 +333,13 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
 }
 
 bool IsDeadlySignal(int signum) {
+#if (SANITIZER_WATCHOS || SANITIZER_TVOS) && !SANITIZER_IOSSIM
+  // Handling fatal signals on watchOS and tvOS devices is disallowed
+  // (rdar://21952708).
+  return false;
+#else
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
+#endif
 }
 
 MacosVersion cached_macos_version = MACOS_VERSION_UNINITIALIZED;
@@ -381,11 +386,96 @@ MacosVersion GetMacosVersion() {
 }
 
 uptr GetRSS() {
-  return 0;
+  struct task_basic_info info;
+  unsigned count = TASK_BASIC_INFO_COUNT;
+  kern_return_t result =
+      task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &count);
+  if (UNLIKELY(result != KERN_SUCCESS)) {
+    Report("Cannot get task info. Error: %d\n", result);
+    Die();
+  }
+  return info.resident_size;
 }
 
 void *internal_start_thread(void (*func)(void *arg), void *arg) { return 0; }
 void internal_join_thread(void *th) { }
+
+static BlockingMutex syslog_lock(LINKER_INITIALIZED);
+
+void WriteOneLineToSyslog(const char *s) {
+  syslog_lock.CheckLocked();
+  asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", s);
+}
+
+void LogMessageOnPrintf(const char *str) {
+  // Log all printf output to CrashLog.
+  if (common_flags()->abort_on_error)
+    CRAppendCrashLogMessage(str);
+}
+
+void LogFullErrorReport(const char *buffer) {
+  // Log with os_trace. This will make it into the crash log.
+#if SANITIZER_OS_TRACE
+  if (GetMacosVersion() >= MACOS_VERSION_YOSEMITE) {
+    // os_trace requires the message (format parameter) to be a string literal.
+    if (internal_strncmp(SanitizerToolName, "AddressSanitizer",
+                         sizeof("AddressSanitizer") - 1) == 0)
+      os_trace("Address Sanitizer reported a failure.");
+    else if (internal_strncmp(SanitizerToolName, "UndefinedBehaviorSanitizer",
+                              sizeof("UndefinedBehaviorSanitizer") - 1) == 0)
+      os_trace("Undefined Behavior Sanitizer reported a failure.");
+    else if (internal_strncmp(SanitizerToolName, "ThreadSanitizer",
+                              sizeof("ThreadSanitizer") - 1) == 0)
+      os_trace("Thread Sanitizer reported a failure.");
+    else
+      os_trace("Sanitizer tool reported a failure.");
+
+    if (common_flags()->log_to_syslog)
+      os_trace("Consult syslog for more information.");
+  }
+#endif
+
+  // Log to syslog.
+  // The logging on OS X may call pthread_create so we need the threading
+  // environment to be fully initialized. Also, this should never be called when
+  // holding the thread registry lock since that may result in a deadlock. If
+  // the reporting thread holds the thread registry mutex, and asl_log waits
+  // for GCD to dispatch a new thread, the process will deadlock, because the
+  // pthread_create wrapper needs to acquire the lock as well.
+  BlockingMutexLock l(&syslog_lock);
+  if (common_flags()->log_to_syslog)
+    WriteToSyslog(buffer);
+
+  // The report is added to CrashLog as part of logging all of Printf output.
+}
+
+void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
+  ucontext_t *ucontext = (ucontext_t*)context;
+# if defined(__aarch64__)
+  *pc = ucontext->uc_mcontext->__ss.__pc;
+  // See <rdar://19552184>.
+#   if defined(__IPHONE_8_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_8_0
+  *bp = ucontext->uc_mcontext->__ss.__fp;
+#   else
+  *bp = ucontext->uc_mcontext->__ss.__lr;
+#   endif
+  *sp = ucontext->uc_mcontext->__ss.__sp;
+# elif defined(__x86_64__)
+  *pc = ucontext->uc_mcontext->__ss.__rip;
+  *bp = ucontext->uc_mcontext->__ss.__rbp;
+  *sp = ucontext->uc_mcontext->__ss.__rsp;
+# elif defined(__arm__)
+  *pc = ucontext->uc_mcontext->__ss.__pc;
+  *bp = ucontext->uc_mcontext->__ss.__r[7];
+  *sp = ucontext->uc_mcontext->__ss.__sp;
+# elif defined(__i386__)
+  *pc = ucontext->uc_mcontext->__ss.__eip;
+  *bp = ucontext->uc_mcontext->__ss.__ebp;
+  *sp = ucontext->uc_mcontext->__ss.__esp;
+# else
+# error "Unknown architecture"
+# endif
+}
 
 }  // namespace __sanitizer
 

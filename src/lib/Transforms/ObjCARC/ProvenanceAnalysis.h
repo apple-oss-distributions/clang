@@ -26,10 +26,10 @@
 #define LLVM_LIB_TRANSFORMS_OBJCARC_PROVENANCEANALYSIS_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 
 namespace llvm {
   class Value;
-  class AliasAnalysis;
   class DataLayout;
   class PHINode;
   class SelectInst;
@@ -58,8 +58,8 @@ class ProvenanceAnalysis {
   bool relatedSelect(const SelectInst *A, const Value *B);
   bool relatedPHI(const PHINode *A, const Value *B);
 
-  void operator=(const ProvenanceAnalysis &) LLVM_DELETED_FUNCTION;
-  ProvenanceAnalysis(const ProvenanceAnalysis &) LLVM_DELETED_FUNCTION;
+  void operator=(const ProvenanceAnalysis &) = delete;
+  ProvenanceAnalysis(const ProvenanceAnalysis &) = delete;
 
 public:
   ProvenanceAnalysis() {}

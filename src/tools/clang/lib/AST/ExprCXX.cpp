@@ -238,10 +238,7 @@ CXXPseudoDestructorExpr::CXXPseudoDestructorExpr(const ASTContext &Context,
                 SourceLocation ColonColonLoc, SourceLocation TildeLoc, 
                 PseudoDestructorTypeStorage DestroyedType)
   : Expr(CXXPseudoDestructorExprClass,
-         Context.getPointerType(Context.getFunctionType(
-             Context.VoidTy, None,
-             FunctionProtoType::ExtProtoInfo(
-                 Context.getDefaultCallingConvention(false, true)))),
+         Context.BoundMemberTy,
          VK_RValue, OK_Ordinary,
          /*isTypeDependent=*/(Base->isTypeDependent() ||
            (DestroyedType.getTypeSourceInfo() &&
@@ -764,14 +761,6 @@ const IdentifierInfo *UserDefinedLiteral::getUDSuffix() const {
   return cast<FunctionDecl>(getCalleeDecl())->getLiteralIdentifier();
 }
 
-CXXDefaultArgExpr *
-CXXDefaultArgExpr::Create(const ASTContext &C, SourceLocation Loc, 
-                          ParmVarDecl *Param, Expr *SubExpr) {
-  void *Mem = C.Allocate(sizeof(CXXDefaultArgExpr) + sizeof(Stmt *));
-  return new (Mem) CXXDefaultArgExpr(CXXDefaultArgExprClass, Loc, Param, 
-                                     SubExpr);
-}
-
 CXXDefaultInitExpr::CXXDefaultInitExpr(const ASTContext &C, SourceLocation Loc,
                                        FieldDecl *Field, QualType T)
     : Expr(CXXDefaultInitExprClass, T.getNonLValueExprType(C),
@@ -1030,6 +1019,11 @@ LambdaExpr *LambdaExpr::CreateDeserialized(const ASTContext &C,
   return new (Mem) LambdaExpr(EmptyShell(), NumCaptures, NumArrayIndexVars > 0);
 }
 
+bool LambdaExpr::isInitCapture(const LambdaCapture *C) const {
+  return (C->capturesVariable() && C->getCapturedVar()->isInitCapture() &&
+          (getCallOperator() == C->getCapturedVar()->getDeclContext()));
+}
+
 LambdaExpr::capture_iterator LambdaExpr::capture_begin() const {
   return getLambdaClass()->getLambdaData().Captures;
 }
@@ -1068,15 +1062,15 @@ LambdaExpr::capture_range LambdaExpr::implicit_captures() const {
   return capture_range(implicit_capture_begin(), implicit_capture_end());
 }
 
-ArrayRef<VarDecl *> 
-LambdaExpr::getCaptureInitIndexVars(capture_init_iterator Iter) const {
+ArrayRef<VarDecl *>
+LambdaExpr::getCaptureInitIndexVars(const_capture_init_iterator Iter) const {
   assert(HasArrayIndexVars && "No array index-var data?");
   
   unsigned Index = Iter - capture_init_begin();
   assert(Index < getLambdaClass()->getLambdaData().NumCaptures &&
          "Capture index out-of-range");
-  VarDecl **IndexVars = getArrayIndexVars();
-  unsigned *IndexStarts = getArrayIndexStarts();
+  VarDecl *const *IndexVars = getArrayIndexVars();
+  const unsigned *IndexStarts = getArrayIndexStarts();
   return llvm::makeArrayRef(IndexVars + IndexStarts[Index],
                             IndexVars + IndexStarts[Index + 1]);
 }
@@ -1097,9 +1091,13 @@ TemplateParameterList *LambdaExpr::getTemplateParameterList() const {
 }
 
 CompoundStmt *LambdaExpr::getBody() const {
+  // FIXME: this mutation in getBody is bogus. It should be
+  // initialized in ASTStmtReader::VisitLambdaExpr, but for reasons I
+  // don't understand, that doesn't work.
   if (!getStoredStmts()[NumCaptures])
-    getStoredStmts()[NumCaptures] = getCallOperator()->getBody();
-    
+    *const_cast<clang::Stmt **>(&getStoredStmts()[NumCaptures]) =
+        getCallOperator()->getBody();
+
   return reinterpret_cast<CompoundStmt *>(getStoredStmts()[NumCaptures]);
 }
 
@@ -1426,6 +1424,25 @@ CXXRecordDecl *UnresolvedMemberExpr::getNamingClass() const {
   return Record;
 }
 
+SizeOfPackExpr *
+SizeOfPackExpr::Create(ASTContext &Context, SourceLocation OperatorLoc,
+                       NamedDecl *Pack, SourceLocation PackLoc,
+                       SourceLocation RParenLoc,
+                       Optional<unsigned> Length,
+                       ArrayRef<TemplateArgument> PartialArgs) {
+  void *Storage = Context.Allocate(
+      sizeof(SizeOfPackExpr) + sizeof(TemplateArgument) * PartialArgs.size());
+  return new (Storage) SizeOfPackExpr(Context.getSizeType(), OperatorLoc, Pack,
+                                      PackLoc, RParenLoc, Length, PartialArgs);
+}
+
+SizeOfPackExpr *SizeOfPackExpr::CreateDeserialized(ASTContext &Context,
+                                                   unsigned NumPartialArgs) {
+  void *Storage = Context.Allocate(
+      sizeof(SizeOfPackExpr) + sizeof(TemplateArgument) * NumPartialArgs);
+  return new (Storage) SizeOfPackExpr(EmptyShell(), NumPartialArgs);
+}
+
 SubstNonTypeTemplateParmPackExpr::
 SubstNonTypeTemplateParmPackExpr(QualType T, 
                                  NonTypeTemplateParmDecl *Param,
@@ -1437,25 +1454,25 @@ SubstNonTypeTemplateParmPackExpr(QualType T,
     NumArguments(ArgPack.pack_size()), NameLoc(NameLoc) { }
 
 TemplateArgument SubstNonTypeTemplateParmPackExpr::getArgumentPack() const {
-  return TemplateArgument(Arguments, NumArguments);
+  return TemplateArgument(llvm::makeArrayRef(Arguments, NumArguments));
 }
 
 FunctionParmPackExpr::FunctionParmPackExpr(QualType T, ParmVarDecl *ParamPack,
                                            SourceLocation NameLoc,
                                            unsigned NumParams,
-                                           Decl * const *Params)
-  : Expr(FunctionParmPackExprClass, T, VK_LValue, OK_Ordinary,
-         true, true, true, true),
-    ParamPack(ParamPack), NameLoc(NameLoc), NumParameters(NumParams) {
+                                           ParmVarDecl *const *Params)
+    : Expr(FunctionParmPackExprClass, T, VK_LValue, OK_Ordinary, true, true,
+           true, true),
+      ParamPack(ParamPack), NameLoc(NameLoc), NumParameters(NumParams) {
   if (Params)
     std::uninitialized_copy(Params, Params + NumParams,
-                            reinterpret_cast<Decl**>(this+1));
+                            reinterpret_cast<ParmVarDecl **>(this + 1));
 }
 
 FunctionParmPackExpr *
 FunctionParmPackExpr::Create(const ASTContext &Context, QualType T,
                              ParmVarDecl *ParamPack, SourceLocation NameLoc,
-                             ArrayRef<Decl *> Params) {
+                             ArrayRef<ParmVarDecl *> Params) {
   return new (Context.Allocate(sizeof(FunctionParmPackExpr) +
                                sizeof(ParmVarDecl*) * Params.size()))
     FunctionParmPackExpr(T, ParamPack, NameLoc, Params.size(), Params.data());

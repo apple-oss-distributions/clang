@@ -22,8 +22,9 @@ public:
 
   typedef uint32_t TargetPtrT;
 
-  RuntimeDyldMachOI386(RTDyldMemoryManager *MM)
-      : RuntimeDyldMachOCRTPBase(MM) {}
+  RuntimeDyldMachOI386(RuntimeDyld::MemoryManager &MM,
+                       RuntimeDyld::SymbolResolver &Resolver)
+      : RuntimeDyldMachOCRTPBase(MM, Resolver) {}
 
   unsigned getMaxStubSize() override { return 0; }
 
@@ -66,7 +67,7 @@ public:
     //   Value.Addend += RelocAddr + 4;
     // }
     if (RE.IsPCRel)
-      makeValueAddendPCRel(Value, Obj, RelI, 1 << RE.Size);
+      makeValueAddendPCRel(Value, RelI, 1 << RE.Size);
 
     RE.Addend = Value.Offset;
 
@@ -82,10 +83,10 @@ public:
     DEBUG(dumpRelocationToResolve(RE, Value));
 
     const SectionEntry &Section = Sections[RE.SectionID];
-    uint8_t *LocalAddress = Section.Address + RE.Offset;
+    uint8_t *LocalAddress = Section.getAddressWithOffset(RE.Offset);
 
     if (RE.IsPCRel) {
-      uint64_t FinalAddress = Section.LoadAddress + RE.Offset;
+      uint64_t FinalAddress = Section.getLoadAddressWithOffset(RE.Offset);
       Value -= FinalAddress + 4; // see MachOX86_64::resolveRelocation.
     }
 
@@ -97,8 +98,8 @@ public:
       break;
     case MachO::GENERIC_RELOC_SECTDIFF:
     case MachO::GENERIC_RELOC_LOCAL_SECTDIFF: {
-      uint64_t SectionABase = Sections[RE.Sections.SectionA].LoadAddress;
-      uint64_t SectionBBase = Sections[RE.Sections.SectionB].LoadAddress;
+      uint64_t SectionABase = Sections[RE.Sections.SectionA].getLoadAddress();
+      uint64_t SectionBBase = Sections[RE.Sections.SectionB].getLoadAddress();
       assert((Value == SectionABase || Value == SectionBBase) &&
              "Unexpected SECTDIFF relocation value.");
       Value = SectionABase - SectionBBase + RE.Addend;
@@ -136,9 +137,8 @@ private:
     uint32_t RelocType = Obj.getAnyRelocationType(RE);
     bool IsPCRel = Obj.getAnyRelocationPCRel(RE);
     unsigned Size = Obj.getAnyRelocationLength(RE);
-    uint64_t Offset;
-    RelI->getOffset(Offset);
-    uint8_t *LocalAddress = Section.Address + Offset;
+    uint64_t Offset = RelI->getOffset();
+    uint8_t *LocalAddress = Section.getAddressWithOffset(Offset);
     unsigned NumBytes = 1 << Size;
     uint64_t Addend = readBytesUnaligned(LocalAddress, NumBytes);
 
@@ -204,13 +204,14 @@ private:
       unsigned SymbolIndex =
           Obj.getIndirectSymbolTableEntry(DySymTabCmd, FirstIndirectSymbol + i);
       symbol_iterator SI = Obj.getSymbolByIndex(SymbolIndex);
-      StringRef IndirectSymbolName;
-      SI->getName(IndirectSymbolName);
+      ErrorOr<StringRef> IndirectSymbolName = SI->getName();
+      if (std::error_code EC = IndirectSymbolName.getError())
+        report_fatal_error(EC.message());
       uint8_t *JTEntryAddr = JTSectionAddr + JTEntryOffset;
       createStubFunction(JTEntryAddr);
       RelocationEntry RE(JTSectionID, JTEntryOffset + 1,
                          MachO::GENERIC_RELOC_VANILLA, 0, true, 2);
-      addRelocationForSymbol(RE, IndirectSymbolName);
+      addRelocationForSymbol(RE, *IndirectSymbolName);
       JTEntryOffset += JTEntrySize;
     }
   }

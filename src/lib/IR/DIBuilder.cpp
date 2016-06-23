@@ -58,8 +58,7 @@ public:
 }
 
 DIBuilder::DIBuilder(Module &m, bool AllowUnresolvedNodes)
-    : M(m), VMContext(M.getContext()), TempEnumTypes(nullptr),
-      TempRetainTypes(nullptr), TempSubprograms(nullptr), TempGVs(nullptr),
+  : M(m), VMContext(M.getContext()), CUNode(nullptr),
       DeclareFn(nullptr), ValueFn(nullptr),
       AllowUnresolvedNodes(AllowUnresolvedNodes) {}
 
@@ -74,7 +73,13 @@ void DIBuilder::trackIfUnresolved(MDNode *N) {
 }
 
 void DIBuilder::finalize() {
-  TempEnumTypes->replaceAllUsesWith(MDTuple::get(VMContext, AllEnumTypes));
+  if (!CUNode) {
+    assert(!AllowUnresolvedNodes &&
+           "creating type nodes without a CU is not supported");
+    return;
+  }
+
+  CUNode->replaceEnumTypes(MDTuple::get(VMContext, AllEnumTypes));
 
   SmallVector<Metadata *, 16> RetainValues;
   // Declarations and definitions of the same type may be retained. Some
@@ -85,25 +90,30 @@ void DIBuilder::finalize() {
   for (unsigned I = 0, E = AllRetainTypes.size(); I < E; I++)
     if (RetainSet.insert(AllRetainTypes[I]).second)
       RetainValues.push_back(AllRetainTypes[I]);
-  TempRetainTypes->replaceAllUsesWith(MDTuple::get(VMContext, RetainValues));
+
+  if (!RetainValues.empty())
+    CUNode->replaceRetainedTypes(MDTuple::get(VMContext, RetainValues));
 
   DISubprogramArray SPs = MDTuple::get(VMContext, AllSubprograms);
-  TempSubprograms->replaceAllUsesWith(SPs.get());
+  if (!AllSubprograms.empty())
+    CUNode->replaceSubprograms(SPs.get());
+
   for (auto *SP : SPs) {
     if (MDTuple *Temp = SP->getVariables().get()) {
-      SmallVector<Metadata *, 4> Variables;
-      for (Metadata *V : PreservedVariables.lookup(SP))
-        Variables.push_back(V);
+      const auto &PV = PreservedVariables.lookup(SP);
+      SmallVector<Metadata *, 4> Variables(PV.begin(), PV.end());
       DINodeArray AV = getOrCreateArray(Variables);
       TempMDTuple(Temp)->replaceAllUsesWith(AV.get());
     }
   }
 
-  TempGVs->replaceAllUsesWith(MDTuple::get(VMContext, AllGVs));
+  if (!AllGVs.empty())
+    CUNode->replaceGlobalVariables(MDTuple::get(VMContext, AllGVs));
 
-  TempImportedModules->replaceAllUsesWith(MDTuple::get(
-      VMContext, SmallVector<Metadata *, 16>(AllImportedModules.begin(),
-                                             AllImportedModules.end())));
+  if (!AllImportedModules.empty())
+    CUNode->replaceImportedEntities(MDTuple::get(
+        VMContext, SmallVector<Metadata *, 16>(AllImportedModules.begin(),
+                                               AllImportedModules.end())));
 
   // Now that all temp nodes have been replaced or deleted, resolve remaining
   // cycles.
@@ -134,22 +144,11 @@ DICompileUnit *DIBuilder::createCompileUnit(
   assert(!Filename.empty() &&
          "Unable to create compile unit without filename");
 
-  // TODO: Once we make DICompileUnit distinct, stop using temporaries here
-  // (just start with operands assigned to nullptr).
-  TempEnumTypes = MDTuple::getTemporary(VMContext, None);
-  TempRetainTypes = MDTuple::getTemporary(VMContext, None);
-  TempSubprograms = MDTuple::getTemporary(VMContext, None);
-  TempGVs = MDTuple::getTemporary(VMContext, None);
-  TempImportedModules = MDTuple::getTemporary(VMContext, None);
-
-  // TODO: Switch to getDistinct().  We never want to merge compile units based
-  // on contents.
-  // FIXME: We've already done this out-of-tree?
-  DICompileUnit *CUNode = DICompileUnit::getDistinct(
+  assert(!CUNode && "Can only make one compile unit per DIBuilder instance");
+  CUNode = DICompileUnit::getDistinct(
       VMContext, Lang, DIFile::get(VMContext, Filename, Directory), Producer,
-      isOptimized, Flags, RunTimeVer, SplitName, Kind, TempEnumTypes.get(),
-      TempRetainTypes.get(), TempSubprograms.get(), TempGVs.get(),
-      TempImportedModules.get(), DWOId);
+      isOptimized, Flags, RunTimeVer, SplitName, Kind, nullptr,
+      nullptr, nullptr, nullptr, nullptr, DWOId);
 
   // Create a named metadata so that it is easier to find cu in a module.
   // Note that we only generate this when the caller wants to actually
@@ -256,10 +255,12 @@ DIDerivedType *DIBuilder::createMemberPointerType(DIType *PointeeTy,
                             DITypeRef::get(Base));
 }
 
-DIDerivedType *DIBuilder::createReferenceType(unsigned Tag, DIType *RTy) {
+DIDerivedType *DIBuilder::createReferenceType(unsigned Tag, DIType *RTy,
+                                              uint64_t SizeInBits,
+                                              uint64_t AlignInBits) {
   assert(RTy && "Unable to create reference type");
   return DIDerivedType::get(VMContext, Tag, "", nullptr, 0, nullptr,
-                            DITypeRef::get(RTy), 0, 0, 0, 0);
+                            DITypeRef::get(RTy), SizeInBits, AlignInBits, 0, 0);
 }
 
 DIDerivedType *DIBuilder::createTypedef(DIType *Ty, StringRef Name,
@@ -430,8 +431,7 @@ DICompositeType *DIBuilder::createUnionType(
   return R;
 }
 
-DISubroutineType *DIBuilder::createSubroutineType(DIFile *File,
-                                                  DITypeRefArray ParameterTypes,
+DISubroutineType *DIBuilder::createSubroutineType(DITypeRefArray ParameterTypes,
                                                   unsigned Flags) {
   return DISubroutineType::get(VMContext, Flags, ParameterTypes);
 }
@@ -439,10 +439,11 @@ DISubroutineType *DIBuilder::createSubroutineType(DIFile *File,
 DICompositeType *DIBuilder::createExternalTypeRef(unsigned Tag, DIFile *File,
                                                   StringRef UniqueIdentifier) {
   assert(!UniqueIdentifier.empty() && "external type ref without uid");
-  auto *CTy = DICompositeType::get(
-      VMContext, Tag, "", File, 0, nullptr, nullptr, 0, 0, 0,
-      DINode::FlagExternalTypeRef, nullptr,
-      0, nullptr, nullptr, UniqueIdentifier);
+  auto *CTy =
+      DICompositeType::get(VMContext, Tag, "", File, 0, nullptr, nullptr, 0,
+                           0, 0, DINode::FlagExternalTypeRef, nullptr, 0,
+                           nullptr, nullptr, UniqueIdentifier);
+  // Types with unique IDs need to be in the type map.
   retainType(CTy);
   return CTy;
 }
@@ -602,20 +603,22 @@ DIGlobalVariable *DIBuilder::createTempGlobalVariableFwdDecl(
       .release();
 }
 
-DILocalVariable *DIBuilder::createLocalVariable(
-    unsigned Tag, DIScope *Scope, StringRef Name, DIFile *File, unsigned LineNo,
-    DIType *Ty, bool AlwaysPreserve, unsigned Flags, unsigned ArgNo) {
+static DILocalVariable *createLocalVariable(
+    LLVMContext &VMContext,
+    DenseMap<MDNode *, std::vector<TrackingMDNodeRef>> &PreservedVariables,
+    DIScope *Scope, StringRef Name, unsigned ArgNo, DIFile *File,
+    unsigned LineNo, DIType *Ty, bool AlwaysPreserve, unsigned Flags) {
   // FIXME: Why getNonCompileUnitScope()?
   // FIXME: Why is "!Context" okay here?
-  // FIXME: WHy doesn't this check for a subprogram or lexical block (AFAICT
+  // FIXME: Why doesn't this check for a subprogram or lexical block (AFAICT
   // the only valid scopes)?
   DIScope *Context = getNonCompileUnitScope(Scope);
 
-  auto *Node = DILocalVariable::get(
-      VMContext, Tag, cast_or_null<DILocalScope>(Context), Name, File, LineNo,
-      DITypeRef::get(Ty), ArgNo, Flags);
+  auto *Node =
+      DILocalVariable::get(VMContext, cast_or_null<DILocalScope>(Context), Name,
+                           File, LineNo, DITypeRef::get(Ty), ArgNo, Flags);
   if (AlwaysPreserve) {
-    // The optimizer may remove local variable. If there is an interest
+    // The optimizer may remove local variables. If there is an interest
     // to preserve variable info in such situation then stash it in a
     // named mdnode.
     DISubprogram *Fn = getDISubprogram(Scope);
@@ -623,6 +626,23 @@ DILocalVariable *DIBuilder::createLocalVariable(
     PreservedVariables[Fn].emplace_back(Node);
   }
   return Node;
+}
+
+DILocalVariable *DIBuilder::createAutoVariable(DIScope *Scope, StringRef Name,
+                                               DIFile *File, unsigned LineNo,
+                                               DIType *Ty, bool AlwaysPreserve,
+                                               unsigned Flags) {
+  return createLocalVariable(VMContext, PreservedVariables, Scope, Name,
+                             /* ArgNo */ 0, File, LineNo, Ty, AlwaysPreserve,
+                             Flags);
+}
+
+DILocalVariable *DIBuilder::createParameterVariable(
+    DIScope *Scope, StringRef Name, unsigned ArgNo, DIFile *File,
+    unsigned LineNo, DIType *Ty, bool AlwaysPreserve, unsigned Flags) {
+  assert(ArgNo && "Expected non-zero argument number for parameter");
+  return createLocalVariable(VMContext, PreservedVariables, Scope, Name, ArgNo,
+                             File, LineNo, Ty, AlwaysPreserve, Flags);
 }
 
 DIExpression *DIBuilder::createExpression(ArrayRef<uint64_t> Addr) {
@@ -641,36 +661,37 @@ DIExpression *DIBuilder::createBitPieceExpression(unsigned OffsetInBytes,
   return DIExpression::get(VMContext, Addr);
 }
 
-DISubprogram *DIBuilder::createFunction(DIScopeRef Context, StringRef Name,
-                                        StringRef LinkageName, DIFile *File,
-                                        unsigned LineNo, DISubroutineType *Ty,
-                                        bool isLocalToUnit, bool isDefinition,
-                                        unsigned ScopeLine, unsigned Flags,
-                                        bool isOptimized, Function *Fn,
-                                        MDNode *TParams, MDNode *Decl) {
+DISubprogram *DIBuilder::createFunction(
+    DIScopeRef Context, StringRef Name, StringRef LinkageName, DIFile *File,
+    unsigned LineNo, DISubroutineType *Ty, bool isLocalToUnit,
+    bool isDefinition, unsigned ScopeLine, unsigned Flags, bool isOptimized,
+    DITemplateParameterArray TParams, DISubprogram *Decl) {
   // dragonegg does not generate identifier for types, so using an empty map
   // to resolve the context should be fine.
   DITypeIdentifierMap EmptyMap;
   return createFunction(Context.resolve(EmptyMap), Name, LinkageName, File,
                         LineNo, Ty, isLocalToUnit, isDefinition, ScopeLine,
-                        Flags, isOptimized, Fn, TParams, Decl);
+                        Flags, isOptimized, TParams, Decl);
 }
 
-DISubprogram *DIBuilder::createFunction(DIScope *Context, StringRef Name,
-                                        StringRef LinkageName, DIFile *File,
-                                        unsigned LineNo, DISubroutineType *Ty,
-                                        bool isLocalToUnit, bool isDefinition,
-                                        unsigned ScopeLine, unsigned Flags,
-                                        bool isOptimized, Function *Fn,
-                                        MDNode *TParams, MDNode *Decl) {
-  assert(Ty->getTag() == dwarf::DW_TAG_subroutine_type &&
-         "function types should be subroutines");
-  auto *Node = DISubprogram::get(
-      VMContext, DIScopeRef::get(getNonCompileUnitScope(Context)), Name,
-      LinkageName, File, LineNo, Ty, isLocalToUnit, isDefinition, ScopeLine,
-      nullptr, 0, 0, Flags, isOptimized, Fn, cast_or_null<MDTuple>(TParams),
-      cast_or_null<DISubprogram>(Decl),
-      MDTuple::getTemporary(VMContext, None).release());
+template <class... Ts>
+static DISubprogram *getSubprogram(bool IsDistinct, Ts &&... Args) {
+  if (IsDistinct)
+    return DISubprogram::getDistinct(std::forward<Ts>(Args)...);
+  return DISubprogram::get(std::forward<Ts>(Args)...);
+}
+
+DISubprogram *DIBuilder::createFunction(
+    DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *File,
+    unsigned LineNo, DISubroutineType *Ty, bool isLocalToUnit,
+    bool isDefinition, unsigned ScopeLine, unsigned Flags, bool isOptimized,
+    DITemplateParameterArray TParams, DISubprogram *Decl) {
+  auto *Node =
+      getSubprogram(/* IsDistinct = */ isDefinition, VMContext,
+                    DIScopeRef::get(getNonCompileUnitScope(Context)), Name,
+                    LinkageName, File, LineNo, Ty, isLocalToUnit, isDefinition,
+                    ScopeLine, nullptr, 0, 0, Flags, isOptimized, TParams, Decl,
+                    MDTuple::getTemporary(VMContext, None).release());
 
   if (isDefinition)
     AllSubprograms.push_back(Node);
@@ -682,12 +703,11 @@ DISubprogram *DIBuilder::createTempFunctionFwdDecl(
     DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *File,
     unsigned LineNo, DISubroutineType *Ty, bool isLocalToUnit,
     bool isDefinition, unsigned ScopeLine, unsigned Flags, bool isOptimized,
-    Function *Fn, MDNode *TParams, MDNode *Decl) {
+    DITemplateParameterArray TParams, DISubprogram *Decl) {
   return DISubprogram::getTemporary(
              VMContext, DIScopeRef::get(getNonCompileUnitScope(Context)), Name,
              LinkageName, File, LineNo, Ty, isLocalToUnit, isDefinition,
-             ScopeLine, nullptr, 0, 0, Flags, isOptimized, Fn,
-             cast_or_null<MDTuple>(TParams), cast_or_null<DISubprogram>(Decl),
+             ScopeLine, nullptr, 0, 0, Flags, isOptimized, TParams, Decl,
              nullptr)
       .release();
 }
@@ -697,18 +717,16 @@ DIBuilder::createMethod(DIScope *Context, StringRef Name, StringRef LinkageName,
                         DIFile *F, unsigned LineNo, DISubroutineType *Ty,
                         bool isLocalToUnit, bool isDefinition, unsigned VK,
                         unsigned VIndex, DIType *VTableHolder, unsigned Flags,
-                        bool isOptimized, Function *Fn, MDNode *TParam) {
-  assert(Ty->getTag() == dwarf::DW_TAG_subroutine_type &&
-         "function types should be subroutines");
+                        bool isOptimized, DITemplateParameterArray TParams) {
   assert(getNonCompileUnitScope(Context) &&
          "Methods should have both a Context and a context that isn't "
          "the compile unit.");
   // FIXME: Do we want to use different scope/lines?
-  auto *SP = DISubprogram::get(
-      VMContext, DIScopeRef::get(cast<DIScope>(Context)), Name, LinkageName, F,
-      LineNo, Ty, isLocalToUnit, isDefinition, LineNo,
-      DITypeRef::get(VTableHolder), VK, VIndex, Flags, isOptimized, Fn,
-      cast_or_null<MDTuple>(TParam), nullptr, nullptr);
+  auto *SP = getSubprogram(
+      /* IsDistinct = */ isDefinition, VMContext,
+      DIScopeRef::get(cast<DIScope>(Context)), Name, LinkageName, F, LineNo, Ty,
+      isLocalToUnit, isDefinition, LineNo, DITypeRef::get(VTableHolder), VK,
+      VIndex, Flags, isOptimized, TParams, nullptr, nullptr);
 
   if (isDefinition)
     AllSubprograms.push_back(SP);
@@ -879,7 +897,7 @@ void DIBuilder::replaceArrays(DICompositeType *&T, DINodeArray Elements,
   if (!T->isResolved())
     return;
 
-  // If "T" is resolved, it may be due to a self-reference cycle.  Track the
+  // If T is resolved, it may be due to a self-reference cycle.  Track the
   // arrays explicitly if they're unresolved, or else the cycles will be
   // orphaned.
   if (Elements)

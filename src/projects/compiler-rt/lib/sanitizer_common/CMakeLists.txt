@@ -12,6 +12,7 @@ set(SANITIZER_SOURCES
   sanitizer_libignore.cc
   sanitizer_linux.cc
   sanitizer_mac.cc
+  sanitizer_mac_spi.cc
   sanitizer_persistent_allocator.cc
   sanitizer_platform_limits_linux.cc
   sanitizer_platform_limits_posix.cc
@@ -27,11 +28,17 @@ set(SANITIZER_SOURCES
   sanitizer_suppressions.cc
   sanitizer_symbolizer.cc
   sanitizer_symbolizer_libbacktrace.cc
-  sanitizer_symbolizer_win.cc
   sanitizer_symbolizer_mac.cc
+  sanitizer_symbolizer_win.cc
   sanitizer_tls_get_addr.cc
   sanitizer_thread_registry.cc
   sanitizer_win.cc)
+
+# Libc functions stubs. These sources should be linked instead of
+# SANITIZER_LIBCDEP_SOURCES when sanitizer_common library must not depend on
+# libc.
+set(SANITIZER_NOLIBC_SOURCES
+  sanitizer_common_nolibc.cc)
 
 set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_common_libcdep.cc
@@ -43,7 +50,7 @@ set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_stoptheworld_linux_libcdep.cc
   sanitizer_symbolizer_libcdep.cc
   sanitizer_symbolizer_posix_libcdep.cc
-  sanitizer_unwind_posix_libcdep.cc)
+  sanitizer_unwind_linux_libcdep.cc)
 
 # Explicitly list all sanitizer_common headers. Not all of these are
 # included in sanitizer_common source files, but we need to depend on
@@ -68,6 +75,7 @@ set(SANITIZER_HEADERS
   sanitizer_flag_parser.h
   sanitizer_flags.h
   sanitizer_flags.inc
+  sanitizer_interface_internal.h
   sanitizer_internal_defs.h
   sanitizer_lfstack.h
   sanitizer_libc.h
@@ -81,6 +89,7 @@ set(SANITIZER_HEADERS
   sanitizer_platform.h
   sanitizer_platform_interceptors.h
   sanitizer_platform_limits_posix.h
+  sanitizer_posix.h
   sanitizer_procmaps.h
   sanitizer_quarantine.h
   sanitizer_report_decorator.h
@@ -91,9 +100,12 @@ set(SANITIZER_HEADERS
   sanitizer_stoptheworld.h
   sanitizer_suppressions.h
   sanitizer_symbolizer.h
+  sanitizer_symbolizer_internal.h
   sanitizer_symbolizer_libbacktrace.h
+  sanitizer_symbolizer_mac.h
   sanitizer_syscall_generic.inc
   sanitizer_syscall_linux_x86_64.inc
+  sanitizer_syscall_linux_aarch64.inc
   sanitizer_thread_registry.h)
 
 set(SANITIZER_COMMON_DEFINITIONS)
@@ -106,47 +118,40 @@ else()
     SANITIZER_NEEDS_SEGV=1)
 endif()
 
+include(CheckIncludeFile)
+append_have_file_definition(rpc/xdr.h HAVE_RPC_XDR_H SANITIZER_COMMON_DEFINITIONS)
+append_have_file_definition(tirpc/rpc/xdr.h HAVE_TIRPC_RPC_XDR_H SANITIZER_COMMON_DEFINITIONS)
+
 set(SANITIZER_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_no_rtti_flag(SANITIZER_CFLAGS)
 
-append_list_if(SANITIZER_LIMIT_FRAME_SIZE -Wframe-larger-than=512
+append_list_if(SANITIZER_LIMIT_FRAME_SIZE -Wframe-larger-than=570
                SANITIZER_CFLAGS)
 append_list_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors
                SANITIZER_CFLAGS)
 
-add_custom_target(sanitizer_common)
-set(SANITIZER_RUNTIME_LIBRARIES)
 if(APPLE)
-  # Build universal binary on APPLE.
-  foreach(os ${SANITIZER_COMMON_SUPPORTED_DARWIN_OS})
-    add_compiler_rt_darwin_object_library(RTSanitizerCommon ${os}
-      ARCH ${SANITIZER_COMMON_DARWIN_${os}_ARCHES}
-      SOURCES ${SANITIZER_SOURCES} ${SANITIZER_LIBCDEP_SOURCES}
-      CFLAGS ${SANITIZER_CFLAGS}
-      DEFS ${SANITIZER_COMMON_DEFINITIONS})
-    list(APPEND SANITIZER_RUNTIME_LIBRARIES RTSanitizerCommon.${os})
-  endforeach()
-else()
-  # Otherwise, build separate libraries for each target.
-  foreach(arch ${SANITIZER_COMMON_SUPPORTED_ARCH})
-    add_compiler_rt_object_library(RTSanitizerCommon ${arch}
-      SOURCES ${SANITIZER_SOURCES} CFLAGS ${SANITIZER_CFLAGS}
-      DEFS ${SANITIZER_COMMON_DEFINITIONS})
-    add_compiler_rt_object_library(RTSanitizerCommonLibc ${arch}
-      SOURCES ${SANITIZER_LIBCDEP_SOURCES} CFLAGS ${SANITIZER_CFLAGS}
-      DEFS ${SANITIZER_COMMON_DEFINITIONS})
-    list(APPEND SANITIZER_RUNTIME_LIBRARIES RTSanitizerCommon.${arch}
-                                            RTSanitizerCommonLibc.${arch})
-    add_compiler_rt_runtime(clang_rt.san-${arch} ${arch} STATIC
-      SOURCES $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
-              $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
-      CFLAGS ${SANITIZER_CFLAGS}
-      DEFS ${SANITIZER_COMMON_DEFINITIONS})
-    add_dependencies(sanitizer_common clang_rt.san-${arch})
-  endforeach()
+  set(OS_OPTION OS ${SANITIZER_COMMON_SUPPORTED_OS})
 endif()
 
-add_dependencies(compiler-rt sanitizer_common)
+add_compiler_rt_object_libraries(RTSanitizerCommon
+  ${OS_OPTION}
+  ARCHS ${SANITIZER_COMMON_SUPPORTED_ARCH}
+  SOURCES ${SANITIZER_SOURCES}
+  CFLAGS ${SANITIZER_CFLAGS}
+  DEFS ${SANITIZER_COMMON_DEFINITIONS})
+add_compiler_rt_object_libraries(RTSanitizerCommonNoLibc
+  ${OS_OPTION}
+  ARCHS ${SANITIZER_COMMON_SUPPORTED_ARCH}
+  SOURCES ${SANITIZER_NOLIBC_SOURCES}
+  CFLAGS ${SANITIZER_CFLAGS}
+  DEFS ${SANITIZER_COMMON_DEFINITIONS})
+add_compiler_rt_object_libraries(RTSanitizerCommonLibc
+  ${OS_OPTION}
+  ARCHS ${SANITIZER_COMMON_SUPPORTED_ARCH}
+  SOURCES ${SANITIZER_LIBCDEP_SOURCES}
+  CFLAGS ${SANITIZER_CFLAGS}
+  DEFS ${SANITIZER_COMMON_DEFINITIONS})
 
 # Unit tests for common sanitizer runtime.
 if(COMPILER_RT_INCLUDE_TESTS)

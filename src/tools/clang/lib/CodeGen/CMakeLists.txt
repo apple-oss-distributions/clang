@@ -1,10 +1,8 @@
 set(LLVM_LINK_COMPONENTS
-  ${LLVM_TARGETS_TO_BUILD}
   Analysis
   BitReader
   BitWriter
   Core
-  DebugInfoDWARF
   IPO
   IRReader
   InstCombine
@@ -16,6 +14,7 @@ set(LLVM_LINK_COMPONENTS
   ProfileData
   ScalarOpts
   Support
+  Target
   TransformUtils
   )
 
@@ -71,9 +70,9 @@ add_clang_library(clangCodeGen
   CodeGenTypes.cpp
   CoverageMappingGen.cpp
   ItaniumCXXABI.cpp
-  LLVMModuleProvider.cpp
   MicrosoftCXXABI.cpp
   ModuleBuilder.cpp
+  ObjectFilePCHContainerOperations.cpp
   SanitizerMetadata.cpp
   TargetInfo.cpp
 
@@ -85,5 +84,4 @@ add_clang_library(clangCodeGen
   clangBasic
   clangFrontend
   clangLex
-  clangIndex
   )

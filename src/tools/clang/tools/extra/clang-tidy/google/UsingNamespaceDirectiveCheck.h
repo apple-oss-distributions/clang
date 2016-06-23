@@ -7,19 +7,31 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_USING_NAMESPACE_CHECK_H
-#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_USING_NAMESPACE_CHECK_H
+#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_USINGNAMESPACEDIRECTIVECHECK_H
+#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_USINGNAMESPACEDIRECTIVECHECK_H
 
 #include "../ClangTidy.h"
 
 namespace clang {
 namespace tidy {
+namespace google {
 namespace build {
 
-/// \brief Finds using namespace directives.
+/// Finds using namespace directives.
 ///
 /// http://google-styleguide.googlecode.com/svn/trunk/cppguide.xml?showone=Namespaces#Namespaces
-/// Corresponding cpplint.py check name: 'build/namespaces'.
+///
+/// The check implements the following rule of the Google C++ Style Guide:
+///
+///   You may not use a using-directive to make all names from a namespace
+///   available.
+///
+///   \code
+///     // Forbidden -- This pollutes the namespace.
+///     using namespace foo;
+///   \endcode
+///
+/// Corresponding cpplint.py check name: `build/namespaces`.
 class UsingNamespaceDirectiveCheck : public ClangTidyCheck {
 public:
   UsingNamespaceDirectiveCheck(StringRef Name, ClangTidyContext *Context)
@@ -29,7 +41,8 @@ public:
 };
 
 } // namespace build
+} // namespace google
 } // namespace tidy
 } // namespace clang
 
-#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_USING_NAMESPACE_CHECK_H
+#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_GOOGLE_USINGNAMESPACEDIRECTIVECHECK_H

@@ -15,9 +15,9 @@ using namespace clang::ast_matchers;
 
 namespace clang {
 
-namespace ast_matchers {
-AST_MATCHER_P(Stmt, ignoringTemporaryExpr, internal::Matcher<Stmt>,
-              InnerMatcher) {
+namespace {
+AST_MATCHER_P(Stmt, ignoringTemporaryExpr,
+              ast_matchers::internal::Matcher<Stmt>, InnerMatcher) {
   const Stmt *E = &Node;
   for (;;) {
     // Temporaries with non-trivial dtors.
@@ -38,14 +38,16 @@ AST_MATCHER_P(Stmt, ignoringTemporaryExpr, internal::Matcher<Stmt>,
 
 // Finds a node if it's a base of an already bound node.
 AST_MATCHER_P(CXXRecordDecl, baseOfBoundNode, std::string, ID) {
-  return Builder->removeBindings([&](const internal::BoundNodesMap &Nodes) {
-    const auto *Derived = Nodes.getNodeAs<CXXRecordDecl>(ID);
-    return Derived != &Node && !Derived->isDerivedFrom(&Node);
-  });
+  return Builder->removeBindings(
+      [&](const ast_matchers::internal::BoundNodesMap &Nodes) {
+        const auto *Derived = Nodes.getNodeAs<CXXRecordDecl>(ID);
+        return Derived != &Node && !Derived->isDerivedFrom(&Node);
+      });
 }
-} // namespace ast_matchers
+} // namespace
 
 namespace tidy {
+namespace misc {
 
 void UndelegatedConstructorCheck::registerMatchers(MatchFinder *Finder) {
   // We look for calls to constructors of the same type in constructors. To do
@@ -53,12 +55,19 @@ void UndelegatedConstructorCheck::registerMatchers(MatchFinder *Finder) {
   // depending on the type's destructor and the number of arguments on the
   // constructor call, this is handled by ignoringTemporaryExpr. Ignore template
   // instantiations to reduce the number of duplicated warnings.
+  //
+  // Only register the matchers for C++11; the functionality currently does not
+  // provide any benefit to other languages, despite being benign.
+  if (!getLangOpts().CPlusPlus11)
+    return;
+
   Finder->addMatcher(
       compoundStmt(
-          hasParent(constructorDecl(ofClass(recordDecl().bind("parent")))),
+          hasParent(
+              cxxConstructorDecl(ofClass(cxxRecordDecl().bind("parent")))),
           forEach(ignoringTemporaryExpr(
-              constructExpr(hasDeclaration(constructorDecl(ofClass(
-                                recordDecl(baseOfBoundNode("parent"))))))
+              cxxConstructExpr(hasDeclaration(cxxConstructorDecl(ofClass(
+                                   cxxRecordDecl(baseOfBoundNode("parent"))))))
                   .bind("construct"))),
           unless(isInTemplateInstantiation())),
       this);
@@ -70,5 +79,6 @@ void UndelegatedConstructorCheck::check(const MatchFinder::MatchResult &Result) 
                          "A temporary object is created here instead");
 }
 
+} // namespace misc
 } // namespace tidy
 } // namespace clang

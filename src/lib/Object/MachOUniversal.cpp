@@ -69,14 +69,14 @@ MachOUniversalBinary::ObjectForArch::ObjectForArch(
 
 ErrorOr<std::unique_ptr<MachOObjectFile>>
 MachOUniversalBinary::ObjectForArch::getAsObjectFile() const {
-  if (Parent) {
-    StringRef ParentData = Parent->getData();
-    StringRef ObjectData = ParentData.substr(Header.offset, Header.size);
-    StringRef ObjectName = Parent->getFileName();
-    MemoryBufferRef ObjBuffer(ObjectData, ObjectName);
-    return ObjectFile::createMachOObjectFile(ObjBuffer);
-  }
-  return object_error::parse_failed;
+  if (!Parent)
+    return object_error::parse_failed;
+
+  StringRef ParentData = Parent->getData();
+  StringRef ObjectData = ParentData.substr(Header.offset, Header.size);
+  StringRef ObjectName = Parent->getFileName();
+  MemoryBufferRef ObjBuffer(ObjectData, ObjectName);
+  return ObjectFile::createMachOObjectFile(ObjBuffer);
 }
 
 ErrorOr<std::unique_ptr<Archive>>
@@ -120,7 +120,7 @@ MachOUniversalBinary::MachOUniversalBinary(MemoryBufferRef Source,
     ec = object_error::parse_failed;
     return;
   }
-  ec = object_error::success;
+  ec = std::error_code();
 }
 
 ErrorOr<std::unique_ptr<MachOObjectFile>>

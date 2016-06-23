@@ -31,7 +31,7 @@ class FlagHandler : public FlagHandlerBase {
 
  public:
   explicit FlagHandler(T *t) : t_(t) {}
-  bool Parse(const char *value);
+  bool Parse(const char *value) final;
 };
 
 template <>
@@ -93,6 +93,7 @@ class FlagParser {
   void RegisterHandler(const char *name, FlagHandlerBase *handler,
                        const char *desc);
   void ParseString(const char *s);
+  bool ParseFile(const char *path, bool ignore_missing);
   void PrintFlagDescriptions();
 
   static LowLevelAllocator Alloc;

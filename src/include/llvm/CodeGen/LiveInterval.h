@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/Support/AlignOf.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Target/TargetRegisterInfo.h"
 #include <cassert>
 #include <climits>
 #include <set>
@@ -199,7 +200,7 @@ namespace llvm {
     // of live ranges of physical registers in computeRegUnitRange.
     // After that the set is flushed to the segment vector and deleted.
     typedef std::set<Segment> SegmentSet;
-    SegmentSet *segmentSet;
+    std::unique_ptr<SegmentSet> segmentSet;
 
     typedef Segments::iterator iterator;
     iterator begin() { return segments.begin(); }
@@ -218,15 +219,13 @@ namespace llvm {
     const_vni_iterator vni_end() const   { return valnos.end(); }
 
     /// Constructs a new LiveRange object.
-    LiveRange(bool UseSegmentSet = false) : segmentSet(nullptr) {
-      if (UseSegmentSet)
-        segmentSet = new SegmentSet();
-    }
+    LiveRange(bool UseSegmentSet = false)
+        : segmentSet(UseSegmentSet ? llvm::make_unique<SegmentSet>()
+                                   : nullptr) {}
 
     /// Constructs a new LiveRange object by copying segments and valnos from
     /// another LiveRange.
-    LiveRange(const LiveRange &Other, BumpPtrAllocator &Allocator)
-        : segmentSet(nullptr) {
+    LiveRange(const LiveRange &Other, BumpPtrAllocator &Allocator) {
       assert(Other.segmentSet == nullptr &&
              "Copying of LiveRanges with active SegmentSets is not supported");
 
@@ -239,8 +238,6 @@ namespace llvm {
         segments.push_back(Segment(S.start, S.end, valnos[S.valno->id]));
       }
     }
-
-    ~LiveRange() { delete segmentSet; }
 
     /// advanceTo - Advance the specified iterator to point to the Segment
     /// containing the specified position, or end() if the position is past the
@@ -454,10 +451,10 @@ namespace llvm {
     /// may have grown since it was inserted).
     iterator addSegment(Segment S);
 
-    /// extendInBlock - If this range is live before Kill in the basic block
-    /// that starts at StartIdx, extend it to be live up to Kill, and return
-    /// the value. If there is no segment before Kill, return NULL.
-    VNInfo *extendInBlock(SlotIndex StartIdx, SlotIndex Kill);
+    /// If this range is live before @p Use in the basic block that starts at
+    /// @p StartIdx, extend it to be live up to @p Use, and return the value. If
+    /// there is no segment before @p Use, return nullptr.
+    VNInfo *extendInBlock(SlotIndex StartIdx, SlotIndex Use);
 
     /// join - Join two live ranges (this, and other) together.  This applies
     /// mappings to the value numbers in the LHS/RHS ranges as specified.  If
@@ -599,15 +596,15 @@ namespace llvm {
     class SubRange : public LiveRange {
     public:
       SubRange *Next;
-      unsigned LaneMask;
+      LaneBitmask LaneMask;
 
       /// Constructs a new SubRange object.
-      SubRange(unsigned LaneMask)
+      SubRange(LaneBitmask LaneMask)
         : Next(nullptr), LaneMask(LaneMask) {
       }
 
       /// Constructs a new SubRange object by copying liveness from @p Other.
-      SubRange(unsigned LaneMask, const LiveRange &Other,
+      SubRange(LaneBitmask LaneMask, const LiveRange &Other,
                BumpPtrAllocator &Allocator)
         : LiveRange(Other, Allocator), Next(nullptr), LaneMask(LaneMask) {
       }
@@ -681,7 +678,8 @@ namespace llvm {
 
     /// Creates a new empty subregister live range. The range is added at the
     /// beginning of the subrange list; subrange iterators stay valid.
-    SubRange *createSubRange(BumpPtrAllocator &Allocator, unsigned LaneMask) {
+    SubRange *createSubRange(BumpPtrAllocator &Allocator,
+                             LaneBitmask LaneMask) {
       SubRange *Range = new (Allocator) SubRange(LaneMask);
       appendSubRange(Range);
       return Range;
@@ -689,7 +687,8 @@ namespace llvm {
 
     /// Like createSubRange() but the new range is filled with a copy of the
     /// liveness information in @p CopyFrom.
-    SubRange *createSubRangeFrom(BumpPtrAllocator &Allocator, unsigned LaneMask,
+    SubRange *createSubRangeFrom(BumpPtrAllocator &Allocator,
+                                 LaneBitmask LaneMask,
                                  const LiveRange &CopyFrom) {
       SubRange *Range = new (Allocator) SubRange(LaneMask, CopyFrom, Allocator);
       appendSubRange(Range);
@@ -745,8 +744,6 @@ namespace llvm {
 #endif
 
   private:
-    LiveInterval& operator=(const LiveInterval& rhs) LLVM_DELETED_FUNCTION;
-
     /// Appends @p Range to SubRanges list.
     void appendSubRange(SubRange *Range) {
       Range->Next = SubRanges;
@@ -848,11 +845,6 @@ namespace llvm {
     LiveIntervals &LIS;
     IntEqClasses EqClass;
 
-    // Note that values a and b are connected.
-    void Connect(unsigned a, unsigned b);
-
-    unsigned Renumber();
-
   public:
     explicit ConnectedVNInfoEqClasses(LiveIntervals &lis) : LIS(lis) {}
 
@@ -864,12 +856,12 @@ namespace llvm {
     /// the equivalence class assigned the VNI.
     unsigned getEqClass(const VNInfo *VNI) const { return EqClass[VNI->id]; }
 
-    /// Distribute - Distribute values in LIV[0] into a separate LiveInterval
-    /// for each connected component. LIV must have a LiveInterval for each
-    /// connected component. The LiveIntervals in Liv[1..] must be empty.
-    /// Instructions using LIV[0] are rewritten.
-    void Distribute(LiveInterval *LIV[], MachineRegisterInfo &MRI);
-
+    /// Distribute values in \p LI into a separate LiveIntervals
+    /// for each connected component. LIV must have an empty LiveInterval for
+    /// each additional connected component. The first connected component is
+    /// left in \p LI.
+    void Distribute(LiveInterval &LI, LiveInterval *LIV[],
+                    MachineRegisterInfo &MRI);
   };
 
 }

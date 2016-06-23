@@ -9,8 +9,8 @@
 
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/SCCIterator.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Analysis/RegionIterator.h"
@@ -18,6 +18,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
 using namespace llvm;
@@ -357,13 +358,9 @@ void StructurizeCFG::analyzeLoops(RegionNode *N) {
     BasicBlock *BB = N->getNodeAs<BasicBlock>();
     BranchInst *Term = cast<BranchInst>(BB->getTerminator());
 
-    for (unsigned i = 0, e = Term->getNumSuccessors(); i != e; ++i) {
-      BasicBlock *Succ = Term->getSuccessor(i);
-
-      if (Visited.count(Succ)) {
+    for (BasicBlock *Succ : Term->successors())
+      if (Visited.count(Succ))
         Loops[Succ] = BB;
-      }
-    }
   }
 }
 
@@ -886,7 +883,7 @@ void StructurizeCFG::createFlow() {
 /// no longer dominate all their uses. Not sure if this is really nessasary
 void StructurizeCFG::rebuildSSA() {
   SSAUpdater Updater;
-  for (const auto &BB : ParentRegion->blocks())
+  for (auto *BB : ParentRegion->blocks())
     for (BasicBlock::iterator II = BB->begin(), IE = BB->end();
          II != IE; ++II) {
 
@@ -902,14 +899,14 @@ void StructurizeCFG::rebuildSSA() {
             continue;
         }
 
-        if (DT->dominates(II, User))
+        if (DT->dominates(&*II, User))
           continue;
 
         if (!Initialized) {
           Value *Undef = UndefValue::get(II->getType());
           Updater.Initialize(II->getType(), "");
           Updater.AddAvailableValue(&Func->getEntryBlock(), Undef);
-          Updater.AddAvailableValue(BB, II);
+          Updater.AddAvailableValue(BB, &*II);
           Initialized = true;
         }
         Updater.RewriteUseAfterInsertions(U);

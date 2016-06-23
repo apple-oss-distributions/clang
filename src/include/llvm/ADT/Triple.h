@@ -50,7 +50,9 @@ public:
     armeb,      // ARM (big endian): armeb
     aarch64,    // AArch64 (little endian): aarch64
     aarch64_be, // AArch64 (big endian): aarch64_be
-    bpf,        // eBPF or extended BPF or 64-bit BPF (little endian)
+    avr,        // AVR: Atmel AVR microcontroller
+    bpfel,      // eBPF or extended BPF or 64-bit BPF (little endian)
+    bpfeb,      // eBPF or extended BPF or 64-bit BPF (big endian)
     hexagon,    // Hexagon: hexagon
     mips,       // MIPS: mips, mipsallegrex
     mipsel,     // MIPSEL: mipsel, mipsallegrexel
@@ -64,6 +66,7 @@ public:
     amdgcn,     // AMDGCN: AMD GCN GPUs
     sparc,      // Sparc: sparc
     sparcv9,    // Sparcv9: Sparcv9
+    sparcel,    // Sparc: (endianness = little). NB: 'Sparcle' is a CPU variant
     systemz,    // SystemZ: s390x
     tce,        // TCE (http://tce.cs.tut.fi/): tce
     thumb,      // Thumb (little endian): thumb, thumbv.*
@@ -75,19 +78,24 @@ public:
     nvptx64,    // NVPTX: 64-bit
     gpu_32,     // OpenCL generic GPU: (32-bit)
     gpu_64,     // OpenCL generic GPU: (64-bit)
-    le32,       // le32: generic little-endian 32-bit CPU (PNaCl / Emscripten)
-    le64,       // le64: generic little-endian 64-bit CPU (PNaCl / Emscripten)
+    le32,       // le32: generic little-endian 32-bit CPU (PNaCl)
+    le64,       // le64: generic little-endian 64-bit CPU (PNaCl)
     amdil,      // AMDIL
     amdil64,    // AMDIL with 64-bit pointers
     hsail,      // AMD HSAIL
     hsail64,    // AMD HSAIL with 64-bit pointers
     spir,       // SPIR: standard portable IR for OpenCL 32-bit version
     spir64,     // SPIR: standard portable IR for OpenCL 64-bit version
-    kalimba     // Kalimba: generic kalimba
+    kalimba,    // Kalimba: generic kalimba
+    shave,      // SHAVE: Movidius vector VLIW processors
+    wasm32,     // WebAssembly with 32-bit pointers
+    wasm64,     // WebAssembly with 64-bit pointers
+    LastArchType = wasm64
   };
   enum SubArchType {
     NoSubArch,
 
+    ARMSubArch_v8_1a,
     ARMSubArch_v8,
     ARMSubArch_v7,
     ARMSubArch_v7em,
@@ -96,6 +104,7 @@ public:
     ARMSubArch_v7k,
     ARMSubArch_v6,
     ARMSubArch_v6m,
+    ARMSubArch_v6k,
     ARMSubArch_v6t2,
     ARMSubArch_v5,
     ARMSubArch_v5te,
@@ -118,11 +127,14 @@ public:
     ImaginationTechnologies,
     MipsTechnologies,
     NVIDIA,
-    CSR
+    CSR,
+    Myriad,
+    LastVendorType = Myriad
   };
   enum OSType {
     UnknownOS,
 
+    CloudABI,
     Darwin,
     DragonFly,
     FreeBSD,
@@ -146,7 +158,10 @@ public:
     NVCL,       // NVIDIA OpenCL
     AMDHSA,     // AMD HSA Runtime
     PS4,
+    ELFIAMCU,
+    TvOS,       // Apple tvOS
     WatchOS,    // Apple watchOS
+    LastOSType = WatchOS
   };
   enum EnvironmentType {
     UnknownEnvironment,
@@ -163,6 +178,9 @@ public:
     MSVC,
     Itanium,
     Cygnus,
+    AMDOpenCL,
+    CoreCLR,
+    LastEnvironmentType = CoreCLR
   };
   enum ObjectFormatType {
     UnknownObjectFormat,
@@ -251,6 +269,15 @@ public:
   /// getEnvironment - Get the parsed environment type of this triple.
   EnvironmentType getEnvironment() const { return Environment; }
 
+  /// \brief Parse the version number from the OS name component of the
+  /// triple, if present.
+  ///
+  /// For example, "fooos1.2.3" would return (1, 2, 3).
+  ///
+  /// If an entry is not defined, it will be returned as 0.
+  void getEnvironmentVersion(unsigned &Major, unsigned &Minor,
+                             unsigned &Micro) const;
+
   /// getFormat - Get the object format for this triple.
   ObjectFormatType getObjectFormat() const { return ObjectFormat; }
 
@@ -278,9 +305,14 @@ public:
                         unsigned &Micro) const;
 
   /// getiOSVersion - Parse the version number as with getOSVersion.  This should
-  /// only be called with IOS triples.
+  /// only be called with IOS or generic triples.
   void getiOSVersion(unsigned &Major, unsigned &Minor,
                      unsigned &Micro) const;
+
+  /// getWatchOSVersion - Parse the version number as with getOSVersion.  This
+  /// should only be called with WatchOS or generic triples.
+  void getWatchOSVersion(unsigned &Major, unsigned &Minor,
+                         unsigned &Micro) const;
 
   /// @}
   /// @name Direct Component Access
@@ -379,13 +411,26 @@ public:
   }
 
   /// Is this an iOS triple.
+  /// Note: This identifies tvOS as a variant of iOS. If that ever
+  /// changes, i.e., if the two operating systems diverge or their version
+  /// numbers get out of sync, that will need to be changed.
+  /// watchOS has completely different version numbers so it is not included.
   bool isiOS() const {
-    return getOS() == Triple::IOS;
+    return getOS() == Triple::IOS || isTvOS();
+  }
+
+  /// Is this an Apple tvOS triple.
+  bool isTvOS() const {
+    return getOS() == Triple::TvOS;
   }
 
   /// Is this an Apple watchOS triple.
   bool isWatchOS() const {
     return getOS() == Triple::WatchOS;
+  }
+
+  bool isWatchABI() const {
+    return getSubArch() == Triple::ARMSubArch_v7k;
   }
 
   /// isOSDarwin - Is this a "Darwin" OS (OS X, iOS, or watchOS).
@@ -415,6 +460,10 @@ public:
     return getOS() == Triple::Bitrig;
   }
 
+  bool isOSIAMCU() const {
+    return getOS() == Triple::ELFIAMCU;
+  }
+
   bool isWindowsMSVCEnvironment() const {
     return getOS() == Triple::Win32 &&
            (getEnvironment() == Triple::UnknownEnvironment ||
@@ -423,6 +472,10 @@ public:
 
   bool isKnownWindowsMSVCEnvironment() const {
     return getOS() == Triple::Win32 && getEnvironment() == Triple::MSVC;
+  }
+
+  bool isWindowsCoreCLREnvironment() const {
+    return getOS() == Triple::Win32 && getEnvironment() == Triple::CoreCLR;
   }
 
   bool isWindowsItaniumEnvironment() const {
@@ -491,6 +544,9 @@ public:
            getOS() == Triple::PS4;
   }
 
+  /// \brief Tests whether the target is Android
+  bool isAndroid() const { return getEnvironment() == Triple::Android; }
+
   /// @}
   /// @name Mutators
   /// @{
@@ -557,11 +613,27 @@ public:
   ///          architecture if no such variant can be found.
   llvm::Triple get64BitArchVariant() const;
 
+  /// Form a triple with a big endian variant of the current architecture.
+  ///
+  /// This can be used to move across "families" of architectures where useful.
+  ///
+  /// \returns A new triple with a big endian architecture or an unknown
+  ///          architecture if no such variant can be found.
+  llvm::Triple getBigEndianArchVariant() const;
+
+  /// Form a triple with a little endian variant of the current architecture.
+  ///
+  /// This can be used to move across "families" of architectures where useful.
+  ///
+  /// \returns A new triple with a little endian architecture or an unknown
+  ///          architecture if no such variant can be found.
+  llvm::Triple getLittleEndianArchVariant() const;
+
   /// Get the (LLVM) name of the minimum ARM CPU for the arch we are targeting.
   ///
   /// \param Arch the architecture name (e.g., "armv7s"). If it is an empty
   /// string then the triple's arch name is used.
-  const char* getARMCPUForArch(StringRef Arch = StringRef()) const;
+  StringRef getARMCPUForArch(StringRef Arch = StringRef()) const;
 
   /// @}
   /// @name Static helpers for IDs.

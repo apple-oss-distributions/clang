@@ -8,13 +8,12 @@
 //===----------------------------------------------------------------------===//
 //
 // This unit test exercises the legacy pass manager infrastructure. We use the
-// old names as well to ensure that the source-level compatibility wrapper
-// works for out-of-tree code that expects to include llvm/PassManager.h and
-// subclass the core pass classes.
+// old names as well to ensure that the source-level compatibility is preserved
+// where possible.
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -511,7 +510,7 @@ namespace llvm {
       // Function: test4 (func_test4)
       {
         Function::arg_iterator args = func_test4->arg_begin();
-        Value* int1_f = args++;
+        Value *int1_f = &*args++;
         int1_f->setName("f");
 
         BasicBlock* label_entry_11 = BasicBlock::Create(getGlobalContext(), "entry",func_test4,nullptr);

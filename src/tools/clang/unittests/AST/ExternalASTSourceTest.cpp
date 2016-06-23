@@ -14,7 +14,6 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ExternalASTSource.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -29,15 +28,15 @@ public:
   TestFrontendAction(ExternalASTSource *Source) : Source(Source) {}
 
 private:
-  virtual void ExecuteAction() {
+  void ExecuteAction() override {
     getCompilerInstance().getASTContext().setExternalSource(Source);
     getCompilerInstance().getASTContext().getTranslationUnitDecl()
         ->setHasExternalVisibleStorage();
     return ASTFrontendAction::ExecuteAction();
   }
 
-  virtual std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
-                                                         StringRef InFile) {
+  std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
+                                                 StringRef InFile) override {
     return llvm::make_unique<ASTConsumer>();
   }
 
@@ -46,7 +45,7 @@ private:
 
 bool testExternalASTSource(ExternalASTSource *Source,
                            StringRef FileContents) {
-  CompilerInstance Compiler(SharedModuleProvider::Create<LLVMModuleProvider>());
+  CompilerInstance Compiler;
   Compiler.createDiagnostics();
 
   CompilerInvocation *Invocation = new CompilerInvocation;
@@ -68,8 +67,8 @@ TEST(ExternalASTSourceTest, FailedLookupOccursOnce) {
   struct TestSource : ExternalASTSource {
     TestSource(unsigned &Calls) : Calls(Calls) {}
 
-    bool FindExternalVisibleDeclsByName(const DeclContext*,
-                                        DeclarationName Name) {
+    bool FindExternalVisibleDeclsByName(const DeclContext *,
+                                        DeclarationName Name) override {
       if (Name.getAsString() == "j")
         ++Calls;
       return false;

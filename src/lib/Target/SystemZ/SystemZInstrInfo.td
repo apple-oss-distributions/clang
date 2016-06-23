@@ -397,7 +397,7 @@ let mayLoad = 1, mayStore = 1 in
   defm MVC : MemorySS<"mvc", 0xD2, z_mvc, z_mvc_loop>;
 
 // String moves.
-let mayLoad = 1, mayStore = 1, Defs = [CC], Uses = [R0L] in
+let mayLoad = 1, mayStore = 1, Defs = [CC] in
   defm MVST : StringRRE<"mvst", 0xB255, z_stpcpy>;
 
 //===----------------------------------------------------------------------===//
@@ -424,7 +424,7 @@ let hasSideEffects = 0 in {
   def LGFR : UnaryRRE<"lgf", 0xB914, sext32, GR64, GR32>;
 }
 let Defs = [CC], CCValues = 0xE, CompareZeroCCMask = 0xE in
-  def LTGFR : UnaryRRE<"ltgf", 0xB912, null_frag, GR64, GR64>;
+  def LTGFR : UnaryRRE<"ltgf", 0xB912, null_frag, GR64, GR32>;
 
 // Match 32-to-64-bit sign extensions in which the source is already
 // in a 64-bit register.
@@ -490,7 +490,7 @@ def : Pat<(and GR64:$src, 0xffffffff),
 def LLCMux : UnaryRXYPseudo<"llc", azextloadi8, GRX32, 1>,
              Requires<[FeatureHighWord]>;
 def LLC  : UnaryRXY<"llc", 0xE394, azextloadi8, GR32, 1>;
-def LLCH : UnaryRXY<"llch", 0xE3C2, azextloadi8, GR32, 1>,
+def LLCH : UnaryRXY<"llch", 0xE3C2, azextloadi8, GRH32, 1>,
            Requires<[FeatureHighWord]>;
 
 // 32-bit extensions from 16-bit memory.  LLHMux expands to LLH or LLHH,
@@ -498,7 +498,7 @@ def LLCH : UnaryRXY<"llch", 0xE3C2, azextloadi8, GR32, 1>,
 def LLHMux : UnaryRXYPseudo<"llh", azextloadi16, GRX32, 2>,
              Requires<[FeatureHighWord]>;
 def LLH   : UnaryRXY<"llh", 0xE395, azextloadi16, GR32, 2>;
-def LLHH  : UnaryRXY<"llhh", 0xE3C6, azextloadi16, GR32, 2>,
+def LLHH  : UnaryRXY<"llhh", 0xE3C6, azextloadi16, GRH32, 2>,
             Requires<[FeatureHighWord]>;
 def LLHRL : UnaryRILPC<"llhrl", 0xC42, aligned_azextloadi16, GR32>;
 
@@ -1061,6 +1061,10 @@ let Defs = [CC] in {
     def RISBG : RotateSelectRIEf<"risbg", 0xEC55, GR64, GR64>;
 }
 
+// On zEC12 we have a variant of RISBG that does not set CC.
+let Predicates = [FeatureMiscellaneousExtensions] in
+  def RISBGN : RotateSelectRIEf<"risbgn", 0xEC59, GR64, GR64>;
+
 // Forms of RISBG that only affect one word of the destination register.
 // They do not set CC.
 let Predicates = [FeatureHighWord] in {
@@ -1143,7 +1147,7 @@ let Defs = [CC], CCValues = 0xE, IsLogical = 1 in {
   def CLFIMux : CompareRIPseudo<z_ucmp, GRX32, uimm32>,
                 Requires<[FeatureHighWord]>;
   def CLFI  : CompareRIL<"clfi",  0xC2F, z_ucmp, GR32, uimm32>;
-  def CLIH  : CompareRIL<"clih",  0xCCF, z_ucmp, GR32, uimm32>,
+  def CLIH  : CompareRIL<"clih",  0xCCF, z_ucmp, GRH32, uimm32>,
               Requires<[FeatureHighWord]>;
   def CLGFI : CompareRIL<"clgfi", 0xC2E, z_ucmp, GR64, imm64zx32>;
 
@@ -1181,7 +1185,7 @@ let mayLoad = 1, Defs = [CC] in
   defm CLC : MemorySS<"clc", 0xD5, z_clc, z_clc_loop>;
 
 // String comparison.
-let mayLoad = 1, Defs = [CC], Uses = [R0L] in
+let mayLoad = 1, Defs = [CC] in
   defm CLST : StringRRE<"clst", 0xB25D, z_strcmp>;
 
 // Test under mask.
@@ -1358,6 +1362,60 @@ let Defs = [CC] in {
 }
 
 //===----------------------------------------------------------------------===//
+// Transactional execution
+//===----------------------------------------------------------------------===//
+
+let Predicates = [FeatureTransactionalExecution] in {
+  // Transaction Begin
+  let hasSideEffects = 1, mayStore = 1,
+      usesCustomInserter = 1, Defs = [CC] in {
+    def TBEGIN : InstSIL<0xE560,
+                         (outs), (ins bdaddr12only:$BD1, imm32zx16:$I2),
+                         "tbegin\t$BD1, $I2",
+                         [(z_tbegin bdaddr12only:$BD1, imm32zx16:$I2)]>;
+    def TBEGIN_nofloat : Pseudo<(outs), (ins bdaddr12only:$BD1, imm32zx16:$I2),
+                                [(z_tbegin_nofloat bdaddr12only:$BD1,
+                                                   imm32zx16:$I2)]>;
+    def TBEGINC : InstSIL<0xE561,
+                          (outs), (ins bdaddr12only:$BD1, imm32zx16:$I2),
+                          "tbeginc\t$BD1, $I2",
+                          [(int_s390_tbeginc bdaddr12only:$BD1,
+                                             imm32zx16:$I2)]>;
+  }
+
+  // Transaction End
+  let hasSideEffects = 1, Defs = [CC], BD2 = 0 in
+    def TEND : InstS<0xB2F8, (outs), (ins), "tend", [(z_tend)]>;
+
+  // Transaction Abort
+  let hasSideEffects = 1, isTerminator = 1, isBarrier = 1 in
+    def TABORT : InstS<0xB2FC, (outs), (ins bdaddr12only:$BD2),
+                       "tabort\t$BD2",
+                       [(int_s390_tabort bdaddr12only:$BD2)]>;
+
+  // Nontransactional Store
+  let hasSideEffects = 1 in
+    def NTSTG : StoreRXY<"ntstg", 0xE325, int_s390_ntstg, GR64, 8>;
+
+  // Extract Transaction Nesting Depth
+  let hasSideEffects = 1 in
+    def ETND : InherentRRE<"etnd", 0xB2EC, GR32, (int_s390_etnd)>;
+}
+
+//===----------------------------------------------------------------------===//
+// Processor assist
+//===----------------------------------------------------------------------===//
+
+let Predicates = [FeatureProcessorAssist] in {
+  let hasSideEffects = 1, R4 = 0 in
+    def PPA : InstRRF<0xB2E8, (outs), (ins GR64:$R1, GR64:$R2, imm32zx4:$R3),
+                      "ppa\t$R1, $R2, $R3", []>;
+  def : Pat<(int_s390_ppa_txassist GR32:$src),
+            (PPA (INSERT_SUBREG (i64 (IMPLICIT_DEF)), GR32:$src, subreg_l32),
+                 0, 1)>;
+}
+
+//===----------------------------------------------------------------------===//
 // Miscellaneous Instructions.
 //===----------------------------------------------------------------------===//
 
@@ -1382,6 +1440,13 @@ let Defs = [CC] in {
 def : Pat<(ctlz GR64:$src),
           (EXTRACT_SUBREG (FLOGR GR64:$src), subreg_h64)>;
 
+// Population count.  Counts bits set per byte.
+let Predicates = [FeaturePopulationCount], Defs = [CC] in {
+  def POPCNT : InstRRE<0xB9E1, (outs GR64:$R1), (ins GR64:$R2),
+                       "popcnt\t$R1, $R2",
+                       [(set GR64:$R1, (z_popcnt GR64:$R2))]>;
+}
+
 // Use subregs to populate the "don't care" bits in a 32-bit to 64-bit anyext.
 def : Pat<(i64 (anyext GR32:$src)),
           (INSERT_SUBREG (i64 (IMPLICIT_DEF)), GR32:$src, subreg_l32)>;
@@ -1394,8 +1459,28 @@ let usesCustomInserter = 1 in {
 }
 
 // Search a block of memory for a character.
-let mayLoad = 1, Defs = [CC], Uses = [R0L] in
+let mayLoad = 1, Defs = [CC] in
   defm SRST : StringRRE<"srst", 0xb25e, z_search_string>;
+
+// Other instructions for inline assembly
+let hasSideEffects = 1, Defs = [CC], mayStore = 1 in
+  def STCK : InstS<0xB205, (outs), (ins bdaddr12only:$BD2),
+                       "stck\t$BD2",
+                       []>;
+let hasSideEffects = 1, Defs = [CC], mayStore = 1 in
+  def STCKF : InstS<0xB27C, (outs), (ins bdaddr12only:$BD2),
+                       "stckf\t$BD2",
+                       []>;
+let hasSideEffects = 1, Defs = [CC], mayStore = 1 in
+  def STCKE : InstS<0xB278, (outs), (ins bdaddr12only:$BD2),
+                       "stcke\t$BD2",
+                       []>;
+let hasSideEffects = 1, Defs = [CC], mayStore = 1 in
+  def STFLE : InstS<0xB2B0, (outs), (ins bdaddr12only:$BD2),
+                       "stfle\t$BD2",
+                       []>;
+
+
 
 //===----------------------------------------------------------------------===//
 // Peepholes.

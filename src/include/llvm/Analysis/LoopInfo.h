@@ -37,6 +37,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Pass.h"
 #include <algorithm>
 
@@ -46,13 +47,6 @@ namespace llvm {
 // PassManager.h when doing so doesn't break the PassManagerBuilder.
 template <typename IRUnitT> class AnalysisManager;
 class PreservedAnalyses;
-
-template<typename T>
-inline void RemoveFromVector(std::vector<T*> &V, T *N) {
-  typename std::vector<T*>::iterator I = std::find(V.begin(), V.end(), N);
-  assert(I != V.end() && "N is not in this list!");
-  V.erase(I);
-}
 
 class DominatorTree;
 class LoopInfo;
@@ -79,9 +73,9 @@ class LoopBase {
 
   SmallPtrSet<const BlockT*, 8> DenseBlockSet;
 
-  LoopBase(const LoopBase<BlockT, LoopT> &) LLVM_DELETED_FUNCTION;
+  LoopBase(const LoopBase<BlockT, LoopT> &) = delete;
   const LoopBase<BlockT, LoopT>&
-    operator=(const LoopBase<BlockT, LoopT> &) LLVM_DELETED_FUNCTION;
+    operator=(const LoopBase<BlockT, LoopT> &) = delete;
 public:
   /// Loop ctor - This creates an empty loop.
   LoopBase() : ParentLoop(nullptr) {}
@@ -147,6 +141,9 @@ public:
   typedef typename std::vector<BlockT*>::const_iterator block_iterator;
   block_iterator block_begin() const { return Blocks.begin(); }
   block_iterator block_end() const { return Blocks.end(); }
+  inline iterator_range<block_iterator> blocks() const {
+    return iterator_range<block_iterator>(block_begin(), block_end());
+  }
 
   /// getNumBlocks - Get the number of blocks in this loop in constant time.
   unsigned getNumBlocks() const {
@@ -324,7 +321,10 @@ public:
   /// current loop, updating the Blocks as appropriate.  This does not update
   /// the mapping in the LoopInfo class.
   void removeBlockFromLoop(BlockT *BB) {
-    RemoveFromVector(Blocks, BB);
+    auto I = std::find(Blocks.begin(), Blocks.end(), BB);
+    assert(I != Blocks.end() && "N is not in this list!");
+    Blocks.erase(I);
+
     DenseBlockSet.erase(BB);
   }
 
@@ -351,9 +351,7 @@ raw_ostream& operator<<(raw_ostream &OS, const LoopBase<BlockT, LoopT> &Loop) {
 }
 
 // Implementation in LoopInfoImpl.h
-#ifdef __GNUC__
-__extension__ extern template class LoopBase<BasicBlock, Loop>;
-#endif
+extern template class LoopBase<BasicBlock, Loop>;
 
 class Loop : public LoopBase<BasicBlock, Loop> {
 public:
@@ -361,11 +359,11 @@ public:
 
   /// isLoopInvariant - Return true if the specified value is loop invariant
   ///
-  bool isLoopInvariant(Value *V) const;
+  bool isLoopInvariant(const Value *V) const;
 
   /// hasLoopInvariantOperands - Return true if all the operands of the
   /// specified instruction are loop invariant.
-  bool hasLoopInvariantOperands(Instruction *I) const;
+  bool hasLoopInvariantOperands(const Instruction *I) const;
 
   /// makeLoopInvariant - If the given value is an instruction inside of the
   /// loop and it can be hoisted, do so to make it trivially loop-invariant.
@@ -403,6 +401,9 @@ public:
 
   /// isLCSSAForm - Return true if the Loop is in LCSSA form
   bool isLCSSAForm(DominatorTree &DT) const;
+
+  /// \brief Return true if this Loop and all inner subloops are in LCSSA form.
+  bool isRecursivelyLCSSAForm(DominatorTree &DT) const;
 
   /// isLoopSimplifyForm - Return true if the Loop is in the form that
   /// the LoopSimplify form transforms loops to, which is sometimes called
@@ -493,13 +494,13 @@ private:
 template<class BlockT, class LoopT>
 class LoopInfoBase {
   // BBMap - Mapping of basic blocks to the inner most loop they occur in
-  DenseMap<BlockT *, LoopT *> BBMap;
+  DenseMap<const BlockT *, LoopT *> BBMap;
   std::vector<LoopT *> TopLevelLoops;
   friend class LoopBase<BlockT, LoopT>;
   friend class LoopInfo;
 
-  void operator=(const LoopInfoBase &) LLVM_DELETED_FUNCTION;
-  LoopInfoBase(const LoopInfoBase &) LLVM_DELETED_FUNCTION;
+  void operator=(const LoopInfoBase &) = delete;
+  LoopInfoBase(const LoopInfoBase &) = delete;
 public:
   LoopInfoBase() { }
   ~LoopInfoBase() { releaseMemory(); }
@@ -543,11 +544,9 @@ public:
   /// getLoopFor - Return the inner most loop that BB lives in.  If a basic
   /// block is in no loop (for example the entry node), null is returned.
   ///
-  LoopT *getLoopFor(const BlockT *BB) const {
-    return BBMap.lookup(const_cast<BlockT*>(BB));
-  }
+  LoopT *getLoopFor(const BlockT *BB) const { return BBMap.lookup(BB); }
 
-  const DenseMap<BlockT *, LoopT *> &getBlockMap() const { return BBMap; }
+  const DenseMap<const BlockT *, LoopT *> &getBlockMap() const { return BBMap; }
 
   /// operator[] - same as getLoopFor...
   ///
@@ -564,7 +563,7 @@ public:
   }
 
   // isLoopHeader - True if the block is a loop header node
-  bool isLoopHeader(BlockT *BB) const {
+  bool isLoopHeader(const BlockT *BB) const {
     const LoopT *L = getLoopFor(BB);
     return L && L->getHeader() == BB;
   }
@@ -632,7 +631,7 @@ public:
   }
 
   /// Create the loop forest using a stable algorithm.
-  void Analyze(DominatorTreeBase<BlockT> &DomTree);
+  void analyze(const DominatorTreeBase<BlockT> &DomTree);
 
   // Debugging
   void print(raw_ostream &OS) const;
@@ -641,19 +640,18 @@ public:
 };
 
 // Implementation in LoopInfoImpl.h
-#ifdef __GNUC__
-__extension__ extern template class LoopInfoBase<BasicBlock, Loop>;
-#endif
+extern template class LoopInfoBase<BasicBlock, Loop>;
 
 class LoopInfo : public LoopInfoBase<BasicBlock, Loop> {
   typedef LoopInfoBase<BasicBlock, Loop> BaseT;
 
   friend class LoopBase<BasicBlock, Loop>;
 
-  void operator=(const LoopInfo &) LLVM_DELETED_FUNCTION;
-  LoopInfo(const LoopInfo &) LLVM_DELETED_FUNCTION;
+  void operator=(const LoopInfo &) = delete;
+  LoopInfo(const LoopInfo &) = delete;
 public:
   LoopInfo() {}
+  explicit LoopInfo(const DominatorTreeBase<BasicBlock> &DomTree);
 
   LoopInfo(LoopInfo &&Arg) : BaseT(std::move(static_cast<BaseT &>(Arg))) {}
   LoopInfo &operator=(LoopInfo &&RHS) {
@@ -688,6 +686,78 @@ public:
     // instruction, or in a loop that contains it as an inner loop, then using
     // it as a replacement will not break LCSSA form.
     return ToLoop->contains(getLoopFor(From->getParent()));
+  }
+
+  /// \brief Checks if moving a specific instruction can break LCSSA in any
+  /// loop.
+  ///
+  /// Return true if moving \p Inst to before \p NewLoc will break LCSSA,
+  /// assuming that the function containing \p Inst and \p NewLoc is currently
+  /// in LCSSA form.
+  bool movementPreservesLCSSAForm(Instruction *Inst, Instruction *NewLoc) {
+    assert(Inst->getFunction() == NewLoc->getFunction() &&
+           "Can't reason about IPO!");
+
+    auto *OldBB = Inst->getParent();
+    auto *NewBB = NewLoc->getParent();
+
+    // Movement within the same loop does not break LCSSA (the equality check is
+    // to avoid doing a hashtable lookup in case of intra-block movement).
+    if (OldBB == NewBB)
+      return true;
+
+    auto *OldLoop = getLoopFor(OldBB);
+    auto *NewLoop = getLoopFor(NewBB);
+
+    if (OldLoop == NewLoop)
+      return true;
+
+    // Check if Outer contains Inner; with the null loop counting as the
+    // "outermost" loop.
+    auto Contains = [](const Loop *Outer, const Loop *Inner) {
+      return !Outer || Outer->contains(Inner);
+    };
+
+    // To check that the movement of Inst to before NewLoc does not break LCSSA,
+    // we need to check two sets of uses for possible LCSSA violations at
+    // NewLoc: the users of NewInst, and the operands of NewInst.
+
+    // If we know we're hoisting Inst out of an inner loop to an outer loop,
+    // then the uses *of* Inst don't need to be checked.
+
+    if (!Contains(NewLoop, OldLoop)) {
+      for (Use &U : Inst->uses()) {
+        auto *UI = cast<Instruction>(U.getUser());
+        auto *UBB = isa<PHINode>(UI) ? cast<PHINode>(UI)->getIncomingBlock(U)
+                                     : UI->getParent();
+        if (UBB != NewBB && getLoopFor(UBB) != NewLoop)
+          return false;
+      }
+    }
+
+    // If we know we're sinking Inst from an outer loop into an inner loop, then
+    // the *operands* of Inst don't need to be checked.
+
+    if (!Contains(OldLoop, NewLoop)) {
+      // See below on why we can't handle phi nodes here.
+      if (isa<PHINode>(Inst))
+        return false;
+
+      for (Use &U : Inst->operands()) {
+        auto *DefI = dyn_cast<Instruction>(U.get());
+        if (!DefI)
+          return false;
+
+        // This would need adjustment if we allow Inst to be a phi node -- the
+        // new use block won't simply be NewBB.
+
+        auto *DefBlock = DefI->getParent();
+        if (DefBlock != NewBB && getLoopFor(DefBlock) != NewLoop)
+          return false;
+      }
+    }
+
+    return true;
   }
 };
 
@@ -731,12 +801,6 @@ public:
   /// \brief Provide a name for the analysis for debugging and logging.
   static StringRef name() { return "LoopAnalysis"; }
 
-  LoopAnalysis() {}
-  LoopAnalysis(const LoopAnalysis &Arg) {}
-  LoopAnalysis(LoopAnalysis &&Arg) {}
-  LoopAnalysis &operator=(const LoopAnalysis &RHS) { return *this; }
-  LoopAnalysis &operator=(LoopAnalysis &&RHS) { return *this; }
-
   LoopInfo run(Function &F, AnalysisManager<Function> *AM);
 };
 
@@ -775,6 +839,19 @@ public:
   void print(raw_ostream &O, const Module *M = nullptr) const override;
 
   void getAnalysisUsage(AnalysisUsage &AU) const override;
+};
+
+/// \brief Pass for printing a loop's contents as LLVM's text IR assembly.
+class PrintLoopPass {
+  raw_ostream &OS;
+  std::string Banner;
+
+public:
+  PrintLoopPass();
+  PrintLoopPass(raw_ostream &OS, const std::string &Banner = "");
+
+  PreservedAnalyses run(Loop &L);
+  static StringRef name() { return "PrintLoopPass"; }
 };
 
 } // End llvm namespace

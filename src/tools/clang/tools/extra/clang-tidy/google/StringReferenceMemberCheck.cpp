@@ -16,10 +16,16 @@ using namespace clang::ast_matchers;
 
 namespace clang {
 namespace tidy {
+namespace google {
 namespace runtime {
 
 void StringReferenceMemberCheck::registerMatchers(
     ast_matchers::MatchFinder *Finder) {
+  // Only register the matchers for C++; the functionality currently does not
+  // provide any benefit to other languages, despite being benign.
+  if (!getLangOpts().CPlusPlus)
+    return;
+
   // Look for const references to std::string or ::string.
   auto String = anyOf(recordDecl(hasName("::std::basic_string")),
                       recordDecl(hasName("::string")));
@@ -40,5 +46,6 @@ StringReferenceMemberCheck::check(const MatchFinder::MatchResult &Result) {
 }
 
 } // namespace runtime
+} // namespace google
 } // namespace tidy
 } // namespace clang

@@ -127,7 +127,7 @@ void BracesAroundStatementsCheck::registerMatchers(MatchFinder *Finder) {
   Finder->addMatcher(whileStmt().bind("while"), this);
   Finder->addMatcher(doStmt().bind("do"), this);
   Finder->addMatcher(forStmt().bind("for"), this);
-  Finder->addMatcher(forRangeStmt().bind("for-range"), this);
+  Finder->addMatcher(cxxForRangeStmt().bind("for-range"), this);
 }
 
 void
@@ -151,11 +151,15 @@ BracesAroundStatementsCheck::check(const MatchFinder::MatchResult &Result) {
     SourceLocation StartLoc = findRParenLoc(S, SM, Context);
     if (StartLoc.isInvalid())
       return;
-    checkStmt(Result, S->getThen(), StartLoc, S->getElseLoc());
+    if (ForceBracesStmts.erase(S))
+      ForceBracesStmts.insert(S->getThen());
+    bool BracedIf = checkStmt(Result, S->getThen(), StartLoc, S->getElseLoc());
     const Stmt *Else = S->getElse();
+    if (Else && BracedIf)
+      ForceBracesStmts.insert(Else);
     if (Else && !isa<IfStmt>(Else)) {
       // Omit 'else if' statements here, they will be handled directly.
-      checkStmt(Result, Else, S->getElseLoc());
+      checkStmt(Result, Else, S->getElseLoc(), SourceLocation());
     }
   } else {
     llvm_unreachable("Invalid match");
@@ -168,7 +172,7 @@ SourceLocation
 BracesAroundStatementsCheck::findRParenLoc(const IfOrWhileStmt *S,
                                            const SourceManager &SM,
                                            const ASTContext *Context) {
-  // Skip macros
+  // Skip macros.
   if (S->getLocStart().isMacroID())
     return SourceLocation();
 
@@ -199,10 +203,11 @@ BracesAroundStatementsCheck::findRParenLoc(const IfOrWhileStmt *S,
   return RParenLoc;
 }
 
-void
-BracesAroundStatementsCheck::checkStmt(const MatchFinder::MatchResult &Result,
-                                       const Stmt *S, SourceLocation InitialLoc,
-                                       SourceLocation EndLocHint) {
+/// Determine if the statement needs braces around it, and add them if it does.
+/// Returns true if braces where added.
+bool BracesAroundStatementsCheck::checkStmt(
+    const MatchFinder::MatchResult &Result, const Stmt *S,
+    SourceLocation InitialLoc, SourceLocation EndLocHint) {
   // 1) If there's a corresponding "else" or "while", the check inserts "} "
   // right before that token.
   // 2) If there's a multi-line block comment starting on the same line after
@@ -212,19 +217,33 @@ BracesAroundStatementsCheck::checkStmt(const MatchFinder::MatchResult &Result,
   // line comments) and inserts "\n}" right before that EOL.
   if (!S || isa<CompoundStmt>(S)) {
     // Already inside braces.
-    return;
+    return false;
   }
-  // Skip macros.
-  if (S->getLocStart().isMacroID())
-    return;
 
   const SourceManager &SM = *Result.SourceManager;
   const ASTContext *Context = Result.Context;
 
+  // Treat macros.
+  CharSourceRange FileRange = Lexer::makeFileCharRange(
+      CharSourceRange::getTokenRange(S->getSourceRange()), SM,
+      Context->getLangOpts());
+  if (FileRange.isInvalid())
+    return false;
+
   // InitialLoc points at the last token before opening brace to be inserted.
   assert(InitialLoc.isValid());
+  // Convert InitialLoc to file location, if it's on the same macro expansion
+  // level as the start of the statement. We also need file locations for
+  // Lexer::getLocForEndOfToken working properly.
+  InitialLoc = Lexer::makeFileCharRange(
+                   CharSourceRange::getCharRange(InitialLoc, S->getLocStart()),
+                   SM, Context->getLangOpts())
+                   .getBegin();
+  if (InitialLoc.isInvalid())
+    return false;
   SourceLocation StartLoc =
       Lexer::getLocForEndOfToken(InitialLoc, 0, SM, Context->getLangOpts());
+
   // StartLoc points at the location of the opening brace to be inserted.
   SourceLocation EndLoc;
   std::string ClosingInsertion;
@@ -232,7 +251,8 @@ BracesAroundStatementsCheck::checkStmt(const MatchFinder::MatchResult &Result,
     EndLoc = EndLocHint;
     ClosingInsertion = "} ";
   } else {
-    EndLoc = findEndLocation(S->getLocEnd(), SM, Context);
+    const auto FREnd = FileRange.getEnd().getLocWithOffset(-1);
+    EndLoc = findEndLocation(FREnd, SM, Context);
     ClosingInsertion = "\n}";
   }
 
@@ -240,16 +260,21 @@ BracesAroundStatementsCheck::checkStmt(const MatchFinder::MatchResult &Result,
   assert(EndLoc.isValid());
   // Don't require braces for statements spanning less than certain number of
   // lines.
-  if (ShortStatementLines) {
+  if (ShortStatementLines && !ForceBracesStmts.erase(S)) {
     unsigned StartLine = SM.getSpellingLineNumber(StartLoc);
     unsigned EndLine = SM.getSpellingLineNumber(EndLoc);
     if (EndLine - StartLine < ShortStatementLines)
-      return;
+      return false;
   }
 
   auto Diag = diag(StartLoc, "statement should be inside braces");
   Diag << FixItHint::CreateInsertion(StartLoc, " {")
        << FixItHint::CreateInsertion(EndLoc, ClosingInsertion);
+  return true;
+}
+
+void BracesAroundStatementsCheck::onEndOfTranslationUnit() {
+  ForceBracesStmts.clear();
 }
 
 } // namespace readability

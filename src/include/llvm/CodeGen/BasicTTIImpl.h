@@ -91,8 +91,10 @@ private:
   }
 
 protected:
-  explicit BasicTTIImplBase(const TargetMachine *TM)
-      : BaseT(TM->getDataLayout()) {}
+  explicit BasicTTIImplBase(const TargetMachine *TM, const DataLayout &DL)
+      : BaseT(DL) {}
+
+  using TargetTransformInfoImplBase::DL;
 
 public:
   // Provide value semantics. MSVC requires that we spell all of these out.
@@ -100,19 +102,13 @@ public:
       : BaseT(static_cast<const BaseT &>(Arg)) {}
   BasicTTIImplBase(BasicTTIImplBase &&Arg)
       : BaseT(std::move(static_cast<BaseT &>(Arg))) {}
-  BasicTTIImplBase &operator=(const BasicTTIImplBase &RHS) {
-    BaseT::operator=(static_cast<const BaseT &>(RHS));
-    return *this;
-  }
-  BasicTTIImplBase &operator=(BasicTTIImplBase &&RHS) {
-    BaseT::operator=(std::move(static_cast<BaseT &>(RHS)));
-    return *this;
-  }
 
   /// \name Scalar TTI Implementations
   /// @{
 
   bool hasBranchDivergence() { return false; }
+
+  bool isSourceOfDivergence(const Value *V) { return false; }
 
   bool isLegalAddImmediate(int64_t imm) {
     return getTLI()->isLegalAddImmediate(imm);
@@ -123,32 +119,63 @@ public:
   }
 
   bool isLegalAddressingMode(Type *Ty, GlobalValue *BaseGV, int64_t BaseOffset,
-                             bool HasBaseReg, int64_t Scale) {
+                             bool HasBaseReg, int64_t Scale,
+                             unsigned AddrSpace) {
     TargetLoweringBase::AddrMode AM;
     AM.BaseGV = BaseGV;
     AM.BaseOffs = BaseOffset;
     AM.HasBaseReg = HasBaseReg;
     AM.Scale = Scale;
-    return getTLI()->isLegalAddressingMode(AM, Ty);
+    return getTLI()->isLegalAddressingMode(DL, AM, Ty, AddrSpace);
   }
 
   int getScalingFactorCost(Type *Ty, GlobalValue *BaseGV, int64_t BaseOffset,
-                           bool HasBaseReg, int64_t Scale) {
+                           bool HasBaseReg, int64_t Scale, unsigned AddrSpace) {
     TargetLoweringBase::AddrMode AM;
     AM.BaseGV = BaseGV;
     AM.BaseOffs = BaseOffset;
     AM.HasBaseReg = HasBaseReg;
     AM.Scale = Scale;
-    return getTLI()->getScalingFactorCost(AM, Ty);
+    return getTLI()->getScalingFactorCost(DL, AM, Ty, AddrSpace);
   }
 
   bool isTruncateFree(Type *Ty1, Type *Ty2) {
     return getTLI()->isTruncateFree(Ty1, Ty2);
   }
 
+  bool isZExtFree(Type *Ty1, Type *Ty2) const {
+    return getTLI()->isZExtFree(Ty1, Ty2);
+  }
+
+  bool isProfitableToHoist(Instruction *I) {
+    return getTLI()->isProfitableToHoist(I);
+  }
+
   bool isTypeLegal(Type *Ty) {
-    EVT VT = getTLI()->getValueType(Ty);
+    EVT VT = getTLI()->getValueType(DL, Ty);
     return getTLI()->isTypeLegal(VT);
+  }
+
+  unsigned getIntrinsicCost(Intrinsic::ID IID, Type *RetTy,
+                            ArrayRef<const Value *> Arguments) {
+    return BaseT::getIntrinsicCost(IID, RetTy, Arguments);
+  }
+
+  unsigned getIntrinsicCost(Intrinsic::ID IID, Type *RetTy,
+                            ArrayRef<Type *> ParamTys) {
+    if (IID == Intrinsic::cttz) {
+      if (getTLI()->isCheapToSpeculateCttz())
+        return TargetTransformInfo::TCC_Basic;
+      return TargetTransformInfo::TCC_Expensive;
+    }
+
+    if (IID == Intrinsic::ctlz) {
+      if (getTLI()->isCheapToSpeculateCtlz())
+        return TargetTransformInfo::TCC_Basic;
+      return TargetTransformInfo::TCC_Expensive;
+    }
+
+    return BaseT::getIntrinsicCost(IID, RetTy, ParamTys);
   }
 
   unsigned getJumpBufAlignment() { return getTLI()->getJumpBufAlignment(); }
@@ -163,7 +190,7 @@ public:
 
   bool haveFastSqrt(Type *Ty) {
     const TargetLoweringBase *TLI = getTLI();
-    EVT VT = TLI->getValueType(Ty);
+    EVT VT = TLI->getValueType(DL, Ty);
     return TLI->isTypeLegal(VT) &&
            TLI->isOperationLegalOrCustom(ISD::FSQRT, VT);
   }
@@ -172,6 +199,25 @@ public:
     // By default, FP instructions are no more expensive since they are
     // implemented in HW.  Target specific TTI can override this.
     return TargetTransformInfo::TCC_Basic;
+  }
+
+  unsigned getOperationCost(unsigned Opcode, Type *Ty, Type *OpTy) {
+    const TargetLoweringBase *TLI = getTLI();
+    switch (Opcode) {
+    default: break;
+    case Instruction::Trunc: {
+      if (TLI->isTruncateFree(OpTy, Ty))
+        return TargetTransformInfo::TCC_Free;
+      return TargetTransformInfo::TCC_Basic;
+    }
+    case Instruction::ZExt: {
+      if (TLI->isZExtFree(OpTy, Ty))
+        return TargetTransformInfo::TCC_Free;
+      return TargetTransformInfo::TCC_Basic;
+    }
+    }
+
+    return BaseT::getOperationCost(Opcode, Ty, OpTy);
   }
 
   void getUnrollingPreferences(Loop *L, TTI::UnrollingPreferences &UP) {
@@ -214,7 +260,7 @@ public:
 
       for (BasicBlock::iterator J = BB->begin(), JE = BB->end(); J != JE; ++J)
         if (isa<CallInst>(J) || isa<InvokeInst>(J)) {
-          ImmutableCallSite CS(J);
+          ImmutableCallSite CS(&*J);
           if (const Function *F = CS.getCalledFunction()) {
             if (!static_cast<T *>(this)->isLoweredToCall(F))
               continue;
@@ -234,11 +280,11 @@ public:
   /// \name Vector TTI Implementations
   /// @{
 
-  unsigned getNumberOfRegisters(bool Vector) { return 1; }
+  unsigned getNumberOfRegisters(bool Vector) { return Vector ? 0 : 1; }
 
   unsigned getRegisterBitWidth(bool Vector) { return 32; }
 
-  unsigned getMaxInterleaveFactor() { return 1; }
+  unsigned getMaxInterleaveFactor(unsigned VF) { return 1; }
 
   unsigned getArithmeticInstrCost(
       unsigned Opcode, Type *Ty,
@@ -251,7 +297,7 @@ public:
     int ISD = TLI->InstructionOpcodeToISD(Opcode);
     assert(ISD && "Invalid opcode");
 
-    std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(Ty);
+    std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(DL, Ty);
 
     bool IsFloat = Ty->getScalarType()->isFloatingPointTy();
     // Assume that floating point arithmetic operations cost twice as much as
@@ -301,9 +347,8 @@ public:
     const TargetLoweringBase *TLI = getTLI();
     int ISD = TLI->InstructionOpcodeToISD(Opcode);
     assert(ISD && "Invalid opcode");
-
-    std::pair<unsigned, MVT> SrcLT = TLI->getTypeLegalizationCost(Src);
-    std::pair<unsigned, MVT> DstLT = TLI->getTypeLegalizationCost(Dst);
+    std::pair<unsigned, MVT> SrcLT = TLI->getTypeLegalizationCost(DL, Src);
+    std::pair<unsigned, MVT> DstLT = TLI->getTypeLegalizationCost(DL, Dst);
 
     // Check for NOOP conversions.
     if (SrcLT.first == DstLT.first &&
@@ -407,8 +452,7 @@ public:
       if (CondTy->isVectorTy())
         ISD = ISD::VSELECT;
     }
-
-    std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(ValTy);
+    std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(DL, ValTy);
 
     if (!(ValTy->isVectorTy() && !LT.second.isVector()) &&
         !TLI->isOperationExpand(ISD, LT.second)) {
@@ -437,7 +481,7 @@ public:
 
   unsigned getVectorInstrCost(unsigned Opcode, Type *Val, unsigned Index) {
     std::pair<unsigned, MVT> LT =
-        getTLI()->getTypeLegalizationCost(Val->getScalarType());
+        getTLI()->getTypeLegalizationCost(DL, Val->getScalarType());
 
     return LT.first;
   }
@@ -445,7 +489,7 @@ public:
   unsigned getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                            unsigned AddressSpace) {
     assert(!Src->isVoidTy() && "Invalid type");
-    std::pair<unsigned, MVT> LT = getTLI()->getTypeLegalizationCost(Src);
+    std::pair<unsigned, MVT> LT = getTLI()->getTypeLegalizationCost(DL, Src);
 
     // Assuming that all loads of legal types cost 1.
     unsigned Cost = LT.first;
@@ -456,7 +500,7 @@ public:
       // itself. Unless the corresponding extending load or truncating store is
       // legal, then this will scalarize.
       TargetLowering::LegalizeAction LA = TargetLowering::Expand;
-      EVT MemVT = getTLI()->getValueType(Src, true);
+      EVT MemVT = getTLI()->getValueType(DL, Src, true);
       if (MemVT.isSimple() && MemVT != MVT::Other) {
         if (Opcode == Instruction::Store)
           LA = getTLI()->getTruncStoreAction(LT.second, MemVT.getSimpleVT());
@@ -470,6 +514,77 @@ public:
         Cost += getScalarizationOverhead(Src, Opcode != Instruction::Store,
                                          Opcode == Instruction::Store);
       }
+    }
+
+    return Cost;
+  }
+
+  unsigned getInterleavedMemoryOpCost(unsigned Opcode, Type *VecTy,
+                                      unsigned Factor,
+                                      ArrayRef<unsigned> Indices,
+                                      unsigned Alignment,
+                                      unsigned AddressSpace) {
+    VectorType *VT = dyn_cast<VectorType>(VecTy);
+    assert(VT && "Expect a vector type for interleaved memory op");
+
+    unsigned NumElts = VT->getNumElements();
+    assert(Factor > 1 && NumElts % Factor == 0 && "Invalid interleave factor");
+
+    unsigned NumSubElts = NumElts / Factor;
+    VectorType *SubVT = VectorType::get(VT->getElementType(), NumSubElts);
+
+    // Firstly, the cost of load/store operation.
+    unsigned Cost = static_cast<T *>(this)->getMemoryOpCost(
+        Opcode, VecTy, Alignment, AddressSpace);
+
+    // Then plus the cost of interleave operation.
+    if (Opcode == Instruction::Load) {
+      // The interleave cost is similar to extract sub vectors' elements
+      // from the wide vector, and insert them into sub vectors.
+      //
+      // E.g. An interleaved load of factor 2 (with one member of index 0):
+      //      %vec = load <8 x i32>, <8 x i32>* %ptr
+      //      %v0 = shuffle %vec, undef, <0, 2, 4, 6>         ; Index 0
+      // The cost is estimated as extract elements at 0, 2, 4, 6 from the
+      // <8 x i32> vector and insert them into a <4 x i32> vector.
+
+      assert(Indices.size() <= Factor &&
+             "Interleaved memory op has too many members");
+
+      for (unsigned Index : Indices) {
+        assert(Index < Factor && "Invalid index for interleaved memory op");
+
+        // Extract elements from loaded vector for each sub vector.
+        for (unsigned i = 0; i < NumSubElts; i++)
+          Cost += static_cast<T *>(this)->getVectorInstrCost(
+              Instruction::ExtractElement, VT, Index + i * Factor);
+      }
+
+      unsigned InsSubCost = 0;
+      for (unsigned i = 0; i < NumSubElts; i++)
+        InsSubCost += static_cast<T *>(this)->getVectorInstrCost(
+            Instruction::InsertElement, SubVT, i);
+
+      Cost += Indices.size() * InsSubCost;
+    } else {
+      // The interleave cost is extract all elements from sub vectors, and
+      // insert them into the wide vector.
+      //
+      // E.g. An interleaved store of factor 2:
+      //      %v0_v1 = shuffle %v0, %v1, <0, 4, 1, 5, 2, 6, 3, 7>
+      //      store <8 x i32> %interleaved.vec, <8 x i32>* %ptr
+      // The cost is estimated as extract all elements from both <4 x i32>
+      // vectors and insert into the <8 x i32> vector.
+
+      unsigned ExtSubCost = 0;
+      for (unsigned i = 0; i < NumSubElts; i++)
+        ExtSubCost += static_cast<T *>(this)->getVectorInstrCost(
+            Instruction::ExtractElement, SubVT, i);
+      Cost += ExtSubCost * Factor;
+
+      for (unsigned i = 0; i < NumElts; i++)
+        Cost += static_cast<T *>(this)
+                    ->getVectorInstrCost(Instruction::InsertElement, VT, i);
     }
 
     return Cost;
@@ -585,7 +700,7 @@ public:
     }
 
     const TargetLoweringBase *TLI = getTLI();
-    std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(RetTy);
+    std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(DL, RetTy);
 
     if (TLI->isOperationLegalOrPromote(ISD, LT.second)) {
       // The operation is legal. Assume it costs 1.
@@ -648,14 +763,15 @@ public:
   /// This is used, for instance,  when we estimate call of a vector
   /// counterpart of the given function.
   /// \param F Called function, might be nullptr.
-  /// \param RetTy,Tys Return value and argument types.
+  /// \param RetTy Return value types.
+  /// \param Tys Argument types.
   /// \returns The cost of Call instruction.
   unsigned getCallInstrCost(Function *F, Type *RetTy, ArrayRef<Type *> Tys) {
     return 10;
   }
 
   unsigned getNumberOfParts(Type *Tp) {
-    std::pair<unsigned, MVT> LT = getTLI()->getTypeLegalizationCost(Tp);
+    std::pair<unsigned, MVT> LT = getTLI()->getTypeLegalizationCost(DL, Tp);
     return LT.first;
   }
 
@@ -692,7 +808,7 @@ class BasicTTIImpl : public BasicTTIImplBase<BasicTTIImpl> {
   const TargetLoweringBase *getTLI() const { return TLI; }
 
 public:
-  explicit BasicTTIImpl(const TargetMachine *ST, Function &F);
+  explicit BasicTTIImpl(const TargetMachine *ST, const Function &F);
 
   // Provide value semantics. MSVC requires that we spell all of these out.
   BasicTTIImpl(const BasicTTIImpl &Arg)
@@ -700,18 +816,6 @@ public:
   BasicTTIImpl(BasicTTIImpl &&Arg)
       : BaseT(std::move(static_cast<BaseT &>(Arg))), ST(std::move(Arg.ST)),
         TLI(std::move(Arg.TLI)) {}
-  BasicTTIImpl &operator=(const BasicTTIImpl &RHS) {
-    BaseT::operator=(static_cast<const BaseT &>(RHS));
-    ST = RHS.ST;
-    TLI = RHS.TLI;
-    return *this;
-  }
-  BasicTTIImpl &operator=(BasicTTIImpl &&RHS) {
-    BaseT::operator=(std::move(static_cast<BaseT &>(RHS)));
-    ST = std::move(RHS.ST);
-    TLI = std::move(RHS.TLI);
-    return *this;
-  }
 };
 
 }

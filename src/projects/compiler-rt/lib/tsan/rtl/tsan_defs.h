@@ -17,6 +17,20 @@
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "tsan_stat.h"
+#include "ubsan/ubsan_platform.h"
+
+// Setup defaults for compile definitions.
+#ifndef TSAN_NO_HISTORY
+# define TSAN_NO_HISTORY 0
+#endif
+
+#ifndef TSAN_COLLECT_STATS
+# define TSAN_COLLECT_STATS 0
+#endif
+
+#ifndef TSAN_CONTAINS_UBSAN
+# define TSAN_CONTAINS_UBSAN (CAN_SANITIZE_UB && !defined(SANITIZER_GO))
+#endif
 
 namespace __tsan {
 
@@ -35,7 +49,11 @@ const char *const kTsanOptionsEnv = "TSAN_OPTIONS";
 
 const int kTidBits = 13;
 const unsigned kMaxTid = 1 << kTidBits;
+#ifndef SANITIZER_GO
 const unsigned kMaxTidInClock = kMaxTid * 2;  // This includes msb 'freed' bit.
+#else
+const unsigned kMaxTidInClock = kMaxTid;  // Go does not track freed memory.
+#endif
 const int kClkBits = 42;
 const unsigned kMaxTidReuse = (1 << (64 - kClkBits)) - 1;
 const uptr kShadowStackSize = 64 * 1024;
@@ -59,17 +77,13 @@ const uptr kMetaShadowCell = 8;
 // Size of a single meta shadow value (u32).
 const uptr kMetaShadowSize = 4;
 
-#if defined(TSAN_NO_HISTORY) && TSAN_NO_HISTORY
+#if TSAN_NO_HISTORY
 const bool kCollectHistory = false;
 #else
 const bool kCollectHistory = true;
 #endif
 
-#if defined(TSAN_COLLECT_STATS) && TSAN_COLLECT_STATS
-const bool kCollectStats = true;
-#else
-const bool kCollectStats = false;
-#endif
+const unsigned kInvalidTid = (unsigned)-1;
 
 // The following "build consistency" machinery ensures that all source files
 // are built in the same configuration. Inconsistent builds lead to

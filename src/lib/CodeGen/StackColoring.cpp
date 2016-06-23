@@ -48,7 +48,6 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
-#include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -364,7 +363,7 @@ void StackColoring::calculateLocalLiveness() {
       }
     }
 
-    BBSet = NextBBSet;
+    BBSet = std::move(NextBBSet);
   }// while changed.
 }
 

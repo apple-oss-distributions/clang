@@ -51,7 +51,6 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Driver/Options.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -83,27 +82,28 @@ using namespace llvm::opt;
 // Options:
 
 // Collect the source files.
-cl::list<std::string> SourcePaths(cl::Positional,
-                                  cl::desc("<source0> [... <sourceN>]"),
-                                  cl::OneOrMore);
+static cl::list<std::string> SourcePaths(cl::Positional,
+                                         cl::desc("<source0> [... <sourceN>]"),
+                                         cl::OneOrMore);
 
 // Option to specify a list or one or more callback names to ignore.
-cl::opt<std::string> IgnoreCallbacks(
+static cl::opt<std::string> IgnoreCallbacks(
     "ignore", cl::init(""),
     cl::desc("Ignore callbacks, i.e. \"Callback1, Callback2...\"."));
 
 // Option to specify the trace output file name.
-cl::opt<std::string> OutputFileName(
+static cl::opt<std::string> OutputFileName(
     "output", cl::init(""),
     cl::desc("Output trace to the given file name or '-' for stdout."));
 
 // Collect all other arguments, which will be passed to the front end.
-cl::list<std::string>
-CC1Arguments(cl::ConsumeAfter,
-             cl::desc("<arguments to be passed to front end>..."));
+static cl::list<std::string>
+    CC1Arguments(cl::ConsumeAfter,
+                 cl::desc("<arguments to be passed to front end>..."));
 
 // Frontend action stuff:
 
+namespace {
 // Consumer is responsible for setting up the callbacks.
 class PPTraceConsumer : public ASTConsumer {
 public:
@@ -139,7 +139,7 @@ public:
                                std::vector<CallbackCall> &CallbackCalls)
       : Ignore(Ignore), CallbackCalls(CallbackCalls) {}
 
-  virtual PPTraceAction *create() {
+  PPTraceAction *create() override {
     return new PPTraceAction(Ignore, CallbackCalls);
   }
 
@@ -147,10 +147,11 @@ private:
   SmallSet<std::string, 4> &Ignore;
   std::vector<CallbackCall> &CallbackCalls;
 };
+} // namespace
 
 // Output the trace given its data structure and a stream.
-int outputPPTrace(std::vector<CallbackCall> &CallbackCalls,
-                  llvm::raw_ostream &OS) {
+static int outputPPTrace(std::vector<CallbackCall> &CallbackCalls,
+                         llvm::raw_ostream &OS) {
   // Mark start of document.
   OS << "---\n";
 
@@ -201,8 +202,7 @@ int main(int Argc, const char **Argv) {
   std::vector<CallbackCall> CallbackCalls;
 
   // Create the tool and run the compilation.
-  ClangTool Tool(*Compilations, SourcePaths,
-                 SharedModuleProvider::Create<LLVMModuleProvider>());
+  ClangTool Tool(*Compilations, SourcePaths);
   PPTraceFrontendActionFactory Factory(Ignore, CallbackCalls);
   int HadErrors = Tool.run(&Factory);
 

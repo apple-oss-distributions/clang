@@ -16,7 +16,6 @@
 #include "LoopConvert.h"
 #include "LoopActions.h"
 #include "LoopMatchers.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/Refactoring.h"
 #include "clang/Tooling/Tooling.h"
@@ -27,8 +26,7 @@ using namespace clang;
 
 int LoopConvertTransform::apply(const CompilationDatabase &Database,
                                 const std::vector<std::string> &SourcePaths) {
-  ClangTool LoopTool(Database, SourcePaths,
-                     SharedModuleProvider::Create<LLVMModuleProvider>());
+  ClangTool LoopTool(Database, SourcePaths);
 
   unsigned AcceptedChanges = 0;
   unsigned DeferredChanges = 0;
@@ -71,6 +69,7 @@ LoopConvertTransform::handleBeginSource(clang::CompilerInstance &CI,
   return Transform::handleBeginSource(CI, Filename);
 }
 
+namespace {
 struct LoopConvertFactory : TransformFactory {
   LoopConvertFactory() {
     Since.Clang = Version(3, 0);
@@ -83,6 +82,7 @@ struct LoopConvertFactory : TransformFactory {
     return new LoopConvertTransform(Opts);
   }
 };
+} // namespace
 
 // Register the factory using this statically initialized variable.
 static TransformFactoryRegistry::Add<LoopConvertFactory>

@@ -108,6 +108,7 @@ CodeGenRegister::CodeGenRegister(Record *R, unsigned Enum)
     EnumValue(Enum),
     CostPerUse(R->getValueAsInt("CostPerUse")),
     CoveredBySubRegs(R->getValueAsBit("CoveredBySubRegs")),
+    HasDisjunctSubRegs(false),
     SubRegsComplete(false),
     SuperRegsComplete(false),
     TopoSig(~0u)
@@ -217,6 +218,8 @@ CodeGenRegister::computeSubRegs(CodeGenRegBank &RegBank) {
     return SubRegs;
   SubRegsComplete = true;
 
+  HasDisjunctSubRegs = ExplicitSubRegs.size() > 1;
+
   // First insert the explicit subregs and make sure they are fully indexed.
   for (unsigned i = 0, e = ExplicitSubRegs.size(); i != e; ++i) {
     CodeGenRegister *SR = ExplicitSubRegs[i];
@@ -237,6 +240,7 @@ CodeGenRegister::computeSubRegs(CodeGenRegBank &RegBank) {
   for (unsigned i = 0, e = ExplicitSubRegs.size(); i != e; ++i) {
     CodeGenRegister *SR = ExplicitSubRegs[i];
     const SubRegMap &Map = SR->computeSubRegs(RegBank);
+    HasDisjunctSubRegs |= SR->HasDisjunctSubRegs;
 
     for (SubRegMap::const_iterator SI = Map.begin(), SE = Map.end(); SI != SE;
          ++SI) {
@@ -539,7 +543,7 @@ struct TupleExpander : SetTheory::Expander {
     std::vector<Record*> Indices = Def->getValueAsListOfDefs("SubRegIndices");
     unsigned Dim = Indices.size();
     ListInit *SubRegs = Def->getValueAsListInit("SubRegs");
-    if (Dim != SubRegs->getSize())
+    if (Dim != SubRegs->size())
       PrintFatalError(Def->getLoc(), "SubRegIndices and SubRegs size mismatch");
     if (Dim < 2)
       PrintFatalError(Def->getLoc(),
@@ -656,9 +660,7 @@ CodeGenRegisterClass::CodeGenRegisterClass(CodeGenRegBank &RegBank, Record *R)
   // Rename anonymous register classes.
   if (R->getName().size() > 9 && R->getName()[9] == '.') {
     static unsigned AnonCounter = 0;
-    R->setName("AnonRegClass_" + utostr(AnonCounter));
-    // MSVC2012 ICEs if AnonCounter++ is directly passed to utostr.
-    ++AnonCounter;
+    R->setName("AnonRegClass_" + utostr(AnonCounter++));
   }
 
   std::vector<Record*> TypeList = R->getValueAsListOfDefs("RegTypes");
@@ -709,6 +711,10 @@ CodeGenRegisterClass::CodeGenRegisterClass(CodeGenRegBank &RegBank, Record *R)
   CopyCost = R->getValueAsInt("CopyCost");
   Allocatable = R->getValueAsBit("isAllocatable");
   AltOrderSelect = R->getValueAsString("AltOrderSelect");
+  int AllocationPriority = R->getValueAsInt("AllocationPriority");
+  if (AllocationPriority < 0 || AllocationPriority > 63)
+    PrintFatalError(R->getLoc(), "AllocationPriority out of range [0,63]");
+  this->AllocationPriority = AllocationPriority;
 }
 
 // Create an inferred register class that was missing from the .td files.
@@ -724,7 +730,8 @@ CodeGenRegisterClass::CodeGenRegisterClass(CodeGenRegBank &RegBank,
     SpillSize(Props.SpillSize),
     SpillAlignment(Props.SpillAlignment),
     CopyCost(0),
-    Allocatable(true) {
+    Allocatable(true),
+    AllocationPriority(0) {
   for (const auto R : Members)
     TopoSigs.set(R->getTopoSig());
 }
@@ -744,6 +751,7 @@ void CodeGenRegisterClass::inheritProperties(CodeGenRegBank &RegBank) {
   CopyCost = Super.CopyCost;
   Allocatable = Super.Allocatable;
   AltOrderSelect = Super.AltOrderSelect;
+  AllocationPriority = Super.AllocationPriority;
 
   // Copy all allocation orders, filter out foreign registers from the larger
   // super-class.
@@ -986,7 +994,7 @@ CodeGenRegBank::CodeGenRegBank(RecordKeeper &Records) {
 
   // Allocate user-defined register classes.
   for (auto *RC : RCs) {
-    RegClasses.push_back(CodeGenRegisterClass(*this, RC));
+    RegClasses.emplace_back(*this, RC);
     addToMaps(&RegClasses.back());
   }
 
@@ -1048,7 +1056,7 @@ CodeGenRegBank::getOrCreateSubClass(const CodeGenRegisterClass *RC,
     return FoundI->second;
 
   // Sub-class doesn't exist, create a new one.
-  RegClasses.push_back(CodeGenRegisterClass(*this, Name, K));
+  RegClasses.emplace_back(*this, Name, K);
   addToMaps(&RegClasses.back());
   return &RegClasses.back();
 }
@@ -1262,7 +1270,7 @@ void CodeGenRegBank::computeSubRegLaneMasks() {
   for (auto &RegClass : RegClasses) {
     unsigned LaneMask = 0;
     for (const auto &SubRegIndex : SubRegIndices) {
-      if (RegClass.getSubClassWithSubReg(&SubRegIndex) != &RegClass)
+      if (RegClass.getSubClassWithSubReg(&SubRegIndex) == nullptr)
         continue;
       LaneMask |= SubRegIndex.LaneMask;
     }
@@ -1772,7 +1780,7 @@ void CodeGenRegBank::computeRegUnitLaneMasks() {
       const CodeGenRegister *SubRegister = S->second;
       unsigned LaneMask = SubRegIndex->LaneMask;
       // Distribute LaneMask to Register Units touched.
-      for (const auto &SUI : SubRegister->getRegUnits()) {
+      for (unsigned SUI : SubRegister->getRegUnits()) {
         bool Found = false;
         unsigned u = 0;
         for (unsigned RU : RegUnits) {
@@ -1783,6 +1791,7 @@ void CodeGenRegBank::computeRegUnitLaneMasks() {
           }
           ++u;
         }
+        (void)Found;
         assert(Found);
       }
     }
@@ -1803,6 +1812,13 @@ void CodeGenRegBank::computeDerivedInfo() {
   computeRegUnitSets();
 
   computeRegUnitLaneMasks();
+
+  // Compute register class HasDisjunctSubRegs flag.
+  for (CodeGenRegisterClass &RC : RegClasses) {
+    RC.HasDisjunctSubRegs = false;
+    for (const CodeGenRegister *Reg : RC.getMembers())
+      RC.HasDisjunctSubRegs |= Reg->HasDisjunctSubRegs;
+  }
 
   // Get the weight of each set.
   for (unsigned Idx = 0, EndIdx = RegUnitSets.size(); Idx != EndIdx; ++Idx)

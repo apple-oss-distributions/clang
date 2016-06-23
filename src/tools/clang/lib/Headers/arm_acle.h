@@ -175,14 +175,18 @@ static __inline__ uint32_t __attribute__((__always_inline__, __nodebug__))
   return __ror(__rev(t), 16);
 }
 
-static __inline__ unsigned long __attribute__((__always_inline__, __nodebug__))
-  __rev16l(unsigned long t) {
-    return __rorl(__revl(t), sizeof(long) / 2);
-}
-
 static __inline__ uint64_t __attribute__((__always_inline__, __nodebug__))
   __rev16ll(uint64_t t) {
-  return __rorll(__revll(t), 32);
+  return (((uint64_t)__rev16(t >> 32)) << 32) | __rev16(t);
+}
+
+static __inline__ unsigned long __attribute__((__always_inline__, __nodebug__))
+  __rev16l(unsigned long t) {
+#if __SIZEOF_LONG__ == 4
+    return __rev16(t);
+#else
+    return __rev16ll(t);
+#endif
 }
 
 /* REVSH */
@@ -288,6 +292,14 @@ static __inline__ uint32_t __attribute__((__always_inline__, __nodebug__))
   return __builtin_arm_crc32cd(a, b);
 }
 #endif
+
+/* 10.1 Special register intrinsics */
+#define __arm_rsr(sysreg) __builtin_arm_rsr(sysreg)
+#define __arm_rsr64(sysreg) __builtin_arm_rsr64(sysreg)
+#define __arm_rsrp(sysreg) __builtin_arm_rsrp(sysreg)
+#define __arm_wsr(sysreg, v) __builtin_arm_wsr(sysreg, v)
+#define __arm_wsr64(sysreg, v) __builtin_arm_wsr64(sysreg, v)
+#define __arm_wsrp(sysreg, v) __builtin_arm_wsrp(sysreg, v)
 
 #if defined(__cplusplus)
 }

@@ -77,7 +77,7 @@ public:
   }
 
   /// \brief Test whether the inline cost is low enough for inlining.
-  LLVM_EXPLICIT operator bool() const {
+  explicit operator bool() const {
     return Cost < Threshold;
   }
 
@@ -107,7 +107,7 @@ public:
   static char ID;
 
   InlineCostAnalysis();
-  ~InlineCostAnalysis();
+  ~InlineCostAnalysis() override;
 
   // Pass interface implementation.
   void getAnalysisUsage(AnalysisUsage &AU) const override;

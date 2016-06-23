@@ -1,4 +1,4 @@
-//===-- MachOUtils.h - Utility class for accessing binaries ------------===//
+//===-- MachOUtils.h - Mach-o specific helpers for dsymutil  --------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -6,41 +6,36 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
-//
-// This program is a utility that aims to be a dropin replacement for
-// Darwin's dsymutil.
-//
-//===----------------------------------------------------------------------===//
-
 #ifndef LLVM_TOOLS_DSYMUTIL_MACHOUTILS_H
 #define LLVM_TOOLS_DSYMUTIL_MACHOUTILS_H
 
+#include <functional>
 #include <string>
-#include <vector>
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Triple.h"
 
 namespace llvm {
+class MCStreamer;
+class raw_fd_ostream;
 namespace dsymutil {
+class DebugMap;
+struct LinkOptions;
+namespace MachOUtils {
 
-class MachOUtils {
-public:
-  struct ArchAndFilename{
-    std::string Arch, Path;
-  };
-
-  static bool mergeThinFiles(StringRef Path,
-                             ArrayRef<ArchAndFilename> ThinDwarfList,
-                             StringRef FinalLinkedOut);
-private:
-  static bool runLipo(StringRef Path,
-                      SmallVectorImpl<const char *> &Args);
-  static const char *LipoExec;
+struct ArchAndFilename {
+  std::string Arch, Path;
+  ArchAndFilename(StringRef Arch, StringRef Path) : Arch(Arch), Path(Path) {}
 };
 
-}
-}
+bool generateUniversalBinary(SmallVectorImpl<ArchAndFilename> &ArchFiles,
+                             StringRef OutputFileName, const LinkOptions &,
+                             StringRef SDKPath);
 
-#endif
+bool generateDsymCompanion(const DebugMap &DM,
+                           std::function<StringRef(StringRef)> Translator,
+                           MCStreamer &MS, raw_fd_ostream &OutFile);
+
+std::string getArchName(StringRef Arch);
+}
+}
+}
+#endif // LLVM_TOOLS_DSYMUTIL_MACHOUTILS_H

@@ -22,9 +22,9 @@ using namespace PatternMatch;
 #define DEBUG_TYPE "instcombine"
 
 
-/// simplifyValueKnownNonZero - The specific integer value is used in a context
-/// where it is known to be non-zero.  If this allows us to simplify the
-/// computation, do so and return the new operand, otherwise return null.
+/// The specific integer value is used in a context where it is known to be
+/// non-zero.  If this allows us to simplify the computation, do so and return
+/// the new operand, otherwise return null.
 static Value *simplifyValueKnownNonZero(Value *V, InstCombiner &IC,
                                         Instruction &CxtI) {
   // If V has multiple uses, then we would have to do more analysis to determine
@@ -76,8 +76,7 @@ static Value *simplifyValueKnownNonZero(Value *V, InstCombiner &IC,
 }
 
 
-/// MultiplyOverflows - True if the multiply can not be expressed in an int
-/// this size.
+/// True if the multiply can not be expressed in an int this size.
 static bool MultiplyOverflows(const APInt &C1, const APInt &C2, APInt &Product,
                               bool IsSigned) {
   bool Overflow;
@@ -94,6 +93,14 @@ static bool IsMultiple(const APInt &C1, const APInt &C2, APInt &Quotient,
                        bool IsSigned) {
   assert(C1.getBitWidth() == C2.getBitWidth() &&
          "Inconsistent width of constants!");
+
+  // Bail if we will divide by zero.
+  if (C2.isMinValue())
+    return false;
+
+  // Bail if we would divide INT_MIN by -1.
+  if (IsSigned && C1.isMinSignedValue() && C2.isAllOnesValue())
+    return false;
 
   APInt Remainder(C1.getBitWidth(), /*Val=*/0ULL, IsSigned);
   if (IsSigned)
@@ -217,12 +224,16 @@ Instruction *InstCombiner::visitMul(BinaryOperator &I) {
         NewCst = getLogBase2Vector(CV);
 
       if (NewCst) {
+        unsigned Width = NewCst->getType()->getPrimitiveSizeInBits();
         BinaryOperator *Shl = BinaryOperator::CreateShl(NewOp, NewCst);
 
         if (I.hasNoUnsignedWrap())
           Shl->setHasNoUnsignedWrap();
-        if (I.hasNoSignedWrap() && NewCst->isNotMinSignedValue())
-          Shl->setHasNoSignedWrap();
+        if (I.hasNoSignedWrap()) {
+          uint64_t V;
+          if (match(NewCst, m_ConstantInt(V)) && V != Width - 1)
+            Shl->setHasNoSignedWrap();
+        }
 
         return Shl;
       }
@@ -701,8 +712,7 @@ Instruction *InstCombiner::visitFMul(BinaryOperator &I) {
   return Changed ? &I : nullptr;
 }
 
-/// SimplifyDivRemOfSelect - Try to fold a divide or remainder of a select
-/// instruction.
+/// Try to fold a divide or remainder of a select instruction.
 bool InstCombiner::SimplifyDivRemOfSelect(BinaryOperator &I) {
   SelectInst *SI = cast<SelectInst>(I.getOperand(1));
 
@@ -736,7 +746,7 @@ bool InstCombiner::SimplifyDivRemOfSelect(BinaryOperator &I) {
     return true;
 
   // Scan the current block backward, looking for other uses of SI.
-  BasicBlock::iterator BBI = &I, BBFront = I.getParent()->begin();
+  BasicBlock::iterator BBI = I.getIterator(), BBFront = I.getParent()->begin();
 
   while (BBI != BBFront) {
     --BBI;
@@ -750,10 +760,10 @@ bool InstCombiner::SimplifyDivRemOfSelect(BinaryOperator &I) {
          I != E; ++I) {
       if (*I == SI) {
         *I = SI->getOperand(NonNullOperand);
-        Worklist.Add(BBI);
+        Worklist.Add(&*BBI);
       } else if (*I == SelectCond) {
         *I = Builder->getInt1(NonNullOperand == 1);
-        Worklist.Add(BBI);
+        Worklist.Add(&*BBI);
       }
     }
 
@@ -1206,7 +1216,8 @@ Instruction *InstCombiner::visitFDiv(BinaryOperator &I) {
   if (Value *V = SimplifyVectorOp(I))
     return ReplaceInstUsesWith(I, V);
 
-  if (Value *V = SimplifyFDivInst(Op0, Op1, DL, TLI, DT, AC))
+  if (Value *V = SimplifyFDivInst(Op0, Op1, I.getFastMathFlags(),
+                                  DL, TLI, DT, AC))
     return ReplaceInstUsesWith(I, V);
 
   if (isa<Constant>(Op0))
@@ -1481,7 +1492,8 @@ Instruction *InstCombiner::visitFRem(BinaryOperator &I) {
   if (Value *V = SimplifyVectorOp(I))
     return ReplaceInstUsesWith(I, V);
 
-  if (Value *V = SimplifyFRemInst(Op0, Op1, DL, TLI, DT, AC))
+  if (Value *V = SimplifyFRemInst(Op0, Op1, I.getFastMathFlags(),
+                                  DL, TLI, DT, AC))
     return ReplaceInstUsesWith(I, V);
 
   // Handle cases involving: rem X, (select Cond, Y, Z)

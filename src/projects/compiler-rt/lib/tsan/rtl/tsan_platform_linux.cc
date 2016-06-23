@@ -18,6 +18,7 @@
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_posix.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
 #include "sanitizer_common/sanitizer_stoptheworld.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
@@ -65,8 +66,6 @@ namespace __tsan {
 
 static uptr g_data_start;
 static uptr g_data_end;
-
-const uptr kPageSize = 4096;
 
 enum {
   MemTotal  = 0,
@@ -133,17 +132,6 @@ void FlushShadowMemory() {
 }
 
 #ifndef SANITIZER_GO
-static void ProtectRange(uptr beg, uptr end) {
-  CHECK_LE(beg, end);
-  if (beg == end)
-    return;
-  if (beg != (uptr)Mprotect(beg, end - beg)) {
-    Printf("FATAL: ThreadSanitizer can not protect [%zx,%zx]\n", beg, end);
-    Printf("FATAL: Make sure you are not using unlimited stack\n");
-    Die();
-  }
-}
-
 // Mark shadow for .rodata sections with the special kShadowRodata marker.
 // Accesses to .rodata can't race, so this saves time, memory and trace space.
 static void MapRodata() {
@@ -173,7 +161,7 @@ static void MapRodata() {
     *p = kShadowRodata;
   internal_write(fd, marker.data(), marker.size());
   // Map the file into memory.
-  uptr page = internal_mmap(0, kPageSize, PROT_READ | PROT_WRITE,
+  uptr page = internal_mmap(0, GetPageSizeCached(), PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANONYMOUS, fd, 0);
   if (internal_iserror(page)) {
     internal_close(fd);
@@ -201,43 +189,7 @@ static void MapRodata() {
   internal_close(fd);
 }
 
-void InitializeShadowMemory() {
-  // Map memory shadow.
-  uptr shadow = (uptr)MmapFixedNoReserve(kShadowBeg,
-    kShadowEnd - kShadowBeg);
-  if (shadow != kShadowBeg) {
-    Printf("FATAL: ThreadSanitizer can not mmap the shadow memory\n");
-    Printf("FATAL: Make sure to compile with -fPIE and "
-               "to link with -pie (%p, %p).\n", shadow, kShadowBeg);
-    Die();
-  }
-  // This memory range is used for thread stacks and large user mmaps.
-  // Frequently a thread uses only a small part of stack and similarly
-  // a program uses a small part of large mmap. On some programs
-  // we see 20% memory usage reduction without huge pages for this range.
-  // FIXME: don't use constants here.
-  NoHugePagesInRegion(MemToShadow(0x7f0000000000ULL),
-                      0x10000000000ULL * kShadowMultiplier);
-  if (common_flags()->use_madv_dontdump)
-    DontDumpShadowMemory(kShadowBeg, kShadowEnd - kShadowBeg);
-  DPrintf("memory shadow: %zx-%zx (%zuGB)\n",
-      kShadowBeg, kShadowEnd,
-      (kShadowEnd - kShadowBeg) >> 30);
-
-  // Map meta shadow.
-  uptr meta_size = kMetaShadowEnd - kMetaShadowBeg;
-  uptr meta = (uptr)MmapFixedNoReserve(kMetaShadowBeg, meta_size);
-  if (meta != kMetaShadowBeg) {
-    Printf("FATAL: ThreadSanitizer can not mmap the shadow memory\n");
-    Printf("FATAL: Make sure to compile with -fPIE and "
-               "to link with -pie (%p, %p).\n", meta, kMetaShadowBeg);
-    Die();
-  }
-  if (common_flags()->use_madv_dontdump)
-    DontDumpShadowMemory(meta, meta_size);
-  DPrintf("meta shadow: %zx-%zx (%zuGB)\n",
-      meta, meta + meta_size, meta_size >> 30);
-
+void InitializeShadowMemoryPlatform() {
   MapRodata();
 }
 
@@ -281,31 +233,6 @@ static void InitDataSeg() {
   CHECK_LT((uptr)&g_data_start, g_data_end);
 }
 
-static void CheckAndProtect() {
-  // Ensure that the binary is indeed compiled with -pie.
-  MemoryMappingLayout proc_maps(true);
-  uptr p, end;
-  while (proc_maps.Next(&p, &end, 0, 0, 0, 0)) {
-    if (IsAppMem(p))
-      continue;
-    if (p >= kHeapMemEnd &&
-        p < kHeapMemEnd + PrimaryAllocator::AdditionalSize())
-      continue;
-    if (p >= 0xf000000000000000ull)  // vdso
-      break;
-    Printf("FATAL: ThreadSanitizer: unexpected memory mapping %p-%p\n", p, end);
-    Die();
-  }
-
-  ProtectRange(kLoAppMemEnd, kShadowBeg);
-  ProtectRange(kShadowEnd, kMetaShadowBeg);
-  ProtectRange(kMetaShadowEnd, kTraceMemBeg);
-  // Memory for traces is mapped lazily in MapThreadTrace.
-  // Protect the whole range for now, so that user does not map something here.
-  ProtectRange(kTraceMemBeg, kTraceMemEnd);
-  ProtectRange(kTraceMemEnd, kHeapMemBeg);
-  ProtectRange(kHeapMemEnd + PrimaryAllocator::AdditionalSize(), kHiAppMemBeg);
-}
 #endif  // #ifndef SANITIZER_GO
 
 void InitializePlatform() {
@@ -389,6 +316,8 @@ int ExtractRecvmsgFDs(void *msgp, int *fds, int nfd) {
   return res;
 }
 
+// Note: this function runs with async signals enabled,
+// so it must not touch any tsan state.
 int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
     void *abstime), void *c, void *m, void *abstime,
     void(*cleanup)(void *arg), void *arg) {
@@ -400,6 +329,10 @@ int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
   pthread_cleanup_pop(0);
   return res;
 }
+#endif
+
+#ifndef SANITIZER_GO
+void ReplaceSystemMalloc() { }
 #endif
 
 }  // namespace __tsan

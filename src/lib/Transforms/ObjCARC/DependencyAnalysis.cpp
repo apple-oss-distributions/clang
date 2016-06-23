@@ -45,11 +45,11 @@ bool llvm::objcarc::CanAlterRefCount(const Instruction *Inst, const Value *Ptr,
   default: break;
   }
 
-  ImmutableCallSite CS = static_cast<const Value *>(Inst);
+  ImmutableCallSite CS(Inst);
   assert(CS && "Only calls can alter reference counts!");
 
   // See if AliasAnalysis can help us with the call.
-  AliasAnalysis::ModRefBehavior MRB = PA.getAA()->getModRefBehavior(CS);
+  FunctionModRefBehavior MRB = PA.getAA()->getModRefBehavior(CS);
   if (AliasAnalysis::onlyReadsMemory(MRB))
     return false;
   if (AliasAnalysis::onlyAccessesArgPointees(MRB)) {
@@ -99,7 +99,7 @@ bool llvm::objcarc::CanUse(const Instruction *Inst, const Value *Ptr,
     // of any other dynamic reference-counted pointers.
     if (!IsPotentialRetainableObjPtr(ICI->getOperand(1), *PA.getAA()))
       return false;
-  } else if (ImmutableCallSite CS = static_cast<const Value *>(Inst)) {
+  } else if (auto CS = ImmutableCallSite(Inst)) {
     // For calls, just check the arguments (and not the callee operand).
     for (ImmutableCallSite::arg_iterator OI = CS.arg_begin(),
          OE = CS.arg_end(); OI != OE; ++OI) {
@@ -226,7 +226,7 @@ llvm::objcarc::FindDependencies(DependenceKind Flavor,
                                 SmallPtrSetImpl<Instruction *> &DependingInsts,
                                 SmallPtrSetImpl<const BasicBlock *> &Visited,
                                 ProvenanceAnalysis &PA) {
-  BasicBlock::iterator StartPos = StartInst;
+  BasicBlock::iterator StartPos = StartInst->getIterator();
 
   SmallVector<std::pair<BasicBlock *, BasicBlock::iterator>, 4> Worklist;
   Worklist.push_back(std::make_pair(StartBB, StartPos));
@@ -252,7 +252,7 @@ llvm::objcarc::FindDependencies(DependenceKind Flavor,
         break;
       }
 
-      Instruction *Inst = --LocalStartPos;
+      Instruction *Inst = &*--LocalStartPos;
       if (Depends(Flavor, Inst, Arg, PA)) {
         DependingInsts.insert(Inst);
         break;
@@ -260,16 +260,31 @@ llvm::objcarc::FindDependencies(DependenceKind Flavor,
     }
   } while (!Worklist.empty());
 
+  // Our users consider the results iif there is exactly 1 depending
+  // instruction detected.
+  if (DependingInsts.size() != 1 || !*DependingInsts.begin())
+    return;
+
+  const BasicBlock *EndBB = (*DependingInsts.begin())->getParent();
+
   // Determine whether the original StartBB post-dominates all of the blocks we
-  // visited. If not, insert a sentinal indicating that most optimizations are
-  // not safe.
+  // visited. Also verify that there is no back-edge to the EndBB
+  // block as the transformation would be invalid if the depending
+  // instruction was inside a loop (and StartInst was not in the same
+  // BB). If EndBB was involved in a loop whose back-edge didn't point
+  // to EndBB, then the back-edge would necessarily point outside of
+  // the Visited set and the depending Inst would be flagged unsafe
+  // by the below logic too.
+  // If any of those unsafe conditions is met, insert a sentinal
+  // indicating that most optimizations are not safe.
   for (const BasicBlock *BB : Visited) {
     if (BB == StartBB)
       continue;
     const TerminatorInst *TI = cast<TerminatorInst>(&BB->back());
     for (succ_const_iterator SI(TI), SE(TI, false); SI != SE; ++SI) {
       const BasicBlock *Succ = *SI;
-      if (Succ != StartBB && !Visited.count(Succ)) {
+      if (Succ == EndBB ||
+          (Succ != StartBB && !Visited.count(Succ))) {
         DependingInsts.insert(reinterpret_cast<Instruction *>(-1));
         return;
       }

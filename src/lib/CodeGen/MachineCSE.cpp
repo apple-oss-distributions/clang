@@ -24,6 +24,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/RecyclingAllocator.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetInstrInfo.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
 using namespace llvm;
@@ -47,7 +48,7 @@ namespace {
     MachineRegisterInfo *MRI;
   public:
     static char ID; // Pass identification
-    MachineCSE() : MachineFunctionPass(ID), LookAheadLimit(5), CurrVN(0) {
+    MachineCSE() : MachineFunctionPass(ID), LookAheadLimit(0), CurrVN(0) {
       initializeMachineCSEPass(*PassRegistry::getPassRegistry());
     }
 
@@ -56,7 +57,7 @@ namespace {
     void getAnalysisUsage(AnalysisUsage &AU) const override {
       AU.setPreservesCFG();
       MachineFunctionPass::getAnalysisUsage(AU);
-      AU.addRequired<AliasAnalysis>();
+      AU.addRequired<AAResultsWrapperPass>();
       AU.addPreservedID(MachineLoopInfoID);
       AU.addRequired<MachineDominatorTree>();
       AU.addPreserved<MachineDominatorTree>();
@@ -68,7 +69,7 @@ namespace {
     }
 
   private:
-    const unsigned LookAheadLimit;
+    unsigned LookAheadLimit;
     typedef RecyclingAllocator<BumpPtrAllocator,
         ScopedHashTableVal<MachineInstr*, unsigned> > AllocatorTy;
     typedef ScopedHashTable<MachineInstr*, unsigned,
@@ -110,7 +111,7 @@ char &llvm::MachineCSEID = MachineCSE::ID;
 INITIALIZE_PASS_BEGIN(MachineCSE, "machine-cse",
                 "Machine Common Subexpression Elimination", false, false)
 INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_END(MachineCSE, "machine-cse",
                 "Machine Common Subexpression Elimination", false, false)
 
@@ -713,7 +714,8 @@ bool MachineCSE::runOnMachineFunction(MachineFunction &MF) {
   TII = MF.getSubtarget().getInstrInfo();
   TRI = MF.getSubtarget().getRegisterInfo();
   MRI = &MF.getRegInfo();
-  AA = &getAnalysis<AliasAnalysis>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   DT = &getAnalysis<MachineDominatorTree>();
+  LookAheadLimit = TII->getMachineCSELookAheadLimit();
   return PerformCSE(DT->getRootNode());
 }

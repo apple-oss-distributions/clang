@@ -386,10 +386,8 @@ static bool ExtractLoops(BugDriver &BD,
       // that masked the error.  Stop loop extraction now.
 
       std::vector<std::pair<std::string, FunctionType*> > MisCompFunctions;
-      for (unsigned i = 0, e = MiscompiledFunctions.size(); i != e; ++i) {
-        Function *F = MiscompiledFunctions[i];
-        MisCompFunctions.push_back(std::make_pair(F->getName(),
-                                                  F->getFunctionType()));
+      for (Function *F : MiscompiledFunctions) {
+        MisCompFunctions.emplace_back(F->getName(), F->getFunctionType());
       }
 
       if (Linker::LinkModules(ToNotOptimize, ToOptimizeLoopExtracted))
@@ -414,8 +412,7 @@ static bool ExtractLoops(BugDriver &BD,
     for (Module::iterator I = ToOptimizeLoopExtracted->begin(),
            E = ToOptimizeLoopExtracted->end(); I != E; ++I)
       if (!I->isDeclaration())
-        MisCompFunctions.push_back(std::make_pair(I->getName(),
-                                                  I->getFunctionType()));
+        MisCompFunctions.emplace_back(I->getName(), I->getFunctionType());
 
     // Okay, great!  Now we know that we extracted a loop and that loop
     // extraction both didn't break the program, and didn't mask the problem.
@@ -548,9 +545,8 @@ static bool ExtractBlocks(BugDriver &BD,
 
   std::vector<BasicBlock*> Blocks;
   for (unsigned i = 0, e = MiscompiledFunctions.size(); i != e; ++i)
-    for (Function::iterator I = MiscompiledFunctions[i]->begin(),
-           E = MiscompiledFunctions[i]->end(); I != E; ++I)
-      Blocks.push_back(I);
+    for (BasicBlock &BB : *MiscompiledFunctions[i])
+      Blocks.push_back(&BB);
 
   // Use the list reducer to identify blocks that can be extracted without
   // obscuring the bug.  The Blocks list will end up containing blocks that must
@@ -596,8 +592,7 @@ static bool ExtractBlocks(BugDriver &BD,
   for (Module::iterator I = Extracted->begin(), E = Extracted->end();
        I != E; ++I)
     if (!I->isDeclaration())
-      MisCompFunctions.push_back(std::make_pair(I->getName(),
-                                                I->getFunctionType()));
+      MisCompFunctions.emplace_back(I->getName(), I->getFunctionType());
 
   if (Linker::LinkModules(ProgClone, Extracted.get()))
     exit(1);
@@ -632,9 +627,9 @@ DebugAMiscompilation(BugDriver &BD,
   // the program.
   std::vector<Function*> MiscompiledFunctions;
   Module *Prog = BD.getProgram();
-  for (Module::iterator I = Prog->begin(), E = Prog->end(); I != E; ++I)
-    if (!I->isDeclaration())
-      MiscompiledFunctions.push_back(I);
+  for (Function &F : *Prog)
+    if (!F.isDeclaration())
+      MiscompiledFunctions.push_back(&F);
 
   // Do the reduction...
   if (!BugpointIsInterrupted)
@@ -806,7 +801,7 @@ static void CleanupAndPrepareModules(BugDriver &BD, Module *&Test,
              I = newMain->arg_begin(), E = newMain->arg_end(),
              OI = oldMain->arg_begin(); I != E; ++I, ++OI) {
         I->setName(OI->getName());    // Copy argument names from oldMain
-        args.push_back(I);
+        args.push_back(&*I);
       }
 
       // Call the old main function and return its result
@@ -852,7 +847,8 @@ static void CleanupAndPrepareModules(BugDriver &BD, Module *&Test,
         // GetElementPtr *funcName, ulong 0, ulong 0
         std::vector<Constant*> GEPargs(2,
                      Constant::getNullValue(Type::getInt32Ty(F->getContext())));
-        Value *GEP = ConstantExpr::getGetElementPtr(funcName, GEPargs);
+        Value *GEP = ConstantExpr::getGetElementPtr(InitArray->getType(),
+                                                    funcName, GEPargs);
         std::vector<Value*> ResolverArgs;
         ResolverArgs.push_back(GEP);
 
@@ -908,9 +904,8 @@ static void CleanupAndPrepareModules(BugDriver &BD, Module *&Test,
 
           // Save the argument list.
           std::vector<Value*> Args;
-          for (Function::arg_iterator i = FuncWrapper->arg_begin(),
-                 e = FuncWrapper->arg_end(); i != e; ++i)
-            Args.push_back(i);
+          for (Argument &A : FuncWrapper->args())
+            Args.push_back(&A);
 
           // Pass on the arguments to the real function, return its result
           if (F->getReturnType()->isVoidTy()) {
@@ -975,7 +970,7 @@ static bool TestCodeGenerator(BugDriver &BD, Module *Test, Module *Safe,
   }
 
   if (BD.writeProgramToFile(SafeModuleBC.str(), SafeModuleFD, Safe)) {
-    errs() << "Error writing bitcode to `" << SafeModuleBC.str()
+    errs() << "Error writing bitcode to `" << SafeModuleBC
            << "'\nExiting.";
     exit(1);
   }
@@ -1050,7 +1045,7 @@ bool BugDriver::debugCodeGenerator(std::string *Error) {
   }
 
   if (writeProgramToFile(TestModuleBC.str(), TestModuleFD, ToCodeGen)) {
-    errs() << "Error writing bitcode to `" << TestModuleBC.str()
+    errs() << "Error writing bitcode to `" << TestModuleBC
            << "'\nExiting.";
     exit(1);
   }
@@ -1068,7 +1063,7 @@ bool BugDriver::debugCodeGenerator(std::string *Error) {
   }
 
   if (writeProgramToFile(SafeModuleBC.str(), SafeModuleFD, ToNotCodeGen)) {
-    errs() << "Error writing bitcode to `" << SafeModuleBC.str()
+    errs() << "Error writing bitcode to `" << SafeModuleBC
            << "'\nExiting.";
     exit(1);
   }
@@ -1079,24 +1074,24 @@ bool BugDriver::debugCodeGenerator(std::string *Error) {
 
   outs() << "You can reproduce the problem with the command line: \n";
   if (isExecutingJIT()) {
-    outs() << "  lli -load " << SharedObject << " " << TestModuleBC.str();
+    outs() << "  lli -load " << SharedObject << " " << TestModuleBC;
   } else {
-    outs() << "  llc " << TestModuleBC.str() << " -o " << TestModuleBC.str()
+    outs() << "  llc " << TestModuleBC << " -o " << TestModuleBC
            << ".s\n";
-    outs() << "  gcc " << SharedObject << " " << TestModuleBC.str()
-              << ".s -o " << TestModuleBC.str() << ".exe";
+    outs() << "  cc " << SharedObject << " " << TestModuleBC.str()
+              << ".s -o " << TestModuleBC << ".exe";
 #if defined (HAVE_LINK_R)
     outs() << " -Wl,-R.";
 #endif
     outs() << "\n";
-    outs() << "  " << TestModuleBC.str() << ".exe";
+    outs() << "  " << TestModuleBC << ".exe";
   }
   for (unsigned i = 0, e = InputArgv.size(); i != e; ++i)
     outs() << " " << InputArgv[i];
   outs() << '\n';
   outs() << "The shared object was created with:\n  llc -march=c "
          << SafeModuleBC.str() << " -o temporary.c\n"
-         << "  gcc -xc temporary.c -O2 -o " << SharedObject;
+         << "  cc -xc temporary.c -O2 -o " << SharedObject;
   if (TargetTriple.getArch() == Triple::sparc)
     outs() << " -G";              // Compile a shared library, `-G' for Sparc
   else

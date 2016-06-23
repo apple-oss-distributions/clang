@@ -25,6 +25,7 @@
 #include "llvm/MC/MCFixupKindInfo.h"
 #include "llvm/MC/MCMachObjectWriter.h"
 #include "llvm/MC/MCObjectWriter.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCSubtargetInfo.h"
@@ -34,6 +35,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MachO.h"
+#include "llvm/Support/TargetParser.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
 
@@ -155,18 +157,20 @@ void ARMAsmBackend::handleAssemblerFlag(MCAssemblerFlag Flag) {
 }
 } // end anonymous namespace
 
-static unsigned getRelaxedOpcode(unsigned Op) {
+unsigned ARMAsmBackend::getRelaxedOpcode(unsigned Op) const {
+  bool HasThumb2 = STI->getFeatureBits()[ARM::FeatureThumb2];
+
   switch (Op) {
   default:
     return Op;
   case ARM::tBcc:
-    return ARM::t2Bcc;
+    return HasThumb2 ? (unsigned)ARM::t2Bcc : Op;
   case ARM::tLDRpci:
-    return ARM::t2LDRpci;
+    return HasThumb2 ? (unsigned)ARM::t2LDRpci : Op;
   case ARM::tADR:
-    return ARM::t2ADR;
+    return HasThumb2 ? (unsigned)ARM::t2ADR : Op;
   case ARM::tB:
-    return ARM::t2B;
+    return HasThumb2 ? (unsigned)ARM::t2B : Op;
   case ARM::tCBZ:
     return ARM::tHINT;
   case ARM::tCBNZ:
@@ -180,9 +184,8 @@ bool ARMAsmBackend::mayNeedRelaxation(const MCInst &Inst) const {
   return false;
 }
 
-bool ARMAsmBackend::fixupNeedsRelaxation(const MCFixup &Fixup, uint64_t Value,
-                                         const MCRelaxableFragment *DF,
-                                         const MCAsmLayout &Layout) const {
+const char *ARMAsmBackend::reasonForFixupRelaxation(const MCFixup &Fixup,
+                                                    uint64_t Value) const {
   switch ((unsigned)Fixup.getKind()) {
   case ARM::fixup_arm_thumb_br: {
     // Relaxing tB to t2B. tB has a signed 12-bit displacement with the
@@ -192,7 +195,9 @@ bool ARMAsmBackend::fixupNeedsRelaxation(const MCFixup &Fixup, uint64_t Value,
     //
     // Relax if the value is too big for a (signed) i8.
     int64_t Offset = int64_t(Value) - 4;
-    return Offset > 2046 || Offset < -2048;
+    if (Offset > 2046 || Offset < -2048)
+      return "out of range pc-relative fixup value";
+    break;
   }
   case ARM::fixup_arm_thumb_bcc: {
     // Relaxing tBcc to t2Bcc. tBcc has a signed 9-bit displacement with the
@@ -202,23 +207,40 @@ bool ARMAsmBackend::fixupNeedsRelaxation(const MCFixup &Fixup, uint64_t Value,
     //
     // Relax if the value is too big for a (signed) i8.
     int64_t Offset = int64_t(Value) - 4;
-    return Offset > 254 || Offset < -256;
+    if (Offset > 254 || Offset < -256)
+      return "out of range pc-relative fixup value";
+    break;
   }
   case ARM::fixup_thumb_adr_pcrel_10:
   case ARM::fixup_arm_thumb_cp: {
     // If the immediate is negative, greater than 1020, or not a multiple
     // of four, the wide version of the instruction must be used.
     int64_t Offset = int64_t(Value) - 4;
-    return Offset > 1020 || Offset < 0 || Offset & 3;
+    if (Offset & 3)
+      return "misaligned pc-relative fixup value";
+    else if (Offset > 1020 || Offset < 0)
+      return "out of range pc-relative fixup value";
+    break;
   }
-  case ARM::fixup_arm_thumb_cb:
+  case ARM::fixup_arm_thumb_cb: {
     // If we have a Thumb CBZ or CBNZ instruction and its target is the next
     // instruction it is is actually out of range for the instruction.
     // It will be changed to a NOP.
     int64_t Offset = (Value & ~1);
-    return Offset == 2;
+    if (Offset == 2)
+      return "will be converted to nop";
+    break;
   }
-  llvm_unreachable("Unexpected fixup kind in fixupNeedsRelaxation()!");
+  default:
+    llvm_unreachable("Unexpected fixup kind in reasonForFixupRelaxation()!");
+  }
+  return nullptr;
+}
+
+bool ARMAsmBackend::fixupNeedsRelaxation(const MCFixup &Fixup, uint64_t Value,
+                                         const MCRelaxableFragment *DF,
+                                         const MCAsmLayout &Layout) const {
+  return reasonForFixupRelaxation(Fixup, Value);
 }
 
 void ARMAsmBackend::relaxInstruction(const MCInst &Inst, MCInst &Res) const {
@@ -238,9 +260,9 @@ void ARMAsmBackend::relaxInstruction(const MCInst &Inst, MCInst &Res) const {
   if ((Inst.getOpcode() == ARM::tCBZ || Inst.getOpcode() == ARM::tCBNZ) &&
       RelaxedOp == ARM::tHINT) {
     Res.setOpcode(RelaxedOp);
-    Res.addOperand(MCOperand::CreateImm(0));
-    Res.addOperand(MCOperand::CreateImm(14));
-    Res.addOperand(MCOperand::CreateReg(0));
+    Res.addOperand(MCOperand::createImm(0));
+    Res.addOperand(MCOperand::createImm(14));
+    Res.addOperand(MCOperand::createReg(0));
     return;
   }
 
@@ -260,9 +282,9 @@ bool ARMAsmBackend::writeNopData(uint64_t Count, MCObjectWriter *OW) const {
         hasNOP() ? Thumb2_16bitNopEncoding : Thumb1_16bitNopEncoding;
     uint64_t NumNops = Count / 2;
     for (uint64_t i = 0; i != NumNops; ++i)
-      OW->Write16(nopEncoding);
+      OW->write16(nopEncoding);
     if (Count & 1)
-      OW->Write8(0);
+      OW->write8(0);
     return true;
   }
   // ARM mode
@@ -270,21 +292,21 @@ bool ARMAsmBackend::writeNopData(uint64_t Count, MCObjectWriter *OW) const {
       hasNOP() ? ARMv6T2_NopEncoding : ARMv4_NopEncoding;
   uint64_t NumNops = Count / 4;
   for (uint64_t i = 0; i != NumNops; ++i)
-    OW->Write32(nopEncoding);
+    OW->write32(nopEncoding);
   // FIXME: should this function return false when unable to write exactly
   // 'Count' bytes with NOP encodings?
   switch (Count % 4) {
   default:
     break; // No leftover bytes to write
   case 1:
-    OW->Write8(0);
+    OW->write8(0);
     break;
   case 2:
-    OW->Write16(0);
+    OW->write16(0);
     break;
   case 3:
-    OW->Write16(0);
-    OW->Write8(0xa0);
+    OW->write16(0);
+    OW->write8(0xa0);
     break;
   }
 
@@ -317,9 +339,10 @@ static uint32_t joinHalfWords(uint32_t FirstHalf, uint32_t SecondHalf,
   return Value;
 }
 
-static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
-                                 bool IsPCRel, MCContext *Ctx,
-                                 bool IsLittleEndian) {
+unsigned ARMAsmBackend::adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
+                                         bool IsPCRel, MCContext *Ctx,
+                                         bool IsLittleEndian,
+                                         bool IsResolved) const {
   unsigned Kind = Fixup.getKind();
   switch (Kind) {
   default:
@@ -373,7 +396,7 @@ static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
       isAdd = false;
     }
     if (Ctx && Value >= 4096)
-      Ctx->FatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
+      Ctx->reportFatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
     Value |= isAdd << 23;
 
     // Same addressing mode as fixup_arm_pcrel_10,
@@ -383,8 +406,6 @@ static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
 
     return Value;
   }
-  case ARM::fixup_thumb_adr_pcrel_10:
-    return ((Value - 4) >> 2) & 0xff;
   case ARM::fixup_arm_adr_pcrel_12: {
     // ARM PC-relative values are offset by 8.
     Value -= 8;
@@ -394,7 +415,7 @@ static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
       opc = 2; // 0b0010
     }
     if (Ctx && ARM_AM::getSOImmVal(Value) == -1)
-      Ctx->FatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
+      Ctx->reportFatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
     // Encode the immediate and shift the opcode into place.
     return ARM_AM::getSOImmVal(Value) | (opc << 21);
   }
@@ -517,21 +538,38 @@ static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
                            ((uint16_t)imm10LBits) << 1);
     return joinHalfWords(FirstHalf, SecondHalf, IsLittleEndian);
   }
+  case ARM::fixup_thumb_adr_pcrel_10:
   case ARM::fixup_arm_thumb_cp:
-    // Offset by 4, and don't encode the low two bits. Two bytes of that
-    // 'off by 4' is implicitly handled by the half-word ordering of the
-    // Thumb encoding, so we only need to adjust by 2 here.
-    return ((Value - 2) >> 2) & 0xff;
+    // On CPUs supporting Thumb2, this will be relaxed to an ldr.w, otherwise we
+    // could have an error on our hands.
+    if (Ctx && !STI->getFeatureBits()[ARM::FeatureThumb2] && IsResolved) {
+      const char *FixupDiagnostic = reasonForFixupRelaxation(Fixup, Value);
+      if (FixupDiagnostic)
+        Ctx->reportFatalError(Fixup.getLoc(), FixupDiagnostic);
+    }
+    // Offset by 4, and don't encode the low two bits.
+    return ((Value - 4) >> 2) & 0xff;
   case ARM::fixup_arm_thumb_cb: {
     // Offset by 4 and don't encode the lower bit, which is always 0.
+    // FIXME: diagnose if no Thumb2
     uint32_t Binary = (Value - 4) >> 1;
     return ((Binary & 0x20) << 4) | ((Binary & 0x1f) << 3);
   }
   case ARM::fixup_arm_thumb_br:
     // Offset by 4 and don't encode the lower bit, which is always 0.
+    if (Ctx && !STI->getFeatureBits()[ARM::FeatureThumb2]) {
+      const char *FixupDiagnostic = reasonForFixupRelaxation(Fixup, Value);
+      if (FixupDiagnostic)
+        Ctx->reportFatalError(Fixup.getLoc(), FixupDiagnostic);
+    }
     return ((Value - 4) >> 1) & 0x7ff;
   case ARM::fixup_arm_thumb_bcc:
     // Offset by 4 and don't encode the lower bit, which is always 0.
+    if (Ctx && !STI->getFeatureBits()[ARM::FeatureThumb2]) {
+      const char *FixupDiagnostic = reasonForFixupRelaxation(Fixup, Value);
+      if (FixupDiagnostic)
+        Ctx->reportFatalError(Fixup.getLoc(), FixupDiagnostic);
+    }
     return ((Value - 4) >> 1) & 0xff;
   case ARM::fixup_arm_pcrel_10_unscaled: {
     Value = Value - 8; // ARM fixups offset by an additional word and don't
@@ -543,7 +581,7 @@ static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
     }
     // The value has the low 4 bits encoded in [3:0] and the high 4 in [11:8].
     if (Ctx && Value >= 256)
-      Ctx->FatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
+      Ctx->reportFatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
     Value = (Value & 0xf) | ((Value & 0xf0) << 4);
     return Value | (isAdd << 23);
   }
@@ -562,7 +600,7 @@ static unsigned adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
     // These values don't encode the low two bits since they're always zero.
     Value >>= 2;
     if (Ctx && Value >= 256)
-      Ctx->FatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
+      Ctx->reportFatalError(Fixup.getLoc(), "out of range pc-relative fixup value");
     Value |= isAdd << 23;
 
     // Same addressing mode as fixup_arm_pcrel_10, but with 16-bit halfwords
@@ -582,6 +620,7 @@ void ARMAsmBackend::processFixupValue(const MCAssembler &Asm,
                                       const MCValue &Target, uint64_t &Value,
                                       bool &IsResolved) {
   const MCSymbolRefExpr *A = Target.getSymA();
+  const MCSymbol *Sym = A ? &A->getSymbol() : nullptr;
   // Some fixups to thumb function symbols need the low bit (thumb bit)
   // twiddled.
   if ((unsigned)Fixup.getKind() != ARM::fixup_arm_ldst_pcrel_12 &&
@@ -590,19 +629,21 @@ void ARMAsmBackend::processFixupValue(const MCAssembler &Asm,
       (unsigned)Fixup.getKind() != ARM::fixup_thumb_adr_pcrel_10 &&
       (unsigned)Fixup.getKind() != ARM::fixup_t2_adr_pcrel_12 &&
       (unsigned)Fixup.getKind() != ARM::fixup_arm_thumb_cp) {
-    if (A) {
-      const MCSymbol &Sym = A->getSymbol().AliasedSymbol();
-      if (Asm.isThumbFunc(&Sym))
+    if (Sym) {
+      if (Asm.isThumbFunc(Sym))
         Value |= 1;
     }
   }
-  // For Thumb1 BL instruction, it is possible to be a long jump between
-  // the basic blocks of the same function.  Thus, we would like to resolve
-  // the offset when the destination has the same MCFragment.
-  if (A && (unsigned)Fixup.getKind() == ARM::fixup_arm_thumb_bl) {
-    const MCSymbol &Sym = A->getSymbol().AliasedSymbol();
-    const MCSymbolData &SymData = Asm.getSymbolData(Sym);
-    IsResolved = (SymData.getFragment() == DF);
+  if (IsResolved && (unsigned)Fixup.getKind() == ARM::fixup_arm_thumb_bl) {
+    assert(Sym && "How did we resolve this?");
+
+    // If the symbol is external the linker will handle it.
+    // FIXME: Should we handle it as an optimization?
+
+    // If the symbol is out of range, produce a relocation and hope the
+    // linker can handle it. GNU AS produces an error in this case.
+    if (Sym->isExternal() || Value >= 0x400004)
+      IsResolved = false;
   }
   // We must always generate a relocation for BL/BLX instructions if we have
   // a symbol to reference, as the linker relies on knowing the destination
@@ -617,7 +658,7 @@ void ARMAsmBackend::processFixupValue(const MCAssembler &Asm,
   // the instruction. This allows adjustFixupValue() to issue a diagnostic
   // if the value aren't invalid.
   (void)adjustFixupValue(Fixup, Value, false, &Asm.getContext(),
-                         IsLittleEndian);
+                         IsLittleEndian, IsResolved);
 }
 
 /// getFixupKindNumBytes - The number of bytes the fixup may change.
@@ -720,7 +761,8 @@ void ARMAsmBackend::applyFixup(const MCFixup &Fixup, char *Data,
                                unsigned DataSize, uint64_t Value,
                                bool IsPCRel) const {
   unsigned NumBytes = getFixupKindNumBytes(Fixup.getKind());
-  Value = adjustFixupValue(Fixup, Value, IsPCRel, nullptr, IsLittleEndian);
+  Value =
+      adjustFixupValue(Fixup, Value, IsPCRel, nullptr, IsLittleEndian, true);
   if (!Value)
     return; // Doesn't change encoding.
 
@@ -786,23 +828,10 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
   if (Instrs.empty())
     return 0;
   // Start off assuming CFA is at SP+0.
-  int CFARegister = 13;
+  int CFARegister = ARM::SP;
   int CFARegisterOffset = 0;
   // Mark savable registers as initially unsaved
-  const int UnsavedRegister = -1;
-  int RegOffsets[16];
-  for (int i = 0; i < 15; ++i) {
-    RegOffsets[i] = UnsavedRegister;
-  }
-  int FloatRegOffsets[8];
-  for (int i = 0; i < 8; ++i) {
-    FloatRegOffsets[i] = UnsavedRegister;
-  }
-  int AlignedFloatRegOffsets[8];
-  for (int i = 0; i < 8; ++i) {
-    AlignedFloatRegOffsets[i] = UnsavedRegister;
-  }
-  int CommonPreOffset = 0;
+  DenseMap<unsigned, int> RegOffsets;
   int FloatRegCount = 0;
   // Process each .cfi directive and build up compact unwind info.
   for (size_t i = 0, e = Instrs.size(); i != e; ++i) {
@@ -811,75 +840,27 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
     switch (Inst.getOperation()) {
     case MCCFIInstruction::OpDefCfa: // DW_CFA_def_cfa
       CFARegisterOffset = -Inst.getOffset();
-      CFARegister = Inst.getRegister();
+      CFARegister = MRI.getLLVMRegNum(Inst.getRegister(), true);
       break;
     case MCCFIInstruction::OpDefCfaOffset: // DW_CFA_def_cfa_offset
       CFARegisterOffset = -Inst.getOffset();
       break;
     case MCCFIInstruction::OpDefCfaRegister: // DW_CFA_def_cfa_register
-      CFARegister = Inst.getRegister();
+      CFARegister = MRI.getLLVMRegNum(Inst.getRegister(), true);
       break;
     case MCCFIInstruction::OpOffset: // DW_CFA_offset
-      Reg = Inst.getRegister();
-      if ((Reg >= 4) && (Reg <= 15)) {
-        if (RegOffsets[Reg] != UnsavedRegister) {
-          DEBUG_WITH_TYPE("compact-unwind",
-                          llvm::dbgs() << ".cfi_offset used twice on register="
-                                       << Reg << "\n");
-          return CU::UNWIND_ARM_MODE_DWARF;
-        }
+      Reg = MRI.getLLVMRegNum(Inst.getRegister(), true);
+      if (ARMMCRegisterClasses[ARM::GPRRegClassID].contains(Reg))
         RegOffsets[Reg] = Inst.getOffset();
-      } else if ((Reg >= 264) && (Reg <= 271)) {
-        if (FloatRegOffsets[Reg - 264] != UnsavedRegister) {
-          DEBUG_WITH_TYPE("compact-unwind",
-                          llvm::dbgs() << ".cfi_offset used twice on register="
-                                       << Reg << "\n");
-          return CU::UNWIND_ARM_MODE_DWARF;
-        }
-        FloatRegOffsets[Reg - 264] = Inst.getOffset();
+      else if (ARMMCRegisterClasses[ARM::DPRRegClassID].contains(Reg)) {
+        RegOffsets[Reg] = Inst.getOffset();
         ++FloatRegCount;
       } else {
-        DEBUG_WITH_TYPE(
-            "compact-unwind",
-            llvm::dbgs() << ".cfi_offset on unknown register=" << Reg << "\n");
-        return CU::UNWIND_ARM_MODE_DWARF;
-      }
-      break;
-    case MCCFIInstruction::OpRealignedOffset:
-      Reg = Inst.getRegister();
-      // Compact unwind only support 16-byte alignment.
-      if (Inst.getAlign() != 16) {
-        DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                              << "register=" << Reg
-                                              << " is not 16-byte aligned\n");
-        return CU::UNWIND_ARM_MODE_DWARF;
-      }
-      // All alignments must use same pre-offset.
-      if (CommonPreOffset && (Inst.getOffset() != CommonPreOffset)) {
         DEBUG_WITH_TYPE("compact-unwind",
-                        llvm::dbgs()
-                            << "register=" << Reg
-                            << " does not have same pre-offset as others\n");
+                        llvm::dbgs() << ".cfi_offset on unknown register="
+                                     << Inst.getRegister() << "\n");
         return CU::UNWIND_ARM_MODE_DWARF;
       }
-      CommonPreOffset = Inst.getOffset();
-      if ((Reg >= 264) && (Reg <= 271)) {
-        if (AlignedFloatRegOffsets[Reg - 264] != UnsavedRegister) {
-          DEBUG_WITH_TYPE("compact-unwind",
-                          llvm::dbgs()
-                              << ".cfi_aligned_offset used twice on register="
-                              << Reg << "\n");
-          return CU::UNWIND_ARM_MODE_DWARF;
-        }
-      } else {
-        DEBUG_WITH_TYPE("compact-unwind",
-                        llvm::dbgs()
-                            << ".cfi_aligned_offset on unknown register=" << Reg
-                            << "\n");
-        return CU::UNWIND_ARM_MODE_DWARF;
-      }
-      AlignedFloatRegOffsets[Reg - 264] = Inst.getOffset2();
-      ++FloatRegCount;
       break;
     case MCCFIInstruction::OpRelOffset: // DW_CFA_advance_loc
       // Ignore
@@ -897,23 +878,18 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
   }
 
   // If no frame set up, return no unwind info.
-  if ((CFARegister == 13) && (CFARegisterOffset == 0))
+  if ((CFARegister == ARM::SP) && (CFARegisterOffset == 0))
     return 0;
 
   // Verify standard frame (lr/r7) was used.
-  if (CFARegister != 7) {
+  if (CFARegister != ARM::R7) {
     DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs() << "frame register is "
                                                    << CFARegister
                                                    << " instead of r7\n");
     return CU::UNWIND_ARM_MODE_DWARF;
   }
-  if (RegOffsets[14] != RegOffsets[7] + 4) {
-    DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                          << "LR and r7 not saved together\n");
-    return CU::UNWIND_ARM_MODE_DWARF;
-  }
   int StackAdjust = CFARegisterOffset - 8;
-  if (RegOffsets[14] != (-4 - StackAdjust)) {
+  if (RegOffsets.lookup(ARM::LR) != (-4 - StackAdjust)) {
     DEBUG_WITH_TYPE("compact-unwind",
                     llvm::dbgs()
                         << "LR not saved as standard frame, StackAdjust="
@@ -922,7 +898,7 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
                         << ", lr save at offset=" << RegOffsets[14] << "\n");
     return CU::UNWIND_ARM_MODE_DWARF;
   }
-  if (RegOffsets[7] != (-8 - StackAdjust)) {
+  if (RegOffsets.lookup(ARM::R7) != (-8 - StackAdjust)) {
     DEBUG_WITH_TYPE("compact-unwind",
                     llvm::dbgs() << "r7 not saved as standard frame\n");
     return CU::UNWIND_ARM_MODE_DWARF;
@@ -950,107 +926,33 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
   }
 
   // If r6 is saved, it must be right below r7.
-  int CurOffset = -12 - StackAdjust;
-  if (RegOffsets[6] != UnsavedRegister) {
-    if (RegOffsets[6] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r6 saved at " << RegOffsets[6]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_FIRST_PUSH_R6;
-    CurOffset -= 4;
-  }
+  static struct {
+    unsigned Reg;
+    unsigned Encoding;
+  } GPRCSRegs[] = {{ARM::R6, CU::UNWIND_ARM_FRAME_FIRST_PUSH_R6},
+                   {ARM::R5, CU::UNWIND_ARM_FRAME_FIRST_PUSH_R5},
+                   {ARM::R4, CU::UNWIND_ARM_FRAME_FIRST_PUSH_R4},
+                   {ARM::R12, CU::UNWIND_ARM_FRAME_SECOND_PUSH_R12},
+                   {ARM::R11, CU::UNWIND_ARM_FRAME_SECOND_PUSH_R11},
+                   {ARM::R10, CU::UNWIND_ARM_FRAME_SECOND_PUSH_R10},
+                   {ARM::R9, CU::UNWIND_ARM_FRAME_SECOND_PUSH_R9},
+                   {ARM::R8, CU::UNWIND_ARM_FRAME_SECOND_PUSH_R8}};
 
-  // If r5 is saved, it must be right below previous.
-  if (RegOffsets[5] != UnsavedRegister) {
-    if (RegOffsets[5] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r5 saved at " << RegOffsets[5]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_FIRST_PUSH_R5;
-    CurOffset -= 4;
-  }
+  int CurOffset = -8 - StackAdjust;
+  for (auto CSReg : GPRCSRegs) {
+    auto Offset = RegOffsets.find(CSReg.Reg);
+    if (Offset == RegOffsets.end())
+      continue;
 
-  // If r4 is saved, it must be right below previous.
-  if (RegOffsets[4] != UnsavedRegister) {
-    if (RegOffsets[4] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r4 saved at " << RegOffsets[4]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
+    int RegOffset = Offset->second;
+    if (RegOffset != CurOffset - 4) {
+      DEBUG_WITH_TYPE("compact-unwind",
+                      llvm::dbgs() << MRI.getName(CSReg.Reg) << " saved at "
+                                   << RegOffset << " but only supported at "
+                                   << CurOffset << "\n");
       return CU::UNWIND_ARM_MODE_DWARF;
     }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_FIRST_PUSH_R4;
-    CurOffset -= 4;
-  }
-
-  // If r12 is saved, it must be right below previous.
-  if (RegOffsets[12] != UnsavedRegister) {
-    if (RegOffsets[12] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r12 saved at " << RegOffsets[12]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_SECOND_PUSH_R12;
-    CurOffset -= 4;
-  }
-
-  // If r11 is saved, it must be right below previous.
-  if (RegOffsets[11] != UnsavedRegister) {
-    if (RegOffsets[11] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r11 saved at " << RegOffsets[11]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_SECOND_PUSH_R11;
-    CurOffset -= 4;
-  }
-
-  // If r10 is saved, it must be right below previous.
-  if (RegOffsets[10] != UnsavedRegister) {
-    if (RegOffsets[10] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r10 saved at " << RegOffsets[10]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_SECOND_PUSH_R10;
-    CurOffset -= 4;
-  }
-
-  // If r9 is saved, it must be right below previous.
-  if (RegOffsets[9] != UnsavedRegister) {
-    if (RegOffsets[9] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r9 saved at " << RegOffsets[9]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_SECOND_PUSH_R9;
-    CurOffset -= 4;
-  }
-
-  // If r8 is saved, it must be right below previous.
-  if (RegOffsets[8] != UnsavedRegister) {
-    if (RegOffsets[8] != CurOffset) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "r8 saved at " << RegOffsets[8]
-                                            << " but only supported at "
-                                            << CurOffset << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    CompactUnwindEncoding |= CU::UNWIND_ARM_FRAME_SECOND_PUSH_R8;
+    CompactUnwindEncoding |= CSReg.Encoding;
     CurOffset -= 4;
   }
 
@@ -1062,250 +964,116 @@ uint32_t ARMAsmBackendDarwin::generateCompactUnwindEncoding(
   CompactUnwindEncoding &= ~CU::UNWIND_ARM_MODE_MASK;
   CompactUnwindEncoding |= CU::UNWIND_ARM_MODE_FRAME_D;
 
-  // Encode commmon patterns of D-register saving.
-  CurOffset += 4;
-  switch (FloatRegCount) {
-  case 1:
-    // vpush {d8}
-    if (FloatRegOffsets[0] != CurOffset - 8) {
-      DEBUG_WITH_TYPE("compact-unwind",
-                      llvm::dbgs() << "one D-reg saved, but D8 saved at "
-                                   << FloatRegOffsets[0] << " expected at "
-                                   << CurOffset - 8 << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000000;
-  case 2:
-    // vpush {d10}
-    // vpush {d8}
-    if (FloatRegOffsets[2] != CurOffset - 8 ||
-        FloatRegOffsets[0] != CurOffset - 16) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "two D-regs saved, but not "
-                                               "D8 at offset=" << CurOffset - 16
-                                            << " and "
-                                               "D10 at offset=" << CurOffset - 8
-                                            << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000100;
-  case 3:
-    // vpush {d12}
-    // vpush {d10}
-    // vpush {d8}
-    if (FloatRegOffsets[4] != CurOffset - 8 ||
-        FloatRegOffsets[2] != CurOffset - 16 ||
-        FloatRegOffsets[0] != CurOffset - 24) {
-      DEBUG_WITH_TYPE("compact-unwind",
-                      llvm::dbgs() << "three D-regs saved, but not "
-                                      "D8 at offset=" << CurOffset - 24
-                                   << ", "
-                                      "D10 at offset=" << CurOffset - 16
-                                   << ",  and "
-                                      "D12 at offset=" << CurOffset - 8
-                                   << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000200;
-  case 4:
-    // vpush {d14}
-    // vpush {d12}
-    // vpush {d10}
-    // vpush {d8}
-    if (FloatRegOffsets[6] != CurOffset - 8 ||
-        FloatRegOffsets[4] != CurOffset - 16 ||
-        FloatRegOffsets[2] != CurOffset - 24 ||
-        FloatRegOffsets[0] != CurOffset - 32) {
-      DEBUG_WITH_TYPE("compact-unwind",
-                      llvm::dbgs() << "four D-regs saved, but not "
-                                      "D8 at offset=" << CurOffset - 32
-                                   << ", "
-                                      "D10 at offset=" << CurOffset - 24
-                                   << ", "
-                                      "D12 at offset=" << CurOffset - 16
-                                   << ",  and "
-                                      "D14 at offset=" << CurOffset - 8
-                                   << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000300;
-  case 5:
-    // vpush {d14}
-    // vpush {d12}
-    // vst	{d8, d9, d10}
-    if (FloatRegOffsets[6] != CurOffset - 8 ||
-        FloatRegOffsets[4] != CurOffset - 16) {
-      DEBUG_WITH_TYPE("compact-unwind",
-                      llvm::dbgs() << "five D-regs saved, but not "
-                                      "D12 at offset=" << CurOffset - 8
-                                   << " and "
-                                      "D14 at offset=" << CurOffset - 16
-                                   << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    if (CommonPreOffset != CurOffset - 40) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "five D-regs saved, but aligned "
-                                               "offset is not "
-                                            << CurOffset - 40 << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    if (AlignedFloatRegOffsets[2] != 16 || AlignedFloatRegOffsets[1] != 8 ||
-        AlignedFloatRegOffsets[0] != 0) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "five D-regs saved, but not "
-                                               "D8 at aligned offset=0, "
-                                               "D9 at aligned offset=8, and "
-                                               "D10 at aligned offset=16\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000400;
-  case 6:
-    // vpush {d14}
-    // vst	{d8, d9, d10, d11}
-    // vst	{d12}
-    if (FloatRegOffsets[6] != CurOffset - 8) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "six D-regs saved, but not "
-                                               "D14 at offset=" << CurOffset - 8
-                                            << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    if (CommonPreOffset != CurOffset - 48) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "six D-regs saved, but aligned "
-                                               "offset is not "
-                                            << CurOffset - 48 << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    if (AlignedFloatRegOffsets[4] != 32 || AlignedFloatRegOffsets[3] != 24 ||
-        AlignedFloatRegOffsets[2] != 16 || AlignedFloatRegOffsets[1] != 8 ||
-        AlignedFloatRegOffsets[0] != 0) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "six D-regs saved, but not "
-                                               "D8 at aligned offset=0, "
-                                               "D9 at aligned offset=8, "
-                                               "D10 at aligned offset=16, "
-                                               "D11 at aligned offset=24, and "
-                                               "D12 at aligned offset=32\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000500;
-  case 7:
-    // vst	{d8, d9, d10, d11}
-    // vst	{d12, d13, d14}
-    if (CommonPreOffset != CurOffset - 56) {
-      DEBUG_WITH_TYPE("compact-unwind",
-                      llvm::dbgs() << "seven D-regs saved, but aligned "
-                                      "offset is not " << CurOffset - 56
-                                   << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    if (AlignedFloatRegOffsets[6] != 48 || AlignedFloatRegOffsets[5] != 40 ||
-        AlignedFloatRegOffsets[4] != 32 || AlignedFloatRegOffsets[3] != 24 ||
-        AlignedFloatRegOffsets[2] != 16 || AlignedFloatRegOffsets[1] != 8 ||
-        AlignedFloatRegOffsets[0] != 0) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "seven D-regs saved, but not "
-                                               "D8 at aligned offset=0, "
-                                               "D9 at aligned offset=8, "
-                                               "D10 at aligned offset=16, "
-                                               "D11 at aligned offset=24, "
-                                               "D12 at aligned offset=32, "
-                                               "D13 at aligned offset=40, and "
-                                               "D14 at aligned offset=48\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000600;
-  case 8:
-    // vst	{d8, d9, d10, d11}
-    // vst	{d12, d13, d14, d15}
-    if (CommonPreOffset != CurOffset - 64) {
-      DEBUG_WITH_TYPE("compact-unwind",
-                      llvm::dbgs() << "eight D-regs saved, but aligned "
-                                      "offset is not " << CurOffset - 64
-                                   << "\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    if (AlignedFloatRegOffsets[7] != 56 || AlignedFloatRegOffsets[6] != 48 ||
-        AlignedFloatRegOffsets[5] != 40 || AlignedFloatRegOffsets[4] != 32 ||
-        AlignedFloatRegOffsets[3] != 24 || AlignedFloatRegOffsets[2] != 16 ||
-        AlignedFloatRegOffsets[1] != 8 || AlignedFloatRegOffsets[0] != 0) {
-      DEBUG_WITH_TYPE("compact-unwind", llvm::dbgs()
-                                            << "eight D-regs saved, but not "
-                                               "D8 at aligned offset=0, "
-                                               "D9 at aligned offset=8, "
-                                               "D10 at aligned offset=16, "
-                                               "D11 at aligned offset=24, "
-                                               "D12 at aligned offset=32, "
-                                               "D13 at aligned offset=40, "
-                                               "D14 at aligned offset=48, and"
-                                               "D15 at aligned offset=56\n");
-      return CU::UNWIND_ARM_MODE_DWARF;
-    }
-    return CompactUnwindEncoding | 0x00000700;
-  default:
+  // FIXME: supporting more than 4 saved D-registers compactly would be trivial,
+  // but needs coordination with the linker and libunwind.
+  if (FloatRegCount > 4) {
     DEBUG_WITH_TYPE("compact-unwind",
                     llvm::dbgs() << "unsupported number of D registers saved ("
                                  << FloatRegCount << ")\n");
-    return CU::UNWIND_ARM_MODE_DWARF;
+      return CU::UNWIND_ARM_MODE_DWARF;
   }
-  return CompactUnwindEncoding;
+
+  // Floating point registers must either be saved sequentially, or we defer to
+  // DWARF. No gaps allowed here so check that each saved d-register is
+  // precisely where it should be.
+  static unsigned FPRCSRegs[] = { ARM::D8, ARM::D10, ARM::D12, ARM::D14 };
+  for (int Idx = FloatRegCount - 1; Idx >= 0; --Idx) {
+    auto Offset = RegOffsets.find(FPRCSRegs[Idx]);
+    if (Offset == RegOffsets.end()) {
+      DEBUG_WITH_TYPE("compact-unwind",
+                      llvm::dbgs() << FloatRegCount << " D-regs saved, but "
+                                   << MRI.getName(FPRCSRegs[Idx])
+                                   << " not saved\n");
+      return CU::UNWIND_ARM_MODE_DWARF;
+    } else if (Offset->second != CurOffset - 8) {
+      DEBUG_WITH_TYPE("compact-unwind",
+                      llvm::dbgs() << FloatRegCount << " D-regs saved, but "
+                                   << MRI.getName(FPRCSRegs[Idx])
+                                   << " saved at " << Offset->second
+                                   << ", expected at " << CurOffset - 8
+                                   << "\n");
+      return CU::UNWIND_ARM_MODE_DWARF;
+    }
+    CurOffset -= 8;
+  }
+
+  return CompactUnwindEncoding | ((FloatRegCount - 1) << 8);
+}
+
+static MachO::CPUSubTypeARM getMachOSubTypeFromArch(StringRef Arch) {
+  unsigned AK = ARM::parseArch(Arch);
+  switch (AK) {
+  default:
+    return MachO::CPU_SUBTYPE_ARM_V7;
+  case ARM::AK_ARMV4T:
+    return MachO::CPU_SUBTYPE_ARM_V4T;
+  case ARM::AK_ARMV6:
+  case ARM::AK_ARMV6K:
+    return MachO::CPU_SUBTYPE_ARM_V6;
+  case ARM::AK_ARMV5:
+    return MachO::CPU_SUBTYPE_ARM_V5;
+  case ARM::AK_ARMV5T:
+  case ARM::AK_ARMV5E:
+  case ARM::AK_ARMV5TE:
+  case ARM::AK_ARMV5TEJ:
+    return MachO::CPU_SUBTYPE_ARM_V5TEJ;
+  case ARM::AK_ARMV7:
+    return MachO::CPU_SUBTYPE_ARM_V7;
+  case ARM::AK_ARMV7S:
+    return MachO::CPU_SUBTYPE_ARM_V7S;
+  case ARM::AK_ARMV7K:
+    return MachO::CPU_SUBTYPE_ARM_V7K;
+  case ARM::AK_ARMV6M:
+  case ARM::AK_ARMV6SM:
+    return MachO::CPU_SUBTYPE_ARM_V6M;
+  case ARM::AK_ARMV7M:
+    return MachO::CPU_SUBTYPE_ARM_V7M;
+  case ARM::AK_ARMV7EM:
+    return MachO::CPU_SUBTYPE_ARM_V7EM;
+  }
 }
 
 MCAsmBackend *llvm::createARMAsmBackend(const Target &T,
-                                        const MCRegisterInfo &MRI, StringRef TT,
-                                        StringRef CPU, bool isLittle) {
-  Triple TheTriple(TT);
-
+                                        const MCRegisterInfo &MRI,
+                                        const Triple &TheTriple, StringRef CPU,
+                                        bool isLittle) {
   switch (TheTriple.getObjectFormat()) {
   default:
     llvm_unreachable("unsupported object format");
   case Triple::MachO: {
-    MachO::CPUSubTypeARM CS =
-        StringSwitch<MachO::CPUSubTypeARM>(TheTriple.getArchName())
-            .Cases("armv4t", "thumbv4t", MachO::CPU_SUBTYPE_ARM_V4T)
-            .Cases("armv5e", "thumbv5e", MachO::CPU_SUBTYPE_ARM_V5TEJ)
-            .Cases("armv6", "thumbv6", MachO::CPU_SUBTYPE_ARM_V6)
-            .Cases("armv6m", "thumbv6m", MachO::CPU_SUBTYPE_ARM_V6M)
-            .Cases("armv7em", "thumbv7em", MachO::CPU_SUBTYPE_ARM_V7EM)
-            .Cases("armv7k", "thumbv7k", MachO::CPU_SUBTYPE_ARM_V7K)
-            .Cases("armv7m", "thumbv7m", MachO::CPU_SUBTYPE_ARM_V7M)
-            .Cases("armv7s", "thumbv7s", MachO::CPU_SUBTYPE_ARM_V7S)
-            .Default(MachO::CPU_SUBTYPE_ARM_V7);
-
-    return new ARMAsmBackendDarwin(T, TT, CS);
+    MachO::CPUSubTypeARM CS = getMachOSubTypeFromArch(TheTriple.getArchName());
+    return new ARMAsmBackendDarwin(T, TheTriple, MRI, CS);
   }
   case Triple::COFF:
     assert(TheTriple.isOSWindows() && "non-Windows ARM COFF is not supported");
-    return new ARMAsmBackendWinCOFF(T, TT);
+    return new ARMAsmBackendWinCOFF(T, TheTriple);
   case Triple::ELF:
     assert(TheTriple.isOSBinFormatELF() && "using ELF for non-ELF target");
-    uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(Triple(TT).getOS());
-    return new ARMAsmBackendELF(T, TT, OSABI, isLittle);
+    uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(TheTriple.getOS());
+    return new ARMAsmBackendELF(T, TheTriple, OSABI, isLittle);
   }
 }
 
 MCAsmBackend *llvm::createARMLEAsmBackend(const Target &T,
                                           const MCRegisterInfo &MRI,
-                                          StringRef TT, StringRef CPU) {
+                                          const Triple &TT, StringRef CPU) {
   return createARMAsmBackend(T, MRI, TT, CPU, true);
 }
 
 MCAsmBackend *llvm::createARMBEAsmBackend(const Target &T,
                                           const MCRegisterInfo &MRI,
-                                          StringRef TT, StringRef CPU) {
+                                          const Triple &TT, StringRef CPU) {
   return createARMAsmBackend(T, MRI, TT, CPU, false);
 }
 
 MCAsmBackend *llvm::createThumbLEAsmBackend(const Target &T,
                                             const MCRegisterInfo &MRI,
-                                            StringRef TT, StringRef CPU) {
+                                            const Triple &TT, StringRef CPU) {
   return createARMAsmBackend(T, MRI, TT, CPU, true);
 }
 
 MCAsmBackend *llvm::createThumbBEAsmBackend(const Target &T,
                                             const MCRegisterInfo &MRI,
-                                            StringRef TT, StringRef CPU) {
+                                            const Triple &TT, StringRef CPU) {
   return createARMAsmBackend(T, MRI, TT, CPU, false);
 }

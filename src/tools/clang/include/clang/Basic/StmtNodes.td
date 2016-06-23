@@ -48,6 +48,10 @@ def CXXCatchStmt : Stmt;
 def CXXTryStmt : Stmt;
 def CXXForRangeStmt : Stmt;
 
+// C++ Coroutines TS statements
+def CoroutineBodyStmt : Stmt;
+def CoreturnStmt : Stmt;
+
 // Expressions
 def Expr : Stmt<1>;
 def PredefinedExpr : DStmt<Expr>;
@@ -62,6 +66,7 @@ def UnaryOperator : DStmt<Expr>;
 def OffsetOfExpr : DStmt<Expr>;
 def UnaryExprOrTypeTraitExpr : DStmt<Expr>;
 def ArraySubscriptExpr : DStmt<Expr>;
+def OMPArraySectionExpr : DStmt<Expr>;
 def CallExpr : DStmt<Expr>;
 def MemberExpr : DStmt<Expr>;
 def CastExpr : DStmt<Expr, 1>;
@@ -77,7 +82,9 @@ def CompoundLiteralExpr : DStmt<Expr>;
 def ExtVectorElementExpr : DStmt<Expr>;
 def InitListExpr : DStmt<Expr>;
 def DesignatedInitExpr : DStmt<Expr>;
+def DesignatedInitUpdateExpr : DStmt<Expr>;
 def ImplicitValueInitExpr : DStmt<Expr>;
+def NoInitExpr : DStmt<Expr>;
 def ParenListExpr : DStmt<Expr>;
 def VAArgExpr : DStmt<Expr>;
 def GenericSelectionExpr : DStmt<Expr>;
@@ -136,6 +143,10 @@ def FunctionParmPackExpr : DStmt<Expr>;
 def MaterializeTemporaryExpr : DStmt<Expr>;
 def LambdaExpr : DStmt<Expr>;
 def CXXFoldExpr : DStmt<Expr>;
+
+// C++ Coroutines TS expressions
+def CoawaitExpr : DStmt<Expr>;
+def CoyieldExpr : DStmt<Expr>;
 
 // Obj-C Expressions.
 def ObjCStringLiteral : DStmt<Expr>;
@@ -197,8 +208,12 @@ def OMPTaskDirective : DStmt<OMPExecutableDirective>;
 def OMPTaskyieldDirective : DStmt<OMPExecutableDirective>;
 def OMPBarrierDirective : DStmt<OMPExecutableDirective>;
 def OMPTaskwaitDirective : DStmt<OMPExecutableDirective>;
+def OMPTaskgroupDirective : DStmt<OMPExecutableDirective>;
 def OMPFlushDirective : DStmt<OMPExecutableDirective>;
 def OMPOrderedDirective : DStmt<OMPExecutableDirective>;
 def OMPAtomicDirective : DStmt<OMPExecutableDirective>;
 def OMPTargetDirective : DStmt<OMPExecutableDirective>;
+def OMPTargetDataDirective : DStmt<OMPExecutableDirective>;
 def OMPTeamsDirective : DStmt<OMPExecutableDirective>;
+def OMPCancellationPointDirective : DStmt<OMPExecutableDirective>;
+def OMPCancelDirective : DStmt<OMPExecutableDirective>;

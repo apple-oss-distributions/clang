@@ -41,7 +41,6 @@ set(LIBS
   clangAST
   clangAPINotes
   clangBasic
-  clangCodeGen
   clangFrontend
   clangIndex
   clangLex
@@ -93,6 +92,7 @@ add_clang_library(libclang ${ENABLE_SHARED} ${ENABLE_STATIC}
   ${LIBS}
 
   LINK_COMPONENTS
+  ${LLVM_TARGETS_TO_BUILD}
   Core
   Support
   )
@@ -103,21 +103,38 @@ if(ENABLE_SHARED)
       PROPERTIES
       VERSION ${LIBCLANG_LIBRARY_VERSION}
       DEFINE_SYMBOL _CINDEX_LIB_)
+  elseif(APPLE)
+    set(LIBCLANG_LINK_FLAGS " -Wl,-compatibility_version -Wl,1")
+    set(LIBCLANG_LINK_FLAGS "${LIBCLANG_LINK_FLAGS} -Wl,-current_version -Wl,${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}")
+
+    set_property(TARGET libclang APPEND_STRING PROPERTY
+                 LINK_FLAGS ${LIBCLANG_LINK_FLAGS})
   else()
     set_target_properties(libclang
       PROPERTIES
       VERSION ${LIBCLANG_LIBRARY_VERSION}
       DEFINE_SYMBOL _CINDEX_LIB_)
   endif()
+endif()
 
-  if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    set(LIBCLANG_LINK_FLAGS " -Wl,-compatibility_version -Wl,1")
-    if (DEFINED ${LLVM_SUBMIT_VERSION})
-      set(LIBCLANG_LINK_FLAGS
-        "${LIBCLANG_LINK_FLAGS} -Wl,-current_version -Wl,${LLVM_SUBMIT_VERSION}.${LLVM_SUBMIT_SUBVERSION}")
-    endif()
+if(INTERNAL_INSTALL_PREFIX)
+  set(LIBCLANG_HEADERS_INSTALL_DESTINATION "${INTERNAL_INSTALL_PREFIX}/include")
+else()
+  set(LIBCLANG_HEADERS_INSTALL_DESTINATION include)
+endif()
 
-    set_property(TARGET libclang APPEND_STRING PROPERTY
-                 LINK_FLAGS ${LIBCLANG_LINK_FLAGS})
-  endif()
+install(DIRECTORY ../../include/clang-c
+  COMPONENT libclang-headers
+  DESTINATION "${LIBCLANG_HEADERS_INSTALL_DESTINATION}"
+  FILES_MATCHING
+  PATTERN "*.h"
+  PATTERN ".svn" EXCLUDE
+  )
+
+if (NOT CMAKE_CONFIGURATION_TYPES) # don't add this for IDE's.
+  add_custom_target(install-libclang-headers
+    DEPENDS
+    COMMAND "${CMAKE_COMMAND}"
+            -DCMAKE_INSTALL_COMPONENT=libclang-headers
+            -P "${CMAKE_BINARY_DIR}/cmake_install.cmake")
 endif()

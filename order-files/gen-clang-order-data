@@ -159,6 +159,7 @@ def get_cc1_command_for_args(cmd, cwd, env):
             ln.startswith('Configured with:') or
             ln.startswith('Target:') or
             ln.startswith('Thread model:') or
+            ln.startswith('InstalledDir:') or
             ' version ' in ln):
             continue
         cc_commands.append(ln)
@@ -257,7 +258,8 @@ def execute_test_case(test_case, opts):
 
     # Create a scrubbed environment to execute the tests in.
     test_env = {
-        'PATH' : os.environ['PATH'] }
+        'PATH'    : os.environ['PATH'],
+        'SDKROOT' : os.environ['SDKROOT'] }
 
     # Gather data on the driver invocation.
     if opts.sample_driver and test_driver:

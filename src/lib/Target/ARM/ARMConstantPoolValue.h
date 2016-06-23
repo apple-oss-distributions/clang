@@ -39,8 +39,7 @@ namespace ARMCP {
   enum ARMCPModifier {
     no_modifier,
     TLSGD,
-    GOT,
-    GOTOFF,
+    GOT_PREL,
     GOTTPOFF,
     TPOFF
   };
@@ -86,7 +85,7 @@ protected:
   }
 
 public:
-  virtual ~ARMConstantPoolValue();
+  ~ARMConstantPoolValue() override;
 
   ARMCP::ARMCPModifier getModifier() const { return Modifier; }
   const char *getModifierText() const;

@@ -12,11 +12,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/GCMetadata.h"
+#include "llvm/CodeGen/GCStrategy.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
-#include "llvm/CodeGen/GCStrategy.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -142,7 +142,7 @@ static bool CouldBecomeSafePoint(Instruction *I) {
   // llvm.gcroot is safe because it doesn't do anything at runtime.
   if (CallInst *CI = dyn_cast<CallInst>(I))
     if (Function *F = CI->getCalledFunction())
-      if (unsigned IID = F->getIntrinsicID())
+      if (Intrinsic::ID IID = F->getIntrinsicID())
         if (IID == Intrinsic::gcroot)
           return false;
 
@@ -158,7 +158,7 @@ static bool InsertRootInitializers(Function &F, AllocaInst **Roots,
 
   // Search for initializers in the initial BB.
   SmallPtrSet<AllocaInst *, 16> InitedRoots;
-  for (; !CouldBecomeSafePoint(IP); ++IP)
+  for (; !CouldBecomeSafePoint(&*IP); ++IP)
     if (StoreInst *SI = dyn_cast<StoreInst>(IP))
       if (AllocaInst *AI =
               dyn_cast<AllocaInst>(SI->getOperand(1)->stripPointerCasts()))
@@ -272,7 +272,7 @@ void GCMachineCodeAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
 MCSymbol *GCMachineCodeAnalysis::InsertLabel(MachineBasicBlock &MBB,
                                              MachineBasicBlock::iterator MI,
                                              DebugLoc DL) const {
-  MCSymbol *Label = MBB.getParent()->getContext().CreateTempSymbol();
+  MCSymbol *Label = MBB.getParent()->getContext().createTempSymbol();
   BuildMI(MBB, MI, DL, TII->get(TargetOpcode::GC_LABEL)).addSym(Label);
   return Label;
 }
@@ -320,7 +320,9 @@ void GCMachineCodeAnalysis::FindStackOffsets(MachineFunction &MF) {
     if (MF.getFrameInfo()->isDeadObjectIndex(RI->Num)) {
       RI = FI->removeStackRoot(RI);
     } else {
-      RI->StackOffset = TFI->getFrameIndexOffset(MF, RI->Num);
+      unsigned FrameReg; // FIXME: surely GCRoot ought to store the
+                         // register that the offset is from?
+      RI->StackOffset = TFI->getFrameIndexReference(MF, RI->Num, FrameReg);
       ++RI;
     }
   }
@@ -332,19 +334,22 @@ bool GCMachineCodeAnalysis::runOnMachineFunction(MachineFunction &MF) {
     return false;
 
   FI = &getAnalysis<GCModuleInfo>().getFunctionInfo(*MF.getFunction());
-  if (!FI->getStrategy().needsSafePoints())
-    return false;
-
   MMI = &getAnalysis<MachineModuleInfo>();
   TII = MF.getSubtarget().getInstrInfo();
 
-  // Find the size of the stack frame.
-  FI->setFrameSize(MF.getFrameInfo()->getStackSize());
+  // Find the size of the stack frame.  There may be no correct static frame
+  // size, we use UINT64_MAX to represent this.
+  const MachineFrameInfo *MFI = MF.getFrameInfo();
+  const TargetRegisterInfo *RegInfo = MF.getSubtarget().getRegisterInfo();
+  const bool DynamicFrameSize = MFI->hasVarSizedObjects() ||
+    RegInfo->needsStackRealignment(MF);
+  FI->setFrameSize(DynamicFrameSize ? UINT64_MAX : MFI->getStackSize());
 
   // Find all safe points.
-  FindSafePoints(MF);
+  if (FI->getStrategy().needsSafePoints())
+    FindSafePoints(MF);
 
-  // Find the stack offsets for all roots.
+  // Find the concrete stack offsets for all roots (stack slots)
   FindStackOffsets(MF);
 
   return false;

@@ -22,33 +22,60 @@ kUseCloseFDs = not kIsWindows
 # Use temporary files to replace /dev/null on Windows.
 kAvoidDevNull = kIsWindows
 
-def executeShCmd(cmd, cfg, cwd, results):
+class ShellEnvironment(object):
+
+    """Mutable shell environment containing things like CWD and env vars.
+
+    Environment variables are not implemented, but cwd tracking is.
+    """
+
+    def __init__(self, cwd, env):
+        self.cwd = cwd
+        self.env = dict(env)
+
+def executeShCmd(cmd, shenv, results):
     if isinstance(cmd, ShUtil.Seq):
         if cmd.op == ';':
-            res = executeShCmd(cmd.lhs, cfg, cwd, results)
-            return executeShCmd(cmd.rhs, cfg, cwd, results)
+            res = executeShCmd(cmd.lhs, shenv, results)
+            return executeShCmd(cmd.rhs, shenv, results)
 
         if cmd.op == '&':
             raise InternalShellError(cmd,"unsupported shell operator: '&'")
 
         if cmd.op == '||':
-            res = executeShCmd(cmd.lhs, cfg, cwd, results)
+            res = executeShCmd(cmd.lhs, shenv, results)
             if res != 0:
-                res = executeShCmd(cmd.rhs, cfg, cwd, results)
+                res = executeShCmd(cmd.rhs, shenv, results)
             return res
 
         if cmd.op == '&&':
-            res = executeShCmd(cmd.lhs, cfg, cwd, results)
+            res = executeShCmd(cmd.lhs, shenv, results)
             if res is None:
                 return res
 
             if res == 0:
-                res = executeShCmd(cmd.rhs, cfg, cwd, results)
+                res = executeShCmd(cmd.rhs, shenv, results)
             return res
 
         raise ValueError('Unknown shell command: %r' % cmd.op)
-
     assert isinstance(cmd, ShUtil.Pipeline)
+
+    # Handle shell builtins first.
+    if cmd.commands[0].args[0] == 'cd':
+        if len(cmd.commands) != 1:
+            raise ValueError("'cd' cannot be part of a pipeline")
+        if len(cmd.commands[0].args) != 2:
+            raise ValueError("'cd' supports only one argument")
+        newdir = cmd.commands[0].args[1]
+        # Update the cwd in the parent environment.
+        if os.path.isabs(newdir):
+            shenv.cwd = newdir
+        else:
+            shenv.cwd = os.path.join(shenv.cwd, newdir)
+        # The cd builtin always succeeds. If the directory does not exist, the
+        # following Popen calls will fail instead.
+        return 0
+
     procs = []
     input = subprocess.PIPE
     stderrTempFiles = []
@@ -58,6 +85,23 @@ def executeShCmd(cmd, cfg, cwd, results):
     # output. This is null until we have seen some output using
     # stderr.
     for i,j in enumerate(cmd.commands):
+        # Reference the global environment by default.
+        cmd_shenv = shenv
+        if j.args[0] == 'env':
+            # Create a copy of the global environment and modify it for this one
+            # command. There might be multiple envs in a pipeline:
+            #   env FOO=1 llc < %s | env BAR=2 llvm-mc | FileCheck %s
+            cmd_shenv = ShellEnvironment(shenv.cwd, shenv.env)
+            arg_idx = 1
+            for arg_idx, arg in enumerate(j.args[1:]):
+                # Partition the string into KEY=VALUE.
+                key, eq, val = arg.partition('=')
+                # Stop if there was no equals.
+                if eq == '':
+                    break
+                cmd_shenv.env[key] = val
+            j.args = j.args[arg_idx+1:]
+
         # Apply the redirections, we use (N,) as a sentinel to indicate stdin,
         # stdout, stderr for N equal to 0, 1, or 2 respectively. Redirects to or
         # from a file are represented with a list [file, mode, file-object]
@@ -102,7 +146,9 @@ def executeShCmd(cmd, cfg, cwd, results):
                     if kAvoidDevNull and r[0] == '/dev/null':
                         r[2] = tempfile.TemporaryFile(mode=r[1])
                     else:
-                        r[2] = open(r[0], r[1])
+                        # Make sure relative paths are relative to the cwd.
+                        redir_filename = os.path.join(cmd_shenv.cwd, r[0])
+                        r[2] = open(redir_filename, r[1])
                     # Workaround a Win32 and/or subprocess bug when appending.
                     #
                     # FIXME: Actually, this is probably an instance of PR6753.
@@ -132,7 +178,14 @@ def executeShCmd(cmd, cfg, cwd, results):
 
         # Resolve the executable path ourselves.
         args = list(j.args)
-        executable = lit.util.which(args[0], cfg.environment['PATH'])
+        executable = None
+        # For paths relative to cwd, use the cwd of the shell environment.
+        if args[0].startswith('.'):
+            exe_in_cwd = os.path.join(cmd_shenv.cwd, args[0])
+            if os.path.isfile(exe_in_cwd):
+                executable = exe_in_cwd
+        if not executable:
+            executable = lit.util.which(args[0], cmd_shenv.env['PATH'])
         if not executable:
             raise InternalShellError(j, '%r: command not found' % j.args[0])
 
@@ -146,12 +199,12 @@ def executeShCmd(cmd, cfg, cwd, results):
                     args[i] = f.name
 
         try:
-            procs.append(subprocess.Popen(args, cwd=cwd,
+            procs.append(subprocess.Popen(args, cwd=cmd_shenv.cwd,
                                           executable = executable,
                                           stdin = stdin,
                                           stdout = stdout,
                                           stderr = stderr,
-                                          env = cfg.environment,
+                                          env = cmd_shenv.env,
                                           close_fds = kUseCloseFDs))
         except OSError as e:
             raise InternalShellError(j, 'Could not create process due to {}'.format(e))
@@ -257,7 +310,8 @@ def executeScriptInternal(test, litConfig, tmpBase, commands, cwd):
 
     results = []
     try:
-        exitCode = executeShCmd(cmd, test.config, cwd, results)
+        shenv = ShellEnvironment(cwd, test.config.environment)
+        exitCode = executeShCmd(cmd, shenv, results)
     except InternalShellError:
         e = sys.exc_info()[1]
         exitCode = 127
@@ -308,7 +362,7 @@ def executeScript(test, litConfig, tmpBase, commands, cwd):
     return lit.util.executeCommand(command, cwd=cwd,
                                    env=test.config.environment)
 
-def parseIntegratedTestScriptCommands(source_path):
+def parseIntegratedTestScriptCommands(source_path, keywords):
     """
     parseIntegratedTestScriptCommands(source_path) -> commands
 
@@ -327,7 +381,6 @@ def parseIntegratedTestScriptCommands(source_path):
     # remaining code can work with "strings" agnostic of the executing Python
     # version.
 
-    keywords = ['RUN:', 'XFAIL:', 'REQUIRES:', 'UNSUPPORTED:', 'END.']
     keywords_re = re.compile(
         to_bytes("(%s)(.*)\n" % ("|".join(k for k in keywords),)))
 
@@ -361,27 +414,18 @@ def parseIntegratedTestScriptCommands(source_path):
     finally:
         f.close()
 
-
-def parseIntegratedTestScript(test, normalize_slashes=False,
-                              extra_substitutions=[], require_script=True):
-    """parseIntegratedTestScript - Scan an LLVM/Clang style integrated test
-    script and extract the lines to 'RUN' as well as 'XFAIL' and 'REQUIRES'
-    and 'UNSUPPORTED' information. The RUN lines also will have variable
-    substitution performed. If 'require_script' is False an empty script may be
-    returned. This can be used for test formats where the actual script is
-    optional or ignored.
-    """
-
-    # Get the temporary location, this is always relative to the test suite
-    # root, not test source root.
-    #
-    # FIXME: This should not be here?
-    sourcepath = test.getSourcePath()
-    sourcedir = os.path.dirname(sourcepath)
+def getTempPaths(test):
+    """Get the temporary location, this is always relative to the test suite
+    root, not test source root."""
     execpath = test.getExecPath()
     execdir,execbase = os.path.split(execpath)
     tmpDir = os.path.join(execdir, 'Output')
     tmpBase = os.path.join(tmpDir, execbase)
+    return tmpDir, tmpBase
+
+def getDefaultSubstitutions(test, tmpDir, tmpBase, normalize_slashes=False):
+    sourcepath = test.getSourcePath()
+    sourcedir = os.path.dirname(sourcepath)
 
     # Normalize slashes, if requested.
     if normalize_slashes:
@@ -391,7 +435,7 @@ def parseIntegratedTestScript(test, normalize_slashes=False,
         tmpBase = tmpBase.replace('\\', '/')
 
     # We use #_MARKER_# to hide %% while we do the other substitutions.
-    substitutions = list(extra_substitutions)
+    substitutions = []
     substitutions.extend([('%%', '#_MARKER_#')])
     substitutions.extend(test.config.substitutions)
     substitutions.extend([('%s', sourcepath),
@@ -410,13 +454,38 @@ def parseIntegratedTestScript(test, normalize_slashes=False,
             ('%/t', tmpBase.replace('\\', '/') + '.tmp'),
             ('%/T', tmpDir.replace('\\', '/')),
             ])
+    return substitutions
 
+def applySubstitutions(script, substitutions):
+    """Apply substitutions to the script.  Allow full regular expression syntax.
+    Replace each matching occurrence of regular expression pattern a with
+    substitution b in line ln."""
+    def processLine(ln):
+        # Apply substitutions
+        for a,b in substitutions:
+            if kIsWindows:
+                b = b.replace("\\","\\\\")
+            ln = re.sub(a, b, ln)
+
+        # Strip the trailing newline and any extra whitespace.
+        return ln.strip()
+    return map(processLine, script)
+
+def parseIntegratedTestScript(test, require_script=True):
+    """parseIntegratedTestScript - Scan an LLVM/Clang style integrated test
+    script and extract the lines to 'RUN' as well as 'XFAIL' and 'REQUIRES'
+    and 'UNSUPPORTED' information. If 'require_script' is False an empty script
+    may be returned. This can be used for test formats where the actual script
+    is optional or ignored.
+    """
     # Collect the test lines from the script.
+    sourcepath = test.getSourcePath()
     script = []
     requires = []
     unsupported = []
+    keywords = ['RUN:', 'XFAIL:', 'REQUIRES:', 'UNSUPPORTED:', 'END.']
     for line_number, command_type, ln in \
-            parseIntegratedTestScriptCommands(sourcepath):
+            parseIntegratedTestScriptCommands(sourcepath, keywords):
         if command_type == 'RUN':
             # Trim trailing whitespace.
             ln = ln.rstrip()
@@ -449,21 +518,6 @@ def parseIntegratedTestScript(test, normalize_slashes=False,
             raise ValueError("unknown script command type: %r" % (
                     command_type,))
 
-    # Apply substitutions to the script.  Allow full regular
-    # expression syntax.  Replace each matching occurrence of regular
-    # expression pattern a with substitution b in line ln.
-    def processLine(ln):
-        # Apply substitutions
-        for a,b in substitutions:
-            if kIsWindows:
-                b = b.replace("\\","\\\\")
-            ln = re.sub(a, b, ln)
-
-        # Strip the trailing newline and any extra whitespace.
-        return ln.strip()
-    script = [processLine(ln)
-              for ln in script]
-
     # Verify the script contains a run line.
     if require_script and not script:
         return lit.Test.Result(Test.UNRESOLVED, "Test has no run line!")
@@ -487,6 +541,13 @@ def parseIntegratedTestScript(test, normalize_slashes=False,
         return lit.Test.Result(Test.UNSUPPORTED,
                     "Test is unsupported with the following features: %s" % msg)
 
+    unsupported_targets = [f for f in unsupported
+                           if f in test.suite.config.target_triple]
+    if unsupported_targets:
+      return lit.Test.Result(Test.UNSUPPORTED,
+                  "Test is unsupported with the following triple: %s" % (
+                      test.suite.config.target_triple,))
+
     if test.config.limit_to_features:
         # Check that we have one of the limit_to_features features in requires.
         limit_to_features_tests = [f for f in test.config.limit_to_features
@@ -496,13 +557,13 @@ def parseIntegratedTestScript(test, normalize_slashes=False,
             return lit.Test.Result(Test.UNSUPPORTED,
                  "Test requires one of the limit_to_features features %s" % msg)
 
-    return script,tmpBase,execdir
+    return script
 
-def _runShTest(test, litConfig, useExternalSh,
-                   script, tmpBase, execdir):
+def _runShTest(test, litConfig, useExternalSh, script, tmpBase):
     # Create the output directory if it does not already exist.
     lit.util.mkdir_p(os.path.dirname(tmpBase))
 
+    execdir = os.path.dirname(test.getExecPath())
     if useExternalSh:
         res = executeScript(test, litConfig, tmpBase, script, execdir)
     else:
@@ -534,12 +595,28 @@ def executeShTest(test, litConfig, useExternalSh,
     if test.config.unsupported:
         return (Test.UNSUPPORTED, 'Test is unsupported')
 
-    res = parseIntegratedTestScript(test, useExternalSh, extra_substitutions)
-    if isinstance(res, lit.Test.Result):
-        return res
+    script = parseIntegratedTestScript(test)
+    if isinstance(script, lit.Test.Result):
+        return script
     if litConfig.noExecute:
         return lit.Test.Result(Test.PASS)
 
-    script, tmpBase, execdir = res
-    return _runShTest(test, litConfig, useExternalSh, script, tmpBase, execdir)
+    tmpDir, tmpBase = getTempPaths(test)
+    substitutions = list(extra_substitutions)
+    substitutions += getDefaultSubstitutions(test, tmpDir, tmpBase,
+                                             normalize_slashes=useExternalSh)
+    script = applySubstitutions(script, substitutions)
 
+    # Re-run failed tests up to test_retry_attempts times.
+    attempts = 1
+    if hasattr(test.config, 'test_retry_attempts'):
+        attempts += test.config.test_retry_attempts
+    for i in range(attempts):
+        res = _runShTest(test, litConfig, useExternalSh, script, tmpBase)
+        if res.code != Test.FAIL:
+            break
+    # If we had to run the test more than once, count it as a flaky pass. These
+    # will be printed separately in the test summary.
+    if i > 0 and res.code == Test.PASS:
+        res.code = Test.FLAKYPASS
+    return res

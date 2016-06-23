@@ -44,7 +44,7 @@ public:
   explicit DelegatingDeserializationListener(
       ASTDeserializationListener *Previous, bool DeletePrevious)
       : Previous(Previous), DeletePrevious(DeletePrevious) {}
-  virtual ~DelegatingDeserializationListener() {
+  ~DelegatingDeserializationListener() override {
     if (DeletePrevious)
       delete Previous;
   }
@@ -71,7 +71,7 @@ public:
       Previous->SelectorRead(ID, Sel);
   }
   void MacroDefinitionRead(serialization::PreprocessedEntityID PPID,
-                           MacroDefinition *MD) override {
+                           MacroDefinitionRecord *MD) override {
     if (Previous)
       Previous->MacroDefinitionRead(PPID, MD);
   }
@@ -191,7 +191,8 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     IntrusiveRefCntPtr<DiagnosticsEngine> Diags(&CI.getDiagnostics());
 
     std::unique_ptr<ASTUnit> AST = ASTUnit::LoadFromASTFile(
-        InputFile, CI.getSharedModuleProvider(), Diags, CI.getFileSystemOpts());
+        InputFile, CI.getPCHContainerReader(), Diags, CI.getFileSystemOpts(),
+        CI.getCodeGenOpts().DebugTypeExtRefs);
 
     if (!AST)
       goto failure;
@@ -268,15 +269,13 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
       SmallString<128> DirNative;
       llvm::sys::path::native(PCHDir->getName(), DirNative);
       bool Found = false;
-      for (llvm::sys::fs::directory_iterator Dir(DirNative.str(), EC), DirEnd;
+      for (llvm::sys::fs::directory_iterator Dir(DirNative, EC), DirEnd;
            Dir != DirEnd && !EC; Dir.increment(EC)) {
         // Check whether this is an acceptable AST file.
-        if (ASTReader::isAcceptableASTFile(Dir->path(), FileMgr,
-                                           CI.getModuleProvider(),
-                                           CI.getLangOpts(),
-                                           CI.getTargetOpts(),
-                                           CI.getPreprocessorOpts(),
-                                           SpecificModuleCachePath)) {
+        if (ASTReader::isAcceptableASTFile(
+                Dir->path(), FileMgr, CI.getPCHContainerReader(),
+                CI.getLangOpts(), CI.getTargetOpts(), CI.getPreprocessorOpts(),
+                SpecificModuleCachePath)) {
           PPOpts.ImplicitPCHInclude = Dir->path();
           Found = true;
           break;
@@ -285,7 +284,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 
       if (!Found) {
         CI.getDiagnostics().Report(diag::err_fe_no_pch_in_dir) << PCHInclude;
-        return true;
+        goto failure;
       }
     }
   }
@@ -376,7 +375,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     if (CI.getLangOpts().Modules)
       CI.createModuleManager();
 
-    PP.getBuiltinInfo().InitializeBuiltins(PP.getIdentifierTable(),
+    PP.getBuiltinInfo().initializeBuiltins(PP.getIdentifierTable(),
                                            PP.getLangOpts());
   } else {
     // FIXME: If this is a problem, recover from it by creating a multiplex
@@ -394,6 +393,13 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     else
       CI.getDiagnostics().Report(diag::err_module_map_not_found) << Filename;
   }
+
+  // Add a module declaration scope so that modules from -fmodule-map-file
+  // arguments may shadow modules found implicitly in search paths.
+  CI.getPreprocessor()
+      .getHeaderSearchInfo()
+      .getModuleMap()
+      .finishModuleDeclarationScope();
 
   // If we were asked to load any module files, do so now.
   for (const auto &ModuleFile : CI.getFrontendOpts().ModuleFiles)
@@ -443,9 +449,11 @@ bool FrontendAction::Execute() {
   // there were any module-build failures.
   if (CI.shouldBuildGlobalModuleIndex() && CI.hasFileManager() &&
       CI.hasPreprocessor()) {
-    GlobalModuleIndex::writeIndex(
-      CI.getFileManager(), CI.getModuleProvider(),
-      CI.getPreprocessor().getHeaderSearchInfo().getModuleCachePath());
+    StringRef Cache =
+        CI.getPreprocessor().getHeaderSearchInfo().getModuleCachePath();
+    if (!Cache.empty())
+      GlobalModuleIndex::writeIndex(CI.getFileManager(),
+                                    CI.getPCHContainerReader(), Cache);
   }
 
   return true;

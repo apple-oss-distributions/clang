@@ -16,6 +16,7 @@
 #define LLVM_TRANSFORMS_IPO_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace llvm {
 
@@ -69,6 +70,12 @@ ModulePass *createGlobalOptimizerPass();
 /// internal globals (functions or global variables)
 ///
 ModulePass *createGlobalDCEPass();
+
+//===----------------------------------------------------------------------===//
+/// This transform is designed to eliminate available external globals
+/// (functions or global variables)
+///
+ModulePass *createEliminateAvailableExternallyPass();
 
 //===----------------------------------------------------------------------===//
 /// createGVExtractionPass - If deleteFn is true, this pass deletes
@@ -194,10 +201,28 @@ ModulePass *createPartialInliningPass();
 //
 ModulePass *createMetaRenamerPass();
 
+/// Strip all debug info except linetables
+ModulePass *createStripNonLineTableDebugInfoPass();
+
+//===----------------------------------------------------------------------===//
+// Obfuscate all the string inside the module
+//
+ModulePass *createObfuscateModulePass();
+
 //===----------------------------------------------------------------------===//
 /// createBarrierNoopPass - This pass is purely a module pass barrier in a pass
 /// manager.
 ModulePass *createBarrierNoopPass();
+
+/// \brief This pass lowers bitset metadata and the llvm.bitset.test intrinsic
+/// to bitsets.
+ModulePass *createLowerBitSetsPass();
+
+//===----------------------------------------------------------------------===//
+// SampleProfilePass - Loads sample profile data from disk and generates
+// IR metadata to reflect the profile.
+ModulePass *createSampleProfileLoaderPass();
+ModulePass *createSampleProfileLoaderPass(StringRef Name);
 
 } // End llvm namespace
 

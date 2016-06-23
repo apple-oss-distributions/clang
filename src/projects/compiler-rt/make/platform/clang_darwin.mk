@@ -66,6 +66,8 @@ DSYMUTIL := $(call XCRun,dsymutil)
 OSX_SDK := $(call XCRunSdkPath,macosx)
 IOS_SDK := $(call XCRunSdkPath,iphoneos)
 IOSSIM_SDK := $(call XCRunSdkPath,iphonesimulator)
+TVOS_SDK := $(call XCRunSdkPath,appletvos)
+TVOSSIM_SDK := $(call XCRunSdkPath,appletvsimulator)
 WATCHOS_SDK := $(call XCRunSdkPath,watchos)
 WATCHOSSIM_SDK := $(call XCRunSdkPath,watchsimulator)
 
@@ -95,6 +97,11 @@ UniversalArchs.ios += $(call CheckArches,armv7 arm64,ios,$(IOS_SDK))
 Configs += osx
 UniversalArchs.osx := $(call CheckArches,i386 x86_64 x86_64h,osx,$(OSX_SDK))
 
+# Configuration for targeting tvOS.
+Configs += tvos
+UniversalArchs.tvos := $(call CheckArches,i386 x86_64,tvos,$(TVOSSIM_SDK))
+UniversalArchs.tvos += $(call CheckArches,armv7 arm64,tvos,$(TVOS_SDK))
+
 # Configuration for targeting watchOS.
 Configs += watchos
 UniversalArchs.watchos := $(call CheckArches,i386 x86_64,watchos,$(WATCHOSSIM_SDK))
@@ -103,14 +110,14 @@ UniversalArchs.watchos += $(call CheckArches,armv7 armv7k armv7s arm64,watchos,$
 # Configuration for use with kernel/kexts.
 Configs += cc_kext
 UniversalArchs.cc_kext := $(call CheckArches,i386 x86_64 x86_64h,cc_kext,$(OSX_SDK))
-UniversalArchs.cc_kext += $(call CheckArches,armv7 arm64,cc_kext,$(IOS_SDK))
 
-# Configuration for use with kernel/kexts for iOS 5.0 and earlier (which used 
-# a different code generation strategy). Note: the x86_64 slice is unused but
-# it avoids build problems (see pr14013).
-Configs += cc_kext_ios5
-UniversalArchs.cc_kext_ios5 := $(call CheckArches,x86_64,cc_kext_ios5,$(IOSSIM_SDK))
-UniversalArchs.cc_kext_ios5 += $(call CheckArches,armv7,cc_kext_ios5,$(IOS_SDK))
+# Configuration for use with iOS kernel/kexts
+Configs += cc_kext_ios
+UniversalArchs.cc_kext_ios += $(call CheckArches,armv7,cc_kext_ios,$(IOS_SDK))
+
+# Configuration for use with tvOS kernel/kexts.
+Configs += cc_kext_tvos
+UniversalArchs.cc_kext_tvos += $(call CheckArches,armv7 arm64,cc_kext_tvos,$(TVOS_SDK))
 
 # Configuration for use with watchOS kernel/kexts.
 Configs += cc_kext_watchos
@@ -122,6 +129,9 @@ UniversalArchs.profile_osx := $(call CheckArches,i386 x86_64 x86_64h,profile_osx
 Configs += profile_ios
 UniversalArchs.profile_ios := $(call CheckArches,i386 x86_64,profile_ios,$(IOSSIM_SDK))
 UniversalArchs.profile_ios += $(call CheckArches,armv7 arm64,profile_ios,$(IOS_SDK))
+Configs += profile_tvos
+UniversalArchs.profile_tvos := $(call CheckArches,i386 x86_64,profile_tvos,$(TVOSSIM_SDK))
+UniversalArchs.profile_tvos += $(call CheckArches,armv7 arm64,profile_tvos,$(TVOS_SDK))
 Configs += profile_watchos
 UniversalArchs.profile_watchos := $(call CheckArches,i386 x86_64,profile_watchos,$(WATCHOSSIM_SDK))
 UniversalArchs.profile_watchos += $(call CheckArches,armv7 armv7k armv7s arm64,profile_watchos,$(WATCHOS_SDK))
@@ -129,7 +139,7 @@ UniversalArchs.profile_watchos += $(call CheckArches,armv7 armv7k armv7s arm64,p
 # Add slices for additional ARMv7 slices.
 UniversalArchs.ios += $(call CheckArches,armv7k armv7s,ios,$(IOS_SDK))
 UniversalArchs.cc_kext += $(call CheckArches,armv7k armv7s,cc_kext,$(IOS_SDK))
-UniversalArchs.cc_kext_ios5 += $(call CheckArches,armv7k armv7s,cc_kext_ios5,$(IOS_SDK))
+UniversalArchs.cc_kext_ios += $(call CheckArches,armv7k armv7s arm64,cc_kext_ios,$(IOS_SDK))
 UniversalArchs.profile_ios += $(call CheckArches,armv7k armv7s,profile_ios,$(IOS_SDK))
 
 # Configurations which define the ASAN support functions.
@@ -142,8 +152,26 @@ UniversalArchs.asan_iossim_dynamic := $(call CheckArches,i386 x86_64,asan_iossim
 Configs += asan_ios_dynamic
 UniversalArchs.asan_ios_dynamic := $(call CheckArches,armv7 armv7s arm64,asan_ios_dynamic,$(IOS_SDK))
 
-#Configs += ubsan_osx
-#UniversalArchs.ubsan_osx := $(call CheckArches,i386 x86_64 x86_64h,ubsan_osx,$(OSX_SDK))
+Configs += asan_tvos_dynamic
+UniversalArchs.asan_tvos_dynamic += $(call CheckArches,armv7 arm64,asan_tvos_dynamic,$(TVOS_SDK))
+
+Configs += asan_tvossim_dynamic
+UniversalArchs.asan_tvossim_dynamic := $(call CheckArches,i386 x86_64,asan_tvossim_dynamic,$(TVOSSIM_SDK))
+
+Configs += asan_watchossim_dynamic
+UniversalArchs.asan_watchossim_dynamic := $(call CheckArches,i386 x86_64,asan_watchossim_dynamic,$(WATCHOSSIM_SDK))
+
+Configs += asan_watchos_dynamic
+UniversalArchs.asan_watchos_dynamic += $(call CheckArches,armv7 armv7k armv7s arm64,asan_watchos_dynamic,$(WATCHOS_SDK))
+
+Configs += ubsan_osx_dynamic
+UniversalArchs.ubsan_osx_dynamic := $(call CheckArches,i386 x86_64 x86_64h,ubsan_osx_dynamic,$(OSX_SDK))
+
+Configs += ubsan_iossim_dynamic
+UniversalArchs.ubsan_iossim_dynamic := $(call CheckArches,i386 x86_64,ubsan_iossim_dynamic,$(IOSSIM_SDK))
+
+Configs += ubsan_ios_dynamic
+UniversalArchs.ubsan_ios_dynamic := $(call CheckArches,armv7 armv7s arm64,ubsan_ios_dynamic,$(IOS_SDK))
 
 # Darwin 10.6 has a bug in cctools that makes it unable to use ranlib on our ARM
 # object files. If we are on that platform, strip out all ARM archs. We still
@@ -151,8 +179,7 @@ UniversalArchs.asan_ios_dynamic := $(call CheckArches,armv7 armv7s arm64,asan_io
 # them, even though they might not have an expected slice.
 ifneq ($(shell test -x /usr/bin/sw_vers && sw_vers -productVersion | grep 10.6),)
 UniversalArchs.ios := $(filter-out armv7, $(UniversalArchs.ios))
-UniversalArchs.cc_kext := $(filter-out armv7, $(UniversalArchs.cc_kext))
-UniversalArchs.cc_kext_ios5 := $(filter-out armv7, $(UniversalArchs.cc_kext_ios5))
+UniversalArchs.cc_kext_ios := $(filter-out armv7, $(UniversalArchs.cc_kext_ios))
 UniversalArchs.profile_ios := $(filter-out armv7, $(UniversalArchs.profile_ios))
 endif
 
@@ -186,6 +213,8 @@ OSX_DEPLOYMENT_ARGS := -mmacosx-version-min=10.4
 IOS_DEPLOYMENT_ARGS := -mios-version-min=1.0
 IOS6_DEPLOYMENT_ARGS := -mios-version-min=6.0
 IOSSIM_DEPLOYMENT_ARGS := -mios-simulator-version-min=1.0
+TVOS_DEPLOYMENT_ARGS := -mtvos-version-min=8.3
+TVOSSIM_DEPLOYMENT_ARGS := -mtvos-simulator-version-min=8.3
 WATCHOS_DEPLOYMENT_ARGS := -mwatchos-version-min=1.0
 WATCHOSSIM_DEPLOYMENT_ARGS := -mwatchos-simulator-version-min=1.0
 
@@ -193,41 +222,73 @@ OSX_DEPLOYMENT_ARGS += -isysroot $(OSX_SDK)
 IOS_DEPLOYMENT_ARGS += -isysroot $(IOS_SDK)
 IOS6_DEPLOYMENT_ARGS += -isysroot $(IOS_SDK)
 IOSSIM_DEPLOYMENT_ARGS += -isysroot $(IOSSIM_SDK)
+TVOS_DEPLOYMENT_ARGS += -isysroot $(TVOS_SDK)
+TVOSSIM_DEPLOYMENT_ARGS += -isysroot $(TVOSSIM_SDK)
 WATCHOS_DEPLOYMENT_ARGS += -isysroot $(WATCHOS_SDK)
 WATCHOSSIM_DEPLOYMENT_ARGS += -isysroot $(WATCHOSSIM_SDK)
 
 CFLAGS.eprintf		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.10.4		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 
+SANITIZER_MACOSX_DEPLOYMENT_ARGS := -mmacosx-version-min=10.7
+SANITIZER_IOSSIM_DEPLOYMENT_ARGS := -mios-simulator-version-min=7.0 \
+  -isysroot $(IOSSIM_SDK)
+SANITIZER_IOS_DEPLOYMENT_ARGS := $(IOS6_DEPLOYMENT_ARGS)
+SANITIZER_CFLAGS := -fno-builtin -gline-tables-only -stdlib=libc++
+
 CFLAGS.asan_osx_dynamic := \
-	$(CFLAGS) -mmacosx-version-min=10.7 \
-	-stdlib=libc++ \
-	-isysroot $(OSX_SDK) \
-	-fno-builtin \
-	-gline-tables-only \
+	$(CFLAGS) $(SANITIZER_MACOSX_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS) \
 	-DMAC_INTERPOSE_FUNCTIONS=1 \
 	-DASAN_DYNAMIC=1
 
 CFLAGS.asan_iossim_dynamic := \
-	$(CFLAGS) -mios-simulator-version-min=7.0 \
-	-isysroot $(IOSSIM_SDK) \
-	-stdlib=libc++ \
-	-fno-builtin \
-	-gline-tables-only \
+	$(CFLAGS) $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS) \
 	-DMAC_INTERPOSE_FUNCTIONS=1 \
 	-DASAN_DYNAMIC=1
 
 CFLAGS.asan_ios_dynamic := \
-	$(CFLAGS) $(IOS6_DEPLOYMENT_ARGS) \
-	-stdlib=libc++ \
-	-fno-builtin \
-	-gline-tables-only \
+	$(CFLAGS) $(SANITIZER_IOS_DEPLOYMENT_ARGS) \
+    $(SANITIZER_CFLAGS) \
 	-DMAC_INTERPOSE_FUNCTIONS=1 \
 	-DASAN_DYNAMIC=1
 
-CFLAGS.ubsan_osx := $(CFLAGS) -mmacosx-version-min=10.6 \
-	-isysroot $(OSX_SDK) \
-	-fno-builtin
+CFLAGS.asan_tvossim_dynamic := \
+  $(CFLAGS) $(TVOSSIM_DEPLOYMENT_ARGS) \
+  $(SANITIZER_CFLAGS) \
+  -DMAC_INTERPOSE_FUNCTIONS=1 \
+  -DASAN_DYNAMIC=1
+
+CFLAGS.asan_tvos_dynamic := \
+  $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS) \
+    $(SANITIZER_CFLAGS) \
+  -DMAC_INTERPOSE_FUNCTIONS=1 \
+  -DASAN_DYNAMIC=1
+
+CFLAGS.asan_watchossim_dynamic := \
+  $(CFLAGS) $(WATCHOSSIM_DEPLOYMENT_ARGS) \
+  $(SANITIZER_CFLAGS) \
+  -DMAC_INTERPOSE_FUNCTIONS=1 \
+  -DASAN_DYNAMIC=1
+
+CFLAGS.asan_watchos_dynamic := \
+  $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS) \
+    $(SANITIZER_CFLAGS) \
+  -DMAC_INTERPOSE_FUNCTIONS=1 \
+  -DASAN_DYNAMIC=1
+
+CFLAGS.ubsan_osx_dynamic := \
+	$(CFLAGS) $(SANITIZER_MACOSX_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS)
+
+CFLAGS.ubsan_iossim_dynamic := \
+	$(CFLAGS) $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS)
+
+CFLAGS.ubsan_ios_dynamic := \
+	$(CFLAGS) $(SANITIZER_IOS_DEPLOYMENT_ARGS) \
+    $(SANITIZER_CFLAGS)
 
 CFLAGS.ios.i386		:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.ios.x86_64	:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
@@ -238,6 +299,10 @@ CFLAGS.ios.arm64	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 CFLAGS.osx.i386		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.osx.x86_64	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.osx.x86_64h	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
+CFLAGS.tvos.i386	:= $(CFLAGS) $(TVOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.tvos.x86_64	:= $(CFLAGS) $(TVOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.tvos.armv7	:= $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS)
+CFLAGS.tvos.arm64	:= $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS)
 CFLAGS.watchos.i386	:= $(CFLAGS) $(WATCHOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.watchos.x86_64	:= $(CFLAGS) $(WATCHOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.watchos.armv7 	:= $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
@@ -247,13 +312,12 @@ CFLAGS.watchos.arm64	:= $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.i386	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.x86_64	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext.x86_64h	:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.armv7	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.armv7k	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.armv7s	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext.arm64	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext_ios5.armv7  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext_ios5.armv7k := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
-CFLAGS.cc_kext_ios5.armv7s := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext_ios.armv7	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext_ios.armv7k	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext_ios.armv7s	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext_ios.arm64	:= $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext_tvos.armv7  := $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS)
+CFLAGS.cc_kext_tvos.arm64  := $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext_watchos.armv7  := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext_watchos.armv7k := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
 CFLAGS.cc_kext_watchos.armv7s := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
@@ -267,6 +331,10 @@ CFLAGS.profile_ios.armv7  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7k := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7s := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.arm64  := $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
+CFLAGS.profile_tvos.i386   := $(CFLAGS) $(TVOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.profile_tvos.x86_64 := $(CFLAGS) $(TVOSSIM_DEPLOYMENT_ARGS)
+CFLAGS.profile_tvos.armv7  := $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS)
+CFLAGS.profile_tvos.arm64  := $(CFLAGS) $(TVOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_watchos.i386   := $(CFLAGS) $(WATCHOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.profile_watchos.x86_64 := $(CFLAGS) $(WATCHOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.profile_watchos.armv7  := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
@@ -274,26 +342,58 @@ CFLAGS.profile_watchos.armv7k := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_watchos.armv7s := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_watchos.arm64  := $(CFLAGS) $(WATCHOS_DEPLOYMENT_ARGS)
 
-# Configure the asan_osx_dynamic library to be built shared.
+SANITIZER_LDFLAGS := -stdlib=libc++ -lc++ -lc++abi
+
 SHARED_LIBRARY.asan_osx_dynamic := 1
-LDFLAGS.asan_osx_dynamic := -lc++ -undefined dynamic_lookup -install_name @rpath/libclang_rt.asan_osx_dynamic.dylib \
-  -mmacosx-version-min=10.7 \
-  -isysroot $(OSX_SDK)
+LDFLAGS.asan_osx_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_osx_dynamic.dylib \
+  $(SANITIZER_MACOSX_DEPLOYMENT_ARGS)
 
-# Configure the asan_iossim_dynamic library to be built shared.
 SHARED_LIBRARY.asan_iossim_dynamic := 1
-# configure+make uses Clang, so we're using isysroot instead of --sysroot
-# or -Wl,-syslibroot.
-LDFLAGS.asan_iossim_dynamic := -undefined dynamic_lookup -install_name @rpath/libclang_rt.asan_iossim_dynamic.dylib \
-  -Wl,-ios_simulator_version_min,7.0.0 \
-  -mios-simulator-version-min=7.0 -isysroot $(IOSSIM_SDK)
+LDFLAGS.asan_iossim_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_iossim_dynamic.dylib \
+  -Wl,-ios_simulator_version_min,7.0.0 $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS)
 
-# Configure the asan_ios_dynamic library to be built shared.
 SHARED_LIBRARY.asan_ios_dynamic := 1
 # configure+make uses Clang, so we're using isysroot instead of --sysroot
 # or -Wl,-syslibroot.
-LDFLAGS.asan_ios_dynamic := -undefined dynamic_lookup -install_name @rpath/libclang_rt.asan_ios_dynamic.dylib \
-  -Wl,-segalign,0x4000 $(IOS6_DEPLOYMENT_ARGS)
+LDFLAGS.asan_ios_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_ios_dynamic.dylib \
+  -Wl,-segalign,0x4000 \
+  $(SANITIZER_IOS_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.asan_tvossim_dynamic := 1
+LDFLAGS.asan_tvossim_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_tvossim_dynamic.dylib \
+  $(TVOSSIM_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.asan_tvos_dynamic := 1
+LDFLAGS.asan_tvos_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_tvos_dynamic.dylib \
+  $(TVOS_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.asan_watchossim_dynamic := 1
+LDFLAGS.asan_watchossim_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_watchossim_dynamic.dylib \
+  $(WATCHOSSIM_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.asan_watchos_dynamic := 1
+LDFLAGS.asan_watchos_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_watchos_dynamic.dylib \
+  $(WATCHOS_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.ubsan_osx_dynamic := 1
+LDFLAGS.ubsan_osx_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.ubsan_osx_dynamic.dylib \
+  $(SANITIZER_MACOSX_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.ubsan_iossim_dynamic := 1
+LDFLAGS.ubsan_iossim_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.ubsan_iossim_dynamic.dylib \
+  -Wl,-ios_simulator_version_min,7.0.0 $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.ubsan_ios_dynamic := 1
+LDFLAGS.ubsan_ios_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.ubsan_ios_dynamic.dylib \
+  -Wl,-segalign,0x4000 \
+  $(SANITIZER_IOS_DEPLOYMENT_ARGS)
+
+ifneq ($(OSX_SDK),)
+CFLAGS.asan_osx_dynamic += -isysroot $(OSX_SDK)
+LDFLAGS.asan_osx_dynamic += -isysroot $(OSX_SDK)
+CFLAGS.ubsan_osx_dynamic += -isysroot $(OSX_SDK)
+LDFLAGS.ubsan_osx_dynamic += -isysroot $(OSX_SDK)
+endif
 
 ATOMIC_FUNCTIONS := \
 	atomic_flag_clear \
@@ -317,9 +417,15 @@ FUNCTIONS.ios	    := divmodsi4 udivmodsi4 mulosi4 mulodi4 muloti4 \
 FUNCTIONS.ios.i386    := $(FUNCTIONS.ios) \
                          divsi3 udivsi3
 FUNCTIONS.ios.x86_64  := $(FUNCTIONS.ios.i386)
-FUNCTIONS.ios.arm64   := mulsc3 muldc3 divsc3 divdc3 $(ATOMIC_FUNCTIONS)
+FUNCTIONS.ios.arm64   := mulsc3 muldc3 divsc3 divdc3 udivti3 umodti3 \
+                         $(ATOMIC_FUNCTIONS)
 
 FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4 $(ATOMIC_FUNCTIONS) $(FP16_FUNCTIONS)
+
+FUNCTIONS.tvos        := $(FUNCTIONS.ios)
+FUNCTIONS.tvos.i386   := $(FUNCTIONS.ios.i386)
+FUNCTIONS.tvos.x86_64 := $(FUNCTIONS.ios.x86_64)
+FUNCTIONS.tvos.arm64  := $(FUNCTIONS.ios.arm64)
 
 FUNCTIONS.watchos      := $(FUNCTIONS.ios)
 FUNCTIONS.watchos.i386 := $(FUNCTIONS.ios.i386)
@@ -328,27 +434,65 @@ FUNCTIONS.watchos.arm64  := $(FUNCTIONS.ios.arm64)
 
 FUNCTIONS.profile_osx := GCDAProfiling InstrProfiling InstrProfilingBuffer \
                          InstrProfilingFile InstrProfilingPlatformDarwin \
-                         InstrProfilingRuntime
+                         InstrProfilingRuntime InstrProfilingUtil
 FUNCTIONS.profile_ios := $(FUNCTIONS.profile_osx)
+FUNCTIONS.profile_tvos := $(FUNCTIONS.profile_osx)
 FUNCTIONS.profile_watchos := $(FUNCTIONS.profile_osx)
 
 FUNCTIONS.asan_osx_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
                               $(InterceptionFunctions) \
                               $(SanitizerCommonFunctions) \
-	                      $(AsanDynamicFunctions)
+                              $(AsanDynamicFunctions) \
+                              $(UbsanFunctions) $(UbsanCXXFunctions)
 
 FUNCTIONS.asan_iossim_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
                                  $(InterceptionFunctions) \
                                  $(SanitizerCommonFunctions) \
-	                         $(AsanDynamicFunctions)
+                                 $(AsanDynamicFunctions) \
+                                 $(UbsanFunctions) $(UbsanCXXFunctions)
 
 FUNCTIONS.asan_ios_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
                               $(InterceptionFunctions) \
                               $(SanitizerCommonFunctions) \
-	                          $(AsanDynamicFunctions)
+                              $(AsanDynamicFunctions) \
+                              $(UbsanFunctions) $(UbsanCXXFunctions)
 
-FUNCTIONS.ubsan_osx := $(UbsanFunctions) $(UbsanCXXFunctions) \
-                       $(SanitizerCommonFunctions)
+
+FUNCTIONS.asan_tvossim_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
+                                  $(InterceptionFunctions) \
+                                  $(SanitizerCommonFunctions) \
+                                  $(AsanDynamicFunctions) \
+                                  $(UbsanFunctions) $(UbsanCXXFunctions)
+
+FUNCTIONS.asan_tvos_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
+                               $(InterceptionFunctions) \
+                               $(SanitizerCommonFunctions) \
+                               $(AsanDynamicFunctions) \
+                               $(UbsanFunctions) $(UbsanCXXFunctions)
+
+FUNCTIONS.asan_watchossim_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
+                                   $(InterceptionFunctions) \
+                                   $(SanitizerCommonFunctions) \
+                                   $(AsanDynamicFunctions) \
+                                   $(UbsanFunctions) $(UbsanCXXFunctions)
+
+FUNCTIONS.asan_watchos_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
+                                  $(InterceptionFunctions) \
+                                  $(SanitizerCommonFunctions) \
+                                  $(AsanDynamicFunctions) \
+                                  $(UbsanFunctions) $(UbsanCXXFunctions)
+
+FUNCTIONS.ubsan_osx_dynamic := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                               $(SanitizerCommonFunctions) \
+                               $(UbsanStandaloneFunctions)
+
+FUNCTIONS.ubsan_iossim_dynamic := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                                  $(SanitizerCommonFunctions) \
+                                  $(UbsanStandaloneFunctions)
+
+FUNCTIONS.ubsan_ios_dynamic := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                               $(SanitizerCommonFunctions) \
+                               $(UbsanStandaloneFunctions)
 
 CCKEXT_PROFILE_FUNCTIONS := \
 	InstrProfiling \
@@ -377,6 +521,7 @@ CCKEXT_COMMON_FUNCTIONS := \
 	udivmodsi4 \
 	do_global_dtors \
 	eprintf \
+	extendhfsf2 \
 	ffsdi2 \
 	fixdfdi \
 	fixsfdi \
@@ -407,6 +552,8 @@ CCKEXT_COMMON_FUNCTIONS := \
 	powisf2 \
 	subvdi3 \
 	subvsi3 \
+	truncdfhf2 \
+	truncsfhf2 \
 	ucmpdi2 \
 	udiv_w_sdiv \
 	udivdi3 \
@@ -507,19 +654,20 @@ CCKEXT_ARM64_FUNCTIONS := \
 	divdc3 \
 	divsc3 \
 	muldc3 \
-	mulsc3
+	mulsc3 \
+	udivti3 \
+	umodti3
 
-FUNCTIONS.cc_kext.armv7 := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext.armv7k := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext.armv7s := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext.arm64 := $(CCKEXT_ARM64_FUNCTIONS)
-FUNCTIONS.cc_kext_ios5.armv7 := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext_ios5.armv7k := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext_ios5.armv7s := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext_watchos.armv7  := $(FUNCTIONS.cc_kext.armv7)
-FUNCTIONS.cc_kext_watchos.armv7k := $(FUNCTIONS.cc_kext.armv7k)
-FUNCTIONS.cc_kext_watchos.armv7s := $(FUNCTIONS.cc_kext.armv7s)
-FUNCTIONS.cc_kext_watchos.arm64  := $(FUNCTIONS.cc_kext.arm64)
+FUNCTIONS.cc_kext_ios.armv7 := $(CCKEXT_ARMVFP_FUNCTIONS)
+FUNCTIONS.cc_kext_ios.armv7k := $(CCKEXT_ARMVFP_FUNCTIONS)
+FUNCTIONS.cc_kext_ios.armv7s := $(CCKEXT_ARMVFP_FUNCTIONS)
+FUNCTIONS.cc_kext_ios.arm64 := $(CCKEXT_ARM64_FUNCTIONS)
+FUNCTIONS.cc_kext_tvos.armv7  := $(FUNCTIONS.cc_kext_ios.armv7)
+FUNCTIONS.cc_kext_tvos.arm64  := $(FUNCTIONS.cc_kext_ios.arm64)
+FUNCTIONS.cc_kext_watchos.armv7  := $(FUNCTIONS.cc_kext_ios.armv7)
+FUNCTIONS.cc_kext_watchos.armv7k := $(FUNCTIONS.cc_kext_ios.armv7k)
+FUNCTIONS.cc_kext_watchos.armv7s := $(FUNCTIONS.cc_kext_ios.armv7s)
+FUNCTIONS.cc_kext_watchos.arm64  := $(FUNCTIONS.cc_kext_ios.arm64)
 
 CCKEXT_X86_FUNCTIONS := $(CCKEXT_COMMON_FUNCTIONS) \
 	divxc3 \
@@ -596,20 +744,18 @@ CCKEXT_MISSING_FUNCTIONS := \
 	aeabi_fcmpge aeabi_fcmpgt aeabi_fcmple aeabi_fcmplt aeabi_frsub aeabi_idivmod \
 	aeabi_uidivmod
 
-FUNCTIONS.cc_kext.armv7 := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv7))
-FUNCTIONS.cc_kext.armv7k := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv7k))
-FUNCTIONS.cc_kext.armv7s := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.armv7s))
-FUNCTIONS.cc_kext.arm64 := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.arm64))
-FUNCTIONS.cc_kext_ios5.armv7 := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios5.armv7))
-FUNCTIONS.cc_kext_ios5.armv7k := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios5.armv7k))
-FUNCTIONS.cc_kext_ios5.armv7s := \
-	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios5.armv7s))
+FUNCTIONS.cc_kext_ios.armv7 := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios.armv7))
+FUNCTIONS.cc_kext_ios.armv7k := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios.armv7k))
+FUNCTIONS.cc_kext_ios.armv7s := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios.armv7s))
+FUNCTIONS.cc_kext_ios.arm64 := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_ios.arm64))
+FUNCTIONS.cc_kext_tvos.armv7 := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_tvos.armv7))
+FUNCTIONS.cc_kext_tvos.arm64 := \
+	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_tvos.arm64))
 FUNCTIONS.cc_kext_watchos.armv7 := \
 	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext_watchos.armv7))
 FUNCTIONS.cc_kext_watchos.armv7k := \
@@ -626,7 +772,8 @@ FUNCTIONS.cc_kext.x86_64h := \
 	$(filter-out $(CCKEXT_MISSING_FUNCTIONS),$(FUNCTIONS.cc_kext.x86_64h))
 
 KERNEL_USE.cc_kext := 1
-KERNEL_USE.cc_kext_ios5 := 1
+KERNEL_USE.cc_kext_ios := 1
+KERNEL_USE.cc_kext_tvos := 1
 KERNEL_USE.cc_kext_watchos := 1
 
 VISIBILITY_HIDDEN := 1

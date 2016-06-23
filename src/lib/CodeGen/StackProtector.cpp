@@ -122,7 +122,7 @@ bool StackProtector::ContainsProtectableArray(Type *Ty, bool &IsLarge,
 
     // If an array has more than SSPBufferSize bytes of allocated space, then we
     // emit stack protectors.
-    if (SSPBufferSize <= TLI->getDataLayout()->getTypeAllocSize(AT)) {
+    if (SSPBufferSize <= M->getDataLayout().getTypeAllocSize(AT)) {
       IsLarge = true;
       return true;
     }
@@ -353,8 +353,8 @@ static bool CreatePrologue(Function *F, Module *M, ReturnInst *RI,
   IRBuilder<> B(&F->getEntryBlock().front());
   AI = B.CreateAlloca(PtrTy, nullptr, "StackGuardSlot");
   LoadInst *LI = B.CreateLoad(StackGuardVar, "StackGuard");
-  B.CreateCall2(Intrinsic::getDeclaration(M, Intrinsic::stackprotector), LI,
-                AI);
+  B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::stackprotector),
+               {LI, AI});
 
   return SupportsSelectionDAGSP;
 }
@@ -373,7 +373,7 @@ bool StackProtector::InsertStackProtectors() {
   Value *StackGuardVar = nullptr; // The stack guard variable.
 
   for (Function::iterator I = F->begin(), E = F->end(); I != E;) {
-    BasicBlock *BB = I++;
+    BasicBlock *BB = &*I++;
     ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator());
     if (!RI)
       continue;
@@ -433,7 +433,7 @@ bool StackProtector::InsertStackProtectors() {
       BasicBlock *FailBB = CreateFailBB();
 
       // Split the basic block before the return instruction.
-      BasicBlock *NewBB = BB->splitBasicBlock(RI, "SP_return");
+      BasicBlock *NewBB = BB->splitBasicBlock(RI->getIterator(), "SP_return");
 
       // Update the dominator tree if we need to.
       if (DT && DT->isReachableFromEntry(BB)) {
@@ -465,10 +465,7 @@ bool StackProtector::InsertStackProtectors() {
 
   // Return if we didn't modify any basic blocks. i.e., there are no return
   // statements in the function.
-  if (!HasPrologue)
-    return false;
-
-  return true;
+  return HasPrologue;
 }
 
 /// CreateFailBB - Create a basic block to jump to when the stack protector
@@ -488,7 +485,7 @@ BasicBlock *StackProtector::CreateFailBB() {
     Constant *StackChkFail =
         M->getOrInsertFunction("__stack_chk_fail", Type::getVoidTy(Context),
                                nullptr);
-    B.CreateCall(StackChkFail);
+    B.CreateCall(StackChkFail, {});
   }
   B.CreateUnreachable();
   return FailBB;

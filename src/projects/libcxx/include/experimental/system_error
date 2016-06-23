@@ -40,9 +40,13 @@ inline namespace fundamentals_v1 {
 
 #include <system_error>
 
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#pragma GCC system_header
+#endif
+
 _LIBCPP_BEGIN_NAMESPACE_LFTS
 
-#if __has_feature(cxx_variable_templates)
+#ifndef _LIBCPP_HAS_NO_VARIABLE_TEMPLATES
 
 template <class _Tp> _LIBCPP_CONSTEXPR bool is_error_code_enum_v
     = is_error_code_enum<_Tp>::value;
@@ -50,7 +54,7 @@ template <class _Tp> _LIBCPP_CONSTEXPR bool is_error_code_enum_v
 template <class _Tp> _LIBCPP_CONSTEXPR bool is_error_condition_enum_v
     = is_error_condition_enum<_Tp>::value;
 
-#endif /* __has_feature(cxx_variable_templates) */
+#endif /* _LIBCPP_HAS_NO_VARIABLE_TEMPLATES */
 
 _LIBCPP_END_NAMESPACE_LFTS
 

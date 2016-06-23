@@ -11,6 +11,7 @@
 //
 // This file contains error reporting code.
 //===----------------------------------------------------------------------===//
+
 #include "asan_flags.h"
 #include "asan_internal.h"
 #include "asan_mapping.h"
@@ -23,33 +24,13 @@
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 
-// Apple-internal CrashReporter support.
-#if SANITIZER_MAC
-# include <asl.h>
-# include <os/trace.h>
-# if defined(__has_include) && __has_include(<CrashReporterClient.h>)
-#  define HAVE_CRASHREPORTERCLIENT_H 1
-#  include <CrashReporterClient.h>
-extern "C" {
-CRASH_REPORTER_CLIENT_HIDDEN
-struct crashreporter_annotations_t gCRAnnotations
-    __attribute__((section("__DATA," CRASHREPORTER_ANNOTATIONS_SECTION))) = {
-        CRASHREPORTER_ANNOTATIONS_VERSION, 0, 0, 0, 0, 0, 0,
-#if CRASHREPORTER_ANNOTATIONS_VERSION > 4
-        0,
-#endif
-};
-}
-# endif
-#endif
-
 namespace __asan {
 
 // -------------------- User-specified callbacks ----------------- {{{1
 static void (*error_report_callback)(const char*);
-static char *error_message_buffer = 0;
+static char *error_message_buffer = nullptr;
 static uptr error_message_buffer_pos = 0;
-static uptr error_message_buffer_size = 0;
+static BlockingMutex error_message_buf_mutex(LINKER_INITIALIZED);
 
 struct ReportData {
   uptr pc;
@@ -65,24 +46,20 @@ static bool report_happened = false;
 static ReportData report_data = {0, 0, 0, 0, false, 0, ""};
 
 void AppendToErrorMessageBuffer(const char *buffer) {
-  // Apple-internal CrashReporter support: Always store reports into buffer.
+  BlockingMutexLock l(&error_message_buf_mutex);
   if (!error_message_buffer) {
-    error_message_buffer_size = 1 << 16;
     error_message_buffer =
-        (char*)MmapOrDie(error_message_buffer_size, __func__);
+      (char*)MmapOrDieQuietly(kErrorMessageBufferSize, __func__);
     error_message_buffer_pos = 0;
   }
-
-  if (error_message_buffer) {
-    uptr length = internal_strlen(buffer);
-    CHECK_GE(error_message_buffer_size, error_message_buffer_pos);
-    uptr remaining = error_message_buffer_size - error_message_buffer_pos;
-    internal_strncpy(error_message_buffer + error_message_buffer_pos,
-                     buffer, remaining);
-    error_message_buffer[error_message_buffer_size - 1] = '\0';
-    // FIXME: reallocate the buffer instead of truncating the message.
-    error_message_buffer_pos += Min(remaining, length);
-  }
+  uptr length = internal_strlen(buffer);
+  RAW_CHECK(kErrorMessageBufferSize >= error_message_buffer_pos);
+  uptr remaining = kErrorMessageBufferSize - error_message_buffer_pos;
+  internal_strncpy(error_message_buffer + error_message_buffer_pos,
+                   buffer, remaining);
+  error_message_buffer[kErrorMessageBufferSize - 1] = '\0';
+  // FIXME: reallocate the buffer instead of truncating the message.
+  error_message_buffer_pos += Min(remaining, length);
 }
 
 // ---------------------- Decorator ------------------------------ {{{1
@@ -309,9 +286,8 @@ static void PrintGlobalLocation(InternalScopedString *str,
     str->append(":%d", g.location->column_no);
 }
 
-bool DescribeAddressRelativeToGlobal(uptr addr, uptr size,
-                                     const __asan_global &g) {
-  if (!IsAddressNearGlobal(addr, g)) return false;
+static void DescribeAddressRelativeToGlobal(uptr addr, uptr size,
+                                            const __asan_global &g) {
   InternalScopedString str(4096);
   Decorator d;
   str.append("%s", d.Location());
@@ -334,6 +310,26 @@ bool DescribeAddressRelativeToGlobal(uptr addr, uptr size,
   str.append("%s", d.EndLocation());
   PrintGlobalNameIfASCII(&str, g);
   Printf("%s", str.data());
+}
+
+static bool DescribeAddressIfGlobal(uptr addr, uptr size,
+                                    const char *bug_type) {
+  // Assume address is close to at most four globals.
+  const int kMaxGlobalsInReport = 4;
+  __asan_global globals[kMaxGlobalsInReport];
+  u32 reg_sites[kMaxGlobalsInReport];
+  int globals_num =
+      GetGlobalsForAddress(addr, globals, reg_sites, ARRAY_SIZE(globals));
+  if (globals_num == 0)
+    return false;
+  for (int i = 0; i < globals_num; i++) {
+    DescribeAddressRelativeToGlobal(addr, size, globals[i]);
+    if (0 == internal_strcmp(bug_type, "initialization-order-fiasco") &&
+        reg_sites[i]) {
+      Printf("  registered at:\n");
+      StackDepotGet(reg_sites[i]).Print();
+    }
+  }
   return true;
 }
 
@@ -382,7 +378,7 @@ static void PrintAccessAndVarIntersection(const StackVarDescr &var, uptr addr,
                                           uptr next_var_beg) {
   uptr var_end = var.beg + var.size;
   uptr addr_end = addr + access_size;
-  const char *pos_descr = 0;
+  const char *pos_descr = nullptr;
   // If the variable [var.beg, var_end) is the nearest variable to the
   // current memory access, indicate it in the log.
   if (addr >= var.beg) {
@@ -553,7 +549,7 @@ void DescribeHeapAddress(uptr addr, uptr access_size) {
   StackTrace alloc_stack = chunk.GetAllocStack();
   char tname[128];
   Decorator d;
-  AsanThreadContext *free_thread = 0;
+  AsanThreadContext *free_thread = nullptr;
   if (chunk.FreeTid() != kInvalidTid) {
     free_thread = GetThreadContextByTidLocked(chunk.FreeTid());
     Printf("%sfreed by thread T%d%s here:%s\n", d.Allocation(),
@@ -579,12 +575,12 @@ void DescribeHeapAddress(uptr addr, uptr access_size) {
   DescribeThread(alloc_thread);
 }
 
-void DescribeAddress(uptr addr, uptr access_size) {
+static void DescribeAddress(uptr addr, uptr access_size, const char *bug_type) {
   // Check if this is shadow or shadow gap.
   if (DescribeAddressIfShadow(addr))
     return;
   CHECK(AddrIsInMem(addr));
-  if (DescribeAddressIfGlobal(addr, access_size))
+  if (DescribeAddressIfGlobal(addr, access_size, bug_type))
     return;
   if (DescribeAddressIfStack(addr, access_size))
     return;
@@ -606,6 +602,11 @@ void DescribeThread(AsanThreadContext *context) {
   InternalScopedString str(1024);
   str.append("Thread T%d%s", context->tid,
              ThreadNameWithParenthesis(context->tid, tname, sizeof(tname)));
+  if (context->parent_tid == kInvalidTid) {
+    str.append(" created by unknown thread\n");
+    Printf("%s", str.data());
+    return;
+  }
   str.append(
       " created by T%d%s here:\n", context->parent_tid,
       ThreadNameWithParenthesis(context->parent_tid, tname, sizeof(tname)));
@@ -620,36 +621,6 @@ void DescribeThread(AsanThreadContext *context) {
 }
 
 // -------------------- Different kinds of reports ----------------- {{{1
-
-// Removes the ANSI escape sequences from the input string (in-place).
-void RemoveANSIEscapeSequencesFromString(char *str) {
-  if (!str)
-    return;
-
-  // We are going to remove the escape sequences in place.
-  char *s = str;
-  char *z = str;
-  while (*s != '\0') {
-    // Skip ANSI escape sequences.
-    if (*s == '\033' && *(s + 1) == '[') {
-      while (*s != 'm' && *s != '\0') {
-        s++;
-      }
-      if (*s == '\0') {
-        break;
-      }
-    // Copy over the buffer content.
-    } else if (s != z) {
-      CHECK_GT(s, z);
-      *z = *s;
-      z++;
-    }
-    s++;
-  }
-
-  // Null terminate the string.
-  *z = '\0';
-}
 
 // Use ScopedInErrorReport to run common actions just before and
 // immediately after printing error report.
@@ -673,7 +644,7 @@ class ScopedInErrorReport {
       }
       // If we're still not dead for some reason, use raw _exit() instead of
       // Die() to bypass any additional checks.
-      internal__exit(flags()->exitcode);
+      internal__exit(common_flags()->exitcode);
     }
     if (report) report_data = *report;
     report_happened = true;
@@ -698,25 +669,19 @@ class ScopedInErrorReport {
     if (flags()->print_stats)
       __asan_print_accumulated_stats();
 
-    // Apple-internal CrashReporter support: Save report to ASL and CrashLog.
-    if (error_message_buffer_size > 0) {
-      RemoveANSIEscapeSequencesFromString(error_message_buffer);
-      // Always log the full message to syslog.
-      asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", error_message_buffer);
-
-      // Log with genealogy. This will make it into the Crash Log on embedded.
-      if (&_os_trace_with_buffer != nullptr) {
-        os_trace("AddressSanitizer reported a failure. "
-                 "Consult syslog for more information.");
-      }
-
-#if HAVE_CRASHREPORTERCLIENT_H
-      CRSetCrashLogMessage(error_message_buffer);
-#endif
+    // Copy the message buffer so that we could start logging without holding a
+    // lock that gets aquired during printing.
+    InternalScopedBuffer<char> buffer_copy(kErrorMessageBufferSize);
+    {
+      BlockingMutexLock l(&error_message_buf_mutex);
+      internal_memcpy(buffer_copy.data(),
+                      error_message_buffer, kErrorMessageBufferSize);
     }
 
+    LogFullErrorReport(buffer_copy.data());
+
     if (error_report_callback) {
-      error_report_callback(error_message_buffer);
+      error_report_callback(buffer_copy.data());
     }
     Report("ABORTING\n");
     Die();
@@ -740,7 +705,7 @@ void ReportStackOverflow(const SignalContext &sig) {
   ReportErrorSummary("stack-overflow", &stack);
 }
 
-void ReportSIGSEGV(const char *description, const SignalContext &sig) {
+void ReportDeadlySignal(const char *description, const SignalContext &sig) {
   ScopedInErrorReport in_report;
   Decorator d;
   Printf("%s", d.Warning());
@@ -757,7 +722,7 @@ void ReportSIGSEGV(const char *description, const SignalContext &sig) {
   stack.Print();
   MaybeDumpInstructionBytes(sig.pc);
   Printf("AddressSanitizer can not provide additional info.\n");
-  ReportErrorSummary("SEGV", &stack);
+  ReportErrorSummary(description, &stack);
 }
 
 void ReportDoubleFree(uptr addr, BufferedStackTrace *free_stack) {
@@ -895,8 +860,8 @@ void ReportStringFunctionMemoryRangesOverlap(const char *function,
              bug_type, offset1, offset1 + length1, offset2, offset2 + length2);
   Printf("%s", d.EndWarning());
   stack->Print();
-  DescribeAddress((uptr)offset1, length1);
-  DescribeAddress((uptr)offset2, length2);
+  DescribeAddress((uptr)offset1, length1, bug_type);
+  DescribeAddress((uptr)offset2, length2, bug_type);
   ReportErrorSummary(bug_type, stack);
 }
 
@@ -909,7 +874,7 @@ void ReportStringFunctionSizeOverflow(uptr offset, uptr size,
   Report("ERROR: AddressSanitizer: %s: (size=%zd)\n", bug_type, size);
   Printf("%s", d.EndWarning());
   stack->Print();
-  DescribeAddress(offset, size);
+  DescribeAddress(offset, size, bug_type);
   ReportErrorSummary(bug_type, stack);
 }
 
@@ -964,15 +929,16 @@ void ReportODRViolation(const __asan_global *g1, u32 stack_id1,
 static NOINLINE void
 ReportInvalidPointerPair(uptr pc, uptr bp, uptr sp, uptr a1, uptr a2) {
   ScopedInErrorReport in_report;
+  const char *bug_type = "invalid-pointer-pair";
   Decorator d;
   Printf("%s", d.Warning());
   Report("ERROR: AddressSanitizer: invalid-pointer-pair: %p %p\n", a1, a2);
   Printf("%s", d.EndWarning());
   GET_STACK_TRACE_FATAL(pc, bp);
   stack.Print();
-  DescribeAddress(a1, 1);
-  DescribeAddress(a2, 1);
-  ReportErrorSummary("invalid-pointer-pair", &stack);
+  DescribeAddress(a1, 1, bug_type);
+  DescribeAddress(a2, 1, bug_type);
+  ReportErrorSummary(bug_type, &stack);
 }
 
 static INLINE void CheckForInvalidPointerPair(void *p1, void *p2) {
@@ -1029,14 +995,23 @@ void ReportMacCfReallocUnknown(uptr addr, uptr zone_ptr, const char *zone_name,
   DescribeHeapAddress(addr, 1);
 }
 
-}  // namespace __asan
+} // namespace __asan
 
 // --------------------------- Interface --------------------- {{{1
 using namespace __asan;  // NOLINT
 
 void __asan_report_error(uptr pc, uptr bp, uptr sp, uptr addr, int is_write,
-                         uptr access_size) {
+                         uptr access_size, u32 exp) {
   ENABLE_FRAME_POINTER;
+
+  // Optimization experiments.
+  // The experiments can be used to evaluate potential optimizations that remove
+  // instrumentation (assess false negatives). Instead of completely removing
+  // some instrumentation, compiler can emit special calls into runtime
+  // (e.g. __asan_report_exp_load1 instead of __asan_report_load1) and pass
+  // mask of experiments (exp).
+  // The reaction to a non-zero value of exp is to be defined.
+  (void)exp;
 
   // Determine the error type.
   const char *bug_descr = "unknown-crash";
@@ -1116,25 +1091,20 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp, uptr addr, int is_write,
   GET_STACK_TRACE_FATAL(pc, bp);
   stack.Print();
 
-  DescribeAddress(addr, access_size);
+  DescribeAddress(addr, access_size, bug_descr);
   ReportErrorSummary(bug_descr, &stack);
   PrintShadowMemoryForAddress(addr);
 }
 
 void NOINLINE __asan_set_error_report_callback(void (*callback)(const char*)) {
+  BlockingMutexLock l(&error_message_buf_mutex);
   error_report_callback = callback;
-  if (callback) {
-    error_message_buffer_size = 1 << 16;
-    error_message_buffer =
-        (char*)MmapOrDie(error_message_buffer_size, __func__);
-    error_message_buffer_pos = 0;
-  }
 }
 
 void __asan_describe_address(uptr addr) {
   // Thread registry must be locked while we're describing an address.
   asanThreadRegistry().Lock();
-  DescribeAddress(addr, 1);
+  DescribeAddress(addr, 1, "");
   asanThreadRegistry().Unlock();
 }
 
@@ -1179,7 +1149,7 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __sanitizer_ptr_cmp(void *a, void *b) {
   CheckForInvalidPointerPair(a, b);
 }
-}  // extern "C"
+} // extern "C"
 
 #if !SANITIZER_SUPPORTS_WEAK_HOOKS
 // Provide default implementation of __asan_on_error that does nothing

@@ -43,7 +43,7 @@
  Name: AppKit             # The name of the framework
 
  Availability: OSX        # Optional: Specifies which platform the API is
-                          # available on. [OSX / iOS / WatchOS / none/
+                          # available on. [OSX / iOS / TVOS / WatchOS / none/
                           #                available]
 
  AvailabilityMsg: ""  # Optional: Custom availability message to display to
@@ -142,6 +142,7 @@ namespace {
     Available = 0,
     OSX,
     IOS,
+    TvOS,
     WatchOS,
     None,
   };
@@ -264,6 +265,7 @@ namespace llvm {
       static void enumeration(IO &io, APIAvailability &value) {
         io.enumCase(value, "OSX",       APIAvailability::OSX);
         io.enumCase(value, "iOS",       APIAvailability::IOS);
+        io.enumCase(value, "TVOS",      APIAvailability::TvOS);
         io.enumCase(value, "WatchOS",   APIAvailability::WatchOS);
         io.enumCase(value, "none",      APIAvailability::None);
         io.enumCase(value, "available", APIAvailability::Available);

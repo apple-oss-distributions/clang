@@ -12,6 +12,7 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCParser/MCAsmLexer.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCSectionMachO.h"
@@ -37,6 +38,8 @@ class DarwinAsmParser : public MCAsmParserExtension {
   bool parseSectionSwitch(const char *Segment, const char *Section,
                           unsigned TAA = 0, unsigned ImplicitAlign = 0,
                           unsigned StubSize = 0);
+
+  SMLoc LastVersionMinDirective;
 
 public:
   DarwinAsmParser() {}
@@ -166,9 +169,12 @@ public:
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveIdent>(".ident");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(
       ".watchos_version_min");
+    addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(".tvos_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(".ios_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseVersionMin>(
       ".macosx_version_min");
+
+    LastVersionMinDirective = SMLoc();
   }
 
   bool parseDirectiveDesc(StringRef, SMLoc);
@@ -409,7 +415,7 @@ bool DarwinAsmParser::parseDirectiveDesc(StringRef, SMLoc) {
     return TokError("expected identifier in directive");
 
   // Handle the identifier as the key symbol.
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(Name);
+  MCSymbol *Sym = getContext().getOrCreateSymbol(Name);
 
   if (getLexer().isNot(AsmToken::Comma))
     return TokError("unexpected token in '.desc' directive");
@@ -446,7 +452,7 @@ bool DarwinAsmParser::parseDirectiveIndirectSymbol(StringRef, SMLoc Loc) {
   if (getParser().parseIdentifier(Name))
     return TokError("expected identifier in .indirect_symbol directive");
 
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(Name);
+  MCSymbol *Sym = getContext().getOrCreateSymbol(Name);
 
   // Assembler local symbols don't make any sense here. Complain loudly.
   if (Sym->isTemporary())
@@ -521,7 +527,7 @@ bool DarwinAsmParser::parseDirectiveLsym(StringRef, SMLoc) {
     return TokError("expected identifier in directive");
 
   // Handle the identifier as the key symbol.
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(Name);
+  MCSymbol *Sym = getContext().getOrCreateSymbol(Name);
 
   if (getLexer().isNot(AsmToken::Comma))
     return TokError("unexpected token in '.lsym' directive");
@@ -628,7 +634,7 @@ bool DarwinAsmParser::parseDirectiveSecureLogUnique(StringRef, SMLoc IDLoc) {
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return TokError("unexpected token in '.secure_log_unique' directive");
 
-  if (getContext().getSecureLogUsed() != false)
+  if (getContext().getSecureLogUsed())
     return Error(IDLoc, ".secure_log_unique specified multiple times");
 
   // Get the secure log path.
@@ -697,7 +703,7 @@ bool DarwinAsmParser::parseDirectiveTBSS(StringRef, SMLoc) {
     return TokError("expected identifier in directive");
 
   // Handle the identifier as the key symbol.
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(Name);
+  MCSymbol *Sym = getContext().getOrCreateSymbol(Name);
 
   if (getLexer().isNot(AsmToken::Comma))
     return TokError("unexpected token in directive");
@@ -780,7 +786,7 @@ bool DarwinAsmParser::parseDirectiveZerofill(StringRef, SMLoc) {
     return TokError("expected identifier in directive");
 
   // handle the identifier as the key symbol.
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(IDStr);
+  MCSymbol *Sym = getContext().getOrCreateSymbol(IDStr);
 
   if (getLexer().isNot(AsmToken::Comma))
     return TokError("unexpected token in directive");
@@ -869,10 +875,11 @@ bool DarwinAsmParser::parseDirectiveDataRegionEnd(StringRef, SMLoc) {
 /// parseVersionMin
 ///  ::= .ios_version_min major,minor[,update]
 ///  ::= .macosx_version_min major,minor[,update]
-bool DarwinAsmParser::parseVersionMin(StringRef Directive, SMLoc) {
+bool DarwinAsmParser::parseVersionMin(StringRef Directive, SMLoc Loc) {
   int64_t Major = 0, Minor = 0, Update = 0;
   int Kind = StringSwitch<int>(Directive)
     .Case(".watchos_version_min", MCVM_WatchOSVersionMin)
+    .Case(".tvos_version_min", MCVM_TvOSVersionMin)
     .Case(".ios_version_min", MCVM_IOSVersionMin)
     .Case(".macosx_version_min", MCVM_OSXVersionMin);
   // Get the major version number.
@@ -904,6 +911,24 @@ bool DarwinAsmParser::parseVersionMin(StringRef Directive, SMLoc) {
     return TokError("invalid OS update number");
     Lex();
   }
+
+  const Triple &T = getContext().getObjectFileInfo()->getTargetTriple();
+  Triple::OSType ExpectedOS = Triple::UnknownOS;
+  switch ((MCVersionMinType)Kind) {
+  case MCVM_WatchOSVersionMin: ExpectedOS = Triple::WatchOS; break;
+  case MCVM_TvOSVersionMin:    ExpectedOS = Triple::TvOS;    break;
+  case MCVM_IOSVersionMin:     ExpectedOS = Triple::IOS;     break;
+  case MCVM_OSXVersionMin:     ExpectedOS = Triple::MacOSX;  break;
+  }
+  if (T.getOS() != ExpectedOS)
+    Warning(Loc, Directive + " should only be used for " +
+            Triple::getOSTypeName(ExpectedOS) + " targets");
+
+  if (LastVersionMinDirective.isValid()) {
+    Warning(Loc, "overriding previous version_min directive");
+    Note(LastVersionMinDirective, "previous definition is here");
+  }
+  LastVersionMinDirective = Loc;
 
   // We've parsed a correct version specifier, so send it to the streamer.
   getStreamer().EmitVersionMin((MCVersionMinType)Kind, Major, Minor, Update);

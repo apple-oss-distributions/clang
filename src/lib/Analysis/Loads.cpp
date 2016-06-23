@@ -65,6 +65,12 @@ static bool AreEquivalentAddressValues(const Value *A, const Value *B) {
 bool llvm::isSafeToLoadUnconditionally(Value *V, Instruction *ScanFrom,
                                        unsigned Align) {
   const DataLayout &DL = ScanFrom->getModule()->getDataLayout();
+
+  // Zero alignment means that the load has the ABI alignment for the target
+  if (Align == 0)
+    Align = DL.getABITypeAlignment(V->getType()->getPointerElementType());
+  assert(isPowerOf2_32(Align));
+
   int64_t ByteOffset = 0;
   Value *Base = V;
   Base = GetPointerBaseWithConstantOffset(V, ByteOffset, DL);
@@ -102,7 +108,7 @@ bool llvm::isSafeToLoadUnconditionally(Value *V, Instruction *ScanFrom,
     if (Align <= BaseAlign) {
       // Check if the load is within the bounds of the underlying object.
       if (ByteOffset + LoadSize <= DL.getTypeAllocSize(BaseType) &&
-          (Align == 0 || (ByteOffset % Align) == 0))
+          ((ByteOffset % Align) == 0))
         return true;
     }
   }
@@ -112,7 +118,8 @@ bool llvm::isSafeToLoadUnconditionally(Value *V, Instruction *ScanFrom,
   // from/to.  If so, the previous load or store would have already trapped,
   // so there is no harm doing an extra load (also, CSE will later eliminate
   // the load entirely).
-  BasicBlock::iterator BBI = ScanFrom, E = ScanFrom->getParent()->begin();
+  BasicBlock::iterator BBI = ScanFrom->getIterator(),
+                       E = ScanFrom->getParent()->begin();
 
   // We can at least always strip pointer casts even though we can't use the
   // base here.
@@ -128,24 +135,44 @@ bool llvm::isSafeToLoadUnconditionally(Value *V, Instruction *ScanFrom,
       return false;
 
     Value *AccessedPtr;
-    if (LoadInst *LI = dyn_cast<LoadInst>(BBI))
+    unsigned AccessedAlign;
+    if (LoadInst *LI = dyn_cast<LoadInst>(BBI)) {
       AccessedPtr = LI->getPointerOperand();
-    else if (StoreInst *SI = dyn_cast<StoreInst>(BBI))
+      AccessedAlign = LI->getAlignment();
+    } else if (StoreInst *SI = dyn_cast<StoreInst>(BBI)) {
       AccessedPtr = SI->getPointerOperand();
-    else
+      AccessedAlign = SI->getAlignment();
+    } else
+      continue;
+
+    Type *AccessedTy = AccessedPtr->getType()->getPointerElementType();
+    if (AccessedAlign == 0)
+      AccessedAlign = DL.getABITypeAlignment(AccessedTy);
+    if (AccessedAlign < Align)
       continue;
 
     // Handle trivial cases.
     if (AccessedPtr == V)
       return true;
 
-    auto *AccessedTy = cast<PointerType>(AccessedPtr->getType());
     if (AreEquivalentAddressValues(AccessedPtr->stripPointerCasts(), V) &&
-        LoadSize <= DL.getTypeStoreSize(AccessedTy->getElementType()))
+        LoadSize <= DL.getTypeStoreSize(AccessedTy))
       return true;
   }
   return false;
 }
+
+/// DefMaxInstsToScan - the default number of maximum instructions
+/// to scan in the block, used by FindAvailableLoadedValue().
+/// FindAvailableLoadedValue() was introduced in r60148, to improve jump
+/// threading in part by eliminating partially redundant loads.
+/// At that point, the value of MaxInstsToScan was already set to '6'
+/// without documented explanation.
+cl::opt<unsigned>
+llvm::DefMaxInstsToScan("available-load-scan-limit", cl::init(6), cl::Hidden,
+  cl::desc("Use this to specify the default maximum number of instructions "
+           "to scan backward from a given instruction, when searching for "
+           "available loaded value"));
 
 /// \brief Scan the ScanBB block backwards to see if we have the value at the
 /// memory address *Ptr locally available within a small number of instructions.
@@ -185,7 +212,7 @@ Value *llvm::FindAvailableLoadedValue(Value *Ptr, BasicBlock *ScanBB,
   while (ScanFrom != ScanBB->begin()) {
     // We must ignore debug info directives when counting (otherwise they
     // would affect codegen).
-    Instruction *Inst = --ScanFrom;
+    Instruction *Inst = &*--ScanFrom;
     if (isa<DbgInfoIntrinsic>(Inst))
       continue;
 
@@ -232,9 +259,7 @@ Value *llvm::FindAvailableLoadedValue(Value *Ptr, BasicBlock *ScanBB,
 
       // If we have alias analysis and it says the store won't modify the loaded
       // value, ignore the store.
-      if (AA &&
-          (AA->getModRefInfo(SI, StrippedPtr, AccessSize) &
-           AliasAnalysis::Mod) == 0)
+      if (AA && (AA->getModRefInfo(SI, StrippedPtr, AccessSize) & MRI_Mod) == 0)
         continue;
 
       // Otherwise the store that may or may not alias the pointer, bail out.
@@ -247,8 +272,7 @@ Value *llvm::FindAvailableLoadedValue(Value *Ptr, BasicBlock *ScanBB,
       // If alias analysis claims that it really won't modify the load,
       // ignore it.
       if (AA &&
-          (AA->getModRefInfo(Inst, StrippedPtr, AccessSize) &
-           AliasAnalysis::Mod) == 0)
+          (AA->getModRefInfo(Inst, StrippedPtr, AccessSize) & MRI_Mod) == 0)
         continue;
 
       // May modify the pointer, bail out.

@@ -19,6 +19,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryObject.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <system_error>
 using namespace llvm;
@@ -447,7 +448,7 @@ static uint32_t branchDiv(uint64_t Numerator, uint64_t Divisor) {
 
 namespace {
 struct formatBranchInfo {
-  formatBranchInfo(const GCOVOptions &Options, uint64_t Count, uint64_t Total)
+  formatBranchInfo(const GCOV::Options &Options, uint64_t Count, uint64_t Total)
       : Options(Options), Count(Count), Total(Total) {}
 
   void print(raw_ostream &OS) const {
@@ -459,7 +460,7 @@ struct formatBranchInfo {
       OS << "taken " << branchDiv(Count, Total) << "%";
   }
 
-  const GCOVOptions &Options;
+  const GCOV::Options &Options;
   uint64_t Count;
   uint64_t Total;
 };
@@ -554,7 +555,7 @@ FileInfo::openCoveragePath(StringRef CoveragePath) {
     return llvm::make_unique<raw_null_ostream>();
 
   std::error_code EC;
-  auto OS = llvm::make_unique<raw_fd_ostream>(CoveragePath.str(), EC,
+  auto OS = llvm::make_unique<raw_fd_ostream>(CoveragePath, EC,
                                               sys::fs::F_Text);
   if (EC) {
     errs() << EC.message() << "\n";

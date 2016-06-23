@@ -54,8 +54,8 @@ private:
       return Finder.newASTConsumer();
     }
 
-    virtual bool BeginSourceFileAction(CompilerInstance &CI,
-                                       StringRef Filename) override {
+    bool BeginSourceFileAction(CompilerInstance &CI,
+                               StringRef Filename) override {
       if (!ASTFrontendAction::BeginSourceFileAction(CI, Filename))
         return false;
 
@@ -85,7 +85,7 @@ Transform::Transform(llvm::StringRef Name, const TransformOptions &Options)
 Transform::~Transform() {}
 
 bool Transform::isFileModifiable(const SourceManager &SM,
-                                 const SourceLocation &Loc) const {
+                                 SourceLocation Loc) const {
   if (SM.isWrittenInMainFile(Loc))
     return true;
 

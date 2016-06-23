@@ -7,37 +7,89 @@
 //
 //===----------------------------------------------------------------------===//
 //
+// Introduction
+//
 // This file implements a tool that checks whether a set of headers provides
-// the consistent definitions required to use modules. For example, it detects
-// whether the same entity (say, a NULL macro or size_t typedef) is defined in
-// multiple headers or whether a header produces different definitions under
+// the consistent definitions required to use modules.  It can also check an
+// existing module map for full coverage of the headers in a directory tree.
+//
+// For example, in examining headers, it detects whether the same entity
+// (say, a NULL macro or size_t typedef) is defined in multiple headers
+// or whether a header produces different definitions under
 // different circumstances. These conditions cause modules built from the
 // headers to behave poorly, and should be fixed before introducing a module
 // map.
 //
-// Modularize takes as argument a file name for a file containing the
-// newline-separated list of headers to check with respect to each other.
+// Modularize takes as input either one or more module maps (by default,
+// "module.modulemap") or one or more text files contatining lists of headers
+// to check.
+//
+// In the case of a module map, the module map must be well-formed in
+// terms of syntax.  Modularize will extract the header file names
+// from the map.  Only normal headers are checked, assuming headers
+// marked "private", "textual", or "exclude" are not to be checked
+// as a top-level include, assuming they either are included by
+// other headers which are checked, or they are not suitable for
+// modules.
+//
+// In the case of a file list, the list is a newline-separated list of headers
+// to check with respect to each other.
 // Lines beginning with '#' and empty lines are ignored.
 // Header file names followed by a colon and other space-separated
 // file names will include those extra files as dependencies.
 // The file names can be relative or full paths, but must be on the
 // same line.
 //
-// Modularize also accepts regular front-end arguments.
+// Modularize also accepts regular clang front-end arguments.
 //
-// Usage:   modularize [-prefix (optional header path prefix)]
-//   (include-files_list) [(front-end-options) ...]
+// Usage:   modularize [(modularize options)]
+//   [(include-files_list)|(module map)]+ [(front-end-options) ...]
 //
-// Note that unless a "-prefix (header path)" option is specified,
-// non-absolute file paths in the header list file will be relative
-// to the header list file directory.  Use -prefix to specify a different
-// directory.
+// Options:
+//    -prefix=(optional header path prefix)
+//          Note that unless a "-prefix (header path)" option is specified,
+//          non-absolute file paths in the header list file will be relative
+//          to the header list file directory.  Use -prefix to specify a
+//          different directory.
+//    -module-map-path=(module map)
+//          Skip the checks, and instead act as a module.map generation
+//          assistant, generating a module map file based on the header list.
+//          An optional "-root-module=(rootName)" argument can specify a root
+//          module to be created in the generated module.map file.  Note that
+//          you will likely need to edit this file to suit the needs of your
+//          headers.
+//    -problem-files-list=(problem files list file name)
+//          For use only with module map assistant.  Input list of files that
+//          have problems with respect to modules.  These will still be
+//          included in the generated module map, but will be marked as
+//          "excluded" headers.
+//    -root-module=(root module name)
+//          Specifies a root module to be created in the generated module.map
+//          file.
+//    -block-check-header-list-only
+//          Only warn if #include directives are inside extern or namespace
+//          blocks if the included header is in the header list.
+//    -no-coverage-check
+//          Don't do the coverage check.
+//    -coverage-check-only
+//          Only do the coverage check.
+//    -display-file-lists
+//          Display lists of good files (no compile errors), problem files,
+//          and a combined list with problem files preceded by a '#'.
+//          This can be used to quickly determine which files have problems.
+//          The latter combined list might be useful in starting to modularize
+//          a set of headers.  You can start with a full list of headers,
+//          use -display-file-lists option, and then use the combined list as
+//          your intermediate list, uncommenting-out headers as you fix them.
 //
-// Note that by default, the underlying Clang front end assumes .h files
-// contain C source.  If your .h files in the file list contain C++ source,
-// you should append the following to your command lines: -x c++
+// Note that by default, the modularize assumes .h files contain C++ source.
+// If your .h files in the file list contain another language, you should
+// append an appropriate -x option to your command line, i.e.:  -x c
 //
-// Modularize will do normal parsing, reporting normal errors and warnings,
+// Modularization Issue Checks
+//
+// In the process of checking headers for modularization issues, modularize
+// will do normal parsing, reporting normal errors and warnings,
 // but will also report special error messages like the following:
 //
 //   error: '(symbol)' defined at multiple locations:
@@ -90,16 +142,47 @@
 //
 // See PreprocessorTracker.cpp for additional details.
 //
-// Modularize also has an option ("-module-map-path=module.map") that will
-// skip the checks, and instead act as a module.map generation assistant,
+// Module Map Coverage Check
+//
+// The coverage check uses the Clang ModuleMap class to read and parse the
+// module map file.  Starting at the module map file directory, or just the
+// include paths, if specified, it will collect the names of all the files it
+// considers headers (no extension, .h, or .inc--if you need more, modify the
+// isHeader function).  It then compares the headers against those referenced
+// in the module map, either explicitly named, or implicitly named via an
+// umbrella directory or umbrella file, as parsed by the ModuleMap object.
+// If headers are found which are not referenced or covered by an umbrella
+// directory or file, warning messages will be produced, and this program
+// will return an error code of 1.  Other errors result in an error code of 2.
+// If no problems are found, an error code of 0 is returned.
+//
+// Note that in the case of umbrella headers, this tool invokes the compiler
+// to preprocess the file, and uses a callback to collect the header files
+// included by the umbrella header or any of its nested includes.  If any
+// front end options are needed for these compiler invocations, these
+// can be included on the command line after the module map file argument.
+//
+// Warning message have the form:
+//
+//  warning: module.modulemap does not account for file: Level3A.h
+//
+// Note that for the case of the module map referencing a file that does
+// not exist, the module map parser in Clang will (at the time of this
+// writing) display an error message.
+//
+// Module Map Assistant - Module Map Generation
+//
+// Modularize also has an option ("-module-map-path=module.modulemap") that will
+// skip the checks, and instead act as a module.modulemap generation assistant,
 // generating a module map file based on the header list.  An optional
 // "-root-module=(rootName)" argument can specify a root module to be
-// created in the generated module.map file.  Note that you will likely
+// created in the generated module.modulemap file.  Note that you will likely
 // need to edit this file to suit the needs of your headers.
 //
-// An example command line for generating a module.map file:
+// An example command line for generating a module.modulemap file:
 //
-//   modularize -module-map-path=module.map -root-module=myroot headerlist.txt
+//   modularize -module-map-path=module.modulemap -root-module=myroot \
+//      headerlist.txt
 //
 // Note that if the headers in the header list have partial paths, sub-modules
 // will be created for the subdirectires involved, assuming that the
@@ -143,12 +226,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "Modularize.h"
+#include "ModularizeUtilities.h"
 #include "PreprocessorTracker.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Driver/Options.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -178,17 +261,18 @@ using namespace llvm::opt;
 using namespace Modularize;
 
 // Option to specify a file name for a list of header files to check.
-cl::opt<std::string>
-ListFileName(cl::Positional,
-             cl::desc("<name of file containing list of headers to check>"));
+static cl::list<std::string>
+    ListFileNames(cl::Positional, cl::value_desc("list"),
+                  cl::desc("<list of one or more header list files>"),
+                  cl::CommaSeparated);
 
 // Collect all other arguments, which will be passed to the front end.
-cl::list<std::string>
-CC1Arguments(cl::ConsumeAfter,
-             cl::desc("<arguments to be passed to front end>..."));
+static cl::list<std::string>
+    CC1Arguments(cl::ConsumeAfter,
+                 cl::desc("<arguments to be passed to front end>..."));
 
 // Option to specify a prefix to be prepended to the header names.
-cl::opt<std::string> HeaderPrefix(
+static cl::opt<std::string> HeaderPrefix(
     "prefix", cl::init(""),
     cl::desc(
         "Prepend header file paths with this prefix."
@@ -197,99 +281,62 @@ cl::opt<std::string> HeaderPrefix(
 
 // Option for assistant mode, telling modularize to output a module map
 // based on the headers list, and where to put it.
-cl::opt<std::string> ModuleMapPath(
+static cl::opt<std::string> ModuleMapPath(
     "module-map-path", cl::init(""),
     cl::desc("Turn on module map output and specify output path or file name."
              " If no path is specified and if prefix option is specified,"
              " use prefix for file path."));
 
-// Option for assistant mode, telling modularize to output a module map
-// based on the headers list, and where to put it.
-cl::opt<std::string>
+// Option to specify list of problem files for assistant.
+// This will cause assistant to exclude these files.
+static cl::opt<std::string> ProblemFilesList(
+  "problem-files-list", cl::init(""),
+  cl::desc(
+  "List of files with compilation or modularization problems for"
+    " assistant mode.  This will be excluded."));
+
+// Option for assistant mode, telling modularize the name of the root module.
+static cl::opt<std::string>
 RootModule("root-module", cl::init(""),
            cl::desc("Specify the name of the root module."));
+
+// Option for limiting the #include-inside-extern-or-namespace-block
+// check to only those headers explicitly listed in the header list.
+// This is a work-around for private includes that purposefully get
+// included inside blocks.
+static cl::opt<bool>
+BlockCheckHeaderListOnly("block-check-header-list-only", cl::init(false),
+cl::desc("Only warn if #include directives are inside extern or namespace"
+  " blocks if the included header is in the header list."));
+
+// Option for include paths for coverage check.
+static cl::list<std::string>
+IncludePaths("I", cl::desc("Include path for coverage check."),
+cl::ZeroOrMore, cl::value_desc("path"));
+
+// Option for disabling the coverage check.
+static cl::opt<bool>
+NoCoverageCheck("no-coverage-check", cl::init(false),
+cl::desc("Don't do the coverage check."));
+
+// Option for just doing the coverage check.
+static cl::opt<bool>
+CoverageCheckOnly("coverage-check-only", cl::init(false),
+cl::desc("Only do the coverage check."));
+
+// Option for displaying lists of good, bad, and mixed files.
+static cl::opt<bool>
+DisplayFileLists("display-file-lists", cl::init(false),
+cl::desc("Display lists of good files (no compile errors), problem files,"
+  " and a combined list with problem files preceded by a '#'."));
 
 // Save the program name for error messages.
 const char *Argv0;
 // Save the command line for comments.
 std::string CommandLine;
 
-// Read the header list file and collect the header file names and
-// optional dependencies.
-std::error_code
-getHeaderFileNames(SmallVectorImpl<std::string> &HeaderFileNames,
-                   DependencyMap &Dependencies, StringRef ListFileName,
-                   StringRef HeaderPrefix) {
-  // By default, use the path component of the list file name.
-  SmallString<256> HeaderDirectory(ListFileName);
-  sys::path::remove_filename(HeaderDirectory);
-  SmallString<256> CurrentDirectory;
-  sys::fs::current_path(CurrentDirectory);
-
-  // Get the prefix if we have one.
-  if (HeaderPrefix.size() != 0)
-    HeaderDirectory = HeaderPrefix;
-
-  // Read the header list file into a buffer.
-  ErrorOr<std::unique_ptr<MemoryBuffer>> listBuffer =
-      MemoryBuffer::getFile(ListFileName);
-  if (std::error_code EC = listBuffer.getError())
-    return EC;
-
-  // Parse the header list into strings.
-  SmallVector<StringRef, 32> Strings;
-  listBuffer.get()->getBuffer().split(Strings, "\n", -1, false);
-
-  // Collect the header file names from the string list.
-  for (SmallVectorImpl<StringRef>::iterator I = Strings.begin(),
-                                            E = Strings.end();
-       I != E; ++I) {
-    StringRef Line = I->trim();
-    // Ignore comments and empty lines.
-    if (Line.empty() || (Line[0] == '#'))
-      continue;
-    std::pair<StringRef, StringRef> TargetAndDependents = Line.split(':');
-    SmallString<256> HeaderFileName;
-    // Prepend header file name prefix if it's not absolute.
-    if (sys::path::is_absolute(TargetAndDependents.first))
-      llvm::sys::path::native(TargetAndDependents.first, HeaderFileName);
-    else {
-      if (HeaderDirectory.size() != 0)
-        HeaderFileName = HeaderDirectory;
-      else
-        HeaderFileName = CurrentDirectory;
-      sys::path::append(HeaderFileName, TargetAndDependents.first);
-      sys::path::native(HeaderFileName);
-    }
-    // Handle optional dependencies.
-    DependentsVector Dependents;
-    SmallVector<StringRef, 4> DependentsList;
-    TargetAndDependents.second.split(DependentsList, " ", -1, false);
-    int Count = DependentsList.size();
-    for (int Index = 0; Index < Count; ++Index) {
-      SmallString<256> Dependent;
-      if (sys::path::is_absolute(DependentsList[Index]))
-        Dependent = DependentsList[Index];
-      else {
-        if (HeaderDirectory.size() != 0)
-          Dependent = HeaderDirectory;
-        else
-          Dependent = CurrentDirectory;
-        sys::path::append(Dependent, DependentsList[Index]);
-      }
-      sys::path::native(Dependent);
-      Dependents.push_back(Dependent.str());
-    }
-    // Save the resulting header file path and dependencies.
-    HeaderFileNames.push_back(HeaderFileName.str());
-    Dependencies[HeaderFileName.str()] = Dependents;
-  }
-
-  return std::error_code();
-}
-
 // Helper function for finding the input file in an arguments list.
-std::string findInputFile(const CommandLineArguments &CLArgs) {
+static std::string findInputFile(const CommandLineArguments &CLArgs) {
   std::unique_ptr<OptTable> Opts(createDriverOptTable());
   const unsigned IncludedFlagsBitmask = options::CC1Option;
   unsigned MissingArgIndex, MissingArgCount;
@@ -298,17 +345,19 @@ std::string findInputFile(const CommandLineArguments &CLArgs) {
                                             E = CLArgs.end();
        I != E; ++I)
     Argv.push_back(I->c_str());
-  std::unique_ptr<InputArgList> Args(
-      Opts->ParseArgs(Argv.data(), Argv.data() + Argv.size(), MissingArgIndex,
-                      MissingArgCount, IncludedFlagsBitmask));
-  std::vector<std::string> Inputs = Args->getAllArgValues(OPT_INPUT);
-  return Inputs.back();
+  InputArgList Args = Opts->ParseArgs(Argv, MissingArgIndex, MissingArgCount,
+                                      IncludedFlagsBitmask);
+  std::vector<std::string> Inputs = Args.getAllArgValues(OPT_INPUT);
+  return ModularizeUtilities::getCanonicalPath(Inputs.back());
 }
 
 // This arguments adjuster inserts "-include (file)" arguments for header
-// dependencies.
-ArgumentsAdjuster getAddDependenciesAdjuster(DependencyMap &Dependencies) {
-  return [&Dependencies](const CommandLineArguments &Args) {
+// dependencies.  It also inserts a "-w" option and a "-x c++",
+// if no other "-x" option is present.
+static ArgumentsAdjuster
+getModularizeArgumentsAdjuster(DependencyMap &Dependencies) {
+  return [&Dependencies](const CommandLineArguments &Args,
+                         StringRef /*unused*/) {
     std::string InputFile = findInputFile(Args);
     DependentsVector &FileDependents = Dependencies[InputFile];
     CommandLineArguments NewArgs(Args);
@@ -319,6 +368,13 @@ ArgumentsAdjuster getAddDependenciesAdjuster(DependencyMap &Dependencies) {
                          std::string("\""));
         NewArgs.push_back(FileDependents[Index]);
       }
+    }
+    // Ignore warnings.  (Insert after "clang_tool" at beginning.)
+    NewArgs.insert(NewArgs.begin() + 1, "-w");
+    // Since we are compiling .h files, assume C++ unless given a -x option.
+    if (std::find(NewArgs.begin(), NewArgs.end(), "-x") == NewArgs.end()) {
+      NewArgs.insert(NewArgs.begin() + 2, "-x");
+      NewArgs.insert(NewArgs.begin() + 3, "c++");
     }
     return NewArgs;
   };
@@ -605,9 +661,9 @@ public:
     PPTracker.handlePreprocessorEntry(PP, InFile);
   }
 
-  ~CollectEntitiesConsumer() { PPTracker.handlePreprocessorExit(); }
+  ~CollectEntitiesConsumer() override { PPTracker.handlePreprocessorExit(); }
 
-  virtual void HandleTranslationUnit(ASTContext &Ctx) {
+  void HandleTranslationUnit(ASTContext &Ctx) override {
     SourceManager &SM = Ctx.getSourceManager();
 
     // Collect declared entities.
@@ -618,7 +674,7 @@ public:
     for (Preprocessor::macro_iterator M = PP.macro_begin(),
                                       MEnd = PP.macro_end();
          M != MEnd; ++M) {
-      Location Loc(SM, M->second->getLocation());
+      Location Loc(SM, M->second.getLatest()->getLocation());
       if (!Loc)
         continue;
 
@@ -665,7 +721,7 @@ public:
       : Entities(Entities), PPTracker(preprocessorTracker),
         HadErrors(HadErrors) {}
 
-  virtual CollectEntitiesAction *create() {
+  CollectEntitiesAction *create() override {
     return new CollectEntitiesAction(Entities, PPTracker, HadErrors);
   }
 
@@ -675,12 +731,84 @@ private:
   int &HadErrors;
 };
 
+class CompileCheckVisitor
+  : public RecursiveASTVisitor<CompileCheckVisitor> {
+public:
+  CompileCheckVisitor() {}
+
+  bool TraverseStmt(Stmt *S) { return true; }
+  bool TraverseType(QualType T) { return true; }
+  bool TraverseTypeLoc(TypeLoc TL) { return true; }
+  bool TraverseNestedNameSpecifier(NestedNameSpecifier *NNS) { return true; }
+  bool TraverseNestedNameSpecifierLoc(NestedNameSpecifierLoc NNS) {
+    return true;
+  }
+  bool TraverseDeclarationNameInfo(DeclarationNameInfo NameInfo) {
+    return true;
+  }
+  bool TraverseTemplateName(TemplateName Template) { return true; }
+  bool TraverseTemplateArgument(const TemplateArgument &Arg) { return true; }
+  bool TraverseTemplateArgumentLoc(const TemplateArgumentLoc &ArgLoc) {
+    return true;
+  }
+  bool TraverseTemplateArguments(const TemplateArgument *Args,
+    unsigned NumArgs) {
+    return true;
+  }
+  bool TraverseConstructorInitializer(CXXCtorInitializer *Init) { return true; }
+  bool TraverseLambdaCapture(LambdaCapture C) { return true; }
+
+  // Check 'extern "*" {}' block for #include directives.
+  bool VisitLinkageSpecDecl(LinkageSpecDecl *D) {
+    return true;
+  }
+
+  // Check 'namespace (name) {}' block for #include directives.
+  bool VisitNamespaceDecl(const NamespaceDecl *D) {
+    return true;
+  }
+
+  // Collect definition entities.
+  bool VisitNamedDecl(NamedDecl *ND) {
+    return true;
+  }
+};
+
+class CompileCheckConsumer : public ASTConsumer {
+public:
+  CompileCheckConsumer() {}
+
+  void HandleTranslationUnit(ASTContext &Ctx) override {
+    CompileCheckVisitor().TraverseDecl(Ctx.getTranslationUnitDecl());
+  }
+};
+
+class CompileCheckAction : public SyntaxOnlyAction {
+public:
+  CompileCheckAction() {}
+
+protected:
+  std::unique_ptr<clang::ASTConsumer>
+    CreateASTConsumer(CompilerInstance &CI, StringRef InFile) override {
+    return llvm::make_unique<CompileCheckConsumer>();
+  }
+};
+
+class CompileCheckFrontendActionFactory : public FrontendActionFactory {
+public:
+  CompileCheckFrontendActionFactory() {}
+
+  CompileCheckAction *create() override {
+    return new CompileCheckAction();
+  }
+};
+
 int main(int Argc, const char **Argv) {
 
   // Save program name for error messages.
   Argv0 = Argv[0];
 
-  // Save program arguments for use in module.map comment.
+  // Save program arguments for use in module.modulemap comment.
   CommandLine = sys::path::stem(sys::path::filename(Argv0));
   for (int ArgIndex = 1; ArgIndex < Argc; ArgIndex++) {
     CommandLine.append(" ");
@@ -691,28 +819,41 @@ int main(int Argc, const char **Argv) {
   cl::ParseCommandLineOptions(Argc, Argv, "modularize.\n");
 
   // No go if we have no header list file.
-  if (ListFileName.size() == 0) {
+  if (ListFileNames.size() == 0) {
     cl::PrintHelpMessage();
     return 1;
   }
 
+  std::unique_ptr<ModularizeUtilities> ModUtil;
+  int HadErrors = 0;
+
+  ModUtil.reset(
+    ModularizeUtilities::createModularizeUtilities(
+      ListFileNames, HeaderPrefix, ProblemFilesList));
+
   // Get header file names and dependencies.
-  SmallVector<std::string, 32> Headers;
-  DependencyMap Dependencies;
-  if (std::error_code EC = getHeaderFileNames(Headers, Dependencies,
-                                              ListFileName, HeaderPrefix)) {
-    errs() << Argv[0] << ": error: Unable to get header list '" << ListFileName
-           << "': " << EC.message() << '\n';
-    return 1;
-  }
+  if (ModUtil->loadAllHeaderListsAndDependencies())
+    HadErrors = 1;
 
   // If we are in assistant mode, output the module map and quit.
   if (ModuleMapPath.length() != 0) {
-    if (!createModuleMap(ModuleMapPath, Headers, Dependencies, HeaderPrefix,
-                         RootModule))
+    if (!createModuleMap(ModuleMapPath, ModUtil->HeaderFileNames,
+                         ModUtil->ProblemFileNames,
+                         ModUtil->Dependencies, HeaderPrefix, RootModule))
       return 1; // Failed.
     return 0;   // Success - Skip checks in assistant mode.
   }
+
+  // If we're doing module maps.
+  if (!NoCoverageCheck && ModUtil->HasModuleMap) {
+    // Do coverage check.
+    if (ModUtil->doCoverageCheck(IncludePaths, CommandLine))
+      HadErrors = 1;
+  }
+
+  // Bail early if only doing the coverage check.
+  if (CoverageCheckOnly)
+    return HadErrors;
 
   // Create the compilation database.
   SmallString<256> PathBuf;
@@ -722,14 +863,42 @@ int main(int Argc, const char **Argv) {
       new FixedCompilationDatabase(Twine(PathBuf), CC1Arguments));
 
   // Create preprocessor tracker, to watch for macro and conditional problems.
-  std::unique_ptr<PreprocessorTracker> PPTracker(PreprocessorTracker::create());
+  std::unique_ptr<PreprocessorTracker> PPTracker(
+    PreprocessorTracker::create(ModUtil->HeaderFileNames,
+                                BlockCheckHeaderListOnly));
 
-  // Parse all of the headers, detecting duplicates.
+  // Coolect entities here.
   EntityMap Entities;
-  ClangTool Tool(*Compilations, Headers,
-                 SharedModuleProvider::Create<LLVMModuleProvider>());
-  Tool.appendArgumentsAdjuster(getAddDependenciesAdjuster(Dependencies));
-  int HadErrors = 0;
+
+  // Because we can't easily determine which files failed
+  // during the tool run, if we're collecting the file lists
+  // for display, we do a first compile pass on individual
+  // files to find which ones don't compile stand-alone.
+  if (DisplayFileLists) {
+    // First, make a pass to just get compile errors.
+    for (auto &CompileCheckFile : ModUtil->HeaderFileNames) {
+      llvm::SmallVector<std::string, 32> CompileCheckFileArray;
+      CompileCheckFileArray.push_back(CompileCheckFile);
+      ClangTool CompileCheckTool(*Compilations, CompileCheckFileArray);
+      CompileCheckTool.appendArgumentsAdjuster(
+        getModularizeArgumentsAdjuster(ModUtil->Dependencies));
+      int CompileCheckFileErrors = 0;
+      CompileCheckFrontendActionFactory CompileCheckFactory;
+      CompileCheckFileErrors |= CompileCheckTool.run(&CompileCheckFactory);
+      if (CompileCheckFileErrors != 0) {
+        ModUtil->addUniqueProblemFile(CompileCheckFile);   // Save problem file.
+        HadErrors |= 1;
+      }
+      else
+        ModUtil->addNoCompileErrorsFile(CompileCheckFile); // Save good file.
+    }
+  }
+
+  // Then we make another pass on the good files to do the rest of the work.
+  ClangTool Tool(*Compilations,
+    (DisplayFileLists ? ModUtil->GoodFileNames : ModUtil->HeaderFileNames));
+  Tool.appendArgumentsAdjuster(
+    getModularizeArgumentsAdjuster(ModUtil->Dependencies));
   ModularizeFrontendActionFactory Factory(Entities, *PPTracker, HadErrors);
   HadErrors |= Tool.run(&Factory);
 
@@ -764,7 +933,7 @@ int main(int Argc, const char **Argv) {
     for (EntryBinArray::iterator DI = EntryBins.begin(), DE = EntryBins.end();
          DI != DE; ++DI, ++KindIndex) {
       int ECount = DI->size();
-      // If only 1 occurrence of this entity, skip it, as we only report duplicates.
+      // If only 1 occurrence of this entity, skip it, we only report duplicates.
       if (ECount <= 1)
         continue;
       LocationArray::iterator FI = DI->begin();
@@ -774,6 +943,7 @@ int main(int Argc, const char **Argv) {
       for (LocationArray::iterator FE = DI->end(); FI != FE; ++FI) {
         errs() << "    " << FI->File->getName() << ":" << FI->Line << ":"
                << FI->Column << "\n";
+        ModUtil->addUniqueProblemFile(FI->File->getName());
       }
       HadErrors = 1;
     }
@@ -803,6 +973,7 @@ int main(int Argc, const char **Argv) {
     }
 
     HadErrors = 1;
+    ModUtil->addUniqueProblemFile(H->first->getName());
     errs() << "error: header '" << H->first->getName()
            << "' has different contents depending on how it was included.\n";
     for (unsigned I = 0, N = H->second.size(); I != N; ++I) {
@@ -811,6 +982,12 @@ int main(int Argc, const char **Argv) {
              << H->second[I].Loc.Line << ":" << H->second[I].Loc.Column
              << " not always provided\n";
     }
+  }
+
+  if (DisplayFileLists) {
+    ModUtil->displayProblemFiles();
+    ModUtil->displayGoodFiles();
+    ModUtil->displayCombinedFiles();
   }
 
   return HadErrors;

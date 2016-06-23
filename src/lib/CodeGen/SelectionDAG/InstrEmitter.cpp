@@ -330,11 +330,15 @@ InstrEmitter::AddRegisterOperand(MachineInstrBuilder &MIB,
   // shrink VReg's register class within reason.  For example, if VReg == GR32
   // and II requires a GR32_NOSP, just constrain VReg to GR32_NOSP.
   if (II) {
-    const TargetRegisterClass *DstRC = nullptr;
+    const TargetRegisterClass *OpRC = nullptr;
     if (IIOpNum < II->getNumOperands())
-      DstRC = TRI->getAllocatableClass(TII->getRegClass(*II,IIOpNum,TRI,*MF));
-    if (DstRC && !MRI->constrainRegClass(VReg, DstRC, MinRCSize)) {
-      unsigned NewVReg = MRI->createVirtualRegister(DstRC);
+      OpRC = TII->getRegClass(*II, IIOpNum, TRI, *MF);
+
+    if (OpRC && !MRI->constrainRegClass(VReg, OpRC, MinRCSize)) {
+      assert(OpRC->isAllocatable() &&
+           "Constraining an allocatable VReg produced an unallocatable class?");
+
+      unsigned NewVReg = MRI->createVirtualRegister(OpRC);
       BuildMI(*MBB, InsertPos, Op.getNode()->getDebugLoc(),
               TII->get(TargetOpcode::COPY), NewVReg).addReg(VReg);
       VReg = NewVReg;
@@ -406,10 +410,10 @@ void InstrEmitter::AddOperand(MachineInstrBuilder &MIB,
     Type *Type = CP->getType();
     // MachineConstantPool wants an explicit alignment.
     if (Align == 0) {
-      Align = MF->getTarget().getDataLayout()->getPrefTypeAlignment(Type);
+      Align = MF->getDataLayout().getPrefTypeAlignment(Type);
       if (Align == 0) {
         // Alignment of vector types.  FIXME!
-        Align = MF->getTarget().getDataLayout()->getTypeAllocSize(Type);
+        Align = MF->getDataLayout().getTypeAllocSize(Type);
       }
     }
 
@@ -422,6 +426,8 @@ void InstrEmitter::AddOperand(MachineInstrBuilder &MIB,
     MIB.addConstantPoolIndex(Idx, Offset, CP->getTargetFlags());
   } else if (ExternalSymbolSDNode *ES = dyn_cast<ExternalSymbolSDNode>(Op)) {
     MIB.addExternalSymbol(ES->getSymbol(), ES->getTargetFlags());
+  } else if (auto *SymNode = dyn_cast<MCSymbolSDNode>(Op)) {
+    MIB.addSym(SymNode->getMCSymbol());
   } else if (BlockAddressSDNode *BA = dyn_cast<BlockAddressSDNode>(Op)) {
     MIB.addBlockAddress(BA->getBlockAddress(),
                         BA->getOffset(),

@@ -121,7 +121,7 @@ public:
   /// label just prior to the safe point (if the code generator is using
   /// MachineModuleInfo).
   void addSafePoint(GC::PointKind Kind, MCSymbol *Label, DebugLoc DL) {
-    SafePoints.push_back(GCPoint(Kind, Label, DL));
+    SafePoints.emplace_back(Kind, Label, DL);
   }
 
   /// getFrameSize/setFrameSize - Records the function's frame size.
@@ -160,9 +160,9 @@ class GCModuleInfo : public ImmutablePass {
 public:
   /// Lookup the GCStrategy object associated with the given gc name.
   /// Objects are owned internally; No caller should attempt to delete the
-  /// returned objects. 
+  /// returned objects.
   GCStrategy *getGCStrategy(const StringRef Name);
-  
+
   /// List of per function info objects.  In theory, Each of these
   /// may be associated with a different GC.
   typedef std::vector<std::unique_ptr<GCFunctionInfo>> FuncInfoVec;

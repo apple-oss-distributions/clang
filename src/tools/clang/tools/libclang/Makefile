@@ -23,14 +23,14 @@ USEDLIBS = clangIndex.a clangARCMigrate.a \
 	   clangRewriteFrontend.a \
 	   clangFormat.a \
 	   clangTooling.a clangToolingCore.a \
-	   clangFrontend.a clangCodeGen.a clangIndex.a clangDriver.a \
+	   clangFrontend.a clangCodeGen.a clangDriver.a \
 	   clangSerialization.a \
 	   clangParse.a clangSema.a \
 	   clangStaticAnalyzerCheckers.a clangStaticAnalyzerCore.a \
 	   clangRewrite.a \
 	   clangAnalysis.a clangEdit.a \
 	   clangASTMatchers.a \
-	   clangAST.a clangLex.a clangAPINotes.a clangBasic.a \
+	   clangAST.a clangLex.a clangAPINotes.a clangBasic.a
 
 include $(CLANG_LEVEL)/Makefile
 

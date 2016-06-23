@@ -60,6 +60,7 @@ STATISTIC(NumAdjusted,  "Number of scalar allocas adjusted to allow promotion");
 STATISTIC(NumConverted, "Number of aggregates converted to scalar");
 
 namespace {
+#define SROA SROA_
   struct SROA : public FunctionPass {
     SROA(int T, bool hasDT, char &ID, int ST, int AT, int SLT)
       : FunctionPass(ID), HasDomTree(hasDT) {
@@ -382,8 +383,8 @@ AllocaInst *ConvertToScalarInfo::TryConvert(AllocaInst *AI) {
     // Create and insert the integer alloca.
     NewTy = IntegerType::get(AI->getContext(), BitWidth);
   }
-  AllocaInst *NewAI = new AllocaInst(NewTy, nullptr, "",
-                                     AI->getParent()->begin());
+  AllocaInst *NewAI =
+      new AllocaInst(NewTy, nullptr, "", &AI->getParent()->front());
   ConvertUsesToScalar(AI, NewAI, 0, nullptr);
   return NewAI;
 }
@@ -1052,7 +1053,7 @@ class AllocaPromoter : public LoadAndStorePromoter {
   SmallVector<DbgDeclareInst *, 4> DDIs;
   SmallVector<DbgValueInst *, 4> DVIs;
 public:
-  AllocaPromoter(const SmallVectorImpl<Instruction*> &Insts, SSAUpdater &S,
+  AllocaPromoter(ArrayRef<Instruction*> Insts, SSAUpdater &S,
                  DIBuilder *DB)
     : LoadAndStorePromoter(Insts, S), AI(nullptr), DIB(DB) {}
 
@@ -1140,8 +1141,8 @@ public:
 /// the select can be loaded unconditionally.
 static bool isSafeSelectToSpeculate(SelectInst *SI) {
   const DataLayout &DL = SI->getModule()->getDataLayout();
-  bool TDerefable = SI->getTrueValue()->isDereferenceablePointer(DL);
-  bool FDerefable = SI->getFalseValue()->isDereferenceablePointer(DL);
+  bool TDerefable = isDereferenceablePointer(SI->getTrueValue(), DL);
+  bool FDerefable = isDereferenceablePointer(SI->getFalseValue(), DL);
 
   for (User *U : SI->users()) {
     LoadInst *LI = dyn_cast<LoadInst>(U);
@@ -1195,7 +1196,7 @@ static bool isSafePHIToSpeculate(PHINode *PN) {
 
     // Ensure that there are no instructions between the PHI and the load that
     // could store.
-    for (BasicBlock::iterator BBI = PN; &*BBI != LI; ++BBI)
+    for (BasicBlock::iterator BBI(PN); &*BBI != LI; ++BBI)
       if (BBI->mayWriteToMemory())
         return false;
 
@@ -1228,7 +1229,7 @@ static bool isSafePHIToSpeculate(PHINode *PN) {
 
     // If this pointer is always safe to load, or if we can prove that there is
     // already a load in the block, then we can move the load to the pred block.
-    if (InVal->isDereferenceablePointer(DL) ||
+    if (isDereferenceablePointer(InVal, DL) ||
         isSafeToLoadUnconditionally(InVal, Pred->getTerminator(), MaxAlign))
       continue;
 
@@ -2134,7 +2135,7 @@ void SROA::RewriteLifetimeIntrinsic(IntrinsicInst *II, AllocaInst *AI,
     // split the alloca again later.
     unsigned AS = AI->getType()->getAddressSpace();
     Value *V = Builder.CreateBitCast(NewElts[Idx], Builder.getInt8PtrTy(AS));
-    V = Builder.CreateGEP(V, Builder.getInt64(NewOffset));
+    V = Builder.CreateGEP(Builder.getInt8Ty(), V, Builder.getInt64(NewOffset));
 
     IdxTy = NewElts[Idx]->getAllocatedType();
     uint64_t EltSize = DL.getTypeAllocSize(IdxTy) - NewOffset;

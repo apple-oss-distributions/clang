@@ -15,13 +15,16 @@ using namespace clang::ast_matchers;
 
 namespace clang {
 namespace tidy {
+namespace readability {
 
 void ElseAfterReturnCheck::registerMatchers(MatchFinder *Finder) {
   // FIXME: Support continue, break and throw.
   Finder->addMatcher(
-      ifStmt(
-          hasThen(stmt(anyOf(returnStmt(), compoundStmt(has(returnStmt()))))),
-          hasElse(stmt().bind("else"))).bind("if"),
+      compoundStmt(
+          forEach(ifStmt(hasThen(stmt(anyOf(returnStmt(),
+                                            compoundStmt(has(returnStmt()))))),
+                         hasElse(stmt().bind("else")))
+                      .bind("if"))),
       this);
 }
 
@@ -41,6 +44,6 @@ void ElseAfterReturnCheck::check(const MatchFinder::MatchResult &Result) {
     Diag << removeToken(CS->getLBracLoc()) << removeToken(CS->getRBracLoc());
 }
 
+} // namespace readability
 } // namespace tidy
 } // namespace clang
-

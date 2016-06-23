@@ -1,5 +1,4 @@
-// RUN: $(dirname %s)/check_clang_tidy.sh %s readability-else-after-return %t
-// REQUIRES: shell
+// RUN: %check_clang_tidy %s readability-else-after-return %t
 
 void f(int a) {
   if (a > 0)
@@ -24,5 +23,12 @@ void f(int a) {
   } else {
     return;
   }
+
+  if (a > 0)
+    f(0);
+  else if (a > 10)
+    return;
+  else
+    f(0);
 }
 

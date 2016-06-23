@@ -180,12 +180,11 @@ LexicalScopes::getOrCreateInlinedScope(const DILocalScope *Scope,
   else
     Parent = getOrCreateLexicalScope(InlinedAt);
 
-  // FIXME: Use forward_as_tuple instead of make_tuple, once MSVC2012
-  // compatibility is no longer required.
   I = InlinedLexicalScopeMap.emplace(std::piecewise_construct,
-                                     std::make_tuple(P),
-                                     std::make_tuple(Parent, Scope, InlinedAt,
-                                                     false)).first;
+                                     std::forward_as_tuple(P),
+                                     std::forward_as_tuple(Parent, Scope,
+                                                           InlinedAt, false))
+          .first;
   return &I->second;
 }
 

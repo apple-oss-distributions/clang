@@ -7,199 +7,147 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file is shared between AddressSanitizer and ThreadSanitizer
-// run-time libraries.
+// This file is shared between various sanitizers' runtime libraries.
+//
 // Implementation of Mac-specific "atos" symbolizer.
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_platform.h"
 #if SANITIZER_MAC
 
+#include "sanitizer_allocator_internal.h"
 #include "sanitizer_mac.h"
-#include "sanitizer_symbolizer.h"
 #include "sanitizer_symbolizer_mac.h"
-
-#include <dlfcn.h>
-#include <stdlib.h>
-
-// C++ demangling function, as required by Itanium C++ ABI. This is weak,
-// because we do not require a C++ ABI library to be linked to a program
-// using sanitizers; if it's not present, we'll just use the mangled name.
-namespace __cxxabiv1 {
-  extern "C" SANITIZER_WEAK_ATTRIBUTE
-  char *__cxa_demangle(const char *mangled, char *buffer,
-                       size_t *length, int *status);
-}
 
 namespace __sanitizer {
 
-bool AtosSymbolizer::StartSubprocessIfNotStarted() {
-  if (fd_to_child_)
-    return true;
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <util.h>
 
-  if (forkfailed_)
-    return false;
-
-  int main_process_pid = getpid();
-  int fd;
-
-  if (!sandbox_allows_to_perform("process-fork")) {
-    // Stop, fork() is not allowed.
-    VReport(1, "Forking external symbolizer is not allowed under sandbox.\n");
-    forkfailed_ = true;
-    return false;
-  }
-
-  // Continue, fork() is allowed.
-
-  // Use forkpty to disable buffering in the new terminal.
-  int pid = forkpty(&fd, 0, 0, 0);
-  if (pid == -1) {
-    // Fork() failed.
-    Report("WARNING: failed to fork external symbolizer (errno: %d)\n", errno);
-    forkfailed_ = true;
-    return false;
-  } else if (pid == 0) {
-    // Child subprocess.
-
-    char pid_str[16] = {0};
-    internal_snprintf(pid_str, sizeof(pid_str), "%d", main_process_pid);
-    execl(atos_path_, atos_path_, "-p", pid_str, (char *)0);
-    internal__exit(1);
-  }
-
-  // Continue execution in parent process.
-  fd_to_child_ = fd;
-
-  // Disable echo in the new terminal.
-  struct termios termflags;
-  tcgetattr(fd_to_child_, &termflags);
-  termflags.c_lflag &= ~ECHO;
-  tcsetattr(fd_to_child_, TCSANOW, &termflags);
-
+bool DlAddrSymbolizer::SymbolizePC(uptr addr, SymbolizedStack *stack) {
+  Dl_info info;
+  int result = dladdr((const void *)addr, &info);
+  if (!result) return false;
+  const char *demangled = DemangleCXXABI(info.dli_sname);
+  stack->info.function = internal_strdup(demangled);
   return true;
 }
 
-static const char *ExtractToken(const char *str, const char *delimiter,
-                                char **result) {
-  const char *found_delimiter = internal_strstr(str, delimiter);
-  uptr prefix_len =
-      found_delimiter ? found_delimiter - str : internal_strlen(str);
-  *result = (char *)InternalAlloc(prefix_len + 1);
-  internal_memcpy(*result, str, prefix_len);
-  (*result)[prefix_len] = '\0';
-  const char *prefix_end = str + prefix_len;
-  if (*prefix_end != '\0')
-    prefix_end += internal_strlen(delimiter);
-  return prefix_end;
+bool DlAddrSymbolizer::SymbolizeData(uptr addr, DataInfo *info) {
+  return false;
 }
 
-static const char* getSafeSymbolicatedString(const char* p) {
-  return p ? p : "??";
-}
-
-static void DlAddrIntoStringBuffer(uptr addr, char *buffer, uptr size) {
-  Dl_info info;
-  int result = dladdr((const void *)addr, &info);
-
-  if (result) {
-    const char* func_name = getSafeSymbolicatedString(info.dli_sname);
-
-    // Try to demangle the name.
-    if (__cxxabiv1::__cxa_demangle) {
-      int demangler_status = 0;
-      const char* demangled_func_name =
-        __cxxabiv1::__cxa_demangle(func_name, 0, 0, &demangler_status);
-      func_name = (demangler_status == 0) ? demangled_func_name : func_name;
-    }
-
-    uptr offset = addr - (uptr)info.dli_saddr;
-    internal_snprintf(buffer, size, "%s (in %s) + 0x%x\n", func_name,
-                      getSafeSymbolicatedString(info.dli_fname), offset);
-  } else {
-    internal_snprintf(buffer, size, "0x%x\n", addr);
+class AtosSymbolizerProcess : public SymbolizerProcess {
+ public:
+  explicit AtosSymbolizerProcess(const char *path, pid_t parent_pid)
+      : SymbolizerProcess(path, /*use_forkpty*/ true) {
+    // Put the string command line argument in the object so that it outlives
+    // the call to GetArgV.
+    internal_snprintf(pid_str_, sizeof(pid_str_), "%d", parent_pid);
   }
+
+ private:
+  bool ReachedEndOfOutput(const char *buffer, uptr length) const override {
+    return (length >= 1 && buffer[length - 1] == '\n');
+  }
+
+  void GetArgV(const char *path_to_binary,
+               const char *(&argv)[kArgVMax]) const override {
+    int i = 0;
+    argv[i++] = path_to_binary;
+    argv[i++] = "-p";
+    argv[i++] = &pid_str_[0];
+    if (GetMacosVersion() == MACOS_VERSION_MAVERICKS) {
+      // On Mavericks atos prints a deprecation warning which we suppress by
+      // passing -d. The warning isn't present on other OSX versions, even the
+      // newer ones.
+      argv[i++] = "-d";
+    }
+    argv[i++] = nullptr;
+  }
+
+  char pid_str_[16];
+};
+
+static const char *kAtosErrorMessages[] = {
+  "atos cannot examine process",
+  "unable to get permission to examine process",
+  "An admin user name and password is required",
+  "could not load inserted library",
+  "architecture mismatch between analysis process",
+};
+
+static bool IsAtosErrorMessage(const char *str) {
+  for (uptr i = 0; i < ARRAY_SIZE(kAtosErrorMessages); i++) {
+    if (internal_strstr(str, kAtosErrorMessages[i])) {
+      return true;
+    }
+  }
+  return false;
 }
 
-void AtosSymbolizer::ParseSymbolizedStackFrames(const char *str,
-                                                SymbolizedStack *res) {
-  // The line from `atos` is in of these formats:
+static bool ParseCommandOutput(const char *str, SymbolizedStack *res) {
+  // Trim ending newlines.
+  char *trim;
+  ExtractTokenUpToDelimiter(str, "\n", &trim);
+
+  // The line from `atos` is in one of these formats:
   //   myfunction (in library.dylib) (sourcefile.c:17)
   //   myfunction (in library.dylib) + 0x1fe
+  //   0xdeadbeef (in library.dylib) + 0x1fe
   //   0xdeadbeef (in library.dylib)
   //   0xdeadbeef
 
-  if (internal_strstr(str, "atos cannot examine process") ||
-      internal_strstr(str, "unable to get permission to examine process") ||
-      internal_strstr(str, "An admin user name and password is required")) {
-    Report("atos returned: %s\n", str);
-    fd_to_child_ = 0;
-    forkfailed_ = true;
-
-    DlAddrIntoStringBuffer(res->info.address, buffer_, kBufferSize);
-    str = buffer_;
+  if (IsAtosErrorMessage(trim)) {
+    Report("atos returned an error: %s\n", trim);
+    InternalFree(trim);
+    return false;
   }
 
-  const char *newstr = str;
-  newstr = ExtractToken(newstr, " (in", &res->info.function);
+  const char *rest = trim;
+  char *function_name;
+  rest = ExtractTokenUpToDelimiter(rest, " (in ", &function_name);
+  if (internal_strncmp(function_name, "0x", 2) != 0)
+    res->info.function = function_name;
+  else
+    InternalFree(function_name);
+  rest = ExtractTokenUpToDelimiter(rest, ") ", &res->info.module);
 
-  char *extracted_module_name;
-  newstr = ExtractToken(newstr, ") ", &extracted_module_name);
-  InternalFree(extracted_module_name);
-
-  if (newstr[0] == '(') {
-    newstr++;
-    newstr = ExtractToken(newstr, ":", &res->info.file);
+  if (rest[0] == '(') {
+    rest++;
+    rest = ExtractTokenUpToDelimiter(rest, ":", &res->info.file);
     char *extracted_line_number;
-    newstr = ExtractToken(newstr, ")", &extracted_line_number);
+    rest = ExtractTokenUpToDelimiter(rest, ")", &extracted_line_number);
     res->info.line = internal_atoll(extracted_line_number);
     InternalFree(extracted_line_number);
   }
+
+  InternalFree(trim);
+  return true;
 }
 
-char *AtosSymbolizer::SendCommand(uptr addr, bool is_data,
-                                  const char *module_name, uptr module_offset) {
-  bool result = StartSubprocessIfNotStarted();
+AtosSymbolizer::AtosSymbolizer(const char *path, LowLevelAllocator *allocator)
+    : process_(new(*allocator) AtosSymbolizerProcess(path, getpid())) {}
 
-  uptr length;
-  if (result && !forkfailed_) {
-    length = internal_snprintf(buffer_, kBufferSize, "0x%zx\n", addr);
-    uptr write_len;
-    write_len = internal_write(fd_to_child_, buffer_, length);
-    if (write_len == 0 || write_len == (uptr)-1) {
-      Report("WARNING: Can't write to symbolizer at fd %d\n", fd_to_child_);
-      fd_to_child_ = 0;
-      forkfailed_ = true;
-    }
+bool AtosSymbolizer::SymbolizePC(uptr addr, SymbolizedStack *stack) {
+  if (!process_) return false;
+  char command[32];
+  internal_snprintf(command, sizeof(command), "0x%zx\n", addr);
+  const char *buf = process_->SendCommand(command);
+  if (!buf) return false;
+  if (!ParseCommandOutput(buf, stack)) {
+    process_ = nullptr;
+    return false;
   }
-
-  length = 0;
-  while (!forkfailed_ && true) {
-    uptr just_read =
-        internal_read(fd_to_child_, buffer_ + length, kBufferSize - length - 1);
-    if (just_read == 0 || just_read == (uptr)-1) {
-      Report("WARNING: Can't read from symbolizer at fd %d\n", fd_to_child_);
-      fd_to_child_ = 0;
-      forkfailed_ = true;
-      break;
-    }
-    length += just_read;
-    char *pos = internal_strstr(buffer_, "\n");
-    if (length >= 1 && pos) {
-      length = pos - buffer_;
-      buffer_[length] = '\0';
-      break;
-    }
-  }
-
-  if (forkfailed_) {
-    DlAddrIntoStringBuffer(addr, buffer_, kBufferSize);
-  } else {
-    buffer_[length] = '\0';
-  }
-  return buffer_;
+  return true;
 }
 
-} // namespace __sanitizer
+bool AtosSymbolizer::SymbolizeData(uptr addr, DataInfo *info) { return false; }
 
-#endif // SANITIZER_MAC
+}  // namespace __sanitizer
+
+#endif  // SANITIZER_MAC

@@ -93,7 +93,7 @@ public:
   }
 
   bool isNull() const { return !Ty; }
-  LLVM_EXPLICIT operator bool() const { return Ty; }
+  explicit operator bool() const { return Ty; }
 
   /// \brief Returns the size of type source info data block for the given type.
   static unsigned getFullDataSizeForType(QualType Ty);
@@ -151,6 +151,14 @@ public:
 
   TypeLoc IgnoreParens() const;
 
+  /// \brief Find a type with the location of an explicit type qualifier.
+  ///
+  /// The result, if non-null, will be one of:
+  ///   QualifiedTypeLoc
+  ///   AtomicTypeLoc
+  ///   AttributedTypeLoc, for those type attributes that behave as qualifiers
+  TypeLoc findExplicitQualifierLoc() const;
+
   /// \brief Initializes this to state that every location in this
   /// type is the given location.
   ///
@@ -206,6 +214,7 @@ private:
 
 /// \brief Return the TypeLoc for a type source info.
 inline TypeLoc TypeSourceInfo::getTypeLoc() const {
+  // TODO: is this alignment already sufficient?
   return TypeLoc(Ty, const_cast<void*>(static_cast<const void*>(this + 1)));
 }
 
@@ -736,6 +745,10 @@ public:
     return hasAttrExprOperand() || hasAttrEnumOperand();
   }
 
+  bool isQualifier() const {
+    return getTypePtr()->isQualifier();
+  }
+
   /// The modified type, which is generally canonically different from
   /// the attribute type.
   ///    int main(int, char**) __attribute__((noreturn))
@@ -948,8 +961,9 @@ public:
   }
 
   unsigned getExtraLocalDataAlignment() const {
-    static_assert(alignof(ObjCObjectTypeLoc) >= alignof(TypeSourceInfo *),
-                  "not enough alignment for tail-allocated data");
+    assert(llvm::alignOf<ObjCObjectTypeLoc>()
+	     >= llvm::alignOf<TypeSourceInfo *>() &&
+	   "not enough alignment for tail-allocated data");
     return llvm::alignOf<TypeSourceInfo *>();
   }
 

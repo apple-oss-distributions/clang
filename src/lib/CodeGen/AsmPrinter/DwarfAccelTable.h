@@ -65,13 +65,7 @@ class AsmPrinter;
 class DwarfDebug;
 
 class DwarfAccelTable {
-public:
-  static uint32_t HashDJB(StringRef Str, uint32_t h = 5381) {
-    for (unsigned i = 0, e = Str.size(); i != e; ++i)
-      h = ((h << 5) + h) + (unsigned char)Str[i];
-    return h;
-  }
-private:
+
   // Helper function to compute the number of buckets needed based on
   // the number of unique hashes.
   void ComputeBucketCount(void);
@@ -107,6 +101,12 @@ private:
   };
 
 public:
+  static uint32_t HashDJB(StringRef Str, uint32_t h = 5381) {
+    for (unsigned i = 0, e = Str.size(); i != e; ++i)
+      h = ((h << 5) + h) + uint8_t(Str[i]);
+    return h;
+  }
+
   // The HeaderData describes the form of each set of data. In general this
   // is as a list of atoms (atom_count) where each atom contains a type
   // (AtomType type) of data, and an encoding form (form). In the case of
@@ -164,67 +164,17 @@ private:
   // HashData[hash_data_count]
 public:
   struct HashDataContents {
-    union {
-      const DIE *Die;   // Offsets
-      MCSymbol *Strp;   // debug_str offset
-      uint32_t DieOffset; ///< Offset of the DIE in debug_info.
-    };
-    char Flags; // Specific flags to output
-
-    HashDataContents(const DIE *D, char Flags = 0) : Die(D), Flags(Flags) {}
-    HashDataContents(uint32_t DieOffset) : DieOffset(DieOffset), Flags(0) {}
-    HashDataContents(MCSymbol *Strp) : Strp(Strp), Flags(-1) {}
-    bool isDIE() const { return Flags != -1; }
-
-    /// \brief Get the start of the Atom storage.
-    /// Atoms are stored right after the HashDataContents object in memory.
-    char *getAtomData() const {
-      return (char *)(void *)(this + 1);
-    }
-
-    /// \brief Get the atom of type AtomT at \p Offset in the Atom data.
-    template<typename AtomT>
-    AtomT getAtom(unsigned int Offset) const {
-      AtomT Atom;
-      memcpy(&Atom, getAtomData() + Offset, sizeof(AtomT));
-      return Atom;
-    }
-
-#ifndef NDEBUG
-    void print(raw_ostream &O, const DwarfAccelTable &Table) const;
-#endif
+    virtual void emit(AsmPrinter *Asm, DwarfDebug *D) const = 0;
+    virtual bool less(const HashDataContents *Other) const = 0;
+    virtual void print(raw_ostream &OS) const = 0;
+    virtual ~HashDataContents();
   };
-  
-  class HashDataContentsRef {
-    const HashDataContents &Contents; ///< The entry we are populating
-    const DwarfAccelTable &Table; ///< The table that owns us
-    uint16_t AtomBytePos; ///< Byte position of the next Atom
-    uint8_t AtomPos; ///< Index of the next Atom
-    
-  public:
-    HashDataContentsRef(HashDataContents &Contents, DwarfAccelTable &Table)
-      : Contents(Contents), Table(Table), AtomBytePos(0), AtomPos(1) {}
-    
-    template<typename AtomT>
-    HashDataContentsRef addAtom(AtomT Atom) {
-      assert(AtomBytePos + sizeof(AtomT) <= Table.getAtomsSize());
-      assert(Table.checkAtomSize(AtomPos, sizeof(AtomT)));
-      memcpy(Contents.getAtomData() + AtomBytePos, &Atom, sizeof(AtomT));
-      ++AtomPos;
-      AtomBytePos += sizeof(AtomT);
-      return *this;
-    }
-  };
-  
-private:
+
+protected:
   // String Data
   struct DataArray {
-    union {
-      MCSymbol *StrSym; ///< Symbol of the string in debug_str.
-      uint32_t StrOffset; ///<Offset of the string in debug_str.
-    };
+    DwarfStringPoolEntryRef Name;
     std::vector<HashDataContents *> Values;
-    DataArray() : StrSym(nullptr) {}
   };
   friend struct HashData;
   struct HashData {
@@ -237,24 +187,24 @@ private:
       HashValue = DwarfAccelTable::HashDJB(S);
     }
 #ifndef NDEBUG
-    void print(raw_ostream &O, DwarfAccelTable& Table) {
+    void print(raw_ostream &O) {
       O << "Name: " << Str << "\n";
       O << "  Hash Value: " << format("0x%x", HashValue) << "\n";
       O << "  Symbol: ";
       if (Sym)
-        Sym->print(O);
+        O << *Sym;
       else
         O << "<none>";
       O << "\n";
-      for (HashDataContents *C : Data.Values)
-        C->print(O, Table);
+      for (auto *C : Data.Values)
+        C->print(O);
     }
-    void dump(DwarfAccelTable& Table) { print(dbgs(), Table); }
+    void dump() { print(dbgs()); }
 #endif
   };
 
-  DwarfAccelTable(const DwarfAccelTable &) LLVM_DELETED_FUNCTION;
-  void operator=(const DwarfAccelTable &) LLVM_DELETED_FUNCTION;
+  DwarfAccelTable(const DwarfAccelTable &) = delete;
+  void operator=(const DwarfAccelTable &) = delete;
 
   // Internal Functions
   void EmitHeader(AsmPrinter *);
@@ -263,6 +213,7 @@ private:
   void emitOffsets(AsmPrinter *, const MCSymbol *);
   void EmitData(AsmPrinter *, DwarfDebug *D);
 
+protected:
   // Allocator for HashData and HashDataContents.
   BumpPtrAllocator Allocator;
 
@@ -271,6 +222,7 @@ private:
   TableHeaderData HeaderData;
   std::vector<HashData *> Data;
 
+  // This map needs to be filled by subclasses.
   typedef StringMap<DataArray, BumpPtrAllocator &> StringEntries;
   StringEntries Entries;
 
@@ -279,30 +231,37 @@ private:
   typedef std::vector<HashList> BucketList;
   BucketList Buckets;
   HashList Hashes;
-  unsigned AtomsSize;
-  bool UseDieOffsets;
-  bool UseStringOffsets;
-  
-  // Public Implementation
-public:
-  DwarfAccelTable(ArrayRef<DwarfAccelTable::Atom>, bool UseDieOffset = false,
-                  bool UseStringOffsets = false);
-  HashDataContentsRef AddName(StringRef Name, MCSymbol *StrSym, const DIE *Die);
-  HashDataContentsRef AddName(StringRef Name, uint32_t StrOffset,
-                              uint32_t DIeOffset);
-  void AddUID(StringRef UID, MCSymbol *UIDSym, MCSymbol *ModuleSym);
 
+  DwarfAccelTable(ArrayRef<DwarfAccelTable::Atom>);
+public:
   void FinalizeTable(AsmPrinter *, StringRef);
   void emit(AsmPrinter *, const MCSymbol *, DwarfDebug *);
-  unsigned getAtomsSize() const { return AtomsSize; }
-  bool useDieOffssets() const { return UseDieOffsets; }
-  bool useStringOffssets() const { return UseStringOffsets; }
-  const TableHeaderData &getHeaderData() const { return HeaderData; }
 #ifndef NDEBUG
-  bool checkAtomSize(unsigned Index, unsigned ByteSize) const;
   void print(raw_ostream &O);
   void dump() { print(dbgs()); }
 #endif
 };
+
+class DIEDwarfAccelTable : public DwarfAccelTable {
+  bool IsType;
+
+public:
+  /// Construct a DIE accelerator table. \p IsType is true if it will
+  /// be emitted as a type accelerator table.
+  DIEDwarfAccelTable(bool IsType = false);
+
+  void AddName(DwarfStringPoolEntryRef Name, const DIE *Die);
+};
+
+class ModuleDwarfAccelTable : public DwarfAccelTable {
+public:
+  /// Construct a DIE accelerator table. \p IsType is true if it will
+  /// be emitted as a type accelerator table.
+  ModuleDwarfAccelTable();
+
+  void AddUID(StringRef UID, DwarfStringPoolEntryRef UIDEntry,
+              DwarfStringPoolEntryRef ModuleEntry);
+};
+
 }
 #endif

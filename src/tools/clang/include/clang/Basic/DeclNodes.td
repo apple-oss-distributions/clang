@@ -11,6 +11,7 @@ class DDecl<Decl base, bit abstract = 0> : Decl<abstract> {
 class DeclContext { }
 
 def TranslationUnit : Decl, DeclContext;
+def ExternCContext : Decl, DeclContext;
 def Named : Decl<1>;
   def Namespace : DDecl<Named>, DeclContext;
   def UsingDirective : DDecl<Named>;
@@ -58,6 +59,7 @@ def Named : Decl<1>;
       def VarTemplate : DDecl<RedeclarableTemplate>;
       def TypeAliasTemplate : DDecl<RedeclarableTemplate>;
     def TemplateTemplateParm : DDecl<Template>;
+    def BuiltinTemplate : DDecl<Template>;
   def Using : DDecl<Named>;
   def UsingShadow : DDecl<Named>;
   def ObjCMethod : DDecl<Named>, DeclContext;

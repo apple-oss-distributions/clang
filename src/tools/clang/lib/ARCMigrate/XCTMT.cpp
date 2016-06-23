@@ -170,9 +170,9 @@ void XCTMigrator::migrateRef(NamedDecl *D, SourceLocation Loc) {
 }
 
 void XCTMigrator::keepMacroArgInfo(const MacroArgs *Args,
-                                   const MacroDirective *MD) {
+                                   const MacroDefinition &MD) {
   assert(Args && MD);
-  const MacroInfo *MI = MD->getMacroInfo();
+  const MacroInfo *MI = MD.getMacroInfo();
   if (!MI->isVariadic())
     return;
   unsigned NumArgs = MI->getNumArgs();
@@ -212,7 +212,7 @@ void XCTMigrator::keepMacroArgInfo(const MacroArgs *Args,
 
 void XCTMigrator::migrateMacro(IdentifierInfo *Name, SourceRange Range,
                                SourceLocation DefLoc, const MacroArgs *Args,
-                               const MacroDirective *MD) {
+                               const MacroDefinition &MD) {
   SourceLocation Loc = Range.getBegin();
   if (!Name || Loc.isInvalid())
     return;
@@ -301,7 +301,8 @@ public:
   }
 
   bool needsInputFileVisitation() override { return true; }
-  bool visitInputFile(StringRef Filename, bool isSystem, bool isOverride) override {
+  bool visitInputFile(StringRef Filename, bool isSystem, bool isOverride,
+                      bool isExplicitModule) override {
     if (isSystem)
       return false;
     StringRef Name = llvm::sys::path::filename(Filename);
@@ -331,12 +332,14 @@ void XCTMigrator::handleInvocation(CompilerInstance &CI) {
   XCTSenTestingPCHCheck PCHCheck;
   ASTReader::readASTFileControlBlock(PPOpts.ImplicitPCHInclude,
                                      CI.getFileManager(),
-                                     CI.getModuleProvider(), PCHCheck);
+                                     CI.getPCHContainerReader(),
+                                     /*ReadModuleFileExtensions=*/false,
+                                     PCHCheck);
   if (PCHCheck.ContainsSenHeader) {
     std::string PrefixHeader =
         ASTReader::getOriginalSourceFile(PPOpts.ImplicitPCHInclude,
                                          CI.getFileManager(),
-                                         CI.getModuleProvider(),
+                                         CI.getPCHContainerReader(),
                                          CI.getDiagnostics());
     if (!PrefixHeader.empty())
       PPOpts.Includes.insert(PPOpts.Includes.begin(), PrefixHeader);

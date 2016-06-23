@@ -15,7 +15,6 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/ModuleLoader.h"
@@ -29,12 +28,6 @@ using namespace clang;
 namespace {
 
 class VoidModuleLoader : public ModuleLoader {
-public:
-  VoidModuleLoader()
-    : ModuleLoader(SharedModuleProvider::Create<LLVMModuleProvider>())
-  { }
-
-private:
   ModuleLoadResult loadModule(SourceLocation ImportLoc, 
                               ModuleIdPath Path,
                               Module::NameVisibilityKind Visibility,
@@ -44,13 +37,12 @@ private:
 
   void makeModuleVisible(Module *Mod,
                          Module::NameVisibilityKind Visibility,
-                         SourceLocation ImportLoc,
-                         bool Complain) override { }
+                         SourceLocation ImportLoc) override { }
 
   GlobalModuleIndex *loadGlobalModuleIndex(SourceLocation TriggerLoc) override
     { return nullptr; }
   bool lookupMissingImports(StringRef Name, SourceLocation TriggerLoc) override
-    { return 0; };
+    { return 0; }
 };
 
 // The test fixture.

@@ -19,6 +19,7 @@
 
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/FileSystemStatCache.h"
+#include "clang/Frontend/PCHContainerOperations.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/FileSystem.h"
@@ -208,6 +209,11 @@ const DirectoryEntry *FileManager::getDirectory(StringRef DirName,
     // We don't have this directory yet, add it.  We use the string
     // key from the SeenDirEntries map as the string.
     UDE.Name  = InterndDirName;
+
+    // Track if the directory had an entry found in the VFS overlay.
+    // Since there's no dir <-> dir mapping in the VFS, track that
+    // there are entries matching this directory request.
+    UDE.HasVFSEntry = Data.IsVFSMapped;
   }
 
   return &UDE;
@@ -442,7 +448,7 @@ FileManager::getBufferForFile(const FileEntry *Entry, bool isVolatile,
 
   SmallString<128> FilePath(Entry->getName());
   FixupRelativePath(FilePath);
-  return FS->getBufferForFile(FilePath.str(), FileSize,
+  return FS->getBufferForFile(FilePath, FileSize,
                               /*RequiresNullTerminator=*/true, isVolatile);
 }
 
@@ -525,37 +531,6 @@ void FileManager::modifyFileEntry(FileEntry *File,
   File->ModTime = ModificationTime;
 }
 
-/// Remove '.' path components from the given absolute path.
-/// \return \c true if any changes were made.
-// FIXME: Move this to llvm::sys::path.
-bool FileManager::removeDotPaths(SmallVectorImpl<char> &Path) {
-  using namespace llvm::sys;
-
-  SmallVector<StringRef, 16> ComponentStack;
-  StringRef P(Path.data(), Path.size());
-
-  // Skip the root path, then look for traversal in the components.
-  StringRef Rel = path::relative_path(P);
-  bool AnyDots = false;
-  for (StringRef C : llvm::make_range(path::begin(Rel), path::end(Rel))) {
-    if (C == ".") {
-      AnyDots = true;
-      continue;
-    }
-    ComponentStack.push_back(C);
-  }
-
-  if (!AnyDots)
-    return false;
-
-  SmallString<256> Buffer = path::root_path(P);
-  for (StringRef C : ComponentStack)
-    path::append(Buffer, C);
-
-  Path.swap(Buffer);
-  return true;
-}
-
 StringRef FileManager::getCanonicalName(const DirectoryEntry *Dir) {
   // FIXME: use llvm::sys::fs::canonical() when it gets implemented
   llvm::DenseMap<const DirectoryEntry *, llvm::StringRef>::iterator Known
@@ -567,17 +542,20 @@ StringRef FileManager::getCanonicalName(const DirectoryEntry *Dir) {
 
 #ifdef LLVM_ON_UNIX
   char CanonicalNameBuf[PATH_MAX];
-  if (realpath(Dir->getName(), CanonicalNameBuf)) {
-    unsigned Len = strlen(CanonicalNameBuf);
-    char *Mem = static_cast<char *>(CanonicalNameStorage.Allocate(Len, 1));
-    memcpy(Mem, CanonicalNameBuf, Len);
-    CanonicalName = StringRef(Mem, Len);
-  }
+  if (realpath(Dir->getName(), CanonicalNameBuf))
+    CanonicalName = StringRef(CanonicalNameBuf).copy(CanonicalNameStorage);
 #else
   SmallString<256> CanonicalNameBuf(CanonicalName);
   llvm::sys::fs::make_absolute(CanonicalNameBuf);
   llvm::sys::path::native(CanonicalNameBuf);
-  removeDotPaths(CanonicalNameBuf);
+  // We've run into needing to remove '..' here in the wild though, so
+  // remove it.
+  // On Windows, symlinks are significantly less prevalent, so removing
+  // '..' is pretty safe.
+  // Ideally we'd have an equivalent of `realpath` and could implement
+  // sys::fs::canonical across all the platforms.
+  llvm::sys::path::remove_dots(CanonicalNameBuf, /* remove_dot_dot */ true);
+  CanonicalName = StringRef(CanonicalNameBuf).copy(CanonicalNameStorage);
 #endif
 
   CanonicalDirNames.insert(std::make_pair(Dir, CanonicalName));
@@ -596,4 +574,18 @@ void FileManager::PrintStats() const {
                << NumFileCacheMisses << " file cache misses.\n";
 
   //llvm::errs() << PagesMapped << BytesOfPagesMapped << FSLookups;
+}
+
+// Virtual destructors for abstract base classes that need live in Basic.
+PCHContainerWriter::~PCHContainerWriter() {}
+PCHContainerReader::~PCHContainerReader() {}
+
+std::shared_ptr<ModuleDependencyCollector>
+FileManager::getModuleDepCollector() const {
+  return ModuleDepCollector;
+}
+
+void FileManager::setModuleDepCollector(
+    std::shared_ptr<ModuleDependencyCollector> Collector) {
+  ModuleDepCollector = Collector;
 }

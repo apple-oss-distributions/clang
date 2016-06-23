@@ -26,7 +26,6 @@ target_link_libraries(ClangModernizeTests
   clangAST
   clangASTMatchers
   clangBasic
-  clangCodeGen
   clangFrontend
   clangTooling
   clangToolingCore

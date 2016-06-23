@@ -460,6 +460,7 @@ enum OperandEncoding {
   ENUM_ENTRY(TYPE_SEGMENTREG, "Segment register operand")                      \
   ENUM_ENTRY(TYPE_DEBUGREG,   "Debug register operand")                        \
   ENUM_ENTRY(TYPE_CONTROLREG, "Control register operand")                      \
+  ENUM_ENTRY(TYPE_BNDR,       "MPX bounds register")                           \
                                                                                \
   ENUM_ENTRY(TYPE_Mv,         "Memory operand of operand size")                \
   ENUM_ENTRY(TYPE_Rv,         "Register operand of operand size")              \
@@ -484,18 +485,6 @@ struct OperandSpecifier {
   uint8_t encoding;
   uint8_t type;
 };
-
-// Indicates where the opcode modifier (if any) is to be found.  Extended
-// opcodes with AddRegFrm have the opcode modifier in the ModR/M byte.
-#define MODIFIER_TYPES        \
-  ENUM_ENTRY(MODIFIER_NONE)
-
-#define ENUM_ENTRY(n) n,
-enum ModifierType {
-  MODIFIER_TYPES
-  MODIFIER_max
-};
-#undef ENUM_ENTRY
 
 static const unsigned X86_MAX_OPERANDS = 6;
 

@@ -17,7 +17,6 @@
 #include "NullptrActions.h"
 #include "NullptrMatchers.h"
 #include "clang/Frontend/FrontendActions.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Tooling/Refactoring.h"
 #include "clang/Tooling/Tooling.h"
 
@@ -34,8 +33,7 @@ UserNullMacroNames("user-null-macros",
 
 int UseNullptrTransform::apply(const CompilationDatabase &Database,
                                const std::vector<std::string> &SourcePaths) {
-  ClangTool UseNullptrTool(Database, SourcePaths,
-                           SharedModuleProvider::Create<LLVMModuleProvider>());
+  ClangTool UseNullptrTool(Database, SourcePaths);
 
   unsigned AcceptedChanges = 0;
 
@@ -58,6 +56,7 @@ int UseNullptrTransform::apply(const CompilationDatabase &Database,
   return 0;
 }
 
+namespace {
 struct UseNullptrFactory : TransformFactory {
   UseNullptrFactory() {
     Since.Clang = Version(3, 0);
@@ -70,6 +69,7 @@ struct UseNullptrFactory : TransformFactory {
     return new UseNullptrTransform(Opts);
   }
 };
+} // namespace
 
 // Register the factory using this statically initialized variable.
 static TransformFactoryRegistry::Add<UseNullptrFactory>

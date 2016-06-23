@@ -15,8 +15,8 @@
 #include "MSP430.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/MC/MCAsmInfo.h"
-#include "llvm/PassManager.h"
 #include "llvm/Support/TargetRegistry.h"
 using namespace llvm;
 
@@ -25,7 +25,7 @@ extern "C" void LLVMInitializeMSP430Target() {
   RegisterTargetMachine<MSP430TargetMachine> X(TheMSP430Target);
 }
 
-MSP430TargetMachine::MSP430TargetMachine(const Target &T, StringRef TT,
+MSP430TargetMachine::MSP430TargetMachine(const Target &T, const Triple &TT,
                                          StringRef CPU, StringRef FS,
                                          const TargetOptions &Options,
                                          Reloc::Model RM, CodeModel::Model CM,

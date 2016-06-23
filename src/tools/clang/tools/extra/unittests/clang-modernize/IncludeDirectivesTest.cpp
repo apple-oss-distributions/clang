@@ -34,8 +34,7 @@ static void applyActionOnCode(FrontendAction *ToolAction, StringRef Code) {
   sys::path::append(InputFile, "input.cc");
 
   ASSERT_TRUE(
-      tooling::runToolOnCodeWithArgs(
-          ToolAction, Code, Args, InputFile.str()));
+      tooling::runToolOnCodeWithArgs(ToolAction, Code, Args, InputFile.str()));
 }
 
 namespace {
@@ -83,8 +82,8 @@ public:
   }
 
 private:
-  virtual bool BeginSourceFileAction(CompilerInstance &CI,
-                                     StringRef FileName) override {
+  bool BeginSourceFileAction(CompilerInstance &CI,
+                             StringRef FileName) override {
     if (!PreprocessOnlyAction::BeginSourceFileAction(CI, FileName))
       return false;
     VFHelper.mapVirtualFiles(CI.getSourceManager());
@@ -96,7 +95,7 @@ private:
     return true;
   }
 
-  virtual void EndSourceFileAction() override {
+  void EndSourceFileAction() override {
     const tooling::Replacement &Replace =
         FileIncludes->addAngledInclude(FileToModify, Include);
     if (Replace.isApplicable())

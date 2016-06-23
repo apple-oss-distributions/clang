@@ -17,7 +17,6 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
-#include "clang/CodeGen/LLVMModuleProvider.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/ModuleLoader.h"
@@ -34,12 +33,6 @@ namespace {
 
 // Stub out module loading.
 class VoidModuleLoader : public ModuleLoader {
-public:
-  VoidModuleLoader()
-    : ModuleLoader(SharedModuleProvider::Create<LLVMModuleProvider>())
-  { }
-
-private:
   ModuleLoadResult loadModule(SourceLocation ImportLoc, 
                               ModuleIdPath Path,
                               Module::NameVisibilityKind Visibility,
@@ -49,27 +42,22 @@ private:
 
   void makeModuleVisible(Module *Mod,
                          Module::NameVisibilityKind Visibility,
-                         SourceLocation ImportLoc,
-                         bool Complain) override { }
+                         SourceLocation ImportLoc) override { }
 
   GlobalModuleIndex *loadGlobalModuleIndex(SourceLocation TriggerLoc) override
     { return nullptr; }
   bool lookupMissingImports(StringRef Name, SourceLocation TriggerLoc) override
-    { return 0; };
+    { return 0; }
 };
 
 // Stub to collect data from InclusionDirective callbacks.
 class InclusionDirectiveCallbacks : public PPCallbacks {
 public:
-  void InclusionDirective(SourceLocation HashLoc, 
-    const Token &IncludeTok, 
-    StringRef FileName, 
-    bool IsAngled, 
-    CharSourceRange FilenameRange, 
-    const FileEntry *File, 
-    StringRef SearchPath, 
-    StringRef RelativePath, 
-    const Module *Imported) {
+  void InclusionDirective(SourceLocation HashLoc, const Token &IncludeTok,
+                          StringRef FileName, bool IsAngled,
+                          CharSourceRange FilenameRange, const FileEntry *File,
+                          StringRef SearchPath, StringRef RelativePath,
+                          const Module *Imported) override {
       this->HashLoc = HashLoc;
       this->IncludeTok = IncludeTok;
       this->FileName = FileName.str();
@@ -100,16 +88,17 @@ public:
     unsigned State;
   } CallbackParameters;
 
-  PragmaOpenCLExtensionCallbacks() : Name("Not called."), State(99) {};
+  PragmaOpenCLExtensionCallbacks() : Name("Not called."), State(99) {}
 
-  void PragmaOpenCLExtension(
-    clang::SourceLocation NameLoc, const clang::IdentifierInfo *Name,
-    clang::SourceLocation StateLoc, unsigned State) {
+  void PragmaOpenCLExtension(clang::SourceLocation NameLoc,
+                             const clang::IdentifierInfo *Name,
+                             clang::SourceLocation StateLoc,
+                             unsigned State) override {
       this->NameLoc = NameLoc;
       this->Name = Name->getName();
       this->StateLoc = StateLoc;
       this->State = State;
-  };
+  }
 
   SourceLocation NameLoc;
   SmallString<16> Name;
@@ -121,15 +110,16 @@ public:
 class PPCallbacksTest : public ::testing::Test {
 protected:
   PPCallbacksTest()
-      : FileMgr(FileMgrOpts), DiagID(new DiagnosticIDs()),
-        DiagOpts(new DiagnosticOptions()),
+      : InMemoryFileSystem(new vfs::InMemoryFileSystem),
+        FileMgr(FileSystemOptions(), InMemoryFileSystem),
+        DiagID(new DiagnosticIDs()), DiagOpts(new DiagnosticOptions()),
         Diags(DiagID, DiagOpts.get(), new IgnoringDiagConsumer()),
         SourceMgr(Diags, FileMgr), TargetOpts(new TargetOptions()) {
     TargetOpts->Triple = "x86_64-apple-darwin11.1.0";
     Target = TargetInfo::CreateTargetInfo(Diags, TargetOpts);
   }
 
-  FileSystemOptions FileMgrOpts;
+  IntrusiveRefCntPtr<vfs::InMemoryFileSystem> InMemoryFileSystem;
   FileManager FileMgr;
   IntrusiveRefCntPtr<DiagnosticIDs> DiagID;
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts;
@@ -144,7 +134,8 @@ protected:
   void AddFakeHeader(HeaderSearch& HeaderInfo, const char* HeaderPath, 
     bool IsSystemHeader) {
       // Tell FileMgr about header.
-      FileMgr.getVirtualFile(HeaderPath, 0, 0);
+      InMemoryFileSystem->addFile(HeaderPath, 0,
+                                  llvm::MemoryBuffer::getMemBuffer("\n"));
 
       // Add header's parent path to search path.
       StringRef SearchPath = llvm::sys::path::parent_path(HeaderPath);

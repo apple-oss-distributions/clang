@@ -57,6 +57,7 @@ static cl::opt<bool> PacketizeVolatiles("hexagon-packetize-volatiles",
       cl::desc("Allow non-solo packetization of volatile memory references"));
 
 namespace llvm {
+  FunctionPass *createHexagonPacketizer();
   void initializeHexagonPacketizerPass(PassRegistry&);
 }
 
@@ -176,7 +177,7 @@ INITIALIZE_PASS_BEGIN(HexagonPacketizer, "packets", "Hexagon Packetizer",
 INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
 INITIALIZE_PASS_DEPENDENCY(MachineBranchProbabilityInfo)
 INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_END(HexagonPacketizer, "packets", "Hexagon Packetizer",
                     false, false)
 
@@ -185,7 +186,7 @@ INITIALIZE_PASS_END(HexagonPacketizer, "packets", "Hexagon Packetizer",
 HexagonPacketizerList::HexagonPacketizerList(
     MachineFunction &MF, MachineLoopInfo &MLI,
     const MachineBranchProbabilityInfo *MBPI)
-    : VLIWPacketizerList(MF, MLI, true) {
+    : VLIWPacketizerList(MF, MLI) {
   this->MBPI = MBPI;
 }
 
@@ -237,7 +238,7 @@ bool HexagonPacketizer::runOnMachineFunction(MachineFunction &Fn) {
       // instruction stream until we find the nearest boundary.
       MachineBasicBlock::iterator I = RegionEnd;
       for(;I != MBB->begin(); --I, --RemainingCount) {
-        if (TII->isSchedulingBoundary(std::prev(I), MBB, Fn))
+        if (TII->isSchedulingBoundary(std::prev(I), &*MBB, Fn))
           break;
       }
       I = MBB->begin();
@@ -254,7 +255,7 @@ bool HexagonPacketizer::runOnMachineFunction(MachineFunction &Fn) {
         continue;
       }
 
-      Packetizer.PacketizeMIs(MBB, I, RegionEnd);
+      Packetizer.PacketizeMIs(&*MBB, I, RegionEnd);
       RegionEnd = I;
     }
   }
@@ -271,9 +272,8 @@ static bool IsIndirectCall(MachineInstr* MI) {
 // reservation fail.
 void HexagonPacketizerList::reserveResourcesForConstExt(MachineInstr* MI) {
   const HexagonInstrInfo *QII = (const HexagonInstrInfo *) TII;
-  MachineFunction *MF = MI->getParent()->getParent();
-  MachineInstr *PseudoMI = MF->CreateMachineInstr(QII->get(Hexagon::A4_ext),
-                                                  MI->getDebugLoc());
+  MachineInstr *PseudoMI = MF.CreateMachineInstr(QII->get(Hexagon::A4_ext),
+                                                 MI->getDebugLoc());
 
   if (ResourceTracker->canReserveResources(PseudoMI)) {
     ResourceTracker->reserveResources(PseudoMI);
@@ -289,11 +289,10 @@ bool HexagonPacketizerList::canReserveResourcesForConstExt(MachineInstr *MI) {
   const HexagonInstrInfo *QII = (const HexagonInstrInfo *) TII;
   assert((QII->isExtended(MI) || QII->isConstExtended(MI)) &&
          "Should only be called for constant extended instructions");
-  MachineFunction *MF = MI->getParent()->getParent();
-  MachineInstr *PseudoMI = MF->CreateMachineInstr(QII->get(Hexagon::A4_ext),
-                                                  MI->getDebugLoc());
+  MachineInstr *PseudoMI = MF.CreateMachineInstr(QII->get(Hexagon::A4_ext),
+                                                 MI->getDebugLoc());
   bool CanReserve = ResourceTracker->canReserveResources(PseudoMI);
-  MF->DeleteMachineInstr(PseudoMI);
+  MF.DeleteMachineInstr(PseudoMI);
   return CanReserve;
 }
 
@@ -301,9 +300,8 @@ bool HexagonPacketizerList::canReserveResourcesForConstExt(MachineInstr *MI) {
 // true, otherwise, return false.
 bool HexagonPacketizerList::tryAllocateResourcesForConstExt(MachineInstr* MI) {
   const HexagonInstrInfo *QII = (const HexagonInstrInfo *) TII;
-  MachineFunction *MF = MI->getParent()->getParent();
-  MachineInstr *PseudoMI = MF->CreateMachineInstr(QII->get(Hexagon::A4_ext),
-                                                  MI->getDebugLoc());
+  MachineInstr *PseudoMI = MF.CreateMachineInstr(QII->get(Hexagon::A4_ext),
+                                                 MI->getDebugLoc());
 
   if (ResourceTracker->canReserveResources(PseudoMI)) {
     ResourceTracker->reserveResources(PseudoMI);
@@ -403,10 +401,7 @@ static bool DoesModifyCalleeSavedReg(MachineInstr *MI,
 // or new-value store.
 bool HexagonPacketizerList::isNewifiable(MachineInstr* MI) {
   const HexagonInstrInfo *QII = (const HexagonInstrInfo *) TII;
-  if ( isCondInst(MI) || QII->mayBeNewStore(MI))
-    return true;
-  else
-    return false;
+  return isCondInst(MI) || QII->mayBeNewStore(MI);
 }
 
 bool HexagonPacketizerList::isCondInst (MachineInstr* MI) {
@@ -953,6 +948,9 @@ bool HexagonPacketizerList::ignorePseudoInstruction(MachineInstr *MI,
   if (MI->isDebugValue())
     return true;
 
+  if (MI->isCFIInstruction())
+    return false;
+
   // We must print out inline assembly
   if (MI->isInlineAsm())
     return false;
@@ -970,11 +968,10 @@ bool HexagonPacketizerList::ignorePseudoInstruction(MachineInstr *MI,
 // isSoloInstruction: - Returns true for instructions that must be
 // scheduled in their own packet.
 bool HexagonPacketizerList::isSoloInstruction(MachineInstr *MI) {
-
-  if (MI->isInlineAsm())
+  if (MI->isEHLabel() || MI->isCFIInstruction())
     return true;
 
-  if (MI->isEHLabel())
+  if (MI->isInlineAsm())
     return true;
 
   // From Hexagon V4 Programmer's Reference Manual 3.4.4 Grouping constraints:
@@ -1326,7 +1323,7 @@ bool HexagonPacketizerList::isLegalToPruneDependencies(SUnit *SUI, SUnit *SUJ) {
 
     // Check if the instruction (must be a store) was glued with an Allocframe
     // instruction. If so, restore its offset to its original value, i.e. use
-    // curent SP instead of caller's SP.
+    // current SP instead of caller's SP.
     if (GlueAllocframeStore) {
       I->getOperand(1).setImm(I->getOperand(1).getImm() +
                                              FrameSize + HEXAGON_LRFP_SIZE);

@@ -414,7 +414,7 @@ def OP_XTN      : Op<(call "vcombine", $p0, (call "vmovn", $p1))>;
 def OP_SQXTUN   : Op<(call "vcombine", (cast $p0, "U", $p0),
                                        (call "vqmovun", $p1))>;
 def OP_QXTN     : Op<(call "vcombine", $p0, (call "vqmovn", $p1))>;
-def OP_VCVT_NA_HI_F16 : Op<(call "vcombine", $p0, (call "vcvt_f16", $p1))>;
+def OP_VCVT_NA_HI_F16 : Op<(call "vcombine", $p0, (call "vcvt_f16_f32", $p1))>;
 def OP_VCVT_NA_HI_F32 : Op<(call "vcombine", $p0, (call "vcvt_f32_f64", $p1))>;
 def OP_VCVT_EX_HI_F32 : Op<(call "vcvt_f32_f16", (call "vget_high", $p0))>;
 def OP_VCVT_EX_HI_F64 : Op<(call "vcvt_f64_f32", (call "vget_high", $p0))>;
@@ -687,16 +687,19 @@ def VGET_LOW  : NoTestOpInst<"vget_low", "dk", "csilhfUcUsUiUlPcPs", OP_LO>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.22 Converting vectors
+
+def VCVT_F16_F32 : SInst<"vcvt_f16_f32", "md", "Hf">;
+def VCVT_F32_F16 : SInst<"vcvt_f32_f16", "wd", "h">;
+
 def VCVT_S32     : SInst<"vcvt_s32", "xd",  "fQf">;
 def VCVT_U32     : SInst<"vcvt_u32", "ud",  "fQf">;
-def VCVT_F16     : SInst<"vcvt_f16", "hk",  "f">;
 def VCVT_F32     : SInst<"vcvt_f32", "fd",  "iUiQiQUi">;
-def VCVT_F32_F16 : SInst<"vcvt_f32_f16", "fd",  "h">;
 let isVCVT_N = 1 in {
 def VCVT_N_S32   : SInst<"vcvt_n_s32", "xdi", "fQf">;
 def VCVT_N_U32   : SInst<"vcvt_n_u32", "udi", "fQf">;
 def VCVT_N_F32   : SInst<"vcvt_n_f32", "fdi", "iUiQiQUi">;
 }
+
 def VMOVN        : IInst<"vmovn", "hk",  "silUsUiUl">;
 def VMOVL        : SInst<"vmovl", "wd",  "csiUcUsUi">;
 def VQMOVN       : SInst<"vqmovn", "hk",  "silUsUiUl">;
@@ -801,6 +804,13 @@ def VREINTERPRET
 // Vector fused multiply-add operations
 
 def VFMA : SInst<"vfma", "dddd", "fQf">;
+
+////////////////////////////////////////////////////////////////////////////////
+// fp16 vector operations
+def SCALAR_HALF_GET_LANE : IOpInst<"vget_lane", "sdi", "h", OP_SCALAR_HALF_GET_LN>;
+def SCALAR_HALF_SET_LANE : IOpInst<"vset_lane", "dsdi", "h", OP_SCALAR_HALF_SET_LN>;
+def SCALAR_HALF_GET_LANEQ : IOpInst<"vget_lane", "sdi", "Qh", OP_SCALAR_HALF_GET_LNQ>;
+def SCALAR_HALF_SET_LANEQ : IOpInst<"vset_lane", "dsdi", "Qh", OP_SCALAR_HALF_SET_LNQ>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // AArch64 Intrinsics
@@ -916,6 +926,9 @@ def USQADD : SInst<"vsqadd", "ddd", "UcUsUiUlQUcQUsQUiQUl">;
 // Reciprocal/Sqrt
 def FRECPS  : IInst<"vrecps", "ddd", "dQd">;
 def FRSQRTS : IInst<"vrsqrts", "ddd", "dQd">;
+def FRECPE  : SInst<"vrecpe", "dd", "dQd">;
+def FRSQRTE : SInst<"vrsqrte", "dd", "dQd">;
+def FSQRT   : SInst<"vsqrt", "dd", "fdQfQd">;
 
 ////////////////////////////////////////////////////////////////////////////////
 // bitwise reverse
@@ -935,20 +948,21 @@ def QXTN2 : SOpInst<"vqmovn_high", "qhk", "silUsUiUl", OP_QXTN>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Converting vectors
-def VCVT_HIGH_F16 : SOpInst<"vcvt_high_f16", "qhj", "f", OP_VCVT_NA_HI_F16>;
-def VCVT_HIGH_F32_F16 : SOpInst<"vcvt_high_f32", "wk", "h", OP_VCVT_EX_HI_F32>;
+
 def VCVT_F32_F64 : SInst<"vcvt_f32_f64", "md", "Qd">;
-def VCVT_HIGH_F32_F64 : SOpInst<"vcvt_high_f32", "qfj", "d", OP_VCVT_NA_HI_F32>;
 def VCVT_F64_F32 : SInst<"vcvt_f64_f32", "wd", "f">;
-def VCVT_F64 : SInst<"vcvt_f64", "Fd",  "lUlQlQUl">;
-def VCVT_HIGH_F64_F32 : SOpInst<"vcvt_high_f64", "wj", "f", OP_VCVT_EX_HI_F64>;
-def VCVTX_F32_F64 : SInst<"vcvtx_f32", "fj",  "d">;
-def VCVTX_HIGH_F32_F64 : SOpInst<"vcvtx_high_f32", "qfj", "d", OP_VCVTX_HI>;
+
 def VCVT_S64 : SInst<"vcvt_s64", "xd",  "dQd">;
 def VCVT_U64 : SInst<"vcvt_u64", "ud",  "dQd">;
-def FRECPE  : SInst<"vrecpe", "dd", "dQd">;
-def FRSQRTE : SInst<"vrsqrte", "dd", "dQd">;
-def FSQRT   : SInst<"vsqrt", "dd", "fdQfQd">;
+def VCVT_F64 : SInst<"vcvt_f64", "Fd",  "lUlQlQUl">;
+
+def VCVT_HIGH_F16_F32 : SOpInst<"vcvt_high_f16", "hmj", "Hf", OP_VCVT_NA_HI_F16>;
+def VCVT_HIGH_F32_F16 : SOpInst<"vcvt_high_f32", "wk", "h", OP_VCVT_EX_HI_F32>;
+def VCVT_HIGH_F32_F64 : SOpInst<"vcvt_high_f32", "qfj", "d", OP_VCVT_NA_HI_F32>;
+def VCVT_HIGH_F64_F32 : SOpInst<"vcvt_high_f64", "wj", "f", OP_VCVT_EX_HI_F64>;
+
+def VCVTX_F32_F64      : SInst<"vcvtx_f32", "fj",  "d">;
+def VCVTX_HIGH_F32_F64 : SOpInst<"vcvtx_high_f32", "qfj", "d", OP_VCVTX_HI>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Comparison
@@ -1095,30 +1109,12 @@ def VMLA_LANEQ   : IOpInst<"vmla_laneq", "dddji",
 def VMLS_LANEQ   : IOpInst<"vmls_laneq", "dddji",
                            "siUsUifQsQiQUsQUiQf", OP_MLS_LN>;
 
-// Before the merge, Clang generated incorrect code for vfma_lane (&
-// vfms_lane) intrinsics: we took the lane from the middle argument. As a
-// temporary compatibility measure we're adding this tristate macro to
-// (hopefully only) clang-602.
-//    + If USE_CORRECT_VFMA_INTRINSICS is undefined, we will emit the
-//      incorrect code, but warn about it.
-//    + If USE_CORRECT_VFMA_INTRINSICS is defined to 0, we will emit incorrect
-//      code and silence the warning.
-//    + Otherwise we will emit correct code.
-// See rdar://problem/17964959 for details. The changes here are:
-//    + Rename auto-generated vfma_lane & add warning version.
-//    + Remove auto-generated vfms_lane intrinsic.
-// The usual intrinsics will be defined to the correct variant manually at the
-// top of arm_neon.h.
-def VFMA_LANE    : IInst<"vfma_lane_silent", "dddgi", "fdQfQd">;
-def VFMA_LANE_WARN : IInst<"vfma_lane_warn", "dddgi", "fdQfQd">;
-
-def VFMA_LANEQ   : IInst<"vfma_laneq_silent", "dddji", "fdQfQd"> {
+def VFMA_LANE    : IInst<"vfma_lane", "dddgi", "fdQfQd">;
+def VFMA_LANEQ   : IInst<"vfma_laneq", "dddji", "fdQfQd"> {
   let isLaneQ = 1;
 }
-
-def VFMA_LANEQ_WARN   : IInst<"vfma_laneq_warn", "dddji", "fdQfQd"> {
-  let isLaneQ = 1;
-}
+def VFMS_LANE    : IOpInst<"vfms_lane", "dddgi", "fdQfQd", OP_FMS_LN>;
+def VFMS_LANEQ   : IOpInst<"vfms_laneq", "dddji", "fdQfQd", OP_FMS_LNQ>;
 
 def VMLAL_LANEQ  : SOpInst<"vmlal_laneq", "wwdki", "siUsUi", OP_MLAL_LN>;
 def VMLAL_HIGH_LANE   : SOpInst<"vmlal_high_lane", "wwkdi", "siUsUi",
@@ -1612,10 +1608,4 @@ def SCALAR_SQRDMULH_LANEQ : SOpInst<"vqrdmulh_laneq", "ssji", "SsSi", OP_SCALAR_
 
 def SCALAR_VDUP_LANE : IInst<"vdup_lane", "sdi", "ScSsSiSlSfSdSUcSUsSUiSUlSPcSPs">;
 def SCALAR_VDUP_LANEQ : IInst<"vdup_laneq", "sji", "ScSsSiSlSfSdSUcSUsSUiSUlSPcSPs">;
-
-// FIXME: Rename so it is obvious this only applies to halfs.
-def SCALAR_HALF_GET_LANE : IOpInst<"vget_lane", "sdi", "h", OP_SCALAR_HALF_GET_LN>;
-def SCALAR_HALF_SET_LANE : IOpInst<"vset_lane", "dsdi", "h", OP_SCALAR_HALF_SET_LN>;
-def SCALAR_HALF_GET_LANEQ : IOpInst<"vget_lane", "sdi", "Qh", OP_SCALAR_HALF_GET_LNQ>;
-def SCALAR_HALF_SET_LANEQ : IOpInst<"vset_lane", "dsdi", "Qh", OP_SCALAR_HALF_SET_LNQ>;
 }

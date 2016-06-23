@@ -45,6 +45,10 @@ static cl::opt<bool>
 DisableOutput("disable-output", cl::desc("Disable output"), cl::init(false));
 
 static cl::opt<bool>
+EmitFunctionSummary("function-summary", cl::desc("Emit function summary index"),
+                    cl::init(false));
+
+static cl::opt<bool>
 DumpAsm("d", cl::desc("Print assembly as parsed"), cl::Hidden);
 
 static cl::opt<bool>
@@ -62,14 +66,8 @@ static void WriteOutputFile(const Module *M) {
     if (InputFilename == "-") {
       OutputFilename = "-";
     } else {
-      std::string IFN = InputFilename;
-      int Len = IFN.length();
-      if (IFN[Len-3] == '.' && IFN[Len-2] == 'l' && IFN[Len-1] == 'l') {
-        // Source ends in .ll
-        OutputFilename = std::string(IFN.begin(), IFN.end()-3);
-      } else {
-        OutputFilename = IFN;   // Append a .bc to it
-      }
+      StringRef IFN = InputFilename;
+      OutputFilename = (IFN.endswith(".ll") ? IFN.drop_back(3) : IFN).str();
       OutputFilename += ".bc";
     }
   }
@@ -83,7 +81,8 @@ static void WriteOutputFile(const Module *M) {
   }
 
   if (Force || !CheckBitcodeOutputToConsole(Out->os(), true))
-    WriteBitcodeToFile(M, Out->os(), PreserveBitcodeUseListOrder);
+    WriteBitcodeToFile(M, Out->os(), PreserveBitcodeUseListOrder,
+                       EmitFunctionSummary);
 
   // Declare success.
   Out->keep();

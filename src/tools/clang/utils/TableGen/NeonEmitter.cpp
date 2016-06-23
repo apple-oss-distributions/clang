@@ -36,6 +36,7 @@
 #include "llvm/TableGen/SetTheory.h"
 #include "llvm/TableGen/TableGenBackend.h"
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <sstream>
 #include <string>
@@ -131,7 +132,7 @@ class Type {
 private:
   TypeSpec TS;
 
-  bool Float, Signed, Void, Poly, Constant, Pointer;
+  bool Float, Signed, Immediate, Void, Poly, Constant, Pointer;
   // ScalarForMangling and NoManglingQ are really not suited to live here as
   // they are not related to the type. But they live in the TypeSpec (not the
   // prototype), so this is really the only place to store them.
@@ -140,13 +141,13 @@ private:
 
 public:
   Type()
-      : Float(false), Signed(false), Void(true), Poly(false), Constant(false),
-        Pointer(false), ScalarForMangling(false), NoManglingQ(false),
-        Bitwidth(0), ElementBitwidth(0), NumVectors(0) {}
+      : Float(false), Signed(false), Immediate(false), Void(true), Poly(false),
+        Constant(false), Pointer(false), ScalarForMangling(false),
+        NoManglingQ(false), Bitwidth(0), ElementBitwidth(0), NumVectors(0) {}
 
   Type(TypeSpec TS, char CharMod)
-      : TS(TS), Float(false), Signed(false), Void(false), Poly(false),
-        Constant(false), Pointer(false), ScalarForMangling(false),
+      : TS(TS), Float(false), Signed(false), Immediate(false), Void(false),
+        Poly(false), Constant(false), Pointer(false), ScalarForMangling(false),
         NoManglingQ(false), Bitwidth(0), ElementBitwidth(0), NumVectors(0) {
     applyModifier(CharMod);
   }
@@ -167,6 +168,7 @@ public:
   bool isFloating() const { return Float; }
   bool isInteger() const { return !Float && !Poly; }
   bool isSigned() const { return Signed; }
+  bool isImmediate() const { return Immediate; }
   bool isScalar() const { return NumVectors == 0; }
   bool isVector() const { return NumVectors > 0; }
   bool isFloat() const { return Float && ElementBitwidth == 32; }
@@ -192,6 +194,14 @@ public:
     Float = false;
     Poly = false;
     Signed = Sign;
+    Immediate = false;
+    ElementBitwidth = ElemWidth;
+  }
+  void makeImmediate(unsigned ElemWidth) {
+    Float = false;
+    Poly = false;
+    Signed = true;
+    Immediate = true;
     ElementBitwidth = ElemWidth;
   }
   void makeScalar() {
@@ -337,9 +347,9 @@ public:
     // Modify the TypeSpec per-argument to get a concrete Type, and create
     // known variables for each.
     // Types[0] is the return value.
-    Types.push_back(Type(OutTS, Proto[0]));
+    Types.emplace_back(OutTS, Proto[0]);
     for (unsigned I = 1; I < Proto.size(); ++I)
-      Types.push_back(Type(InTS, Proto[I]));
+      Types.emplace_back(InTS, Proto[I]);
   }
 
   /// Get the Record that this intrinsic is based off.
@@ -384,7 +394,7 @@ public:
 
   /// Return true if the prototype has a scalar argument.
   /// This does not return true for the "splat" code ('a').
-  bool protoHasScalar();
+  bool protoHasScalar() const;
 
   /// Return the index that parameter PIndex will sit at
   /// in a generated function call. This is often just PIndex,
@@ -422,9 +432,9 @@ public:
   /// Return the name, mangled with type information.
   /// If ForceClassS is true, use ClassS (u32/s32) instead
   /// of the intrinsic's own type class.
-  std::string getMangledName(bool ForceClassS = false);
+  std::string getMangledName(bool ForceClassS = false) const;
   /// Return the type code for a builtin function call.
-  std::string getInstTypeCode(Type T, ClassKind CK);
+  std::string getInstTypeCode(Type T, ClassKind CK) const;
   /// Return the type string for a BUILTIN() macro in Builtins.def.
   std::string getBuiltinTypeStr();
 
@@ -435,7 +445,7 @@ public:
   void indexBody();
 
 private:
-  std::string mangleName(std::string Name, ClassKind CK);
+  std::string mangleName(std::string Name, ClassKind CK) const;
 
   void initVariables();
   std::string replaceParamsIn(std::string S);
@@ -485,7 +495,7 @@ private:
 class NeonEmitter {
   RecordKeeper &Records;
   DenseMap<Record *, ClassKind> ClassMap;
-  std::map<std::string, std::vector<Intrinsic *>> IntrinsicMap;
+  std::map<std::string, std::deque<Intrinsic>> IntrinsicMap;
   unsigned UniqueNumber;
 
   void createIntrinsic(Record *R, SmallVectorImpl<Intrinsic *> &Out);
@@ -498,7 +508,7 @@ class NeonEmitter {
 public:
   /// Called by Intrinsic - this attempts to get an intrinsic that takes
   /// the given types as arguments.
-  Intrinsic *getIntrinsic(StringRef Name, ArrayRef<Type> Types);
+  Intrinsic &getIntrinsic(StringRef Name, ArrayRef<Type> Types);
 
   /// Called by Intrinsic - returns a globally-unique number.
   unsigned getUniqueNumber() { return UniqueNumber++; }
@@ -599,6 +609,12 @@ std::string Type::builtin_str() const {
     S = "S" + S;
   else if (isInteger() && !Pointer && !Signed)
     S = "U" + S;
+
+  // Constant indices are "int", but have the "constant expression" modifier.
+  if (isImmediate()) {
+    assert(isInteger() && isSigned());
+    S = "I" + S;
+  }
 
   if (isScalar()) {
     if (Constant) S += "C";
@@ -821,10 +837,6 @@ void Type::applyModifier(char Mod) {
     Float = true;
     break;
   case 'f':
-    // Special case - if we're half-precision, a floating
-    // point argument needs to be 128-bits (double size).
-    if (isHalf())
-      Bitwidth = 128;
     Float = true;
     ElementBitwidth = 32;
     break;
@@ -853,6 +865,7 @@ void Type::applyModifier(char Mod) {
     ElementBitwidth = Bitwidth = 32;
     NumVectors = 0;
     Signed = true;
+    Immediate = true;
     break;
   case 'l':
     Float = false;
@@ -860,6 +873,7 @@ void Type::applyModifier(char Mod) {
     ElementBitwidth = Bitwidth = 64;
     NumVectors = 0;
     Signed = false;
+    Immediate = true;
     break;
   case 'z':
     ElementBitwidth /= 2;
@@ -937,7 +951,7 @@ void Type::applyModifier(char Mod) {
 // Intrinsic implementation
 //===----------------------------------------------------------------------===//
 
-std::string Intrinsic::getInstTypeCode(Type T, ClassKind CK) {
+std::string Intrinsic::getInstTypeCode(Type T, ClassKind CK) const {
   char typeCode = '\0';
   bool printNumber = true;
 
@@ -975,6 +989,10 @@ std::string Intrinsic::getInstTypeCode(Type T, ClassKind CK) {
   return S;
 }
 
+static bool isFloatingPointProtoModifier(char Mod) {
+  return Mod == 'F' || Mod == 'f';
+}
+
 std::string Intrinsic::getBuiltinTypeStr() {
   ClassKind LocalCK = getClassKind(true);
   std::string S;
@@ -996,7 +1014,7 @@ std::string Intrinsic::getBuiltinTypeStr() {
     if (!RetT.isScalar() && !RetT.isSigned())
       RetT.makeSigned();
 
-    bool ForcedVectorFloatingType = Proto[0] == 'F' || Proto[0] == 'f';
+    bool ForcedVectorFloatingType = isFloatingPointProtoModifier(Proto[0]);
     if (LocalCK == ClassB && !RetT.isScalar() && !ForcedVectorFloatingType)
       // Cast to vector of 8-bit elements.
       RetT.makeInteger(8, true);
@@ -1009,7 +1027,7 @@ std::string Intrinsic::getBuiltinTypeStr() {
     if (T.isPoly())
       T.makeInteger(T.getElementSizeInBits(), false);
 
-    bool ForcedFloatingType = Proto[I + 1] == 'F' || Proto[I + 1] == 'f';
+    bool ForcedFloatingType = isFloatingPointProtoModifier(Proto[I + 1]);
     if (LocalCK == ClassB && !T.isScalar() && !ForcedFloatingType)
       T.makeInteger(8, true);
     // Halves always get converted to 8-bit elements.
@@ -1019,9 +1037,8 @@ std::string Intrinsic::getBuiltinTypeStr() {
     if (LocalCK == ClassI)
       T.makeSigned();
 
-    // Constant indices are always just "int".
     if (hasImmediate() && getImmediateIdx() == I)
-      T.makeInteger(32, true);
+      T.makeImmediate(32);
 
     S += T.builtin_str();
   }
@@ -1033,7 +1050,7 @@ std::string Intrinsic::getBuiltinTypeStr() {
   return S;
 }
 
-std::string Intrinsic::getMangledName(bool ForceClassS) {
+std::string Intrinsic::getMangledName(bool ForceClassS) const {
   // Check if the prototype has a scalar operand with the type of the vector
   // elements.  If not, bitcasting the args will take care of arg checking.
   // The actual signedness etc. will be taken care of with special enums.
@@ -1044,12 +1061,12 @@ std::string Intrinsic::getMangledName(bool ForceClassS) {
   return mangleName(Name, ForceClassS ? ClassS : LocalCK);
 }
 
-std::string Intrinsic::mangleName(std::string Name, ClassKind LocalCK) {
+std::string Intrinsic::mangleName(std::string Name, ClassKind LocalCK) const {
   std::string typeCode = getInstTypeCode(BaseType, LocalCK);
   std::string S = Name;
 
-  if (Name == "vcvt_f32_f16" || Name == "vcvt_f32_f64" ||
-      Name == "vcvt_f64_f32")
+  if (Name == "vcvt_f16_f32" || Name == "vcvt_f32_f16" ||
+      Name == "vcvt_f32_f64" || Name == "vcvt_f64_f32")
     return Name;
 
   if (typeCode.size() > 0) {
@@ -1262,7 +1279,7 @@ void Intrinsic::emitShadowedArgs() {
 
 // We don't check 'a' in this function, because for builtin function the
 // argument matching to 'a' uses a vector type splatted from a scalar type.
-bool Intrinsic::protoHasScalar() {
+bool Intrinsic::protoHasScalar() const {
   return (Proto.find('s') != std::string::npos ||
           Proto.find('z') != std::string::npos ||
           Proto.find('r') != std::string::npos ||
@@ -1347,7 +1364,7 @@ void Intrinsic::emitBodyAsBuiltinCall() {
   // Extra constant integer to hold type class enum for this function, e.g. s8
   if (getClassKind(true) == ClassB) {
     Type ThisTy = getReturnType();
-    if (Proto[0] == 'v' || Proto[0] == 'f' || Proto[0] == 'F')
+    if (Proto[0] == 'v' || isFloatingPointProtoModifier(Proto[0]))
       ThisTy = getParamType(0);
     if (ThisTy.isPointer())
       ThisTy = getParamType(1);
@@ -1475,15 +1492,14 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagCall(DagInit *DI) {
     N = SI->getAsUnquotedString();
   else
     N = emitDagArg(DI->getArg(0), "").second;
-  Intrinsic *Callee = Intr.Emitter.getIntrinsic(N, Types);
-  assert(Callee && "getIntrinsic should not return us nullptr!");
+  Intrinsic &Callee = Intr.Emitter.getIntrinsic(N, Types);
 
   // Make sure the callee is known as an early def.
-  Callee->setNeededEarly();
-  Intr.Dependencies.insert(Callee);
+  Callee.setNeededEarly();
+  Intr.Dependencies.insert(&Callee);
 
   // Now create the call itself.
-  std::string S = CallPrefix.str() + Callee->getMangledName(true) + "(";
+  std::string S = CallPrefix.str() + Callee.getMangledName(true) + "(";
   for (unsigned I = 0; I < DI->getNumArgs() - 1; ++I) {
     if (I != 0)
       S += ", ";
@@ -1491,7 +1507,7 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagCall(DagInit *DI) {
   }
   S += ")";
 
-  return std::make_pair(Callee->getReturnType(), S);
+  return std::make_pair(Callee.getReturnType(), S);
 }
 
 std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagCast(DagInit *DI,
@@ -1564,10 +1580,8 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagShuffle(DagInit *DI){
   // See the documentation in arm_neon.td for a description of these operators.
   class LowHalf : public SetTheory::Operator {
   public:
-    virtual void anchor() {}
-    virtual ~LowHalf() {}
-    virtual void apply(SetTheory &ST, DagInit *Expr, SetTheory::RecSet &Elts,
-                       ArrayRef<SMLoc> Loc) {
+    void apply(SetTheory &ST, DagInit *Expr, SetTheory::RecSet &Elts,
+               ArrayRef<SMLoc> Loc) override {
       SetTheory::RecSet Elts2;
       ST.evaluate(Expr->arg_begin(), Expr->arg_end(), Elts2, Loc);
       Elts.insert(Elts2.begin(), Elts2.begin() + (Elts2.size() / 2));
@@ -1575,10 +1589,8 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagShuffle(DagInit *DI){
   };
   class HighHalf : public SetTheory::Operator {
   public:
-    virtual void anchor() {}
-    virtual ~HighHalf() {}
-    virtual void apply(SetTheory &ST, DagInit *Expr, SetTheory::RecSet &Elts,
-                       ArrayRef<SMLoc> Loc) {
+    void apply(SetTheory &ST, DagInit *Expr, SetTheory::RecSet &Elts,
+               ArrayRef<SMLoc> Loc) override {
       SetTheory::RecSet Elts2;
       ST.evaluate(Expr->arg_begin(), Expr->arg_end(), Elts2, Loc);
       Elts.insert(Elts2.begin() + (Elts2.size() / 2), Elts2.end());
@@ -1589,10 +1601,8 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagShuffle(DagInit *DI){
 
   public:
     Rev(unsigned ElementSize) : ElementSize(ElementSize) {}
-    virtual void anchor() {}
-    virtual ~Rev() {}
-    virtual void apply(SetTheory &ST, DagInit *Expr, SetTheory::RecSet &Elts,
-                       ArrayRef<SMLoc> Loc) {
+    void apply(SetTheory &ST, DagInit *Expr, SetTheory::RecSet &Elts,
+               ArrayRef<SMLoc> Loc) override {
       SetTheory::RecSet Elts2;
       ST.evaluate(Expr->arg_begin() + 1, Expr->arg_end(), Elts2, Loc);
 
@@ -1614,9 +1624,7 @@ std::pair<Type, std::string> Intrinsic::DagEmitter::emitDagShuffle(DagInit *DI){
 
   public:
     MaskExpander(unsigned N) : N(N) {}
-    virtual void anchor() {}
-    virtual ~MaskExpander() {}
-    virtual void expand(SetTheory &ST, Record *R, SetTheory::RecSet &Elts) {
+    void expand(SetTheory &ST, Record *R, SetTheory::RecSet &Elts) override {
       unsigned Addend = 0;
       if (R->getName() == "mask0")
         Addend = 0;
@@ -1847,11 +1855,11 @@ void Intrinsic::indexBody() {
 // NeonEmitter implementation
 //===----------------------------------------------------------------------===//
 
-Intrinsic *NeonEmitter::getIntrinsic(StringRef Name, ArrayRef<Type> Types) {
+Intrinsic &NeonEmitter::getIntrinsic(StringRef Name, ArrayRef<Type> Types) {
   // First, look up the name in the intrinsic map.
   assert_with_loc(IntrinsicMap.find(Name.str()) != IntrinsicMap.end(),
                   ("Intrinsic '" + Name + "' not found!").str());
-  std::vector<Intrinsic *> &V = IntrinsicMap[Name.str()];
+  auto &V = IntrinsicMap.find(Name.str())->second;
   std::vector<Intrinsic *> GoodVec;
 
   // Create a string to print if we end up failing.
@@ -1866,35 +1874,35 @@ Intrinsic *NeonEmitter::getIntrinsic(StringRef Name, ArrayRef<Type> Types) {
 
   // Now, look through each intrinsic implementation and see if the types are
   // compatible.
-  for (auto *I : V) {
-    ErrMsg += "  - " + I->getReturnType().str() + " " + I->getMangledName();
+  for (auto &I : V) {
+    ErrMsg += "  - " + I.getReturnType().str() + " " + I.getMangledName();
     ErrMsg += "(";
-    for (unsigned A = 0; A < I->getNumParams(); ++A) {
+    for (unsigned A = 0; A < I.getNumParams(); ++A) {
       if (A != 0)
         ErrMsg += ", ";
-      ErrMsg += I->getParamType(A).str();
+      ErrMsg += I.getParamType(A).str();
     }
     ErrMsg += ")\n";
 
-    if (I->getNumParams() != Types.size())
+    if (I.getNumParams() != Types.size())
       continue;
 
     bool Good = true;
     for (unsigned Arg = 0; Arg < Types.size(); ++Arg) {
-      if (I->getParamType(Arg) != Types[Arg]) {
+      if (I.getParamType(Arg) != Types[Arg]) {
         Good = false;
         break;
       }
     }
     if (Good)
-      GoodVec.push_back(I);
+      GoodVec.push_back(&I);
   }
 
   assert_with_loc(GoodVec.size() > 0,
                   "No compatible intrinsic found - " + ErrMsg);
   assert_with_loc(GoodVec.size() == 1, "Multiple overloads found - " + ErrMsg);
 
-  return GoodVec.front();
+  return *GoodVec.front();
 }
 
 void NeonEmitter::createIntrinsic(Record *R,
@@ -1937,14 +1945,14 @@ void NeonEmitter::createIntrinsic(Record *R,
   }
 
   std::sort(NewTypeSpecs.begin(), NewTypeSpecs.end());
-  std::unique(NewTypeSpecs.begin(), NewTypeSpecs.end());
+  NewTypeSpecs.erase(std::unique(NewTypeSpecs.begin(), NewTypeSpecs.end()),
+		     NewTypeSpecs.end());
+  auto &Entry = IntrinsicMap[Name];
 
   for (auto &I : NewTypeSpecs) {
-    Intrinsic *IT = new Intrinsic(R, Name, Proto, I.first, I.second, CK, Body,
-                                  *this, Guard, IsUnavailable, BigEndianSafe);
-
-    IntrinsicMap[Name].push_back(IT);
-    Out.push_back(IT);
+    Entry.emplace_back(R, Name, Proto, I.first, I.second, CK, Body, *this,
+                       Guard, IsUnavailable, BigEndianSafe);
+    Out.push_back(&Entry.back());
   }
 
   CurrentRecord = nullptr;
@@ -2014,8 +2022,8 @@ void NeonEmitter::genOverloadTypeCheckCode(raw_ostream &OS,
 
     uint64_t Mask = 0ULL;
     Type Ty = Def->getReturnType();
-    if (Def->getProto()[0] == 'v' || Def->getProto()[0] == 'f' ||
-        Def->getProto()[0] == 'F')
+    if (Def->getProto()[0] == 'v' ||
+        isFloatingPointProtoModifier(Def->getProto()[0]))
       Ty = Def->getParamType(0);
     if (Ty.isPointer())
       Ty = Def->getParamType(1);
@@ -2251,69 +2259,7 @@ void NeonEmitter::run(raw_ostream &OS) {
   OS << "#else\n";
   OS << "typedef int8_t poly8_t;\n";
   OS << "typedef int16_t poly16_t;\n";
-  OS << "#endif\n\n";
-
-  // Before the merge, Clang generated incorrect code for vfma_lane (&
-  // vfms_lane) intrinsics: we took the lane from the middle argument. As a
-  // temporary compatibility measure we're adding this tristate macro to
-  // (hopefully only) clang-602.
-  //    + If USE_CORRECT_VFMA_INTRINSICS is undefined, we will emit the
-  //      incorrect code, but warn about it.
-  //    + If USE_CORRECT_VFMA_INTRINSICS is defined to 0, we will emit incorrect
-  //      code and silence the warning.
-  //    + Otherwise we will emit correct code.
-  // See rdar://problem/17964959 for details.
-  OS << "#if USE_CORRECT_VFMA_INTRINSICS\n";
-  OS << "// Silently correct\n";
-  OS << "#define vfma_lane_f32(a,b,c,l) vfma_lane_silent_f32(a,b,c,l)\n";
-  OS << "#define vfmaq_lane_f32(a,b,c,l) vfmaq_lane_silent_f32(a,b,c,l)\n";
-  OS << "#define vfms_lane_f32(a,b,c,l) vfma_lane_silent_f32(a,b,-c,l)\n";
-  OS << "#define vfmsq_lane_f32(a,b,c,l) vfmaq_lane_silent_f32(a,b,-c,l)\n";
-  OS << "#define vfma_laneq_f32(a,b,c,l) vfma_laneq_silent_f32(a,b,c,l)\n";
-  OS << "#define vfmaq_laneq_f32(a,b,c,l) vfmaq_laneq_silent_f32(a,b,c,l)\n";
-  OS << "#define vfms_laneq_f32(a,b,c,l) vfma_laneq_silent_f32(a,b,-c,l)\n";
-  OS << "#define vfmsq_laneq_f32(a,b,c,l) vfmaq_laneq_silent_f32(a,b,-c,l)\n";
-  OS << "#define vfma_laneq_f64(a,b,c,l) vfma_laneq_silent_f64(a,b,c,l)\n";
-  OS << "#define vfmaq_laneq_f64(a,b,c,l) vfmaq_laneq_silent_f64(a,b,c,l)\n";
-  OS << "#define vfms_laneq_f64(a,b,c,l) vfma_laneq_silent_f64(a,b,-c,l)\n";
-  OS << "#define vfmsq_laneq_f64(a,b,c,l) vfmaq_laneq_silent_f64(a,b,-c,l)\n";
-  OS << "#elif defined(USE_CORRECT_VFMA_INTRINSICS)\n";
-  OS << "// Silently wrong\n";
-  OS << "#define vfma_lane_f32(a,b,c,l) vfma_lane_silent_f32(a, c, b, l)\n";
-  OS << "#define vfmaq_lane_f32(a,b,c,l) vfmaq_lane_silent_f32(a,c,b,l)\n";
-  OS << "#define vfms_lane_f32(a,b,c,l) vfma_lane_silent_f32(a,-c,b,l)\n";
-  OS << "#define vfmsq_lane_f32(a,b,c,l) vfmaq_lane_silent_f32(a,-c,b,l)\n";
-  OS << "#define vfma_laneq_f32(a,b,c,l) vfma_laneq_silent_f32(a, c, b, l)\n";
-  OS << "#define vfmaq_laneq_f32(a,b,c,l) vfmaq_laneq_silent_f32(a,c,b,l)\n";
-  OS << "#define vfms_laneq_f32(a,b,c,l) vfma_laneq_silent_f32(a,-c,b,l)\n";
-  OS << "#define vfmsq_laneq_f32(a,b,c,l) vfmaq_laneq_silent_f32(a,-c,b,l)\n";
-  OS << "#define vfma_laneq_f64(a,b,c,l) vfma_laneq_silent_f64(a,c,b,l)\n";
-  OS << "#define vfmaq_laneq_f64(a,b,c,l) vfmaq_laneq_silent_f64(a,c,b,l)\n";
-  OS << "#define vfms_laneq_f64(a,b,c,l) vfma_laneq_silent_f64(a,-c,b,l)\n";
-  OS << "#define vfmsq_laneq_f64(a,b,c,l) vfmaq_laneq_silent_f64(a,-c,b,l)\n";
-  OS << "#elif !defined(USE_CORRECT_VFMA_INTRINSICS)\n";
-  OS << "// Noisiliy wrong\n";
-  OS << "#define vfma_lane_f32(a,b,c,l) vfma_lane_warn_f32(a, c, b, l)\n";
-  OS << "#define vfmaq_lane_f32(a,b,c,l) vfmaq_lane_warn_f32(a,c,b,l)\n";
-  OS << "#define vfms_lane_f32(a,b,c,l) vfma_lane_warn_f32(a,-c,b,l)\n";
-  OS << "#define vfmsq_lane_f32(a,b,c,l) vfmaq_lane_warn_f32(a,-c,b,l)\n";
-  OS << "#define vfma_laneq_f32(a,b,c,l) vfma_laneq_warn_f32(a, c, b, l)\n";
-  OS << "#define vfmaq_laneq_f32(a,b,c,l) vfmaq_laneq_warn_f32(a,c,b,l)\n";
-  OS << "#define vfms_laneq_f32(a,b,c,l) vfma_laneq_warn_f32(a,-c,b,l)\n";
-  OS << "#define vfmsq_laneq_f32(a,b,c,l) vfmaq_laneq_warn_f32(a,-c,b,l)\n";
-  OS << "#define vfma_laneq_f64(a,b,c,l) vfma_laneq_warn_f64(a,c,b,l)\n";
-  OS << "#define vfmaq_laneq_f64(a,b,c,l) vfmaq_laneq_warn_f64(a,c,b,l)\n";
-  OS << "#define vfms_laneq_f64(a,b,c,l) vfma_laneq_warn_f64(a,-c,b,l)\n";
-  OS << "#define vfmsq_laneq_f64(a,b,c,l) vfmaq_laneq_warn_f64(a,-c,b,l)\n";
-  OS << "#endif\n\n";
-
-  // The rest do not need adjusting because the 64-bit f64 intrinsic
-  // only *has* one lane.
-  OS << "#define vfma_lane_f64(a,b,c,l) vfma_lane_silent_f64(a,b,c,l)\n";
-  OS << "#define vfmaq_lane_f64(a,b,c,l) vfmaq_lane_silent_f64(a,b,c,l)\n";
-  OS << "#define vfms_lane_f64(a,b,c,l) vfma_lane_silent_f64(a,b,-c,l)\n";
-  OS << "#define vfmsq_lane_f64(a,b,c,l) vfmaq_lane_silent_f64(a,b,-c,l)\n\n";
-
+  OS << "#endif\n";
 
   // Emit Neon vector typedefs.
   std::string TypedefTypes(

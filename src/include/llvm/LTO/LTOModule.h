@@ -47,17 +47,17 @@ private:
 
   std::unique_ptr<LLVMContext> OwnedContext;
 
+  std::string LinkerOpts;
+
   std::unique_ptr<object::IRObjectFile> IRFile;
   std::unique_ptr<TargetMachine> _target;
-  StringSet<>                             _linkeropt_strings;
-  std::vector<const char *>               _deplibs;
-  std::vector<const char *>               _linkeropts;
-  std::vector<NameAndAttributes>          _symbols;
+  std::vector<NameAndAttributes> _symbols;
 
   // _defines and _undefines only needed to disambiguate tentative definitions
   StringSet<>                             _defines;
   StringMap<NameAndAttributes> _undefines;
   std::vector<const char*>                _asm_undefines;
+  std::vector<const char*>                _asm_symbols;
 
   LTOModule(std::unique_ptr<object::IRObjectFile> Obj, TargetMachine *TM);
   LTOModule(std::unique_ptr<object::IRObjectFile> Obj, TargetMachine *TM,
@@ -74,6 +74,11 @@ public:
   /// triple.
   static bool isBitcodeForTarget(MemoryBuffer *memBuffer,
                                  StringRef triplePrefix);
+
+  /// Returns a string representing the producer identification stored in the
+  /// bitcode, or "" if the bitcode does not contains any.
+  ///
+  static std::string getProducerString(MemoryBuffer *Buffer);
 
   /// Create a MemoryBuffer from a memory range with an optional name.
   static std::unique_ptr<MemoryBuffer>
@@ -114,6 +119,8 @@ public:
     return IRFile->getModule();
   }
 
+  std::unique_ptr<Module> takeModule() { return IRFile->takeModule(); }
+
   /// Return the Module's target triple.
   const std::string &getTargetTriple() {
     return getModule().getTargetTriple();
@@ -143,28 +150,26 @@ public:
     return nullptr;
   }
 
-  /// Get the number of dependent libraries
-  uint32_t getDependentLibraryCount() {
-    return _deplibs.size();
+  /// Get the number of asm symbols
+  uint32_t getAsmSymbolCount() {
+    return _asm_symbols.size();
   }
 
-  /// Get the dependent library at the specified index.
-  const char *getDependentLibrary(uint32_t index) {
-    if (index < _deplibs.size())
-      return _deplibs[index];
+  /// Get the name of the asm symbol at the specified index.
+  const char *getAsmSymbolName(uint32_t index) {
+    if (index < _asm_symbols.size())
+      return _asm_symbols[index];
     return nullptr;
   }
 
-  /// Get the number of linker options
-  uint32_t getLinkerOptCount() {
-    return _linkeropts.size();
+  const GlobalValue *getSymbolGV(uint32_t index) {
+    if (index < _symbols.size())
+      return _symbols[index].symbol;
+    return nullptr;
   }
 
-  /// Get the linker option at the specified index.
-  const char *getLinkerOpt(uint32_t index) {
-    if (index < _linkeropts.size())
-      return _linkeropts[index];
-    return nullptr;
+  const char *getLinkerOpts() {
+    return LinkerOpts.c_str();
   }
 
   const std::vector<const char*> &getAsmUndefinedRefs() {

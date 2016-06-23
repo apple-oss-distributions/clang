@@ -24,18 +24,6 @@ namespace clang {
 class GlobalModuleIndex;
 class IdentifierInfo;
 class Module;
-class ModuleProvider;
-
-/// \brief A shared pointer to a ModuleProvider that is non-null.
-class SharedModuleProvider : public std::shared_ptr<ModuleProvider> {
-  SharedModuleProvider() = delete;
-  SharedModuleProvider(ModuleProvider *MP);
-public:
-  template<class T, typename... ArgTypes>
-  static SharedModuleProvider Create(ArgTypes &&... Args) {
-    return SharedModuleProvider(new T(std::forward<ArgTypes>(Args)...));
-  }
-};
 
 /// \brief A sequence of identifier/location pairs used to describe a particular
 /// module or submodule, e.g., std.vector.
@@ -66,15 +54,10 @@ public:
 /// for resolving a module name (e.g., "std") to an actual module file, and
 /// then loading that module.
 class ModuleLoader {
-  /// \brief The ModuleProvider.
-  SharedModuleProvider TheModuleProvider;
-
   // Building a module if true.
   bool BuildingModule;
-
 public:
-  explicit ModuleLoader(SharedModuleProvider MP, bool BuildingModule = false) :
-    TheModuleProvider(MP),
+  explicit ModuleLoader(bool BuildingModule = false) :
     BuildingModule(BuildingModule),
     HadFatalFailure(false) {}
 
@@ -87,14 +70,6 @@ public:
   /// \brief Flag indicating whether this instance is building a module.
   void setBuildingModule(bool BuildingModuleFlag) {
     BuildingModule = BuildingModuleFlag;
-  }
-
-  SharedModuleProvider getSharedModuleProvider() const {
-    return TheModuleProvider;
-  }
-
-  ModuleProvider &getModuleProvider() const {
-    return *TheModuleProvider;
   }
  
   /// \brief Attempt to load the given module.
@@ -124,8 +99,7 @@ public:
   /// \brief Make the given module visible.
   virtual void makeModuleVisible(Module *Mod,
                                  Module::NameVisibilityKind Visibility,
-                                 SourceLocation ImportLoc,
-                                 bool Complain) = 0;
+                                 SourceLocation ImportLoc) = 0;
 
   /// \brief Load, create, or return global module.
   /// This function returns an existing global module index, if one

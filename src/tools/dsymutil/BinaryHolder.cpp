@@ -13,12 +13,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "BinaryHolder.h"
-#include "llvm/ADT/iterator_range.h"
-#include "llvm/Object/Error.h"
+#include "llvm/Object/MachO.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
 namespace dsymutil {
+
+Triple BinaryHolder::getTriple(const object::MachOObjectFile &Obj) {
+  // If a ThumbTriple is returned, use it instead of the standard
+  // one. This is because the thumb triple always allows to create a
+  // target, whereas the non-thumb one might not.
+  Triple ThumbTriple;
+  Triple T = Obj.getArch(nullptr, &ThumbTriple);
+  return ThumbTriple.getArch() ? ThumbTriple : T;
+}
 
 static std::vector<MemoryBufferRef>
 getMachOFatMemoryBuffers(StringRef Filename, MemoryBuffer &Mem,
@@ -30,11 +38,11 @@ getMachOFatMemoryBuffers(StringRef Filename, MemoryBuffer &Mem,
     StringRef ObjData = FatData.substr(It->getOffset(), It->getSize());
     Buffers.emplace_back(ObjData, Filename);
   }
-  return std::move(Buffers);
+  return Buffers;
 }
 
-void
-BinaryHolder::changeBackingMemoryBuffer(std::unique_ptr<MemoryBuffer> &&Buf) {
+void BinaryHolder::changeBackingMemoryBuffer(
+    std::unique_ptr<MemoryBuffer> &&Buf) {
   CurrentArchives.clear();
   CurrentObjectFiles.clear();
   CurrentFatBinary.reset();
@@ -55,9 +63,9 @@ BinaryHolder::GetMemoryBuffersForFile(StringRef Filename,
   // If the name ends with a closing paren, there is a huge chance
   // it is an archive member specification.
   if (Filename.endswith(")"))
-    if (auto ErrOrArchiveMember =
-        MapArchiveAndGetMemberBuffers(Filename, Timestamp))
-      return *ErrOrArchiveMember;
+    if (auto ErrOrArchiveMembers =
+            MapArchiveAndGetMemberBuffers(Filename, Timestamp))
+      return *ErrOrArchiveMembers;
 
   // Otherwise, just try opening a standard file. If this is an
   // archive member specifiaction and any of the above didn't handle it
@@ -75,9 +83,8 @@ BinaryHolder::GetMemoryBuffersForFile(StringRef Filename,
   auto ErrOrFat = object::MachOUniversalBinary::create(
       CurrentMemoryBuffer->getMemBufferRef());
   if (ErrOrFat.getError()) {
-    // Not a fat binary must be a standard one.
-    return std::vector<MemoryBufferRef>(1,
-                                        CurrentMemoryBuffer->getMemBufferRef());
+    // Not a fat binary must be a standard one. Return a one element vector.
+    return std::vector<MemoryBufferRef>{CurrentMemoryBuffer->getMemBufferRef()};
   }
 
   CurrentFatBinary = std::move(*ErrOrFat);
@@ -101,24 +108,25 @@ BinaryHolder::GetArchiveMemberBuffers(StringRef Filename,
   std::vector<MemoryBufferRef> Buffers;
   Buffers.reserve(CurrentArchives.size());
 
-  for (const auto &Archive : CurrentArchives) {
-    for (const auto &Child : Archive->children()) {
+  for (const auto &CurrentArchive : CurrentArchives) {
+    for (auto ChildOrErr : CurrentArchive->children()) {
+      if (std::error_code Err = ChildOrErr.getError())
+        return Err;
+      const auto &Child = *ChildOrErr;
       if (auto NameOrErr = Child.getName()) {
-        if (auto Err = NameOrErr.getError())
-          return Err;
         if (*NameOrErr == Filename) {
-          if (Timestamp != sys::TimeValue::MinTime() &&
+          if (Timestamp != sys::TimeValue::PosixZeroTime() &&
               Timestamp != Child.getLastModified()) {
             if (Verbose)
-              outs() << "\ttimestamp mismatch.\n";
-          } else {
-            if (Verbose)
-              outs() << "\tfound member in current archive.\n";
-            auto ErrOrMem = Child.getMemoryBufferRef();
-            if (auto Err = ErrOrMem.getError())
-              return Err;
-            Buffers.push_back(*ErrOrMem);
+              outs() << "\tmember had timestamp mismatch.\n";
+            continue;
           }
+          if (Verbose)
+            outs() << "\tfound member in current archive.\n";
+          auto ErrOrMem = Child.getMemoryBufferRef();
+          if (auto Err = ErrOrMem.getError())
+            return Err;
+          Buffers.push_back(*ErrOrMem);
         }
       }
     }
@@ -126,7 +134,6 @@ BinaryHolder::GetArchiveMemberBuffers(StringRef Filename,
 
   if (Buffers.empty())
     return make_error_code(errc::no_such_file_or_directory);
-
   return Buffers;
 }
 
@@ -168,15 +175,7 @@ ErrorOr<const object::ObjectFile &>
 BinaryHolder::getObjfileForArch(const Triple &T) {
   for (const auto &Obj : CurrentObjectFiles) {
     if (const auto *MachO = dyn_cast<object::MachOObjectFile>(Obj.get())) {
-      // FIXME: getArch will return bad triples for the processors
-      // that can only do Thumb. Use the thumb triple when one is
-      // returned, we don't really care about the arch details anyway.
-      // Maybe we should change getArch to return only valid triples?
-      Triple ThumbTriple;
-      Triple MachOTriple = MachO->getArch(nullptr, &ThumbTriple);
-      if (ThumbTriple.getArch())
-        MachOTriple = ThumbTriple;
-      if (MachOTriple.str() == T.str())
+      if (getTriple(*MachO).str() == T.str())
         return *MachO;
     } else if (Obj->getArch() == T.getArch())
       return *Obj;
@@ -184,24 +183,6 @@ BinaryHolder::getObjfileForArch(const Triple &T) {
 
   return make_error_code(object::object_error::arch_not_found);
 }
-
-// ErrorOr<const object::MachOObjectFile *>
-// BinaryHolder::GetNextObjectFile() {
-//   if (!CurrentFatBinary)
-//     return make_error_code(object::object_error::invalid_file_type);
-
-//   ++CurrentFatPos;
-//   if (CurrentFatPos == CurrentFatBinary->end_objects())
-//     return nullptr;
-
-//   auto ErrOrMacho = CurrentFatPos->getAsObjectFile();
-//   if (auto Err = ErrOrMacho.getError())
-//     return Err;
-
-//   auto *MachO = (*ErrOrMacho).get();
-//   CurrentObjectFile = std::move(*ErrOrMacho);
-//   return MachO;
-// }
 
 ErrorOr<std::vector<const object::ObjectFile *>>
 BinaryHolder::GetObjectFiles(StringRef Filename, sys::TimeValue Timestamp) {

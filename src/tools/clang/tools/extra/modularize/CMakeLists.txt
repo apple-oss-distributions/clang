@@ -6,6 +6,8 @@ set(LLVM_LINK_COMPONENTS
 add_clang_executable(modularize
   Modularize.cpp
   ModuleAssistant.cpp
+  ModularizeUtilities.cpp
+  CoverageChecker.cpp
   PreprocessorTracker.cpp
   )
 
@@ -13,7 +15,6 @@ target_link_libraries(modularize
   clangAPINotes
   clangAST
   clangBasic
-  clangCodeGen
   clangDriver
   clangFrontend
   clangLex

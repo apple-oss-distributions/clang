@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
 #include "llvm/ExecutionEngine/RuntimeDyld.h"
 #include "llvm/ExecutionEngine/RuntimeDyldChecker.h"
 #include "llvm/Object/ObjectFile.h"
@@ -36,14 +37,21 @@ using namespace llvm::object;
 
 namespace llvm {
 
+  // Helper for extensive error checking in debug builds.
+inline std::error_code Check(std::error_code Err) {
+  if (Err) {
+    report_fatal_error(Err.message());
+  }
+  return Err;
+}
+
 class Twine;
 
 /// SectionEntry - represents a section emitted into memory by the dynamic
 /// linker.
 class SectionEntry {
-public:
   /// Name - section name.
-  StringRef Name;
+  std::string Name;
 
   /// Address - address in the linker's memory where the section resides.
   uint8_t *Address;
@@ -65,11 +73,37 @@ public:
   /// for calculating relocations in some object formats (like MachO).
   uintptr_t ObjAddress;
 
+public:
   SectionEntry(StringRef name, uint8_t *address, size_t size,
                uintptr_t objAddress)
       : Name(name), Address(address), Size(size),
         LoadAddress(reinterpret_cast<uintptr_t>(address)), StubOffset(size),
         ObjAddress(objAddress) {}
+
+  StringRef getName() const { return Name; }
+
+  uint8_t *getAddress() const { return Address; }
+
+  /// \brief Return the address of this section with an offset.
+  uint8_t *getAddressWithOffset(unsigned OffsetBytes) const {
+    return Address + OffsetBytes;
+  }
+
+  size_t getSize() const { return Size; }
+
+  uint64_t getLoadAddress() const { return LoadAddress; }
+  void setLoadAddress(uint64_t LA) { LoadAddress = LA; }
+
+  /// \brief Return the load address of this section with an offset.
+  uint64_t getLoadAddressWithOffset(unsigned OffsetBytes) const {
+    return LoadAddress + OffsetBytes;
+  }
+
+  uintptr_t getStubOffset() const { return StubOffset; }
+
+  void advanceStubOffset(unsigned StubSize) { StubOffset += StubSize; }
+
+  uintptr_t getObjAddress() const { return ObjAddress; }
 };
 
 /// RelocationEntry - used to represent relocations internally in the dynamic
@@ -156,34 +190,36 @@ public:
   }
 };
 
-/// @brief Symbol info for RuntimeDyld.
-class SymbolInfo {
+/// @brief Symbol info for RuntimeDyld. 
+class SymbolTableEntry : public JITSymbolBase {
 public:
-  typedef enum { Hidden = 0, Default = 1 } Visibility;
+  SymbolTableEntry()
+    : JITSymbolBase(JITSymbolFlags::None), Offset(0), SectionID(0) {}
 
-  SymbolInfo() : Offset(0), SectionID(0), Vis(Hidden) {}
-
-  SymbolInfo(unsigned SectionID, uint64_t Offset, Visibility Vis)
-    : Offset(Offset), SectionID(SectionID), Vis(Vis) {}
+  SymbolTableEntry(unsigned SectionID, uint64_t Offset, JITSymbolFlags Flags)
+    : JITSymbolBase(Flags), Offset(Offset), SectionID(SectionID) {}
 
   unsigned getSectionID() const { return SectionID; }
   uint64_t getOffset() const { return Offset; }
-  Visibility getVisibility() const { return Vis; }
 
 private:
   uint64_t Offset;
-  unsigned SectionID : 31;
-  Visibility Vis : 1;
+  unsigned SectionID;
 };
 
-typedef StringMap<SymbolInfo> RTDyldSymbolTable;
+typedef StringMap<SymbolTableEntry> RTDyldSymbolTable;
 
 class RuntimeDyldImpl {
   friend class RuntimeDyld::LoadedObjectInfo;
   friend class RuntimeDyldCheckerImpl;
 protected:
+  static const unsigned AbsoluteSymbolSection = ~0U;
+
   // The MemoryManager to load objects into.
-  RTDyldMemoryManager *MemMgr;
+  RuntimeDyld::MemoryManager &MemMgr;
+
+  // The symbol resolver to use for external symbols.
+  RuntimeDyld::SymbolResolver &Resolver;
 
   // Attached RuntimeDyldChecker instance. Null if no instance attached.
   RuntimeDyldCheckerImpl *Checker;
@@ -194,7 +230,7 @@ protected:
   SectionList Sections;
 
   typedef unsigned SID; // Type for SectionIDs
-#define RTDYLD_INVALID_SECTION_ID ((SID)(-1))
+#define RTDYLD_INVALID_SECTION_ID ((RuntimeDyldImpl::SID)(-1))
 
   // Keep a map of sections from object file to the SectionID which
   // references it.
@@ -227,6 +263,8 @@ protected:
 
   Triple::ArchType Arch;
   bool IsTargetLittleEndian;
+  bool IsMipsO32ABI;
+  bool IsMipsN64ABI;
 
   // True if all sections should be passed to the memory manager, false if only
   // sections containing relocations should be. Defaults to 'false'.
@@ -258,11 +296,11 @@ protected:
   }
 
   uint64_t getSectionLoadAddress(unsigned SectionID) const {
-    return Sections[SectionID].LoadAddress;
+    return Sections[SectionID].getLoadAddress();
   }
 
   uint8_t *getSectionAddress(unsigned SectionID) const {
-    return (uint8_t *)Sections[SectionID].Address;
+    return Sections[SectionID].getAddress();
   }
 
   void writeInt16BE(uint8_t *Addr, uint16_t Value) {
@@ -292,6 +330,11 @@ protected:
     *(Addr + 5) = (Value >> 16) & 0xFF;
     *(Addr + 6) = (Value >> 8) & 0xFF;
     *(Addr + 7) = Value & 0xFF;
+  }
+
+  virtual void setMipsABI(const ObjectFile &Obj) {
+    IsMipsO32ABI = false;
+    IsMipsN64ABI = false;
   }
 
   /// Endian-aware read Read the least significant Size bytes from Src.
@@ -352,10 +395,6 @@ protected:
   /// \brief Resolve relocations to external symbols.
   void resolveExternalSymbols();
 
-  /// \brief Update GOT entries for external symbols.
-  // The base class does nothing.  ELF overrides this.
-  virtual void updateGOTEntries(StringRef Name, uint64_t Addr) {}
-
   // \brief Compute an upper bound of the memory that is required to load all
   // sections
   void computeTotalAllocSize(const ObjectFile &Obj, uint64_t &CodeSize,
@@ -366,11 +405,13 @@ protected:
                                      const SectionRef &Section);
 
   // \brief Implementation of the generic part of the loadObject algorithm.
-  std::pair<unsigned, unsigned> loadObjectImpl(const object::ObjectFile &Obj);
+  ObjSectionToIDMap loadObjectImpl(const object::ObjectFile &Obj);
 
 public:
-  RuntimeDyldImpl(RTDyldMemoryManager *mm)
-    : MemMgr(mm), Checker(nullptr), ProcessAllSections(false), HasError(false) {
+  RuntimeDyldImpl(RuntimeDyld::MemoryManager &MemMgr,
+                  RuntimeDyld::SymbolResolver &Resolver)
+    : MemMgr(MemMgr), Resolver(Resolver), Checker(nullptr),
+      ProcessAllSections(false), HasError(false) {
   }
 
   virtual ~RuntimeDyldImpl();
@@ -386,34 +427,31 @@ public:
   virtual std::unique_ptr<RuntimeDyld::LoadedObjectInfo>
   loadObject(const object::ObjectFile &Obj) = 0;
 
-  uint8_t* getSymbolAddress(StringRef Name) const {
+  uint8_t* getSymbolLocalAddress(StringRef Name) const {
     // FIXME: Just look up as a function for now. Overly simple of course.
     // Work in progress.
     RTDyldSymbolTable::const_iterator pos = GlobalSymbolTable.find(Name);
     if (pos == GlobalSymbolTable.end())
       return nullptr;
     const auto &SymInfo = pos->second;
+    // Absolute symbols do not have a local address.
+    if (SymInfo.getSectionID() == AbsoluteSymbolSection)
+      return nullptr;
     return getSectionAddress(SymInfo.getSectionID()) + SymInfo.getOffset();
   }
 
-  uint64_t getSymbolLoadAddress(StringRef Name) const {
+  RuntimeDyld::SymbolInfo getSymbol(StringRef Name) const {
     // FIXME: Just look up as a function for now. Overly simple of course.
     // Work in progress.
     RTDyldSymbolTable::const_iterator pos = GlobalSymbolTable.find(Name);
     if (pos == GlobalSymbolTable.end())
-      return 0;
-    const auto &SymInfo = pos->second;
-    return getSectionLoadAddress(SymInfo.getSectionID()) + SymInfo.getOffset();
-  }
-
-  uint64_t getExportedSymbolLoadAddress(StringRef Name) const {
-    RTDyldSymbolTable::const_iterator pos = GlobalSymbolTable.find(Name);
-    if (pos == GlobalSymbolTable.end())
-      return 0;
-    const auto &SymInfo = pos->second;
-    if (SymInfo.getVisibility() == SymbolInfo::Hidden)
-      return 0;
-    return getSectionLoadAddress(SymInfo.getSectionID()) + SymInfo.getOffset();
+      return nullptr;
+    const auto &SymEntry = pos->second;
+    uint64_t SectionAddr = 0;
+    if (SymEntry.getSectionID() != AbsoluteSymbolSection)
+      SectionAddr = getSectionLoadAddress(SymEntry.getSectionID());
+    uint64_t TargetAddr = SectionAddr + SymEntry.getOffset();
+    return RuntimeDyld::SymbolInfo(TargetAddr, SymEntry.getFlags());
   }
 
   void resolveRelocations();

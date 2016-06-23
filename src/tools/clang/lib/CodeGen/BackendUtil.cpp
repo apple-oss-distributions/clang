@@ -14,23 +14,21 @@
 #include "clang/Frontend/CodeGenOptions.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Frontend/Utils.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
+#include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
 #include "llvm/CodeGen/SchedulerRegistry.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRPrintingPasses.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/MC/SubtargetFeature.h"
-#include "llvm/PassManager.h"
-#include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/Timer.h"
@@ -59,9 +57,9 @@ class EmitAssemblyHelper {
 
   Timer CodeGenerationTime;
 
-  mutable PassManager *CodeGenPasses;
-  mutable PassManager *PerModulePasses;
-  mutable FunctionPassManager *PerFunctionPasses;
+  mutable legacy::PassManager *CodeGenPasses;
+  mutable legacy::PassManager *PerModulePasses;
+  mutable legacy::FunctionPassManager *PerFunctionPasses;
 
 private:
   TargetIRAnalysis getTargetIRAnalysis() const {
@@ -100,7 +98,7 @@ private:
 
   void CreatePasses();
 
-  /// CreateTargetMachine - Generates the TargetMachine.
+  /// Generates the TargetMachine.
   /// Returns Null if it is unable to create the target machine.
   /// Some of our clang tests specify triples which are not built
   /// into clang. This is okay because these tests check the generated
@@ -110,10 +108,10 @@ private:
   /// the requested target.
   TargetMachine *CreateTargetMachine(bool MustCreateTM);
 
-  /// AddEmitPasses - Add passes necessary to emit assembly or LLVM IR.
+  /// Add passes necessary to emit assembly or LLVM IR.
   ///
   /// \return True on success.
-  bool AddEmitPasses(BackendAction Action, formatted_raw_ostream &OS);
+  bool AddEmitPasses(BackendAction Action, raw_pwrite_stream &OS);
 
 public:
   EmitAssemblyHelper(DiagnosticsEngine &_Diags,
@@ -136,7 +134,7 @@ public:
 
   std::unique_ptr<TargetMachine> TM;
 
-  void EmitAssembly(BackendAction Action, raw_ostream *OS);
+  void EmitAssembly(BackendAction Action, raw_pwrite_stream *OS);
 };
 
 // We need this wrapper to access LangOpts and CGOpts from extension functions
@@ -170,40 +168,45 @@ static void addObjCARCOptPass(const PassManagerBuilder &Builder, PassManagerBase
     PM.add(createObjCARCOptPass());
 }
 
-static void addSampleProfileLoaderPass(const PassManagerBuilder &Builder,
-                                       PassManagerBase &PM) {
-  const PassManagerBuilderWrapper &BuilderWrapper =
-      static_cast<const PassManagerBuilderWrapper &>(Builder);
-  const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
-  PM.add(createSampleProfileLoaderPass(CGOpts.SampleProfileFile));
-}
-
 static void addAddDiscriminatorsPass(const PassManagerBuilder &Builder,
-                                     PassManagerBase &PM) {
+                                     legacy::PassManagerBase &PM) {
   PM.add(createAddDiscriminatorsPass());
 }
 
 static void addBoundsCheckingPass(const PassManagerBuilder &Builder,
-                                    PassManagerBase &PM) {
+                                    legacy::PassManagerBase &PM) {
   PM.add(createBoundsCheckingPass());
 }
 
 static void addSanitizerCoveragePass(const PassManagerBuilder &Builder,
-                                     PassManagerBase &PM) {
+                                     legacy::PassManagerBase &PM) {
   const PassManagerBuilderWrapper &BuilderWrapper =
       static_cast<const PassManagerBuilderWrapper&>(Builder);
   const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
-  PM.add(createSanitizerCoverageModulePass(CGOpts.SanitizeCoverage));
+  SanitizerCoverageOptions Opts;
+  Opts.CoverageType =
+      static_cast<SanitizerCoverageOptions::Type>(CGOpts.SanitizeCoverageType);
+  Opts.IndirectCalls = CGOpts.SanitizeCoverageIndirectCalls;
+  Opts.TraceBB = CGOpts.SanitizeCoverageTraceBB;
+  Opts.TraceCmp = CGOpts.SanitizeCoverageTraceCmp;
+  Opts.Use8bitCounters = CGOpts.SanitizeCoverage8bitCounters;
+  PM.add(createSanitizerCoverageModulePass(Opts));
 }
 
 static void addAddressSanitizerPasses(const PassManagerBuilder &Builder,
-                                      PassManagerBase &PM) {
-  PM.add(createAddressSanitizerFunctionPass());
-  PM.add(createAddressSanitizerModulePass());
+                                      legacy::PassManagerBase &PM) {
+  PM.add(createAddressSanitizerFunctionPass(/*CompileKernel*/false));
+  PM.add(createAddressSanitizerModulePass(/*CompileKernel*/false));
+}
+
+static void addKernelAddressSanitizerPasses(const PassManagerBuilder &Builder,
+                                            legacy::PassManagerBase &PM) {
+  PM.add(createAddressSanitizerFunctionPass(/*CompileKernel*/true));
+  PM.add(createAddressSanitizerModulePass(/*CompileKernel*/true));
 }
 
 static void addMemorySanitizerPass(const PassManagerBuilder &Builder,
-                                   PassManagerBase &PM) {
+                                   legacy::PassManagerBase &PM) {
   const PassManagerBuilderWrapper &BuilderWrapper =
       static_cast<const PassManagerBuilderWrapper&>(Builder);
   const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
@@ -223,12 +226,12 @@ static void addMemorySanitizerPass(const PassManagerBuilder &Builder,
 }
 
 static void addThreadSanitizerPass(const PassManagerBuilder &Builder,
-                                   PassManagerBase &PM) {
+                                   legacy::PassManagerBase &PM) {
   PM.add(createThreadSanitizerPass());
 }
 
 static void addDataFlowSanitizerPass(const PassManagerBuilder &Builder,
-                                     PassManagerBase &PM) {
+                                     legacy::PassManagerBase &PM) {
   const PassManagerBuilderWrapper &BuilderWrapper =
       static_cast<const PassManagerBuilderWrapper&>(Builder);
   const LangOptions &LangOpts = BuilderWrapper.getLangOpts();
@@ -252,7 +255,7 @@ static TargetLibraryInfoImpl *createTLII(llvm::Triple &TargetTriple,
 }
 
 static void addSymbolRewriterPass(const CodeGenOptions &Opts,
-                                  PassManager *MPM) {
+                                  legacy::PassManager *MPM) {
   llvm::SymbolRewriter::RewriteDescriptorList DL;
 
   llvm::SymbolRewriter::RewriteMapParser MapParser;
@@ -283,18 +286,14 @@ void EmitAssemblyHelper::CreatePasses() {
   PMBuilder.SLPVectorize = CodeGenOpts.VectorizeSLP;
   PMBuilder.LoopVectorize = CodeGenOpts.VectorizeLoop;
 
-  PMBuilder.DisableTailCalls = CodeGenOpts.DisableTailCalls;
   PMBuilder.DisableUnitAtATime = !CodeGenOpts.UnitAtATime;
   PMBuilder.DisableUnrollLoops = !CodeGenOpts.UnrollLoops;
   PMBuilder.MergeFunctions = CodeGenOpts.MergeFunctions;
+  PMBuilder.PrepareForLTO = CodeGenOpts.PrepareForLTO;
   PMBuilder.RerollLoops = CodeGenOpts.RerollLoops;
 
   PMBuilder.addExtension(PassManagerBuilder::EP_EarlyAsPossible,
                          addAddDiscriminatorsPass);
-
-  if (!CodeGenOpts.SampleProfileFile.empty())
-    PMBuilder.addExtension(PassManagerBuilder::EP_EarlyAsPossible,
-                           addSampleProfileLoaderPass);
 
   // In ObjC ARC mode, add the main ARC optimization passes.
   if (LangOpts.ObjCAutoRefCount) {
@@ -313,7 +312,9 @@ void EmitAssemblyHelper::CreatePasses() {
                            addBoundsCheckingPass);
   }
 
-  if (CodeGenOpts.SanitizeCoverage) {
+  if (CodeGenOpts.SanitizeCoverageType ||
+      CodeGenOpts.SanitizeCoverageIndirectCalls ||
+      CodeGenOpts.SanitizeCoverageTraceCmp) {
     PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
                            addSanitizerCoveragePass);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
@@ -325,6 +326,13 @@ void EmitAssemblyHelper::CreatePasses() {
                            addAddressSanitizerPasses);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
                            addAddressSanitizerPasses);
+  }
+
+  if (LangOpts.Sanitize.has(SanitizerKind::KernelAddress)) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addKernelAddressSanitizerPasses);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addKernelAddressSanitizerPasses);
   }
 
   if (LangOpts.Sanitize.has(SanitizerKind::Memory)) {
@@ -370,13 +378,13 @@ void EmitAssemblyHelper::CreatePasses() {
   }
 
   // Set up the per-function pass manager.
-  FunctionPassManager *FPM = getPerFunctionPasses();
+  legacy::FunctionPassManager *FPM = getPerFunctionPasses();
   if (CodeGenOpts.VerifyModule)
     FPM->add(createVerifierPass());
   PMBuilder.populateFunctionPassManager(*FPM);
 
   // Set up the per-module pass manager.
-  PassManager *MPM = getPerModulePasses();
+  legacy::PassManager *MPM = getPerModulePasses();
   if (!CodeGenOpts.RewriteMapFiles.empty())
     addSymbolRewriterPass(CodeGenOpts, MPM);
 
@@ -401,8 +409,12 @@ void EmitAssemblyHelper::CreatePasses() {
   if (CodeGenOpts.ProfileInstrGenerate) {
     InstrProfOptions Options;
     Options.NoRedZone = CodeGenOpts.DisableRedZone;
+    Options.InstrProfileOutput = CodeGenOpts.InstrProfileOutput;
     MPM->add(createInstrProfilingPass(Options));
   }
+
+  if (!CodeGenOpts.SampleProfileFile.empty())
+    MPM->add(createSampleProfileLoaderPass(CodeGenOpts.SampleProfileFile));
 
   PMBuilder.populateModulePassManager(*MPM);
 }
@@ -439,24 +451,16 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
     BackendArgs.push_back("-limit-float-precision");
     BackendArgs.push_back(CodeGenOpts.LimitFloatPrecision.c_str());
   }
-  if (llvm::TimePassesIsEnabled)
-    BackendArgs.push_back("-time-passes");
-  for (unsigned i = 0, e = CodeGenOpts.BackendOptions.size(); i != e; ++i)
-    BackendArgs.push_back(CodeGenOpts.BackendOptions[i].c_str());
+  for (const std::string &BackendOption : CodeGenOpts.BackendOptions)
+    BackendArgs.push_back(BackendOption.c_str());
   BackendArgs.push_back(nullptr);
   llvm::cl::ParseCommandLineOptions(BackendArgs.size() - 1,
                                     BackendArgs.data());
 
-  std::string FeaturesStr;
-  if (!TargetOpts.Features.empty()) {
-    SubtargetFeatures Features;
-    for (std::vector<std::string>::const_iterator
-           it = TargetOpts.Features.begin(),
-           ie = TargetOpts.Features.end(); it != ie; ++it)
-      Features.AddFeature(*it);
-    FeaturesStr = Features.getString();
-  }
+  std::string FeaturesStr =
+      llvm::join(TargetOpts.Features.begin(), TargetOpts.Features.end(), ",");
 
+  // Keep this synced with the equivalent code in tools/driver/cc1as_main.cpp.
   llvm::Reloc::Model RM = llvm::Reloc::Default;
   if (CodeGenOpts.RelocationModel == "static") {
     RM = llvm::Reloc::Static;
@@ -477,38 +481,24 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
 
   llvm::TargetOptions Options;
 
+  if (!TargetOpts.Reciprocals.empty())
+    Options.Reciprocals = TargetRecip(TargetOpts.Reciprocals);
+
   Options.ThreadModel =
     llvm::StringSwitch<llvm::ThreadModel::Model>(CodeGenOpts.ThreadModel)
       .Case("posix", llvm::ThreadModel::POSIX)
       .Case("single", llvm::ThreadModel::Single);
 
-  if (CodeGenOpts.DisableIntegratedAS)
-    Options.DisableIntegratedAS = true;
-
-  if (CodeGenOpts.CompressDebugSections)
-    Options.CompressDebugSections = true;
-
-  // Set frame pointer elimination mode.
-  if (!CodeGenOpts.DisableFPElim) {
-    Options.NoFramePointerElim = false;
-  } else if (CodeGenOpts.OmitLeafFramePointer) {
-    Options.NoFramePointerElim = false;
-  } else {
-    Options.NoFramePointerElim = true;
-  }
-
-  if (CodeGenOpts.UseInitArray)
-    Options.UseInitArray = true;
-
   // Set float ABI type.
-  if (CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp")
-    Options.FloatABIType = llvm::FloatABI::Soft;
-  else if (CodeGenOpts.FloatABI == "hard")
-    Options.FloatABIType = llvm::FloatABI::Hard;
-  else {
-    assert(CodeGenOpts.FloatABI.empty() && "Invalid float abi!");
-    Options.FloatABIType = llvm::FloatABI::Default;
-  }
+  assert((CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp" ||
+          CodeGenOpts.FloatABI == "hard" || CodeGenOpts.FloatABI.empty()) &&
+         "Invalid Floating Point ABI!");
+  Options.FloatABIType =
+      llvm::StringSwitch<llvm::FloatABI::ABIType>(CodeGenOpts.FloatABI)
+          .Case("soft", llvm::FloatABI::Soft)
+          .Case("softfp", llvm::FloatABI::Soft)
+          .Case("hard", llvm::FloatABI::Hard)
+          .Default(llvm::FloatABI::Default);
 
   // Set FP fusion mode.
   switch (CodeGenOpts.getFPContractMode()) {
@@ -523,18 +513,28 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
     break;
   }
 
+  Options.UseInitArray = CodeGenOpts.UseInitArray;
+  Options.DisableIntegratedAS = CodeGenOpts.DisableIntegratedAS;
+  Options.CompressDebugSections = CodeGenOpts.CompressDebugSections;
+
+  // Set EABI version.
+  Options.EABIVersion = llvm::StringSwitch<llvm::EABI>(CodeGenOpts.EABIVersion)
+                            .Case("4", llvm::EABI::EABI4)
+                            .Case("5", llvm::EABI::EABI5)
+                            .Case("gnu", llvm::EABI::GNU)
+                            .Default(llvm::EABI::Default);
+
   Options.LessPreciseFPMADOption = CodeGenOpts.LessPreciseFPMAD;
   Options.NoInfsFPMath = CodeGenOpts.NoInfsFPMath;
   Options.NoNaNsFPMath = CodeGenOpts.NoNaNsFPMath;
   Options.NoZerosInBSS = CodeGenOpts.NoZeroInitializedInBSS;
   Options.UnsafeFPMath = CodeGenOpts.UnsafeFPMath;
-  Options.UseSoftFloat = CodeGenOpts.SoftFloat;
   Options.StackAlignmentOverride = CodeGenOpts.StackAlignment;
-  Options.DisableTailCalls = CodeGenOpts.DisableTailCalls;
-  Options.TrapFuncName = CodeGenOpts.TrapFuncName;
   Options.PositionIndependentExecutable = LangOpts.PIELevel != 0;
   Options.FunctionSections = CodeGenOpts.FunctionSections;
   Options.DataSections = CodeGenOpts.DataSections;
+  Options.UniqueSectionNames = CodeGenOpts.UniqueSectionNames;
+  Options.EmulatedTLS = CodeGenOpts.EmulatedTLS;
 
   Options.MCOptions.MCRelaxAll = CodeGenOpts.RelaxAll;
   Options.MCOptions.MCSaveTempLabels = CodeGenOpts.SaveTempLabels;
@@ -552,10 +552,10 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
 }
 
 bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
-                                       formatted_raw_ostream &OS) {
+                                       raw_pwrite_stream &OS) {
 
   // Create the code generator passes.
-  PassManager *PM = getCodeGenPasses();
+  legacy::PassManager *PM = getCodeGenPasses();
 
   // Add LibraryInfo.
   llvm::Triple TargetTriple(TheModule->getTargetTriple());
@@ -588,9 +588,9 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   return true;
 }
 
-void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
+void EmitAssemblyHelper::EmitAssembly(BackendAction Action,
+                                      raw_pwrite_stream *OS) {
   TimeRegion Region(llvm::TimePassesIsEnabled ? &CodeGenerationTime : nullptr);
-  llvm::formatted_raw_ostream FormattedOS;
 
   bool UsesCodeGen = (Action != Backend_EmitNothing &&
                       Action != Backend_EmitBC &&
@@ -598,7 +598,10 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
   if (!TM)
     TM.reset(CreateTargetMachine(UsesCodeGen));
 
-  if (UsesCodeGen && !TM) return;
+  if (UsesCodeGen && !TM)
+    return;
+  if (TM)
+    TheModule->setDataLayout(TM->createDataLayout());
   CreatePasses();
 
   switch (Action) {
@@ -606,19 +609,17 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
     break;
 
   case Backend_EmitBC:
-    getPerModulePasses()->add(
-        createBitcodeWriterPass(*OS, CodeGenOpts.EmitLLVMUseLists));
+    getPerModulePasses()->add(createBitcodeWriterPass(
+        *OS, CodeGenOpts.EmitLLVMUseLists, CodeGenOpts.EmitFunctionSummary));
     break;
 
   case Backend_EmitLL:
-    FormattedOS.setStream(*OS, formatted_raw_ostream::PRESERVE_STREAM);
     getPerModulePasses()->add(
-        createPrintModulePass(FormattedOS, "", CodeGenOpts.EmitLLVMUseLists));
+        createPrintModulePass(*OS, "", CodeGenOpts.EmitLLVMUseLists));
     break;
 
   default:
-    FormattedOS.setStream(*OS, formatted_raw_ostream::PRESERVE_STREAM);
-    if (!AddEmitPasses(Action, FormattedOS))
+    if (!AddEmitPasses(Action, *OS))
       return;
   }
 
@@ -632,10 +633,9 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
     PrettyStackTraceString CrashInfo("Per-function optimization");
 
     PerFunctionPasses->doInitialization();
-    for (Module::iterator I = TheModule->begin(),
-           E = TheModule->end(); I != E; ++I)
-      if (!I->isDeclaration())
-        PerFunctionPasses->run(*I);
+    for (Function &F : *TheModule)
+      if (!F.isDeclaration())
+        PerFunctionPasses->run(F);
     PerFunctionPasses->doFinalization();
   }
 
@@ -655,7 +655,7 @@ void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
                               const clang::TargetOptions &TOpts,
                               const LangOptions &LOpts, StringRef TDesc,
                               Module *M, BackendAction Action,
-                              raw_ostream *OS) {
+                              raw_pwrite_stream *OS) {
   EmitAssemblyHelper AsmHelper(Diags, CGOpts, TOpts, LOpts, M);
 
   AsmHelper.EmitAssembly(Action, OS);
@@ -663,8 +663,7 @@ void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
   // If an optional clang TargetInfo description string was passed in, use it to
   // verify the LLVM TargetMachine's DataLayout.
   if (AsmHelper.TM && !TDesc.empty()) {
-    std::string DLDesc =
-        AsmHelper.TM->getDataLayout()->getStringRepresentation();
+    std::string DLDesc = M->getDataLayout().getStringRepresentation();
     if (DLDesc != TDesc) {
       unsigned DiagID = Diags.getCustomDiagID(
           DiagnosticsEngine::Error, "backend data layout '%0' does not match "
@@ -676,21 +675,32 @@ void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
 
 // With -fembed-bitcode, save a copy of the llvm IR as data in the
 // __LLVM,__bitcode section.
-void clang::EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts)
+void clang::EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts,
+                         llvm::MemoryBufferRef Buf)
 {
   if (!CGOpts.EmbedBitcode && !CGOpts.EmbedMarkerOnly)
     return;
 
   // Embed the bitcode for the llvm module.
   std::string Data;
-  llvm::raw_string_ostream OS(Data);
-  if (!CGOpts.EmbedMarkerOnly)
-    // FIXME: It's crazy to serialize here.  Instead we should just copy the
-    // raw data.
-    llvm::WriteBitcodeToFile(M, OS, /* ShouldPreserveUseListOrder */ true);
-  ArrayRef<uint8_t> ModuleData((uint8_t*)OS.str().data(), OS.str().size());
+  ArrayRef<uint8_t> ModuleData;
+  if (!CGOpts.EmbedMarkerOnly) {
+    if (!isBitcode((const unsigned char*)Buf.getBufferStart(),
+                   (const unsigned char*)Buf.getBufferEnd())) {
+      // If the input is LLVM Assembly, bitcode is produced by serializing
+      // the module. Use-lists order need to be perserved in this case.
+      llvm::raw_string_ostream OS(Data);
+      llvm::WriteBitcodeToFile(M, OS, /* ShouldPreserveUseListOrder */ true);
+      ModuleData = ArrayRef<uint8_t>((uint8_t*)OS.str().data(),
+                                     OS.str().size());
+    } else {
+      // If the input is LLVM bitcode, write the input byte stream directly.
+      ModuleData = ArrayRef<uint8_t>((uint8_t*)Buf.getBufferStart(),
+                                     Buf.getBufferSize());
+    }
+  }
   llvm::Constant *ModuleConstant =
-    llvm::ConstantDataArray::get(M->getContext(), ModuleData);
+      llvm::ConstantDataArray::get(M->getContext(), ModuleData);
   // Use Appending linkage so it doesn't get optimized out.
   llvm::GlobalVariable *GV = new llvm::GlobalVariable(*M,
                                        ModuleConstant->getType(), true,
@@ -699,9 +709,9 @@ void clang::EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts)
   GV->setSection("__LLVM,__bitcode");
   if (llvm::GlobalVariable *Old =
       M->getGlobalVariable("llvm.embedded.module")) {
+    assert(Old->use_empty() && "llvm.embedded.module must have no uses");
     GV->takeName(Old);
-    Old->replaceAllUsesWith(GV);
-    delete Old;
+    Old->eraseFromParent();
   } else {
     GV->setName("llvm.embedded.module");
   }
@@ -717,9 +727,9 @@ void clang::EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts)
                                 CmdConstant);
   GV->setSection("__LLVM,__cmdline");
   if (llvm::GlobalVariable *Old = M->getGlobalVariable("llvm.cmdline")) {
+    assert(Old->use_empty() && "llvm.cmdline must have no uses");
     GV->takeName(Old);
-    Old->replaceAllUsesWith(GV);
-    delete Old;
+    Old->eraseFromParent();
   } else {
     GV->setName("llvm.cmdline");
   }

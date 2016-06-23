@@ -13,7 +13,9 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/DebugInfo/DWARF/DIContext.h"
+#include "llvm/DebugInfo/DIContext.h"
+#include "llvm/DebugInfo/DWARF/DWARFContext.h"
+#include "llvm/Object/MachOUniversal.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Object/RelocVisitor.h"
 #include "llvm/Support/CommandLine.h"
@@ -21,6 +23,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/raw_ostream.h"
@@ -34,7 +37,7 @@ using namespace llvm;
 using namespace object;
 
 static cl::list<std::string>
-InputFilenames(cl::Positional, cl::desc("<input object files>"),
+InputFilenames(cl::Positional, cl::desc("<input object files or .dSYM bundles>"),
                cl::ZeroOrMore);
 
 static cl::opt<DIDumpType>
@@ -69,30 +72,74 @@ DumpType("debug-dump", cl::init(DIDT_All),
         clEnumValN(DIDT_StrOffsetsDwo, "str_offsets.dwo", ".debug_str_offsets.dwo"),
         clEnumValEnd));
 
+static void error(StringRef Filename, std::error_code EC) {
+  if (!EC)
+    return;
+  errs() << Filename << ": " << EC.message() << "\n";
+  exit(1);
+}
+
+static void DumpObjectFile(ObjectFile &Obj, Twine Filename) {
+  std::unique_ptr<DIContext> DICtx(new DWARFContextInMemory(Obj));
+
+  outs() << Filename.str() << ":\tfile format " << Obj.getFileFormatName()
+         << "\n\n";
+  // Dump the complete DWARF structure.
+  DICtx->dump(outs(), DumpType);
+}
+
 static void DumpInput(StringRef Filename) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> BuffOrErr =
       MemoryBuffer::getFileOrSTDIN(Filename);
-
-  if (std::error_code EC = BuffOrErr.getError()) {
-    errs() << Filename << ": " << EC.message() << "\n";
-    return;
-  }
+  error(Filename, BuffOrErr.getError());
   std::unique_ptr<MemoryBuffer> Buff = std::move(BuffOrErr.get());
 
-  ErrorOr<std::unique_ptr<ObjectFile>> ObjOrErr =
-      ObjectFile::createObjectFile(Buff->getMemBufferRef());
-  if (std::error_code EC = ObjOrErr.getError()) {
-    errs() << Filename << ": " << EC.message() << '\n';
-    return;
+  ErrorOr<std::unique_ptr<Binary>> BinOrErr =
+      object::createBinary(Buff->getMemBufferRef());
+  error(Filename, BinOrErr.getError());
+
+  if (auto *Obj = dyn_cast<ObjectFile>(BinOrErr->get()))
+    DumpObjectFile(*Obj, Filename);
+  else if (auto *Fat = dyn_cast<MachOUniversalBinary>(BinOrErr->get()))
+    for (auto &ObjForArch : Fat->objects()) {
+      auto MachOOrErr = ObjForArch.getAsObjectFile();
+      error(Filename, MachOOrErr.getError());
+      DumpObjectFile(**MachOOrErr,
+                     Filename + " (" + ObjForArch.getArchTypeName() + ")");
+    }
+}
+
+/// If the input path is a .dSYM bundle (as created by the dsymutil tool),
+/// replace it with individual entries for each of the object files inside the
+/// bundle otherwise return the input path.
+static std::vector<std::string> expandBundle(std::string InputPath) {
+  std::vector<std::string> BundlePaths;
+  SmallString<256> BundlePath(InputPath);
+  // Manually open up the bundle to avoid introducing additional dependencies.
+  if (sys::fs::is_directory(BundlePath) &&
+      sys::path::extension(BundlePath) == ".dSYM") {
+    std::error_code EC;
+    sys::path::append(BundlePath, "Contents", "Resources", "DWARF");
+    for (sys::fs::directory_iterator Dir(BundlePath, EC), DirEnd;
+         Dir != DirEnd && !EC; Dir.increment(EC)) {
+      const std::string &Path = Dir->path();
+      sys::fs::file_status Status;
+      EC = sys::fs::status(Path, Status);
+      error(Path, EC);
+      switch (Status.type()) {
+      case sys::fs::file_type::regular_file:
+      case sys::fs::file_type::symlink_file:
+      case sys::fs::file_type::type_unknown:
+        BundlePaths.push_back(Path);
+        break;
+      default: /*ignore*/;
+      }
+    }
+    error(BundlePath, EC);
   }
-  ObjectFile &Obj = *ObjOrErr.get();
-
-  std::unique_ptr<DIContext> DICtx(DIContext::getDWARFContext(Obj));
-
-  outs() << Filename
-         << ":\tfile format " << Obj.getFileFormatName() << "\n\n";
-  // Dump the complete DWARF structure.
-  DICtx->dump(outs(), DumpType);
+  if (!BundlePaths.size())
+    BundlePaths.push_back(InputPath);
+  return BundlePaths;
 }
 
 int main(int argc, char **argv) {
@@ -107,7 +154,14 @@ int main(int argc, char **argv) {
   if (InputFilenames.size() == 0)
     InputFilenames.push_back("a.out");
 
-  std::for_each(InputFilenames.begin(), InputFilenames.end(), DumpInput);
+  // Expand any .dSYM bundles to the individual object files contained therein.
+  std::vector<std::string> Objects;
+  for (auto F : InputFilenames) {
+    auto Objs = expandBundle(F);
+    Objects.insert(Objects.end(), Objs.begin(), Objs.end());
+  }
 
-  return 0;
+  std::for_each(Objects.begin(), Objects.end(), DumpInput);
+
+  return EXIT_SUCCESS;
 }
