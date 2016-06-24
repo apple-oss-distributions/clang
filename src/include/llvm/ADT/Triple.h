@@ -77,7 +77,7 @@ public:
     nvptx,      // NVPTX: 32-bit
     nvptx64,    // NVPTX: 64-bit
     gpu_32,     // OpenCL generic GPU: (32-bit)
-    gpu_64,     // OpenCL generic GPU: (64-bit)
+    gpu_64,     // OpenCL generic GPU: (64-bit)    
     le32,       // le32: generic little-endian 32-bit CPU (PNaCl)
     le64,       // le64: generic little-endian 64-bit CPU (PNaCl)
     amdil,      // AMDIL

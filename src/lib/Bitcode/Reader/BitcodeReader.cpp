@@ -1906,6 +1906,7 @@ std::error_code BitcodeReader::parseMetadata() {
   if (Stream.EnterSubBlock(bitc::METADATA_BLOCK_ID))
     return error("Invalid record");
 
+  SmallVector<Metadata *, 2> AllCUs; // APPLE INTERNAL: rdar://problem/25293255
   SmallVector<uint64_t, 64> Record;
 
   auto getMD =
@@ -1934,6 +1935,32 @@ std::error_code BitcodeReader::parseMetadata() {
       return error("Malformed block");
     case BitstreamEntry::EndBlock:
       MDValueList.tryToResolveCycles();
+
+      // BEGIN APPLE INTERNAL: Workaround for rdar://problem/25293255
+      // If there are DICompileUnits not mentioned in llvm.dbg.cu, set
+      // the version to a bogus value, thus causing the debug info to
+      // be dropped.
+      if (NamedMDNode *CUs = TheModule->getNamedMetadata("llvm.dbg.cu"))
+        for (auto *CU : AllCUs)
+          if (std::find(CUs->op_begin(), CUs->op_end(), CU) == CUs->op_end()) {
+            NamedMDNode *ModFlags = TheModule->getModuleFlagsMetadata();
+            for (unsigned I = 0, E = ModFlags->getNumOperands(); I != E; ++I)
+              if (MDNode *Flag = ModFlags->getOperand(I))
+                if (Flag->getNumOperands() == 3 &&
+                    cast<MDString>(Flag->getOperand(1))
+                        ->getString()
+                        .equals("Debug Info Version")) {
+                  auto Clone = Flag->clone();
+                  auto BogusVersion = ConstantAsMetadata::get(
+                      ConstantInt::get(Type::getInt32Ty(Context), ~1U));
+                  Clone->replaceOperandWith(2, BogusVersion);
+                  auto NewFlag = MDNode::replaceWithUniqued(std::move(Clone));
+                  ModFlags->setOperand(I, NewFlag);
+                  break;
+                }
+          }
+      // END APPLE INTERNAL: Workaround for rdar://problem/25293255
+
       return std::error_code();
     case BitstreamEntry::Record:
       // The interesting case.
@@ -2209,6 +2236,8 @@ std::error_code BitcodeReader::parseMetadata() {
               getMDOrNull(Record[11]), getMDOrNull(Record[12]),
               getMDOrNull(Record[13]), Record.size() == 14 ? 0 : Record[14]),
           NextMDValueNo++);
+      // APPLE INTERNAL: Workaround for rdar://problem/25293255.
+      AllCUs.push_back(MDValueList[NextMDValueNo-1]);
       break;
     }
     case bitc::METADATA_SUBPROGRAM: {

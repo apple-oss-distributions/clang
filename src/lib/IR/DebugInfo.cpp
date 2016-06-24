@@ -555,7 +555,8 @@ void GLTOMapper::traverse(MDNode *N) {
     Opened.insert(N);
     for (auto &I : N->operands())
       if (auto MDN = dyn_cast_or_null<MDNode>(I))
-        if (!Opened.count(MDN) && !Replacements.count(MDN) && !prune(N, MDN))
+        if (!Opened.count(MDN) && !Replacements.count(MDN) && !prune(N, MDN) &&
+            !isa<DICompileUnit>(MDN))
           ToVisit.push_back(MDN);
   }
 }
