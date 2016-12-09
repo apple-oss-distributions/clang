@@ -346,7 +346,9 @@ private:
     auto LinkageName = MDS->getName().empty() ? MDS->getLinkageName() : "";
     DISubprogram *Declaration = nullptr;
     auto Type = cast_or_null<DISubroutineType>(map(MDS->getType()));
-    auto ContainingType = map(MDS->getContainingType());
+    auto ContainingTypeNode = map(MDS->getContainingType());
+    auto ContainingType = DITypeRef(
+        ContainingTypeNode == EmptyNode ? nullptr : ContainingTypeNode);
     auto Unit = cast_or_null<DICompileUnit>(map(MDS->getUnit()));
     auto Variables = cast<MDTuple>(EmptyNode);
     auto TemplateParams = nullptr;
@@ -356,7 +358,7 @@ private:
       return DISubprogram::getDistinct(
           MDS->getContext(), FileAndScope, MDS->getName(),
           LinkageName, FileAndScope, MDS->getLine(), Type, MDS->isLocalToUnit(),
-          MDS->isDefinition(), MDS->getScopeLine(), DITypeRef(ContainingType),
+          MDS->isDefinition(), MDS->getScopeLine(), ContainingType,
           MDS->getVirtuality(), MDS->getVirtualIndex(), MDS->getFlags(),
           MDS->isOptimized(), Unit, TemplateParams, Declaration,
           Variables);
@@ -368,7 +370,7 @@ private:
     auto NewMDS = DISubprogram::get(
         MDS->getContext(), FileAndScope, MDS->getName(), LinkageName,
         FileAndScope, MDS->getLine(), Type, MDS->isLocalToUnit(),
-        MDS->isDefinition(), MDS->getScopeLine(), DITypeRef(ContainingType),
+        MDS->isDefinition(), MDS->getScopeLine(), ContainingType,
         MDS->getVirtuality(), MDS->getVirtualIndex(), MDS->getFlags(),
         MDS->isOptimized(), Unit, TemplateParams, Declaration,
         Variables);

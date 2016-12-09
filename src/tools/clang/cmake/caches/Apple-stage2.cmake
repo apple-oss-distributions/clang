@@ -46,7 +46,6 @@ set(LLVM_TOOLCHAIN_TOOLS
 
 set(LLVM_DISTRIBUTION_COMPONENTS
   clang
-  libclang
   LTO
   clang-format
   IndexStore

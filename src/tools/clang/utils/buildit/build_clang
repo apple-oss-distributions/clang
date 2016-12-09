@@ -235,7 +235,7 @@ if [ "$BUILDING_HOST" = "YES" ]; then
   fi
 fi
 
-$NINJA -v $BUILD_TARGET $LLVM_CONFIG_TARGET install-clang-headers install-libclang-headers
+$NINJA -v $BUILD_TARGET $LLVM_CONFIG_TARGET install-clang-headers
 if ! test $? == 0 ; then
     echo "error: LLVM 'ninja stage2-install' failed!"
     exit 1
