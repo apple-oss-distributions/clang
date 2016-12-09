@@ -92,7 +92,7 @@ uptr GetMaxVirtualAddress() {
 # if defined(__aarch64__) && SANITIZER_IOS && !SANITIZER_IOSSIM
   // Ideally, we would derive the upper bound from MACH_VM_MAX_ADDRESS. The
   // upper bound can change depending on the device.
-  return 0x200000000 - 1;
+  return 0x218000000 - 1;
 # elif defined(__powerpc64__) || defined(__aarch64__)
   // On PowerPC64 we have two different address space layouts: 44- and 46-bit.
   // We somehow need to figure out which one we are using now and choose
@@ -323,22 +323,6 @@ SignalContext SignalContext::Create(void *siginfo, void *context) {
   uptr pc, sp, bp;
   GetPcSpBp(context, &pc, &sp, &bp);
   return SignalContext(context, addr, pc, sp, bp);
-}
-
-// This function check is the built VMA matches the runtime one for
-// architectures with multiple VMA size.
-void CheckVMASize() {
-#if defined(__aarch64__) && !SANITIZER_IOS
-  static const unsigned kBuiltVMA = SANITIZER_AARCH64_VMA;
-  unsigned maxRuntimeVMA =
-    (MostSignificantSetBitIndex(GET_CURRENT_FRAME()) + 1);
-  if (kBuiltVMA != maxRuntimeVMA) {
-    Printf("WARNING: %s runtime VMA is not the one built for.\n",
-      SanitizerToolName);
-    Printf("\tBuilt VMA:   %u bits\n", kBuiltVMA);
-    Printf("\tRuntime VMA: %u bits\n", maxRuntimeVMA);
-  }
-#endif
 }
 
 } // namespace __sanitizer

@@ -37,7 +37,7 @@ SRCS="
 if [ "`uname -a | grep Linux`" != "" ]; then
 	SUFFIX="linux_amd64"
 	OSCFLAGS="-fPIC -ffreestanding -Wno-maybe-uninitialized -Wno-unused-const-variable -Werror -Wno-unknown-warning-option"
-	OSLDFLAGS="-lpthread -lrt -fPIC -fpie"
+	OSLDFLAGS="-lpthread -fPIC -fpie"
 	SRCS="
 		$SRCS
 		../rtl/tsan_platform_linux.cc
@@ -65,12 +65,13 @@ elif [ "`uname -a | grep FreeBSD`" != "" ]; then
         "
 elif [ "`uname -a | grep Darwin`" != "" ]; then
 	SUFFIX="darwin_amd64"
-	OSCFLAGS="-fPIC -Wno-unused-const-variable -Wno-unknown-warning-option"
+	OSCFLAGS="-fPIC -Wno-unused-const-variable -Wno-unknown-warning-option -isysroot $(xcodebuild -version -sdk macosx Path)"
 	OSLDFLAGS="-lpthread -fPIC -fpie"
 	SRCS="
 		$SRCS
 		../rtl/tsan_platform_mac.cc
 		../../sanitizer_common/sanitizer_mac.cc
+		../../sanitizer_common/sanitizer_mac_spi.cc
 		../../sanitizer_common/sanitizer_posix.cc
 		../../sanitizer_common/sanitizer_posix_libcdep.cc
 		../../sanitizer_common/sanitizer_procmaps_mac.cc

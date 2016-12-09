@@ -626,11 +626,17 @@ void llvm::SplitLandingPadPredecessors(BasicBlock *OrigBB,
     Clone2->setName(Twine("lpad") + Suffix2);
     NewBB2->getInstList().insert(NewBB2->getFirstInsertionPt(), Clone2);
 
-    // Create a PHI node for the two cloned landingpad instructions.
-    PHINode *PN = PHINode::Create(LPad->getType(), 2, "lpad.phi", LPad);
-    PN->addIncoming(Clone1, NewBB1);
-    PN->addIncoming(Clone2, NewBB2);
-    LPad->replaceAllUsesWith(PN);
+    // Create a PHI node for the two cloned landingpad instructions only
+    // if the original landingpad instruction has some uses.
+    if (!LPad->use_empty()) {
+      assert(!LPad->getType()->isTokenTy() &&
+             "Split cannot be applied if LPad is token type. Otherwise an "
+             "invalid PHINode of token type would be created.");
+      PHINode *PN = PHINode::Create(LPad->getType(), 2, "lpad.phi", LPad);
+      PN->addIncoming(Clone1, NewBB1);
+      PN->addIncoming(Clone2, NewBB2);
+      LPad->replaceAllUsesWith(PN);
+    }
     LPad->eraseFromParent();
   } else {
     // There is no second clone. Just replace the landing pad with the first
@@ -703,11 +709,10 @@ ReturnInst *llvm::FoldReturnIntoUncondBranch(ReturnInst *RI, BasicBlock *BB,
 /// UnreachableInst, otherwise it branches to Tail.
 /// Returns the NewBasicBlock's terminator.
 
-TerminatorInst *llvm::SplitBlockAndInsertIfThen(Value *Cond,
-                                                Instruction *SplitBefore,
-                                                bool Unreachable,
-                                                MDNode *BranchWeights,
-                                                DominatorTree *DT) {
+TerminatorInst *
+llvm::SplitBlockAndInsertIfThen(Value *Cond, Instruction *SplitBefore,
+                                bool Unreachable, MDNode *BranchWeights,
+                                DominatorTree *DT, LoopInfo *LI) {
   BasicBlock *Head = SplitBefore->getParent();
   BasicBlock *Tail = Head->splitBasicBlock(SplitBefore->getIterator());
   TerminatorInst *HeadOldTerm = Head->getTerminator();
@@ -735,6 +740,12 @@ TerminatorInst *llvm::SplitBlockAndInsertIfThen(Value *Cond,
       // Head dominates ThenBlock.
       DT->addNewBlock(ThenBlock, Head);
     }
+  }
+
+  if (LI) {
+    Loop *L = LI->getLoopFor(Head);
+    L->addBasicBlockToLoop(ThenBlock, *LI);
+    L->addBasicBlockToLoop(Tail, *LI);
   }
 
   return CheckTerm;

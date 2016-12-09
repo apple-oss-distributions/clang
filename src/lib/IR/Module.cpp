@@ -15,10 +15,12 @@
 #include "SymbolTableListTraitsImpl.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/GVMaterializer.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/LLVMContext.h"
@@ -47,7 +49,7 @@ template class llvm::SymbolTableListTraits<GlobalAlias>;
 //
 
 Module::Module(StringRef MID, LLVMContext &C)
-    : Context(C), Materializer(), ModuleID(MID), DL("") {
+    : Context(C), Materializer(), ModuleID(MID), SourceFileName(MID), DL("") {
   ValSymTab = new ValueSymbolTable();
   NamedMDSymTab = new StringMap<NamedMDNode *>();
   Context.addModule(this);
@@ -374,20 +376,27 @@ void Module::setDataLayout(const DataLayout &Other) { DL = Other; }
 
 const DataLayout &Module::getDataLayout() const { return DL; }
 
+DICompileUnit *Module::debug_compile_units_iterator::operator*() const {
+  return cast<DICompileUnit>(CUs->getOperand(Idx));
+}
+DICompileUnit *Module::debug_compile_units_iterator::operator->() const {
+  return cast<DICompileUnit>(CUs->getOperand(Idx));
+}
+
+void Module::debug_compile_units_iterator::SkipNoDebugCUs() {
+  while (CUs && (Idx < CUs->getNumOperands()) &&
+         ((*this)->getEmissionKind() == DICompileUnit::NoDebug))
+    ++Idx;
+}
+
 //===----------------------------------------------------------------------===//
 // Methods to control the materialization of GlobalValues in the Module.
 //
 void Module::setMaterializer(GVMaterializer *GVM) {
   assert(!Materializer &&
-         "Module already has a GVMaterializer.  Call MaterializeAllPermanently"
+         "Module already has a GVMaterializer.  Call materializeAll"
          " to clear it out before setting another one.");
   Materializer.reset(GVM);
-}
-
-bool Module::isDematerializable(const GlobalValue *GV) const {
-  if (Materializer)
-    return Materializer->isDematerializable(GV);
-  return false;
 }
 
 std::error_code Module::materialize(GlobalValue *GV) {
@@ -397,23 +406,11 @@ std::error_code Module::materialize(GlobalValue *GV) {
   return Materializer->materialize(GV);
 }
 
-void Module::dematerialize(GlobalValue *GV) {
-  if (Materializer)
-    return Materializer->dematerialize(GV);
-}
-
 std::error_code Module::materializeAll() {
   if (!Materializer)
     return std::error_code();
-  return Materializer->materializeModule(this);
-}
-
-std::error_code Module::materializeAllPermanently() {
-  if (std::error_code EC = materializeAll())
-    return EC;
-
-  Materializer.reset();
-  return std::error_code();
+  std::unique_ptr<GVMaterializer> M = std::move(Materializer);
+  return M->materializeModule();
 }
 
 std::error_code Module::materializeMetadata() {
@@ -490,4 +487,31 @@ PICLevel::Level Module::getPICLevel() const {
 
 void Module::setPICLevel(PICLevel::Level PL) {
   addModuleFlag(ModFlagBehavior::Error, "PIC Level", PL);
+}
+
+void Module::setMaximumFunctionCount(uint64_t Count) {
+  addModuleFlag(ModFlagBehavior::Error, "MaxFunctionCount", Count);
+}
+
+Optional<uint64_t> Module::getMaximumFunctionCount() {
+  auto *Val =
+      cast_or_null<ConstantAsMetadata>(getModuleFlag("MaxFunctionCount"));
+  if (!Val)
+    return None;
+  return cast<ConstantInt>(Val->getValue())->getZExtValue();
+}
+
+GlobalVariable *llvm::collectUsedGlobalVariables(
+    const Module &M, SmallPtrSetImpl<GlobalValue *> &Set, bool CompilerUsed) {
+  const char *Name = CompilerUsed ? "llvm.compiler.used" : "llvm.used";
+  GlobalVariable *GV = M.getGlobalVariable(Name);
+  if (!GV || !GV->hasInitializer())
+    return GV;
+
+  const ConstantArray *Init = cast<ConstantArray>(GV->getInitializer());
+  for (Value *Op : Init->operands()) {
+    GlobalValue *G = cast<GlobalValue>(Op->stripPointerCastsNoFollowAliases());
+    Set.insert(G);
+  }
+  return GV;
 }

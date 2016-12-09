@@ -25,6 +25,7 @@ add_llvm_library(LLVMAnalysis
   DivergenceAnalysis.cpp
   DomPrinter.cpp
   DominanceFrontier.cpp
+  EHPersonalities.cpp
   GlobalsModRef.cpp
   IVUsers.cpp
   InlineCost.cpp
@@ -35,10 +36,10 @@ add_llvm_library(LLVMAnalysis
   IteratedDominanceFrontier.cpp
   LazyCallGraph.cpp
   LazyValueInfo.cpp
-  LibCallSemantics.cpp
   Lint.cpp
   Loads.cpp
   LoopAccessAnalysis.cpp
+  LoopUnrollAnalyzer.cpp
   LoopInfo.cpp
   LoopPass.cpp
   MemDepPrinter.cpp
@@ -47,6 +48,7 @@ add_llvm_library(LLVMAnalysis
   MemoryDependenceAnalysis.cpp
   MemoryLocation.cpp
   ModuleDebugInfoPrinter.cpp
+  ModuleSummaryAnalysis.cpp
   ObjCARCAliasAnalysis.cpp
   ObjCARCAnalysisUtils.cpp
   ObjCARCInstKind.cpp

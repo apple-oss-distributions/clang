@@ -37,6 +37,7 @@ add_llvm_library(LLVMSupport
   Allocator.cpp
   BlockFrequency.cpp
   BranchProbability.cpp
+  CachePruning.cpp
   circular_raw_ostream.cpp
   COM.cpp
   CommandLine.cpp
@@ -50,6 +51,7 @@ add_llvm_library(LLVMSupport
   DeltaAlgorithm.cpp
   DAGDeltaAlgorithm.cpp
   Dwarf.cpp
+  Error.cpp
   ErrorHandling.cpp
   FileUtilities.cpp
   FileOutputBuffer.cpp
@@ -77,6 +79,7 @@ add_llvm_library(LLVMSupport
   RandomNumberGenerator.cpp
   Regex.cpp
   ScaledNumber.cpp
+  SHA1.cpp
   SmallPtrSet.cpp
   SmallVector.cpp
   SourceMgr.cpp
@@ -90,6 +93,7 @@ add_llvm_library(LLVMSupport
   StringRef.cpp
   SystemUtils.cpp
   TargetParser.cpp
+  ThreadPool.cpp
   Timer.cpp
   ToolOutputFile.cpp
   Triple.cpp

@@ -221,7 +221,7 @@ static Optional<Visibility> getVisibilityOf(const NamedDecl *D,
   // implies visibility(default).
   if (D->getASTContext().getTargetInfo().getTriple().isOSDarwin()) {
     for (const auto *A : D->specific_attrs<AvailabilityAttr>())
-      if (A->getPlatform()->getName().equals("macosx"))
+      if (A->getPlatform()->getName().equals("macos"))
         return DefaultVisibility;
   }
 
@@ -1184,7 +1184,7 @@ static LinkageInfo getLVForLocalDecl(const NamedDecl *D,
     return LinkageInfo::none();
 
   const Decl *OuterD = getOutermostFuncOrBlockContext(D);
-  if (!OuterD)
+  if (!OuterD || OuterD->isInvalidDecl())
     return LinkageInfo::none();
 
   LinkageInfo LV;
@@ -1223,6 +1223,10 @@ getOutermostEnclosingLambda(const CXXRecordDecl *Record) {
 
 static LinkageInfo computeLVForDecl(const NamedDecl *D,
                                     LVComputationKind computation) {
+  // Internal_linkage attribute overrides other considerations.
+  if (D->hasAttr<InternalLinkageAttr>())
+    return LinkageInfo::internal();
+
   // Objective-C: treat all Objective-C declarations as having external
   // linkage.
   switch (D->getKind()) {
@@ -1235,7 +1239,6 @@ static LinkageInfo computeLVForDecl(const NamedDecl *D,
     // Note that the name of a typedef, namespace alias, using declaration,
     // and so on are not the name of the corresponding type, namespace, or
     // declaration, so they do *not* have linkage.
-    case Decl::EnumConstant: // FIXME: This has linkage, but that's dumb.
     case Decl::ImplicitParam:
     case Decl::Label:
     case Decl::NamespaceAlias:
@@ -1244,6 +1247,10 @@ static LinkageInfo computeLVForDecl(const NamedDecl *D,
     case Decl::UsingShadow:
     case Decl::UsingDirective:
       return LinkageInfo::none();
+
+    case Decl::EnumConstant:
+      // C++ [basic.link]p4: an enumerator has the linkage of its enumeration.
+      return getLVForDecl(cast<EnumDecl>(D->getDeclContext()), computation);
 
     case Decl::Typedef:
     case Decl::TypeAlias:
@@ -1338,6 +1345,10 @@ class LinkageComputer {
 public:
   static LinkageInfo getLVForDecl(const NamedDecl *D,
                                   LVComputationKind computation) {
+    // Internal_linkage attribute overrides other considerations.
+    if (D->hasAttr<InternalLinkageAttr>())
+      return LinkageInfo::internal();
+
     if (computation == LVForLinkageOnly && D->hasCachedLinkage())
       return LinkageInfo(D->getCachedLinkage(), DefaultVisibility, false);
 
@@ -1423,8 +1434,10 @@ void NamedDecl::printQualifiedName(raw_ostream &OS,
       if (P.SuppressUnwrittenScope &&
           (ND->isAnonymousNamespace() || ND->isInline()))
         continue;
-      if (ND->isAnonymousNamespace())
-        OS << "(anonymous namespace)";
+      if (ND->isAnonymousNamespace()) {
+        OS << (P.MSVCFormatting ? "`anonymous namespace\'"
+                                : "(anonymous namespace)");
+      }
       else
         OS << *ND;
     } else if (const auto *RD = dyn_cast<RecordDecl>(*I)) {
@@ -1593,6 +1606,9 @@ NamedDecl *NamedDecl::getUnderlyingDeclImpl() {
 
   if (auto *AD = dyn_cast<ObjCCompatibleAliasDecl>(ND))
     return AD->getClassInterface();
+
+  if (auto *AD = dyn_cast<NamespaceAliasDecl>(ND))
+    return AD->getNamespace();
 
   return ND;
 }
@@ -2015,6 +2031,31 @@ const Expr *VarDecl::getAnyInitializer(const VarDecl *&D) const {
   return nullptr;
 }
 
+bool VarDecl::hasInit() const {
+  if (auto *P = dyn_cast<ParmVarDecl>(this))
+    if (P->hasUnparsedDefaultArg() || P->hasUninstantiatedDefaultArg())
+      return false;
+
+  return !Init.isNull();
+}
+
+Expr *VarDecl::getInit() {
+  if (!hasInit())
+    return nullptr;
+
+  if (auto *S = Init.dyn_cast<Stmt *>())
+    return cast<Expr>(S);
+
+  return cast_or_null<Expr>(Init.get<EvaluatedStmt *>()->Value);
+}
+
+Stmt **VarDecl::getInitAddress() {
+  if (auto *ES = Init.dyn_cast<EvaluatedStmt *>())
+    return &ES->Value;
+
+  return Init.getAddrOfPtr1();
+}
+
 bool VarDecl::isOutOfLine() const {
   if (Decl::isOutOfLine())
     return true;
@@ -2085,13 +2126,12 @@ bool VarDecl::isUsableInConstantExpressions(ASTContext &C) const {
 EvaluatedStmt *VarDecl::ensureEvaluatedStmt() const {
   auto *Eval = Init.dyn_cast<EvaluatedStmt *>();
   if (!Eval) {
-    auto *S = Init.get<Stmt *>();
     // Note: EvaluatedStmt contains an APValue, which usually holds
     // resources not allocated from the ASTContext.  We need to do some
     // work to avoid leaking those, but we do so in VarDecl::evaluateValue
     // where we can detect whether there's anything to clean up or not.
     Eval = new (getASTContext()) EvaluatedStmt;
-    Eval->Value = S;
+    Eval->Value = Init.get<Stmt *>();
     Init = Eval;
   }
   return Eval;
@@ -2153,6 +2193,27 @@ APValue *VarDecl::evaluateValue(
   }
 
   return Result ? &Eval->Evaluated : nullptr;
+}
+
+APValue *VarDecl::getEvaluatedValue() const {
+  if (EvaluatedStmt *Eval = Init.dyn_cast<EvaluatedStmt *>())
+    if (Eval->WasEvaluated)
+      return &Eval->Evaluated;
+
+  return nullptr;
+}
+
+bool VarDecl::isInitKnownICE() const {
+  if (EvaluatedStmt *Eval = Init.dyn_cast<EvaluatedStmt *>())
+    return Eval->CheckedICE;
+
+  return false;
+}
+
+bool VarDecl::isInitICE() const {
+  assert(isInitKnownICE() &&
+         "Check whether we already know that the initializer is an ICE");
+  return Init.get<EvaluatedStmt *>()->IsICE;
 }
 
 bool VarDecl::checkInitIsICE() const {
@@ -2320,14 +2381,48 @@ Expr *ParmVarDecl::getDefaultArg() {
   return Arg;
 }
 
-SourceRange ParmVarDecl::getDefaultArgRange() const {
-  if (const Expr *E = getInit())
-    return E->getSourceRange();
+void ParmVarDecl::setDefaultArg(Expr *defarg) {
+  ParmVarDeclBits.DefaultArgKind = DAK_Normal;
+  Init = defarg;
+}
 
-  if (hasUninstantiatedDefaultArg())
+SourceRange ParmVarDecl::getDefaultArgRange() const {
+  switch (ParmVarDeclBits.DefaultArgKind) {
+  case DAK_None:
+  case DAK_Unparsed:
+    // Nothing we can do here.
+    return SourceRange();
+
+  case DAK_Uninstantiated:
     return getUninstantiatedDefaultArg()->getSourceRange();
 
-  return SourceRange();
+  case DAK_Normal:
+    if (const Expr *E = getInit())
+      return E->getSourceRange();
+
+    // Missing an actual expression, may be invalid.
+    return SourceRange();
+  }
+  llvm_unreachable("Invalid default argument kind.");
+}
+
+void ParmVarDecl::setUninstantiatedDefaultArg(Expr *arg) {
+  ParmVarDeclBits.DefaultArgKind = DAK_Uninstantiated;
+  Init = arg;
+}
+
+Expr *ParmVarDecl::getUninstantiatedDefaultArg() {
+  assert(hasUninstantiatedDefaultArg() &&
+         "Wrong kind of initialization expression!");
+  return cast_or_null<Expr>(Init.get<Stmt *>());
+}
+
+bool ParmVarDecl::hasDefaultArg() const {
+  // FIXME: We should just return false for DAK_None here once callers are
+  // prepared for the case that we encountered an invalid default argument and
+  // were unable to even build an invalid expression.
+  return hasUnparsedDefaultArg() || hasUninstantiatedDefaultArg() ||
+         !Init.isNull();
 }
 
 bool ParmVarDecl::isParameterPack() const {
@@ -2950,6 +3045,10 @@ FunctionDecl *FunctionDecl::getInstantiatedFromMemberFunction() const {
   return nullptr;
 }
 
+MemberSpecializationInfo *FunctionDecl::getMemberSpecializationInfo() const {
+  return TemplateOrSpecialization.dyn_cast<MemberSpecializationInfo *>();
+}
+
 void 
 FunctionDecl::setInstantiationOfMemberFunction(ASTContext &C,
                                                FunctionDecl *FD,
@@ -2959,6 +3058,14 @@ FunctionDecl::setInstantiationOfMemberFunction(ASTContext &C,
   MemberSpecializationInfo *Info 
     = new (C) MemberSpecializationInfo(FD, TSK);
   TemplateOrSpecialization = Info;
+}
+
+FunctionTemplateDecl *FunctionDecl::getDescribedFunctionTemplate() const {
+  return TemplateOrSpecialization.dyn_cast<FunctionTemplateDecl *>();
+}
+
+void FunctionDecl::setDescribedFunctionTemplate(FunctionTemplateDecl *Template) {
+  TemplateOrSpecialization = Template;
 }
 
 bool FunctionDecl::isImplicitlyInstantiable() const {
@@ -3067,6 +3174,12 @@ FunctionDecl *FunctionDecl::getClassScopeSpecializationPattern() const {
     return getASTContext().getClassScopeSpecializationPattern(this);
 }
 
+FunctionTemplateSpecializationInfo *
+FunctionDecl::getTemplateSpecializationInfo() const {
+  return TemplateOrSpecialization
+      .dyn_cast<FunctionTemplateSpecializationInfo *>();
+}
+
 const TemplateArgumentList *
 FunctionDecl::getTemplateSpecializationArgs() const {
   if (FunctionTemplateSpecializationInfo *Info
@@ -3117,6 +3230,12 @@ FunctionDecl::setDependentTemplateSpecialization(ASTContext &Context,
       DependentFunctionTemplateSpecializationInfo::Create(Context, Templates,
                                                           TemplateArgs);
   TemplateOrSpecialization = Info;
+}
+
+DependentFunctionTemplateSpecializationInfo *
+FunctionDecl::getDependentSpecializationInfo() const {
+  return TemplateOrSpecialization
+      .dyn_cast<DependentFunctionTemplateSpecializationInfo *>();
 }
 
 DependentFunctionTemplateSpecializationInfo *
@@ -3401,6 +3520,7 @@ SourceLocation TagDecl::getOuterLocStart() const {
 }
 
 SourceRange TagDecl::getSourceRange() const {
+  SourceLocation RBraceLoc = BraceRange.getEnd();
   SourceLocation E = RBraceLoc.isValid() ? RBraceLoc : getLocation();
   return SourceRange(getOuterLocStart(), E);
 }
@@ -3868,6 +3988,10 @@ BlockDecl *BlockDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
   return new (C, ID) BlockDecl(nullptr, SourceLocation());
 }
 
+CapturedDecl::CapturedDecl(DeclContext *DC, unsigned NumParams)
+    : Decl(Captured, DC, SourceLocation()), DeclContext(Captured),
+      NumParams(NumParams), ContextParam(0), BodyAndNothrow(nullptr, false) {}
+
 CapturedDecl *CapturedDecl::Create(ASTContext &C, DeclContext *DC,
                                    unsigned NumParams) {
   return new (C, DC, additionalSizeToAlloc<ImplicitParamDecl *>(NumParams))
@@ -3879,6 +4003,12 @@ CapturedDecl *CapturedDecl::CreateDeserialized(ASTContext &C, unsigned ID,
   return new (C, ID, additionalSizeToAlloc<ImplicitParamDecl *>(NumParams))
       CapturedDecl(nullptr, NumParams);
 }
+
+Stmt *CapturedDecl::getBody() const { return BodyAndNothrow.getPointer(); }
+void CapturedDecl::setBody(Stmt *B) { BodyAndNothrow.setPointer(B); }
+
+bool CapturedDecl::isNothrow() const { return BodyAndNothrow.getInt(); }
+void CapturedDecl::setNothrow(bool Nothrow) { BodyAndNothrow.setInt(Nothrow); }
 
 EnumConstantDecl *EnumConstantDecl::Create(ASTContext &C, EnumDecl *CD,
                                            SourceLocation L,
@@ -3895,16 +4025,26 @@ EnumConstantDecl::CreateDeserialized(ASTContext &C, unsigned ID) {
 
 void IndirectFieldDecl::anchor() { }
 
+IndirectFieldDecl::IndirectFieldDecl(ASTContext &C, DeclContext *DC,
+                                     SourceLocation L, DeclarationName N,
+                                     QualType T, NamedDecl **CH, unsigned CHS)
+    : ValueDecl(IndirectField, DC, L, N, T), Chaining(CH), ChainingSize(CHS) {
+  // In C++, indirect field declarations conflict with tag declarations in the
+  // same scope, so add them to IDNS_Tag so that tag redeclaration finds them.
+  if (C.getLangOpts().CPlusPlus)
+    IdentifierNamespace |= IDNS_Tag;
+}
+
 IndirectFieldDecl *
 IndirectFieldDecl::Create(ASTContext &C, DeclContext *DC, SourceLocation L,
                           IdentifierInfo *Id, QualType T, NamedDecl **CH,
                           unsigned CHS) {
-  return new (C, DC) IndirectFieldDecl(DC, L, Id, T, CH, CHS);
+  return new (C, DC) IndirectFieldDecl(C, DC, L, Id, T, CH, CHS);
 }
 
 IndirectFieldDecl *IndirectFieldDecl::CreateDeserialized(ASTContext &C,
                                                          unsigned ID) {
-  return new (C, ID) IndirectFieldDecl(nullptr, SourceLocation(),
+  return new (C, ID) IndirectFieldDecl(C, nullptr, SourceLocation(),
                                        DeclarationName(), QualType(), nullptr,
                                        0);
 }

@@ -169,7 +169,9 @@ public:
   bool getMachineCombinerPatterns(MachineInstr &Root,
                   SmallVectorImpl<MachineCombinerPattern> &Patterns)
       const override;
-
+  /// Return true when Inst is associative and commutative so that it can be
+  /// reassociated.
+  bool isAssociativeAndCommutative(const MachineInstr &Inst) const override;
   /// When getMachineCombinerPatterns() finds patterns, this function generates
   /// the instructions that could replace the original code sequence
   void genAlternativeCodeSequence(
@@ -193,6 +195,8 @@ private:
   void instantiateCondBranch(MachineBasicBlock &MBB, DebugLoc DL,
                              MachineBasicBlock *TBB,
                              ArrayRef<MachineOperand> Cond) const;
+  bool substituteCmpToZero(MachineInstr *CmpInstr,
+                        unsigned SrcReg, const MachineRegisterInfo *MRI) const;
 };
 
 /// emitFrameOffset - Emit instructions as needed to set DestReg to SrcReg

@@ -40,7 +40,7 @@ EnableAtomicTidy("arm-atomic-cfg-tidy", cl::Hidden,
 static cl::opt<bool>
 EnableARMLoadStoreOpt("arm-load-store-opt", cl::Hidden,
                       cl::desc("Enable ARM load/store optimization pass"),
-                      cl::init(false));
+                      cl::init(true));
 
 // FIXME: Unify control over GlobalMerge.
 static cl::opt<cl::boolOrDefault>

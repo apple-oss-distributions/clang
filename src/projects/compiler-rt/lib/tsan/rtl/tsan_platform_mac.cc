@@ -24,6 +24,7 @@
 #include "tsan_rtl.h"
 #include "tsan_flags.h"
 
+#include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -40,8 +41,13 @@
 #include <errno.h>
 #include <sched.h>
 
+#include "interception/interception.h"
+#include "sanitizer_common/sanitizer_mac_spi.h"
+#include "tsan_interceptors.h"
+
 namespace __tsan {
 
+#ifndef SANITIZER_GO
 static void *SignalSafeGetOrAllocate(uptr *dst, uptr size) {
   atomic_uintptr_t *a = (atomic_uintptr_t *)dst;
   void *val = (void *)atomic_load_relaxed(a);
@@ -61,26 +67,23 @@ static void *SignalSafeGetOrAllocate(uptr *dst, uptr size) {
   return val;
 }
 
-#ifndef SANITIZER_GO
 // On OS X, accessing TLVs via __thread or manually by using pthread_key_* is
 // problematic, because there are several places where interceptors are called
 // when TLVs are not accessible (early process startup, thread cleanup, ...).
 // The following provides a "poor man's TLV" implementation, where we use the
 // shadow memory of the pointer returned by pthread_self() to store a pointer to
-// the ThreadState object. The main thread's ThreadState pointer is stored
-// separately in a static variable, because we need to access it even before the
+// the ThreadState object. The main thread's ThreadState is stored separately
+// in a static variable, because we need to access it even before the
 // shadow memory is set up.
 static uptr main_thread_identity = 0;
-static ThreadState *main_thread_state = nullptr;
+ALIGNED(64) static char main_thread_state[sizeof(ThreadState)];
 
 ThreadState *cur_thread() {
-  ThreadState **fake_tls;
   uptr thread_identity = (uptr)pthread_self();
   if (thread_identity == main_thread_identity || main_thread_identity == 0) {
-    fake_tls = &main_thread_state;
-  } else {
-    fake_tls = (ThreadState **)MemToShadow(thread_identity);
+    return (ThreadState *)&main_thread_state;
   }
+  ThreadState **fake_tls = (ThreadState **)MemToShadow(thread_identity);
   ThreadState *thr = (ThreadState *)SignalSafeGetOrAllocate(
       (uptr *)fake_tls, sizeof(ThreadState));
   return thr;
@@ -91,7 +94,11 @@ ThreadState *cur_thread() {
 // handler will try to access the unmapped ThreadState.
 void cur_thread_finalize() {
   uptr thread_identity = (uptr)pthread_self();
-  CHECK_NE(thread_identity, main_thread_identity);
+  if (thread_identity == main_thread_identity) {
+    // Calling dispatch_main() or xpc_main() actually invokes pthread_exit to
+    // exit the main thread. Let's keep the main thread's ThreadState.
+    return;
+  }
   ThreadState **fake_tls = (ThreadState **)MemToShadow(thread_identity);
   internal_munmap(*fake_tls, sizeof(ThreadState));
   *fake_tls = nullptr;
@@ -110,7 +117,6 @@ void WriteMemoryProfile(char *buf, uptr buf_size, uptr nthread, uptr nlive) {
 
 #ifndef SANITIZER_GO
 void InitializeShadowMemoryPlatform() { }
-#endif
 
 // On OS X, GCD worker threads are created without a call to pthread_create. We
 // need to properly register these threads with ThreadCreate and ThreadStart.
@@ -125,7 +131,7 @@ typedef void (*pthread_introspection_hook_t)(unsigned int event,
 extern "C" pthread_introspection_hook_t pthread_introspection_hook_install(
     pthread_introspection_hook_t hook);
 static const uptr PTHREAD_INTROSPECTION_THREAD_CREATE = 1;
-static const uptr PTHREAD_INTROSPECTION_THREAD_DESTROY = 4;
+static const uptr PTHREAD_INTROSPECTION_THREAD_TERMINATE = 3;
 static pthread_introspection_hook_t prev_pthread_introspection_hook;
 static void my_pthread_introspection_hook(unsigned int event, pthread_t thread,
                                           void *addr, size_t size) {
@@ -138,16 +144,62 @@ static void my_pthread_introspection_hook(unsigned int event, pthread_t thread,
       ThreadState *thr = cur_thread();
       ThreadStart(thr, tid, GetTid());
     }
-  } else if (event == PTHREAD_INTROSPECTION_THREAD_DESTROY) {
-    ThreadState *thr = cur_thread();
-    if (thr->tctx->parent_tid == kInvalidTid) {
-      DestroyThreadState();
+  } else if (event == PTHREAD_INTROSPECTION_THREAD_TERMINATE) {
+    if (thread == pthread_self()) {
+      ThreadState *thr = cur_thread();
+      if (thr->tctx) {
+        DestroyThreadState();
+      }
     }
   }
 
   if (prev_pthread_introspection_hook != nullptr)
     prev_pthread_introspection_hook(event, thread, addr, size);
 }
+#endif
+
+void InitializePlatformEarly() {
+}
+
+#ifndef SANITIZER_GO
+
+static void (*real_os_unfair_lock_lock)(void *lock) = nullptr;
+static bool (*real_os_unfair_lock_trylock)(void *lock) = nullptr;
+static void (*real_os_unfair_lock_unlock)(void *lock) = nullptr;
+
+void wrap_os_unfair_lock_lock(void *lock) {
+  CHECK(!cur_thread()->is_dead);
+  if (!cur_thread()->is_inited) {
+    return real_os_unfair_lock_lock(lock);
+  }
+  SCOPED_TSAN_INTERCEPTOR(real_os_unfair_lock_lock, lock);
+  real_os_unfair_lock_lock(lock);
+  Acquire(thr, pc, (uptr)lock);
+}
+
+bool wrap_os_unfair_lock_trylock(void *lock) {
+  CHECK(!cur_thread()->is_dead);
+  if (!cur_thread()->is_inited) {
+    return real_os_unfair_lock_trylock(lock);
+  }
+  SCOPED_TSAN_INTERCEPTOR(real_os_unfair_lock_trylock, lock);
+  bool result = real_os_unfair_lock_trylock(lock);
+  if (result)
+    Acquire(thr, pc, (uptr)lock);
+  return result;
+}
+
+void wrap_os_unfair_lock_unlock(void *lock) {
+  CHECK(!cur_thread()->is_dead);
+  if (!cur_thread()->is_inited) {
+    return real_os_unfair_lock_unlock(lock);
+  }
+  SCOPED_TSAN_INTERCEPTOR(real_os_unfair_lock_unlock, lock);
+  Release(thr, pc, (uptr)lock);
+  real_os_unfair_lock_unlock(lock);
+}
+
+#endif  // SANITIZER_GO
 
 void InitializePlatform() {
   DisableCoreDumperIfNecessary();
@@ -156,10 +208,29 @@ void InitializePlatform() {
 
   CHECK_EQ(main_thread_identity, 0);
   main_thread_identity = (uptr)pthread_self();
-#endif
 
   prev_pthread_introspection_hook =
       pthread_introspection_hook_install(&my_pthread_introspection_hook);
+#endif
+
+#ifndef SANITIZER_GO
+  real_os_unfair_lock_lock =
+      (void (*)(void *lock))dlsym(RTLD_DEFAULT, "os_unfair_lock_lock");
+  dynamic_interpose_add((void *)&wrap_os_unfair_lock_lock,
+                        (void *)real_os_unfair_lock_lock);
+
+  real_os_unfair_lock_trylock =
+      (bool (*)(void *lock))dlsym(RTLD_DEFAULT, "os_unfair_lock_trylock");
+  dynamic_interpose_add((void *)&wrap_os_unfair_lock_trylock,
+                        (void *)real_os_unfair_lock_trylock);
+
+  real_os_unfair_lock_unlock =
+      (void (*)(void *lock))dlsym(RTLD_DEFAULT, "os_unfair_lock_unlock");
+  dynamic_interpose_add((void *)&wrap_os_unfair_lock_unlock,
+                        (void *)real_os_unfair_lock_unlock);
+
+  dynamic_interpose();
+#endif
 }
 
 #ifndef SANITIZER_GO

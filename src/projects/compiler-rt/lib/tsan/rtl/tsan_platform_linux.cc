@@ -18,6 +18,8 @@
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_linux.h"
+#include "sanitizer_common/sanitizer_platform_limits_posix.h"
 #include "sanitizer_common/sanitizer_posix.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
 #include "sanitizer_common/sanitizer_stoptheworld.h"
@@ -67,6 +69,11 @@ namespace __tsan {
 static uptr g_data_start;
 static uptr g_data_end;
 
+#ifdef TSAN_RUNTIME_VMA
+// Runtime detected VMA size.
+uptr vmaSize;
+#endif
+
 enum {
   MemTotal  = 0,
   MemShadow = 1,
@@ -82,29 +89,30 @@ enum {
 void FillProfileCallback(uptr p, uptr rss, bool file,
                          uptr *mem, uptr stats_size) {
   mem[MemTotal] += rss;
-  if (p >= kShadowBeg && p < kShadowEnd)
+  if (p >= ShadowBeg() && p < ShadowEnd())
     mem[MemShadow] += rss;
-  else if (p >= kMetaShadowBeg && p < kMetaShadowEnd)
+  else if (p >= MetaShadowBeg() && p < MetaShadowEnd())
     mem[MemMeta] += rss;
 #ifndef SANITIZER_GO
-  else if (p >= kHeapMemBeg && p < kHeapMemEnd)
+  else if (p >= HeapMemBeg() && p < HeapMemEnd())
     mem[MemHeap] += rss;
-  else if (p >= kLoAppMemBeg && p < kLoAppMemEnd)
+  else if (p >= LoAppMemBeg() && p < LoAppMemEnd())
     mem[file ? MemFile : MemMmap] += rss;
-  else if (p >= kHiAppMemBeg && p < kHiAppMemEnd)
+  else if (p >= HiAppMemBeg() && p < HiAppMemEnd())
     mem[file ? MemFile : MemMmap] += rss;
 #else
-  else if (p >= kAppMemBeg && p < kAppMemEnd)
+  else if (p >= AppMemBeg() && p < AppMemEnd())
     mem[file ? MemFile : MemMmap] += rss;
 #endif
-  else if (p >= kTraceMemBeg && p < kTraceMemEnd)
+  else if (p >= TraceMemBeg() && p < TraceMemEnd())
     mem[MemTrace] += rss;
   else
     mem[MemOther] += rss;
 }
 
 void WriteMemoryProfile(char *buf, uptr buf_size, uptr nthread, uptr nlive) {
-  uptr mem[MemCount] = {};
+  uptr mem[MemCount];
+  internal_memset(mem, 0, sizeof(mem[0]) * MemCount);
   __sanitizer::GetMemoryProfile(FillProfileCallback, mem, 7);
   StackDepotStats *stacks = StackDepotGetStats();
   internal_snprintf(buf, buf_size,
@@ -121,7 +129,7 @@ void WriteMemoryProfile(char *buf, uptr buf_size, uptr nthread, uptr nlive) {
 void FlushShadowMemoryCallback(
     const SuspendedThreadsList &suspended_threads_list,
     void *argument) {
-  FlushUnneededShadowMemory(kShadowBeg, kShadowEnd - kShadowBeg);
+  FlushUnneededShadowMemory(ShadowBeg(), ShadowEnd() - ShadowBeg());
 }
 #endif
 
@@ -235,6 +243,26 @@ static void InitDataSeg() {
 
 #endif  // #ifndef SANITIZER_GO
 
+void InitializePlatformEarly() {
+#ifdef TSAN_RUNTIME_VMA
+  vmaSize =
+    (MostSignificantSetBitIndex(GET_CURRENT_FRAME()) + 1);
+#if defined(__aarch64__)
+  if (vmaSize != 39 && vmaSize != 42) {
+    Printf("FATAL: ThreadSanitizer: unsupported VMA range\n");
+    Printf("FATAL: Found %d - Supported 39 and 42\n", vmaSize);
+    Die();
+  }
+#elif defined(__powerpc64__)
+  if (vmaSize != 44 && vmaSize != 46) {
+    Printf("FATAL: ThreadSanitizer: unsupported VMA range\n");
+    Printf("FATAL: Found %d - Supported 44 and 46\n", vmaSize);
+    Die();
+  }
+#endif
+#endif
+}
+
 void InitializePlatform() {
   DisableCoreDumperIfNecessary();
 
@@ -283,7 +311,7 @@ bool IsGlobalVar(uptr addr) {
 // This is required to properly "close" the fds, because we do not see internal
 // closes within glibc. The code is a pure hack.
 int ExtractResolvFDs(void *state, int *fds, int nfd) {
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
   int cnt = 0;
   __res_state *statp = (__res_state*)state;
   for (int i = 0; i < MAXNS && cnt < nfd; i++) {
@@ -334,6 +362,69 @@ int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
 #ifndef SANITIZER_GO
 void ReplaceSystemMalloc() { }
 #endif
+
+#ifndef SANITIZER_GO
+#if SANITIZER_ANDROID
+
+#if defined(__aarch64__)
+# define __get_tls() \
+    ({ void** __val; __asm__("mrs %0, tpidr_el0" : "=r"(__val)); __val; })
+#elif defined(__x86_64__)
+# define __get_tls() \
+    ({ void** __val; __asm__("mov %%fs:0, %0" : "=r"(__val)); __val; })
+#else
+#error unsupported architecture
+#endif
+
+// On Android, __thread is not supported. So we store the pointer to ThreadState
+// in TLS_SLOT_TSAN, which is the tls slot allocated by Android bionic for tsan.
+static const int TLS_SLOT_TSAN = 8;
+// On Android, one thread can call intercepted functions after
+// DestroyThreadState(), so add a fake thread state for "dead" threads.
+static ThreadState *dead_thread_state = nullptr;
+
+ThreadState *cur_thread() {
+  ThreadState* thr = (ThreadState*)__get_tls()[TLS_SLOT_TSAN];
+  if (thr == nullptr) {
+    __sanitizer_sigset_t emptyset;
+    internal_sigfillset(&emptyset);
+    __sanitizer_sigset_t oldset;
+    CHECK_EQ(0, internal_sigprocmask(SIG_SETMASK, &emptyset, &oldset));
+    thr = reinterpret_cast<ThreadState*>(__get_tls()[TLS_SLOT_TSAN]);
+    if (thr == nullptr) {
+      thr = reinterpret_cast<ThreadState*>(MmapOrDie(sizeof(ThreadState),
+                                                     "ThreadState"));
+      __get_tls()[TLS_SLOT_TSAN] = thr;
+      if (dead_thread_state == nullptr) {
+        dead_thread_state = reinterpret_cast<ThreadState*>(
+            MmapOrDie(sizeof(ThreadState), "ThreadState"));
+        dead_thread_state->fast_state.SetIgnoreBit();
+        dead_thread_state->ignore_interceptors = 1;
+        dead_thread_state->is_dead = true;
+        *const_cast<int*>(&dead_thread_state->tid) = -1;
+        CHECK_EQ(0, internal_mprotect(dead_thread_state, sizeof(ThreadState),
+                                      PROT_READ));
+      }
+    }
+    CHECK_EQ(0, internal_sigprocmask(SIG_SETMASK, &oldset, nullptr));
+  }
+  return thr;
+}
+
+void cur_thread_finalize() {
+  __sanitizer_sigset_t emptyset;
+  internal_sigfillset(&emptyset);
+  __sanitizer_sigset_t oldset;
+  CHECK_EQ(0, internal_sigprocmask(SIG_SETMASK, &emptyset, &oldset));
+  ThreadState* thr = (ThreadState*)__get_tls()[TLS_SLOT_TSAN];
+  if (thr != dead_thread_state) {
+    __get_tls()[TLS_SLOT_TSAN] = dead_thread_state;
+    UnmapOrDie(thr, sizeof(ThreadState));
+  }
+  CHECK_EQ(0, internal_sigprocmask(SIG_SETMASK, &oldset, nullptr));
+}
+#endif  // SANITIZER_ANDROID
+#endif  // ifndef SANITIZER_GO
 
 }  // namespace __tsan
 

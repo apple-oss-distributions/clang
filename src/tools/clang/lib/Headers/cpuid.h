@@ -146,6 +146,10 @@
 #define bit_SMEP        0x00000080
 #define bit_ENH_MOVSB   0x00000200
 
+/* The watch platform doesn't allow inline assembly and passes
+  -fno-gnu-inline-asm even for simulators. */ 
+#ifndef __ENVIRONMENT_WATCH_OS_VERSION_MIN_REQUIRED__
+
 #if __i386__
 #define __cpuid(__level, __eax, __ebx, __ecx, __edx) \
     __asm("cpuid" : "=a"(__eax), "=b" (__ebx), "=c"(__ecx), "=d"(__edx) \
@@ -207,3 +211,5 @@ static __inline int __get_cpuid_max (unsigned int __level, unsigned int *__sig)
         *__sig = __ebx;
     return __eax;
 }
+
+#endif /* __ENVIRONMENT_WATCH_OS_VERSION_MIN_REQUIRED__ */

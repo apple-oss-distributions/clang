@@ -140,11 +140,11 @@ public:
   unsigned getStackAlignment() const;
 
   /// \brief Returns the number of dereferenceable bytes from the
-  /// dereferenceable attribute (or zero if unknown).
+  /// dereferenceable attribute.
   uint64_t getDereferenceableBytes() const;
 
   /// \brief Returns the number of dereferenceable_or_null bytes from the
-  /// dereferenceable_or_null attribute (or zero if unknown).
+  /// dereferenceable_or_null attribute.
   uint64_t getDereferenceableOrNullBytes() const;
 
   /// \brief The Attribute is converted to a string of equivalent mnemonic. This
@@ -291,6 +291,10 @@ public:
 
   /// \brief Return true if attribute exists at the given index.
   bool hasAttributes(unsigned Index) const;
+
+  /// \brief Equivalent to hasAttribute(AttributeSet::FunctionIndex, Kind) but
+  /// may be faster.
+  bool hasFnAttribute(Attribute::AttrKind Kind) const;
 
   /// \brief Return true if the specified attribute is set for at least one
   /// parameter or for the return value.

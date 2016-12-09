@@ -18,10 +18,11 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/Support/Path.h" // FIXME: Kill when CompilationInfo
-#include <memory>
-                              // lands.
+#include "llvm/Support/Path.h" // FIXME: Kill when CompilationInfo lands.
+
 #include <list>
+#include <map>
+#include <memory>
 #include <set>
 #include <string>
 
@@ -308,22 +309,21 @@ public:
   /// BuildActions - Construct the list of actions to perform for the
   /// given arguments, which are only done for a single architecture.
   ///
+  /// \param C - The compilation that is being built.
   /// \param TC - The default host tool chain.
   /// \param Args - The input arguments.
   /// \param Actions - The list to store the resulting actions onto.
-  void BuildActions(const ToolChain &TC, llvm::opt::DerivedArgList &Args,
-                    const InputList &Inputs, ActionList &Actions) const;
+  void BuildActions(Compilation &C, const ToolChain &TC,
+                    llvm::opt::DerivedArgList &Args, const InputList &Inputs,
+                    ActionList &Actions) const;
 
   /// BuildUniversalActions - Construct the list of actions to perform
   /// for the given arguments, which may require a universal build.
   ///
+  /// \param C - The compilation that is being built.
   /// \param TC - The default host tool chain.
-  /// \param Args - The input arguments.
-  /// \param Actions - The list to store the resulting actions onto.
-  void BuildUniversalActions(const ToolChain &TC,
-                             llvm::opt::DerivedArgList &Args,
-                             const InputList &BAInputs,
-                             ActionList &Actions) const;
+  void BuildUniversalActions(Compilation &C, const ToolChain &TC,
+                             const InputList &BAInputs) const;
 
   /// BuildJobs - Bind actions to concrete tools and translate
   /// arguments to form the list of jobs to run.
@@ -387,20 +387,19 @@ public:
   /// ConstructAction - Construct the appropriate action to do for
   /// \p Phase on the \p Input, taking in to account arguments
   /// like -fsyntax-only or --analyze.
-  std::unique_ptr<Action>
-  ConstructPhaseAction(const ToolChain &TC, const llvm::opt::ArgList &Args,
-                       phases::ID Phase, std::unique_ptr<Action> Input) const;
+  Action *ConstructPhaseAction(Compilation &C, const ToolChain &TC,
+                               const llvm::opt::ArgList &Args, phases::ID Phase,
+                               Action *Input) const;
 
-  /// BuildJobsForAction - Construct the jobs to perform for the
-  /// action \p A.
-  void BuildJobsForAction(Compilation &C,
-                          const Action *A,
-                          const ToolChain *TC,
-                          const char *BoundArch,
-                          bool AtTopLevel,
-                          bool MultipleArchs,
-                          const char *LinkingOutput,
-                          InputInfo &Result) const;
+  /// BuildJobsForAction - Construct the jobs to perform for the action \p A and
+  /// return an InputInfo for the result of running \p A.  Will only construct
+  /// jobs for a given (Action, ToolChain, BoundArch) tuple once.
+  InputInfo BuildJobsForAction(Compilation &C, const Action *A,
+                               const ToolChain *TC, const char *BoundArch,
+                               bool AtTopLevel, bool MultipleArchs,
+                               const char *LinkingOutput,
+                               std::map<std::pair<const Action *, std::string>,
+                                        InputInfo> &CachedResults) const;
 
   /// Returns the default name for linked images (e.g., "a.out").
   const char *getDefaultImageName() const;
@@ -457,6 +456,16 @@ private:
   /// the driver mode.
   std::pair<unsigned, unsigned> getIncludeExcludeOptionFlagMasks() const;
 
+  /// Helper used in BuildJobsForAction.  Doesn't use the cache when building
+  /// jobs specifically for the given action, but will use the cache when
+  /// building jobs for the Action's inputs.
+  InputInfo BuildJobsForActionNoCache(
+      Compilation &C, const Action *A, const ToolChain *TC,
+      const char *BoundArch, bool AtTopLevel, bool MultipleArchs,
+      const char *LinkingOutput,
+      std::map<std::pair<const Action *, std::string>, InputInfo>
+          &CachedResults) const;
+
 public:
   /// GetReleaseVersion - Parse (([0-9]+)(.([0-9]+)(.([0-9]+)?))?)? and
   /// return the grouped values as integers. Numbers which are not
@@ -468,6 +477,15 @@ public:
   static bool GetReleaseVersion(const char *Str, unsigned &Major,
                                 unsigned &Minor, unsigned &Micro,
                                 bool &HadExtra);
+
+  /// Parse digits from a string \p Str and fulfill \p Digits with
+  /// the parsed numbers. This method assumes that the max number of
+  /// digits to look for is equal to Digits.size().
+  ///
+  /// \return True if the entire string was parsed and there are
+  /// no extra characters remaining at the end.
+  static bool GetReleaseVersion(const char *Str,
+                                MutableArrayRef<unsigned> Digits);
 };
 
 /// \return True if the last defined optimization level is -Ofast.

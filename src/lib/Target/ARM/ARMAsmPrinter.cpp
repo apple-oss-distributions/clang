@@ -60,7 +60,7 @@ using namespace llvm;
 ARMAsmPrinter::ARMAsmPrinter(TargetMachine &TM,
                              std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer)), AFI(nullptr), MCP(nullptr),
-      InConstantPool(false) {}
+      InConstantPool(false), OptimizationGoals(-1) {}
 
 void ARMAsmPrinter::EmitFunctionBodyEnd() {
   // Make sure to terminate any constant pools that were at the end
@@ -106,9 +106,38 @@ bool ARMAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
   Subtarget = &MF.getSubtarget<ARMSubtarget>();
 
   SetupMachineFunction(MF);
+  const Function* F = MF.getFunction();
+  const TargetMachine& TM = MF.getTarget();
+
+  // Calculate this function's optimization goal.
+  unsigned OptimizationGoal;
+  if (F->hasFnAttribute(Attribute::OptimizeNone))
+    // For best debugging illusion, speed and small size sacrificed
+    OptimizationGoal = 6;
+  else if (F->optForMinSize())
+    // Aggressively for small size, speed and debug illusion sacrificed
+    OptimizationGoal = 4;
+  else if (F->optForSize())
+    // For small size, but speed and debugging illusion preserved
+    OptimizationGoal = 3;
+  else if (TM.getOptLevel() == CodeGenOpt::Aggressive)
+    // Aggressively for speed, small size and debug illusion sacrificed
+    OptimizationGoal = 2;
+  else if (TM.getOptLevel() > CodeGenOpt::None)
+    // For speed, but small size and good debug illusion preserved
+    OptimizationGoal = 1;
+  else // TM.getOptLevel() == CodeGenOpt::None
+    // For good debugging, but speed and small size preserved
+    OptimizationGoal = 5;
+
+  // Combine a new optimization goal with existing ones.
+  if (OptimizationGoals == -1) // uninitialized goals
+    OptimizationGoals = OptimizationGoal;
+  else if (OptimizationGoals != (int)OptimizationGoal) // conflicting goals
+    OptimizationGoals = 0;
 
   if (Subtarget->isTargetCOFF()) {
-    bool Internal = MF.getFunction()->hasInternalLinkage();
+    bool Internal = F->hasInternalLinkage();
     COFF::SymbolStorageClass Scl = Internal ? COFF::IMAGE_SYM_CLASS_STATIC
                                             : COFF::IMAGE_SYM_CLASS_EXTERNAL;
     int Type = COFF::IMAGE_SYM_DTYPE_FUNCTION << COFF::SCT_COMPLEX_TYPE_SHIFT;
@@ -499,6 +528,19 @@ void ARMAsmPrinter::EmitEndOfAsmFile(Module &M) {
       OutStreamer->AddBlankLine();
     }
 
+    Stubs = MMIMacho.GetThreadLocalGVStubList();
+    if (!Stubs.empty()) {
+      // Switch with ".non_lazy_symbol_pointer" directive.
+      OutStreamer->SwitchSection(TLOFMacho.getThreadLocalPointerSection());
+      EmitAlignment(2);
+
+      for (auto &Stub : Stubs)
+        emitNonLazySymbolPointer(*OutStreamer, Stub.first, Stub.second);
+
+      Stubs.clear();
+      OutStreamer->AddBlankLine();
+    }
+
     // Funny Darwin hack: This flag tells the linker that no global symbols
     // contain code that falls through to other global symbols (e.g. the obvious
     // implementation of multiple entry points).  If this doesn't occur, the
@@ -506,6 +548,23 @@ void ARMAsmPrinter::EmitEndOfAsmFile(Module &M) {
     // generates code that does this, it is always safe to set.
     OutStreamer->EmitAssemblerFlag(MCAF_SubsectionsViaSymbols);
   }
+
+  // The last attribute to be emitted is ABI_optimization_goals
+  MCTargetStreamer &TS = *OutStreamer->getTargetStreamer();
+  ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
+
+  if (OptimizationGoals > 0 &&
+      (Subtarget->isTargetAEABI() || Subtarget->isTargetGNUAEABI()))
+    ATS.emitAttribute(ARMBuildAttrs::ABI_optimization_goals, OptimizationGoals);
+  OptimizationGoals = -1;
+
+  ATS.finishAttributeSection();
+}
+
+static bool isV8M(const ARMSubtarget *Subtarget) {
+  // Note that v8M Baseline is a subset of v6T2!
+  return (Subtarget->hasV8MBaselineOps() && !Subtarget->hasV6T2Ops()) ||
+         Subtarget->hasV8MMainlineOps();
 }
 
 //===----------------------------------------------------------------------===//
@@ -521,13 +580,17 @@ static ARMBuildAttrs::CPUArch getArchForCPU(StringRef CPU,
     return ARMBuildAttrs::v5TEJ;
 
   if (Subtarget->hasV8Ops())
-    return ARMBuildAttrs::v8;
+    return ARMBuildAttrs::v8_A;
+  else if (Subtarget->hasV8MMainlineOps())
+    return ARMBuildAttrs::v8_M_Main;
   else if (Subtarget->hasV7Ops()) {
     if (Subtarget->isMClass() && Subtarget->hasDSP())
       return ARMBuildAttrs::v7E_M;
     return ARMBuildAttrs::v7;
   } else if (Subtarget->hasV6T2Ops())
     return ARMBuildAttrs::v6T2;
+  else if (Subtarget->hasV8MBaselineOps())
+    return ARMBuildAttrs::v8_M_Base;
   else if (Subtarget->hasV6MOps())
     return ARMBuildAttrs::v6S_M;
   else if (Subtarget->hasV6Ops())
@@ -587,7 +650,7 @@ void ARMAsmPrinter::emitAttributes() {
 
   // Tag_CPU_arch_profile must have the default value of 0 when "Architecture
   // profile is not applicable (e.g. pre v7, or cross-profile code)".
-  if (STI.hasV7Ops()) {
+  if (STI.hasV7Ops() || isV8M(&STI)) {
     if (STI.isAClass()) {
       ATS.emitAttribute(ARMBuildAttrs::CPU_arch_profile,
                         ARMBuildAttrs::ApplicationProfile);
@@ -603,7 +666,10 @@ void ARMAsmPrinter::emitAttributes() {
   ATS.emitAttribute(ARMBuildAttrs::ARM_ISA_use,
                     STI.hasARMOps() ? ARMBuildAttrs::Allowed
                                     : ARMBuildAttrs::Not_Allowed);
-  if (STI.isThumb1Only()) {
+  if (isV8M(&STI)) {
+    ATS.emitAttribute(ARMBuildAttrs::THUMB_ISA_use,
+                      ARMBuildAttrs::AllowThumbDerived);
+  } else if (STI.isThumb1Only()) {
     ATS.emitAttribute(ARMBuildAttrs::THUMB_ISA_use, ARMBuildAttrs::Allowed);
   } else if (STI.hasThumb2()) {
     ATS.emitAttribute(ARMBuildAttrs::THUMB_ISA_use,
@@ -798,8 +864,6 @@ void ARMAsmPrinter::emitAttributes() {
   else if (STI.hasVirtualization())
     ATS.emitAttribute(ARMBuildAttrs::Virtualization_use,
                       ARMBuildAttrs::AllowVirtualization);
-
-  ATS.finishAttributeSection();
 }
 
 //===----------------------------------------------------------------------===//
@@ -838,8 +902,11 @@ MCSymbol *ARMAsmPrinter::GetARMGVSymbol(const GlobalValue *GV,
     MachineModuleInfoMachO &MMIMachO =
       MMI->getObjFileInfo<MachineModuleInfoMachO>();
     MachineModuleInfoImpl::StubValueTy &StubSym =
-      GV->hasHiddenVisibility() ? MMIMachO.getHiddenGVStubEntry(MCSym)
-                                : MMIMachO.getGVStubEntry(MCSym);
+        GV->isThreadLocal()
+            ? MMIMachO.getThreadLocalGVStubEntry(MCSym)
+            : (GV->hasHiddenVisibility() ? MMIMachO.getHiddenGVStubEntry(MCSym)
+                                         : MMIMachO.getGVStubEntry(MCSym));
+
     if (!StubSym.getPointer())
       StubSym = MachineModuleInfoImpl::StubValueTy(getSymbol(GV),
                                                    !GV->hasInternalLinkage());

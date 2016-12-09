@@ -43,10 +43,16 @@ class ARMSubtarget : public ARMGenSubtargetInfo {
 protected:
   enum ARMProcFamilyEnum {
     Others, CortexA5, CortexA7, CortexA8, CortexA9, CortexA12, CortexA15,
-    CortexA17, CortexR4, CortexR4F, CortexR5, Swift, CortexA53, CortexA57, Krait,
+    CortexA17, CortexR4, CortexR4F, CortexR5, CortexR7, CortexA32, CortexA35,
+    CortexA53, CortexA57, CortexA72, Krait, Swift, ExynosM1
   };
   enum ARMProcClassEnum {
     None, AClass, RClass, MClass
+  };
+  enum ARMArchEnum {
+    ARMv2, ARMv2a, ARMv3, ARMv3m, ARMv4, ARMv4t, ARMv5, ARMv5t, ARMv5te,
+    ARMv5tej, ARMv6, ARMv6k, ARMv6kz, ARMv6t2, ARMv6m, ARMv6sm, ARMv7a, ARMv7r,
+    ARMv7m, ARMv7em, ARMv8a, ARMv81a, ARMv82a, ARMv8mMainline, ARMv8mBaseline
   };
 
   /// ARMProcFamily - ARM processor family: Cortex-A8, Cortex-A9, and others.
@@ -54,6 +60,9 @@ protected:
 
   /// ARMProcClass - ARM processor class: None, AClass, RClass or MClass.
   ARMProcClassEnum ARMProcClass;
+
+  /// ARMArch - ARM architecture
+  ARMArchEnum ARMArch;
 
   /// HasV4TOps, HasV5TOps, HasV5TEOps,
   /// HasV6Ops, HasV6MOps, HasV6KOps, HasV6T2Ops, HasV7Ops, HasV8Ops -
@@ -68,6 +77,9 @@ protected:
   bool HasV7Ops;
   bool HasV8Ops;
   bool HasV8_1aOps;
+  bool HasV8_2aOps;
+  bool HasV8MBaselineOps;
+  bool HasV8MMainlineOps;
 
   /// HasVFPv2, HasVFPv3, HasVFPv4, HasFPARMv8, HasNEON - Specify what
   /// floating point ISAs are supported.
@@ -122,9 +134,11 @@ protected:
   /// Thumb.
   bool SupportsTailCall;
 
-  /// HasFP16 - True if subtarget supports half-precision FP (We support VFP+HF
-  /// only so far)
+  /// HasFP16 - True if subtarget supports half-precision FP conversions
   bool HasFP16;
+
+  /// HasFullFP16 - True if subtarget supports half-precision FP operations
+  bool HasFullFP16;
 
   /// HasD16 - True if subtarget is limited to 16 double precision
   /// FP registers for VFPv3.
@@ -143,6 +157,13 @@ protected:
   /// HasDataBarrier - True if the subtarget supports DMB / DSB data barrier
   /// instructions.
   bool HasDataBarrier;
+
+  /// HasV7Clrex - True if the subtarget supports CLREX instructions
+  bool HasV7Clrex;
+
+  /// HasAcquireRelease - True if the subtarget supports v8 atomics (LDA/LDAEX etc)
+  /// instructions
+  bool HasAcquireRelease;
 
   /// Pref32BitThumb - If true, codegen would prefer 32-bit Thumb instructions
   /// over 16-bit ones.
@@ -305,6 +326,9 @@ public:
   bool hasV7Ops()   const { return HasV7Ops;  }
   bool hasV8Ops()   const { return HasV8Ops;  }
   bool hasV8_1aOps() const { return HasV8_1aOps; }
+  bool hasV8_2aOps() const { return HasV8_2aOps; }
+  bool hasV8MBaselineOps() const { return HasV8MBaselineOps; }
+  bool hasV8MMainlineOps() const { return HasV8MMainlineOps; }
 
   bool isCortexA5() const { return ARMProcFamily == CortexA5; }
   bool isCortexA7() const { return ARMProcFamily == CortexA7; }
@@ -335,6 +359,8 @@ public:
   bool hasDivideInARMMode() const { return HasHardwareDivideInARM; }
   bool hasT2ExtractPack() const { return HasT2ExtractPack; }
   bool hasDataBarrier() const { return HasDataBarrier; }
+  bool hasV7Clrex() const { return HasV7Clrex; }
+  bool hasAcquireRelease() const { return HasAcquireRelease; }
   bool hasAnyDataBarrier() const {
     return HasDataBarrier || (hasV6Ops() && !isThumb());
   }
@@ -359,6 +385,7 @@ public:
 
   bool hasFP16() const { return HasFP16; }
   bool hasD16() const { return HasD16; }
+  bool hasFullFP16() const { return HasFullFP16; }
 
   const Triple &getTargetTriple() const { return TargetTriple; }
 
@@ -427,6 +454,13 @@ public:
 
   bool isR9Reserved() const {
     return isTargetMachO() ? (ReserveR9 || !HasV6Ops) : ReserveR9;
+  }
+
+  /// Returns true if the frame setup is split into two separate pushes (first
+  /// r0-r7,lr then r8-r11), principally so that the frame pointer is adjacent
+  /// to lr.
+  bool splitFramePushPop() const {
+    return isTargetMachO();
   }
 
   bool useStride4VFPs(const MachineFunction &MF) const;

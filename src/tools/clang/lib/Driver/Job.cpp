@@ -41,17 +41,16 @@ static int skipArgs(const char *Flag, bool HaveCrashVFS) {
   // These flags are all of the form -Flag <Arg> and are treated as two
   // arguments.  Therefore, we need to skip the flag and the next argument.
   bool Res = llvm::StringSwitch<bool>(Flag)
-    .Cases("-I", "-MF", "-MT", "-MQ", true)
+    .Cases("-MF", "-MT", "-MQ", "-serialize-diagnostic-file", true)
     .Cases("-o", "-coverage-file", "-dependency-file", true)
     .Cases("-fdebug-compilation-dir", "-idirafter", true)
     .Cases("-include", "-include-pch", "-internal-isystem", true)
     .Cases("-internal-externc-isystem", "-iprefix", "-iwithprefix", true)
     .Cases("-iwithprefixbefore", "-isystem", "-iquote", true)
-    .Cases("-resource-dir", "-serialize-diagnostic-file", true)
     .Cases("-dwarf-debug-flags", "-ivfsoverlay", true)
     .Cases("-header-include-file", "-diagnostic-log-file", true)
     // Some include flags shouldn't be skipped if we have a crash VFS
-    .Case("-isysroot", !HaveCrashVFS)
+    .Cases("-isysroot", "-I", "-F", "-resource-dir", !HaveCrashVFS)
     .Default(false);
 
   // Match found.
@@ -72,7 +71,8 @@ static int skipArgs(const char *Flag, bool HaveCrashVFS) {
 
   // These flags are treated as a single argument (e.g., -F<Dir>).
   StringRef FlagRef(Flag);
-  if (FlagRef.startswith("-F") || FlagRef.startswith("-I") ||
+  if ((!HaveCrashVFS &&
+       (FlagRef.startswith("-F") || FlagRef.startswith("-I"))) ||
       FlagRef.startswith("-fmodules-cache-path=") ||
       FlagRef.startswith("-fapinotes-cache-path="))
     return 1;
@@ -197,35 +197,17 @@ void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
     OS << ' ';
     printArg(OS, CrashInfo->VFSPath.str().c_str(), Quote);
 
-    // Get the module cache directory from the VFS overlay. Since we
-    // lack preprocessor info at this point, lookup for the hashed dir
-    // inside <tmp_path_to>.cache/vfs/modules/<hashed_dir>.
-    SmallString<128> CacheDirFullPath = CrashInfo->Filename;
-    llvm::sys::path::replace_extension(CacheDirFullPath, ".cache");
+    // Insert -fmodules-cache-path and use the relative module directory
+    // <name>.cache/vfs/modules where we already dumped the modules.
     SmallString<128> RelModCacheDir = llvm::sys::path::parent_path(
         llvm::sys::path::parent_path(CrashInfo->VFSPath));
-    llvm::sys::path::append(CacheDirFullPath, "modules");
+    llvm::sys::path::append(RelModCacheDir, "modules");
 
-    std::error_code EC;
-    llvm::sys::fs::directory_iterator Dir(CacheDirFullPath, EC), DirEnd;
-    assert(!EC && Dir != DirEnd &&
-           "module cache should contain only one hash directory");
-    StringRef HashDir = llvm::sys::path::stem(Dir->path());
-    llvm::sys::path::append(RelModCacheDir, "modules", HashDir);
+    std::string ModCachePath = "-fmodules-cache-path=";
+    ModCachePath.append(RelModCacheDir.c_str());
 
-    const char Arg[] = "-fmodules-cache-path=";
-    RelModCacheDir.insert(RelModCacheDir.begin(), Arg, Arg + strlen(Arg));
-
-    // Disable module hash in the reproducer because the computed hash in future
-    // reproduction won't match, making modules cache dir unable to be reused.
-    // TODO: We are currently are unable to reuse modules anyway since there
-    // could be hashes on the .pcm filenames. To fix that the .pcm files in the
-    // output module caches need to be renamed without the hashes. Using this
-    // flag now is already a step in the right direction.
     OS << ' ';
-    printArg(OS, "-fdisable-module-hash", Quote);
-    OS << ' ';
-    printArg(OS, RelModCacheDir.c_str(), Quote);
+    printArg(OS, ModCachePath.c_str(), Quote);
   }
 
   if (ResponseFile != nullptr) {

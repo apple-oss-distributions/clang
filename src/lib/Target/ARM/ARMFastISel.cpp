@@ -1063,14 +1063,18 @@ bool ARMFastISel::SelectLoad(const Instruction *I) {
     return false;
 
   const Value *SV = I->getOperand(0);
-  if (const Argument *Arg = dyn_cast<Argument>(SV)) {
-    if (Arg->hasSwiftErrorAttr() && TLI.supportSwiftError())
-      return false;
-  }
+  if (TLI.supportSwiftError()) {
+    // Swifterror values can come from either a function parameter with
+    // swifterror attribute or an alloca with swifterror attribute.
+    if (const Argument *Arg = dyn_cast<Argument>(SV)) {
+      if (Arg->hasSwiftErrorAttr())
+        return false;
+    }
 
-  if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(SV)) {
-    if (Alloca->isSwiftError() && TLI.supportSwiftError())
-      return false;
+    if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(SV)) {
+      if (Alloca->isSwiftError())
+        return false;
+    }
   }
 
   // Verify we have a legal type before going any further.
@@ -1189,14 +1193,18 @@ bool ARMFastISel::SelectStore(const Instruction *I) {
     return false;
 
   const Value *PtrV = I->getOperand(1);
-  if (const Argument *Arg = dyn_cast<Argument>(PtrV)) {
-    if (Arg->hasSwiftErrorAttr() && TLI.supportSwiftError())
-      return false;
-  }
+  if (TLI.supportSwiftError()) {
+    // Swifterror values can come from either a function parameter with
+    // swifterror attribute or an alloca with swifterror attribute.
+    if (const Argument *Arg = dyn_cast<Argument>(PtrV)) {
+      if (Arg->hasSwiftErrorAttr())
+        return false;
+    }
 
-  if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(PtrV)) {
-    if (Alloca->isSwiftError() && TLI.supportSwiftError())
-      return false;
+    if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(PtrV)) {
+      if (Alloca->isSwiftError())
+        return false;
+    }
   }
 
   // Verify we have a legal type before going any further.
@@ -1861,7 +1869,6 @@ CCAssignFn *ARMFastISel::CCAssignFnForCall(CallingConv::ID CC,
   default:
     llvm_unreachable("Unsupported calling convention");
   case CallingConv::Fast:
-  case CallingConv::Swift:
     if (Subtarget->hasVFP2() && !isVarArg) {
       if (!Subtarget->isAAPCS_ABI())
         return (Return ? RetFastCC_ARM_APCS : FastCC_ARM_APCS);
@@ -1870,6 +1877,7 @@ CCAssignFn *ARMFastISel::CCAssignFnForCall(CallingConv::ID CC,
     }
     // Fallthrough
   case CallingConv::C:
+  case CallingConv::CXX_FAST_TLS:
     // Use target triple & subtarget features to do actual dispatch.
     if (Subtarget->isAAPCS_ABI()) {
       if (Subtarget->hasVFP2() &&
@@ -1881,6 +1889,7 @@ CCAssignFn *ARMFastISel::CCAssignFnForCall(CallingConv::ID CC,
       return (Return ? RetCC_ARM_APCS: CC_ARM_APCS);
     }
   case CallingConv::ARM_AAPCS_VFP:
+  case CallingConv::Swift:
     if (!isVarArg)
       return (Return ? RetCC_ARM_AAPCS_VFP: CC_ARM_AAPCS_VFP);
     // Fall through to soft float variant, variadic functions don't
@@ -2106,8 +2115,11 @@ bool ARMFastISel::SelectRet(const Instruction *I) {
   if (!FuncInfo.CanLowerReturn)
     return false;
 
-  if (F.getAttributes().hasAttrSomewhere(Attribute::SwiftError) &&
-      TLI.supportSwiftError())
+  if (TLI.supportSwiftError() &&
+      F.getAttributes().hasAttrSomewhere(Attribute::SwiftError))
+    return false;
+
+  if (TLI.supportSplitCSR(FuncInfo.MF))
     return false;
 
   // Build a list of return value registers.
@@ -2319,8 +2331,7 @@ bool ARMFastISel::SelectCall(const Instruction *I,
 
   // TODO: Avoid some calling conventions?
 
-  PointerType *PT = cast<PointerType>(CS.getCalledValue()->getType());
-  FunctionType *FTy = cast<FunctionType>(PT->getElementType());
+  FunctionType *FTy = CS.getFunctionType();
   bool isVarArg = FTy->isVarArg();
 
   // Handle *simple* calls for now.
@@ -3068,7 +3079,7 @@ bool ARMFastISel::fastLowerArguments() {
   }
 
 
-  static const uint16_t GPRArgRegs[] = {
+  static const MCPhysReg GPRArgRegs[] = {
     ARM::R0, ARM::R1, ARM::R2, ARM::R3
   };
 

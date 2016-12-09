@@ -150,6 +150,9 @@ class ScheduleDAGMI;
 struct MachineSchedPolicy {
   // Allow the scheduler to disable register pressure tracking.
   bool ShouldTrackPressure;
+  /// Track LaneMasks to allow reordering of independent subregister writes
+  /// of the same vreg. \sa MachineSchedStrategy::shouldTrackLaneMasks()
+  bool ShouldTrackLaneMasks;
 
   // Allow the scheduler to force top-down or bottom-up scheduling. If neither
   // is true, the scheduler runs in both directions and converges.
@@ -160,8 +163,8 @@ struct MachineSchedPolicy {
   // first.
   bool DisableLatencyHeuristic;
 
-  MachineSchedPolicy(): ShouldTrackPressure(false), OnlyTopDown(false),
-    OnlyBottomUp(false), DisableLatencyHeuristic(false) {}
+  MachineSchedPolicy(): ShouldTrackPressure(false), ShouldTrackLaneMasks(false),
+    OnlyTopDown(false), OnlyBottomUp(false), DisableLatencyHeuristic(false) {}
 };
 
 /// MachineSchedStrategy - Interface to the scheduling algorithm used by
@@ -184,6 +187,11 @@ public:
   /// Check if pressure tracking is needed before building the DAG and
   /// initializing this strategy. Called after initPolicy.
   virtual bool shouldTrackPressure() const { return true; }
+
+  /// Returns true if lanemasks should be tracked. LaneMask tracking is
+  /// necessary to reorder independent subregister defs for the same vreg.
+  /// This has to be enabled in combination with shouldTrackPressure().
+  virtual bool shouldTrackLaneMasks() const { return false; }
 
   /// Initialize the strategy after building the DAG for a new region.
   virtual void initialize(ScheduleDAGMI *DAG) = 0;
@@ -228,6 +236,7 @@ public:
 class ScheduleDAGMI : public ScheduleDAGInstrs {
 protected:
   AliasAnalysis *AA;
+  LiveIntervals *LIS;
   std::unique_ptr<MachineSchedStrategy> SchedImpl;
 
   /// Topo - A topological ordering for SUnits which permits fast IsReachable
@@ -255,9 +264,10 @@ protected:
 public:
   ScheduleDAGMI(MachineSchedContext *C, std::unique_ptr<MachineSchedStrategy> S,
                 bool RemoveKillFlags)
-      : ScheduleDAGInstrs(*C->MF, C->MLI, C->LIS, RemoveKillFlags),
-        AA(C->AA), SchedImpl(std::move(S)), Topo(SUnits, &ExitSU), CurrentTop(),
-        CurrentBottom(), NextClusterPred(nullptr), NextClusterSucc(nullptr) {
+      : ScheduleDAGInstrs(*C->MF, C->MLI, RemoveKillFlags), AA(C->AA),
+        LIS(C->LIS), SchedImpl(std::move(S)), Topo(SUnits, &ExitSU),
+        CurrentTop(), CurrentBottom(), NextClusterPred(nullptr),
+        NextClusterSucc(nullptr) {
 #ifndef NDEBUG
     NumInstrsScheduled = 0;
 #endif
@@ -265,6 +275,9 @@ public:
 
   // Provide a vtable anchor
   ~ScheduleDAGMI() override;
+
+  // Returns LiveIntervals instance for use in DAG mutators and such.
+  LiveIntervals *getLIS() const { return LIS; }
 
   /// Return true if this DAG supports VReg liveness and RegPressure.
   virtual bool hasVRegLiveness() const { return false; }
@@ -366,6 +379,7 @@ protected:
 
   /// Register pressure in this region computed by initRegPressure.
   bool ShouldTrackPressure;
+  bool ShouldTrackLaneMasks;
   IntervalPressure RegPressure;
   RegPressureTracker RPTracker;
 
@@ -382,13 +396,18 @@ protected:
   IntervalPressure BotPressure;
   RegPressureTracker BotRPTracker;
 
+  /// True if disconnected subregister components are already renamed.
+  /// The renaming is only done on demand if lane masks are tracked.
+  bool DisconnectedComponentsRenamed;
+
 public:
   ScheduleDAGMILive(MachineSchedContext *C,
                     std::unique_ptr<MachineSchedStrategy> S)
       : ScheduleDAGMI(C, std::move(S), /*RemoveKillFlags=*/false),
         RegClassInfo(C->RegClassInfo), DFSResult(nullptr),
-        ShouldTrackPressure(false), RPTracker(RegPressure),
-        TopRPTracker(TopPressure), BotRPTracker(BotPressure) {}
+        ShouldTrackPressure(false), ShouldTrackLaneMasks(false),
+        RPTracker(RegPressure), TopRPTracker(TopPressure),
+        BotRPTracker(BotPressure), DisconnectedComponentsRenamed(false) {}
 
   ~ScheduleDAGMILive() override;
 
@@ -457,7 +476,7 @@ protected:
 
   void initRegPressure();
 
-  void updatePressureDiffs(ArrayRef<unsigned> LiveUses);
+  void updatePressureDiffs(ArrayRef<RegisterMaskPair> LiveUses);
 
   void updateScheduledPressure(const SUnit *SU,
                                const std::vector<unsigned> &NewMaxPressure);
@@ -867,6 +886,10 @@ public:
 
   bool shouldTrackPressure() const override {
     return RegionPolicy.ShouldTrackPressure;
+  }
+
+  bool shouldTrackLaneMasks() const override {
+    return RegionPolicy.ShouldTrackLaneMasks;
   }
 
   void initialize(ScheduleDAGMI *dag) override;

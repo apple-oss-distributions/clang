@@ -4,6 +4,24 @@
 
 # TODO: Need to add a mechanism for logging errors when builtin source files are
 # added to a sub-directory and not this CMakeLists file.
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  cmake_minimum_required(VERSION 3.2)
+
+  project(CompilerRTBuiltins C CXX ASM)
+  set(COMPILER_RT_STANDALONE_BUILD TRUE)
+  set(COMPILER_RT_BUILTINS_STANDALONE_BUILD TRUE)
+  list(INSERT CMAKE_MODULE_PATH 0
+    "${CMAKE_SOURCE_DIR}/../../cmake"
+    "${CMAKE_SOURCE_DIR}/../../cmake/Modules")
+  include(base-config-ix)
+  include(CompilerRTUtils)
+  if(APPLE)
+    include(CompilerRTDarwinUtils)
+  endif()
+  include(AddCompilerRT)
+endif()
+
+include(builtin-config-ix)
 
 set(GENERIC_SOURCES
   absvdi2.c
@@ -41,6 +59,7 @@ set(GENERIC_SOURCES
   divsc3.c
   divsf3.c
   divsi3.c
+  divtc3.c
   divti3.c
   divtf3.c
   divxc3.c
@@ -153,7 +172,7 @@ if(APPLE)
     atomic_thread_fence.c)
 endif()
 
-if(NOT WIN32)
+if(NOT WIN32 OR MINGW)
   set(GENERIC_SOURCES
       ${GENERIC_SOURCES}
       emutls.c)
@@ -353,6 +372,9 @@ set(mipsel_SOURCES ${mips_SOURCES})
 set(mips64_SOURCES ${mips_SOURCES})
 set(mips64el_SOURCES ${mips_SOURCES})
 
+set(wasm32_SOURCES ${GENERIC_SOURCES})
+set(wasm64_SOURCES ${GENERIC_SOURCES})
+
 add_custom_target(builtins)
 
 if (APPLE)
@@ -360,6 +382,8 @@ if (APPLE)
   add_subdirectory(macho_embedded)
   darwin_add_builtin_libraries(${BUILTIN_SUPPORTED_OS})
 elseif (NOT WIN32 OR MINGW)
+  append_string_if(COMPILER_RT_HAS_STD_C99_FLAG -std=c99 maybe_stdc99)
+
   foreach (arch ${BUILTIN_SUPPORTED_ARCH})
     if (CAN_TARGET_${arch})
       # Filter out generic versions of routines that are re-implemented in
@@ -377,7 +401,7 @@ elseif (NOT WIN32 OR MINGW)
                               STATIC
                               ARCHS ${arch}
                               SOURCES ${${arch}_SOURCES}
-                              CFLAGS "-std=c99"
+                              CFLAGS ${maybe_stdc99}
                               PARENT_TARGET builtins)
     endif ()
   endforeach ()

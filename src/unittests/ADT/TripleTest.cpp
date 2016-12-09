@@ -862,10 +862,14 @@ TEST(TripleTest, getARMCPUForArch) {
   }
   {
     llvm::Triple Triple("armv6j-unknown-eabi");
-    EXPECT_EQ("arm1136j-s", Triple.getARMCPUForArch());
+    EXPECT_EQ("arm1136jf-s", Triple.getARMCPUForArch());
   }
   {
     llvm::Triple Triple("armv6k-unknown-eabi");
+    EXPECT_EQ("arm1176j-s", Triple.getARMCPUForArch());
+  }
+  {
+    llvm::Triple Triple("armv6kz-unknown-eabi");
     EXPECT_EQ("arm1176jzf-s", Triple.getARMCPUForArch());
   }
   {
@@ -966,6 +970,18 @@ TEST(TripleTest, getARMCPUForArch) {
   {
     llvm::Triple Triple("armv7s-apple-ios7");
     EXPECT_EQ("swift", Triple.getARMCPUForArch());
+  }
+  {
+    llvm::Triple Triple("armv7k-apple-ios9");
+    EXPECT_EQ("cortex-a7", Triple.getARMCPUForArch());
+  }
+  {
+    llvm::Triple Triple("armv7k-apple-watchos3");
+    EXPECT_EQ("cortex-a7", Triple.getARMCPUForArch());
+  }
+  {
+    llvm::Triple Triple("armv7k-apple-tvos9");
+    EXPECT_EQ("cortex-a7", Triple.getARMCPUForArch());
   }
   {
     llvm::Triple Triple("armv7em-apple-ios7");

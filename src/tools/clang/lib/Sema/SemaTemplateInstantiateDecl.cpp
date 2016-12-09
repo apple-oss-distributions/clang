@@ -273,6 +273,20 @@ void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
       }
     }
 
+    if (auto ABIAttr = dyn_cast<ParameterABIAttr>(TmplAttr)) {
+      AddParameterABIAttr(ABIAttr->getRange(), New, ABIAttr->getABI(),
+                          ABIAttr->getSpellingListIndex());
+      continue;
+    }
+
+    if (isa<NSConsumedAttr>(TmplAttr) || isa<CFConsumedAttr>(TmplAttr)) {
+      AddNSConsumedAttr(TmplAttr->getRange(), New,
+                        TmplAttr->getSpellingListIndex(),
+                        isa<NSConsumedAttr>(TmplAttr),
+                        /*template instantiation*/ true);
+      continue;
+    }
+
     assert(!TmplAttr->isPackExpansion());
     if (TmplAttr->isLateParsed() && LateAttrs) {
       // Late parsed attributes must be instantiated and attached after the
@@ -911,9 +925,7 @@ void TemplateDeclInstantiator::InstantiateEnumDefinition(
     }
   }
 
-  // FIXME: Fixup LBraceLoc
-  SemaRef.ActOnEnumBody(Enum->getLocation(), SourceLocation(),
-                        Enum->getRBraceLoc(), Enum,
+  SemaRef.ActOnEnumBody(Enum->getLocation(), Enum->getBraceRange(), Enum,
                         Enumerators,
                         nullptr, nullptr);
 }
@@ -2104,6 +2116,8 @@ Decl *TemplateDeclInstantiator::VisitNonTypeTemplateParmDecl(
     Param->setInvalidDecl();
 
   if (D->hasDefaultArgument() && !D->defaultArgumentWasInherited()) {
+    EnterExpressionEvaluationContext ConstantEvaluated(SemaRef,
+                                                       Sema::ConstantEvaluated);
     ExprResult Value = SemaRef.SubstExpr(D->getDefaultArgument(), TemplateArgs);
     if (!Value.isInvalid())
       Param->setDefaultArgument(Value.get());
@@ -2767,7 +2781,7 @@ TemplateDeclInstantiator::SubstTemplateParams(TemplateParameterList *L) {
 
   TemplateParameterList *InstL
     = TemplateParameterList::Create(SemaRef.Context, L->getTemplateLoc(),
-                                    L->getLAngleLoc(), &Params.front(), N,
+                                    L->getLAngleLoc(), Params,
                                     L->getRAngleLoc());
   return InstL;
 }
@@ -3118,9 +3132,10 @@ TemplateDeclInstantiator::SubstFunctionType(FunctionDecl *D,
     // In this case, we'll just go instantiate the ParmVarDecls that we
     // synthesized in the method declaration.
     SmallVector<QualType, 4> ParamTypes;
+    Sema::ExtParameterInfoBuilder ExtParamInfos;
     if (SemaRef.SubstParmTypes(D->getLocation(), D->param_begin(),
-                               D->getNumParams(), TemplateArgs, ParamTypes,
-                               &Params))
+                               D->getNumParams(), nullptr, TemplateArgs,
+                               ParamTypes, &Params, ExtParamInfos))
       return nullptr;
   }
 
@@ -3713,9 +3728,14 @@ void Sema::InstantiateVariableInitializer(
       PushExpressionEvaluationContext(Sema::PotentiallyEvaluated, OldVar);
 
     // Instantiate the initializer.
-    ExprResult Init =
-        SubstInitializer(OldVar->getInit(), TemplateArgs,
-                         OldVar->getInitStyle() == VarDecl::CallInit);
+    ExprResult Init;
+
+    {
+      ContextRAII SwitchContext(*this, Var->getDeclContext());
+      Init = SubstInitializer(OldVar->getInit(), TemplateArgs,
+                              OldVar->getInitStyle() == VarDecl::CallInit);
+    }
+
     if (!Init.isInvalid()) {
       bool TypeMayContainAuto = true;
       Expr *InitExpr = Init.get();

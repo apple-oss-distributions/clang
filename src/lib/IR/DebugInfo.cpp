@@ -39,48 +39,6 @@ DISubprogram *llvm::getDISubprogram(const MDNode *Scope) {
   return nullptr;
 }
 
-DISubprogram *llvm::getDISubprogram(const Function *F) {
-  // We look for the first instr that has a debug annotation leading back to F.
-  for (auto &BB : *F) {
-    auto Inst = std::find_if(BB.begin(), BB.end(), [](const Instruction &Inst) {
-      return Inst.getDebugLoc();
-    });
-    if (Inst == BB.end())
-      continue;
-    DebugLoc DLoc = Inst->getDebugLoc();
-    const MDNode *Scope = DLoc.getInlinedAtScope();
-    auto *Subprogram = getDISubprogram(Scope);
-    return Subprogram->describes(F) ? Subprogram : nullptr;
-  }
-
-  return nullptr;
-}
-
-DITypeIdentifierMap
-llvm::generateDITypeIdentifierMap(const NamedMDNode *CU_Nodes) {
-  DITypeIdentifierMap Map;
-  for (unsigned CUi = 0, CUe = CU_Nodes->getNumOperands(); CUi != CUe; ++CUi) {
-    auto *CU = cast<DICompileUnit>(CU_Nodes->getOperand(CUi));
-    DINodeArray Retain = CU->getRetainedTypes();
-    for (unsigned Ti = 0, Te = Retain.size(); Ti != Te; ++Ti) {
-      if (!isa<DICompositeType>(Retain[Ti]))
-        continue;
-      auto *Ty = cast<DICompositeType>(Retain[Ti]);
-      if (MDString *TypeId = Ty->getRawIdentifier()) {
-        // Definition has priority over declaration.
-        // Try to insert (TypeId, Ty) to Map.
-        std::pair<DITypeIdentifierMap::iterator, bool> P =
-            Map.insert(std::make_pair(TypeId, Ty));
-        // If TypeId already exists in Map and this is a definition, replace
-        // whatever we had (declaration or definition) with the definition.
-        if (!P.second && !Ty->isForwardDecl())
-          P.first->second = Ty;
-      }
-    }
-  }
-  return Map;
-}
-
 //===----------------------------------------------------------------------===//
 // DebugInfoFinder implementations.
 //===----------------------------------------------------------------------===//
@@ -92,55 +50,44 @@ void DebugInfoFinder::reset() {
   TYs.clear();
   Scopes.clear();
   NodesSeen.clear();
-  TypeIdentifierMap.clear();
-  TypeMapInitialized = false;
-}
-
-void DebugInfoFinder::InitializeTypeMap(const Module &M) {
-  if (!TypeMapInitialized)
-    if (NamedMDNode *CU_Nodes = M.getNamedMetadata("llvm.dbg.cu")) {
-      TypeIdentifierMap = generateDITypeIdentifierMap(CU_Nodes);
-      TypeMapInitialized = true;
-    }
 }
 
 void DebugInfoFinder::processModule(const Module &M) {
-  InitializeTypeMap(M);
-  if (NamedMDNode *CU_Nodes = M.getNamedMetadata("llvm.dbg.cu")) {
-    for (unsigned i = 0, e = CU_Nodes->getNumOperands(); i != e; ++i) {
-      auto *CU = cast<DICompileUnit>(CU_Nodes->getOperand(i));
-      addCompileUnit(CU);
-      for (auto *DIG : CU->getGlobalVariables()) {
-        if (addGlobalVariable(DIG)) {
-          processScope(DIG->getScope());
-          processType(DIG->getType().resolve(TypeIdentifierMap));
-        }
-      }
-      for (auto *SP : CU->getSubprograms())
-        processSubprogram(SP);
-      for (auto *ET : CU->getEnumTypes())
-        processType(ET);
-      for (auto *RT : CU->getRetainedTypes())
-        processType(RT);
-      for (auto *Import : CU->getImportedEntities()) {
-        auto *Entity = Import->getEntity().resolve(TypeIdentifierMap);
-        if (auto *T = dyn_cast<DIType>(Entity))
-          processType(T);
-        else if (auto *SP = dyn_cast<DISubprogram>(Entity))
-          processSubprogram(SP);
-        else if (auto *NS = dyn_cast<DINamespace>(Entity))
-          processScope(NS->getScope());
-        else if (auto *M = dyn_cast<DIModule>(Entity))
-          processScope(M->getScope());
+  for (auto *CU : M.debug_compile_units()) {
+    addCompileUnit(CU);
+    for (auto *DIG : CU->getGlobalVariables()) {
+      if (addGlobalVariable(DIG)) {
+        processScope(DIG->getScope());
+        processType(DIG->getType().resolve());
       }
     }
+    for (auto *ET : CU->getEnumTypes())
+      processType(ET);
+    for (auto *RT : CU->getRetainedTypes())
+      if (auto *T = dyn_cast<DIType>(RT))
+        processType(T);
+      else
+        processSubprogram(cast<DISubprogram>(RT));
+    for (auto *Import : CU->getImportedEntities()) {
+      auto *Entity = Import->getEntity().resolve();
+      if (auto *T = dyn_cast<DIType>(Entity))
+        processType(T);
+      else if (auto *SP = dyn_cast<DISubprogram>(Entity))
+        processSubprogram(SP);
+      else if (auto *NS = dyn_cast<DINamespace>(Entity))
+        processScope(NS->getScope());
+      else if (auto *M = dyn_cast<DIModule>(Entity))
+        processScope(M->getScope());
+    }
   }
+  for (auto &F : M.functions())
+    if (auto *SP = cast_or_null<DISubprogram>(F.getSubprogram()))
+      processSubprogram(SP);
 }
 
 void DebugInfoFinder::processLocation(const Module &M, const DILocation *Loc) {
   if (!Loc)
     return;
-  InitializeTypeMap(M);
   processScope(Loc->getScope());
   processLocation(M, Loc->getInlinedAt());
 }
@@ -148,14 +95,14 @@ void DebugInfoFinder::processLocation(const Module &M, const DILocation *Loc) {
 void DebugInfoFinder::processType(DIType *DT) {
   if (!addType(DT))
     return;
-  processScope(DT->getScope().resolve(TypeIdentifierMap));
+  processScope(DT->getScope().resolve());
   if (auto *ST = dyn_cast<DISubroutineType>(DT)) {
     for (DITypeRef Ref : ST->getTypeArray())
-      processType(Ref.resolve(TypeIdentifierMap));
+      processType(Ref.resolve());
     return;
   }
   if (auto *DCT = dyn_cast<DICompositeType>(DT)) {
-    processType(DCT->getBaseType().resolve(TypeIdentifierMap));
+    processType(DCT->getBaseType().resolve());
     for (Metadata *D : DCT->getElements()) {
       if (auto *T = dyn_cast<DIType>(D))
         processType(T);
@@ -165,7 +112,7 @@ void DebugInfoFinder::processType(DIType *DT) {
     return;
   }
   if (auto *DDT = dyn_cast<DIDerivedType>(DT)) {
-    processType(DDT->getBaseType().resolve(TypeIdentifierMap));
+    processType(DDT->getBaseType().resolve());
   }
 }
 
@@ -198,13 +145,13 @@ void DebugInfoFinder::processScope(DIScope *Scope) {
 void DebugInfoFinder::processSubprogram(DISubprogram *SP) {
   if (!addSubprogram(SP))
     return;
-  processScope(SP->getScope().resolve(TypeIdentifierMap));
+  processScope(SP->getScope().resolve());
   processType(SP->getType());
   for (auto *Element : SP->getTemplateParams()) {
     if (auto *TType = dyn_cast<DITemplateTypeParameter>(Element)) {
-      processType(TType->getType().resolve(TypeIdentifierMap));
+      processType(TType->getType().resolve());
     } else if (auto *TVal = dyn_cast<DITemplateValueParameter>(Element)) {
-      processType(TVal->getType().resolve(TypeIdentifierMap));
+      processType(TVal->getType().resolve());
     }
   }
 }
@@ -214,7 +161,6 @@ void DebugInfoFinder::processDeclare(const Module &M,
   auto *N = dyn_cast<MDNode>(DDI->getVariable());
   if (!N)
     return;
-  InitializeTypeMap(M);
 
   auto *DV = dyn_cast<DILocalVariable>(N);
   if (!DV)
@@ -223,14 +169,13 @@ void DebugInfoFinder::processDeclare(const Module &M,
   if (!NodesSeen.insert(DV).second)
     return;
   processScope(DV->getScope());
-  processType(DV->getType().resolve(TypeIdentifierMap));
+  processType(DV->getType().resolve());
 }
 
 void DebugInfoFinder::processValue(const Module &M, const DbgValueInst *DVI) {
   auto *N = dyn_cast<MDNode>(DVI->getVariable());
   if (!N)
     return;
-  InitializeTypeMap(M);
 
   auto *DV = dyn_cast<DILocalVariable>(N);
   if (!DV)
@@ -239,7 +184,7 @@ void DebugInfoFinder::processValue(const Module &M, const DbgValueInst *DVI) {
   if (!NodesSeen.insert(DV).second)
     return;
   processScope(DV->getScope());
-  processType(DV->getType().resolve(TypeIdentifierMap));
+  processType(DV->getType().resolve());
 }
 
 bool DebugInfoFinder::addType(DIType *DT) {
@@ -304,8 +249,22 @@ bool llvm::stripDebugInfo(Function &F) {
     Changed = true;
     F.setSubprogram(nullptr);
   }
+
+  Function *Declare = F.getParent()->getFunction("llvm.dbg.declare");
+  Function *DbgVal = F.getParent()->getFunction("llvm.dbg.value");
   for (BasicBlock &BB : F) {
-    for (Instruction &I : BB) {
+    for (auto II = BB.begin(), End = BB.end(); II != End;) {
+      Instruction &I = *II++; // We may delete the instruction, increment now.
+      // Remove all of the calls to the debugger intrinsics, and remove them
+      // from the module.
+      CallInst *CI = dyn_cast<CallInst>(&I);
+      if (CI && CI->getCalledFunction() &&
+          (CI->getCalledFunction() == Declare ||
+           CI->getCalledFunction() == DbgVal)) {
+        CI->eraseFromParent();
+        Changed = true;
+        continue;
+      }
       if (I.getDebugLoc()) {
         Changed = true;
         I.setDebugLoc(DebugLoc());
@@ -317,26 +276,6 @@ bool llvm::stripDebugInfo(Function &F) {
 
 bool llvm::StripDebugInfo(Module &M) {
   bool Changed = false;
-
-  // Remove all of the calls to the debugger intrinsics, and remove them from
-  // the module.
-  if (Function *Declare = M.getFunction("llvm.dbg.declare")) {
-    while (!Declare->use_empty()) {
-      CallInst *CI = cast<CallInst>(Declare->user_back());
-      CI->eraseFromParent();
-    }
-    Declare->eraseFromParent();
-    Changed = true;
-  }
-
-  if (Function *DbgVal = M.getFunction("llvm.dbg.value")) {
-    while (!DbgVal->use_empty()) {
-      CallInst *CI = cast<CallInst>(DbgVal->user_back());
-      CI->eraseFromParent();
-    }
-    DbgVal->eraseFromParent();
-    Changed = true;
-  }
 
   for (Module::named_metadata_iterator NMI = M.named_metadata_begin(),
          NME = M.named_metadata_end(); NMI != NME;) {
@@ -408,28 +347,31 @@ private:
     DISubprogram *Declaration = nullptr;
     auto Type = cast_or_null<DISubroutineType>(map(MDS->getType()));
     auto ContainingType = map(MDS->getContainingType());
+    auto Unit = cast_or_null<DICompileUnit>(map(MDS->getUnit()));
     auto Variables = cast<MDTuple>(EmptyNode);
     auto TemplateParams = nullptr;
 
     // Make a distinct DISubprogram, for situations that warrent it.
     auto distinctMDSubprogram = [&]() {
       return DISubprogram::getDistinct(
-          MDS->getContext(), FileAndScope->getRef(), MDS->getName(),
+          MDS->getContext(), FileAndScope, MDS->getName(),
           LinkageName, FileAndScope, MDS->getLine(), Type, MDS->isLocalToUnit(),
           MDS->isDefinition(), MDS->getScopeLine(), DITypeRef(ContainingType),
           MDS->getVirtuality(), MDS->getVirtualIndex(), MDS->getFlags(),
-          MDS->isOptimized(), TemplateParams, Declaration, Variables);
+          MDS->isOptimized(), Unit, TemplateParams, Declaration,
+          Variables);
     };
 
     if (MDS->isDistinct())
       return distinctMDSubprogram();
 
     auto NewMDS = DISubprogram::get(
-        MDS->getContext(), FileAndScope->getRef(), MDS->getName(), LinkageName,
+        MDS->getContext(), FileAndScope, MDS->getName(), LinkageName,
         FileAndScope, MDS->getLine(), Type, MDS->isLocalToUnit(),
         MDS->isDefinition(), MDS->getScopeLine(), DITypeRef(ContainingType),
         MDS->getVirtuality(), MDS->getVirtualIndex(), MDS->getFlags(),
-        MDS->isOptimized(), TemplateParams, Declaration, Variables);
+        MDS->isOptimized(), Unit, TemplateParams, Declaration,
+        Variables);
 
     auto OldLinkageName = MDS->getLinkageName();
 
@@ -454,18 +396,17 @@ private:
     if (CU->getDWOId())
       return nullptr;
 
-    auto EmissionKind = 2; // -g-line-tables-only
     auto *File = cast_or_null<DIFile>(map(CU->getFile()));
     MDTuple *EnumTypes = nullptr;
     MDTuple *RetainedTypes = nullptr;
-    auto *Subprograms = cast_or_null<MDTuple>(map(CU->getSubprograms().get()));
     MDTuple *GlobalVariables = nullptr;
     MDTuple *ImportedEntities = nullptr;
     return DICompileUnit::getDistinct(
         CU->getContext(), CU->getSourceLanguage(), File, CU->getProducer(),
         CU->isOptimized(), CU->getFlags(), CU->getRuntimeVersion(),
-        CU->getSplitDebugFilename(), EmissionKind, EnumTypes, RetainedTypes,
-        Subprograms, GlobalVariables, ImportedEntities, CU->getDWOId());
+        CU->getSplitDebugFilename(), DICompileUnit::LineTablesOnly, EnumTypes,
+        RetainedTypes, GlobalVariables, ImportedEntities, CU->getMacros(),
+        CU->getDWOId());
   }
 
   DILocation *getReplacementMDLocation(DILocation *MLD) {
@@ -499,8 +440,10 @@ private:
     auto doRemap = [&](MDNode * N) -> MDNode * {
       if (!N)
         return nullptr;
-      if (auto MDSub = dyn_cast<DISubprogram>(N))
+      if (auto MDSub = dyn_cast<DISubprogram>(N)) {
+        remap(MDSub->getUnit());
         return getReplacementSubprogram(MDSub);
+      }
       if (isa<DISubroutineType>(N))
         return EmptySubroutineType;
       if (auto CU = dyn_cast<DICompileUnit>(N))
@@ -555,7 +498,8 @@ void GLTOMapper::traverse(MDNode *N) {
     Opened.insert(N);
     for (auto &I : N->operands())
       if (auto MDN = dyn_cast_or_null<MDNode>(I))
-        if (!Opened.count(MDN) && !Replacements.count(MDN) && !prune(N, MDN))
+        if (!Opened.count(MDN) && !Replacements.count(MDN) && !prune(N, MDN) &&
+            !isa<DICompileUnit>(MDN))
           ToVisit.push_back(MDN);
   }
 }

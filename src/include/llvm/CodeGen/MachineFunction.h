@@ -24,6 +24,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ArrayRecycler.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/Recycler.h"
 
 namespace llvm {
@@ -43,12 +44,15 @@ class TargetMachine;
 class TargetSubtargetInfo;
 class TargetRegisterClass;
 struct MachinePointerInfo;
+struct WinEHFuncInfo;
 
 template <>
 struct ilist_traits<MachineBasicBlock>
     : public ilist_default_traits<MachineBasicBlock> {
   mutable ilist_half_node<MachineBasicBlock> Sentinel;
 public:
+  // FIXME: This downcast is UB. See llvm.org/PR26753.
+  LLVM_NO_SANITIZE("object-size")
   MachineBasicBlock *createSentinel() const {
     return static_cast<MachineBasicBlock*>(&Sentinel);
   }
@@ -107,6 +111,10 @@ class MachineFunction {
   // Keep track of jump tables for switch instructions
   MachineJumpTableInfo *JumpTableInfo;
 
+  // Keeps track of Windows exception handling related data. This will be null
+  // for functions that aren't using a funclet-based EH personality.
+  WinEHFuncInfo *WinEHInfo = nullptr;
+
   // Function-level unique numbering for MachineBasicBlocks.  When a
   // MachineBasicBlock is inserted into a MachineFunction is it automatically
   // numbered and this vector keeps track of the mapping from ID's to MBB's.
@@ -141,10 +149,10 @@ class MachineFunction {
   /// the attribute itself.
   /// This is used to limit optimizations which cannot reason
   /// about the control flow of such functions.
-  bool ExposesReturnsTwice;
+  bool ExposesReturnsTwice = false;
 
   /// True if the function includes any inline assembly.
-  bool HasInlineAsm;
+  bool HasInlineAsm = false;
 
   // Allocation management for pseudo source values.
   std::unique_ptr<PseudoSourceValueManager> PSVManager;
@@ -221,6 +229,12 @@ public:
   MachineConstantPool *getConstantPool() { return ConstantPool; }
   const MachineConstantPool *getConstantPool() const { return ConstantPool; }
 
+  /// getWinEHFuncInfo - Return information about how the current function uses
+  /// Windows exception handling. Returns null for functions that don't use
+  /// funclets for exception handling.
+  const WinEHFuncInfo *getWinEHFuncInfo() const { return WinEHInfo; }
+  WinEHFuncInfo *getWinEHFuncInfo() { return WinEHInfo; }
+
   /// getAlignment - Return the alignment (log2, not bytes) of the function.
   ///
   unsigned getAlignment() const { return Alignment; }
@@ -284,7 +298,7 @@ public:
   }
 
   /// Should we be emitting segmented stack stuff for the function
-  bool shouldSplitStack();
+  bool shouldSplitStack() const;
 
   /// getNumBlockIDs - Return the number of MBB ID's allocated.
   ///
@@ -330,6 +344,12 @@ public:
   typedef BasicBlockListType::const_iterator const_iterator;
   typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
   typedef std::reverse_iterator<iterator>             reverse_iterator;
+
+  /// Support for MachineBasicBlock::getNextNode().
+  static BasicBlockListType MachineFunction::*
+  getSublistAccess(MachineBasicBlock *) {
+    return &MachineFunction::BasicBlocks;
+  }
 
   /// addLiveIn - Add the specified physical register as a live-in value and
   /// create a corresponding virtual register for it.

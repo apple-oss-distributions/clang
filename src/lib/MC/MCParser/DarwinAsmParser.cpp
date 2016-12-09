@@ -8,8 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCParser/MCAsmParserExtension.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -109,6 +111,9 @@ public:
     addDirectiveHandler<
       &DarwinAsmParser::parseSectionDirectiveNonLazySymbolPointers>(
         ".non_lazy_symbol_pointer");
+    addDirectiveHandler<
+      &DarwinAsmParser::parseSectionDirectiveThreadLocalVariablePointers>(
+        ".thread_local_variable_pointer");
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveObjCCatClsMeth>(
       ".objc_cat_cls_meth");
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveObjCCatInstMeth>(
@@ -259,6 +264,10 @@ public:
     return parseSectionSwitch("__DATA", "__la_symbol_ptr",
                               MachO::S_LAZY_SYMBOL_POINTERS, 4);
   }
+  bool parseSectionDirectiveThreadLocalVariablePointers(StringRef, SMLoc) {
+    return parseSectionSwitch("__DATA", "__thread_ptr",
+                              MachO::S_THREAD_LOCAL_VARIABLE_POINTERS, 4);
+  }
   bool parseSectionDirectiveDyld(StringRef, SMLoc) {
     return parseSectionSwitch("__DATA", "__dyld");
   }
@@ -389,9 +398,8 @@ bool DarwinAsmParser::parseSectionSwitch(const char *Segment,
   // FIXME: Arch specific.
   bool isText = TAA & MachO::S_ATTR_PURE_INSTRUCTIONS;
   getStreamer().SwitchSection(getContext().getMachOSection(
-                                Segment, Section, TAA, StubSize,
-                                isText ? SectionKind::getText()
-                                       : SectionKind::getDataRel()));
+      Segment, Section, TAA, StubSize,
+      isText ? SectionKind::getText() : SectionKind::getData()));
 
   // Set the implicit alignment, if any.
   //
@@ -444,6 +452,7 @@ bool DarwinAsmParser::parseDirectiveIndirectSymbol(StringRef, SMLoc Loc) {
   MachO::SectionType SectionType = Current->getType();
   if (SectionType != MachO::S_NON_LAZY_SYMBOL_POINTERS &&
       SectionType != MachO::S_LAZY_SYMBOL_POINTERS &&
+      SectionType != MachO::S_THREAD_LOCAL_VARIABLE_POINTERS &&
       SectionType != MachO::S_SYMBOL_STUBS)
     return Error(Loc, "indirect symbol not in a symbol pointer or stub "
                       "section");
@@ -587,12 +596,34 @@ bool DarwinAsmParser::parseDirectiveSection(StringRef, SMLoc) {
   if (!ErrorStr.empty())
     return Error(Loc, ErrorStr.c_str());
 
+  // Issue a warning if the target is not powerpc and Section is a *coal* section.
+  Triple TT = getParser().getContext().getObjectFileInfo()->getTargetTriple();
+  Triple::ArchType ArchTy = TT.getArch();
+
+  if (ArchTy != Triple::ppc && ArchTy != Triple::ppc64) {
+    StringRef NonCoalSection = StringSwitch<StringRef>(Section)
+                                   .Case("__textcoal_nt", "__text")
+                                   .Case("__const_coal", "__const")
+                                   .Case("__datacoal_nt", "__data")
+                                   .Default(Section);
+
+    if (!Section.equals(NonCoalSection)) {
+      StringRef SectionVal(Loc.getPointer());
+      size_t B = SectionVal.find(',') + 1, E = SectionVal.find(',', B);
+      SMLoc BLoc = SMLoc::getFromPointer(SectionVal.data() + B);
+      SMLoc ELoc = SMLoc::getFromPointer(SectionVal.data() + E);
+      getParser().Warning(Loc, "section \"" + Section + "\" is deprecated",
+                          SMRange(BLoc, ELoc));
+      getParser().Note(Loc, "change section name to \"" + NonCoalSection +
+                       "\"", SMRange(BLoc, ELoc));
+    }
+  }
+
   // FIXME: Arch specific.
   bool isText = Segment == "__TEXT";  // FIXME: Hack.
   getStreamer().SwitchSection(getContext().getMachOSection(
-                                Segment, Section, TAA, StubSize,
-                                isText ? SectionKind::getText()
-                                : SectionKind::getDataRel()));
+      Segment, Section, TAA, StubSize,
+      isText ? SectionKind::getText() : SectionKind::getData()));
   return false;
 }
 
@@ -644,17 +675,16 @@ bool DarwinAsmParser::parseDirectiveSecureLogUnique(StringRef, SMLoc IDLoc) {
                  "environment variable unset.");
 
   // Open the secure log file if we haven't already.
-  raw_ostream *OS = getContext().getSecureLog();
+  raw_fd_ostream *OS = getContext().getSecureLog();
   if (!OS) {
     std::error_code EC;
-    OS = new raw_fd_ostream(SecureLogFile, EC,
-                            sys::fs::F_Append | sys::fs::F_Text);
-    if (EC) {
-       delete OS;
+    auto NewOS = llvm::make_unique<raw_fd_ostream>(
+        SecureLogFile, EC, sys::fs::F_Append | sys::fs::F_Text);
+    if (EC)
        return Error(IDLoc, Twine("can't open secure log file: ") +
                                SecureLogFile + " (" + EC.message() + ")");
-    }
-    getContext().setSecureLog(OS);
+    OS = NewOS.get();
+    getContext().setSecureLog(std::move(NewOS));
   }
 
   // Write the message.

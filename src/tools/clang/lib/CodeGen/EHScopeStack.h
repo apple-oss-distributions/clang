@@ -334,10 +334,6 @@ public:
   /// Pops a terminate handler off the stack.
   void popTerminate();
 
-  void pushPadEnd(llvm::BasicBlock *PadEndBB);
-
-  void popPadEnd();
-
   // Returns true iff the current scope is either empty or contains only
   // lifetime markers, i.e. no real cleanup code
   bool containsOnlyLifetimeMarkers(stable_iterator Old) const;
@@ -345,9 +341,7 @@ public:
   /// Determines whether the exception-scopes stack is empty.
   bool empty() const { return StartOfData == EndOfBuffer; }
 
-  bool requiresLandingPad() const {
-    return InnermostEHScope != stable_end();
-  }
+  bool requiresLandingPad() const;
 
   /// Determines whether there are any normal cleanups on the stack.
   bool hasNormalCleanups() const {

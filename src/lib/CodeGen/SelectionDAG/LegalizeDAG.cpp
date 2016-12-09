@@ -11,7 +11,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
@@ -20,6 +19,8 @@
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -145,6 +146,7 @@ private:
   SDValue PromoteLegalFP_TO_INT(SDValue LegalOp, EVT DestVT, bool isSigned,
                                 SDLoc dl);
 
+  SDValue ExpandBITREVERSE(SDValue Op, SDLoc dl);
   SDValue ExpandBSWAP(SDValue Op, SDLoc dl);
   SDValue ExpandBitCount(unsigned Opc, SDValue Op, SDLoc dl);
 
@@ -153,6 +155,7 @@ private:
   SDValue ExpandVectorBuildThroughStack(SDNode* Node);
 
   SDValue ExpandConstantFP(ConstantFPSDNode *CFP, bool UseCP);
+  SDValue ExpandConstant(ConstantSDNode *CP);
 
   // if ExpandNode returns false, LegalizeOp falls back to ConvertNodeToLibcall
   bool ExpandNode(SDNode *Node);
@@ -293,6 +296,20 @@ SelectionDAGLegalize::ExpandConstantFP(ConstantFPSDNode *CFP, bool UseCP) {
   return Result;
 }
 
+/// Expands the Constant node to a load from the constant pool.
+SDValue SelectionDAGLegalize::ExpandConstant(ConstantSDNode *CP) {
+  SDLoc dl(CP);
+  EVT VT = CP->getValueType(0);
+  SDValue CPIdx = DAG.getConstantPool(CP->getConstantIntValue(),
+                                      TLI.getPointerTy(DAG.getDataLayout()));
+  unsigned Alignment = cast<ConstantPoolSDNode>(CPIdx)->getAlignment();
+  SDValue Result =
+    DAG.getLoad(VT, dl, DAG.getEntryNode(), CPIdx,
+                MachinePointerInfo::getConstantPool(DAG.getMachineFunction()),
+                false, false, false, Alignment);
+  return Result;
+}
+
 /// Expands an unaligned store to 2 half-size stores.
 static void ExpandUnalignedStore(StoreSDNode *ST, SelectionDAG &DAG,
                                  const TargetLowering &TLI,
@@ -311,6 +328,12 @@ static void ExpandUnalignedStore(StoreSDNode *ST, SelectionDAG &DAG,
       ST->getMemoryVT().isVector()) {
     EVT intVT = EVT::getIntegerVT(*DAG.getContext(), VT.getSizeInBits());
     if (TLI.isTypeLegal(intVT)) {
+      if (!TLI.isOperationLegalOrCustom(ISD::STORE, intVT)) {
+        // Scalarize the store and let the individual components be handled.
+        SDValue Result = TLI.scalarizeVectorStore(ST, DAG);
+        DAGLegalize->ReplaceNode(SDValue(ST, 0), Result);
+        return;
+      }
       // Expand to a bitconvert of the value to the integer type of the
       // same size, then a (misaligned) int store.
       // FIXME: Does not handle truncating floating point stores!
@@ -435,6 +458,14 @@ ExpandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG,
   if (VT.isFloatingPoint() || VT.isVector()) {
     EVT intVT = EVT::getIntegerVT(*DAG.getContext(), LoadedVT.getSizeInBits());
     if (TLI.isTypeLegal(intVT) && TLI.isTypeLegal(LoadedVT)) {
+      if (!TLI.isOperationLegalOrCustom(ISD::LOAD, intVT)) {
+        // Scalarize the load and let the individual components be handled.
+        SDValue Scalarized = TLI.scalarizeVectorLoad(LD, DAG);
+        ValResult = Scalarized.getValue(0);
+        ChainResult = Scalarized.getValue(1);
+        return;
+      }
+
       // Expand to a (misaligned) integer load of the same size,
       // then bitconvert to floating point or vector.
       SDValue newLoad = DAG.getLoad(intVT, dl, Chain, Ptr,
@@ -843,8 +874,7 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
         SDValue Result = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Lo, Hi);
         ReplaceNode(SDValue(Node, 0), Result);
       } else {
-        switch (TLI.getTruncStoreAction(ST->getValue().getSimpleValueType(),
-                                        StVT.getSimpleVT())) {
+        switch (TLI.getTruncStoreAction(ST->getValue().getValueType(), StVT)) {
         default: llvm_unreachable("This action is not supported yet!");
         case TargetLowering::Legal: {
           EVT MemVT = ST->getMemoryVT();
@@ -1192,15 +1222,17 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
 
 #ifndef NDEBUG
   for (unsigned i = 0, e = Node->getNumValues(); i != e; ++i)
-    assert(TLI.getTypeAction(*DAG.getContext(), Node->getValueType(i)) ==
-             TargetLowering::TypeLegal &&
+    assert((TLI.getTypeAction(*DAG.getContext(), Node->getValueType(i)) ==
+              TargetLowering::TypeLegal ||
+            TLI.isTypeLegal(Node->getValueType(i))) &&
            "Unexpected illegal type!");
 
   for (const SDValue &Op : Node->op_values())
-    assert((TLI.getTypeAction(*DAG.getContext(),
-                              Op.getValueType()) == TargetLowering::TypeLegal ||
-                              Op.getOpcode() == ISD::TargetConstant) &&
-                              "Unexpected illegal type!");
+    assert((TLI.getTypeAction(*DAG.getContext(), Op.getValueType()) ==
+              TargetLowering::TypeLegal ||
+            TLI.isTypeLegal(Op.getValueType()) ||
+            Op.getOpcode() == ISD::TargetConstant) &&
+            "Unexpected illegal type!");
 #endif
 
   // Figure out the correct action; the way to query this varies by opcode
@@ -1212,6 +1244,10 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
   case ISD::INTRINSIC_VOID:
   case ISD::STACKSAVE:
     Action = TLI.getOperationAction(Node->getOpcode(), MVT::Other);
+    break;
+  case ISD::GET_DYNAMIC_AREA_OFFSET:
+    Action = TLI.getOperationAction(Node->getOpcode(),
+                                    Node->getValueType(0));
     break;
   case ISD::VAARG:
     Action = TLI.getOperationAction(Node->getOpcode(),
@@ -1241,7 +1277,8 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
   case ISD::SETCC:
   case ISD::BR_CC: {
     unsigned CCOperand = Node->getOpcode() == ISD::SELECT_CC ? 4 :
-                         Node->getOpcode() == ISD::SETCC ? 2 : 1;
+                         Node->getOpcode() == ISD::SETCC ? 2 :
+                         Node->getOpcode() == ISD::SETCCE ? 3 : 1;
     unsigned CompareOperand = Node->getOpcode() == ISD::BR_CC ? 2 : 0;
     MVT OpVT = Node->getOperand(CompareOperand).getSimpleValueType();
     ISD::CondCode CCCode =
@@ -1441,6 +1478,11 @@ SDValue SelectionDAGLegalize::ExpandExtractFromVectorThroughStack(SDValue Op) {
   // series of EXTRACT_VECTOR_ELT nodes are generated, one for each element in
   // the vector. If all are expanded here, we don't want one store per vector
   // element.
+
+  // Caches for hasPredecessorHelper
+  SmallPtrSet<const SDNode *, 32> Visited;
+  SmallVector<const SDNode *, 16> Worklist;
+  Worklist.push_back(Idx.getNode());
   SDValue StackPtr, Ch;
   for (SDNode::use_iterator UI = Vec.getNode()->use_begin(),
        UE = Vec.getNode()->use_end(); UI != UE; ++UI) {
@@ -1453,6 +1495,12 @@ SDValue SelectionDAGLegalize::ExpandExtractFromVectorThroughStack(SDValue Op) {
       // Make sure that nothing else could have stored into the destination of
       // this store.
       if (!ST->getChain().reachesChainWithoutSideEffects(DAG.getEntryNode()))
+        continue;
+
+      // If the index is dependent on the store we will introduce a cycle when
+      // creating the load (the load uses the index, and by replacing the chain
+      // we will make the index dependent on the load).
+      if (SDNode::hasPredecessorHelper(ST, Visited, Worklist))
         continue;
 
       StackPtr = ST->getBasePtr();
@@ -2184,9 +2232,12 @@ SDValue SelectionDAGLegalize::ExpandLibCall(RTLIB::Libcall LC, SDNode *Node,
   SDValue InChain = DAG.getEntryNode();
 
   // isTailCall may be true since the callee does not reference caller stack
-  // frame. Check if it's in the right position.
+  // frame. Check if it's in the right position and that the return types match.
   SDValue TCChain = InChain;
-  bool isTailCall = TLI.isInTailCallPosition(DAG, Node, TCChain);
+  const Function *F = DAG.getMachineFunction().getFunction();
+  bool isTailCall =
+      TLI.isInTailCallPosition(DAG, Node, TCChain) &&
+      (RetTy == F->getReturnType() || F->getReturnType()->isVoidTy());
   if (isTailCall)
     InChain = TCChain;
 
@@ -2775,6 +2826,31 @@ SDValue SelectionDAGLegalize::PromoteLegalFP_TO_INT(SDValue LegalOp,
   return DAG.getNode(ISD::TRUNCATE, dl, DestVT, Operation);
 }
 
+/// Open code the operations for BITREVERSE.
+SDValue SelectionDAGLegalize::ExpandBITREVERSE(SDValue Op, SDLoc dl) {
+  EVT VT = Op.getValueType();
+  EVT SHVT = TLI.getShiftAmountTy(VT, DAG.getDataLayout());
+  unsigned Sz = VT.getScalarSizeInBits();
+  
+  SDValue Tmp, Tmp2;
+  Tmp = DAG.getConstant(0, dl, VT);
+  for (unsigned I = 0, J = Sz-1; I < Sz; ++I, --J) {
+    if (I < J)
+      Tmp2 =
+          DAG.getNode(ISD::SHL, dl, VT, Op, DAG.getConstant(J - I, dl, SHVT));
+    else
+      Tmp2 =
+          DAG.getNode(ISD::SRL, dl, VT, Op, DAG.getConstant(I - J, dl, SHVT));
+    
+    APInt Shift(Sz, 1);
+    Shift = Shift.shl(J);
+    Tmp2 = DAG.getNode(ISD::AND, dl, VT, Tmp2, DAG.getConstant(Shift, dl, VT));
+    Tmp = DAG.getNode(ISD::OR, dl, VT, Tmp, Tmp2);
+  }
+
+  return Tmp;
+}
+
 /// Open code the operations for BSWAP of the specified operation.
 SDValue SelectionDAGLegalize::ExpandBSWAP(SDValue Op, SDLoc dl) {
   EVT VT = Op.getValueType();
@@ -2883,6 +2959,18 @@ SDValue SelectionDAGLegalize::ExpandBitCount(unsigned Opc, SDValue Op,
     // This trivially expands to CTLZ.
     return DAG.getNode(ISD::CTLZ, dl, Op.getValueType(), Op);
   case ISD::CTLZ: {
+    EVT VT = Op.getValueType();
+    unsigned len = VT.getSizeInBits();
+
+    if (TLI.isOperationLegalOrCustom(ISD::CTLZ_ZERO_UNDEF, VT)) {
+      EVT SetCCVT = getSetCCResultType(VT);
+      SDValue CTLZ = DAG.getNode(ISD::CTLZ_ZERO_UNDEF, dl, VT, Op);
+      SDValue Zero = DAG.getConstant(0, dl, VT);
+      SDValue SrcIsZero = DAG.getSetCC(dl, SetCCVT, Op, Zero, ISD::SETEQ);
+      return DAG.getNode(ISD::SELECT, dl, VT, SrcIsZero,
+                         DAG.getConstant(len, dl, VT), CTLZ);
+    }
+
     // for now, we do this:
     // x = x | (x >> 1);
     // x = x | (x >> 2);
@@ -2892,9 +2980,7 @@ SDValue SelectionDAGLegalize::ExpandBitCount(unsigned Opc, SDValue Op,
     // return popcount(~x);
     //
     // Ref: "Hacker's Delight" by Henry Warren
-    EVT VT = Op.getValueType();
     EVT ShVT = TLI.getShiftAmountTy(VT, DAG.getDataLayout());
-    unsigned len = VT.getSizeInBits();
     for (unsigned i = 0; (1U << i) <= (len / 2); ++i) {
       SDValue Tmp3 = DAG.getConstant(1ULL << i, dl, ShVT);
       Op = DAG.getNode(ISD::OR, dl, VT, Op,
@@ -2940,6 +3026,9 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
   case ISD::CTTZ_ZERO_UNDEF:
     Tmp1 = ExpandBitCount(Node->getOpcode(), Node->getOperand(0), dl);
     Results.push_back(Tmp1);
+    break;
+  case ISD::BITREVERSE:
+    Results.push_back(ExpandBITREVERSE(Node->getOperand(0), dl));
     break;
   case ISD::BSWAP:
     Results.push_back(ExpandBSWAP(Node->getOperand(0), dl));
@@ -3266,6 +3355,10 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
       Results.push_back(Node->getOperand(0));
     }
     break;
+  case ISD::GET_DYNAMIC_AREA_OFFSET:
+    Results.push_back(DAG.getConstant(0, dl, Node->getValueType(0)));
+    Results.push_back(Results[0].getValue(0));
+    break;
   case ISD::FCOPYSIGN:
     Results.push_back(ExpandFCOPYSIGN(Node));
     break;
@@ -3351,6 +3444,11 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
     // If this is a legal constant, turn it into a TargetConstantFP node.
     if (!TLI.isFPImmLegal(CFP->getValueAPF(), Node->getValueType(0)))
       Results.push_back(ExpandConstantFP(CFP, true));
+    break;
+  }
+  case ISD::Constant: {
+    ConstantSDNode *CP = cast<ConstantSDNode>(Node);
+    Results.push_back(ExpandConstant(CP));
     break;
   }
   case ISD::FSUB: {
@@ -4130,12 +4228,24 @@ void SelectionDAGLegalize::ConvertNodeToLibcall(SDNode *Node) {
     ReplaceNode(Node, Results.data());
 }
 
+// Determine the vector type to use in place of an original scalar element when
+// promoting equally sized vectors.
+static MVT getPromotedVectorElementType(const TargetLowering &TLI,
+                                        MVT EltVT, MVT NewEltVT) {
+  unsigned OldEltsPerNewElt = EltVT.getSizeInBits() / NewEltVT.getSizeInBits();
+  MVT MidVT = MVT::getVectorVT(NewEltVT, OldEltsPerNewElt);
+  assert(TLI.isTypeLegal(MidVT) && "unexpected");
+  return MidVT;
+}
+
 void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
   SmallVector<SDValue, 8> Results;
   MVT OVT = Node->getSimpleValueType(0);
   if (Node->getOpcode() == ISD::UINT_TO_FP ||
       Node->getOpcode() == ISD::SINT_TO_FP ||
-      Node->getOpcode() == ISD::SETCC) {
+      Node->getOpcode() == ISD::SETCC ||
+      Node->getOpcode() == ISD::EXTRACT_VECTOR_ELT ||
+      Node->getOpcode() == ISD::INSERT_VECTOR_ELT) {
     OVT = Node->getOperand(0).getSimpleValueType();
   }
   if (Node->getOpcode() == ISD::BR_CC)
@@ -4389,9 +4499,7 @@ void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
            "Invalid promote type for build_vector");
     assert(NewEltVT.bitsLT(EltVT) && "not handled");
 
-    unsigned OldEltsPerNewElt = EltVT.getSizeInBits() / NewEltVT.getSizeInBits();
-    MVT MidVT = MVT::getVectorVT(NewEltVT, OldEltsPerNewElt);
-    assert(TLI.isTypeLegal(MidVT) && "unexpected");
+    MVT MidVT = getPromotedVectorElementType(TLI, EltVT, NewEltVT);
 
     SmallVector<SDValue, 8> NewOps;
     for (unsigned I = 0, E = Node->getNumOperands(); I != E; ++I) {
@@ -4401,6 +4509,129 @@ void SelectionDAGLegalize::PromoteNode(SDNode *Node) {
 
     SDLoc SL(Node);
     SDValue Concat = DAG.getNode(ISD::CONCAT_VECTORS, SL, NVT, NewOps);
+    SDValue CvtVec = DAG.getNode(ISD::BITCAST, SL, OVT, Concat);
+    Results.push_back(CvtVec);
+    break;
+  }
+  case ISD::EXTRACT_VECTOR_ELT: {
+    MVT EltVT = OVT.getVectorElementType();
+    MVT NewEltVT = NVT.getVectorElementType();
+
+    // Handle bitcasts to a different vector type with the same total bit size.
+    //
+    // e.g. v2i64 = extract_vector_elt x:v2i64, y:i32
+    //  =>
+    //  v4i32:castx = bitcast x:v2i64
+    //
+    // i64 = bitcast
+    //   (v2i32 build_vector (i32 (extract_vector_elt castx, (2 * y))),
+    //                       (i32 (extract_vector_elt castx, (2 * y + 1)))
+    //
+
+    assert(NVT.isVector() && OVT.getSizeInBits() == NVT.getSizeInBits() &&
+           "Invalid promote type for extract_vector_elt");
+    assert(NewEltVT.bitsLT(EltVT) && "not handled");
+
+    MVT MidVT = getPromotedVectorElementType(TLI, EltVT, NewEltVT);
+    unsigned NewEltsPerOldElt = MidVT.getVectorNumElements();
+
+    SDValue Idx = Node->getOperand(1);
+    EVT IdxVT = Idx.getValueType();
+    SDLoc SL(Node);
+    SDValue Factor = DAG.getConstant(NewEltsPerOldElt, SL, IdxVT);
+    SDValue NewBaseIdx = DAG.getNode(ISD::MUL, SL, IdxVT, Idx, Factor);
+
+    SDValue CastVec = DAG.getNode(ISD::BITCAST, SL, NVT, Node->getOperand(0));
+
+    SmallVector<SDValue, 8> NewOps;
+    for (unsigned I = 0; I < NewEltsPerOldElt; ++I) {
+      SDValue IdxOffset = DAG.getConstant(I, SL, IdxVT);
+      SDValue TmpIdx = DAG.getNode(ISD::ADD, SL, IdxVT, NewBaseIdx, IdxOffset);
+
+      SDValue Elt = DAG.getNode(ISD::EXTRACT_VECTOR_ELT, SL, NewEltVT,
+                                CastVec, TmpIdx);
+      NewOps.push_back(Elt);
+    }
+
+    SDValue NewVec = DAG.getNode(ISD::BUILD_VECTOR, SL, MidVT, NewOps);
+
+    Results.push_back(DAG.getNode(ISD::BITCAST, SL, EltVT, NewVec));
+    break;
+  }
+  case ISD::INSERT_VECTOR_ELT: {
+    MVT EltVT = OVT.getVectorElementType();
+    MVT NewEltVT = NVT.getVectorElementType();
+
+    // Handle bitcasts to a different vector type with the same total bit size
+    //
+    // e.g. v2i64 = insert_vector_elt x:v2i64, y:i64, z:i32
+    //  =>
+    //  v4i32:castx = bitcast x:v2i64
+    //  v2i32:casty = bitcast y:i64
+    //
+    // v2i64 = bitcast
+    //   (v4i32 insert_vector_elt
+    //       (v4i32 insert_vector_elt v4i32:castx,
+    //                                (extract_vector_elt casty, 0), 2 * z),
+    //        (extract_vector_elt casty, 1), (2 * z + 1))
+
+    assert(NVT.isVector() && OVT.getSizeInBits() == NVT.getSizeInBits() &&
+           "Invalid promote type for insert_vector_elt");
+    assert(NewEltVT.bitsLT(EltVT) && "not handled");
+
+    MVT MidVT = getPromotedVectorElementType(TLI, EltVT, NewEltVT);
+    unsigned NewEltsPerOldElt = MidVT.getVectorNumElements();
+
+    SDValue Val = Node->getOperand(1);
+    SDValue Idx = Node->getOperand(2);
+    EVT IdxVT = Idx.getValueType();
+    SDLoc SL(Node);
+
+    SDValue Factor = DAG.getConstant(NewEltsPerOldElt, SDLoc(), IdxVT);
+    SDValue NewBaseIdx = DAG.getNode(ISD::MUL, SL, IdxVT, Idx, Factor);
+
+    SDValue CastVec = DAG.getNode(ISD::BITCAST, SL, NVT, Node->getOperand(0));
+    SDValue CastVal = DAG.getNode(ISD::BITCAST, SL, MidVT, Val);
+
+    SDValue NewVec = CastVec;
+    for (unsigned I = 0; I < NewEltsPerOldElt; ++I) {
+      SDValue IdxOffset = DAG.getConstant(I, SL, IdxVT);
+      SDValue InEltIdx = DAG.getNode(ISD::ADD, SL, IdxVT, NewBaseIdx, IdxOffset);
+
+      SDValue Elt = DAG.getNode(ISD::EXTRACT_VECTOR_ELT, SL, NewEltVT,
+                                CastVal, IdxOffset);
+
+      NewVec = DAG.getNode(ISD::INSERT_VECTOR_ELT, SL, NVT,
+                           NewVec, Elt, InEltIdx);
+    }
+
+    Results.push_back(DAG.getNode(ISD::BITCAST, SL, OVT, NewVec));
+    break;
+  }
+  case ISD::SCALAR_TO_VECTOR: {
+    MVT EltVT = OVT.getVectorElementType();
+    MVT NewEltVT = NVT.getVectorElementType();
+
+    // Handle bitcasts to different vector type with the smae total bit size.
+    //
+    // e.g. v2i64 = scalar_to_vector x:i64
+    //   =>
+    //  concat_vectors (v2i32 bitcast x:i64), (v2i32 undef)
+    //
+
+    MVT MidVT = getPromotedVectorElementType(TLI, EltVT, NewEltVT);
+    SDValue Val = Node->getOperand(0);
+    SDLoc SL(Node);
+
+    SDValue CastVal = DAG.getNode(ISD::BITCAST, SL, MidVT, Val);
+    SDValue Undef = DAG.getUNDEF(MidVT);
+
+    SmallVector<SDValue, 8> NewElts;
+    NewElts.push_back(CastVal);
+    for (unsigned I = 1, NElts = OVT.getVectorNumElements(); I != NElts; ++I)
+      NewElts.push_back(Undef);
+
+    SDValue Concat = DAG.getNode(ISD::CONCAT_VECTORS, SL, NVT, NewElts);
     SDValue CvtVec = DAG.getNode(ISD::BITCAST, SL, OVT, Concat);
     Results.push_back(CvtVec);
     break;

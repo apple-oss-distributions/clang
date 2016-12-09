@@ -22,12 +22,20 @@ StringRef Obfuscator::obfuscate(StringRef Src, bool reverse) {
   assert(Src.size() && "passed in empty string");
 
   // See if we've already encountered this value
-  if (ForwardMap.count(Src))
-    return ForwardMap.lookup(Src);
+  if (reverse) {
+    if (ForwardMap.count(Src))
+      return ForwardMap.lookup(Src);
 
-  auto Res = obfuscateImpl(Src, reverse);
-  ForwardMap[Src] = Res;
-  return Res;
+    auto Res = obfuscateImpl(Src, reverse);
+    ForwardMap[Src] = Res;
+    return Res;
+  } else {
+    if (IrreveribleForwardMap.count(Src))
+      return IrreveribleForwardMap.lookup(Src);
+    auto Res = obfuscateImpl(Src, reverse);
+    IrreveribleForwardMap[Src] = Res;
+    return Res;
+  }
 }
 
 // look up symbol in the forward map
@@ -112,7 +120,7 @@ ErrorOr<StringRef> IncrementObfuscator::lookupImpl(StringRef ObfStr) const {
 
 // Write reverse mapping.
 void IncrementObfuscator::writeReverseMapImpl(raw_ostream &OS) const {
-  OS << "BCSymbolMap Version: 1.0\n";
+  OS << "BCSymbolMap Version: 2.0\n";
   for (auto S : ReverseMap) {
     assert(S != "" && "failed to initialize a member");
     OS << S << "\n";

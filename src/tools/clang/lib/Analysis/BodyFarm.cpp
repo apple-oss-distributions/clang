@@ -414,7 +414,7 @@ static const ObjCIvarDecl *findBackingIvar(const ObjCPropertyDecl *Prop) {
   // is guaranteed to find the shadowing property, if it exists, rather than
   // the shadowed property.
   auto *ShadowingProp = PrimaryInterface->FindPropertyVisibleInPrimaryClass(
-      Prop->getIdentifier());
+      Prop->getIdentifier(), Prop->getQueryKind());
   if (ShadowingProp && ShadowingProp != Prop) {
     IVar = ShadowingProp->getPropertyIvarDecl();
   }
@@ -498,6 +498,14 @@ Stmt *BodyFarm::getBody(const ObjCMethodDecl *D) {
     return nullptr;
 
   // For now, we only synthesize getters.
+  // Synthesizing setters would cause false negatives in the
+  // RetainCountChecker because the method body would bind the parameter
+  // to an instance variable, causing it to escape. This would prevent
+  // warning in the following common scenario:
+  //
+  //  id foo = [[NSObject alloc] init];
+  //  self.foo = foo; // We should warn that foo leaks here.
+  //
   if (D->param_size() != 0)
     return nullptr;
 

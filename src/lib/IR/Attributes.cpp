@@ -121,28 +121,28 @@ Attribute::AttrKind Attribute::getKindAsEnum() const {
   if (!pImpl) return None;
   assert((isEnumAttribute() || isIntAttribute()) &&
          "Invalid attribute type to get the kind as an enum!");
-  return pImpl ? pImpl->getKindAsEnum() : None;
+  return pImpl->getKindAsEnum();
 }
 
 uint64_t Attribute::getValueAsInt() const {
   if (!pImpl) return 0;
   assert(isIntAttribute() &&
          "Expected the attribute to be an integer attribute!");
-  return pImpl ? pImpl->getValueAsInt() : 0;
+  return pImpl->getValueAsInt();
 }
 
 StringRef Attribute::getKindAsString() const {
   if (!pImpl) return StringRef();
   assert(isStringAttribute() &&
          "Invalid attribute type to get the kind as a string!");
-  return pImpl ? pImpl->getKindAsString() : StringRef();
+  return pImpl->getKindAsString();
 }
 
 StringRef Attribute::getValueAsString() const {
   if (!pImpl) return StringRef();
   assert(isStringAttribute() &&
          "Invalid attribute type to get the value as a string!");
-  return pImpl ? pImpl->getValueAsString() : StringRef();
+  return pImpl->getValueAsString();
 }
 
 bool Attribute::hasAttribute(AttrKind Kind) const {
@@ -203,6 +203,10 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     return "swifterror";
   if (hasAttribute(Attribute::SwiftSelf))
     return "swiftself";
+  if (hasAttribute(Attribute::InaccessibleMemOnly))
+    return "inaccessiblememonly";
+  if (hasAttribute(Attribute::InaccessibleMemOrArgMemOnly))
+    return "inaccessiblemem_or_argmemonly";
   if (hasAttribute(Attribute::InAlloca))
     return "inalloca";
   if (hasAttribute(Attribute::InlineHint))
@@ -389,7 +393,11 @@ bool AttributeImpl::operator<(const AttributeImpl &AI) const {
 
   if (isIntAttribute()) {
     if (AI.isEnumAttribute()) return false;
-    if (AI.isIntAttribute()) return getValueAsInt() < AI.getValueAsInt();
+    if (AI.isIntAttribute()) {
+      if (getKindAsEnum() == AI.getKindAsEnum())
+        return getValueAsInt() < AI.getValueAsInt();
+      return getKindAsEnum() < AI.getKindAsEnum();
+    }
     if (AI.isStringAttribute()) return true;
   }
 
@@ -452,6 +460,8 @@ uint64_t AttributeImpl::getAttrMask(Attribute::AttrKind Val) {
   case Attribute::NoRecurse:       return 1ULL << 48;
   case Attribute::SwiftSelf:       return 1ULL << 49;
   case Attribute::SwiftError:      return 1ULL << 50;
+  case Attribute::InaccessibleMemOnly:         return 1ULL << 51;
+  case Attribute::InaccessibleMemOrArgMemOnly: return 1ULL << 52;
   case Attribute::Dereferenceable:
     llvm_unreachable("dereferenceable attribute not supported in raw format");
     break;
@@ -480,11 +490,10 @@ AttributeSetNode *AttributeSetNode::get(LLVMContext &C,
   FoldingSetNodeID ID;
 
   SmallVector<Attribute, 8> SortedAttrs(Attrs.begin(), Attrs.end());
-  array_pod_sort(SortedAttrs.begin(), SortedAttrs.end());
+  std::sort(SortedAttrs.begin(), SortedAttrs.end());
 
-  for (SmallVectorImpl<Attribute>::iterator I = SortedAttrs.begin(),
-         E = SortedAttrs.end(); I != E; ++I)
-    I->Profile(ID);
+  for (Attribute Attr : SortedAttrs)
+    Attr.Profile(ID);
 
   void *InsertPoint;
   AttributeSetNode *PA =
@@ -503,13 +512,6 @@ AttributeSetNode *AttributeSetNode::get(LLVMContext &C,
   return PA;
 }
 
-bool AttributeSetNode::hasAttribute(Attribute::AttrKind Kind) const {
-  for (iterator I = begin(), E = end(); I != E; ++I)
-    if (I->hasAttribute(Kind))
-      return true;
-  return false;
-}
-
 bool AttributeSetNode::hasAttribute(StringRef Kind) const {
   for (iterator I = begin(), E = end(); I != E; ++I)
     if (I->hasAttribute(Kind))
@@ -518,9 +520,11 @@ bool AttributeSetNode::hasAttribute(StringRef Kind) const {
 }
 
 Attribute AttributeSetNode::getAttribute(Attribute::AttrKind Kind) const {
-  for (iterator I = begin(), E = end(); I != E; ++I)
-    if (I->hasAttribute(Kind))
-      return *I;
+  if (hasAttribute(Kind)) {
+    for (iterator I = begin(), E = end(); I != E; ++I)
+      if (I->hasAttribute(Kind))
+        return *I;
+  }
   return Attribute();
 }
 
@@ -642,14 +646,15 @@ AttributeSet AttributeSet::get(LLVMContext &C,
   if (Attrs.empty())
     return AttributeSet();
 
-#ifndef NDEBUG
-  for (unsigned i = 0, e = Attrs.size(); i != e; ++i) {
-    assert((!i || Attrs[i-1].first <= Attrs[i].first) &&
-           "Misordered Attributes list!");
-    assert(!Attrs[i].second.hasAttribute(Attribute::None) &&
-           "Pointless attribute!");
-  }
-#endif
+  assert(std::is_sorted(Attrs.begin(), Attrs.end(),
+                        [](const std::pair<unsigned, Attribute> &LHS,
+                           const std::pair<unsigned, Attribute> &RHS) {
+                          return LHS.first < RHS.first;
+                        }) && "Misordered Attributes list!");
+  assert(std::none_of(Attrs.begin(), Attrs.end(),
+                      [](const std::pair<unsigned, Attribute> &Pair) {
+                        return Pair.second.hasAttribute(Attribute::None);
+                      }) && "Pointless attribute!");
 
   // Create a vector if (unsigned, AttributeSetNode*) pairs from the attributes
   // list.
@@ -692,22 +697,26 @@ AttributeSet AttributeSet::get(LLVMContext &C, unsigned Index,
     if (!B.contains(Kind))
       continue;
 
-    if (Kind == Attribute::Alignment)
-      Attrs.push_back(std::make_pair(Index, Attribute::
-                                     getWithAlignment(C, B.getAlignment())));
-    else if (Kind == Attribute::StackAlignment)
-      Attrs.push_back(std::make_pair(Index, Attribute::
-                              getWithStackAlignment(C, B.getStackAlignment())));
-    else if (Kind == Attribute::Dereferenceable)
-      Attrs.push_back(std::make_pair(Index,
-                                     Attribute::getWithDereferenceableBytes(C,
-                                       B.getDereferenceableBytes())));
-    else if (Kind == Attribute::DereferenceableOrNull)
-      Attrs.push_back(
-          std::make_pair(Index, Attribute::getWithDereferenceableOrNullBytes(
-                                    C, B.getDereferenceableOrNullBytes())));
-    else
-      Attrs.push_back(std::make_pair(Index, Attribute::get(C, Kind)));
+    Attribute Attr;
+    switch (Kind) {
+    case Attribute::Alignment:
+      Attr = Attribute::getWithAlignment(C, B.getAlignment());
+      break;
+    case Attribute::StackAlignment:
+      Attr = Attribute::getWithStackAlignment(C, B.getStackAlignment());
+      break;
+    case Attribute::Dereferenceable:
+      Attr = Attribute::getWithDereferenceableBytes(
+          C, B.getDereferenceableBytes());
+      break;
+    case Attribute::DereferenceableOrNull:
+      Attr = Attribute::getWithDereferenceableOrNullBytes(
+          C, B.getDereferenceableOrNullBytes());
+      break;
+    default:
+      Attr = Attribute::get(C, Kind);
+    }
+    Attrs.push_back(std::make_pair(Index, Attr));
   }
 
   // Add target-dependent (string) attributes.
@@ -721,9 +730,8 @@ AttributeSet AttributeSet::get(LLVMContext &C, unsigned Index,
 AttributeSet AttributeSet::get(LLVMContext &C, unsigned Index,
                                ArrayRef<Attribute::AttrKind> Kind) {
   SmallVector<std::pair<unsigned, Attribute>, 8> Attrs;
-  for (ArrayRef<Attribute::AttrKind>::iterator I = Kind.begin(),
-         E = Kind.end(); I != E; ++I)
-    Attrs.push_back(std::make_pair(Index, Attribute::get(C, *I)));
+  for (Attribute::AttrKind K : Kind)
+    Attrs.push_back(std::make_pair(Index, Attribute::get(C, K)));
   return get(C, Attrs);
 }
 
@@ -992,17 +1000,21 @@ AttributeSet AttributeSet::getFnAttributes() const {
 
 bool AttributeSet::hasAttribute(unsigned Index, Attribute::AttrKind Kind) const{
   AttributeSetNode *ASN = getAttributes(Index);
-  return ASN ? ASN->hasAttribute(Kind) : false;
+  return ASN && ASN->hasAttribute(Kind);
 }
 
 bool AttributeSet::hasAttribute(unsigned Index, StringRef Kind) const {
   AttributeSetNode *ASN = getAttributes(Index);
-  return ASN ? ASN->hasAttribute(Kind) : false;
+  return ASN && ASN->hasAttribute(Kind);
 }
 
 bool AttributeSet::hasAttributes(unsigned Index) const {
   AttributeSetNode *ASN = getAttributes(Index);
-  return ASN ? ASN->hasAttributes() : false;
+  return ASN && ASN->hasAttributes();
+}
+
+bool AttributeSet::hasFnAttribute(Attribute::AttrKind Kind) const {
+  return pImpl && pImpl->hasFnAttribute(Kind);
 }
 
 /// \brief Return true if the specified attribute is set for at least one
@@ -1215,23 +1227,10 @@ AttrBuilder &AttrBuilder::removeAttributes(AttributeSet A, uint64_t Index) {
   for (AttributeSet::iterator I = A.begin(Slot), E = A.end(Slot); I != E; ++I) {
     Attribute Attr = *I;
     if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
-      Attribute::AttrKind Kind = I->getKindAsEnum();
-      Attrs[Kind] = false;
-
-      if (Kind == Attribute::Alignment)
-        Alignment = 0;
-      else if (Kind == Attribute::StackAlignment)
-        StackAlignment = 0;
-      else if (Kind == Attribute::Dereferenceable)
-        DerefBytes = 0;
-      else if (Kind == Attribute::DereferenceableOrNull)
-        DerefOrNullBytes = 0;
+      removeAttribute(Attr.getKindAsEnum());
     } else {
       assert(Attr.isStringAttribute() && "Invalid attribute type!");
-      std::map<std::string, std::string>::iterator
-        Iter = TargetDepAttrs.find(Attr.getKindAsString());
-      if (Iter != TargetDepAttrs.end())
-        TargetDepAttrs.erase(Iter);
+      removeAttribute(Attr.getKindAsString());
     }
   }
 
@@ -1360,8 +1359,7 @@ bool AttrBuilder::hasAttributes(AttributeSet A, uint64_t Index) const {
 
   assert(Slot != ~0U && "Couldn't find the index!");
 
-  for (AttributeSet::iterator I = A.begin(Slot), E = A.end(Slot);
-       I != E; ++I) {
+  for (AttributeSet::iterator I = A.begin(Slot), E = A.end(Slot); I != E; ++I) {
     Attribute Attr = *I;
     if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
       if (Attrs[I->getKindAsEnum()])
@@ -1404,14 +1402,14 @@ AttrBuilder &AttrBuilder::addRawValue(uint64_t Val) {
       continue;
     if (uint64_t A = (Val & AttributeImpl::getAttrMask(I))) {
       Attrs[I] = true;
- 
+
       if (I == Attribute::Alignment)
         Alignment = 1ULL << ((A >> 16) - 1);
       else if (I == Attribute::StackAlignment)
         StackAlignment = 1ULL << ((A >> 26)-1);
     }
   }
- 
+
   return *this;
 }
 

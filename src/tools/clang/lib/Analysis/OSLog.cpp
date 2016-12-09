@@ -1,4 +1,16 @@
-// TODO: header template
+//===--- OSLog.cpp - Analysis of calls to os_log builtins -------*- C++ -*-===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// This file defines APIs for determining the layout of the data buffer for
+// os_log() and os_trace().
+//
+//===----------------------------------------------------------------------===//
 
 #include "clang/Analysis/Analyses/OSLog.h"
 #include "clang/Analysis/Analyses/FormatString.h"
@@ -42,6 +54,9 @@ public:
     //  * "%.*P" len (arg), pointer to data
     //  * "%.16P" len (non-arg), pointer to data
     //  * "%@" pointer to objc object
+
+    if (!FS.consumesDataArgument())
+      return false;
 
     unsigned argIndex = FS.getArgIndex();
     if (argIndex >= Args.size()) {
@@ -118,7 +133,9 @@ public:
   }
 };
 
-bool clang::analyze_os_log::computeOSLogBufferLayout(ASTContext &Ctx, const CallExpr *E, OSLogBufferLayout &layout)
+bool clang::analyze_os_log::computeOSLogBufferLayout(ASTContext &Ctx,
+                                                     const CallExpr *E,
+                                                     OSLogBufferLayout &layout)
 {
   ArrayRef<const Expr *> Args(E->getArgs(), E->getArgs() + E->getNumArgs());
 

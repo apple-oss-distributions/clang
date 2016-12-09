@@ -19,12 +19,14 @@
 #include "tsan_flags.h"
 
 // May be overriden by front-end.
-extern "C" void WEAK __sanitizer_malloc_hook(void *ptr, uptr size) {
+SANITIZER_WEAK_DEFAULT_IMPL
+void __sanitizer_malloc_hook(void *ptr, uptr size) {
   (void)ptr;
   (void)size;
 }
 
-extern "C" void WEAK __sanitizer_free_hook(void *ptr) {
+SANITIZER_WEAK_DEFAULT_IMPL
+void __sanitizer_free_hook(void *ptr) {
   (void)ptr;
 }
 
@@ -141,20 +143,16 @@ void OnUserFree(ThreadState *thr, uptr pc, uptr p, bool write) {
 }
 
 void *user_realloc(ThreadState *thr, uptr pc, void *p, uptr sz) {
-  void *p2 = 0;
   // FIXME: Handle "shrinking" more efficiently,
   // it seems that some software actually does this.
-  if (sz) {
-    p2 = user_alloc(thr, pc, sz);
-    if (p2 == 0)
-      return 0;
-    if (p) {
-      uptr oldsz = user_alloc_usable_size(p);
-      internal_memcpy(p2, p, min(oldsz, sz));
-    }
-  }
-  if (p)
+  void *p2 = user_alloc(thr, pc, sz);
+  if (p2 == 0)
+    return 0;
+  if (p) {
+    uptr oldsz = user_alloc_usable_size(p);
+    internal_memcpy(p2, p, min(oldsz, sz));
     user_free(thr, pc, p);
+  }
   return p2;
 }
 
@@ -162,7 +160,11 @@ uptr user_alloc_usable_size(const void *p) {
   if (p == 0)
     return 0;
   MBlock *b = ctx->metamap.GetBlock((uptr)p);
-  return b ? b->siz : 0;
+  if (!b)
+    return 0;  // Not a valid pointer.
+  if (b->siz == 0)
+    return 1;  // Zero-sized allocations are actually 1 byte.
+  return b->siz;
 }
 
 void invoke_malloc_hook(void *ptr, uptr size) {

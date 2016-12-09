@@ -151,7 +151,7 @@ public:
     CodeGenOpts.CodeModel = "default";
     CodeGenOpts.ThreadModel = "single";
     CodeGenOpts.DebugTypeExtRefs = true;
-    CodeGenOpts.setDebugInfo(CodeGenOptions::FullDebugInfo);
+    CodeGenOpts.setDebugInfo(codegenoptions::FullDebugInfo);
   }
 
   ~PCHContainerGenerator() override = default;
@@ -239,7 +239,7 @@ public:
 
     // PCH files don't have a signature field in the control block,
     // but LLVM detects DWO CUs by looking for a non-zero DWO id.
-    uint64_t Signature = Buffer->Signature ? Buffer->Signature : ~1U;
+    uint64_t Signature = Buffer->Signature ? Buffer->Signature : ~1ULL;
     Builder->getModuleDebugInfo()->setDwoId(Signature);
 
     // Finalize the Builder.

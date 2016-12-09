@@ -97,11 +97,11 @@ void RuntimeDyldImpl::resolveRelocations() {
     // The Section here (Sections[i]) refers to the section in which the
     // symbol for the relocation is located.  The SectionID in the relocation
     // entry provides the section to which the relocation will be applied.
-    int Idx = it->getFirst();
+    int Idx = it->first;
     uint64_t Addr = Sections[Idx].getLoadAddress();
     DEBUG(dbgs() << "Resolving relocations Section #" << Idx << "\t"
                  << format("%p", (uintptr_t)Addr) << "\n");
-    resolveRelocationList(it->getSecond(), Addr);
+    resolveRelocationList(it->second, Addr);
   }
   Relocations.clear();
 
@@ -146,9 +146,12 @@ RuntimeDyldImpl::loadObjectImpl(const object::ObjectFile &Obj) {
   // Compute the memory size required to load all sections to be loaded
   // and pass this information to the memory manager
   if (MemMgr.needsToReserveAllocationSpace()) {
-    uint64_t CodeSize = 0, DataSizeRO = 0, DataSizeRW = 0;
-    computeTotalAllocSize(Obj, CodeSize, DataSizeRO, DataSizeRW);
-    MemMgr.reserveAllocationSpace(CodeSize, DataSizeRO, DataSizeRW);
+    uint64_t CodeSize = 0, RODataSize = 0, RWDataSize = 0;
+    uint32_t CodeAlign = 1, RODataAlign = 1, RWDataAlign = 1;
+    computeTotalAllocSize(Obj, CodeSize, CodeAlign, RODataSize, RODataAlign,
+                          RWDataSize, RWDataAlign);
+    MemMgr.reserveAllocationSpace(CodeSize, CodeAlign, RODataSize, RODataAlign,
+                                  RWDataSize, RWDataAlign);
   }
 
   // Used sections from the object file
@@ -335,13 +338,15 @@ static bool isZeroInit(const SectionRef Section) {
 // sections
 void RuntimeDyldImpl::computeTotalAllocSize(const ObjectFile &Obj,
                                             uint64_t &CodeSize,
-                                            uint64_t &DataSizeRO,
-                                            uint64_t &DataSizeRW) {
+                                            uint32_t &CodeAlign,
+                                            uint64_t &RODataSize,
+                                            uint32_t &RODataAlign,
+                                            uint64_t &RWDataSize,
+                                            uint32_t &RWDataAlign) {
   // Compute the size of all sections required for execution
   std::vector<uint64_t> CodeSectionSizes;
   std::vector<uint64_t> ROSectionSizes;
   std::vector<uint64_t> RWSectionSizes;
-  uint64_t MaxAlignment = sizeof(void *);
 
   // Collect sizes of all sections to be loaded;
   // also determine the max alignment of all sections
@@ -376,16 +381,14 @@ void RuntimeDyldImpl::computeTotalAllocSize(const ObjectFile &Obj,
         SectionSize = 1;
 
       if (IsCode) {
+        CodeAlign = std::max(CodeAlign, Alignment);
         CodeSectionSizes.push_back(SectionSize);
       } else if (IsReadOnly) {
+        RODataAlign = std::max(RODataAlign, Alignment);
         ROSectionSizes.push_back(SectionSize);
       } else {
+        RWDataAlign = std::max(RWDataAlign, Alignment);
         RWSectionSizes.push_back(SectionSize);
-      }
-
-      // update the max alignment
-      if (Alignment > MaxAlignment) {
-        MaxAlignment = Alignment;
       }
     }
   }
@@ -410,9 +413,9 @@ void RuntimeDyldImpl::computeTotalAllocSize(const ObjectFile &Obj,
   // allocated with the max alignment. Note that we cannot compute with the
   // individual alignments of the sections, because then the required size
   // depends on the order, in which the sections are allocated.
-  CodeSize = computeAllocationSizeForSections(CodeSectionSizes, MaxAlignment);
-  DataSizeRO = computeAllocationSizeForSections(ROSectionSizes, MaxAlignment);
-  DataSizeRW = computeAllocationSizeForSections(RWSectionSizes, MaxAlignment);
+  CodeSize = computeAllocationSizeForSections(CodeSectionSizes, CodeAlign);
+  RODataSize = computeAllocationSizeForSections(ROSectionSizes, RODataAlign);
+  RWDataSize = computeAllocationSizeForSections(RWSectionSizes, RWDataAlign);
 }
 
 // compute stub buffer size for the given section
@@ -432,10 +435,9 @@ unsigned RuntimeDyldImpl::computeSectionStubBufSize(const ObjectFile &Obj,
     if (!(RelSecI == Section))
       continue;
 
-    for (const RelocationRef &Reloc : SI->relocations()) {
-      (void)Reloc;
-      StubBufSize += StubSize;
-    }
+    for (const RelocationRef &Reloc : SI->relocations())
+      if (relocationNeedsStub(Reloc))
+        StubBufSize += StubSize;
   }
 
   // Get section data size and alignment
@@ -518,7 +520,8 @@ void RuntimeDyldImpl::emitCommonSymbols(const ObjectFile &Obj,
   if (!Addr)
     report_fatal_error("Unable to allocate memory for common symbols!");
   uint64_t Offset = 0;
-  Sections.push_back(SectionEntry("<common symbols>", Addr, CommonSize, 0));
+  Sections.push_back(
+      SectionEntry("<common symbols>", Addr, CommonSize, CommonSize, 0));
   memset(Addr, 0, CommonSize);
 
   DEBUG(dbgs() << "emitCommonSection SectionID: " << SectionID << " new addr: "
@@ -643,7 +646,8 @@ unsigned RuntimeDyldImpl::emitSection(const ObjectFile &Obj,
                  << " Allocate: " << Allocate << "\n");
   }
 
-  Sections.push_back(SectionEntry(Name, Addr, DataSize, (uintptr_t)pData));
+  Sections.push_back(
+      SectionEntry(Name, Addr, DataSize, Allocate, (uintptr_t)pData));
 
   if (Checker)
     Checker->registerSection(Obj.getFileName(), SectionID);
@@ -936,7 +940,9 @@ RuntimeDyld::loadObject(const ObjectFile &Obj) {
   if (!Dyld->isCompatibleFile(Obj))
     report_fatal_error("Incompatible object format!");
 
-  return Dyld->loadObject(Obj);
+  auto LoadedObjInfo = Dyld->loadObject(Obj);
+  MemMgr.notifyObjectLoaded(*this, Obj);
+  return LoadedObjInfo;
 }
 
 void *RuntimeDyld::getSymbolLocalAddress(StringRef Name) const {
@@ -965,6 +971,17 @@ void RuntimeDyld::mapSectionAddress(const void *LocalAddress,
 bool RuntimeDyld::hasError() { return Dyld->hasError(); }
 
 StringRef RuntimeDyld::getErrorString() { return Dyld->getErrorString(); }
+
+void RuntimeDyld::finalizeWithMemoryManagerLocking() {
+  bool MemoryFinalizationLocked = MemMgr.FinalizationLocked;
+  MemMgr.FinalizationLocked = true;
+  resolveRelocations();
+  registerEHFrames();
+  if (!MemoryFinalizationLocked) {
+    MemMgr.finalizeMemory();
+    MemMgr.FinalizationLocked = false;
+  }
+}
 
 void RuntimeDyld::registerEHFrames() {
   if (Dyld)

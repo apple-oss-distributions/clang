@@ -59,6 +59,12 @@ def FeatureFastFMAF32 : SubtargetFeature<"fast-fmaf",
         "Assuming f32 fma is at least as fast as mul + add",
         []>;
 
+def HalfRate64Ops : SubtargetFeature<"half-rate-64-ops",
+        "HalfRate64Ops",
+        "true",
+        "Most fp64 instructions are half rate instead of quarter",
+        []>;
+
 // Some instructions do not support denormals despite this flag. Using
 // fp32 denormals also causes instructions to run at the double
 // precision rate for the device.
@@ -108,10 +114,20 @@ def FeatureEnableUnsafeDSOffsetFolding : SubtargetFeature <"unsafe-ds-offset-fol
         "true",
         "Force using DS instruction immediate offsets on SI">;
 
+def FeatureFlatForGlobal : SubtargetFeature<"flat-for-global",
+        "FlatForGlobal",
+        "true",
+        "Force to generate flat instruction for global">;
+
 def FeatureFlatAddressSpace : SubtargetFeature<"flat-address-space",
         "FlatAddressSpace",
         "true",
         "Support flat address space">;
+
+def FeatureXNACK : SubtargetFeature<"xnack",
+        "EnableXNACK",
+        "true",
+        "Enable XNACK support">;
 
 def FeatureVGPRSpilling : SubtargetFeature<"vgpr-spilling",
         "EnableVGPRSpilling",
@@ -168,6 +184,7 @@ def FeatureISAVersion7_0_0 : SubtargetFeatureISAVersion <7,0,0>;
 def FeatureISAVersion7_0_1 : SubtargetFeatureISAVersion <7,0,1>;
 def FeatureISAVersion8_0_0 : SubtargetFeatureISAVersion <8,0,0>;
 def FeatureISAVersion8_0_1 : SubtargetFeatureISAVersion <8,0,1>;
+def FeatureISAVersion8_0_3 : SubtargetFeatureISAVersion <8,0,3>;
 
 class SubtargetFeatureLocalMemorySize <int Value> : SubtargetFeature<
         "localmemorysize"#Value,
@@ -272,9 +289,14 @@ def isSICI : Predicate<
   "Subtarget->getGeneration() == AMDGPUSubtarget::SEA_ISLANDS"
 >, AssemblerPredicate<"FeatureGCN1Encoding">;
 
+def isVI : Predicate <
+  "Subtarget->getGeneration() >= AMDGPUSubtarget::VOLCANIC_ISLANDS">,
+  AssemblerPredicate<"FeatureGCN3Encoding">;
+
 class PredicateControl {
   Predicate SubtargetPredicate;
   Predicate SIAssemblerPredicate = isSICI;
+  Predicate VIAssemblerPredicate = isVI;
   list<Predicate> AssemblerPredicates = [];
   Predicate AssemblerPredicate = TruePredicate;
   list<Predicate> OtherPredicates = [];

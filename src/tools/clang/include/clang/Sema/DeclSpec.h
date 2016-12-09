@@ -31,7 +31,6 @@
 #include "clang/Lex/Token.h"
 #include "clang/Sema/AttributeList.h"
 #include "clang/Sema/Ownership.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -41,14 +40,10 @@ namespace clang {
   class CXXRecordDecl;
   class TypeLoc;
   class LangOptions;
-  class DiagnosticsEngine;
   class IdentifierInfo;
   class NamespaceAliasDecl;
   class NamespaceDecl;
-  class NestedNameSpecifier;
-  class NestedNameSpecifierLoc;
   class ObjCDeclSpec;
-  class Preprocessor;
   class Sema;
   class Declarator;
   struct TemplateIdAnnotation;
@@ -301,6 +296,7 @@ public:
   static const TST TST_decltype_auto = clang::TST_decltype_auto;
   static const TST TST_underlyingType = clang::TST_underlyingType;
   static const TST TST_auto = clang::TST_auto;
+  static const TST TST_auto_type = clang::TST_auto_type;
   static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
   static const TST TST_atomic = clang::TST_atomic;
   static const TST TST_error = clang::TST_error;
@@ -341,6 +337,7 @@ private:
   unsigned TypeAltiVecPixel : 1;
   unsigned TypeAltiVecBool : 1;
   unsigned TypeSpecOwned : 1;
+  unsigned TypeSpecPipe : 1;
 
   // type-qualifiers
   unsigned TypeQualifiers : 4;  // Bitwise OR of TQ.
@@ -389,6 +386,7 @@ private:
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc, FS_noreturnLoc;
   SourceLocation FS_forceinlineLoc;
   SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc, ConceptLoc;
+  SourceLocation TQ_pipeLoc;
 
   WrittenBuiltinSpecs writtenBS;
   void SaveWrittenBuiltinSpecs();
@@ -424,6 +422,7 @@ public:
       TypeAltiVecPixel(false),
       TypeAltiVecBool(false),
       TypeSpecOwned(false),
+      TypeSpecPipe(false),
       TypeQualifiers(TQ_unspecified),
       FS_inline_specified(false),
       FS_forceinline_specified(false),
@@ -477,6 +476,7 @@ public:
   bool isTypeAltiVecBool() const { return TypeAltiVecBool; }
   bool isTypeSpecOwned() const { return TypeSpecOwned; }
   bool isTypeRep() const { return isTypeRep((TST) TypeSpecType); }
+  bool isTypeSpecPipe() const { return TypeSpecPipe; }
 
   ParsedType getRepAsType() const {
     assert(isTypeRep((TST) TypeSpecType) && "DeclSpec does not store a type");
@@ -512,7 +512,8 @@ public:
   void setTypeofParensRange(SourceRange range) { TypeofParensRange = range; }
 
   bool containsPlaceholderType() const {
-    return TypeSpecType == TST_auto || TypeSpecType == TST_decltype_auto;
+    return (TypeSpecType == TST_auto || TypeSpecType == TST_auto_type ||
+            TypeSpecType == TST_decltype_auto);
   }
 
   bool hasTagDefinition() const;
@@ -535,6 +536,7 @@ public:
   SourceLocation getRestrictSpecLoc() const { return TQ_restrictLoc; }
   SourceLocation getVolatileSpecLoc() const { return TQ_volatileLoc; }
   SourceLocation getAtomicSpecLoc() const { return TQ_atomicLoc; }
+  SourceLocation getPipeLoc() const { return TQ_pipeLoc; }
 
   /// \brief Clear out all of the type qualifiers.
   void ClearTypeQualifiers() {
@@ -543,6 +545,7 @@ public:
     TQ_restrictLoc = SourceLocation();
     TQ_volatileLoc = SourceLocation();
     TQ_atomicLoc = SourceLocation();
+    TQ_pipeLoc = SourceLocation();
   }
 
   // function-specifier
@@ -646,6 +649,9 @@ public:
   bool SetTypeAltiVecBool(bool isAltiVecBool, SourceLocation Loc,
                        const char *&PrevSpec, unsigned &DiagID,
                        const PrintingPolicy &Policy);
+  bool SetTypePipe(bool isPipe, SourceLocation Loc,
+                       const char *&PrevSpec, unsigned &DiagID,
+                       const PrintingPolicy &Policy);
   bool SetTypeSpecError();
   void UpdateDeclRep(Decl *Rep) {
     assert(isDeclRep((TST) TypeSpecType));
@@ -742,8 +748,7 @@ public:
   /// Finish - This does final analysis of the declspec, issuing diagnostics for
   /// things like "_Imaginary" (lacking an FP type).  After calling this method,
   /// DeclSpec is guaranteed self-consistent, even if an error occurred.
-  void Finish(DiagnosticsEngine &D, Preprocessor &PP,
-              const PrintingPolicy &Policy);
+  void Finish(Sema &S, const PrintingPolicy &Policy);
 
   const WrittenBuiltinSpecs& getWrittenBuiltinSpecs() const {
     return writtenBS;
@@ -780,6 +785,7 @@ public:
   };
 
   /// PropertyAttributeKind - list of property attributes.
+  /// Keep this list in sync with LLVM's Dwarf.h ApplePropertyAttributes.
   enum ObjCPropertyAttributeKind {
     DQ_PR_noattr = 0x0,
     DQ_PR_readonly = 0x01,
@@ -795,7 +801,8 @@ public:
     DQ_PR_strong = 0x400,
     DQ_PR_unsafe_unretained = 0x800,
     DQ_PR_nullability = 0x1000,
-    DQ_PR_null_resettable = 0x2000
+    DQ_PR_null_resettable = 0x2000,
+    DQ_PR_class = 0x4000
   };
 
   ObjCDeclSpec()
@@ -855,7 +862,7 @@ private:
   ObjCDeclQualifier objcDeclQualifier : 7;
 
   // NOTE: VC++ treats enums as signed, avoid using ObjCPropertyAttributeKind
-  unsigned PropertyAttributes : 14;
+  unsigned PropertyAttributes : 15;
 
   unsigned Nullability : 2;
 
@@ -1085,7 +1092,7 @@ typedef SmallVector<Token, 4> CachedTokens;
 /// This is intended to be a small value object.
 struct DeclaratorChunk {
   enum {
-    Pointer, Reference, Array, Function, BlockPointer, MemberPointer, Paren
+    Pointer, Reference, Array, Function, BlockPointer, MemberPointer, Paren, Pipe
   } Kind;
 
   /// Loc - The place where this type was defined.
@@ -1413,6 +1420,13 @@ struct DeclaratorChunk {
     }
   };
 
+  struct PipeTypeInfo : TypeInfoCommon {
+  /// The access writes.
+  unsigned AccessWrites : 3;
+
+  void destroy() {}
+  };
+
   union {
     TypeInfoCommon        Common;
     PointerTypeInfo       Ptr;
@@ -1421,6 +1435,7 @@ struct DeclaratorChunk {
     FunctionTypeInfo      Fun;
     BlockPointerTypeInfo  Cls;
     MemberPointerTypeInfo Mem;
+    PipeTypeInfo          PipeInfo;
   };
 
   void destroy() {
@@ -1432,6 +1447,7 @@ struct DeclaratorChunk {
     case DeclaratorChunk::Array:         return Arr.destroy();
     case DeclaratorChunk::MemberPointer: return Mem.destroy();
     case DeclaratorChunk::Paren:         return;
+    case DeclaratorChunk::Pipe:          return PipeInfo.destroy();
     }
   }
 
@@ -1527,6 +1543,17 @@ struct DeclaratorChunk {
     I.Loc           = Loc;
     I.Cls.TypeQuals = TypeQuals;
     I.Cls.AttrList  = nullptr;
+    return I;
+  }
+
+  /// \brief Return a DeclaratorChunk for a block.
+  static DeclaratorChunk getPipe(unsigned TypeQuals,
+                                 SourceLocation Loc) {
+    DeclaratorChunk I;
+    I.Kind          = Pipe;
+    I.Loc           = Loc;
+    I.Cls.TypeQuals = TypeQuals;
+    I.Cls.AttrList  = 0;
     return I;
   }
 
@@ -2030,6 +2057,7 @@ public:
       case DeclaratorChunk::Array:
       case DeclaratorChunk::BlockPointer:
       case DeclaratorChunk::MemberPointer:
+      case DeclaratorChunk::Pipe:
         return false;
       }
       llvm_unreachable("Invalid type chunk");

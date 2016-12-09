@@ -13,6 +13,7 @@ tablegen(LLVM PPCGenSubtargetInfo.inc -gen-subtarget)
 add_public_tablegen_target(PowerPCCommonTableGen)
 
 add_llvm_target(PowerPCCodeGen
+  PPCBoolRetToInt.cpp
   PPCAsmPrinter.cpp
   PPCBranchSelector.cpp
   PPCCTRLoops.cpp
@@ -23,10 +24,10 @@ add_llvm_target(PowerPCCodeGen
   PPCEarlyReturn.cpp
   PPCFastISel.cpp
   PPCFrameLowering.cpp
-  PPCLoopDataPrefetch.cpp
   PPCLoopPreIncPrep.cpp
   PPCMCInstLower.cpp
   PPCMachineFunctionInfo.cpp
+  PPCMIPeephole.cpp
   PPCRegisterInfo.cpp
   PPCSubtarget.cpp
   PPCTargetMachine.cpp

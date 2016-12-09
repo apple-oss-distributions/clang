@@ -22,19 +22,38 @@ bool isXar(llvm::MemoryBufferRef &fileData) {
 
 void PopulateResult(APIAnalysisIntermediateResult &intRes,
                     APIAnalysisResult &result) {
+  result.installName = intRes.installName;
+
   for (auto &d : intRes.messageNames)
     result.messageNames.insert(d.first());
 
+  auto ClassNameTranslation = [&intRes](StringRef name) -> StringRef {
+    if (intRes.classLinkMap.find(name) != intRes.classLinkMap.end())
+      return intRes.classLinkMap.find(name)->second;
+    return name;
+  };
+
   for (auto &d : intRes.classNames) {
-    if (d.second)
-      result.internalClassNames.insert(d.first());
-    else
-      result.externalClassNames.insert(d.first());
+    auto name = ClassNameTranslation(d.first());
+    if (d.second) {
+      // Record the internal class.
+      // Cover the corner case where the class doesn't have any methods/props.
+      auto classInfo = result.objCClasses.find(name);
+      if (classInfo == result.objCClasses.end())
+        classInfo =
+            result.objCClasses.insert(std::make_pair(name, ObjCClassInfo()))
+                .first;
+      result.internalClassNames.insert(name);
+    } else
+      result.externalClassNames.insert(name);
   }
 
   for (auto &d : intRes.functionNames) {
     if (d.second)
       result.internalFunctions.insert(d.first());
+    else if (intRes.localSymbols.count(d.first()))
+      // if undefined function in local symbols set, skip.
+      continue;
     else
       result.externalFunctions.insert(d.first());
   }
@@ -42,6 +61,9 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
   for (auto &d : intRes.globals) {
     if (d.second)
       result.internalGlobals.insert(d.first());
+    else if (intRes.localSymbols.count(d.first()))
+      // if undefined function in local symbols set, skip.
+      continue;
     else
       result.externalGlobals.insert(d.first());
   }
@@ -50,12 +72,12 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
     result.linkedLibraries.insert(d.first());
 
   for (auto &c : intRes.instanceMethods) {
-    auto classInfo = result.objCClasses.find(c.first());
-    if (classInfo == result.objCClasses.end()) {
+    auto name = ClassNameTranslation(c.first());
+    auto classInfo = result.objCClasses.find(name);
+    if (classInfo == result.objCClasses.end())
       classInfo =
-          result.objCClasses.insert(std::make_pair(c.first(), ObjCClassInfo()))
+          result.objCClasses.insert(std::make_pair(name, ObjCClassInfo()))
               .first;
-    }
     for (auto &m : c.second) {
       if (m.second)
         classInfo->second.internalInstanceMethods.push_back(m.first());
@@ -65,12 +87,12 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
   }
 
   for (auto &c : intRes.classMethods) {
-    auto classInfo = result.objCClasses.find(c.first());
-    if (classInfo == result.objCClasses.end()) {
+    auto name = ClassNameTranslation(c.first());
+    auto classInfo = result.objCClasses.find(name);
+    if (classInfo == result.objCClasses.end())
       classInfo =
-          result.objCClasses.insert(std::make_pair(c.first(), ObjCClassInfo()))
+          result.objCClasses.insert(std::make_pair(name, ObjCClassInfo()))
               .first;
-    }
     for (auto &m : c.second) {
       if (m.second)
         classInfo->second.internalClassMethods.push_back(m.first());
@@ -80,22 +102,23 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
   }
 
   for (auto &c : intRes.superClasses) {
-    auto classInfo = result.objCClasses.find(c.first());
-    if (classInfo == result.objCClasses.end()) {
+    auto name = ClassNameTranslation(c.first());
+    auto classInfo = result.objCClasses.find(name);
+    if (classInfo == result.objCClasses.end())
       classInfo =
-          result.objCClasses.insert(std::make_pair(c.first(), ObjCClassInfo()))
+          result.objCClasses.insert(std::make_pair(name, ObjCClassInfo()))
               .first;
-    }
-    classInfo->second.parentClass = c.second;
+    auto parentName = ClassNameTranslation(c.second);
+    classInfo->second.parentClass = parentName;
   }
 
   for (auto &c : intRes.protocolInstanceMethods) {
-    auto classInfo = result.objCProtocols.find(c.first());
-    if (classInfo == result.objCProtocols.end()) {
+    auto name = ClassNameTranslation(c.first());
+    auto classInfo = result.objCProtocols.find(name);
+    if (classInfo == result.objCProtocols.end())
       classInfo = result.objCProtocols.insert(std::make_pair(c.first(),
                                                              ObjCClassInfo()))
                       .first;
-    }
     for (auto &m : c.second) {
       if (m.second)
         classInfo->second.internalInstanceMethods.push_back(m.first());
@@ -106,11 +129,10 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
 
   for (auto &c : intRes.protocolClassMethods) {
     auto classInfo = result.objCProtocols.find(c.first());
-    if (classInfo == result.objCProtocols.end()) {
+    if (classInfo == result.objCProtocols.end())
       classInfo = result.objCProtocols.insert(std::make_pair(c.first(),
                                                              ObjCClassInfo()))
                       .first;
-    }
     for (auto &m : c.second) {
       if (m.second)
         classInfo->second.internalClassMethods.push_back(m.first());
@@ -120,7 +142,7 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
   }
 
   for (auto &cl : intRes.categoryInstanceMethods) {
-    StringRef className = cl.first();
+    auto className = ClassNameTranslation(cl.first());
     for (auto &ca : cl.second) {
       StringRef catName = ca.first();
       auto pair = std::make_pair(className.str(), catName.str());
@@ -136,12 +158,21 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
           classInfo->second.internalInstanceMethods.push_back(m.first());
         else
           classInfo->second.externalInstanceMethods.push_back(m.first());
+
+        // Link category method to the class (Linker optimization).
+        auto objcClass = result.objCClasses.find(className);
+        if (objcClass != result.objCClasses.end()) {
+          if (m.second)
+            objcClass->second.internalInstanceMethods.push_back(m.first());
+          else
+            objcClass->second.externalInstanceMethods.push_back(m.first());
+        }
       }
     }
   }
 
   for (auto &cl : intRes.categoryClassMethods) {
-    StringRef className = cl.first();
+    StringRef className = ClassNameTranslation(cl.first());
     for (auto &ca : cl.second) {
       StringRef catName = ca.first();
       auto pair = std::make_pair(className.str(), catName.str());
@@ -157,6 +188,15 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
           classInfo->second.internalClassMethods.push_back(m.first());
         else
           classInfo->second.externalClassMethods.push_back(m.first());
+
+        // Link category method to the class (Linker optimization).
+        auto objcClass = result.objCClasses.find(className);
+        if (objcClass != result.objCClasses.end()) {
+          if (m.second)
+            objcClass->second.internalClassMethods.push_back(m.first());
+          else
+            objcClass->second.externalClassMethods.push_back(m.first());
+        }
       }
     }
   }
@@ -165,6 +205,9 @@ void PopulateResult(APIAnalysisIntermediateResult &intRes,
 
   for (auto &s : intRes.asmSymbols)
     result.asmSymbols.push_back(s.first());
+
+  for (auto &s : intRes.potentiallyDefinedSelectors)
+    result.potentiallyDefinedSelectors.insert(s.first());
 }
 
 int AnalyzeFile(llvm::MemoryBufferRef &fileData, APIAnalysisResult &result,
@@ -210,6 +253,20 @@ int AnalyzeFileImpl(StringRef &filePath, APIAnalysisIntermediateResult &result,
   if (isBitcode(&Buf[0], &Buf[3]))
     return AnalyzeModule(filePath, result, options);
   return AnalyzeBinary(filePath, result, options);
+}
+
+int AnalyzeFileImpl(llvm::MemoryBufferRef &fileData,
+                    APIAnalysisIntermediateResult &result,
+                    const APIAnalysisOptions &options) {
+  int retVal = -1;
+  if (isBitcode(fileData.getBuffer().bytes_begin(),
+                fileData.getBuffer().bytes_end()))
+    retVal = AnalyzeModule(fileData, result, options);
+  else if (isXar(fileData))
+    retVal = AnalyzeXar(fileData, result, options);
+  else
+    retVal = AnalyzeBinary(fileData, result, options);
+  return retVal;
 }
 
 int InitializeAnalyzer() {

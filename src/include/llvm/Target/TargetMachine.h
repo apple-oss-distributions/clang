@@ -17,9 +17,11 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"
 #include <cassert>
 #include <string>
 
@@ -102,6 +104,7 @@ protected: // Can only create subclasses.
   const MCSubtargetInfo *STI;
 
   unsigned RequireStructuredCFG : 1;
+  unsigned O0WantsFastISel : 1;
 
   /// This API is here to support the C API, deprecated in 3.7 release.
   /// This should never be used outside of legacy existing client.
@@ -190,6 +193,8 @@ public:
   void setOptLevel(CodeGenOpt::Level Level) const;
 
   void setFastISel(bool Enable) { Options.EnableFastISel = Enable; }
+  bool getO0WantsFastISel() { return O0WantsFastISel; }
+  void setO0WantsFastISel(bool Enable) { O0WantsFastISel = Enable; }
 
   bool shouldPrintMachineCode() const { return Options.PrintMachineCode; }
 
@@ -252,8 +257,25 @@ public:
     return true;
   }
 
+  /// True if subtarget inserts the final scheduling pass on its own.
+  ///
+  /// Branch relaxation, which must happen after block placement, can
+  /// on some targets (e.g. SystemZ) expose additional post-RA
+  /// scheduling opportunities.
+  virtual bool targetSchedulesPostRAScheduling() const { return false; };
+
   void getNameWithPrefix(SmallVectorImpl<char> &Name, const GlobalValue *GV,
-                         Mangler &Mang, bool MayAlwaysUsePrivate = false) const;
+                         Mangler &Mang, bool MayAlwaysUsePrivate = false) const {
+    if (MayAlwaysUsePrivate || !GV->hasPrivateLinkage()) {
+      // Simple case: If GV is not private, it is not important to find out if
+      // private labels are legal in this case or not.
+      Mang.getNameWithPrefix(Name, GV, false);
+      return;
+    }
+    const TargetLoweringObjectFile *TLOF = getObjFileLowering();
+    TLOF->getNameWithPrefix(Name, GV, Mang, *this);
+  }
+
   MCSymbol *getSymbol(const GlobalValue *GV, Mangler &Mang) const;
 };
 

@@ -15,7 +15,7 @@
 
 #include "APIAnalysisImpl.h"
 
-int AnalyzeArchive(llvm::StringRef &filePath,
+int AnalyzeArchive(llvm::StringRef filePath,
                    APIAnalysisIntermediateResult &result,
                    const APIAnalysisOptions &options);
 

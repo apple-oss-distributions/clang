@@ -312,12 +312,8 @@ public:
     // Support for fixups (MCFixup)
     if (MO.isExpr()) {
       const MCExpr *Expr = MO.getExpr();
-      // In instruction code this value always encoded as lowest 12 bits,
-      // so we don't have to perform any specific adjustments.
-      // Due to requirements of relocatable records we have to use FK_Data_4.
-      // See ARMELFObjectWriter::ExplicitRelSym and
-      //     ARMELFObjectWriter::GetRelocTypeInner for more details.
-      MCFixupKind Kind = MCFixupKind(FK_Data_4);
+      // Fixups resolve to plain values that need to be encoded.
+      MCFixupKind Kind = MCFixupKind(ARM::fixup_arm_mod_imm);
       Fixups.push_back(MCFixup::create(0, Expr, Kind, MI.getLoc()));
       return 0;
     }
@@ -1049,12 +1045,12 @@ ARMMCCodeEmitter::getHiLo16ImmOpValue(const MCInst &MI, unsigned OpIdx,
     switch (ARM16Expr->getKind()) {
     default: llvm_unreachable("Unsupported ARMFixup");
     case ARMMCExpr::VK_ARM_HI16:
-      Kind = MCFixupKind(isThumb2(STI) ? ARM::fixup_t2_movt_hi16
-                                       : ARM::fixup_arm_movt_hi16);
+      Kind = MCFixupKind(isThumb(STI) ? ARM::fixup_t2_movt_hi16
+                                      : ARM::fixup_arm_movt_hi16);
       break;
     case ARMMCExpr::VK_ARM_LO16:
-      Kind = MCFixupKind(isThumb2(STI) ? ARM::fixup_t2_movw_lo16
-                                       : ARM::fixup_arm_movw_lo16);
+      Kind = MCFixupKind(isThumb(STI) ? ARM::fixup_t2_movw_lo16
+                                      : ARM::fixup_arm_movw_lo16);
       break;
     }
 

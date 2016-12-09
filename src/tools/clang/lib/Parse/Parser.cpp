@@ -491,6 +491,8 @@ void Parser::Initialize() {
   Ident_deprecated = nullptr;
   Ident_obsoleted = nullptr;
   Ident_unavailable = nullptr;
+  Ident_strict = nullptr;
+  Ident_replacement = nullptr;
 
   Ident__except = nullptr;
 
@@ -545,7 +547,7 @@ bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result) {
   if (PP.isIncrementalProcessingEnabled() && Tok.is(tok::eof))
     ConsumeToken();
 
-  Result = DeclGroupPtrTy();
+  Result = nullptr;
   switch (Tok.getKind()) {
   case tok::annot_pragma_unused:
     HandlePragmaUnused();
@@ -625,49 +627,52 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
 
   if (PP.isCodeCompletionReached()) {
     cutOffParsing();
-    return DeclGroupPtrTy();
+    return nullptr;
   }
 
   Decl *SingleDecl = nullptr;
   switch (Tok.getKind()) {
   case tok::annot_pragma_vis:
     HandlePragmaVisibility();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_pack:
     HandlePragmaPack();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_msstruct:
     HandlePragmaMSStruct();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_align:
     HandlePragmaAlign();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_weak:
     HandlePragmaWeak();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_weakalias:
     HandlePragmaWeakAlias();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_redefine_extname:
     HandlePragmaRedefineExtname();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_fp_contract:
     HandlePragmaFPContract();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_opencl_extension:
     HandlePragmaOpenCLExtension();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_openmp:
     return ParseOpenMPDeclarativeDirective();
   case tok::annot_pragma_ms_pointers_to_members:
     HandlePragmaMSPointersToMembers();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_ms_vtordisp:
     HandlePragmaMSVtorDisp();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::annot_pragma_ms_pragma:
     HandlePragmaMSPragma();
-    return DeclGroupPtrTy();
+    return nullptr;
+  case tok::annot_pragma_dump:
+    HandlePragmaDump();
+    return nullptr;
   case tok::semi:
     // Either a C++11 empty-declaration or attribute-declaration.
     SingleDecl = Actions.ActOnEmptyDeclaration(getCurScope(),
@@ -678,10 +683,10 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
   case tok::r_brace:
     Diag(Tok, diag::err_extraneous_closing_brace);
     ConsumeBrace();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::eof:
     Diag(Tok, diag::err_expected_external_declaration);
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::kw___extension__: {
     // __extension__ silences extension warnings in the subexpression.
     ExtensionRAIIObject O(Diags);  // Use RAII to do this.
@@ -709,7 +714,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
                      "top-level asm block");
 
     if (Result.isInvalid())
-      return DeclGroupPtrTy();
+      return nullptr;
     SingleDecl = Actions.ActOnFileScopeAsmDecl(Result.get(), StartLoc, EndLoc);
     break;
   }
@@ -720,7 +725,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     if (!getLangOpts().ObjC1) {
       Diag(Tok, diag::err_expected_external_declaration);
       ConsumeToken();
-      return DeclGroupPtrTy();
+      return nullptr;
     }
     SingleDecl = ParseObjCMethodDefinition();
     break;
@@ -729,7 +734,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
                              CurParsedObjCImpl? Sema::PCC_ObjCImplementation
                                               : Sema::PCC_Namespace);
     cutOffParsing();
-    return DeclGroupPtrTy();
+    return nullptr;
   case tok::kw_using:
   case tok::kw_namespace:
   case tok::kw_typedef:
@@ -793,8 +798,8 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
   case tok::kw___if_exists:
   case tok::kw___if_not_exists:
     ParseMicrosoftIfExistsExternalDeclaration();
-    return DeclGroupPtrTy();
-      
+    return nullptr;
+
   default:
   dont_know:
     // We can't tell whether this is a function-definition or declaration yet.
@@ -873,7 +878,7 @@ Parser::ParseDeclOrFunctionDefInternal(ParsedAttributesWithRange &attrs,
   // may get this far before the problem becomes obvious.
   if (DS.hasTagDefinition() &&
       DiagnoseMissingSemiAfterTagDefinition(DS, AS, DSC_top_level))
-    return DeclGroupPtrTy();
+    return nullptr;
 
   // C99 6.7.2.3p6: Handle "struct-or-union identifier;", "enum { X };"
   // declaration-specifiers init-declarator-list[opt] ';'
@@ -896,7 +901,7 @@ Parser::ParseDeclOrFunctionDefInternal(ParsedAttributesWithRange &attrs,
         !Tok.isObjCAtKeyword(tok::objc_protocol)) {
       Diag(Tok, diag::err_objc_unexpected_attr);
       SkipUntil(tok::semi); // FIXME: better skip?
-      return DeclGroupPtrTy();
+      return nullptr;
     }
 
     DS.abort();
@@ -1094,14 +1099,16 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
     SourceLocation KWLoc;
     if (TryConsumeToken(tok::kw_delete, KWLoc)) {
       Diag(KWLoc, getLangOpts().CPlusPlus11
-                      ? diag::warn_cxx98_compat_deleted_function
-                      : diag::ext_deleted_function);
+                      ? diag::warn_cxx98_compat_defaulted_deleted_function
+                      : diag::ext_defaulted_deleted_function)
+        << 1 /* deleted */;
       Actions.SetDeclDeleted(Res, KWLoc);
       Delete = true;
     } else if (TryConsumeToken(tok::kw_default, KWLoc)) {
       Diag(KWLoc, getLangOpts().CPlusPlus11
-                      ? diag::warn_cxx98_compat_defaulted_function
-                      : diag::ext_defaulted_function);
+                      ? diag::warn_cxx98_compat_defaulted_deleted_function
+                      : diag::ext_defaulted_deleted_function)
+        << 0 /* defaulted */;
       Actions.SetDeclDefaulted(Res, KWLoc);
     } else {
       llvm_unreachable("function definition after = not 'delete' or 'default'");
@@ -1395,7 +1402,7 @@ Parser::TryAnnotateName(bool IsAddressOfOperand,
 
   CXXScopeSpec SS;
   if (getLangOpts().CPlusPlus &&
-      ParseOptionalCXXScopeSpecifier(SS, ParsedType(), EnteringContext))
+      ParseOptionalCXXScopeSpecifier(SS, nullptr, EnteringContext))
     return ANK_Error;
 
   if (Tok.isNot(tok::identifier) || SS.isInvalid()) {
@@ -1583,9 +1590,9 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
     //            simple-template-id
     SourceLocation TypenameLoc = ConsumeToken();
     CXXScopeSpec SS;
-    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/ParsedType(), 
-                                       /*EnteringContext=*/false,
-                                       nullptr, /*IsTypename*/ true))
+    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/nullptr,
+                                       /*EnteringContext=*/false, nullptr,
+                                       /*IsTypename*/ true))
       return true;
     if (!SS.isSet()) {
       if (Tok.is(tok::identifier) || Tok.is(tok::annot_template_id) ||
@@ -1641,7 +1648,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
 
     SourceLocation EndLoc = Tok.getLastLoc();
     Tok.setKind(tok::annot_typename);
-    setTypeAnnotation(Tok, Ty.isInvalid() ? ParsedType() : Ty.get());
+    setTypeAnnotation(Tok, Ty.isInvalid() ? nullptr : Ty.get());
     Tok.setAnnotationEndLoc(EndLoc);
     Tok.setLocation(TypenameLoc);
     PP.AnnotateCachedTokens(Tok);
@@ -1653,7 +1660,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
 
   CXXScopeSpec SS;
   if (getLangOpts().CPlusPlus)
-    if (ParseOptionalCXXScopeSpecifier(SS, ParsedType(), EnteringContext))
+    if (ParseOptionalCXXScopeSpecifier(SS, nullptr, EnteringContext))
       return true;
 
   return TryAnnotateTypeOrScopeTokenAfterScopeSpec(EnteringContext, NeedType,
@@ -1670,15 +1677,12 @@ bool Parser::TryAnnotateTypeOrScopeTokenAfterScopeSpec(bool EnteringContext,
   if (Tok.is(tok::identifier)) {
     IdentifierInfo *CorrectedII = nullptr;
     // Determine whether the identifier is a type name.
-    if (ParsedType Ty = Actions.getTypeName(*Tok.getIdentifierInfo(),
-                                            Tok.getLocation(), getCurScope(),
-                                            &SS, false, 
-                                            NextToken().is(tok::period),
-                                            ParsedType(),
-                                            /*IsCtorOrDtorName=*/false,
-                                            /*NonTrivialTypeSourceInfo*/ true,
-                                            NeedType ? &CorrectedII
-                                                     : nullptr)) {
+    if (ParsedType Ty = Actions.getTypeName(
+            *Tok.getIdentifierInfo(), Tok.getLocation(), getCurScope(), &SS,
+            false, NextToken().is(tok::period), nullptr,
+            /*IsCtorOrDtorName=*/false,
+            /*NonTrivialTypeSourceInfo*/ true,
+            NeedType ? &CorrectedII : nullptr)) {
       // A FixIt was applied as a result of typo correction
       if (CorrectedII)
         Tok.setIdentifierInfo(CorrectedII);
@@ -1729,12 +1733,11 @@ bool Parser::TryAnnotateTypeOrScopeTokenAfterScopeSpec(bool EnteringContext,
       UnqualifiedId TemplateName;
       TemplateName.setIdentifier(Tok.getIdentifierInfo(), Tok.getLocation());
       bool MemberOfUnknownSpecialization;
-      if (TemplateNameKind TNK
-          = Actions.isTemplateName(getCurScope(), SS,
-                                   /*hasTemplateKeyword=*/false, TemplateName,
-                                   /*ObjectType=*/ ParsedType(),
-                                   EnteringContext,
-                                   Template, MemberOfUnknownSpecialization)) {
+      if (TemplateNameKind TNK =
+              Actions.isTemplateName(getCurScope(), SS,
+                                     /*hasTemplateKeyword=*/false, TemplateName,
+                                     /*ObjectType=*/nullptr, EnteringContext,
+                                     Template, MemberOfUnknownSpecialization)) {
         // Consume the identifier.
         ConsumeToken();
         if (AnnotateTemplateIdToken(Template, TNK, SS, SourceLocation(),
@@ -1788,7 +1791,7 @@ bool Parser::TryAnnotateCXXScopeToken(bool EnteringContext) {
          "Cannot be a type or scope token!");
 
   CXXScopeSpec SS;
-  if (ParseOptionalCXXScopeSpecifier(SS, ParsedType(), EnteringContext))
+  if (ParseOptionalCXXScopeSpecifier(SS, nullptr, EnteringContext))
     return true;
   if (SS.isEmpty())
     return false;
@@ -1892,7 +1895,7 @@ bool Parser::ParseMicrosoftIfExistsCondition(IfExistsCondition& Result) {
   
   // Parse nested-name-specifier.
   if (getLangOpts().CPlusPlus)
-    ParseOptionalCXXScopeSpecifier(Result.SS, ParsedType(),
+    ParseOptionalCXXScopeSpecifier(Result.SS, nullptr,
                                    /*EnteringContext=*/false);
 
   // Check nested-name specifier.
@@ -1903,8 +1906,8 @@ bool Parser::ParseMicrosoftIfExistsCondition(IfExistsCondition& Result) {
 
   // Parse the unqualified-id.
   SourceLocation TemplateKWLoc; // FIXME: parsed, but unused.
-  if (ParseUnqualifiedId(Result.SS, false, true, true, ParsedType(),
-                         TemplateKWLoc, Result.Name)) {
+  if (ParseUnqualifiedId(Result.SS, false, true, true, nullptr, TemplateKWLoc,
+                         Result.Name)) {
     T.skipToEnd();
     return true;
   }
@@ -1985,12 +1988,12 @@ Parser::DeclGroupPtrTy Parser::ParseModuleImport(SourceLocation AtLoc) {
       if (Tok.is(tok::code_completion)) {
         Actions.CodeCompleteModuleImport(ImportLoc, Path);
         cutOffParsing();
-        return DeclGroupPtrTy();
+        return nullptr;
       }
       
       Diag(Tok, diag::err_module_expected_ident);
       SkipUntil(tok::semi);
-      return DeclGroupPtrTy();
+      return nullptr;
     }
     
     // Record this part of the module path.
@@ -2008,14 +2011,14 @@ Parser::DeclGroupPtrTy Parser::ParseModuleImport(SourceLocation AtLoc) {
   if (PP.hadModuleLoaderFatalFailure()) {
     // With a fatal failure in the module loader, we abort parsing.
     cutOffParsing();
-    return DeclGroupPtrTy();
+    return nullptr;
   }
 
   DeclResult Import = Actions.ActOnModuleImport(AtLoc, ImportLoc, Path);
   ExpectAndConsumeSemi(diag::err_module_expected_semi);
   if (Import.isInvalid())
-    return DeclGroupPtrTy();
-  
+    return nullptr;
+
   return Actions.ConvertDeclToDeclGroup(Import.get());
 }
 

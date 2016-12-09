@@ -33,19 +33,8 @@ class Module;
 class DbgDeclareInst;
 class DbgValueInst;
 
-/// \brief Maps from type identifier to the actual MDNode.
-typedef DenseMap<const MDString *, DIType *> DITypeIdentifierMap;
-
 /// \brief Find subprogram that is enclosing this scope.
 DISubprogram *getDISubprogram(const MDNode *Scope);
-
-/// \brief Find debug info for a given function.
-///
-/// \returns a valid subprogram, if found. Otherwise, return \c nullptr.
-DISubprogram *getDISubprogram(const Function *F);
-
-/// \brief Generate map by visiting all retained types.
-DITypeIdentifierMap generateDITypeIdentifierMap(const NamedMDNode *CU_Nodes);
 
 /// \brief Strip debug info in the module if it exists.
 ///
@@ -77,8 +66,6 @@ unsigned getDebugMetadataVersionFromModule(const Module &M);
 /// used by the CUs.
 class DebugInfoFinder {
 public:
-  DebugInfoFinder() : TypeMapInitialized(false) {}
-
   /// \brief Process entire module and collect debug info anchors.
   void processModule(const Module &M);
 
@@ -114,23 +101,23 @@ public:
   typedef SmallVectorImpl<DIScope *>::const_iterator scope_iterator;
 
   iterator_range<compile_unit_iterator> compile_units() const {
-    return iterator_range<compile_unit_iterator>(CUs.begin(), CUs.end());
+    return make_range(CUs.begin(), CUs.end());
   }
 
   iterator_range<subprogram_iterator> subprograms() const {
-    return iterator_range<subprogram_iterator>(SPs.begin(), SPs.end());
+    return make_range(SPs.begin(), SPs.end());
   }
 
   iterator_range<global_variable_iterator> global_variables() const {
-    return iterator_range<global_variable_iterator>(GVs.begin(), GVs.end());
+    return make_range(GVs.begin(), GVs.end());
   }
 
   iterator_range<type_iterator> types() const {
-    return iterator_range<type_iterator>(TYs.begin(), TYs.end());
+    return make_range(TYs.begin(), TYs.end());
   }
 
   iterator_range<scope_iterator> scopes() const {
-    return iterator_range<scope_iterator>(Scopes.begin(), Scopes.end());
+    return make_range(Scopes.begin(), Scopes.end());
   }
 
   unsigned compile_unit_count() const { return CUs.size(); }
@@ -145,11 +132,7 @@ private:
   SmallVector<DIGlobalVariable *, 8> GVs;
   SmallVector<DIType *, 8> TYs;
   SmallVector<DIScope *, 8> Scopes;
-  SmallPtrSet<const MDNode *, 64> NodesSeen;
-  DITypeIdentifierMap TypeIdentifierMap;
-
-  /// \brief Specify if TypeIdentifierMap is initialized.
-  bool TypeMapInitialized;
+  SmallPtrSet<const MDNode *, 32> NodesSeen;
 };
 
 } // end namespace llvm

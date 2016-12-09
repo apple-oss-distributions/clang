@@ -247,9 +247,6 @@ public:
 
   SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
 
-  /// Return the Log2 alignment of this function.
-  unsigned getFunctionAlignment(const Function *F) const;
-
   /// Returns true if a cast between SrcAS and DestAS is a noop.
   bool isNoopAddrSpaceCast(unsigned SrcAS, unsigned DestAS) const override {
     // Addrspacecasts are always noops.
@@ -381,6 +378,26 @@ public:
     return AArch64::X1;
   }
 
+  bool isCheapToSpeculateCttz() const override {
+    return true;
+  }
+
+  bool isCheapToSpeculateCtlz() const override {
+    return true;
+  }
+  bool supportSplitCSR(MachineFunction *MF) const override {
+    return MF->getFunction()->getCallingConv() == CallingConv::CXX_FAST_TLS &&
+           MF->getFunction()->hasFnAttribute(Attribute::NoUnwind);
+  }
+  void initializeSplitCSR(MachineBasicBlock *Entry) const override;
+  void insertCopiesSplitCSR(
+      MachineBasicBlock *Entry,
+      const SmallVectorImpl<MachineBasicBlock *> &Exits) const override;
+
+  bool supportSwiftError() const override {
+    return true;
+  }
+
 private:
   bool isExtFreeImpl(const Instruction *Ext) const override;
 
@@ -391,10 +408,6 @@ private:
   void addTypeForNEON(EVT VT, EVT PromotedBitwiseVT);
   void addDRTypeForNEON(MVT VT);
   void addQRTypeForNEON(MVT VT);
-
-  bool supportSwiftError() const override {
-    return true;
-  }
 
   SDValue
   LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
@@ -415,7 +428,6 @@ private:
 
   bool isEligibleForTailCallOptimization(
       SDValue Callee, CallingConv::ID CalleeCC, bool isVarArg,
-      bool isCalleeStructRet, bool isCallerStructRet,
       const SmallVectorImpl<ISD::OutputArg> &Outs,
       const SmallVectorImpl<SDValue> &OutVals,
       const SmallVectorImpl<ISD::InputArg> &Ins, SelectionDAG &DAG) const;

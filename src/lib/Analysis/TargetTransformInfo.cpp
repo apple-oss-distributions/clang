@@ -144,10 +144,6 @@ bool TargetTransformInfo::isTruncateFree(Type *Ty1, Type *Ty2) const {
   return TTIImpl->isTruncateFree(Ty1, Ty2);
 }
 
-bool TargetTransformInfo::isZExtFree(Type *Ty1, Type *Ty2) const {
-  return TTIImpl->isZExtFree(Ty1, Ty2);
-}
-
 bool TargetTransformInfo::isProfitableToHoist(Instruction *I) const {
   return TTIImpl->isProfitableToHoist(I);
 }
@@ -219,6 +215,22 @@ unsigned TargetTransformInfo::getRegisterBitWidth(bool Vector) const {
   return TTIImpl->getRegisterBitWidth(Vector);
 }
 
+unsigned TargetTransformInfo::getCacheLineSize() const {
+  return TTIImpl->getCacheLineSize();
+}
+
+unsigned TargetTransformInfo::getPrefetchDistance() const {
+  return TTIImpl->getPrefetchDistance();
+}
+
+unsigned TargetTransformInfo::getMinPrefetchStride() const {
+  return TTIImpl->getMinPrefetchStride();
+}
+
+unsigned TargetTransformInfo::getMaxPrefetchIterationsAhead() const {
+  return TTIImpl->getMaxPrefetchIterationsAhead();
+}
+
 unsigned TargetTransformInfo::getMaxInterleaveFactor(unsigned VF) const {
   return TTIImpl->getMaxInterleaveFactor(VF);
 }
@@ -284,6 +296,15 @@ int TargetTransformInfo::getMaskedMemoryOpCost(unsigned Opcode, Type *Src,
   return Cost;
 }
 
+int TargetTransformInfo::getGatherScatterOpCost(unsigned Opcode, Type *DataTy,
+                                                Value *Ptr, bool VariableMask,
+                                                unsigned Alignment) const {
+  int Cost = TTIImpl->getGatherScatterOpCost(Opcode, DataTy, Ptr, VariableMask,
+                                             Alignment);
+  assert(Cost >= 0 && "TTI should not produce negative costs!");
+  return Cost;
+}
+
 int TargetTransformInfo::getInterleavedMemoryOpCost(
     unsigned Opcode, Type *VecTy, unsigned Factor, ArrayRef<unsigned> Indices,
     unsigned Alignment, unsigned AddressSpace) const {
@@ -296,6 +317,13 @@ int TargetTransformInfo::getInterleavedMemoryOpCost(
 int TargetTransformInfo::getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
                                                ArrayRef<Type *> Tys) const {
   int Cost = TTIImpl->getIntrinsicInstrCost(ID, RetTy, Tys);
+  assert(Cost >= 0 && "TTI should not produce negative costs!");
+  return Cost;
+}
+
+int TargetTransformInfo::getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
+                                               ArrayRef<Value *> Args) const {
+  int Cost = TTIImpl->getIntrinsicInstrCost(ID, RetTy, Args);
   assert(Cost >= 0 && "TTI should not produce negative costs!");
   return Cost;
 }

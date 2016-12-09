@@ -240,6 +240,9 @@ public:
   void EmitBundleLock(bool AlignToEnd) override;
   void EmitBundleUnlock() override;
 
+  bool EmitRelocDirective(const MCExpr &Offset, StringRef Name,
+                          const MCExpr *Expr, SMLoc Loc) override;
+
   /// EmitRawText - If this file is backed by an assembly streamer, this dumps
   /// the specified string in the output .s file.  This capability is
   /// indicated by the hasRawTextSupport() predicate.
@@ -706,17 +709,15 @@ void MCAsmStreamer::EmitValueImpl(const MCExpr *Value, unsigned Size,
       report_fatal_error("Don't know how to emit this value.");
 
     // We couldn't handle the requested integer size so we fallback by breaking
-    // the request down into several, smaller, integers.  Since sizes greater
-    // than eight are invalid and size equivalent to eight should have been
-    // handled earlier, we use four bytes as our largest piece of granularity.
+    // the request down into several, smaller, integers.
+    // Since sizes greater or equal to "Size" are invalid, we use the greatest
+    // power of 2 that is less than "Size" as our largest piece of granularity.
     bool IsLittleEndian = MAI->isLittleEndian();
     for (unsigned Emitted = 0; Emitted != Size;) {
       unsigned Remaining = Size - Emitted;
       // The size of our partial emission must be a power of two less than
-      // eight.
-      unsigned EmissionSize = PowerOf2Floor(Remaining);
-      if (EmissionSize > 4)
-        EmissionSize = 4;
+      // Size.
+      unsigned EmissionSize = PowerOf2Floor(std::min(Remaining, Size - 1));
       // Calculate the byte offset of our partial emission taking into account
       // the endianness of the target.
       unsigned ByteOffset =
@@ -1356,6 +1357,19 @@ void MCAsmStreamer::EmitBundleLock(bool AlignToEnd) {
 void MCAsmStreamer::EmitBundleUnlock() {
   OS << "\t.bundle_unlock";
   EmitEOL();
+}
+
+bool MCAsmStreamer::EmitRelocDirective(const MCExpr &Offset, StringRef Name,
+                                       const MCExpr *Expr, SMLoc) {
+  OS << "\t.reloc ";
+  Offset.print(OS, MAI);
+  OS << ", " << Name;
+  if (Expr) {
+    OS << ", ";
+    Expr->print(OS, MAI);
+  }
+  EmitEOL();
+  return false;
 }
 
 /// EmitRawText - If this file is backed by an assembly streamer, this dumps

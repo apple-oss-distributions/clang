@@ -2,6 +2,7 @@ set(LLVM_LINK_COMPONENTS
   Analysis
   Core
   IRReader
+  ObjCMetadata
   Object
   Support
   )
@@ -22,7 +23,9 @@ add_llvm_library(APIAnalysis
   XarAnalyzer.cpp
   )
 
-target_link_libraries(APIAnalysis INTERFACE xar ${LIBXML2_LIBRARIES})
+target_link_libraries(APIAnalysis INTERFACE xar)
+
+add_dependencies(APIAnalysis intrinsics_gen)
 
 install(DIRECTORY include/llvm
     DESTINATION include

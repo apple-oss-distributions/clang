@@ -15,16 +15,40 @@
 
 #include "APIAnalysisImpl.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <unordered_map>
 
 namespace llvm {
 class Module;
 }
 
-int AnalyzeModule(llvm::StringRef &filePath,
+typedef std::unordered_map<std::string, bool> APIInfo;
+
+struct ObjCClass {
+  std::string className;
+  ObjCClass* superClass;
+  
+  APIInfo instanceMethods;
+  APIInfo classMethods;
+
+  bool isDefined;
+
+  // constuctor
+  ObjCClass(llvm::StringRef name) {
+    className = name.str();
+    superClass = nullptr;
+    isDefined = false;
+  }
+};
+
+typedef llvm::StringMap<ObjCClass> ObjCClassCollection;
+
+int AnalyzeModule(llvm::StringRef filePath,
                   APIAnalysisIntermediateResult &result,
                   const APIAnalysisOptions &options);
 
-int AnalyzeModule(llvm::MemoryBufferRef &data,
+int AnalyzeModule(llvm::MemoryBufferRef data,
                   APIAnalysisIntermediateResult &result,
                   const APIAnalysisOptions &options);
 

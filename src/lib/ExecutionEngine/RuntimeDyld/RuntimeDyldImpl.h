@@ -30,6 +30,7 @@
 #include "llvm/Support/SwapByteOrder.h"
 #include "llvm/Support/raw_ostream.h"
 #include <map>
+#include <unordered_map>
 #include <system_error>
 
 using namespace llvm;
@@ -69,16 +70,24 @@ class SectionEntry {
   /// relocations (like ARM).
   uintptr_t StubOffset;
 
+  /// The total amount of space allocated for this section.  This includes the
+  /// section size and the maximum amount of space that the stubs can occupy.
+  size_t AllocationSize;
+
   /// ObjAddress - address of the section in the in-memory object file.  Used
   /// for calculating relocations in some object formats (like MachO).
   uintptr_t ObjAddress;
 
 public:
   SectionEntry(StringRef name, uint8_t *address, size_t size,
-               uintptr_t objAddress)
+               size_t allocationSize, uintptr_t objAddress)
       : Name(name), Address(address), Size(size),
         LoadAddress(reinterpret_cast<uintptr_t>(address)), StubOffset(size),
-        ObjAddress(objAddress) {}
+        AllocationSize(allocationSize), ObjAddress(objAddress) {
+    // AllocationSize is used only in asserts, prevent an "unused private field"
+    // warning:
+    (void)AllocationSize;
+  }
 
   StringRef getName() const { return Name; }
 
@@ -86,6 +95,7 @@ public:
 
   /// \brief Return the address of this section with an offset.
   uint8_t *getAddressWithOffset(unsigned OffsetBytes) const {
+    assert(OffsetBytes <= AllocationSize && "Offset out of bounds!");
     return Address + OffsetBytes;
   }
 
@@ -96,12 +106,16 @@ public:
 
   /// \brief Return the load address of this section with an offset.
   uint64_t getLoadAddressWithOffset(unsigned OffsetBytes) const {
+    assert(OffsetBytes <= AllocationSize && "Offset out of bounds!");
     return LoadAddress + OffsetBytes;
   }
 
   uintptr_t getStubOffset() const { return StubOffset; }
 
-  void advanceStubOffset(unsigned StubSize) { StubOffset += StubSize; }
+  void advanceStubOffset(unsigned StubSize) {
+    StubOffset += StubSize;
+    assert(StubOffset <= AllocationSize && "Not enough space allocated!");
+  }
 
   uintptr_t getObjAddress() const { return ObjAddress; }
 };
@@ -251,7 +265,7 @@ protected:
   // Relocations to sections already loaded. Indexed by SectionID which is the
   // source of the address. The target where the address will be written is
   // SectionID/Offset in the relocation itself.
-  DenseMap<unsigned, RelocationList> Relocations;
+  std::unordered_map<unsigned, RelocationList> Relocations;
 
   // Relocations to external symbols that are not yet resolved.  Symbols are
   // external when they aren't found in the global symbol table of all loaded
@@ -397,8 +411,10 @@ protected:
 
   // \brief Compute an upper bound of the memory that is required to load all
   // sections
-  void computeTotalAllocSize(const ObjectFile &Obj, uint64_t &CodeSize,
-                             uint64_t &DataSizeRO, uint64_t &DataSizeRW);
+  void computeTotalAllocSize(const ObjectFile &Obj,
+                             uint64_t &CodeSize, uint32_t &CodeAlign,
+                             uint64_t &RODataSize, uint32_t &RODataAlign,
+                             uint64_t &RWDataSize, uint32_t &RWDataAlign);
 
   // \brief Compute the stub buffer size required for a section
   unsigned computeSectionStubBufSize(const ObjectFile &Obj,
@@ -406,6 +422,11 @@ protected:
 
   // \brief Implementation of the generic part of the loadObject algorithm.
   ObjSectionToIDMap loadObjectImpl(const object::ObjectFile &Obj);
+
+  // \brief Return true if the relocation R may require allocating a stub.
+  virtual bool relocationNeedsStub(const RelocationRef &R) const {
+    return true;    // Conservative answer
+  }
 
 public:
   RuntimeDyldImpl(RuntimeDyld::MemoryManager &MemMgr,

@@ -132,7 +132,7 @@ Pass *createIndVarSimplifyPass();
 // into:
 //    %Z = add int 2, %X
 //
-FunctionPass *createInstructionCombiningPass();
+FunctionPass *createInstructionCombiningPass(bool ExpensiveCombines = true);
 
 //===----------------------------------------------------------------------===//
 //
@@ -382,6 +382,13 @@ Pass *createLowerAtomicPass();
 
 //===----------------------------------------------------------------------===//
 //
+// LowerEmuTLS - This pass generates __emutls_[vt].xyz variables for all
+// TLS variables for the emulated TLS model.
+//
+ModulePass *createLowerEmuTLSPass(const TargetMachine *TM);
+
+//===----------------------------------------------------------------------===//
+//
 // ValuePropagation - Propagate CFG-derived value information
 //
 Pass *createCorrelatedValuePropagationPass();
@@ -478,13 +485,31 @@ FunctionPass *createNaryReassociatePass();
 //
 // LoopDistribute - Distribute loops.
 //
-FunctionPass *createLoopDistributePass();
+// ProcessAllLoopsByDefault instructs the pass to look for distribution
+// opportunities in all loops unless -enable-loop-distribute or the
+// llvm.loop.distribute.enable metadata data override this default.
+FunctionPass *createLoopDistributePass(bool ProcessAllLoopsByDefault);
 
 //===----------------------------------------------------------------------===//
 //
 // LoopLoadElimination - Perform loop-aware load elimination.
 //
 FunctionPass *createLoopLoadEliminationPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LoopVersioning - Perform loop multi-versioning.
+//
+FunctionPass *createLoopVersioningPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LoopDataPrefetch - Perform data prefetching in loops.
+//
+FunctionPass *createLoopDataPrefetchPass();
+
+///===---------------------------------------------------------------------===//
+ModulePass *createNameAnonFunctionPass();
 
 } // End llvm namespace
 

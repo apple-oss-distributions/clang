@@ -47,31 +47,10 @@ STATISTIC(NumMergedAllocas, "Number of allocas merged together");
 // if those would be more profitable and blocked inline steps.
 STATISTIC(NumCallerCallersAnalyzed, "Number of caller-callers analyzed");
 
-static cl::opt<int>
-InlineLimit("inline-threshold", cl::Hidden, cl::init(225), cl::ZeroOrMore,
-        cl::desc("Control the amount of inlining to perform (default = 225)"));
+Inliner::Inliner(char &ID) : CallGraphSCCPass(ID), InsertLifetime(true) {}
 
-static cl::opt<int>
-HintThreshold("inlinehint-threshold", cl::Hidden, cl::init(600),
-              cl::desc("Threshold for inlining functions with inline hint"));
-
-// We instroduce this threshold to help performance of instrumentation based
-// PGO before we actually hook up inliner with analysis passes such as BPI and
-// BFI.
-static cl::opt<int>
-ColdThreshold("inlinecold-threshold", cl::Hidden, cl::init(225),
-              cl::desc("Threshold for inlining functions with cold attribute"));
-
-// Threshold to use when optsize is specified (and there is no -inline-limit).
-const int OptSizeThreshold = 75;
-
-Inliner::Inliner(char &ID) 
-  : CallGraphSCCPass(ID), InlineThreshold(InlineLimit), InsertLifetime(true) {}
-
-Inliner::Inliner(char &ID, int Threshold, bool InsertLifetime)
-  : CallGraphSCCPass(ID), InlineThreshold(InlineLimit.getNumOccurrences() > 0 ?
-                                          InlineLimit : Threshold),
-    InsertLifetime(InsertLifetime) {}
+Inliner::Inliner(char &ID, bool InsertLifetime)
+    : CallGraphSCCPass(ID), InsertLifetime(InsertLifetime) {}
 
 /// For this class, we declare that we require and preserve the call graph.
 /// If the derived class implements this method, it should
@@ -79,6 +58,7 @@ Inliner::Inliner(char &ID, int Threshold, bool InsertLifetime)
 void Inliner::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<AssumptionCacheTracker>();
   AU.addRequired<TargetLibraryInfoWrapperPass>();
+  getAAResultsAnalysisUsage(AU);
   CallGraphSCCPass::getAnalysisUsage(AU);
 }
 
@@ -241,43 +221,6 @@ static bool InlineCallIfPossible(Pass &P, CallSite CS, InlineFunctionInfo &IFI,
   return true;
 }
 
-unsigned Inliner::getInlineThreshold(CallSite CS) const {
-  int Threshold = InlineThreshold; // -inline-threshold or else selected by
-                                   // overall opt level
-
-  // If -inline-threshold is not given, listen to the optsize attribute when it
-  // would decrease the threshold.
-  Function *Caller = CS.getCaller();
-  bool OptSize = Caller && !Caller->isDeclaration() &&
-                 // FIXME: Use Function::optForSize().
-                 Caller->hasFnAttribute(Attribute::OptimizeForSize);
-  if (!(InlineLimit.getNumOccurrences() > 0) && OptSize &&
-      OptSizeThreshold < Threshold)
-    Threshold = OptSizeThreshold;
-
-  // Listen to the inlinehint attribute when it would increase the threshold
-  // and the caller does not need to minimize its size.
-  Function *Callee = CS.getCalledFunction();
-  bool InlineHint = Callee && !Callee->isDeclaration() &&
-                    Callee->hasFnAttribute(Attribute::InlineHint);
-  if (InlineHint && HintThreshold > Threshold &&
-      !Caller->hasFnAttribute(Attribute::MinSize))
-    Threshold = HintThreshold;
-
-  // Listen to the cold attribute when it would decrease the threshold.
-  bool ColdCallee = Callee && !Callee->isDeclaration() &&
-                    Callee->hasFnAttribute(Attribute::Cold);
-  // Command line argument for InlineLimit will override the default
-  // ColdThreshold. If we have -inline-threshold but no -inlinecold-threshold,
-  // do not use the default cold threshold even if it is smaller.
-  if ((InlineLimit.getNumOccurrences() == 0 ||
-       ColdThreshold.getNumOccurrences() > 0) && ColdCallee &&
-      ColdThreshold < Threshold)
-    Threshold = ColdThreshold;
-
-  return Threshold;
-}
-
 static void emitAnalysis(CallSite CS, const Twine &Msg) {
   Function *Caller = CS.getCaller();
   LLVMContext &Ctx = Caller->getContext();
@@ -415,7 +358,7 @@ static bool InlineHistoryIncludes(Function *F, int InlineHistoryID,
 
 bool Inliner::runOnSCC(CallGraphSCC &SCC) {
   CallGraph &CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
-  AssumptionCacheTracker *ACT = &getAnalysis<AssumptionCacheTracker>();
+  ACT = &getAnalysis<AssumptionCacheTracker>();
   auto &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
 
   SmallPtrSet<Function*, 8> SCCFunctions;

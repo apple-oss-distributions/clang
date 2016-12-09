@@ -158,6 +158,7 @@ def RetCC_X86_64_C : CallingConv<[
   // The X86-64 calling convention always returns FP values in XMM0.
   CCIfType<[f32], CCAssignToReg<[XMM0, XMM1]>>,
   CCIfType<[f64], CCAssignToReg<[XMM0, XMM1]>>,
+  CCIfType<[f128], CCAssignToReg<[XMM0, XMM1]>>,
 
   // MMX vector types are always returned in XMM0.
   CCIfType<[x86mmx], CCAssignToReg<[XMM0, XMM1]>>,
@@ -195,15 +196,19 @@ def RetCC_X86_64_WebKit_JS : CallingConv<[
 ]>;
 
 def RetCC_X86_64_Swift : CallingConv<[
+  // For integers, ECX, R8D can be used as extra return registers.
+  CCIfType<[i1],  CCPromoteToType<i8>>,
   CCIfType<[i8] , CCAssignToReg<[AL, DL, CL, R8B]>>,
   CCIfType<[i16], CCAssignToReg<[AX, DX, CX, R8W]>>,
   CCIfType<[i32], CCAssignToReg<[EAX, EDX, ECX, R8D]>>,
   CCIfType<[i64], CCAssignToReg<[RAX, RDX, RCX, R8]>>,
 
+  // XMM0, XMM1, XMM2 and XMM3 can be used to return FP values.
   CCIfType<[f32], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3]>>,
   CCIfType<[f64], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3]>>,
+  CCIfType<[f128], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3]>>,
 
-  // MMX vector types are always returned in XMM0.
+  // MMX vector types are returned in XMM0, XMM1, XMM2 and XMM3.
   CCIfType<[x86mmx], CCAssignToReg<[XMM0, XMM1, XMM2, XMM3]>>,
   CCDelegateTo<RetCC_X86Common>
 ]>;
@@ -292,11 +297,15 @@ def CC_X86_64_C : CallingConv<[
   CCIfNest<CCIfSubtarget<"isTarget64BitILP32()", CCAssignToReg<[R10D]>>>,
   CCIfNest<CCAssignToReg<[R10]>>,
 
-  // An SwiftSelf is passed in R10.
-  CCIfSwiftSelf<CCIfType<[i64], CCAssignToReg<[R10]>>>,
+  // Pass SwiftSelf in a callee saved register.
+  CCIfSwiftSelf<CCIfType<[i64], CCAssignToReg<[R13]>>>,
 
-  // An SwiftError is passed in R12.
+  // A SwiftError is passed in R12.
   CCIfSwiftError<CCIfType<[i64], CCAssignToReg<[R12]>>>,
+
+  // For Swift Calling Convention, pass sret in %RAX.
+  CCIfCC<"CallingConv::Swift",
+    CCIfSRet<CCIfType<[i64], CCAssignToReg<[RAX]>>>>,
 
   // The first 6 integer arguments are passed in integer registers.
   CCIfType<[i32], CCAssignToReg<[EDI, ESI, EDX, ECX, R8D, R9D]>>,
@@ -319,7 +328,7 @@ def CC_X86_64_C : CallingConv<[
   CCIfType<[v64i1], CCPromoteToType<v64i8>>,
 
   // The first 8 FP/Vector arguments are passed in XMM registers.
-  CCIfType<[f32, f64, v16i8, v8i16, v4i32, v2i64, v4f32, v2f64],
+  CCIfType<[f32, f64, f128, v16i8, v8i16, v4i32, v2i64, v4f32, v2f64],
             CCIfSubtarget<"hasSSE1()",
             CCAssignToReg<[XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7]>>>,
 
@@ -344,7 +353,7 @@ def CC_X86_64_C : CallingConv<[
 
   // Long doubles get stack slots whose size and alignment depends on the
   // subtarget.
-  CCIfType<[f80], CCAssignToStack<0, 0>>,
+  CCIfType<[f80, f128], CCAssignToStack<0, 0>>,
 
   // Vectors get 16-byte stack slots that are 16-byte aligned.
   CCIfType<[v16i8, v8i16, v4i32, v2i64, v4f32, v2f64], CCAssignToStack<16, 16>>,
@@ -617,6 +626,23 @@ def CC_X86_32_C : CallingConv<[
   CCDelegateTo<CC_X86_32_Common>
 ]>;
 
+def CC_X86_32_MCU : CallingConv<[
+  // Handles byval parameters.  Note that, like FastCC, we can't rely on
+  // the delegation to CC_X86_32_Common because that happens after code that
+  // puts arguments in registers.
+  CCIfByVal<CCPassByVal<4, 4>>,
+
+  // Promote i1/i8/i16 arguments to i32.
+  CCIfType<[i1, i8, i16], CCPromoteToType<i32>>,
+
+  // If the call is not a vararg call, some arguments may be passed
+  // in integer registers.
+  CCIfNotVarArg<CCIfType<[i32], CCCustom<"CC_X86_32_MCUInReg">>>,
+
+  // Otherwise, same as everything else.
+  CCDelegateTo<CC_X86_32_Common>
+]>;
+
 def CC_X86_32_FastCall : CallingConv<[
   // Promote i1/i8/i16 arguments to i32.
   CCIfType<[i1, i8, i16], CCPromoteToType<i32>>,
@@ -764,18 +790,28 @@ def CC_Intel_OCL_BI : CallingConv<[
   CCDelegateTo<CC_X86_32_C>
 ]>;
 
+def CC_X86_32_Intr : CallingConv<[
+  CCAssignToStack<4, 4>
+]>;
+
+def CC_X86_64_Intr : CallingConv<[
+  CCAssignToStack<8, 8>
+]>;
+
 //===----------------------------------------------------------------------===//
 // X86 Root Argument Calling Conventions
 //===----------------------------------------------------------------------===//
 
 // This is the root argument convention for the X86-32 backend.
 def CC_X86_32 : CallingConv<[
+  CCIfSubtarget<"isTargetMCU()", CCDelegateTo<CC_X86_32_MCU>>,
   CCIfCC<"CallingConv::X86_FastCall", CCDelegateTo<CC_X86_32_FastCall>>,
   CCIfCC<"CallingConv::X86_VectorCall", CCDelegateTo<CC_X86_32_VectorCall>>,
   CCIfCC<"CallingConv::X86_ThisCall", CCDelegateTo<CC_X86_32_ThisCall>>,
   CCIfCC<"CallingConv::Fast", CCDelegateTo<CC_X86_32_FastCC>>,
   CCIfCC<"CallingConv::GHC", CCDelegateTo<CC_X86_32_GHC>>,
   CCIfCC<"CallingConv::HiPE", CCDelegateTo<CC_X86_32_HiPE>>,
+  CCIfCC<"CallingConv::X86_INTR", CCDelegateTo<CC_X86_32_Intr>>,
 
   // Otherwise, drop to normal X86-32 CC
   CCDelegateTo<CC_X86_32_C>
@@ -792,6 +828,7 @@ def CC_X86_64 : CallingConv<[
   CCIfCC<"CallingConv::X86_VectorCall", CCDelegateTo<CC_X86_Win64_VectorCall>>,
   CCIfCC<"CallingConv::HHVM", CCDelegateTo<CC_X86_64_HHVM>>,
   CCIfCC<"CallingConv::HHVM_C", CCDelegateTo<CC_X86_64_HHVM_C>>,
+  CCIfCC<"CallingConv::X86_INTR", CCDelegateTo<CC_X86_64_Intr>>,
 
   // Mingw64 and native Win64 use Win64 CC
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<CC_X86_Win64_C>>,
@@ -816,7 +853,7 @@ def CSR_NoRegs : CalleeSavedRegs<(add)>;
 def CSR_32 : CalleeSavedRegs<(add ESI, EDI, EBX, EBP)>;
 def CSR_64 : CalleeSavedRegs<(add RBX, R12, R13, R14, R15, RBP)>;
 
-def CSR_64_SwiftError : CalleeSavedRegs<(add RBX, R13, R14, R15, RBP)>;
+def CSR_64_SwiftError : CalleeSavedRegs<(sub CSR_64, R12)>;
 
 def CSR_32EHRet : CalleeSavedRegs<(add EAX, EDX, CSR_32)>;
 def CSR_64EHRet : CalleeSavedRegs<(add RAX, RDX, CSR_64)>;
@@ -829,6 +866,12 @@ def CSR_Win64 : CalleeSavedRegs<(add RBX, RBP, RDI, RSI, R12, R13, R14, R15,
 // GPRs are preserved.
 def CSR_64_TLS_Darwin : CalleeSavedRegs<(add CSR_64, RCX, RDX, RSI,
                                              R8, R9, R10, R11)>;
+
+// CSRs that are handled by prologue, epilogue.
+def CSR_64_CXX_TLS_Darwin_PE : CalleeSavedRegs<(add RBP)>;
+
+// CSRs that are handled explicitly via copies.
+def CSR_64_CXX_TLS_Darwin_ViaCopy : CalleeSavedRegs<(sub CSR_64_TLS_Darwin, RBP)>;
 
 // All GPRs - except r11
 def CSR_64_RT_MostRegs : CalleeSavedRegs<(add CSR_64, RAX, RCX, RDX, RSI, RDI,
@@ -843,6 +886,11 @@ def CSR_64_RT_AllRegs_AVX : CalleeSavedRegs<(add CSR_64_RT_MostRegs,
 def CSR_64_MostRegs : CalleeSavedRegs<(add RBX, RCX, RDX, RSI, RDI, R8, R9, R10,
                                            R11, R12, R13, R14, R15, RBP,
                                            (sequence "XMM%u", 0, 15))>;
+
+def CSR_32_AllRegs     : CalleeSavedRegs<(add EAX, EBX, ECX, EDX, EBP, ESI,
+                                              EDI, ESP)>;
+def CSR_32_AllRegs_SSE : CalleeSavedRegs<(add CSR_32_AllRegs,
+                                              (sequence "XMM%u", 0, 7))>;
 
 def CSR_64_AllRegs     : CalleeSavedRegs<(add CSR_64_MostRegs, RAX, RSP,
                                               (sequence "XMM%u", 16, 31))>;

@@ -21,10 +21,10 @@ class SectionRef;
 }
 }
 
-int AnalyzeXar(llvm::StringRef &filePath, APIAnalysisIntermediateResult &result,
+int AnalyzeXar(llvm::StringRef filePath, APIAnalysisIntermediateResult &result,
                const APIAnalysisOptions &options);
 
-int AnalyzeXar(llvm::MemoryBufferRef &fileData,
+int AnalyzeXar(llvm::MemoryBufferRef fileData,
                APIAnalysisIntermediateResult &result,
                const APIAnalysisOptions &options);
 

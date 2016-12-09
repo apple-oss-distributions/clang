@@ -53,7 +53,8 @@ public:
     ISAVersion7_0_0,
     ISAVersion7_0_1,
     ISAVersion8_0_0,
-    ISAVersion8_0_1
+    ISAVersion8_0_1,
+    ISAVersion8_0_3
   };
 
 private:
@@ -68,13 +69,16 @@ private:
   bool FP64Denormals;
   bool FP32Denormals;
   bool FastFMAF32;
+  bool HalfRate64Ops;
   bool CaymanISA;
   bool FlatAddressSpace;
+  bool FlatForGlobal;
   bool EnableIRStructurizer;
   bool EnablePromoteAlloca;
   bool EnableIfCvt;
   bool EnableLoadStoreOpt;
   bool EnableUnsafeDSOffsetFolding;
+  bool EnableXNACK;
   unsigned WavefrontSize;
   bool CFALUBug;
   int LocalMemorySize;
@@ -155,8 +159,16 @@ public:
     return FastFMAF32;
   }
 
+  bool hasHalfRate64Ops() const {
+    return HalfRate64Ops;
+  }
+
   bool hasFlatAddressSpace() const {
     return FlatAddressSpace;
+  }
+
+  bool useFlatForGlobal() const {
+    return FlatForGlobal;
   }
 
   bool hasBFE() const {
@@ -285,6 +297,10 @@ public:
   }
   bool isVGPRSpillingEnabled(const SIMachineFunctionInfo *MFI) const;
 
+  bool isXNACKEnabled() const {
+    return EnableXNACK;
+  }
+
   unsigned getMaxWavesPerCU() const {
     if (getGeneration() >= AMDGPUSubtarget::SOUTHERN_ISLANDS)
       return 10;
@@ -303,6 +319,9 @@ public:
     return isAmdHsaOS() ? 0 : 36;
   }
 
+  unsigned getMaxNumUserSGPRs() const {
+    return 16;
+  }
 };
 
 } // End namespace llvm

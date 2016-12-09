@@ -15,6 +15,7 @@
 #ifndef LLVM_CLANG_BASIC_MODULE_H
 #define LLVM_CLANG_BASIC_MODULE_H
 
+#include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
@@ -35,9 +36,6 @@ namespace llvm {
 
 namespace clang {
   
-class DirectoryEntry;
-class FileEntry;
-class FileManager;
 class LangOptions;
 class TargetInfo;
 class IdentifierInfo;
@@ -155,6 +153,9 @@ public:
   /// \brief Whether this module is missing a feature from \c Requirements.
   unsigned IsMissingRequirement : 1;
 
+  /// \brief Whether we tried and failed to load a module file for this module.
+  unsigned HasIncompatibleModuleFile : 1;
+
   /// \brief Whether this module is available in the current translation unit.
   ///
   /// If the module is missing headers or does not meet all requirements then
@@ -181,6 +182,9 @@ public:
 
   /// \brief Whether this is an inferred submodule (module * { ... }).
   unsigned IsInferred : 1;
+
+  /// \brief Whether this is a module who has its swift_names inferred.
+  unsigned IsSwiftInferImportAsMember : 1;
 
   /// \brief Whether we should infer submodules for this module based on 
   /// the headers.

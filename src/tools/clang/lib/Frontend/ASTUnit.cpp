@@ -1723,11 +1723,12 @@ ASTUnit *ASTUnit::create(CompilerInvocation *CI,
 ASTUnit *ASTUnit::LoadFromCompilerInvocationAction(
     CompilerInvocation *CI,
     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
-    IntrusiveRefCntPtr<DiagnosticsEngine> Diags, ASTFrontendAction *Action,
+    IntrusiveRefCntPtr<DiagnosticsEngine> Diags, FrontendAction *Action,
     ASTUnit *Unit, bool Persistent, StringRef ResourceFilesPath,
-    bool OnlyLocalDecls, bool CaptureDiagnostics, bool PrecompilePreamble,
-    bool CacheCodeCompletionResults, bool IncludeBriefCommentsInCodeCompletion,
-    bool UserFilesAreVolatile, std::unique_ptr<ASTUnit> *ErrAST) {
+    bool OnlyLocalDecls, bool CaptureDiagnostics,
+    unsigned PrecompilePreambleAfterNParses, bool CacheCodeCompletionResults,
+    bool IncludeBriefCommentsInCodeCompletion, bool UserFilesAreVolatile,
+    std::unique_ptr<ASTUnit> *ErrAST) {
   assert(CI && "A CompilerInvocation is required");
 
   std::unique_ptr<ASTUnit> OwnAST;
@@ -1746,8 +1747,8 @@ ASTUnit *ASTUnit::LoadFromCompilerInvocationAction(
   }
   AST->OnlyLocalDecls = OnlyLocalDecls;
   AST->CaptureDiagnostics = CaptureDiagnostics;
-  if (PrecompilePreamble)
-    AST->PreambleRebuildCounter = 2;
+  if (PrecompilePreambleAfterNParses > 0)
+    AST->PreambleRebuildCounter = PrecompilePreambleAfterNParses;
   AST->TUKind = Action ? Action->getTranslationUnitKind() : TU_Complete;
   AST->ShouldCacheCodeCompletionResults = CacheCodeCompletionResults;
   AST->IncludeBriefCommentsInCodeCompletion
@@ -1811,7 +1812,7 @@ ASTUnit *ASTUnit::LoadFromCompilerInvocationAction(
   // Create the source manager.
   Clang->setSourceManager(&AST->getSourceManager());
 
-  ASTFrontendAction *Act = Action;
+  FrontendAction *Act = Action;
 
   std::unique_ptr<TopLevelDeclTrackerAction> TrackerAct;
   if (!Act) {
@@ -1864,7 +1865,7 @@ ASTUnit *ASTUnit::LoadFromCompilerInvocationAction(
 
 bool ASTUnit::LoadFromCompilerInvocation(
     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
-    bool PrecompilePreamble) {
+    unsigned PrecompilePreambleAfterNParses) {
   if (!Invocation)
     return true;
   
@@ -1874,8 +1875,8 @@ bool ASTUnit::LoadFromCompilerInvocation(
   ProcessWarningOptions(getDiagnostics(), Invocation->getDiagnosticOpts());
 
   std::unique_ptr<llvm::MemoryBuffer> OverrideMainBuffer;
-  if (PrecompilePreamble) {
-    PreambleRebuildCounter = 2;
+  if (PrecompilePreambleAfterNParses > 0) {
+    PreambleRebuildCounter = PrecompilePreambleAfterNParses;
     OverrideMainBuffer =
         getMainBufferWithPrecompiledPreamble(PCHContainerOps, *Invocation);
   }
@@ -1894,9 +1895,10 @@ std::unique_ptr<ASTUnit> ASTUnit::LoadFromCompilerInvocation(
     CompilerInvocation *CI,
     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
     IntrusiveRefCntPtr<DiagnosticsEngine> Diags, FileManager *FileMgr,
-    bool OnlyLocalDecls, bool CaptureDiagnostics, bool PrecompilePreamble,
-    TranslationUnitKind TUKind, bool CacheCodeCompletionResults,
-    bool IncludeBriefCommentsInCodeCompletion, bool UserFilesAreVolatile) {
+    bool OnlyLocalDecls, bool CaptureDiagnostics,
+    unsigned PrecompilePreambleAfterNParses, TranslationUnitKind TUKind,
+    bool CacheCodeCompletionResults, bool IncludeBriefCommentsInCodeCompletion,
+    bool UserFilesAreVolatile) {
   // Create the AST unit.
   std::unique_ptr<ASTUnit> AST(new ASTUnit(false));
   ConfigureDiags(Diags, *AST, CaptureDiagnostics);
@@ -1919,7 +1921,8 @@ std::unique_ptr<ASTUnit> ASTUnit::LoadFromCompilerInvocation(
     llvm::CrashRecoveryContextReleaseRefCleanup<DiagnosticsEngine> >
     DiagCleanup(Diags.get());
 
-  if (AST->LoadFromCompilerInvocation(PCHContainerOps, PrecompilePreamble))
+  if (AST->LoadFromCompilerInvocation(PCHContainerOps,
+                                      PrecompilePreambleAfterNParses))
     return nullptr;
   return AST;
 }
@@ -1930,12 +1933,11 @@ ASTUnit *ASTUnit::LoadFromCommandLine(
     IntrusiveRefCntPtr<DiagnosticsEngine> Diags, StringRef ResourceFilesPath,
     bool OnlyLocalDecls, bool CaptureDiagnostics,
     ArrayRef<RemappedFile> RemappedFiles, bool RemappedFilesKeepOriginalName,
-    bool PrecompilePreamble, TranslationUnitKind TUKind,
+    unsigned PrecompilePreambleAfterNParses, TranslationUnitKind TUKind,
     bool CacheCodeCompletionResults, bool IncludeBriefCommentsInCodeCompletion,
     bool AllowPCHWithCompilerErrors, bool SkipFunctionBodies,
     bool UserFilesAreVolatile, bool ForSerialization,
-    llvm::Optional<StringRef> ModuleFormat,
-    std::unique_ptr<ASTUnit> *ErrAST) {
+    llvm::Optional<StringRef> ModuleFormat, std::unique_ptr<ASTUnit> *ErrAST) {
   assert(Diags.get() && "no DiagnosticsEngine was provided");
 
   SmallVector<StoredDiagnostic, 4> StoredDiagnostics;
@@ -2002,7 +2004,8 @@ ASTUnit *ASTUnit::LoadFromCommandLine(
   llvm::CrashRecoveryContextCleanupRegistrar<ASTUnit>
     ASTUnitCleanup(AST.get());
 
-  if (AST->LoadFromCompilerInvocation(PCHContainerOps, PrecompilePreamble)) {
+  if (AST->LoadFromCompilerInvocation(PCHContainerOps,
+                                      PrecompilePreambleAfterNParses)) {
     // Some error occurred, if caller wants to examine diagnostics, pass it the
     // ASTUnit.
     if (ErrAST) {
@@ -2497,7 +2500,8 @@ static bool serializeUnit(ASTWriter &Writer,
 }
 
 bool ASTUnit::serialize(raw_ostream &OS) {
-  bool hasErrors = getDiagnostics().hasErrorOccurred();
+  // For serialization we are lenient if the errors were only warn-as-error kind.
+  bool hasErrors = getDiagnostics().hasUncompilableErrorOccurred();
 
   if (WriterData)
     return serializeUnit(WriterData->Writer, WriterData->Buffer,

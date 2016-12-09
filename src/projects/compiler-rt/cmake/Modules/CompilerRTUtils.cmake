@@ -1,3 +1,6 @@
+include(CMakePushCheckState)
+include(CheckSymbolExists)
+
 # Because compiler-rt spends a lot of time setting up custom compile flags,
 # define a handy helper function for it. The compile flags setting in CMake
 # has serious issues that make its syntax challenging at best.
@@ -58,7 +61,7 @@ macro(append_have_file_definition filename varname list)
   list(APPEND ${list} "${varname}=${${varname}}")
 endmacro()
 
-macro(list_union output input1 input2)
+macro(list_intersect output input1 input2)
   set(${output})
   foreach(it ${${input1}})
     list(FIND ${input2} ${it} index)
@@ -67,3 +70,28 @@ macro(list_union output input1 input2)
     endif()
   endforeach()
 endmacro()
+
+# Takes ${ARGN} and puts only supported architectures in @out_var list.
+function(filter_available_targets out_var)
+  set(archs ${${out_var}})
+  foreach(arch ${ARGN})
+    list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
+    if(NOT (ARCH_INDEX EQUAL -1) AND CAN_TARGET_${arch})
+      list(APPEND archs ${arch})
+    endif()
+  endforeach()
+  set(${out_var} ${archs} PARENT_SCOPE)
+endfunction()
+
+function(check_compile_definition def argstring out_var)
+  if("${def}" STREQUAL "")
+    set(${out_var} TRUE PARENT_SCOPE)
+    return()
+  endif()
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${argstring}")
+  check_symbol_exists(${def} "" ${out_var})
+  cmake_pop_check_state()
+endfunction()
+
+

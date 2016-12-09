@@ -154,17 +154,9 @@ public:
                                Address Ptr, QualType ElementType,
                                const CXXDestructorDecl *Dtor) override;
 
-  /// Itanium says that an _Unwind_Exception has to be "double-word"
-  /// aligned (and thus the end of it is also so-aligned), meaning 16
-  /// bytes.  Of course, that was written for the actual Itanium,
-  /// which is a 64-bit platform.  Classically, the ABI doesn't really
-  /// specify the alignment on other platforms, but in practice
-  /// libUnwind declares the struct with __attribute__((aligned)), so
-  /// we assume that alignment here.  (It's generally 16 bytes, but
-  /// some targets overwrite it.)
   CharUnits getAlignmentOfExnObject() {
-    auto align = CGM.getContext().getTargetDefaultAlignForAttributeAligned();
-    return CGM.getContext().toCharUnitsFromBits(align);
+    unsigned Align = CGM.getContext().getTargetInfo().getExnObjectAlignment();
+    return CGM.getContext().toCharUnitsFromBits(Align);
   }
 
   void emitRethrow(CodeGenFunction &CGF, bool isNoReturn) override;
@@ -327,10 +319,9 @@ public:
                                                 llvm::Value *Val);
   void EmitThreadLocalInitFuncs(
       CodeGenModule &CGM,
-      ArrayRef<std::pair<const VarDecl *, llvm::GlobalVariable *>>
-          CXXThreadLocals,
+      ArrayRef<const VarDecl *> CXXThreadLocals,
       ArrayRef<llvm::Function *> CXXThreadLocalInits,
-      ArrayRef<llvm::GlobalVariable *> CXXThreadLocalInitVars) override;
+      ArrayRef<const VarDecl *> CXXThreadLocalInitVars) override;
 
   bool usesThreadWrapperFunction() const override { return true; }
   LValue EmitThreadLocalVarDeclLValue(CodeGenFunction &CGF, const VarDecl *VD,
@@ -535,9 +526,8 @@ llvm::Value *ItaniumCXXABI::EmitLoadOfMemberFunctionPointer(
   const CXXRecordDecl *RD = 
     cast<CXXRecordDecl>(MPT->getClass()->getAs<RecordType>()->getDecl());
 
-  llvm::FunctionType *FTy = 
-    CGM.getTypes().GetFunctionType(
-      CGM.getTypes().arrangeCXXMethodType(RD, FPT));
+  llvm::FunctionType *FTy = CGM.getTypes().GetFunctionType(
+      CGM.getTypes().arrangeCXXMethodType(RD, FPT, /*FD=*/nullptr));
 
   llvm::Constant *ptrdiff_1 = llvm::ConstantInt::get(CGM.PtrDiffTy, 1);
 
@@ -1498,7 +1488,8 @@ void ItaniumCXXABI::emitVTableDefinitions(CodeGenVTables &CGVT,
       DC->getParent()->isTranslationUnit())
     EmitFundamentalRTTIDescriptors();
 
-  CGM.EmitVTableBitSetEntries(VTable, VTLayout);
+  if (!VTable->isDeclarationForLinker())
+    CGM.EmitVTableBitSetEntries(VTable, VTLayout);
 }
 
 bool ItaniumCXXABI::isVirtualOffsetNeededForVTableField(
@@ -1570,7 +1561,7 @@ llvm::GlobalVariable *ItaniumCXXABI::getAddrOfVTable(const CXXRecordDecl *RD,
   if (VTable)
     return VTable;
 
-  // Queue up this v-table for possible deferred emission.
+  // Queue up this vtable for possible deferred emission.
   CGM.addDeferredVTable(RD);
 
   SmallString<256> Name;
@@ -2088,7 +2079,7 @@ static void emitGlobalDtorWithCXAAtExit(CodeGenFunction &CGF,
   const char *Name = "__cxa_atexit";
   if (TLS) {
     const llvm::Triple &T = CGF.getTarget().getTriple();
-    Name = T.isMacOSX() ?  "_tlv_atexit" : "__cxa_thread_atexit";
+    Name = T.isOSDarwin() ?  "_tlv_atexit" : "__cxa_thread_atexit";
   }
 
   // We're assuming that the destructor function is something we can
@@ -2144,10 +2135,10 @@ void ItaniumCXXABI::registerGlobalDtor(CodeGenFunction &CGF,
 static bool isThreadWrapperReplaceable(const VarDecl *VD,
                                        CodeGen::CodeGenModule &CGM) {
   assert(!VD->isStaticLocal() && "static local VarDecls don't need wrappers!");
-  // OS X prefers to have references to thread local variables to go through
+  // Darwin prefers to have references to thread local variables to go through
   // the thread wrapper instead of directly referencing the backing variable.
   return VD->getTLSKind() == VarDecl::TLS_Dynamic &&
-         CGM.getTarget().getTriple().isMacOSX();
+         CGM.getTarget().getTriple().isOSDarwin();
 }
 
 /// Get the appropriate linkage for the wrapper function. This is essentially
@@ -2163,12 +2154,10 @@ getThreadLocalWrapperLinkage(const VarDecl *VD, CodeGen::CodeGenModule &CGM) {
     return VarLinkage;
 
   // If the thread wrapper is replaceable, give it appropriate linkage.
-  if (isThreadWrapperReplaceable(VD, CGM)) {
-    if (llvm::GlobalVariable::isLinkOnceLinkage(VarLinkage) ||
-        llvm::GlobalVariable::isWeakODRLinkage(VarLinkage))
-      return llvm::GlobalVariable::WeakAnyLinkage;
-    return VarLinkage;
-  }
+  if (isThreadWrapperReplaceable(VD, CGM))
+    if (!llvm::GlobalVariable::isLinkOnceLinkage(VarLinkage) &&
+        !llvm::GlobalVariable::isWeakODRLinkage(VarLinkage))
+      return VarLinkage;
   return llvm::GlobalValue::WeakODRLinkage;
 }
 
@@ -2182,28 +2171,45 @@ ItaniumCXXABI::getOrCreateThreadLocalWrapper(const VarDecl *VD,
     getMangleContext().mangleItaniumThreadLocalWrapper(VD, Out);
   }
 
+  // FIXME: If VD is a definition, we should regenerate the function attributes
+  // before returning.
   if (llvm::Value *V = CGM.getModule().getNamedValue(WrapperName))
     return cast<llvm::Function>(V);
 
-  llvm::Type *RetTy = Val->getType();
-  if (VD->getType()->isReferenceType())
-    RetTy = RetTy->getPointerElementType();
+  QualType RetQT = VD->getType();
+  if (RetQT->isReferenceType())
+    RetQT = RetQT.getNonReferenceType();
 
-  llvm::FunctionType *FnTy = llvm::FunctionType::get(RetTy, false);
+  const CGFunctionInfo &FI = CGM.getTypes().arrangeBuiltinFunctionDeclaration(
+      getContext().getPointerType(RetQT), FunctionArgList());
+
+  llvm::FunctionType *FnTy = CGM.getTypes().GetFunctionType(FI);
   llvm::Function *Wrapper =
       llvm::Function::Create(FnTy, getThreadLocalWrapperLinkage(VD, CGM),
                              WrapperName.str(), &CGM.getModule());
+
+  CGM.SetLLVMFunctionAttributes(nullptr, FI, Wrapper);
+
+  if (VD->hasDefinition())
+    CGM.SetLLVMFunctionAttributesForDefinition(nullptr, Wrapper);
+
   // Always resolve references to the wrapper at link time.
-  if (!Wrapper->hasLocalLinkage() && !isThreadWrapperReplaceable(VD, CGM))
+  if (!Wrapper->hasLocalLinkage() && !(isThreadWrapperReplaceable(VD, CGM) &&
+      !llvm::GlobalVariable::isLinkOnceLinkage(Wrapper->getLinkage()) &&
+      !llvm::GlobalVariable::isWeakODRLinkage(Wrapper->getLinkage())))
     Wrapper->setVisibility(llvm::GlobalValue::HiddenVisibility);
+
+  if (isThreadWrapperReplaceable(VD, CGM)) {
+    Wrapper->setCallingConv(llvm::CallingConv::CXX_FAST_TLS);
+    Wrapper->addFnAttr(llvm::Attribute::NoUnwind);
+  }
   return Wrapper;
 }
 
 void ItaniumCXXABI::EmitThreadLocalInitFuncs(
-    CodeGenModule &CGM,
-    ArrayRef<std::pair<const VarDecl *, llvm::GlobalVariable *>>
-        CXXThreadLocals, ArrayRef<llvm::Function *> CXXThreadLocalInits,
-    ArrayRef<llvm::GlobalVariable *> CXXThreadLocalInitVars) {
+    CodeGenModule &CGM, ArrayRef<const VarDecl *> CXXThreadLocals,
+    ArrayRef<llvm::Function *> CXXThreadLocalInits,
+    ArrayRef<const VarDecl *> CXXThreadLocalInitVars) {
   llvm::Function *InitFunc = nullptr;
   if (!CXXThreadLocalInits.empty()) {
     // Generate a guarded initialization function.
@@ -2225,10 +2231,15 @@ void ItaniumCXXABI::EmitThreadLocalInitFuncs(
     CodeGenFunction(CGM)
         .GenerateCXXGlobalInitFunc(InitFunc, CXXThreadLocalInits,
                                    Address(Guard, GuardAlign));
+    // On Darwin platforms, use CXX_FAST_TLS calling convention.
+    if (CGM.getTarget().getTriple().isOSDarwin()) {
+      InitFunc->setCallingConv(llvm::CallingConv::CXX_FAST_TLS);
+      InitFunc->addFnAttr(llvm::Attribute::NoUnwind);
+    }
   }
-  for (auto &I : CXXThreadLocals) {
-    const VarDecl *VD = I.first;
-    llvm::GlobalVariable *Var = I.second;
+  for (const VarDecl *VD : CXXThreadLocals) {
+    llvm::GlobalVariable *Var =
+        cast<llvm::GlobalVariable>(CGM.GetGlobalValue(CGM.getMangledName(VD)));
 
     // Some targets require that all access to thread local variables go through
     // the thread wrapper.  This means that we cannot attempt to create a thread
@@ -2262,6 +2273,8 @@ void ItaniumCXXABI::EmitThreadLocalInitFuncs(
       Init = llvm::Function::Create(
           FnTy, llvm::GlobalVariable::ExternalWeakLinkage, InitFnName.str(),
           &CGM.getModule());
+      const CGFunctionInfo &FI = CGM.getTypes().arrangeNullaryFunction();
+      CGM.SetLLVMFunctionAttributes(nullptr, FI, cast<llvm::Function>(Init));
     }
 
     if (Init)
@@ -2272,8 +2285,11 @@ void ItaniumCXXABI::EmitThreadLocalInitFuncs(
     llvm::BasicBlock *Entry = llvm::BasicBlock::Create(Context, "", Wrapper);
     CGBuilderTy Builder(CGM, Entry);
     if (InitIsInitFunc) {
-      if (Init)
-        Builder.CreateCall(Init);
+      if (Init) {
+        llvm::CallInst *CallVal = Builder.CreateCall(Init);
+        if (isThreadWrapperReplaceable(VD, CGM))
+          CallVal->setCallingConv(llvm::CallingConv::CXX_FAST_TLS);
+      }
     } else {
       // Don't know whether we have an init function. Call it if it exists.
       llvm::Value *Have = Builder.CreateIsNotNull(Init);
@@ -2305,18 +2321,19 @@ void ItaniumCXXABI::EmitThreadLocalInitFuncs(
 LValue ItaniumCXXABI::EmitThreadLocalVarDeclLValue(CodeGenFunction &CGF,
                                                    const VarDecl *VD,
                                                    QualType LValType) {
-  QualType T = VD->getType();
-  llvm::Type *Ty = CGF.getTypes().ConvertTypeForMem(T);
-  llvm::Value *Val = CGF.CGM.GetAddrOfGlobalVar(VD, Ty);
+  llvm::Value *Val = CGF.CGM.GetAddrOfGlobalVar(VD);
   llvm::Function *Wrapper = getOrCreateThreadLocalWrapper(VD, Val);
 
-  Val = CGF.Builder.CreateCall(Wrapper);
+  llvm::CallInst *CallVal = CGF.Builder.CreateCall(Wrapper);
+  if (isThreadWrapperReplaceable(VD, CGF.CGM))
+    CallVal->setCallingConv(llvm::CallingConv::CXX_FAST_TLS);
 
   LValue LV;
   if (VD->getType()->isReferenceType())
-    LV = CGF.MakeNaturalAlignAddrLValue(Val, LValType);
+    LV = CGF.MakeNaturalAlignAddrLValue(CallVal, LValType);
   else
-    LV = CGF.MakeAddrLValue(Val, LValType, CGF.getContext().getDeclAlign(VD));
+    LV = CGF.MakeAddrLValue(CallVal, LValType,
+                            CGF.getContext().getDeclAlign(VD));
   // FIXME: need setObjCGCLValueClass?
   return LV;
 }
@@ -2712,6 +2729,9 @@ void ItaniumRTTIBuilder::BuildVTablePointer(const Type *Ty) {
   case Type::Auto:
     llvm_unreachable("Undeduced auto type shouldn't get here");
 
+  case Type::Pipe:
+    llvm_unreachable("Pipe types shouldn't get here");
+
   case Type::Builtin:
   // GCC treats vector and complex types as fundamental types.
   case Type::Vector:
@@ -2935,6 +2955,9 @@ llvm::Constant *ItaniumRTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
 
   case Type::Auto:
     llvm_unreachable("Undeduced auto type shouldn't get here");
+
+  case Type::Pipe:
+    llvm_unreachable("Pipe type shouldn't get here");
 
   case Type::ConstantArray:
   case Type::IncompleteArray:

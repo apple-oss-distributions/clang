@@ -93,7 +93,6 @@ muldf3
 muldi3
 mulodi4
 mulosi4
-muloti4
 mulsf3
 multf3
 multi3

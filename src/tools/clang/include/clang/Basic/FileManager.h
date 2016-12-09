@@ -39,12 +39,10 @@ class FileSystemStatCache;
 /// the virtual file system).
 class DirectoryEntry {
   const char *Name;   // Name of the directory.
-  bool HasVFSEntry = true;   // Track entries in the VFS overlay.
   friend class FileManager;
 public:
   DirectoryEntry() : Name(nullptr) {}
   const char *getName() const { return Name; }
-  bool hasVFSEntry() const { return HasVFSEntry; }
 };
 
 /// \brief Cached information about one file (either on disk
@@ -128,9 +126,9 @@ class FileManager : public RefCountedBase<FileManager> {
   ///
   /// For each virtual file (e.g. foo/bar/baz.cpp), we add all of its parent
   /// directories (foo/ and foo/bar/) here.
-  SmallVector<DirectoryEntry*, 4> VirtualDirectoryEntries;
+  SmallVector<std::unique_ptr<DirectoryEntry>, 4> VirtualDirectoryEntries;
   /// \brief The virtual files that we have allocated.
-  SmallVector<FileEntry*, 4> VirtualFileEntries;
+  SmallVector<std::unique_ptr<FileEntry>, 4> VirtualFileEntries;
 
   /// \brief A cache that maps paths to directory entries (either real or
   /// virtual) we have looked up
@@ -171,13 +169,6 @@ class FileManager : public RefCountedBase<FileManager> {
   /// Add all ancestors of the given path (pointing to either a file
   /// or a directory) as virtual directories.
   void addAncestorsAsVirtualDirs(StringRef Path);
-
-  /// The module dependency collector is needed to collect header files
-  /// during module parsing and make them available to be copied out to a VFS
-  /// cache in a crash reproducer.
-  /// FIXME: This might not be the right place for the module dep collector but
-  /// given no other reliable alternatives, use it here.
-  std::shared_ptr<ModuleDependencyCollector> ModuleDepCollector;
 
 public:
   FileManager(const FileSystemOptions &FileSystemOpts,
@@ -290,14 +281,6 @@ public:
   StringRef getCanonicalName(const DirectoryEntry *Dir);
 
   void PrintStats() const;
-
-  /// Return the ModuleDependencyCollector object used to collect
-  /// header files found while parsing module maps.
-  std::shared_ptr<ModuleDependencyCollector> getModuleDepCollector() const;
-
-  /// Setup the ModuleDependencyCollector.
-  void
-  setModuleDepCollector(std::shared_ptr<ModuleDependencyCollector> Collector);
 };
 
 }  // end namespace clang

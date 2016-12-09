@@ -35,6 +35,7 @@
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/MCTargetOptionsCommandFlags.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/LEB128.h"
@@ -471,16 +472,15 @@ public:
   const std::vector<AccelInfo> &getObjC() const { return ObjC; }
 
   /// Get the full path for file \a FileNum in the line table
-  const char *getResolvedPath(unsigned FileNum) {
+  StringRef getResolvedPath(unsigned FileNum) {
     if (FileNum >= ResolvedPaths.size())
-      return nullptr;
-    return ResolvedPaths[FileNum].size() ? ResolvedPaths[FileNum].c_str()
-                                         : nullptr;
+      return StringRef();
+    return ResolvedPaths[FileNum];
   }
 
   /// Set the fully resolved path for the line-table's file \a FileNum
   /// to \a Path.
-  void setResolvedPath(unsigned FileNum, const std::string &Path) {
+  void setResolvedPath(unsigned FileNum, StringRef Path) {
     if (ResolvedPaths.size() <= FileNum)
       ResolvedPaths.resize(FileNum + 1);
     ResolvedPaths[FileNum] = Path;
@@ -539,7 +539,10 @@ private:
   /// @}
 
   /// Cached resolved paths from the line table.
-  std::vector<std::string> ResolvedPaths;
+  /// Note, the StringRefs here point in to the intern (uniquing) string pool.
+  /// This means that a StringRef returned here doesn't need to then be uniqued
+  /// for the purposes of getting a unique address for each string.
+  std::vector<StringRef> ResolvedPaths;
 
   /// Is this unit subject to the ODR rule?
   bool HasODR;
@@ -844,9 +847,11 @@ bool DwarfStreamer::init(Triple TheTriple, StringRef OutputFilename) {
   if (EC)
     return error(Twine(OutputFilename) + ": " + EC.message(), Context);
 
-  MS = TheTarget->createMCObjectStreamer(TheTriple, *MC, *MAB, *OutFile, MCE,
-                                         *MSTI, false,
-                                         /*DWARFMustBeAtTheEnd*/ false);
+  MCTargetOptions MCOptions = InitMCTargetOptionsFromFlags();
+  MS = TheTarget->createMCObjectStreamer(
+      TheTriple, *MC, *MAB, *OutFile, MCE, *MSTI, MCOptions.MCRelaxAll,
+      MCOptions.MCIncrementalLinkerCompatible,
+      /*DWARFMustBeAtTheEnd*/ false);
   if (!MS)
     return error("no object streamer for target " + TripleName, Context);
 
@@ -2002,7 +2007,6 @@ PointerIntPair<DeclContext *, 1> DeclContextTree::getChildDeclContext(
       Tag != dwarf::DW_TAG_enumeration_type && NameRef.empty())
     return PointerIntPair<DeclContext *, 1>(nullptr);
 
-  std::string File;
   unsigned Line = 0;
   unsigned ByteSize = UINT32_MAX;
 
@@ -2030,25 +2034,27 @@ PointerIntPair<DeclContext *, 1> DeclContextTree::getChildDeclContext(
           // FIXME: Passing U.getOrigUnit().getCompilationDir()
           // instead of "" would allow more uniquing, but for now, do
           // it this way to match dsymutil-classic.
+          std::string File;
           if (LT->getFileNameByIndex(
                   FileNum, "",
                   DILineInfoSpecifier::FileLineInfoKind::AbsoluteFilePath,
                   File)) {
             Line = DIE->getAttributeValueAsUnsignedConstant(
                 &U.getOrigUnit(), dwarf::DW_AT_decl_line, 0);
-#ifdef HAVE_REALPATH
             // Cache the resolved paths, because calling realpath is expansive.
-            if (const char *ResolvedPath = U.getResolvedPath(FileNum)) {
-              File = ResolvedPath;
+            StringRef ResolvedPath = U.getResolvedPath(FileNum);
+            if (!ResolvedPath.empty()) {
+              FileRef = ResolvedPath;
             } else {
+#ifdef HAVE_REALPATH
               char RealPath[PATH_MAX + 1];
               RealPath[PATH_MAX] = 0;
               if (::realpath(File.c_str(), RealPath))
                 File = RealPath;
-              U.setResolvedPath(FileNum, File);
-            }
 #endif
-            FileRef = StringPool.internString(File);
+              FileRef = StringPool.internString(File);
+              U.setResolvedPath(FileNum, FileRef);
+            }
           }
         }
       }
@@ -3417,7 +3423,7 @@ void DwarfLinker::patchRangesForUnit(const CompileUnit &Unit,
   uint64_t OrigLowPc = OrigUnitDie->getAttributeValueAsAddress(
       &OrigUnit, dwarf::DW_AT_low_pc, -1ULL);
   // Ranges addresses are based on the unit's low_pc. Compute the
-  // offset we need to apply to adapt to the the new unit's low_pc.
+  // offset we need to apply to adapt to the new unit's low_pc.
   int64_t UnitPcOffset = 0;
   if (OrigLowPc != -1ULL)
     UnitPcOffset = int64_t(OrigLowPc) - Unit.getLowPc();
@@ -3852,7 +3858,10 @@ bool DwarfLinker::registerModuleReference(
 
   auto Cached = ClangModules.find(PCMfile);
   if (Cached != ClangModules.end()) {
-    if (Cached->second != DwoId)
+    // FIXME: Until PR27449 (https://llvm.org/bugs/show_bug.cgi?id=27449) is
+    // fixed in clang, only warn about DWO_id mismatches in verbose mode.
+    // ASTFileSignatures will change randomly when a module is rebuilt.
+    if (Options.Verbose && (Cached->second != DwoId))
       reportWarning(Twine("hash mismatch: this object file was built against a "
                           "different version of the module ") + PCMfile);
     if (Options.Verbose)
@@ -3902,7 +3911,6 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
     bool isClangModule = sys::path::extension(Filename).equals(".pcm");
     bool isArchive = ObjFile.endswith(")");
     if (isClangModule) {
-      sys::path::remove_filename(Path);
       StringRef ModuleCacheDir = sys::path::parent_path(Path);
       if (sys::fs::exists(ModuleCacheDir)) {
         // If the module's parent directory exists, we assume that the module
@@ -3920,8 +3928,11 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
         // was built on a different machine. We don't want to discourage module
         // debugging for convenience libraries within a project though.
         if (!ArchiveHintDisplayed) {
-          errs() << "note: Module debugging should be disabled when shipping "
-                    "static libraries.\n";
+          errs() << "note: Linking a static library that was built with "
+                    "-gmodules, but the module cache was not found.  "
+                    "Redistributable static libraries should never be built "
+                    "with module debugging enabled.  The debug experience will "
+                    "be degraded due to incomplete debug information.\n";
           ArchiveHintDisplayed = true;
         }
       }
@@ -3945,10 +3956,18 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
                << " 1 compile unit.\n";
         exitDsymutil(1);
       }
-      if (getDwoId(*CUDie, *CU) != DwoId)
-        reportWarning(
-            Twine("hash mismatch: this object file was built against a "
-                  "different version of the module ") + Filename);
+      // FIXME: Until PR27449 (https://llvm.org/bugs/show_bug.cgi?id=27449) is
+      // fixed in clang, only warn about DWO_id mismatches in verbose mode.
+      // ASTFileSignatures will change randomly when a module is rebuilt.
+      uint64_t PCMDwoId = getDwoId(*CUDie, *CU);
+      if (PCMDwoId != DwoId) {
+        if (Options.Verbose)
+          reportWarning(
+              Twine("hash mismatch: this object file was built against a "
+                    "different version of the module ") + Filename);
+        // Update the cache entry with the DwoId of the module loaded from disk.
+        ClangModules[Filename] = PCMDwoId;
+      }
 
       // Add this module.
       Unit = llvm::make_unique<CompileUnit>(*CU, UnitID++, !Options.NoODR,

@@ -17,7 +17,8 @@ TOOL_NO_EXPORTS = 1
 include $(CLANG_LEVEL)/../../Makefile.config
 LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader support mc option
 USEDLIBS = clangTidy.a clangTidyLLVMModule.a clangTidyGoogleModule.a \
-           clangTidyMiscModule.a clangTidyModernizeModule.a clangTidyReadability.a \
+           clangTidyMiscModule.a clangTidyModernizeModule.a \
+	   clangTidyPerformanceModule.a clangTidyReadability.a \
 	   clangTidyUtils.a clangTidyCERTModule.a clangStaticAnalyzerFrontend.a \
 	   clangTidyCppCoreGuidelinesModule.a \
 	   clangStaticAnalyzerCheckers.a clangStaticAnalyzerCore.a \
@@ -40,10 +41,10 @@ $(PROJ_sharedir):
 	$(Echo) Making install directory: $@
 	$(Verb) $(MKDIR) $@
 
-$(DESTFILES): $(SRCFILES)
+$(DESTFILES): $(SRCFILES) $(PROJ_sharedir)
 
 $(PROJ_sharedir)/%.py: $(PROJ_SRC_DIR)/%.py
 	$(Echo) Installing script file: $(notdir $<)
 	$(Verb) $(ScriptInstall) $< $(PROJ_sharedir)
 
-install-local:: $(PROJ_sharedir) $(DESTFILES)
+install-local:: $(DESTFILES)

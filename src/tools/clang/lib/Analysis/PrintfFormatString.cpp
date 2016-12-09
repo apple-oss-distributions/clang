@@ -343,8 +343,13 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
     argIndex++;
 
   if (k == ConversionSpecifier::InvalidSpecifier) {
+    unsigned Len = I - Start;
+    if (ParseUTF8InvalidSpecifier(Start, E, Len)) {
+      CS.setEndScanList(Start + Len);
+      FS.setConversionSpecifier(CS);
+    }
     // Assume the conversion takes one argument.
-    return !H.HandleInvalidPrintfConversionSpecifier(FS, Start, I - Start);
+    return !H.HandleInvalidPrintfConversionSpecifier(FS, Start, Len);
   }
   return PrintfSpecifierResult(Start, FS);
 }
@@ -965,8 +970,3 @@ bool PrintfSpecifier::hasValidFieldWidth() const {
     return true;
   }
 }
-
-
-// current approach for os_log work: write a handler for os_log data elements;
-// yield the objects that should be added to the buffer, along with a size and
-// Value */APInt for each as necessary

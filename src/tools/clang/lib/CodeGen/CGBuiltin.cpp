@@ -343,6 +343,82 @@ Value *CodeGenFunction::EmitVAStartEnd(Value *ArgValue, bool IsStart) {
   return Builder.CreateCall(CGM.getIntrinsic(inst), ArgValue);
 }
 
+/// Checks if using the result of __builtin_object_size(p, @p From) in place of
+/// __builtin_object_size(p, @p To) is correct
+static bool areBOSTypesCompatible(int From, int To) {
+  // Note: Our __builtin_object_size implementation currently treats Type=0 and
+  // Type=2 identically. Encoding this implementation detail here may make
+  // improving __builtin_object_size difficult in the future, so it's omitted.
+  return From == To || (From == 0 && To == 1) || (From == 3 && To == 2);
+}
+
+static llvm::Value *
+getDefaultBuiltinObjectSizeResult(unsigned Type, llvm::IntegerType *ResType) {
+  return ConstantInt::get(ResType, (Type & 2) ? 0 : -1, /*isSigned=*/true);
+}
+
+llvm::Value *
+CodeGenFunction::evaluateOrEmitBuiltinObjectSize(const Expr *E, unsigned Type,
+                                                 llvm::IntegerType *ResType) {
+  uint64_t ObjectSize;
+  if (!E->tryEvaluateObjectSize(ObjectSize, getContext(), Type))
+    return emitBuiltinObjectSize(E, Type, ResType);
+  return ConstantInt::get(ResType, ObjectSize, /*isSigned=*/true);
+}
+
+/// Returns a Value corresponding to the size of the given expression.
+/// This Value may be either of the following:
+///   - A llvm::Argument (if E is a param with the pass_object_size attribute on
+///     it)
+///   - A call to the @llvm.objectsize intrinsic
+llvm::Value *
+CodeGenFunction::emitBuiltinObjectSize(const Expr *E, unsigned Type,
+                                       llvm::IntegerType *ResType) {
+  // We need to reference an argument if the pointer is a parameter with the
+  // pass_object_size attribute.
+  if (auto *D = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts())) {
+    auto *Param = dyn_cast<ParmVarDecl>(D->getDecl());
+    auto *PS = D->getDecl()->getAttr<PassObjectSizeAttr>();
+    if (Param != nullptr && PS != nullptr &&
+        areBOSTypesCompatible(PS->getType(), Type)) {
+      auto Iter = SizeArguments.find(Param);
+      assert(Iter != SizeArguments.end());
+
+      const ImplicitParamDecl *D = Iter->second;
+      auto DIter = LocalDeclMap.find(D);
+      assert(DIter != LocalDeclMap.end());
+
+      return EmitLoadOfScalar(DIter->second, /*volatile=*/false,
+                              getContext().getSizeType(), E->getLocStart());
+    }
+  }
+
+  // LLVM can't handle Type=3 appropriately, and __builtin_object_size shouldn't
+  // evaluate E for side-effects. In either case, we shouldn't lower to
+  // @llvm.objectsize.
+  if (Type == 3 || E->HasSideEffects(getContext()))
+    return getDefaultBuiltinObjectSizeResult(Type, ResType);
+
+  // LLVM only supports 0 and 2, make sure that we pass along that
+  // as a boolean.
+  auto *CI = ConstantInt::get(Builder.getInt1Ty(), (Type & 2) >> 1);
+  // FIXME: Get right address space.
+  llvm::Type *Tys[] = {ResType, Builder.getInt8PtrTy(0)};
+  Value *F = CGM.getIntrinsic(Intrinsic::objectsize, Tys);
+  return Builder.CreateCall(F, {EmitScalarExpr(E), CI});
+}
+
+namespace {
+  struct CallObjCArcUse final : EHScopeStack::Cleanup {
+    CallObjCArcUse(llvm::Value *object) : object(object) {}
+    llvm::Value *object;
+
+    void Emit(CodeGenFunction &CGF, Flags flags) override {
+      CGF.EmitARCIntrinsicUse(object);
+    }
+  };
+}
+
 RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
                                         unsigned BuiltinID, const CallExpr *E,
                                         ReturnValueSlot ReturnValue) {
@@ -587,26 +663,13 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
     return RValue::get(Builder.CreateCall(F, ArgValue));
   }
   case Builtin::BI__builtin_object_size: {
-    // We rely on constant folding to deal with expressions with side effects.
-    assert(!E->getArg(0)->HasSideEffects(getContext()) &&
-           "should have been constant folded");
+    unsigned Type =
+        E->getArg(1)->EvaluateKnownConstInt(getContext()).getZExtValue();
+    auto *ResType = cast<llvm::IntegerType>(ConvertType(E->getType()));
 
-    // We pass this builtin onto the optimizer so that it can
-    // figure out the object size in more complex cases.
-    llvm::Type *ResType = ConvertType(E->getType());
-
-    // LLVM only supports 0 and 2, make sure that we pass along that
-    // as a boolean.
-    Value *Ty = EmitScalarExpr(E->getArg(1));
-    ConstantInt *CI = dyn_cast<ConstantInt>(Ty);
-    assert(CI);
-    uint64_t val = CI->getZExtValue();
-    CI = ConstantInt::get(Builder.getInt1Ty(), (val & 0x2) >> 1);
-    // FIXME: Get right address space.
-    llvm::Type *Tys[] = { ResType, Builder.getInt8PtrTy(0) };
-    Value *F = CGM.getIntrinsic(Intrinsic::objectsize, Tys);
-    return RValue::get(
-        Builder.CreateCall(F, {EmitScalarExpr(E->getArg(0)), CI}));
+    // We pass this builtin onto the optimizer so that it can figure out the
+    // object size in more complex cases.
+    return RValue::get(emitBuiltinObjectSize(E->getArg(0), Type, ResType));
   }
   case Builtin::BI__builtin_prefetch: {
     Value *Locality, *RW, *Address = EmitScalarExpr(E->getArg(0));
@@ -1243,9 +1306,7 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
       Args.add(RValue::get(llvm::Constant::getNullValue(VoidPtrTy)),
                getContext().VoidPtrTy);
     const CGFunctionInfo &FuncInfo =
-        CGM.getTypes().arrangeFreeFunctionCall(E->getType(), Args,
-                                               FunctionType::ExtInfo(),
-                                               RequiredArgs::All);
+        CGM.getTypes().arrangeBuiltinFunctionCall(E->getType(), Args);
     llvm::FunctionType *FTy = CGM.getTypes().GetFunctionType(FuncInfo);
     llvm::Constant *Func = CGM.CreateRuntimeFunction(FTy, LibCallName);
     return EmitCall(FuncInfo, Func, ReturnValueSlot(), Args);
@@ -1919,7 +1980,7 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
     analyze_os_log::OSLogBufferLayout Layout;
     analyze_os_log::computeOSLogBufferLayout(CGM.getContext(), E, Layout);
     Address BufAddr = EmitPointerWithAlignment(E->getArg(0));
-    llvm::Value *FormatStr = EmitScalarExpr(E->getArg(1));
+    // Ignore argument 1, the format string. It is not currently used.
     CharUnits offset;
     Builder.CreateStore(
       Builder.getInt8(Layout.getSummaryByte()),
@@ -1927,6 +1988,8 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
     Builder.CreateStore(
       Builder.getInt8(Layout.getNumArgsByte()),
       Builder.CreateConstByteGEP(BufAddr, offset++, "numArgs"));
+
+    llvm::SmallVector<llvm::Value *, 4> RetainableOperands;
     for (const auto &item : Layout.Items) {
       Builder.CreateStore(
         Builder.getInt8(item.getDescriptorByte()),
@@ -1938,7 +2001,21 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
       if (const Expr *expr = item.getExpr()) {
         addr = Builder.CreateElementBitCast(addr,
                                             ConvertTypeForMem(expr->getType()));
-        EmitAnyExprToMem(expr, addr, Qualifiers(), /*isInit*/true);
+        // Check if this is a retainable type.
+        if (expr->getType()->isObjCRetainableType()) {
+          assert(getEvaluationKind(expr->getType()) == TEK_Scalar &&
+                 "Only scalar can be a ObjC retainable type");
+          llvm::Value *SV = EmitScalarExpr(expr, /*Ignore*/ false);
+          RValue RV = RValue::get(SV);
+          LValue LV = MakeAddrLValue(addr, expr->getType());
+          EmitStoreThroughLValue(RV, LV);
+          // Check if the object is constant, if not, save it in
+          // RetainableOperands.
+          if (!isa<Constant>(SV))
+            RetainableOperands.push_back(SV);
+        } else {
+          EmitAnyExprToMem(expr, addr, Qualifiers(), /*isInit*/true);
+        }
       } else {
         addr = Builder.CreateElementBitCast(addr, Int32Ty);
         Builder.CreateStore(
@@ -1946,7 +2023,19 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
       }
       offset += item.getSize();
     }
-    return RValue::get(FormatStr);
+
+    // Push a clang.arc.use cleanup for each object in RetainableOperands. The
+    // cleanup will cause the use to appear after the final log call, keeping
+    // the object valid while it’s held in the log buffer.  Note that if there’s
+    // a release cleanup on the object, it will already be active; since
+    // cleanups are emitted in reverse order, the use will occur before the
+    // object is released.
+    if (!RetainableOperands.empty() && getLangOpts().ObjCAutoRefCount &&
+        CGM.getCodeGenOpts().OptimizationLevel != 0)
+      for (llvm::Value *object : RetainableOperands)
+         pushFullExprCleanup<CallObjCArcUse>(getARCCleanupKind(), object);
+
+    return RValue::get(BufAddr.getPointer());
   }
 
   case Builtin::BI__builtin_os_log_format_buffer_size: {
@@ -2228,29 +2317,32 @@ enum {
 
 namespace {
 struct NeonIntrinsicInfo {
+  const char *NameHint;
   unsigned BuiltinID;
   unsigned LLVMIntrinsic;
   unsigned AltLLVMIntrinsic;
-  const char *NameHint;
   unsigned TypeModifier;
 
   bool operator<(unsigned RHSBuiltinID) const {
     return BuiltinID < RHSBuiltinID;
   }
+  bool operator<(const NeonIntrinsicInfo &TE) const {
+    return BuiltinID < TE.BuiltinID;
+  }
 };
 } // end anonymous namespace
 
 #define NEONMAP0(NameBase) \
-  { NEON::BI__builtin_neon_ ## NameBase, 0, 0, #NameBase, 0 }
+  { #NameBase, NEON::BI__builtin_neon_ ## NameBase, 0, 0, 0 }
 
 #define NEONMAP1(NameBase, LLVMIntrinsic, TypeModifier) \
-  { NEON:: BI__builtin_neon_ ## NameBase, \
-      Intrinsic::LLVMIntrinsic, 0, #NameBase, TypeModifier }
+  { #NameBase, NEON:: BI__builtin_neon_ ## NameBase, \
+      Intrinsic::LLVMIntrinsic, 0, TypeModifier }
 
 #define NEONMAP2(NameBase, LLVMIntrinsic, AltLLVMIntrinsic, TypeModifier) \
-  { NEON:: BI__builtin_neon_ ## NameBase, \
+  { #NameBase, NEON:: BI__builtin_neon_ ## NameBase, \
       Intrinsic::LLVMIntrinsic, Intrinsic::AltLLVMIntrinsic, \
-      #NameBase, TypeModifier }
+      TypeModifier }
 
 static const NeonIntrinsicInfo ARMSIMDIntrinsicMap [] = {
   NEONMAP2(vabd_v, arm_neon_vabdu, arm_neon_vabds, Add1ArgType | UnsignedAlts),
@@ -2795,9 +2887,7 @@ findNeonIntrinsicInMap(ArrayRef<NeonIntrinsicInfo> IntrinsicMap,
 
 #ifndef NDEBUG
   if (!MapProvenSorted) {
-    // FIXME: use std::is_sorted once C++11 is allowed
-    for (unsigned i = 0; i < IntrinsicMap.size() - 1; ++i)
-      assert(IntrinsicMap[i].BuiltinID <= IntrinsicMap[i + 1].BuiltinID);
+    assert(std::is_sorted(std::begin(IntrinsicMap), std::end(IntrinsicMap)));
     MapProvenSorted = true;
   }
 #endif
@@ -5140,22 +5230,6 @@ Value *CodeGenFunction::EmitAArch64BuiltinExpr(unsigned BuiltinID,
     Value *F = CGM.getIntrinsic(Intrinsic::fma, Ty);
     Ops[2] = Builder.CreateExtractElement(Ops[2], Ops[3], "extract");
     return Builder.CreateCall(F, {Ops[1], Ops[2], Ops[0]});
-  }
-  case NEON::BI__builtin_neon_vfms_v:
-  case NEON::BI__builtin_neon_vfmsq_v: {  // Only used for FP types
-    // FIXME: probably remove when we no longer support aarch64_simd.h
-    // (arm_neon.h delegates to vfma).
-
-    // The ARM builtins (and instructions) have the addend as the first
-    // operand, but the 'fma' intrinsics have it last. Swap it around here.
-    Value *Subtrahend = Ops[0];
-    Value *Multiplicand = Ops[2];
-    Ops[0] = Multiplicand;
-    Ops[2] = Subtrahend;
-    Ops[1] = Builder.CreateBitCast(Ops[1], VTy);
-    Ops[1] = Builder.CreateFNeg(Ops[1]);
-    Int = Intrinsic::fma;
-    return EmitNeonCall(CGM.getIntrinsic(Int, Ty), Ops, "fmls");
   }
   case NEON::BI__builtin_neon_vmull_v:
     // FIXME: improve sharing scheme to cope with 3 alternative LLVM intrinsics.

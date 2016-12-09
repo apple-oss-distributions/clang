@@ -23,7 +23,17 @@
 
 #define _LIBCPP_VERSION 3700
 
+#ifndef _LIBCPP_ABI_VERSION
 #define _LIBCPP_ABI_VERSION 1
+#endif
+
+#if defined(_LIBCPP_ABI_UNSTABLE) || _LIBCPP_ABI_VERSION >= 2
+#define _LIBCPP_ABI_ALTERNATE_STRING_LAYOUT
+// Fix undefined behavior in how std::list stores it's linked nodes.
+#define _LIBCPP_ABI_LIST_REMOVE_NODE_POINTER_UB
+#define _LIBCPP_ABI_FORWARD_LIST_REMOVE_NODE_POINTER_UB
+#define _LIBCPP_ABI_FIX_UNORDERED_CONTAINER_SIZE_TYPE
+#endif
 
 #define _LIBCPP_CONCAT1(_LIBCPP_X,_LIBCPP_Y) _LIBCPP_X##_LIBCPP_Y
 #define _LIBCPP_CONCAT(_LIBCPP_X,_LIBCPP_Y) _LIBCPP_CONCAT1(_LIBCPP_X,_LIBCPP_Y)
@@ -227,8 +237,10 @@
 
 #if defined(__clang__)
 
-#if defined(__APPLE__) && !defined(__i386__) && !defined(__x86_64__) && (!defined(__arm__) || __ARM_ARCH_7K__ >= 2)
-#define _LIBCPP_ALTERNATE_STRING_LAYOUT
+#if (defined(__APPLE__) && !defined(__i386__) && !defined(__x86_64__) &&       \
+     (!defined(__arm__) || __ARM_ARCH_7K__ >= 2)) ||                           \
+    defined(_LIBCPP_ALTERNATE_STRING_LAYOUT)
+#define _LIBCPP_ABI_ALTERNATE_STRING_LAYOUT
 #endif
 
 #if __has_feature(cxx_alignas)
@@ -271,6 +283,10 @@ typedef __char32_t char32_t;
 #endif
 
 #define _LIBCPP_UNUSED __attribute__((__unused__))
+
+#if !(__has_feature(cxx_default_function_template_args))
+#define _LIBCPP_HAS_NO_DEFAULT_FUNCTION_TEMPLATE_ARGS
+#endif
 
 #if !(__has_feature(cxx_defaulted_functions))
 #define _LIBCPP_HAS_NO_DEFAULTED_FUNCTIONS
@@ -363,14 +379,8 @@ typedef __char32_t char32_t;
 #endif
 #endif
 
-#if (__has_feature(cxx_noexcept))
-#  define _NOEXCEPT noexcept
-#  define _NOEXCEPT_(x) noexcept(x)
-#  define _NOEXCEPT_OR_FALSE(x) noexcept(x)
-#else
-#  define _NOEXCEPT throw()
-#  define _NOEXCEPT_(x)
-#  define _NOEXCEPT_OR_FALSE(x) false
+#if !(__has_feature(cxx_noexcept))
+#define _LIBCPP_HAS_NO_NOEXCEPT
 #endif
 
 #if __has_feature(underlying_type)
@@ -418,8 +428,6 @@ namespace std {
 #define _LIBCPP_NO_EXCEPTIONS
 #endif
 
-#define _LIBCPP_HAS_NO_TEMPLATE_ALIASES
-
 // constexpr was added to GCC in 4.6.
 #if _GNUC_VER < 406
 #define _LIBCPP_HAS_NO_CONSTEXPR
@@ -433,14 +441,11 @@ namespace std {
 // GCC 5 will support variable templates
 #define _LIBCPP_HAS_NO_VARIABLE_TEMPLATES
 
-#define _NOEXCEPT throw()
-#define _NOEXCEPT_(x)
-#define _NOEXCEPT_OR_FALSE(x) false
-
 #ifndef __GXX_EXPERIMENTAL_CXX0X__
 
 #define _LIBCPP_HAS_NO_ADVANCED_SFINAE
 #define _LIBCPP_HAS_NO_DECLTYPE
+#define _LIBCPP_HAS_NO_DEFAULT_FUNCTION_TEMPLATE_ARGS
 #define _LIBCPP_HAS_NO_DEFAULTED_FUNCTIONS
 #define _LIBCPP_HAS_NO_DELETED_FUNCTIONS
 #define _LIBCPP_HAS_NO_NULLPTR
@@ -450,6 +455,8 @@ namespace std {
 #define _LIBCPP_HAS_NO_RVALUE_REFERENCES
 #define _LIBCPP_HAS_NO_ALWAYS_INLINE_VARIADICS
 #define _LIBCPP_HAS_NO_STRONG_ENUMS
+#define _LIBCPP_HAS_NO_TEMPLATE_ALIASES
+#define _LIBCPP_HAS_NO_NOEXCEPT
 
 #else  // __GXX_EXPERIMENTAL_CXX0X__
 
@@ -457,12 +464,11 @@ namespace std {
 #define _LIBCPP_HAS_NO_ALWAYS_INLINE_VARIADICS
 
 #if _GNUC_VER < 403
+#define _LIBCPP_HAS_NO_DEFAULT_FUNCTION_TEMPLATE_ARGS
 #define _LIBCPP_HAS_NO_RVALUE_REFERENCES
-#endif
-
-#if _GNUC_VER < 403
 #define _LIBCPP_HAS_NO_STATIC_ASSERT
 #endif
+
 
 #if _GNUC_VER < 404
 #define _LIBCPP_HAS_NO_DECLTYPE
@@ -473,7 +479,9 @@ namespace std {
 #endif  // _GNUC_VER < 404
 
 #if _GNUC_VER < 406
+#define _LIBCPP_HAS_NO_NOEXCEPT
 #define _LIBCPP_HAS_NO_NULLPTR
+#define _LIBCPP_HAS_NO_TEMPLATE_ALIASES
 #endif
 
 #if _GNUC_VER < 407
@@ -507,15 +515,14 @@ using namespace _LIBCPP_NAMESPACE __attribute__((__strong__));
 #define _LIBCPP_HAS_NO_UNICODE_CHARS
 #define _LIBCPP_HAS_NO_DELETED_FUNCTIONS
 #define _LIBCPP_HAS_NO_DEFAULTED_FUNCTIONS
+#define _LIBCPP_HAS_NO_NOEXCEPT
 #define __alignof__ __alignof
 #define _LIBCPP_NORETURN __declspec(noreturn)
 #define _LIBCPP_UNUSED
 #define _ALIGNAS(x) __declspec(align(x))
 #define _LIBCPP_HAS_NO_VARIADICS
 
-#define _NOEXCEPT throw ()
-#define _NOEXCEPT_(x)
-#define _NOEXCEPT_OR_FALSE(x) false
+
 
 #define _LIBCPP_BEGIN_NAMESPACE_STD namespace std {
 #define _LIBCPP_END_NAMESPACE_STD  }
@@ -535,14 +542,12 @@ namespace std {
 #define _LIBCPP_NORETURN __attribute__((noreturn))
 #define _LIBCPP_UNUSED
 
-#define _NOEXCEPT throw()
-#define _NOEXCEPT_(x)
-#define _NOEXCEPT_OR_FALSE(x) false
-
+#define _LIBCPP_HAS_NO_DEFAULT_FUNCTION_TEMPLATE_ARGS
 #define _LIBCPP_HAS_NO_TEMPLATE_ALIASES
 #define _LIBCPP_HAS_NO_ADVANCED_SFINAE
 #define _LIBCPP_HAS_NO_ALWAYS_INLINE_VARIADICS
 #define _LIBCPP_HAS_NO_GENERALIZED_INITIALIZERS
+#define _LIBCPP_HAS_NO_NOEXCEPT
 #define _LIBCPP_HAS_NO_NULLPTR
 #define _LIBCPP_HAS_NO_UNICODE_CHARS
 #define _LIBCPP_HAS_IS_BASE_OF
@@ -565,6 +570,14 @@ namespace std {
 #define _LIBCPP_HAS_NO_ASAN
 
 #endif // __clang__ || __GNUC__ || _MSC_VER || __IBMCPP__
+
+#ifndef _LIBCPP_HAS_NO_NOEXCEPT
+#  define _NOEXCEPT noexcept
+#  define _NOEXCEPT_(x) noexcept(x)
+#else
+#  define _NOEXCEPT throw()
+#  define _NOEXCEPT_(x)
+#endif
 
 #ifdef _LIBCPP_HAS_NO_UNICODE_CHARS
 typedef unsigned short char16_t;
@@ -766,4 +779,86 @@ extern "C" void __sanitizer_annotate_contiguous_container(
 #define _LIBCPP_HAS_NO_THREAD_UNSAFE_C_FUNCTIONS
 #endif
 
-#endif  // _LIBCPP_CONFIG
+#if __cplusplus < 201103L
+#define _LIBCPP_CXX03_LANG
+#else
+#if defined(_LIBCPP_HAS_NO_VARIADIC_TEMPLATES) || defined(_LIBCPP_HAS_NO_RVALUE_REFERENCES)
+#error Libc++ requires a feature complete C++11 compiler in C++11 or greater.
+#endif
+#endif
+
+// Decide whether to use availability macros.
+#if !defined(_LIBCPP_BUILDING_LIB) &&                                          \
+    !defined(_LIBCPP_DISABLE_AVAILABILITY) &&                                  \
+    __has_feature(attribute_availability_with_strict) &&                       \
+    __has_feature(attribute_availability_in_templates)
+#ifdef __APPLE__
+#define _LIBCPP_USE_AVAILABILITY_APPLE
+#endif
+#endif
+
+// Define availability macros.
+#if defined(_LIBCPP_USE_AVAILABILITY_APPLE)
+#define _LIBCPP_AVAILABILITY_SHARED_MUTEX                                      \
+  __attribute__((availability(macosx,strict,introduced=10.12)))                \
+  __attribute__((availability(ios,strict,introduced=10.0)))                    \
+  __attribute__((availability(tvos,strict,introduced=10.0)))                   \
+  __attribute__((availability(watchos,strict,introduced=3.0)))
+#define _LIBCPP_AVAILABILITY_BAD_OPTIONAL_ACCESS __attribute__((unavailable))
+#define _LIBCPP_AVAILABILITY_BAD_ARRAY_LENGTH __attribute__((unavailable))
+#define _LIBCPP_AVAILABILITY_UNCAUGHT_EXCEPTIONS                               \
+  __attribute__((availability(macosx,strict,introduced=10.12)))                \
+  __attribute__((availability(ios,strict,introduced=10.0)))                    \
+  __attribute__((availability(tvos,strict,introduced=10.0)))                   \
+  __attribute__((availability(watchos,strict,introduced=3.0)))
+#define _LIBCPP_AVAILABILITY_SIZED_NEW_DELETE                                  \
+  __attribute__((availability(macosx,strict,introduced=10.12)))                \
+  __attribute__((availability(ios,strict,introduced=10.0)))                    \
+  __attribute__((availability(tvos,strict,introduced=10.0)))                   \
+  __attribute__((availability(watchos,strict,introduced=3.0)))
+#define _LIBCPP_AVAILABILITY_FUTURE_ERROR                                      \
+  __attribute__((availability(macosx,strict,introduced=10.8)))                 \
+  __attribute__((availability(ios,strict,introduced=6.0)))
+#define _LIBCPP_AVAILABILITY_TYPEINFO_VTABLE                                   \
+  __attribute__((availability(macosx,strict,introduced=10.9)))                 \
+  __attribute__((availability(ios,strict,introduced=7.0)))
+#define _LIBCPP_AVAILABILITY_LOCALE_CATEGORY                                   \
+  __attribute__((availability(macosx,strict,introduced=10.9)))                 \
+  __attribute__((availability(ios,strict,introduced=7.0)))
+#define _LIBCPP_AVAILABILITY_ATOMIC_SHARED_PTR                                 \
+  __attribute__((availability(macosx,strict,introduced=10.9)))                 \
+  __attribute__((availability(ios,strict,introduced=7.0)))
+#else
+#define _LIBCPP_AVAILABILITY_SHARED_MUTEX
+#define _LIBCPP_AVAILABILITY_BAD_OPTIONAL_ACCESS
+#define _LIBCPP_AVAILABILITY_BAD_ARRAY_LENGTH
+#define _LIBCPP_AVAILABILITY_UNCAUGHT_EXCEPTIONS
+#define _LIBCPP_AVAILABILITY_SIZED_NEW_DELETE
+#define _LIBCPP_AVAILABILITY_FUTURE_ERROR
+#define _LIBCPP_AVAILABILITY_TYPEINFO_VTABLE
+#define _LIBCPP_AVAILABILITY_LOCALE_CATEGORY
+#define _LIBCPP_AVAILABILITY_ATOMIC_SHARED_PTR
+#endif
+
+// Define availability that depends on _LIBCPP_NO_EXCEPTIONS.
+#ifdef _LIBCPP_NO_EXCEPTIONS
+#define _LIBCPP_AVAILABILITY_DYNARRAY
+#define _LIBCPP_AVAILABILITY_FUTURE
+#else
+#define _LIBCPP_AVAILABILITY_DYNARRAY _LIBCPP_AVAILABILITY_BAD_ARRAY_LENGTH
+#define _LIBCPP_AVAILABILITY_FUTURE _LIBCPP_AVAILABILITY_FUTURE_ERROR
+#endif
+
+// Availability of stream API in the dylib got dropped and re-added.  The
+// extern template should effectively be available at:
+//    availability(macosx,introduced=10.9)
+//    availability(ios,introduced=7.0)
+#if defined(_LIBCPP_USE_AVAILABILITY_APPLE) &&                                 \
+    ((defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) &&                \
+      __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ <= 1090) ||                \
+     (defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__) &&               \
+      __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ <= 70000))
+#define _LIBCPP_AVAILABILITY_NO_STREAMS_EXTERN_TEMPLATE
+#endif
+
+#endif // _LIBCPP_CONFIG

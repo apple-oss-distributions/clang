@@ -105,6 +105,12 @@ if( NOT PURE_WINDOWS )
   endif()
   check_library_exists(dl dlopen "" HAVE_LIBDL)
   check_library_exists(rt clock_gettime "" HAVE_LIBRT)
+endif()
+
+# Don't look for these libraries on Windows. Also don't look for them if we're
+# using MSan, since uninstrmented third party code may call MSan interceptors
+# like strlen, leading to false positives.
+if( NOT PURE_WINDOWS AND NOT LLVM_USE_SANITIZER MATCHES "Memory.*")
   if (LLVM_ENABLE_ZLIB)
     check_library_exists(z compress2 "" HAVE_LIBZ)
   else()
@@ -127,6 +133,11 @@ if( NOT PURE_WINDOWS )
   else()
     set(HAVE_TERMINFO 0)
   endif()
+endif()
+
+check_library_exists(xar xar_open "" HAVE_LIBXAR)
+if(HAVE_LIBXAR)
+  set(XAR_LIB xar)
 endif()
 
 # function checks
@@ -293,7 +304,8 @@ if( LLVM_ENABLE_PIC )
   set(ENABLE_PIC 1)
 else()
   set(ENABLE_PIC 0)
-  if(APPLE)
+  check_cxx_compiler_flag("-fno-pie" SUPPORTS_NO_PIE_FLAG)
+  if(SUPPORTS_NO_PIE_FLAG)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-pie")
   endif()
 endif()

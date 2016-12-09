@@ -41,6 +41,8 @@
 // in this shared library, so that they can be overriden by programs
 // that define non-weak copies of the functions.
 
+#ifndef _LIBCPPABI_VERSION
+
 _LIBCPP_WEAK _LIBCPP_NEW_DELETE_VIS
 void *
 operator new(std::size_t size)
@@ -131,12 +133,16 @@ operator delete(void* ptr, const std::nothrow_t&) _NOEXCEPT
     ::operator delete(ptr);
 }
 
+#endif
+
 _LIBCPP_WEAK _LIBCPP_NEW_DELETE_VIS
 void
 operator delete(void* ptr, size_t) _NOEXCEPT
 {
     ::operator delete(ptr);
 }
+
+#ifndef _LIBCPPABI_VERSION
 
 _LIBCPP_WEAK _LIBCPP_NEW_DELETE_VIS
 void
@@ -151,6 +157,8 @@ operator delete[] (void* ptr, const std::nothrow_t&) _NOEXCEPT
 {
     ::operator delete[](ptr);
 }
+
+#endif
 
 _LIBCPP_WEAK _LIBCPP_NEW_DELETE_VIS
 void

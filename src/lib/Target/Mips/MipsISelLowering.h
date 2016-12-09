@@ -235,6 +235,9 @@ namespace llvm {
       return MVT::i32;
     }
 
+    bool isCheapToSpeculateCttz() const override;
+    bool isCheapToSpeculateCtlz() const override;
+
     void LowerOperationWrapper(SDNode *N,
                                SmallVectorImpl<SDValue> &Results,
                                SelectionDAG &DAG) const override;
@@ -427,7 +430,6 @@ namespace llvm {
     SDValue lowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerJumpTable(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerSELECT(SDValue Op, SelectionDAG &DAG) const;
-    SDValue lowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerSETCC(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerVASTART(SDValue Op, SelectionDAG &DAG) const;
     SDValue lowerVAARG(SDValue Op, SelectionDAG &DAG) const;

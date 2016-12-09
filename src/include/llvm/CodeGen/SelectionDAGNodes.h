@@ -135,7 +135,7 @@ public:
     return SDValue(Node, R);
   }
 
-  // Return true if this node is an operand of N.
+  /// Return true if this node is an operand of N.
   bool isOperandOf(const SDNode *N) const;
 
   /// Return the ValueType of the referenced return value.
@@ -328,6 +328,7 @@ private:
   bool NoInfs : 1;
   bool NoSignedZeros : 1;
   bool AllowReciprocal : 1;
+  bool VectorReduction : 1;
 
 public:
   /// Default constructor turns off all optimization flags.
@@ -340,6 +341,7 @@ public:
     NoInfs = false;
     NoSignedZeros = false;
     AllowReciprocal = false;
+    VectorReduction = false;
   }
 
   // These are mutators for each flag.
@@ -351,6 +353,7 @@ public:
   void setNoInfs(bool b) { NoInfs = b; }
   void setNoSignedZeros(bool b) { NoSignedZeros = b; }
   void setAllowReciprocal(bool b) { AllowReciprocal = b; }
+  void setVectorReduction(bool b) { VectorReduction = b; }
 
   // These are accessors for each flag.
   bool hasNoUnsignedWrap() const { return NoUnsignedWrap; }
@@ -361,6 +364,7 @@ public:
   bool hasNoInfs() const { return NoInfs; }
   bool hasNoSignedZeros() const { return NoSignedZeros; }
   bool hasAllowReciprocal() const { return AllowReciprocal; }
+  bool hasVectorReduction() const { return VectorReduction; }
 
   /// Return a raw encoding of the flags.
   /// This function should only be used to add data to the NodeID value.
@@ -368,6 +372,18 @@ public:
     return (NoUnsignedWrap << 0) | (NoSignedWrap << 1) | (Exact << 2) |
     (UnsafeAlgebra << 3) | (NoNaNs << 4) | (NoInfs << 5) |
     (NoSignedZeros << 6) | (AllowReciprocal << 7);
+  }
+
+  /// Clear any flags in this flag set that aren't also set in Flags.
+  void intersectWith(const SDNodeFlags *Flags) {
+    NoUnsignedWrap &= Flags->NoUnsignedWrap;
+    NoSignedWrap &= Flags->NoSignedWrap;
+    Exact &= Flags->Exact;
+    UnsafeAlgebra &= Flags->UnsafeAlgebra;
+    NoNaNs &= Flags->NoNaNs;
+    NoInfs &= Flags->NoInfs;
+    NoSignedZeros &= Flags->NoSignedZeros;
+    AllowReciprocal &= Flags->AllowReciprocal;
   }
 };
 
@@ -576,10 +592,10 @@ public:
   static use_iterator use_end() { return use_iterator(nullptr); }
 
   inline iterator_range<use_iterator> uses() {
-    return iterator_range<use_iterator>(use_begin(), use_end());
+    return make_range(use_begin(), use_end());
   }
   inline iterator_range<use_iterator> uses() const {
-    return iterator_range<use_iterator>(use_begin(), use_end());
+    return make_range(use_begin(), use_end());
   }
 
   /// Return true if there are exactly NUSES uses of the indicated value.
@@ -609,18 +625,32 @@ public:
   /// NOTE: This is an expensive method. Use it carefully.
   bool hasPredecessor(const SDNode *N) const;
 
-  /// Return true if N is a predecessor of this node.
-  /// N is either an operand of this node, or can be reached by recursively
-  /// traversing up the operands.
-  /// In this helper the Visited and worklist sets are held externally to
-  /// cache predecessors over multiple invocations. If you want to test for
-  /// multiple predecessors this method is preferable to multiple calls to
-  /// hasPredecessor. Be sure to clear Visited and Worklist if the DAG
-  /// changes.
-  /// NOTE: This is still very expensive. Use carefully.
-  bool hasPredecessorHelper(const SDNode *N,
-                            SmallPtrSetImpl<const SDNode *> &Visited,
-                            SmallVectorImpl<const SDNode *> &Worklist) const;
+  /// Returns true if N is a predecessor of any node in Worklist. This
+  /// helper keeps Visited and Worklist sets externally to allow unions
+  /// searches to be performed in parallel, caching of results across
+  /// queries and incremental addition to Worklist. Stops early if N is
+  /// found but will resume. Remember to clear Visited and Worklists
+  /// if DAG changes.
+  static bool hasPredecessorHelper(const SDNode *N,
+                                   SmallPtrSetImpl<const SDNode *> &Visited,
+                                   SmallVectorImpl<const SDNode *> &Worklist) {
+    if (Visited.count(N))
+      return true;
+    while (!Worklist.empty()) {
+      const SDNode *M = Worklist.pop_back_val();
+      bool Found = false;
+      for (const SDValue &OpV : M->op_values()) {
+        SDNode *Op = OpV.getNode();
+        if (Visited.insert(Op).second)
+          Worklist.push_back(Op);
+        if (Op == N)
+          Found = true;
+      }
+      if (Found)
+        return true;
+    }
+    return false;
+  }
 
   /// Return the number of values used by this operation.
   unsigned getNumOperands() const { return NumOperands; }
@@ -651,8 +681,8 @@ public:
   };
 
   iterator_range<value_op_iterator> op_values() const {
-    return iterator_range<value_op_iterator>(value_op_iterator(op_begin()),
-                                             value_op_iterator(op_end()));
+    return make_range(value_op_iterator(op_begin()),
+                      value_op_iterator(op_end()));
   }
 
   SDVTList getVTList() const {
@@ -664,7 +694,7 @@ public:
   /// to which the glue operand points. Otherwise return NULL.
   SDNode *getGluedNode() const {
     if (getNumOperands() != 0 &&
-      getOperand(getNumOperands()-1).getValueType() == MVT::Glue)
+        getOperand(getNumOperands()-1).getValueType() == MVT::Glue)
       return getOperand(getNumOperands()-1).getNode();
     return nullptr;
   }
@@ -681,6 +711,9 @@ public:
   /// This could be defined as a virtual function and implemented more simply
   /// and directly, but it is not to avoid creating a vtable for this class.
   const SDNodeFlags *getFlags() const;
+
+  /// Clear any flags in this node that aren't also set in Flags.
+  void intersectFlagsWith(const SDNodeFlags *Flags);
 
   /// Return the number of values defined/returned by this operator.
   unsigned getNumValues() const { return NumValues; }
@@ -883,40 +916,20 @@ protected:
 /// be used by the DAGBuilder, the other to be used by others.
 class SDLoc {
 private:
-  // Ptr could be used for either Instruction* or SDNode*. It is used for
-  // Instruction* if IROrder is not -1.
-  const void *Ptr;
-  int IROrder;
+  DebugLoc DL;
+  int IROrder = 0;
 
 public:
-  SDLoc() : Ptr(nullptr), IROrder(0) {}
-  SDLoc(const SDNode *N) : Ptr(N), IROrder(-1) {
-    assert(N && "null SDNode");
-  }
-  SDLoc(const SDValue V) : Ptr(V.getNode()), IROrder(-1) {
-    assert(Ptr && "null SDNode");
-  }
-  SDLoc(const Instruction *I, int Order) : Ptr(I), IROrder(Order) {
+  SDLoc() = default;
+  SDLoc(const SDNode *N) : DL(N->getDebugLoc()), IROrder(N->getIROrder()) {}
+  SDLoc(const SDValue V) : SDLoc(V.getNode()) {}
+  SDLoc(const Instruction *I, int Order) : IROrder(Order) {
     assert(Order >= 0 && "bad IROrder");
+    if (I)
+      DL = I->getDebugLoc();
   }
-  unsigned getIROrder() {
-    if (IROrder >= 0 || Ptr == nullptr) {
-      return (unsigned)IROrder;
-    }
-    const SDNode *N = (const SDNode*)(Ptr);
-    return N->getIROrder();
-  }
-  DebugLoc getDebugLoc() {
-    if (!Ptr) {
-      return DebugLoc();
-    }
-    if (IROrder >= 0) {
-      const Instruction *I = (const Instruction*)(Ptr);
-      return I->getDebugLoc();
-    }
-    const SDNode *N = (const SDNode*)(Ptr);
-    return N->getDebugLoc();
-  }
+  unsigned getIROrder() { return IROrder; }
+  DebugLoc getDebugLoc() { return DL; }
 };
 
 
@@ -1493,6 +1506,15 @@ public:
            N->getOpcode() == ISD::TargetConstantFP;
   }
 };
+
+/// Returns true if \p V is a constant integer zero.
+bool isNullConstant(SDValue V);
+/// Returns true if \p V is an FP constant with a value of positive zero.
+bool isNullFPConstant(SDValue V);
+/// Returns true if \p V is an integer constant with all bits set.
+bool isAllOnesConstant(SDValue V);
+/// Returns true if \p V is a constant integer one.
+bool isOneConstant(SDValue V);
 
 class GlobalAddressSDNode : public SDNode {
   const GlobalValue *TheGlobal;
@@ -2113,12 +2135,13 @@ public:
     : MaskedGatherScatterSDNode(ISD::MGATHER, Order, dl, Operands, VTs, MemVT,
                                 MMO) {
     assert(getValue().getValueType() == getValueType(0) &&
-           "Incompatible type of the PathThru value in MaskedGatherSDNode");
+           "Incompatible type of the PassThru value in MaskedGatherSDNode");
     assert(getMask().getValueType().getVectorNumElements() ==
-               getValueType(0).getVectorNumElements() &&
+           getValueType(0).getVectorNumElements() &&
            "Vector width mismatch between mask and data");
-    assert(getMask().getValueType().getScalarType() == MVT::i1 &&
-           "Vector width mismatch between mask and data");
+    assert(getIndex().getValueType().getVectorNumElements() ==
+           getValueType(0).getVectorNumElements() &&
+           "Vector width mismatch between index and data");
   }
 
   static bool classof(const SDNode *N) {
@@ -2134,13 +2157,14 @@ public:
   friend class SelectionDAG;
   MaskedScatterSDNode(unsigned Order, DebugLoc dl,ArrayRef<SDValue> Operands,
                       SDVTList VTs, EVT MemVT, MachineMemOperand *MMO)
-      : MaskedGatherScatterSDNode(ISD::MSCATTER, Order, dl, Operands, VTs,
-                                  MemVT, MMO) {
+    : MaskedGatherScatterSDNode(ISD::MSCATTER, Order, dl, Operands, VTs, MemVT,
+                                MMO) {
     assert(getMask().getValueType().getVectorNumElements() ==
-               getValue().getValueType().getVectorNumElements() &&
+           getValue().getValueType().getVectorNumElements() &&
            "Vector width mismatch between mask and data");
-    assert(getMask().getValueType().getScalarType() == MVT::i1 &&
-           "Vector width mismatch between mask and data");
+    assert(getIndex().getValueType().getVectorNumElements() ==
+           getValue().getValueType().getVectorNumElements() &&
+           "Vector width mismatch between index and data");
   }
 
   static bool classof(const SDNode *N) {

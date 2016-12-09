@@ -27,12 +27,13 @@ check_cxx_compiler_flag("-Werror -fno-function-sections" COMPILER_RT_HAS_FNO_FUN
 check_cxx_compiler_flag(-std=c++11           COMPILER_RT_HAS_STD_CXX11_FLAG)
 check_cxx_compiler_flag(-ftls-model=initial-exec COMPILER_RT_HAS_FTLS_MODEL_INITIAL_EXEC)
 check_cxx_compiler_flag(-fno-lto             COMPILER_RT_HAS_FNO_LTO_FLAG)
-check_cxx_compiler_flag(-msse3               COMPILER_RT_HAS_MSSE3_FLAG)
+check_cxx_compiler_flag("-Werror -msse3" COMPILER_RT_HAS_MSSE3_FLAG)
+check_cxx_compiler_flag(-std=c99             COMPILER_RT_HAS_STD_C99_FLAG)
+check_cxx_compiler_flag(--sysroot=.          COMPILER_RT_HAS_SYSROOT_FLAG)
 
 if(NOT WIN32 AND NOT CYGWIN)
   # MinGW warns if -fvisibility-inlines-hidden is used.
   check_cxx_compiler_flag("-fvisibility-inlines-hidden" COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG)
-  append_string_if(COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG "-fvisibility-inlines-hidden" CMAKE_CXX_FLAGS)
 endif()
 
 check_cxx_compiler_flag(/GR COMPILER_RT_HAS_GR_FLAG)
@@ -67,7 +68,7 @@ check_cxx_compiler_flag(/wd4800 COMPILER_RT_HAS_WD4800_FLAG)
 check_symbol_exists(__func__ "" COMPILER_RT_HAS_FUNC_SYMBOL)
 
 # Libraries.
-check_library_exists(c printf "" COMPILER_RT_HAS_LIBC)
+check_library_exists(c fopen "" COMPILER_RT_HAS_LIBC)
 check_library_exists(dl dlopen "" COMPILER_RT_HAS_LIBDL)
 check_library_exists(rt shm_open "" COMPILER_RT_HAS_LIBRT)
 check_library_exists(m pow "" COMPILER_RT_HAS_LIBM)
@@ -91,17 +92,6 @@ set(COMPILER_RT_SUPPORTED_ARCH)
 # abilities.
 set(SIMPLE_SOURCE ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/simple.cc)
 file(WRITE ${SIMPLE_SOURCE} "#include <stdlib.h>\n#include <limits>\nint main() {}\n")
-
-function(check_compile_definition def argstring out_var)
-  if("${def}" STREQUAL "")
-    set(${out_var} TRUE PARENT_SCOPE)
-    return()
-  endif()
-  cmake_push_check_state()
-  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${argstring}")
-  check_symbol_exists(${def} "" ${out_var})
-  cmake_pop_check_state()
-endfunction()
 
 # test_target_arch(<arch> <def> <target flags...>)
 # Checks if architecture is supported: runs host compiler with provided
@@ -149,6 +139,8 @@ macro(detect_target_arch)
   check_symbol_exists(__i386__ "" __I386)
   check_symbol_exists(__mips__ "" __MIPS)
   check_symbol_exists(__mips64__ "" __MIPS64)
+  check_symbol_exists(__wasm32__ "" __WEBASSEMBLY32)
+  check_symbol_exists(__wasm64__ "" __WEBASSEMBLY64)
   if(__ARM)
     add_default_target_arch(arm)
   elseif(__AARCH64)
@@ -163,6 +155,10 @@ macro(detect_target_arch)
     add_default_target_arch(mips64)
   elseif(__MIPS)
     add_default_target_arch(mips)
+  elseif(__WEBASSEMBLY32)
+    add_default_target_arch(wasm32)
+  elseif(__WEBASSEMBLY64)
+    add_default_target_arch(wasm64)
   endif()
 endmacro()
 
@@ -173,75 +169,7 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
   message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
 endif()
 
-# Generate the COMPILER_RT_SUPPORTED_ARCH list.
-if(ANDROID)
-  # Examine compiler output to determine target architecture.
-  detect_target_arch()
-  set(COMPILER_RT_OS_SUFFIX "-android")
-elseif(NOT APPLE) # Supported archs for Apple platforms are generated later
-  if("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "i[2-6]86|x86|amd64")
-    if(NOT MSVC)
-      test_target_arch(x86_64 "" "-m64")
-      # FIXME: We build runtimes for both i686 and i386, as "clang -m32" may
-      # target different variant than "$CMAKE_C_COMPILER -m32". This part should
-      # be gone after we resolve PR14109.
-      test_target_arch(i686 __i686__ "-m32")
-      test_target_arch(i386 __i386__ "-m32")
-    else()
-      if (CMAKE_SIZEOF_VOID_P EQUAL 4)
-        test_target_arch(i386 "" "")
-      else()
-        test_target_arch(x86_64 "" "")
-      endif()
-    endif()
-
-    execute_process(
-      COMMAND xcodebuild -version -sdk iphoneos Path
-      OUTPUT_VARIABLE IOS_SDK_DIR
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    test_target_arch(arm64 "-arch arm64 -isysroot ${IOS_SDK_DIR}")
-    test_target_arch(armv7 "-arch armv7 -isysroot ${IOS_SDK_DIR}")
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "powerpc")
-    TEST_BIG_ENDIAN(HOST_IS_BIG_ENDIAN)
-    if(HOST_IS_BIG_ENDIAN)
-      test_target_arch(powerpc64 "" "-m64")
-    else()
-      test_target_arch(powerpc64le "" "-m64")
-    endif()
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "mipsel|mips64el")
-    # Gcc doesn't accept -m32/-m64 so we do the next best thing and use
-    # -mips32r2/-mips64r2. We don't use -mips1/-mips3 because we want to match
-    # clang's default CPU's. In the 64-bit case, we must also specify the ABI
-    # since the default ABI differs between gcc and clang.
-    # FIXME: Ideally, we would build the N32 library too.
-    test_target_arch(mipsel "" "-mips32r2" "--target=mipsel-linux-gnu")
-    test_target_arch(mips64el "" "-mips64r2" "--target=mips64el-linux-gnu" "-mabi=n64")
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "mips")
-    test_target_arch(mips "" "-mips32r2" "--target=mips-linux-gnu")
-    test_target_arch(mips64 "" "-mips64r2" "--target=mips64-linux-gnu" "-mabi=n64")
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "arm")
-    test_target_arch(arm "" "-march=armv7-a" "-mfloat-abi=soft")
-    test_target_arch(armhf "" "-march=armv7-a" "-mfloat-abi=hard")
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "aarch32")
-    test_target_arch(aarch32 "" "-march=armv8-a")
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "aarch64")
-    test_target_arch(aarch64 "" "-march=armv8-a")
-  endif()
-  set(COMPILER_RT_OS_SUFFIX "")
-endif()
-
-# Takes ${ARGN} and puts only supported architectures in @out_var list.
-function(filter_available_targets out_var)
-  set(archs ${${out_var}})
-  foreach(arch ${ARGN})
-    list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
-    if(NOT (ARCH_INDEX EQUAL -1) AND CAN_TARGET_${arch})
-      list(APPEND archs ${arch})
-    endif()
-  endforeach()
-  set(${out_var} ${archs} PARENT_SCOPE)
-endfunction()
+test_targets()
 
 # Returns a list of architecture specific target cflags in @out_var list.
 function(get_target_flags_for_arch arch out_var)
@@ -267,6 +195,8 @@ set(X86_64 x86_64)
 set(MIPS32 mips mipsel)
 set(MIPS64 mips64 mips64el)
 set(PPC64 powerpc64 powerpc64le)
+set(WASM32 wasm32)
+set(WASM64 wasm64)
 
 if(APPLE)
   set(ARM64 arm64)
@@ -274,8 +204,6 @@ if(APPLE)
   set(X86_64 x86_64 x86_64h)
 endif()
 
-set(ALL_BUILTIN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
-    ${MIPS32} ${MIPS64})
 set(ALL_SANITIZER_COMMON_SUPPORTED_ARCH ${X86} ${X86_64} ${PPC64}
     ${ARM32} ${ARM64} ${MIPS32} ${MIPS64})
 set(ALL_ASAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
@@ -285,18 +213,14 @@ set(ALL_LSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64})
 set(ALL_MSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64})
 set(ALL_PROFILE_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64} ${PPC64}
     ${MIPS32} ${MIPS64})
-set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64})
+set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64} ${PPC64})
 set(ALL_UBSAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
     ${MIPS32} ${MIPS64} ${PPC64})
-set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64})
+set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM64})
+set(ALL_CFI_SUPPORTED_ARCH ${X86} ${X86_64})
 
 if(APPLE)
   include(CompilerRTDarwinUtils)
-
-  option(COMPILER_RT_ENABLE_IOS "Enable building for iOS - Experimental" On)
-  option(COMPILER_RT_ENABLE_TVOS "Enable building for AppleTVOS - Experimental" On)
-  option(COMPILER_RT_ENABLE_WATCHOS "Enable building for AppleWatchOS - Experimental" On)
-
   find_darwin_sdk_dir(DARWIN_osx_SYSROOT macosx)
   find_darwin_sdk_dir(DARWIN_iossim_SYSROOT iphonesimulator)
   find_darwin_sdk_dir(DARWIN_ios_SYSROOT iphoneos)
@@ -310,33 +234,23 @@ if(APPLE)
     set(DARWIN_ios_MIN_VER_FLAG -miphoneos-version-min)
     set(DARWIN_ios_SANITIZER_MIN_VER_FLAG
       ${DARWIN_ios_MIN_VER_FLAG}=7.0)
-    set(DARWIN_ios_BUILTIN_MIN_VER 6.0)
-    set(DARWIN_ios_BUILTIN_MIN_VER_FLAG
-      ${DARWIN_ios_MIN_VER_FLAG}=${DARWIN_ios_BUILTIN_MIN_VER})
   endif()
   if(COMPILER_RT_ENABLE_WATCHOS)
     list(APPEND DARWIN_EMBEDDED_PLATFORMS watchos)
     set(DARWIN_watchos_MIN_VER_FLAG -mwatchos-version-min)
     set(DARWIN_watchos_SANITIZER_MIN_VER_FLAG
       ${DARWIN_watchos_MIN_VER_FLAG}=1.0)
-    set(DARWIN_watchos_BUILTIN_MIN_VER 1.0)
-    set(DARWIN_watchos_BUILTIN_MIN_VER_FLAG
-      ${DARWIN_watchos_MIN_VER_FLAG}=${DARWIN_watchos_BUILTIN_MIN_VER})
   endif()
   if(COMPILER_RT_ENABLE_TVOS)
     list(APPEND DARWIN_EMBEDDED_PLATFORMS tvos)
     set(DARWIN_tvos_MIN_VER_FLAG -mtvos-version-min)
     set(DARWIN_tvos_SANITIZER_MIN_VER_FLAG
       ${DARWIN_tvos_MIN_VER_FLAG}=9.0)
-    set(DARWIN_tvos_BUILTIN_MIN_VER 9.0)
-    set(DARWIN_tvos_BUILTIN_MIN_VER_FLAG
-      ${DARWIN_tvos_MIN_VER_FLAG}=${DARWIN_tvos_BUILTIN_MIN_VER})
   endif()
 
   # Note: In order to target x86_64h on OS X the minimum deployment target must
   # be 10.8 or higher.
   set(SANITIZER_COMMON_SUPPORTED_OS osx)
-  set(BUILTIN_SUPPORTED_OS osx)
   set(PROFILE_SUPPORTED_OS osx)
   set(TSAN_SUPPORTED_OS osx)
   if(NOT SANITIZER_MIN_OSX_VERSION)
@@ -374,9 +288,6 @@ if(APPLE)
   set(DARWIN_osx_LINKFLAGS
     ${DARWIN_COMMON_LINKFLAGS}
     -mmacosx-version-min=${SANITIZER_MIN_OSX_VERSION})
-  set(DARWIN_osx_BUILTIN_MIN_VER 10.5)
-  set(DARWIN_osx_BUILTIN_MIN_VER_FLAG
-      -mmacosx-version-min=${DARWIN_osx_BUILTIN_MIN_VER})
 
   if(DARWIN_osx_SYSROOT)
     list(APPEND DARWIN_osx_CFLAGS -isysroot ${DARWIN_osx_SYSROOT})
@@ -397,36 +308,16 @@ if(APPLE)
       set(CAN_TARGET_${arch} 1)
     endforeach()
 
-    # Need to build a 10.4 compatible libclang_rt
-    set(DARWIN_10.4_SYSROOT ${DARWIN_osx_SYSROOT})
-    set(DARWIN_10.4_BUILTIN_MIN_VER 10.4)
-    set(DARWIN_10.4_BUILTIN_MIN_VER_FLAG
-        -mmacosx-version-min=${DARWIN_10.4_BUILTIN_MIN_VER})
-    set(DARWIN_10.4_SKIP_CC_KEXT On)
-    darwin_test_archs(10.4
-      DARWIN_10.4_ARCHS
-      ${toolchain_arches})
-    message(STATUS "OSX 10.4 supported arches: ${DARWIN_10.4_ARCHS}")
-    if(DARWIN_10.4_ARCHS)
-      # don't include the Haswell slice in the 10.4 compatibility library
-      list(REMOVE_ITEM DARWIN_10.4_ARCHS x86_64h)
-      list(APPEND BUILTIN_SUPPORTED_OS 10.4)
-    endif()
-
     foreach(platform ${DARWIN_EMBEDDED_PLATFORMS})
       if(DARWIN_${platform}sim_SYSROOT)
         set(DARWIN_${platform}sim_CFLAGS
           ${DARWIN_COMMON_CFLAGS}
           ${DARWIN_${platform}_SANITIZER_MIN_VER_FLAG}
-          -isysroot ${DARWIN_iossim_SYSROOT})
+          -isysroot ${DARWIN_${platform}sim_SYSROOT})
         set(DARWIN_${platform}sim_LINKFLAGS
           ${DARWIN_COMMON_LINKFLAGS}
           ${DARWIN_${platform}_SANITIZER_MIN_VER_FLAG}
           -isysroot ${DARWIN_${platform}sim_SYSROOT})
-        set(DARWIN_${platform}sim_BUILTIN_MIN_VER
-          ${DARWIN_${platform}_BUILTIN_MIN_VER})
-        set(DARWIN_${platform}sim_BUILTIN_MIN_VER_FLAG
-          ${DARWIN_${platform}_BUILTIN_MIN_VER_FLAG})
 
         set(DARWIN_${platform}sim_SKIP_CC_KEXT On)
         darwin_test_archs(${platform}sim
@@ -435,8 +326,8 @@ if(APPLE)
         message(STATUS "${platform} Simulator supported arches: ${DARWIN_${platform}sim_ARCHS}")
         if(DARWIN_iossim_ARCHS)
           list(APPEND SANITIZER_COMMON_SUPPORTED_OS ${platform}sim)
-          list(APPEND BUILTIN_SUPPORTED_OS ${platform}sim)
           list(APPEND PROFILE_SUPPORTED_OS ${platform}sim)
+          list(APPEND TSAN_SUPPORTED_OS ${platform}sim)
         endif()
         foreach(arch ${DARWIN_${platform}sim_ARCHS})
           list(APPEND COMPILER_RT_SUPPORTED_ARCH ${arch})
@@ -460,7 +351,6 @@ if(APPLE)
         message(STATUS "${platform} supported arches: ${DARWIN_${platform}_ARCHS}")
         if(DARWIN_${platform}_ARCHS)
           list(APPEND SANITIZER_COMMON_SUPPORTED_OS ${platform})
-          list(APPEND BUILTIN_SUPPORTED_OS ${platform})
           list(APPEND PROFILE_SUPPORTED_OS ${platform})
         endif()
         foreach(arch ${DARWIN_${platform}_ARCHS})
@@ -471,45 +361,47 @@ if(APPLE)
     endforeach()
   endif()
 
-  # for list_union
+  # for list_intersect
   include(CompilerRTUtils)
 
-  list_union(BUILTIN_SUPPORTED_ARCH ALL_BUILTIN_SUPPORTED_ARCH toolchain_arches)
+  # Apple-internal: Explicitly don't support watchOS simulator.
+  list(REMOVE_ITEM TSAN_SUPPORTED_OS "watchossim")
 
-  list_union(SANITIZER_COMMON_SUPPORTED_ARCH
+  list_intersect(SANITIZER_COMMON_SUPPORTED_ARCH
     ALL_SANITIZER_COMMON_SUPPORTED_ARCH
     COMPILER_RT_SUPPORTED_ARCH
     )
   set(LSAN_COMMON_SUPPORTED_ARCH ${SANITIZER_COMMON_SUPPORTED_ARCH})
   set(UBSAN_COMMON_SUPPORTED_ARCH ${SANITIZER_COMMON_SUPPORTED_ARCH})
-  list_union(ASAN_SUPPORTED_ARCH
+  list_intersect(ASAN_SUPPORTED_ARCH
     ALL_ASAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(DFSAN_SUPPORTED_ARCH
+  list_intersect(DFSAN_SUPPORTED_ARCH
     ALL_DFSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(LSAN_SUPPORTED_ARCH
+  list_intersect(LSAN_SUPPORTED_ARCH
     ALL_LSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(MSAN_SUPPORTED_ARCH
+  list_intersect(MSAN_SUPPORTED_ARCH
     ALL_MSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(PROFILE_SUPPORTED_ARCH
+  list_intersect(PROFILE_SUPPORTED_ARCH
     ALL_PROFILE_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(TSAN_SUPPORTED_ARCH
+  list_intersect(TSAN_SUPPORTED_ARCH
     ALL_TSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(UBSAN_SUPPORTED_ARCH
+  list_intersect(UBSAN_SUPPORTED_ARCH
     ALL_UBSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(SAFESTACK_SUPPORTED_ARCH
+  list_intersect(SAFESTACK_SUPPORTED_ARCH
     ALL_SAFESTACK_SUPPORTED_ARCH
+    SANITIZER_COMMON_SUPPORTED_ARCH)
+  list_intersect(CFI_SUPPORTED_ARCH
+    ALL_CFI_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
 else()
   # Architectures supported by compiler-rt libraries.
-  filter_available_targets(BUILTIN_SUPPORTED_ARCH
-    ${ALL_BUILTIN_SUPPORTED_ARCH})
   filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
     ${ALL_SANITIZER_COMMON_SUPPORTED_ARCH})
   # LSan and UBSan common files should be available on all architectures
@@ -527,6 +419,7 @@ else()
   filter_available_targets(UBSAN_SUPPORTED_ARCH ${ALL_UBSAN_SUPPORTED_ARCH})
   filter_available_targets(SAFESTACK_SUPPORTED_ARCH
     ${ALL_SAFESTACK_SUPPORTED_ARCH})
+  filter_available_targets(CFI_SUPPORTED_ARCH ${ALL_CFI_SUPPORTED_ARCH})
 endif()
 
 message(STATUS "Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARCH}")
@@ -589,24 +482,17 @@ else()
 endif()
 
 if (PROFILE_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Darwin|Linux|FreeBSD")
+    OS_NAME MATCHES "Darwin|Linux|FreeBSD|Windows")
   set(COMPILER_RT_HAS_PROFILE TRUE)
 else()
   set(COMPILER_RT_HAS_PROFILE FALSE)
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND TSAN_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Linux|FreeBSD")
+    OS_NAME MATCHES "Darwin|Linux|FreeBSD")
   set(COMPILER_RT_HAS_TSAN TRUE)
 else()
   set(COMPILER_RT_HAS_TSAN FALSE)
-endif()
-
-if(APPLE)
-  option(COMPILER_RT_ENABLE_TSAN_OSX "Enable building TSan for OS X - Experimental" Off)
-  if(COMPILER_RT_ENABLE_TSAN_OSX)
-    set(COMPILER_RT_HAS_TSAN TRUE)
-  endif()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND UBSAN_SUPPORTED_ARCH AND
@@ -619,17 +505,16 @@ endif()
 # Apple-internal: Don't build UBSan runtime.
 set(COMPILER_RT_HAS_UBSAN FALSE)
 
-# -msse3 flag is not valid for Mips therefore clang gives a warning
-# message with -msse3. But check_c_compiler_flags() checks only for
-# compiler error messages. Therefore COMPILER_RT_HAS_MSSE3_FLAG turns out to be
-# true on Mips, so we make it false here.
-if("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "mips")
-  set(COMPILER_RT_HAS_MSSE3_FLAG FALSE)
-endif()
-
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND SAFESTACK_SUPPORTED_ARCH AND
     OS_NAME MATCHES "Darwin|Linux|FreeBSD")
   set(COMPILER_RT_HAS_SAFESTACK TRUE)
 else()
   set(COMPILER_RT_HAS_SAFESTACK FALSE)
+endif()
+
+if (COMPILER_RT_HAS_SANITIZER_COMMON AND CFI_SUPPORTED_ARCH AND
+    OS_NAME MATCHES "Linux")
+  set(COMPILER_RT_HAS_CFI TRUE)
+else()
+  set(COMPILER_RT_HAS_CFI FALSE)
 endif()

@@ -29,7 +29,7 @@ add_clang_library(clangFrontend
   LangStandards.cpp
   LayoutOverrideSource.cpp
   LogDiagnosticPrinter.cpp
-  ModuleDependencyListener.cpp
+  ModuleDependencyCollector.cpp
   MultiplexConsumer.cpp
   PCHContainerOperations.cpp
   PrintPreprocessedOutput.cpp
@@ -43,12 +43,14 @@ add_clang_library(clangFrontend
 
   DEPENDS
   ClangDriverOptions
+  intrinsics_gen
 
   LINK_LIBS
   clangAST
   clangBasic
   clangDriver
   clangEdit
+  clangIndex
   clangLex
   clangParse
   clangSema

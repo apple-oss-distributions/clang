@@ -40,6 +40,7 @@ enum LLVMConstants : uint32_t {
   // LLVM mock tags (see also llvm/Support/Dwarf.def).
   DW_TAG_invalid = ~0U,        // Tag for invalid results.
   DW_VIRTUALITY_invalid = ~0U, // Virtuality for invalid results.
+  DW_MACINFO_invalid = ~0U,    // Macinfo type for invalid results.
 
   // Other constants.
   DWARF_VERSION = 4,       // Default dwarf version we output.
@@ -195,6 +196,7 @@ enum Attribute : uint16_t {
   DW_AT_dwo_name = 0x76,
   DW_AT_reference = 0x77,
   DW_AT_rvalue_reference = 0x78,
+  DW_AT_macros = 0x79,
 
   DW_AT_lo_user = 0x2000,
   DW_AT_hi_user = 0x3fff,
@@ -230,6 +232,7 @@ enum Attribute : uint16_t {
   DW_AT_GNU_template_name = 0x2110,
 
   DW_AT_GNU_odr_signature = 0x210f,
+  DW_AT_GNU_macros = 0x2119,
 
   // Extensions for Fission proposal.
   DW_AT_GNU_dwo_name = 0x2130,
@@ -457,6 +460,24 @@ enum MacinfoRecordType {
   DW_MACINFO_vendor_ext = 0xff
 };
 
+enum MacroEntryType {
+  // Macro Information Entry Type Encodings
+  DW_MACRO_define = 0x01,
+  DW_MACRO_undef = 0x02,
+  DW_MACRO_start_file = 0x03,
+  DW_MACRO_end_file = 0x04,
+  DW_MACRO_define_indirect = 0x05,
+  DW_MACRO_undef_indirect = 0x06,
+  DW_MACRO_transparent_include = 0x07,
+  DW_MACRO_define_indirect_sup = 0x08,
+  DW_MACRO_undef_indirect_sup = 0x09,
+  DW_MACRO_transparent_include_sup = 0x0a,
+  DW_MACRO_define_indirectx = 0x0b,
+  DW_MACRO_undef_indirectx = 0x0c,
+  DW_MACRO_lo_user = 0xe0,
+  DW_MACRO_hi_user = 0xff
+};
+
 enum CallFrameInfo {
   // Call frame instruction encodings
   DW_CFA_extended = 0x00,
@@ -526,7 +547,7 @@ enum LocationListEntry : unsigned char {
   DW_LLE_offset_pair_entry
 };
 
-/// Contstants for the DW_APPLE_PROPERTY_attributes attribute.
+/// Constants for the DW_APPLE_PROPERTY_attributes attribute.
 /// Keep this list in sync with clang's DeclSpec.h ObjCPropertyAttributeKind.
 enum ApplePropertyAttributes {
   // Apple Objective-C Property Attributes
@@ -541,7 +562,10 @@ enum ApplePropertyAttributes {
   DW_APPLE_PROPERTY_atomic = 0x100,
   DW_APPLE_PROPERTY_weak =   0x200,
   DW_APPLE_PROPERTY_strong = 0x400,
-  DW_APPLE_PROPERTY_unsafe_unretained = 0x800
+  DW_APPLE_PROPERTY_unsafe_unretained = 0x800,
+  DW_APPLE_PROPERTY_nullability = 0x1000,
+  DW_APPLE_PROPERTY_null_resettable = 0x2000,
+  DW_APPLE_PROPERTY_class = 0x4000
 };
 
 // Constants for the DWARF5 Accelerator Table Proposal
@@ -629,6 +653,7 @@ const char *GDBIndexEntryLinkageString(GDBIndexEntryLinkage Linkage);
 ///
 /// \li \a getTag() returns \a DW_TAG_invalid on invalid input.
 /// \li \a getVirtuality() returns \a DW_VIRTUALITY_invalid on invalid input.
+/// \li \a getMacinfo() returns \a DW_MACINFO_invalid on invalid input.
 ///
 /// @{
 unsigned getTag(StringRef TagString);
@@ -636,6 +661,7 @@ unsigned getOperationEncoding(StringRef OperationEncodingString);
 unsigned getVirtuality(StringRef VirtualityString);
 unsigned getLanguage(StringRef LanguageString);
 unsigned getAttributeEncoding(StringRef EncodingString);
+unsigned getMacinfo(StringRef MacinfoString);
 /// @}
 
 /// \brief Returns the symbolic string representing Val when used as a value

@@ -12,8 +12,7 @@
 // This file defines a family of thunks that should be statically linked into
 // the DLLs that have ASan instrumentation in order to delegate the calls to the
 // shared runtime that lives in the main binary.
-// See https://code.google.com/p/address-sanitizer/issues/detail?id=209 for the
-// details.
+// See https://github.com/google/sanitizers/issues/209 for the details.
 //===----------------------------------------------------------------------===//
 
 // Only compile this code when buidling asan_dll_thunk.lib
@@ -303,6 +302,7 @@ INTERFACE_FUNCTION(__asan_stack_free_10)
 
 // FIXME: we might want to have a sanitizer_win_dll_thunk?
 INTERFACE_FUNCTION(__sanitizer_annotate_contiguous_container)
+INTERFACE_FUNCTION(__sanitizer_contiguous_container_find_bad_address)
 INTERFACE_FUNCTION(__sanitizer_cov)
 INTERFACE_FUNCTION(__sanitizer_cov_dump)
 INTERFACE_FUNCTION(__sanitizer_cov_indir_call16)
@@ -315,11 +315,13 @@ INTERFACE_FUNCTION(__sanitizer_cov_trace_switch)
 INTERFACE_FUNCTION(__sanitizer_cov_with_check)
 INTERFACE_FUNCTION(__sanitizer_get_allocated_size)
 INTERFACE_FUNCTION(__sanitizer_get_coverage_guards)
+INTERFACE_FUNCTION(__sanitizer_get_coverage_pc_buffer)
 INTERFACE_FUNCTION(__sanitizer_get_current_allocated_bytes)
 INTERFACE_FUNCTION(__sanitizer_get_estimated_allocated_size)
 INTERFACE_FUNCTION(__sanitizer_get_free_bytes)
 INTERFACE_FUNCTION(__sanitizer_get_heap_size)
 INTERFACE_FUNCTION(__sanitizer_get_ownership)
+INTERFACE_FUNCTION(__sanitizer_get_total_unique_caller_callee_pairs)
 INTERFACE_FUNCTION(__sanitizer_get_total_unique_coverage)
 INTERFACE_FUNCTION(__sanitizer_get_unmapped_bytes)
 INTERFACE_FUNCTION(__sanitizer_maybe_open_cov_file)

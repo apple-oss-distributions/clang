@@ -563,13 +563,14 @@ let hasSideEffects = 0 in {
 
 // Byte-swapping loads.  Unlike normal loads, these instructions are
 // allowed to access storage more than once.
-def LRV  : UnaryRXY<"lrv",  0xE31E, loadu<bswap, nonvolatile_load>, GR32, 4>;
-def LRVG : UnaryRXY<"lrvg", 0xE30F, loadu<bswap, nonvolatile_load>, GR64, 8>;
+def LRVH : UnaryRXY<"lrvh", 0xE31F, z_lrvh, GR32, 2>;
+def LRV  : UnaryRXY<"lrv",  0xE31E, z_lrv,  GR32, 4>;
+def LRVG : UnaryRXY<"lrvg", 0xE30F, z_lrvg, GR64, 8>;
 
 // Likewise byte-swapping stores.
-def STRV  : StoreRXY<"strv", 0xE33E, storeu<bswap, nonvolatile_store>, GR32, 4>;
-def STRVG : StoreRXY<"strvg", 0xE32F, storeu<bswap, nonvolatile_store>,
-                     GR64, 8>;
+def STRVH : StoreRXY<"strvh", 0xE33F, z_strvh, GR32, 2>;
+def STRV  : StoreRXY<"strv",  0xE33E, z_strv,  GR32, 4>;
+def STRVG : StoreRXY<"strvg", 0xE32F, z_strvg, GR64, 8>;
 
 //===----------------------------------------------------------------------===//
 // Load address instructions
@@ -812,7 +813,7 @@ defm : ZXB<subc, GR64, SLGFR>;
 let Defs = [CC], Uses = [CC] in {
   // Subtraction of a register.
   def SLBR  : BinaryRRE<"slb",  0xB999, sube, GR32, GR32>;
-  def SLGBR : BinaryRRE<"slbg", 0xB989, sube, GR64, GR64>;
+  def SLBGR : BinaryRRE<"slbg", 0xB989, sube, GR64, GR64>;
 
   // Subtraction of memory.
   def SLB  : BinaryRXY<"slb",  0xE399, sube, GR32, load, 4>;
@@ -1219,7 +1220,14 @@ def PFDRL : PrefetchRILPC<"pfdrl", 0xC62, z_prefetch>;
 // Atomic operations
 //===----------------------------------------------------------------------===//
 
+// A serialization instruction that acts as a barrier for all memory
+// accesses, which expands to "bcr 14, 0".
+let hasSideEffects = 1 in
 def Serialize : Alias<2, (outs), (ins), [(z_serialize)]>;
+
+// A pseudo instruction that serves as a compiler barrier.
+let hasSideEffects = 1 in
+def MemBarrier : Pseudo<(outs), (ins), [(z_membarrier)]>;
 
 let Predicates = [FeatureInterlockedAccess1], Defs = [CC] in {
   def LAA   : LoadAndOpRSY<"laa",   0xEBF8, atomic_load_add_32, GR32>;

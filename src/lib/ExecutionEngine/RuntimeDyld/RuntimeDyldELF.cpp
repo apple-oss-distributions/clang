@@ -993,7 +993,7 @@ void RuntimeDyldELF::resolvePPC64Relocation(const SectionEntry &Section,
   case ELF::R_PPC64_REL24: {
     uint64_t FinalAddress = Section.getLoadAddressWithOffset(Offset);
     int32_t delta = static_cast<int32_t>(Value - FinalAddress + Addend);
-    if (SignExtend32<24>(delta) != delta)
+    if (SignExtend32<26>(delta) != delta)
       llvm_unreachable("Relocation R_PPC64_REL24 overflow");
     // Generates a 'bl <address>' instruction
     writeInt32BE(LocalAddress, 0x48000001 | (delta & 0x03FFFFFC));
@@ -1047,6 +1047,11 @@ void RuntimeDyldELF::resolveSystemZRelocation(const SectionEntry &Section,
   case ELF::R_390_64:
     writeInt64BE(LocalAddress, Value + Addend);
     break;
+  case ELF::R_390_PC64: {
+    int64_t Delta = (Value + Addend) - Section.getLoadAddressWithOffset(Offset);
+    writeInt64BE(LocalAddress, Delta);
+    break;
+  }
   }
 }
 
@@ -1463,8 +1468,8 @@ relocation_iterator RuntimeDyldELF::processRelocationRef(
         uint8_t *RelocTarget =
             Sections[Value.SectionID].getAddressWithOffset(Value.Addend);
         int32_t delta = static_cast<int32_t>(Target - RelocTarget);
-        // If it is within 24-bits branch range, just set the branch target
-        if (SignExtend32<24>(delta) == delta) {
+        // If it is within 26-bits branch range, just set the branch target
+        if (SignExtend32<26>(delta) == delta) {
           RelocationEntry RE(SectionID, Offset, RelType, Value.Addend);
           if (Value.SymbolName)
             addRelocationForSymbol(RE, Value.SymbolName);
@@ -1770,7 +1775,7 @@ uint64_t RuntimeDyldELF::allocateGOTEntries(unsigned SectionID, unsigned no)
     GOTSectionID = Sections.size();
     // Reserve a section id. We'll allocate the section later
     // once we know the total size
-    Sections.push_back(SectionEntry(".got", nullptr, 0, 0));
+    Sections.push_back(SectionEntry(".got", nullptr, 0, 0, 0));
   }
   uint64_t StartOffset = CurrentGOTIndex * getGOTEntrySize();
   CurrentGOTIndex += no;
@@ -1806,7 +1811,8 @@ void RuntimeDyldELF::finalizeLoad(const ObjectFile &Obj,
     if (!Addr)
       report_fatal_error("Unable to allocate memory for GOT!");
 
-    Sections[GOTSectionID] = SectionEntry(".got", Addr, TotalSize, 0);
+    Sections[GOTSectionID] =
+        SectionEntry(".got", Addr, TotalSize, TotalSize, 0);
 
     if (Checker)
       Checker->registerSection(Obj.getFileName(), GOTSectionID);
@@ -1848,6 +1854,25 @@ void RuntimeDyldELF::finalizeLoad(const ObjectFile &Obj,
 
 bool RuntimeDyldELF::isCompatibleFile(const object::ObjectFile &Obj) const {
   return Obj.isELF();
+}
+
+bool RuntimeDyldELF::relocationNeedsStub(const RelocationRef &R) const {
+  if (Arch != Triple::x86_64)
+    return true;  // Conservative answer
+
+  switch (R.getType()) {
+  default:
+    return true;  // Conservative answer
+
+
+  case ELF::R_X86_64_GOTPCREL:
+  case ELF::R_X86_64_PC32:
+  case ELF::R_X86_64_PC64:
+  case ELF::R_X86_64_64:
+    // We know that these reloation types won't need a stub function.  This list
+    // can be extended as needed.
+    return false;
+  }
 }
 
 } // namespace llvm

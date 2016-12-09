@@ -121,10 +121,10 @@ llvm::checkBinaryFloatSignature(const CallInst &I,
 /// \brief Returns intrinsic ID for call.
 /// For the input call instruction it finds mapping intrinsic and returns
 /// its ID, in case it does not found it return not_intrinsic.
-Intrinsic::ID llvm::getIntrinsicIDForCall(CallInst *CI,
+Intrinsic::ID llvm::getIntrinsicIDForCall(const CallInst *CI,
                                           const TargetLibraryInfo *TLI) {
   // If we have an intrinsic call, check if it is trivially vectorizable.
-  if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(CI)) {
+  if (const auto *II = dyn_cast<IntrinsicInst>(CI)) {
     Intrinsic::ID ID = II->getIntrinsicID();
     if (isTriviallyVectorizable(ID) || ID == Intrinsic::lifetime_start ||
         ID == Intrinsic::lifetime_end || ID == Intrinsic::assume)
@@ -318,14 +318,11 @@ Value *llvm::getStrideFromPointer(Value *Ptr, ScalarEvolution *SE, Loop *Lp) {
   // Strip off the size of access multiplication if we are still analyzing the
   // pointer.
   if (OrigPtr == Ptr) {
-    const DataLayout &DL = Lp->getHeader()->getModule()->getDataLayout();
-    DL.getTypeAllocSize(PtrTy->getElementType());
     if (const SCEVMulExpr *M = dyn_cast<SCEVMulExpr>(V)) {
       if (M->getOperand(0)->getSCEVType() != scConstant)
         return nullptr;
 
-      const APInt &APStepVal =
-          cast<SCEVConstant>(M->getOperand(0))->getValue()->getValue();
+      const APInt &APStepVal = cast<SCEVConstant>(M->getOperand(0))->getAPInt();
 
       // Huge step value - give up.
       if (APStepVal.getBitWidth() > 64)
@@ -417,9 +414,11 @@ Value *llvm::findScalarElement(Value *V, unsigned EltNo) {
 /// the input value is (1) a splat constants vector or (2) a sequence
 /// of instructions that broadcast a single value into a vector.
 ///
-llvm::Value *llvm::getSplatValue(Value *V) {
-  if (auto *CV = dyn_cast<ConstantDataVector>(V))
-    return CV->getSplatValue();
+const llvm::Value *llvm::getSplatValue(const Value *V) {
+
+  if (auto *C = dyn_cast<Constant>(V))
+    if (isa<VectorType>(V->getType()))
+      return C->getSplatValue();
 
   auto *ShuffleInst = dyn_cast<ShuffleVectorInst>(V);
   if (!ShuffleInst)
@@ -438,7 +437,7 @@ llvm::Value *llvm::getSplatValue(Value *V) {
   return InsertEltInst->getOperand(1);
 }
 
-DenseMap<Instruction *, uint64_t>
+MapVector<Instruction *, uint64_t>
 llvm::computeMinimumValueSizes(ArrayRef<BasicBlock *> Blocks, DemandedBits &DB,
                                const TargetTransformInfo *TTI) {
 
@@ -451,7 +450,7 @@ llvm::computeMinimumValueSizes(ArrayRef<BasicBlock *> Blocks, DemandedBits &DB,
   SmallPtrSet<Value *, 16> Visited;
   DenseMap<Value *, uint64_t> DBits;
   SmallPtrSet<Instruction *, 4> InstructionSet;
-  DenseMap<Instruction *, uint64_t> MinBWs;
+  MapVector<Instruction *, uint64_t> MinBWs;
 
   // Determine the roots. We work bottom-up, from truncs or icmps.
   bool SeenExtFromIllegalType = false;
@@ -497,7 +496,7 @@ llvm::computeMinimumValueSizes(ArrayRef<BasicBlock *> Blocks, DemandedBits &DB,
     // If we encounter a type that is larger than 64 bits, we can't represent
     // it so bail out.
     if (DB.getDemandedBits(I).getBitWidth() > 64)
-      return DenseMap<Instruction *, uint64_t>();
+      return MapVector<Instruction *, uint64_t>();
 
     uint64_t V = DB.getDemandedBits(I).getZExtValue();
     DBits[Leader] |= V;

@@ -3,6 +3,8 @@ set(LLVM_LINK_COMPONENTS support)
 add_clang_library(clangTidyCERTModule
   CERTTidyModule.cpp
   SetLongJmpCheck.cpp
+  StaticObjectExceptionCheck.cpp
+  ThrownExceptionTypeCheck.cpp
   VariadicFunctionDefCheck.cpp
 
   LINK_LIBS
@@ -13,4 +15,5 @@ add_clang_library(clangTidyCERTModule
   clangTidy
   clangTidyGoogleModule
   clangTidyMiscModule
+  clangTidyUtils
   )

@@ -15,6 +15,7 @@
 #ifndef LLVM_IR_MODULE_H
 #define LLVM_IR_MODULE_H
 
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Comdat.h"
 #include "llvm/IR/DataLayout.h"
@@ -33,6 +34,7 @@ class GVMaterializer;
 class LLVMContext;
 class RandomNumberGenerator;
 class StructType;
+template <class PtrType> class SmallPtrSetImpl;
 
 template<> struct ilist_traits<NamedMDNode>
   : public ilist_default_traits<NamedMDNode> {
@@ -169,6 +171,8 @@ private:
   std::unique_ptr<GVMaterializer>
   Materializer;                   ///< Used to materialize GlobalValues
   std::string ModuleID;           ///< Human readable identifier for the module
+  std::string SourceFileName;     ///< Original source file name for module,
+                                  ///< recorded in bitcode.
   std::string TargetTriple;       ///< Platform target triple Module compiled on
                                   ///< Format: (arch)(sub)-(vendor)-(sys0-(abi)
   void *NamedMDSymTab;            ///< NamedMDNode names.
@@ -193,6 +197,12 @@ public:
   /// Get the module identifier which is, essentially, the name of the module.
   /// @returns the module identifier as a string
   const std::string &getModuleIdentifier() const { return ModuleID; }
+
+  /// Get the module's original source file name. When compiling from
+  /// bitcode, this is taken from a bitcode record where it was recorded.
+  /// For other compiles it is the same as the ModuleID, which would
+  /// contain the source file name.
+  const std::string &getSourceFileName() const { return SourceFileName; }
 
   /// \brief Get a short "name" for the module.
   ///
@@ -238,6 +248,9 @@ public:
 
   /// Set the module identifier.
   void setModuleIdentifier(StringRef ID) { ModuleID = ID; }
+
+  /// Set the module's original source file name.
+  void setSourceFileName(StringRef Name) { SourceFileName = Name; }
 
   /// Set the data layout
   void setDataLayout(StringRef Desc);
@@ -430,7 +443,7 @@ public:
 
   /// Sets the GVMaterializer to GVM. This module must not yet have a
   /// Materializer. To reset the materializer for a module that already has one,
-  /// call MaterializeAllPermanently first. Destroying this module will destroy
+  /// call materializeAll first. Destroying this module will destroy
   /// its materializer without materializing any more GlobalValues. Without
   /// destroying the Module, there is no way to detach or destroy a materializer
   /// without materializing all the GVs it controls, to avoid leaving orphan
@@ -438,27 +451,16 @@ public:
   void setMaterializer(GVMaterializer *GVM);
   /// Retrieves the GVMaterializer, if any, for this Module.
   GVMaterializer *getMaterializer() const { return Materializer.get(); }
-
-  /// Returns true if this GV was loaded from this Module's GVMaterializer and
-  /// the GVMaterializer knows how to dematerialize the GV.
-  bool isDematerializable(const GlobalValue *GV) const;
+  bool isMaterialized() const { return !getMaterializer(); }
 
   /// Make sure the GlobalValue is fully read. If the module is corrupt, this
   /// returns true and fills in the optional string with information about the
   /// problem. If successful, this returns false.
   std::error_code materialize(GlobalValue *GV);
-  /// If the GlobalValue is read in, and if the GVMaterializer supports it,
-  /// release the memory for the function, and set it up to be materialized
-  /// lazily. If !isDematerializable(), this method is a no-op.
-  void dematerialize(GlobalValue *GV);
-
-  /// Make sure all GlobalValues in this Module are fully read.
-  std::error_code materializeAll();
 
   /// Make sure all GlobalValues in this Module are fully read and clear the
-  /// Materializer. If the module is corrupt, this DOES NOT clear the old
   /// Materializer.
-  std::error_code materializeAllPermanently();
+  std::error_code materializeAll();
 
   std::error_code materializeMetadata();
 
@@ -514,10 +516,10 @@ public:
   bool                  global_empty() const { return GlobalList.empty(); }
 
   iterator_range<global_iterator> globals() {
-    return iterator_range<global_iterator>(global_begin(), global_end());
+    return make_range(global_begin(), global_end());
   }
   iterator_range<const_global_iterator> globals() const {
-    return iterator_range<const_global_iterator>(global_begin(), global_end());
+    return make_range(global_begin(), global_end());
   }
 
 /// @}
@@ -536,10 +538,10 @@ public:
   bool                    empty() const { return FunctionList.empty(); }
 
   iterator_range<iterator> functions() {
-    return iterator_range<iterator>(begin(), end());
+    return make_range(begin(), end());
   }
   iterator_range<const_iterator> functions() const {
-    return iterator_range<const_iterator>(begin(), end());
+    return make_range(begin(), end());
   }
 
 /// @}
@@ -554,10 +556,10 @@ public:
   bool                 alias_empty() const      { return AliasList.empty(); }
 
   iterator_range<alias_iterator> aliases() {
-    return iterator_range<alias_iterator>(alias_begin(), alias_end());
+    return make_range(alias_begin(), alias_end());
   }
   iterator_range<const_alias_iterator> aliases() const {
-    return iterator_range<const_alias_iterator>(alias_begin(), alias_end());
+    return make_range(alias_begin(), alias_end());
   }
 
 /// @}
@@ -578,13 +580,63 @@ public:
   bool named_metadata_empty() const { return NamedMDList.empty(); }
 
   iterator_range<named_metadata_iterator> named_metadata() {
-    return iterator_range<named_metadata_iterator>(named_metadata_begin(),
-                                                   named_metadata_end());
+    return make_range(named_metadata_begin(), named_metadata_end());
   }
   iterator_range<const_named_metadata_iterator> named_metadata() const {
-    return iterator_range<const_named_metadata_iterator>(named_metadata_begin(),
-                                                         named_metadata_end());
+    return make_range(named_metadata_begin(), named_metadata_end());
   }
+
+  /// An iterator for DICompileUnits that skips those marked NoDebug.
+  class debug_compile_units_iterator
+      : public std::iterator<std::input_iterator_tag, DICompileUnit *> {
+    NamedMDNode *CUs;
+    unsigned Idx;
+    void SkipNoDebugCUs();
+  public:
+    explicit debug_compile_units_iterator(NamedMDNode *CUs, unsigned Idx)
+        : CUs(CUs), Idx(Idx) {
+      SkipNoDebugCUs();
+    }
+    debug_compile_units_iterator &operator++() {
+      ++Idx;
+      SkipNoDebugCUs();
+      return *this;
+    }
+    debug_compile_units_iterator operator++(int) {
+      debug_compile_units_iterator T(*this);
+      ++Idx;
+      return T;
+    }
+    bool operator==(const debug_compile_units_iterator &I) const {
+      return Idx == I.Idx;
+    }
+    bool operator!=(const debug_compile_units_iterator &I) const {
+      return Idx != I.Idx;
+    }
+    DICompileUnit *operator*() const;
+    DICompileUnit *operator->() const;
+  };
+
+  debug_compile_units_iterator debug_compile_units_begin() const {
+    auto *CUs = getNamedMetadata("llvm.dbg.cu");
+    return debug_compile_units_iterator(CUs, 0);
+  }
+
+  debug_compile_units_iterator debug_compile_units_end() const {
+    auto *CUs = getNamedMetadata("llvm.dbg.cu");
+    return debug_compile_units_iterator(CUs, CUs ? CUs->getNumOperands() : 0);
+  }
+
+  /// Return an iterator for all DICompileUnits listed in this Module's
+  /// llvm.dbg.cu named metadata node and aren't explicitly marked as
+  /// NoDebug.
+  iterator_range<debug_compile_units_iterator> debug_compile_units() const {
+    auto *CUs = getNamedMetadata("llvm.dbg.cu");
+    return make_range(
+        debug_compile_units_iterator(CUs, 0),
+        debug_compile_units_iterator(CUs, CUs ? CUs->getNumOperands() : 0));
+  }
+/// @}
 
   /// Destroy ConstantArrays in LLVMContext if they are not used.
   /// ConstantArrays constructed during linking can cause quadratic memory
@@ -595,7 +647,6 @@ public:
   /// be called where all uses of the LLVMContext are understood.
   void dropTriviallyDeadConstantArrays();
 
-/// @}
 /// @name Utility functions for printing and dumping Module objects
 /// @{
 
@@ -639,7 +690,23 @@ public:
   /// \brief Set the PIC level (small or large model)
   void setPICLevel(PICLevel::Level PL);
 /// @}
+
+  /// @name Utility functions for querying and setting PGO counts
+  /// @{
+
+  /// \brief Set maximum function count in PGO mode
+  void setMaximumFunctionCount(uint64_t);
+
+  /// \brief Returns maximum function count in PGO mode
+  Optional<uint64_t> getMaximumFunctionCount();
+  /// @}
 };
+
+/// \brief Given "llvm.used" or "llvm.compiler.used" as a global name, collect
+/// the initializer elements of that global in Set and return the global itself.
+GlobalVariable *collectUsedGlobalVariables(const Module &M,
+                                           SmallPtrSetImpl<GlobalValue *> &Set,
+                                           bool CompilerUsed);
 
 /// An raw_ostream inserter for modules.
 inline raw_ostream &operator<<(raw_ostream &O, const Module &M) {

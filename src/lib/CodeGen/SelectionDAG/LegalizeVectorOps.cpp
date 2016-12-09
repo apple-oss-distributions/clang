@@ -105,7 +105,8 @@ class VectorLegalizer {
   SDValue ExpandLoad(SDValue Op);
   SDValue ExpandStore(SDValue Op);
   SDValue ExpandFNEG(SDValue Op);
-  SDValue ExpandABSDIFF(SDValue Op);
+  SDValue ExpandBITREVERSE(SDValue Op);
+  SDValue ExpandCTLZ_CTTZ_ZERO_UNDEF(SDValue Op);
 
   /// \brief Implements vector promotion.
   ///
@@ -231,7 +232,7 @@ SDValue VectorLegalizer::LegalizeOp(SDValue Op) {
     EVT StVT = ST->getMemoryVT();
     MVT ValVT = ST->getValue().getSimpleValueType();
     if (StVT.isVector() && ST->isTruncatingStore())
-      switch (TLI.getTruncStoreAction(ValVT, StVT.getSimpleVT())) {
+      switch (TLI.getTruncStoreAction(ValVT, StVT)) {
       default: llvm_unreachable("This action is not supported yet!");
       case TargetLowering::Legal:
         return TranslateLegalizeResults(Op, Result);
@@ -244,7 +245,7 @@ SDValue VectorLegalizer::LegalizeOp(SDValue Op) {
         Changed = true;
         return LegalizeOp(ExpandStore(Op));
       }
-  } else if (Op.getOpcode() == ISD::MSCATTER)
+  } else if (Op.getOpcode() == ISD::MSCATTER || Op.getOpcode() == ISD::MSTORE)
     HasVectorValue = true;
 
   for (SDNode::value_iterator J = Node->value_begin(), E = Node->value_end();
@@ -281,6 +282,7 @@ SDValue VectorLegalizer::LegalizeOp(SDValue Op) {
   case ISD::ROTL:
   case ISD::ROTR:
   case ISD::BSWAP:
+  case ISD::BITREVERSE:
   case ISD::CTLZ:
   case ISD::CTTZ:
   case ISD::CTLZ_ZERO_UNDEF:
@@ -330,8 +332,6 @@ SDValue VectorLegalizer::LegalizeOp(SDValue Op) {
   case ISD::SMAX:
   case ISD::UMIN:
   case ISD::UMAX:
-  case ISD::UABSDIFF:
-  case ISD::SABSDIFF:
     QueryType = Node->getValueType(0);
     break;
   case ISD::FP_ROUND_INREG:
@@ -343,6 +343,9 @@ SDValue VectorLegalizer::LegalizeOp(SDValue Op) {
     break;
   case ISD::MSCATTER:
     QueryType = cast<MaskedScatterSDNode>(Node)->getValue().getValueType();
+    break;
+  case ISD::MSTORE:
+    QueryType = cast<MaskedStoreSDNode>(Node)->getValue().getValueType();
     break;
   }
 
@@ -417,7 +420,7 @@ SDValue VectorLegalizer::Promote(SDValue Op) {
     else
       Operands[j] = Op.getOperand(j);
   }
-  
+
   Op = DAG.getNode(Op.getOpcode(), dl, NVT, Operands, Op.getNode()->getFlags());
   if ((VT.isFloatingPoint() && NVT.isFloatingPoint()) ||
       (VT.isVector() && VT.getVectorElementType().isFloatingPoint() &&
@@ -490,21 +493,26 @@ SDValue VectorLegalizer::PromoteFP_TO_INT(SDValue Op, bool isSigned) {
 
 
 SDValue VectorLegalizer::ExpandLoad(SDValue Op) {
-  SDLoc dl(Op);
   LoadSDNode *LD = cast<LoadSDNode>(Op.getNode());
-  SDValue Chain = LD->getChain();
-  SDValue BasePTR = LD->getBasePtr();
-  EVT SrcVT = LD->getMemoryVT();
-  ISD::LoadExtType ExtType = LD->getExtensionType();
 
-  SmallVector<SDValue, 8> Vals;
-  SmallVector<SDValue, 8> LoadChains;
+  EVT SrcVT = LD->getMemoryVT();
+  EVT SrcEltVT = SrcVT.getScalarType();
   unsigned NumElem = SrcVT.getVectorNumElements();
 
-  EVT SrcEltVT = SrcVT.getScalarType();
-  EVT DstEltVT = Op.getNode()->getValueType(0).getScalarType();
 
+  SDValue NewChain;
+  SDValue Value;
   if (SrcVT.getVectorNumElements() > 1 && !SrcEltVT.isByteSized()) {
+    SDLoc dl(Op);
+
+    SmallVector<SDValue, 8> Vals;
+    SmallVector<SDValue, 8> LoadChains;
+
+    EVT DstEltVT = LD->getValueType(0).getScalarType();
+    SDValue Chain = LD->getChain();
+    SDValue BasePTR = LD->getBasePtr();
+    ISD::LoadExtType ExtType = LD->getExtensionType();
+
     // When elements in a vector is not byte-addressable, we cannot directly
     // load each element by advancing pointer, which could only address bytes.
     // Instead, we load all significant words, mask bits off, and concatenate
@@ -611,28 +619,16 @@ SDValue VectorLegalizer::ExpandLoad(SDValue Op) {
       }
       Vals.push_back(Lo);
     }
+
+    NewChain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, LoadChains);
+    Value = DAG.getNode(ISD::BUILD_VECTOR, dl,
+                        Op.getNode()->getValueType(0), Vals);
   } else {
-    unsigned Stride = SrcVT.getScalarType().getSizeInBits()/8;
+    SDValue Scalarized = TLI.scalarizeVectorLoad(LD, DAG);
 
-    for (unsigned Idx=0; Idx<NumElem; Idx++) {
-      SDValue ScalarLoad = DAG.getExtLoad(ExtType, dl,
-                Op.getNode()->getValueType(0).getScalarType(),
-                Chain, BasePTR, LD->getPointerInfo().getWithOffset(Idx * Stride),
-                SrcVT.getScalarType(),
-                LD->isVolatile(), LD->isNonTemporal(), LD->isInvariant(),
-                MinAlign(LD->getAlignment(), Idx * Stride), LD->getAAInfo());
-
-      BasePTR = DAG.getNode(ISD::ADD, dl, BasePTR.getValueType(), BasePTR,
-                         DAG.getConstant(Stride, dl, BasePTR.getValueType()));
-
-      Vals.push_back(ScalarLoad.getValue(0));
-      LoadChains.push_back(ScalarLoad.getValue(1));
-    }
+    NewChain = Scalarized.getValue(1);
+    Value = Scalarized.getValue(0);
   }
-
-  SDValue NewChain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, LoadChains);
-  SDValue Value = DAG.getNode(ISD::BUILD_VECTOR, dl,
-                              Op.getNode()->getValueType(0), Vals);
 
   AddLegalizedOperand(Op.getValue(0), Value);
   AddLegalizedOperand(Op.getValue(1), NewChain);
@@ -641,54 +637,40 @@ SDValue VectorLegalizer::ExpandLoad(SDValue Op) {
 }
 
 SDValue VectorLegalizer::ExpandStore(SDValue Op) {
-  SDLoc dl(Op);
   StoreSDNode *ST = cast<StoreSDNode>(Op.getNode());
-  SDValue Chain = ST->getChain();
-  SDValue BasePTR = ST->getBasePtr();
-  SDValue Value = ST->getValue();
+
   EVT StVT = ST->getMemoryVT();
-
-  unsigned Alignment = ST->getAlignment();
-  bool isVolatile = ST->isVolatile();
-  bool isNonTemporal = ST->isNonTemporal();
-  AAMDNodes AAInfo = ST->getAAInfo();
-
-  unsigned NumElem = StVT.getVectorNumElements();
-  // The type of the data we want to save
-  EVT RegVT = Value.getValueType();
-  EVT RegSclVT = RegVT.getScalarType();
-  // The type of data as saved in memory.
   EVT MemSclVT = StVT.getScalarType();
-
-  // Cast floats into integers
   unsigned ScalarSize = MemSclVT.getSizeInBits();
 
   // Round odd types to the next pow of two.
-  if (!isPowerOf2_32(ScalarSize))
-    ScalarSize = NextPowerOf2(ScalarSize);
+  if (!isPowerOf2_32(ScalarSize)) {
+    // FIXME: This is completely broken and inconsistent with ExpandLoad
+    // handling.
 
-  // Store Stride in bytes
-  unsigned Stride = ScalarSize/8;
-  // Extract each of the elements from the original vector
-  // and save them into memory individually.
-  SmallVector<SDValue, 8> Stores;
-  for (unsigned Idx = 0; Idx < NumElem; Idx++) {
-    SDValue Ex = DAG.getNode(
-        ISD::EXTRACT_VECTOR_ELT, dl, RegSclVT, Value,
-        DAG.getConstant(Idx, dl, TLI.getVectorIdxTy(DAG.getDataLayout())));
+    // For sub-byte element sizes, this ends up with 0 stride between elements,
+    // so the same element just gets re-written to the same location. There seem
+    // to be tests explicitly testing for this broken behavior though.  tests
+    // for this broken behavior.
 
-    // This scalar TruncStore may be illegal, but we legalize it later.
-    SDValue Store = DAG.getTruncStore(Chain, dl, Ex, BasePTR,
-               ST->getPointerInfo().getWithOffset(Idx*Stride), MemSclVT,
-               isVolatile, isNonTemporal, MinAlign(Alignment, Idx*Stride),
-               AAInfo);
+    LLVMContext &Ctx = *DAG.getContext();
 
-    BasePTR = DAG.getNode(ISD::ADD, dl, BasePTR.getValueType(), BasePTR,
-                          DAG.getConstant(Stride, dl, BasePTR.getValueType()));
+    EVT NewMemVT
+      = EVT::getVectorVT(Ctx,
+                         MemSclVT.getIntegerVT(Ctx, NextPowerOf2(ScalarSize)),
+                         StVT.getVectorNumElements());
 
-    Stores.push_back(Store);
+    SDValue NewVectorStore
+      = DAG.getTruncStore(ST->getChain(), SDLoc(Op), ST->getValue(),
+                          ST->getBasePtr(),
+                          ST->getPointerInfo(), NewMemVT,
+                          ST->isVolatile(), ST->isNonTemporal(),
+                          ST->getAlignment(),
+                          ST->getAAInfo());
+    ST = cast<StoreSDNode>(NewVectorStore.getNode());
   }
-  SDValue TF =  DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Stores);
+
+  SDValue TF = TLI.scalarizeVectorStore(ST, DAG);
   AddLegalizedOperand(Op, TF);
   return TF;
 }
@@ -715,40 +697,14 @@ SDValue VectorLegalizer::Expand(SDValue Op) {
     return ExpandFNEG(Op);
   case ISD::SETCC:
     return UnrollVSETCC(Op);
-  case ISD::UABSDIFF:
-  case ISD::SABSDIFF:
-    return ExpandABSDIFF(Op);
+  case ISD::BITREVERSE:
+    return ExpandBITREVERSE(Op);
+  case ISD::CTLZ_ZERO_UNDEF:
+  case ISD::CTTZ_ZERO_UNDEF:
+    return ExpandCTLZ_CTTZ_ZERO_UNDEF(Op);
   default:
     return DAG.UnrollVectorOp(Op.getNode());
   }
-}
-
-SDValue VectorLegalizer::ExpandABSDIFF(SDValue Op) {
-  SDLoc dl(Op);
-  SDValue Op0 = Op.getOperand(0);
-  SDValue Op1 = Op.getOperand(1);
-  EVT VT = Op.getValueType();
-
-  // For unsigned intrinsic, promote the type to handle unsigned overflow.
-  bool isUabsdiff = (Op->getOpcode() == ISD::UABSDIFF);
-  if (isUabsdiff) {
-    VT = VT.widenIntegerVectorElementType(*DAG.getContext());
-    Op0 = DAG.getNode(ISD::ZERO_EXTEND, dl, VT, Op0);
-    Op1 = DAG.getNode(ISD::ZERO_EXTEND, dl, VT, Op1);
-  }
-
-  SDNodeFlags Flags;
-  Flags.setNoSignedWrap(!isUabsdiff);
-  SDValue Sub = DAG.getNode(ISD::SUB, dl, VT, Op0, Op1, &Flags);
-  if (isUabsdiff)
-    return DAG.getNode(ISD::TRUNCATE, dl, Op.getValueType(), Sub);
-
-  SDValue Cmp =
-      DAG.getNode(ISD::SETCC, dl, TLI.getSetCCResultType(DAG.getDataLayout(),
-                                                         *DAG.getContext(), VT),
-                  Sub, DAG.getConstant(0, dl, VT), DAG.getCondCode(ISD::SETGE));
-  SDValue Neg = DAG.getNode(ISD::SUB, dl, VT, DAG.getConstant(0, dl, VT), Sub, &Flags);
-  return DAG.getNode(ISD::VSELECT, dl, VT, Cmp, Sub, Neg);
 }
 
 SDValue VectorLegalizer::ExpandSELECT(SDValue Op) {
@@ -931,6 +887,25 @@ SDValue VectorLegalizer::ExpandBSWAP(SDValue Op) {
   return DAG.getNode(ISD::BITCAST, DL, VT, Op);
 }
 
+SDValue VectorLegalizer::ExpandBITREVERSE(SDValue Op) {
+  EVT VT = Op.getValueType();
+
+  // If we have the scalar operation, it's probably cheaper to unroll it.
+  if (TLI.isOperationLegalOrCustom(ISD::BITREVERSE, VT.getScalarType()))
+    return DAG.UnrollVectorOp(Op.getNode());
+
+  // If we have the appropriate vector bit operations, it is better to use them
+  // than unrolling and expanding each component.
+  if (!TLI.isOperationLegalOrCustom(ISD::SHL, VT) ||
+      !TLI.isOperationLegalOrCustom(ISD::SRL, VT) ||
+      !TLI.isOperationLegalOrCustom(ISD::AND, VT) ||
+      !TLI.isOperationLegalOrCustom(ISD::OR, VT))
+    return DAG.UnrollVectorOp(Op.getNode());
+
+  // Let LegalizeDAG handle this later.
+  return Op;
+}
+
 SDValue VectorLegalizer::ExpandVSELECT(SDValue Op) {
   // Implement VSELECT in terms of XOR, AND, OR
   // on platforms which do not support blend natively.
@@ -1027,6 +1002,16 @@ SDValue VectorLegalizer::ExpandFNEG(SDValue Op) {
     return DAG.getNode(ISD::FSUB, DL, Op.getValueType(),
                        Zero, Op.getOperand(0));
   }
+  return DAG.UnrollVectorOp(Op.getNode());
+}
+
+SDValue VectorLegalizer::ExpandCTLZ_CTTZ_ZERO_UNDEF(SDValue Op) {
+  // If the non-ZERO_UNDEF version is supported we can let LegalizeDAG handle.
+  unsigned Opc = Op.getOpcode() == ISD::CTLZ_ZERO_UNDEF ? ISD::CTLZ : ISD::CTTZ;
+  if (TLI.isOperationLegalOrCustom(Opc, Op.getValueType()))
+    return Op;
+
+  // Otherwise go ahead and unroll.
   return DAG.UnrollVectorOp(Op.getNode());
 }
 

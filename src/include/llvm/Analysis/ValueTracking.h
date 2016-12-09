@@ -138,12 +138,14 @@ namespace llvm {
   /// CannotBeNegativeZero - Return true if we can prove that the specified FP
   /// value is never equal to -0.0.
   ///
-  bool CannotBeNegativeZero(const Value *V, unsigned Depth = 0);
+  bool CannotBeNegativeZero(const Value *V, const TargetLibraryInfo *TLI,
+                            unsigned Depth = 0);
 
   /// CannotBeOrderedLessThanZero - Return true if we can prove that the
   /// specified FP value is either a NaN or never less than 0.0.
   ///
-  bool CannotBeOrderedLessThanZero(const Value *V, unsigned Depth = 0);
+  bool CannotBeOrderedLessThanZero(const Value *V, const TargetLibraryInfo *TLI,
+                                   unsigned Depth = 0);
 
   /// isBytewiseValue - If the specified value can be set by repeating the same
   /// byte in memory, return the i8 value that it is represented with.  This is
@@ -286,7 +288,7 @@ namespace llvm {
 
   /// Returns true if the result or effects of the given instructions \p I
   /// depend on or influence global memory.
-  /// Memory dependence arises for example if the the instruction reads from
+  /// Memory dependence arises for example if the instruction reads from
   /// memory or may produce effects or undefined behaviour. Memory dependent
   /// instructions generally cannot be reorderd with respect to other memory
   /// dependent instructions or moved into non-dominated basic blocks.
@@ -412,6 +414,11 @@ namespace llvm {
     bool Ordered;               /// When implementing this min/max pattern as
                                 /// fcmp; select, does the fcmp have to be
                                 /// ordered?
+
+    /// \brief Return true if \p SPF is a min or a max pattern.
+    static bool isMinOrMax(SelectPatternFlavor SPF) {
+      return !(SPF == SPF_UNKNOWN || SPF == SPF_ABS || SPF == SPF_NABS);
+    }
   };
   /// Pattern match integer [SU]MIN, [SU]MAX and ABS idioms, returning the kind
   /// and providing the out parameter results if we successfully match.

@@ -244,9 +244,8 @@ public:
     Params.push_back(Ctx.getPointerDiffType()->getCanonicalTypeUnqualified());
     Params.push_back(Ctx.BoolTy);
     llvm::FunctionType *FTy =
-        Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(
-            IdType, false, false, Params, FunctionType::ExtInfo(),
-            RequiredArgs::All));
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(IdType, Params));
     return CGM.CreateRuntimeFunction(FTy, "objc_getProperty");
   }
 
@@ -264,9 +263,8 @@ public:
     Params.push_back(Ctx.BoolTy);
     Params.push_back(Ctx.BoolTy);
     llvm::FunctionType *FTy =
-        Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(
-            Ctx.VoidTy, false, false, Params, FunctionType::ExtInfo(),
-            RequiredArgs::All));
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(Ctx.VoidTy, Params));
     return CGM.CreateRuntimeFunction(FTy, "objc_setProperty");
   }
 
@@ -290,9 +288,8 @@ public:
     Params.push_back(IdType);
     Params.push_back(Ctx.getPointerDiffType()->getCanonicalTypeUnqualified());
     llvm::FunctionType *FTy =
-        Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(
-            Ctx.VoidTy, false, false, Params, FunctionType::ExtInfo(),
-            RequiredArgs::All));
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(Ctx.VoidTy, Params));
     const char *name;
     if (atomic && copy)
       name = "objc_setProperty_atomic_copy";
@@ -317,9 +314,8 @@ public:
     Params.push_back(Ctx.BoolTy);
     Params.push_back(Ctx.BoolTy);
     llvm::FunctionType *FTy =
-        Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(
-            Ctx.VoidTy, false, false, Params, FunctionType::ExtInfo(),
-            RequiredArgs::All));
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(Ctx.VoidTy, Params));
     return CGM.CreateRuntimeFunction(FTy, "objc_copyStruct");
   }
   
@@ -336,10 +332,8 @@ public:
     Params.push_back(Ctx.VoidPtrTy);
     Params.push_back(Ctx.VoidPtrTy);
     llvm::FunctionType *FTy =
-      Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(Ctx.VoidTy, false, false,
-                                                          Params,
-                                                          FunctionType::ExtInfo(),
-                                                          RequiredArgs::All));
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(Ctx.VoidTy, Params));
     return CGM.CreateRuntimeFunction(FTy, "objc_copyCppObjectAtomic");
   }
   
@@ -350,10 +344,24 @@ public:
     SmallVector<CanQualType,1> Params;
     Params.push_back(Ctx.getCanonicalParamType(Ctx.getObjCIdType()));
     llvm::FunctionType *FTy =
-        Types.GetFunctionType(Types.arrangeLLVMFunctionInfo(
-            Ctx.VoidTy, false, false, Params, FunctionType::ExtInfo(),
-            RequiredArgs::All));
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(Ctx.VoidTy, Params));
     return CGM.CreateRuntimeFunction(FTy, "objc_enumerationMutation");
+  }
+
+  llvm::Constant *getLookUpClassFn() {
+    CodeGen::CodeGenTypes &Types = CGM.getTypes();
+    ASTContext &Ctx = CGM.getContext();
+    // Class objc_lookUpClass (const char *)
+    SmallVector<CanQualType,1> Params;
+    Params.push_back(
+      Ctx.getCanonicalType(Ctx.getPointerType(Ctx.CharTy.withConst())));
+    llvm::FunctionType *FTy =
+        Types.GetFunctionType(
+          Types.arrangeBuiltinFunctionDeclaration(
+                                Ctx.getCanonicalType(Ctx.getObjCClassType()),
+                                Params));
+    return CGM.CreateRuntimeFunction(FTy, "objc_lookUpClass");
   }
 
   /// GcReadWeakFn -- LLVM objc_read_weak (id *src) function.
@@ -833,7 +841,7 @@ protected:
   llvm::DenseMap<Selector, llvm::GlobalVariable*> MethodVarNames;
 
   /// DefinedCategoryNames - list of category names in form Class_Category.
-  llvm::SetVector<std::string> DefinedCategoryNames;
+  llvm::SmallSetVector<std::string, 16> DefinedCategoryNames;
 
   /// MethodVarTypes - uniqued method type signatures. We have to use
   /// a StringMap here because have no other unique reference.
@@ -967,7 +975,8 @@ protected:
   llvm::Constant *EmitPropertyList(Twine Name,
                                    const Decl *Container,
                                    const ObjCContainerDecl *OCD,
-                                   const ObjCCommonTypesHelper &ObjCTypes);
+                                   const ObjCCommonTypesHelper &ObjCTypes,
+                                   bool IsClassProperty);
 
   /// EmitProtocolMethodTypes - Generate the array of extended method type 
   /// strings. The return value has type Int8PtrPtrTy.
@@ -981,12 +990,19 @@ protected:
     SmallVectorImpl<llvm::Constant*> &Properties,
     const Decl *Container,
     const ObjCProtocolDecl *Proto,
-    const ObjCCommonTypesHelper &ObjCTypes);
+    const ObjCCommonTypesHelper &ObjCTypes,
+    bool IsClassProperty);
 
   /// GetProtocolRef - Return a reference to the internal protocol
   /// description, creating an empty one if it has not been
   /// defined. The return value has type ProtocolPtrTy.
   llvm::Constant *GetProtocolRef(const ObjCProtocolDecl *PD);
+
+  /// Return a reference to the given Class using runtime calls rather than
+  /// by a symbol reference.
+  llvm::Value *EmitClassRefViaRuntime(CodeGenFunction &CGF,
+                                      const ObjCInterfaceDecl *ID,
+                                      ObjCCommonTypesHelper &ObjCTypes);
 
 public:
   /// CreateMetadataVar - Create a global variable with internal
@@ -1079,7 +1095,8 @@ private:
   /// has type ClassExtensionPtrTy.
   llvm::Constant *EmitClassExtension(const ObjCImplementationDecl *ID,
                                      CharUnits instanceSize,
-                                     bool hasMRCWeakIvars);
+                                     bool hasMRCWeakIvars,
+                                     bool isClassProperty);
 
   /// EmitClassRef - Return a Value*, of type ObjCTypes.ClassPtrTy,
   /// for the given class.
@@ -1949,7 +1966,7 @@ CGObjCCommonMac::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
   llvm::Instruction *CallSite;
   Fn = llvm::ConstantExpr::getBitCast(Fn, MSI.MessengerType);
   RValue rvalue = CGF.EmitCall(MSI.CallInfo, Fn, Return, ActualArgs,
-                               nullptr, &CallSite);
+                               CGCalleeInfo(), &CallSite);
 
   // Mark the call as noreturn if the method is marked noreturn and the
   // receiver cannot be null.
@@ -2679,6 +2696,25 @@ llvm::Constant *CGObjCCommonMac::GetProtocolRef(const ObjCProtocolDecl *PD) {
   return GetOrEmitProtocolRef(PD);
 }
 
+llvm::Value *CGObjCCommonMac::EmitClassRefViaRuntime(
+               CodeGenFunction &CGF,
+               const ObjCInterfaceDecl *ID,
+               ObjCCommonTypesHelper &ObjCTypes) {
+  llvm::Constant *lookUpClassFn = ObjCTypes.getLookUpClassFn();
+
+  llvm::Value *className =
+      CGF.CGM.GetAddrOfConstantCString(ID->getObjCRuntimeNameAsString())
+        .getPointer();
+  ASTContext &ctx = CGF.CGM.getContext();
+  className =
+      CGF.Builder.CreateBitCast(className,
+                                CGF.ConvertType(
+                                  ctx.getPointerType(ctx.CharTy.withConst())));
+  llvm::CallInst *call = CGF.Builder.CreateCall(lookUpClassFn, className);
+  call->setDoesNotThrow();
+  return call;
+}
+
 /*
 // Objective-C 1.0 extensions
 struct _objc_protocol {
@@ -2800,6 +2836,7 @@ llvm::Constant *CGObjCMac::GetOrEmitProtocolRef(const ObjCProtocolDecl *PD) {
   struct objc_method_description_list *optional_class_methods;
   struct objc_property_list *instance_properties;
   const char ** extendedMethodTypes;
+  struct objc_property_list *class_properties;
   };
 */
 llvm::Constant *
@@ -2818,13 +2855,16 @@ CGObjCMac::EmitProtocolExtension(const ObjCProtocolDecl *PD,
                          "__OBJC,__cat_cls_meth,regular,no_dead_strip",
                          OptClassMethods),
       EmitPropertyList("OBJC_$_PROP_PROTO_LIST_" + PD->getName(), nullptr, PD,
-                       ObjCTypes),
+                       ObjCTypes, false),
       EmitProtocolMethodTypes("OBJC_PROTOCOL_METHOD_TYPES_" + PD->getName(),
-                              MethodTypesExt, ObjCTypes)};
+                              MethodTypesExt, ObjCTypes),
+      EmitPropertyList("OBJC_$_CLASS_PROP_PROTO_LIST_" + PD->getName(), nullptr,
+                       PD, ObjCTypes, true)};
 
   // Return null if no extension bits are used.
   if (Values[1]->isNullValue() && Values[2]->isNullValue() &&
-      Values[3]->isNullValue() && Values[4]->isNullValue())
+      Values[3]->isNullValue() && Values[4]->isNullValue() &&
+      Values[5]->isNullValue())
     return llvm::Constant::getNullValue(ObjCTypes.ProtocolExtensionPtrTy);
 
   llvm::Constant *Init =
@@ -2880,10 +2920,15 @@ PushProtocolProperties(llvm::SmallPtrSet<const IdentifierInfo*,16> &PropertySet,
                        SmallVectorImpl<llvm::Constant *> &Properties,
                        const Decl *Container,
                        const ObjCProtocolDecl *Proto,
-                       const ObjCCommonTypesHelper &ObjCTypes) {
+                       const ObjCCommonTypesHelper &ObjCTypes,
+                       bool IsClassProperty) {
   for (const auto *P : Proto->protocols()) 
-    PushProtocolProperties(PropertySet, Properties, Container, P, ObjCTypes);
+    PushProtocolProperties(PropertySet, Properties, Container, P, ObjCTypes,
+                           IsClassProperty);
+
   for (const auto *PD : Proto->properties()) {
+    if (IsClassProperty != PD->isClassProperty())
+      continue;
     if (!PropertySet.insert(PD->getIdentifier()).second)
       continue;
     llvm::Constant *Prop[] = {
@@ -2909,7 +2954,17 @@ PushProtocolProperties(llvm::SmallPtrSet<const IdentifierInfo*,16> &PropertySet,
 llvm::Constant *CGObjCCommonMac::EmitPropertyList(Twine Name,
                                        const Decl *Container,
                                        const ObjCContainerDecl *OCD,
-                                       const ObjCCommonTypesHelper &ObjCTypes) {
+                                       const ObjCCommonTypesHelper &ObjCTypes,
+                                       bool IsClassProperty) {
+  if (IsClassProperty) {
+    // Make this entry NULL for OS X with deployment target < 10.11, for iOS
+    // with deployment target < 9.0.
+    const llvm::Triple &Triple = CGM.getTarget().getTriple();
+    if ((Triple.isMacOSX() && Triple.isMacOSXVersionLT(10, 11)) ||
+        (Triple.isiOS() && Triple.isOSVersionLT(9)))
+      return llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
+  }
+
   SmallVector<llvm::Constant *, 16> Properties;
   llvm::SmallPtrSet<const IdentifierInfo*, 16> PropertySet;
 
@@ -2921,10 +2976,15 @@ llvm::Constant *CGObjCCommonMac::EmitPropertyList(Twine Name,
   if (const ObjCInterfaceDecl *OID = dyn_cast<ObjCInterfaceDecl>(OCD))
     for (const ObjCCategoryDecl *ClassExt : OID->known_extensions())
       for (auto *PD : ClassExt->properties()) {
+        if (IsClassProperty != PD->isClassProperty())
+          continue;
         PropertySet.insert(PD->getIdentifier());
         AddProperty(PD);
       }
+
   for (const auto *PD : OCD->properties()) {
+    if (IsClassProperty != PD->isClassProperty())
+      continue;
     // Don't emit duplicate metadata for properties that were already in a
     // class extension.
     if (!PropertySet.insert(PD->getIdentifier()).second)
@@ -2934,11 +2994,13 @@ llvm::Constant *CGObjCCommonMac::EmitPropertyList(Twine Name,
 
   if (const ObjCInterfaceDecl *OID = dyn_cast<ObjCInterfaceDecl>(OCD)) {
     for (const auto *P : OID->all_referenced_protocols())
-      PushProtocolProperties(PropertySet, Properties, Container, P, ObjCTypes);
+      PushProtocolProperties(PropertySet, Properties, Container, P, ObjCTypes,
+                             IsClassProperty);
   }
   else if (const ObjCCategoryDecl *CD = dyn_cast<ObjCCategoryDecl>(OCD)) {
     for (const auto *P : CD->protocols())
-      PushProtocolProperties(PropertySet, Properties, Container, P, ObjCTypes);
+      PushProtocolProperties(PropertySet, Properties, Container, P, ObjCTypes,
+                             IsClassProperty);
   }
 
   // Return null for empty list.
@@ -3031,6 +3093,7 @@ CGObjCMac::EmitMethodDescList(Twine Name, const char *Section,
   struct _objc_protocol_list *protocols;
   uint32_t size; // <rdar://4585769>
   struct _objc_property_list *instance_properties;
+  struct _objc_property_list *class_properties;
   };
 */
 void CGObjCMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
@@ -3057,7 +3120,7 @@ void CGObjCMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
     // Class methods should always be defined.
     ClassMethods.push_back(GetMethodConstant(I));
 
-  llvm::Constant *Values[7];
+  llvm::Constant *Values[8];
   Values[0] = GetClassName(OCD->getName());
   Values[1] = GetClassName(Interface->getObjCRuntimeNameAsString());
   LazySymbols.insert(Interface->getIdentifier());
@@ -3079,9 +3142,12 @@ void CGObjCMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   // If there is no category @interface then there can be no properties.
   if (Category) {
     Values[6] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + ExtName.str(),
-                                 OCD, Category, ObjCTypes);
+                                 OCD, Category, ObjCTypes, false);
+    Values[7] = EmitPropertyList("\01l_OBJC_$_CLASS_PROP_LIST_" + ExtName.str(),
+                                 OCD, Category, ObjCTypes, true);
   } else {
     Values[6] = llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
+    Values[7] = llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
   }
 
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.CategoryTy,
@@ -3276,7 +3342,8 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
   Values[ 8] = llvm::Constant::getNullValue(ObjCTypes.CachePtrTy);
   Values[ 9] = Protocols;
   Values[10] = BuildStrongIvarLayout(ID, CharUnits::Zero(), Size);
-  Values[11] = EmitClassExtension(ID, Size, hasMRCWeak);
+  Values[11] = EmitClassExtension(ID, Size, hasMRCWeak,
+                                  false/*isClassProperty*/);
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.ClassTy,
                                                    Values);
   std::string Name("OBJC_CLASS_");
@@ -3340,8 +3407,9 @@ llvm::Constant *CGObjCMac::EmitMetaClass(const ObjCImplementationDecl *ID,
   Values[ 9] = Protocols;
   // ivar_layout for metaclass is always NULL.
   Values[10] = llvm::Constant::getNullValue(ObjCTypes.Int8PtrTy);
-  // The class extension is always unused for metaclasses.
-  Values[11] = llvm::Constant::getNullValue(ObjCTypes.ClassExtensionPtrTy);
+  // The class extension is used to store class properties for metaclasses.
+  Values[11] = EmitClassExtension(ID, CharUnits::Zero(), false/*hasMRCWeak*/,
+                                  true/*isClassProperty*/);
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.ClassTy,
                                                    Values);
 
@@ -3415,19 +3483,28 @@ llvm::Value *CGObjCMac::EmitSuperClassRef(const ObjCInterfaceDecl *ID) {
 */
 llvm::Constant *
 CGObjCMac::EmitClassExtension(const ObjCImplementationDecl *ID,
-                              CharUnits InstanceSize, bool hasMRCWeakIvars) {
+                              CharUnits InstanceSize, bool hasMRCWeakIvars,
+                              bool isClassProperty) {
   uint64_t Size =
     CGM.getDataLayout().getTypeAllocSize(ObjCTypes.ClassExtensionTy);
 
   llvm::Constant *Values[3];
   Values[0] = llvm::ConstantInt::get(ObjCTypes.IntTy, Size);
-  Values[1] = BuildWeakIvarLayout(ID, CharUnits::Zero(), InstanceSize,
-                                  hasMRCWeakIvars);
-  Values[2] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + ID->getName(),
-                               ID, ID->getClassInterface(), ObjCTypes);
+  if (isClassProperty) {
+    llvm::Type *PtrTy = CGM.Int8PtrTy;
+    Values[1] = llvm::Constant::getNullValue(PtrTy);
+  } else
+    Values[1] = BuildWeakIvarLayout(ID, CharUnits::Zero(), InstanceSize,
+                                    hasMRCWeakIvars);
+  if (isClassProperty)
+    Values[2] = EmitPropertyList("\01l_OBJC_$_CLASS_PROP_LIST_" + ID->getName(),
+                                 ID, ID->getClassInterface(), ObjCTypes, true);
+  else
+    Values[2] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + ID->getName(),
+                                 ID, ID->getClassInterface(), ObjCTypes, false);
 
   // Return null if no extension bits are used.
-  if (Values[1]->isNullValue() && Values[2]->isNullValue())
+  if ((!Values[1] || Values[1]->isNullValue()) && Values[2]->isNullValue())
     return llvm::Constant::getNullValue(ObjCTypes.ClassExtensionPtrTy);
 
   llvm::Constant *Init =
@@ -4457,7 +4534,8 @@ enum ImageInfoFlags {
   // A flag indicating that the module has no instances of a @synthesize of a
   // superclass variable. <rdar://problem/6803242>
   eImageInfo_CorrectedSynthesize = (1 << 4), // This flag is no longer set by clang.
-  eImageInfo_ImageIsSimulated    = (1 << 5)
+  eImageInfo_ImageIsSimulated    = (1 << 5),
+  eImageInfo_ClassProperties     = (1 << 6)
 };
 
 void CGObjCCommonMac::EmitImageInfo() {
@@ -4509,6 +4587,10 @@ void CGObjCCommonMac::EmitImageInfo() {
        Triple.getArch() == llvm::Triple::x86_64))
     Mod.addModuleFlag(llvm::Module::Error, "Objective-C Is Simulated",
                       eImageInfo_ImageIsSimulated);
+
+  // Indicate whether we are generating class properties.
+  Mod.addModuleFlag(llvm::Module::Error, "Objective-C Class Properties",
+                    eImageInfo_ClassProperties);
 }
 
 // struct objc_module {
@@ -4604,6 +4686,11 @@ llvm::Value *CGObjCMac::EmitClassRefFromId(CodeGenFunction &CGF,
 
 llvm::Value *CGObjCMac::EmitClassRef(CodeGenFunction &CGF,
                                      const ObjCInterfaceDecl *ID) {
+  // If the class has the objc_runtime_visible attribute, we need to
+  // use the Objective-C runtime to get the class.
+  if (ID->hasAttr<ObjCRuntimeVisibleAttr>())
+    return EmitClassRefViaRuntime(CGF, ID, ObjCTypes);
+
   return EmitClassRefFromId(CGF, ID->getIdentifier());
 }
 
@@ -4772,11 +4859,7 @@ llvm::Constant *IvarLayoutBuilder::buildBitmap(CGObjCCommonMac &CGObjC,
     // This isn't a stable sort, but our algorithm should handle it fine.
     llvm::array_pod_sort(IvarsInfo.begin(), IvarsInfo.end());
   } else {
-#ifndef NDEBUG
-    for (unsigned i = 1; i != IvarsInfo.size(); ++i) {
-      assert(IvarsInfo[i - 1].Offset <= IvarsInfo[i].Offset);
-    }
-#endif
+    assert(std::is_sorted(IvarsInfo.begin(), IvarsInfo.end()));
   }
   assert(IvarsInfo.back().Offset < InstanceEnd);
 
@@ -4960,7 +5043,7 @@ CGObjCCommonMac::BuildIvarLayout(const ObjCImplementationDecl *OMD,
       baseOffset = CharUnits::Zero();
     }
 
-    baseOffset = baseOffset.RoundUpToAlignment(CGM.getPointerAlign());
+    baseOffset = baseOffset.alignTo(CGM.getPointerAlign());
   }
   else {
     CGM.getContext().DeepCollectObjCIvars(OI, true, ivars);
@@ -5262,12 +5345,13 @@ ObjCTypesHelper::ObjCTypesHelper(CodeGen::CodeGenModule &cgm)
   //   struct _objc_method_description_list *optional_class_methods;
   //   struct _objc_property_list *instance_properties;
   //   const char ** extendedMethodTypes;
+  //   struct _objc_property_list *class_properties;
   // }
   ProtocolExtensionTy =
     llvm::StructType::create("struct._objc_protocol_extension",
                              IntTy, MethodDescriptionListPtrTy,
                              MethodDescriptionListPtrTy, PropertyListPtrTy,
-                             Int8PtrPtrTy, nullptr);
+                             Int8PtrPtrTy, PropertyListPtrTy, nullptr);
 
   // struct _objc_protocol_extension *
   ProtocolExtensionPtrTy = llvm::PointerType::getUnqual(ProtocolExtensionTy);
@@ -5365,14 +5449,17 @@ ObjCTypesHelper::ObjCTypesHelper(CodeGen::CodeGenModule &cgm)
   //   char *class_name;
   //   struct _objc_method_list *instance_method;
   //   struct _objc_method_list *class_method;
+  //   struct _objc_protocol_list *protocols;
   //   uint32_t size;  // sizeof(struct _objc_category)
   //   struct _objc_property_list *instance_properties;// category's @property
+  //   struct _objc_property_list *class_properties;
   // }
   CategoryTy =
     llvm::StructType::create("struct._objc_category",
                              Int8PtrTy, Int8PtrTy, MethodListPtrTy,
                              MethodListPtrTy, ProtocolListPtrTy,
-                             IntTy, PropertyListPtrTy, nullptr);
+                             IntTy, PropertyListPtrTy, PropertyListPtrTy,
+                             nullptr);
 
   // Global metadata structures
 
@@ -5440,6 +5527,7 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
   //   const uint32_t flags;  // = 0
   //   const char ** extendedMethodTypes;
   //   const char *demangledName;
+  //   const struct _prop_list_t * class_properties;
   // }
 
   // Holder for struct _protocol_list_t *
@@ -5452,7 +5540,7 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
                              MethodListnfABIPtrTy, MethodListnfABIPtrTy,
                              MethodListnfABIPtrTy, MethodListnfABIPtrTy,
                              PropertyListPtrTy, IntTy, IntTy, Int8PtrPtrTy,
-                             Int8PtrTy,
+                             Int8PtrTy, PropertyListPtrTy,
                              nullptr);
 
   // struct _protocol_t*
@@ -5545,6 +5633,8 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
   //   const struct _method_list_t * const class_methods;
   //   const struct _protocol_list_t * const protocols;
   //   const struct _prop_list_t * const properties;
+  //   const struct _prop_list_t * const class_properties;
+  //   const uint32_t size;
   // }
   CategorynfABITy = llvm::StructType::create("struct._category_t",
                                              Int8PtrTy, ClassnfABIPtrTy,
@@ -5552,6 +5642,8 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
                                              MethodListnfABIPtrTy,
                                              ProtocolListnfABIPtrTy,
                                              PropertyListPtrTy,
+                                             PropertyListPtrTy,
+                                             IntTy,
                                              nullptr);
 
   // New types for nonfragile abi messaging.
@@ -5820,13 +5912,16 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassRoTInitializer(
   if (flags & NonFragileABI_Class_Meta) {
     Values[ 7] = llvm::Constant::getNullValue(ObjCTypes.IvarListnfABIPtrTy);
     Values[ 8] = GetIvarLayoutName(nullptr, ObjCTypes);
-    Values[ 9] = llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
+    Values[ 9] = EmitPropertyList(
+        "\01l_OBJC_$_CLASS_PROP_LIST_" + ID->getObjCRuntimeNameAsString(),
+        ID, ID->getClassInterface(), ObjCTypes, true);
   } else {
     Values[ 7] = EmitIvarList(ID);
     Values[ 8] = BuildWeakIvarLayout(ID, beginInstance, endInstance,
                                      hasMRCWeak);
-    Values[ 9] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + ID->getObjCRuntimeNameAsString(),
-                                  ID, ID->getClassInterface(), ObjCTypes);
+    Values[ 9] = EmitPropertyList(
+        "\01l_OBJC_$_PROP_LIST_" + ID->getObjCRuntimeNameAsString(),
+        ID, ID->getClassInterface(), ObjCTypes, false);
   }
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.ClassRonfABITy,
                                                    Values);
@@ -6109,6 +6204,8 @@ llvm::Value *CGObjCNonFragileABIMac::GenerateProtocolRef(CodeGenFunction &CGF,
 ///   const struct _method_list_t * const class_methods;
 ///   const struct _protocol_list_t * const protocols;
 ///   const struct _prop_list_t * const properties;
+///   const struct _prop_list_t * const class_properties;
+///   const uint32_t size;
 /// }
 ///
 void CGObjCNonFragileABIMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
@@ -6123,7 +6220,7 @@ void CGObjCNonFragileABIMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
   llvm::SmallString<64> ExtClassName(getClassSymbolPrefix());
   ExtClassName += Interface->getObjCRuntimeNameAsString();
 
-  llvm::Constant *Values[6];
+  llvm::Constant *Values[8];
   Values[0] = GetClassName(OCD->getIdentifier()->getName());
   // meta-class entry symbol
   llvm::Constant *ClassGV = GetClassGlobal(ExtClassName.str(),
@@ -6173,11 +6270,17 @@ void CGObjCNonFragileABIMac::GenerateCategory(const ObjCCategoryImplDecl *OCD) {
                                    Category->protocol_begin(),
                                    Category->protocol_end());
     Values[5] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + ExtName.str(),
-                                 OCD, Category, ObjCTypes);
+                                 OCD, Category, ObjCTypes, false);
+    Values[6] = EmitPropertyList("\01l_OBJC_$_CLASS_PROP_LIST_" + ExtName.str(),
+                                 OCD, Category, ObjCTypes, true);
   } else {
     Values[4] = llvm::Constant::getNullValue(ObjCTypes.ProtocolListnfABIPtrTy);
     Values[5] = llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
+    Values[6] = llvm::Constant::getNullValue(ObjCTypes.PropertyListPtrTy);
   }
+
+  unsigned Size = CGM.getDataLayout().getTypeAllocSize(ObjCTypes.CategorynfABITy);
+  Values[7] = llvm::ConstantInt::get(ObjCTypes.IntTy, Size);
 
   llvm::Constant *Init =
     llvm::ConstantStruct::get(ObjCTypes.CategorynfABITy,
@@ -6378,7 +6481,7 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocolRef(
   const ObjCProtocolDecl *PD) {
   llvm::GlobalVariable *&Entry = Protocols[PD->getIdentifier()];
 
-  if (!Entry) {
+  if (!Entry)
     // We use the initializer as a marker of whether this is a forward
     // reference or not. At module finalization we add the empty
     // contents for protocols which were referenced but never defined.
@@ -6387,8 +6490,6 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocolRef(
                                  false, llvm::GlobalValue::ExternalLinkage,
                                  nullptr,
                                  "\01l_OBJC_PROTOCOL_$_" + PD->getObjCRuntimeNameAsString());
-    Entry->setSection("__DATA,__datacoal_nt,coalesced");
-  }
 
   return Entry;
 }
@@ -6408,6 +6509,7 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocolRef(
 ///   const uint32_t flags;  // = 0
 ///   const char ** extendedMethodTypes;
 ///   const char *demangledName;
+///   const struct _prop_list_t * class_properties;
 /// }
 /// @endcode
 ///
@@ -6459,7 +6561,7 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocol(
   MethodTypesExt.insert(MethodTypesExt.end(),
                         OptMethodTypesExt.begin(), OptMethodTypesExt.end());
 
-  llvm::Constant *Values[12];
+  llvm::Constant *Values[13];
   // isa is NULL
   Values[0] = llvm::Constant::getNullValue(ObjCTypes.ObjectPtrTy);
   Values[1] = GetClassName(PD->getObjCRuntimeNameAsString());
@@ -6483,8 +6585,9 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocol(
                              + PD->getObjCRuntimeNameAsString(),
                              "__DATA, __objc_const",
                              OptClassMethods);
-  Values[7] = EmitPropertyList("\01l_OBJC_$_PROP_LIST_" + PD->getObjCRuntimeNameAsString(),
-                               nullptr, PD, ObjCTypes);
+  Values[7] = EmitPropertyList(
+      "\01l_OBJC_$_PROP_LIST_" + PD->getObjCRuntimeNameAsString(),
+      nullptr, PD, ObjCTypes, false);
   uint32_t Size =
     CGM.getDataLayout().getTypeAllocSize(ObjCTypes.ProtocolnfABITy);
   Values[8] = llvm::ConstantInt::get(ObjCTypes.IntTy, Size);
@@ -6494,6 +6597,10 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocol(
                                        MethodTypesExt, ObjCTypes);
   // const char *demangledName;
   Values[11] = llvm::Constant::getNullValue(ObjCTypes.Int8PtrTy);
+
+  Values[12] = EmitPropertyList(
+      "\01l_OBJC_$_CLASS_PROP_LIST_" + PD->getObjCRuntimeNameAsString(),
+      nullptr, PD, ObjCTypes, true);
     
   llvm::Constant *Init = llvm::ConstantStruct::get(ObjCTypes.ProtocolnfABITy,
                                                    Values);
@@ -6509,7 +6616,6 @@ llvm::Constant *CGObjCNonFragileABIMac::GetOrEmitProtocol(
                                "\01l_OBJC_PROTOCOL_$_" + PD->getObjCRuntimeNameAsString());
     Entry->setAlignment(
       CGM.getDataLayout().getABITypeAlignment(ObjCTypes.ProtocolnfABITy));
-    Entry->setSection("__DATA,__datacoal_nt,coalesced");
 
     Protocols[PD->getIdentifier()] = Entry;
   }
@@ -6657,7 +6763,7 @@ static void appendSelectorForMessageRefTable(std::string &buffer,
   }
 }
 
-/// Emit a "v-table" message send.  We emit a weak hidden-visibility
+/// Emit a "vtable" message send.  We emit a weak hidden-visibility
 /// struct, initially containing the selector pointer and a pointer to
 /// a "fixup" variant of the appropriate objc_msgSend.  To call, we
 /// load and call the function pointer, passing the address of the
@@ -6848,6 +6954,11 @@ llvm::Value *CGObjCNonFragileABIMac::EmitClassRefFromId(CodeGenFunction &CGF,
 
 llvm::Value *CGObjCNonFragileABIMac::EmitClassRef(CodeGenFunction &CGF,
                                                   const ObjCInterfaceDecl *ID) {
+  // If the class has the objc_runtime_visible attribute, we need to
+  // use the Objective-C runtime to get the class.
+  if (ID->hasAttr<ObjCRuntimeVisibleAttr>())
+    return EmitClassRefViaRuntime(CGF, ID, ObjCTypes);
+
   return EmitClassRefFromId(CGF, ID->getIdentifier(), ID->isWeakImported(), ID);
 }
 
@@ -7252,8 +7363,6 @@ CGObjCNonFragileABIMac::GetInterfaceEHType(const ObjCInterfaceDecl *ID,
 
   if (ForDefinition)
     Entry->setSection("__DATA,__objc_const");
-  else
-    Entry->setSection("__DATA,__datacoal_nt,coalesced");
 
   return Entry;
 }

@@ -31,10 +31,24 @@ static const char *const std_suppressions =
 // False positive when using std <thread>.
 // Happens because we miss atomic synchronization in libstdc++.
 // See http://llvm.org/bugs/show_bug.cgi?id=17066 for details.
-"race:std::_Sp_counted_ptr_inplace<std::thread::_Impl\n";
+"race:std::_Sp_counted_ptr_inplace<std::thread::_Impl\n"
+// <rdar://problem/25887822>.  This is already fixed in next major OS
+// (<rdar://problem/25166164>), but the bug is already in shipping code for
+// older OS versions.
+"mutex:ConvertMatchingCGEvents\n"
+// <rdar://problem/26262682>.  Again, fixed for next major OS
+// (<rdar://problem/25166164>), but we want to support existing OS versions.
+"mutex:AcquireCoalescingStack\n"
+// <rdar://problem/26371156>. Filed a bug asking the framework to fix the issue
+// (<rdar://problem/26380068>).
+"mutex:CFRunLoopRunSpecific\n"
+// <rdar://problem/26331497>. Filed a bug asking the framework to fix the issue
+// (<rdar://problem/26196956>).
+"mutex:QuartzCore::post_notification\n";
 
 // Can be overriden in frontend.
-extern "C" const char *WEAK __tsan_default_suppressions() {
+SANITIZER_WEAK_DEFAULT_IMPL
+const char *__tsan_default_suppressions() {
   return 0;
 }
 #endif
@@ -78,6 +92,8 @@ static const char *conv(ReportType typ) {
   else if (typ == ReportTypeMutexDestroyLocked)
     return kSuppressionMutex;
   else if (typ == ReportTypeMutexDoubleLock)
+    return kSuppressionMutex;
+  else if (typ == ReportTypeMutexInvalidAccess)
     return kSuppressionMutex;
   else if (typ == ReportTypeMutexBadUnlock)
     return kSuppressionMutex;

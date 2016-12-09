@@ -146,8 +146,7 @@ void MachODebugMapParser::switchToNewDebugMapObject(StringRef Filename,
 }
 
 static std::string getArchName(const object::MachOObjectFile &Obj) {
-  Triple ThumbTriple;
-  Triple T = Obj.getArch(nullptr, &ThumbTriple);
+  Triple T = Obj.getArchTriple();
   return T.getArchName();
 }
 
@@ -156,7 +155,7 @@ MachODebugMapParser::parseOneBinary(const MachOObjectFile &MainBinary,
                                     StringRef BinaryPath) {
   loadMainBinarySymbols(MainBinary);
   ArrayRef<uint8_t> UUID = MainBinary.getUuid();
-  Result = make_unique<DebugMap>(BinaryHolder::getTriple(MainBinary),
+  Result = make_unique<DebugMap>(MainBinary.getArchTriple(),
                                  BinaryPath, UUID);
   MainBinaryStrings = MainBinary.getStringTableData();
   for (const SymbolRef &Symbol : MainBinary.symbols()) {
@@ -306,7 +305,11 @@ static bool shouldLinkArch(SmallVectorImpl<StringRef> &Archs, StringRef Arch) {
       std::find(Archs.begin(), Archs.end(), "arm") != Archs.end())
     return true;
 
-  return std::find(Archs.begin(), Archs.end(), Arch) != Archs.end();
+  SmallString<16> ArchName = Arch;
+  if (Arch.startswith("thumb"))
+    ArchName = ("arm" + Arch.substr(5)).str();
+
+  return std::find(Archs.begin(), Archs.end(), ArchName) != Archs.end();
 }
 
 bool MachODebugMapParser::dumpStab() {
@@ -318,9 +321,8 @@ bool MachODebugMapParser::dumpStab() {
     return false;
   }
 
-  Triple T;
   for (const auto *Binary : *MainBinOrError)
-    if (shouldLinkArch(Archs, Binary->getArch(nullptr, &T).getArchName()))
+    if (shouldLinkArch(Archs, Binary->getArchTriple().getArchName()))
       dumpOneBinaryStab(*Binary, BinaryPath);
 
   return true;
@@ -336,9 +338,8 @@ ErrorOr<std::vector<std::unique_ptr<DebugMap>>> MachODebugMapParser::parse() {
     return Error;
 
   std::vector<std::unique_ptr<DebugMap>> Results;
-  Triple T;
   for (const auto *Binary : *MainBinOrError)
-    if (shouldLinkArch(Archs, Binary->getArch(nullptr, &T).getArchName()))
+    if (shouldLinkArch(Archs, Binary->getArchTriple().getArchName()))
       Results.push_back(parseOneBinary(*Binary, BinaryPath));
 
   return std::move(Results);

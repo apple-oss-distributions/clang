@@ -79,7 +79,7 @@ namespace {
         auto Offset = OrigBFI.Offset % C.toBits(lvalue.getAlignment());
         AtomicSizeInBits = C.toBits(
             C.toCharUnitsFromBits(Offset + OrigBFI.Size + C.getCharWidth() - 1)
-                .RoundUpToAlignment(lvalue.getAlignment()));
+                .alignTo(lvalue.getAlignment()));
         auto VoidPtrAddr = CGF.EmitCastToVoidPtr(lvalue.getBitFieldPointer());
         auto OffsetInChars =
             (C.toCharUnitsFromBits(OrigBFI.Offset) / lvalue.getAlignment()) *
@@ -323,8 +323,7 @@ static RValue emitAtomicLibcall(CodeGenFunction &CGF,
                                 QualType resultType,
                                 CallArgList &args) {
   const CGFunctionInfo &fnInfo =
-    CGF.CGM.getTypes().arrangeFreeFunctionCall(resultType, args,
-            FunctionType::ExtInfo(), RequiredArgs::All);
+    CGF.CGM.getTypes().arrangeBuiltinFunctionCall(resultType, args);
   llvm::FunctionType *fnTy = CGF.CGM.getTypes().GetFunctionType(fnInfo);
   llvm::Constant *fn = CGF.CGM.CreateRuntimeFunction(fnTy, fnName);
   return CGF.EmitCall(fnInfo, fn, ReturnValueSlot(), args);

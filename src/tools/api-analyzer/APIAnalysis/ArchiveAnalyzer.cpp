@@ -9,7 +9,7 @@
 using namespace llvm;
 using namespace object;
 
-int AnalyzeArchive(StringRef &filePath, APIAnalysisIntermediateResult &result,
+int AnalyzeArchive(StringRef filePath, APIAnalysisIntermediateResult &result,
                    const APIAnalysisOptions &options) {
   // Create or open the archive object.
   ErrorOr<std::unique_ptr<MemoryBuffer>> Buf =

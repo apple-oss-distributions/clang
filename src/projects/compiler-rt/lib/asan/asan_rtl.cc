@@ -113,13 +113,18 @@ static void OnLowLevelAllocate(uptr ptr, uptr size) {
 extern "C" NOINLINE INTERFACE_ATTRIBUTE                             \
 void __asan_report_ ## type ## size(uptr addr) {                    \
   GET_CALLER_PC_BP_SP;                                              \
-  __asan_report_error(pc, bp, sp, addr, is_write, size, 0);         \
+  ReportGenericError(pc, bp, sp, addr, is_write, size, 0, true);    \
 }                                                                   \
 extern "C" NOINLINE INTERFACE_ATTRIBUTE                             \
 void __asan_report_exp_ ## type ## size(uptr addr, u32 exp) {       \
   GET_CALLER_PC_BP_SP;                                              \
-  __asan_report_error(pc, bp, sp, addr, is_write, size, exp);       \
-}
+  ReportGenericError(pc, bp, sp, addr, is_write, size, exp, true);  \
+}                                                                   \
+extern "C" NOINLINE INTERFACE_ATTRIBUTE                             \
+void __asan_report_ ## type ## size ## _noabort(uptr addr) {        \
+  GET_CALLER_PC_BP_SP;                                              \
+  ReportGenericError(pc, bp, sp, addr, is_write, size, 0, false);   \
+}                                                                   \
 
 ASAN_REPORT_ERROR(load, false, 1)
 ASAN_REPORT_ERROR(load, false, 2)
@@ -132,22 +137,27 @@ ASAN_REPORT_ERROR(store, true, 4)
 ASAN_REPORT_ERROR(store, true, 8)
 ASAN_REPORT_ERROR(store, true, 16)
 
-#define ASAN_REPORT_ERROR_N(type, is_write)                    \
-extern "C" NOINLINE INTERFACE_ATTRIBUTE                        \
-void __asan_report_ ## type ## _n(uptr addr, uptr size) {      \
-  GET_CALLER_PC_BP_SP;                                         \
-  __asan_report_error(pc, bp, sp, addr, is_write, size, 0);    \
-}                                                              \
-extern "C" NOINLINE INTERFACE_ATTRIBUTE                        \
+#define ASAN_REPORT_ERROR_N(type, is_write)                                 \
+extern "C" NOINLINE INTERFACE_ATTRIBUTE                                     \
+void __asan_report_ ## type ## _n(uptr addr, uptr size) {                   \
+  GET_CALLER_PC_BP_SP;                                                      \
+  ReportGenericError(pc, bp, sp, addr, is_write, size, 0, true);            \
+}                                                                           \
+extern "C" NOINLINE INTERFACE_ATTRIBUTE                                     \
 void __asan_report_exp_ ## type ## _n(uptr addr, uptr size, u32 exp) {      \
   GET_CALLER_PC_BP_SP;                                                      \
-  __asan_report_error(pc, bp, sp, addr, is_write, size, exp);               \
-}
+  ReportGenericError(pc, bp, sp, addr, is_write, size, exp, true);          \
+}                                                                           \
+extern "C" NOINLINE INTERFACE_ATTRIBUTE                                     \
+void __asan_report_ ## type ## _n_noabort(uptr addr, uptr size) {           \
+  GET_CALLER_PC_BP_SP;                                                      \
+  ReportGenericError(pc, bp, sp, addr, is_write, size, 0, false);           \
+}                                                                           \
 
 ASAN_REPORT_ERROR_N(load, false)
 ASAN_REPORT_ERROR_N(store, true)
 
-#define ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, exp_arg)        \
+#define ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, exp_arg, fatal) \
     uptr sp = MEM_TO_SHADOW(addr);                                             \
     uptr s = size <= SHADOW_GRANULARITY ? *reinterpret_cast<u8 *>(sp)          \
                                         : *reinterpret_cast<u16 *>(sp);        \
@@ -159,7 +169,8 @@ ASAN_REPORT_ERROR_N(store, true)
           *__asan_test_only_reported_buggy_pointer = addr;                     \
         } else {                                                               \
           GET_CALLER_PC_BP_SP;                                                 \
-          __asan_report_error(pc, bp, sp, addr, is_write, size, exp_arg);      \
+          ReportGenericError(pc, bp, sp, addr, is_write, size, exp_arg,        \
+                              fatal);                                          \
         }                                                                      \
       }                                                                        \
     }
@@ -167,12 +178,16 @@ ASAN_REPORT_ERROR_N(store, true)
 #define ASAN_MEMORY_ACCESS_CALLBACK(type, is_write, size)                      \
   extern "C" NOINLINE INTERFACE_ATTRIBUTE                                      \
   void __asan_##type##size(uptr addr) {                                        \
-    ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, 0)                  \
+    ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, 0, true)            \
   }                                                                            \
   extern "C" NOINLINE INTERFACE_ATTRIBUTE                                      \
   void __asan_exp_##type##size(uptr addr, u32 exp) {                           \
-    ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, exp)                \
-  }
+    ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, exp, true)          \
+  }                                                                            \
+  extern "C" NOINLINE INTERFACE_ATTRIBUTE                                      \
+  void __asan_##type##size ## _noabort(uptr addr) {                            \
+    ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, 0, false)           \
+  }                                                                            \
 
 ASAN_MEMORY_ACCESS_CALLBACK(load, false, 1)
 ASAN_MEMORY_ACCESS_CALLBACK(load, false, 2)
@@ -190,7 +205,7 @@ NOINLINE INTERFACE_ATTRIBUTE
 void __asan_loadN(uptr addr, uptr size) {
   if (__asan_region_is_poisoned(addr, size)) {
     GET_CALLER_PC_BP_SP;
-    __asan_report_error(pc, bp, sp, addr, false, size, 0);
+    ReportGenericError(pc, bp, sp, addr, false, size, 0, true);
   }
 }
 
@@ -199,7 +214,16 @@ NOINLINE INTERFACE_ATTRIBUTE
 void __asan_exp_loadN(uptr addr, uptr size, u32 exp) {
   if (__asan_region_is_poisoned(addr, size)) {
     GET_CALLER_PC_BP_SP;
-    __asan_report_error(pc, bp, sp, addr, false, size, exp);
+    ReportGenericError(pc, bp, sp, addr, false, size, exp, true);
+  }
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_loadN_noabort(uptr addr, uptr size) {
+  if (__asan_region_is_poisoned(addr, size)) {
+    GET_CALLER_PC_BP_SP;
+    ReportGenericError(pc, bp, sp, addr, false, size, 0, false);
   }
 }
 
@@ -208,7 +232,7 @@ NOINLINE INTERFACE_ATTRIBUTE
 void __asan_storeN(uptr addr, uptr size) {
   if (__asan_region_is_poisoned(addr, size)) {
     GET_CALLER_PC_BP_SP;
-    __asan_report_error(pc, bp, sp, addr, true, size, 0);
+    ReportGenericError(pc, bp, sp, addr, true, size, 0, true);
   }
 }
 
@@ -217,7 +241,16 @@ NOINLINE INTERFACE_ATTRIBUTE
 void __asan_exp_storeN(uptr addr, uptr size, u32 exp) {
   if (__asan_region_is_poisoned(addr, size)) {
     GET_CALLER_PC_BP_SP;
-    __asan_report_error(pc, bp, sp, addr, true, size, exp);
+    ReportGenericError(pc, bp, sp, addr, true, size, exp, true);
+  }
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE
+void __asan_storeN_noabort(uptr addr, uptr size) {
+  if (__asan_region_is_poisoned(addr, size)) {
+    GET_CALLER_PC_BP_SP;
+    ReportGenericError(pc, bp, sp, addr, true, size, 0, false);
   }
 }
 
@@ -293,6 +326,8 @@ static void InitializeHighMemEnd() {
 }
 
 static void ProtectGap(uptr addr, uptr size) {
+  if (!flags()->protect_shadow_gap)
+    return;
   void *res = MmapNoAccess(addr, size, "shadow gap");
   if (addr == (uptr)res)
     return;
@@ -433,6 +468,27 @@ static void AsanInitInternal() {
 
   DisableCoreDumperIfNecessary();
 
+    // We cannot cover all of VM on some devices, reserve the memory above the
+    // highest address covered by the shadow map.
+#if SANITIZER_IOS && !SANITIZER_IOSSIM && (SANITIZER_WORDSIZE == 64)
+    // TODO(zaks): The kernel team should provide vm_map->max_offset for the
+    // current task.
+    const uptr kMaxVMOffset = (uptr)0x0000000318000000ULL;
+    CHECK_EQ(((kHighMemEnd + 1) % GetPageSizeCached()), 0);
+    CHECK_EQ((kMaxVMOffset % GetPageSizeCached()), 0);
+    uptr size = kMaxVMOffset - kHighMemEnd - 1;
+    VReport(1, "Reserving from %p to %p\n", kHighMemEnd + 1,
+                                            kHighMemEnd + size);
+    DecreaseTotalMmap(size); // Don't count the shadow against mmap_limit_mb.
+    void *retp = MmapNoAccess(kHighMemEnd + 1, size, nullptr);
+    bool succeeded = (retp == (void*)(kHighMemEnd + 1));
+    VReport(1,
+      "%s the memory above the highest address covered by the shadow map"
+      " from %p to %p\n",
+      succeeded ? "Reserved" : "Failed to reserve",
+      kHighMemEnd + 1, kHighMemEnd + size);
+#endif
+
   if (full_shadow_is_available) {
     // mmap the low shadow plus at least one page at the left.
     if (kLowShadowBeg)
@@ -570,7 +626,7 @@ void NOINLINE __asan_handle_no_return() {
            "stack top: %p; bottom %p; size: %p (%zd)\n"
            "False positive error reports may follow\n"
            "For details see "
-           "http://code.google.com/p/address-sanitizer/issues/detail?id=189\n",
+           "https://github.com/google/sanitizers/issues/189\n",
            top, bottom, top - bottom, top - bottom);
     return;
   }

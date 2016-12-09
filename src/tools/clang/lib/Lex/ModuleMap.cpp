@@ -18,7 +18,6 @@
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
-#include "clang/Basic/VirtualFileSystem.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/LexDiagnostic.h"
@@ -155,6 +154,7 @@ static bool isBuiltinHeader(StringRef FileName) {
            .Case("limits.h", true)
            .Case("stdalign.h", true)
            .Case("stdarg.h", true)
+           .Case("stdatomic.h", true)
            .Case("stdbool.h", true)
            .Case("stddef.h", true)
            .Case("stdint.h", true)
@@ -598,9 +598,8 @@ static void inferFrameworkLink(Module *Mod, const DirectoryEntry *FrameworkDir,
   LibName += FrameworkDir->getName();
   llvm::sys::path::append(LibName, Mod->Name);
 
-  // The library name of a framework has more than one possible extension since
-  // the introduction of the text-based dynamic library format. We need to check
-  // for both before we give up.
+  // The library name of a framework has several possible extensions with the
+  // introduction of the text-based dynamic library format.
   static const char *frameworkExtensions[] = { "", ".tbd", ".api", ".spi" };
   for (const auto *extension : frameworkExtensions) {
     llvm::sys::path::replace_extension(LibName, extension);
@@ -743,13 +742,15 @@ Module *ModuleMap::inferFrameworkModule(const DirectoryEntry *FrameworkDir,
     = StringRef(FrameworkDir->getName());
   llvm::sys::path::append(SubframeworksDirName, "Frameworks");
   llvm::sys::path::native(SubframeworksDirName);
-  for (llvm::sys::fs::directory_iterator Dir(SubframeworksDirName, EC), DirEnd;
+  vfs::FileSystem &FS = *FileMgr.getVirtualFileSystem();
+  for (vfs::directory_iterator Dir = FS.dir_begin(SubframeworksDirName, EC),
+                               DirEnd;
        Dir != DirEnd && !EC; Dir.increment(EC)) {
-    if (!StringRef(Dir->path()).endswith(".framework"))
+    if (!StringRef(Dir->getName()).endswith(".framework"))
       continue;
 
-    if (const DirectoryEntry *SubframeworkDir
-          = FileMgr.getDirectory(Dir->path())) {
+    if (const DirectoryEntry *SubframeworkDir =
+            FileMgr.getDirectory(Dir->getName())) {
       // Note: as an egregious but useful hack, we use the real path here and
       // check whether it is actually a subdirectory of the parent directory.
       // This will not be the case if the 'subframework' is actually a symlink
@@ -792,6 +793,10 @@ void ModuleMap::setUmbrellaHeader(Module *Mod, const FileEntry *UmbrellaHeader,
   Mod->Umbrella = UmbrellaHeader;
   Mod->UmbrellaAsWritten = NameAsWritten.str();
   UmbrellaDirs[UmbrellaHeader->getDir()] = Mod;
+
+  // Notify callbacks that we just added a new header.
+  for (const auto &Cb : Callbacks)
+    Cb->moduleMapAddUmbrellaHeader(&SourceMgr.getFileManager(), UmbrellaHeader);
 }
 
 void ModuleMap::setUmbrellaDir(Module *Mod, const DirectoryEntry *UmbrellaDir,
@@ -836,16 +841,11 @@ void ModuleMap::addHeader(Module *Mod, Module::Header Header,
     // set the isModuleHeader flag itself.
     HeaderInfo.MarkFileModuleHeader(Header.Entry, Role,
                                     isCompilingModuleHeader);
-
-    // Collect this header if a module collector is available. This guarantees
-    // that all dependencies for a module are correctly placed inside a VFS
-    // cache output by the crash reproducer.
-    StringRef HeaderName = Header.Entry->getName();
-    std::shared_ptr<ModuleDependencyCollector> MDC =
-        SourceMgr.getFileManager().getModuleDepCollector();
-    if (MDC && llvm::sys::path::is_absolute(HeaderName))
-      MDC->collectFile(HeaderName);
   }
+
+  // Notify callbacks that we just added a new header.
+  for (const auto &Cb : Callbacks)
+    Cb->moduleMapAddHeader(Header.Entry->getName());
 }
 
 void ModuleMap::excludeHeader(Module *Mod, Module::Header Header) {
@@ -880,7 +880,7 @@ void ModuleMap::setInferredModuleAllowedBy(Module *M, const FileEntry *ModMap) {
   InferredModuleAllowedBy[M] = ModMap;
 }
 
-void ModuleMap::dump() {
+LLVM_DUMP_METHOD void ModuleMap::dump() {
   llvm::errs() << "Modules:";
   for (llvm::StringMap<Module *>::iterator M = Modules.begin(), 
                                         MEnd = Modules.end(); 
@@ -1315,7 +1315,9 @@ namespace {
     /// \brief The 'extern_c' attribute.
     AT_extern_c,
     /// \brief The 'exhaustive' attribute.
-    AT_exhaustive
+    AT_exhaustive,
+    // \brief The 'swift_infer_import_as_member' attribute.
+    AT_swift_infer_import_as_member,
   };
 }
 
@@ -1974,11 +1976,13 @@ void ModuleMapParser::parseUmbrellaDirDecl(SourceLocation UmbrellaLoc) {
     // uncommonly used Tcl module on Darwin platforms.
     std::error_code EC;
     SmallVector<Module::Header, 6> Headers;
-    for (llvm::sys::fs::recursive_directory_iterator I(Dir->getName(), EC), E;
+    vfs::FileSystem &FS = *SourceMgr.getFileManager().getVirtualFileSystem();
+    for (vfs::recursive_directory_iterator I(FS, Dir->getName(), EC), E;
          I != E && !EC; I.increment(EC)) {
-      if (const FileEntry *FE = SourceMgr.getFileManager().getFile(I->path())) {
+      if (const FileEntry *FE =
+              SourceMgr.getFileManager().getFile(I->getName())) {
 
-        Module::Header Header = {I->path(), FE};
+        Module::Header Header = {I->getName(), FE};
         Headers.push_back(std::move(Header));
       }
     }
@@ -2388,6 +2392,7 @@ bool ModuleMapParser::parseOptionalAttributes(Attributes &Attrs) {
           .Case("exhaustive", AT_exhaustive)
           .Case("extern_c", AT_extern_c)
           .Case("system", AT_system)
+          .Case("swift_infer_import_as_member", AT_swift_infer_import_as_member)
           .Default(AT_unknown);
     switch (Attribute) {
     case AT_unknown:
@@ -2401,6 +2406,10 @@ bool ModuleMapParser::parseOptionalAttributes(Attributes &Attrs) {
 
     case AT_extern_c:
       Attrs.IsExternC = true;
+      break;
+
+    case AT_swift_infer_import_as_member:
+      Attrs.IsSwiftInferImportAsMember = true;
       break;
 
     case AT_exhaustive:

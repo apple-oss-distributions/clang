@@ -176,8 +176,6 @@ def ARMMemBarrierMCR  : SDNode<"ARMISD::MEMBARRIER_MCR", SDT_ARMMEMBARRIER,
 def ARMPreload        : SDNode<"ARMISD::PRELOAD", SDT_ARMPREFETCH,
                                [SDNPHasChain, SDNPMayLoad, SDNPMayStore]>;
 
-def ARMrbit          : SDNode<"ARMISD::RBIT", SDTIntUnaryOp>;
-
 def ARMtcret         : SDNode<"ARMISD::TC_RETURN", SDT_ARMTCRET,
                         [SDNPHasChain,  SDNPOptInGlue, SDNPVariadic]>;
 
@@ -203,6 +201,12 @@ def NoV6             : Predicate<"!Subtarget->hasV6Ops()">;
 def HasV6M           : Predicate<"Subtarget->hasV6MOps()">,
                                  AssemblerPredicate<"HasV6MOps",
                                                     "armv6m or armv6t2">;
+def HasV8MBaseline   : Predicate<"Subtarget->hasV8MBaselineOps()">,
+                                 AssemblerPredicate<"HasV8MBaselineOps",
+                                                    "armv8m.base">;
+def HasV8MMainline   : Predicate<"Subtarget->hasV8MMainlineOps()">,
+                                 AssemblerPredicate<"HasV8MMainlineOps",
+                                                    "armv8m.main">;
 def HasV6T2          : Predicate<"Subtarget->hasV6T2Ops()">,
                                  AssemblerPredicate<"HasV6T2Ops", "armv6t2">;
 def NoV6T2           : Predicate<"!Subtarget->hasV6T2Ops()">;
@@ -217,6 +221,8 @@ def PreV8            : Predicate<"!Subtarget->hasV8Ops()">,
                                  AssemblerPredicate<"!HasV8Ops", "armv7 or earlier">;
 def HasV8_1a         : Predicate<"Subtarget->hasV8_1aOps()">,
                                  AssemblerPredicate<"HasV8_1aOps", "armv8.1a">;
+def HasV8_2a         : Predicate<"Subtarget->hasV8_2aOps()">,
+                                 AssemblerPredicate<"HasV8_2aOps", "armv8.2a">;
 def NoVFP            : Predicate<"!Subtarget->hasVFP2()">;
 def HasVFP2          : Predicate<"Subtarget->hasVFP2()">,
                                  AssemblerPredicate<"FeatureVFP2", "VFP2">;
@@ -236,7 +242,9 @@ def HasCrypto        : Predicate<"Subtarget->hasCrypto()">,
 def HasCRC           : Predicate<"Subtarget->hasCRC()">,
                                  AssemblerPredicate<"FeatureCRC", "crc">;
 def HasFP16          : Predicate<"Subtarget->hasFP16()">,
-                                 AssemblerPredicate<"FeatureFP16","half-float">;
+                                 AssemblerPredicate<"FeatureFP16","half-float conversions">;
+def HasFullFP16      : Predicate<"Subtarget->hasFullFP16()">,
+                                 AssemblerPredicate<"FeatureFullFP16","full half-float">;
 def HasDivide        : Predicate<"Subtarget->hasDivide()">,
                                  AssemblerPredicate<"FeatureHWDiv", "divide in THUMB">;
 def HasDivideInARM   : Predicate<"Subtarget->hasDivideInARMMode()">,
@@ -249,6 +257,12 @@ def HasDSP           : Predicate<"Subtarget->hasDSP()">,
 def HasDB            : Predicate<"Subtarget->hasDataBarrier()">,
                                  AssemblerPredicate<"FeatureDB",
                                                     "data-barriers">;
+def HasV7Clrex  : Predicate<"Subtarget->hasV7Clrex()">,
+                            AssemblerPredicate<"FeatureV7Clrex",
+                                               "v7 clrex">;
+def HasAcquireRelease : Predicate<"Subtarget->hasAcquireRelease()">,
+                                  AssemblerPredicate<"FeatureAcquireRelease",
+                                                     "acquire/release">;
 def HasMP            : Predicate<"Subtarget->hasMPExtension()">,
                                  AssemblerPredicate<"FeatureMP",
                                                     "mp-extensions">;
@@ -4194,7 +4208,7 @@ def CLZ  : AMiscA1I<0b00010110, 0b0001, (outs GPR:$Rd), (ins GPR:$Rm),
 
 def RBIT : AMiscA1I<0b01101111, 0b0011, (outs GPR:$Rd), (ins GPR:$Rm),
               IIC_iUNAr, "rbit", "\t$Rd, $Rm",
-              [(set GPR:$Rd, (ARMrbit GPR:$Rm))]>,
+              [(set GPR:$Rd, (bitreverse GPR:$Rm))]>,
            Requires<[IsARM, HasV6T2]>,
            Sched<[WriteALU]>;
 
@@ -4726,7 +4740,7 @@ def STLEXD : AIstlex<0b01, (outs GPR:$Rd),
 
 def CLREX : AXI<(outs), (ins), MiscFrm, NoItinerary, "clrex",
                 [(int_arm_clrex)]>,
-            Requires<[IsARM, HasV7]>  {
+            Requires<[IsARM, HasV6K]>  {
   let Inst{31-0} = 0b11110101011111111111000000011111;
 }
 
@@ -5581,13 +5595,13 @@ def : MnemonicAlias<"stmfd", "stmdb">;
 def : MnemonicAlias<"stmia", "stm">;
 def : MnemonicAlias<"stmea", "stm">;
 
-// PKHBT/PKHTB with default shift amount. PKHTB is equivalent to PKHBT when the
-// shift amount is zero (i.e., unspecified).
+// PKHBT/PKHTB with default shift amount. PKHTB is equivalent to PKHBT with the
+// input operands swapped when the shift amount is zero (i.e., unspecified).
 def : InstAlias<"pkhbt${p} $Rd, $Rn, $Rm",
                 (PKHBT GPRnopc:$Rd, GPRnopc:$Rn, GPRnopc:$Rm, 0, pred:$p)>,
         Requires<[IsARM, HasV6]>;
 def : InstAlias<"pkhtb${p} $Rd, $Rn, $Rm",
-                (PKHBT GPRnopc:$Rd, GPRnopc:$Rn, GPRnopc:$Rm, 0, pred:$p)>,
+                (PKHBT GPRnopc:$Rd, GPRnopc:$Rm, GPRnopc:$Rn, 0, pred:$p)>,
         Requires<[IsARM, HasV6]>;
 
 // PUSH/POP aliases for STM/LDM
@@ -5674,16 +5688,16 @@ def : ARMInstAlias<"mvn${s}${p} $Rd, $imm",
                    (MOVi rGPR:$Rd, mod_imm_not:$imm, pred:$p, cc_out:$s)>;
 // Same for AND <--> BIC
 def : ARMInstAlias<"bic${s}${p} $Rd, $Rn, $imm",
-                   (ANDri rGPR:$Rd, rGPR:$Rn, mod_imm_not:$imm,
+                   (ANDri GPR:$Rd, GPR:$Rn, mod_imm_not:$imm,
                           pred:$p, cc_out:$s)>;
 def : ARMInstAlias<"bic${s}${p} $Rdn, $imm",
-                   (ANDri rGPR:$Rdn, rGPR:$Rdn, mod_imm_not:$imm,
+                   (ANDri GPR:$Rdn, GPR:$Rdn, mod_imm_not:$imm,
                           pred:$p, cc_out:$s)>;
 def : ARMInstAlias<"and${s}${p} $Rd, $Rn, $imm",
-                   (BICri rGPR:$Rd, rGPR:$Rn, mod_imm_not:$imm,
+                   (BICri GPR:$Rd, GPR:$Rn, mod_imm_not:$imm,
                           pred:$p, cc_out:$s)>;
 def : ARMInstAlias<"and${s}${p} $Rdn, $imm",
-                   (BICri rGPR:$Rdn, rGPR:$Rdn, mod_imm_not:$imm,
+                   (BICri GPR:$Rdn, GPR:$Rdn, mod_imm_not:$imm,
                           pred:$p, cc_out:$s)>;
 
 // Likewise, "add Rd, mod_imm_neg" -> sub
@@ -5773,3 +5787,36 @@ let mayLoad = 1, mayStore =1, hasSideEffects = 1 in
 def SPACE : PseudoInst<(outs GPR:$Rd), (ins i32imm:$size, GPR:$Rn),
                        NoItinerary,
                        [(set GPR:$Rd, (int_arm_space imm:$size, GPR:$Rn))]>;
+
+//===----------------------------------
+// Atomic cmpxchg for -O0
+//===----------------------------------
+
+// The fast register allocator used during -O0 inserts spills to cover any VRegs
+// live across basic block boundaries. When this happens between an LDXR and an
+// STXR it can clear the exclusive monitor, causing all cmpxchg attempts to
+// fail.
+
+// Unfortunately, this means we have to have an alternative (expanded
+// post-regalloc) path for -O0 compilations. Fortunately this path can be
+// significantly more naive than the standard expansion: we conservatively
+// assume seq_cst, strong cmpxchg and omit clrex on failure.
+
+let Constraints = "@earlyclobber $Rd,@earlyclobber $status",
+    mayLoad = 1, mayStore = 1 in {
+def CMP_SWAP_8 : PseudoInst<(outs GPR:$Rd, GPR:$status),
+                            (ins GPR:$addr, GPR:$desired, GPR:$new),
+                            NoItinerary, []>, Sched<[]>;
+
+def CMP_SWAP_16 : PseudoInst<(outs GPR:$Rd, GPR:$status),
+                             (ins GPR:$addr, GPR:$desired, GPR:$new),
+                             NoItinerary, []>, Sched<[]>;
+
+def CMP_SWAP_32 : PseudoInst<(outs GPR:$Rd, GPR:$status),
+                             (ins GPR:$addr, GPR:$desired, GPR:$new),
+                             NoItinerary, []>, Sched<[]>;
+
+def CMP_SWAP_64 : PseudoInst<(outs GPRPair:$Rd, GPR:$status),
+                             (ins GPR:$addr, GPRPair:$desired, GPRPair:$new),
+                             NoItinerary, []>, Sched<[]>;
+}

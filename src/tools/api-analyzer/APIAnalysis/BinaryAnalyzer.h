@@ -20,11 +20,11 @@ class Binary;
 }
 }
 
-int AnalyzeBinary(llvm::StringRef &filePath,
+int AnalyzeBinary(llvm::StringRef filePath,
                   APIAnalysisIntermediateResult &result,
                   const APIAnalysisOptions &options);
 
-int AnalyzeBinary(llvm::MemoryBufferRef &fileData,
+int AnalyzeBinary(llvm::MemoryBufferRef fileData,
                   APIAnalysisIntermediateResult &result,
                   const APIAnalysisOptions &options);
 

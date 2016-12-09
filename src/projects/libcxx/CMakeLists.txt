@@ -57,6 +57,8 @@ set(LIBCXX_LIBDIR_SUFFIX "${LLVM_LIBDIR_SUFFIX}" CACHE STRING
 option(LIBCXX_INSTALL_HEADERS "Install the libc++ headers." ON)
 option(LIBCXX_INSTALL_LIBRARY "Install the libc++ library." ON)
 option(LIBCXX_INSTALL_SUPPORT_HEADERS "Install libc++ support headers." ON)
+set(LIBCXX_ABI_VERSION 1 CACHE STRING "ABI version of libc++.")
+option(LIBCXX_ABI_UNSTABLE "Unstable ABI of libc++." OFF)
 
 # ABI Library options ---------------------------------------------------------
 set(LIBCXX_CXX_ABI "${LIBCXX_CXX_ABI}" CACHE STRING
@@ -193,6 +195,8 @@ include(HandleLibcxxFlags)
 remove_flags(-DNDEBUG -UNDEBUG -D_DEBUG
              -stdlib=libc++ -stdlib=libstdc++ -lc++abi -m32)
 
+add_definitions(-D_LIBCPP_BUILDING_LIB)
+
 # Required flags ==============================================================
 add_compile_flags_if_supported(-std=c++11)
 if (NOT MSVC AND NOT LIBCXX_SUPPORTS_STD_EQ_CXX11_FLAG)
@@ -257,13 +261,6 @@ endif()
 
 # Feature flags ===============================================================
 define_if(MSVC -D_CRT_SECURE_NO_WARNINGS)
-define_if_not(LIBCXX_ENABLE_GLOBAL_FILESYSTEM_NAMESPACE -D_LIBCPP_HAS_NO_GLOBAL_FILESYSTEM_NAMESPACE)
-define_if_not(LIBCXX_ENABLE_STDIN -D_LIBCPP_HAS_NO_STDIN)
-define_if_not(LIBCXX_ENABLE_STDOUT -D_LIBCPP_HAS_NO_STDOUT)
-define_if_not(LIBCXX_ENABLE_THREADS -D_LIBCPP_HAS_NO_THREADS)
-define_if_not(LIBCXX_ENABLE_MONOTONIC_CLOCK -D_LIBCPP_HAS_NO_MONOTONIC_CLOCK)
-define_if_not(LIBCXX_ENABLE_THREAD_UNSAFE_C_FUNCTIONS -D_LIBCPP_HAS_NO_THREAD_UNSAFE_C_FUNCTIONS)
-
 
 # Sanitizer flags
 
@@ -300,6 +297,27 @@ if (LIBCXX_BUILT_STANDALONE)
     message(WARNING "LLVM_USE_SANITIZER is not supported on this platform.")
   endif()
 endif()
+
+# Configuration file flags =====================================================
+if (NOT LIBCXX_ABI_VERSION EQUAL "1")
+  config_define(${LIBCXX_ABI_VERSION} _LIBCPP_ABI_VERSION)
+endif()
+config_define_if(LIBCXX_ABI_UNSTABLE _LIBCPP_ABI_UNSTABLE)
+
+config_define_if_not(LIBCXX_ENABLE_GLOBAL_FILESYSTEM_NAMESPACE _LIBCPP_HAS_NO_GLOBAL_FILESYSTEM_NAMESPACE)
+config_define_if_not(LIBCXX_ENABLE_STDIN _LIBCPP_HAS_NO_STDIN)
+config_define_if_not(LIBCXX_ENABLE_STDOUT _LIBCPP_HAS_NO_STDOUT)
+config_define_if_not(LIBCXX_ENABLE_THREADS _LIBCPP_HAS_NO_THREADS)
+config_define_if_not(LIBCXX_ENABLE_MONOTONIC_CLOCK _LIBCPP_HAS_NO_MONOTONIC_CLOCK)
+config_define_if_not(LIBCXX_ENABLE_THREAD_UNSAFE_C_FUNCTIONS _LIBCPP_HAS_NO_THREAD_UNSAFE_C_FUNCTIONS)
+
+if (LIBCXX_NEEDS_SITE_CONFIG)
+  configure_file(
+    include/__config_site.in
+    ${LIBCXX_BINARY_DIR}/__config_site
+    @ONLY)
+endif()
+
 #===============================================================================
 # Setup Source Code And Tests
 #===============================================================================

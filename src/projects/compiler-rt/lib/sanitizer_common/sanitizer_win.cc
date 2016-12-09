@@ -221,12 +221,14 @@ struct ModuleInfo {
   uptr end_address;
 };
 
+#ifndef SANITIZER_GO
 int CompareModulesBase(const void *pl, const void *pr) {
   const ModuleInfo *l = (ModuleInfo *)pl, *r = (ModuleInfo *)pr;
   if (l->base_address < r->base_address)
     return -1;
   return l->base_address > r->base_address;
 }
+#endif
 }  // namespace
 
 #ifndef SANITIZER_GO
@@ -240,7 +242,7 @@ void DumpProcessMap() {
   for (size_t i = 0; i < num_modules; ++i) {
     module_infos[i].filepath = modules[i].full_name();
     module_infos[i].base_address = modules[i].base_address();
-    module_infos[i].end_address = modules[i].ranges().next()->end;
+    module_infos[i].end_address = modules[i].ranges().front()->end;
   }
   qsort(module_infos.data(), num_modules, sizeof(ModuleInfo),
         CompareModulesBase);
@@ -367,6 +369,7 @@ static uptr GetPreferredBase(const char *modname) {
   return (uptr)pe_header->ImageBase;
 }
 
+#ifndef SANITIZER_GO
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
                       string_predicate_t filter) {
   HANDLE cur_process = GetCurrentProcess();
@@ -435,7 +438,6 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
   return count;
 };
 
-#ifndef SANITIZER_GO
 // We can't use atexit() directly at __asan_init time as the CRT is not fully
 // initialized at this point.  Place the functions into a vector and use
 // atexit() as soon as it is ready for use (i.e. after .CRT$XIC initializers).
@@ -758,6 +760,15 @@ uptr ReadLongProcessName(/*out*/char *buf, uptr buf_len) {
 
 void CheckVMASize() {
   // Do nothing.
+}
+
+void MaybeReexec() {
+  // No need to re-exec on Windows.
+}
+
+char **GetArgv() {
+  // FIXME: Actually implement this function.
+  return 0;
 }
 
 }  // namespace __sanitizer

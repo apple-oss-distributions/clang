@@ -43,6 +43,7 @@
 namespace llvm {
   class CallInst;
   class CCState;
+  class CCValAssign;
   class FastISel;
   class FunctionLoweringInfo;
   class ImmutableCallSite;
@@ -52,6 +53,7 @@ namespace llvm {
   class MachineInstr;
   class MachineJumpTableInfo;
   class MachineLoop;
+  class MachineRegisterInfo;
   class Mangler;
   class MCContext;
   class MCExpr;
@@ -83,7 +85,7 @@ class TargetLoweringBase {
 public:
   /// This enum indicates whether operations are valid for a target, and if not,
   /// what action should be used to make them valid.
-  enum LegalizeAction {
+  enum LegalizeAction : uint8_t {
     Legal,      // The target natively supports this operation.
     Promote,    // This operation should be executed in a larger type.
     Expand,     // Try to expand this to other ops, otherwise use a libcall.
@@ -93,11 +95,12 @@ public:
 
   /// This enum indicates whether a types are legal for a target, and if not,
   /// what action should be used to make them valid.
-  enum LegalizeTypeAction {
+  enum LegalizeTypeAction : uint8_t {
     TypeLegal,           // The target natively supports this type.
     TypePromoteInteger,  // Replace this integer with a larger one.
     TypeExpandInteger,   // Split this integer into two of half the size.
-    TypeSoftenFloat,     // Convert this float to a same size integer type.
+    TypeSoftenFloat,     // Convert this float to a same size integer type,
+                         // if an operation is not supported in target HW.
     TypeExpandFloat,     // Split this float into two of half the size.
     TypeScalarizeVector, // Replace this one-element vector with its element.
     TypeSplitVector,     // Split this vector into two of half the size.
@@ -412,20 +415,20 @@ public:
   class ValueTypeActionImpl {
     /// ValueTypeActions - For each value type, keep a LegalizeTypeAction enum
     /// that indicates how instruction selection should deal with the type.
-    uint8_t ValueTypeActions[MVT::LAST_VALUETYPE];
+    LegalizeTypeAction ValueTypeActions[MVT::LAST_VALUETYPE];
 
   public:
     ValueTypeActionImpl() {
-      std::fill(std::begin(ValueTypeActions), std::end(ValueTypeActions), 0);
+      std::fill(std::begin(ValueTypeActions), std::end(ValueTypeActions),
+                TypeLegal);
     }
 
     LegalizeTypeAction getTypeAction(MVT VT) const {
-      return (LegalizeTypeAction)ValueTypeActions[VT.SimpleTy];
+      return ValueTypeActions[VT.SimpleTy];
     }
 
     void setTypeAction(MVT VT, LegalizeTypeAction Action) {
-      unsigned I = VT.SimpleTy;
-      ValueTypeActions[I] = Action;
+      ValueTypeActions[VT.SimpleTy] = Action;
     }
   };
 
@@ -549,8 +552,7 @@ public:
     // If a target-specific SDNode requires legalization, require the target
     // to provide custom legalization for it.
     if (Op > array_lengthof(OpActions[0])) return Custom;
-    unsigned I = (unsigned) VT.getSimpleVT().SimpleTy;
-    return (LegalizeAction)OpActions[I][Op];
+    return OpActions[(unsigned)VT.getSimpleVT().SimpleTy][Op];
   }
 
   /// Return true if the specified operation is legal on this target or can be
@@ -594,7 +596,7 @@ public:
     unsigned MemI = (unsigned) MemVT.getSimpleVT().SimpleTy;
     assert(ExtType < ISD::LAST_LOADEXT_TYPE && ValI < MVT::LAST_VALUETYPE &&
            MemI < MVT::LAST_VALUETYPE && "Table isn't big enough!");
-    return (LegalizeAction)LoadExtActions[ValI][MemI][ExtType];
+    return LoadExtActions[ValI][MemI][ExtType];
   }
 
   /// Return true if the specified load with extension is legal on this target.
@@ -620,7 +622,7 @@ public:
     unsigned MemI = (unsigned) MemVT.getSimpleVT().SimpleTy;
     assert(ValI < MVT::LAST_VALUETYPE && MemI < MVT::LAST_VALUETYPE &&
            "Table isn't big enough!");
-    return (LegalizeAction)TruncStoreActions[ValI][MemI];
+    return TruncStoreActions[ValI][MemI];
   }
 
   /// Return true if the specified store with truncation is legal on this
@@ -833,6 +835,10 @@ public:
   bool hasTargetDAGCombine(ISD::NodeType NT) const {
     assert(unsigned(NT >> 3) < array_lengthof(TargetDAGCombineArray));
     return TargetDAGCombineArray[NT >> 3] & (1 << (NT&7));
+  }
+
+  unsigned getGatherAllAliasesMaxDepth() const {
+    return GatherAllAliasesMaxDepth;
   }
 
   /// \brief Get maximum # of store operations permitted for llvm.memset
@@ -1288,7 +1294,7 @@ protected:
 
   /// Remove all register classes.
   void clearRegisterClasses() {
-    memset(RegClassForVT, 0,MVT::LAST_VALUETYPE * sizeof(TargetRegisterClass*));
+    std::fill(std::begin(RegClassForVT), std::end(RegClassForVT), nullptr);
 
     AvailableRegClasses.clear();
   }
@@ -1311,7 +1317,7 @@ protected:
   void setOperationAction(unsigned Op, MVT VT,
                           LegalizeAction Action) {
     assert(Op < array_lengthof(OpActions[0]) && "Table isn't big enough!");
-    OpActions[(unsigned)VT.SimpleTy][Op] = (uint8_t)Action;
+    OpActions[(unsigned)VT.SimpleTy][Op] = Action;
   }
 
   /// Indicate that the specified load with extension does not work with the
@@ -1320,7 +1326,7 @@ protected:
                         LegalizeAction Action) {
     assert(ExtType < ISD::LAST_LOADEXT_TYPE && ValVT.isValid() &&
            MemVT.isValid() && "Table isn't big enough!");
-    LoadExtActions[ValVT.SimpleTy][MemVT.SimpleTy][ExtType] = (uint8_t)Action;
+    LoadExtActions[(unsigned)ValVT.SimpleTy][MemVT.SimpleTy][ExtType] = Action;
   }
 
   /// Indicate that the specified truncating store does not work with the
@@ -1328,7 +1334,7 @@ protected:
   void setTruncStoreAction(MVT ValVT, MVT MemVT,
                            LegalizeAction Action) {
     assert(ValVT.isValid() && MemVT.isValid() && "Table isn't big enough!");
-    TruncStoreActions[ValVT.SimpleTy][MemVT.SimpleTy] = (uint8_t)Action;
+    TruncStoreActions[(unsigned)ValVT.SimpleTy][MemVT.SimpleTy] = Action;
   }
 
   /// Indicate that the specified indexed load does or does not work with the
@@ -1881,17 +1887,17 @@ private:
   /// operations are Legal (aka, supported natively by the target), but
   /// operations that are not should be described.  Note that operations on
   /// non-legal value types are not described here.
-  uint8_t OpActions[MVT::LAST_VALUETYPE][ISD::BUILTIN_OP_END];
+  LegalizeAction OpActions[MVT::LAST_VALUETYPE][ISD::BUILTIN_OP_END];
 
   /// For each load extension type and each value type, keep a LegalizeAction
   /// that indicates how instruction selection should deal with a load of a
   /// specific value type and extension type.
-  uint8_t LoadExtActions[MVT::LAST_VALUETYPE][MVT::LAST_VALUETYPE]
-                        [ISD::LAST_LOADEXT_TYPE];
+  LegalizeAction LoadExtActions[MVT::LAST_VALUETYPE][MVT::LAST_VALUETYPE]
+                               [ISD::LAST_LOADEXT_TYPE];
 
   /// For each value type pair keep a LegalizeAction that indicates whether a
   /// truncating store of a specific value type and truncating type is legal.
-  uint8_t TruncStoreActions[MVT::LAST_VALUETYPE][MVT::LAST_VALUETYPE];
+  LegalizeAction TruncStoreActions[MVT::LAST_VALUETYPE][MVT::LAST_VALUETYPE];
 
   /// For each indexed mode and each value type, keep a pair of LegalizeAction
   /// that indicates how instruction selection should deal with the load /
@@ -1909,6 +1915,7 @@ private:
   /// up the MVT::LAST_VALUETYPE value to the next multiple of 8.
   uint32_t CondCodeActions[ISD::SETCC_INVALID][(MVT::LAST_VALUETYPE + 7) / 8];
 
+protected:
   ValueTypeActionImpl ValueTypeActions;
 
 private:
@@ -1947,6 +1954,12 @@ protected:
   /// \pre \p I is a sign, zero, or fp extension and
   ///      is[Z|FP]ExtFree of the related types is not true.
   virtual bool isExtFreeImpl(const Instruction *I) const { return false; }
+
+  /// Depth that GatherAllAliases should should continue looking for chain
+  /// dependencies when trying to find a more preferrable chain. As an
+  /// approximation, this should be more than the number of consecutive stores
+  /// expected to be merged.
+  unsigned GatherAllAliasesMaxDepth;
 
   /// \brief Specify maximum number of store instructions per memset call.
   ///
@@ -2093,6 +2106,14 @@ public:
                                           bool doesNotReturn = false,
                                           bool isReturnValueUsed = true) const;
 
+  /// Check whether parameters to a call that are passed in callee saved
+  /// registers are the same as from the calling function.  This needs to be
+  /// checked for tail call eligibility.
+  bool parametersInCSRMatch(const MachineRegisterInfo &MRI,
+      const uint32_t *CallerPreservedMask,
+      const SmallVectorImpl<CCValAssign> &ArgLocs,
+      const SmallVectorImpl<SDValue> &OutVals) const;
+
   //===--------------------------------------------------------------------===//
   // TargetLowering Optimization Methods
   //
@@ -2193,6 +2214,9 @@ public:
   /// from getBooleanContents().
   bool isConstFalseVal(const SDNode *N) const;
 
+  /// Return if \p N is a True value when extended to \p VT.
+  bool isExtendedTrueVal(const ConstantSDNode *N, EVT VT, bool Signed) const;
+
   /// Try to simplify a setcc built with the specified operands and cc. If it is
   /// unable to simplify it, return a null SDValue.
   SDValue SimplifySetCC(EVT VT, SDValue N0, SDValue N1,
@@ -2252,9 +2276,39 @@ public:
     return false;
   }
 
-  /// Return true if the target supports swifterror attribute.
+  /// Return true if the target supports swifterror attribute. It optimizes
+  /// loads and stores to reading and writing a specific register.
   virtual bool supportSwiftError() const {
     return false;
+  }
+
+  /// Return true if the target supports that a subset of CSRs for the given
+  /// machine function is handled explicitly via copies.
+  virtual bool supportSplitCSR(MachineFunction *MF) const {
+    return false;
+  }
+
+  /// Return true if the MachineFunction contains a COPY which would imply
+  /// HasCopyImplyingStackAdjustment.
+  virtual bool hasCopyImplyingStackAdjustment(MachineFunction *MF) const {
+    return false;
+  }
+
+  /// Perform necessary initialization to handle a subset of CSRs explicitly
+  /// via copies. This function is called at the beginning of instruction
+  /// selection.
+  virtual void initializeSplitCSR(MachineBasicBlock *Entry) const {
+    llvm_unreachable("Not Implemented");
+  }
+
+  /// Insert explicit copies in entry and exit blocks. We copy a subset of
+  /// CSRs to virtual registers in the entry block, and copy them back to
+  /// physical registers in the exit blocks. This function is called at the end
+  /// of instruction selection.
+  virtual void insertCopiesSplitCSR(
+      MachineBasicBlock *Entry,
+      const SmallVectorImpl<MachineBasicBlock *> &Exits) const {
+    llvm_unreachable("Not Implemented");
   }
 
   //===--------------------------------------------------------------------===//
@@ -2427,13 +2481,6 @@ public:
     }
 
   };
-
-  // Mark inreg arguments for lib-calls. For normal calls this is done by
-  // the frontend ABI code.
-  virtual void markInRegArguments(SelectionDAG &DAG, 
-                 TargetLowering::ArgListTy &Args) const {
-    return;
-  }
 
   /// This function lowers an abstract call to a function into an actual call.
   /// This returns a pair of operands.  The first element is the return value
@@ -2815,6 +2862,16 @@ public:
   /// \param Result output after conversion
   /// \returns True, if the expansion was successful, false otherwise
   bool expandFP_TO_SINT(SDNode *N, SDValue &Result, SelectionDAG &DAG) const;
+
+  /// Turn load of vector type into a load of the individual elements.
+  /// \param LD load to expand
+  /// \returns MERGE_VALUEs of the scalar loads with their chains.
+  SDValue scalarizeVectorLoad(LoadSDNode *LD, SelectionDAG &DAG) const;
+
+  // Turn a store of a vector type into stores of the individual elements.
+  /// \param ST Store with a vector value type
+  /// \returns MERGE_VALUs of the individual store chains.
+  SDValue scalarizeVectorStore(StoreSDNode *ST, SelectionDAG &DAG) const;
 
   //===--------------------------------------------------------------------===//
   // Instruction Emitting Hooks

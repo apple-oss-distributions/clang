@@ -268,6 +268,12 @@ private:
                               DenseSet<SDNode *> &visited,
                               int level, bool &printed);
 
+  template <typename SDNodeT, typename... ArgTypes>
+  SDNodeT *newSDNode(ArgTypes &&... Args) {
+    return new (NodeAllocator.template Allocate<SDNodeT>())
+        SDNodeT(std::forward<ArgTypes>(Args)...);
+  }
+
   void operator=(const SelectionDAG&) = delete;
   SelectionDAG(const SelectionDAG&) = delete;
 
@@ -326,11 +332,10 @@ public:
   }
 
   iterator_range<allnodes_iterator> allnodes() {
-    return iterator_range<allnodes_iterator>(allnodes_begin(), allnodes_end());
+    return make_range(allnodes_begin(), allnodes_end());
   }
   iterator_range<allnodes_const_iterator> allnodes() const {
-    return iterator_range<allnodes_const_iterator>(allnodes_begin(),
-                                                   allnodes_end());
+    return make_range(allnodes_begin(), allnodes_end());
   }
 
   /// Return the root tag of the SelectionDAG.
@@ -1229,10 +1234,12 @@ public:
   /// vector op and fill the end of the resulting vector with UNDEFS.
   SDValue UnrollVectorOp(SDNode *N, unsigned ResNE = 0);
 
-  /// Return true if LD is loading 'Bytes' bytes from a location that is 'Dist'
-  /// units away from the location that the 'Base' load is loading from.
-  bool isConsecutiveLoad(LoadSDNode *LD, LoadSDNode *Base,
-                         unsigned Bytes, int Dist) const;
+  /// Return true if loads are next to each other and can be
+  /// merged. Check that both are nonvolatile and if LD is loading
+  /// 'Bytes' bytes from a location that is 'Dist' units away from the
+  /// location that the 'Base' load is loading from.
+  bool areNonVolatileConsecutiveLoads(LoadSDNode *LD, LoadSDNode *Base,
+                                      unsigned Bytes, int Dist) const;
 
   /// Infer alignment of a load / store address. Return 0 if
   /// it cannot be inferred.

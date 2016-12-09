@@ -14,9 +14,11 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/TypeFinder.h"
 #include "llvm/Support/FileSystem.h"
@@ -24,6 +26,7 @@
 #include "llvm/Support/Obfuscation.h"
 #include "llvm/Support/Options.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Utils/ModuleObfuscator.h"
 #include "llvm/Pass.h"
@@ -49,7 +52,9 @@ namespace {
 /// \brief This pass obfuscate the strings inside the module.
 struct ObfuscateModule : public ModulePass {
   static char ID; // Pass identification, replacement for typeid
-  ObfuscateModule() : ModulePass(ID) {
+
+  explicit ObfuscateModule(const TargetMachine *TM = nullptr)
+      : ModulePass(ID), TM(TM) {
     initializeObfuscateModulePass(*PassRegistry::getPassRegistry());
   }
 
@@ -58,8 +63,11 @@ struct ObfuscateModule : public ModulePass {
   }
 
   bool runOnModule(Module &M) override {
-    return obfuscateModule(M);
+    return obfuscateModule(M, TM);
   }
+
+private:
+  const TargetMachine *TM;
 };
 
 /// \brief Helper class to recursively gather and modify all MDStrings from
@@ -123,34 +131,102 @@ void MDSRecursiveModify::run() {
   }
 }
 
-static bool obfuscateModuleModify(Module &M, Obfuscator &obfs,
-                                  std::function<bool(Value &)> preserve) {
+static bool
+obfuscateModuleModify(Module &M, const TargetMachine *TM, Obfuscator &obfs,
+                      std::function<bool(StringRef, StringRef)> preserve) {
+  // Obfuscate source file name.
+  auto SourceName = M.getSourceFileName();
+  if (SourceName.size() != 0)
+    M.setSourceFileName("");
+
   // Obfuscate value names
+  SmallString<64> MangledName;
+  Mangler mangler;
+  auto ShouldObfuscateGlobalName = [&](GlobalValue &V) {
+    if (!V.hasName() || V.hasPrivateLinkage() ||
+        V.getName().startswith("llvm.") || V.getName().startswith("clang.arc"))
+      return StringRef();
+    MangledName.clear();
+    TM->getNameWithPrefix(MangledName, &V, mangler);
+    if (!preserve(V.getName(), MangledName))
+      return StringRef(MangledName);
+    else
+      return StringRef();
+  };
+
   {
+    // Obfuscate instruction metadata.
+    // Only following metadata attached to the instructions are 
+    // obufscated:
+    // 1. tbaa and tbaa.struct
+    // 2. alias.scope and noalias
+    // 3. invariant.group
+    // None of them has to be reversible and they dont intersect
+    // with other metadata.
+    MDSRecursiveModify MDInstrModify(M.getContext(), [&obfs](StringRef S) {
+      return obfs.obfuscate(S, false);
+    });
     typedef std::pair<GlobalValue*, SmallString<64>> WorkEntry;
     SmallVector<WorkEntry, 64> Worklist;
-    auto hasName = [](const Value &V) { return V.getName() != ""; };
     for (auto &F : M) {
-      if (hasName(F) && !preserve(F))
-        Worklist.push_back({&F, F.getName()});
       // While we're here, drop parameter names if they exist
       for (auto &Arg : F.args())
         Arg.setName("");
+      // Drop all BasicBlock names as well
+      for (auto &BB : F) {
+        BB.setName("");
+        for (auto &I : BB) {
+          // Obfuscate some of the metadata that contains type info
+          // or descriptive strings.
+          if (!I.hasMetadata())
+            continue;
+          if (auto MD = I.getMetadata(LLVMContext::MD_tbaa))
+            MDInstrModify.addEntryPoint(MD);
+          if (auto MD = I.getMetadata(LLVMContext::MD_tbaa_struct))
+            MDInstrModify.addEntryPoint(MD);
+          if (auto MD = I.getMetadata(LLVMContext::MD_alias_scope))
+            MDInstrModify.addEntryPoint(MD);
+          if (auto MD = I.getMetadata(LLVMContext::MD_noalias))
+            MDInstrModify.addEntryPoint(MD);
+          if (auto MD = I.getMetadata(LLVMContext::MD_invariant_group))
+            MDInstrModify.addEntryPoint(MD);
+        }
+      }
+
+      if (F.isIntrinsic())
+        continue;
+
+      auto MName = ShouldObfuscateGlobalName(F);
+      if (!MName.empty()) {
+        Worklist.push_back({&F, StringRef(MName)});
+      }
     }
-    for (auto &I : M.globals())
-      if (hasName(I) && !preserve(I))
-        Worklist.push_back({&I, I.getName()});
-    for (auto &I : M.aliases())
-      if (hasName(I) && !preserve(I))
-        Worklist.push_back({&I, I.getName()});
+
+    // Run MD Modifier.
+    MDInstrModify.run();
+
+    for (auto &I : M.globals()) {
+      auto MName = ShouldObfuscateGlobalName(I);
+      if (!MName.empty()) {
+        Worklist.push_back({&I, StringRef(MName)});
+      }
+    }
+    for (auto &I : M.aliases()) {
+      auto MName = ShouldObfuscateGlobalName(I);
+      if (!MName.empty()) {
+        Worklist.push_back({&I, StringRef(MName)});
+      }
+    }
     // Obfuscate all the symbols in the list.
     // Run two passes across the worklist, first time rename to a temp name
     // to avoid conflicts.
     for (auto &I : Worklist)
       // Just set to something but don't really care what it becames.
       I.first->setName("__obfs_tmp#");
-    for (auto &I : Worklist)
-      I.first->setName(obfs.obfuscate(I.second, true));
+    for (auto &I : Worklist) {
+      StringRef obfName = obfs.obfuscate(I.second, true);
+      I.first->setName(std::string("\01") + obfName.str());
+    }
   }
 
   // Drop type names
@@ -200,14 +276,13 @@ static bool obfuscateModuleModify(Module &M, Obfuscator &obfs,
   return false;
 }
 
-bool llvm::obfuscateModule(Module &M) {
+bool llvm::obfuscateModule(Module &M, const TargetMachine *TM) {
   IncrementObfuscator IncrObfuscate;
-  StringMap<detail::DenseSetEmpty, BumpPtrAllocator &> Preserves(
-      IncrObfuscate.getAllocator());
+  StringSet<> Preserves;
   // Add PreserveSymbols from commandline.
   for (auto & sym : PreserveSymbols)
-    Preserves.insert({sym, {}});
-  bool Changed = obfuscateModule(M, IncrObfuscate, Preserves);
+    Preserves.insert(sym);
+  bool Changed = obfuscateModule(M, TM, IncrObfuscate, Preserves);
   // Output SymbolFile if needed.
   if (!SymbolFileOut.empty()) {
     // Create output file
@@ -227,12 +302,12 @@ bool llvm::obfuscateModule(Module &M) {
   return Changed;
 }
 
-bool llvm::obfuscateModule(Module &M, Obfuscator &obfs,
-                           SymbolSet &PreserveSymbols) {
+bool llvm::obfuscateModule(Module &M, const TargetMachine *TM, Obfuscator &obfs,
+                           StringSet<> &PreserveSymbols) {
   // Predicate to indicate if we should preserve the original name.
   TargetLibraryInfoImpl TLII(Triple(M.getTargetTriple()));
   TargetLibraryInfo TLI(TLII);
-  auto isLibName = [&TLI](StringRef S) {
+  auto isLibName = [&TLI](StringRef &S) {
     LibFunc::Func F;
     return TLI.getLibFunc(S, F);
   };
@@ -242,23 +317,25 @@ bool llvm::obfuscateModule(Module &M, Obfuscator &obfs,
 #define COMPILER_SYMBOL(Name) #Name,
 #include "llvm/Transforms/Utils/CompilerRTSymbols.def"
 #undef COMPILER_SYMBOL
-      "objc_retain",
-      "objc_release",
-      "objc_autorelease",
-      "objc_retainAutoreleasedReturnValue",
-      "objc_retainBlock",
-      "objc_autoreleaseReturnValue",
-      "objc_autoreleasePoolPush",
-      "objc_loadWeakRetained",
-      "objc_loadWeak",
-      "objc_destroyWeak",
-      "objc_storeWeak",
-      "objc_initWeak",
-      "objc_moveWeak",
-      "objc_copyWeak",
-      "objc_retainedObject",
-      "objc_unretainedObject",
-      "objc_unretainedPointer"
+      "_objc_retain",
+      "_objc_release",
+      "_objc_autorelease",
+      "_objc_retainAutoreleasedReturnValue",
+      "_objc_retainBlock",
+      "_objc_autoreleaseReturnValue",
+      "_objc_autoreleasePoolPush",
+      "_objc_loadWeakRetained",
+      "_objc_loadWeak",
+      "_objc_destroyWeak",
+      "_objc_storeWeak",
+      "_objc_initWeak",
+      "_objc_moveWeak",
+      "_objc_copyWeak",
+      "_objc_retainedObject",
+      "_objc_unretainedObject",
+      "_objc_unretainedPointer",
+      "___stack_chk_fail",
+      "___stack_chk_guard"
   };
   static const unsigned NumSpecialSymbols = sizeof(SpecialSymbols) /
                                             sizeof(const char *);
@@ -273,16 +350,12 @@ bool llvm::obfuscateModule(Module &M, Obfuscator &obfs,
   // either be a compiler-internal symbol, or an external symbol that the
   // compiler special cases. Eitherway, checks based on name
   auto isSpecialSymbolName = [SymbolSet](StringRef Name) {
-    if (Name.startswith("llvm.") || Name.startswith("__stack_chk") ||
-        Name.startswith("clang.arc"))
-      return true;
-
     // Special symbols supplied by ld64.
-    if (Name.startswith("__dtrace") ||
-        Name.startswith("\01section$start$") ||
-        Name.startswith("\01section$end$") ||
-        Name.startswith("\01segment$start$") ||
-        Name.startswith("\01segment$end$"))
+    if (Name.startswith("___dtrace") ||
+        Name.startswith("section$start$") ||
+        Name.startswith("section$end$") ||
+        Name.startswith("segment$start$") ||
+        Name.startswith("segment$end$"))
       return true;
 
     // Some special external names, which might of gotten dropped due to
@@ -293,20 +366,19 @@ bool llvm::obfuscateModule(Module &M, Obfuscator &obfs,
     return false;
   };
 
-  auto mustPreserve =
-                [&PreserveSymbols, isLibName, isSpecialSymbolName](Value &V) {
-    auto Name = V.getName();
-    return PreserveSymbols.count(Name) || isLibName(Name) ||
-           isSpecialSymbolName(Name);
+  auto mustPreserve = [&PreserveSymbols, isLibName, isSpecialSymbolName](
+      StringRef Name, StringRef MangledName) {
+    return PreserveSymbols.count(MangledName) || isLibName(Name) ||
+           isSpecialSymbolName(MangledName);
   };
 
-  return obfuscateModuleModify(M, obfs, mustPreserve);
+  return obfuscateModuleModify(M, TM, obfs, mustPreserve);
 }
 
 char ObfuscateModule::ID = 0;
-INITIALIZE_PASS(ObfuscateModule, "obfuscate-module",
-                "Obfuscate all strings in the module", false, false)
+INITIALIZE_TM_PASS(ObfuscateModule, "obfuscate-module",
+                   "Obfuscate all strings in the module", false, false)
 
-ModulePass *llvm::createObfuscateModulePass() {
-  return new ObfuscateModule();
+ModulePass *llvm::createObfuscateModulePass(const llvm::TargetMachine *TM) {
+  return new ObfuscateModule(TM);
 }

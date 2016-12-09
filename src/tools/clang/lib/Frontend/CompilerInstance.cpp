@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/APINotes/APINotesReader.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -16,7 +17,6 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/Version.h"
-#include "clang/Basic/VirtualFileSystem.h"
 #include "clang/Config/config.h"
 #include "clang/Frontend/ChainedDiagnosticConsumer.h"
 #include "clang/Frontend/FrontendAction.h"
@@ -27,6 +27,7 @@
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Frontend/Utils.h"
 #include "clang/Frontend/VerifyDiagnosticConsumer.h"
+#include "clang/Index/IndexingAction.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/PTHManager.h"
 #include "clang/Lex/Preprocessor.h"
@@ -156,7 +157,6 @@ static void SetUpDiagnosticLog(DiagnosticOptions *DiagOpts,
           << DiagOpts->DiagnosticLogFile << EC.message();
     } else {
       FileOS->SetUnbuffered();
-      FileOS->SetUseAtomicWrites(true);
       OS = FileOS.get();
       StreamOwner = std::move(FileOS);
     }
@@ -351,16 +351,18 @@ void CompilerInstance::createPreprocessor(TranslationUnitKind TUKind) {
     AttachDependencyGraphGen(*PP, DepOpts.DOTOutputFile,
                              getHeaderSearchOpts().Sysroot);
 
-  for (auto &Listener : DependencyCollectors)
-    Listener->attachToPreprocessor(*PP);
-
   // If we don't have a collector, but we are collecting module dependencies,
   // then we're the top level compiler instance and need to create one.
-  // FIXME: come up with a reliable way to detect case sensitivity.
-  if (!ModuleDepCollector && !DepOpts.ModuleDependencyOutputDir.empty())
+  if (!ModuleDepCollector && !DepOpts.ModuleDependencyOutputDir.empty()) {
     ModuleDepCollector = std::make_shared<ModuleDependencyCollector>(
-        DepOpts.ModuleDependencyOutputDir,
-        !getTarget().getTriple().isOSDarwin() /*CaseSensitive*/);
+        DepOpts.ModuleDependencyOutputDir);
+  }
+
+  if (ModuleDepCollector)
+    addDependencyCollector(ModuleDepCollector);
+
+  for (auto &Listener : DependencyCollectors)
+    Listener->attachToPreprocessor(*PP);
 
   // Handle generating header include information, if requested.
   if (DepOpts.ShowHeaderIncludes)
@@ -535,6 +537,24 @@ void CompilerInstance::createSema(TranslationUnitKind TUKind,
                                   CodeCompleteConsumer *CompletionConsumer) {
   TheSema.reset(new Sema(getPreprocessor(), getASTContext(), getASTConsumer(),
                          TUKind, CompletionConsumer));
+
+  // If we're building a module, notify the API notes manager.
+  StringRef currentModuleName = getLangOpts().CurrentModule;
+  if (!currentModuleName.empty()) {
+    (void)TheSema->APINotes.loadCurrentModuleAPINotes(
+            currentModuleName,
+            getAPINotesOpts().ModuleSearchPaths);
+    // Check for any attributes we should add to the module
+    if (auto curReader = TheSema->APINotes.getCurrentModuleReader()) {
+      auto currentModule = getPreprocessor().getCurrentModule();
+      assert(currentModule && "how can we have a reader for it?");
+
+      // swift_infer_import_as_member
+      if (curReader->getModuleOptions().SwiftInferImportAsMember) {
+        currentModule->IsSwiftInferImportAsMember = true;
+      }
+    }
+  }
 }
 
 // Output Files
@@ -839,13 +859,13 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
   if (getFrontendOpts().ShowStats)
     llvm::EnableStatistics();
 
-  for (unsigned i = 0, e = getFrontendOpts().Inputs.size(); i != e; ++i) {
+  for (const FrontendInputFile &FIF : getFrontendOpts().Inputs) {
     // Reset the ID tables if we are reusing the SourceManager and parsing
     // regular files.
     if (hasSourceManager() && !Act.isModelParsingAction())
       getSourceManager().clearIDTables();
 
-    if (Act.BeginSourceFile(*this, getFrontendOpts().Inputs[i])) {
+    if (Act.BeginSourceFile(*this, FIF)) {
       Act.Execute();
       Act.EndSourceFile();
     }
@@ -975,10 +995,9 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
     FullSourceLoc(ImportLoc, ImportingInstance.getSourceManager()));
 
   // If we're collecting module dependencies, we need to share a collector
-  // between all of the module CompilerInstances and the ModuleMap.
+  // between all of the module CompilerInstances. Other than that, we don't
+  // want to produce any dependency output from the module build.
   Instance.setModuleDepCollector(ImportingInstance.getModuleDepCollector());
-  Instance.getFileManager().setModuleDepCollector(
-      ImportingInstance.getModuleDepCollector());
   Invocation->getDependencyOutputOpts() = DependencyOutputOptions();
 
   // Get or create the module map that we'll use to build this module.
@@ -1003,20 +1022,37 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
     SourceMgr.overrideFileContents(ModuleMapFile, std::move(ModuleMapBuffer));
   }
 
+  std::unique_ptr<FrontendAction> CreateModuleAction;
+
   // Construct a module-generating action. Passing through the module map is
   // safe because the FileManager is shared between the compiler instances.
-  GenerateModuleAction CreateModuleAction(
-      ModMap.getModuleMapFileForUniquing(Module), Module->IsSystem);
+  CreateModuleAction.reset(new GenerateModuleAction(
+      ModMap.getModuleMapFileForUniquing(Module), Module->IsSystem));
 
   ImportingInstance.getDiagnostics().Report(ImportLoc,
                                             diag::remark_module_build)
     << Module->Name << ModuleFileName;
 
+  if (!FrontendOpts.IndexStorePath.empty()) {
+#if defined(__APPLE__)
+    index::IndexingOptions IndexOpts;
+    index::RecordingOptions RecordOpts;
+    RecordOpts.DataDirPath = FrontendOpts.IndexStorePath;
+    if (FrontendOpts.IndexIgnoreSystemSymbols) {
+      IndexOpts.SystemSymbolFilter =
+        index::IndexingOptions::SystemSymbolFilterKind::None;
+    }
+    RecordOpts.RecordSymbolCodeGenName = FrontendOpts.IndexRecordCodegenName;
+    CreateModuleAction = index::createIndexDataRecordingAction(IndexOpts,
+                                     RecordOpts, std::move(CreateModuleAction));
+#endif
+  }
+
   // Execute the action to actually build the module in-place. Use a separate
   // thread so that we get a stack large enough.
   const unsigned ThreadStackSize = 8 << 20;
   llvm::CrashRecoveryContext CRC;
-  CRC.RunSafelyOnThread([&]() { Instance.ExecuteAction(CreateModuleAction); },
+  CRC.RunSafelyOnThread([&]() { Instance.ExecuteAction(*CreateModuleAction); },
                         ThreadStackSize);
 
   ImportingInstance.getDiagnostics().Report(ImportLoc,
@@ -1060,7 +1096,7 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
     switch (Locked) {
     case llvm::LockFileManager::LFS_Error:
       Diags.Report(ModuleNameLoc, diag::err_module_lock_failure)
-          << Module->Name;
+          << Module->Name << Locked.getErrorMessage();
       return false;
 
     case llvm::LockFileManager::LFS_Owned:
@@ -1300,9 +1336,6 @@ void CompilerInstance::createModuleManager() {
 
     if (TheDependencyFileGenerator)
       TheDependencyFileGenerator->AttachToASTReader(*ModuleManager);
-    if (ModuleDepCollector)
-      ModuleDependencyListener::attachToASTReader(*ModuleManager,
-                                                  ModuleDepCollector);
     for (auto &Listener : DependencyCollectors)
       Listener->attachToASTReader(*ModuleManager);
   }
@@ -1337,6 +1370,17 @@ bool CompilerInstance::loadModuleFile(StringRef FileName) {
       }
       LoadedModules.clear();
     }
+
+    void markAllUnavailable() {
+      for (auto *II : LoadedModules) {
+        if (Module *M = CI.getPreprocessor()
+                            .getHeaderSearchInfo()
+                            .getModuleMap()
+                            .findModule(II->getName()))
+          M->HasIncompatibleModuleFile = true;
+      }
+      LoadedModules.clear();
+    }
   };
 
   // If we don't already have an ASTReader, create one now.
@@ -1353,15 +1397,18 @@ bool CompilerInstance::loadModuleFile(StringRef FileName) {
                                  SourceLocation(),
                                  ASTReader::ARR_ConfigurationMismatch)) {
   case ASTReader::Success:
-  // We successfully loaded the module file; remember the set of provided
-  // modules so that we don't try to load implicit modules for them.
-  ListenerRef.registerAll();
-  return true;
+    // We successfully loaded the module file; remember the set of provided
+    // modules so that we don't try to load implicit modules for them.
+    ListenerRef.registerAll();
+    return true;
 
   case ASTReader::ConfigurationMismatch:
     // Ignore unusable module files.
     getDiagnostics().Report(SourceLocation(), diag::warn_module_config_mismatch)
         << FileName;
+    // All modules provided by any files we tried and failed to load are now
+    // unavailable; includes of those modules should now be handled textually.
+    ListenerRef.markAllUnavailable();
     return true;
 
   default:
@@ -1417,6 +1464,12 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
     std::string ModuleFileName =
         PP->getHeaderSearchInfo().getModuleFileName(Module);
     if (ModuleFileName.empty()) {
+      if (Module->HasIncompatibleModuleFile) {
+        // We tried and failed to load a module file for this module. Fall
+        // back to textual inclusion for its headers.
+        return ModuleLoadResult(nullptr, /*missingExpected*/true);
+      }
+
       getDiagnostics().Report(ModuleNameLoc, diag::err_module_build_disabled)
           << ModuleName;
       ModuleBuildFailed = true;

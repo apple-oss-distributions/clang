@@ -47,11 +47,17 @@ public:
 
   unsigned StackPtr;
 
-  /// Emit a call to the target's stack probe function. This is required for all
+  /// Emit target stack probe code. This is required for all
   /// large stack allocations on Windows. The caller is required to materialize
-  /// the number of bytes to probe in RAX/EAX.
-  void emitStackProbeCall(MachineFunction &MF, MachineBasicBlock &MBB,
-                          MachineBasicBlock::iterator MBBI, DebugLoc DL) const;
+  /// the number of bytes to probe in RAX/EAX. Returns instruction just
+  /// after the expansion.
+  MachineInstr *emitStackProbe(MachineFunction &MF, MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI, DebugLoc DL,
+                               bool InProlog) const;
+
+  /// Replace a StackProbe inline-stub with the actual probe code inline.
+  void inlineStackProbe(MachineFunction &MF,
+                        MachineBasicBlock &PrologMBB) const override;
 
   void emitCalleeSavedFrameMoves(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator MBBI,
@@ -105,6 +111,9 @@ public:
 
   unsigned getWinEHParentFrameOffset(const MachineFunction &MF) const override;
 
+  void processFunctionBeforeFrameFinalized(MachineFunction &MF,
+                                           RegScavenger *RS) const override;
+
   /// Check the instruction before/after the passed instruction. If
   /// it is an ADD/SUB/LEA instruction it is deleted argument and the
   /// stack adjustment is returned as a positive value for ADD/LEA and
@@ -119,6 +128,16 @@ public:
 
   /// Check that LEA can be used on SP in an epilogue sequence for \p MF.
   bool canUseLEAForSPInEpilogue(const MachineFunction &MF) const;
+
+  /// Check whether or not the given \p MBB can be used as a prologue
+  /// for the target.
+  /// The prologue will be inserted first in this basic block.
+  /// This method is used by the shrink-wrapping pass to decide if
+  /// \p MBB will be correctly handled by the target.
+  /// As soon as the target enable shrink-wrapping without overriding
+  /// this method, we assume that each basic block is a valid
+  /// prologue.
+  bool canUseAsPrologue(const MachineBasicBlock &MBB) const override;
 
   /// Check whether or not the given \p MBB can be used as a epilogue
   /// for the target.
@@ -153,6 +172,23 @@ public:
 private:
   uint64_t calculateMaxStackAlign(const MachineFunction &MF) const;
 
+  /// Emit target stack probe as a call to a helper function
+  MachineInstr *emitStackProbeCall(MachineFunction &MF, MachineBasicBlock &MBB,
+                                   MachineBasicBlock::iterator MBBI,
+                                   DebugLoc DL, bool InProlog) const;
+
+  /// Emit target stack probe as an inline sequence.
+  MachineInstr *emitStackProbeInline(MachineFunction &MF,
+                                     MachineBasicBlock &MBB,
+                                     MachineBasicBlock::iterator MBBI,
+                                     DebugLoc DL, bool InProlog) const;
+
+  /// Emit a stub to later inline the target stack probe.
+  MachineInstr *emitStackProbeInlineStub(MachineFunction &MF,
+                                         MachineBasicBlock &MBB,
+                                         MachineBasicBlock::iterator MBBI,
+                                         DebugLoc DL, bool InProlog) const;
+
   /// Aligns the stack pointer by ANDing it with -MaxAlign.
   void BuildStackAlignAND(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI, DebugLoc DL,
@@ -168,6 +204,8 @@ private:
                                            MachineBasicBlock::iterator MBBI,
                                            DebugLoc DL, int64_t Offset,
                                            bool InEpilogue) const;
+
+  unsigned getPSPSlotOffsetFromSP(const MachineFunction &MF) const;
 
   unsigned getWinEHFuncletFrameSize(const MachineFunction &MF) const;
 };

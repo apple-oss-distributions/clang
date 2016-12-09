@@ -12,13 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Analysis/ScalarEvolutionExpressions.h"
-#include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 
 using namespace llvm;
@@ -423,7 +423,7 @@ RecurrenceDescriptor::isRecurrenceInstr(Instruction *I, RecurrenceKind Kind,
   default:
     return InstDesc(false, I);
   case Instruction::PHI:
-    return InstDesc(I, Prev.getMinMaxKind());
+    return InstDesc(I, Prev.getMinMaxKind(), Prev.getUnsafeAlgebraInst());
   case Instruction::Sub:
   case Instruction::Add:
     return InstDesc(Kind == RK_IntegerAdd, I);
@@ -599,7 +599,7 @@ Value *RecurrenceDescriptor::createMinMaxOp(IRBuilder<> &Builder,
   IRBuilder<>::FastMathFlagGuard FMFG(Builder);
   FastMathFlags FMF;
   FMF.setUnsafeAlgebra();
-  Builder.SetFastMathFlags(FMF);
+  Builder.setFastMathFlags(FMF);
 
   Value *Cmp;
   if (RK == MRK_FloatMin || RK == MRK_FloatMax)
@@ -726,4 +726,42 @@ SmallVector<Instruction *, 8> llvm::findDefsUsedOutsideOfLoop(Loop *L) {
     }
 
   return UsedOutside;
+}
+
+/// \brief Find string metadata for loop
+///
+/// If it has a value (e.g. {"llvm.distribute", 1} return the value as an
+/// operand or null otherwise.  If the string metadata is not found return
+/// Optional's not-a-value.
+Optional<const MDOperand *> llvm::findStringMetadataForLoop(Loop *TheLoop,
+                                                            StringRef Name) {
+  MDNode *LoopID = TheLoop->getLoopID();
+  // Return none if LoopID is false.
+  if (!LoopID)
+    return None;
+
+  // First operand should refer to the loop id itself.
+  assert(LoopID->getNumOperands() > 0 && "requires at least one operand");
+  assert(LoopID->getOperand(0) == LoopID && "invalid loop id");
+
+  // Iterate over LoopID operands and look for MDString Metadata
+  for (unsigned i = 1, e = LoopID->getNumOperands(); i < e; ++i) {
+    MDNode *MD = dyn_cast<MDNode>(LoopID->getOperand(i));
+    if (!MD)
+      continue;
+    MDString *S = dyn_cast<MDString>(MD->getOperand(0));
+    if (!S)
+      continue;
+    // Return true if MDString holds expected MetaData.
+    if (Name.equals(S->getString()))
+      switch (MD->getNumOperands()) {
+      case 1:
+        return nullptr;
+      case 2:
+        return &MD->getOperand(1);
+      default:
+        llvm_unreachable("loop metadata has 0 or 1 operand");
+      }
+  }
+  return None;
 }

@@ -435,7 +435,7 @@ checkAvailability(ASTContext &Context, const AvailabilityAttr *A,
           << VTI << HintMessage;
     }
 
-    return AR_NotYetIntroduced;
+    return A->getStrict() ? AR_Unavailable : AR_NotYetIntroduced;
   }
 
   // Make sure that this declaration hasn't been obsoleted.
@@ -471,6 +471,9 @@ checkAvailability(ASTContext &Context, const AvailabilityAttr *A,
 
 AvailabilityResult Decl::getAvailability(std::string *Message,
                                          Optional<VersionTuple> Version) const {
+  if (auto *FTD = dyn_cast<FunctionTemplateDecl>(this))
+    return FTD->getTemplatedDecl()->getAvailability(Message, Version);
+
   AvailabilityResult Result = AR_Available;
   std::string ResultMessage;
 
@@ -573,7 +576,6 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
     case Var:
     case ImplicitParam:
     case ParmVar:
-    case NonTypeTemplateParm:
     case ObjCMethod:
     case ObjCProperty:
     case MSProperty:
@@ -582,6 +584,12 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
       return IDNS_Label;
     case IndirectField:
       return IDNS_Ordinary | IDNS_Member;
+
+    case NonTypeTemplateParm:
+      // Non-type template parameters are not found by lookups that ignore
+      // non-types, but they are found by redeclaration lookups for tag types,
+      // so we include them in the tag namespace.
+      return IDNS_Ordinary | IDNS_Tag;
 
     case ObjCCompatibleAlias:
     case ObjCInterface:
@@ -1214,13 +1222,16 @@ void DeclContext::removeDecl(Decl *D) {
     // Remove only decls that have a name
     if (!ND->getDeclName()) return;
 
-    StoredDeclsMap *Map = getPrimaryContext()->LookupPtr;
-    if (!Map) return;
-
-    StoredDeclsMap::iterator Pos = Map->find(ND->getDeclName());
-    assert(Pos != Map->end() && "no lookup entry for decl");
-    if (Pos->second.getAsVector() || Pos->second.getAsDecl() == ND)
-      Pos->second.remove(ND);
+    auto *DC = this;
+    do {
+      StoredDeclsMap *Map = DC->getPrimaryContext()->LookupPtr;
+      if (Map) {
+        StoredDeclsMap::iterator Pos = Map->find(ND->getDeclName());
+        assert(Pos != Map->end() && "no lookup entry for decl");
+        if (Pos->second.getAsVector() || Pos->second.getAsDecl() == ND)
+          Pos->second.remove(ND);
+      }
+    } while (DC->isTransparentContext() && (DC = DC->getParent()));
   }
 }
 
@@ -1545,9 +1556,12 @@ void DeclContext::makeDeclVisibleInContextWithFlags(NamedDecl *D, bool Internal,
                                                     bool Recoverable) {
   assert(this == getPrimaryContext() && "expected a primary DC");
 
-  // Skip declarations within functions.
-  if (isFunctionOrMethod())
+  if (!isLookupContext()) {
+    if (isTransparentContext())
+      getParent()->getPrimaryContext()
+        ->makeDeclVisibleInContextWithFlags(D, Internal, Recoverable);
     return;
+  }
 
   // Skip declarations which should be invisible to name lookup.
   if (shouldBeHidden(D))

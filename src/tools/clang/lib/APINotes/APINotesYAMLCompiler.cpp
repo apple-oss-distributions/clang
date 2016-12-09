@@ -44,7 +44,7 @@
 
  Availability: OSX        # Optional: Specifies which platform the API is
                           # available on. [OSX / iOS / TVOS / WatchOS / none/
-                          #                available]
+                          #                available / nonswift]
 
  AvailabilityMsg: ""  # Optional: Custom availability message to display to
                           # the user, when API is not available.
@@ -56,6 +56,10 @@
  Functions:               # List of functions
  ...
  Globals:                 # List of globals
+ ...
+ Tags:                    # List of tags (struct/union/enum/C++ class)
+ ...
+ Typedefs:                # List of typedef-names and C++11 type aliases
  ...
 
  Each class and protocol is defined as following:
@@ -145,6 +149,7 @@ namespace {
     TvOS,
     WatchOS,
     None,
+    NonSwift,
   };
 
   enum class MethodKind {
@@ -163,12 +168,22 @@ namespace {
     NullabilityKind::NonNull;
   typedef std::vector<clang::NullabilityKind> NullabilitySeq;
 
+  struct Param {
+    unsigned Position;
+    bool NoEscape = false;
+    llvm::Optional<NullabilityKind> Nullability;
+  };
+  typedef std::vector<Param> ParamsSeq;
+
   struct Method {
     StringRef Selector;
     MethodKind Kind;
+    ParamsSeq Params;
     NullabilitySeq Nullability;
     llvm::Optional<NullabilityKind> NullabilityOfRet;
     AvailabilityItem Availability;
+    bool SwiftPrivate = false;
+    StringRef SwiftName;
     api_notes::FactoryAsInitKind FactoryAsInit
       = api_notes::FactoryAsInitKind::Infer;
     bool DesignatedInit = false;
@@ -180,6 +195,8 @@ namespace {
     StringRef Name;
     llvm::Optional<NullabilityKind> Nullability;
     AvailabilityItem Availability;
+    bool SwiftPrivate = false;
+    StringRef SwiftName;
   };
   typedef std::vector<Property> PropertiesSeq;
 
@@ -187,6 +204,10 @@ namespace {
     StringRef Name;
     bool AuditedForNullability = false;
     AvailabilityItem Availability;
+    bool SwiftPrivate = false;
+    StringRef SwiftName;
+    StringRef SwiftBridge;
+    StringRef NSErrorDomain;
     MethodsSeq Methods;
     PropertiesSeq Properties;
   };
@@ -194,9 +215,12 @@ namespace {
 
   struct Function {
     StringRef Name;
+    ParamsSeq Params;
     NullabilitySeq Nullability;
     llvm::Optional<NullabilityKind> NullabilityOfRet;
     AvailabilityItem Availability;
+    bool SwiftPrivate = false;
+    StringRef SwiftName;
   };
   typedef std::vector<Function> FunctionsSeq;
 
@@ -204,8 +228,38 @@ namespace {
     StringRef Name;
     llvm::Optional<NullabilityKind> Nullability;
     AvailabilityItem Availability;
+    bool SwiftPrivate = false;
+    StringRef SwiftName;
   };
   typedef std::vector<GlobalVariable> GlobalVariablesSeq;
+
+  struct EnumConstant {
+    StringRef Name;
+    AvailabilityItem Availability;
+    bool SwiftPrivate = false;
+    StringRef SwiftName;
+  };
+  typedef std::vector<EnumConstant> EnumConstantsSeq;
+
+  struct Tag {
+    StringRef Name;
+    AvailabilityItem Availability;
+    StringRef SwiftName;
+    bool SwiftPrivate = false;
+    StringRef SwiftBridge;
+    StringRef NSErrorDomain;
+  };
+  typedef std::vector<Tag> TagsSeq;
+
+  struct Typedef {
+    StringRef Name;
+    AvailabilityItem Availability;
+    StringRef SwiftName;
+    bool SwiftPrivate = false;
+    StringRef SwiftBridge;
+    StringRef NSErrorDomain;
+  };
+  typedef std::vector<Typedef> TypedefsSeq;
 
   struct Module {
     StringRef Name;
@@ -214,6 +268,11 @@ namespace {
     ClassesSeq Protocols;
     FunctionsSeq Functions;
     GlobalVariablesSeq Globals;
+    EnumConstantsSeq EnumConstants;
+    TagsSeq Tags;
+    TypedefsSeq Typedefs;
+
+    llvm::Optional<bool> SwiftInferImportAsMember = {llvm::None};
 
     LLVM_ATTRIBUTE_DEPRECATED(
       void dump() LLVM_ATTRIBUTE_USED,
@@ -224,9 +283,13 @@ namespace {
 LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(clang::NullabilityKind)
 LLVM_YAML_IS_SEQUENCE_VECTOR(Method)
 LLVM_YAML_IS_SEQUENCE_VECTOR(Property)
+LLVM_YAML_IS_SEQUENCE_VECTOR(Param)
 LLVM_YAML_IS_SEQUENCE_VECTOR(Class)
 LLVM_YAML_IS_SEQUENCE_VECTOR(Function)
 LLVM_YAML_IS_SEQUENCE_VECTOR(GlobalVariable)
+LLVM_YAML_IS_SEQUENCE_VECTOR(EnumConstant)
+LLVM_YAML_IS_SEQUENCE_VECTOR(Tag)
+LLVM_YAML_IS_SEQUENCE_VECTOR(Typedef)
 
 namespace llvm {
   namespace yaml {
@@ -268,7 +331,18 @@ namespace llvm {
         io.enumCase(value, "TVOS",      APIAvailability::TvOS);
         io.enumCase(value, "WatchOS",   APIAvailability::WatchOS);
         io.enumCase(value, "none",      APIAvailability::None);
+        io.enumCase(value, "nonswift",  APIAvailability::NonSwift);
         io.enumCase(value, "available", APIAvailability::Available);
+      }
+    };
+
+    template <>
+    struct MappingTraits<Param> {
+      static void mapping(IO &io, Param& p) {
+        io.mapRequired("Position",        p.Position);
+        io.mapOptional("Nullability",     p.Nullability, 
+                                          AbsentNullability);
+        io.mapOptional("NoEscape",        p.NoEscape);
       }
     };
 
@@ -280,6 +354,8 @@ namespace llvm {
                                           AbsentNullability);
         io.mapOptional("Availability",    p.Availability.Mode);
         io.mapOptional("AvailabilityMsg", p.Availability.Msg);
+        io.mapOptional("SwiftPrivate",    p.SwiftPrivate);
+        io.mapOptional("SwiftName",       p.SwiftName);
       }
     };
 
@@ -288,11 +364,14 @@ namespace llvm {
       static void mapping(IO &io, Method& m) {
         io.mapRequired("Selector",        m.Selector);
         io.mapRequired("MethodKind",      m.Kind);
+        io.mapOptional("Parameters",      m.Params);
         io.mapOptional("Nullability",     m.Nullability);
         io.mapOptional("NullabilityOfRet",  m.NullabilityOfRet,
                                             AbsentNullability);
         io.mapOptional("Availability",    m.Availability.Mode);
         io.mapOptional("AvailabilityMsg", m.Availability.Msg);
+        io.mapOptional("SwiftPrivate",    m.SwiftPrivate);
+        io.mapOptional("SwiftName",       m.SwiftName);
         io.mapOptional("FactoryAsInit",   m.FactoryAsInit,
                                           api_notes::FactoryAsInitKind::Infer);
         io.mapOptional("DesignatedInit",  m.DesignatedInit, false);
@@ -307,6 +386,10 @@ namespace llvm {
         io.mapOptional("AuditedForNullability", c.AuditedForNullability, false);
         io.mapOptional("Availability",          c.Availability.Mode);
         io.mapOptional("AvailabilityMsg",       c.Availability.Msg);
+        io.mapOptional("SwiftPrivate",          c.SwiftPrivate);
+        io.mapOptional("SwiftName",             c.SwiftName);
+        io.mapOptional("SwiftBridge",           c.SwiftBridge);
+        io.mapOptional("NSErrorDomain",         c.NSErrorDomain);
         io.mapOptional("Methods",               c.Methods);
         io.mapOptional("Properties",            c.Properties);
       }
@@ -316,11 +399,14 @@ namespace llvm {
     struct MappingTraits<Function> {
       static void mapping(IO &io, Function& f) {
         io.mapRequired("Name",             f.Name);
+        io.mapOptional("Parameters",       f.Params);
         io.mapOptional("Nullability",      f.Nullability);
         io.mapOptional("NullabilityOfRet", f.NullabilityOfRet,
                                            AbsentNullability);
         io.mapOptional("Availability",     f.Availability.Mode);
         io.mapOptional("AvailabilityMsg",  f.Availability.Msg);
+        io.mapOptional("SwiftPrivate",     f.SwiftPrivate);
+        io.mapOptional("SwiftName",        f.SwiftName);
       }
     };
 
@@ -332,6 +418,45 @@ namespace llvm {
                                           AbsentNullability);
         io.mapOptional("Availability",    v.Availability.Mode);
         io.mapOptional("AvailabilityMsg", v.Availability.Msg);
+        io.mapOptional("SwiftPrivate",    v.SwiftPrivate);
+        io.mapOptional("SwiftName",       v.SwiftName);
+      }
+    };
+
+    template <>
+    struct MappingTraits<EnumConstant> {
+      static void mapping(IO &io, EnumConstant& v) {
+        io.mapRequired("Name",            v.Name);
+        io.mapOptional("Availability",    v.Availability.Mode);
+        io.mapOptional("AvailabilityMsg", v.Availability.Msg);
+        io.mapOptional("SwiftPrivate",    v.SwiftPrivate);
+        io.mapOptional("SwiftName",       v.SwiftName);
+      }
+    };
+
+    template <>
+    struct MappingTraits<Tag> {
+      static void mapping(IO &io, Tag& t) {
+        io.mapRequired("Name",                  t.Name);
+        io.mapOptional("Availability",          t.Availability.Mode);
+        io.mapOptional("AvailabilityMsg",       t.Availability.Msg);
+        io.mapOptional("SwiftPrivate",          t.SwiftPrivate);
+        io.mapOptional("SwiftName",             t.SwiftName);
+        io.mapOptional("SwiftBridge",           t.SwiftBridge);
+        io.mapOptional("NSErrorDomain",         t.NSErrorDomain);
+      }
+    };
+
+    template <>
+    struct MappingTraits<Typedef> {
+      static void mapping(IO &io, Typedef& t) {
+        io.mapRequired("Name",                  t.Name);
+        io.mapOptional("Availability",          t.Availability.Mode);
+        io.mapOptional("AvailabilityMsg",       t.Availability.Msg);
+        io.mapOptional("SwiftPrivate",          t.SwiftPrivate);
+        io.mapOptional("SwiftName",             t.SwiftName);
+        io.mapOptional("SwiftBridge",           t.SwiftBridge);
+        io.mapOptional("NSErrorDomain",         t.NSErrorDomain);
       }
     };
 
@@ -341,10 +466,14 @@ namespace llvm {
         io.mapRequired("Name",            m.Name);
         io.mapOptional("Availability",    m.Availability.Mode);
         io.mapOptional("AvailabilityMsg", m.Availability.Msg);
+        io.mapOptional("SwiftInferImportAsMember", m.SwiftInferImportAsMember);
         io.mapOptional("Classes",         m.Classes);
         io.mapOptional("Protocols",       m.Protocols);
         io.mapOptional("Functions",       m.Functions);
         io.mapOptional("Globals",         m.Globals);
+        io.mapOptional("Enumerators",     m.EnumConstants);
+        io.mapOptional("Tags",            m.Tags);
+        io.mapOptional("Typedefs",        m.Typedefs);
       }
     };
   }
@@ -367,11 +496,7 @@ static bool parseAPINotes(StringRef yamlInput, Module &module,
   return static_cast<bool>(yin.error());
 }
 
-static bool compile(const Module &module,
-                    llvm::raw_ostream &os,
-                    api_notes::OSType targetOS,
-                    llvm::SourceMgr::DiagHandlerTy diagHandler,
-                    void *diagHandlerCtxt){
+namespace {
   using namespace api_notes;
 
   class YAMLConverter {
@@ -414,17 +539,32 @@ static bool compile(const Module &module,
     bool convertAvailability(const AvailabilityItem &in,
                              CommonEntityInfo &outInfo,
                              llvm::StringRef apiName) {
-      // Populate the 'Unavailable' information.
+      // Populate the unavailability information.
       outInfo.Unavailable = (in.Mode == APIAvailability::None);
-      if (outInfo.Unavailable) {
+      outInfo.UnavailableInSwift = (in.Mode == APIAvailability::NonSwift);
+      if (outInfo.Unavailable || outInfo.UnavailableInSwift) {
         outInfo.UnavailableMsg = in.Msg;
       } else {
         if (!in.Msg.empty()) {
-          emitError("availability message for available class '" +
+          emitError("availability message for available API '" +
                     apiName + "' will not be used");
         }
       }
       return false;
+    }
+
+    void convertParams(const ParamsSeq &params, FunctionInfo &outInfo) {
+      for (const auto &p : params) {
+        ParamInfo pi;
+        if (p.Nullability)
+          pi.setNullabilityAudited(*p.Nullability);
+        pi.setNoEscape(p.NoEscape);
+
+        while (outInfo.Params.size() <= p.Position) {
+          outInfo.Params.push_back(ParamInfo());
+        }
+        outInfo.Params[p.Position] |= pi;
+      }
     }
 
     void convertNullability(const NullabilitySeq &nullability,
@@ -455,15 +595,38 @@ static bool compile(const Module &module,
       }
     }
 
+    /// Convert the common parts of an entity from YAML.
+    template<typename T>
+    bool convertCommon(const T& common, CommonEntityInfo &info,
+                       StringRef apiName) {
+      if (!isAvailable(common.Availability))
+        return true;
+
+      convertAvailability(common.Availability, info, apiName);
+      info.SwiftPrivate = common.SwiftPrivate;
+      info.SwiftName = common.SwiftName;
+      return false;
+    }
+    
+    /// Convert the common parts of a type entity from YAML.
+    template<typename T>
+    bool convertCommonType(const T& common, CommonTypeInfo &info,
+                           StringRef apiName) {
+      if (convertCommon(common, info, apiName))
+        return true;
+
+      info.setSwiftBridge(common.SwiftBridge);
+      info.setNSErrorDomain(common.NSErrorDomain);
+      return false;
+    }
+
     // Translate from Method into ObjCMethodInfo and write it out.
     void convertMethod(const Method &meth,
                        ContextID classID, StringRef className) {
       ObjCMethodInfo mInfo;
 
-      if (!isAvailable(meth.Availability))
+      if (convertCommon(meth, mInfo, meth.Selector))
         return;
-
-      convertAvailability(meth.Availability, mInfo, meth.Selector);
 
       // Check if the selector ends with ':' to determine if it takes arguments.
       bool takesArguments = meth.Selector.endswith(":");
@@ -487,25 +650,25 @@ static bool compile(const Module &module,
       if (meth.FactoryAsInit != FactoryAsInitKind::Infer)
         mInfo.setFactoryAsInitKind(meth.FactoryAsInit);
 
+      // Translate parameter information.
+      convertParams(meth.Params, mInfo);
+
       // Translate nullability info.
       convertNullability(meth.Nullability, meth.NullabilityOfRet,
                          mInfo, meth.Selector);
 
       // Write it.
       Writer->addObjCMethod(classID, selectorRef,
-                           meth.Kind == MethodKind::Instance,
-                           mInfo);
+                            meth.Kind == MethodKind::Instance,
+                            mInfo);
     }
 
     void convertContext(const Class &cl, bool isClass) {
       // Write the class.
       ObjCContextInfo cInfo;
 
-      // First, translate and check availability info.
-      if (!isAvailable(cl.Availability))
+      if (convertCommonType(cl, cInfo, cl.Name))
         return;
-
-      convertAvailability(cl.Availability, cInfo, cl.Name);
 
       if (cl.AuditedForNullability)
         cInfo.setDefaultNullability(*DefaultNullability);
@@ -546,6 +709,8 @@ static bool compile(const Module &module,
         if (!isAvailable(prop.Availability))
           continue;
         convertAvailability(prop.Availability, pInfo, prop.Name);
+        pInfo.SwiftPrivate = prop.SwiftPrivate;
+        pInfo.SwiftName = prop.SwiftName;
         if (prop.Nullability)
           pInfo.setNullabilityAudited(*prop.Nullability);
         Writer->addObjCProperty(clID, prop.Name, pInfo);
@@ -599,6 +764,8 @@ static bool compile(const Module &module,
         if (!isAvailable(global.Availability))
           continue;
         convertAvailability(global.Availability, info, global.Name);
+        info.SwiftPrivate = global.SwiftPrivate;
+        info.SwiftName = global.SwiftName;
         if (global.Nullability)
           info.setNullabilityAudited(*global.Nullability);
         Writer->addGlobalVariable(global.Name, info);
@@ -618,11 +785,71 @@ static bool compile(const Module &module,
         if (!isAvailable(function.Availability))
           continue;
         convertAvailability(function.Availability, info, function.Name);
+        info.SwiftPrivate = function.SwiftPrivate;
+        info.SwiftName = function.SwiftName;
+        convertParams(function.Params, info);
         convertNullability(function.Nullability,
                            function.NullabilityOfRet,
                            info, function.Name);
 
         Writer->addGlobalFunction(function.Name, info);
+      }
+
+      // Write all enumerators.
+      llvm::StringSet<> knownEnumConstants;
+      for (const auto &enumConstant : TheModule.EnumConstants) {
+        // Check for duplicate enumerators
+        if (!knownEnumConstants.insert(enumConstant.Name).second) {
+          emitError("multiple definitions of enumerator '" +
+                    enumConstant.Name + "'");
+          continue;
+        }
+
+        EnumConstantInfo info;
+        if (!isAvailable(enumConstant.Availability))
+          continue;
+        convertAvailability(enumConstant.Availability, info, enumConstant.Name);
+        info.SwiftPrivate = enumConstant.SwiftPrivate;
+        info.SwiftName = enumConstant.SwiftName;
+        Writer->addEnumConstant(enumConstant.Name, info);
+      }
+
+      // Write all tags.
+      llvm::StringSet<> knownTags;
+      for (const auto &t : TheModule.Tags) {
+        // Check for duplicate tag definitions.
+        if (!knownTags.insert(t.Name).second) {
+          emitError("multiple definitions Of tag '" + t.Name + "'");
+          continue;
+        }
+
+        TagInfo tagInfo;
+        if (convertCommonType(t, tagInfo, t.Name))
+          continue;
+
+        Writer->addTag(t.Name, tagInfo);
+      }
+
+      // Write all typedefs.
+      llvm::StringSet<> knownTypedefs;
+      for (const auto &t : TheModule.Typedefs) {
+        // Check for duplicate typedef definitions.
+        if (!knownTags.insert(t.Name).second) {
+          emitError("multiple definitions of typedef '" + t.Name + "'");
+          continue;
+        }
+
+        TypedefInfo typedefInfo;
+        if (convertCommonType(t, typedefInfo, t.Name))
+          continue;
+
+        Writer->addTypedef(t.Name, typedefInfo);
+      }
+
+      if (TheModule.SwiftInferImportAsMember) {
+        ModuleOptions opts;
+        opts.SwiftInferImportAsMember = true;
+        Writer->addModuleOptions(opts);
       }
 
       if (!ErrorOccured)
@@ -631,6 +858,14 @@ static bool compile(const Module &module,
       return ErrorOccured;
     }
   };
+}
+
+static bool compile(const Module &module,
+                    llvm::raw_ostream &os,
+                    api_notes::OSType targetOS,
+                    llvm::SourceMgr::DiagHandlerTy diagHandler,
+                    void *diagHandlerCtxt){
+  using namespace api_notes;
 
   YAMLConverter c(module, targetOS, os, diagHandler, diagHandlerCtxt);
   return c.convertModule();
@@ -670,15 +905,7 @@ bool api_notes::compileAPINotes(StringRef yamlInput,
   return compile(module, os, targetOS, diagHandler, diagHandlerCtxt);
 }
 
-bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
-                                  llvm::raw_ostream &os) {
-  // Try to read the file.
-  auto reader = APINotesReader::get(std::move(input));
-  if (!reader) {
-    llvm::errs() << "not a well-formed API notes binary file\n";
-    return true;
-  }
-
+namespace {
   // Deserialize the API notes file into a module.
   class DecompileVisitor : public APINotesReader::Visitor {
     /// Allocator used to clone those strings that need it.
@@ -701,13 +928,27 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
       return StringRef(reinterpret_cast<const char *>(ptr), string.size());
     }
 
+    template<typename T>
+    void handleCommon(T &record, const CommonEntityInfo &info) {
+      handleAvailability(record.Availability, info);
+      record.SwiftPrivate = info.SwiftPrivate;
+      record.SwiftName = copyString(info.SwiftName);
+    }
+
+    template<typename T>
+    void handleCommonType(T &record, const CommonTypeInfo &info) {
+      handleCommon(record, info);
+      record.SwiftBridge = copyString(info.getSwiftBridge());      
+      record.NSErrorDomain = copyString(info.getNSErrorDomain());
+    }
+
     /// Map Objective-C context info.
     void handleObjCContext(Class &record, StringRef name,
                            const ObjCContextInfo &info) {
       record.Name = name;
 
-      // Handle class information.
-      handleAvailability(record.Availability, info);
+      handleCommonType(record, info);
+
       if (info.getDefaultNullability()) {
         record.AuditedForNullability = true;
       }
@@ -719,6 +960,24 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
       if (info.Unavailable) {
         availability.Mode = APIAvailability::None;
         availability.Msg = copyString(info.UnavailableMsg);
+      }
+
+      if (info.UnavailableInSwift) {
+        availability.Mode = APIAvailability::NonSwift;
+        availability.Msg = copyString(info.UnavailableMsg);
+      }
+    }
+
+    /// Map parameter information for a function.
+    void handleParameters(ParamsSeq &params,
+                          const FunctionInfo &info) {
+      unsigned position = 0;
+      for (const auto &pi: info.Params) {
+        Param p;
+        p.Position = position++;
+        p.Nullability = pi.getNullability();
+        p.NoEscape = pi.isNoEscape();
+        params.push_back(p);
       }
     }
 
@@ -764,9 +1023,10 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
       method.Selector = copyString(selector);
       method.Kind = isInstanceMethod ? MethodKind::Instance : MethodKind::Class;
 
+      handleCommon(method, info);
+      handleParameters(method.Params, info);
       handleNullability(method.Nullability, method.NullabilityOfRet, info,
                         selector.count(':'));
-      handleAvailability(method.Availability, info);
       method.FactoryAsInit = info.getFactoryAsInitKind();
       method.DesignatedInit = info.DesignatedInit;
       method.Required = info.Required;
@@ -782,7 +1042,7 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
                                    const ObjCPropertyInfo &info) {
       Property property;
       property.Name = name;
-      handleAvailability(property.Availability, info);
+      handleCommon(property, info);
 
       // FIXME: No way to represent "not audited for nullability".
       if (auto nullability = info.getNullability()) {
@@ -800,7 +1060,8 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
                                      const GlobalFunctionInfo &info) {
       Function function;
       function.Name = name;
-      handleAvailability(function.Availability, info);
+      handleCommon(function, info);
+      handleParameters(function.Params, info);
       if (info.NumAdjustedNullable > 0)
         handleNullability(function.Nullability, function.NullabilityOfRet,
                           info, info.NumAdjustedNullable-1);
@@ -812,7 +1073,7 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
                                      const GlobalVariableInfo &info) {
       GlobalVariable global;
       global.Name = name;
-      handleAvailability(global.Availability, info);
+      handleCommon(global, info);
 
       // FIXME: No way to represent "not audited for nullability".
       if (auto nullability = info.getNullability()) {
@@ -822,10 +1083,44 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
       TheModule.Globals.push_back(global);
     }
 
+    virtual void visitEnumConstant(StringRef name,
+                                   const EnumConstantInfo &info) {
+      EnumConstant enumConstant;
+      enumConstant.Name = name;
+      handleCommon(enumConstant, info);
+
+      TheModule.EnumConstants.push_back(enumConstant);
+    }
+
+    virtual void visitTag(StringRef name, const TagInfo &info) {
+      Tag tag;
+      tag.Name = name;
+      handleCommonType(tag, info);
+      TheModule.Tags.push_back(tag);
+    }
+
+    virtual void visitTypedef(StringRef name, const TypedefInfo &info) {
+      Typedef td;
+      td.Name = name;
+      handleCommonType(td, info);
+      TheModule.Typedefs.push_back(td);
+    }
+
     /// Retrieve the module.
     Module &getModule() { return TheModule; }
-  } decompileVisitor;
+  };
+}
 
+bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
+                                  llvm::raw_ostream &os) {
+  // Try to read the file.
+  auto reader = APINotesReader::get(std::move(input));
+  if (!reader) {
+    llvm::errs() << "not a well-formed API notes binary file\n";
+    return true;
+  }
+
+  DecompileVisitor decompileVisitor;
   reader->visit(decompileVisitor);
 
   // Sort the data in the module, because the API notes reader doesn't preserve
@@ -834,6 +1129,11 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
 
   // Set module name.
   module.Name = reader->getModuleName();
+
+  // Set module options
+  auto opts = reader->getModuleOptions();
+  if (opts.SwiftInferImportAsMember)
+    module.SwiftInferImportAsMember = true;
 
   // Sort classes.
   std::sort(module.Classes.begin(), module.Classes.end(),
@@ -876,6 +1176,24 @@ bool api_notes::decompileAPINotes(std::unique_ptr<llvm::MemoryBuffer> input,
   // Sort global variables.
   std::sort(module.Globals.begin(), module.Globals.end(),
             [](const GlobalVariable &lhs, const GlobalVariable &rhs) -> bool {
+              return lhs.Name < rhs.Name;
+            });
+
+  // Sort enum constants.
+  std::sort(module.EnumConstants.begin(), module.EnumConstants.end(),
+            [](const EnumConstant &lhs, const EnumConstant &rhs) -> bool {
+              return lhs.Name < rhs.Name;
+            });
+
+  // Sort tags.
+  std::sort(module.Tags.begin(), module.Tags.end(),
+            [](const Tag &lhs, const Tag &rhs) -> bool {
+              return lhs.Name < rhs.Name;
+            });
+
+  // Sort typedefs.
+  std::sort(module.Typedefs.begin(), module.Typedefs.end(),
+            [](const Typedef &lhs, const Typedef &rhs) -> bool {
               return lhs.Name < rhs.Name;
             });
 

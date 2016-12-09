@@ -24,8 +24,11 @@ set(ADTSources
   MakeUniqueTest.cpp
   MapVectorTest.cpp
   OptionalTest.cpp
+  OptionSetTest.cpp
   PackedVectorTest.cpp
+  PointerEmbeddedIntTest.cpp
   PointerIntPairTest.cpp
+  PointerSumTypeTest.cpp
   PointerUnionTest.cpp
   PostOrderIteratorTest.cpp
   RangeAdapterTest.cpp

@@ -351,6 +351,76 @@ TEST(Support, UserCacheDirectory) {
   }
 }
 
+TEST(Support, TempDirectory) {
+  SmallString<32> TempDir;
+  path::system_temp_directory(false, TempDir);
+  EXPECT_TRUE(!TempDir.empty());
+  TempDir.clear();
+  path::system_temp_directory(true, TempDir);
+  EXPECT_TRUE(!TempDir.empty());
+}
+
+#ifdef LLVM_ON_WIN32
+static std::string path2regex(std::string Path) {
+  size_t Pos = 0;
+  while ((Pos = Path.find('\\', Pos)) != std::string::npos) {
+    Path.replace(Pos, 1, "\\\\");
+    Pos += 2;
+  }
+  return Path;
+}
+
+/// Helper for running temp dir test in separated process. See below.
+#define EXPECT_TEMP_DIR(prepare, expected)                                     \
+  EXPECT_EXIT(                                                                 \
+      {                                                                        \
+        prepare;                                                               \
+        SmallString<300> TempDir;                                              \
+        path::system_temp_directory(true, TempDir);                            \
+        raw_os_ostream(std::cerr) << TempDir;                                  \
+        std::exit(0);                                                          \
+      },                                                                       \
+      ::testing::ExitedWithCode(0), path2regex(expected))
+
+TEST(SupportDeathTest, TempDirectoryOnWindows) {
+  // In this test we want to check how system_temp_directory responds to
+  // different values of specific env vars. To prevent corrupting env vars of
+  // the current process all checks are done in separated processes.
+  EXPECT_TEMP_DIR(_wputenv_s(L"TMP", L"C:\\OtherFolder"), "C:\\OtherFolder");
+  EXPECT_TEMP_DIR(_wputenv_s(L"TMP", L"C:/Unix/Path/Seperators"),
+                  "C:\\Unix\\Path\\Seperators");
+  EXPECT_TEMP_DIR(_wputenv_s(L"TMP", L"Local Path"), ".+\\Local Path$");
+  EXPECT_TEMP_DIR(_wputenv_s(L"TMP", L"F:\\TrailingSep\\"), "F:\\TrailingSep");
+  EXPECT_TEMP_DIR(
+      _wputenv_s(L"TMP", L"C:\\2\x03C0r-\x00B5\x00B3\\\x2135\x2080"),
+      "C:\\2\xCF\x80r-\xC2\xB5\xC2\xB3\\\xE2\x84\xB5\xE2\x82\x80");
+
+  // Test $TMP empty, $TEMP set.
+  EXPECT_TEMP_DIR(
+      {
+        _wputenv_s(L"TMP", L"");
+        _wputenv_s(L"TEMP", L"C:\\Valid\\Path");
+      },
+      "C:\\Valid\\Path");
+
+  // All related env vars empty
+  EXPECT_TEMP_DIR(
+  {
+    _wputenv_s(L"TMP", L"");
+    _wputenv_s(L"TEMP", L"");
+    _wputenv_s(L"USERPROFILE", L"");
+  },
+    "C:\\Temp");
+
+  // Test evn var / path with 260 chars.
+  SmallString<270> Expected{"C:\\Temp\\AB\\123456789"};
+  while (Expected.size() < 260)
+    Expected.append("\\DirNameWith19Charss");
+  ASSERT_EQ(260, Expected.size());
+  EXPECT_TEMP_DIR(_putenv_s("TMP", Expected.c_str()), Expected.c_str());
+}
+#endif
+
 class FileSystemTest : public testing::Test {
 protected:
   /// Unique temporary directory in which all created filesystem entities must
@@ -655,22 +725,30 @@ const char coff_bigobj[] = "\x00\x00\xff\xff\x00\x02......"
 const char coff_import_library[] = "\x00\x00\xff\xff....";
 const char elf_relocatable[] = { 0x7f, 'E', 'L', 'F', 1, 2, 1, 0, 0,
                                  0,    0,   0,   0,   0, 0, 0, 0, 1 };
-const char macho_universal_binary[] = "\xca\xfe\xba\xbe...\0x00";
-const char macho_object[] = "\xfe\xed\xfa\xce..........\x00\x01";
-const char macho_executable[] = "\xfe\xed\xfa\xce..........\x00\x02";
+const char macho_universal_binary[] = "\xca\xfe\xba\xbe...\x00";
+const char macho_object[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x01............";
+const char macho_executable[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x02............";
 const char macho_fixed_virtual_memory_shared_lib[] =
-    "\xfe\xed\xfa\xce..........\x00\x03";
-const char macho_core[] = "\xfe\xed\xfa\xce..........\x00\x04";
-const char macho_preload_executable[] = "\xfe\xed\xfa\xce..........\x00\x05";
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x03............";
+const char macho_core[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x04............";
+const char macho_preload_executable[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x05............";
 const char macho_dynamically_linked_shared_lib[] =
-    "\xfe\xed\xfa\xce..........\x00\x06";
-const char macho_dynamic_linker[] = "\xfe\xed\xfa\xce..........\x00\x07";
-const char macho_bundle[] = "\xfe\xed\xfa\xce..........\x00\x08";
-const char macho_dsym_companion[] = "\xfe\xed\xfa\xce..........\x00\x0a";
-const char macho_kext_bundle[] = "\xfe\xed\xfa\xce..........\x00\x0b";
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x06............";
+const char macho_dynamic_linker[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x07............";
+const char macho_bundle[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x08............";
+const char macho_dsym_companion[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x0a............";
+const char macho_kext_bundle[] =
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x0b............";
 const char windows_resource[] = "\x00\x00\x00\x00\x020\x00\x00\x00\xff";
 const char macho_dynamically_linked_shared_lib_stub[] =
-    "\xfe\xed\xfa\xce..........\x00\x09";
+    "\xfe\xed\xfa\xce........\x00\x00\x00\x09............";
 
 TEST_F(FileSystemTest, Magic) {
   struct type {

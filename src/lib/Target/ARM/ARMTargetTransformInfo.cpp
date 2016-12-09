@@ -18,12 +18,12 @@ using namespace llvm;
 int ARMTTIImpl::getIntImmCost(const APInt &Imm, Type *Ty) {
   assert(Ty->isIntegerTy());
 
-  unsigned Bits = Ty->getPrimitiveSizeInBits();
-  if (Bits == 0 || Bits > 32)
-    return 4;
+ unsigned Bits = Ty->getPrimitiveSizeInBits();
+ if (Bits == 0 || Bits > 64)
+   return 4;
 
-  int32_t SImmVal = Imm.getSExtValue();
-  uint32_t ZImmVal = Imm.getZExtValue();
+  int64_t SImmVal = Imm.getSExtValue();
+  uint64_t ZImmVal = Imm.getZExtValue();
   if (!ST->isThumb()) {
     if ((SImmVal >= 0 && SImmVal < 65536) ||
         (ARM_AM::getSOImmVal(ZImmVal) != -1) ||
@@ -46,6 +46,21 @@ int ARMTTIImpl::getIntImmCost(const APInt &Imm, Type *Ty) {
   // Load from constantpool.
   return 3;
 }
+
+int ARMTTIImpl::getIntImmCost(unsigned Opcode, unsigned Idx, const APInt &Imm,
+                              Type *Ty) {
+  // Division by a constant can be turned into multiplication, but only if we
+  // know it's constant. So it's not so much that the immediate is cheap (it's
+  // not), but that the alternative is worse.
+  // FIXME: this is probably unneeded with GlobalISel.
+  if ((Opcode == Instruction::SDiv || Opcode == Instruction::UDiv ||
+       Opcode == Instruction::SRem || Opcode == Instruction::URem) &&
+      Idx == 1)
+    return 0;
+
+  return getIntImmCost(Imm, Ty);
+}
+
 
 int ARMTTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) {
   int ISD = TLI->InstructionOpcodeToISD(Opcode);
@@ -274,9 +289,6 @@ int ARMTTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy, Type *CondTy) {
   if (ST->hasNEON() && ValTy->isVectorTy() && ISD == ISD::SELECT) {
     // Lowering of some vector selects is currently far from perfect.
     static const TypeConversionCostTblEntry NEONVectorSelectTbl[] = {
-      { ISD::SELECT, MVT::v16i1, MVT::v16i16, 2*16 + 1 + 3*1 + 4*1 },
-      { ISD::SELECT, MVT::v8i1, MVT::v8i32, 4*8 + 1*3 + 1*4 + 1*2 },
-      { ISD::SELECT, MVT::v16i1, MVT::v16i32, 4*16 + 1*6 + 1*8 + 1*4 },
       { ISD::SELECT, MVT::v4i1, MVT::v4i64, 4*4 + 1*2 + 1 },
       { ISD::SELECT, MVT::v8i1, MVT::v8i64, 50 },
       { ISD::SELECT, MVT::v16i1, MVT::v16i64, 100 }

@@ -22,17 +22,17 @@ namespace llvm {
 
 class Module;
 class Obfuscator;
-
-typedef StringMap<detail::DenseSetEmpty, BumpPtrAllocator &> SymbolSet;
+class TargetMachine;
 
 /// \brief Given a Module, obfuscate the strings in the modules. Symbols that
 /// requires to be preserved for the system will be preserved as well.
-bool obfuscateModule(Module &M);
+bool obfuscateModule(Module &M, const TargetMachine *TM);
 
 /// \brief Given a Module and a set of symbols must be preserved, obfuscate
 /// the strings in the modules. Symbols that requires to be preserved for the
 /// system will be preserved as well.
-bool obfuscateModule(Module &M, Obfuscator &obfs, SymbolSet &PreserveSymbols);
+bool obfuscateModule(Module &M, const TargetMachine *TM, Obfuscator &obfs,
+                     StringSet<> &PreserveSymbols);
 
 } // End llvm namespace
 

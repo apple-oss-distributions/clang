@@ -56,6 +56,14 @@ extern "C" {
                                               // or NULL if it is unknown.
   };
 
+  // These functions can be called on some platforms to find globals in the same
+  // loaded image as `flag' and apply __asan_(un)register_globals to them,
+  // filtering out redundant calls.
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __asan_register_image_globals(uptr *flag);
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __asan_unregister_image_globals(uptr *flag);
+
   // These two functions should be called by the instrumented code.
   // 'globals' is an array of structures describing 'n' globals.
   SANITIZER_INTERFACE_ATTRIBUTE
@@ -166,6 +174,19 @@ extern "C" {
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_store16(uptr p);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_loadN(uptr p, uptr size);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_storeN(uptr p, uptr size);
+
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load1_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load2_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load4_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load8_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load16_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store1_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store2_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store4_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store8_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store16_noabort(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_loadN_noabort(uptr p, uptr size);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_storeN_noabort(uptr p, uptr size);
 
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_exp_load1(uptr p, u32 exp);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_exp_load2(uptr p, u32 exp);

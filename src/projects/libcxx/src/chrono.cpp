@@ -75,8 +75,14 @@ steady_clock::time_point
 steady_clock::now() _NOEXCEPT
 {
     struct timespec tp;
+#if defined(__APPLE__) && defined(CLOCK_UPTIME_RAW)
+    // On Darwin, CLOCK_UPTIME_RAW's behavior matches that of mach_absolute_time.
+    if (0 != clock_gettime(CLOCK_UPTIME_RAW, &tp))
+        __throw_system_error(errno, "clock_gettime(CLOCK_UPTIME_RAW) failed");
+#else
     if (0 != clock_gettime(CLOCK_MONOTONIC, &tp))
         __throw_system_error(errno, "clock_gettime(CLOCK_MONOTONIC) failed");
+#endif
     return time_point(seconds(tp.tv_sec) + nanoseconds(tp.tv_nsec));
 }
 

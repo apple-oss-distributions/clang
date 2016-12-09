@@ -946,6 +946,10 @@ static void highlightRange(const CharSourceRange &R,
     }
   }
 
+  // FIXME: this is a hack to workaround rdar://problem/20754602.
+  if (StartColNo > EndColNo)
+    return;
+
   assert(StartColNo <= EndColNo && "Invalid range!");
 
   // Check that a token range does not highlight only whitespace.

@@ -683,7 +683,8 @@ void CastOperation::CheckDynamicCast() {
 
   // C++ 5.2.7p5
   // Upcasts are resolved statically.
-  if (DestRecord && Self.IsDerivedFrom(SrcPointee, DestPointee)) {
+  if (DestRecord &&
+      Self.IsDerivedFrom(OpRange.getBegin(), SrcPointee, DestPointee)) {
     if (Self.CheckDerivedToBaseConversion(SrcPointee, DestPointee,
                                            OpRange.getBegin(), OpRange, 
                                            &BasePath)) {
@@ -1171,7 +1172,8 @@ TryLValueToRValueCast(Sema &Self, Expr *SrcExpr, QualType DestType,
     Kind = CK_DerivedToBase;
     CXXBasePaths Paths(/*FindAmbiguities=*/true, /*RecordPaths=*/true,
                        /*DetectVirtual=*/true);
-    if (!Self.IsDerivedFrom(SrcExpr->getType(), R->getPointeeType(), Paths))
+    if (!Self.IsDerivedFrom(SrcExpr->getLocStart(), SrcExpr->getType(),
+                            R->getPointeeType(), Paths))
       return TC_NotApplicable;
   
     Self.BuildBasePathArray(Paths, BasePath);
@@ -1260,8 +1262,8 @@ TryStaticDowncast(Sema &Self, CanQualType SrcType, CanQualType DestType,
                   QualType OrigDestType, unsigned &msg, 
                   CastKind &Kind, CXXCastPath &BasePath) {
   // We can only work with complete types. But don't complain if it doesn't work
-  if (Self.RequireCompleteType(OpRange.getBegin(), SrcType, 0) ||
-      Self.RequireCompleteType(OpRange.getBegin(), DestType, 0))
+  if (!Self.isCompleteType(OpRange.getBegin(), SrcType) ||
+      !Self.isCompleteType(OpRange.getBegin(), DestType))
     return TC_NotApplicable;
 
   // Downcast can only happen in class hierarchies, so we need classes.
@@ -1271,7 +1273,7 @@ TryStaticDowncast(Sema &Self, CanQualType SrcType, CanQualType DestType,
 
   CXXBasePaths Paths(/*FindAmbiguities=*/true, /*RecordPaths=*/true,
                      /*DetectVirtual=*/true);
-  if (!Self.IsDerivedFrom(DestType, SrcType, Paths)) {
+  if (!Self.IsDerivedFrom(OpRange.getBegin(), DestType, SrcType, Paths)) {
     return TC_NotApplicable;
   }
 
@@ -1307,7 +1309,7 @@ TryStaticDowncast(Sema &Self, CanQualType SrcType, CanQualType DestType,
     if (!Paths.isRecordingPaths()) {
       Paths.clear();
       Paths.setRecordingPaths(true);
-      Self.IsDerivedFrom(DestType, SrcType, Paths);
+      Self.IsDerivedFrom(OpRange.getBegin(), DestType, SrcType, Paths);
     }
     std::string PathDisplayStr;
     std::set<unsigned> DisplayedPaths;
@@ -1397,8 +1399,11 @@ TryStaticMemberPointerUpcast(Sema &Self, ExprResult &SrcExpr, QualType SrcType,
     msg = diag::err_bad_static_cast_member_pointer_nonmp;
     return TC_NotApplicable;
   }
+
+  // Lock down the inheritance model right now in MS ABI, whether or not the
+  // pointee types are the same.
   if (Self.Context.getTargetInfo().getCXXABI().isMicrosoft())
-    Self.RequireCompleteType(OpRange.getBegin(), SrcType, 0);
+    (void)Self.isCompleteType(OpRange.getBegin(), SrcType);
 
   // T == T, modulo cv
   if (!Self.Context.hasSameUnqualifiedType(SrcMemPtr->getPointeeType(),
@@ -1410,16 +1415,15 @@ TryStaticMemberPointerUpcast(Sema &Self, ExprResult &SrcExpr, QualType SrcType,
   QualType DestClass(DestMemPtr->getClass(), 0);
   CXXBasePaths Paths(/*FindAmbiguities=*/true, /*RecordPaths=*/true,
                   /*DetectVirtual=*/true);
-  if (Self.RequireCompleteType(OpRange.getBegin(), SrcClass, 0) ||
-      !Self.IsDerivedFrom(SrcClass, DestClass, Paths)) {
+  if (!Self.IsDerivedFrom(OpRange.getBegin(), SrcClass, DestClass, Paths))
     return TC_NotApplicable;
-  }
 
   // B is a base of D. But is it an allowed base? If not, it's a hard error.
   if (Paths.isAmbiguous(Self.Context.getCanonicalType(DestClass))) {
     Paths.clear();
     Paths.setRecordingPaths(true);
-    bool StillOkay = Self.IsDerivedFrom(SrcClass, DestClass, Paths);
+    bool StillOkay =
+        Self.IsDerivedFrom(OpRange.getBegin(), SrcClass, DestClass, Paths);
     assert(StillOkay);
     (void)StillOkay;
     std::string PathDisplayStr = Self.getAmbiguousPathsDisplayString(Paths);
@@ -1746,6 +1750,44 @@ static void checkIntToPointerCast(bool CStyle, SourceLocation Loc,
   }
 }
 
+static bool fixOverloadedReinterpretCastExpr(Sema &Self, QualType DestType,
+                                             ExprResult &Result) {
+  // We can only fix an overloaded reinterpret_cast if
+  // - it is a template with explicit arguments that resolves to an lvalue
+  //   unambiguously, or
+  // - it is the only function in an overload set that may have its address
+  //   taken.
+
+  Expr *E = Result.get();
+  // TODO: what if this fails because of DiagnoseUseOfDecl or something
+  // like it?
+  if (Self.ResolveAndFixSingleFunctionTemplateSpecialization(
+          Result,
+          Expr::getValueKindForType(DestType) == VK_RValue // Convert Fun to Ptr
+          ) &&
+      Result.isUsable())
+    return true;
+
+  DeclAccessPair DAP;
+  FunctionDecl *Found = Self.resolveAddressOfOnlyViableOverloadCandidate(E, DAP);
+  if (!Found)
+    return false;
+
+  // It seems that if we encounter a call to a function that is both unavailable
+  // and inaccessible, we'll emit multiple diags for said call. Hence, we run
+  // both checks below unconditionally.
+  Self.DiagnoseUseOfDecl(Found, E->getExprLoc());
+  Self.CheckAddressOfMemberAccess(E, DAP);
+
+  Expr *Fixed = Self.FixOverloadedFunctionReference(E, DAP, Found);
+  if (Fixed->getType()->isFunctionType())
+    Result = Self.DefaultFunctionArrayConversion(Fixed, /*Diagnose=*/false);
+  else
+    Result = Fixed;
+
+  return !Result.isInvalid();
+}
+
 static TryCastResult TryReinterpretCast(Sema &Self, ExprResult &SrcExpr,
                                         QualType DestType, bool CStyle,
                                         SourceRange OpRange,
@@ -1757,21 +1799,15 @@ static TryCastResult TryReinterpretCast(Sema &Self, ExprResult &SrcExpr,
   QualType SrcType = SrcExpr.get()->getType();
 
   // Is the source an overloaded name? (i.e. &foo)
-  // If so, reinterpret_cast can not help us here (13.4, p1, bullet 5) ...
+  // If so, reinterpret_cast generally can not help us here (13.4, p1, bullet 5)
   if (SrcType == Self.Context.OverloadTy) {
-    // ... unless foo<int> resolves to an lvalue unambiguously.
-    // TODO: what if this fails because of DiagnoseUseOfDecl or something
-    // like it?
-    ExprResult SingleFunctionExpr = SrcExpr;
-    if (Self.ResolveAndFixSingleFunctionTemplateSpecialization(
-          SingleFunctionExpr,
-          Expr::getValueKindForType(DestType) == VK_RValue // Convert Fun to Ptr 
-        ) && SingleFunctionExpr.isUsable()) {
-      SrcExpr = SingleFunctionExpr;
-      SrcType = SrcExpr.get()->getType();
-    } else {
+    ExprResult FixedExpr = SrcExpr;
+    if (!fixOverloadedReinterpretCastExpr(Self, DestType, FixedExpr))
       return TC_NotApplicable;
-    }
+
+    assert(FixedExpr.isUsable() && "Invalid result fixing overloaded expr");
+    SrcExpr = FixedExpr;
+    SrcType = SrcExpr.get()->getType();
   }
 
   if (const ReferenceType *DestTypeTmp = DestType->getAs<ReferenceType>()) {
@@ -1843,8 +1879,8 @@ static TryCastResult TryReinterpretCast(Sema &Self, ExprResult &SrcExpr,
     if (Self.Context.getTargetInfo().getCXXABI().isMicrosoft()) {
       // We need to determine the inheritance model that the class will use if
       // haven't yet.
-      Self.RequireCompleteType(OpRange.getBegin(), SrcType, 0);
-      Self.RequireCompleteType(OpRange.getBegin(), DestType, 0);
+      (void)Self.isCompleteType(OpRange.getBegin(), SrcType);
+      (void)Self.isCompleteType(OpRange.getBegin(), DestType);
     }
 
     // Don't allow casting between member pointers of different sizes.
@@ -2101,6 +2137,7 @@ void CastOperation::CheckCXXCStyleCast(bool FunctionalStyle,
         && (SrcExpr.get()->getType()->isIntegerType()
             || SrcExpr.get()->getType()->isFloatingType())) {
       Kind = CK_VectorSplat;
+      SrcExpr = Self.prepareVectorSplat(DestType, SrcExpr.get());
       return;
     }
 
@@ -2335,6 +2372,7 @@ void CastOperation::CheckCStyleCast() {
     if (DestVecTy->getVectorKind() == VectorType::AltiVecVector &&
           (SrcType->isIntegerType() || SrcType->isFloatingType())) {
       Kind = CK_VectorSplat;
+      SrcExpr = Self.prepareVectorSplat(DestType, SrcExpr.get());
     } else if (Self.CheckVectorCast(OpRange, DestType, SrcType, Kind)) {
       SrcExpr = ExprError();
     }

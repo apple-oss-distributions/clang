@@ -425,16 +425,16 @@ bool ObjCARCContract::tryToPeepholeInstruction(
       // FALLTHROUGH
     case ARCInstKind::RetainRV:
     case ARCInstKind::ClaimRV: {
-      // If we're compiling for a target which needs a special inline-asm marker
-      // to do the return value optimization, insert it now.
+      // If we're compiling for a target which needs a special inline-asm
+      // marker to do the return value optimization, insert it now.
       if (!RVInstMarker)
         return false;
       BasicBlock::iterator BBI = Inst->getIterator();
       BasicBlock *InstParent = Inst->getParent();
 
-      // Step up to see if the call immediately precedes the RV call.  If it's
-      // an invoke, we have to cross a block boundary. And we have to carefully
-      // dodge no-op instructions.
+      // Step up to see if the call immediately precedes the RV call.
+      // If it's an invoke, we have to cross a block boundary. And we have
+      // to carefully dodge no-op instructions.
       do {
         if (&*BBI == InstParent->begin()) {
           BasicBlock *Pred = InstParent->getSinglePredecessor();

@@ -29,6 +29,7 @@
 
 #include "llvm/Bitcode/BitstreamReader.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Bitcode/LLVMBitCodes.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/IR/Verifier.h"
@@ -38,8 +39,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
+#include "llvm/Support/SHA1.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <map>
 #include <system_error>
@@ -114,10 +117,11 @@ static const char *GetBlockName(unsigned BlockID,
     return "IDENTIFICATION_BLOCK_ID";
   case bitc::VALUE_SYMTAB_BLOCK_ID:    return "VALUE_SYMTAB";
   case bitc::METADATA_BLOCK_ID:        return "METADATA_BLOCK";
+  case bitc::METADATA_KIND_BLOCK_ID:   return "METADATA_KIND_BLOCK";
   case bitc::METADATA_ATTACHMENT_ID:   return "METADATA_ATTACHMENT_BLOCK";
   case bitc::USELIST_BLOCK_ID:         return "USELIST_BLOCK_ID";
-  case bitc::FUNCTION_SUMMARY_BLOCK_ID:
-                                       return "FUNCTION_SUMMARY_BLOCK";
+  case bitc::GLOBALVAL_SUMMARY_BLOCK_ID:
+    return "GLOBALVAL_SUMMARY_BLOCK";
   case bitc::MODULE_STRTAB_BLOCK_ID:   return "MODULE_STRTAB_BLOCK";
   }
 }
@@ -171,6 +175,9 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
       STRINGIFY_CODE(MODULE_CODE, PURGEVALS)
       STRINGIFY_CODE(MODULE_CODE, GCNAME)
       STRINGIFY_CODE(MODULE_CODE, VSTOFFSET)
+      STRINGIFY_CODE(MODULE_CODE, METADATA_VALUES_UNUSED)
+      STRINGIFY_CODE(MODULE_CODE, SOURCE_FILENAME)
+      STRINGIFY_CODE(MODULE_CODE, HASH)
     }
   case bitc::IDENTIFICATION_BLOCK_ID:
     switch (CodeID) {
@@ -257,9 +264,6 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
       STRINGIFY_CODE(FUNC_CODE, INST_CLEANUPRET)
       STRINGIFY_CODE(FUNC_CODE, INST_CATCHRET)
       STRINGIFY_CODE(FUNC_CODE, INST_CATCHPAD)
-      STRINGIFY_CODE(FUNC_CODE, INST_CLEANUPENDPAD)
-      STRINGIFY_CODE(FUNC_CODE, INST_CATCHENDPAD)
-      STRINGIFY_CODE(FUNC_CODE, INST_TERMINATEPAD)
       STRINGIFY_CODE(FUNC_CODE, INST_PHI)
       STRINGIFY_CODE(FUNC_CODE, INST_ALLOCA)
       STRINGIFY_CODE(FUNC_CODE, INST_LOAD)
@@ -280,20 +284,29 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
     STRINGIFY_CODE(VST_CODE, ENTRY)
     STRINGIFY_CODE(VST_CODE, BBENTRY)
     STRINGIFY_CODE(VST_CODE, FNENTRY)
-    STRINGIFY_CODE(VST_CODE, COMBINED_FNENTRY)
+    STRINGIFY_CODE(VST_CODE, COMBINED_ENTRY)
     }
   case bitc::MODULE_STRTAB_BLOCK_ID:
     switch (CodeID) {
     default:
       return nullptr;
       STRINGIFY_CODE(MST_CODE, ENTRY)
+      STRINGIFY_CODE(MST_CODE, HASH)
     }
-  case bitc::FUNCTION_SUMMARY_BLOCK_ID:
+  case bitc::GLOBALVAL_SUMMARY_BLOCK_ID:
     switch (CodeID) {
     default:
       return nullptr;
-      STRINGIFY_CODE(FS_CODE, PERMODULE_ENTRY)
-      STRINGIFY_CODE(FS_CODE, COMBINED_ENTRY)
+      STRINGIFY_CODE(FS, PERMODULE)
+      STRINGIFY_CODE(FS, PERMODULE_PROFILE)
+      STRINGIFY_CODE(FS, PERMODULE_GLOBALVAR_INIT_REFS)
+      STRINGIFY_CODE(FS, COMBINED)
+      STRINGIFY_CODE(FS, COMBINED_PROFILE)
+      STRINGIFY_CODE(FS, COMBINED_GLOBALVAR_INIT_REFS)
+      STRINGIFY_CODE(FS, ALIAS)
+      STRINGIFY_CODE(FS, COMBINED_ALIAS)
+      STRINGIFY_CODE(FS, COMBINED_ORIGINAL_NAME)
+      STRINGIFY_CODE(FS, VERSION)
     }
   case bitc::METADATA_ATTACHMENT_ID:
     switch(CodeID) {
@@ -303,9 +316,10 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
   case bitc::METADATA_BLOCK_ID:
     switch(CodeID) {
     default:return nullptr;
-      STRINGIFY_CODE(METADATA, STRING)
+      STRINGIFY_CODE(METADATA, STRING_OLD)
+      STRINGIFY_CODE(METADATA, STRINGS)
       STRINGIFY_CODE(METADATA, NAME)
-      STRINGIFY_CODE(METADATA, KIND)
+      STRINGIFY_CODE(METADATA, KIND) // Older bitcode has it in a MODULE_BLOCK
       STRINGIFY_CODE(METADATA, NODE)
       STRINGIFY_CODE(METADATA, VALUE)
       STRINGIFY_CODE(METADATA, OLD_NODE)
@@ -334,6 +348,12 @@ static const char *GetCodeName(unsigned CodeID, unsigned BlockID,
       STRINGIFY_CODE(METADATA, OBJC_PROPERTY)
       STRINGIFY_CODE(METADATA, IMPORTED_ENTITY)
       STRINGIFY_CODE(METADATA, MODULE)
+    }
+  case bitc::METADATA_KIND_BLOCK_ID:
+    switch (CodeID) {
+    default:
+      return nullptr;
+      STRINGIFY_CODE(METADATA, KIND)
     }
   case bitc::USELIST_BLOCK_ID:
     switch(CodeID) {
@@ -389,6 +409,57 @@ static bool Error(const Twine &Err) {
   return true;
 }
 
+static bool decodeMetadataStringsBlob(BitstreamReader &Reader, StringRef Indent,
+                                      ArrayRef<uint64_t> Record,
+                                      StringRef Blob) {
+  if (Blob.empty())
+    return true;
+
+  if (Record.size() != 2)
+    return true;
+
+  unsigned NumStrings = Record[0];
+  unsigned StringsOffset = Record[1];
+  outs() << " num-strings = " << NumStrings << " {\n";
+
+  StringRef Lengths = Blob.slice(0, StringsOffset);
+  SimpleBitstreamCursor R(Reader);
+  R.jumpToPointer(Lengths.begin());
+
+  // Ensure that Blob doesn't get invalidated, even if this is reading from a
+  // StreamingMemoryObject with corrupt data.
+  R.setArtificialByteLimit(R.getCurrentByteNo() + StringsOffset);
+
+  StringRef Strings = Blob.drop_front(StringsOffset);
+  do {
+    if (R.AtEndOfStream())
+      return Error("bad length");
+
+    unsigned Size = R.ReadVBR(6);
+    if (Strings.size() < Size)
+      return Error("truncated chars");
+
+    outs() << Indent << "    '";
+    outs().write_escaped(Strings.slice(0, Size), /*hex=*/true);
+    outs() << "'\n";
+    Strings = Strings.drop_front(Size);
+  } while (--NumStrings);
+
+  outs() << Indent << "  }";
+  return false;
+}
+
+static bool decodeBlob(unsigned Code, unsigned BlockID, BitstreamReader &Reader,
+                       StringRef Indent, ArrayRef<uint64_t> Record,
+                       StringRef Blob) {
+  if (BlockID != bitc::METADATA_BLOCK_ID)
+    return true;
+  if (Code != bitc::METADATA_STRINGS)
+    return true;
+
+  return decodeMetadataStringsBlob(Reader, Indent, Record, Blob);
+}
+
 /// ParseBlock - Read a block, updating statistics, etc.
 static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
                        unsigned IndentLevel, CurStreamTypeType CurStreamType) {
@@ -401,21 +472,24 @@ static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
   BlockStats.NumInstances++;
 
   // BLOCKINFO is a special part of the stream.
+  bool DumpRecords = Dump;
   if (BlockID == bitc::BLOCKINFO_BLOCK_ID) {
     if (Dump) outs() << Indent << "<BLOCKINFO_BLOCK/>\n";
-    if (Stream.ReadBlockInfoBlock())
+    if (BitstreamCursor(Stream).ReadBlockInfoBlock())
       return Error("Malformed BlockInfoBlock");
-    uint64_t BlockBitEnd = Stream.GetCurrentBitNo();
-    BlockStats.NumBits += BlockBitEnd-BlockBitStart;
-    return false;
+    // It's not really interesting to dump the contents of the blockinfo block.
+    DumpRecords = false;
   }
 
   unsigned NumWords = 0;
   if (Stream.EnterSubBlock(BlockID, &NumWords))
     return Error("Malformed block record");
 
+  // Keep it for later, when we see a MODULE_HASH record
+  uint64_t BlockEntryPos = Stream.getCurrentByteNo();
+
   const char *BlockName = nullptr;
-  if (Dump) {
+  if (DumpRecords) {
     outs() << Indent << "<";
     if ((BlockName = GetBlockName(BlockID, *Stream.getBitStreamReader(),
                                   CurStreamType)))
@@ -448,7 +522,7 @@ static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
     case BitstreamEntry::EndBlock: {
       uint64_t BlockBitEnd = Stream.GetCurrentBitNo();
       BlockStats.NumBits += BlockBitEnd-BlockBitStart;
-      if (Dump) {
+      if (DumpRecords) {
         outs() << Indent << "</";
         if (BlockName)
           outs() << BlockName << ">\n";
@@ -485,6 +559,7 @@ static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
     ++BlockStats.NumRecords;
 
     StringRef Blob;
+    unsigned CurrentRecordPos = Stream.getCurrentByteNo();
     unsigned Code = Stream.readRecord(Entry.ID, Record, &Blob);
 
     // Increment the # occurrences of this code.
@@ -498,7 +573,7 @@ static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
       ++BlockStats.NumAbbreviatedRecords;
     }
 
-    if (Dump) {
+    if (DumpRecords) {
       outs() << Indent << "  <";
       if (const char *CodeName =
             GetCodeName(Code, BlockID, *Stream.getBitStreamReader(),
@@ -518,6 +593,37 @@ static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
 
       for (unsigned i = 0, e = Record.size(); i != e; ++i)
         outs() << " op" << i << "=" << (int64_t)Record[i];
+
+      // If we found a module hash, let's verify that it matches!
+      if (BlockID == bitc::MODULE_BLOCK_ID && Code == bitc::MODULE_CODE_HASH) {
+        if (Record.size() != 5)
+          outs() << " (invalid)";
+        else {
+          // Recompute the hash and compare it to the one in the bitcode
+          SHA1 Hasher;
+          StringRef Hash;
+          {
+            int BlockSize = CurrentRecordPos - BlockEntryPos;
+            auto Ptr = Stream.getPointerToByte(BlockEntryPos, BlockSize);
+            Hasher.update(ArrayRef<uint8_t>(Ptr, BlockSize));
+            Hash = Hasher.result();
+          }
+          SmallString<20> RecordedHash;
+          RecordedHash.resize(20);
+          int Pos = 0;
+          for (auto &Val : Record) {
+            assert(!(Val >> 32) && "Unexpected high bits set");
+            RecordedHash[Pos++] = (Val >> 24) & 0xFF;
+            RecordedHash[Pos++] = (Val >> 16) & 0xFF;
+            RecordedHash[Pos++] = (Val >> 8) & 0xFF;
+            RecordedHash[Pos++] = (Val >> 0) & 0xFF;
+          }
+          if (Hash == RecordedHash)
+            outs() << " (match)";
+          else
+            outs() << " (!mismatch!)";
+        }
+      }
 
       outs() << "/>";
 
@@ -542,7 +648,8 @@ static bool ParseBlock(BitstreamCursor &Stream, unsigned BlockID,
         }
       }
 
-      if (Blob.data()) {
+      if (Blob.data() && decodeBlob(Code, BlockID, *Stream.getBitStreamReader(),
+                                    Indent, Record, Blob)) {
         outs() << " blob data = ";
         if (ShowBinaryBlobs) {
           outs() << "'";
@@ -595,9 +702,28 @@ static bool openBitcodeFile(StringRef Path,
 
   // If we have a wrapper header, parse it and ignore the non-bc file contents.
   // The magic number is 0x0B17C0DE stored in little endian.
-  if (isBitcodeWrapper(BufPtr, EndBufPtr))
+  if (isBitcodeWrapper(BufPtr, EndBufPtr)) {
+    if (MemBuf->getBufferSize() < BWH_HeaderSize)
+      return Error("Invalid bitcode wrapper header");
+
+    if (Dump) {
+      unsigned Magic = support::endian::read32le(&BufPtr[BWH_MagicField]);
+      unsigned Version = support::endian::read32le(&BufPtr[BWH_VersionField]);
+      unsigned Offset = support::endian::read32le(&BufPtr[BWH_OffsetField]);
+      unsigned Size = support::endian::read32le(&BufPtr[BWH_SizeField]);
+      unsigned CPUType = support::endian::read32le(&BufPtr[BWH_CPUTypeField]);
+
+      outs() << "<BITCODE_WRAPPER_HEADER"
+             << " Magic=" << format_hex(Magic, 10)
+             << " Version=" << format_hex(Version, 10)
+             << " Offset=" << format_hex(Offset, 10)
+             << " Size=" << format_hex(Size, 10)
+             << " CPUType=" << format_hex(CPUType, 10) << "/>\n";
+    }
+
     if (SkipBitcodeWrapperHeader(BufPtr, EndBufPtr, true))
       return Error("Invalid bitcode wrapper header");
+  }
 
   StreamFile = BitstreamReader(BufPtr, EndBufPtr);
   Stream = BitstreamCursor(StreamFile);
@@ -740,7 +866,7 @@ static int AnalyzeBitcode() {
       std::reverse(FreqPairs.begin(), FreqPairs.end());
 
       outs() << "\tRecord Histogram:\n";
-      outs() << "\t\t  Count    # Bits   %% Abv  Record Kind\n";
+      outs() << "\t\t  Count    # Bits     b/Rec   % Abv  Record Kind\n";
       for (unsigned i = 0, e = FreqPairs.size(); i != e; ++i) {
         const PerRecordStats &RecStats = Stats.CodeFreq[FreqPairs[i].second];
 
@@ -748,13 +874,20 @@ static int AnalyzeBitcode() {
                          RecStats.NumInstances,
                          (unsigned long)RecStats.TotalBits);
 
+        if (RecStats.NumInstances > 1)
+          outs() << format(" %9.1f",
+                           (double)RecStats.TotalBits/RecStats.NumInstances);
+        else
+          outs() << "          ";
+
         if (RecStats.NumAbbrev)
           outs() <<
-              format("%7.2f  ",
+              format(" %7.2f",
                      (double)RecStats.NumAbbrev/RecStats.NumInstances*100);
         else
-          outs() << "         ";
+          outs() << "        ";
 
+        outs() << "  ";
         if (const char *CodeName =
               GetCodeName(FreqPairs[i].second, I->first, StreamFile,
                           CurStreamType))

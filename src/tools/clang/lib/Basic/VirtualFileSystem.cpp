@@ -16,6 +16,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -99,6 +100,9 @@ FileSystem::getBufferForFile(const llvm::Twine &Name, int64_t FileSize,
 }
 
 std::error_code FileSystem::makeAbsolute(SmallVectorImpl<char> &Path) const {
+  if (llvm::sys::path::is_absolute(Path))
+    return std::error_code();
+
   auto WorkingDir = getCurrentWorkingDirectory();
   if (!WorkingDir)
     return WorkingDir.getError();
@@ -110,6 +114,20 @@ bool FileSystem::exists(const Twine &Path) {
   auto Status = status(Path);
   return Status && Status->exists();
 }
+
+#ifndef NDEBUG
+static bool isTraversalComponent(StringRef Component) {
+  return Component.equals("..") || Component.equals(".");
+}
+
+static bool pathHasTraversal(StringRef Path) {
+  using namespace llvm::sys;
+  for (StringRef Comp : llvm::make_range(path::begin(Path), path::end(Path)))
+    if (isTraversalComponent(Comp))
+      return true;
+  return false;
+}
+#endif
 
 //===-----------------------------------------------------------------------===/
 // RealFileSystem implementation
@@ -658,6 +676,23 @@ directory_iterator InMemoryFileSystem::dir_begin(const Twine &Dir,
   EC = make_error_code(llvm::errc::not_a_directory);
   return directory_iterator(std::make_shared<InMemoryDirIterator>());
 }
+
+std::error_code InMemoryFileSystem::setCurrentWorkingDirectory(const Twine &P) {
+  SmallString<128> Path;
+  P.toVector(Path);
+
+  // Fix up relative paths. This just prepends the current working directory.
+  std::error_code EC = makeAbsolute(Path);
+  assert(!EC);
+  (void)EC;
+
+  if (useNormalizedPaths())
+    llvm::sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+
+  if (!Path.empty())
+    WorkingDirectory = Path.str();
+  return std::error_code();
+}
 }
 }
 
@@ -694,7 +729,13 @@ public:
                             Status S)
       : Entry(EK_Directory, Name), Contents(std::move(Contents)),
         S(std::move(S)) {}
+  RedirectingDirectoryEntry(StringRef Name, Status S)
+      : Entry(EK_Directory, Name), S(std::move(S)) {}
   Status getStatus() { return S; }
+  void addContent(std::unique_ptr<Entry> Content) {
+    Contents.push_back(std::move(Content));
+  }
+  Entry *getLastContent() const { return Contents.back().get(); }
   typedef decltype(Contents)::iterator iterator;
   iterator contents_begin() { return Contents.begin(); }
   iterator contents_end() { return Contents.end(); }
@@ -722,6 +763,7 @@ public:
     return UseName == NK_NotSet ? GlobalUseExternalName
                                 : (UseName == NK_External);
   }
+  NameKind getUseName() const { return UseName; }
   static bool classof(const Entry *E) { return E->getKind() == EK_File; }
 };
 
@@ -810,7 +852,7 @@ class RedirectingFileSystem : public vfs::FileSystem {
   /// \brief Whether to perform case-sensitive comparisons.
   ///
   /// Currently, case-insensitive matching only works correctly with ASCII.
-  bool CaseSensitive;
+  bool CaseSensitive = true;
 
   /// IsRelativeOverlay marks whether a IsExternalContentsPrefixDir path must
   /// be prefixed in every 'external-contents' when reading from YAML files.
@@ -818,14 +860,24 @@ class RedirectingFileSystem : public vfs::FileSystem {
 
   /// \brief Whether to use to use the value of 'external-contents' for the
   /// names of files.  This global value is overridable on a per-file basis.
-  bool UseExternalNames;
+  bool UseExternalNames = true;
   /// @}
+
+  /// Virtual file paths and external files could be canonicalized without "..",
+  /// "." and "./" in their paths. FIXME: some unittests currently fail on
+  /// win32 when using remove_dots and remove_leading_dotslash on paths.
+  bool UseCanonicalizedPaths =
+#ifdef LLVM_ON_WIN32
+      false;
+#else
+      true;
+#endif
 
   friend class RedirectingFileSystemParser;
 
 private:
   RedirectingFileSystem(IntrusiveRefCntPtr<FileSystem> ExternalFS)
-      : ExternalFS(ExternalFS), CaseSensitive(true), UseExternalNames(true) {}
+      : ExternalFS(ExternalFS) {}
 
   /// \brief Looks up \p Path in \c Roots.
   ErrorOr<Entry *> lookupPath(const Twine &Path);
@@ -885,6 +937,29 @@ public:
   StringRef getExternalContentsPrefixDir() const {
     return ExternalContentsPrefixDir;
   }
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void dump() const {
+    for (const std::unique_ptr<Entry> &Root : Roots)
+      dumpEntry(Root.get());
+  }
+
+LLVM_DUMP_METHOD void dumpEntry(Entry *E, int NumSpaces = 0) const {
+    StringRef Name = E->getName();
+    for (int i = 0, e = NumSpaces; i < e; ++i)
+      dbgs() << " ";
+    dbgs() << "'" << Name.str().c_str() << "'" << "\n";
+
+    if (E->getKind() == EK_Directory) {
+      auto *DE = dyn_cast<RedirectingDirectoryEntry>(E);
+      assert(DE && "Should be a directory");
+
+      for (std::unique_ptr<Entry> &SubEntry :
+           llvm::make_range(DE->contents_begin(), DE->contents_end()))
+        dumpEntry(SubEntry.get(), NumSpaces+2);
+    }
+  }
+#endif
 
 };
 
@@ -965,6 +1040,70 @@ class RedirectingFileSystemParser {
     return true;
   }
 
+  Entry *lookupOrCreateEntry(RedirectingFileSystem *FS, StringRef Name,
+                             Entry *ParentEntry = nullptr) {
+    if (!ParentEntry) { // Look for a existent root
+      for (const std::unique_ptr<Entry> &Root : FS->Roots) {
+        if (Name.equals(Root->getName())) {
+          ParentEntry = Root.get();
+          return ParentEntry;
+        }
+      }
+    } else { // Advance to the next component
+      auto *DE = dyn_cast<RedirectingDirectoryEntry>(ParentEntry);
+      for (std::unique_ptr<Entry> &Content :
+           llvm::make_range(DE->contents_begin(), DE->contents_end())) {
+        auto *DirContent = dyn_cast<RedirectingDirectoryEntry>(Content.get());
+        if (DirContent && Name.equals(Content->getName()))
+          return DirContent;
+      }
+    }
+
+    // ... or create a new one
+    std::unique_ptr<Entry> E = llvm::make_unique<RedirectingDirectoryEntry>(
+        Name, Status("", getNextVirtualUniqueID(), sys::TimeValue::now(), 0, 0,
+                     0, file_type::directory_file, sys::fs::all_all));
+
+    if (!ParentEntry) { // Add a new root to the overlay
+      FS->Roots.push_back(std::move(E));
+      ParentEntry = FS->Roots.back().get();
+      return ParentEntry;
+    }
+
+    auto *DE = dyn_cast<RedirectingDirectoryEntry>(ParentEntry);
+    DE->addContent(std::move(E));
+    return DE->getLastContent();
+  }
+
+  void uniqueOverlayTree(RedirectingFileSystem *FS, Entry *SrcE,
+                         Entry *NewParentE = nullptr) {
+    StringRef Name = SrcE->getName();
+    switch (SrcE->getKind()) {
+    case EK_Directory: {
+      auto *DE = dyn_cast<RedirectingDirectoryEntry>(SrcE);
+      assert(DE && "Must be a directory");
+      // Empty directories could be present in the YAML as a way to
+      // describe a file for a current directory after some of its subdir
+      // is parsed. This only leads to redundant walks, ignore it.
+      if (!Name.empty())
+        NewParentE = lookupOrCreateEntry(FS, Name, NewParentE);
+      for (std::unique_ptr<Entry> &SubEntry :
+           llvm::make_range(DE->contents_begin(), DE->contents_end()))
+        uniqueOverlayTree(FS, SubEntry.get(), NewParentE);
+      break;
+    }
+    case EK_File: {
+      auto *FE = dyn_cast<RedirectingFileEntry>(SrcE);
+      assert(FE && "Must be a file");
+      assert(NewParentE && "Parent entry must exist");
+      auto *DE = dyn_cast<RedirectingDirectoryEntry>(NewParentE);
+      DE->addContent(llvm::make_unique<RedirectingFileEntry>(
+          Name, FE->getExternalContentsPath(), FE->getUseName()));
+      break;
+    }
+    }
+  }
+
   std::unique_ptr<Entry> parseEntry(yaml::Node *N, RedirectingFileSystem *FS) {
     yaml::MappingNode *M = dyn_cast<yaml::MappingNode>(N);
     if (!M) {
@@ -980,8 +1119,7 @@ class RedirectingFileSystemParser {
       KeyStatusPair("use-external-name", false),
     };
 
-    DenseMap<StringRef, KeyStatus> Keys(
-        &Fields[0], Fields + sizeof(Fields)/sizeof(Fields[0]));
+    DenseMap<StringRef, KeyStatus> Keys(std::begin(Fields), std::end(Fields));
 
     bool HasContents = false; // external or otherwise
     std::vector<std::unique_ptr<Entry>> EntryArrayContents;
@@ -1006,7 +1144,17 @@ class RedirectingFileSystemParser {
       if (Key == "name") {
         if (!parseScalarString(I->getValue(), Value, Buffer))
           return nullptr;
-        Name = Value;
+
+        if (FS->UseCanonicalizedPaths) {
+          SmallString<256> Path(Value);
+          // Guarantee that old YAML files containing paths with ".." and "."
+          // are properly canonicalized before read into the VFS.
+          Path = sys::path::remove_leading_dotslash(Path);
+          sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+          Name = Path.str();
+        } else {
+          Name = Value;
+        }
       } else if (Key == "type") {
         if (!parseScalarString(I->getValue(), Value, Buffer))
           return nullptr;
@@ -1050,16 +1198,24 @@ class RedirectingFileSystemParser {
         HasContents = true;
         if (!parseScalarString(I->getValue(), Value, Buffer))
           return nullptr;
+
+        SmallString<256> FullPath;
         if (FS->IsRelativeOverlay) {
-          StringRef PrefixDir = FS->getExternalContentsPrefixDir();
-          assert(!PrefixDir.empty() &&
+          FullPath = FS->getExternalContentsPrefixDir();
+          assert(!FullPath.empty() &&
                  "External contents prefix directory must exist");
-          SmallString<128> RealPath(PrefixDir);
-          llvm::sys::path::append(RealPath, Value);
-          ExternalContentsPath = RealPath.str();
+          llvm::sys::path::append(FullPath, Value);
         } else {
-          ExternalContentsPath = Value;
+          FullPath = Value;
         }
+
+        if (FS->UseCanonicalizedPaths) {
+          // Guarantee that old YAML files containing paths with ".." and "."
+          // are properly canonicalized before read into the VFS.
+          FullPath = sys::path::remove_leading_dotslash(FullPath);
+          sys::path::remove_dots(FullPath, /*remove_dot_dot=*/true);
+        }
+        ExternalContentsPath = FullPath.str();
       } else if (Key == "use-external-name") {
         bool Val;
         if (!parseScalarBool(I->getValue(), Val))
@@ -1149,8 +1305,8 @@ public:
       KeyStatusPair("roots", true),
     };
 
-    DenseMap<StringRef, KeyStatus> Keys(
-        &Fields[0], Fields + sizeof(Fields)/sizeof(Fields[0]));
+    DenseMap<StringRef, KeyStatus> Keys(std::begin(Fields), std::end(Fields));
+    std::vector<std::unique_ptr<Entry>> RootEntries;
 
     // Parse configuration and 'roots'
     for (yaml::MappingNode::iterator I = Top->begin(), E = Top->end(); I != E;
@@ -1173,7 +1329,7 @@ public:
         for (yaml::SequenceNode::iterator I = Roots->begin(), E = Roots->end();
              I != E; ++I) {
           if (std::unique_ptr<Entry> E = parseEntry(&*I, FS))
-            FS->Roots.push_back(std::move(E));
+            RootEntries.push_back(std::move(E));
           else
             return false;
         }
@@ -1214,6 +1370,13 @@ public:
 
     if (!checkMissingKeys(Top, Keys))
       return false;
+
+    // Now that we sucessefully parsed the YAML file, canonicalize the internal
+    // representation to a proper directory tree so that we can search faster
+    // inside the VFS.
+    for (std::unique_ptr<Entry> &E : RootEntries)
+      uniqueOverlayTree(FS, E.get());
+
     return true;
   }
 };
@@ -1273,6 +1436,14 @@ ErrorOr<Entry *> RedirectingFileSystem::lookupPath(const Twine &Path_) {
   if (std::error_code EC = makeAbsolute(Path))
     return EC;
 
+  // Canonicalize path by removing ".", "..", "./", etc components. This is
+  // a VFS request, do bot bother about symlinks in the path components
+  // but canonicalize in order to perform the correct entry search.
+  if (UseCanonicalizedPaths) {
+    Path = sys::path::remove_leading_dotslash(Path);
+    sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+  }
+
   if (Path.empty())
     return make_error_code(llvm::errc::invalid_argument);
 
@@ -1289,28 +1460,27 @@ ErrorOr<Entry *> RedirectingFileSystem::lookupPath(const Twine &Path_) {
 ErrorOr<Entry *>
 RedirectingFileSystem::lookupPath(sys::path::const_iterator Start,
                                   sys::path::const_iterator End, Entry *From) {
+#ifndef LLVM_ON_WIN32
+  assert(!isTraversalComponent(*Start) &&
+         !isTraversalComponent(From->getName()) &&
+         "Paths should not contain traversal components");
+#else
+  // FIXME: this is here to support windows, remove it once canonicalized
+  // paths become globally default.
+  if (Start->equals("."))
+    ++Start;
+#endif
+
   StringRef FromName = From->getName();
 
-  // Empty `From` means that the search should be forwarded to the next
-  // underlying directories in the overlay tree.
+  // Forward the search to the next component in case this is an empty one.
   if (!FromName.empty()) {
-    // Skip intermediate "." directories. Note this isn't enough to catch the
-    // case where the last component is a ".", see below.
-    // e.g. /usr/include/./objc
-    if (Start->equals("."))
-      ++Start;
-
-    // FIXME: handle ..
     if (CaseSensitive ? !Start->equals(FromName)
                       : !Start->equals_lower(FromName))
       // failure to match
       return make_error_code(llvm::errc::no_such_file_or_directory);
 
     ++Start;
-    // Catch the case where the last component is one "." or a series of those.
-    // e.g. "/usr/include/objc/."
-    while (Start->equals("."))
-      ++Start;
 
     if (Start == End) {
       // Match!
@@ -1351,12 +1521,7 @@ ErrorOr<Status> RedirectingFileSystem::status(const Twine &Path, Entry *E) {
     return S;
   } else { // directory
     auto *DE = cast<RedirectingDirectoryEntry>(E);
-    Status S = Status::copyWithNewName(DE->getStatus(), Path.str());
-    // The semantics for directories is a different from files; there's no
-    // dir <-> dir mapping in VFS, but we need to keep track of whether we
-    // found a directory in the VFS context.
-    S.IsVFSMapped = true;
-    return S;
+    return Status::copyWithNewName(DE->getStatus(), Path.str());
   }
 }
 
@@ -1432,12 +1597,9 @@ UniqueID vfs::getNextVirtualUniqueID() {
 }
 
 void YAMLVFSWriter::addFileMapping(StringRef VirtualPath, StringRef RealPath) {
-  // TODO: Note that the path traversals "." or ".." aren't translated (removed)
-  // along the paths, but using the path string without translation is currently
-  // enough for VirtualPath and RealPath to work when reading out the YAML with
-  // the VFS description. Handling the traversal would be cleaner though.
   assert(sys::path::is_absolute(VirtualPath) && "virtual path not absolute");
   assert(sys::path::is_absolute(RealPath) && "real path not absolute");
+  assert(!pathHasTraversal(VirtualPath) && "path traversal is not supported");
   Mappings.emplace_back(VirtualPath, RealPath);
 }
 
@@ -1455,8 +1617,9 @@ class JSONWriter {
 
 public:
   JSONWriter(llvm::raw_ostream &OS) : OS(OS) {}
-  void write(ArrayRef<YAMLVFSEntry> Entries, Optional<bool> IsCaseSensitive,
-             Optional<bool> IsOverlayRelative, StringRef OverlayDir);
+  void write(ArrayRef<YAMLVFSEntry> Entries, Optional<bool> UseExternalNames,
+             Optional<bool> IsCaseSensitive, Optional<bool> IsOverlayRelative,
+             StringRef OverlayDir);
 };
 }
 
@@ -1509,6 +1672,7 @@ void JSONWriter::writeEntry(StringRef VPath, StringRef RPath) {
 }
 
 void JSONWriter::write(ArrayRef<YAMLVFSEntry> Entries,
+                       Optional<bool> UseExternalNames,
                        Optional<bool> IsCaseSensitive,
                        Optional<bool> IsOverlayRelative,
                        StringRef OverlayDir) {
@@ -1519,6 +1683,9 @@ void JSONWriter::write(ArrayRef<YAMLVFSEntry> Entries,
   if (IsCaseSensitive.hasValue())
     OS << "  'case-sensitive': '"
        << (IsCaseSensitive.getValue() ? "true" : "false") << "',\n";
+  if (UseExternalNames.hasValue())
+    OS << "  'use-external-names': '"
+       << (UseExternalNames.getValue() ? "true" : "false") << "',\n";
   bool UseOverlayRelative = false;
   if (IsOverlayRelative.hasValue()) {
     UseOverlayRelative = IsOverlayRelative.getValue();
@@ -1580,8 +1747,8 @@ void YAMLVFSWriter::write(llvm::raw_ostream &OS) {
     return LHS.VPath < RHS.VPath;
   });
 
-  JSONWriter(OS).write(Mappings, IsCaseSensitive, IsOverlayRelative,
-                       OverlayDir);
+  JSONWriter(OS).write(Mappings, UseExternalNames, IsCaseSensitive,
+                       IsOverlayRelative, OverlayDir);
 }
 
 VFSFromYamlDirIterImpl::VFSFromYamlDirIterImpl(
@@ -1589,29 +1756,45 @@ VFSFromYamlDirIterImpl::VFSFromYamlDirIterImpl(
     RedirectingDirectoryEntry::iterator Begin,
     RedirectingDirectoryEntry::iterator End, std::error_code &EC)
     : Dir(_Path.str()), FS(FS), Current(Begin), End(End) {
-  if (Current != End) {
+  while (Current != End) {
     SmallString<128> PathStr(Dir);
     llvm::sys::path::append(PathStr, (*Current)->getName());
     llvm::ErrorOr<vfs::Status> S = FS.status(PathStr);
-    if (S)
+    if (S) {
       CurrentEntry = *S;
-    else
+      return;
+    }
+    // Skip entries which do not map to a reliable external content.
+    if (S.getError() == llvm::errc::no_such_file_or_directory) {
+      ++Current;
+      continue;
+    } else {
       EC = S.getError();
+      break;
+    }
   }
 }
 
 std::error_code VFSFromYamlDirIterImpl::increment() {
   assert(Current != End && "cannot iterate past end");
-  if (++Current != End) {
+  while (++Current != End) {
     SmallString<128> PathStr(Dir);
     llvm::sys::path::append(PathStr, (*Current)->getName());
     llvm::ErrorOr<vfs::Status> S = FS.status(PathStr);
-    if (!S)
-      return S.getError();
+    if (!S) {
+      // Skip entries which do not map to a reliable external content.
+      if (S.getError() == llvm::errc::no_such_file_or_directory) {
+        continue;
+      } else {
+        return S.getError();
+      }
+    }
     CurrentEntry = *S;
-  } else {
-    CurrentEntry = Status();
+    break;
   }
+
+  if (Current == End)
+    CurrentEntry = Status();
   return std::error_code();
 }
 
@@ -1648,69 +1831,4 @@ recursive_directory_iterator::increment(std::error_code &EC) {
     State.reset(); // end iterator
 
   return *this;
-}
-
-void ModuleDependencyCollector::writeFileMap() {
-  if (Seen.empty())
-    return;
-
-  SmallString<256> Dest = getDest();
-  llvm::sys::path::append(Dest, "vfs.yaml");
-
-  VFSWriter.setCaseSensitivity(IsCaseSensitive);
-
-  // Default to use relative overlay directories in the VFS yaml file. This
-  // handy for users to be able to reproduce crashes by copying the .cache dir
-  // to any place in the system and solely pointing to the YAML file via
-  // -ivfsovelay option.
-  VFSWriter.setOverlayDir(getDest());
-
-  std::error_code EC;
-  llvm::raw_fd_ostream OS(Dest, EC, llvm::sys::fs::F_Text);
-  if (EC) {
-    setHasErrors();
-    return;
-  }
-  VFSWriter.write(OS);
-}
-
-std::error_code ModuleDependencyCollector::copyToRoot(StringRef Src) {
-  using namespace llvm::sys;
-
-  // We need an absolute path to append to the root.
-  SmallString<256> AbsoluteSrc = Src;
-  fs::make_absolute(AbsoluteSrc);
-  // Canonicalize to a native path to avoid mixed separator styles.
-  path::native(AbsoluteSrc);
-  // TODO: We probably need to handle .. as well as . in order to have valid
-  // input to the YAMLVFSWriter.
-  path::remove_dots(AbsoluteSrc);
-
-  // Build the destination path.
-  SmallString<256> Dest = getDest();
-  // TODO: Symbolic links are currently duplicated through the copy operation,
-  // a better solution is to maintain the original path for the symbolic link
-  // in AbsoluteSrc, but make `Dest` be appended to the real/resolved path.
-  // This would allow a unique file and multiple YAML entries for it (one for
-  // each symbolic link).
-  path::append(Dest, path::relative_path(AbsoluteSrc));
-
-  // Copy the file into place.
-  if (std::error_code EC = fs::create_directories(path::parent_path(Dest),
-                                                   /*IgnoreExisting=*/true))
-    return EC;
-
-  if (std::error_code EC = fs::copy_file(AbsoluteSrc, Dest))
-    return EC;
-
-  // Use the absolute path under the root for the file mapping.
-  addFileMapping(AbsoluteSrc, Dest);
-  return std::error_code();
-}
-
-bool ModuleDependencyCollector::collectFile(StringRef Filename) {
-  if (insertSeen(Filename))
-    if (copyToRoot(Filename))
-      setHasErrors();
-  return true;
 }

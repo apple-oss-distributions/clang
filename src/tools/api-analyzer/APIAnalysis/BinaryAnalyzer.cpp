@@ -3,8 +3,11 @@
 #include "XarAnalyzer.h"
 #include "ObjCStructs.h"
 
+#include "llvm/ObjCMetadata/ObjCMetadata.h"
+#include "llvm/ObjCMetadata/ObjCMachOBinary.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Object/MachOUniversal.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -34,7 +37,27 @@ std::string DemangleName(const std::string &Name) {
   return Result;
 }
 
-int AnalyzeBinary(StringRef &filePath, APIAnalysisIntermediateResult &result,
+static inline void InsertExternalObjCClass(StringRef SymName, bool mangled,
+                                           StringMap<bool> &classes) {
+  auto insertClassName = [&](StringRef Sym) {
+    if (classes.find(Sym) == classes.end())
+      classes.insert({Sym, false});
+  };
+
+  if (mangled) {
+    if (SymName.startswith("_OBJC_CLASS_$_"))
+      insertClassName(SymName.drop_front(strlen("_OBJC_CLASS_$_")));
+    else if (SymName.startswith(".objc_class_name_"))
+      insertClassName(SymName.drop_front(strlen(".objc_class_name_")));
+  } else {
+    if (SymName.startswith("OBJC_CLASS_$_"))
+      insertClassName(SymName.drop_front(strlen("OBJC_CLASS_$_")));
+    else if (SymName.startswith("\01.objc_class_name_"))
+      insertClassName(SymName.drop_front(strlen("\01.objc_class_name_")));
+  }
+}
+
+int AnalyzeBinary(StringRef filePath, APIAnalysisIntermediateResult &result,
                   const APIAnalysisOptions &options) {
   ErrorOr<OwningBinary<Binary>> BinaryOrErr = createBinary(filePath);
   if (std::error_code EC = BinaryOrErr.getError()) {
@@ -45,7 +68,7 @@ int AnalyzeBinary(StringRef &filePath, APIAnalysisIntermediateResult &result,
   return AnalyzeBinaryImpl(binary, result, options);
 }
 
-int AnalyzeBinary(llvm::MemoryBufferRef &fileData,
+int AnalyzeBinary(llvm::MemoryBufferRef fileData,
                   APIAnalysisIntermediateResult &result,
                   const APIAnalysisOptions &options) {
   ErrorOr<std::unique_ptr<Binary>> BinaryOrErr = createBinary(fileData);
@@ -57,311 +80,295 @@ int AnalyzeBinary(llvm::MemoryBufferRef &fileData,
   return AnalyzeBinaryImpl(binary, result, options);
 }
 
-const char *TranslateOffset(uint64_t offset,
-                            const MachOObjectFile *InputObject) {
-  for (auto section : InputObject->sections()) {
-    uint64_t sectAddress = section.getAddress();
-    uint64_t sectSize = section.getSize();
-    if (offset >= sectAddress && offset < sectAddress + sectSize) {
-      auto sectOffset = offset - sectAddress;
-      StringRef sectContents;
-      section.getContents(sectContents);
-      return sectContents.data() + sectOffset;
-    }
-  }
-  return nullptr;
-}
-
-StringRef FindSymbol(uint64_t offset, const MachOObjectFile *InputObject) {
-  for (auto section : InputObject->sections()) {
-    uint64_t sectAddress = section.getAddress();
-    for (auto bindEntry : InputObject->bindTable()) {
-      uint64_t bindOffset = bindEntry.segmentOffset() + sectAddress;
-      if (bindOffset == offset) {
-        return bindEntry.symbolName();
-      }
-    }
-  }
-  return StringRef();
-}
-
-template <typename _uintptr_t>
-void HandleObjCMethods(const MachOObjectFile *InputObject,
-                       _uintptr_t method_list_offset,
-                       StringMap<bool> &methods) {
-  auto method_list_bytes = TranslateOffset(method_list_offset, InputObject);
-  if (!method_list_bytes)
-    return;
-  auto method_list =
-      reinterpret_cast<const _method_list_t<_uintptr_t> *>(method_list_bytes);
-
-  auto method_list_start =
-      method_list_bytes + sizeof(_method_list_t<_uintptr_t>);
-  auto method_itr =
-      reinterpret_cast<const _objc_method<_uintptr_t> *>(method_list_start);
-  for (uint32_t idx = 0; idx < method_list->method_count; ++idx, ++method_itr) {
-    const char *meth_name = TranslateOffset(method_itr->_cmd, InputObject);
-    StringRef methName = StringRef(meth_name);
-    auto methodIt = methods.find(methName);
-    if (methodIt == methods.end()) {
-      methodIt = methods.insert(std::make_pair(methName, false)).first;
-    }
-    methodIt->second = methodIt->second || (0 != method_itr->_imp);
-  }
-}
-
-template <typename _uintptr_t>
-void TraverseObjCClassList(uint64_t offset, const MachOObjectFile *InputObject,
-                           APIAnalysisIntermediateResult &result) {
-  auto class_t_bytes = TranslateOffset(offset, InputObject);
-  auto class_t = reinterpret_cast<const _class_t<_uintptr_t> *>(class_t_bytes);
-
-  auto class_ro_bytes = TranslateOffset(class_t->ro, InputObject);
-  auto class_ro =
-      reinterpret_cast<const _class_ro_t<_uintptr_t> *>(class_ro_bytes);
-
-  const char *name = TranslateOffset(class_ro->name, InputObject);
-  StringRef className = StringRef(name);
-
-  HandleObjCMethods(InputObject, class_ro->baseMethods,
-                    result.instanceMethods[className]);
-
-  auto metaclass_t_bytes = TranslateOffset(class_t->isa, InputObject);
-  auto metaclass_t =
-      reinterpret_cast<const _class_t<_uintptr_t> *>(metaclass_t_bytes);
-
-  auto metaclass_ro_bytes = TranslateOffset(metaclass_t->ro, InputObject);
-  auto metaclass_ro =
-      reinterpret_cast<const _class_ro_t<_uintptr_t> *>(metaclass_ro_bytes);
-
-  HandleObjCMethods(InputObject, metaclass_ro->baseMethods,
-                    result.classMethods[className]);
-
-  StringRef superClassName;
-  if (class_t->superclass) {
-    auto superclass_t_bytes = TranslateOffset(class_t->superclass, InputObject);
-    auto superclass_t =
-        reinterpret_cast<const _class_t<_uintptr_t> *>(superclass_t_bytes);
-
-    auto superclass_ro_bytes = TranslateOffset(superclass_t->ro, InputObject);
-    auto superclass_ro =
-        reinterpret_cast<const _class_ro_t<_uintptr_t> *>(superclass_ro_bytes);
-
-    const char *superClsName =
-        TranslateOffset(superclass_ro->name, InputObject);
-    superClassName = StringRef(superClsName);
-  } else {
-    auto superclass_offset =
-        offset + offsetof(_class_t<_uintptr_t>, superclass);
-    auto symbolName = FindSymbol(superclass_offset, InputObject);
-    auto start = symbolName.find('$') + 2;
-    superClassName = symbolName.substr(start);
-  }
-  result.superClasses.insert(std::make_pair(className, superClassName));
-}
-
-template <typename _uintptr_t>
-void TraverseObjCProtoList(uint64_t offset, const MachOObjectFile *InputObject,
-                           APIAnalysisIntermediateResult &result) {
-  auto protocol_t_bytes = TranslateOffset(offset, InputObject);
-  auto protocol_t =
-      reinterpret_cast<const _protocol_t<_uintptr_t> *>(protocol_t_bytes);
-
-  const char *name = TranslateOffset(protocol_t->protocol_name, InputObject);
-  StringRef protocolName = StringRef(name);
-
-  HandleObjCMethods(InputObject, protocol_t->instance_methods,
-                    result.protocolInstanceMethods[protocolName]);
-  HandleObjCMethods(InputObject, protocol_t->class_methods,
-                    result.protocolClassMethods[protocolName]);
-}
-
-template <typename _uintptr_t>
-void TraverseObjCCatList(uint64_t offset, const MachOObjectFile *InputObject,
-                         APIAnalysisIntermediateResult &result) {
-  auto category_t_bytes = TranslateOffset(offset, InputObject);
-  auto category_t =
-      reinterpret_cast<const _category_t<_uintptr_t> *>(category_t_bytes);
-
-  const char *name = TranslateOffset(category_t->name, InputObject);
-  StringRef catName = StringRef(name);
-
-  StringRef className;
-
-  if (category_t->cls) {
-    auto class_t_bytes = TranslateOffset(category_t->cls, InputObject);
-    auto class_t =
-        reinterpret_cast<const _class_t<_uintptr_t> *>(class_t_bytes);
-
-    auto class_ro_bytes = TranslateOffset(class_t->ro, InputObject);
-    auto class_ro =
-        reinterpret_cast<const _class_ro_t<_uintptr_t> *>(class_ro_bytes);
-
-    const char *clsName = TranslateOffset(class_ro->name, InputObject);
-    className = StringRef(clsName);
-  } else {
-    auto class_offset = offset + offsetof(_category_t<_uintptr_t>, cls);
-    auto symbolName = FindSymbol(class_offset, InputObject);
-    auto start = symbolName.find('$') + 2;
-    className = symbolName.substr(start);
-  }
-
-  HandleObjCMethods(InputObject, category_t->instance_methods,
-                    result.categoryInstanceMethods[className][catName]);
-  HandleObjCMethods(InputObject, category_t->class_methods,
-                    result.categoryClassMethods[className][catName]);
-}
-
 int AnalyzeBinaryImpl(const MachOObjectFile *InputObject,
                       APIAnalysisIntermediateResult &result,
                       const APIAnalysisOptions &options) {
   // check to see if there is a bitcode section
   bool hasBitcode = false;
   for (auto s : InputObject->sections()) {
-    StringRef name;
-    s.getName(name);
-    if (name == "__bundle")
+    StringRef SegmentName =
+        InputObject->getSectionFinalSegmentName(s.getRawDataRefImpl());
+    StringRef SectName;
+    s.getName(SectName);
+    if (SegmentName == "__LLVM" && SectName == "__bundle") {
+      if (options.bitcodeOnly) {
+        StringRef contents;
+        if (std::error_code EC = s.getContents(contents)) {
+          errs() << "Could not get section data: '" << EC.message() << "'";
+          return 1;
+        }
+        auto xarBuf = MemoryBuffer::getMemBuffer(
+            contents, "", /*RequiresNullTerminator=*/false);
+        AnalyzeXar(xarBuf->getMemBufferRef(), result, options);
+      }
       hasBitcode = true;
+      break;
+    }
   }
 
   // if there is no bitcode section, this may be from an assembly file that was
   // hand coded, and since we support that we need to ignore bitcodeOnly
   bool bitcodeOnly = options.bitcodeOnly && hasBitcode;
-  for (auto s : InputObject->symbols()) {
-    section_iterator sec = s.getSection().get();
+  if (!bitcodeOnly) {
+    for (auto s : InputObject->symbols()) {
+      section_iterator sec = s.getSection().get();
 
-    // If the symbol has a section, and that section is not text or the symbol
-    // has no flags -- skip it.
-    if (sec != InputObject->section_end() &&
-        (!sec->isText() || BasicSymbolRef::SF_None == s.getFlags()))
-      continue;
+      // If the symbol has a section, and the symbol has no flags -- skip it.
+      if (sec != InputObject->section_end() &&
+          BasicSymbolRef::SF_None == s.getFlags())
+        continue;
 
-    // If the symbol is format specific, skip it
-    if (BasicSymbolRef::SF_FormatSpecific == s.getFlags())
-      continue;
+      // If the symbol is format specific, skip it
+      if (BasicSymbolRef::SF_FormatSpecific == s.getFlags())
+        continue;
 
-    auto type = s.getType();
-    StringRef name = s.getName().get();
-    bool declared = s.getFlags() & BasicSymbolRef::SF_Undefined;
-
-    if (SymbolRef::ST_Function & type) {
+      auto type = s.getType();
+      std::string name = s.getName()->str();
       if (options.demangle)
-        result.functionNames.insert(
-            std::make_pair(DemangleName(name), !declared));
-      else {
-        result.functionNames.insert(std::make_pair(name, !declared));
-      }
-      continue;
-    }
-  }
+        name = DemangleName(name);
+      bool declared = !(s.getFlags() & BasicSymbolRef::SF_Undefined);
 
-  for (auto s : InputObject->sections()) {
-    StringRef name;
-    s.getName(name);
-
-    if (name == "__bundle") {
-      StringRef contents;
-      if (std::error_code EC = s.getContents(contents)) {
-        errs() << "Could not get section data: '" << EC.message() << "'";
-        return 1;
-      }
-      MemoryBufferRef xarRef =
-          MemoryBuffer::getMemBuffer(contents)->getMemBufferRef();
-      AnalyzeXar(xarRef, result, options);
-    }
-
-    // If only looking at bitcode skip everything else.
-    if (bitcodeOnly)
-      continue;
-
-    if (name == "__objc_methname") {
-      StringRef contents;
-      InputObject->getSectionContents(s.getRawDataRefImpl(), contents);
-
-      size_t start = 0;
-      size_t current = 0;
-      size_t end = contents.size();
-      for (; current < end; start = current + 1) {
-        current = contents.find('\0', start);
-        StringRef selector = contents.substr(start, current - start);
-        if (0 < selector.size())
-          result.messageNames.insert(selector);
-      }
-      continue;
-    }
-    if (name == "__objc_classname") {
-      StringRef contents;
-      InputObject->getSectionContents(s.getRawDataRefImpl(), contents);
-
-      size_t start = 0;
-      size_t current = 0;
-      size_t end = contents.size();
-      for (; current < end; start = current + 1) {
-        current = contents.find('\0', start);
-        StringRef className = contents.substr(start, current - start);
-        if (className.empty())
-          continue;
-        auto I = result.classNames.find(className);
-        if (result.classNames.end() == I)
-          result.classNames.insert(std::make_pair(className, true));
+      if (SymbolRef::ST_Function & type) {
+        auto entry = result.functionNames.find(name);
+        if (entry != result.functionNames.end())
+          entry->second = entry->second || declared;
         else
-          I->second = true;
+          result.functionNames.insert(std::make_pair(name, declared));
       }
-      continue;
-    }
-    if (name == "__objc_classlist") {
-      StringRef contents;
-      InputObject->getSectionContents(s.getRawDataRefImpl(), contents);
 
-      auto *itr = contents.bytes_begin();
-      auto *end = contents.bytes_end();
-      if (InputObject->is64Bit())
-        for (; itr < end; itr += sizeof(uint64_t))
-          TraverseObjCClassList<uint64_t>(
-              *reinterpret_cast<const uint64_t *>(itr), InputObject, result);
-      else
-        for (; itr < end; itr += sizeof(uint32_t))
-          TraverseObjCClassList<uint32_t>(
-              *reinterpret_cast<const uint32_t *>(itr), InputObject, result);
-      continue;
-    }
-    if (name == "__objc_protolist") {
-      StringRef contents;
-      InputObject->getSectionContents(s.getRawDataRefImpl(), contents);
+      if (SymbolRef::ST_Data & type) {
+        auto entry = result.globals.find(name);
+        if (entry != result.globals.end())
+          entry->second = entry->second || declared;
+        else
+          result.globals.insert(std::make_pair(name, declared));
+      }
 
-      auto *itr = contents.bytes_begin();
-      auto *end = contents.bytes_end();
-      if (InputObject->is64Bit())
-        for (; itr < end; itr += sizeof(uint64_t))
-          TraverseObjCProtoList<uint64_t>(
-              *reinterpret_cast<const uint64_t *>(itr), InputObject, result);
-      else
-        for (; itr < end; itr += sizeof(uint32_t))
-          TraverseObjCProtoList<uint32_t>(
-              *reinterpret_cast<const uint32_t *>(itr), InputObject, result);
-      continue;
-    }
-    if (name == "__objc_catlist") {
-      StringRef contents;
-      InputObject->getSectionContents(s.getRawDataRefImpl(), contents);
-
-      auto *itr = contents.bytes_begin();
-      auto *end = contents.bytes_end();
-      if (InputObject->is64Bit())
-        for (; itr < end; itr += sizeof(uint64_t))
-          TraverseObjCCatList<uint64_t>(
-              *reinterpret_cast<const uint64_t *>(itr), InputObject, result);
-      else
-        for (; itr < end; itr += sizeof(uint32_t))
-          TraverseObjCCatList<uint32_t>(
-              *reinterpret_cast<const uint32_t *>(itr), InputObject, result);
-      continue;
+      if (!declared)
+        InsertExternalObjCClass(name, !options.demangle, result.classNames);
     }
   }
 
   // If only looking at bitcode skip everything else.
   if (bitcodeOnly)
     return 0;
+
+  // Parse ObjC Metadata.
+  MachOMetadata ObjCInfo(InputObject);
+  Error hasError;
+  auto recordError = [&](Error&& NewError) {
+    hasError = joinErrors(std::move(hasError), std::move(NewError));
+  };
+
+  // Handle ObjC Classes.
+  if (auto ObjCClasses = ObjCInfo.classes()) {
+    for (auto c : *ObjCClasses) {
+      auto ObjCClass = *c;
+      if (!ObjCClass) {
+        recordError(ObjCClass.takeError());
+        continue;
+      }
+      auto name = ObjCClass->getName();
+      if (!name) {
+        recordError(name.takeError());
+        continue;
+      }
+      result.classNames.insert({*name, true});
+      // Instance Methods.
+      if (auto instanceMethods = ObjCClass->instanceMethods()) {
+        for (auto m : *instanceMethods) {
+          if (auto mName = m.getName())
+            result.instanceMethods[*name].insert({*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(instanceMethods.takeError());
+      // Class Methods.
+      if (auto classMethods = ObjCClass->classMethods()) {
+        for (auto m : *classMethods) {
+          if (auto mName = m.getName())
+            result.classMethods[*name].insert({*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(classMethods.takeError());
+      // Properties.
+      if (auto Properties = ObjCClass->properties()) {
+        for (auto m : *Properties) {
+          if (auto getter = m.getGetter()) {
+            if (!getter->empty())
+              result.instanceMethods[*name].insert({*getter, true});
+          } else
+            recordError(getter.takeError());
+          if (auto setter = m.getSetter()) {
+            if (!setter->empty())
+              result.instanceMethods[*name].insert({*setter, true});
+          } else
+            recordError(setter.takeError());
+        }
+      } else
+        recordError(Properties.takeError());
+      // Superclass.
+      if (auto superclass = ObjCClass->getSuperClassName())
+        result.superClasses[*name] = *superclass;
+      else
+        recordError(superclass.takeError());
+    }
+  } else
+    recordError(ObjCClasses.takeError());
+
+  // Handle ObjC Protocols.
+  if (auto ObjCProtocols = ObjCInfo.protocols()) {
+    for (auto p : *ObjCProtocols) {
+      auto ObjCProtocol = *p;
+      if (!ObjCProtocol) {
+        recordError(ObjCProtocol.takeError());
+        continue;
+      }
+      auto name = ObjCProtocol->getName();
+      if (!name) {
+        recordError(name.takeError());
+        continue;
+      }
+      // Instance Methods.
+      if (auto instanceMethods = ObjCProtocol->instanceMethods()) {
+        for (auto m : *instanceMethods) {
+          if (auto mName = m.getName())
+            result.protocolInstanceMethods[*name].insert({*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(instanceMethods.takeError());
+      if (auto instanceMethods = ObjCProtocol->optionalInstanceMethods()) {
+        for (auto m : *instanceMethods) {
+          if (auto mName = m.getName())
+            result.protocolInstanceMethods[*name].insert({*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(instanceMethods.takeError());
+      // Class Methods.
+      if (auto classMethods = ObjCProtocol->classMethods()) {
+        for (auto m : *classMethods) {
+          if (auto mName = m.getName())
+            result.protocolClassMethods[*name].insert({*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(classMethods.takeError());
+      if (auto classMethods = ObjCProtocol->optionalClassMethods()) {
+        for (auto m : *classMethods) {
+          if (auto mName = m.getName())
+            result.protocolClassMethods[*name].insert({*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(classMethods.takeError());
+      // Properties.
+      if (auto Properties = ObjCProtocol->properties()) {
+        for (auto m : *Properties) {
+          if (auto getter = m.getGetter()) {
+            if (!getter->empty())
+              result.protocolInstanceMethods[*name].insert({*getter, true});
+          } else
+            recordError(getter.takeError());
+          if (auto setter = m.getSetter()) {
+            if (!setter->empty())
+              result.protocolInstanceMethods[*name].insert({*setter, true});
+          } else
+            recordError(setter.takeError());
+        }
+      } else
+        recordError(Properties.takeError());
+    }
+  } else
+    recordError(ObjCProtocols.takeError());
+
+  // Handle ObjC Categories.
+  if (auto ObjCCategories = ObjCInfo.categories()) {
+    for (auto c : *ObjCCategories) {
+      auto ObjCCategory = *c;
+      if (!ObjCCategory) {
+        recordError(ObjCCategory.takeError());
+        continue;
+      }
+      auto name = ObjCCategory->getName();
+      if (!name) {
+        recordError(name.takeError());
+        continue;
+      }
+      auto baseName = ObjCCategory->getBaseClassName();
+      if (!baseName) {
+        recordError(baseName.takeError());
+        continue;
+      }
+      // Instance Methods.
+      if (auto instanceMethods = ObjCCategory->instanceMethods()) {
+        for (auto m : *instanceMethods) {
+          if (auto mName = m.getName())
+            result.categoryInstanceMethods[*baseName][*name].insert(
+                {*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(instanceMethods.takeError());
+      // Class Methods.
+      if (auto classMethods = ObjCCategory->classMethods()) {
+        for (auto m : *classMethods) {
+          if (auto mName = m.getName())
+            result.categoryClassMethods[*baseName][*name].insert(
+                {*mName, true});
+          else
+            recordError(mName.takeError());
+        }
+      } else
+        recordError(classMethods.takeError());
+      // Properties.
+      if (auto Properties = ObjCCategory->properties()) {
+        for (auto m : *Properties) {
+          if (auto getter = m.getGetter()) {
+            if (!getter->empty())
+              result.categoryInstanceMethods[*baseName][*name].insert(
+                  {*getter, true});
+          } else
+            recordError(getter.takeError());
+          if (auto setter = m.getSetter()) {
+            if (!setter->empty())
+              result.categoryInstanceMethods[*baseName][*name].insert(
+                  {*setter, true});
+          } else
+            recordError(setter.takeError());
+        }
+      } else
+        recordError(Properties.takeError());
+    }
+  } else
+    recordError(ObjCCategories.takeError());
+
+  // Handle Selector References.
+  if (auto ObjCSelectRefs = ObjCInfo.referencedSelectors()) {
+    for (auto s : *ObjCSelectRefs) {
+      if (auto name = s.getSelector())
+        result.messageNames.insert(*name);
+      else
+        recordError(name.takeError());
+    }
+  } else
+    recordError(ObjCSelectRefs.takeError());
+
+  // Potentially Defined Selectors;
+  ObjCInfo.getAllPotentiallyDefinedSelectors(
+      result.potentiallyDefinedSelectors);
+  // Log all errors.
+  logAllUnhandledErrors(std::move(hasError), errs(),
+                        "All binary scanning errors:\n");
 
   for (size_t i = 0; i < InputObject->getNumLibraries(); ++i) {
     StringRef name;

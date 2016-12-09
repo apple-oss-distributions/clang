@@ -30,11 +30,11 @@
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCTargetAsmParser.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
@@ -126,6 +126,7 @@ struct AssemblerInvocation {
   unsigned RelaxAll : 1;
   unsigned NoExecStack : 1;
   unsigned FatalWarnings : 1;
+  unsigned IncrementalLinkerCompatible : 1;
   unsigned EmbedBitcode : 1;
 
   /// The name of the relocation model to use.
@@ -146,6 +147,7 @@ public:
     RelaxAll = 0;
     NoExecStack = 0;
     FatalWarnings = 0;
+    IncrementalLinkerCompatible = 0;
     DwarfVersion = 0;
     EmbedBitcode = 0;
   }
@@ -201,7 +203,7 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
   // Any DebugInfoKind implies GenDwarfForAssembly.
   Opts.GenDwarfForAssembly = Args.hasArg(OPT_debug_info_kind_EQ);
   Opts.CompressDebugSections = Args.hasArg(OPT_compress_debug_sections);
-  Opts.DwarfVersion = getLastArgIntValue(Args, OPT_dwarf_version_EQ, 0, Diags);
+  Opts.DwarfVersion = getLastArgIntValue(Args, OPT_dwarf_version_EQ, 2, Diags);
   Opts.DwarfDebugFlags = Args.getLastArgValue(OPT_dwarf_debug_flags);
   Opts.DwarfDebugProducer = Args.getLastArgValue(OPT_dwarf_debug_producer);
   Opts.DebugCompilationDir = Args.getLastArgValue(OPT_fdebug_compilation_dir);
@@ -251,6 +253,8 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
   Opts.NoExecStack = Args.hasArg(OPT_mno_exec_stack);
   Opts.FatalWarnings = Args.hasArg(OPT_massembler_fatal_warnings);
   Opts.RelocationModel = Args.getLastArgValue(OPT_mrelocation_model, "pic");
+  Opts.IncrementalLinkerCompatible =
+      Args.hasArg(OPT_mincremental_linker_compatible);
 
   Opts.EmbedBitcode = Args.hasArg(OPT_fembed_bitcode);
 
@@ -399,9 +403,10 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
     MCAsmBackend *MAB = TheTarget->createMCAsmBackend(*MRI, Opts.Triple,
                                                       Opts.CPU);
     Triple T(Opts.Triple);
-    Str.reset(TheTarget->createMCObjectStreamer(T, Ctx, *MAB, *Out, CE, *STI,
-                                                Opts.RelaxAll,
-                                                /*DWARFMustBeAtTheEnd*/ true));
+    Str.reset(TheTarget->createMCObjectStreamer(
+        T, Ctx, *MAB, *Out, CE, *STI, Opts.RelaxAll,
+        Opts.IncrementalLinkerCompatible,
+        /*DWARFMustBeAtTheEnd*/ true));
     Str.get()->InitSections(Opts.NoExecStack);
 
     if (Opts.EmbedBitcode &&
@@ -411,7 +416,7 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts,
       // is emitted in __LLVM,__asm section to tell the linker to add
       // the macho object into the bundle
       MCSection *AsmLabel = Ctx.getMachOSection(
-          "__LLVM", "__asm", MachO::S_REGULAR, 4, SectionKind::getDataNoRel());
+          "__LLVM", "__asm", MachO::S_REGULAR, 4, SectionKind::getReadOnly());
       Str.get()->SwitchSection(AsmLabel);
       Str.get()->EmitZeros(1);
     }

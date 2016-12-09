@@ -19,9 +19,9 @@
 
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/FileSystemStatCache.h"
-#include "clang/Frontend/PCHContainerOperations.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Config/llvm-config.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -58,12 +58,7 @@ FileManager::FileManager(const FileSystemOptions &FSO,
     this->FS = vfs::getRealFileSystem();
 }
 
-FileManager::~FileManager() {
-  for (unsigned i = 0, e = VirtualFileEntries.size(); i != e; ++i)
-    delete VirtualFileEntries[i];
-  for (unsigned i = 0, e = VirtualDirectoryEntries.size(); i != e; ++i)
-    delete VirtualDirectoryEntries[i];
-}
+FileManager::~FileManager() = default;
 
 void FileManager::addStatCache(std::unique_ptr<FileSystemStatCache> statCache,
                                bool AtBeginning) {
@@ -128,7 +123,7 @@ static const DirectoryEntry *getDirectoryFromFile(FileManager &FileMgr,
 void FileManager::addAncestorsAsVirtualDirs(StringRef Path) {
   StringRef DirName = llvm::sys::path::parent_path(Path);
   if (DirName.empty())
-    return;
+    DirName = ".";
 
   auto &NamedDirEnt =
       *SeenDirEntries.insert(std::make_pair(DirName, nullptr)).first;
@@ -137,14 +132,14 @@ void FileManager::addAncestorsAsVirtualDirs(StringRef Path) {
   // at the same time.  Therefore, if DirName is already in the cache,
   // we don't need to recurse as its ancestors must also already be in
   // the cache.
-  if (NamedDirEnt.second)
+  if (NamedDirEnt.second && NamedDirEnt.second != NON_EXISTENT_DIR)
     return;
 
   // Add the virtual directory to the cache.
-  DirectoryEntry *UDE = new DirectoryEntry;
+  auto UDE = llvm::make_unique<DirectoryEntry>();
   UDE->Name = NamedDirEnt.first().data();
-  NamedDirEnt.second = UDE;
-  VirtualDirectoryEntries.push_back(UDE);
+  NamedDirEnt.second = UDE.get();
+  VirtualDirectoryEntries.push_back(std::move(UDE));
 
   // Recursively add the other ancestors.
   addAncestorsAsVirtualDirs(DirName);
@@ -209,11 +204,6 @@ const DirectoryEntry *FileManager::getDirectory(StringRef DirName,
     // We don't have this directory yet, add it.  We use the string
     // key from the SeenDirEntries map as the string.
     UDE.Name  = InterndDirName;
-
-    // Track if the directory had an entry found in the VFS overlay.
-    // Since there's no dir <-> dir mapping in the VFS, track that
-    // there are entries matching this directory request.
-    UDE.HasVFSEntry = Data.IsVFSMapped;
   }
 
   return &UDE;
@@ -380,8 +370,8 @@ FileManager::getVirtualFile(StringRef Filename, off_t Size,
   }
 
   if (!UFE) {
-    UFE = new FileEntry();
-    VirtualFileEntries.push_back(UFE);
+    VirtualFileEntries.push_back(llvm::make_unique<FileEntry>());
+    UFE = VirtualFileEntries.back().get();
     NamedFileEnt.second = UFE;
   }
 
@@ -518,11 +508,9 @@ void FileManager::GetUniqueIDMapping(
       UIDToFiles[FE->getValue()->getUID()] = FE->getValue();
   
   // Map virtual file entries
-  for (SmallVectorImpl<FileEntry *>::const_iterator
-         VFE = VirtualFileEntries.begin(), VFEEnd = VirtualFileEntries.end();
-       VFE != VFEEnd; ++VFE)
-    if (*VFE && *VFE != NON_EXISTENT_FILE)
-      UIDToFiles[(*VFE)->getUID()] = *VFE;
+  for (const auto &VFE : VirtualFileEntries)
+    if (VFE && VFE.get() != NON_EXISTENT_FILE)
+      UIDToFiles[VFE->getUID()] = VFE.get();
 }
 
 void FileManager::modifyFileEntry(FileEntry *File,
@@ -574,18 +562,4 @@ void FileManager::PrintStats() const {
                << NumFileCacheMisses << " file cache misses.\n";
 
   //llvm::errs() << PagesMapped << BytesOfPagesMapped << FSLookups;
-}
-
-// Virtual destructors for abstract base classes that need live in Basic.
-PCHContainerWriter::~PCHContainerWriter() {}
-PCHContainerReader::~PCHContainerReader() {}
-
-std::shared_ptr<ModuleDependencyCollector>
-FileManager::getModuleDepCollector() const {
-  return ModuleDepCollector;
-}
-
-void FileManager::setModuleDepCollector(
-    std::shared_ptr<ModuleDependencyCollector> Collector) {
-  ModuleDepCollector = Collector;
 }

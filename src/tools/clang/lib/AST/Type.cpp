@@ -970,7 +970,7 @@ public:
           == T->getDeducedType().getAsOpaquePtr())
       return QualType(T, 0);
 
-    return Ctx.getAutoType(deducedType, T->isDecltypeAuto(),
+    return Ctx.getAutoType(deducedType, T->getKeyword(),
                            T->isDependentType());
   }
 
@@ -1272,6 +1272,12 @@ QualType QualType::stripObjCKindOfType(const ASTContext &constCtx) const {
 
              return type;
            });
+}
+
+QualType QualType::getAtomicUnqualifiedType() const {
+  if (auto AT = getTypePtr()->getAs<AtomicType>())
+    return AT->getValueType().getUnqualifiedType();
+  return getUnqualifiedType();
 }
 
 Optional<ArrayRef<QualType>> Type::getObjCSubstitutions(
@@ -2614,7 +2620,7 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
   case OCLQueue:
     return "queue_t";
   case OCLNDRange:
-    return "event_t";
+    return "ndrange_t";
   case OCLReserveID:
     return "reserve_id_t";
   case OMPArraySection:
@@ -2655,6 +2661,9 @@ StringRef FunctionType::getNameForCallConv(CallingConv CC) {
   case CC_IntelOclBicc: return "intel_ocl_bicc";
   case CC_SpirFunction: return "spir_function";
   case CC_SpirKernel: return "spir_kernel";
+  case CC_Swift: return "swiftcall";
+  case CC_PreserveMost: return "preserve_most";
+  case CC_PreserveAll: return "preserve_all";
   }
 
   llvm_unreachable("Invalid calling convention.");
@@ -2671,7 +2680,7 @@ FunctionProtoType::FunctionProtoType(QualType result, ArrayRef<QualType> params,
       NumParams(params.size()),
       NumExceptions(epi.ExceptionSpec.Exceptions.size()),
       ExceptionSpecType(epi.ExceptionSpec.Type),
-      HasAnyConsumedParams(epi.ConsumedParameters != nullptr),
+      HasExtParameterInfos(epi.ExtParameterInfos != nullptr),
       Variadic(epi.Variadic), HasTrailingReturn(epi.HasTrailingReturn) {
   assert(NumParams == params.size() && "function has too many parameters");
 
@@ -2737,10 +2746,11 @@ FunctionProtoType::FunctionProtoType(QualType result, ArrayRef<QualType> params,
     slot[0] = epi.ExceptionSpec.SourceDecl;
   }
 
-  if (epi.ConsumedParameters) {
-    bool *consumedParams = const_cast<bool *>(getConsumedParamsBuffer());
+  if (epi.ExtParameterInfos) {
+    ExtParameterInfo *extParamInfos =
+      const_cast<ExtParameterInfo *>(getExtParameterInfosBuffer());
     for (unsigned i = 0; i != NumParams; ++i)
-      consumedParams[i] = epi.ConsumedParameters[i];
+      extParamInfos[i] = epi.ExtParameterInfos[i];
   }
 }
 
@@ -2860,9 +2870,9 @@ void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID, QualType Result,
              epi.ExceptionSpec.Type == EST_Unevaluated) {
     ID.AddPointer(epi.ExceptionSpec.SourceDecl->getCanonicalDecl());
   }
-  if (epi.ConsumedParameters) {
+  if (epi.ExtParameterInfos) {
     for (unsigned i = 0; i != NumParams; ++i)
-      ID.AddBoolean(epi.ConsumedParameters[i]);
+      ID.AddInteger(epi.ExtParameterInfos[i].getOpaqueValue());
   }
   epi.ExtInfo.Profile(ID);
   ID.AddBoolean(epi.HasTrailingReturn);
@@ -2994,8 +3004,11 @@ bool AttributedType::isQualifier() const {
   case AttributedType::attr_stdcall:
   case AttributedType::attr_thiscall:
   case AttributedType::attr_pascal:
+  case AttributedType::attr_swiftcall:
   case AttributedType::attr_vectorcall:
   case AttributedType::attr_inteloclbicc:
+  case AttributedType::attr_preserve_most:
+  case AttributedType::attr_preserve_all:
   case AttributedType::attr_ms_abi:
   case AttributedType::attr_sysv_abi:
   case AttributedType::attr_ptr32:
@@ -3047,11 +3060,14 @@ bool AttributedType::isCallingConv() const {
   case attr_fastcall:
   case attr_stdcall:
   case attr_thiscall:
+  case attr_swiftcall:
   case attr_vectorcall:
   case attr_pascal:
   case attr_ms_abi:
   case attr_sysv_abi:
   case attr_inteloclbicc:
+  case attr_preserve_most:
+  case attr_preserve_all:
     return true;
   }
   llvm_unreachable("invalid attr kind");
@@ -3361,6 +3377,8 @@ static CachedProperties computeCachedProperties(const Type *T) {
     return Cache::get(cast<ObjCObjectPointerType>(T)->getPointeeType());
   case Type::Atomic:
     return Cache::get(cast<AtomicType>(T)->getValueType());
+  case Type::Pipe:
+    return Cache::get(cast<PipeType>(T)->getElementType());
   }
 
   llvm_unreachable("unhandled type class");
@@ -3443,6 +3461,8 @@ static LinkageInfo computeLinkageInfo(const Type *T) {
     return computeLinkageInfo(cast<ObjCObjectPointerType>(T)->getPointeeType());
   case Type::Atomic:
     return computeLinkageInfo(cast<AtomicType>(T)->getValueType());
+  case Type::Pipe:
+    return computeLinkageInfo(cast<PipeType>(T)->getElementType());
   }
 
   llvm_unreachable("unhandled type class");
@@ -3601,6 +3621,7 @@ bool Type::canHaveNullability() const {
   case Type::ObjCObject:
   case Type::ObjCInterface:
   case Type::Atomic:
+  case Type::Pipe:
     return false;
   }
   llvm_unreachable("bad type kind!");

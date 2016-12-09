@@ -729,6 +729,11 @@ namespace {
       }
       
       SemaRef.CurrentInstantiationScope->InstantiatedLocal(Old, New);
+
+      // We recreated a local declaration, but not by instantiating it. There
+      // may be pending dependent diagnostics to produce.
+      if (auto *DC = dyn_cast<DeclContext>(Old))
+        SemaRef.PerformDependentDiagnostics(DC, TemplateArgs);
     }
     
     /// \brief Transform the definition of the given declaration by
@@ -1720,9 +1725,11 @@ ParmVarDecl *Sema::SubstParmVarDecl(ParmVarDecl *OldParm,
 /// from such a substitution.
 bool Sema::SubstParmTypes(SourceLocation Loc, 
                           ParmVarDecl **Params, unsigned NumParams,
+                    const FunctionProtoType::ExtParameterInfo *ExtParamInfos,
                           const MultiLevelTemplateArgumentList &TemplateArgs,
                           SmallVectorImpl<QualType> &ParamTypes,
-                          SmallVectorImpl<ParmVarDecl *> *OutParams) {
+                          SmallVectorImpl<ParmVarDecl *> *OutParams,
+                          ExtParameterInfoBuilder &ParamInfos) {
   assert(!ActiveTemplateInstantiations.empty() &&
          "Cannot perform an instantiation without some context on the "
          "instantiation stack");
@@ -1730,8 +1737,9 @@ bool Sema::SubstParmTypes(SourceLocation Loc,
   TemplateInstantiator Instantiator(*this, TemplateArgs, Loc, 
                                     DeclarationName());
   return Instantiator.TransformFunctionTypeParams(Loc, Params, NumParams,
-                                                  nullptr, ParamTypes,
-                                                  OutParams);
+                                                  nullptr, ExtParamInfos,
+                                                  ParamTypes, OutParams,
+                                                  ParamInfos);
 }
 
 /// \brief Perform substitution on the base class specifiers of the
@@ -1837,9 +1845,7 @@ Sema::SubstBaseSpecifiers(CXXRecordDecl *Instantiation,
       Invalid = true;
   }
 
-  if (!Invalid &&
-      AttachBaseSpecifiers(Instantiation, InstantiatedBases.data(),
-                           InstantiatedBases.size()))
+  if (!Invalid && AttachBaseSpecifiers(Instantiation, InstantiatedBases))
     Invalid = true;
 
   return Invalid;
@@ -2076,7 +2082,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
   if (TSK == TSK_ImplicitInstantiation) {
     Instantiation->setLocation(Pattern->getLocation());
     Instantiation->setLocStart(Pattern->getInnerLocStart());
-    Instantiation->setRBraceLoc(Pattern->getRBraceLoc());
+    Instantiation->setBraceRange(Pattern->getBraceRange());
   }
 
   if (!Instantiation->isInvalidDecl()) {
@@ -2666,16 +2672,17 @@ ExprResult Sema::SubstInitializer(Expr *Init,
   return Instantiator.TransformInitializer(Init, CXXDirectInit);
 }
 
-bool Sema::SubstExprs(Expr **Exprs, unsigned NumExprs, bool IsCall,
+bool Sema::SubstExprs(ArrayRef<Expr *> Exprs, bool IsCall,
                       const MultiLevelTemplateArgumentList &TemplateArgs,
                       SmallVectorImpl<Expr *> &Outputs) {
-  if (NumExprs == 0)
+  if (Exprs.empty())
     return false;
 
   TemplateInstantiator Instantiator(*this, TemplateArgs,
                                     SourceLocation(),
                                     DeclarationName());
-  return Instantiator.TransformExprs(Exprs, NumExprs, IsCall, Outputs);
+  return Instantiator.TransformExprs(Exprs.data(), Exprs.size(),
+                                     IsCall, Outputs);
 }
 
 NestedNameSpecifierLoc

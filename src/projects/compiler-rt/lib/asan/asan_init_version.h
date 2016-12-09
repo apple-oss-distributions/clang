@@ -28,8 +28,8 @@ extern "C" {
   // v4=>v5: changed the semantics and format of __asan_stack_malloc_ and
   //         __asan_stack_free_ functions.
   // v5=>v6: changed the name of the version check symbol
-  // Apple Internal: v6=>apple_703: changed with the new apple clang release
-  #define __asan_version_mismatch_check __asan_version_mismatch_check_apple_703
+  // Apple Internal: v6=>apple_800: changed with the new apple clang release
+  #define __asan_version_mismatch_check __asan_version_mismatch_check_apple_800
 }
 
 #endif  // ASAN_INIT_VERSION_H

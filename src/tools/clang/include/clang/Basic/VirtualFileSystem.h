@@ -16,7 +16,6 @@
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/Optional.h"
-#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SourceMgr.h"
@@ -177,6 +176,11 @@ public:
   bool operator!=(const recursive_directory_iterator &RHS) const {
     return !(*this == RHS);
   }
+  /// \brief Gets the current level. Starting path is at level 0.
+  int level() const {
+    assert(State->size() && "Cannot get level without any iteration state");
+    return State->size()-1;
+  }
 };
 
 /// \brief The virtual file system interface.
@@ -300,10 +304,7 @@ public:
   llvm::ErrorOr<std::string> getCurrentWorkingDirectory() const override {
     return WorkingDirectory;
   }
-  std::error_code setCurrentWorkingDirectory(const Twine &Path) override {
-    WorkingDirectory = Path.str();
-    return std::error_code();
-  }
+  std::error_code setCurrentWorkingDirectory(const Twine &Path) override;
 };
 
 /// \brief Get a globally unique ID for a virtual file or directory.
@@ -329,6 +330,7 @@ class YAMLVFSWriter {
   std::vector<YAMLVFSEntry> Mappings;
   Optional<bool> IsCaseSensitive;
   Optional<bool> IsOverlayRelative;
+  Optional<bool> UseExternalNames;
   std::string OverlayDir;
 
 public:
@@ -336,6 +338,9 @@ public:
   void addFileMapping(StringRef VirtualPath, StringRef RealPath);
   void setCaseSensitivity(bool CaseSensitive) {
     IsCaseSensitive = CaseSensitive;
+  }
+  void setUseExternalNames(bool UseExtNames) {
+    UseExternalNames = UseExtNames;
   }
   void setOverlayDir(StringRef OverlayDirectory) {
     IsOverlayRelative = true;
@@ -346,38 +351,5 @@ public:
 };
 
 } // end namespace vfs
-
-/// Collects the dependencies for imported modules into a directory. There
-/// are currently two users:
-///   (1) ASTReaderListeners that attach the collector whenever a module is
-///       loaded.
-///   (2) Since (1) isn't enough to collect all necessary headers for crash
-///       reproduction, the FileManager also holds a ModuleDependencyCollector
-///       to collect the remaining.
-class ModuleDependencyCollector {
-  std::string DestDir;
-  bool HasErrors;
-  llvm::StringSet<> Seen;
-  vfs::YAMLVFSWriter VFSWriter;
-  bool IsCaseSensitive;
-
-public:
-  StringRef getDest() { return DestDir; }
-  bool insertSeen(StringRef Filename) { return Seen.insert(Filename).second; }
-  void setHasErrors() { HasErrors = true; }
-  void addFileMapping(StringRef VPath, StringRef RPath) {
-    VFSWriter.addFileMapping(VPath, RPath);
-  }
-
-  bool collectFile(StringRef Filename);
-  std::error_code copyToRoot(StringRef Src);
-  void writeFileMap();
-  bool hasErrors() { return HasErrors; }
-  bool isCaseSensitive() const { return IsCaseSensitive; }
-  ModuleDependencyCollector(std::string DestDir, bool IsCaseSensitive = false)
-      : DestDir(DestDir), HasErrors(false), IsCaseSensitive(IsCaseSensitive) {}
-  ~ModuleDependencyCollector() { writeFileMap(); }
-};
-
 } // end namespace clang
 #endif

@@ -50,7 +50,9 @@ floatuntixf
 gcc_personality_v0
 lshrti3
 modti3
+muloti4
 multf3
+multf
 multi3
 mulvti3
 mulxc3

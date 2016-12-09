@@ -91,7 +91,7 @@ def err_module_header_missing : Error<
 def err_module_shadowed : Error<
   "import of shadowed module '%0'">;
 def err_module_lock_failure : Error<
-  "could not acquire lock file for module '%0'">, DefaultFatal;
+  "could not acquire lock file for module '%0': %1">, DefaultFatal;
 def err_module_lock_timeout : Error<
   "timed out waiting to acquire lock file for module '%0'">, DefaultFatal;
 def err_module_cycle : Error<"cyclic dependency in module '%0': %1">, 
@@ -220,5 +220,5 @@ def note_apinotes_message : Note<"%0">;
 
 // OpenMP
 def err_omp_more_one_clause : Error<
-  "directive '#pragma omp %0' cannot contain more than one '%1' clause%select{| with '%3' name modifier}2">;
+  "directive '#pragma omp %0' cannot contain more than one '%1' clause%select{| with '%3' name modifier| with 'source' dependence}2">;
 }

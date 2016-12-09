@@ -317,9 +317,9 @@ void MultiplexConsumer::HandleImplicitImportDecl(ImportDecl *D) {
     Consumer->HandleImplicitImportDecl(D);
 }
 
-void MultiplexConsumer::HandleLinkerOptionPragma(llvm::StringRef Opts) {
+void MultiplexConsumer::HandleLinkerOption(llvm::StringRef Opts) {
   for (auto &Consumer : Consumers)
-    Consumer->HandleLinkerOptionPragma(Opts);
+    Consumer->HandleLinkerOption(Opts);
 }
 
 void MultiplexConsumer::HandleDetectMismatch(llvm::StringRef Name, llvm::StringRef Value) {
@@ -353,6 +353,13 @@ ASTDeserializationListener *MultiplexConsumer::GetASTDeserializationListener() {
 void MultiplexConsumer::PrintStats() {
   for (auto &Consumer : Consumers)
     Consumer->PrintStats();
+}
+
+bool MultiplexConsumer::shouldSkipFunctionBody(Decl *D) {
+  bool Skip = true;
+  for (auto &Consumer : Consumers)
+    Skip = Skip && Consumer->shouldSkipFunctionBody(D);
+  return Skip;
 }
 
 void MultiplexConsumer::InitializeSema(Sema &S) {

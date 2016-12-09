@@ -17,14 +17,19 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
+
+#include <functional>
 
 namespace llvm {
 
+class ModuleSummaryIndex;
 class ModulePass;
 class Pass;
 class Function;
 class BasicBlock;
 class GlobalValue;
+class TargetMachine;
 
 //===----------------------------------------------------------------------===//
 //
@@ -86,6 +91,10 @@ ModulePass *createGVExtractionPass(std::vector<GlobalValue*>& GVs, bool
                                    deleteFn = false);
 
 //===----------------------------------------------------------------------===//
+/// This pass performs iterative function importing from other modules.
+Pass *createFunctionImportPass(const ModuleSummaryIndex *Index = nullptr);
+
+//===----------------------------------------------------------------------===//
 /// createFunctionInliningPass - Return a new pass object that uses a heuristic
 /// to inline direct function calls to small functions.
 ///
@@ -114,14 +123,17 @@ Pass *createPruneEHPass();
 /// createInternalizePass - This pass loops over all of the functions in the
 /// input module, internalizing all globals (functions and variables) it can.
 ////
-/// The symbols in \p ExportList are never internalized.
+/// Before internalizing a symbol, the callback \p MustPreserveGV is invoked and
+/// gives to the client the ability to prevent internalizing specific symbols.
 ///
 /// The symbol in DSOList are internalized if it is safe to drop them from
 /// the symbol table.
 ///
 /// Note that commandline options that are used with the above function are not
 /// used now!
-ModulePass *createInternalizePass(ArrayRef<const char *> ExportList);
+ModulePass *
+createInternalizePass(std::function<bool(const GlobalValue &)> MustPreserveGV);
+
 /// createInternalizePass - Same as above, but with an empty exportList.
 ModulePass *createInternalizePass();
 
@@ -178,12 +190,20 @@ ModulePass *createBlockExtractorPass();
 ModulePass *createStripDeadPrototypesPass();
 
 //===----------------------------------------------------------------------===//
-/// createFunctionAttrsPass - This pass discovers functions that do not access
-/// memory, or only read memory, and gives them the readnone/readonly attribute.
-/// It also discovers function arguments that are not captured by the function
-/// and marks them with the nocapture attribute.
+/// createPostOrderFunctionAttrsPass - This pass walks SCCs of the call graph
+/// in post-order to deduce and propagate function attributes. It can discover
+/// functions that do not access memory, or only read memory, and give them the
+/// readnone/readonly attribute. It also discovers function arguments that are
+/// not captured by the function and marks them with the nocapture attribute.
 ///
-Pass *createFunctionAttrsPass();
+Pass *createPostOrderFunctionAttrsPass();
+
+//===----------------------------------------------------------------------===//
+/// createReversePostOrderFunctionAttrsPass - This pass walks SCCs of the call
+/// graph in RPO to deduce and propagate function attributes. Currently it
+/// only handles synthesizing norecurse attributes.
+///
+Pass *createReversePostOrderFunctionAttrsPass();
 
 //===----------------------------------------------------------------------===//
 /// createMergeFunctionsPass - This pass discovers identical functions and
@@ -207,7 +227,7 @@ ModulePass *createStripNonLineTableDebugInfoPass();
 //===----------------------------------------------------------------------===//
 // Obfuscate all the string inside the module
 //
-ModulePass *createObfuscateModulePass();
+ModulePass *createObfuscateModulePass(const TargetMachine* TM);
 
 //===----------------------------------------------------------------------===//
 /// createBarrierNoopPass - This pass is purely a module pass barrier in a pass
@@ -217,6 +237,9 @@ ModulePass *createBarrierNoopPass();
 /// \brief This pass lowers bitset metadata and the llvm.bitset.test intrinsic
 /// to bitsets.
 ModulePass *createLowerBitSetsPass();
+
+/// \brief This pass export CFI checks for use by external modules.
+ModulePass *createCrossDSOCFIPass();
 
 //===----------------------------------------------------------------------===//
 // SampleProfilePass - Loads sample profile data from disk and generates

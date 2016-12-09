@@ -611,10 +611,13 @@ const FileEntry *Preprocessor::LookupFile(
     SmallVectorImpl<char> *RelativePath,
     ModuleMap::KnownHeader *SuggestedModule,
     bool SkipCache) {
+  Module *RequestingModule = getModuleForLocation(FilenameLoc); 
+
   // If the header lookup mechanism may be relative to the current inclusion
   // stack, record the parent #includes.
   SmallVector<std::pair<const FileEntry *, const DirectoryEntry *>, 16>
       Includers;
+  bool BuildSystemModule = false;
   if (!FromDir && !FromFile) {
     FileID FID = getCurrentFileLexer()->getFileID();
     const FileEntry *FileEnt = SourceMgr.getFileEntryForID(FID);
@@ -632,9 +635,10 @@ const FileEntry *Preprocessor::LookupFile(
     // come from header declarations in the module map) relative to the module
     // map file.
     if (!FileEnt) {
-      if (FID == SourceMgr.getMainFileID() && MainFileDir)
+      if (FID == SourceMgr.getMainFileID() && MainFileDir) {
         Includers.push_back(std::make_pair(nullptr, MainFileDir));
-      else if ((FileEnt =
+        BuildSystemModule = getCurrentModule()->IsSystem;
+      } else if ((FileEnt =
                     SourceMgr.getFileEntryForID(SourceMgr.getMainFileID())))
         Includers.push_back(std::make_pair(FileEnt, FileMgr.getDirectory(".")));
     } else {
@@ -648,8 +652,7 @@ const FileEntry *Preprocessor::LookupFile(
       for (unsigned i = 0, e = IncludeMacroStack.size(); i != e; ++i) {
         IncludeStackInfo &ISEntry = IncludeMacroStack[e - i - 1];
         if (IsFileLexer(ISEntry))
-          if ((FileEnt = SourceMgr.getFileEntryForID(
-                   ISEntry.ThePPLexer->getFileID())))
+          if ((FileEnt = ISEntry.ThePPLexer->getFileEntry()))
             Includers.push_back(std::make_pair(FileEnt, FileEnt->getDir()));
       }
     }
@@ -681,11 +684,11 @@ const FileEntry *Preprocessor::LookupFile(
   // Do a standard file entry lookup.
   const FileEntry *FE = HeaderInfo.LookupFile(
       Filename, FilenameLoc, isAngled, FromDir, CurDir, Includers, SearchPath,
-      RelativePath, SuggestedModule, SkipCache);
+      RelativePath, SuggestedModule, SkipCache, BuildSystemModule);
   if (FE) {
     if (SuggestedModule && !LangOpts.AsmPreprocessor)
       HeaderInfo.getModuleMap().diagnoseHeaderInclusion(
-          getModuleForLocation(FilenameLoc), FilenameLoc, Filename, FE);
+          RequestingModule, FilenameLoc, Filename, FE);
     return FE;
   }
 
@@ -694,13 +697,13 @@ const FileEntry *Preprocessor::LookupFile(
   // to one of the headers on the #include stack.  Walk the list of the current
   // headers on the #include stack and pass them to HeaderInfo.
   if (IsFileLexer()) {
-    if ((CurFileEnt = SourceMgr.getFileEntryForID(CurPPLexer->getFileID()))) {
+    if ((CurFileEnt = CurPPLexer->getFileEntry())) {
       if ((FE = HeaderInfo.LookupSubframeworkHeader(Filename, CurFileEnt,
                                                     SearchPath, RelativePath,
                                                     SuggestedModule))) {
         if (SuggestedModule && !LangOpts.AsmPreprocessor)
           HeaderInfo.getModuleMap().diagnoseHeaderInclusion(
-              getModuleForLocation(FilenameLoc), FilenameLoc, Filename, FE);
+              RequestingModule, FilenameLoc, Filename, FE);
         return FE;
       }
     }
@@ -709,14 +712,13 @@ const FileEntry *Preprocessor::LookupFile(
   for (unsigned i = 0, e = IncludeMacroStack.size(); i != e; ++i) {
     IncludeStackInfo &ISEntry = IncludeMacroStack[e-i-1];
     if (IsFileLexer(ISEntry)) {
-      if ((CurFileEnt =
-           SourceMgr.getFileEntryForID(ISEntry.ThePPLexer->getFileID()))) {
+      if ((CurFileEnt = ISEntry.ThePPLexer->getFileEntry())) {
         if ((FE = HeaderInfo.LookupSubframeworkHeader(
                 Filename, CurFileEnt, SearchPath, RelativePath,
                 SuggestedModule))) {
           if (SuggestedModule && !LangOpts.AsmPreprocessor)
             HeaderInfo.getModuleMap().diagnoseHeaderInclusion(
-                getModuleForLocation(FilenameLoc), FilenameLoc, Filename, FE);
+                RequestingModule, FilenameLoc, Filename, FE);
           return FE;
         }
       }
@@ -1228,7 +1230,7 @@ void Preprocessor::HandleUserDiagnosticDirective(Token &Tok,
 
   // Find the first non-whitespace character, so that we can make the
   // diagnostic more succinct.
-  StringRef Msg = StringRef(Message).ltrim(" ");
+  StringRef Msg = StringRef(Message).ltrim(' ');
 
   if (isWarning)
     Diag(Tok, diag::pp_hash_warning) << Msg;
@@ -2046,13 +2048,9 @@ static bool isConfigurationPattern(Token &MacroName, MacroInfo *MI,
   }
 
   // #define inline
-  if (MacroName.isOneOf(tok::kw_extern, tok::kw_inline, tok::kw_static,
-                        tok::kw_const) &&
-      MI->getNumTokens() == 0) {
-    return true;
-  }
-
-  return false;
+  return MacroName.isOneOf(tok::kw_extern, tok::kw_inline, tok::kw_static,
+                           tok::kw_const) &&
+         MI->getNumTokens() == 0;
 }
 
 /// HandleDefineDirective - Implements \#define.  This consumes the entire macro

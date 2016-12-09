@@ -103,6 +103,16 @@ public:
   std::error_code read();
 };
 
+/// \brief Checks if the given coverage mapping data is exported for
+/// an unused function.
+class RawCoverageMappingDummyChecker : public RawCoverageReader {
+public:
+  RawCoverageMappingDummyChecker(StringRef MappingData)
+      : RawCoverageReader(MappingData) {}
+
+  ErrorOr<bool> isDummy();
+};
+
 /// \brief Reader for the raw coverage mapping data.
 class RawCoverageMappingReader : public RawCoverageReader {
   ArrayRef<StringRef> TranslationUnitFilenames;
@@ -140,14 +150,14 @@ private:
 class BinaryCoverageReader : public CoverageMappingReader {
 public:
   struct ProfileMappingRecord {
-    CoverageMappingVersion Version;
+    CovMapVersion Version;
     StringRef FunctionName;
     uint64_t FunctionHash;
     StringRef CoverageMapping;
     size_t FilenamesBegin;
     size_t FilenamesSize;
 
-    ProfileMappingRecord(CoverageMappingVersion Version, StringRef FunctionName,
+    ProfileMappingRecord(CovMapVersion Version, StringRef FunctionName,
                          uint64_t FunctionHash, StringRef CoverageMapping,
                          size_t FilenamesBegin, size_t FilenamesSize)
         : Version(Version), FunctionName(FunctionName),
@@ -158,6 +168,7 @@ public:
 private:
   std::vector<StringRef> Filenames;
   std::vector<ProfileMappingRecord> MappingRecords;
+  InstrProfSymtab ProfileNames;
   size_t CurrentRecord;
   std::vector<StringRef> FunctionsFilenames;
   std::vector<CounterExpression> Expressions;

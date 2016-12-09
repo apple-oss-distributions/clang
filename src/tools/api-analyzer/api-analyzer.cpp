@@ -111,6 +111,12 @@ int main(int argc, char **argv) {
     outs() << d.first() << "\n";
 
   outs() << "\n--------------------------------------------------\n"
+         << "Internal Globals:\n"
+         << "--------------------------------------------------\n";
+  for (auto &d : result.internalGlobals)
+    outs() << d.first() << "\n";
+
+  outs() << "\n--------------------------------------------------\n"
          << "Asm Symbols:\n"
          << "--------------------------------------------------\n";
   for (auto &d : result.asmSymbols)
@@ -170,7 +176,7 @@ int main(int argc, char **argv) {
          << "Obj-C Category Metadata:\n"
          << "--------------------------------------------------\n";
   for (auto &d : result.objCCategories) {
-    outs() << "*** " << d.second.parentClass << " (" << d.first.second << ") ***\n";
+    outs() << "*** " << d.first.second << " (" << d.first.first << ") ***\n";
     outs() << "Defined Class Methods:\n";
     for (auto &m : d.second.internalClassMethods)
       outs() << "\t" << m << "\n";
@@ -184,6 +190,12 @@ int main(int argc, char **argv) {
     for (auto &m : d.second.externalInstanceMethods)
       outs() << "\t" << m << "\n";
   }
+
+  outs() << "\n--------------------------------------------------\n"
+         << "Obj-C Potentially Defined Selectors:\n"
+         << "--------------------------------------------------\n";
+  for (auto &s : result.potentiallyDefinedSelectors)
+    outs() << "\t" << s.first() << "\n";
 
   return exit_code;
 }

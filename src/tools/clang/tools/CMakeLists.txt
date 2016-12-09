@@ -5,11 +5,9 @@ add_clang_subdirectory(driver)
 add_clang_subdirectory(clang-format)
 add_clang_subdirectory(clang-format-vs)
 add_clang_subdirectory(clang-fuzzer)
-add_clang_subdirectory(scan-build)
-add_clang_subdirectory(scan-view)
 
 add_clang_subdirectory(c-index-test)
-add_clang_subdirectory(libclang)
+add_clang_subdirectory(IndexStore)
 
 if(CLANG_ENABLE_ARCMT)
   add_clang_subdirectory(arcmt-test)
@@ -18,6 +16,8 @@ endif()
 
 if(CLANG_ENABLE_STATIC_ANALYZER)
   add_clang_subdirectory(clang-check)
+  add_clang_subdirectory(scan-build)
+  add_clang_subdirectory(scan-view)
 endif()
 
 # We support checking out the clang-tools-extra repository into the 'extra'
@@ -26,6 +26,14 @@ endif()
 # to keep the primary Clang repository small and focused.
 # It also may be included by LLVM_EXTERNAL_CLANG_TOOLS_EXTRA_SOURCE_DIR.
 add_llvm_external_project(clang-tools-extra extra)
+
+# libclang may require clang-tidy in clang-tools-extra.
+add_clang_subdirectory(libclang)
+
+# Include the clang service (Apple Internal).
+if(APPLE)
+  add_clang_subdirectory(clang-service)
+endif()
 
 # Include TAPI (Apple Internal).
 add_llvm_external_project(tapi)

@@ -12,6 +12,11 @@
 
 #include "sanitizer_platform.h"
 #if SANITIZER_MAC
+#include "sanitizer_common.h"
+#include "sanitizer_mac_spi.h"
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <os/trace.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -45,6 +50,44 @@ bool sandbox_allows_to_perform(const char *operation) {
     return false;
   }
   return true;
+}
+
+struct dynamic_interpose_entry {
+  void *wrapper_function;
+  void *real_function;
+};
+
+const int kMaxDynamicInterposeEntries = 10;
+static
+dynamic_interpose_entry dynamic_interpose_entries[kMaxDynamicInterposeEntries];
+static int dynamic_interpose_entry_count = 0;
+static bool dynamic_interpose_called = false;
+
+void dynamic_interpose_add(void *wrapper, void *real) {
+  CHECK(!dynamic_interpose_called);
+  CHECK_GT(kMaxDynamicInterposeEntries, dynamic_interpose_entry_count);
+  if (!real) return;
+  dynamic_interpose_entries[dynamic_interpose_entry_count] = {wrapper, real};
+  dynamic_interpose_entry_count++;
+}
+
+extern "C" void dyld_dynamic_interpose(const mach_header *mh, void *array,
+                                       size_t count);
+
+static void dynamic_interpose_image_callback(const mach_header *mh,
+                                             intptr_t vmaddr_slide) {
+  if (mh == (mach_header *)&__dso_handle) return;  // Do not interpose ourself.
+
+  dyld_dynamic_interpose(mh, (void *)dynamic_interpose_entries,
+                         dynamic_interpose_entry_count);
+}
+
+void dynamic_interpose() {
+  CHECK(!dynamic_interpose_called);  // Must not be called twice.
+  dynamic_interpose_called = true;
+  if (dynamic_interpose_entry_count > 0) {
+    _dyld_register_func_for_add_image(&dynamic_interpose_image_callback);
+  }
 }
 
 }  // namespace __sanitizer

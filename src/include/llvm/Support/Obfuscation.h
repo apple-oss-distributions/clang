@@ -32,7 +32,10 @@ class Obfuscator {
 
 public:
   Obfuscator()
-      : Alloc(), ForwardMap(64, Alloc) {}
+      : Alloc(), ForwardMap(64, Alloc), IrreveribleForwardMap(32, Alloc) {}
+
+  Obfuscator(const Obfuscator &) = delete;
+  Obfuscator &operator = (const Obfuscator &) = delete;
 
   /// \brief Obfuscate a string, remember in the reverseMap if reverse is true.
   StringRef obfuscate(StringRef Src, bool reverse = false);
@@ -100,8 +103,7 @@ private:
   // Track the mapping, to enforce idempotence under sequential composition
   MapTy ForwardMap;
 
-  Obfuscator(const Obfuscator &) = delete;
-  Obfuscator &operator = (const Obfuscator &) = delete;
+  MapTy IrreveribleForwardMap;
 
   virtual void anchor() = 0;
 };

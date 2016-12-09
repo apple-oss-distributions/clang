@@ -12,6 +12,7 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugArangeSet.h"
+#include "llvm/DebugInfo/DWARF/DWARFUnitIndex.h"
 #include "llvm/Support/Compression.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/Format.h"
@@ -71,7 +72,7 @@ static void dumpAccelSection(raw_ostream &OS, StringRef Name,
   Accel.dump(OS);
 }
 
-void DWARFContext::dump(raw_ostream &OS, DIDumpType DumpType) {
+void DWARFContext::dump(raw_ostream &OS, DIDumpType DumpType, bool DumpEH) {
   if (DumpType == DIDT_All || DumpType == DIDT_Abbrev) {
     OS << ".debug_abbrev contents:\n";
     getDebugAbbrev()->dump(OS);
@@ -124,6 +125,15 @@ void DWARFContext::dump(raw_ostream &OS, DIDumpType DumpType) {
   if (DumpType == DIDT_All || DumpType == DIDT_Frames) {
     OS << "\n.debug_frame contents:\n";
     getDebugFrame()->dump(OS);
+    if (DumpEH) {
+      OS << "\n.eh_frame contents:\n";
+      getEHFrame()->dump(OS);
+    }
+  }
+
+  if (DumpType == DIDT_All || DumpType == DIDT_Macro) {
+    OS << "\n.debug_macinfo contents:\n";
+    getDebugMacro()->dump(OS);
   }
 
   uint32_t offset = 0;
@@ -153,6 +163,16 @@ void DWARFContext::dump(raw_ostream &OS, DIDumpType DumpType) {
         LineTable.dump(OS);
       }
     }
+  }
+
+  if (DumpType == DIDT_All || DumpType == DIDT_CUIndex) {
+    OS << "\n.debug_cu_index contents:\n";
+    getCUIndex().dump(OS);
+  }
+
+  if (DumpType == DIDT_All || DumpType == DIDT_TUIndex) {
+    OS << "\n.debug_tu_index contents:\n";
+    getTUIndex().dump(OS);
   }
 
   if (DumpType == DIDT_All || DumpType == DIDT_LineDwo) {
@@ -254,6 +274,28 @@ void DWARFContext::dump(raw_ostream &OS, DIDumpType DumpType) {
                      getStringSection(), isLittleEndian());
 }
 
+const DWARFUnitIndex &DWARFContext::getCUIndex() {
+  if (CUIndex)
+    return *CUIndex;
+
+  DataExtractor CUIndexData(getCUIndexSection(), isLittleEndian(), 0);
+
+  CUIndex = llvm::make_unique<DWARFUnitIndex>(DW_SECT_INFO);
+  CUIndex->parse(CUIndexData);
+  return *CUIndex;
+}
+
+const DWARFUnitIndex &DWARFContext::getTUIndex() {
+  if (TUIndex)
+    return *TUIndex;
+
+  DataExtractor TUIndexData(getTUIndexSection(), isLittleEndian(), 0);
+
+  TUIndex = llvm::make_unique<DWARFUnitIndex>(DW_SECT_TYPES);
+  TUIndex->parse(TUIndexData);
+  return *TUIndex;
+}
+
 const DWARFDebugAbbrev *DWARFContext::getDebugAbbrev() {
   if (Abbrev)
     return Abbrev.get();
@@ -321,29 +363,53 @@ const DWARFDebugFrame *DWARFContext::getDebugFrame() {
   // http://lists.dwarfstd.org/htdig.cgi/dwarf-discuss-dwarfstd.org/2011-December/001173.html
   DataExtractor debugFrameData(getDebugFrameSection(), isLittleEndian(),
                                getAddressSize());
-  DebugFrame.reset(new DWARFDebugFrame());
+  DebugFrame.reset(new DWARFDebugFrame(false /* IsEH */));
   DebugFrame->parse(debugFrameData);
   return DebugFrame.get();
+}
+
+const DWARFDebugFrame *DWARFContext::getEHFrame() {
+  if (EHFrame)
+    return EHFrame.get();
+
+  DataExtractor debugFrameData(getEHFrameSection(), isLittleEndian(),
+                               getAddressSize());
+  DebugFrame.reset(new DWARFDebugFrame(true /* IsEH */));
+  DebugFrame->parse(debugFrameData);
+  return DebugFrame.get();
+}
+
+const DWARFDebugMacro *DWARFContext::getDebugMacro() {
+  if (Macro)
+    return Macro.get();
+
+  DataExtractor MacinfoData(getMacinfoSection(), isLittleEndian(), 0);
+  Macro.reset(new DWARFDebugMacro());
+  Macro->parse(MacinfoData);
+  return Macro.get();
 }
 
 const DWARFLineTable *
 DWARFContext::getLineTableForUnit(DWARFUnit *U) {
   if (!Line)
     Line.reset(new DWARFDebugLine(&getLineSection().Relocs));
+
   const auto *UnitDIE = U->getUnitDIE();
   if (UnitDIE == nullptr)
     return nullptr;
+
   unsigned stmtOffset =
       UnitDIE->getAttributeValueAsSectionOffset(U, DW_AT_stmt_list, -1U);
   if (stmtOffset == -1U)
     return nullptr; // No line table for this compile unit.
 
+  stmtOffset += U->getLineTableOffset();
   // See if the line table is cached.
   if (const DWARFLineTable *lt = Line->getLineTable(stmtOffset))
     return lt;
 
   // We have to parse it first.
-  DataExtractor lineData(getLineSection().Data, isLittleEndian(),
+  DataExtractor lineData(U->getLineSection(), isLittleEndian(),
                          U->getAddressByteSize());
   return Line->getOrParseLineTable(lineData, stmtOffset);
 }
@@ -594,8 +660,10 @@ DWARFContextInMemory::DWARFContextInMemory(const object::ObjectFile &Obj,
             .Case("debug_line", &LineSection.Data)
             .Case("debug_aranges", &ARangeSection)
             .Case("debug_frame", &DebugFrameSection)
+            .Case("eh_frame", &EHFrameSection)
             .Case("debug_str", &StringSection)
             .Case("debug_ranges", &RangeSection)
+            .Case("debug_macinfo", &MacinfoSection)
             .Case("debug_pubnames", &PubNamesSection)
             .Case("debug_pubtypes", &PubTypesSection)
             .Case("debug_gnu_pubnames", &GnuPubNamesSection)
@@ -613,6 +681,8 @@ DWARFContextInMemory::DWARFContextInMemory(const object::ObjectFile &Obj,
             .Case("apple_namespaces", &AppleNamespacesSection.Data)
             .Case("apple_namespac", &AppleNamespacesSection.Data)
             .Case("apple_objc", &AppleObjCSection.Data)
+            .Case("debug_cu_index", &CUIndexSection)
+            .Case("debug_tu_index", &TUIndexSection)
             // Any more debug info sections go here.
             .Default(nullptr);
     if (SectionData) {
@@ -647,7 +717,7 @@ DWARFContextInMemory::DWARFContextInMemory(const object::ObjectFile &Obj,
     // relocation point already factors in the section address
     // (actually applying the relocations will produce wrong results
     // as the section address will be added twice).
-    if (!L && dyn_cast<MachOObjectFile>(&Obj))
+    if (!L && isa<MachOObjectFile>(&Obj))
       continue;
 
     RelSecName = RelSecName.substr(

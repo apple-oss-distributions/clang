@@ -23,10 +23,10 @@
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCTargetAsmParser.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -209,23 +209,27 @@ ExprResult Parser::ParseMSAsmIdentifier(llvm::SmallVectorImpl<Token> &LineToks,
   // Parse an optional scope-specifier if we're in C++.
   CXXScopeSpec SS;
   if (getLangOpts().CPlusPlus) {
-    ParseOptionalCXXScopeSpecifier(SS, ParsedType(), /*EnteringContext=*/false);
+    ParseOptionalCXXScopeSpecifier(SS, nullptr, /*EnteringContext=*/false);
   }
 
   // Require an identifier here.
   SourceLocation TemplateKWLoc;
   UnqualifiedId Id;
-  bool Invalid =
-      ParseUnqualifiedId(SS,
-                         /*EnteringContext=*/false,
-                         /*AllowDestructorName=*/false,
-                         /*AllowConstructorName=*/false,
-                         /*ObjectType=*/ParsedType(), TemplateKWLoc, Id);
-
-  // Perform the lookup.
-  ExprResult Result = Actions.LookupInlineAsmIdentifier(
-      SS, TemplateKWLoc, Id, Info, IsUnevaluatedContext);
-
+  bool Invalid = true;
+  ExprResult Result;
+  if (Tok.is(tok::kw_this)) {
+    Result = ParseCXXThis();
+    Invalid = false;
+  } else {
+    Invalid = ParseUnqualifiedId(SS,
+                                 /*EnteringContext=*/false,
+                                 /*AllowDestructorName=*/false,
+                                 /*AllowConstructorName=*/false,
+                                 /*ObjectType=*/nullptr, TemplateKWLoc, Id);
+    // Perform the lookup.
+    Result = Actions.LookupInlineAsmIdentifier(SS, TemplateKWLoc, Id, Info,
+                                               IsUnevaluatedContext);
+  }
   // While the next two tokens are 'period' 'identifier', repeatedly parse it as
   // a field access. We have to avoid consuming assembler directives that look
   // like '.' 'else'.
@@ -236,9 +240,8 @@ ExprResult Parser::ParseMSAsmIdentifier(llvm::SmallVectorImpl<Token> &LineToks,
     ConsumeToken(); // Consume the period.
     IdentifierInfo *Id = Tok.getIdentifierInfo();
     ConsumeToken(); // Consume the identifier.
-    unsigned OffsetUnused;
-    Result = Actions.LookupInlineAsmVarDeclField(
-        Result.get(), Id->getName(), OffsetUnused, Info, Tok.getLocation());
+    Result = Actions.LookupInlineAsmVarDeclField(Result.get(), Id->getName(),
+                                                 Info, Tok.getLocation());
   }
 
   // Figure out how many tokens we are into LineToks.
@@ -421,6 +424,10 @@ StmtResult Parser::ParseMicrosoftAsmStatement(SourceLocation AsmLoc) {
         // We're no longer in a comment.
         InAsmComment = false;
         if (isAsm) {
+          // If this is a new __asm {} block we want to process it seperately
+          // from the single-line __asm statements
+          if (PP.LookAhead(0).is(tok::l_brace))
+            break;
           LineNo = SrcMgr.getLineNumber(ExpLoc.first, ExpLoc.second);
           SkippedStartOfLine = Tok.isAtStartOfLine();
         }

@@ -30,6 +30,7 @@
 		96D2573B14FF3E24005DCB16 /* typeinfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F92E43FB1411A4EF001B9B73 /* typeinfo.cpp */; };
 		96D2573C14FF3E24005DCB16 /* utility.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F92E43FC1411A4EF001B9B73 /* utility.cpp */; };
 		96D2573D14FF3E24005DCB16 /* valarray.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F92E43FD1411A4EF001B9B73 /* valarray.cpp */; };
+		9C6909271C5AEC5B007DF294 /* shared_mutex.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 9C6909261C5AEC5B007DF294 /* shared_mutex.cpp */; };
 		F92E43FE1411A4EF001B9B73 /* algorithm.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F92E43E71411A4EF001B9B73 /* algorithm.cpp */; };
 		F92E43FF1411A4EF001B9B73 /* bind.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F92E43E81411A4EF001B9B73 /* bind.cpp */; };
 		F92E44001411A4EF001B9B73 /* chrono.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F92E43E91411A4EF001B9B73 /* chrono.cpp */; };
@@ -63,6 +64,7 @@
 			isEditable = 1;
 			outputFiles = (
 			);
+			script = "";
 		};
 		F92E44A41411A7E4001B9B73 /* PBXBuildRule */ = {
 			isa = PBXBuildRule;
@@ -71,6 +73,7 @@
 			isEditable = 1;
 			outputFiles = (
 			);
+			script = "";
 		};
 /* End PBXBuildRule section */
 
@@ -87,6 +90,7 @@
 /* Begin PBXFileReference section */
 		4A9F64D3187F3BA5008CBB55 /* libcxx.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = libcxx.xcconfig; sourceTree = "<group>"; };
 		96D2574414FF3E24005DCB16 /* libc++.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libc++.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		9C6909261C5AEC5B007DF294 /* shared_mutex.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = shared_mutex.cpp; sourceTree = "<group>"; };
 		D2AAC0630554660B00DB518D /* libc++.1.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = "libc++.1.dylib"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F92E43E71411A4EF001B9B73 /* algorithm.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = algorithm.cpp; sourceTree = "<group>"; };
 		F92E43E81411A4EF001B9B73 /* bind.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = bind.cpp; sourceTree = "<group>"; };
@@ -260,6 +264,7 @@
 		F92E43E61411A4EF001B9B73 /* src */ = {
 			isa = PBXGroup;
 			children = (
+				9C6909261C5AEC5B007DF294 /* shared_mutex.cpp */,
 				F92E43E71411A4EF001B9B73 /* algorithm.cpp */,
 				F92E43E81411A4EF001B9B73 /* bind.cpp */,
 				F92E43E91411A4EF001B9B73 /* chrono.cpp */,
@@ -478,7 +483,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 1;
 			shellPath = /bin/sh;
-			shellScript = "# install symlink to unversioned dylib\nmkdir -p  ${DSTROOT}/${INSTALL_PATH_PREFIX}/usr/lib\ncd ${DSTROOT}${INSTALL_PATH_PREFIX}/usr/lib\nln -s libc++.1.dylib libc++.dylib\n";
+			shellScript = "[ \"${ACTION}\" = \"installhdrs\" ] && exit 0\n# install symlink to unversioned dylib\nmkdir -p  ${DSTROOT}/${INSTALL_PATH_PREFIX}/usr/lib\ncd ${DSTROOT}${INSTALL_PATH_PREFIX}/usr/lib\nln -s libc++.1.dylib libc++.dylib\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -536,6 +541,7 @@
 				F92E440D1411A4EF001B9B73 /* stdexcept.cpp in Sources */,
 				F92E440E1411A4EF001B9B73 /* string.cpp in Sources */,
 				F92E440F1411A4EF001B9B73 /* strstream.cpp in Sources */,
+				9C6909271C5AEC5B007DF294 /* shared_mutex.cpp in Sources */,
 				F92E44101411A4EF001B9B73 /* system_error.cpp in Sources */,
 				F92E44111411A4EF001B9B73 /* thread.cpp in Sources */,
 				F92E44121411A4EF001B9B73 /* typeinfo.cpp in Sources */,
@@ -563,25 +569,43 @@
 				EXECUTABLE_PREFIX = "";
 				GCC_INLINES_ARE_PRIVATE_EXTERN = NO;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH_ACTUAL = /usr/lib;
+				INSTALLHDRS_SCRIPT_PHASE = YES;
+				INSTALL_PATH = /usr/lib;
+				LIBCPPABI_EXTRAS_appletvos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_appletvos_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_appletvos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_appletvsimulator_i386 = "-Wl,-reexport-lc++abi";
+				LIBCPPABI_EXTRAS_appletvsimulator_x86_64 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonenanosimulator_i386 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonenanosimulator_x86_64 = "-Wl,-reexport-lc++abi";
-				LIBCPPABI_EXTRAS_iphoneos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_arm7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
+				LIBCPPABI_EXTRAS_iphoneos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_arm7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
 				LIBCPPABI_EXTRAS_iphonesimulator_i386 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonesimulator_x86_64 = "-Wl,-reexport-lc++abi";
-				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				ORDER_FILE = "$(SRCROOT)/data_order.exp";
-				OTHER_CFLAGS = "-mno-global-merge";
+				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchsimulator_i386 = "-Wl,-reexport-lc++abi";
+				LIBCPPABI_EXTRAS_watchsimulator_x86_64 = "-Wl,-reexport-lc++abi";
+				OTHER_CFLAGS = "";
+				"OTHER_CFLAGS[sdk=appletvos*]" = "-mno-global-merge";
+				"OTHER_CFLAGS[sdk=iphoneos*]" = "-mno-global-merge";
+				"OTHER_CFLAGS[sdk=watchos*]" = "-mno-global-merge";
 				OTHER_CPLUSPLUSFLAGS = (
+					"-D_LIBCPP_BUILDING_LIB",
 					"-nostdinc++",
 					"$(OTHER_CFLAGS)",
 				);
@@ -606,25 +630,43 @@
 				EXECUTABLE_PREFIX = "";
 				GCC_INLINES_ARE_PRIVATE_EXTERN = NO;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH_ACTUAL = /usr/lib;
+				INSTALLHDRS_SCRIPT_PHASE = YES;
+				INSTALL_PATH = /usr/lib;
+				LIBCPPABI_EXTRAS_appletvos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_appletvos_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_appletvos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_appletvsimulator_i386 = "-Wl,-reexport-lc++abi";
+				LIBCPPABI_EXTRAS_appletvsimulator_x86_64 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonenanosimulator_i386 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonenanosimulator_x86_64 = "-Wl,-reexport-lc++abi";
-				LIBCPPABI_EXTRAS_iphoneos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_arm7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneosnano_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
+				LIBCPPABI_EXTRAS_iphoneos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_arm7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneosnano_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
 				LIBCPPABI_EXTRAS_iphonesimulator_i386 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonesimulator_x86_64 = "-Wl,-reexport-lc++abi";
-				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				ORDER_FILE = "$(SRCROOT)/data_order.exp";
-				OTHER_CFLAGS = "-mno-global-merge";
+				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_arm64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_arm64_32 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchsimulator_i386 = "-Wl,-reexport-lc++abi";
+				LIBCPPABI_EXTRAS_watchsimulator_x86_64 = "-Wl,-reexport-lc++abi";
+				OTHER_CFLAGS = "";
+				"OTHER_CFLAGS[sdk=appletvos*]" = "-mno-global-merge";
+				"OTHER_CFLAGS[sdk=iphoneos*]" = "-mno-global-merge";
+				"OTHER_CFLAGS[sdk=watchos*]" = "-mno-global-merge";
 				OTHER_CPLUSPLUSFLAGS = (
+					"-D_LIBCPP_BUILDING_LIB",
 					"-nostdinc++",
 					"$(OTHER_CFLAGS)",
 				);
@@ -636,6 +678,33 @@
 					"-Wl,-force_symbols_not_weak_list,$(SRCROOT)/lib/notweak.exp",
 					"-Wl,-force_symbols_weak_list,$(SRCROOT)/lib/weak.exp",
 					"-Wl,-sectalign,__DATA,__data,0x1000",
+				);
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"-nodefaultlibs",
+					"$(LIBCPPABI_EXTRAS_$(PLATFORM_NAME)_$(CURRENT_ARCH))",
+					"-lSystem",
+					"-Wl,-unexported_symbols_list,$(SRCROOT)/lib/libc++unexp.exp",
+					"-Wl,-force_symbols_not_weak_list,$(SRCROOT)/lib/notweak.exp",
+					"-Wl,-force_symbols_weak_list,$(SRCROOT)/lib/weak.exp",
+					"-Wl,-dirty_data_list,$(SRCROOT)/data_symbols.dirty",
+				);
+				"OTHER_LDFLAGS[sdk=macosx*]" = (
+					"-nodefaultlibs",
+					"$(LIBCPPABI_EXTRAS_$(PLATFORM_NAME)_$(CURRENT_ARCH))",
+					"-lSystem",
+					"-Wl,-unexported_symbols_list,$(SRCROOT)/lib/libc++unexp.exp",
+					"-Wl,-force_symbols_not_weak_list,$(SRCROOT)/lib/notweak.exp",
+					"-Wl,-force_symbols_weak_list,$(SRCROOT)/lib/weak.exp",
+					"-Wl,-sectalign,__DATA,__data,0x1000",
+				);
+				"OTHER_LDFLAGS[sdk=watchos*]" = (
+					"-nodefaultlibs",
+					"$(LIBCPPABI_EXTRAS_$(PLATFORM_NAME)_$(CURRENT_ARCH))",
+					"-lSystem",
+					"-Wl,-unexported_symbols_list,$(SRCROOT)/lib/libc++unexp.exp",
+					"-Wl,-force_symbols_not_weak_list,$(SRCROOT)/lib/notweak.exp",
+					"-Wl,-force_symbols_weak_list,$(SRCROOT)/lib/weak.exp",
+					"-Wl,-dirty_data_list,$(SRCROOT)/data_symbols.dirty",
 				);
 				PRODUCT_NAME = "libc++.1";
 			};
@@ -677,15 +746,20 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "c++0x";
 				EXECUTABLE_PREFIX = "";
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH_ACTUAL = /usr/local/lib/eOS;
-				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
+				INSTALL_PATH = /usr/local/lib/eOS;
+				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
 				LIBCPPABI_EXTRAS_iphonesimulator_i386 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonesimulator_x86_64 = "-Wl,-reexport-lc++abi";
-				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
+				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchsimulator_i386 = "-Wl,-reexport-lc++abi";
+				LIBCPPABI_EXTRAS_watchsimulator_x86_64 = "-Wl,-reexport-lc++abi";
 				OTHER_CPLUSPLUSFLAGS = (
 					"-nostdinc++",
 					"$(OTHER_CFLAGS)",
@@ -700,15 +774,20 @@
 				CLANG_CXX_LANGUAGE_STANDARD = "c++0x";
 				EXECUTABLE_PREFIX = "";
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/include/";
-				INSTALL_PATH_ACTUAL = /usr/local/lib/eOS;
-				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
-				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi.exp";
+				INSTALL_PATH = /usr/local/lib/eOS;
+				LIBCPPABI_EXTRAS_iphoneos_armv6 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_iphoneos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
 				LIBCPPABI_EXTRAS_iphonesimulator_i386 = "-Wl,-reexport-lc++abi";
 				LIBCPPABI_EXTRAS_iphonesimulator_x86_64 = "-Wl,-reexport-lc++abi";
-				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
-				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi.exp";
+				LIBCPPABI_EXTRAS_macosx_i386 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_macosx_x86_64 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7 = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7k = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++abi2.exp";
+				LIBCPPABI_EXTRAS_watchos_armv7s = "-lc++abi -Wl,-reexported_symbols_list,$(SRCROOT)/lib/libc++sjlj-abi2.exp";
+				LIBCPPABI_EXTRAS_watchsimulator_i386 = "-Wl,-reexport-lc++abi";
+				LIBCPPABI_EXTRAS_watchsimulator_x86_64 = "-Wl,-reexport-lc++abi";
 				OTHER_CPLUSPLUSFLAGS = (
 					"-nostdinc++",
 					"$(OTHER_CFLAGS)",

@@ -12,6 +12,7 @@ add_llvm_library(LLVMTransformUtils
   CtorUtils.cpp
   DemoteRegToStack.cpp
   FlattenCFG.cpp
+  FunctionImportUtils.cpp
   GlobalStatus.cpp
   InlineFunction.cpp
   InstructionNamer.cpp
@@ -29,8 +30,10 @@ add_llvm_library(LLVMTransformUtils
   MetaRenamer.cpp
   ModuleObfuscator.cpp
   ModuleUtils.cpp
+  NameAnonFunctions.cpp
   PromoteMemoryToRegister.cpp
   SSAUpdater.cpp
+  SanitizerStats.cpp
   SimplifyCFG.cpp
   SimplifyIndVar.cpp
   SimplifyInstructions.cpp

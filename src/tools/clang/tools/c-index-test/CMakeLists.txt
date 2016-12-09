@@ -1,6 +1,20 @@
+set(LLVM_LINK_COMPONENTS
+  support
+)
+
 add_clang_executable(c-index-test
   c-index-test.c
+  core_main.cpp
+  JSONAggregation.cpp
+  service.cpp
   )
+
+set(INDEXSTORE_LIB)
+set(CINDEXTEST_LIBS)
+if(APPLE)
+  set(INDEXSTORE_LIB IndexStore)
+  list(APPEND CINDEXTEST_LIBS clangServiceCore clangServiceSupport)
+endif()
 
 if(NOT MSVC)
   set_property(
@@ -12,10 +26,18 @@ endif()
 if (LLVM_BUILD_STATIC)
   target_link_libraries(c-index-test
     libclang_static
+    clangIndex
+    ${CINDEXTEST_LIBS}
   )
 else()
   target_link_libraries(c-index-test
     libclang
+    ${INDEXSTORE_LIB}
+    clangAST
+    clangBasic
+    clangFrontend
+    clangIndex
+    ${CINDEXTEST_LIBS}
   )
 endif()
 
@@ -32,6 +54,8 @@ endif()
 if (NOT LLVM_INSTALL_TOOLCHAIN_ONLY)
   if(INTERNAL_INSTALL_PREFIX)
     set(INSTALL_DESTINATION "${INTERNAL_INSTALL_PREFIX}/bin")
+    set_property(TARGET c-index-test APPEND PROPERTY INSTALL_RPATH
+       "@executable_path/../../lib")
   else()
     set(INSTALL_DESTINATION bin)
   endif()

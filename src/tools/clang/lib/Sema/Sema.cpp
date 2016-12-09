@@ -77,7 +77,8 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
     isMultiplexExternalSource(false), FPFeatures(pp.getLangOpts()),
     LangOpts(pp.getLangOpts()), PP(pp), Context(ctxt), Consumer(consumer),
     Diags(PP.getDiagnostics()), SourceMgr(PP.getSourceManager()),
-    APINotes(SourceMgr), CollectStats(false), CodeCompleter(CodeCompleter),
+    APINotes(SourceMgr, LangOpts), CollectStats(false),
+    CodeCompleter(CodeCompleter),
     CurContext(nullptr), OriginalLexicalContext(nullptr),
     PackContext(nullptr), MSStructPragmaOn(false),
     MSPointerToMemberRepresentationMethod(
@@ -120,8 +121,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
     FieldCollector.reset(new CXXFieldCollector());
 
   // Tell diagnostics how to render things from the AST library.
-  PP.getDiagnostics().SetArgToStringFn(&FormatASTNodeDiagnosticArgument,
-                                       &Context);
+  Diags.SetArgToStringFn(&FormatASTNodeDiagnosticArgument, &Context);
 
   ExprEvalContexts.emplace_back(PotentiallyEvaluated, 0, false, nullptr, false);
 
@@ -168,7 +168,7 @@ void Sema::Initialize() {
 
 
   // Initialize predefined Objective-C types:
-  if (PP.getLangOpts().ObjC1) {
+  if (getLangOpts().ObjC1) {
     // If 'SEL' does not yet refer to any declarations, make it refer to the
     // predefined 'SEL'.
     DeclarationName SEL = &Context.Idents.get("SEL");
@@ -198,8 +198,8 @@ void Sema::Initialize() {
     PushOnScopeChains(Context.getCFConstantStringDecl(), TUScope);
 
   // Initialize Microsoft "predefined C++ types".
-  if (PP.getLangOpts().MSVCCompat) {
-    if (PP.getLangOpts().CPlusPlus &&
+  if (getLangOpts().MSVCCompat) {
+    if (getLangOpts().CPlusPlus &&
         IdResolver.begin(&Context.Idents.get("type_info")) == IdResolver.end())
       PushOnScopeChains(Context.buildImplicitRecord("type_info", TTK_Class),
                         TUScope);
@@ -208,7 +208,7 @@ void Sema::Initialize() {
   }
 
   // Initialize predefined OpenCL types.
-  if (PP.getLangOpts().OpenCL) {
+  if (getLangOpts().OpenCL) {
     addImplicitTypedef("image1d_t", Context.OCLImage1dTy);
     addImplicitTypedef("image1d_array_t", Context.OCLImage1dArrayTy);
     addImplicitTypedef("image1d_buffer_t", Context.OCLImage1dBufferTy);
@@ -254,7 +254,7 @@ void Sema::Initialize() {
     }
   }
 
-  if (PP.getTargetInfo().hasBuiltinMSVaList()) {
+  if (Context.getTargetInfo().hasBuiltinMSVaList()) {
     DeclarationName MSVaList = &Context.Idents.get("__builtin_ms_va_list");
     if (IdResolver.begin(MSVaList) == IdResolver.end())
       PushOnScopeChains(Context.getBuiltinMSVaListDecl(), TUScope);
@@ -355,6 +355,20 @@ void Sema::PrintStats() const {
   AnalysisWarnings.PrintStats();
 }
 
+void Sema::diagnoseNullableToNonnullConversion(QualType DstType,
+                                               QualType SrcType,
+                                               SourceLocation Loc) {
+  Optional<NullabilityKind> ExprNullability = SrcType->getNullability(Context);
+  if (!ExprNullability || *ExprNullability != NullabilityKind::Nullable)
+    return;
+
+  Optional<NullabilityKind> TypeNullability = DstType->getNullability(Context);
+  if (!TypeNullability || *TypeNullability != NullabilityKind::NonNull)
+    return;
+
+  Diag(Loc, diag::warn_nullability_lost) << SrcType << DstType;
+}
+
 /// ImpCastExprToType - If Expr is not of type 'Type', insert an implicit cast.
 /// If there is already an implicit cast, merge into the existing one.
 /// The result is of the given category.
@@ -378,18 +392,7 @@ ExprResult Sema::ImpCastExprToType(Expr *E, QualType Ty,
   assert((VK == VK_RValue || !E->isRValue()) && "can't cast rvalue to lvalue");
 #endif
 
-  // Check whether we're implicitly casting from a nullable type to a nonnull
-  // type.
-  if (auto exprNullability = E->getType()->getNullability(Context)) {
-    if (*exprNullability == NullabilityKind::Nullable) {
-      if (auto typeNullability = Ty->getNullability(Context)) {
-        if (*typeNullability == NullabilityKind::NonNull) {
-          Diag(E->getLocStart(), diag::warn_nullability_lost)
-            << E->getType() << Ty;
-        }
-      }
-    }
-  }
+  diagnoseNullableToNonnullConversion(Ty, E->getType(), E->getLocStart());
 
   QualType ExprTy = Context.getCanonicalType(E->getType());
   QualType TypeTy = Context.getCanonicalType(Ty);
@@ -476,10 +479,8 @@ static bool ShouldRemoveFromUnused(Sema *SemaRef, const DeclaratorDecl *D) {
 /// Obtains a sorted list of functions that are undefined but ODR-used.
 void Sema::getUndefinedButUsed(
     SmallVectorImpl<std::pair<NamedDecl *, SourceLocation> > &Undefined) {
-  for (llvm::DenseMap<NamedDecl *, SourceLocation>::iterator
-         I = UndefinedButUsed.begin(), E = UndefinedButUsed.end();
-       I != E; ++I) {
-    NamedDecl *ND = I->first;
+  for (const auto &UndefinedUse : UndefinedButUsed) {
+    NamedDecl *ND = UndefinedUse.first;
 
     // Ignore attributes that have become invalid.
     if (ND->isInvalidDecl()) continue;
@@ -500,24 +501,8 @@ void Sema::getUndefinedButUsed(
         continue;
     }
 
-    Undefined.push_back(std::make_pair(ND, I->second));
+    Undefined.push_back(std::make_pair(ND, UndefinedUse.second));
   }
-
-  // Sort (in order of use site) so that we're not dependent on the iteration
-  // order through an llvm::DenseMap.
-  SourceManager &SM = Context.getSourceManager();
-  std::sort(Undefined.begin(), Undefined.end(),
-            [&SM](const std::pair<NamedDecl *, SourceLocation> &l,
-                  const std::pair<NamedDecl *, SourceLocation> &r) {
-    if (l.second.isValid() && !r.second.isValid())
-      return true;
-    if (!l.second.isValid() && r.second.isValid())
-      return false;
-    if (l.second != r.second)
-      return SM.isBeforeInTranslationUnit(l.second, r.second);
-    return SM.isBeforeInTranslationUnit(l.first->getLocation(),
-                                        r.first->getLocation());
-  });
 }
 
 /// checkUndefinedButUsed - Check for undefined objects with internal linkage
@@ -552,6 +537,8 @@ static void checkUndefinedButUsed(Sema &S) {
     if (I->second.isValid())
       S.Diag(I->second, diag::note_used_here);
   }
+
+  S.UndefinedButUsed.clear();
 }
 
 void Sema::LoadExternalWeakUndeclaredIdentifiers() {
@@ -747,6 +734,12 @@ void Sema::ActOnEndOfTranslationUnit() {
       !Diags.isIgnored(diag::warn_delegating_ctor_cycle, SourceLocation()))
     CheckDelegatingCtorCycles();
 
+  if (!Diags.hasErrorOccurred()) {
+    if (ExternalSource)
+      ExternalSource->ReadUndefinedButUsed(UndefinedButUsed);
+    checkUndefinedButUsed(*this);
+  }
+
   if (TUKind == TU_Module) {
     // If we are building a module, resolve all of the exported declarations
     // now.
@@ -879,10 +872,6 @@ void Sema::ActOnEndOfTranslationUnit() {
         }
       }
     }
-
-    if (ExternalSource)
-      ExternalSource->ReadUndefinedButUsed(UndefinedButUsed);
-    checkUndefinedButUsed(*this);
 
     emitAndClearUnusedLocalTypedefWarnings();
   }
@@ -1263,14 +1252,14 @@ void Sema::ActOnComment(SourceRange Comment) {
 ExternalSemaSource::~ExternalSemaSource() {}
 
 void ExternalSemaSource::ReadMethodPool(Selector Sel) { }
+void ExternalSemaSource::updateOutOfDateSelector(Selector Sel) { }
 
 void ExternalSemaSource::ReadKnownNamespaces(
                            SmallVectorImpl<NamespaceDecl *> &Namespaces) {
 }
 
 void ExternalSemaSource::ReadUndefinedButUsed(
-                       llvm::DenseMap<NamedDecl *, SourceLocation> &Undefined) {
-}
+    llvm::MapVector<NamedDecl *, SourceLocation> &Undefined) {}
 
 void ExternalSemaSource::ReadMismatchingDeleteExpressions(llvm::MapVector<
     FieldDecl *, llvm::SmallVector<std::pair<SourceLocation, bool>, 4>> &) {}
@@ -1474,7 +1463,7 @@ bool Sema::tryToRecoverWithCall(ExprResult &E, const PartialDiagnostic &PD,
     // arguments and that it returns something of a reasonable type,
     // so we can emit a fixit and carry on pretending that E was
     // actually a CallExpr.
-    SourceLocation ParenInsertionLoc = PP.getLocForEndOfToken(Range.getEnd());
+    SourceLocation ParenInsertionLoc = getLocForEndOfToken(Range.getEnd());
     Diag(Loc, PD)
       << /*zero-arg*/ 1 << Range
       << (IsCallableWithAppend(E.get())

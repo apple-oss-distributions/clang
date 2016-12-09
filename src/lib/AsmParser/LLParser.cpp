@@ -27,6 +27,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/ValueSymbolTable.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SaveAndRestore.h"
@@ -44,6 +45,11 @@ static std::string getTypeString(Type *T) {
 bool LLParser::Run() {
   // Prime the lexer.
   Lex.Lex();
+
+  if (Context.discardValueNames())
+    return Error(
+        Lex.getLoc(),
+        "Can't read textual IR with a Context that discards named Values");
 
   return ParseTopLevelEntities() ||
          ValidateEndOfModule();
@@ -78,9 +84,6 @@ void LLParser::restoreParsingState(const SlotMapping *Slots) {
 /// ValidateEndOfModule - Do final validity and sanity checks at the end of the
 /// module.
 bool LLParser::ValidateEndOfModule() {
-  for (unsigned I = 0, E = InstsWithTBAATag.size(); I < E; I++)
-    UpgradeInstWithTBAATag(InstsWithTBAATag[I]);
-
   // Handle any function attribute group forward references.
   for (std::map<Value*, std::vector<unsigned> >::iterator
          I = ForwardRefAttrGroups.begin(), E = ForwardRefAttrGroups.end();
@@ -183,11 +186,16 @@ bool LLParser::ValidateEndOfModule() {
       N.second->resolveCycles();
   }
 
+  for (unsigned I = 0, E = InstsWithTBAATag.size(); I < E; I++)
+    UpgradeInstWithTBAATag(InstsWithTBAATag[I]);
+
   // Look for intrinsic functions and CallInst that need to be upgraded
   for (Module::iterator FI = M->begin(), FE = M->end(); FI != FE; )
     UpgradeCallsToIntrinsic(&*FI++); // must be post-increment, as we remove
 
   UpgradeDebugInfo(*M);
+
+  UpgradeModuleFlags(*M);
 
   if (!Slots)
     return false;
@@ -217,6 +225,10 @@ bool LLParser::ParseTopLevelEntities() {
     case lltok::kw_define:  if (ParseDefine()) return true; break;
     case lltok::kw_module:  if (ParseModuleAsm()) return true; break;
     case lltok::kw_target:  if (ParseTargetDefinition()) return true; break;
+    case lltok::kw_source_filename:
+      if (ParseSourceFileName())
+        return true;
+      break;
     case lltok::kw_deplibs: if (ParseDepLibs()) return true; break;
     case lltok::LocalVarID: if (ParseUnnamedType()) return true; break;
     case lltok::LocalVar:   if (ParseNamedType()) return true; break;
@@ -311,6 +323,19 @@ bool LLParser::ParseTargetDefinition() {
     M->setDataLayout(Str);
     return false;
   }
+}
+
+/// toplevelentity
+///   ::= 'source_filename' '=' STRINGCONSTANT
+bool LLParser::ParseSourceFileName() {
+  assert(Lex.getKind() == lltok::kw_source_filename);
+  std::string Str;
+  Lex.Lex();
+  if (ParseToken(lltok::equal, "expected '=' after source_filename") ||
+      ParseStringConstant(Str))
+    return true;
+  M->setSourceFileName(Str);
+  return false;
 }
 
 /// toplevelentity
@@ -553,7 +578,6 @@ bool LLParser::parseComdat() {
 bool LLParser::ParseMDString(MDString *&Result) {
   std::string Str;
   if (ParseStringConstant(Str)) return true;
-  llvm::UpgradeMDStringConstant(Str);
   Result = MDString::get(Context, Str);
   return false;
 }
@@ -562,6 +586,7 @@ bool LLParser::ParseMDString(MDString *&Result) {
 //   ::= '!' MDNodeNumber
 bool LLParser::ParseMDNodeID(MDNode *&Result) {
   // !{ ..., !42, ... }
+  LocTy IDLoc = Lex.getLoc();
   unsigned MID = 0;
   if (ParseUInt32(MID))
     return true;
@@ -574,7 +599,7 @@ bool LLParser::ParseMDNodeID(MDNode *&Result) {
 
   // Otherwise, create MDNode forward reference.
   auto &FwdRef = ForwardRefMDNodes[MID];
-  FwdRef = std::make_pair(MDTuple::getTemporary(Context, None), Lex.getLoc());
+  FwdRef = std::make_pair(MDTuple::getTemporary(Context, None), IDLoc);
 
   Result = FwdRef.first.get();
   NumberedMetadata[MID].reset(Result);
@@ -713,6 +738,24 @@ bool LLParser::ParseAlias(const std::string &Name, LocTy NameLoc, unsigned L,
         ExplicitTypeLoc,
         "explicit pointee type doesn't match operand's pointee type");
 
+  GlobalValue *GVal = nullptr;
+
+  // See if the alias was forward referenced, if so, prepare to replace the
+  // forward reference.
+  if (!Name.empty()) {
+    GVal = M->getNamedValue(Name);
+    if (GVal) {
+      if (!ForwardRefVals.erase(Name))
+        return Error(NameLoc, "redefinition of global '@" + Name + "'");
+    }
+  } else {
+    auto I = ForwardRefValIDs.find(NumberedVals.size());
+    if (I != ForwardRefValIDs.end()) {
+      GVal = I->second.first;
+      ForwardRefValIDs.erase(I);
+    }
+  }
+
   // Okay, create the alias but do not insert it into the module yet.
   std::unique_ptr<GlobalAlias> GA(
       GlobalAlias::create(Ty, AddrSpace, (GlobalValue::LinkageTypes)Linkage,
@@ -725,26 +768,17 @@ bool LLParser::ParseAlias(const std::string &Name, LocTy NameLoc, unsigned L,
   if (Name.empty())
     NumberedVals.push_back(GA.get());
 
-  // See if this value already exists in the symbol table.  If so, it is either
-  // a redefinition or a definition of a forward reference.
-  if (GlobalValue *Val = M->getNamedValue(Name)) {
-    // See if this was a redefinition.  If so, there is no entry in
-    // ForwardRefVals.
-    auto I = ForwardRefVals.find(Name);
-    if (I == ForwardRefVals.end())
-      return Error(NameLoc, "redefinition of global named '@" + Name + "'");
-
-    // Otherwise, this was a definition of forward ref.  Verify that types
-    // agree.
-    if (Val->getType() != GA->getType())
-      return Error(NameLoc,
-              "forward reference and definition of alias have different types");
+  if (GVal) {
+    // Verify that types agree.
+    if (GVal->getType() != GA->getType())
+      return Error(
+          ExplicitTypeLoc,
+          "forward reference and definition of alias have different types");
 
     // If they agree, just RAUW the old value with the alias and remove the
     // forward ref info.
-    Val->replaceAllUsesWith(GA.get());
-    Val->eraseFromParent();
-    ForwardRefVals.erase(I);
+    GVal->replaceAllUsesWith(GA.get());
+    GVal->eraseFromParent();
   }
 
   // Insert into the module, we know its name won't collide now.
@@ -809,7 +843,7 @@ bool LLParser::ParseGlobal(const std::string &Name, LocTy NameLoc,
   if (!Name.empty()) {
     GVal = M->getNamedValue(Name);
     if (GVal) {
-      if (!ForwardRefVals.erase(Name) || !isa<GlobalValue>(GVal))
+      if (!ForwardRefVals.erase(Name))
         return Error(NameLoc, "redefinition of global '@" + Name + "'");
     }
   } else {
@@ -986,6 +1020,10 @@ bool LLParser::ParseFnAttributeValuePairs(AttrBuilder &B,
     case lltok::kw_builtin: B.addAttribute(Attribute::Builtin); break;
     case lltok::kw_cold: B.addAttribute(Attribute::Cold); break;
     case lltok::kw_convergent: B.addAttribute(Attribute::Convergent); break;
+    case lltok::kw_inaccessiblememonly:
+      B.addAttribute(Attribute::InaccessibleMemOnly); break;
+    case lltok::kw_inaccessiblemem_or_argmemonly:
+      B.addAttribute(Attribute::InaccessibleMemOrArgMemOnly); break;
     case lltok::kw_inlinehint: B.addAttribute(Attribute::InlineHint); break;
     case lltok::kw_jumptable: B.addAttribute(Attribute::JumpTable); break;
     case lltok::kw_minsize: B.addAttribute(Attribute::MinSize); break;
@@ -1540,8 +1578,10 @@ bool LLParser::ParseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'preserve_allcc'
 ///   ::= 'ghccc'
 ///   ::= 'swiftcc'
+///   ::= 'x86_intrcc'
 ///   ::= 'hhvmcc'
 ///   ::= 'hhvm_ccc'
+///   ::= 'cxx_fast_tlscc'
 ///   ::= 'cc' UINT
 ///
 bool LLParser::ParseOptionalCallingConv(unsigned &CC) {
@@ -1571,8 +1611,10 @@ bool LLParser::ParseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_preserve_allcc: CC = CallingConv::PreserveAll; break;
   case lltok::kw_ghccc:          CC = CallingConv::GHC; break;
   case lltok::kw_swiftcc:        CC = CallingConv::Swift; break;
+  case lltok::kw_x86_intrcc:     CC = CallingConv::X86_INTR; break;
   case lltok::kw_hhvmcc:         CC = CallingConv::HHVM; break;
   case lltok::kw_hhvm_ccc:       CC = CallingConv::HHVM_C; break;
+  case lltok::kw_cxx_fast_tlscc: CC = CallingConv::CXX_FAST_TLS; break;
   case lltok::kw_cc: {
       Lex.Lex();
       return ParseUInt32(CC);
@@ -1980,17 +2022,13 @@ bool LLParser::ParseOptionalOperandBundles(
     if (ParseStringConstant(Tag))
       return true;
 
-    BundleList.emplace_back();
-    auto &OBI = BundleList.back();
-
-    OBI.Tag = std::move(Tag);
-
     if (ParseToken(lltok::lparen, "expected '(' in operand bundle"))
       return true;
 
+    std::vector<Value *> Inputs;
     while (Lex.getKind() != lltok::rparen) {
       // If this isn't the first input, we need a comma.
-      if (!OBI.Inputs.empty() &&
+      if (!Inputs.empty() &&
           ParseToken(lltok::comma, "expected ',' in input list"))
         return true;
 
@@ -1998,8 +2036,10 @@ bool LLParser::ParseOptionalOperandBundles(
       Value *Input = nullptr;
       if (ParseType(Ty) || ParseValue(Ty, Input, PFS))
         return true;
-      OBI.Inputs.push_back(Input);
+      Inputs.push_back(Input);
     }
+
+    BundleList.emplace_back(std::move(Tag), std::move(Inputs));
 
     Lex.Lex(); // Lex the ')'.
   }
@@ -2314,7 +2354,7 @@ bool LLParser::PerFunctionState::FinishFunction() {
 /// forward reference record if needed.  This can return null if the value
 /// exists but does not have the right type.
 Value *LLParser::PerFunctionState::GetVal(const std::string &Name, Type *Ty,
-                                          LocTy Loc, OperatorConstraint OC) {
+                                          LocTy Loc) {
   // Look this name up in the normal function symbol table.
   Value *Val = F.getValueSymbolTable().lookup(Name);
 
@@ -2328,24 +2368,6 @@ Value *LLParser::PerFunctionState::GetVal(const std::string &Name, Type *Ty,
 
   // If we have the value in the symbol table or fwd-ref table, return it.
   if (Val) {
-    // Check operator constraints.
-    switch (OC) {
-    case OC_None:
-      // no constraint
-      break;
-    case OC_CatchPad:
-      if (!isa<CatchPadInst>(Val)) {
-        P.Error(Loc, "'%" + Name + "' is not a catchpad");
-        return nullptr;
-      }
-      break;
-    case OC_CleanupPad:
-      if (!isa<CleanupPadInst>(Val)) {
-        P.Error(Loc, "'%" + Name + "' is not a cleanuppad");
-        return nullptr;
-      }
-      break;
-    }
     if (Val->getType() == Ty) return Val;
     if (Ty->isLabelTy())
       P.Error(Loc, "'%" + Name + "' is not a basic block");
@@ -2364,30 +2386,16 @@ Value *LLParser::PerFunctionState::GetVal(const std::string &Name, Type *Ty,
   // Otherwise, create a new forward reference for this value and remember it.
   Value *FwdVal;
   if (Ty->isLabelTy()) {
-    assert(!OC);
     FwdVal = BasicBlock::Create(F.getContext(), Name, &F);
-  } else if (!OC) {
-    FwdVal = new Argument(Ty, Name);
   } else {
-    switch (OC) {
-    case OC_CatchPad:
-      FwdVal = CatchPadInst::Create(&F.getEntryBlock(), &F.getEntryBlock(), {},
-                                    Name);
-      break;
-    case OC_CleanupPad:
-      FwdVal = CleanupPadInst::Create(F.getContext(), {}, Name);
-      break;
-    default:
-      llvm_unreachable("unexpected constraint");
-    }
+    FwdVal = new Argument(Ty, Name);
   }
 
   ForwardRefVals[Name] = std::make_pair(FwdVal, Loc);
   return FwdVal;
 }
 
-Value *LLParser::PerFunctionState::GetVal(unsigned ID, Type *Ty, LocTy Loc,
-                                          OperatorConstraint OC) {
+Value *LLParser::PerFunctionState::GetVal(unsigned ID, Type *Ty, LocTy Loc) {
   // Look this name up in the normal function symbol table.
   Value *Val = ID < NumberedVals.size() ? NumberedVals[ID] : nullptr;
 
@@ -2401,24 +2409,6 @@ Value *LLParser::PerFunctionState::GetVal(unsigned ID, Type *Ty, LocTy Loc,
 
   // If we have the value in the symbol table or fwd-ref table, return it.
   if (Val) {
-    // Check operator constraint.
-    switch (OC) {
-    case OC_None:
-      // no constraint
-      break;
-    case OC_CatchPad:
-      if (!isa<CatchPadInst>(Val)) {
-        P.Error(Loc, "'%" + Twine(ID) + "' is not a catchpad");
-        return nullptr;
-      }
-      break;
-    case OC_CleanupPad:
-      if (!isa<CleanupPadInst>(Val)) {
-        P.Error(Loc, "'%" + Twine(ID) + "' is not a cleanuppad");
-        return nullptr;
-      }
-      break;
-    }
     if (Val->getType() == Ty) return Val;
     if (Ty->isLabelTy())
       P.Error(Loc, "'%" + Twine(ID) + "' is not a basic block");
@@ -2436,21 +2426,9 @@ Value *LLParser::PerFunctionState::GetVal(unsigned ID, Type *Ty, LocTy Loc,
   // Otherwise, create a new forward reference for this value and remember it.
   Value *FwdVal;
   if (Ty->isLabelTy()) {
-    assert(!OC);
     FwdVal = BasicBlock::Create(F.getContext(), "", &F);
-  } else if (!OC) {
-    FwdVal = new Argument(Ty);
   } else {
-    switch (OC) {
-    case OC_CatchPad:
-      FwdVal = CatchPadInst::Create(&F.getEntryBlock(), &F.getEntryBlock(), {});
-      break;
-    case OC_CleanupPad:
-      FwdVal = CleanupPadInst::Create(F.getContext(), {});
-      break;
-    default:
-      llvm_unreachable("unexpected constraint");
-    }
+    FwdVal = new Argument(Ty);
   }
 
   ForwardRefValIDs[ID] = std::make_pair(FwdVal, Loc);
@@ -2486,17 +2464,6 @@ bool LLParser::PerFunctionState::SetInstName(int NameID,
       if (Sentinel->getType() != Inst->getType())
         return P.Error(NameLoc, "instruction forward referenced with type '" +
                        getTypeString(FI->second.first->getType()) + "'");
-      // Check operator constraints.  We only put cleanuppads or catchpads in
-      // the forward value map if the value is constrained to match.
-      if (isa<CatchPadInst>(Sentinel)) {
-        if (!isa<CatchPadInst>(Inst))
-          return P.Error(FI->second.second,
-                         "'%" + Twine(NameID) + "' is not a catchpad");
-      } else if (isa<CleanupPadInst>(Sentinel)) {
-        if (!isa<CleanupPadInst>(Inst))
-          return P.Error(FI->second.second,
-                         "'%" + Twine(NameID) + "' is not a cleanuppad");
-      }
 
       Sentinel->replaceAllUsesWith(Inst);
       delete Sentinel;
@@ -2514,17 +2481,6 @@ bool LLParser::PerFunctionState::SetInstName(int NameID,
     if (Sentinel->getType() != Inst->getType())
       return P.Error(NameLoc, "instruction forward referenced with type '" +
                      getTypeString(FI->second.first->getType()) + "'");
-    // Check operator constraints.  We only put cleanuppads or catchpads in
-    // the forward value map if the value is constrained to match.
-    if (isa<CatchPadInst>(Sentinel)) {
-      if (!isa<CatchPadInst>(Inst))
-        return P.Error(FI->second.second,
-                       "'%" + NameStr + "' is not a catchpad");
-    } else if (isa<CleanupPadInst>(Sentinel)) {
-      if (!isa<CleanupPadInst>(Inst))
-        return P.Error(FI->second.second,
-                       "'%" + NameStr + "' is not a cleanuppad");
-    }
 
     Sentinel->replaceAllUsesWith(Inst);
     delete Sentinel;
@@ -2630,6 +2586,7 @@ bool LLParser::ParseValID(ValID &ID, PerFunctionState *PFS) {
   case lltok::kw_null: ID.Kind = ValID::t_Null; break;
   case lltok::kw_undef: ID.Kind = ValID::t_Undef; break;
   case lltok::kw_zeroinitializer: ID.Kind = ValID::t_Zero; break;
+  case lltok::kw_none: ID.Kind = ValID::t_None; break;
 
   case lltok::lbrace: {
     // ValID ::= '{' ConstVector '}'
@@ -3277,6 +3234,11 @@ struct DwarfTagField : public MDUnsignedField {
   DwarfTagField(dwarf::Tag DefaultTag)
       : MDUnsignedField(DefaultTag, dwarf::DW_TAG_hi_user) {}
 };
+struct DwarfMacinfoTypeField : public MDUnsignedField {
+  DwarfMacinfoTypeField() : MDUnsignedField(0, dwarf::DW_MACINFO_vendor_ext) {}
+  DwarfMacinfoTypeField(dwarf::MacinfoRecordType DefaultType)
+    : MDUnsignedField(DefaultType, dwarf::DW_MACINFO_vendor_ext) {}
+};
 struct DwarfAttEncodingField : public MDUnsignedField {
   DwarfAttEncodingField() : MDUnsignedField(0, dwarf::DW_ATE_hi_user) {}
 };
@@ -3285,6 +3247,9 @@ struct DwarfVirtualityField : public MDUnsignedField {
 };
 struct DwarfLangField : public MDUnsignedField {
   DwarfLangField() : MDUnsignedField(0, dwarf::DW_LANG_hi_user) {}
+};
+struct EmissionKindField : public MDUnsignedField {
+  EmissionKindField() : MDUnsignedField(0, DICompileUnit::LastEmissionKind) {}
 };
 
 struct DIFlagField : public MDUnsignedField {
@@ -3370,6 +3335,26 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name, DwarfTagField &Result) {
 
 template <>
 bool LLParser::ParseMDField(LocTy Loc, StringRef Name,
+                            DwarfMacinfoTypeField &Result) {
+  if (Lex.getKind() == lltok::APSInt)
+    return ParseMDField(Loc, Name, static_cast<MDUnsignedField &>(Result));
+
+  if (Lex.getKind() != lltok::DwarfMacinfo)
+    return TokError("expected DWARF macinfo type");
+
+  unsigned Macinfo = dwarf::getMacinfo(Lex.getStrVal());
+  if (Macinfo == dwarf::DW_MACINFO_invalid)
+    return TokError(
+        "invalid DWARF macinfo type" + Twine(" '") + Lex.getStrVal() + "'");
+  assert(Macinfo <= Result.Max && "Expected valid DWARF macinfo type");
+
+  Result.assign(Macinfo);
+  Lex.Lex();
+  return false;
+}
+
+template <>
+bool LLParser::ParseMDField(LocTy Loc, StringRef Name,
                             DwarfVirtualityField &Result) {
   if (Lex.getKind() == lltok::APSInt)
     return ParseMDField(Loc, Name, static_cast<MDUnsignedField &>(Result));
@@ -3378,7 +3363,7 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name,
     return TokError("expected DWARF virtuality code");
 
   unsigned Virtuality = dwarf::getVirtuality(Lex.getStrVal());
-  if (!Virtuality)
+  if (Virtuality == dwarf::DW_VIRTUALITY_invalid)
     return TokError("invalid DWARF virtuality code" + Twine(" '") +
                     Lex.getStrVal() + "'");
   assert(Virtuality <= Result.Max && "Expected valid DWARF virtuality code");
@@ -3405,6 +3390,24 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name, DwarfLangField &Result) {
   return false;
 }
 
+template <>
+bool LLParser::ParseMDField(LocTy Loc, StringRef Name, EmissionKindField &Result) {
+  if (Lex.getKind() == lltok::APSInt)
+    return ParseMDField(Loc, Name, static_cast<MDUnsignedField &>(Result));
+
+  if (Lex.getKind() != lltok::EmissionKind)
+    return TokError("expected emission kind");
+
+  auto Kind = DICompileUnit::getEmissionKind(Lex.getStrVal());
+  if (!Kind)
+    return TokError("invalid emission kind" + Twine(" '") + Lex.getStrVal() +
+                    "'");
+  assert(*Kind <= Result.Max && "Expected valid emission kind");
+  Result.assign(*Kind);
+  Lex.Lex();
+  return false;
+}
+  
 template <>
 bool LLParser::ParseMDField(LocTy Loc, StringRef Name,
                             DwarfAttEncodingField &Result) {
@@ -3743,6 +3746,19 @@ bool LLParser::ParseDICompositeType(MDNode *&Result, bool IsDistinct) {
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
 
+  // If this has an identifier try to build an ODR type.
+  if (identifier.Val)
+    if (auto *CT = DICompositeType::buildODRType(
+            Context, *identifier.Val, tag.Val, name.Val, file.Val, line.Val,
+            scope.Val, baseType.Val, size.Val, align.Val, offset.Val, flags.Val,
+            elements.Val, runtimeLang.Val, vtableHolder.Val,
+            templateParams.Val)) {
+      Result = CT;
+      return false;
+    }
+
+  // Create a new node, and save it in the context if it belongs in the type
+  // map.
   Result = GET_OR_DISTINCT(
       DICompositeType,
       (Context, tag.Val, name.Val, file.Val, line.Val, scope.Val, baseType.Val,
@@ -3778,9 +3794,9 @@ bool LLParser::ParseDIFile(MDNode *&Result, bool IsDistinct) {
 /// ParseDICompileUnit:
 ///   ::= !DICompileUnit(language: DW_LANG_C99, file: !0, producer: "clang",
 ///                      isOptimized: true, flags: "-O2", runtimeVersion: 1,
-///                      splitDebugFilename: "abc.debug", emissionKind: 1,
-///                      enums: !1, retainedTypes: !2, subprograms: !3,
-///                      globals: !4, imports: !5, dwoId: 0x0abcd)
+///                      splitDebugFilename: "abc.debug",
+///                      emissionKind: FullDebug, enums: !1, retainedTypes: !2,
+///                      globals: !4, imports: !5, macros: !6, dwoId: 0x0abcd)
 bool LLParser::ParseDICompileUnit(MDNode *&Result, bool IsDistinct) {
   if (!IsDistinct)
     return Lex.Error("missing 'distinct', required for !DICompileUnit");
@@ -3793,12 +3809,12 @@ bool LLParser::ParseDICompileUnit(MDNode *&Result, bool IsDistinct) {
   OPTIONAL(flags, MDStringField, );                                            \
   OPTIONAL(runtimeVersion, MDUnsignedField, (0, UINT32_MAX));                  \
   OPTIONAL(splitDebugFilename, MDStringField, );                               \
-  OPTIONAL(emissionKind, MDUnsignedField, (0, UINT32_MAX));                    \
+  OPTIONAL(emissionKind, EmissionKindField, );                                 \
   OPTIONAL(enums, MDField, );                                                  \
   OPTIONAL(retainedTypes, MDField, );                                          \
-  OPTIONAL(subprograms, MDField, );                                            \
   OPTIONAL(globals, MDField, );                                                \
   OPTIONAL(imports, MDField, );                                                \
+  OPTIONAL(macros, MDField, );                                                 \
   OPTIONAL(dwoId, MDUnsignedField, );
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
@@ -3806,7 +3822,7 @@ bool LLParser::ParseDICompileUnit(MDNode *&Result, bool IsDistinct) {
   Result = DICompileUnit::getDistinct(
       Context, language.Val, file.Val, producer.Val, isOptimized.Val, flags.Val,
       runtimeVersion.Val, splitDebugFilename.Val, emissionKind.Val, enums.Val,
-      retainedTypes.Val, subprograms.Val, globals.Val, imports.Val, dwoId.Val);
+      retainedTypes.Val, globals.Val, imports.Val, macros.Val, dwoId.Val);
   return false;
 }
 
@@ -3835,6 +3851,7 @@ bool LLParser::ParseDISubprogram(MDNode *&Result, bool IsDistinct) {
   OPTIONAL(virtualIndex, MDUnsignedField, (0, UINT32_MAX));                    \
   OPTIONAL(flags, DIFlagField, );                                              \
   OPTIONAL(isOptimized, MDBoolField, );                                        \
+  OPTIONAL(unit, MDField, );                                                   \
   OPTIONAL(templateParams, MDField, );                                         \
   OPTIONAL(declaration, MDField, );                                            \
   OPTIONAL(variables, MDField, );
@@ -3847,11 +3864,11 @@ bool LLParser::ParseDISubprogram(MDNode *&Result, bool IsDistinct) {
         "missing 'distinct', required for !DISubprogram when 'isDefinition'");
 
   Result = GET_OR_DISTINCT(
-      DISubprogram,
-      (Context, scope.Val, name.Val, linkageName.Val, file.Val, line.Val,
-       type.Val, isLocal.Val, isDefinition.Val, scopeLine.Val,
-       containingType.Val, virtuality.Val, virtualIndex.Val, flags.Val,
-       isOptimized.Val, templateParams.Val, declaration.Val, variables.Val));
+      DISubprogram, (Context, scope.Val, name.Val, linkageName.Val, file.Val,
+                     line.Val, type.Val, isLocal.Val, isDefinition.Val,
+                     scopeLine.Val, containingType.Val, virtuality.Val,
+                     virtualIndex.Val, flags.Val, isOptimized.Val, unit.Val,
+                     templateParams.Val, declaration.Val, variables.Val));
   return false;
 }
 
@@ -3901,6 +3918,39 @@ bool LLParser::ParseDINamespace(MDNode *&Result, bool IsDistinct) {
                            (Context, scope.Val, file.Val, name.Val, line.Val));
   return false;
 }
+
+/// ParseDIMacro:
+///   ::= !DIMacro(macinfo: type, line: 9, name: "SomeMacro", value: "SomeValue")
+bool LLParser::ParseDIMacro(MDNode *&Result, bool IsDistinct) {
+#define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
+  REQUIRED(type, DwarfMacinfoTypeField, );                                     \
+  REQUIRED(line, LineField, );                                                 \
+  REQUIRED(name, MDStringField, );                                             \
+  OPTIONAL(value, MDStringField, );
+  PARSE_MD_FIELDS();
+#undef VISIT_MD_FIELDS
+
+  Result = GET_OR_DISTINCT(DIMacro,
+                           (Context, type.Val, line.Val, name.Val, value.Val));
+  return false;
+}
+
+/// ParseDIMacroFile:
+///   ::= !DIMacroFile(line: 9, file: !2, nodes: !3)
+bool LLParser::ParseDIMacroFile(MDNode *&Result, bool IsDistinct) {
+#define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
+  OPTIONAL(type, DwarfMacinfoTypeField, (dwarf::DW_MACINFO_start_file));       \
+  REQUIRED(line, LineField, );                                                 \
+  REQUIRED(file, MDField, );                                                   \
+  OPTIONAL(nodes, MDField, );
+  PARSE_MD_FIELDS();
+#undef VISIT_MD_FIELDS
+
+  Result = GET_OR_DISTINCT(DIMacroFile,
+                           (Context, type.Val, line.Val, file.Val, nodes.Val));
+  return false;
+}
+
 
 /// ParseDIModule:
 ///   ::= !DIModule(scope: !0, name: "SomeModule", configMacros: "-DNDEBUG",
@@ -4173,30 +4223,18 @@ bool LLParser::ParseMetadata(Metadata *&MD, PerFunctionState *PFS) {
 //===----------------------------------------------------------------------===//
 
 bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
-                                   PerFunctionState *PFS,
-                                   OperatorConstraint OC) {
+                                   PerFunctionState *PFS) {
   if (Ty->isFunctionTy())
     return Error(ID.Loc, "functions are not values, refer to them as pointers");
-
-  if (OC && ID.Kind != ValID::t_LocalID && ID.Kind != ValID::t_LocalName) {
-    switch (OC) {
-    case OC_CatchPad:
-      return Error(ID.Loc, "Catchpad value required in this position");
-    case OC_CleanupPad:
-      return Error(ID.Loc, "Cleanuppad value required in this position");
-    default:
-      llvm_unreachable("Unexpected constraint kind");
-    }
-  }
 
   switch (ID.Kind) {
   case ValID::t_LocalID:
     if (!PFS) return Error(ID.Loc, "invalid use of function-local name");
-    V = PFS->GetVal(ID.UIntVal, Ty, ID.Loc, OC);
+    V = PFS->GetVal(ID.UIntVal, Ty, ID.Loc);
     return V == nullptr;
   case ValID::t_LocalName:
     if (!PFS) return Error(ID.Loc, "invalid use of function-local name");
-    V = PFS->GetVal(ID.StrVal, Ty, ID.Loc, OC);
+    V = PFS->GetVal(ID.StrVal, Ty, ID.Loc);
     return V == nullptr;
   case ValID::t_InlineAsm: {
     if (!ID.FTy || !InlineAsm::Verify(ID.FTy, ID.StrVal2))
@@ -4263,6 +4301,11 @@ bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
       return Error(ID.Loc, "invalid type for null constant");
     V = Constant::getNullValue(Ty);
     return false;
+  case ValID::t_None:
+    if (!Ty->isTokenTy())
+      return Error(ID.Loc, "invalid type for none constant");
+    V = Constant::getNullValue(Ty);
+    return false;
   case ValID::t_Constant:
     if (ID.ConstantVal->getType() != Ty)
       return Error(ID.Loc, "constant expression type mismatch");
@@ -4318,11 +4361,10 @@ bool LLParser::parseConstantValue(Type *Ty, Constant *&C) {
   }
 }
 
-bool LLParser::ParseValue(Type *Ty, Value *&V, PerFunctionState *PFS,
-                          OperatorConstraint OC) {
+bool LLParser::ParseValue(Type *Ty, Value *&V, PerFunctionState *PFS) {
   V = nullptr;
   ValID ID;
-  return ParseValID(ID, PFS) || ConvertValIDToValue(Ty, ID, V, PFS, OC);
+  return ParseValID(ID, PFS) || ConvertValIDToValue(Ty, ID, V, PFS);
 }
 
 bool LLParser::ParseTypeAndValue(Value *&V, PerFunctionState *PFS) {
@@ -4751,11 +4793,9 @@ int LLParser::ParseInstruction(Instruction *&Inst, BasicBlock *BB,
   case lltok::kw_resume:      return ParseResume(Inst, PFS);
   case lltok::kw_cleanupret:  return ParseCleanupRet(Inst, PFS);
   case lltok::kw_catchret:    return ParseCatchRet(Inst, PFS);
-  case lltok::kw_catchpad:  return ParseCatchPad(Inst, PFS);
-  case lltok::kw_terminatepad: return ParseTerminatePad(Inst, PFS);
-  case lltok::kw_cleanuppad: return ParseCleanupPad(Inst, PFS);
-  case lltok::kw_catchendpad: return ParseCatchEndPad(Inst, PFS);
-  case lltok::kw_cleanupendpad: return ParseCleanupEndPad(Inst, PFS);
+  case lltok::kw_catchswitch: return ParseCatchSwitch(Inst, PFS);
+  case lltok::kw_catchpad:    return ParseCatchPad(Inst, PFS);
+  case lltok::kw_cleanuppad:  return ParseCleanupPad(Inst, PFS);
   // Binary Operators.
   case lltok::kw_add:
   case lltok::kw_sub:
@@ -5195,11 +5235,14 @@ bool LLParser::ParseExceptionArgs(SmallVectorImpl<Value *> &Args,
 }
 
 /// ParseCleanupRet
-///   ::= 'cleanupret' Value unwind ('to' 'caller' | TypeAndValue)
+///   ::= 'cleanupret' from Value unwind ('to' 'caller' | TypeAndValue)
 bool LLParser::ParseCleanupRet(Instruction *&Inst, PerFunctionState &PFS) {
   Value *CleanupPad = nullptr;
 
-  if (ParseValue(Type::getTokenTy(Context), CleanupPad, PFS, OC_CleanupPad))
+  if (ParseToken(lltok::kw_from, "expected 'from' after cleanupret"))
+    return true;
+
+  if (ParseValue(Type::getTokenTy(Context), CleanupPad, PFS))
     return true;
 
   if (ParseToken(lltok::kw_unwind, "expected 'unwind' in cleanupret"))
@@ -5216,16 +5259,19 @@ bool LLParser::ParseCleanupRet(Instruction *&Inst, PerFunctionState &PFS) {
     }
   }
 
-  Inst = CleanupReturnInst::Create(cast<CleanupPadInst>(CleanupPad), UnwindBB);
+  Inst = CleanupReturnInst::Create(CleanupPad, UnwindBB);
   return false;
 }
 
 /// ParseCatchRet
-///   ::= 'catchret' Value 'to' TypeAndValue
+///   ::= 'catchret' from Parent Value 'to' TypeAndValue
 bool LLParser::ParseCatchRet(Instruction *&Inst, PerFunctionState &PFS) {
   Value *CatchPad = nullptr;
 
-  if (ParseValue(Type::getTokenTy(Context), CatchPad, PFS, OC_CatchPad))
+  if (ParseToken(lltok::kw_from, "expected 'from' after catchret"))
+    return true;
+
+  if (ParseValue(Type::getTokenTy(Context), CatchPad, PFS))
     return true;
 
   BasicBlock *BB;
@@ -5233,114 +5279,103 @@ bool LLParser::ParseCatchRet(Instruction *&Inst, PerFunctionState &PFS) {
       ParseTypeAndBasicBlock(BB, PFS))
       return true;
 
-  Inst = CatchReturnInst::Create(cast<CatchPadInst>(CatchPad), BB);
+  Inst = CatchReturnInst::Create(CatchPad, BB);
+  return false;
+}
+
+/// ParseCatchSwitch
+///   ::= 'catchswitch' within Parent
+bool LLParser::ParseCatchSwitch(Instruction *&Inst, PerFunctionState &PFS) {
+  Value *ParentPad;
+  LocTy BBLoc;
+
+  if (ParseToken(lltok::kw_within, "expected 'within' after catchswitch"))
+    return true;
+
+  if (Lex.getKind() != lltok::kw_none && Lex.getKind() != lltok::LocalVar &&
+      Lex.getKind() != lltok::LocalVarID)
+    return TokError("expected scope value for catchswitch");
+
+  if (ParseValue(Type::getTokenTy(Context), ParentPad, PFS))
+    return true;
+
+  if (ParseToken(lltok::lsquare, "expected '[' with catchswitch labels"))
+    return true;
+
+  SmallVector<BasicBlock *, 32> Table;
+  do {
+    BasicBlock *DestBB;
+    if (ParseTypeAndBasicBlock(DestBB, PFS))
+      return true;
+    Table.push_back(DestBB);
+  } while (EatIfPresent(lltok::comma));
+
+  if (ParseToken(lltok::rsquare, "expected ']' after catchswitch labels"))
+    return true;
+
+  if (ParseToken(lltok::kw_unwind,
+                 "expected 'unwind' after catchswitch scope"))
+    return true;
+
+  BasicBlock *UnwindBB = nullptr;
+  if (EatIfPresent(lltok::kw_to)) {
+    if (ParseToken(lltok::kw_caller, "expected 'caller' in catchswitch"))
+      return true;
+  } else {
+    if (ParseTypeAndBasicBlock(UnwindBB, PFS))
+      return true;
+  }
+
+  auto *CatchSwitch =
+      CatchSwitchInst::Create(ParentPad, UnwindBB, Table.size());
+  for (BasicBlock *DestBB : Table)
+    CatchSwitch->addHandler(DestBB);
+  Inst = CatchSwitch;
   return false;
 }
 
 /// ParseCatchPad
 ///   ::= 'catchpad' ParamList 'to' TypeAndValue 'unwind' TypeAndValue
 bool LLParser::ParseCatchPad(Instruction *&Inst, PerFunctionState &PFS) {
+  Value *CatchSwitch = nullptr;
+
+  if (ParseToken(lltok::kw_within, "expected 'within' after catchpad"))
+    return true;
+
+  if (Lex.getKind() != lltok::LocalVar && Lex.getKind() != lltok::LocalVarID)
+    return TokError("expected scope value for catchpad");
+
+  if (ParseValue(Type::getTokenTy(Context), CatchSwitch, PFS))
+    return true;
+
   SmallVector<Value *, 8> Args;
   if (ParseExceptionArgs(Args, PFS))
     return true;
 
-  BasicBlock *NormalBB, *UnwindBB;
-  if (ParseToken(lltok::kw_to, "expected 'to' in catchpad") ||
-      ParseTypeAndBasicBlock(NormalBB, PFS) ||
-      ParseToken(lltok::kw_unwind, "expected 'unwind' in catchpad") ||
-      ParseTypeAndBasicBlock(UnwindBB, PFS))
-    return true;
-
-  Inst = CatchPadInst::Create(NormalBB, UnwindBB, Args);
-  return false;
-}
-
-/// ParseTerminatePad
-///   ::= 'terminatepad' ParamList 'to' TypeAndValue
-bool LLParser::ParseTerminatePad(Instruction *&Inst, PerFunctionState &PFS) {
-  SmallVector<Value *, 8> Args;
-  if (ParseExceptionArgs(Args, PFS))
-    return true;
-
-  if (ParseToken(lltok::kw_unwind, "expected 'unwind' in terminatepad"))
-    return true;
-
-  BasicBlock *UnwindBB = nullptr;
-  if (Lex.getKind() == lltok::kw_to) {
-    Lex.Lex();
-    if (ParseToken(lltok::kw_caller, "expected 'caller' in terminatepad"))
-      return true;
-  } else {
-    if (ParseTypeAndBasicBlock(UnwindBB, PFS)) {
-      return true;
-    }
-  }
-
-  Inst = TerminatePadInst::Create(Context, UnwindBB, Args);
+  Inst = CatchPadInst::Create(CatchSwitch, Args);
   return false;
 }
 
 /// ParseCleanupPad
-///   ::= 'cleanuppad' ParamList
+///   ::= 'cleanuppad' within Parent ParamList
 bool LLParser::ParseCleanupPad(Instruction *&Inst, PerFunctionState &PFS) {
+  Value *ParentPad = nullptr;
+
+  if (ParseToken(lltok::kw_within, "expected 'within' after cleanuppad"))
+    return true;
+
+  if (Lex.getKind() != lltok::kw_none && Lex.getKind() != lltok::LocalVar &&
+      Lex.getKind() != lltok::LocalVarID)
+    return TokError("expected scope value for cleanuppad");
+
+  if (ParseValue(Type::getTokenTy(Context), ParentPad, PFS))
+    return true;
+
   SmallVector<Value *, 8> Args;
   if (ParseExceptionArgs(Args, PFS))
     return true;
 
-  Inst = CleanupPadInst::Create(Context, Args);
-  return false;
-}
-
-/// ParseCatchEndPad
-///   ::= 'catchendpad' unwind ('to' 'caller' | TypeAndValue)
-bool LLParser::ParseCatchEndPad(Instruction *&Inst, PerFunctionState &PFS) {
-  if (ParseToken(lltok::kw_unwind, "expected 'unwind' in catchendpad"))
-    return true;
-
-  BasicBlock *UnwindBB = nullptr;
-  if (Lex.getKind() == lltok::kw_to) {
-    Lex.Lex();
-    if (Lex.getKind() == lltok::kw_caller) {
-      Lex.Lex();
-    } else {
-      return true;
-    }
-  } else {
-    if (ParseTypeAndBasicBlock(UnwindBB, PFS)) {
-      return true;
-    }
-  }
-
-  Inst = CatchEndPadInst::Create(Context, UnwindBB);
-  return false;
-}
-
-/// ParseCatchEndPad
-///   ::= 'cleanupendpad' Value unwind ('to' 'caller' | TypeAndValue)
-bool LLParser::ParseCleanupEndPad(Instruction *&Inst, PerFunctionState &PFS) {
-  Value *CleanupPad = nullptr;
-
-  if (ParseValue(Type::getTokenTy(Context), CleanupPad, PFS, OC_CleanupPad))
-    return true;
-
-  if (ParseToken(lltok::kw_unwind, "expected 'unwind' in catchendpad"))
-    return true;
-
-  BasicBlock *UnwindBB = nullptr;
-  if (Lex.getKind() == lltok::kw_to) {
-    Lex.Lex();
-    if (Lex.getKind() == lltok::kw_caller) {
-      Lex.Lex();
-    } else {
-      return true;
-    }
-  } else {
-    if (ParseTypeAndBasicBlock(UnwindBB, PFS)) {
-      return true;
-    }
-  }
-
-  Inst = CleanupEndPadInst::Create(cast<CleanupPadInst>(CleanupPad), UnwindBB);
+  Inst = CleanupPadInst::Create(ParentPad, Args);
   return false;
 }
 
@@ -5640,12 +5675,14 @@ bool LLParser::ParseLandingPad(Instruction *&Inst, PerFunctionState &PFS) {
 }
 
 /// ParseCall
-///   ::= 'call' OptionalCallingConv OptionalAttrs Type Value
-///       ParameterList OptionalAttrs
-///   ::= 'tail' 'call' OptionalCallingConv OptionalAttrs Type Value
-///       ParameterList OptionalAttrs
-///   ::= 'musttail' 'call' OptionalCallingConv OptionalAttrs Type Value
-///       ParameterList OptionalAttrs
+///   ::= 'call' OptionalFastMathFlags OptionalCallingConv
+///           OptionalAttrs Type Value ParameterList OptionalAttrs
+///   ::= 'tail' 'call' OptionalFastMathFlags OptionalCallingConv
+///           OptionalAttrs Type Value ParameterList OptionalAttrs
+///   ::= 'musttail' 'call' OptionalFastMathFlags OptionalCallingConv
+///           OptionalAttrs Type Value ParameterList OptionalAttrs
+///   ::= 'notail' 'call'  OptionalFastMathFlags OptionalCallingConv
+///           OptionalAttrs Type Value ParameterList OptionalAttrs
 bool LLParser::ParseCall(Instruction *&Inst, PerFunctionState &PFS,
                          CallInst::TailCallKind TCK) {
   AttrBuilder RetAttrs, FnAttrs;
@@ -5659,9 +5696,14 @@ bool LLParser::ParseCall(Instruction *&Inst, PerFunctionState &PFS,
   SmallVector<OperandBundleDef, 2> BundleList;
   LocTy CallLoc = Lex.getLoc();
 
-  if ((TCK != CallInst::TCK_None &&
-       ParseToken(lltok::kw_call, "expected 'tail call'")) ||
-      ParseOptionalCallingConv(CC) || ParseOptionalReturnAttrs(RetAttrs) ||
+  if (TCK != CallInst::TCK_None &&
+      ParseToken(lltok::kw_call,
+                 "expected 'tail call', 'musttail call', or 'notail call'"))
+    return true;
+
+  FastMathFlags FMF = EatFastMathFlagsIfPresent();
+
+  if (ParseOptionalCallingConv(CC) || ParseOptionalReturnAttrs(RetAttrs) ||
       ParseType(RetType, RetTypeLoc, true /*void allowed*/) ||
       ParseValID(CalleeID) ||
       ParseParameterList(ArgList, PFS, TCK == CallInst::TCK_MustTail,
@@ -5669,6 +5711,10 @@ bool LLParser::ParseCall(Instruction *&Inst, PerFunctionState &PFS,
       ParseFnAttributeValuePairs(FnAttrs, FwdRefAttrGrps, false, BuiltinLoc) ||
       ParseOptionalOperandBundles(BundleList, PFS))
     return true;
+
+  if (FMF.any() && !RetType->isFPOrFPVectorTy())
+    return Error(CallLoc, "fast-math-flags specified for call without "
+                          "floating-point scalar or vector return type");
 
   // If RetType is a non-function pointer type, then this is the short syntax
   // for the call, which means that RetType is just the return type.  Infer the
@@ -5742,6 +5788,8 @@ bool LLParser::ParseCall(Instruction *&Inst, PerFunctionState &PFS,
   CallInst *CI = CallInst::Create(Ty, Callee, Args, BundleList);
   CI->setTailCallKind(TCK);
   CI->setCallingConv(CC);
+  if (FMF.any())
+    CI->setFastMathFlags(FMF);
   CI->setAttributes(PAL);
   ForwardRefAttrGroups[CI] = FwdRefAttrGrps;
   Inst = CI;
@@ -5924,13 +5972,8 @@ int LLParser::ParseCmpXchg(Instruction *&Inst, PerFunctionState &PFS) {
     return Error(CmpLoc, "compare value and pointer type do not match");
   if (cast<PointerType>(Ptr->getType())->getElementType() != New->getType())
     return Error(NewLoc, "new value and pointer type do not match");
-  if (!New->getType()->isIntegerTy())
-    return Error(NewLoc, "cmpxchg operand must be an integer");
-  unsigned Size = New->getType()->getPrimitiveSizeInBits();
-  if (Size < 8 || (Size & (Size - 1)))
-    return Error(NewLoc, "cmpxchg operand must be power-of-two byte-sized"
-                         " integer");
-
+  if (!New->getType()->isFirstClassType())
+    return Error(NewLoc, "cmpxchg operand must be a first class value");
   AtomicCmpXchgInst *CXI = new AtomicCmpXchgInst(
       Ptr, Cmp, New, SuccessOrdering, FailureOrdering, Scope);
   CXI->setVolatile(isVolatile);

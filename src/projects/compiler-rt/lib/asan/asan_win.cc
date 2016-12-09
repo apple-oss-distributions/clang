@@ -149,6 +149,10 @@ void InitializePlatformInterceptors() {
       (uptr *)&REAL(NtWaitForWorkViaWorkerFactory)));
 }
 
+void AsanApplyToGlobals(globals_op_fptr op, const void *needle) {
+  UNIMPLEMENTED();
+}
+
 // ---------------------- TSD ---------------- {{{
 static bool tsd_key_inited = false;
 
@@ -175,14 +179,6 @@ void PlatformTSDDtor(void *tsd) {
 // }}}
 
 // ---------------------- Various stuff ---------------- {{{
-void DisableReexec() {
-  // No need to re-exec on Windows.
-}
-
-void MaybeReexec() {
-  // No need to re-exec on Windows.
-}
-
 void *AsanDoesNotSupportStaticLinkage() {
 #if defined(_DEBUG)
 #error Please build the runtime with a non-debug CRT: /MD or /MT

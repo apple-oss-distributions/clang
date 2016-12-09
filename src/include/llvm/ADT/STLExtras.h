@@ -117,7 +117,9 @@ public:
           iterator_category;
   typedef typename std::iterator_traits<RootIt>::difference_type
           difference_type;
-  typedef typename UnaryFunc::result_type value_type;
+  typedef typename std::result_of<
+            UnaryFunc(decltype(*std::declval<RootIt>()))>
+          ::type value_type;
 
   typedef void pointer;
   //typedef typename UnaryFunc::result_type *pointer;
@@ -364,11 +366,33 @@ void DeleteContainerSeconds(Container &C) {
 }
 
 /// Provide wrappers to std::all_of which take ranges instead of having to pass
-/// being/end explicitly.
+/// begin/end explicitly.
 template<typename R, class UnaryPredicate>
 bool all_of(R &&Range, UnaryPredicate &&P) {
   return std::all_of(Range.begin(), Range.end(),
                      std::forward<UnaryPredicate>(P));
+}
+
+/// Provide wrappers to std::any_of which take ranges instead of having to pass
+/// begin/end explicitly.
+template <typename R, class UnaryPredicate>
+bool any_of(R &&Range, UnaryPredicate &&P) {
+  return std::any_of(Range.begin(), Range.end(),
+                     std::forward<UnaryPredicate>(P));
+}
+
+/// Provide wrappers to std::find which take ranges instead of having to pass
+/// begin/end explicitly.
+template<typename R, class T>
+auto find(R &&Range, const T &val) -> decltype(Range.begin()) {
+  return std::find(Range.begin(), Range.end(), val);
+}
+
+/// Provide wrappers to std::find_if which take ranges instead of having to pass
+/// begin/end explicitly.
+template <typename R, class T>
+auto find_if(R &&Range, const T &Pred) -> decltype(Range.begin()) {
+  return std::find_if(Range.begin(), Range.end(), Pred);
 }
 
 //===----------------------------------------------------------------------===//

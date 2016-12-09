@@ -71,6 +71,7 @@ static inline uhwptr *GetCanonicFrame(uptr bp,
 
 void BufferedStackTrace::FastUnwindStack(uptr pc, uptr bp, uptr stack_top,
                                          uptr stack_bottom, u32 max_depth) {
+  const uptr kPageSize = GetPageSizeCached();
   CHECK_GE(max_depth, 2);
   trace_buffer[0] = pc;
   size = 1;
@@ -95,6 +96,8 @@ void BufferedStackTrace::FastUnwindStack(uptr pc, uptr bp, uptr stack_top,
 #else
     uhwptr pc1 = frame[1];
 #endif
+    if (pc1 < kPageSize)
+      break;
     if (pc1 != pc) {
       trace_buffer[size++] = (uptr) pc1;
     }
@@ -118,7 +121,7 @@ void BufferedStackTrace::PopStackFrames(uptr count) {
 uptr BufferedStackTrace::LocatePcInTrace(uptr pc) {
   // Use threshold to find PC in stack trace, as PC we want to unwind from may
   // slightly differ from return address in the actual unwinded stack trace.
-  const int kPcThreshold = 304;
+  const int kPcThreshold = 320;
   for (uptr i = 0; i < size; ++i) {
     if (MatchPc(pc, trace[i], kPcThreshold))
       return i;

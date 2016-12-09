@@ -17,11 +17,13 @@
 #include "../misc/StaticAssertCheck.h"
 #include "../misc/ThrowByValueCatchByReferenceCheck.h"
 #include "SetLongJmpCheck.h"
+#include "StaticObjectExceptionCheck.h"
+#include "ThrownExceptionTypeCheck.h"
 #include "VariadicFunctionDefCheck.h"
 
 namespace clang {
 namespace tidy {
-namespace CERT {
+namespace cert {
 
 class CERTModule : public ClangTidyModule {
 public:
@@ -40,6 +42,10 @@ public:
     // ERR
     CheckFactories.registerCheck<SetLongJmpCheck>(
         "cert-err52-cpp");
+    CheckFactories.registerCheck<StaticObjectExceptionCheck>(
+        "cert-err58-cpp");
+    CheckFactories.registerCheck<ThrownExceptionTypeCheck>(
+        "cert-err60-cpp");
     CheckFactories.registerCheck<ThrowByValueCatchByReferenceCheck>(
         "cert-err61-cpp");
 
@@ -54,10 +60,10 @@ public:
   }
 };
 
-} // namespace misc
+} // namespace cert
 
 // Register the MiscTidyModule using this statically initialized variable.
-static ClangTidyModuleRegistry::Add<CERT::CERTModule>
+static ClangTidyModuleRegistry::Add<cert::CERTModule>
 X("cert-module",
   "Adds lint checks corresponding to CERT secure coding guidelines.");
 

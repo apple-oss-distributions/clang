@@ -36,8 +36,6 @@
 #include "clang/Tooling/Refactoring.h"
 #include "clang/Tooling/ReplacementsYaml.h"
 #include "clang/Tooling/Tooling.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Signals.h"
 #include <algorithm>
@@ -103,7 +101,8 @@ public:
         Diags(IntrusiveRefCntPtr<DiagnosticIDs>(new DiagnosticIDs), &*DiagOpts,
               DiagPrinter),
         SourceMgr(Diags, Files), Rewrite(SourceMgr, LangOpts),
-        ApplyFixes(ApplyFixes), TotalFixes(0), AppliedFixes(0) {
+        ApplyFixes(ApplyFixes), TotalFixes(0), AppliedFixes(0),
+        WarningsAsErrors(0) {
     DiagOpts->ShowColors = llvm::sys::Process::StandardOutHasColors();
     DiagPrinter->BeginSourceFile(LangOpts);
   }
@@ -116,9 +115,14 @@ public:
     SmallVector<std::pair<SourceLocation, bool>, 4> FixLocations;
     {
       auto Level = static_cast<DiagnosticsEngine::Level>(Error.DiagLevel);
-      DiagnosticBuilder Diag =
-          Diags.Report(Loc, Diags.getCustomDiagID(Level, "%0 [%1]"))
-          << Message.Message << Error.CheckName;
+      std::string Name = Error.CheckName;
+      if (Error.IsWarningAsError) {
+        Name += ",-warnings-as-errors";
+        Level = DiagnosticsEngine::Error;
+        WarningsAsErrors++;
+      }
+      auto Diag = Diags.Report(Loc, Diags.getCustomDiagID(Level, "%0 [%1]"))
+                  << Message.Message << Name;
       for (const tooling::Replacement &Fix : Error.Fix) {
         SourceLocation FixLoc = getLocation(Fix.getFilePath(), Fix.getOffset());
         SourceLocation FixEndLoc = FixLoc.getLocWithOffset(Fix.getLength());
@@ -150,6 +154,8 @@ public:
     }
   }
 
+  unsigned getWarningsAsErrorsCount() const { return WarningsAsErrors; }
+
 private:
   SourceLocation getLocation(StringRef FilePath, unsigned Offset) {
     if (FilePath.empty())
@@ -177,6 +183,7 @@ private:
   bool ApplyFixes;
   unsigned TotalFixes;
   unsigned AppliedFixes;
+  unsigned WarningsAsErrors;
 };
 
 class ClangTidyASTConsumer : public MultiplexConsumer {
@@ -424,11 +431,13 @@ runClangTidy(std::unique_ptr<ClangTidyOptionsProvider> OptionsProvider,
   return Context.getStats();
 }
 
-void handleErrors(const std::vector<ClangTidyError> &Errors, bool Fix) {
+void handleErrors(const std::vector<ClangTidyError> &Errors, bool Fix,
+                  unsigned &WarningsAsErrorsCount) {
   ErrorReporter Reporter(Fix);
   for (const ClangTidyError &Error : Errors)
     Reporter.reportDiagnostic(Error);
   Reporter.Finish();
+  WarningsAsErrorsCount += Reporter.getWarningsAsErrorsCount();
 }
 
 void exportReplacements(const std::vector<ClangTidyError> &Errors,

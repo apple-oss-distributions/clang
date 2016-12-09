@@ -28,6 +28,7 @@ struct ObjCClassInfo {
 };
 
 struct APIAnalysisResult {
+  std::string installName;
   llvm::StringSet<> messageNames;
   llvm::StringMap<ObjCClassInfo> objCClasses;
   llvm::StringMap<ObjCClassInfo> objCProtocols;
@@ -39,6 +40,7 @@ struct APIAnalysisResult {
   llvm::StringSet<> externalGlobals;
   llvm::StringSet<> internalGlobals;
   llvm::StringSet<> linkedLibraries;
+  llvm::StringSet<> potentiallyDefinedSelectors;
   llvm::SmallVector<std::string, 16> orderedLibraries;
   llvm::SmallVector<std::string, 16> asmSymbols;
 };

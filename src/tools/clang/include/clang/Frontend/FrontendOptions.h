@@ -150,6 +150,8 @@ public:
                                            ///< dumps in AST dumps.
   unsigned BuildingImplicitModule : 1;     ///< Whether we are performing an
                                            ///< implicit module build.
+  unsigned ModulesEmbedAllFiles : 1;       ///< Whether we should embed all used
+                                           ///< files into the PCM file.
 
   CodeCompleteOptions CodeCompleteOpts;
 
@@ -206,6 +208,10 @@ public:
 
   std::string MTMigrateDir;
   std::string ARCMTMigrateReportOut;
+
+  std::string IndexStorePath;
+  unsigned IndexIgnoreSystemSymbols : 1;
+  unsigned IndexRecordCodegenName : 1;
 
   /// The input files and their types.
   std::vector<FrontendInputFile> Inputs;
@@ -275,8 +281,9 @@ public:
     FixToTemporaries(false), ARCMTMigrateEmitARCErrors(false),
     SkipFunctionBodies(false), UseGlobalModuleIndex(true),
     GenerateGlobalModuleIndex(true), ASTDumpDecls(false), ASTDumpLookups(false),
-    BuildingImplicitModule(false),
+    BuildingImplicitModule(false), ModulesEmbedAllFiles(false),
     ARCMTAction(ARCMT_None), ObjCMTAction(ObjCMT_None), XCTMigrate(false),
+    IndexIgnoreSystemSymbols(false), IndexRecordCodegenName(false),
     ProgramAction(frontend::ParseSyntaxOnly)
   {}
 

@@ -604,9 +604,7 @@ static bool CheckMatchedBrackets(const SmallVectorImpl<Token> &Tokens) {
       Brackets.pop_back();
     }
   }
-  if (!Brackets.empty())
-    return false;
-  return true;
+  return Brackets.empty();
 }
 
 /// GenerateNewArgTokens - Returns true if OldTokens can be converted to a new
@@ -1072,10 +1070,14 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
       .Case("attribute_availability_tvos", true)
       .Case("attribute_availability_watchos", true)
       .Case("attribute_availability_swift", true)
+      .Case("attribute_availability_with_strict", true)
+      .Case("attribute_availability_with_replacement", true)
+      .Case("attribute_availability_in_templates", true)
       .Case("attribute_cf_returns_not_retained", true)
       .Case("attribute_cf_returns_retained", true)
       .Case("attribute_cf_returns_on_parameters", true)
       .Case("attribute_deprecated_with_message", true)
+      .Case("attribute_deprecated_with_replacement", true)
       .Case("attribute_ext_vector_type", true)
       .Case("attribute_ns_returns_not_retained", true)
       .Case("attribute_ns_returns_retained", true)
@@ -1125,6 +1127,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
       .Case("objc_bridge_id_on_typedefs", true)
       .Case("objc_generics", LangOpts.ObjC2)
       .Case("objc_generics_variance", LangOpts.ObjC2)
+      .Case("objc_class_property", LangOpts.ObjC2)
       // C11 features
       .Case("c_alignas", LangOpts.C11)
       .Case("c_alignof", LangOpts.C11)
@@ -1165,10 +1168,8 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
       .Case("cxx_rvalue_references", LangOpts.CPlusPlus11)
       .Case("cxx_strong_enums", LangOpts.CPlusPlus11)
       .Case("cxx_static_assert", LangOpts.CPlusPlus11)
-      // C++11 thread_local is unsupported on Darwin
       .Case("cxx_thread_local",
-            LangOpts.CPlusPlus11 && PP.getTargetInfo().isTLSSupported() &&
-            !PP.getTargetInfo().getTriple().isOSDarwin())
+            LangOpts.CPlusPlus11 && PP.getTargetInfo().isTLSSupported())
       .Case("cxx_trailing_return", LangOpts.CPlusPlus11)
       .Case("cxx_unicode_literals", LangOpts.CPlusPlus11)
       .Case("cxx_unrestricted_unions", LangOpts.CPlusPlus11)

@@ -355,7 +355,7 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
     case ARM::R10:
     case ARM::R11:
     case ARM::R12:
-      if (STI.isTargetDarwin()) {
+      if (STI.splitFramePushPop()) {
         GPRCS2Size += 4;
         break;
       }
@@ -559,7 +559,7 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
       case ARM::R10:
       case ARM::R11:
       case ARM::R12:
-        if (STI.isTargetDarwin())
+        if (STI.splitFramePushPop())
           break;
         // fallthrough
       case ARM::R0:
@@ -592,7 +592,7 @@ void ARMFrameLowering::emitPrologue(MachineFunction &MF,
       case ARM::R10:
       case ARM::R11:
       case ARM::R12:
-        if (STI.isTargetDarwin()) {
+        if (STI.splitFramePushPop()) {
           unsigned DwarfReg =  MRI->getDwarfRegNum(Reg, true);
           unsigned Offset = MFI->getObjectOffset(FI);
           unsigned CFIIndex = MMI.addFrameInst(
@@ -904,33 +904,27 @@ void ARMFrameLowering::emitPushInst(MachineBasicBlock &MBB,
     unsigned LastReg = 0;
     for (; i != 0; --i) {
       unsigned Reg = CSI[i-1].getReg();
-      if (!(Func)(Reg, STI.isTargetDarwin())) continue;
+      if (!(Func)(Reg, STI.splitFramePushPop())) continue;
 
       // D-registers in the aligned area DPRCS2 are NOT spilled here.
       if (Reg >= ARM::D8 && Reg < ARM::D8 + NumAlignedDPRCS2Regs)
         continue;
 
-      // Add the callee-saved register as live-in unless it's LR and
-      // @llvm.returnaddress is called. If LR is returned for
-      // @llvm.returnaddress then it's already added to the function and
-      // entry block live-in sets.
-      bool isKill = true;
-      if (Reg == ARM::LR) {
-        if (MF.getFrameInfo()->isReturnAddressTaken() &&
-            MF.getRegInfo().isLiveIn(Reg))
-          isKill = false;
-      }
-
-      if (isKill)
+      bool isLiveIn = MF.getRegInfo().isLiveIn(Reg);
+      if (!isLiveIn)
         MBB.addLiveIn(Reg);
-
       // If NoGap is true, push consecutive registers and then leave the rest
       // for other instructions. e.g.
       // vpush {d8, d10, d11} -> vpush {d8}, vpush {d10, d11}
       if (NoGap && LastReg && LastReg != Reg-1)
         break;
       LastReg = Reg;
-      Regs.push_back(std::make_pair(Reg, isKill));
+      // Do not set a kill flag on values that are also marked as live-in. This
+      // happens with the @llvm-returnaddress intrinsic and with arguments
+      // passed in callee saved registers.
+      // Omitting the kill flags is conservatively correct even if the live-in
+      // is not used after all.
+      Regs.push_back(std::make_pair(Reg, /*isKill=*/!isLiveIn));
     }
 
     if (Regs.empty())
@@ -991,7 +985,7 @@ void ARMFrameLowering::emitPopInst(MachineBasicBlock &MBB,
     bool DeleteRet = false;
     for (; i != 0; --i) {
       unsigned Reg = CSI[i-1].getReg();
-      if (!(Func)(Reg, STI.isTargetDarwin())) continue;
+      if (!(Func)(Reg, STI.splitFramePushPop())) continue;
 
       // The aligned reloads from area DPRCS2 are not inserted here.
       if (Reg >= ARM::D8 && Reg < ARM::D8 + NumAlignedDPRCS2Regs)
@@ -1545,7 +1539,7 @@ void ARMFrameLowering::determineCalleeSaves(MachineFunction &MF,
     if (Spilled) {
       NumGPRSpills++;
 
-      if (!STI.isTargetDarwin()) {
+      if (!STI.splitFramePushPop()) {
         if (Reg == ARM::LR)
           LRSpilled = true;
         CS1Spilled = true;
@@ -1567,7 +1561,7 @@ void ARMFrameLowering::determineCalleeSaves(MachineFunction &MF,
         break;
       }
     } else {
-      if (!STI.isTargetDarwin()) {
+      if (!STI.splitFramePushPop()) {
         UnspilledCS1GPRs.push_back(Reg);
         continue;
       }
@@ -1889,10 +1883,9 @@ void ARMFrameLowering::adjustForSegmentedStacks(
   // first in the list.
   MachineBasicBlock *AddedBlocks[] = {PrevStackMBB, McrMBB, GetMBB, AllocMBB,
                                       PostStackMBB};
-  const int NbAddedBlocks = sizeof(AddedBlocks) / sizeof(AddedBlocks[0]);
 
-  for (int Idx = 0; Idx < NbAddedBlocks; ++Idx)
-    BeforePrologueRegion.insert(AddedBlocks[Idx]);
+  for (MachineBasicBlock *B : AddedBlocks)
+    BeforePrologueRegion.insert(B);
 
   for (const auto &LI : PrologueMBB.liveins()) {
     for (MachineBasicBlock *PredBB : BeforePrologueRegion)
@@ -1901,9 +1894,9 @@ void ARMFrameLowering::adjustForSegmentedStacks(
 
   // Remove the newly added blocks from the list, since we know
   // we do not have to do the following updates for them.
-  for (int Idx = 0; Idx < NbAddedBlocks; ++Idx) {
-    BeforePrologueRegion.erase(AddedBlocks[Idx]);
-    MF.insert(PrologueMBB.getIterator(), AddedBlocks[Idx]);
+  for (MachineBasicBlock *B : AddedBlocks) {
+    BeforePrologueRegion.erase(B);
+    MF.insert(PrologueMBB.getIterator(), B);
   }
 
   for (MachineBasicBlock *MBB : BeforePrologueRegion) {

@@ -49,12 +49,17 @@ void TsanCheckFailed(const char *file, int line, const char *cond,
 #ifdef TSAN_EXTERNAL_HOOKS
 bool OnReport(const ReportDesc *rep, bool suppressed);
 #else
-SANITIZER_INTERFACE_ATTRIBUTE
-bool WEAK OnReport(const ReportDesc *rep, bool suppressed) {
+SANITIZER_WEAK_CXX_DEFAULT_IMPL
+bool OnReport(const ReportDesc *rep, bool suppressed) {
   (void)rep;
   return suppressed;
 }
 #endif
+
+SANITIZER_WEAK_DEFAULT_IMPL
+void __tsan_on_report(const ReportDesc *rep) {
+  (void)rep;
+}
 
 static void StackStripMain(SymbolizedStack *frames) {
   SymbolizedStack *last_frame = nullptr;
@@ -186,10 +191,10 @@ void ScopedReport::AddThread(const ThreadContext *tctx, bool suppressable) {
       return;
   }
   void *mem = internal_alloc(MBlockReportThread, sizeof(ReportThread));
-  ReportThread *rt = new(mem) ReportThread();
+  ReportThread *rt = new(mem) ReportThread;
   rep_->threads.PushBack(rt);
   rt->id = tctx->tid;
-  rt->pid = tctx->os_id;
+  rt->os_id = tctx->os_id;
   rt->running = (tctx->status == ThreadStatusRunning);
   rt->name = internal_strdup(tctx->name);
   rt->parent_tid = tctx->parent_tid;
@@ -200,16 +205,16 @@ void ScopedReport::AddThread(const ThreadContext *tctx, bool suppressable) {
 }
 
 #ifndef SANITIZER_GO
+static bool FindThreadByUidLockedCallback(ThreadContextBase *tctx, void *arg) {
+  int unique_id = *(int *)arg;
+  return tctx->unique_id == (u32)unique_id;
+}
+
 static ThreadContext *FindThreadByUidLocked(int unique_id) {
   ctx->thread_registry->CheckLocked();
-  for (unsigned i = 0; i < kMaxTid; i++) {
-    ThreadContext *tctx = static_cast<ThreadContext*>(
-        ctx->thread_registry->GetThreadLocked(i));
-    if (tctx && tctx->unique_id == (u32)unique_id) {
-      return tctx;
-    }
-  }
-  return 0;
+  return static_cast<ThreadContext *>(
+      ctx->thread_registry->FindThreadContextLocked(
+          FindThreadByUidLockedCallback, &unique_id));
 }
 
 static ThreadContext *FindThreadByTidLocked(int tid) {
@@ -256,7 +261,7 @@ void ScopedReport::AddMutex(const SyncVar *s) {
       return;
   }
   void *mem = internal_alloc(MBlockReportMutex, sizeof(ReportMutex));
-  ReportMutex *rm = new(mem) ReportMutex();
+  ReportMutex *rm = new(mem) ReportMutex;
   rep_->mutexes.PushBack(rm);
   rm->id = s->uid;
   rm->addr = s->addr;
@@ -289,7 +294,7 @@ void ScopedReport::AddDeadMutex(u64 id) {
       return;
   }
   void *mem = internal_alloc(MBlockReportMutex, sizeof(ReportMutex));
-  ReportMutex *rm = new(mem) ReportMutex();
+  ReportMutex *rm = new(mem) ReportMutex;
   rep_->mutexes.PushBack(rm);
   rm->id = id;
   rm->addr = 0;
@@ -492,6 +497,8 @@ bool OutputReport(ThreadState *thr, const ScopedReport &srep) {
     return false;
   atomic_store_relaxed(&ctx->last_symbolize_time_ns, NanoTime());
   const ReportDesc *rep = srep.GetReport();
+  CHECK_EQ(thr->current_report, nullptr);
+  thr->current_report = rep;
   Suppression *supp = 0;
   uptr pc_or_addr = 0;
   for (uptr i = 0; pc_or_addr == 0 && i < rep->mops.Size(); i++)
@@ -512,13 +519,17 @@ bool OutputReport(ThreadState *thr, const ScopedReport &srep) {
     thr->is_freeing = false;
     bool suppressed = OnReport(rep, pc_or_addr != 0);
     thr->is_freeing = old_is_freeing;
-    if (suppressed)
+    if (suppressed) {
+      thr->current_report = nullptr;
       return false;
+    }
   }
   PrintReport(rep);
+  __tsan_on_report(rep);
   ctx->nreported++;
   if (flags()->halt_on_error)
     Die();
+  thr->current_report = nullptr;
   return true;
 }
 

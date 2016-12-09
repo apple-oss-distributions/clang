@@ -101,6 +101,13 @@ class MachineFrameInfo {
     // cannot alias any other memory objects.
     bool isSpillSlot;
 
+    /// If true, this stack slot is used to spill a value (could be deopt
+    /// and/or GC related) over a statepoint. We know that the address of the
+    /// slot can't alias any LLVM IR value.  This is very similiar to a Spill
+    /// Slot, but is created by statepoint lowering is SelectionDAG, not the
+    /// register allocator. 
+    bool isStatepointSpillSlot;
+
     /// If this stack object is originated from an Alloca instruction
     /// this value saves the original IR allocation. Can be NULL.
     const AllocaInst *Alloca;
@@ -115,16 +122,33 @@ class MachineFrameInfo {
     // arguments have ABI-prescribed offsets).
     bool isAliased;
 
+    /// If true, the object has been zero-extended.
+    bool isZExt;
+
+    /// If true, the object has been zero-extended.
+    bool isSExt;
+
     StackObject(uint64_t Sz, unsigned Al, int64_t SP, bool IM,
                 bool isSS, const AllocaInst *Val, bool A)
       : SPOffset(SP), Size(Sz), Alignment(Al), isImmutable(IM),
-        isSpillSlot(isSS), Alloca(Val), PreAllocated(false), isAliased(A) {}
+        isSpillSlot(isSS), isStatepointSpillSlot(false), Alloca(Val),
+        PreAllocated(false), isAliased(A), isZExt(false), isSExt(false) {}
   };
 
   /// The alignment of the stack.
   unsigned StackAlignment;
 
   /// Can the stack be realigned.
+  /// Targets that set this to false don't have the ability to overalign
+  /// their stack frame, and thus, overaligned allocas are all treated
+  /// as dynamic allocations and the target must handle them as part
+  /// of DYNAMIC_STACKALLOC lowering.
+  /// FIXME: There is room for improvement in this case, in terms of
+  /// grouping overaligned allocas into a "secondary stack frame" and
+  /// then only use a single alloca to allocate this frame and only a
+  /// single virtual register to access it. Currently, without such an
+  /// optimization, each such alloca gets it's own dynamic
+  /// realignment.
   bool StackRealignable;
 
   /// The list of stack objects allocated.
@@ -198,7 +222,7 @@ class MachineFrameInfo {
   /// This contains the size of the largest call frame if the target uses frame
   /// setup/destroy pseudo instructions (as defined in the TargetFrameInfo
   /// class).  This information is important for frame pointer elimination.
-  /// If is only valid during and after prolog/epilog code insertion.
+  /// It is only valid during and after prolog/epilog code insertion.
   unsigned MaxCallFrameSize;
 
   /// The prolog/epilog code inserter fills in this vector with each
@@ -232,6 +256,10 @@ class MachineFrameInfo {
   /// True if the function dynamically adjusts the stack pointer through some
   /// opaque mechanism like inline assembly or Win32 EH.
   bool HasOpaqueSPAdjustment;
+
+  /// True if the function contains operations which will lower down to
+  /// instructions which manipulate the stack pointer.
+  bool HasCopyImplyingStackAdjustment;
 
   /// True if the function contains a call to the llvm.vastart intrinsic.
   bool HasVAStart;
@@ -270,6 +298,7 @@ public:
     LocalFrameMaxAlign = 0;
     UseLocalStackAllocationBlock = false;
     HasOpaqueSPAdjustment = false;
+    HasCopyImplyingStackAdjustment = false;
     HasVAStart = false;
     HasMustTailInVarArgFunc = false;
     Save = nullptr;
@@ -427,6 +456,30 @@ public:
     return Objects[ObjectIdx+NumFixedObjects].SPOffset;
   }
 
+  bool isObjectZExt(int ObjectIdx) const {
+    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    return Objects[ObjectIdx+NumFixedObjects].isZExt;
+  }
+
+  void setObjectZExt(int ObjectIdx, bool IsZExt) {
+    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    Objects[ObjectIdx+NumFixedObjects].isZExt = IsZExt;
+  }
+
+  bool isObjectSExt(int ObjectIdx) const {
+    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    return Objects[ObjectIdx+NumFixedObjects].isSExt;
+  }
+
+  void setObjectSExt(int ObjectIdx, bool IsSExt) {
+    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    Objects[ObjectIdx+NumFixedObjects].isSExt = IsSExt;
+  }
+
   /// Set the stack frame offset of the specified object. The
   /// offset is relative to the stack pointer on entry to the function.
   void setObjectOffset(int ObjectIdx, int64_t SPOffset) {
@@ -474,6 +527,15 @@ public:
   /// Returns true if the function contains opaque dynamic stack adjustments.
   bool hasOpaqueSPAdjustment() const { return HasOpaqueSPAdjustment; }
   void setHasOpaqueSPAdjustment(bool B) { HasOpaqueSPAdjustment = B; }
+
+  /// Returns true if the function contains operations which will lower down to
+  /// instructions which manipulate the stack pointer.
+  bool hasCopyImplyingStackAdjustment() const {
+    return HasCopyImplyingStackAdjustment;
+  }
+  void setHasCopyImplyingStackAdjustment(bool B) {
+    HasCopyImplyingStackAdjustment = B;
+  }
 
   /// Returns true if the function calls the llvm.va_start intrinsic.
   bool hasVAStart() const { return HasVAStart; }
@@ -537,6 +599,12 @@ public:
     return Objects[ObjectIdx+NumFixedObjects].isSpillSlot;
   }
 
+  bool isStatepointSpillSlotObjectIndex(int ObjectIdx) const {
+    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    return Objects[ObjectIdx+NumFixedObjects].isStatepointSpillSlot;
+  }
+
   /// Returns true if the specified index corresponds to a dead object.
   bool isDeadObjectIndex(int ObjectIdx) const {
     assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
@@ -550,6 +618,13 @@ public:
     assert(unsigned(ObjectIdx + NumFixedObjects) < Objects.size() &&
            "Invalid Object Idx!");
     return Objects[ObjectIdx + NumFixedObjects].Size == 0;
+  }
+
+  void markAsStatepointSpillSlotObjectIndex(int ObjectIdx) {
+    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
+           "Invalid Object Idx!");
+    Objects[ObjectIdx+NumFixedObjects].isStatepointSpillSlot = true;
+    assert(isStatepointSpillSlotObjectIndex(ObjectIdx) && "inconsistent");
   }
 
   /// Create a new statically sized stack object, returning

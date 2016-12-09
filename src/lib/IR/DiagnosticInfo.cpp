@@ -122,6 +122,11 @@ void DiagnosticInfoDebugMetadataVersion::print(DiagnosticPrinter &DP) const {
      << ") in " << getModule();
 }
 
+void DiagnosticInfoIgnoringInvalidDebugMetadata::print(
+    DiagnosticPrinter &DP) const {
+  DP << "ignoring invalid debug info in " << getModule().getModuleIdentifier();
+}
+
 void DiagnosticInfoSampleProfile::print(DiagnosticPrinter &DP) const {
   if (!FileName.empty()) {
     DP << getFileName();
@@ -129,6 +134,12 @@ void DiagnosticInfoSampleProfile::print(DiagnosticPrinter &DP) const {
       DP << ":" << getLineNum();
     DP << ": ";
   }
+  DP << getMsg();
+}
+
+void DiagnosticInfoPGOProfile::print(DiagnosticPrinter &DP) const {
+  if (getFileName())
+    DP << getFileName() << ": ";
   DP << getMsg();
 }
 

@@ -1,3 +1,5 @@
+include(CMakeParseArguments)
+
 # On OS X SDKs can be installed anywhere on the base system and xcode-select can
 # set the default Xcode to use. This function finds the SDKs that are present in
 # the current Xcode.
@@ -46,6 +48,11 @@ endfunction()
 # This function takes an OS and a list of architectures and identifies the
 # subset of the architectures list that the installed toolchain can target.
 function(darwin_test_archs os valid_archs)
+  if(${valid_archs})
+    message(STATUS "Using cached valid architectures for ${os}.")
+    return()
+  endif()
+
   set(archs ${ARGN})
   message(STATUS "Finding valid architectures for ${os}...")
   set(SIMPLE_CPP ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/src.cpp)
@@ -73,6 +80,41 @@ function(darwin_test_archs os valid_archs)
                 OUTPUT_VARIABLE TEST_OUTPUT)
     if(${CAN_TARGET_${os}_${arch}})
       list(APPEND working_archs ${arch})
+    else()
+      file(APPEND ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeError.log
+        "Testing compiler for supporting ${os}-${arch}:\n"
+        "${TEST_OUTPUT}\n")
+    endif()
+  endforeach()
+  set(${valid_archs} ${working_archs}
+    CACHE STRING "List of valid architectures for platform ${os}.")
+endfunction()
+
+# This function takes an OS and a list of architectures and identifies the
+# subset of the architectures list that the installed toolchain can target.
+# This variant of the function is specifically for generating builtin libraries
+# where we don't need a fully functioning sysroot.
+function(darwin_builtin_test_archs os valid_archs)
+  if(${valid_archs})
+    message(STATUS "Using cached valid architectures for ${os}.")
+    return()
+  endif()
+
+  set(archs ${ARGN})
+
+  # The simple program will build for x86_64h on the simulator because it is 
+  # compatible with x86_64 libraries (mostly), but since x86_64h isn't actually
+  # a valid or useful architecture for the iOS simulator we should drop it.
+  if(${os} STREQUAL "iossim")
+    list(REMOVE_ITEM archs "x86_64h")
+  endif()
+
+  set(working_archs)
+  foreach(arch ${archs})
+    set(arch_linker_flags "-arch ${arch} ${os_linker_flags}")
+    try_compile_only(CAN_TARGET_${os}_${arch} -v -arch ${arch} ${DARWIN_${os}_CFLAGS})
+    if(CAN_TARGET_${os}_${arch})
+      list(APPEND working_archs ${arch})
     endif()
   endforeach()
   set(${valid_archs} ${working_archs} PARENT_SCOPE)
@@ -81,7 +123,7 @@ endfunction()
 # This function checks the host cpusubtype to see if it is post-haswell. Haswell
 # and later machines can run x86_64h binaries. Haswell is cpusubtype 8.
 function(darwin_filter_host_archs input output)
-  list_union(tmp_var DARWIN_osx_ARCHS ${input})
+  list_intersect(tmp_var DARWIN_osx_ARCHS ${input})
   execute_process(
     COMMAND sysctl hw.cpusubtype
     OUTPUT_VARIABLE SUBTYPE)
@@ -272,9 +314,10 @@ macro(darwin_add_builtin_libraries)
 
   set(PROFILE_SOURCES ../profile/InstrProfiling 
                       ../profile/InstrProfilingBuffer
-                      ../profile/InstrProfilingPlatformDarwin)
+                      ../profile/InstrProfilingPlatformDarwin
+                      ../profile/InstrProfilingWriter)
   foreach (os ${ARGN})
-    list_union(DARWIN_BUILTIN_ARCHS DARWIN_${os}_ARCHS BUILTIN_SUPPORTED_ARCH)
+    list_intersect(DARWIN_BUILTIN_ARCHS DARWIN_${os}_ARCHS BUILTIN_SUPPORTED_ARCH)
     foreach (arch ${DARWIN_BUILTIN_ARCHS})
       darwin_find_excluded_builtins_list(${arch}_${os}_EXCLUDED_BUILTINS
                               OS ${os}

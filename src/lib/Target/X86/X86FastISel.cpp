@@ -973,14 +973,18 @@ bool X86FastISel::X86SelectStore(const Instruction *I) {
     return false;
 
   const Value *PtrV = I->getOperand(1);
-  if (const Argument *Arg = dyn_cast<Argument>(PtrV)) {
-    if (Arg->hasSwiftErrorAttr() && TLI.supportSwiftError())
-      return false;
-  }
+  if (TLI.supportSwiftError()) {
+    // Swifterror values can come from either a function parameter with
+    // swifterror attribute or an alloca with swifterror attribute.
+    if (const Argument *Arg = dyn_cast<Argument>(PtrV)) {
+      if (Arg->hasSwiftErrorAttr())
+        return false;
+    }
 
-  if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(PtrV)) {
-    if (Alloca->isSwiftError() && TLI.supportSwiftError())
-      return false;
+    if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(PtrV)) {
+      if (Alloca->isSwiftError())
+        return false;
+    }
   }
 
   const Value *Val = S->getValueOperand();
@@ -1013,8 +1017,11 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
   if (!FuncInfo.CanLowerReturn)
     return false;
 
-  if (F.getAttributes().hasAttrSomewhere(Attribute::SwiftError) &&
-      TLI.supportSwiftError())
+  if (TLI.supportSwiftError() &&
+      F.getAttributes().hasAttrSomewhere(Attribute::SwiftError))
+    return false;
+
+  if (TLI.supportSplitCSR(FuncInfo.MF))
     return false;
 
   CallingConv::ID CC = F.getCallingConv();
@@ -1113,12 +1120,14 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
     RetRegs.push_back(VA.getLocReg());
   }
 
-  // The x86-64 ABI for returning structs by value requires that we copy
-  // the sret argument into %rax for the return. We saved the argument into
-  // a virtual register in the entry block, so now we copy the value out
-  // and into %rax. We also do the same with %eax for Win32.
-  if (F.hasStructRetAttr() &&
-      (Subtarget->is64Bit() || Subtarget->isTargetKnownWindowsMSVC())) {
+  // Swift calling convention does not require we copy the sret argument
+  // into %rax/%eax for the return, and SRetReturnReg is not set for Swift.
+
+  // All x86 ABIs require that for returning structs by value we copy
+  // the sret argument into %rax/%eax (depending on ABI) for the return.
+  // We saved the argument into a virtual register in the entry block,
+  // so now we copy the value out and into %rax/%eax.
+  if (F.hasStructRetAttr() && CC != CallingConv::Swift) {
     unsigned Reg = X86MFInfo->getSRetReturnReg();
     assert(Reg &&
            "SRetReturnReg should have been set in LowerFormalArguments()!");
@@ -1147,14 +1156,18 @@ bool X86FastISel::X86SelectLoad(const Instruction *I) {
     return false;
 
   const Value *SV = I->getOperand(0);
-  if (const Argument *Arg = dyn_cast<Argument>(SV)) {
-    if (Arg->hasSwiftErrorAttr() && TLI.supportSwiftError())
-      return false;
-  }
+  if (TLI.supportSwiftError()) {
+    // Swifterror values can come from either a function parameter with
+    // swifterror attribute or an alloca with swifterror attribute.
+    if (const Argument *Arg = dyn_cast<Argument>(SV)) {
+      if (Arg->hasSwiftErrorAttr())
+        return false;
+    }
 
-  if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(SV)) {
-    if (Alloca->isSwiftError() && TLI.supportSwiftError())
-      return false;
+    if (const AllocaInst *Alloca = dyn_cast<AllocaInst>(SV)) {
+      if (Alloca->isSwiftError())
+        return false;
+    }
   }
 
   MVT VT;
@@ -2318,8 +2331,10 @@ bool X86FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
       // register class VR128 by method 'constrainOperandRegClass' which is
       // directly called by 'fastEmitInst_ri'.
       // Instruction VCVTPS2PHrr takes an extra immediate operand which is
-      // used to provide rounding control.
-      InputReg = fastEmitInst_ri(X86::VCVTPS2PHrr, RC, InputReg, false, 0);
+      // used to provide rounding control: use MXCSR.RC, encoded as 0b100.
+      // It's consistent with the other FP instructions, which are usually
+      // controlled by MXCSR.
+      InputReg = fastEmitInst_ri(X86::VCVTPS2PHrr, RC, InputReg, false, 4);
 
       // Move the lower 32-bits of ResultReg to another register of class GR32.
       ResultReg = createResultReg(&X86::GR32RegClass);
@@ -2848,7 +2863,7 @@ static unsigned computeBytesPoppedByCallee(const X86Subtarget *Subtarget,
 
   if (CS)
     if (CS->arg_empty() || !CS->paramHasAttr(1, Attribute::StructRet) ||
-        CS->paramHasAttr(1, Attribute::InReg))
+        CS->paramHasAttr(1, Attribute::InReg) || Subtarget->isTargetMCU())
       return 0;
 
   return 4;

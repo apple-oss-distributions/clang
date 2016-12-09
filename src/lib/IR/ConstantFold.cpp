@@ -109,7 +109,7 @@ static Constant *FoldBitCast(Constant *V, Type *DestTy) {
   if (PointerType *PTy = dyn_cast<PointerType>(V->getType()))
     if (PointerType *DPTy = dyn_cast<PointerType>(DestTy))
       if (PTy->getAddressSpace() == DPTy->getAddressSpace()
-          && DPTy->getElementType()->isSized()) {
+          && PTy->getElementType()->isSized()) {
         SmallVector<Value*, 8> IdxList;
         Value *Zero =
           Constant::getNullValue(Type::getInt32Ty(DPTy->getContext()));
@@ -189,6 +189,10 @@ static Constant *FoldBitCast(Constant *V, Type *DestTy) {
     // information. This should instead be handled by
     // Analysis/ConstantFolding.cpp
     if (FP->getType()->isPPC_FP128Ty())
+      return nullptr;
+
+    // Make sure dest type is compatible with the folded integer constant.
+    if (!DestTy->isIntegerTy())
       return nullptr;
 
     return ConstantInt::get(FP->getContext(),
@@ -916,9 +920,11 @@ Constant *llvm::ConstantFoldInsertValueInstruction(Constant *Agg,
 
 Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
                                               Constant *C1, Constant *C2) {
+  assert(Instruction::isBinaryOp(Opcode) && "Non-binary instruction detected");
+
   // Handle UndefValue up front.
   if (isa<UndefValue>(C1) || isa<UndefValue>(C2)) {
-    switch (Opcode) {
+    switch (static_cast<Instruction::BinaryOps>(Opcode)) {
     case Instruction::Xor:
       if (isa<UndefValue>(C1) && isa<UndefValue>(C2))
         // Handle undef ^ undef -> 0 special case. This is a common
@@ -998,8 +1004,21 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
         return C1;
       // undef << X -> 0
       return Constant::getNullValue(C1->getType());
+    case Instruction::FAdd:
+    case Instruction::FSub:
+    case Instruction::FMul:
+    case Instruction::FDiv:
+    case Instruction::FRem:
+      // TODO: UNDEF handling for binary float instructions.
+      return nullptr;
+    case Instruction::BinaryOpsEnd:
+      llvm_unreachable("Invalid BinaryOp");
     }
   }
+
+  // At this point neither constant should be an UndefValue.
+  assert(!isa<UndefValue>(C1) && !isa<UndefValue>(C2) &&
+         "Unexpected UndefValue");
 
   // Handle simplifications when the RHS is a constant int.
   if (ConstantInt *CI2 = dyn_cast<ConstantInt>(C2)) {
@@ -1102,7 +1121,6 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
       return ConstantExpr::get(Opcode, C2, C1);
   }
 
-  // At this point we know neither constant is an UndefValue.
   if (ConstantInt *CI1 = dyn_cast<ConstantInt>(C1)) {
     if (ConstantInt *CI2 = dyn_cast<ConstantInt>(C2)) {
       const APInt &C1V = CI1->getValue();
@@ -1685,7 +1703,7 @@ Constant *llvm::ConstantFoldCompareInstruction(unsigned short pred,
     // Otherwise, for integer compare, pick the same value as the non-undef
     // operand, and fold it to true or false.
     if (isIntegerPredicate)
-      return ConstantInt::get(ResultTy, CmpInst::isTrueWhenEqual(pred));
+      return ConstantInt::get(ResultTy, CmpInst::isTrueWhenEqual(Predicate));
 
     // Choosing NaN for the undef will always make unordered comparison succeed
     // and ordered comparison fails.
@@ -1869,7 +1887,8 @@ Constant *llvm::ConstantFoldCompareInstruction(unsigned short pred,
   } else {
     // Evaluate the relation between the two constants, per the predicate.
     int Result = -1;  // -1 = unknown, 0 = known false, 1 = known true.
-    switch (evaluateICmpRelation(C1, C2, CmpInst::isSigned(pred))) {
+    switch (evaluateICmpRelation(C1, C2,
+                                 CmpInst::isSigned((CmpInst::Predicate)pred))) {
     default: llvm_unreachable("Unknown relational!");
     case ICmpInst::BAD_ICMP_PREDICATE:
       break;  // Couldn't determine anything about these constants.
@@ -1950,8 +1969,10 @@ Constant *llvm::ConstantFoldCompareInstruction(unsigned short pred,
 
     // If the left hand side is an extension, try eliminating it.
     if (ConstantExpr *CE1 = dyn_cast<ConstantExpr>(C1)) {
-      if ((CE1->getOpcode() == Instruction::SExt && ICmpInst::isSigned(pred)) ||
-          (CE1->getOpcode() == Instruction::ZExt && !ICmpInst::isSigned(pred))){
+      if ((CE1->getOpcode() == Instruction::SExt &&
+           ICmpInst::isSigned((ICmpInst::Predicate)pred)) ||
+          (CE1->getOpcode() == Instruction::ZExt &&
+           !ICmpInst::isSigned((ICmpInst::Predicate)pred))){
         Constant *CE1Op0 = CE1->getOperand(0);
         Constant *CE1Inverse = ConstantExpr::getTrunc(CE1, CE1Op0->getType());
         if (CE1Inverse == CE1Op0) {
@@ -2037,11 +2058,13 @@ static Constant *ConstantFoldGetElementPtrImpl(Type *PointeeTy, Constant *C,
     return C;
 
   if (isa<UndefValue>(C)) {
-    PointerType *Ptr = cast<PointerType>(C->getType());
-    Type *Ty = GetElementPtrInst::getIndexedType(
-        cast<PointerType>(Ptr->getScalarType())->getElementType(), Idxs);
+    PointerType *PtrTy = cast<PointerType>(C->getType()->getScalarType());
+    Type *Ty = GetElementPtrInst::getIndexedType(PtrTy->getElementType(), Idxs);
     assert(Ty && "Invalid indices for GEP!");
-    return UndefValue::get(PointerType::get(Ty, Ptr->getAddressSpace()));
+    Type *GEPTy = PointerType::get(Ty, PtrTy->getAddressSpace());
+    if (VectorType *VT = dyn_cast<VectorType>(C->getType()))
+      GEPTy = VectorType::get(GEPTy, VT->getNumElements());
+    return UndefValue::get(GEPTy);
   }
 
   if (C->isNullValue()) {
@@ -2052,12 +2075,14 @@ static Constant *ConstantFoldGetElementPtrImpl(Type *PointeeTy, Constant *C,
         break;
       }
     if (isNull) {
-      PointerType *Ptr = cast<PointerType>(C->getType());
-      Type *Ty = GetElementPtrInst::getIndexedType(
-          cast<PointerType>(Ptr->getScalarType())->getElementType(), Idxs);
+      PointerType *PtrTy = cast<PointerType>(C->getType()->getScalarType());
+      Type *Ty =
+          GetElementPtrInst::getIndexedType(PtrTy->getElementType(), Idxs);
       assert(Ty && "Invalid indices for GEP!");
-      return ConstantPointerNull::get(PointerType::get(Ty,
-                                                       Ptr->getAddressSpace()));
+      Type *GEPTy = PointerType::get(Ty, PtrTy->getAddressSpace());
+      if (VectorType *VT = dyn_cast<VectorType>(C->getType()))
+        GEPTy = VectorType::get(GEPTy, VT->getNumElements());
+      return Constant::getNullValue(GEPTy);
     }
   }
 
@@ -2170,7 +2195,7 @@ static Constant *ConstantFoldGetElementPtrImpl(Type *PointeeTy, Constant *C,
   for (unsigned i = 1, e = Idxs.size(); i != e;
        Prev = Ty, Ty = cast<CompositeType>(Ty)->getTypeAtIndex(Idxs[i]), ++i) {
     if (ConstantInt *CI = dyn_cast<ConstantInt>(Idxs[i])) {
-      if (isa<ArrayType>(Ty) || isa<VectorType>(Ty))
+      if (isa<ArrayType>(Ty))
         if (CI->getSExtValue() > 0 &&
             !isIndexInRangeOfSequentialType(cast<SequentialType>(Ty), CI)) {
           if (isa<SequentialType>(Prev)) {

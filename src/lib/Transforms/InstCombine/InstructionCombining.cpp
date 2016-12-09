@@ -42,9 +42,9 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/EHPersonalities.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/InstructionSimplify.h"
-#include "llvm/Analysis/LibCallSemantics.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -75,6 +75,10 @@ STATISTIC(NumSunkInst , "Number of instructions sunk");
 STATISTIC(NumExpand,    "Number of expansions");
 STATISTIC(NumFactor   , "Number of factorizations");
 STATISTIC(NumReassoc  , "Number of reassociations");
+
+static cl::opt<bool>
+EnableExpensiveCombines("expensive-combines",
+                        cl::desc("Enable expensive instruction combines"));
 
 Value *InstCombiner::EmitGEPOffset(User *GEP) {
   return llvm::EmitGEPOffset(Builder, DL, GEP);
@@ -1245,16 +1249,11 @@ Value *InstCombiner::Descale(Value *Val, APInt Scale, bool &NoSignedWrap) {
 /// specified one but with other operands.
 static Value *CreateBinOpAsGiven(BinaryOperator &Inst, Value *LHS, Value *RHS,
                                  InstCombiner::BuilderTy *B) {
-  Value *BORes = B->CreateBinOp(Inst.getOpcode(), LHS, RHS);
-  if (BinaryOperator *NewBO = dyn_cast<BinaryOperator>(BORes)) {
-    if (isa<OverflowingBinaryOperator>(NewBO)) {
-      NewBO->setHasNoSignedWrap(Inst.hasNoSignedWrap());
-      NewBO->setHasNoUnsignedWrap(Inst.hasNoUnsignedWrap());
-    }
-    if (isa<PossiblyExactOperator>(NewBO))
-      NewBO->setIsExact(Inst.isExact());
-  }
-  return BORes;
+  Value *BO = B->CreateBinOp(Inst.getOpcode(), LHS, RHS);
+  // If LHS and RHS are constant, BO won't be a binary operator.
+  if (BinaryOperator *NewBO = dyn_cast<BinaryOperator>(BO))
+    NewBO->copyIRFlags(&Inst);
+  return BO;
 }
 
 /// \brief Makes transformation of binary operation specific for vector types.
@@ -1288,9 +1287,8 @@ Value *InstCombiner::SimplifyVectorOp(BinaryOperator &Inst) {
         LShuf->getMask() == RShuf->getMask()) {
       Value *NewBO = CreateBinOpAsGiven(Inst, LShuf->getOperand(0),
           RShuf->getOperand(0), Builder);
-      Value *Res = Builder->CreateShuffleVector(NewBO,
+      return Builder->CreateShuffleVector(NewBO,
           UndefValue::get(NewBO->getType()), LShuf->getMask());
-      return Res;
     }
   }
 
@@ -1326,18 +1324,11 @@ Value *InstCombiner::SimplifyVectorOp(BinaryOperator &Inst) {
     }
     if (MayChange) {
       Constant *C2 = ConstantVector::get(C2M);
-      Value *NewLHS, *NewRHS;
-      if (isa<Constant>(LHS)) {
-        NewLHS = C2;
-        NewRHS = Shuffle->getOperand(0);
-      } else {
-        NewLHS = Shuffle->getOperand(0);
-        NewRHS = C2;
-      }
+      Value *NewLHS = isa<Constant>(LHS) ? C2 : Shuffle->getOperand(0);
+      Value *NewRHS = isa<Constant>(LHS) ? Shuffle->getOperand(0) : C2;
       Value *NewBO = CreateBinOpAsGiven(Inst, NewLHS, NewRHS, Builder);
-      Value *Res = Builder->CreateShuffleVector(NewBO,
+      return Builder->CreateShuffleVector(NewBO,
           UndefValue::get(Inst.getType()), Shuffle->getMask());
-      return Res;
     }
   }
 
@@ -1347,7 +1338,7 @@ Value *InstCombiner::SimplifyVectorOp(BinaryOperator &Inst) {
 Instruction *InstCombiner::visitGetElementPtrInst(GetElementPtrInst &GEP) {
   SmallVector<Value*, 8> Ops(GEP.op_begin(), GEP.op_end());
 
-  if (Value *V = SimplifyGEPInst(Ops, DL, TLI, DT, AC))
+  if (Value *V = SimplifyGEPInst(GEP.getSourceElementType(), Ops, DL, TLI, DT, AC))
     return ReplaceInstUsesWith(GEP, V);
 
   Value *PtrOp = GEP.getOperand(0);
@@ -1975,7 +1966,7 @@ Instruction *InstCombiner::visitAllocSite(Instruction &MI) {
 
     if (InvokeInst *II = dyn_cast<InvokeInst>(&MI)) {
       // Replace invoke with a NOP intrinsic to maintain the original CFG
-      Module *M = II->getParent()->getParent()->getParent();
+      Module *M = II->getModule();
       Function *F = Intrinsic::getDeclaration(M, Intrinsic::donothing);
       InvokeInst::Create(F, II->getNormalDest(), II->getUnwindDest(),
                          None, "", II->getParent());
@@ -2324,9 +2315,10 @@ Instruction *InstCombiner::visitExtractValueInst(ExtractValueInst &EV) {
   }
   if (LoadInst *L = dyn_cast<LoadInst>(Agg))
     // If the (non-volatile) load only has one use, we can rewrite this to a
-    // load from a GEP. This reduces the size of the load.
-    // FIXME: If a load is used only by extractvalue instructions then this
-    //        could be done regardless of having multiple uses.
+    // load from a GEP. This reduces the size of the load. If a load is used
+    // only by extractvalue instructions then this either must have been
+    // optimized before, or it is a struct with padding, in which case we
+    // don't want to do the transformation as it loses padding knowledge.
     if (L->isSimple() && L->hasOneUse()) {
       // extractvalue has integer indices, getelementptr has Value*s. Convert.
       SmallVector<Value*, 4> Indices;
@@ -2764,9 +2756,9 @@ bool InstCombiner::run() {
       }
     }
 
-    // In general, it is possible for computeKnownBits to determine all bits in a
-    // value even when the operands are not all constants.
-    if (!I->use_empty() && I->getType()->isIntegerTy()) {
+    // In general, it is possible for computeKnownBits to determine all bits in
+    // a value even when the operands are not all constants.
+    if (ExpensiveCombines && !I->use_empty() && I->getType()->isIntegerTy()) {
       unsigned BitWidth = I->getType()->getScalarSizeInBits();
       APInt KnownZero(BitWidth, 0);
       APInt KnownOne(BitWidth, 0);
@@ -3014,7 +3006,7 @@ static bool prepareICWorklistFromFunction(Function &F, const DataLayout &DL,
   // Do a depth-first traversal of the function, populate the worklist with
   // the reachable instructions.  Ignore blocks that are not reachable.  Keep
   // track of which blocks we visit.
-  SmallPtrSet<BasicBlock *, 64> Visited;
+  SmallPtrSet<BasicBlock *, 32> Visited;
   MadeIRChange |=
       AddReachableCodeToWorklist(&F.front(), DL, Visited, ICWorklist, TLI);
 
@@ -3033,7 +3025,7 @@ static bool prepareICWorklistFromFunction(Function &F, const DataLayout &DL,
       Instruction *Inst = &*--EndInst->getIterator();
       if (!Inst->use_empty() && !Inst->getType()->isTokenTy())
         Inst->replaceAllUsesWith(UndefValue::get(Inst->getType()));
-      if (Inst->isEHPad()) {
+      if (Inst->isEHPad() || Inst->getType()->isTokenTy()) {
         EndInst = Inst;
         continue;
       }
@@ -3041,8 +3033,7 @@ static bool prepareICWorklistFromFunction(Function &F, const DataLayout &DL,
         ++NumDeadInst;
         MadeIRChange = true;
       }
-      if (!Inst->getType()->isTokenTy())
-        Inst->eraseFromParent();
+      Inst->eraseFromParent();
     }
   }
 
@@ -3053,12 +3044,14 @@ static bool
 combineInstructionsOverFunction(Function &F, InstCombineWorklist &Worklist,
                                 AliasAnalysis *AA, AssumptionCache &AC,
                                 TargetLibraryInfo &TLI, DominatorTree &DT,
+                                bool ExpensiveCombines = true,
                                 LoopInfo *LI = nullptr) {
   auto &DL = F.getParent()->getDataLayout();
+  ExpensiveCombines |= EnableExpensiveCombines;
 
   /// Builder - This is an IRBuilder that automatically inserts new
   /// instructions into the worklist when they are created.
-  IRBuilder<true, TargetFolder, InstCombineIRInserter> Builder(
+  IRBuilder<TargetFolder, InstCombineIRInserter> Builder(
       F.getContext(), TargetFolder(DL), InstCombineIRInserter(Worklist, &AC));
 
   // Lower dbg.declare intrinsics otherwise their value may be clobbered
@@ -3076,7 +3069,7 @@ combineInstructionsOverFunction(Function &F, InstCombineWorklist &Worklist,
     if (prepareICWorklistFromFunction(F, DL, &TLI, Worklist))
       Changed = true;
 
-    InstCombiner IC(Worklist, &Builder, F.optForMinSize(),
+    InstCombiner IC(Worklist, &Builder, F.optForMinSize(), ExpensiveCombines,
                     AA, &AC, &TLI, &DT, DL, LI);
     if (IC.run())
       Changed = true;
@@ -3097,7 +3090,8 @@ PreservedAnalyses InstCombinePass::run(Function &F,
   auto *LI = AM->getCachedResult<LoopAnalysis>(F);
 
   // FIXME: The AliasAnalysis is not yet supported in the new pass manager
-  if (!combineInstructionsOverFunction(F, Worklist, nullptr, AC, TLI, DT, LI))
+  if (!combineInstructionsOverFunction(F, Worklist, nullptr, AC, TLI, DT,
+                                       ExpensiveCombines, LI))
     // No changes, all analyses are preserved.
     return PreservedAnalyses::all();
 
@@ -3115,11 +3109,13 @@ namespace {
 /// will try to combine all instructions in the function.
 class InstructionCombiningPass : public FunctionPass {
   InstCombineWorklist Worklist;
+  const bool ExpensiveCombines;
 
 public:
   static char ID; // Pass identification, replacement for typeid
 
-  InstructionCombiningPass() : FunctionPass(ID) {
+  InstructionCombiningPass(bool ExpensiveCombines = true)
+      : FunctionPass(ID), ExpensiveCombines(ExpensiveCombines) {
     initializeInstructionCombiningPassPass(*PassRegistry::getPassRegistry());
   }
 
@@ -3152,7 +3148,8 @@ bool InstructionCombiningPass::runOnFunction(Function &F) {
   auto *LIWP = getAnalysisIfAvailable<LoopInfoWrapperPass>();
   auto *LI = LIWP ? &LIWP->getLoopInfo() : nullptr;
 
-  return combineInstructionsOverFunction(F, Worklist, AA, AC, TLI, DT, LI);
+  return combineInstructionsOverFunction(F, Worklist, AA, AC, TLI, DT,
+                                         ExpensiveCombines, LI);
 }
 
 char InstructionCombiningPass::ID = 0;
@@ -3175,6 +3172,6 @@ void LLVMInitializeInstCombine(LLVMPassRegistryRef R) {
   initializeInstructionCombiningPassPass(*unwrap(R));
 }
 
-FunctionPass *llvm::createInstructionCombiningPass() {
-  return new InstructionCombiningPass();
+FunctionPass *llvm::createInstructionCombiningPass(bool ExpensiveCombines) {
+  return new InstructionCombiningPass(ExpensiveCombines);
 }

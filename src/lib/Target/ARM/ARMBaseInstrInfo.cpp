@@ -2029,15 +2029,6 @@ void llvm::emitARMRegPlusImmediate(MachineBasicBlock &MBB,
   }
 }
 
-static bool isAnySubRegLive(unsigned Reg, const TargetRegisterInfo *TRI,
-                      MachineInstr *MI) {
-  for (MCSubRegIterator Subreg(Reg, TRI, /* IncludeSelf */ true);
-       Subreg.isValid(); ++Subreg)
-    if (MI->getParent()->computeRegisterLiveness(TRI, *Subreg, MI) !=
-        MachineBasicBlock::LQR_Dead)
-      return true;
-  return false;
-}
 bool llvm::tryFoldSPUpdateIntoPushPop(const ARMSubtarget &Subtarget,
                                       MachineFunction &MF, MachineInstr *MI,
                                       unsigned NumBytes) {
@@ -2112,11 +2103,9 @@ bool llvm::tryFoldSPUpdateIntoPushPop(const ARMSubtarget &Subtarget,
     // registers live within the function we might clobber a return value
     // register; the other way a register can be live here is if it's
     // callee-saved.
-    // TODO: Currently, computeRegisterLiveness() does not report "live" if a
-    // sub reg is live. When computeRegisterLiveness() works for sub reg, it
-    // can replace isAnySubRegLive().
     if (isCalleeSavedRegister(CurReg, CSRegs) ||
-        isAnySubRegLive(CurReg, TRI, MI)) {
+        MI->getParent()->computeRegisterLiveness(TRI, CurReg, MI) !=
+        MachineBasicBlock::LQR_Dead) {
       // VFP pops don't allow holes in the register list, so any skip is fatal
       // for our transformation. GPR pops do, so we should just keep looking.
       if (IsVFPPushPop)
@@ -2695,14 +2684,24 @@ bool ARMBaseInstrInfo::FoldImmediate(MachineInstr *UseMI,
     Commute = UseMI->getOperand(2).getReg() != Reg;
     switch (UseOpc) {
     default: break;
-    case ARM::SUBrr: {
-      if (Commute)
-        return false;
-      ImmVal = -ImmVal;
-      NewUseOpc = ARM::SUBri;
-      // Fallthrough
-    }
     case ARM::ADDrr:
+    case ARM::SUBrr: {
+      if (UseOpc == ARM::SUBrr && Commute)
+        return false;
+
+      // ADD/SUB are special because they're essentially the same operation, so
+      // we can handle a larger range of immediates.
+      if (ARM_AM::isSOImmTwoPartVal(ImmVal))
+        NewUseOpc = UseOpc == ARM::ADDrr ? ARM::ADDri : ARM::SUBri;
+      else if (ARM_AM::isSOImmTwoPartVal(-ImmVal)) {
+        ImmVal = -ImmVal;
+        NewUseOpc = UseOpc == ARM::ADDrr ? ARM::SUBri : ARM::ADDri;
+      } else
+        return false;
+      SOImmValV1 = (uint32_t)ARM_AM::getSOImmTwoPartFirst(ImmVal);
+      SOImmValV2 = (uint32_t)ARM_AM::getSOImmTwoPartSecond(ImmVal);
+      break;
+    }
     case ARM::ORRrr:
     case ARM::EORrr: {
       if (!ARM_AM::isSOImmTwoPartVal(ImmVal))
@@ -2711,20 +2710,29 @@ bool ARMBaseInstrInfo::FoldImmediate(MachineInstr *UseMI,
       SOImmValV2 = (uint32_t)ARM_AM::getSOImmTwoPartSecond(ImmVal);
       switch (UseOpc) {
       default: break;
-      case ARM::ADDrr: NewUseOpc = ARM::ADDri; break;
       case ARM::ORRrr: NewUseOpc = ARM::ORRri; break;
       case ARM::EORrr: NewUseOpc = ARM::EORri; break;
       }
       break;
     }
-    case ARM::t2SUBrr: {
-      if (Commute)
-        return false;
-      ImmVal = -ImmVal;
-      NewUseOpc = ARM::t2SUBri;
-      // Fallthrough
-    }
     case ARM::t2ADDrr:
+    case ARM::t2SUBrr: {
+      if (UseOpc == ARM::t2SUBrr && Commute)
+        return false;
+
+      // ADD/SUB are special because they're essentially the same operation, so
+      // we can handle a larger range of immediates.
+      if (ARM_AM::isT2SOImmTwoPartVal(ImmVal))
+        NewUseOpc = UseOpc == ARM::t2ADDrr ? ARM::t2ADDri : ARM::t2SUBri;
+      else if (ARM_AM::isT2SOImmTwoPartVal(-ImmVal)) {
+        ImmVal = -ImmVal;
+        NewUseOpc = UseOpc == ARM::t2ADDrr ? ARM::t2SUBri : ARM::t2ADDri;
+      } else
+        return false;
+      SOImmValV1 = (uint32_t)ARM_AM::getT2SOImmTwoPartFirst(ImmVal);
+      SOImmValV2 = (uint32_t)ARM_AM::getT2SOImmTwoPartSecond(ImmVal);
+      break;
+    }
     case ARM::t2ORRrr:
     case ARM::t2EORrr: {
       if (!ARM_AM::isT2SOImmTwoPartVal(ImmVal))
@@ -2733,7 +2741,6 @@ bool ARMBaseInstrInfo::FoldImmediate(MachineInstr *UseMI,
       SOImmValV2 = (uint32_t)ARM_AM::getT2SOImmTwoPartSecond(ImmVal);
       switch (UseOpc) {
       default: break;
-      case ARM::t2ADDrr: NewUseOpc = ARM::t2ADDri; break;
       case ARM::t2ORRrr: NewUseOpc = ARM::t2ORRri; break;
       case ARM::t2EORrr: NewUseOpc = ARM::t2EORri; break;
       }

@@ -28,11 +28,13 @@ Module::Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent,
                bool IsFramework, bool IsExplicit, unsigned VisibilityID)
     : Name(Name), DefinitionLoc(DefinitionLoc), Parent(Parent), Directory(),
       Umbrella(), Signature(0), ASTFile(nullptr), VisibilityID(VisibilityID),
-      IsMissingRequirement(false), IsAvailable(true), IsFromModuleFile(false),
-      IsFramework(IsFramework), IsExplicit(IsExplicit), IsSystem(false),
-      IsExternC(false), IsInferred(false), InferSubmodules(false),
-      InferExplicitSubmodules(false), InferExportWildcard(false),
-      ConfigMacrosExhaustive(false), NameVisibility(Hidden) {
+      IsMissingRequirement(false), HasIncompatibleModuleFile(false),
+      IsAvailable(true), IsFromModuleFile(false), IsFramework(IsFramework),
+      IsExplicit(IsExplicit), IsSystem(false), IsExternC(false),
+      IsInferred(false), IsSwiftInferImportAsMember(false),
+      InferSubmodules(false), InferExplicitSubmodules(false),
+      InferExportWildcard(false), ConfigMacrosExhaustive(false),
+      NameVisibility(Hidden) {
   if (Parent) {
     if (!Parent->isAvailable())
       IsAvailable = false;
@@ -336,6 +338,8 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
       OS << " [system]";
     if (IsExternC)
       OS << " [extern_c]";
+    if (IsSwiftInferImportAsMember)
+      OS << " [swift_infer_import_as_member]";
   }
 
   OS << " {\n";
@@ -490,7 +494,7 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
   OS << "}\n";
 }
 
-void Module::dump() const {
+LLVM_DUMP_METHOD void Module::dump() const {
   print(llvm::errs());
 }
 

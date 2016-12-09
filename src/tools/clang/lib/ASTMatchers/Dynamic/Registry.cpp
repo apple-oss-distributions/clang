@@ -108,6 +108,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(autoType);
   REGISTER_MATCHER(binaryOperator);
   REGISTER_MATCHER(blockPointerType);
+  REGISTER_MATCHER(booleanType);
   REGISTER_MATCHER(breakStmt);
   REGISTER_MATCHER(builtinType);
   REGISTER_MATCHER(callExpr);
@@ -173,6 +174,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(fieldDecl);
   REGISTER_MATCHER(floatLiteral);
   REGISTER_MATCHER(forEach);
+  REGISTER_MATCHER(forEachArgumentWithParam);
   REGISTER_MATCHER(forEachConstructorInitializer);
   REGISTER_MATCHER(forEachDescendant);
   REGISTER_MATCHER(forEachSwitchCase);
@@ -194,6 +196,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(hasArgument);
   REGISTER_MATCHER(hasArgumentOfType);
   REGISTER_MATCHER(hasAttr);
+  REGISTER_MATCHER(hasAutomaticStorageDuration);
   REGISTER_MATCHER(hasBase);
   REGISTER_MATCHER(hasBody);
   REGISTER_MATCHER(hasCanonicalType);
@@ -238,9 +241,11 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(hasSize);
   REGISTER_MATCHER(hasSizeExpr);
   REGISTER_MATCHER(hasSourceExpression);
+  REGISTER_MATCHER(hasStaticStorageDuration);
   REGISTER_MATCHER(hasTargetDecl);
   REGISTER_MATCHER(hasTemplateArgument);
   REGISTER_MATCHER(hasThen);
+  REGISTER_MATCHER(hasThreadStorageDuration);
   REGISTER_MATCHER(hasTrueExpression);
   REGISTER_MATCHER(hasTypeLoc);
   REGISTER_MATCHER(hasUnaryOperand);
@@ -265,6 +270,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(isConstQualified);
   REGISTER_MATCHER(isCopyConstructor);
   REGISTER_MATCHER(isDefaultConstructor);
+  REGISTER_MATCHER(isDefaulted);
   REGISTER_MATCHER(isDefinition);
   REGISTER_MATCHER(isDeleted);
   REGISTER_MATCHER(isExceptionVariable);
@@ -285,6 +291,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(isListInitialization);
   REGISTER_MATCHER(isMemberInitializer);
   REGISTER_MATCHER(isMoveConstructor);
+  REGISTER_MATCHER(isNoThrow);
   REGISTER_MATCHER(isOverride);
   REGISTER_MATCHER(isPrivate);
   REGISTER_MATCHER(isProtected);
@@ -295,6 +302,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(isUnion);
   REGISTER_MATCHER(isVariadic);
   REGISTER_MATCHER(isVirtual);
+  REGISTER_MATCHER(isVolatileQualified);
   REGISTER_MATCHER(isWritten);
   REGISTER_MATCHER(labelStmt);
   REGISTER_MATCHER(lambdaExpr);

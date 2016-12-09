@@ -129,9 +129,9 @@ class ELFObjectWriter : public MCObjectWriter {
     bool hasRelocationAddend() const {
       return TargetObjectWriter->hasRelocationAddend();
     }
-    unsigned GetRelocType(const MCValue &Target, const MCFixup &Fixup,
-                          bool IsPCRel) const {
-      return TargetObjectWriter->GetRelocType(Target, Fixup, IsPCRel);
+    unsigned getRelocType(MCContext &Ctx, const MCValue &Target,
+                          const MCFixup &Fixup, bool IsPCRel) const {
+      return TargetObjectWriter->getRelocType(Ctx, Target, Fixup, IsPCRel);
     }
 
     void align(unsigned Alignment);
@@ -618,6 +618,7 @@ void ELFObjectWriter::recordRelocation(MCAssembler &Asm,
   const MCSectionELF &FixupSection = cast<MCSectionELF>(*Fragment->getParent());
   uint64_t C = Target.getConstant();
   uint64_t FixupOffset = Layout.getFragmentOffset(Fragment) + Fixup.getOffset();
+  MCContext &Ctx = Asm.getContext();
 
   if (const MCSymbolRefExpr *RefB = Target.getSymB()) {
     assert(RefB->getKind() == MCSymbolRefExpr::VK_None &&
@@ -630,28 +631,29 @@ void ELFObjectWriter::recordRelocation(MCAssembler &Asm,
     // In general, ELF has no relocations for -B. It can only represent (A + C)
     // or (A + C - R). If B = R + K and the relocation is not pcrel, we can
     // replace B to implement it: (A - R - K + C)
-    if (IsPCRel)
-      Asm.getContext().reportFatalError(
+    if (IsPCRel) {
+      Ctx.reportError(
           Fixup.getLoc(),
           "No relocation available to represent this relative expression");
+      return;
+    }
 
     const auto &SymB = cast<MCSymbolELF>(RefB->getSymbol());
 
-    if (SymB.isUndefined())
-      Asm.getContext().reportFatalError(
-          Fixup.getLoc(),
-          Twine("symbol '") + SymB.getName() +
-              "' can not be undefined in a subtraction expression");
+    if (SymB.isUndefined()) {
+      Ctx.reportError(Fixup.getLoc(),
+                      Twine("symbol '") + SymB.getName() +
+                          "' can not be undefined in a subtraction expression");
+      return;
+    }
 
     assert(!SymB.isAbsolute() && "Should have been folded");
     const MCSection &SecB = SymB.getSection();
-    if (&SecB != &FixupSection)
-      Asm.getContext().reportFatalError(
-          Fixup.getLoc(), "Cannot represent a difference across sections");
-
-    if (::isWeak(SymB))
-      Asm.getContext().reportFatalError(
-          Fixup.getLoc(), "Cannot represent a subtraction with a weak symbol");
+    if (&SecB != &FixupSection) {
+      Ctx.reportError(Fixup.getLoc(),
+                      "Cannot represent a difference across sections");
+      return;
+    }
 
     uint64_t SymBOffset = Layout.getSymbolOffset(SymB);
     uint64_t K = SymBOffset - FixupOffset;
@@ -674,7 +676,7 @@ void ELFObjectWriter::recordRelocation(MCAssembler &Asm,
     }
   }
 
-  unsigned Type = GetRelocType(Target, Fixup, IsPCRel);
+  unsigned Type = getRelocType(Ctx, Target, Fixup, IsPCRel);
   bool RelocateWithSymbol = shouldRelocateWithSymbol(Asm, RefA, SymA, C, Type);
   if (!RelocateWithSymbol && SymA && !SymA->isUndefined())
     C += Layout.getSymbolOffset(*SymA);
@@ -784,8 +786,10 @@ void ELFObjectWriter::computeSymbolTable(
                     Renames.count(&Symbol)))
       continue;
 
-    if (Symbol.isTemporary() && Symbol.isUndefined())
-      Ctx.reportFatalError(SMLoc(), "Undefined temporary");
+    if (Symbol.isTemporary() && Symbol.isUndefined()) {
+      Ctx.reportError(SMLoc(), "Undefined temporary symbol");
+      continue;
+    }
 
     ELFSymbolData MSD;
     MSD.Symbol = cast<MCSymbolELF>(&Symbol);
@@ -1040,8 +1044,13 @@ void ELFObjectWriter::writeRelocations(const MCAssembler &Asm,
                                        const MCSectionELF &Sec) {
   std::vector<ELFRelocationEntry> &Relocs = Relocations[&Sec];
 
-  // Sort the relocation entries. Most targets just sort by Offset, but some
-  // (e.g., MIPS) have additional constraints.
+  // We record relocations by pushing to the end of a vector. Reverse the vector
+  // to get the relocations in the order they were created.
+  // In most cases that is not important, but it can be for special sections
+  // (.eh_frame) or specific relocations (TLS optimizations on SystemZ).
+  std::reverse(Relocs.begin(), Relocs.end());
+
+  // Sort the relocation entries. MIPS needs this.
   TargetObjectWriter->sortRelocs(Asm, Relocs);
 
   for (unsigned i = 0, e = Relocs.size(); i != e; ++i) {
@@ -1264,7 +1273,7 @@ void ELFObjectWriter::writeObject(MCAssembler &Asm,
   uint64_t NaturalAlignment = is64Bit() ? 8 : 4;
   align(NaturalAlignment);
 
-  const unsigned SectionHeaderOffset = getStream().tell();
+  const uint64_t SectionHeaderOffset = getStream().tell();
 
   // ... then the section header table ...
   writeSectionHeader(Layout, SectionIndexMap, SectionOffsets);

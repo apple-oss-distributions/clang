@@ -60,6 +60,10 @@ namespace llvm {
   ///
   class DbgInfoIntrinsic : public IntrinsicInst {
   public:
+    /// Get the location corresponding to the variable referenced by the debug
+    /// info intrinsic.  Depending on the intrinsic, this could be the
+    /// variable's value or its address.
+    Value *getVariableLocation(bool AllowNullOp = true) const;
 
     // Methods for support type inquiry through isa, cast, and dyn_cast:
     static inline bool classof(const IntrinsicInst *I) {
@@ -81,7 +85,7 @@ namespace llvm {
   ///
   class DbgDeclareInst : public DbgInfoIntrinsic {
   public:
-    Value *getAddress() const;
+    Value *getAddress() const { return getVariableLocation(); }
     DILocalVariable *getVariable() const {
       return cast<DILocalVariable>(getRawVariable());
     }
@@ -109,8 +113,9 @@ namespace llvm {
   ///
   class DbgValueInst : public DbgInfoIntrinsic {
   public:
-    const Value *getValue() const;
-    Value *getValue();
+    Value *getValue() const {
+      return getVariableLocation(/* AllowNullOp = */ false);
+    }
     uint64_t getOffset() const {
       return cast<ConstantInt>(
                           const_cast<Value*>(getArgOperand(1)))->getZExtValue();
@@ -372,6 +377,39 @@ namespace llvm {
       return cast<ConstantInt>(const_cast<Value *>(getArgOperand(3)));
     }
   };
-}
+
+  /// This represents the llvm.instrprof_value_profile intrinsic.
+  class InstrProfValueProfileInst : public IntrinsicInst {
+  public:
+    static inline bool classof(const IntrinsicInst *I) {
+      return I->getIntrinsicID() == Intrinsic::instrprof_value_profile;
+    }
+    static inline bool classof(const Value *V) {
+      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+    }
+
+    GlobalVariable *getName() const {
+      return cast<GlobalVariable>(
+          const_cast<Value *>(getArgOperand(0))->stripPointerCasts());
+    }
+
+    ConstantInt *getHash() const {
+      return cast<ConstantInt>(const_cast<Value *>(getArgOperand(1)));
+    }
+
+    Value *getTargetValue() const {
+      return cast<Value>(const_cast<Value *>(getArgOperand(2)));
+    }
+
+    ConstantInt *getValueKind() const {
+      return cast<ConstantInt>(const_cast<Value *>(getArgOperand(3)));
+    }
+
+    // Returns the value site index.
+    ConstantInt *getIndex() const {
+      return cast<ConstantInt>(const_cast<Value *>(getArgOperand(4)));
+    }
+  };
+} // namespace llvm
 
 #endif

@@ -65,6 +65,7 @@ public:
     class _LIBCPP_TYPE_VIS id;
 
     typedef int category;
+    _LIBCPP_AVAILABILITY_LOCALE_CATEGORY
     static const category // values assigned here are for exposition only
         none     = 0,
         collate  = LC_COLLATE_MASK,
@@ -273,7 +274,8 @@ _LIBCPP_EXTERN_TEMPLATE2(class _LIBCPP_TYPE_VIS collate<wchar_t>)
 
 // template <class CharT> class collate_byname;
 
-template <class _CharT> class _LIBCPP_TYPE_VIS_ONLY collate_byname;
+template <class _CharT>
+class _LIBCPP_TYPE_VIS_ONLY collate_byname;
 
 template <>
 class _LIBCPP_TYPE_VIS collate_byname<char>

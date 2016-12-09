@@ -224,14 +224,17 @@ static std::string getOutputFileName(llvm::StringRef InputFile,
     return OutputFileOpt;
 
   if (TempFile) {
+    llvm::SmallString<128> TmpFile;
+    llvm::sys::path::system_temp_directory(true, TmpFile);
     llvm::StringRef Basename =
         OutputFileOpt.empty() ? InputFile : llvm::StringRef(OutputFileOpt);
-    llvm::Twine OutputFile = Basename + ".tmp%%%%%%.dwarf";
+    llvm::sys::path::append(TmpFile, llvm::sys::path::filename(Basename));
+
     int FD;
     llvm::SmallString<128> UniqueFile;
-    if (auto EC = getUniqueFile(OutputFile, FD, UniqueFile)) {
+    if (auto EC = getUniqueFile(TmpFile + ".tmp%%%%%.dwarf", FD, UniqueFile)) {
       llvm::errs() << "error: failed to create temporary outfile '"
-                   << OutputFile << "': " << EC.message() << '\n';
+                   << TmpFile << "': " << EC.message() << '\n';
       return "";
     }
     llvm::sys::RemoveFileOnSignal(UniqueFile);
@@ -348,14 +351,20 @@ static void loadSymbolMap(std::string SymbolMapFilename, LinkOptions &Options,
   llvm::StringRef Data(MemBuf.getBufferStart(),
                        MemBuf.getBufferEnd() - MemBuf.getBufferStart());
   llvm::StringRef LHS;
+
   // Check version string first.
   std::tie(LHS, Data) = Data.split('\n');
+  bool MangleNames = false;
   if (!LHS.startswith("BCSymbolMap Version:")) {
     // Version string not present, warns but try to parse it.
     llvm::errs() << "warning: " << SymbolMapFilename
                  << " is missing version string. Assuming 1.0.\n";
     UnobfuscatedStrings.emplace_back(LHS);
-  } else if (!LHS.equals("BCSymbolMap Version: 1.0")) {
+  } else if (LHS.equals("BCSymbolMap Version: 1.0")) {
+    MangleNames = true;
+  } else if (LHS.equals("BCSymbolMap Version: 2.0")) {
+    MangleNames = false;
+  } else {
     llvm::StringRef VersionNum;
     std::tie(LHS, VersionNum) = LHS.split(':');
     llvm::errs() << "warning: " << SymbolMapFilename
@@ -371,7 +380,7 @@ static void loadSymbolMap(std::string SymbolMapFilename, LinkOptions &Options,
   if (Options.Translator)
     return;
 
-  Options.Translator = [](llvm::StringRef Input) -> llvm::StringRef {
+  Options.Translator = [MangleNames](llvm::StringRef Input) -> llvm::StringRef {
     if (!Input.startswith("__hidden#") && !Input.startswith("___hidden#"))
       return Input;
     unsigned LineNumber = UINT_MAX;
@@ -391,7 +400,7 @@ static void loadSymbolMap(std::string SymbolMapFilename, LinkOptions &Options,
     }
 
     const std::string &Translation = UnobfuscatedStrings[LineNumber];
-    if (!MightNeedUnderscore)
+    if (!MightNeedUnderscore || !MangleNames)
       return Translation;
     // Objective C symbols for the Macho symbol table start with that
     // weird \1 character. Do not preprend an underscore to these and

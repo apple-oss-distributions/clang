@@ -198,6 +198,9 @@ private:
   }
 
   bool SelectCVTFixedPosOperand(SDValue N, SDValue &FixedPos, unsigned Width);
+
+  void SelectCMP_SWAP(SDNode *N);
+
 };
 } // end anonymous namespace
 
@@ -687,7 +690,7 @@ bool AArch64DAGToDAGISel::SelectAddrModeIndexed(SDValue N, unsigned Size,
 
     const GlobalValue *GV = GAN->getGlobal();
     unsigned Alignment = GV->getAlignment();
-    Type *Ty = GV->getType()->getElementType();
+    Type *Ty = GV->getValueType();
     if (Alignment == 0 && Ty->isSized())
       Alignment = DL.getABITypeAlignment(Ty);
 
@@ -1974,7 +1977,8 @@ static bool isBitfieldPositioningOp(SelectionDAG *CurDAG, SDValue Op,
 // f = Opc Opd0, Opd1, LSB, MSB ; where Opc is a BFM, LSB = imm, and MSB = imm2
 static bool isBitfieldInsertOpFromOr(SDNode *N, unsigned &Opc, SDValue &Dst,
                                      SDValue &Src, unsigned &ImmR,
-                                     unsigned &ImmS, SelectionDAG *CurDAG) {
+                                     unsigned &ImmS, const APInt &UsefulBits,
+                                     SelectionDAG *CurDAG) {
   assert(N->getOpcode() == ISD::OR && "Expect a OR operation");
 
   // Set Opc
@@ -1988,8 +1992,6 @@ static bool isBitfieldInsertOpFromOr(SDNode *N, unsigned &Opc, SDValue &Dst,
 
   // Because of simplify-demanded-bits in DAGCombine, involved masks may not
   // have the expected shape. Try to undo that.
-  APInt UsefulBits;
-  getUsefulBits(SDValue(N, 0), UsefulBits);
 
   unsigned NumberOfIgnoredLowBits = UsefulBits.countTrailingZeros();
   unsigned NumberOfIgnoredHighBits = UsefulBits.countLeadingZeros();
@@ -2083,11 +2085,18 @@ SDNode *AArch64DAGToDAGISel::SelectBitfieldInsertOp(SDNode *N) {
   unsigned Opc;
   unsigned LSB, MSB;
   SDValue Opd0, Opd1;
+  EVT VT = N->getValueType(0);
+  APInt NUsefulBits;
+  getUsefulBits(SDValue(N, 0), NUsefulBits);
 
-  if (!isBitfieldInsertOpFromOr(N, Opc, Opd0, Opd1, LSB, MSB, CurDAG))
+  // If all bits are not useful, just return UNDEF.
+  if (!NUsefulBits)
+    return CurDAG->SelectNodeTo(N, TargetOpcode::IMPLICIT_DEF, VT);
+
+  if (!isBitfieldInsertOpFromOr(N, Opc, Opd0, Opd1, LSB, MSB, NUsefulBits,
+                                CurDAG))
     return nullptr;
 
-  EVT VT = N->getValueType(0);
   SDLoc dl(N);
   SDValue Ops[] = { Opd0,
                     Opd1,
@@ -2266,7 +2275,7 @@ SDNode *AArch64DAGToDAGISel::SelectWriteRegister(SDNode *N) {
               && "Expected a constant integer expression.");
     uint64_t Immed = cast<ConstantSDNode>(N->getOperand(2))->getZExtValue();
     unsigned State;
-    if (Reg == AArch64PState::PAN) {
+    if (Reg == AArch64PState::PAN || Reg == AArch64PState::UAO) {
       assert(Immed < 2 && "Bad imm");
       State = AArch64::MSRpstateImm1;
     } else {
@@ -2295,6 +2304,36 @@ SDNode *AArch64DAGToDAGISel::SelectWriteRegister(SDNode *N) {
   return nullptr;
 }
 
+/// We've got special pseudo-instructions for these
+void AArch64DAGToDAGISel::SelectCMP_SWAP(SDNode *N) {
+  unsigned Opcode;
+  EVT MemTy = cast<MemSDNode>(N)->getMemoryVT();
+  if (MemTy == MVT::i8)
+    Opcode = AArch64::CMP_SWAP_8;
+  else if (MemTy == MVT::i16)
+    Opcode = AArch64::CMP_SWAP_16;
+  else if (MemTy == MVT::i32)
+    Opcode = AArch64::CMP_SWAP_32;
+  else if (MemTy == MVT::i64)
+    Opcode = AArch64::CMP_SWAP_64;
+  else
+    llvm_unreachable("Unknown AtomicCmpSwap type");
+
+  MVT RegTy = MemTy == MVT::i64 ? MVT::i64 : MVT::i32;
+  SDValue Ops[] = {N->getOperand(1), N->getOperand(2), N->getOperand(3),
+                   N->getOperand(0)};
+  SDNode *CmpSwap = CurDAG->getMachineNode(
+      Opcode, SDLoc(N),
+      CurDAG->getVTList(RegTy, MVT::i32, MVT::Other), Ops);
+
+  MachineSDNode::mmo_iterator MemOp = MF->allocateMemRefsArray(1);
+  MemOp[0] = cast<MemSDNode>(N)->getMemOperand();
+  cast<MachineSDNode>(CmpSwap)->setMemRefs(MemOp, MemOp + 1);
+
+  ReplaceUses(SDValue(N, 0), SDValue(CmpSwap, 0));
+  ReplaceUses(SDValue(N, 1), SDValue(CmpSwap, 2));
+}
+
 SDNode *AArch64DAGToDAGISel::Select(SDNode *Node) {
   // Dump information about the Node being selected
   DEBUG(errs() << "Selecting: ");
@@ -2315,6 +2354,10 @@ SDNode *AArch64DAGToDAGISel::Select(SDNode *Node) {
   switch (Node->getOpcode()) {
   default:
     break;
+
+  case ISD::ATOMIC_CMP_SWAP:
+    SelectCMP_SWAP(Node);
+    return nullptr;
 
   case ISD::READ_REGISTER:
     if (SDNode *Res = SelectReadRegister(Node))

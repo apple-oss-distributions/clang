@@ -10,4 +10,5 @@ add_llvm_unittest(BitcodeTests
   AppleInternalBitcodeVersioning.cpp
   BitReaderTest.cpp
   BitstreamReaderTest.cpp
+  BitstreamWriterTest.cpp
   )

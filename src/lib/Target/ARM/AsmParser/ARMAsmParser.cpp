@@ -20,7 +20,7 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCDisassembler.h"
+#include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCELFStreamer.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
@@ -31,20 +31,20 @@
 #include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCParser/MCAsmParserUtils.h"
 #include "llvm/MC/MCParser/MCParsedAsmOperand.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/MC/MCTargetAsmParser.h"
 #include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/ARMEHABI.h"
-#include "llvm/Support/TargetParser.h"
 #include "llvm/Support/COFF.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ELF.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/TargetParser.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -268,6 +268,9 @@ class ARMAsmParser : public MCTargetAsmParser {
   }
   bool hasV8Ops() const {
     return getSTI().getFeatureBits()[ARM::HasV8Ops];
+  }
+  bool hasV8MBaseline() const {
+    return getSTI().getFeatureBits()[ARM::HasV8MBaselineOps];
   }
   bool hasARM() const {
     return !getSTI().getFeatureBits()[ARM::FeatureNoARM];
@@ -1203,7 +1206,7 @@ public:
   }
   bool isT2MemRegOffset() const {
     if (!isMem() || !Memory.OffsetRegNum || Memory.isNegative ||
-        Memory.Alignment != 0)
+        Memory.Alignment != 0 || Memory.BaseRegNum == ARM::PC)
       return false;
     // Only lsl #{0, 1, 2, 3} allowed.
     if (Memory.ShiftType == ARM_AM::no_shift)
@@ -4673,14 +4676,14 @@ void ARMAsmParser::cvtThumbBranches(MCInst &Inst,
     // classify tB as either t2B or t1B based on range of immediate operand
     case ARM::tB: {
       ARMOperand &op = static_cast<ARMOperand &>(*Operands[ImmOp]);
-      if (!op.isSignedOffset<11, 1>() && isThumbTwo())
+      if (!op.isSignedOffset<11, 1>() && isThumb() && hasV8MBaseline())
         Inst.setOpcode(ARM::t2B);
       break;
     }
     // classify tBcc as either t2Bcc or t1Bcc based on range of immediate operand
     case ARM::tBcc: {
       ARMOperand &op = static_cast<ARMOperand &>(*Operands[ImmOp]);
-      if (!op.isSignedOffset<8, 1>() && isThumbTwo())
+      if (!op.isSignedOffset<8, 1>() && isThumb() && hasV8MBaseline())
         Inst.setOpcode(ARM::t2Bcc);
       break;
     }
@@ -5122,6 +5125,7 @@ bool ARMAsmParser::parseOperand(OperandVector &Operands, StringRef Mnemonic) {
     // FALLTHROUGH
   }
   case AsmToken::Colon: {
+    S = Parser.getTok().getLoc();
     // ":lower16:" and ":upper16:" expression prefixes
     // FIXME: Check it's an expression prefix,
     // e.g. (FOO - :lower16:BAR) isn't legal.
@@ -5140,8 +5144,9 @@ bool ARMAsmParser::parseOperand(OperandVector &Operands, StringRef Mnemonic) {
     return false;
   }
   case AsmToken::Equal: {
+    S = Parser.getTok().getLoc();
     if (Mnemonic != "ldr") // only parse for ldr pseudo (e.g. ldr r0, =val)
-      return Error(Parser.getTok().getLoc(), "unexpected token in operand");
+      return Error(S, "unexpected token in operand");
 
     Parser.Lex(); // Eat '='
     const MCExpr *SubExprVal;
@@ -5149,7 +5154,8 @@ bool ARMAsmParser::parseOperand(OperandVector &Operands, StringRef Mnemonic) {
       return true;
     E = SMLoc::getFromPointer(Parser.getTok().getLoc().getPointer() - 1);
 
-    const MCExpr *CPLoc = getTargetStreamer().addConstantPoolEntry(SubExprVal);
+    const MCExpr *CPLoc =
+        getTargetStreamer().addConstantPoolEntry(SubExprVal, S);
     Operands.push_back(ARMOperand::CreateImm(CPLoc, S, E));
     return false;
   }
@@ -5602,9 +5608,11 @@ bool ARMAsmParser::shouldOmitPredicateOperand(StringRef Mnemonic,
   // VRINT{Z, R, X} have a predicate operand in VFP, but not in NEON
   unsigned RegIdx = 3;
   if ((Mnemonic == "vrintz" || Mnemonic == "vrintx" || Mnemonic == "vrintr") &&
-      static_cast<ARMOperand &>(*Operands[2]).getToken() == ".f32") {
+      (static_cast<ARMOperand &>(*Operands[2]).getToken() == ".f32" ||
+       static_cast<ARMOperand &>(*Operands[2]).getToken() == ".f16")) {
     if (static_cast<ARMOperand &>(*Operands[3]).isToken() &&
-        static_cast<ARMOperand &>(*Operands[3]).getToken() == ".f32")
+        (static_cast<ARMOperand &>(*Operands[3]).getToken() == ".f32" ||
+         static_cast<ARMOperand &>(*Operands[3]).getToken() == ".f16"))
       RegIdx = 4;
 
     if (static_cast<ARMOperand &>(*Operands[RegIdx]).isReg() &&
@@ -8801,7 +8809,7 @@ bool ARMAsmParser::parseLiteralValues(unsigned Size, SMLoc L) {
         return false;
       }
 
-      getParser().getStreamer().EmitValue(Value, Size);
+      getParser().getStreamer().EmitValue(Value, Size, L);
 
       if (getLexer().is(AsmToken::EndOfStatement))
         break;
@@ -9040,7 +9048,7 @@ bool ARMAsmParser::parseDirectiveArch(SMLoc L) {
 
   Triple T;
   MCSubtargetInfo &STI = copySTI();
-  STI.setDefaultFeatures(T.getARMCPUForArch(Arch));
+  STI.setDefaultFeatures("", ("+" + ARM::getArchName(ID)).str());
   setAvailableFeatures(ComputeAvailableFeatures(STI.getFeatureBits()));
 
   getTargetStreamer().emitArch(ID);
@@ -9173,7 +9181,7 @@ bool ARMAsmParser::parseDirectiveCPU(SMLoc L) {
   }
 
   MCSubtargetInfo &STI = copySTI();
-  STI.setDefaultFeatures(CPU);
+  STI.setDefaultFeatures(CPU, "");
   setAvailableFeatures(ComputeAvailableFeatures(STI.getFeatureBits()));
 
   return false;
@@ -9913,7 +9921,7 @@ extern "C" void LLVMInitializeARMAsmParser() {
 // flags below, that were generated by table-gen.
 static const struct {
   const unsigned Kind;
-  const unsigned ArchCheck;
+  const uint64_t ArchCheck;
   const FeatureBitset Features;
 } Extensions[] = {
   { ARM::AEK_CRC, Feature_HasV8, {ARM::FeatureCRC} },
@@ -9927,6 +9935,7 @@ static const struct {
   { ARM::AEK_SEC, Feature_HasV6K, {ARM::FeatureTrustZone} },
   // FIXME: Only available in A-class, isel not predicated
   { ARM::AEK_VIRT, Feature_HasV7, {ARM::FeatureVirtualization} },
+  { ARM::AEK_FP16, Feature_HasV8_2a, {ARM::FeatureFPARMv8, ARM::FeatureFullFP16} },
   // FIXME: Unsupported extensions.
   { ARM::AEK_OS, Feature_None, {} },
   { ARM::AEK_IWMMXT, Feature_None, {} },

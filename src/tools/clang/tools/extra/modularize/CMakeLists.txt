@@ -20,3 +20,7 @@ target_link_libraries(modularize
   clangLex
   clangTooling
   )
+
+install(TARGETS modularize
+        RUNTIME DESTINATION bin
+        COMPONENT clang-extras)

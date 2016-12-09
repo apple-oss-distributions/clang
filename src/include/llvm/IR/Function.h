@@ -56,7 +56,6 @@ private:
   mutable ArgumentListType ArgumentList;  ///< The formal arguments
   ValueSymbolTable *SymTab;               ///< Symbol table of args/instructions
   AttributeSet AttributeSets;             ///< Parameter attributes
-  FunctionType *Ty;
 
   /*
    * Value::SubclassData
@@ -64,9 +63,10 @@ private:
    * bit 0      : HasLazyArguments
    * bit 1      : HasPrefixData
    * bit 2      : HasPrologueData
-   * bit 3      : [reserved]
+   * bit 3      : HasPersonalityFn
    * bits 4-13  : CallingConvention
-   * bits 14-15 : [reserved]
+   * bits 14    : HasGC
+   * bits 15 : [reserved]
    */
 
   /// Bits from GlobalObject::GlobalObjectSubclassData.
@@ -88,9 +88,12 @@ private:
   /// built on demand, so that the list isn't allocated until the first client
   /// needs it.  The hasLazyArguments predicate returns true if the arg list
   /// hasn't been set up yet.
+public:
   bool hasLazyArguments() const {
     return getSubclassDataFromValue() & (1<<0);
   }
+
+private:
   void CheckLazyArguments() const {
     if (hasLazyArguments())
       BuildLazyArguments();
@@ -110,21 +113,13 @@ private:
 public:
   static Function *Create(FunctionType *Ty, LinkageTypes Linkage,
                           const Twine &N = "", Module *M = nullptr) {
-    return new(1) Function(Ty, Linkage, N, M);
+    return new Function(Ty, Linkage, N, M);
   }
 
   ~Function() override;
 
   /// \brief Provide fast operand accessors
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
-
-  /// \brief Get the personality function associated with this function.
-  bool hasPersonalityFn() const { return getNumOperands() != 0; }
-  Constant *getPersonalityFn() const {
-    assert(hasPersonalityFn());
-    return cast<Constant>(Op<0>());
-  }
-  void setPersonalityFn(Constant *C);
 
   Type *getReturnType() const;           // Return the type of the ret val
   FunctionType *getFunctionType() const; // Return the FunctionType for me
@@ -207,7 +202,7 @@ public:
 
   /// @brief Return true if the function has the attribute.
   bool hasFnAttribute(Attribute::AttrKind Kind) const {
-    return AttributeSets.hasAttribute(AttributeSet::FunctionIndex, Kind);
+    return AttributeSets.hasFnAttribute(Kind);
   }
   bool hasFnAttribute(StringRef Kind) const {
     return AttributeSets.hasAttribute(AttributeSet::FunctionIndex, Kind);
@@ -215,6 +210,8 @@ public:
 
   /// @brief Return the attribute for the given attribute kind.
   Attribute getFnAttribute(Attribute::AttrKind Kind) const {
+    if (!hasFnAttribute(Kind))
+      return Attribute();
     return AttributeSets.getAttribute(AttributeSet::FunctionIndex, Kind);
   }
   Attribute getFnAttribute(StringRef Kind) const {
@@ -223,14 +220,18 @@ public:
 
   /// \brief Return the stack alignment for the function.
   unsigned getFnStackAlignment() const {
+    if (!hasFnAttribute(Attribute::StackAlignment))
+      return 0;
     return AttributeSets.getStackAlignment(AttributeSet::FunctionIndex);
   }
 
   /// hasGC/getGC/setGC/clearGC - The name of the garbage collection algorithm
   ///                             to use during code generation.
-  bool hasGC() const;
-  const char *getGC() const;
-  void setGC(const char *Str);
+  bool hasGC() const {
+    return getSubclassDataFromValue() & (1<<14);
+  }
+  const std::string &getGC() const;
+  void setGC(const std::string Str);
   void clearGC();
 
   /// @brief adds the attribute to the list of attributes.
@@ -268,8 +269,7 @@ public:
 
   /// @brief Determine if the function does not access memory.
   bool doesNotAccessMemory() const {
-    return AttributeSets.hasAttribute(AttributeSet::FunctionIndex,
-                                      Attribute::ReadNone);
+    return hasFnAttribute(Attribute::ReadNone);
   }
   void setDoesNotAccessMemory() {
     addFnAttr(Attribute::ReadNone);
@@ -277,9 +277,7 @@ public:
 
   /// @brief Determine if the function does not access or only reads memory.
   bool onlyReadsMemory() const {
-    return doesNotAccessMemory() ||
-      AttributeSets.hasAttribute(AttributeSet::FunctionIndex,
-                                 Attribute::ReadOnly);
+    return doesNotAccessMemory() || hasFnAttribute(Attribute::ReadOnly);
   }
   void setOnlyReadsMemory() {
     addFnAttr(Attribute::ReadOnly);
@@ -288,15 +286,31 @@ public:
   /// @brief Determine if the call can access memmory only using pointers based
   /// on its arguments.
   bool onlyAccessesArgMemory() const {
-    return AttributeSets.hasAttribute(AttributeSet::FunctionIndex,
-                                      Attribute::ArgMemOnly);
+    return hasFnAttribute(Attribute::ArgMemOnly);
   }
   void setOnlyAccessesArgMemory() { addFnAttr(Attribute::ArgMemOnly); }
 
+  /// @brief Determine if the function may only access memory that is 
+  ///  inaccessible from the IR.
+  bool onlyAccessesInaccessibleMemory() const {
+    return hasFnAttribute(Attribute::InaccessibleMemOnly);
+  }
+  void setOnlyAccessesInaccessibleMemory() {
+    addFnAttr(Attribute::InaccessibleMemOnly);
+  }
+
+  /// @brief Determine if the function may only access memory that is
+  //  either inaccessible from the IR or pointed to by its arguments.
+  bool onlyAccessesInaccessibleMemOrArgMem() const {
+    return hasFnAttribute(Attribute::InaccessibleMemOrArgMemOnly);
+  }
+  void setOnlyAccessesInaccessibleMemOrArgMem() {
+    addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+  }
+
   /// @brief Determine if the function cannot return.
   bool doesNotReturn() const {
-    return AttributeSets.hasAttribute(AttributeSet::FunctionIndex,
-                                      Attribute::NoReturn);
+    return hasFnAttribute(Attribute::NoReturn);
   }
   void setDoesNotReturn() {
     addFnAttr(Attribute::NoReturn);
@@ -425,6 +439,12 @@ public:
   ///
   void eraseFromParent() override;
 
+  /// Steal arguments from another function.
+  ///
+  /// Drop this function's arguments and splice in the ones from \c Src.
+  /// Requires that this has no function body.
+  void stealArgumentListFrom(Function &Src);
+
   /// Get the underlying elements of the Function... the basic block list is
   /// empty for external functions.
   ///
@@ -493,11 +513,11 @@ public:
   }
 
   iterator_range<arg_iterator> args() {
-    return iterator_range<arg_iterator>(arg_begin(), arg_end());
+    return make_range(arg_begin(), arg_end());
   }
 
   iterator_range<const_arg_iterator> args() const {
-    return iterator_range<const_arg_iterator>(arg_begin(), arg_end());
+    return make_range(arg_begin(), arg_end());
   }
 
 /// @}
@@ -505,17 +525,30 @@ public:
   size_t arg_size() const;
   bool arg_empty() const;
 
+  /// \brief Check whether this function has a personality function.
+  bool hasPersonalityFn() const {
+    return getSubclassDataFromValue() & (1<<3);
+  }
+
+  /// \brief Get the personality function associated with this function.
+  Constant *getPersonalityFn() const;
+  void setPersonalityFn(Constant *Fn);
+
+  /// \brief Check whether this function has prefix data.
   bool hasPrefixData() const {
     return getSubclassDataFromValue() & (1<<1);
   }
 
+  /// \brief Get the prefix data associated with this function.
   Constant *getPrefixData() const;
   void setPrefixData(Constant *PrefixData);
 
+  /// \brief Check whether this function has prologue data.
   bool hasPrologueData() const {
     return getSubclassDataFromValue() & (1<<2);
   }
 
+  /// \brief Get the prologue data associated with this function.
   Constant *getPrologueData() const;
   void setPrologueData(Constant *PrologueData);
 
@@ -610,11 +643,15 @@ public:
   DISubprogram *getSubprogram() const;
 
 private:
+  void allocHungoffUselist();
+  template<int Idx> void setHungoffOperand(Constant *C);
+
   // Shadow Value::setValueSubclassData with a private forwarding method so that
   // subclasses cannot accidentally use it.
   void setValueSubclassData(unsigned short D) {
     Value::setValueSubclassData(D);
   }
+  void setValueSubclassDataBit(unsigned Bit, bool On);
 
   bool hasMetadataHashEntry() const {
     return getGlobalObjectSubClassData() & HasMetadataHashEntryBit;
@@ -627,7 +664,7 @@ private:
 };
 
 template <>
-struct OperandTraits<Function> : public OptionalOperandTraits<Function> {};
+struct OperandTraits<Function> : public HungoffOperandTraits<3> {};
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(Function, Value)
 

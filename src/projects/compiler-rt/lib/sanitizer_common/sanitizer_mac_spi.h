@@ -19,6 +19,9 @@ namespace __sanitizer {
 // Check if the operation can be performed under the sandbox.
 bool sandbox_allows_to_perform(const char *operation);
 
+void dynamic_interpose_add(void *wrapper, void *real);
+void dynamic_interpose();
+
 }  // namespace __sanitizer
 
 #endif  // SANITIZER_MAC

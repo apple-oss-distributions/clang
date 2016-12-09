@@ -19,6 +19,7 @@
 #include "llvm/APIAnalysis.h"
 
 struct APIAnalysisIntermediateResult {
+  std::string installName;
   llvm::StringSet<> messageNames;
   llvm::StringMap<bool> classNames;
   llvm::StringMap<llvm::StringMap<bool>> instanceMethods;
@@ -33,10 +34,18 @@ struct APIAnalysisIntermediateResult {
   llvm::StringSet<> linkedLibraries;
   llvm::SmallVector<std::string, 16> orderedLibraries;
   llvm::StringSet<> asmSymbols;
+  llvm::StringSet<> localSymbols;
   llvm::StringMap<std::string> superClasses;
+  llvm::StringSet<> potentiallyDefinedSelectors;
+
+  llvm::StringMap<std::string> classLinkMap;
 };
 
 int AnalyzeFileImpl(llvm::StringRef &filePath,
+                    APIAnalysisIntermediateResult &result,
+                    const APIAnalysisOptions &options);
+
+int AnalyzeFileImpl(llvm::MemoryBufferRef &fileData,
                     APIAnalysisIntermediateResult &result,
                     const APIAnalysisOptions &options);
 

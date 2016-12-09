@@ -11,6 +11,8 @@
 #define LLVM_CLANG_CODEGEN_BACKENDUTIL_H
 
 #include "clang/Basic/LLVM.h"
+#include "llvm/IR/ModuleSummaryIndex.h"
+#include <memory>
 
 namespace llvm {
   class Module;
@@ -36,7 +38,6 @@ namespace clang {
                          const TargetOptions &TOpts, const LangOptions &LOpts,
                          StringRef TDesc, llvm::Module *M, BackendAction Action,
                          raw_pwrite_stream *OS);
-
   void EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts,
                     llvm::MemoryBufferRef Buf);
   bool ContainInlineAsm(llvm::Module *M);

@@ -164,7 +164,7 @@ public:
   
   /// \brief A list of parameters which have the nonnull attribute and are
   /// modified in the function.
-  llvm::SmallPtrSet<const ParmVarDecl*, 8>  ModifiedNonNullParams;
+  llvm::SmallPtrSet<const ParmVarDecl*, 8> ModifiedNonNullParams;
 
 public:
   /// Represents a simple identification of a weak object.
@@ -183,6 +183,7 @@ public:
   /// [self foo].prop   | 0 (unknown)         | prop (ObjCPropertyDecl)
   /// self.prop1.prop2  | prop1 (ObjCPropertyDecl)    | prop2 (ObjCPropertyDecl)
   /// MyClass.prop      | MyClass (ObjCInterfaceDecl) | -prop (ObjCMethodDecl)
+  /// MyClass.foo.prop  | +foo (ObjCMethodDecl)       | -prop (ObjCPropertyDecl)
   /// weakVar           | 0 (known)           | weakVar (VarDecl)
   /// self->weakIvar    | self (VarDecl)      | weakIvar (ObjCIvarDecl)
   ///

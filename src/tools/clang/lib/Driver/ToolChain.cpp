@@ -333,7 +333,6 @@ Tool *ToolChain::SelectTool(const JobAction &JA) const {
 
 std::string ToolChain::GetFilePath(const char *Name) const {
   return D.GetFilePath(Name, *this);
-
 }
 
 std::string ToolChain::GetProgramPath(const char *Name) const {
@@ -342,25 +341,32 @@ std::string ToolChain::GetProgramPath(const char *Name) const {
 
 std::string ToolChain::GetLinkerPath() const {
   if (Arg *A = Args.getLastArg(options::OPT_fuse_ld_EQ)) {
-    StringRef Suffix = A->getValue();
+    StringRef UseLinker = A->getValue();
 
-    // If we're passed -fuse-ld= with no argument, or with the argument ld,
-    // then use whatever the default system linker is.
-    if (Suffix.empty() || Suffix == "ld")
-      return GetProgramPath("ld");
+    if (llvm::sys::path::is_absolute(UseLinker)) {
+      // If we're passed -fuse-ld= with what looks like an absolute path,
+      // don't attempt to second-guess that.
+      if (llvm::sys::fs::exists(UseLinker))
+        return UseLinker;
+    } else {
+      // If we're passed -fuse-ld= with no argument, or with the argument ld,
+      // then use whatever the default system linker is.
+      if (UseLinker.empty() || UseLinker == "ld")
+        return GetProgramPath("ld");
 
-    llvm::SmallString<8> LinkerName("ld.");
-    LinkerName.append(Suffix);
+      llvm::SmallString<8> LinkerName("ld.");
+      LinkerName.append(UseLinker);
 
-    std::string LinkerPath(GetProgramPath(LinkerName.c_str()));
-    if (llvm::sys::fs::exists(LinkerPath))
-      return LinkerPath;
+      std::string LinkerPath(GetProgramPath(LinkerName.c_str()));
+      if (llvm::sys::fs::exists(LinkerPath))
+        return LinkerPath;
+    }
 
     getDriver().Diag(diag::err_drv_invalid_linker_name) << A->getAsString(Args);
     return "";
   }
 
-  return GetProgramPath("ld");
+  return GetProgramPath(DefaultLinker);
 }
 
 types::ID ToolChain::LookupTypeForExtension(const char *Ext) const {
@@ -617,6 +623,13 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
   }
 }
 
+void ToolChain::AddFilePathLibArgs(const ArgList &Args,
+                                   ArgStringList &CmdArgs) const {
+  for (const auto &LibPath : getFilePaths())
+    if(LibPath.length() > 0)
+      CmdArgs.push_back(Args.MakeArgString(StringRef("-L") + LibPath));
+}
+
 void ToolChain::AddCCKextLibArgs(const ArgList &Args,
                                  ArgStringList &CmdArgs) const {
   CmdArgs.push_back("-lcc_kext");
@@ -657,3 +670,6 @@ SanitizerMask ToolChain::getSupportedSanitizers() const {
     Res |= CFIICall;
   return Res;
 }
+
+void ToolChain::AddCudaIncludeArgs(const ArgList &DriverArgs,
+                                   ArgStringList &CC1Args) const {}

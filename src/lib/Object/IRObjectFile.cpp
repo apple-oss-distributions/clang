@@ -24,9 +24,9 @@
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCTargetAsmParser.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
@@ -38,12 +38,23 @@ using namespace object;
 IRObjectFile::IRObjectFile(MemoryBufferRef Object, std::unique_ptr<Module> Mod)
     : SymbolicFile(Binary::ID_IR, Object), M(std::move(Mod)) {
   Mang.reset(new Mangler());
+  CollectAsmUndefinedRefs(
+      Triple(M->getTargetTriple()), M->getModuleInlineAsm(),
+      [this](StringRef Name, BasicSymbolRef::Flags Flags) {
+        AsmSymbols.push_back(
+            std::make_pair<std::string, uint32_t>(Name, std::move(Flags)));
+      });
+}
 
-  const std::string &InlineAsm = M->getModuleInlineAsm();
+// Parse inline ASM and collect the list of symbols that are not defined in
+// the current module. This is inspired from IRObjectFile.
+void IRObjectFile::CollectAsmUndefinedRefs(
+    const Triple &TT, StringRef InlineAsm,
+    const std::function<void(StringRef, BasicSymbolRef::Flags)> &
+        AsmUndefinedRefs) {
   if (InlineAsm.empty())
     return;
 
-  Triple TT(M->getTargetTriple());
   std::string Err;
   const Target *T = TargetRegistry::lookupTarget(TT.str(), Err);
   if (!T)
@@ -106,8 +117,7 @@ IRObjectFile::IRObjectFile(MemoryBufferRef Object, std::unique_ptr<Module> Mod)
       Res |= BasicSymbolRef::SF_Global;
       break;
     }
-    AsmSymbols.push_back(
-        std::make_pair<std::string, uint32_t>(Key, std::move(Res)));
+    AsmUndefinedRefs(Key, BasicSymbolRef::Flags(Res));
   }
 }
 
@@ -309,7 +319,7 @@ llvm::object::IRObjectFile::create(MemoryBufferRef Object,
       MemoryBuffer::getMemBuffer(BCOrErr.get(), false));
 
   ErrorOr<std::unique_ptr<Module>> MOrErr =
-      getLazyBitcodeModule(std::move(Buff), Context, nullptr,
+      getLazyBitcodeModule(std::move(Buff), Context,
                            /*ShouldLazyLoadMetadata*/ true);
   if (std::error_code EC = MOrErr.getError())
     return EC;

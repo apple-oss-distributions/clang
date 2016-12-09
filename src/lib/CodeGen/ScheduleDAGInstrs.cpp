@@ -13,7 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/ScheduleDAGInstrs.h"
-#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/IntEqClasses.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -27,6 +27,8 @@
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/CodeGen/RegisterPressure.h"
 #include "llvm/CodeGen/ScheduleDFS.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Type.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -49,12 +51,50 @@ static cl::opt<bool> EnableAASchedMI("enable-aa-sched-mi", cl::Hidden,
 static cl::opt<bool> UseTBAA("use-tbaa-in-sched-mi", cl::Hidden,
     cl::init(true), cl::desc("Enable use of TBAA during MI DAG construction"));
 
+// Note: the two options below might be used in tuning compile time vs
+// output quality. Setting HugeRegion so large that it will never be
+// reached means best-effort, but may be slow.
+
+// When Stores and Loads maps (or NonAliasStores and NonAliasLoads)
+// together hold this many SUs, a reduction of maps will be done.
+static cl::opt<unsigned> HugeRegion("dag-maps-huge-region", cl::Hidden,
+    cl::init(1000), cl::desc("The limit to use while constructing the DAG "
+                             "prior to scheduling, at which point a trade-off "
+                             "is made to avoid excessive compile time."));
+
+static cl::opt<unsigned> ReductionSize(
+    "dag-maps-reduction-size", cl::Hidden,
+    cl::desc("A huge scheduling region will have maps reduced by this many "
+             "nodes at a time. Defaults to HugeRegion / 2."));
+
+static unsigned getReductionSize() {
+  // Always reduce a huge region with half of the elements, except
+  // when user sets this number explicitly.
+  if (ReductionSize.getNumOccurrences() == 0)
+    return HugeRegion / 2;
+  return ReductionSize;
+}
+
+static void dumpSUList(ScheduleDAGInstrs::SUList &L) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+  dbgs() << "{ ";
+  for (auto *su : L) {
+    dbgs() << "SU(" << su->NodeNum << ")";
+    if (su != L.back())
+      dbgs() << ", ";
+  }
+  dbgs() << "}\n";
+#endif
+}
+
 ScheduleDAGInstrs::ScheduleDAGInstrs(MachineFunction &mf,
                                      const MachineLoopInfo *mli,
-                                     LiveIntervals *LIS,
                                      bool RemoveKillFlags)
-    : ScheduleDAG(mf), MLI(mli), MFI(mf.getFrameInfo()), LIS(LIS),
+    : ScheduleDAG(mf), MLI(mli), MFI(mf.getFrameInfo()),
       RemoveKillFlags(RemoveKillFlags), CanHandleTerminators(false),
+      TrackLaneMasks(false), AAForDep(nullptr), BarrierChain(nullptr),
+      UnknownValue(UndefValue::get(
+                     Type::getVoidTy(mf.getFunction()->getContext()))),
       FirstDbgValue(nullptr) {
   DbgValues.clear();
 
@@ -120,10 +160,6 @@ static void getUnderlyingObjects(const Value *V,
     }
   } while (!Working.empty());
 }
-
-typedef PointerUnion<const Value *, const PseudoSourceValue *> ValueType;
-typedef SmallVector<PointerIntPair<ValueType, 1, bool>, 4>
-UnderlyingObjectsVector;
 
 /// getUnderlyingObjectsForInstr - If this machine instr has memory reference
 /// information and it can be tracked to a normal reference to a known
@@ -363,6 +399,20 @@ void ScheduleDAGInstrs::addPhysRegDeps(SUnit *SU, unsigned OperIdx) {
   }
 }
 
+LaneBitmask ScheduleDAGInstrs::getLaneMaskForMO(const MachineOperand &MO) const
+{
+  unsigned Reg = MO.getReg();
+  // No point in tracking lanemasks if we don't have interesting subregisters.
+  const TargetRegisterClass &RC = *MRI.getRegClass(Reg);
+  if (!RC.HasDisjunctSubRegs)
+    return ~0u;
+
+  unsigned SubReg = MO.getSubReg();
+  if (SubReg == 0)
+    return RC.getLaneMask();
+  return TRI->getSubRegIndexLaneMask(SubReg);
+}
+
 /// addVRegDefDeps - Add register output and data dependencies from this SUnit
 /// to instructions that occur later in the same scheduling region if they read
 /// from or write to the virtual register defined at OperIdx.
@@ -370,35 +420,106 @@ void ScheduleDAGInstrs::addPhysRegDeps(SUnit *SU, unsigned OperIdx) {
 /// TODO: Hoist loop induction variable increments. This has to be
 /// reevaluated. Generally, IV scheduling should be done before coalescing.
 void ScheduleDAGInstrs::addVRegDefDeps(SUnit *SU, unsigned OperIdx) {
-  const MachineInstr *MI = SU->getInstr();
-  unsigned Reg = MI->getOperand(OperIdx).getReg();
+  MachineInstr *MI = SU->getInstr();
+  MachineOperand &MO = MI->getOperand(OperIdx);
+  unsigned Reg = MO.getReg();
 
-  // Singly defined vregs do not have output/anti dependencies.
-  // The current operand is a def, so we have at least one.
-  // Check here if there are any others...
+  LaneBitmask DefLaneMask;
+  LaneBitmask KillLaneMask;
+  if (TrackLaneMasks) {
+    bool IsKill = MO.getSubReg() == 0 || MO.isUndef();
+    DefLaneMask = getLaneMaskForMO(MO);
+    // If we have a <read-undef> flag, none of the lane values comes from an
+    // earlier instruction.
+    KillLaneMask = IsKill ? ~0u : DefLaneMask;
+
+    // Clear undef flag, we'll re-add it later once we know which subregister
+    // Def is first.
+    MO.setIsUndef(false);
+  } else {
+    DefLaneMask = ~0u;
+    KillLaneMask = ~0u;
+  }
+
+  if (MO.isDead()) {
+    assert(CurrentVRegUses.find(Reg) == CurrentVRegUses.end() &&
+           "Dead defs should have no uses");
+  } else {
+    // Add data dependence to all uses we found so far.
+    const TargetSubtargetInfo &ST = MF.getSubtarget();
+    for (VReg2SUnitOperIdxMultiMap::iterator I = CurrentVRegUses.find(Reg),
+         E = CurrentVRegUses.end(); I != E; /*empty*/) {
+      LaneBitmask LaneMask = I->LaneMask;
+      // Ignore uses of other lanes.
+      if ((LaneMask & KillLaneMask) == 0) {
+        ++I;
+        continue;
+      }
+
+      if ((LaneMask & DefLaneMask) != 0) {
+        SUnit *UseSU = I->SU;
+        MachineInstr *Use = UseSU->getInstr();
+        SDep Dep(SU, SDep::Data, Reg);
+        Dep.setLatency(SchedModel.computeOperandLatency(MI, OperIdx, Use,
+                                                        I->OperandIndex));
+        ST.adjustSchedDependency(SU, UseSU, Dep);
+        UseSU->addPred(Dep);
+      }
+
+      LaneMask &= ~KillLaneMask;
+      // If we found a Def for all lanes of this use, remove it from the list.
+      if (LaneMask != 0) {
+        I->LaneMask = LaneMask;
+        ++I;
+      } else
+        I = CurrentVRegUses.erase(I);
+    }
+  }
+
+  // Shortcut: Singly defined vregs do not have output/anti dependencies.
   if (MRI.hasOneDef(Reg))
     return;
 
-  // Add output dependence to the next nearest def of this vreg.
+  // Add output dependence to the next nearest defs of this vreg.
   //
   // Unless this definition is dead, the output dependence should be
   // transitively redundant with antidependencies from this definition's
   // uses. We're conservative for now until we have a way to guarantee the uses
   // are not eliminated sometime during scheduling. The output dependence edge
   // is also useful if output latency exceeds def-use latency.
-  VReg2SUnitMap::iterator DefI = VRegDefs.find(Reg);
-  if (DefI == VRegDefs.end())
-    VRegDefs.insert(VReg2SUnit(Reg, SU));
-  else {
-    SUnit *DefSU = DefI->SU;
-    if (DefSU != SU && DefSU != &ExitSU) {
-      SDep Dep(SU, SDep::Output, Reg);
-      Dep.setLatency(
-        SchedModel.computeOutputLatency(MI, OperIdx, DefSU->getInstr()));
-      DefSU->addPred(Dep);
-    }
-    DefI->SU = SU;
+  LaneBitmask LaneMask = DefLaneMask;
+  for (VReg2SUnit &V2SU : make_range(CurrentVRegDefs.find(Reg),
+                                     CurrentVRegDefs.end())) {
+    // Ignore defs for other lanes.
+    if ((V2SU.LaneMask & LaneMask) == 0)
+      continue;
+    // Add an output dependence.
+    SUnit *DefSU = V2SU.SU;
+    // Ignore additional defs of the same lanes in one instruction. This can
+    // happen because lanemasks are shared for targets with too many
+    // subregisters. We also use some representration tricks/hacks where we
+    // add super-register defs/uses, to imply that although we only access parts
+    // of the reg we care about the full one.
+    if (DefSU == SU)
+      continue;
+    SDep Dep(SU, SDep::Output, Reg);
+    Dep.setLatency(
+      SchedModel.computeOutputLatency(MI, OperIdx, DefSU->getInstr()));
+    DefSU->addPred(Dep);
+
+    // Update current definition. This can get tricky if the def was about a
+    // bigger lanemask before. We then have to shrink it and create a new
+    // VReg2SUnit for the non-overlapping part.
+    LaneBitmask OverlapMask = V2SU.LaneMask & LaneMask;
+    LaneBitmask NonOverlapMask = V2SU.LaneMask & ~LaneMask;
+    if (NonOverlapMask != 0)
+      CurrentVRegDefs.insert(VReg2SUnit(Reg, NonOverlapMask, V2SU.SU));
+    V2SU.SU = SU;
+    V2SU.LaneMask = OverlapMask;
   }
+  // If there was no CurrentVRegDefs entry for some lanes yet, create one.
+  if (LaneMask != 0)
+    CurrentVRegDefs.insert(VReg2SUnit(Reg, LaneMask, SU));
 }
 
 /// addVRegUseDeps - Add a register data dependency if the instruction that
@@ -408,49 +529,26 @@ void ScheduleDAGInstrs::addVRegDefDeps(SUnit *SU, unsigned OperIdx) {
 ///
 /// TODO: Handle ExitSU "uses" properly.
 void ScheduleDAGInstrs::addVRegUseDeps(SUnit *SU, unsigned OperIdx) {
-  MachineInstr *MI = SU->getInstr();
-  unsigned Reg = MI->getOperand(OperIdx).getReg();
+  const MachineInstr *MI = SU->getInstr();
+  const MachineOperand &MO = MI->getOperand(OperIdx);
+  unsigned Reg = MO.getReg();
 
-  // Record this local VReg use.
-  VReg2UseMap::iterator UI = VRegUses.find(Reg);
-  for (; UI != VRegUses.end(); ++UI) {
-    if (UI->SU == SU)
-      break;
+  // Remember the use. Data dependencies will be added when we find the def.
+  LaneBitmask LaneMask = TrackLaneMasks ? getLaneMaskForMO(MO) : ~0u;
+  CurrentVRegUses.insert(VReg2SUnitOperIdx(Reg, LaneMask, OperIdx, SU));
+
+  // Add antidependences to the following defs of the vreg.
+  for (VReg2SUnit &V2SU : make_range(CurrentVRegDefs.find(Reg),
+                                     CurrentVRegDefs.end())) {
+    // Ignore defs for unrelated lanes.
+    LaneBitmask PrevDefLaneMask = V2SU.LaneMask;
+    if ((PrevDefLaneMask & LaneMask) == 0)
+      continue;
+    if (V2SU.SU == SU)
+      continue;
+
+    V2SU.SU->addPred(SDep(SU, SDep::Anti, Reg));
   }
-  if (UI == VRegUses.end())
-    VRegUses.insert(VReg2SUnit(Reg, SU));
-
-  // Lookup this operand's reaching definition.
-  assert(LIS && "vreg dependencies requires LiveIntervals");
-  LiveQueryResult LRQ
-    = LIS->getInterval(Reg).Query(LIS->getInstructionIndex(MI));
-  VNInfo *VNI = LRQ.valueIn();
-
-  // VNI will be valid because MachineOperand::readsReg() is checked by caller.
-  assert(VNI && "No value to read by operand");
-  MachineInstr *Def = LIS->getInstructionFromIndex(VNI->def);
-  // Phis and other noninstructions (after coalescing) have a NULL Def.
-  if (Def) {
-    SUnit *DefSU = getSUnit(Def);
-    if (DefSU) {
-      // The reaching Def lives within this scheduling region.
-      // Create a data dependence.
-      SDep dep(DefSU, SDep::Data, Reg);
-      // Adjust the dependence latency using operand def/use information, then
-      // allow the target to perform its own adjustments.
-      int DefOp = Def->findRegisterDefOperandIdx(Reg);
-      dep.setLatency(SchedModel.computeOperandLatency(Def, DefOp, MI, OperIdx));
-
-      const TargetSubtargetInfo &ST = MF.getSubtarget();
-      ST.adjustSchedDependency(DefSU, SU, const_cast<SDep &>(dep));
-      SU->addPred(dep);
-    }
-  }
-
-  // Add antidependence to the following def of the vreg it uses.
-  VReg2SUnitMap::iterator DefI = VRegDefs.find(Reg);
-  if (DefI != VRegDefs.end() && DefI->SU != SU)
-    DefI->SU->addPred(SDep(SU, SDep::Anti, Reg));
 }
 
 /// Return true if MI is an instruction we are unable to reason about
@@ -461,78 +559,27 @@ static inline bool isGlobalMemoryObject(AliasAnalysis *AA, MachineInstr *MI) {
           (!MI->mayLoad() || !MI->isInvariantLoad(AA)));
 }
 
-// This MI might have either incomplete info, or known to be unsafe
-// to deal with (i.e. volatile object).
-static inline bool isUnsafeMemoryObject(MachineInstr *MI,
-                                        const MachineFrameInfo *MFI,
-                                        const DataLayout &DL) {
-  if (!MI || MI->memoperands_empty())
-    return true;
-  // We purposefully do no check for hasOneMemOperand() here
-  // in hope to trigger an assert downstream in order to
-  // finish implementation.
-  if ((*MI->memoperands_begin())->isVolatile() ||
-       MI->hasUnmodeledSideEffects())
-    return true;
-
-  if ((*MI->memoperands_begin())->getPseudoValue()) {
-    // Similarly to getUnderlyingObjectForInstr:
-    // For now, ignore PseudoSourceValues which may alias LLVM IR values
-    // because the code that uses this function has no way to cope with
-    // such aliases.
-    return true;
-  }
-
-  const Value *V = (*MI->memoperands_begin())->getValue();
-  if (!V)
-    return true;
-
-  SmallVector<Value *, 4> Objs;
-  getUnderlyingObjects(V, Objs, DL);
-  for (Value *V : Objs) {
-    // Does this pointer refer to a distinct and identifiable object?
-    if (!isIdentifiedObject(V))
-      return true;
-  }
-
-  return false;
-}
-
 /// This returns true if the two MIs need a chain edge between them.
-/// If these are not even memory operations, we still may need
-/// chain deps between them. The question really is - could
-/// these two MIs be reordered during scheduling from memory dependency
-/// point of view.
+/// This is called on normal stores and loads.
 static bool MIsNeedChainEdge(AliasAnalysis *AA, const MachineFrameInfo *MFI,
                              const DataLayout &DL, MachineInstr *MIa,
                              MachineInstr *MIb) {
   const MachineFunction *MF = MIa->getParent()->getParent();
   const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
 
-  // Cover a trivial case - no edge is need to itself.
-  if (MIa == MIb)
-    return false;
- 
+  assert ((MIa->mayStore() || MIb->mayStore()) &&
+          "Dependency checked between two loads");
+
   // Let the target decide if memory accesses cannot possibly overlap.
-  if ((MIa->mayLoad() || MIa->mayStore()) &&
-      (MIb->mayLoad() || MIb->mayStore()))
-    if (TII->areMemAccessesTriviallyDisjoint(MIa, MIb, AA))
-      return false;
-
-  // FIXME: Need to handle multiple memory operands to support all targets.
-  if (!MIa->hasOneMemOperand() || !MIb->hasOneMemOperand())
-    return true;
-
-  if (isUnsafeMemoryObject(MIa, MFI, DL) || isUnsafeMemoryObject(MIb, MFI, DL))
-    return true;
-
-  // If we are dealing with two "normal" loads, we do not need an edge
-  // between them - they could be reordered.
-  if (!MIa->mayStore() && !MIb->mayStore())
+  if (TII->areMemAccessesTriviallyDisjoint(MIa, MIb, AA))
     return false;
 
   // To this point analysis is generic. From here on we do need AA.
   if (!AA)
+    return true;
+
+  // FIXME: Need to handle multiple memory operands to support all targets.
+  if (!MIa->hasOneMemOperand() || !MIb->hasOneMemOperand())
     return true;
 
   MachineMemOperand *MMOa = *MIa->memoperands_begin();
@@ -573,105 +620,14 @@ static bool MIsNeedChainEdge(AliasAnalysis *AA, const MachineFrameInfo *MFI,
   return (AAResult != NoAlias);
 }
 
-/// This recursive function iterates over chain deps of SUb looking for
-/// "latest" node that needs a chain edge to SUa.
-static unsigned iterateChainSucc(AliasAnalysis *AA, const MachineFrameInfo *MFI,
-                                 const DataLayout &DL, SUnit *SUa, SUnit *SUb,
-                                 SUnit *ExitSU, unsigned *Depth,
-                                 SmallPtrSetImpl<const SUnit *> &Visited) {
-  if (!SUa || !SUb || SUb == ExitSU)
-    return *Depth;
-
-  // Remember visited nodes.
-  if (!Visited.insert(SUb).second)
-      return *Depth;
-  // If there is _some_ dependency already in place, do not
-  // descend any further.
-  // TODO: Need to make sure that if that dependency got eliminated or ignored
-  // for any reason in the future, we would not violate DAG topology.
-  // Currently it does not happen, but makes an implicit assumption about
-  // future implementation.
-  //
-  // Independently, if we encounter node that is some sort of global
-  // object (like a call) we already have full set of dependencies to it
-  // and we can stop descending.
-  if (SUa->isSucc(SUb) ||
-      isGlobalMemoryObject(AA, SUb->getInstr()))
-    return *Depth;
-
-  // If we do need an edge, or we have exceeded depth budget,
-  // add that edge to the predecessors chain of SUb,
-  // and stop descending.
-  if (*Depth > 200 ||
-      MIsNeedChainEdge(AA, MFI, DL, SUa->getInstr(), SUb->getInstr())) {
-    SUb->addPred(SDep(SUa, SDep::MayAliasMem));
-    return *Depth;
-  }
-  // Track current depth.
-  (*Depth)++;
-  // Iterate over memory dependencies only.
-  for (SUnit::const_succ_iterator I = SUb->Succs.begin(), E = SUb->Succs.end();
-       I != E; ++I)
-    if (I->isNormalMemoryOrBarrier())
-      iterateChainSucc(AA, MFI, DL, SUa, I->getSUnit(), ExitSU, Depth, Visited);
-  return *Depth;
-}
-
-/// This function assumes that "downward" from SU there exist
-/// tail/leaf of already constructed DAG. It iterates downward and
-/// checks whether SU can be aliasing any node dominated
-/// by it.
-static void adjustChainDeps(AliasAnalysis *AA, const MachineFrameInfo *MFI,
-                            const DataLayout &DL, SUnit *SU, SUnit *ExitSU,
-                            std::set<SUnit *> &CheckList,
-                            unsigned LatencyToLoad) {
-  if (!SU)
-    return;
-
-  SmallPtrSet<const SUnit*, 16> Visited;
-  unsigned Depth = 0;
-
-  for (std::set<SUnit *>::iterator I = CheckList.begin(), IE = CheckList.end();
-       I != IE; ++I) {
-    if (SU == *I)
-      continue;
-    if (MIsNeedChainEdge(AA, MFI, DL, SU->getInstr(), (*I)->getInstr())) {
-      SDep Dep(SU, SDep::MayAliasMem);
-      Dep.setLatency(((*I)->getInstr()->mayLoad()) ? LatencyToLoad : 0);
-      (*I)->addPred(Dep);
-    }
-
-    // Iterate recursively over all previously added memory chain
-    // successors. Keep track of visited nodes.
-    for (SUnit::const_succ_iterator J = (*I)->Succs.begin(),
-         JE = (*I)->Succs.end(); J != JE; ++J)
-      if (J->isNormalMemoryOrBarrier())
-        iterateChainSucc(AA, MFI, DL, SU, J->getSUnit(), ExitSU, &Depth,
-                         Visited);
-  }
-}
-
-/// Check whether two objects need a chain edge, if so, add it
-/// otherwise remember the rejected SU.
-static inline void addChainDependency(AliasAnalysis *AA,
-                                      const MachineFrameInfo *MFI,
-                                      const DataLayout &DL, SUnit *SUa,
-                                      SUnit *SUb, std::set<SUnit *> &RejectList,
-                                      unsigned TrueMemOrderLatency = 0,
-                                      bool isNormalMemory = false) {
-  // If this is a false dependency,
-  // do not add the edge, but remember the rejected node.
-  if (MIsNeedChainEdge(AA, MFI, DL, SUa->getInstr(), SUb->getInstr())) {
-    SDep Dep(SUa, isNormalMemory ? SDep::MayAliasMem : SDep::Barrier);
-    Dep.setLatency(TrueMemOrderLatency);
+/// Check whether two objects need a chain edge and add it if needed.
+void ScheduleDAGInstrs::addChainDependency (SUnit *SUa, SUnit *SUb,
+                                            unsigned Latency) {
+  if (MIsNeedChainEdge(AAForDep, MFI, MF.getDataLayout(), SUa->getInstr(),
+		       SUb->getInstr())) {
+    SDep Dep(SUa, SDep::MayAliasMem);
+    Dep.setLatency(Latency);
     SUb->addPred(Dep);
-  }
-  else {
-    // Duplicate entries should be ignored.
-    RejectList.insert(SUb);
-    DEBUG(dbgs() << "\tReject chain dep between SU("
-          << SUa->NodeNum << ") and SU("
-          << SUb->NodeNum << ")\n");
   }
 }
 
@@ -733,17 +689,176 @@ void ScheduleDAGInstrs::initSUnits() {
   }
 }
 
+void ScheduleDAGInstrs::collectVRegUses(SUnit *SU) {
+  const MachineInstr *MI = SU->getInstr();
+  for (const MachineOperand &MO : MI->operands()) {
+    if (!MO.isReg())
+      continue;
+    if (!MO.readsReg())
+      continue;
+    if (TrackLaneMasks && !MO.isUse())
+      continue;
+
+    unsigned Reg = MO.getReg();
+    if (!TargetRegisterInfo::isVirtualRegister(Reg))
+      continue;
+
+    // Ignore re-defs.
+    if (TrackLaneMasks) {
+      bool FoundDef = false;
+      for (const MachineOperand &MO2 : MI->operands()) {
+        if (MO2.isReg() && MO2.isDef() && MO2.getReg() == Reg && !MO2.isDead()) {
+          FoundDef = true;
+          break;
+        }
+      }
+      if (FoundDef)
+        continue;
+    }
+
+    // Record this local VReg use.
+    VReg2SUnitMultiMap::iterator UI = VRegUses.find(Reg);
+    for (; UI != VRegUses.end(); ++UI) {
+      if (UI->SU == SU)
+        break;
+    }
+    if (UI == VRegUses.end())
+      VRegUses.insert(VReg2SUnit(Reg, 0, SU));
+  }
+}
+
+class ScheduleDAGInstrs::Value2SUsMap : public MapVector<ValueType, SUList> {
+
+  /// Current total number of SUs in map.
+  unsigned NumNodes;
+
+  /// 1 for loads, 0 for stores. (see comment in SUList)
+  unsigned TrueMemOrderLatency;
+public:
+
+  Value2SUsMap(unsigned lat = 0) : NumNodes(0), TrueMemOrderLatency(lat) {}
+
+  /// To keep NumNodes up to date, insert() is used instead of
+  /// this operator w/ push_back().
+  ValueType &operator[](const SUList &Key) {
+    llvm_unreachable("Don't use. Use insert() instead."); };
+
+  /// Add SU to the SUList of V. If Map grows huge, reduce its size
+  /// by calling reduce().
+  void inline insert(SUnit *SU, ValueType V) {
+    MapVector::operator[](V).push_back(SU);
+    NumNodes++;
+  }
+
+  /// Clears the list of SUs mapped to V.
+  void inline clearList(ValueType V) {
+    iterator Itr = find(V);
+    if (Itr != end()) {
+      assert (NumNodes >= Itr->second.size());
+      NumNodes -= Itr->second.size();
+
+      Itr->second.clear();
+    }
+  }
+
+  /// Clears map from all contents.
+  void clear() {
+    MapVector<ValueType, SUList>::clear();
+    NumNodes = 0;
+  }
+
+  unsigned inline size() const { return NumNodes; }
+
+  /// Count the number of SUs in this map after a reduction.
+  void reComputeSize(void) {
+    NumNodes = 0;
+    for (auto &I : *this)
+      NumNodes += I.second.size();
+  }
+
+  unsigned inline getTrueMemOrderLatency() const {
+    return TrueMemOrderLatency;
+  }
+
+  void dump();
+};
+
+void ScheduleDAGInstrs::addChainDependencies(SUnit *SU,
+                                             Value2SUsMap &Val2SUsMap) {
+  for (auto &I : Val2SUsMap)
+    addChainDependencies(SU, I.second,
+                         Val2SUsMap.getTrueMemOrderLatency());
+}
+
+void ScheduleDAGInstrs::addChainDependencies(SUnit *SU,
+                                             Value2SUsMap &Val2SUsMap,
+                                             ValueType V) {
+  Value2SUsMap::iterator Itr = Val2SUsMap.find(V);
+  if (Itr != Val2SUsMap.end())
+    addChainDependencies(SU, Itr->second,
+                         Val2SUsMap.getTrueMemOrderLatency());
+}
+
+void ScheduleDAGInstrs::addBarrierChain(Value2SUsMap &map) {
+  assert (BarrierChain != nullptr);
+
+  for (auto &I : map) {
+    SUList &sus = I.second;
+    for (auto *SU : sus)
+      SU->addPredBarrier(BarrierChain);
+  }
+  map.clear();
+}
+
+void ScheduleDAGInstrs::insertBarrierChain(Value2SUsMap &map) {
+  assert (BarrierChain != nullptr);
+
+  // Go through all lists of SUs.
+  for (Value2SUsMap::iterator I = map.begin(), EE = map.end(); I != EE;) {
+    Value2SUsMap::iterator CurrItr = I++;
+    SUList &sus = CurrItr->second;
+    SUList::iterator SUItr = sus.begin(), SUEE = sus.end();
+    for (; SUItr != SUEE; ++SUItr) {
+      // Stop on BarrierChain or any instruction above it.
+      if ((*SUItr)->NodeNum <= BarrierChain->NodeNum)
+        break;
+
+      (*SUItr)->addPredBarrier(BarrierChain);
+    }
+
+    // Remove also the BarrierChain from list if present.
+    if (*SUItr == BarrierChain)
+      SUItr++;
+
+    // Remove all SUs that are now successors of BarrierChain.
+    if (SUItr != sus.begin())
+      sus.erase(sus.begin(), SUItr);
+  }
+
+  // Remove all entries with empty su lists.
+  map.remove_if([&](std::pair<ValueType, SUList> &mapEntry) {
+      return (mapEntry.second.empty()); });
+
+  // Recompute the size of the map (NumNodes).
+  map.reComputeSize();
+}
+
 /// If RegPressure is non-null, compute register pressure as a side effect. The
 /// DAG builder is an efficient place to do it because it already visits
 /// operands.
 void ScheduleDAGInstrs::buildSchedGraph(AliasAnalysis *AA,
                                         RegPressureTracker *RPTracker,
-                                        PressureDiffs *PDiffs) {
+                                        PressureDiffs *PDiffs,
+                                        LiveIntervals *LIS,
+                                        bool TrackLaneMasks) {
   const TargetSubtargetInfo &ST = MF.getSubtarget();
   bool UseAA = EnableAASchedMI.getNumOccurrences() > 0 ? EnableAASchedMI
                                                        : ST.useAA();
-  AliasAnalysis *AAForDep = UseAA ? AA : nullptr;
+  AAForDep = UseAA ? AA : nullptr;
 
+  BarrierChain = nullptr;
+
+  this->TrackLaneMasks = TrackLaneMasks;
   MISUnitMap.clear();
   ScheduleDAG::clearDAG();
 
@@ -753,19 +868,25 @@ void ScheduleDAGInstrs::buildSchedGraph(AliasAnalysis *AA,
   if (PDiffs)
     PDiffs->init(SUnits.size());
 
-  // We build scheduling units by walking a block's instruction list from bottom
-  // to top.
+  // We build scheduling units by walking a block's instruction list
+  // from bottom to top.
 
-  // Remember where a generic side-effecting instruction is as we proceed.
-  SUnit *BarrierChain = nullptr, *AliasChain = nullptr;
+  // Each MIs' memory operand(s) is analyzed to a list of underlying
+  // objects. The SU is then inserted in the SUList(s) mapped from
+  // that Value(s). Each Value thus gets mapped to a list of SUs
+  // depending on it, defs and uses kept separately. Two SUs are
+  // non-aliasing to each other if they depend on different Values
+  // exclusively.
+  Value2SUsMap Stores, Loads(1 /*TrueMemOrderLatency*/);
 
-  // Memory references to specific known memory locations are tracked
-  // so that they can be given more precise dependencies. We track
-  // separately the known memory locations that may alias and those
-  // that are known not to alias
-  MapVector<ValueType, std::vector<SUnit *> > AliasMemDefs, NonAliasMemDefs;
-  MapVector<ValueType, std::vector<SUnit *> > AliasMemUses, NonAliasMemUses;
-  std::set<SUnit*> RejectMemNodes;
+  // Certain memory accesses are known to not alias any SU in Stores
+  // or Loads, and have therefore their own 'NonAlias'
+  // domain. E.g. spill / reload instructions never alias LLVM I/R
+  // Values. It is assumed that this type of memory accesses always
+  // have a proper memory operand modelling, and are therefore never
+  // unanalyzable. This means they are non aliasing against all nodes
+  // in Stores and Loads, including the unanalyzable ones.
+  Value2SUsMap NonAliasStores, NonAliasLoads(1 /*TrueMemOrderLatency*/);
 
   // Remove any stale debug info; sometimes BuildSchedGraph is called again
   // without emitting the info from the previous call.
@@ -777,10 +898,14 @@ void ScheduleDAGInstrs::buildSchedGraph(AliasAnalysis *AA,
   Defs.setUniverse(TRI->getNumRegs());
   Uses.setUniverse(TRI->getNumRegs());
 
-  assert(VRegDefs.empty() && "Only BuildSchedGraph may access VRegDefs");
+  assert(CurrentVRegDefs.empty() && "nobody else should use CurrentVRegDefs");
+  assert(CurrentVRegUses.empty() && "nobody else should use CurrentVRegUses");
+  unsigned NumVirtRegs = MRI.getNumVirtRegs();
+  CurrentVRegDefs.setUniverse(NumVirtRegs);
+  CurrentVRegUses.setUniverse(NumVirtRegs);
+
   VRegUses.clear();
-  VRegDefs.setUniverse(MRI.getNumVirtRegs());
-  VRegUses.setUniverse(MRI.getNumVirtRegs());
+  VRegUses.setUniverse(NumVirtRegs);
 
   // Model data dependencies between instructions being scheduled and the
   // ExitSU.
@@ -804,10 +929,20 @@ void ScheduleDAGInstrs::buildSchedGraph(AliasAnalysis *AA,
     assert(SU && "No SUnit mapped to this MI");
 
     if (RPTracker) {
-      PressureDiff *PDiff = PDiffs ? &(*PDiffs)[SU->NodeNum] : nullptr;
-      RPTracker->recede(/*LiveUses=*/nullptr, PDiff);
-      assert(RPTracker->getPos() == std::prev(MII) &&
-             "RPTracker can't find MI");
+      collectVRegUses(SU);
+
+      RegisterOperands RegOpers;
+      RegOpers.collect(*MI, *TRI, MRI, TrackLaneMasks, false);
+      if (TrackLaneMasks) {
+        SlotIndex SlotIdx = LIS->getInstructionIndex(MI);
+        RegOpers.adjustLaneLiveness(*LIS, MRI, SlotIdx);
+      }
+      if (PDiffs != nullptr)
+        PDiffs->addInstruction(SU->NodeNum, RegOpers, MRI);
+
+      RPTracker->recedeSkipDebugValues();
+      assert(&*RPTracker->getPos() == MI && "RPTracker in sync");
+      RPTracker->recede(RegOpers);
     }
 
     assert(
@@ -846,219 +981,196 @@ void ScheduleDAGInstrs::buildSchedGraph(AliasAnalysis *AA,
       ExitSU.addPred(Dep);
     }
 
-    // Add chain dependencies.
-    // Chain dependencies used to enforce memory order should have
-    // latency of 0 (except for true dependency of Store followed by
-    // aliased Load... we estimate that with a single cycle of latency
-    // assuming the hardware will bypass)
-    // Note that isStoreToStackSlot and isLoadFromStackSLot are not usable
-    // after stack slots are lowered to actual addresses.
-    // TODO: Use an AliasAnalysis and do real alias-analysis queries, and
-    // produce more precise dependence information.
-    unsigned TrueMemOrderLatency = MI->mayStore() ? 1 : 0;
+    // Add memory dependencies (Note: isStoreToStackSlot and
+    // isLoadFromStackSLot are not usable after stack slots are lowered to
+    // actual addresses).
+
+    // This is a barrier event that acts as a pivotal node in the DAG.
     if (isGlobalMemoryObject(AA, MI)) {
-      // Be conservative with these and add dependencies on all memory
-      // references, even those that are known to not alias.
-      for (MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-             NonAliasMemDefs.begin(), E = NonAliasMemDefs.end(); I != E; ++I) {
-        for (unsigned i = 0, e = I->second.size(); i != e; ++i) {
-          I->second[i]->addPred(SDep(SU, SDep::Barrier));
-        }
-      }
-      for (MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-             NonAliasMemUses.begin(), E = NonAliasMemUses.end(); I != E; ++I) {
-        for (unsigned i = 0, e = I->second.size(); i != e; ++i) {
-          SDep Dep(SU, SDep::Barrier);
-          Dep.setLatency(TrueMemOrderLatency);
-          I->second[i]->addPred(Dep);
-        }
-      }
-      // Add SU to the barrier chain.
+
+      // Become the barrier chain.
       if (BarrierChain)
-        BarrierChain->addPred(SDep(SU, SDep::Barrier));
+        BarrierChain->addPredBarrier(SU);
       BarrierChain = SU;
-      // This is a barrier event that acts as a pivotal node in the DAG,
-      // so it is safe to clear list of exposed nodes.
-      adjustChainDeps(AA, MFI, MF.getDataLayout(), SU, &ExitSU, RejectMemNodes,
-                      TrueMemOrderLatency);
-      RejectMemNodes.clear();
-      NonAliasMemDefs.clear();
-      NonAliasMemUses.clear();
 
-      // fall-through
-    new_alias_chain:
-      // Chain all possibly aliasing memory references through SU.
-      if (AliasChain) {
-        unsigned ChainLatency = 0;
-        if (AliasChain->getInstr()->mayLoad())
-          ChainLatency = TrueMemOrderLatency;
-        addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU, AliasChain,
-                           RejectMemNodes, ChainLatency);
-      }
-      AliasChain = SU;
-      for (unsigned k = 0, m = PendingLoads.size(); k != m; ++k)
-        addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                           PendingLoads[k], RejectMemNodes,
-                           TrueMemOrderLatency);
-      for (MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-           AliasMemDefs.begin(), E = AliasMemDefs.end(); I != E; ++I) {
-        for (unsigned i = 0, e = I->second.size(); i != e; ++i)
-          addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                             I->second[i], RejectMemNodes);
-      }
-      for (MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-           AliasMemUses.begin(), E = AliasMemUses.end(); I != E; ++I) {
-        for (unsigned i = 0, e = I->second.size(); i != e; ++i)
-          addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                             I->second[i], RejectMemNodes, TrueMemOrderLatency);
-      }
-      adjustChainDeps(AA, MFI, MF.getDataLayout(), SU, &ExitSU, RejectMemNodes,
-                      TrueMemOrderLatency);
-      PendingLoads.clear();
-      AliasMemDefs.clear();
-      AliasMemUses.clear();
-    } else if (MI->mayStore()) {
-      // Add dependence on barrier chain, if needed.
-      // There is no point to check aliasing on barrier event. Even if
-      // SU and barrier _could_ be reordered, they should not. In addition,
-      // we have lost all RejectMemNodes below barrier.
-      if (BarrierChain)
-        BarrierChain->addPred(SDep(SU, SDep::Barrier));
+      DEBUG(dbgs() << "Global memory object and new barrier chain: SU("
+            << BarrierChain->NodeNum << ").\n";);
 
-      UnderlyingObjectsVector Objs;
-      getUnderlyingObjectsForInstr(MI, MFI, Objs, MF.getDataLayout());
+      // Add dependencies against everything below it and clear maps.
+      addBarrierChain(Stores);
+      addBarrierChain(Loads);
+      addBarrierChain(NonAliasStores);
+      addBarrierChain(NonAliasLoads);
 
+      continue;
+    }
+
+    // If it's not a store or a variant load, we're done.
+    if (!MI->mayStore() && !(MI->mayLoad() && !MI->isInvariantLoad(AA)))
+      continue;
+
+    // Always add dependecy edge to BarrierChain if present.
+    if (BarrierChain)
+      BarrierChain->addPredBarrier(SU);
+
+    // Find the underlying objects for MI. The Objs vector is either
+    // empty, or filled with the Values of memory locations which this
+    // SU depends on. An empty vector means the memory location is
+    // unknown, and may alias anything.
+    UnderlyingObjectsVector Objs;
+    getUnderlyingObjectsForInstr(MI, MFI, Objs, MF.getDataLayout());
+
+    if (MI->mayStore()) {
       if (Objs.empty()) {
-        // Treat all other stores conservatively.
-        goto new_alias_chain;
-      }
+        // An unknown store depends on all stores and loads.
+        addChainDependencies(SU, Stores);
+        addChainDependencies(SU, NonAliasStores);
+        addChainDependencies(SU, Loads);
+        addChainDependencies(SU, NonAliasLoads);
 
-      bool MayAlias = false;
-      for (UnderlyingObjectsVector::iterator K = Objs.begin(), KE = Objs.end();
-           K != KE; ++K) {
-        ValueType V = K->getPointer();
-        bool ThisMayAlias = K->getInt();
-        if (ThisMayAlias)
-          MayAlias = true;
-
-        // A store to a specific PseudoSourceValue. Add precise dependencies.
-        // Record the def in MemDefs, first adding a dep if there is
-        // an existing def.
-        MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-          ((ThisMayAlias) ? AliasMemDefs.find(V) : NonAliasMemDefs.find(V));
-        MapVector<ValueType, std::vector<SUnit *> >::iterator IE =
-          ((ThisMayAlias) ? AliasMemDefs.end() : NonAliasMemDefs.end());
-        if (I != IE) {
-          for (unsigned i = 0, e = I->second.size(); i != e; ++i)
-            addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                               I->second[i], RejectMemNodes, 0, true);
-
-          // If we're not using AA, then we only need one store per object.
-          if (!AAForDep)
-            I->second.clear();
-          I->second.push_back(SU);
-        } else {
-          if (ThisMayAlias) {
-            if (!AAForDep)
-              AliasMemDefs[V].clear();
-            AliasMemDefs[V].push_back(SU);
-          } else {
-            if (!AAForDep)
-              NonAliasMemDefs[V].clear();
-            NonAliasMemDefs[V].push_back(SU);
-          }
-        }
-        // Handle the uses in MemUses, if there are any.
-        MapVector<ValueType, std::vector<SUnit *> >::iterator J =
-          ((ThisMayAlias) ? AliasMemUses.find(V) : NonAliasMemUses.find(V));
-        MapVector<ValueType, std::vector<SUnit *> >::iterator JE =
-          ((ThisMayAlias) ? AliasMemUses.end() : NonAliasMemUses.end());
-        if (J != JE) {
-          for (unsigned i = 0, e = J->second.size(); i != e; ++i)
-            addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                               J->second[i], RejectMemNodes,
-                               TrueMemOrderLatency, true);
-          J->second.clear();
-        }
-      }
-      if (MayAlias) {
-        // Add dependencies from all the PendingLoads, i.e. loads
-        // with no underlying object.
-        for (unsigned k = 0, m = PendingLoads.size(); k != m; ++k)
-          addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                             PendingLoads[k], RejectMemNodes,
-                             TrueMemOrderLatency);
-        // Add dependence on alias chain, if needed.
-        if (AliasChain)
-          addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU, AliasChain,
-                             RejectMemNodes);
-      }
-      adjustChainDeps(AA, MFI, MF.getDataLayout(), SU, &ExitSU, RejectMemNodes,
-                      TrueMemOrderLatency);
-    } else if (MI->mayLoad()) {
-      bool MayAlias = true;
-      if (MI->isInvariantLoad(AA)) {
-        // Invariant load, no chain dependencies needed!
+        // Map this store to 'UnknownValue'.
+        Stores.insert(SU, UnknownValue);
       } else {
-        UnderlyingObjectsVector Objs;
-        getUnderlyingObjectsForInstr(MI, MFI, Objs, MF.getDataLayout());
+        // Add precise dependencies against all previously seen memory
+        // accesses mapped to the same Value(s).
+        for (auto &underlObj : Objs) {
+          ValueType V = underlObj.getPointer();
+          bool ThisMayAlias = underlObj.getInt();
 
-        if (Objs.empty()) {
-          // A load with no underlying object. Depend on all
-          // potentially aliasing stores.
-          for (MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-                 AliasMemDefs.begin(), E = AliasMemDefs.end(); I != E; ++I)
-            for (unsigned i = 0, e = I->second.size(); i != e; ++i)
-              addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                                 I->second[i], RejectMemNodes);
+          Value2SUsMap &stores_ = (ThisMayAlias ? Stores : NonAliasStores);
 
-          PendingLoads.push_back(SU);
-          MayAlias = true;
-        } else {
-          MayAlias = false;
+          // Add dependencies to previous stores and loads mapped to V.
+          addChainDependencies(SU, stores_, V);
+          addChainDependencies(SU, (ThisMayAlias ? Loads : NonAliasLoads), V);
+
+          // Map this store to V.
+          stores_.insert(SU, V);
         }
+        // The store may have dependencies to unanalyzable loads and
+        // stores.
+        addChainDependencies(SU, Loads, UnknownValue);
+        addChainDependencies(SU, Stores, UnknownValue);
+      }
+    } else { // SU is a load.
+      if (Objs.empty()) {
+        // An unknown load depends on all stores.
+        addChainDependencies(SU, Stores);
+        addChainDependencies(SU, NonAliasStores);
 
-        for (UnderlyingObjectsVector::iterator
-             J = Objs.begin(), JE = Objs.end(); J != JE; ++J) {
-          ValueType V = J->getPointer();
-          bool ThisMayAlias = J->getInt();
+        Loads.insert(SU, UnknownValue);
+      } else {
+        for (auto &underlObj : Objs) {
+          ValueType V = underlObj.getPointer();
+          bool ThisMayAlias = underlObj.getInt();
 
-          if (ThisMayAlias)
-            MayAlias = true;
+          // Add precise dependencies against all previously seen stores
+          // mapping to the same Value(s).
+          addChainDependencies(SU, (ThisMayAlias ? Stores : NonAliasStores), V);
 
-          // A load from a specific PseudoSourceValue. Add precise dependencies.
-          MapVector<ValueType, std::vector<SUnit *> >::iterator I =
-            ((ThisMayAlias) ? AliasMemDefs.find(V) : NonAliasMemDefs.find(V));
-          MapVector<ValueType, std::vector<SUnit *> >::iterator IE =
-            ((ThisMayAlias) ? AliasMemDefs.end() : NonAliasMemDefs.end());
-          if (I != IE)
-            for (unsigned i = 0, e = I->second.size(); i != e; ++i)
-              addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU,
-                                 I->second[i], RejectMemNodes, 0, true);
-          if (ThisMayAlias)
-            AliasMemUses[V].push_back(SU);
-          else
-            NonAliasMemUses[V].push_back(SU);
+          // Map this load to V.
+          (ThisMayAlias ? Loads : NonAliasLoads).insert(SU, V);
         }
-        if (MayAlias)
-          adjustChainDeps(AA, MFI, MF.getDataLayout(), SU, &ExitSU,
-                          RejectMemNodes, /*Latency=*/0);
-        // Add dependencies on alias and barrier chains, if needed.
-        if (MayAlias && AliasChain)
-          addChainDependency(AAForDep, MFI, MF.getDataLayout(), SU, AliasChain,
-                             RejectMemNodes);
-        if (BarrierChain)
-          BarrierChain->addPred(SDep(SU, SDep::Barrier));
+        // The load may have dependencies to unanalyzable stores.
+        addChainDependencies(SU, Stores, UnknownValue);
       }
     }
+
+    // Reduce maps if they grow huge.
+    if (Stores.size() + Loads.size() >= HugeRegion) {
+      DEBUG(dbgs() << "Reducing Stores and Loads maps.\n";);
+      reduceHugeMemNodeMaps(Stores, Loads, getReductionSize());
+    }
+    if (NonAliasStores.size() + NonAliasLoads.size() >= HugeRegion) {
+      DEBUG(dbgs() << "Reducing NonAliasStores and NonAliasLoads maps.\n";);
+      reduceHugeMemNodeMaps(NonAliasStores, NonAliasLoads, getReductionSize());
+    }
   }
+
   if (DbgMI)
     FirstDbgValue = DbgMI;
 
   Defs.clear();
   Uses.clear();
-  VRegDefs.clear();
-  PendingLoads.clear();
+  CurrentVRegDefs.clear();
+  CurrentVRegUses.clear();
+}
+
+raw_ostream &llvm::operator<<(raw_ostream &OS, const PseudoSourceValue* PSV) {
+  PSV->printCustom(OS);
+  return OS;
+}
+
+void ScheduleDAGInstrs::Value2SUsMap::dump() {
+  for (auto &Itr : *this) {
+    if (Itr.first.is<const Value*>()) {
+      const Value *V = Itr.first.get<const Value*>();
+      if (isa<UndefValue>(V))
+        dbgs() << "Unknown";
+      else
+        V->printAsOperand(dbgs());
+    }
+    else if (Itr.first.is<const PseudoSourceValue*>())
+      dbgs() <<  Itr.first.get<const PseudoSourceValue*>();
+    else
+      llvm_unreachable("Unknown Value type.");
+
+    dbgs() << " : ";
+    dumpSUList(Itr.second);
+  }
+}
+
+/// Reduce maps in FIFO order, by N SUs. This is better than turning
+/// every Nth memory SU into BarrierChain in buildSchedGraph(), since
+/// it avoids unnecessary edges between seen SUs above the new
+/// BarrierChain, and those below it.
+void ScheduleDAGInstrs::reduceHugeMemNodeMaps(Value2SUsMap &stores,
+                                              Value2SUsMap &loads, unsigned N) {
+  DEBUG(dbgs() << "Before reduction:\nStoring SUnits:\n";
+        stores.dump();
+        dbgs() << "Loading SUnits:\n";
+        loads.dump());
+
+  // Insert all SU's NodeNums into a vector and sort it.
+  std::vector<unsigned> NodeNums;
+  NodeNums.reserve(stores.size() + loads.size());
+  for (auto &I : stores)
+    for (auto *SU : I.second)
+      NodeNums.push_back(SU->NodeNum);
+  for (auto &I : loads)
+    for (auto *SU : I.second)
+      NodeNums.push_back(SU->NodeNum);
+  std::sort(NodeNums.begin(), NodeNums.end());
+
+  // The N last elements in NodeNums will be removed, and the SU with
+  // the lowest NodeNum of them will become the new BarrierChain to
+  // let the not yet seen SUs have a dependency to the removed SUs.
+  assert (N <= NodeNums.size());
+  SUnit *newBarrierChain = &SUnits[*(NodeNums.end() - N)];
+  if (BarrierChain) {
+    // The aliasing and non-aliasing maps reduce independently of each
+    // other, but share a common BarrierChain. Check if the
+    // newBarrierChain is above the former one. If it is not, it may
+    // introduce a loop to use newBarrierChain, so keep the old one.
+    if (newBarrierChain->NodeNum < BarrierChain->NodeNum) {
+      BarrierChain->addPredBarrier(newBarrierChain);
+      BarrierChain = newBarrierChain;
+      DEBUG(dbgs() << "Inserting new barrier chain: SU("
+            << BarrierChain->NodeNum << ").\n";);
+    }
+    else
+      DEBUG(dbgs() << "Keeping old barrier chain: SU("
+            << BarrierChain->NodeNum << ").\n";);
+  }
+  else
+    BarrierChain = newBarrierChain;
+
+  insertBarrierChain(stores);
+  insertBarrierChain(loads);
+
+  DEBUG(dbgs() << "After reduction:\nStoring SUnits:\n";
+        stores.dump();
+        dbgs() << "Loading SUnits:\n";
+        loads.dump());
 }
 
 /// \brief Initialize register live-range state for updating kills.

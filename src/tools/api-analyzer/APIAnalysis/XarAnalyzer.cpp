@@ -5,151 +5,152 @@ extern "C" {
 }
 
 #include <unistd.h>
-#include <libxml/parser.h>
-#include <libxml/xpath.h>
-#include <libxml/xpathInternals.h>
-#include <libxml/tree.h>
 
 #include "llvm/APIAnalysis.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/Mutex.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/FileSystem.h"
 
 using namespace llvm;
 using namespace object;
 
-int ExtractXar(xar_t x, std::string &tmpDir) {
-
-  xar_iter_t it = xar_iter_new();
-  if (!it) {
-    errs() << "Could not construct xar iter\n";
-    return 1;
-  }
-  for (xar_file_t f = xar_file_first(x, it); f; f = xar_file_next(it)) {
-    xar_extract(x, f);
-  }
-
-  xar_iter_free(it);
-  return 0;
-}
-
-int ProcessXarHeader(xar_t x, APIAnalysisIntermediateResult &result) {
-  xar_serialize(x, "tocfile.xml");
-
-  xmlInitParser();
-
-  xmlDocPtr doc;
-  xmlXPathContextPtr xpathCtx;
-  xmlXPathObjectPtr xpathObj;
-
-  /* Load XML document */
-  doc = xmlParseFile("tocfile.xml");
-  if (!doc) {
-    errs() << "Error: unable to parse tocfile";
-    return 1;
-  }
-
-  /* Create xpath evaluation context */
-  xpathCtx = xmlXPathNewContext(doc);
-  if (!xpathCtx) {
-    errs() << "Error: unable to create new XPath context\n";
-    xmlFreeDoc(doc);
-    return 1;
-  }
-
-  /* Evaluate xpath expression */
-  const xmlChar *xpathExpr = (const xmlChar *)"/xar/subdoc/dylibs/lib";
-  xpathObj = xmlXPathEvalExpression(xpathExpr, xpathCtx);
-  if (!xpathObj) {
-    errs() << "Error: unable to evaluate xpath expression.";
-    xmlXPathFreeContext(xpathCtx);
-    xmlFreeDoc(doc);
-    return 1;
-  }
-
-  auto nodes = xpathObj->nodesetval;
-  int size = (nodes) ? nodes->nodeNr : 0;
-  for (int i = 0; i < size; ++i) {
-    if (nodes->nodeTab[i]->type == XML_ELEMENT_NODE) {
-      StringRef libName((char *)nodes->nodeTab[i]->children->content);
-      if (libName.startswith("{SDKPATH}//"))
-        libName = libName.drop_front(10);
-      result.linkedLibraries.insert(libName.str());
-      result.orderedLibraries.push_back(libName.str());
-    }
-  }
-
-  /* Cleanup */
-  xmlXPathFreeObject(xpathObj);
-  xmlXPathFreeContext(xpathCtx);
-  xmlFreeDoc(doc);
-
-  xmlCleanupParser();
-
-  sys::fs::remove("tocfile.xml");
-  return 0;
-}
-
-int AnalyzeXar(StringRef &filePath, APIAnalysisIntermediateResult &result,
+int AnalyzeXar(StringRef filePath, APIAnalysisIntermediateResult &result,
                const APIAnalysisOptions &options) {
-
-  char buf[4096];
-  if (!getcwd(buf, 4096)) {
-    errs() << "Could not identify cwd\n";
-    return 1;
-  }
-
-  std::string tmpDir = filePath.str() + ".dir";
-  if (std::error_code EC = sys::fs::create_directory(tmpDir)) {
-    errs() << "Could not create a directory to expand into." << EC.message()
-           << "\n";
-    return 1;
-  }
-
   xar_t x;
+
+  SmallVector<std::pair<char*, size_t>, 8> fileBuffers;
+  
+  static ManagedStatic<sys::Mutex> XarLock;
+  XarLock->lock();
+
+  bool isDylib = false;
+  bool installNameNext = false;
+  bool mainFuncNext = false;
+  std::string installName;
+  std::string mainFunction;
+
   x = xar_open(filePath.data(), READ);
   if (x == NULL) {
     errs() << "Error opening xarchive: " << filePath << "\n";
     return 1;
   }
 
-  if (chdir(tmpDir.c_str())) {
-    errs() << "Could not change dir.\n";
+  // Analyze all the bitcode/xar/object files.
+  // Process the XAR header.
+  xar_iter_t it = xar_iter_new();
+  if (!it) {
+    errs() << "Could not construct xar iter\n";
+    xar_close(x);
     return 1;
   }
-  auto success = ExtractXar(x, tmpDir);
-  if (0 != success) {
-    chdir(buf);
-    errs() << "Extracting xar failed.\n";
-    return success;
+  for (xar_file_t f = xar_file_first(x, it); f; f = xar_file_next(it)) {
+    const char* filetype = nullptr;
+    if (xar_prop_get(f, "file-type", &filetype) != 0) {
+      errs() << "Could not decode xar file type\n";
+      xar_close(x);
+      return 1;
+    }
+    if (StringRef(filetype) != "Bitcode" &&
+        StringRef(filetype) != "Object" &&
+        StringRef(filetype) != "LTO" &&
+        StringRef(filetype) != "Bundle")
+      continue;
+    // extract and analyze file.
+    char* buffer = nullptr;
+    size_t size = 0;
+    if (xar_extract_tobuffersz(x, f, &buffer, &size) != 0) {
+      errs() << "Could not extract file\n";
+      xar_close(x);
+      return 1;
+    }
+    fileBuffers.push_back({buffer, size});
   }
+  xar_iter_free(it);
+  
+  // process the library list.
+  // because all the library must be in order, iterating and deleting to
+  // read toc entries.
+  for (xar_subdoc_t sub = xar_subdoc_first(x); sub; sub = xar_subdoc_next(sub)) {
+    const char* docName = xar_subdoc_name(sub);
+    if (StringRef(docName) != "Ld")
+      continue;
 
-  success = ProcessXarHeader(x, result);
-  chdir(buf);
-  if (0 != success) {
-    errs() << "Processing xar header failed.\n";
-    return success;
+    while(1) {
+      xar_iter_t p = xar_iter_new();
+      const char* key = xar_prop_first((xar_file_t)sub, p);
+      while (key && StringRef(key) != "dylibs/lib" &&
+             StringRef(key) != "dylibs/weak" &&
+             StringRef(key) != "link-options/option") {
+        key = xar_prop_next(p);
+      }
+      if (!key) {
+        xar_iter_free(p);
+        break;
+      }
+      const char* value = nullptr;
+      if (xar_prop_get((xar_file_t)sub, key, &value) != 0) {
+        errs() << "Could not read subdoc\n";
+        xar_close(x);
+        return 1;
+      }
+      if (StringRef(key) == "link-options/option") {
+        if (StringRef(value) == "-dylib")
+          isDylib = true;
+        else if (StringRef(value) == "-install_name")
+          installNameNext = true;
+        else if (StringRef(value) == "-e")
+          mainFuncNext = true;
+        else if (installNameNext) {
+          installName = value;
+          installNameNext = false;
+        } else if (mainFuncNext) {
+          mainFunction = value;
+          mainFuncNext = false;
+        }
+      } else if (result.linkedLibraries.find(value) ==
+                 result.linkedLibraries.end()) {
+        result.orderedLibraries.push_back(value);
+        result.linkedLibraries.insert(value);
+      }
+      xar_prop_unset((xar_file_t)sub, key);
+      xar_iter_free(p);
+    }
   }
 
   xar_close(x);
-  std::error_code EC;
-  sys::fs::directory_iterator DI = sys::fs::directory_iterator(tmpDir, EC);
-  sys::fs::directory_iterator DE;
-  auto optionsCopy = options;
-  optionsCopy.bitcodeOnly = false;
-  for (; !EC && DI != DE; DI = DI.increment(EC)) {
-    StringRef path(DI->path());
-    success += AnalyzeFileImpl(path, result, optionsCopy);
-    sys::fs::remove(path);
+  XarLock->unlock();
+
+  // dylib has its install name as the first entry in the library list
+  if (isDylib && !installName.empty() &&
+      result.linkedLibraries.find(installName) ==
+          result.linkedLibraries.end()) {
+    result.orderedLibraries.insert(result.orderedLibraries.begin(),
+                                   installName);
+    result.linkedLibraries.insert(installName);
+    result.installName = installName;
   }
 
-  if (std::error_code EC = sys::fs::remove(tmpDir)) {
-    errs() << "Could not delete directory" << EC.message() << "\n";
+  // main function is an undefined variable
+  if (!mainFunction.empty() &&
+      result.functionNames.find(mainFunction) == result.functionNames.end())
+    result.functionNames.insert({mainFunction, false});
+
+  // Analyze file content.
+  int success = 0;
+  for (auto &buf : fileBuffers) {
+    StringRef fileContent(buf.first, buf.second);
+    MemoryBufferRef memoryBuf(fileContent, "xar file");
+    success += AnalyzeFileImpl(memoryBuf, result, options);
+    free(buf.first);
   }
-  return 0;
+
+  return success;
 }
 
-int AnalyzeXar(llvm::MemoryBufferRef &fileData,
+int AnalyzeXar(llvm::MemoryBufferRef fileData,
                APIAnalysisIntermediateResult &result,
                const APIAnalysisOptions &options) {
   int TmpArchiveFD = -1;

@@ -24,13 +24,7 @@ namespace __sanitizer {
 const char *SanitizerToolName = "SanitizerTool";
 
 atomic_uint32_t current_verbosity;
-
-uptr GetPageSizeCached() {
-  static uptr PageSize;
-  if (!PageSize)
-    PageSize = GetPageSize();
-  return PageSize;
-}
+uptr PageSizeCached;
 
 StaticSpinMutex report_file_mu;
 ReportFile report_file = {&report_file_mu, kStderrFd, "", "", 0};
@@ -153,8 +147,16 @@ void SetCheckFailedCallback(CheckFailedCallbackType callback) {
   CheckFailedCallback = callback;
 }
 
+const int kSecondsToSleepWhenRecursiveCheckFailed = 2;
+
 void NORETURN CheckFailed(const char *file, int line, const char *cond,
                           u64 v1, u64 v2) {
+  static atomic_uint32_t num_calls;
+  if (atomic_fetch_add(&num_calls, 1, memory_order_relaxed) > 10) {
+    SleepForSeconds(kSecondsToSleepWhenRecursiveCheckFailed);
+    Trap();
+  }
+
   if (CheckFailedCallback) {
     CheckFailedCallback(file, line, cond, v1, v2);
   }
@@ -177,7 +179,9 @@ void NORETURN ReportMmapFailureAndDie(uptr size, const char *mem_type,
   Report("ERROR: %s failed to "
          "%s 0x%zx (%zd) bytes of %s (error code: %d)\n",
          SanitizerToolName, mmap_type, size, size, mem_type, err);
+#ifndef SANITIZER_GO
   DumpProcessMap();
+#endif
   UNREACHABLE("unable to mmap");
 }
 
@@ -353,9 +357,8 @@ void LoadedModule::addAddressRange(uptr beg, uptr end, bool executable) {
 }
 
 bool LoadedModule::containsAddress(uptr address) const {
-  for (Iterator iter = ranges(); iter.hasNext();) {
-    const AddressRange *r = iter.next();
-    if (r->beg <= address && address < r->end)
+  for (const AddressRange &r : ranges()) {
+    if (r.beg <= address && address < r.end)
       return true;
   }
   return false;
@@ -484,6 +487,15 @@ uptr ReadBinaryNameCached(/*out*/char *buf, uptr buf_len) {
   internal_memcpy(buf, binary_name_cache_str, name_len);
   buf[name_len] = '\0';
   return name_len;
+}
+
+void PrintCmdline() {
+  char **argv = GetArgv();
+  if (!argv) return;
+  Printf("\nCommand: ");
+  for (uptr i = 0; argv[i]; ++i)
+    Printf("%s ", argv[i]);
+  Printf("\n\n");
 }
 
 } // namespace __sanitizer

@@ -468,8 +468,19 @@ const char *llvm::dwarf::MacinfoString(unsigned Encoding) {
   case DW_MACINFO_start_file:            return "DW_MACINFO_start_file";
   case DW_MACINFO_end_file:              return "DW_MACINFO_end_file";
   case DW_MACINFO_vendor_ext:            return "DW_MACINFO_vendor_ext";
+  case DW_MACINFO_invalid:               return "DW_MACINFO_invalid";
   }
   return nullptr;
+}
+
+unsigned llvm::dwarf::getMacinfo(StringRef MacinfoString) {
+  return StringSwitch<unsigned>(MacinfoString)
+      .Case("DW_MACINFO_define", DW_MACINFO_define)
+      .Case("DW_MACINFO_undef", DW_MACINFO_undef)
+      .Case("DW_MACINFO_start_file", DW_MACINFO_start_file)
+      .Case("DW_MACINFO_end_file", DW_MACINFO_end_file)
+      .Case("DW_MACINFO_vendor_ext", DW_MACINFO_vendor_ext)
+      .Default(DW_MACINFO_invalid);
 }
 
 const char *llvm::dwarf::CallFrameString(unsigned Encoding) {
@@ -535,6 +546,12 @@ const char *llvm::dwarf::ApplePropertyString(unsigned Prop) {
     return "DW_APPLE_PROPERTY_strong";
   case DW_APPLE_PROPERTY_unsafe_unretained:
     return "DW_APPLE_PROPERTY_unsafe_unretained";
+  case DW_APPLE_PROPERTY_nullability:
+    return "DW_APPLE_PROPERTY_nullability";
+  case DW_APPLE_PROPERTY_null_resettable:
+    return "DW_APPLE_PROPERTY_null_resettable";
+  case DW_APPLE_PROPERTY_class:
+    return "DW_APPLE_PROPERTY_class";
   }
   return nullptr;
 }

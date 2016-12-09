@@ -377,6 +377,14 @@ void Parser::HandlePragmaAlign() {
   Actions.ActOnPragmaOptionsAlign(Kind, PragmaLoc);
 }
 
+void Parser::HandlePragmaDump() {
+  assert(Tok.is(tok::annot_pragma_dump));
+  IdentifierInfo *II =
+      reinterpret_cast<IdentifierInfo *>(Tok.getAnnotationValue());
+  Actions.ActOnPragmaDump(getCurScope(), Tok.getLocation(), II);
+  ConsumeToken();
+}
+
 void Parser::HandlePragmaWeak() {
   assert(Tok.is(tok::annot_pragma_weak));
   SourceLocation PragmaLoc = ConsumeToken();
@@ -810,21 +818,25 @@ bool Parser::HandlePragmaLoopHint(LoopHint &Hint) {
 
   // If no option is specified the argument is assumed to be a constant expr.
   bool OptionUnroll = false;
+  bool OptionDistribute = false;
   bool StateOption = false;
   if (OptionInfo) { // Pragma Unroll does not specify an option.
     OptionUnroll = OptionInfo->isStr("unroll");
+    OptionDistribute = OptionInfo->isStr("distribute");
     StateOption = llvm::StringSwitch<bool>(OptionInfo->getName())
                       .Case("vectorize", true)
                       .Case("interleave", true)
-                      .Case("unroll", true)
-                      .Default(false);
+                      .Default(false) ||
+                  OptionUnroll || OptionDistribute;
   }
 
+  bool AssumeSafetyArg = !OptionUnroll && !OptionDistribute;
   // Verify loop hint has an argument.
   if (Toks[0].is(tok::eof)) {
     ConsumeToken(); // The annotation token.
     Diag(Toks[0].getLocation(), diag::err_pragma_loop_missing_argument)
-        << /*StateArgument=*/StateOption << /*FullKeyword=*/OptionUnroll;
+        << /*StateArgument=*/StateOption << /*FullKeyword=*/OptionUnroll
+        << /*AssumeSafetyKeyword=*/AssumeSafetyArg;
     return false;
   }
 
@@ -833,12 +845,17 @@ bool Parser::HandlePragmaLoopHint(LoopHint &Hint) {
     ConsumeToken(); // The annotation token.
     SourceLocation StateLoc = Toks[0].getLocation();
     IdentifierInfo *StateInfo = Toks[0].getIdentifierInfo();
-    if (!StateInfo ||
-        (!StateInfo->isStr("enable") && !StateInfo->isStr("disable") &&
-         ((OptionUnroll && !StateInfo->isStr("full")) ||
-          (!OptionUnroll && !StateInfo->isStr("assume_safety"))))) {
+
+    bool Valid = StateInfo &&
+                 llvm::StringSwitch<bool>(StateInfo->getName())
+                     .Cases("enable", "disable", true)
+                     .Case("full", OptionUnroll)
+                     .Case("assume_safety", AssumeSafetyArg)
+                     .Default(false);
+    if (!Valid) {
       Diag(Toks[0].getLocation(), diag::err_pragma_invalid_keyword)
-          << /*FullKeyword=*/OptionUnroll;
+          << /*FullKeyword=*/OptionUnroll
+          << /*AssumeSafetyKeyword=*/AssumeSafetyArg;
       return false;
     }
     if (TokSize > 2)
@@ -2012,6 +2029,7 @@ void PragmaLoopHintHandler::HandlePragma(Preprocessor &PP,
                            .Case("vectorize", true)
                            .Case("interleave", true)
                            .Case("unroll", true)
+                           .Case("distribute", true)
                            .Case("vectorize_width", true)
                            .Case("interleave_count", true)
                            .Case("unroll_count", true)

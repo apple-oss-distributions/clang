@@ -15,7 +15,7 @@
 #ifndef LLVM_LIB_IR_CONSTANTSCONTEXT_H
 #define LLVM_LIB_IR_CONSTANTSCONTEXT_H
 
-#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
@@ -179,6 +179,13 @@ public:
 
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  static bool classof(const ConstantExpr *CE) {
+    return CE->getOpcode() == Instruction::ExtractValue;
+  }
+  static bool classof(const Value *V) {
+    return isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V));
+  }
 };
 
 /// InsertValueConstantExpr - This class is private to
@@ -205,6 +212,13 @@ public:
 
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  static bool classof(const ConstantExpr *CE) {
+    return CE->getOpcode() == Instruction::InsertValue;
+  }
+  static bool classof(const Value *V) {
+    return isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V));
+  }
 };
 
 /// GetElementPtrConstantExpr - This class is private to Constants.cpp, and is
@@ -235,6 +249,13 @@ public:
   Type *getSourceElementType() const;
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  static bool classof(const ConstantExpr *CE) {
+    return CE->getOpcode() == Instruction::GetElementPtr;
+  }
+  static bool classof(const Value *V) {
+    return isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V));
+  }
 };
 
 // CompareConstantExpr - This class is private to Constants.cpp, and is used
@@ -257,6 +278,14 @@ public:
   }
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  static bool classof(const ConstantExpr *CE) {
+    return CE->getOpcode() == Instruction::ICmp ||
+           CE->getOpcode() == Instruction::FCmp;
+  }
+  static bool classof(const Value *V) {
+    return isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V));
+  }
 };
 
 template <>
@@ -533,7 +562,7 @@ private:
       return ConstantClassInfo::getTombstoneKey();
     }
     static unsigned getHashValue(const ConstantClass *CP) {
-      SmallVector<Constant *, 8> Storage;
+      SmallVector<Constant *, 32> Storage;
       return getHashValue(LookupKey(CP->getType(), ValType(CP, Storage)));
     }
     static bool isEqual(const ConstantClass *LHS, const ConstantClass *RHS) {
@@ -552,19 +581,18 @@ private:
   };
 
 public:
-  typedef DenseMap<ConstantClass *, char, MapInfo> MapTy;
+  typedef DenseSet<ConstantClass *, MapInfo> MapTy;
 
 private:
   MapTy Map;
 
 public:
-  typename MapTy::iterator map_begin() { return Map.begin(); }
-  typename MapTy::iterator map_end() { return Map.end(); }
+  typename MapTy::iterator begin() { return Map.begin(); }
+  typename MapTy::iterator end() { return Map.end(); }
 
   void freeConstants() {
     for (auto &I : Map)
-      // Asserts that use_empty().
-      delete I.first;
+      delete I; // Asserts that use_empty().
   }
 
 private:
@@ -587,7 +615,7 @@ public:
     if (I == Map.end())
       Result = create(Ty, V);
     else
-      Result = I->first;
+      Result = *I;
     assert(Result && "Unexpected nullptr");
 
     return Result;
@@ -599,13 +627,13 @@ public:
   }
 
   /// Insert the constant into its proper slot.
-  void insert(ConstantClass *CP) { Map[CP] = '\0'; }
+  void insert(ConstantClass *CP) { Map.insert(CP); }
 
   /// Remove this constant from the map
   void remove(ConstantClass *CP) {
     typename MapTy::iterator I = Map.find(CP);
     assert(I != Map.end() && "Constant not found in constant table!");
-    assert(I->first == CP && "Didn't find correct element?");
+    assert(*I == CP && "Didn't find correct element?");
     Map.erase(I);
   }
 
@@ -616,7 +644,7 @@ public:
     LookupKey Lookup(CP->getType(), ValType(Operands, CP));
     auto I = find(Lookup);
     if (I != Map.end())
-      return I->first;
+      return *I;
 
     // Update to the new value.  Optimize for the case when we have a single
     // operand that we're changing, but handle bulk updates efficiently.

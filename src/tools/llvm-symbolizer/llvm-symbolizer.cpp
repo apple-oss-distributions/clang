@@ -78,6 +78,14 @@ static cl::opt<bool>
     ClPrintAddress("print-address", cl::init(false),
                    cl::desc("Show address before line information"));
 
+static cl::opt<bool>
+    ClPrettyPrint("pretty-print", cl::init(false),
+                  cl::desc("Make the output more human friendly"));
+
+static cl::opt<int> ClPrintSourceContextLines(
+    "print-source-context-lines", cl::init(0),
+    cl::desc("Print N number of source file context"));
+
 static bool error(std::error_code ec) {
   if (!ec)
     return false;
@@ -85,18 +93,14 @@ static bool error(std::error_code ec) {
   return true;
 }
 
-static bool parseCommand(bool &IsData, std::string &ModuleName,
-                         uint64_t &ModuleOffset) {
+static bool parseCommand(StringRef InputString, bool &IsData,
+                         std::string &ModuleName, uint64_t &ModuleOffset) {
   const char *kDataCmd = "DATA ";
   const char *kCodeCmd = "CODE ";
-  const int kMaxInputStringLength = 1024;
-  const char kDelimiters[] = " \n";
-  char InputString[kMaxInputStringLength];
-  if (!fgets(InputString, sizeof(InputString), stdin))
-    return false;
+  const char kDelimiters[] = " \n\r";
   IsData = false;
   ModuleName = "";
-  char *pos = InputString;
+  const char *pos = InputString.data();
   if (strncmp(pos, kDataCmd, strlen(kDataCmd)) == 0) {
     IsData = true;
     pos += strlen(kDataCmd);
@@ -113,7 +117,7 @@ static bool parseCommand(bool &IsData, std::string &ModuleName,
     if (*pos == '"' || *pos == '\'') {
       char quote = *pos;
       pos++;
-      char *end = strchr(pos, quote);
+      const char *end = strchr(pos, quote);
       if (!end)
         return false;
       ModuleName = std::string(pos, end - pos);
@@ -143,6 +147,7 @@ int main(int argc, char **argv) {
   cl::ParseCommandLineOptions(argc, argv, "llvm-symbolizer\n");
   LLVMSymbolizer::Options Opts(ClPrintFunctions, ClUseSymbolTable, ClDemangle,
                                ClUseRelativeAddress, ClDefaultArch);
+
   for (const auto &hint : ClDsymHint) {
     if (sys::path::extension(hint) == ".dSYM") {
       Opts.DsymHints.push_back(hint);
@@ -153,16 +158,30 @@ int main(int argc, char **argv) {
   }
   LLVMSymbolizer Symbolizer(Opts);
 
-  bool IsData = false;
-  std::string ModuleName;
-  uint64_t ModuleOffset;
-  DIPrinter Printer(outs(), ClPrintFunctions != FunctionNameKind::None);
+  DIPrinter Printer(outs(), ClPrintFunctions != FunctionNameKind::None,
+                    ClPrettyPrint, ClPrintSourceContextLines);
 
-  while (parseCommand(IsData, ModuleName, ModuleOffset)) {
+  const int kMaxInputStringLength = 1024;
+  char InputString[kMaxInputStringLength];
+
+  while (true) {
+    if (!fgets(InputString, sizeof(InputString), stdin))
+      break;
+
+    bool IsData = false;
+    std::string ModuleName;
+    uint64_t ModuleOffset = 0;
+    if (!parseCommand(StringRef(InputString), IsData, ModuleName,
+                      ModuleOffset)) {
+      outs() << InputString;
+      continue;
+    }
+
     if (ClPrintAddress) {
       outs() << "0x";
       outs().write_hex(ModuleOffset);
-      outs() << "\n";
+      StringRef Delimiter = (ClPrettyPrint == true) ? ": " : "\n";
+      outs() << Delimiter;
     }
     if (IsData) {
       auto ResOrErr = Symbolizer.symbolizeData(ModuleName, ModuleOffset);

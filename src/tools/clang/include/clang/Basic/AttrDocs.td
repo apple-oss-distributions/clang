@@ -263,6 +263,103 @@ Query for this feature with ``__has_attribute(enable_if)``.
   }];
 }
 
+def PassObjectSizeDocs : Documentation {
+  let Category = DocCatVariable; // Technically it's a parameter doc, but eh.
+  let Content = [{
+.. Note:: The mangling of functions with parameters that are annotated with
+  ``pass_object_size`` is subject to change. You can get around this by
+  using ``__asm__("foo")`` to explicitly name your functions, thus preserving
+  your ABI; also, non-overloadable C functions with ``pass_object_size`` are
+  not mangled.
+
+The ``pass_object_size(Type)`` attribute can be placed on function parameters to
+instruct clang to call ``__builtin_object_size(param, Type)`` at each callsite
+of said function, and implicitly pass the result of this call in as an invisible
+argument of type ``size_t`` directly after the parameter annotated with
+``pass_object_size``. Clang will also replace any calls to
+``__builtin_object_size(param, Type)`` in the function by said implicit
+parameter.
+
+Example usage:
+
+.. code-block:: c
+
+  int bzero1(char *const p __attribute__((pass_object_size(0))))
+      __attribute__((noinline)) {
+    int i = 0;
+    for (/**/; i < (int)__builtin_object_size(p, 0); ++i) {
+      p[i] = 0;
+    }
+    return i;
+  }
+
+  int main() {
+    char chars[100];
+    int n = bzero1(&chars[0]);
+    assert(n == sizeof(chars));
+    return 0;
+  }
+
+If successfully evaluating ``__builtin_object_size(param, Type)`` at the
+callsite is not possible, then the "failed" value is passed in. So, using the
+definition of ``bzero1`` from above, the following code would exit cleanly:
+
+.. code-block:: c
+
+  int main2(int argc, char *argv[]) {
+    int n = bzero1(argv);
+    assert(n == -1);
+    return 0;
+  }
+
+``pass_object_size`` plays a part in overload resolution. If two overload
+candidates are otherwise equally good, then the overload with one or more
+parameters with ``pass_object_size`` is preferred. This implies that the choice
+between two identical overloads both with ``pass_object_size`` on one or more
+parameters will always be ambiguous; for this reason, having two such overloads
+is illegal. For example:
+
+.. code-block:: c++
+
+  #define PS(N) __attribute__((pass_object_size(N)))
+  // OK
+  void Foo(char *a, char *b); // Overload A
+  // OK -- overload A has no parameters with pass_object_size.
+  void Foo(char *a PS(0), char *b PS(0)); // Overload B
+  // Error -- Same signature (sans pass_object_size) as overload B, and both
+  // overloads have one or more parameters with the pass_object_size attribute.
+  void Foo(void *a PS(0), void *b);
+
+  // OK
+  void Bar(void *a PS(0)); // Overload C
+  // OK
+  void Bar(char *c PS(1)); // Overload D
+
+  void main() {
+    char known[10], *unknown;
+    Foo(unknown, unknown); // Calls overload B
+    Foo(known, unknown); // Calls overload B
+    Foo(unknown, known); // Calls overload B
+    Foo(known, known); // Calls overload B
+
+    Bar(known); // Calls overload D
+    Bar(unknown); // Calls overload D
+  }
+
+Currently, ``pass_object_size`` is a bit restricted in terms of its usage:
+
+* Only one use of ``pass_object_size`` is allowed per parameter.
+
+* It is an error to take the address of a function with ``pass_object_size`` on
+  any of its parameters. If you wish to do this, you can create an overload
+  without ``pass_object_size`` on any parameters.
+
+* It is an error to apply the ``pass_object_size`` attribute to parameters that
+  are not pointers. Additionally, any parameter that ``pass_object_size`` is
+  applied to must be marked ``const`` at its function's definition.
+  }];
+}
+
 def OverloadableDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{
@@ -492,6 +589,13 @@ can only be placed before an @protocol or @interface declaration:
     }];
 }
 
+def ObjCRuntimeVisibleDocs : Documentation {
+    let Category = DocCatFunction;
+    let Content = [{
+This attribute specifies that the Objective-C class to which it applies is visible to the Objective-C runtime but not to the linker. Classes annotated with this attribute cannot be subclassed and cannot have categories defined for them.
+    }];
+}
+
 def ObjCBoxableDocs : Documentation {
     let Category = DocCatFunction;
     let Content = [{
@@ -529,7 +633,7 @@ the function declaration for a hypothetical function ``f``:
 
 .. code-block:: c++
 
-  void f(void) __attribute__((availability(macosx,introduced=10.4,deprecated=10.6,obsoleted=10.7)));
+  void f(void) __attribute__((availability(macos,introduced=10.4,deprecated=10.6,obsoleted=10.7)));
 
 The availability attribute states that ``f`` was introduced in Mac OS X 10.4,
 deprecated in Mac OS X 10.6, and obsoleted in Mac OS X 10.7.  This information
@@ -564,6 +668,11 @@ message=\ *string-literal*
   error about use of a deprecated or obsoleted declaration.  Useful to direct
   users to replacement APIs.
 
+replacement=\ *string-literal*
+  Additional message text that Clang will use to provide Fix-It when emitting
+  a warning about use of a deprecated declaration. The Fix-It will replace
+  the deprecated declaration with the new declaration specified.
+
 Multiple availability attributes can be placed on a declaration, which may
 correspond to different platforms.  Only the availability attribute with the
 platform corresponding to the target platform will be used; any others will be
@@ -576,9 +685,11 @@ are:
   the ``-mios-version-min=*version*`` or ``-miphoneos-version-min=*version*``
   command-line arguments.
 
-``macosx``
+``macos``
   Apple's Mac OS X operating system.  The minimum deployment target is
   specified by the ``-mmacosx-version-min=*version*`` command-line argument.
+  ``macosx`` is supported for backward-compatibility reasons, but it is
+  deprecated.
 
 ``tvos``
   Apple's tvOS operating system.  The minimum deployment target is specified by
@@ -588,14 +699,20 @@ are:
   Apple's watchOS operating system.  The minimum deployment target is specified by
   the ``-mwatchos-version-min=*version*`` command-line argument.
 
-A declaration can be used even when deploying back to a platform version prior
-to when the declaration was introduced.  When this happens, the declaration is
-`weakly linked
+A declaration can typically be used even when deploying back to a platform
+version prior to when the declaration was introduced.  When this happens, the
+declaration is `weakly linked
 <https://developer.apple.com/library/mac/#documentation/MacOSX/Conceptual/BPFrameworks/Concepts/WeakLinking.html>`_,
 as if the ``weak_import`` attribute were added to the declaration.  A
 weakly-linked declaration may or may not be present a run-time, and a program
 can determine whether the declaration is present by checking whether the
 address of that declaration is non-NULL.
+
+The flag ``strict`` disallows using API when deploying back to a
+platform version prior to when the declaration was introduced.  An
+attempt to use such API before its introduction causes a hard error.
+Weakly-linking is almost always a better API choice, since it allows
+users to query availability at runtime.
 
 If there are multiple declarations of the same entity, the availability
 attributes must either match on a per-platform basis or later
@@ -604,24 +721,24 @@ platform. For example:
 
 .. code-block:: c
 
-  void g(void) __attribute__((availability(macosx,introduced=10.4)));
-  void g(void) __attribute__((availability(macosx,introduced=10.4))); // okay, matches
+  void g(void) __attribute__((availability(macos,introduced=10.4)));
+  void g(void) __attribute__((availability(macos,introduced=10.4))); // okay, matches
   void g(void) __attribute__((availability(ios,introduced=4.0))); // okay, adds a new platform
-  void g(void); // okay, inherits both macosx and ios availability from above.
-  void g(void) __attribute__((availability(macosx,introduced=10.5))); // error: mismatch
+  void g(void); // okay, inherits both macos and ios availability from above.
+  void g(void) __attribute__((availability(macos,introduced=10.5))); // error: mismatch
 
 When one method overrides another, the overriding method can be more widely available than the overridden method, e.g.,:
 
 .. code-block:: objc
 
   @interface A
-  - (id)method __attribute__((availability(macosx,introduced=10.4)));
-  - (id)method2 __attribute__((availability(macosx,introduced=10.4)));
+  - (id)method __attribute__((availability(macos,introduced=10.4)));
+  - (id)method2 __attribute__((availability(macos,introduced=10.4)));
   @end
 
   @interface B : A
-  - (id)method __attribute__((availability(macosx,introduced=10.3))); // okay: method moved into base class later
-  - (id)method __attribute__((availability(macosx,introduced=10.5))); // error: this method was available via the base class in 10.4
+  - (id)method __attribute__((availability(macos,introduced=10.3))); // okay: method moved into base class later
+  - (id)method __attribute__((availability(macos,introduced=10.5))); // error: this method was available via the base class in 10.4
   @end
   }];
 }
@@ -711,6 +828,46 @@ The semantics are as follows:
   handler, where the offset from "lr" to the preferred return address depends on
   the execution state of the code which generated the exception. In this case
   a sequence equivalent to "movs pc, lr" will be used.
+  }];
+}
+
+def MipsInterruptDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+Clang supports the GNU style ``__attribute__((interrupt("ARGUMENT")))`` attribute on
+MIPS targets. This attribute may be attached to a function definition and instructs
+the backend to generate appropriate function entry/exit code so that it can be used
+directly as an interrupt service routine.
+
+By default, the compiler will produce a function prologue and epilogue suitable for
+an interrupt service routine that handles an External Interrupt Controller (eic)
+generated interrupt. This behaviour can be explicitly requested with the "eic"
+argument.
+
+Otherwise, for use with vectored interrupt mode, the argument passed should be
+of the form "vector=LEVEL" where LEVEL is one of the following values:
+"sw0", "sw1", "hw0", "hw1", "hw2", "hw3", "hw4", "hw5". The compiler will
+then set the interrupt mask to the corresponding level which will mask all
+interrupts up to and including the argument.
+
+The semantics are as follows:
+
+- The prologue is modified so that the Exception Program Counter (EPC) and
+  Status coprocessor registers are saved to the stack. The interrupt mask is
+  set so that the function can only be interrupted by a higher priority
+  interrupt. The epilogue will restore the previous values of EPC and Status.
+
+- The prologue and epilogue are modified to save and restore all non-kernel
+  registers as necessary.
+
+- The FPU is disabled in the prologue, as the floating pointer registers are not
+  spilled to the stack.
+
+- The function return sequence is changed to use an exception return instruction.
+
+- The parameter sets the interrupt mask for the function corresponding to the
+  interrupt level specified. If no mask is specified the interrupt mask
+  defaults to "eic".
   }];
 }
 
@@ -1627,6 +1784,21 @@ Clang supports additional attributes for controlling how APIs are imported into 
   }];
 }
 
+def NSErrorDomainDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``ns_error_domain`` attribute indicates a global constant representing the error domain.
+  }];
+}
+
+
+def SwiftBridgeDocs : Documentation {
+  let Category = SwiftDocs;
+  let Content = [{
+The ``swift_bridge`` attribute indicates that the type to which the attribute appertains is bridged to the named Swift type. 
+  }];
+}
+
 def SwiftErrorDocs : Documentation {
   let Category = SwiftDocs;
   let Heading = "swift_error";
@@ -1648,13 +1820,26 @@ All of these conventions except ``none`` require the function to have an error p
 }];
 }
 
+def SwiftNewtypeDocs : Documentation {
+  let Category = SwiftDocs;
+  let Heading = "swift_newtype";
+  let Content = [{
+The ``swift_newtype`` attribute indicates that the typedef to which the attribute appertains is imported as a new Swift type of the typedef's name.
+* ``swift_newtype(struct)`` means that a Swift struct will be created for this typedef.
+* ``swift_newtype(enum)`` means that a Swift enum will be created for this typedef.
+  }];
+}
+
+
 def NotTailCalledDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{
 The ``not_tail_called`` attribute prevents tail-call optimization on statically bound calls. It has no effect on indirect calls. Virtual functions, objective-c methods, and functions marked as ``always_inline`` cannot be marked as ``not_tail_called``.
 
 For example, it prevents tail-call optimization in the following case:
+
   .. code-block: c
+
     int __attribute__((not_tail_called)) foo1(int);
 
     int foo2(int a) {
@@ -1662,7 +1847,9 @@ For example, it prevents tail-call optimization in the following case:
     }
 
 However, it doesn't prevent tail-call optimization in this case:
+
   .. code-block: c
+
     int __attribute__((not_tail_called)) foo1(int);
 
     int foo2(int a) {
@@ -1674,7 +1861,9 @@ However, it doesn't prevent tail-call optimization in this case:
     }
 
 Marking virtual functions as ``not_tail_called`` is an error:
+
   .. code-block: c++
+
     class Base {
     public:
       // not_tail_called on a virtual function is an error.
@@ -1693,6 +1882,338 @@ Marking virtual functions as ``not_tail_called`` is an error:
       // not_tail_called on a virtual function is an error.
       [[clang::not_tail_called]] int foo2() override;
     };
+  }];
+}
 
+def InternalLinkageDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``internal_linkage`` attribute changes the linkage type of the declaration to internal.
+This is similar to C-style ``static``, but can be used on classes and class methods. When applied to a class definition,
+this attribute affects all methods and static data members of that class.
+This can be used to contain the ABI of a C++ library by excluding unwanted class methods from the export tables.
+  }];
+}
+
+def DisableTailCallsDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``disable_tail_calls`` attribute instructs the backend to not perform tail call optimization inside the marked function.
+
+For example:
+
+  .. code-block:: c
+
+    int callee(int);
+
+    int foo(int a) __attribute__((disable_tail_calls)) {
+      return callee(a); // This call is not tail-call optimized.
+    }
+
+Marking virtual functions as ``disable_tail_calls`` is legal.
+
+  .. code-block: c++
+
+    int callee(int);
+
+    class Base {
+    public:
+      [[clang::disable_tail_calls]] virtual int foo1() {
+        return callee(); // This call is not tail-call optimized.
+      }
+    };
+
+    class Derived1 : public Base {
+    public:
+      int foo1() override {
+        return callee(); // This call is tail-call optimized.
+      }
+    };
+
+  }];
+}
+
+def AnyX86InterruptDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+Clang supports the GNU style ``__attribute__((interrupt))`` attribute on
+x86/x86-64 targets.The compiler generates function entry and exit sequences
+suitable for use in an interrupt handler when this attribute is present.
+The 'IRET' instruction, instead of the 'RET' instruction, is used to return
+from interrupt or exception handlers.  All registers, except for the EFLAGS
+register which is restored by the 'IRET' instruction, are preserved by the
+compiler.
+
+Any interruptible-without-stack-switch code must be compiled with
+-mno-red-zone since interrupt handlers can and will, because of the
+hardware design, touch the red zone.
+
+1. interrupt handler must be declared with a mandatory pointer argument:
+
+  .. code-block:: c
+
+    struct interrupt_frame
+    {
+      uword_t ip;
+      uword_t cs;
+      uword_t flags;
+      uword_t sp;
+      uword_t ss;
+    };
+
+    __attribute__ ((interrupt))
+    void f (struct interrupt_frame *frame) {
+      ...
+    }
+
+2. exception handler:
+
+  The exception handler is very similar to the interrupt handler with
+  a different mandatory function signature:
+
+  .. code-block:: c
+
+    __attribute__ ((interrupt))
+    void f (struct interrupt_frame *frame, uword_t error_code) {
+      ...
+    }
+
+  and compiler pops 'ERROR_CODE' off stack before the 'IRET' instruction.
+
+  The exception handler should only be used for exceptions which push an
+  error code and all other exceptions must use the interrupt handler.
+  The system will crash if the wrong handler is used.
+  }];
+}
+
+def DeprecatedDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``deprecated`` attribute can be applied to a function, a variable, or a
+type. This is useful when identifying functions, variables, or types that are
+expected to be removed in a future version of a program.
+
+Consider the function declaration for a hypothetical function ``f``:
+
+.. code-block:: c++
+
+  void f(void) __attribute__((deprecated("message", "replacement")));
+
+When spelled as `__attribute__((deprecated))`, the deprecated attribute can have
+two optional string arguments. The first one is the message to display when
+emitting the warning; the second one enables the compiler to provide a Fix-It
+to replace the deprecated name with a new name. Otherwise, when spelled as
+`[[gnu::deprecated]] or [[deprecated]]`, the attribute can have one optional
+string argument which is the message to display when emitting the warning.
+  }];
+}
+
+def PreserveMostDocs : Documentation {
+  let Category = DocCatCallingConvs;
+  let Content = [{
+On X86-64 and AArch64 targets, this attribute changes the calling convention of
+a function. The ``preserve_most`` calling convention attempts to make the code
+in the caller as unintrusive as possible. This convention behaves identically
+to the ``C`` calling convention on how arguments and return values are passed,
+but it uses a different set of caller/callee-saved registers. This alleviates
+the burden of saving and recovering a large register set before and after the
+call in the caller. If the arguments are passed in callee-saved registers,
+then they will be preserved by the callee across the call. This doesn't
+apply for values returned in callee-saved registers.
+
+- On X86-64 the callee preserves all general purpose registers, except for
+  R11. R11 can be used as a scratch register. Floating-point registers
+  (XMMs/YMMs) are not preserved and need to be saved by the caller.
+
+The idea behind this convention is to support calls to runtime functions
+that have a hot path and a cold path. The hot path is usually a small piece
+of code that doesn't use many registers. The cold path might need to call out to
+another function and therefore only needs to preserve the caller-saved
+registers, which haven't already been saved by the caller. The
+`preserve_most` calling convention is very similar to the ``cold`` calling
+convention in terms of caller/callee-saved registers, but they are used for
+different types of function calls. ``coldcc`` is for function calls that are
+rarely executed, whereas `preserve_most` function calls are intended to be
+on the hot path and definitely executed a lot. Furthermore ``preserve_most``
+doesn't prevent the inliner from inlining the function call.
+
+This calling convention will be used by a future version of the Objective-C
+runtime and should therefore still be considered experimental at this time.
+Although this convention was created to optimize certain runtime calls to
+the Objective-C runtime, it is not limited to this runtime and might be used
+by other runtimes in the future too. The current implementation only
+supports X86-64 and AArch64, but the intention is to support more architectures
+in the future.
+  }];
+}
+
+def PreserveAllDocs : Documentation {
+  let Category = DocCatCallingConvs;
+  let Content = [{
+On X86-64 and AArch64 targets, this attribute changes the calling convention of
+a function. The ``preserve_all`` calling convention attempts to make the code
+in the caller even less intrusive than the ``preserve_most`` calling convention.
+This calling convention also behaves identical to the ``C`` calling convention
+on how arguments and return values are passed, but it uses a different set of
+caller/callee-saved registers. This removes the burden of saving and
+recovering a large register set before and after the call in the caller. If
+the arguments are passed in callee-saved registers, then they will be
+preserved by the callee across the call. This doesn't apply for values
+returned in callee-saved registers.
+
+- On X86-64 the callee preserves all general purpose registers, except for
+  R11. R11 can be used as a scratch register. Furthermore it also preserves
+  all floating-point registers (XMMs/YMMs).
+
+The idea behind this convention is to support calls to runtime functions
+that don't need to call out to any other functions.
+
+This calling convention, like the ``preserve_most`` calling convention, will be
+used by a future version of the Objective-C runtime and should be considered
+experimental at this time.
+  }];
+}
+
+def SwiftCallDocs : Documentation {
+  let Category = DocCatVariable;
+  let Content = [{
+The ``swiftcall`` attribute indicates that a function should be called
+using the Swift calling convention for a function or function pointer.
+
+The lowering for the Swift calling convention, as described by the Swift
+ABI documentation, occurs in multiple phases.  The first, "high-level"
+phase breaks down the formal parameters and results into innately direct
+and indirect components, adds implicit paraameters for the generic
+signature, and assigns the context and error ABI treatments to parameters
+where applicable.  The second phase breaks down the direct parameters
+and results from the first phase and assigns them to registers or the
+stack.  The ``swiftcall`` convention only handles this second phase of
+lowering; the C function type must accurately reflect the results
+of the first phase, as follows:
+
+- Results classified as indirect by high-level lowering should be
+  represented as parameters with the ``swift_indirect_result`` attribute.
+
+- Results classified as direct by high-level lowering should be represented
+  as follows:
+
+  - First, remove any empty direct results.
+
+  - If there are no direct results, the C result type should be ``void``.
+
+  - If there is one direct result, the C result type should be a type with
+    the exact layout of that result type.
+
+  - If there are a multiple direct results, the C result type should be
+    a struct type with the exact layout of a tuple of those results.
+
+- Parameters classified as indirect by high-level lowering should be
+  represented as parameters of pointer type.
+
+- Parameters classified as direct by high-level lowering should be
+  omitted if they are empty types; otherwise, they should be represented
+  as a parameter type with a layout exactly matching the layout of the
+  Swift parameter type.
+
+- The context parameter, if present, should be represented as a trailing
+  parameter with the ``swift_context`` attribute.
+
+- The error result parameter, if present, should be represented as a
+  trailing parameter (always following a context parameter) with the
+  ``swift_error_result`` attribute.
+
+``swiftcall`` does not support variadic arguments or unprototyped functions.
+
+The parameter ABI treatment attributes are aspects of the function type.
+A function type which which applies an ABI treatment attribute to a
+parameter is a different type from an otherwise-identical function type
+that does not.  A single parameter may not have multiple ABI treatment
+attributes.
+
+Support for this feature is target-dependent, although it should be
+supported on every target that Swift supports.  Query for this support
+with ``__has_attribute(swiftcall)``.  This implies support for the
+``swift_context``, ``swift_error_result``, and ``swift_indirect_result``
+attributes.
+  }];
+}
+
+def SwiftContextDocs : Documentation {
+  let Category = DocCatVariable;
+  let Content = [{
+The ``swift_context`` attribute marks a parameter of a ``swiftcall``
+function as having the special context-parameter ABI treatment.
+
+This treatment generally passes the context value in a special register
+which is normally callee-preserved.
+
+A ``swift_context`` parameter must either be the last parameter or must be
+followed by a ``swift_error_result`` parameter (which itself must always be
+the last parameter).
+
+A context parameter must have pointer or reference type.
+  }];
+}
+
+def SwiftErrorResultDocs : Documentation {
+  let Category = DocCatVariable;
+  let Content = [{
+The ``swift_error_result`` attribute marks a parameter of a ``swiftcall``
+function as having the special error-result ABI treatment.
+
+This treatment generally passes the underlying error value in and out of
+the function through a special register which is normally callee-preserved.
+This is modeled in C by pretending that the register is addressable memory:
+
+- The caller appears to pass the address of a variable of pointer type.
+  The current value of this variable is copied into the register before
+  the call; if the call returns normally, the value is copied back into the
+  variable.
+
+- The callee appears to receive the address of a variable.  This address
+  is actually a hidden location in its own stack, initialized with the
+  value of the register upon entry.  When the function returns normally,
+  the value in that hidden location is written back to the register.
+
+A ``swift_error_result`` parameter must be the last parameter, and it must be
+preceded by a ``swift_context`` parameter.
+
+A ``swift_error_result`` parameter must have type ``T**`` or ``T*&`` for some
+type T.  Note that no qualifiers are permitted on the intermediate level.
+
+It is undefined behavior if the caller does not pass a pointer or
+reference to a valid object.
+
+The standard convention is that the error value itself (that is, the
+value stored in the apparent argument) will be null upon function entry,
+but this is not enforced by the ABI.
+  }];
+}
+
+def SwiftIndirectResultDocs : Documentation {
+  let Category = DocCatVariable;
+  let Content = [{
+The ``swift_indirect_result`` attribute marks a parameter of a ``swiftcall``
+function as having the special indirect-result ABI treatmenet.
+
+This treatment gives the parameter the target's normal indirect-result
+ABI treatment, which may involve passing it differently from an ordinary
+parameter.  However, only the first indirect result will receive this
+treatment.  Furthermore, low-level lowering may decide that a direct result
+must be returned indirectly; if so, this will take priority over the
+``swift_indirect_result`` parameters.
+
+A ``swift_indirect_result`` parameter must either be the first parameter or
+follow another ``swift_indirect_result`` parameter.
+
+A ``swift_indirect_result`` parameter must have type ``T*`` or ``T&`` for
+some object type ``T``.  If ``T`` is a complete type at the point of
+definition of a function, it is undefined behavior if the argument
+value does not point to storage of adequate size and alignment for a
+value of type ``T``.
+
+Making indirect results explicit in the signature allows C functions to
+directly construct objects into them without relying on language
+optimizations like C++'s named return value optimization (NRVO).
   }];
 }

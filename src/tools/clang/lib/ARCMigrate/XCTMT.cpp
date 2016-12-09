@@ -334,7 +334,8 @@ void XCTMigrator::handleInvocation(CompilerInstance &CI) {
                                      CI.getFileManager(),
                                      CI.getPCHContainerReader(),
                                      /*ReadModuleFileExtensions=*/false,
-                                     PCHCheck);
+                                     PCHCheck,
+                                     /*ValidateDiagnosticOptions=*/true);
   if (PCHCheck.ContainsSenHeader) {
     std::string PrefixHeader =
         ASTReader::getOriginalSourceFile(PPOpts.ImplicitPCHInclude,
